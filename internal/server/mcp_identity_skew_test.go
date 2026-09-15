@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -291,5 +292,66 @@ func TestCallTool_StaleConnectionIdentityRefused(t *testing.T) {
 				assert.Equal(t, int64(2), up.count.Load())
 			})
 		}
+	}
+}
+
+// TestCallTool_RetainedToolsOnNotConnectedSnapshot_LiveClientRefused pins
+// codex r4 E1: the reconcile sweep republishes a server's RETAINED tool set
+// into a StateView entry that reads Connected=false, ToolsDiscovered=false,
+// DiscoveryEpoch=0 (supervisor.reconcile copies existing.Tools forward;
+// TestSupervisor_ToolsDiscoveredMarker pins that shape). Once the next
+// connection is Ready but before its connect event or the next sweep flips
+// Connected, the snapshot is NOT hydrated (so Unresolved() cannot fire) yet
+// still LISTS the previous generation's names. liveIdentityRefusal used to
+// admit that shape — Found without certification — and the call fell to the
+// unpinned CallTool branch on the fresh connection with zero certification.
+// A live client must dispatch only a CERTIFIED identity; a found-but-
+// uncertified name answers the discovery-window body with zero upstream
+// calls, for every consumer of the check.
+func TestCallTool_RetainedToolsOnNotConnectedSnapshot_LiveClientRefused(t *testing.T) {
+	for label, ctx := range identitySkewCallers() {
+		t.Run(label, func(t *testing.T) {
+			proxy, rt, up := seedEpochFixture(t)
+			// Connection B is Ready; the StateView carries the reconcile
+			// shape: not connected, unstamped, previous generation's tools.
+			bounceConnection(t, proxy, "a")
+			rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
+				s.Connected = false
+				s.ToolsDiscovered = false
+				s.DiscoveryEpoch = 0
+				s.Tools = up.Tools
+				s.ToolCount = len(up.Tools)
+			})
+			identity := proxy.resolveExactToolIdentity("a", "erase")
+			require.True(t, identity.ServerKnown && !identity.SnapshotHydrated && identity.Found,
+				"fixture: known, not hydrated, yet listed (got %+v)", identity)
+			require.False(t, identity.Unresolved(), "fixture: the top-of-dispatch gate defers on a not-hydrated snapshot")
+			require.False(t, identity.certified())
+
+			result, text := callToolReadResult(t, proxy, ctx, "a:erase")
+			require.True(t, result.IsError, "%s", text)
+			assert.Contains(t, text, unresolvedToolIdentityMessage("a", "erase", false),
+				"a found-but-uncertified name on a live client is the discovery window (got %s)", text)
+			assert.NotContains(t, text, "not found", "the upstream must never answer")
+			assert.Equal(t, int64(0), up.count.Load(), "nothing reaches connection B uncertified (dispatched %v)", up.dispatched())
+
+			// The sandbox's permission read shares the closure and answers
+			// with jsruntime's permission envelope (its one unresolved
+			// wording) before the bridge is reached.
+			sb := runSandboxCallTool(t, proxy, adminCtx(), "a", "erase")
+			assert.False(t, sb.OK, "the sandbox must refuse too (got %q: %s)", sb.Code, sb.Message)
+			assert.Contains(t, sb.Message, "cannot be resolved")
+			assert.Equal(t, int64(0), up.count.Load())
+			assert.Equal(t, jsruntime.PermissionTierUnresolved, proxy.lookupToolPermission("a", "erase"),
+				"the sandbox's tier read must not classify an uncertified name")
+
+			// Positive control: B's own pass stamps the snapshot under B's
+			// token and the listed name dispatches, pinned to B.
+			stampDiscoveredOnLiveConnection(t, proxy, rt, "a", up.Tools)
+			require.True(t, proxy.resolveExactToolIdentity("a", "erase").certified())
+			_, text = callToolReadResult(t, proxy, ctx, "a:erase")
+			assert.NotContains(t, text, "Permission denied", "control: certified on B (got %s)", text)
+			assert.Equal(t, int64(1), up.count.Load())
+		})
 	}
 }

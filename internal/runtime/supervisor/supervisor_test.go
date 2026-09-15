@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
@@ -1743,4 +1744,47 @@ func TestSupervisor_ReconcileDetectsUnobservedReconnect(t *testing.T) {
 	settledReconcile(sup, configSvc)
 	require.True(t, status("s").ToolsDiscovered)
 	require.Equal(t, 1, kickedCount())
+}
+
+// TestSupervisor_ReconcileRepublishesRetainedToolsWhileNotConnected pins the
+// StateView shape behind codex r4 E1: after a real adapter disconnect and its
+// event (which clears the StateView tool list), the reconcile sweep copies
+// the RETAINED Supervisor-snapshot tools back into a StateView entry that
+// reads Connected=false, ToolsDiscovered=false, DiscoveryEpoch=0. A
+// not-connected snapshot is therefore NOT necessarily empty: it can list the
+// previous connection's names without certifying any of them. The
+// dispatch-side identity check (internal/server liveIdentityRefusal) relies
+// on this test's shape being real, and admits only a certified name once the
+// live client is connected — never a merely listed one.
+func TestSupervisor_ReconcileRepublishesRetainedToolsWhileNotConnected(t *testing.T) {
+	sup, mockUpstream, configSvc, status := markerFixture(t)
+	require.NoError(t, mockUpstream.ConnectServer(context.Background(), "s"))
+	settledReconcile(sup, configSvc)
+	sup.updateSnapshotFromEvent(connectionEvent("s", true))
+
+	tools := []*config.ToolMetadata{{Name: "erase", ServerName: "s"}}
+	_, err := sup.RefreshToolsFromDiscovery(tools, sup.DiscoveryGenerations())
+	require.NoError(t, err)
+	st := status("s")
+	require.True(t, st.Connected && st.ToolsDiscovered, "precondition: certified on the first connection (got %+v)", st)
+	require.NotZero(t, st.DiscoveryEpoch)
+	require.Len(t, st.Tools, 1)
+
+	// The adapter really disconnects and the disconnect event lands: the
+	// StateView tool list is cleared.
+	require.NoError(t, mockUpstream.DisconnectServer("s"))
+	sup.updateSnapshotFromEvent(connectionEvent("s", false))
+	st = status("s")
+	require.False(t, st.Connected)
+	require.False(t, st.ToolsDiscovered)
+	require.Empty(t, st.Tools, "the disconnect event clears the StateView tools")
+
+	// The sweep observes the adapter as not connected and republishes the
+	// retained set into the not-connected entry.
+	settledReconcile(sup, configSvc)
+	st = status("s")
+	assert.False(t, st.Connected, "reconcile is authoritative for Connected")
+	assert.False(t, st.ToolsDiscovered, "no pass has run on the next connection")
+	assert.Zero(t, st.DiscoveryEpoch, "an unstamped entry carries no generation")
+	assert.Len(t, st.Tools, 1, "the retained tools are republished while not connected: a listed name is NOT a certified one")
 }

@@ -2522,13 +2522,15 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// connected, yet the live client IS connected — the connected event
 		// is still in flight or was dropped. The not-connected verdict the
 		// deferral relied on did not fire, so re-read the snapshot and refuse
-		// an unlisted name here, with zero upstream calls. The tier gate
-		// already ran with the destructive fallback (the strictest tier), so
-		// no re-check is needed for scoped callers. The re-read also runs
-		// for a HYDRATED snapshot (astra r2 C3): the live client found
-		// connected here is the authority on which connection the snapshot's
-		// stamp describes, so a name certified by a previous connection is
-		// refused with the discovery-window body.
+		// anything short of a CERTIFIED name here, with zero upstream calls
+		// — an unlisted name, and equally a name the not-hydrated snapshot
+		// still lists from the previous generation's retained set (codex r4
+		// E1). The tier gate already ran with the destructive fallback (the
+		// strictest tier), so no re-check is needed for scoped callers. The
+		// re-read also runs for a HYDRATED snapshot (astra r2 C3): the live
+		// client found connected here is the authority on which connection
+		// the snapshot's stamp describes, so a name certified by a previous
+		// connection is refused with the discovery-window body.
 		live, errMsg, refuse := p.liveIdentityRefusal(serverName, actualToolName, identity, client)
 		if refuse {
 			p.logger.Debug("handleCallToolVariant: refusing unresolved tool identity (live client connected, snapshot stale)",
@@ -6884,12 +6886,15 @@ type toolIdentity struct {
 	ServerKnown bool
 	// SnapshotHydrated reports whether the server is in the state in which
 	// its snapshot is the authority on its tool set: enabled, not quarantined
-	// and CONNECTED. The StateView registers every configured server and
-	// carries an EMPTY tool list for one that is disconnected, connecting,
-	// OAuth-pending, disabled or quarantined — an absent name there says
-	// nothing about the tool's identity, only about the server's state, and
-	// the server-level verdicts (quarantined / disabled / not connected /
-	// reconnect_on_use) own that answer exactly as they did before Spec 105.
+	// and CONNECTED. The StateView registers every configured server; for
+	// one that is disconnected, connecting, OAuth-pending, disabled or
+	// quarantined its tool list is NOT authoritative — usually empty, but
+	// the reconcile sweep republishes a disconnected server's retained set
+	// for counts (supervisor.reconcile) — so neither an absent nor a present
+	// name there says anything about the tool's identity, only about the
+	// server's state, and the server-level verdicts (quarantined / disabled
+	// / not connected / reconnect_on_use) own that answer exactly as they
+	// did before Spec 105.
 	SnapshotHydrated bool
 	// DiscoveryDone reports whether a discovery pass has completed for the
 	// LIVE connection: stateview.ServerStatus.ToolsDiscovered is set AND the
@@ -6931,10 +6936,14 @@ type toolIdentity struct {
 // cases a name whose permission tier cannot be established, so no caller may
 // dispatch it. Two things are NOT this condition: a server the snapshot does
 // not hold (server-existence handling, which stays with the paths that own
-// it), and a known server whose snapshot is empty because of its own state
-// (quarantined, disabled, disconnected, connecting) — those keep their
+// it), and a known server whose snapshot is NOT HYDRATED because of its own
+// state (quarantined, disabled, disconnected, connecting) — those keep their
 // pre-105 server-level verdicts, which run in the same order they always did
-// and which the caller's reconnect_on_use path relies on.
+// and which the caller's reconnect_on_use path relies on. A not-hydrated
+// snapshot is not necessarily EMPTY (the reconcile sweep retains a
+// disconnected server's tool set for counts), which is why the deferral is
+// safe only while the live client really is not connected: once it is,
+// liveIdentityRefusal re-reads and admits nothing short of certified().
 func (id toolIdentity) Unresolved() bool {
 	return id.ServerKnown && id.SnapshotHydrated && (!id.DiscoveryDone || !id.Found)
 }
@@ -6945,9 +6954,11 @@ func (id toolIdentity) Unresolved() bool {
 // dispatch that follows a certified read is pinned to that generation
 // (managed.Client.CallToolOnEpoch): it reaches the upstream on exactly the
 // connection the name, tier and approval hash were certified against, or not
-// at all (Spec 105 FR-009 "stale generation"; codex r3 D2). An uncertified
-// identity (no runtime, server not in the StateView) dispatches unpinned, as
-// it always did — the server-existence handling owns it.
+// at all (Spec 105 FR-009 "stale generation"; codex r3 D2). On a CONNECTED
+// live client it is also the only admitting outcome of liveIdentityRefusal
+// (codex r4 E1); the unpinned dispatch remains only for the shapes in which
+// that check stands aside (no runtime, server not in the StateView, client
+// not connected) — the server-existence and not-connected handling own it.
 func (id toolIdentity) certified() bool {
 	return id.ServerKnown && id.SnapshotHydrated && id.DiscoveryDone && id.Found
 }
@@ -7085,23 +7096,41 @@ func unresolvedToolIdentityMessage(serverName, toolName string, discoveryDone bo
 // compares the stamp's token with it, so a name certified by connection A is
 // refused on connection B with the discovery-window body.
 //
-// The live identity is returned alongside the verdict (codex r3 D2): when it
-// is certified, its DiscoveryEpoch is the generation the caller must pin the
-// dispatch to (upstream.Manager.CallToolOnEpoch / managed.Client.
-// CallToolOnEpoch), so a generation change between this check and the
-// transport — a queue wait behind admission control is seconds long — is
-// refused by the client itself with the same discovery-window body. The
-// zero identity comes back when the check stood aside (no runtime, server
-// not in the StateView, client not connected), and the caller dispatches
-// unpinned as before.
+// Once the live client is connected, the ONLY admitting outcome is a
+// certified identity (codex r4 E1): hydrated, discovery completed, stamp
+// captured under the live client's own generation, name listed. "Listed" on
+// its own is not enough — a not-connected snapshot is NOT empty in general:
+// the reconcile sweep copies a server's retained tool set forward into a
+// StateView entry that reads Connected=false, ToolsDiscovered=false,
+// DiscoveryEpoch=0 (supervisor.reconcile keeps existing.Tools for counts),
+// so between the next connection becoming Ready and the event or sweep that
+// flips Connected, the snapshot lists the PREVIOUS generation's names
+// without certifying any of them. Admitting Found there sent such a name
+// down the unpinned dispatch to the fresh connection; now it is the
+// discovery window, like every other uncertified shape on a live client.
+//
+// The live identity is returned alongside the verdict (codex r3 D2): when
+// admitted it is certified, and its DiscoveryEpoch is the generation the
+// caller must pin the dispatch to (upstream.Manager.CallToolOnEpoch /
+// managed.Client.CallToolOnEpoch), so a generation change between this
+// check and the transport — a queue wait behind admission control is
+// seconds long — is refused by the client itself with the same
+// discovery-window body. The zero identity comes back only when the check
+// stood aside (no runtime, server not in the StateView, client not
+// connected), and the caller dispatches unpinned as before.
 func (p *MCPProxyServer) liveIdentityRefusal(serverName, toolName string, deferred toolIdentity, client interface{ IsConnected() bool }) (toolIdentity, string, bool) {
 	if !deferred.ServerKnown || client == nil || !client.IsConnected() {
 		return toolIdentity{}, "", false
 	}
 	live := p.resolveExactToolIdentity(serverName, toolName)
-	if live.Found && !live.Unresolved() {
+	if live.certified() {
 		return live, "", false
 	}
+	// Not hydrated (Connected still false in the snapshot), no stamp, a
+	// previous generation's stamp, or an unlisted name: refused. The
+	// stale-name body applies only to a hydrated, completed pass of THIS
+	// generation that does not list the name; everything else is the
+	// discovery window.
 	return live, unresolvedToolIdentityMessage(serverName, toolName, live.SnapshotHydrated && live.DiscoveryDone), true
 }
 

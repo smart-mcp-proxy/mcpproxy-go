@@ -748,8 +748,10 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	// the StateView reads the server as not connected — but this path has no
 	// not-connected check of its own before client.CallTool, and the live
 	// client may be connected while the connected event is still in flight.
-	// Same closure as handleCallToolVariant: refuse an unlisted name once the
-	// live client is found connected.
+	// Same closure as handleCallToolVariant: once the live client is found
+	// connected, only a CERTIFIED name dispatches (an unlisted name, or one
+	// the not-hydrated snapshot retains from a previous generation, is the
+	// discovery window — codex r4 E1).
 	var certified toolIdentity
 	if u.proxy != nil {
 		deferred := u.proxy.resolveExactToolIdentity(serverName, toolName)
@@ -1322,8 +1324,10 @@ func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) strin
 	// its own before client.CallTool, and the live client may be connected
 	// while the server_connected event is still in flight. Same closure as
 	// handleCallToolVariant (liveIdentityRefusal): once the live client is
-	// found connected, an unlisted name is unresolved, and the sandbox
-	// answers with the permission envelope before any AuthInfo check.
+	// found connected, any name short of certified — unlisted, or retained
+	// from a previous generation on a not-hydrated snapshot — is unresolved,
+	// and the sandbox answers with the permission envelope before any
+	// AuthInfo check.
 	if identity.ServerKnown && !identity.SnapshotHydrated && p.upstreamManager != nil {
 		if client, ok := p.upstreamManager.GetClient(serverName); ok {
 			if _, _, refuse := p.liveIdentityRefusal(serverName, toolName, identity, client); refuse {
