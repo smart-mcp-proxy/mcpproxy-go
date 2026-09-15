@@ -1345,7 +1345,14 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	}
 
 	// A reconcile pass carries the (cleared) marker over with the retained
-	// tools; the connection's own discovery pass re-stamps it.
+	// tools; the connection's own discovery pass re-stamps it. Reconcile is
+	// authoritative for Connected (astra r1 I4) and reads it from the
+	// adapter, whose ConnectServer the earlier passes dispatched on a
+	// goroutine — on a slow runner that goroutine may not have run yet and
+	// reconcile would rightly clear the marker as a dropped disconnect. The
+	// scenario under test is a server that IS connected, so settle the
+	// adapter state deterministically before every reconcile below.
+	_ = mockUpstream.ConnectServer(context.Background(), "server1")
 	_ = sup.reconcile(configSvc.Current())
 	if st := status("server1"); st.ToolsDiscovered || len(st.Tools) != 1 {
 		t.Errorf("server1 after reconnect+reconcile: marker must stay cleared until discovery re-runs, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
@@ -1356,6 +1363,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 	if st := status("server1"); !st.ToolsDiscovered || len(st.Tools) != 1 {
 		t.Errorf("server1 after rediscovery: marker must be re-stamped with the tools, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
 	}
+	_ = mockUpstream.ConnectServer(context.Background(), "server1")
 	_ = sup.reconcile(configSvc.Current())
 	if st := status("server1"); !st.ToolsDiscovered || len(st.Tools) != 1 {
 		t.Errorf("server1 after rediscovery+reconcile: marker must survive with the tools, got discovered=%v tools=%d", st.ToolsDiscovered, len(st.Tools))
@@ -1379,6 +1387,7 @@ func TestSupervisor_ToolsDiscoveredMarker(t *testing.T) {
 		t.Fatalf("configSvc.Update: %v", err)
 	}
 	_ = mockUpstream.AddServer("fresh", fresh)
+	_ = mockUpstream.ConnectServer(context.Background(), "server1")
 	_ = sup.reconcile(configSvc.Current())
 	if status("fresh").ToolsDiscovered {
 		t.Fatal("fresh: before any discovery ToolsDiscovered must be false")
