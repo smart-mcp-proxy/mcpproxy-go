@@ -1627,6 +1627,24 @@ func TestCallToolRead_EmptySnapshot_KeepsServerLevelVerdicts(t *testing.T) {
 				require.True(t, result.IsError)
 				assert.Contains(t, text, "Server 'a' is not connected", "pre-105 body: the not-connected answer, which is where reconnect_on_use hangs")
 				assert.NotContains(t, text, "cannot be resolved", "the identity gate must not pre-empt the connection verdict")
+
+				// codex r3 D1: a RECORD-LESS name on the same dropped server
+				// keeps the same server-level verdict. The empty snapshot
+				// cannot show the name absent, so no implicit pending record
+				// may be synthesized for it (the "is in the server's tool
+				// list" body would be false — the snapshot is empty); the
+				// not-connected answer owns it, for the administrator too.
+				_, err := proxy.storage.GetToolApproval("a", "ns:erase")
+				require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "fixture: no record for the second name")
+				gate := proxy.evaluateExactToolGate("a", "ns:erase")
+				assert.Empty(t, gate.lockStatus, "a dropped server must not lock a record-less name as pending")
+				assert.False(t, isImplicitPendingApproval(gate.approval), "no implicit pending record on an empty snapshot")
+
+				result, text = callToolReadResult(t, proxy, ctx, "a:ns:erase")
+				require.True(t, result.IsError)
+				assert.Contains(t, text, "Server 'a' is not connected", "a record-less name on a dropped server keeps the not-connected verdict")
+				assert.NotContains(t, text, "no_approval_record", "the approval gate must not pre-empt the connection verdict")
+				assert.NotContains(t, text, "TOOL_QUARANTINED")
 			})
 		}
 	})

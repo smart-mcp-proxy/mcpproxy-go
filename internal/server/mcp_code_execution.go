@@ -20,6 +20,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -749,9 +750,11 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 	// client may be connected while the connected event is still in flight.
 	// Same closure as handleCallToolVariant: refuse an unlisted name once the
 	// live client is found connected.
+	var certified toolIdentity
 	if u.proxy != nil {
 		deferred := u.proxy.resolveExactToolIdentity(serverName, toolName)
-		if msg, refuse := u.proxy.liveIdentityRefusal(serverName, toolName, deferred, client); refuse {
+		live, msg, refuse := u.proxy.liveIdentityRefusal(serverName, toolName, deferred, client)
+		if refuse {
 			refusal := errors.New(msg)
 			duration := time.Since(startTime)
 			u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
@@ -759,10 +762,34 @@ func (u *upstreamToolCaller) CallTool(ctx context.Context, serverName, toolName 
 			u.emitSubCallRefused(serverName, toolName, requestID, args, refusal, startTime, duration)
 			return nil, refusal
 		}
+		certified = live
 	}
 
-	// Call the tool
-	result, err := client.CallTool(ctx, toolName, args)
+	// Call the tool — pinned to the generation the identity check above
+	// certified (Spec 105 FR-009 "stale generation"; codex r3 D2): the
+	// managed client re-checks the connection generation after the
+	// admission queue and immediately before the transport, so a name
+	// certified on connection A can never execute on connection B. The
+	// refusal is answered exactly as the pre-dispatch check answers a name
+	// whose generation is not certified: the discovery-window body, recorded
+	// as a refusal, zero upstream calls.
+	var (
+		result *mcp.CallToolResult
+		err    error
+	)
+	if certified.certified() {
+		result, err = client.CallToolOnEpoch(ctx, toolName, args, certified.DiscoveryEpoch)
+	} else {
+		result, err = client.CallTool(ctx, toolName, args)
+	}
+	if errors.Is(err, managed.ErrConnectionGenerationChanged) {
+		refusal := errors.New(unresolvedToolIdentityMessage(serverName, toolName, false))
+		duration := time.Since(startTime)
+		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
+		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
+		u.emitSubCallRefused(serverName, toolName, requestID, args, refusal, startTime, duration)
+		return nil, refusal
+	}
 	if err == nil {
 		// Spec 054 Track B on the fourth dispatch path: redact or block
 		// BEFORE the result is recorded, stored in history, or handed to the
@@ -1299,7 +1326,7 @@ func (p *MCPProxyServer) lookupToolPermission(serverName, toolName string) strin
 	// answers with the permission envelope before any AuthInfo check.
 	if identity.ServerKnown && !identity.SnapshotHydrated && p.upstreamManager != nil {
 		if client, ok := p.upstreamManager.GetClient(serverName); ok {
-			if _, refuse := p.liveIdentityRefusal(serverName, toolName, identity, client); refuse {
+			if _, _, refuse := p.liveIdentityRefusal(serverName, toolName, identity, client); refuse {
 				return jsruntime.PermissionTierUnresolved
 			}
 		}

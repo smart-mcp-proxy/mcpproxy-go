@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -21,6 +22,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 const (
@@ -527,9 +529,25 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// Emit activity event
 		p.emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
 
-		// Call upstream
+		// Call upstream. Spec 105 FR-009 "stale generation" (codex r3 D2):
+		// the callability gate above ran against the server's LIVE client;
+		// when that client is connected the dispatch is pinned to the
+		// generation observed now, so a disconnect + reconnect that completes
+		// while the call waits behind admission control cannot carry it onto
+		// a fresh generation whose tool set nothing certified (the catalog is
+		// rebuilt on servers.changed). A client found NOT connected here keeps
+		// the pre-105 unpinned path — the not-connected verdict and
+		// reconnect_on_use, which own a dropped server (research D4).
 		qualifiedName := serverName + ":" + toolName
-		result, err := p.upstreamManager.CallTool(ctx, qualifiedName, args)
+		var (
+			result interface{}
+			err    error
+		)
+		if epoch, ok := p.liveConnectionEpoch(serverName); ok {
+			result, err = p.upstreamManager.CallToolOnEpoch(ctx, qualifiedName, args, epoch)
+		} else {
+			result, err = p.upstreamManager.CallTool(ctx, qualifiedName, args)
+		}
 
 		durationMs := time.Since(startTime).Milliseconds()
 
@@ -544,6 +562,15 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			if limitErr, isShed := asShed(err); isShed {
 				recordShed(ctx, limitErr)
 				return shedToolResult(limitErr), nil
+			}
+			// The generation moved before the transport: nothing reached
+			// the upstream. Same discovery-window body and telemetry bucket
+			// as the call_tool_* refusal, with the started record closed.
+			if errors.Is(err, managed.ErrConnectionGenerationChanged) {
+				errMsg := unresolvedToolIdentityMessage(serverName, toolName, false)
+				p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", errMsg, durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
+				p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+				return mcp.NewToolResultError(errMsg), nil
 			}
 			// Emit error activity
 			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")

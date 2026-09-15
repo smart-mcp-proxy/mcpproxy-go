@@ -15,6 +15,7 @@ import (
 	"time"
 
 	uptransport "github.com/mark3labs/mcp-go/client/transport"
+	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -1282,6 +1283,25 @@ func (m *Manager) tryReconnectOnUse(ctx context.Context, client *managed.Client,
 
 // CallTool calls a tool on the appropriate upstream server
 func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+	return m.callTool(ctx, toolName, args, nil)
+}
+
+// CallToolOnEpoch is CallTool pinned to the connection generation the caller
+// certified the tool identity against (Spec 105 FR-009 "stale generation";
+// codex r3 D2): the dispatch reaches the upstream on exactly that generation
+// of the server's live client (managed.Client.CallToolOnEpoch) or is refused
+// with managed.ErrConnectionGenerationChanged and zero upstream calls. The
+// reconnect_on_use branch is deliberately NOT taken for a pinned call — a
+// reconnect is a new generation by construction, whose tool set the caller
+// never certified — so a client found disconnected is refused the same way.
+// The refusal is returned verbatim, never enriched, so errors.Is holds.
+func (m *Manager) CallToolOnEpoch(ctx context.Context, toolName string, args map[string]interface{}, expectedEpoch int64) (interface{}, error) {
+	return m.callTool(ctx, toolName, args, &expectedEpoch)
+}
+
+// callTool is the shared body of CallTool and CallToolOnEpoch; expectedEpoch
+// nil means unpinned (reconnect_on_use applies).
+func (m *Manager) callTool(ctx context.Context, toolName string, args map[string]interface{}, expectedEpoch *int64) (interface{}, error) {
 	m.logger.Debug("CallTool: starting",
 		zap.String("tool_name", toolName),
 		zap.Any("args", args))
@@ -1344,6 +1364,13 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 			return nil, fmt.Errorf("server '%s' is currently connecting - please wait for connection to complete (state: %s)", serverName, state.String())
 		}
 
+		// A pinned dispatch never reconnects: the generation the caller
+		// certified is closed (Disconnect bumped it), and a reconnect would
+		// open one the caller never certified.
+		if expectedEpoch != nil {
+			return nil, managed.ErrConnectionGenerationChanged
+		}
+
 		// Attempt reconnect-on-use if enabled for this server
 		reconnected := false
 		if targetClient.GetConfig().ReconnectOnUse &&
@@ -1400,7 +1427,14 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 		zap.String("actual_tool_name", actualToolName))
 
 	// Call the tool on the upstream server with enhanced error handling
-	result, err := targetClient.CallTool(ctx, actualToolName, args)
+	dispatch := targetClient.CallTool
+	if expectedEpoch != nil {
+		pinned := *expectedEpoch
+		dispatch = func(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+			return targetClient.CallToolOnEpoch(ctx, toolName, args, pinned)
+		}
+	}
+	result, err := dispatch(ctx, actualToolName, args)
 
 	m.logger.Debug("CallTool: client.CallTool returned",
 		zap.String("server_name", serverName),
@@ -1415,6 +1449,12 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 		// queue-full shed is not an upstream rate limit).
 		var limitErr *limiter.LimitError
 		if errors.As(err, &limitErr) {
+			return nil, err
+		}
+		// Spec 105 FR-009 (codex r3 D2): the generation refusal is a typed
+		// identity the dispatch paths map onto their own unresolved-identity
+		// body; return it verbatim so errors.Is survives.
+		if errors.Is(err, managed.ErrConnectionGenerationChanged) {
 			return nil, err
 		}
 

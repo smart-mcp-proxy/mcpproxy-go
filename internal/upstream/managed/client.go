@@ -826,8 +826,58 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 	return tools, nil
 }
 
+// ErrConnectionGenerationChanged is CallToolOnEpoch's refusal: the client's
+// connection generation is no longer the one the caller certified the tool
+// identity against, so the call was NOT sent. It is returned verbatim (never
+// wrapped with server context) so the dispatch paths can map it onto their
+// own unresolved-identity refusal with errors.Is.
+var ErrConnectionGenerationChanged = errors.New("connection generation changed since the tool identity was resolved")
+
 // CallTool executes a tool with error handling
 func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+	return mc.callTool(ctx, toolName, args, nil)
+}
+
+// CallToolOnEpoch is CallTool pinned to the connection generation the caller
+// certified the tool identity against (Spec 105 FR-009 "stale generation";
+// codex r3 D2). The server-side identity check (resolveExactToolIdentity /
+// liveIdentityRefusal) validates a name, its tier and its approval hash on
+// ONE generation (ConnectionEpoch); this entry point makes the dispatch reach
+// the transport on that same generation, or not at all. The generation is
+// re-checked twice: cheaply on entry, and again AFTER the admission-control
+// queue wait — where a call can sit for seconds while a disconnect and a
+// reconnect complete — immediately before the transport, under epochMu, the
+// mutex Connect's and Disconnect's bumps take. A mismatch is refused with
+// ErrConnectionGenerationChanged and zero transport calls. A disconnected
+// client is refused the same way (Disconnect closes the generation), so a
+// reconnect can never happen inside a pinned dispatch.
+//
+// epochMu is never held across the transport (Client.epochMu's invariant), so
+// check→invoke is not atomic; the residual gap is the scheduling instant
+// between the unlock and the transport's own send, which no lock-free design
+// can close without holding the mutex across foreign code.
+func (mc *Client) CallToolOnEpoch(ctx context.Context, toolName string, args map[string]interface{}, expectedEpoch int64) (*mcp.CallToolResult, error) {
+	return mc.callTool(ctx, toolName, args, &expectedEpoch)
+}
+
+// generationIs reports whether the client is connected on exactly the
+// expected generation, read under epochMu so it cannot interleave with
+// Connect's or Disconnect's bump.
+func (mc *Client) generationIs(expectedEpoch int64) bool {
+	mc.epochMu.Lock()
+	defer mc.epochMu.Unlock()
+	return mc.IsConnected() && mc.connectionEpoch.Load() == expectedEpoch
+}
+
+// callTool is the shared body of CallTool and CallToolOnEpoch; expectedEpoch
+// nil means unpinned.
+func (mc *Client) callTool(ctx context.Context, toolName string, args map[string]interface{}, expectedEpoch *int64) (*mcp.CallToolResult, error) {
+	// A pinned call on a moved generation is refused before the connection
+	// check: a Disconnect bumps the epoch, so a dropped client fails here
+	// too, with the generation verdict rather than the not-connected one.
+	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
+		return nil, ErrConnectionGenerationChanged
+	}
 	if !mc.IsConnected() {
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
@@ -841,6 +891,13 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 		return nil, err
 	}
 	defer releaseSlot()
+
+	// The queue wait is the window D2 names: re-check the generation after
+	// it, immediately before the transport (the deferred release returns the
+	// slot on refusal).
+	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
+		return nil, ErrConnectionGenerationChanged
+	}
 
 	invoker := mc.toolInvoker
 	if invoker == nil {

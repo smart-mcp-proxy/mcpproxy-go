@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
@@ -14,7 +15,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Spec 105 FR-009 on the nested (code_execution) dispatch path. The sandbox is
@@ -158,19 +158,25 @@ func TestCodeExecution_EmptySnapshot_KeepsServerLevelVerdicts(t *testing.T) {
 	}
 }
 
-// Round-3 finding 4 (Spec 105 FR-009 migration review): a KNOWN server that
-// DROPPED (reconnect_on_use) has an empty snapshot because of its own state,
-// so identity resolution cannot show a name absent and the tier read falls
-// back to destructive — pre-105 behaviour the server-level verdicts are meant
-// to own. But the shared gate itself used to read "no record" as READY there,
-// which left a never-listed, record-less tool (one the upstream hides from
-// tools/list) with an open gate for an administrator or destructive-tier
-// token the moment anything reconnected the server. Under an active gate the
-// gate now classifies such a name pending, so the refusal is the gate's own
-// (no approval record) and nothing reaches the upstream — the disconnected
-// server with a RECORDED tool keeps the pre-105 not-connected answer
-// (TestCallToolRead_EmptySnapshot_KeepsServerLevelVerdicts).
-func TestCodeExecution_DroppedServer_RecordlessHiddenToolIsPending(t *testing.T) {
+// Spec 105 FR-009 (research D4), codex r3 D1. A KNOWN server that DROPPED
+// (reconnect_on_use) has an empty snapshot because of its own state, so
+// identity resolution cannot show a name absent and the tier read falls back
+// to destructive — pre-105 behaviour the server-level verdicts own. An
+// earlier round had the shared gate synthesize an implicit PENDING record for
+// every record-less name on such a server, on the theory that a reconnect
+// inside dispatch could otherwise carry a never-listed name (one the upstream
+// hides from tools/list) to the fresh connection. That clause was wrong twice
+// over: it answered "is in the server's tool list" for an EMPTY snapshot, and
+// it pre-empted the not-connected verdict for a record-less name while the
+// recorded sibling on the same dropped server kept it — and none of the three
+// consumers of the gate ever reconnects inside dispatch (the sandbox bridge
+// dispatches through managed.Client.CallTool, which refuses a client that is
+// not connected; reconnect_on_use lives only in upstream.Manager.CallTool).
+// So the not-connected verdict answers the record-less name too, with zero
+// upstream calls — and once the server reconnects, the fresh discovery stamp
+// makes the never-listed name Unresolved on the nested AND the retrieve
+// paths, still with zero upstream calls, while the listed sibling dispatches.
+func TestCodeExecution_DroppedServer_RecordlessHiddenTool_KeepsNotConnectedVerdictAndRegatesOnReconnect(t *testing.T) {
 	destructiveTier := agentCtx([]string{"a"}, []string{auth.PermRead, auth.PermDestructive}, "")
 	for label, ctx := range map[string]context.Context{
 		"destructive-tier a-only token": destructiveTier,
@@ -179,6 +185,7 @@ func TestCodeExecution_DroppedServer_RecordlessHiddenToolIsPending(t *testing.T)
 		t.Run(label, func(t *testing.T) {
 			serverCfg := &config.ServerConfig{Name: "a", Enabled: true, ReconnectOnUse: true}
 			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{serverCfg})
+			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 			// The upstream really serves "hidden" (the counter would witness a
 			// leak) but never listed it: no snapshot entry, no record.
 			up := startCountingUpstream(t, proxy, rt, "a", readSpec("erase"), noRecordSpec(readSpec("hidden")))
@@ -188,6 +195,12 @@ func TestCodeExecution_DroppedServer_RecordlessHiddenToolIsPending(t *testing.T)
 			// cleared the way the supervisor clears it on server_disconnected.
 			client, ok := proxy.upstreamManager.GetClient("a")
 			require.True(t, ok)
+			// reconnect_on_use on the LIVE client's config (the stub fixture
+			// wires its own record), so a reconnect inside dispatch would be
+			// witnessed by IsConnected flipping back — it must not.
+			liveCfg := *client.GetConfig()
+			liveCfg.ReconnectOnUse = true
+			client.SetConfig(&liveCfg)
 			require.NoError(t, client.Disconnect())
 			require.False(t, client.IsConnected(), "fixture: the client must be dropped")
 			rt.Supervisor().StateView().UpdateServer("a", func(s *stateview.ServerStatus) {
@@ -201,17 +214,54 @@ func TestCodeExecution_DroppedServer_RecordlessHiddenToolIsPending(t *testing.T)
 			require.False(t, identity.Unresolved(), "a dropped server is not the identity condition")
 			require.NotEqual(t, jsruntime.PermissionTierUnresolved, proxy.lookupToolPermission("a", "hidden"))
 
+			// The shared gate holds no verdict against a record-less name on
+			// a dropped server: implicit pending is keyed on a DISCOVERED
+			// identity, and this snapshot lists nothing.
 			gate := proxy.evaluateExactToolGate("a", "hidden")
-			assert.False(t, gate.callable(), "no record on a dropped server under an active gate must not read as ready")
-			assert.Equal(t, storage.ToolApprovalStatusPending, gate.lockStatus)
-			assert.True(t, isImplicitPendingApproval(gate.approval))
+			assert.True(t, gate.callable(), "the gate must leave a record-less name on a dropped server to the server-level verdicts")
+			assert.Empty(t, gate.lockStatus)
+			assert.False(t, isImplicitPendingApproval(gate.approval), "no implicit pending record on an empty snapshot")
 
+			// Nested: the not-connected verdict answers, from the managed
+			// client — which never reconnects on its own.
 			call := runSandboxCallTool(t, proxy, ctx, "a", "hidden")
 			assert.False(t, call.OK)
-			assert.Contains(t, call.Message, "no approval record", "the gate, not the transport, must answer (got %q: %s)", call.Code, call.Message)
-			assert.NotContains(t, call.Message, "not connected")
+			assert.Equal(t, string(jsruntime.ErrorCodeUpstreamError), call.Code, "got %q: %s", call.Code, call.Message)
+			assert.Contains(t, call.Message, "not connected", "the not-connected verdict must answer a record-less name on a dropped server (got %q: %s)", call.Code, call.Message)
+			assert.NotContains(t, call.Message, "no approval record", "no approval verdict may pre-empt the connection verdict")
+			assert.False(t, client.IsConnected(), "the nested path must never reconnect inside dispatch")
 			assert.Equal(t, int64(0), up.count.Load(), "the hidden tool must never reach the upstream")
-			assert.Empty(t, up.dispatched())
+
+			// Retrieve: the same verdict, for the same reason.
+			_, text := callToolReadResult(t, proxy, ctx, "a:hidden")
+			assert.Contains(t, text, "Server 'a' is not connected")
+			assert.NotContains(t, text, "no_approval_record")
+			assert.False(t, client.IsConnected(), "call_tool_read must never reconnect inside dispatch")
+			assert.Equal(t, int64(0), up.count.Load())
+
+			// The server reconnects and its discovery re-stamps the fresh
+			// connection with the tools it LISTS — "hidden" is still not
+			// among them. The never-listed name is now Unresolved on both
+			// paths (hydrated snapshot, discovery done, name absent), so it
+			// still cannot dispatch; the listed sibling can.
+			require.NoError(t, proxy.upstreamManager.ConnectAll(context.Background()))
+			require.Eventually(t, client.IsConnected, 10*time.Second, 50*time.Millisecond, "fixture: the stub must reconnect")
+			stampDiscoveredOnLiveConnection(t, proxy, rt, "a", []stateview.ToolInfo{readSpec("erase").info()})
+			require.True(t, proxy.resolveExactToolIdentity("a", "hidden").Unresolved(), "fixture: the fresh stamp does not list hidden")
+
+			call = runSandboxCallTool(t, proxy, ctx, "a", "hidden")
+			assert.False(t, call.OK)
+			assert.Equal(t, string(jsruntime.ErrorCodePermissionDenied), call.Code, "got %q: %s", call.Code, call.Message)
+			assert.Contains(t, call.Message, "cannot be resolved")
+			_, text = callToolReadResult(t, proxy, ctx, "a:hidden")
+			assert.Contains(t, text, "Permission denied")
+			assert.Contains(t, text, "cannot be resolved")
+			assert.Equal(t, int64(0), up.count.Load(), "a never-listed name must not reach the reconnected upstream either")
+
+			ctl := runSandboxCallTool(t, proxy, ctx, "a", "erase")
+			assert.True(t, ctl.OK, "control: the listed sibling dispatches after the reconnect (got %q: %s)", ctl.Code, ctl.Message)
+			assert.Equal(t, int64(1), up.count.Load())
+			assert.Equal(t, []string{"erase"}, up.dispatched())
 		})
 	}
 }

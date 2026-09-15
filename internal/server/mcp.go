@@ -2498,6 +2498,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	}
 
 	// Check connection status before attempting tool call to prevent hanging
+	var certified toolIdentity
 	if client, exists := p.upstreamManager.GetClient(serverName); exists {
 		if !client.IsConnected() {
 			state := client.GetState()
@@ -2528,13 +2529,18 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// connected here is the authority on which connection the snapshot's
 		// stamp describes, so a name certified by a previous connection is
 		// refused with the discovery-window body.
-		if errMsg, refuse := p.liveIdentityRefusal(serverName, actualToolName, identity, client); refuse {
+		live, errMsg, refuse := p.liveIdentityRefusal(serverName, actualToolName, identity, client)
+		if refuse {
 			p.logger.Debug("handleCallToolVariant: refusing unresolved tool identity (live client connected, snapshot stale)",
 				zap.String("server_name", serverName),
 				zap.String("tool_name", actualToolName))
 			p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 			return mcp.NewToolResultError(errMsg), nil
 		}
+		// The dispatch below is pinned to the generation this check
+		// certified (codex r3 D2): the managed client re-checks it after
+		// the admission queue and immediately before the transport.
+		certified = live
 	} else {
 		// Get list of available servers for helpful error message
 		availableServers := p.upstreamManager.GetAllServerNames()
@@ -2569,7 +2575,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// tool-call latency/outcome metrics. No-ops when observability is disabled.
 	callCtx, toolSpan := p.startToolCallSpan(ctx, serverName, actualToolName, profileSlug)
 	startTime := time.Now()
-	result, err := p.upstreamManager.CallTool(callCtx, toolName, args)
+	result, err := p.dispatchOnEpoch(callCtx, certified, toolName, args)
 	duration := time.Since(startTime)
 	p.finishToolCall(toolSpan, serverName, actualToolName, duration, err)
 
@@ -2661,6 +2667,31 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, storage.ActivityStatusRejected, shedMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, nil, shedIntentMap, "")
 
 			return shedToolResult(limitErr), nil
+		}
+
+		// Spec 105 FR-009 (codex r3 D2): the connection generation moved
+		// between the identity check above and the transport, so the
+		// managed client refused to send. Nothing reached the upstream; the
+		// answer is the same discovery-window refusal the pre-dispatch gate
+		// gives a name whose generation is not certified, in the same
+		// telemetry bucket, with the started record closed as an error so
+		// the activity funnel sees the call end.
+		if errors.Is(err, managed.ErrConnectionGenerationChanged) {
+			errMsg := unresolvedToolIdentityMessage(serverName, actualToolName, false)
+			toolCallRecord.Error = errMsg
+			if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+				p.logger.Warn("Failed to record refused tool call", zap.Error(storeErr))
+			}
+			p.logger.Debug("handleCallToolVariant: refusing dispatch, connection generation changed since the identity was certified",
+				zap.String("server_name", serverName),
+				zap.String("tool_name", actualToolName))
+			var intentMap map[string]interface{}
+			if intent != nil {
+				intentMap = intent.ToMap()
+			}
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+			p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+			return mcp.NewToolResultError(errMsg), nil
 		}
 
 		// Record error in tool call history
@@ -6880,6 +6911,12 @@ type toolIdentity struct {
 	// live client's connection token differs from the snapshot's stamp: the
 	// discovery result is a previous connection's (astra r2 C3).
 	StaleConnection bool
+	// DiscoveryEpoch is the connection generation the snapshot's discovery
+	// stamp was captured under (stateview.ServerStatus.DiscoveryEpoch). When
+	// DiscoveryDone stands it is the LIVE client's generation too, so it is
+	// the generation a certified identity is valid on — and the one the
+	// dispatch that follows must be pinned to (codex r3 D2; certified).
+	DiscoveryEpoch int64
 	// Found reports whether the server's snapshot lists the raw name, verbatim.
 	Found bool
 	// Description and Annotations are the snapshot's metadata for the tool;
@@ -6900,6 +6937,19 @@ type toolIdentity struct {
 // and which the caller's reconnect_on_use path relies on.
 func (id toolIdentity) Unresolved() bool {
 	return id.ServerKnown && id.SnapshotHydrated && (!id.DiscoveryDone || !id.Found)
+}
+
+// certified reports that the live snapshot lists the raw name as a completed
+// discovery result of the CURRENT connection generation — the only state in
+// which DiscoveryEpoch names the generation the identity is valid on. A
+// dispatch that follows a certified read is pinned to that generation
+// (managed.Client.CallToolOnEpoch): it reaches the upstream on exactly the
+// connection the name, tier and approval hash were certified against, or not
+// at all (Spec 105 FR-009 "stale generation"; codex r3 D2). An uncertified
+// identity (no runtime, server not in the StateView) dispatches unpinned, as
+// it always did — the server-existence handling owns it.
+func (id toolIdentity) certified() bool {
+	return id.ServerKnown && id.SnapshotHydrated && id.DiscoveryDone && id.Found
 }
 
 // resolveExactToolIdentity resolves a pair that is ALREADY split into server
@@ -6934,6 +6984,7 @@ func (p *MCPProxyServer) resolveExactToolIdentityIn(servers map[string]*statevie
 		ServerKnown:      true,
 		SnapshotHydrated: serverStatus.Enabled && !serverStatus.Quarantined && serverStatus.Connected,
 		DiscoveryDone:    serverStatus.ToolsDiscovered,
+		DiscoveryEpoch:   serverStatus.DiscoveryEpoch,
 	}
 	// The stamp certifies the tool list only for the connection it was
 	// captured on. The StateView's Connected/ToolsDiscovered are written by
@@ -7033,15 +7084,35 @@ func unresolvedToolIdentityMessage(serverName, toolName string, discoveryDone bo
 // here is the authority on WHICH connection that is — resolveExactToolIdentity
 // compares the stamp's token with it, so a name certified by connection A is
 // refused on connection B with the discovery-window body.
-func (p *MCPProxyServer) liveIdentityRefusal(serverName, toolName string, deferred toolIdentity, client interface{ IsConnected() bool }) (string, bool) {
+//
+// The live identity is returned alongside the verdict (codex r3 D2): when it
+// is certified, its DiscoveryEpoch is the generation the caller must pin the
+// dispatch to (upstream.Manager.CallToolOnEpoch / managed.Client.
+// CallToolOnEpoch), so a generation change between this check and the
+// transport — a queue wait behind admission control is seconds long — is
+// refused by the client itself with the same discovery-window body. The
+// zero identity comes back when the check stood aside (no runtime, server
+// not in the StateView, client not connected), and the caller dispatches
+// unpinned as before.
+func (p *MCPProxyServer) liveIdentityRefusal(serverName, toolName string, deferred toolIdentity, client interface{ IsConnected() bool }) (toolIdentity, string, bool) {
 	if !deferred.ServerKnown || client == nil || !client.IsConnected() {
-		return "", false
+		return toolIdentity{}, "", false
 	}
 	live := p.resolveExactToolIdentity(serverName, toolName)
 	if live.Found && !live.Unresolved() {
-		return "", false
+		return live, "", false
 	}
-	return unresolvedToolIdentityMessage(serverName, toolName, live.SnapshotHydrated && live.DiscoveryDone), true
+	return live, unresolvedToolIdentityMessage(serverName, toolName, live.SnapshotHydrated && live.DiscoveryDone), true
+}
+
+// dispatchOnEpoch routes one upstream dispatch through the manager, pinned
+// to the certified identity's generation when there is one and unpinned
+// otherwise (see toolIdentity.certified).
+func (p *MCPProxyServer) dispatchOnEpoch(ctx context.Context, certified toolIdentity, toolName string, args map[string]interface{}) (interface{}, error) {
+	if certified.certified() {
+		return p.upstreamManager.CallToolOnEpoch(ctx, toolName, args, certified.DiscoveryEpoch)
+	}
+	return p.upstreamManager.CallTool(ctx, toolName, args)
 }
 
 // lookupOutputSchema returns the declared output schema (raw JSON) for a tool,
