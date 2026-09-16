@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 )
 
 // Every truncation banner mcpproxy emits points the caller at read_cache. That
@@ -37,9 +38,14 @@ func TestCallToolDirect_ReadCacheIsRoutable(t *testing.T) {
 func TestCallToolDirect_ReadCachePagesStoredRecords(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
 
+	// Spec 105 FR-002 (task T031 inversion): an unstamped Store is legacy
+	// provenance and is refused for every caller, so the record is seeded
+	// stamped as the anonymous /mcp caller — the authorization the
+	// unauthenticated CallToolDirect below acts under.
 	const key = "cache-key-direct"
 	content := `{"tools":[{"name":"github:get_repo"},{"name":"github:list_issues"}]}`
-	require.NoError(t, proxy.cacheManager.Store(key, "retrieve_tools", map[string]interface{}{"query": "manage"}, content, "tools", 2))
+	require.NoError(t, proxy.cacheManager.StoreAs(key, "retrieve_tools", map[string]interface{}{"query": "manage"}, content, "tools", 2,
+		cache.Authorization{CallerKind: cache.CallerKindAnonymous}))
 
 	request := mcp.CallToolRequest{}
 	request.Params.Name = "read_cache"

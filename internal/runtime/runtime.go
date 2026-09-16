@@ -2233,10 +2233,15 @@ func (r *Runtime) SearchRegistryServers(registryID, tag, query string, limit int
 	}
 
 	// Cache the freshly fetched list so subsequent searches surface its age.
+	// The entry is stamped internal (Spec 105 FR-002): read_cache refuses it
+	// for every caller without evicting it, and the Peek above keeps serving
+	// it. An unstamped entry would be legacy provenance — invalidated by the
+	// first read_cache probe of this guessable key.
 	var cacheInfo *contracts.RegistryCacheInfo
 	if r.cacheManager != nil {
 		if data, mErr := json.Marshal(result); mErr == nil {
-			if sErr := r.cacheManager.Store(cacheKey, "registry-servers", nil, string(data), "", len(result)); sErr != nil {
+			if sErr := r.cacheManager.StoreAs(cacheKey, "registry-servers", nil, string(data), "", len(result),
+				cache.Authorization{CallerKind: cache.CallerKindInternal}); sErr != nil {
 				r.logger.Warn("Failed to cache registry search", zap.Error(sErr))
 			}
 		}

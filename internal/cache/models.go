@@ -21,9 +21,29 @@ type Record struct {
 	CreatedAt    time.Time              `json:"created_at"`
 	// Producer is the authorization the entry was produced under (Spec 104
 	// FR-016a). nil on entries persisted before stamping existed or written
-	// through Store by internal callers; those are readable only by
-	// unrestricted callers.
+	// through Store; together with Version it decides the entry's provenance
+	// class (see HasCurrentProvenance).
 	Producer *Authorization `json:"producer,omitempty"`
+	// Version is the provenance schema the entry was written under (Spec 105
+	// FR-002). 0/absent marks a record persisted before this field existed;
+	// any value other than RecordVersion is provenance this binary does not
+	// recognise. Both are legacy: refused for every caller and invalidated on
+	// the first gated read.
+	Version uint8 `json:"version,omitempty"`
+}
+
+// RecordVersion is the provenance schema current binaries stamp on every
+// record they write. Bump it only when the meaning of Producer changes in a
+// way older readers must not trust — a bump makes every existing entry legacy.
+const RecordVersion uint8 = 1
+
+// HasCurrentProvenance reports whether the record carries a producer stamp
+// written under the current provenance schema. Anything else — no producer,
+// no version, a version this binary does not know — is legacy provenance
+// (Spec 105 FR-002): the gated read refuses it for every caller kind and
+// invalidates it.
+func (c *Record) HasCurrentProvenance() bool {
+	return c.Producer != nil && c.Version == RecordVersion
 }
 
 // Stats represents cache statistics
@@ -40,6 +60,13 @@ type Stats struct {
 type ReadCacheResponse struct {
 	Records []interface{} `json:"records"`
 	Meta    Meta          `json:"meta"`
+	// Producer is the authorization snapshot the paged entry was produced
+	// under. It never reaches the wire: the read_cache handler carries it to
+	// the store of a recursively re-truncated page so provenance stays
+	// monotone down the chain — a child page is stamped with its PARENT's
+	// snapshot, never with the (possibly broader) redeemer's (Spec 105
+	// FR-001).
+	Producer *Authorization `json:"-"`
 }
 
 // Meta represents metadata about the cached response

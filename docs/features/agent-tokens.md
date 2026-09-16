@@ -268,17 +268,33 @@ Server scoping is enforced at three levels:
    receive every event unchanged; the stream is rendered per connection.
 4. **Cached responses** (`read_cache`) — a truncated response is parked behind
    a cache key, and the key is a hash, not a credential. Every entry is stamped
-   with the authorization that produced it (server scope, permission tier,
-   profile pin, effective profile, caller kind). `read_cache` refuses, on every
-   page, any request whose own authorization could not have produced the entry,
-   so a narrower token sharing the same MCP session cannot page a broader
-   token's response. An unrestricted admin may read any entry; a token may read
-   its own entries and those of tokens at least as narrow as itself. Profile
-   scope is compared as a server set, so deleting or narrowing a profile after
-   the entry was produced revokes cached access as well (a stale pin resolves to
-   a deny-all scope and reads nothing). An unauthenticated `/mcp` caller ranks
-   below an authenticated admin: it cannot page an entry an API-key admin
-   produced.
+   with the authorization snapshot that authorized producing it (server scope,
+   permission tier, profile pin, effective profile, caller kind), captured when
+   the call was authorized — a profile narrowed while the call was in flight
+   does not re-stamp the response. `read_cache` — on every MCP surface and on
+   the REST direct call path (`POST /api/v1/tools/call`) — refuses, on every
+   page, any request whose current authorization is neither equal to nor a
+   superset of that snapshot, so a narrower token sharing the same MCP session
+   cannot page a broader token's response. Superset is ordered by **caller kind
+   first**: an administrator may read any entry regardless of its own profile
+   binding; an agent token never reads an administrator's entry; between agent
+   entries the allowed-server set, permission set and effective profile scope
+   must each contain the entry's. Profile scope is compared as a server set, so
+   deleting or narrowing a profile after the entry was produced revokes cached
+   access as well (a stale pin resolves to a deny-all scope and reads nothing).
+   An unauthenticated `/mcp` caller ranks below an authenticated admin: it
+   cannot page an entry an API-key admin produced.
+
+   A page that `read_cache` itself has to truncate again is stamped with its
+   *parent's* snapshot, never the redeemer's, so provenance is monotone down
+   the chain. For a scoped caller every refusal — an entry it may not read, an
+   expired entry, an internal entry, a key that never existed — answers with
+   the same `cache key not found` body, so a key cannot be probed for
+   existence. Entries written before provenance stamping existed (an upgrade
+   from an older release) are refused for **every** caller, administrators
+   included, and are invalidated on the first attempt to read them; the
+   registry and repository-metadata caches mcpproxy keeps for itself are
+   likewise never readable through `read_cache` (they are kept, not evicted).
 
 ## Administrative Operations Are Admin-Only
 

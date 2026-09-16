@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -19,6 +20,18 @@ const (
 	CacheStatsBucket = "cache_stats"
 	DefaultTTL       = 2 * time.Hour
 	CleanupInterval  = 10 * time.Minute
+)
+
+// Read outcomes a caller can act on with errors.Is. The messages are part of
+// the agent-facing contract: the read_cache banner and its consumers key on
+// "cache key not found", and the non-disclosing refusal for scoped callers
+// (Spec 105 FR-001) reuses ErrKeyNotFound verbatim.
+var (
+	// ErrKeyNotFound: no entry under the key (or nothing left after an
+	// invalidation).
+	ErrKeyNotFound = errors.New("cache key not found")
+	// ErrKeyExpired: the entry had passed its TTL and was evicted by this read.
+	ErrKeyExpired = errors.New("cache key expired")
 )
 
 // Manager handles cached tool responses
@@ -106,14 +119,17 @@ func NextUniqueTimestamp() time.Time {
 var lastKeyNano atomic.Int64
 
 // Store saves a tool response to cache with no producer authorization. Such an
-// entry is readable only by unrestricted callers; production callers stamp the
-// producer via StoreAs.
+// entry has legacy provenance (Spec 105 FR-002): the gated read refuses it for
+// every caller and invalidates it. It exists for the ungated readers and for
+// tests that seed pre-feature records; production callers stamp the producer
+// via StoreAs.
 func (m *Manager) Store(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int) error {
 	return m.storeRecord(key, toolName, args, content, recordPath, totalRecords, nil)
 }
 
 // StoreAs saves a tool response to cache stamped with the authorization it was
-// produced under. GetRecordsAs refuses readers that could not have produced it.
+// produced under and the current RecordVersion. GetRecordsAs refuses readers
+// that could not have produced it.
 func (m *Manager) StoreAs(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int, producer Authorization) error {
 	return m.storeRecord(key, toolName, args, content, recordPath, totalRecords, &producer)
 }
@@ -121,6 +137,7 @@ func (m *Manager) StoreAs(key, toolName string, args map[string]interface{}, con
 func (m *Manager) storeRecord(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int, producer *Authorization) error {
 	record := &Record{
 		Producer:     producer,
+		Version:      RecordVersion,
 		Key:          key,
 		ToolName:     toolName,
 		Args:         args,
@@ -154,42 +171,80 @@ func (m *Manager) storeRecord(key, toolName string, args map[string]interface{},
 	})
 }
 
-// Get retrieves a cached tool response
+// Get retrieves a cached tool response without a read gate. It is the read
+// path of the proxy's own writers (the repository guesser); credentialed
+// requests go through GetRecordsAs.
 func (m *Manager) Get(key string) (*Record, error) {
 	return m.getGuarded(key, nil)
 }
 
-// getGuarded is Get with an optional read gate. The gate runs after the
-// expiry check and BEFORE the access-stats update, so a refused read neither
-// counts as a hit nor marks the entry as accessed.
+// getGuarded is Get with an optional read gate. A non-nil guard marks the
+// GATED door (read_cache): on that door an entry with legacy provenance is
+// refused for every caller and invalidated (Spec 105 FR-002), and the guard
+// then runs after the expiry check and BEFORE the access-stats update, so a
+// refused read neither counts as a hit nor marks the entry as accessed.
+//
+// Durable invalidation: bbolt rolls the whole transaction back when the
+// Update closure returns an error, so every path that deletes (expiry, legacy
+// provenance) or records a stat (miss) returns nil from the closure and hands
+// the outcome out through `verdict` instead. m.stats is mutated only on those
+// committing paths, so the in-memory counters agree with the bucket; a guard
+// refusal returns the error from the closure and therefore changes nothing.
 func (m *Manager) getGuarded(key string, guard func(*Record) error) (*Record, error) {
-	var record *Record
+	var (
+		record  *Record
+		verdict error
+	)
 
 	err := m.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(CacheBucket))
 		data := bucket.Get([]byte(key))
 		if data == nil {
 			m.stats.MissCount++
-			_ = m.saveStats(tx)
-			return fmt.Errorf("cache key not found")
+			verdict = ErrKeyNotFound
+			return m.saveStats(tx)
 		}
 
 		record = &Record{}
 		if err := record.UnmarshalBinary(data); err != nil {
+			record = nil
 			return fmt.Errorf("unmarshal cache record: %w", err)
 		}
 
-		// Check if expired
+		// Expired: evict in this transaction and COMMIT the eviction.
 		if record.IsExpired() {
-			_ = bucket.Delete([]byte(key))
+			if err := bucket.Delete([]byte(key)); err != nil {
+				record = nil
+				return fmt.Errorf("evict expired cache record: %w", err)
+			}
 			m.stats.EvictedCount++
 			m.stats.TotalEntries--
 			m.stats.TotalSizeBytes -= record.TotalSize
-			_ = m.saveStats(tx)
-			return fmt.Errorf("cache key expired")
+			record = nil
+			verdict = ErrKeyExpired
+			return m.saveStats(tx)
 		}
 
 		if guard != nil {
+			// Legacy provenance on the gated door: refuse every caller and
+			// invalidate on this first redemption, committed (FR-002).
+			if !record.HasCurrentProvenance() {
+				if err := bucket.Delete([]byte(key)); err != nil {
+					record = nil
+					return fmt.Errorf("invalidate legacy cache record: %w", err)
+				}
+				m.stats.EvictedCount++
+				m.stats.TotalEntries--
+				m.stats.TotalSizeBytes -= record.TotalSize
+				m.logger.Info("Invalidated cache entry with legacy provenance on first redemption",
+					zap.String("key", key),
+					zap.String("tool", record.ToolName),
+					zap.Uint8("version", record.Version),
+					zap.Bool("has_producer", record.Producer != nil))
+				record = nil
+				verdict = ErrLegacyProvenance
+				return m.saveStats(tx)
+			}
 			if err := guard(record); err != nil {
 				record = nil
 				return err
@@ -212,8 +267,13 @@ func (m *Manager) getGuarded(key string, guard func(*Record) error) (*Record, er
 		m.stats.HitCount++
 		return m.saveStats(tx)
 	})
-
-	return record, err
+	if err != nil {
+		return nil, err
+	}
+	if verdict != nil {
+		return nil, verdict
+	}
+	return record, nil
 }
 
 // GetRecords retrieves paginated records from a cached response without a
@@ -224,17 +284,24 @@ func (m *Manager) GetRecords(key string, offset, limit int) (*ReadCacheResponse,
 
 // GetRecordsAs retrieves paginated records from a cached response, refusing
 // with ErrUnauthorizedRead when reader could not have produced the entry
-// (Spec 104 FR-016a). The gate runs on every page. An entry with no recorded
-// producer (persisted before stamping existed, or written through Store by an
-// internal caller) is treated as produced by an unrestricted caller with no
-// identity — readable by any unrestricted kind, never by an agent or user.
+// (Spec 104 FR-016a). The gate runs on every page.
+//
+// Two classes of entry are refused for EVERY caller kind, administrators
+// included (Spec 105 FR-002):
+//   - legacy provenance (no producer, no version, or a version this binary
+//     does not recognise — every entry persisted before stamping existed):
+//     refused with ErrLegacyProvenance and durably invalidated by the refusal;
+//   - internal entries (CallerKindInternal — the registry and guesser caches):
+//     refused with ErrInternalEntry WITHOUT eviction, since their keys are
+//     guessable and their writers' ungated readers depend on them.
 func (m *Manager) GetRecordsAs(key string, offset, limit int, reader Authorization) (*ReadCacheResponse, error) {
 	return m.getRecords(key, offset, limit, func(r *Record) error {
-		producer := Authorization{CallerKind: CallerKindAnonymous}
-		if r.Producer != nil {
-			producer = *r.Producer
+		// getGuarded has already refused and invalidated legacy provenance,
+		// so a producer is present here.
+		if r.Producer.CallerKind == CallerKindInternal {
+			return ErrInternalEntry
 		}
-		if !producer.CouldHaveProduced(reader) {
+		if !r.Producer.CouldHaveProduced(reader) {
 			return ErrUnauthorizedRead
 		}
 		return nil
@@ -278,7 +345,8 @@ func (m *Manager) getRecords(key string, offset, limit int, guard func(*Record) 
 	}
 
 	response := &ReadCacheResponse{
-		Records: paginatedRecords,
+		Records:  paginatedRecords,
+		Producer: record.Producer,
 		Meta: Meta{
 			Key:          key,
 			TotalRecords: totalRecords,

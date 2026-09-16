@@ -62,14 +62,18 @@ func TestAuthorization_CouldHaveProduced(t *testing.T) {
 		{"different profile pin", pinned, otherPin, false},
 		{"unpinned reader is broader than pinned producer", pinned, broad, true},
 		{"pinned reader is narrower than unpinned producer", broad, pinned, false},
-		{"admin bound to a URL profile cannot read an unscoped admin entry", admin, adminInProfile, false},
+		// Spec 105 FR-001 (D5, task T031): superset is ordered by caller kind
+		// first, so an administrator's own profile binding never narrows what
+		// it may redeem. Before this feature the profile comparison ran first
+		// and these four cells were false (#1226 R1-F2).
+		{"admin bound to a URL profile reads an unscoped admin entry (kind first)", admin, adminInProfile, true},
 		{"unscoped admin reads profile-bound admin entry", adminInProfile, admin, true},
 		{"profile whose servers cover the producer's profile", adminInProfile, adminInWiderProfile, true},
-		{"profile whose servers do not cover the producer's profile", adminInWiderProfile, adminInProfile, false},
-		{"deleted profile: same name, deny-all scope, cannot read", adminInProfile, adminInDenyAll, false},
+		{"admin profile that does not cover the producer's profile still reads (kind first)", adminInWiderProfile, adminInProfile, true},
+		{"deleted profile: same name, deny-all scope, admin still reads (kind first)", adminInProfile, adminInDenyAll, true},
 		{"stale pin (profile deleted) cannot read its own earlier entry", pinned, stalePin, false},
 		{"deny-all reader matches nothing, not even a deny-all-stamped entry", stalePin, stalePin, false},
-		{"deny-all admin reader matches nothing", adminInDenyAll, adminInDenyAll, false},
+		{"deny-all admin reader is not guarded: the deny-all guard is for agents only", adminInDenyAll, adminInDenyAll, true},
 		{"anonymous reads a user's entry", alice, anonymous, true},
 		{"anonymous cannot read an admin_user entry", Authorization{CallerKind: CallerKindAdminUser, Principal: "u9"}, anonymous, false},
 		{"same user", alice, alice, true},
@@ -87,9 +91,12 @@ func TestAuthorization_CouldHaveProduced(t *testing.T) {
 }
 
 // Entries persisted before producer stamping existed carry no authorization.
-// They are treated as produced by an unrestricted caller with no identity:
-// any unrestricted reader (anonymous /mcp included) may page them, no agent
-// or user may.
+// Spec 105 FR-002 (task T031 inversion): they are legacy provenance — refused
+// for EVERY caller kind, administrators and the anonymous /mcp caller
+// included, and invalidated by the first refused redemption. Before this
+// feature they were treated as produced by an unrestricted caller with no
+// identity and any unrestricted reader could page them; the full matrix and
+// the durability proof live in manager_legacy_test.go.
 func TestGetRecordsAs_LegacyEntryWithoutProducer(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
@@ -99,22 +106,36 @@ func TestGetRecordsAs_LegacyEntryWithoutProducer(t *testing.T) {
 	}
 	defer m.Close()
 
-	if err := m.Store("legacy", "github:list", nil, `{"items":[1,2,3]}`, "items", 3); err != nil {
-		t.Fatal(err)
+	seed := func() {
+		t.Helper()
+		if err := m.Store("legacy", "github:list", nil, `{"items":[1,2,3]}`, "items", 3); err != nil {
+			t.Fatal(err)
+		}
 	}
+	seed()
 	agent := Authorization{CallerKind: CallerKindAgent, AllowedServers: []string{"*"}, Permissions: []string{"read"}}
 	if _, err := m.GetRecordsAs("legacy", 0, 10, agent); !errors.Is(err, ErrUnauthorizedRead) {
 		t.Fatalf("agent reading a legacy entry: got %v, want ErrUnauthorizedRead", err)
 	}
-	if _, err := m.GetRecordsAs("legacy", 0, 10, Authorization{CallerKind: CallerKindAdmin}); err != nil {
-		t.Fatalf("admin reading a legacy entry: %v", err)
+	if _, ok := m.Peek("legacy"); ok {
+		t.Fatal("the refused redemption must invalidate the legacy entry")
 	}
-	if _, err := m.GetRecordsAs("legacy", 0, 10, Authorization{CallerKind: CallerKindAnonymous}); err != nil {
-		t.Fatalf("anonymous reading a legacy entry: %v", err)
+	seed()
+	if _, err := m.GetRecordsAs("legacy", 0, 10, Authorization{CallerKind: CallerKindAdmin}); !errors.Is(err, ErrUnauthorizedRead) {
+		t.Fatalf("admin reading a legacy entry: got %v, want ErrUnauthorizedRead (FR-002: every caller)", err)
 	}
+	seed()
+	if _, err := m.GetRecordsAs("legacy", 0, 10, Authorization{CallerKind: CallerKindAnonymous}); !errors.Is(err, ErrUnauthorizedRead) {
+		t.Fatalf("anonymous reading a legacy entry: got %v, want ErrUnauthorizedRead (FR-002: every caller)", err)
+	}
+	seed()
 	user := Authorization{CallerKind: CallerKindUser, Principal: "u1"}
 	if _, err := m.GetRecordsAs("legacy", 0, 10, user); !errors.Is(err, ErrUnauthorizedRead) {
 		t.Fatalf("user reading a legacy entry: got %v, want ErrUnauthorizedRead", err)
+	}
+	// Once invalidated the key is a plain miss for every caller.
+	if _, err := m.GetRecordsAs("legacy", 0, 10, Authorization{CallerKind: CallerKindAdmin}); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("after invalidation: got %v, want ErrKeyNotFound", err)
 	}
 }
 

@@ -2,7 +2,11 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
+
+	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
@@ -83,4 +87,45 @@ func (p *MCPProxyServer) cacheStoreAs(producer cache.Authorization) CacheStore {
 		return nil
 	}
 	return producerCacheStore{store: p.cacheManager, producer: producer}
+}
+
+// childPageProducer is the snapshot a recursively re-truncated read_cache
+// page is stamped with: the parent entry's own producer (Spec 105 FR-001,
+// monotone recursive provenance). GetRecordsAs refuses legacy provenance
+// before a page exists, so a paged entry always carries a producer; the
+// redeemer is the fallback only for a page that somehow arrives without one.
+func childPageProducer(page *cache.ReadCacheResponse, redeemer cache.Authorization) cache.Authorization {
+	if page != nil && page.Producer != nil {
+		return *page.Producer
+	}
+	return redeemer
+}
+
+// readCacheRefusal renders a failed gated read as the read_cache tool error.
+//
+// For a scoped caller — anything but an administrator kind — an entry that
+// exists but was produced under an authorization the caller does not hold,
+// an entry that expired, an internal entry and a key that never existed all
+// answer with ONE body, the not-found one, so the refusal is not an existence
+// oracle (Spec 105 FR-001 "refusal is non-disclosing", FR-010(1)). The body
+// keeps the "cache key not found" substring agents already handle. Storage
+// failures (a corrupt record, a bbolt error) stay distinct: they are
+// operational faults, not answers about the key.
+//
+// Administrators get the reason: legacy provenance (invalidated), an internal
+// entry, or — for the anonymous /mcp caller — an authenticated
+// administrator's entry.
+func readCacheRefusal(err error, reader cache.Authorization) *mcp.CallToolResult {
+	if !reader.IsAdministrator() && (errors.Is(err, cache.ErrUnauthorizedRead) || errors.Is(err, cache.ErrKeyExpired)) {
+		err = cache.ErrKeyNotFound
+	}
+	switch {
+	case errors.Is(err, cache.ErrLegacyProvenance):
+		return mcp.NewToolResultError("Cache entry is not readable: it predates provenance stamping and has been invalidated. Re-run the original tool call to obtain a new cache key.")
+	case errors.Is(err, cache.ErrInternalEntry):
+		return mcp.NewToolResultError("Cache entry is not readable: it is internal to mcpproxy (registry or repository metadata) and cannot be paged through read_cache.")
+	case errors.Is(err, cache.ErrUnauthorizedRead):
+		return mcp.NewToolResultError("Cache entry is not readable with this credential: it was produced under a broader authorization (server scope, permission tier or profile) than this request holds. Re-run the original tool call with this credential to obtain your own cache key.")
+	}
+	return mcp.NewToolResultError(fmt.Sprintf("Failed to retrieve cached data: %v", err))
 }

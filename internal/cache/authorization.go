@@ -1,21 +1,44 @@
 package cache
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Caller kinds recorded on a cache entry. They mirror the auth context types
 // the MCP layer hands out; the cache package keeps its own copy so it does not
 // depend on internal/auth.
 const (
-	CallerKindAdmin     = "admin"      // API-key admin: unrestricted
-	CallerKindAdminUser = "admin_user" // OAuth admin (server edition): unrestricted
-	CallerKindAnonymous = "anonymous"  // unauthenticated /mcp caller (back-compat admin): unrestricted
+	CallerKindAdmin     = "admin"      // API-key admin: administrator
+	CallerKindAdminUser = "admin_user" // OAuth admin (server edition): administrator
+	CallerKindAnonymous = "anonymous"  // unauthenticated /mcp caller (back-compat admin): administrator-shaped
 	CallerKindAgent     = "agent"      // agent token: bounded by AllowedServers/Permissions/ProfilePin
 	CallerKindUser      = "user"       // OAuth user (server edition): bounded to its own identity
+	// CallerKindInternal marks an entry the proxy wrote for ITSELF — the
+	// registry search cache and the repository guesser cache. No request
+	// produces such an entry, so no read_cache caller can redeem it, the
+	// administrator included (Spec 105 FR-002, SC-005 named exception). Its
+	// legitimate readers are the ungated Peek/Get paths of its writers.
+	CallerKindInternal = "internal"
 )
 
 // ErrUnauthorizedRead is returned when a reader's authorization could not have
-// produced the entry it asks for (Spec 104 FR-016a).
+// produced the entry it asks for (Spec 104 FR-016a), and for the entries no
+// request could have produced: legacy provenance and internal entries (Spec
+// 105 FR-002). The handler surfaces one non-disclosing body for scoped callers.
 var ErrUnauthorizedRead = errors.New("cache entry was produced under an authorization this request does not hold")
+
+// ErrLegacyProvenance is the ErrUnauthorizedRead a gated read returns for an
+// entry with absent, legacy or unrecognised provenance (Spec 105 FR-002). The
+// entry has been invalidated by the time the caller sees it. errors.Is(err,
+// ErrUnauthorizedRead) holds.
+var ErrLegacyProvenance = fmt.Errorf("%w: entry predates provenance stamping and has been invalidated", ErrUnauthorizedRead)
+
+// ErrInternalEntry is the ErrUnauthorizedRead a gated read returns for an
+// internal (registry/guesser) entry. The entry is kept: its keys are
+// guessable, and evicting on refusal would let any caller purge what the
+// proxy's own readers depend on. errors.Is(err, ErrUnauthorizedRead) holds.
+var ErrInternalEntry = fmt.Errorf("%w: entry is internal to the proxy", ErrUnauthorizedRead)
 
 // Authorization is the authorization a cache entry was produced under, and the
 // authorization a read_cache request presents. A cache key is a hash, not a
@@ -24,13 +47,13 @@ var ErrUnauthorizedRead = errors.New("cache entry was produced under an authoriz
 type Authorization struct {
 	CallerKind string `json:"caller_kind"`
 	// Principal identifies the caller within its kind: agent name for agent
-	// tokens, user id for OAuth users. Empty for unrestricted kinds.
+	// tokens, user id for OAuth users. Empty for administrator kinds.
 	Principal string `json:"principal,omitempty"`
 	// AllowedServers is the agent token's server scope ("*" = every server).
-	// nil means unrestricted (admin kinds).
+	// nil means unrestricted (administrator kinds).
 	AllowedServers []string `json:"allowed_servers,omitempty"`
 	// Permissions is the agent token's permission tier list. nil means
-	// unrestricted (admin kinds).
+	// unrestricted (administrator kinds).
 	Permissions []string `json:"permissions,omitempty"`
 	// ProfilePin is the agent token's pinned profile ("" = unpinned).
 	ProfilePin string `json:"profile_pin,omitempty"`
@@ -49,9 +72,12 @@ type Authorization struct {
 	ProfileServers []string `json:"profile_servers,omitempty"`
 }
 
-// Unrestricted reports whether the caller kind carries no server/permission
-// bound of its own.
-func (a Authorization) Unrestricted() bool {
+// IsAdministrator reports whether the caller kind is an administrator kind:
+// the API-key admin, the OAuth admin of the server edition, and the
+// administrator-shaped anonymous /mcp caller. The name is deliberately about
+// KIND, not reach — an administrator request can still be bounded to a
+// profile, and the read gate ignores that binding (Spec 105 FR-001, D5).
+func (a Authorization) IsAdministrator() bool {
 	switch a.CallerKind {
 	case CallerKindAdmin, CallerKindAdminUser, CallerKindAnonymous:
 		return true
@@ -60,49 +86,56 @@ func (a Authorization) Unrestricted() bool {
 }
 
 // CouldHaveProduced reports whether reader is at least as broad as the
-// producing authorization a in every dimension — i.e. whether the reader could
-// have generated the entry itself. That is the read gate for read_cache: a
-// reader never sees a payload it could not have obtained by calling the tool.
+// producing authorization a — i.e. whether the reader could have generated
+// the entry itself. That is the read gate for read_cache: a reader never sees
+// a payload it could not have obtained by calling the tool.
 //
-// Profile scope is compared first and for every kind: a request bounded to a
-// profile (by pin, URL or set_profile) is narrower than an unscoped one, and a
-// scoped reader must currently cover every server the producer's profile
-// exposed — compared as server sets, so a profile that was deleted (stale pin:
-// same name, deny-all scope) or narrowed since the entry was produced no
-// longer reads it.
+// Superset is ordered by CALLER KIND FIRST (Spec 105 FR-001, research D5):
 //
-// The anonymous kind is unrestricted for tool calls but is not an identity
-// (auth.AnonymousContext), so it ranks below an authenticated admin: it may
-// read anonymous, agent and user entries, never an authenticated admin's.
+//   - An administrator reader qualifies for any snapshot, whatever its own
+//     profile binding — unscoped, narrower, wider, empty, or a profile deleted
+//     since. The anonymous kind is administrator-shaped for tool calls but is
+//     not an identity (auth.AnonymousContext), so it ranks below an
+//     authenticated administrator: it reads anonymous, agent and user entries,
+//     never an authenticated administrator's.
+//   - A non-administrator reader never qualifies for an administrator snapshot,
+//     however broad its own grant, and never for a snapshot of another kind.
+//   - Between agent snapshots every dimension must contain the snapshot's: the
+//     deny-all guard (a reader bounded to an empty effective profile — an empty
+//     profile, or the scope a stale pin resolves to — can call no tool and so
+//     could not have produced ANY entry, its own deny-all-stamped one included),
+//     then effective profile scope compared as server sets (a request bounded
+//     to a profile is narrower than an unscoped one; a scoped reader must
+//     currently cover every server the producer's profile exposed, so a profile
+//     deleted or narrowed since no longer reads), pin equality, allowed-server
+//     set and permission set.
+//   - Internal entries (CallerKindInternal) were produced by no request and
+//     match no reader (Spec 105 FR-002).
 func (a Authorization) CouldHaveProduced(reader Authorization) bool {
-	if reader.ProfileScoped {
-		// A deny-all scope (empty profile, or a stale pin) can call no tool,
-		// so it could not have produced ANY entry — including one that was
-		// stamped deny-all because the profile vanished while the upstream
-		// call was in flight.
-		if len(reader.ProfileServers) == 0 {
-			return false
-		}
-		if !a.ProfileScoped || !coversAll(reader.ProfileServers, a.ProfileServers) {
-			return false
-		}
+	if a.CallerKind == CallerKindInternal {
+		return false
 	}
-	if reader.Unrestricted() {
+	if reader.IsAdministrator() {
 		if reader.CallerKind == CallerKindAnonymous {
 			return a.CallerKind != CallerKindAdmin && a.CallerKind != CallerKindAdminUser
 		}
 		return true
 	}
-	if a.Unrestricted() {
-		return false
-	}
-	if reader.CallerKind != a.CallerKind {
+	if a.IsAdministrator() || reader.CallerKind != a.CallerKind {
 		return false
 	}
 	switch a.CallerKind {
 	case CallerKindUser:
 		return reader.Principal != "" && reader.Principal == a.Principal
 	case CallerKindAgent:
+		if reader.ProfileScoped {
+			if len(reader.ProfileServers) == 0 {
+				return false
+			}
+			if !a.ProfileScoped || !coversAll(reader.ProfileServers, a.ProfileServers) {
+				return false
+			}
+		}
 		if reader.ProfilePin != "" && reader.ProfilePin != a.ProfilePin {
 			return false
 		}
