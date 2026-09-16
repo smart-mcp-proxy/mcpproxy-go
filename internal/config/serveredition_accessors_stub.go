@@ -21,3 +21,25 @@ func IdPProviderFamily(_ *Config) string { return "" }
 
 // PublicURL is always "" on the personal build.
 func PublicURL(_ *Config) string { return "" }
+
+// ServerEditionRestartProjection returns the opaque carrier itself on the
+// personal build (Spec 107 FR-040): the block is canonical JSON that is never
+// interpreted here, so DetectConfigChanges compares its bytes and reports ANY
+// difference as `server_edition`, restart-pinned. A nil block marshals to
+// `null`, so absent-vs-absent compares equal and absent-vs-present does not.
+func ServerEditionRestartProjection(cfg *Config) any {
+	if cfg == nil {
+		return (*ServerEditionConfig)(nil)
+	}
+	return cfg.ServerEdition
+}
+
+// ServerEditionAdminEmails is always nil on the personal build: the carrier
+// is not interpreted, so there is no live key to compare.
+func ServerEditionAdminEmails(_ *Config) []string { return nil }
+
+// ServerEditionRestartReason is the single reason the personal build can
+// give — it cannot tell which key inside the opaque block moved.
+func ServerEditionRestartReason(_, _ *Config) string {
+	return "server_edition changed - the block is opaque on the personal edition and is read at startup"
+}

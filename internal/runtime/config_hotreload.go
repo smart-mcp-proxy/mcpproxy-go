@@ -423,6 +423,44 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "update_check")
 	}
 
+	// server_edition (Spec 107 FR-039 part 2). Two clauses, because the block
+	// has two lifetimes:
+	//
+	//   - the restart-pinned subset (enabled, oauth.*, public_url,
+	//     session_cookie_secure, session_ttl, bearer_token_ttl,
+	//     credential_encryption_key) is bound once by serveredition/setup.go —
+	//     the login handler, the session store and the credential store are
+	//     built from it — so it is reported as ONE field, `server_edition`,
+	//     with RequiresRestart and a reason naming the key group (never a
+	//     value: the block holds a client secret and an encryption key);
+	//   - admin_emails is read live through ServerEditionConfigProvider by the
+	//     middleware and the login callback, so it is reported on its own as
+	//     `server_edition.admin_emails` and applies hot.
+	//
+	// The projection is build-tagged (internal/config/serveredition_accessors
+	// {,_stub}.go): the server build projects the typed struct; the personal
+	// build returns the opaque canonical-JSON carrier (FR-040), so ANY
+	// difference there is `server_edition`, restart-pinned — it cannot know
+	// which key moved, and must not pretend to. jsonEqual, not DeepEqual, for
+	// the same PATCH round-trip reason as docker_isolation: omitempty collapses
+	// nil-vs-[] on allowed_domains/scopes, and a nil block projects to the same
+	// bytes as `{}`. Like code_execution_pool_size above — and unlike the
+	// early-return keys at the top — this clause accumulates, so a write that
+	// pairs a restart-pinned key with a hot one reports both, and ApplyConfig
+	// can adopt the hot half.
+	if !jsonEqual(config.ServerEditionRestartProjection(oldCfg), config.ServerEditionRestartProjection(newCfg)) {
+		result.ChangedFields = append(result.ChangedFields, "server_edition")
+		result.RequiresRestart = true
+		result.AppliedImmediately = false
+		if result.RestartReason == "" {
+			result.RestartReason = config.ServerEditionRestartReason(oldCfg, newCfg)
+		}
+	}
+	// slices.Equal for the same omitempty reason as trusted_hosts.
+	if !slices.Equal(config.ServerEditionAdminEmails(oldCfg), config.ServerEditionAdminEmails(newCfg)) {
+		result.ChangedFields = append(result.ChangedFields, "server_edition.admin_emails")
+	}
+
 	// If no changes detected
 	if len(result.ChangedFields) == 0 {
 		result.AppliedImmediately = false

@@ -2,6 +2,11 @@
 
 package config
 
+import (
+	"bytes"
+	"encoding/json"
+)
+
 // Build-tagged accessors for the server-edition block (Spec 107 T052). The
 // edition-neutral packages (internal/server, internal/management) read the
 // block only through these, so the personal build — where the block is an
@@ -45,4 +50,96 @@ func PublicURL(cfg *Config) string {
 		return ""
 	}
 	return cfg.ServerEdition.PublicURL
+}
+
+// ServerEditionRestartProjection returns the restart-pinned subset of the
+// block for DetectConfigChanges (Spec 107 FR-039 part 2): every key setup.go
+// binds at construction — enabled, oauth.*, public_url, session_cookie_secure,
+// the TTLs and credential_encryption_key. admin_emails is deliberately absent
+// (live through ServerEditionConfigProvider) and so is the deprecated no-op
+// store_idp_tokens (contracts/config-keys.md: never reported). The value is
+// meant for jsonEqual: a nil block projects to the zero value, so an absent
+// block and `{}` compare equal, and omitempty collapses nil-vs-[] the way the
+// PATCH round-trip does.
+func ServerEditionRestartProjection(cfg *Config) any {
+	var p serverEditionRestartProjection
+	if cfg == nil || cfg.ServerEdition == nil {
+		return p
+	}
+	se := cfg.ServerEdition
+	p.Enabled = se.Enabled
+	p.OAuth = se.OAuth
+	p.SessionTTL = se.SessionTTL
+	p.BearerTokenTTL = se.BearerTokenTTL
+	p.CredentialEncryptionKey = se.CredentialEncryptionKey
+	p.PublicURL = se.PublicURL
+	p.SessionCookieSecure = se.SessionCookieSecure
+	return p
+}
+
+type serverEditionRestartProjection struct {
+	Enabled                 bool                      `json:"enabled"`
+	OAuth                   *ServerEditionOAuthConfig `json:"oauth,omitempty"`
+	SessionTTL              Duration                  `json:"session_ttl,omitempty"`
+	BearerTokenTTL          Duration                  `json:"bearer_token_ttl,omitempty"`
+	CredentialEncryptionKey string                    `json:"credential_encryption_key,omitempty"`
+	PublicURL               string                    `json:"public_url,omitempty"`
+	SessionCookieSecure     string                    `json:"session_cookie_secure,omitempty"`
+}
+
+// ServerEditionAdminEmails returns server_edition.admin_emails (nil when the
+// block is absent) — the one live key of the block, compared with
+// slices.Equal by DetectConfigChanges.
+func ServerEditionAdminEmails(cfg *Config) []string {
+	if cfg == nil || cfg.ServerEdition == nil {
+		return nil
+	}
+	return cfg.ServerEdition.AdminEmails
+}
+
+// ServerEditionRestartReason names the first restart-pinned key group that
+// differs between the two blocks, in the words of contracts/config-keys.md.
+// It carries key names only — never a value, so no secret can reach a log
+// line or an API result through it. "" when nothing restart-pinned differs.
+func ServerEditionRestartReason(oldCfg, newCfg *Config) string {
+	o, n := serverEditionOrZero(oldCfg), serverEditionOrZero(newCfg)
+	switch {
+	case o.Enabled != n.Enabled:
+		return "server_edition.enabled requires a restart"
+	case o.PublicURL != n.PublicURL:
+		return "server_edition.public_url is used at login handler construction"
+	case !oauthBlocksEqual(o.OAuth, n.OAuth):
+		return "server_edition.oauth.* is bound at login handler construction"
+	case o.SessionCookieSecure != n.SessionCookieSecure:
+		return "server_edition.session_cookie_secure is bound at session store construction"
+	case o.SessionTTL != n.SessionTTL:
+		return "server_edition.session_ttl is bound at session store construction"
+	case o.BearerTokenTTL != n.BearerTokenTTL:
+		return "server_edition.bearer_token_ttl is bound at session store construction"
+	case o.CredentialEncryptionKey != n.CredentialEncryptionKey:
+		return "server_edition.credential_encryption_key is bound at credential store construction"
+	}
+	return ""
+}
+
+// oauthBlocksEqual compares two oauth blocks by their JSON form so the PATCH
+// round-trip's nil-vs-[] on allowed_domains/scopes does not name oauth.* as
+// the reason for an unrelated TTL edit.
+func oauthBlocksEqual(a, b *ServerEditionOAuthConfig) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	if a == nil {
+		return true
+	}
+	ab, errA := json.Marshal(a)
+	bb, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(ab, bb)
+}
+
+func serverEditionOrZero(cfg *Config) ServerEditionConfig {
+	if cfg == nil || cfg.ServerEdition == nil {
+		return ServerEditionConfig{}
+	}
+	return *cfg.ServerEdition
 }

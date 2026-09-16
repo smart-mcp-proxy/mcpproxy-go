@@ -1,25 +1,41 @@
 ---
 title: "Server Multi-User Authentication"
 sidebar_label: "Server Multi-User Auth"
-description: "OAuth-based multi-user authentication for the server edition with Google, GitHub, or Microsoft identity providers."
+description: "SSO multi-user authentication for the server edition: generic OIDC (Keycloak, Okta, Auth0, Authentik, Entra) with JWKS-verified ID tokens, plus the Google, GitHub and Microsoft legacy providers, behind a TLS-terminating ingress."
 ---
 
-# Server Multi-User Authentication (Spec 024)
+# Server Multi-User Authentication (Spec 024, hardened by Spec 107)
 
-Server edition supports OAuth-based multi-user authentication with Google, GitHub, or Microsoft identity providers. All server code is behind `//go:build server`; the personal edition is unaffected.
+Server edition supports SSO multi-user authentication with four identity
+providers: the generic **`oidc`** provider (any OpenID Connect Discovery issuer —
+Keycloak, Okta, Auth0, Authentik, Microsoft Entra ID — with a JWKS-verified ID
+token and a groups claim) and the three legacy providers **`google`**,
+**`github`** and **`microsoft`**. All server code is behind `//go:build server`;
+the personal edition is unaffected. The complete key table with defaults,
+validation text and reload behaviour is
+[Server Edition](../configuration/config-file.md#server-edition); this page is
+the developer view.
 
 ## Server Configuration
 
 ```json
 {
+  "listen": "0.0.0.0:8080",
+  "trusted_proxies": ["10.42.0.0/16"],
   "server_edition": {
     "enabled": true,
     "admin_emails": ["admin@company.com"],
+    "public_url": "https://mcp.company.com",
+    "session_cookie_secure": "auto",
     "oauth": {
-      "provider": "google",
-      "client_id": "xxx.apps.googleusercontent.com",
-      "client_secret": "GOCSPX-xxx",
-      "tenant_id": "",
+      "provider": "oidc",
+      "issuer_url": "https://login.company.com/realms/team",
+      "client_id": "mcpproxy",
+      "client_secret": "${env:OIDC_CLIENT_SECRET}",
+      "scopes": ["openid", "profile", "email", "groups"],
+      "groups_claim": "groups",
+      "email_verified_policy": "refuse_false",
+      "display_name": "Company SSO",
       "allowed_domains": ["company.com"]
     },
     "session_ttl": "24h",
@@ -27,6 +43,122 @@ Server edition supports OAuth-based multi-user authentication with Google, GitHu
   }
 }
 ```
+
+A legacy provider needs only `provider`, `client_id`, `client_secret` (and
+`tenant_id` for `microsoft`, default `common`); the six `oidc` keys are ignored
+for it. `oauth.provider` is validated in one place
+(`internal/config/server_edition_config.go`, `Validate`); the Web UI select in
+`frontend/src/views/settings/fields.ts` and `users.User.Validate` must change
+in lockstep with it.
+
+### The `oidc` provider (`internal/serveredition/auth/oidc_provider.go`)
+
+- **Discovery is lazy.** Nothing is fetched at boot or for readiness: the first
+  `GET /api/v1/auth/login` reads `<issuer_url>/.well-known/openid-configuration`,
+  checks the document's `issuer` equals the configured value **byte for byte**
+  (a trailing slash is a mismatch → `discovery_failed`, both values logged),
+  and caches it with a bounded TTL (cache headers respected, clamped to
+  5 min – 24 h). Every discovered endpoint (`authorization_endpoint`,
+  `token_endpoint`, `jwks_uri` required; `userinfo_endpoint` optional) must be
+  absolute `https`; plain `http` is admitted only for a loopback host together
+  with `allow_insecure_issuer: true` (`config.IsAllowedOIDCEndpoint` — the same
+  rule gates the configured issuer). A violating document is rejected before
+  any redirect or any request carrying the client secret.
+- **The back channel never follows redirects** and has a 10 s timeout. A 3xx
+  from discovery, JWKS, the token endpoint or userinfo is `provider_error`, so
+  a misconfigured or compromised IdP cannot downgrade the code or the client
+  secret to another origin.
+- **Client authentication is chosen once, before the single exchange**, from
+  `token_endpoint_auth_methods_supported`: `client_secret_basic` when
+  advertised (also the default when the key is absent), else
+  `client_secret_post`, else `discovery_failed`. An authorization code is
+  single-use, so there is no retry with a second method. PKCE S256 and a
+  per-login `nonce` are always sent; `openid` is appended to `scopes` if missing.
+- **The ID token is verified before any claim is read**
+  (`oidc_jwks.go` parses RSA/EC JWKs with the standard library and
+  `golang-jwt/jwt/v5` verifies): signature by `kid` against the cached JWKS
+  (an unknown `kid` triggers exactly one JWKS refetch per login), algorithm
+  restricted to RS256/RS384/RS512/PS256/PS384/PS512/ES256/ES384/ES512 (never
+  `none`, never HS*), `exp`/`nbf`/`iat` with 60 s skew, exact `iss`, `aud`
+  containing the client id (with `azp` required and checked when there are
+  several audiences), and the nonce stored beside the pending state and
+  consumed once. The unverified `parseIDToken` survives only for the three
+  legacy providers and is unreachable for `oidc`.
+- **Claims.** `sub` and `email` are required (`email_missing`);
+  `email_verified` is applied per `email_verified_policy`; groups are read from
+  the ID token's `groups_claim` (a flat string array or a single string), then
+  from `userinfo` once — and no userinfo claim is used before its `sub` is
+  compared with the verified token's `sub` (`userinfo_subject_mismatch`). A
+  failed userinfo fetch is `provider_error` (503, store untouched, stored
+  groups **not** reset); a claim absent from both, or an Entra overage marker
+  (`_claim_names`), stores `[]` and logs a warning naming the user id and the
+  claim looked for — never the token.
+- **Pending login state** is in-process, 10-minute TTL, capped at 10,000
+  entries with the oldest evicted on insert. A second replica is unsupported.
+- **Never log tokens or the client secret.** Log lines name the issuer, the
+  failed check and the error class only.
+
+### Subject binding and login refusals (every provider)
+
+- A user record stores `(provider, provider_subject_id)` and refreshes both on
+  every successful login. Same provider + same normalised email + different
+  `sub` is refused (`subject_mismatch`); a configured-provider change re-binds
+  on the first login and flags the attempt `provider_rebound`. Email stays the
+  lookup key (no store migration). An administrator re-arms the binding for a
+  genuinely re-created IdP account through `disable` → `enable`: the enable
+  transition sets `subject_rebind_armed_at`, the next successful login consumes
+  it (single-use, persisted across restarts, cleared atomically in the same
+  store write); a failed attempt does not consume it.
+- Every denial renders **one generic page** — `Sign-in was not permitted (ref
+  <request id>)` with the same status for every reason. The closed
+  `LoginRefusal` enum (`oauth_handler.go`: `authorization_denied`,
+  `state_invalid`, `id_token_invalid`, `issuer_mismatch`, `audience_mismatch`,
+  `token_expired`, `nonce_mismatch`, `email_missing`, `email_unverified`,
+  `domain_not_allowed`, `subject_mismatch`, `userinfo_subject_mismatch`,
+  `user_disabled`) reaches only the server log,
+  keyed by that request id. The one distinct class is unavailability —
+  `discovery_failed`, `provider_error` and the post-verification
+  `internal_error` — rendered as `503 Sign-in is temporarily unavailable (ref
+  <id>)`; the proxy stays up, readiness is unaffected and the next login
+  retries. A failure that is not the user's fault is never rendered as "not
+  permitted".
+- `redirect_uri` on `GET /api/v1/auth/login` is accepted only as a same-origin
+  path (single leading `/`, no `//`, `/\`, scheme, host, backslash or control
+  character); anything else becomes `/ui/` silently and flags the attempt
+  `redirect_rejected`. The Web UI passes `window.location.pathname`.
+
+### Front door behind an ingress
+
+The published image listens on `0.0.0.0:8080` behind a TLS-terminating ingress.
+Three keys make the SSO door safe there; `trusted_hosts` is **not** one of them
+(it is DNS-rebinding protection for loopback listeners and never runs on a
+non-loopback one).
+
+| Key | Role | Code |
+|-----|------|------|
+| `server_edition.public_url` (env `MCPPROXY_PUBLIC_URL`) | When set, the sole source of the IdP `redirect_uri` (`<public_url>/api/v1/auth/callback`), of the connect-flow base URL and of the scheme behind the `Secure` cookie decision; `Host` and `X-Forwarded-*` are ignored for those. Unset on a non-loopback listener → boot warning + `doctor` finding (never an error: every existing container deployment must keep booting). When set to https but the callback arrives over http, one warning with the request id is logged and login proceeds | `buildCallbackURL` (`oauth_handler.go`), `connector_provider.go`, `internal/config/env_serveredition.go` |
+| `trusted_proxies` (top-level, edition-neutral, env `MCPPROXY_TRUSTED_PROXIES`, **live**) | The only gate on `X-Forwarded-For` / `X-Real-IP` / `X-Forwarded-Proto` / `X-Forwarded-Host`: honoured only when `RemoteAddr` is inside the list, client IP = right-most untrusted hop. Default empty = trust nobody. Every reader evaluates a `func() []string` provider per request — never a slice captured at construction | `config.ForwardedHeaders` (`internal/config/trusted_proxies.go`) — the one reader; consumers: session store, callback, connector base URL, swagger, `httpapi.tagRequestMeta` |
+| `server_edition.session_cookie_secure` | `auto` (default: `Secure` when the effective scheme is https — `public_url`, in-process TLS, or a **trusted** `X-Forwarded-Proto: https`), `true`, `false`. `false` × (https `public_url` or `tls.enabled`) is refused at boot, PATCH and apply (`validateServerEditionConfig`, the `*Config`-level bridge that can see `tls`); an explicit `false` elsewhere is honoured with a warning + `doctor` finding | `NewSessionManager(..., securePolicy)`, `setup.go` |
+
+Forced MCP auth: when `server_edition.enabled` is `true`,
+`config.EffectiveRequireMCPAuth` makes `mcpAuthMiddleware` behave as if
+`require_mcp_auth` were `true` — no credential → 401, a session cookie or user
+JWT → 401; agent tokens, the API key and the socket are unchanged. An explicit
+`false` is not a validation error: boot logs `require_mcp_auth: false is
+overridden to true because server_edition.enabled is true` and `mcpproxy
+doctor` names the override. The accessors live in
+`internal/config/serveredition_accessors.go` (+ `_stub.go` for the personal
+build) so `internal/server` stays edition-neutral.
+
+`mcpproxy doctor` renders these findings from `config.DoctorFindings(cfg)`
+(`internal/config/doctor_findings*.go`), registered as a runtime-warning source
+on the management service; there is no producer in `cmd/mcpproxy`.
+
+Reload semantics: `enabled`, `oauth.*`, `public_url`, `session_cookie_secure`,
+`session_ttl`, `bearer_token_ttl` and `credential_encryption_key` are bound at
+setup and reported as `server_edition` with `RequiresRestart=true`
+(`server_edition settings are bound at startup`); `admin_emails` is live
+(`server_edition.admin_emails`); `trusted_proxies` is live.
 
 The former knobs `workspace_idle_timeout` and `max_user_servers` never
 controlled anything and were removed (Spec 107). A config file that still
@@ -43,8 +175,9 @@ ignored (one deprecation warning when `true`); see
 
 | Endpoint | Auth | Description |
 |----------|------|-------------|
-| `GET /api/v1/auth/login` | Public | Initiate OAuth login flow |
-| `GET /api/v1/auth/callback` | Public | OAuth callback (creates session) |
+| `GET /api/v1/auth/provider` | Public | Edition + label probe: returns only `{"display_name": "..."}` (`oauth.display_name`, falling back to the provider family name), no side effects. Never the issuer, client id, tenant, scopes or domains. Registered only when the block is enabled; the personal build answers 404 — the Web UI uses that to detect the edition before any authenticated call |
+| `GET /api/v1/auth/login` | Public | Initiate OAuth login flow (PKCE S256, `state`, `nonce`; `?redirect_uri=` must be a same-origin path) |
+| `GET /api/v1/auth/callback` | Public | OAuth callback (verifies the ID token for `oidc`, creates session; one generic refusal page) |
 | `GET /api/v1/auth/me` | Session/JWT | Get current user profile |
 | `POST /api/v1/auth/token` | Session | Mint a user JWT for the REST API and CLI (`/api/v1/user/*`); a JWT is **never** an MCP credential — `/mcp` accepts only agent tokens, the API key and the socket |
 | `POST /api/v1/auth/logout` | Session | Invalidate session |
@@ -59,7 +192,7 @@ ignored (one deprecation warning when `true`); see
 
 ## Server Architecture
 
-- **Auth flow**: OAuth 2.0 + PKCE → Session cookie (Web UI) + JWT bearer (REST API / CLI only). Neither is accepted on `/mcp`; a user reaches tools only through an agent token they own.
+- **Auth flow**: OAuth 2.0 + PKCE (+ nonce and a JWKS-verified ID token for `oidc`) → Session cookie (`HttpOnly; SameSite=Lax`; `Secure` per `session_cookie_secure`) for the Web UI + JWT bearer (REST API / CLI only). Neither is accepted on `/mcp`; a user reaches tools only through an agent token they own.
 - **Server types**: Shared (config file) + Personal (DB rows a user adds through `POST /api/v1/user/servers`). Every upstream connection is the process's single shared connection — there is no per-user connection, per-user workspace or per-user credential on the tool-call path.
 - **Isolation**: REST listing scope (users see only shared + own personal servers), agent-token `allowed_servers` scope narrowed on every authentication, and user-scoped activity logs.
 - **Admin**: Identified by `admin_emails` config. Sees all activity, manages users.
@@ -251,7 +384,9 @@ bucket whose `allowed_servers` contains `"*"` and whose `user_id` is non-empty
 | `cmd/mcpproxy/edition.go` | Default edition = "personal" |
 | `cmd/mcpproxy/edition_teams.go` | Build-tagged override for server edition |
 | `cmd/mcpproxy/serveredition_register.go` | Server feature registration entry point |
-| `internal/serveredition/auth/` | OAuth, sessions, JWT tokens, middleware |
+| `internal/serveredition/auth/` | OAuth (legacy providers), `oidc_provider.go` + `oidc_jwks.go` (discovery, JWKS, verified ID token), sessions, JWT tokens, middleware, `login_pages.go` (generic refusal / unavailability pages) |
+| `internal/config/{server_edition_config,trusted_proxies,serveredition_accessors,env_serveredition,doctor_findings*}.go` | Block schema + validation, `ForwardedHeaders`, edition accessors (`EffectiveRequireMCPAuth`), `MCPPROXY_PUBLIC_URL`, doctor findings |
+| `tests/oauthserver/` (`-oidc`) | In-process fake OpenID Provider with discovery, JWKS, userinfo, per-user claims and a tamper matrix (bad signature, wrong `iss`/`aud`, expired, wrong nonce, `alg: none`, HS256, `email_verified: false`, `http` endpoints, redirecting token endpoint) |
 | `internal/serveredition/users/` | User/session models, BBolt store |
 | `internal/serveredition/multiuser/` | Activity isolation (user-scoped activity queries). The per-user router, tool filter and workspace packages that once lived here had no production caller and were deleted in Spec 107. |
 | `internal/serveredition/broker/` | Per-user `oauth_connect` credential store (stored, not injected — see [Auth Broker](../features/auth-broker.md)) |
