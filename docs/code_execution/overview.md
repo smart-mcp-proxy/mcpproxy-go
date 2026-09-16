@@ -414,10 +414,24 @@ warm. A call landing while that rebuild is merely scheduled or in flight is
 refused exactly like one against a directory the index has never seen —
 never answered from what the index held before the change — so a rename
 under a scoped caller's feet cannot have that caller's own probe fold onto
-whatever now occupies the old name. A script added to, or renamed within,
-the directory becomes callable by agent tokens after the next index
-refresh — milliseconds later; retry a call refused in that window — while
-administrators see the change immediately.) The refusal itself:
+whatever now occupies the old name. Beyond that, the index only ever
+*authorizes* from a stamp that is provably SETTLED — old enough (about two
+seconds, the coarsest directory-timestamp granularity MCPProxy has to assume)
+that no filesystem write could still land on it unseen — so a matching
+generation is not, by itself, enough to trust a hit; a directory whose
+timestamp is younger than that refuses every scoped call, hit or miss alike,
+the same fail-closed way. A script added to, or renamed within, the
+directory becomes callable by agent tokens once the index has both
+refreshed AND settled — typically milliseconds for the refresh, up to about
+two seconds to settle; retry a call refused in that window — while
+administrators see the change immediately. On darwin and Windows, where a
+single-entry platform call reports a path's stored spelling directly, that
+pre-open probe is only the cheap gate: the authoritative check re-reads the
+stored spelling of the file descriptor MCPProxy actually opened
+(`F_GETPATH` on darwin, `GetFinalPathNameByHandle` on Windows) and compares
+it byte-for-byte to the requested name, so a case-rename racing the open
+itself is caught on the descriptor that would have been read, not just on
+an earlier probe of the same path.) The refusal itself:
 
 ```text
 Cannot execute stored script: stored script "fetch-pr" not found (the stored-script

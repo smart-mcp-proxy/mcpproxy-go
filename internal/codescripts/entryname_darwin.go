@@ -25,9 +25,28 @@ func entryName(path string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
+	return entryNameFromFd(f.Fd())
+}
 
+// openedEntryName is entryName's post-open counterpart (round 9 MUST-FIX):
+// it proves the stored spelling of the descriptor that will actually be
+// EXECUTED, not of a separate pre-open probe of the same path — a
+// case-rename or replacement landing between the pre-open probe
+// (storedSpellingsOf) and openScriptFile's own open would otherwise let the
+// wrong spelling run, because a case-folding volume folds the subsequent
+// open onto whatever now occupies the name. F_GETPATH on the EXECUTED file's
+// own descriptor is the same call entryName makes on a descriptor it opened
+// itself for the pre-open probe; here it runs on the descriptor
+// openScriptFile is about to read from.
+func openedEntryName(f *os.File) (string, error) {
+	return entryNameFromFd(f.Fd())
+}
+
+// entryNameFromFd is the shared F_GETPATH call both entryName and
+// openedEntryName resolve to a base name.
+func entryNameFromFd(fd uintptr) (string, error) {
 	var buf [1024]byte // MAXPATHLEN
-	_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), syscall.F_GETPATH, uintptr(unsafe.Pointer(&buf[0])))
+	_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, fd, syscall.F_GETPATH, uintptr(unsafe.Pointer(&buf[0])))
 	if errno != 0 {
 		return "", errno
 	}

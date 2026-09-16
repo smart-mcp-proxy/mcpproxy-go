@@ -53,6 +53,22 @@ import (
 // read is the one the index vouched for, not a replacement that landed in
 // the window between the probe and the open.
 //
+// A matching generation is not enough on its own (round 9 MUST-FIX): a
+// coarse filesystem timestamp (vfat: two seconds) can leave a directory's
+// stamp UNCHANGED across a rename that lands in the same tick as the stamp
+// the index was listed against — the index is then "current" by the
+// gen-equality test above while still blind to the rename, and the renamed
+// entry's own Lstat folds onto it on a case-folding mount exactly as a stale
+// index's does. An index may therefore AUTHORIZE a hit only once it is
+// SETTLED: its stamp predates the listing by at least generationSettleTime,
+// so no write still landing on that stamp could have escaped it. An
+// unsettled index — current or not — is refused with the same non-disclosing
+// not-found a never-built index gets; the documented consequence is that a
+// scoped call is refused for up to ~generationSettleTime after any change to
+// the scripts directory (retry). The rebuild-scheduling cadence below is
+// unaffected by this: it already runs at most once per settle window while
+// unsettled, whether or not this request's own hit is authorized.
+//
 // A directory that never stops changing cannot be allowed to keep a rebuild
 // goroutine re-listing forever, or Warm blocked forever, or a fresh rebuild
 // spawning the instant the last one gave up (round 8 SHOULD): one rebuild
@@ -90,32 +106,133 @@ type storedNames struct {
 	nextAttempt time.Time
 }
 
-// storedNameIndexes holds one *storedNames per cleaned scripts directory.
-var storedNameIndexes sync.Map
+// storedNameIndexes holds one *storedNames per cleaned scripts directory,
+// bounded so it tracks the directories actually in use rather than every
+// directory ever used (round 9 SHOULD): the server calls Warm whenever the
+// active scripts directory changes, and Warm keeps only the directory it was
+// just called for (pruneOtherIndexesLocked) — so in normal operation exactly
+// one index is warm. storedNamesIndex additionally caps the map itself at
+// maxStoredNameIndexes, evicting the least-recently-used entry, for the bare
+// (never-Warmed) case a scoped request alone can produce.
+var (
+	storedIndexesMu  sync.Mutex
+	storedIndexes    = map[string]*storedNames{}
+	storedIndexesLRU []string // least-recently-used first; a touched key moves to the end
+)
+
+// maxStoredNameIndexes bounds storedIndexes for bare (never-Warmed) use.
+const maxStoredNameIndexes = 4
 
 // storedNamesIndex returns the index of one cleaned scripts directory,
-// creating an empty (never built) one on first use.
+// creating an empty (never built) one on first use, and records the access
+// for LRU eviction.
 func storedNamesIndex(key string) *storedNames {
-	v, ok := storedNameIndexes.Load(key)
+	storedIndexesMu.Lock()
+	defer storedIndexesMu.Unlock()
+	idx, ok := storedIndexes[key]
 	if !ok {
-		v, _ = storedNameIndexes.LoadOrStore(key, &storedNames{})
+		idx = &storedNames{}
+		storedIndexes[key] = idx
 	}
-	return v.(*storedNames)
+	touchIndexLocked(key)
+	evictExcessLocked()
+	return idx
+}
+
+// touchIndexLocked moves key to the most-recently-used end of the LRU order.
+// storedIndexesMu must be held.
+func touchIndexLocked(key string) {
+	for i, k := range storedIndexesLRU {
+		if k == key {
+			storedIndexesLRU = append(storedIndexesLRU[:i], storedIndexesLRU[i+1:]...)
+			break
+		}
+	}
+	storedIndexesLRU = append(storedIndexesLRU, key)
+}
+
+// evictExcessLocked drops the least-recently-used indexes once the map holds
+// more than maxStoredNameIndexes. storedIndexesMu must be held.
+func evictExcessLocked() {
+	for len(storedIndexesLRU) > maxStoredNameIndexes {
+		oldest := storedIndexesLRU[0]
+		storedIndexesLRU = storedIndexesLRU[1:]
+		delete(storedIndexes, oldest)
+	}
+}
+
+// pruneOtherIndexesLocked drops every index but keep — Warm's own promise
+// that only the active scripts directory stays warm. storedIndexesMu must be
+// held.
+func pruneOtherIndexesLocked(keep string) {
+	for k := range storedIndexes {
+		if k != keep {
+			delete(storedIndexes, k)
+		}
+	}
+	kept := storedIndexesLRU[:0]
+	for _, k := range storedIndexesLRU {
+		if k == keep {
+			kept = append(kept, k)
+		}
+	}
+	storedIndexesLRU = kept
+}
+
+// forgetIndex removes one directory's index entirely, forcing the next
+// storedNamesIndex(key) to start from a never-built index. Production code
+// never calls this directly (pruneOtherIndexesLocked and evictExcessLocked
+// cover the two bounding cases); it exists so tests can force a cold index
+// without reaching into the map's internals.
+func forgetIndex(key string) {
+	storedIndexesMu.Lock()
+	defer storedIndexesMu.Unlock()
+	delete(storedIndexes, key)
+	for i, k := range storedIndexesLRU {
+		if k == key {
+			storedIndexesLRU = append(storedIndexesLRU[:i], storedIndexesLRU[i+1:]...)
+			break
+		}
+	}
+}
+
+// forEachIndex calls fn for every currently held index. Production code
+// never needs this (each request or Warm call addresses one directory); it
+// exists so tests can wait out every rebuild goroutine the suite has left in
+// flight, whatever directories they touched.
+func forEachIndex(fn func(*storedNames)) {
+	storedIndexesMu.Lock()
+	idxs := make([]*storedNames, 0, len(storedIndexes))
+	for _, idx := range storedIndexes {
+		idxs = append(idxs, idx)
+	}
+	storedIndexesMu.Unlock()
+	for _, idx := range idxs {
+		fn(idx)
+	}
 }
 
 // dirGeneration is the Lstat tuple that moves whenever a directory's entry
 // set can have changed: adding, removing or renaming an entry updates its
 // mtime and ctime (ctime cannot be set from user space, so a restored mtime —
 // tar, rsync -a — does not hide a change), a replaced directory has another
-// inode, and size is the cheap extra. dirGenerationOf reads it per platform.
+// inode, and size is the cheap extra. dev is the device the inode lives on
+// (round 9 MUST-FIX): an inode number is unique only WITHIN a device, so
+// without it a bind-mount swap to another filesystem whose directory happens
+// to collide on inode, size, mtime and ctime would read as the SAME
+// generation — the stale index would then vouch for a spelling that was
+// never proven on the filesystem now actually mounted there.
+// dirGenerationOf reads the tuple per platform.
 type dirGeneration struct {
 	modTime, changeTime time.Time
 	size                int64
 	ino                 uint64
+	dev                 uint64
 }
 
 func (g dirGeneration) equal(o dirGeneration) bool {
-	return g.modTime.Equal(o.modTime) && g.changeTime.Equal(o.changeTime) && g.size == o.size && g.ino == o.ino
+	return g.modTime.Equal(o.modTime) && g.changeTime.Equal(o.changeTime) &&
+		g.size == o.size && g.ino == o.ino && g.dev == o.dev
 }
 
 // latest is the later of the two timestamps.
@@ -158,6 +275,22 @@ const rebuildBackoff = time.Second
 // without waiting.
 var indexClock = time.Now
 
+// SetIndexClockForTest overrides the clock the settle check reads (round 9
+// MUST-FIX) and returns a func that restores it. A directory's ctime cannot
+// be forged from user space — it is exactly what makes the settle window a
+// real guarantee — so a caller outside this package that needs a freshly
+// written scripts directory treated as settled at once (an internal/server
+// fixture, say) has no way to fake it by backdating a file; it must move the
+// clock the settle check reads instead, as this package's own tests do
+// internally. Test-only: production code never calls this, and callers
+// outside this package must restore it (defer the returned func, or
+// t.Cleanup) before any other test observes the override.
+func SetIndexClockForTest(now func() time.Time) (restore func()) {
+	prev := indexClock
+	indexClock = now
+	return func() { indexClock = prev }
+}
+
 // spawnIndexRebuild runs one index rebuild on its own goroutine. A variable
 // so the tests can hold a rebuild back and prove what a request does on its
 // own goroutine, then land it deliberately.
@@ -172,9 +305,17 @@ var spawnIndexRebuild = func(rebuild func()) { go rebuild() }
 // failed index (scoped callers are refused as unreadable until the directory
 // changes) and the failure is returned for logging. On darwin and Windows
 // there is no index and Warm is a no-op.
+//
+// Warm also keeps ONLY scriptsDir's index (round 9 SHOULD): the server calls
+// Warm whenever the active scripts directory changes, so this is the point
+// that knows which directory is current — every other directory's index is
+// dropped rather than left to accumulate for as long as the process runs.
 func Warm(scriptsDir string) error {
 	key := filepath.Clean(scriptsDir)
 	idx := storedNamesIndex(key)
+	storedIndexesMu.Lock()
+	pruneOtherIndexesLocked(key)
+	storedIndexesMu.Unlock()
 	for {
 		idx.mu.Lock()
 		if !idx.building {
@@ -212,7 +353,7 @@ func Warm(scriptsDir string) error {
 // if it moved — gen-before == index.gen == gen-after is what proves the file
 // the open just read is the one the index vouched for, not a replacement
 // that landed in the window between the probe and the open.
-func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool, error), verifyUnchanged func() error, err error) {
+func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool, error), verifyUnchanged func(f *os.File, want string) error, err error) {
 	names, gen, err := storedNamesFor(scriptsDir)
 	if err != nil {
 		return nil, nil, err
@@ -229,7 +370,12 @@ func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool
 		}
 		return true, nil
 	}
-	verifyUnchanged = func() error {
+	// f and want are unused here: the index's own generation recheck (below)
+	// is what this platform can prove, and it needs neither the opened
+	// descriptor nor the requested spelling — see the darwin/Windows
+	// counterpart in storedspellings_probe.go, which proves the spelling
+	// itself on f because it has no directory-generation index to recheck.
+	verifyUnchanged = func(_ *os.File, _ string) error {
 		info, err := lstat(scriptsDir)
 		if err != nil {
 			return err
@@ -289,7 +435,10 @@ func storedNamesFor(scriptsDir string) (names map[string]struct{}, gen dirGenera
 	defer idx.mu.Unlock()
 
 	// current is whether the index is BUILT and answers for exactly this
-	// generation — the only condition under which it may be trusted at all.
+	// generation — the necessary condition for scheduling logic below, which
+	// stays exactly as round 8 left it: an out-of-date generation always
+	// reschedules, an in-date-but-unsettled one reschedules at most once per
+	// window.
 	current := (idx.names != nil || idx.err != nil) && idx.gen.equal(gen)
 
 	switch {
@@ -299,7 +448,11 @@ func storedNamesFor(scriptsDir string) (names map[string]struct{}, gen dirGenera
 		idx.scheduleRebuildLocked(key, now)
 	}
 
-	if !current {
+	// authorized additionally requires the index to be SETTLED (round 9
+	// MUST-FIX, doc comment above): a matching-but-unsettled generation is
+	// refused exactly as a mismatched one is, because a coarse timestamp
+	// cannot rule out a rename that landed on the very stamp being trusted.
+	if !current || !idx.settled {
 		return nil, dirGeneration{}, nil
 	}
 	return idx.names, gen, idx.err

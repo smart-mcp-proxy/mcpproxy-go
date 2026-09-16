@@ -368,10 +368,19 @@ content are published to every caller by design and sit outside the invariant:
    flight is refused once, exactly like a call against a directory it has
    never seen, rather than answered from what the index held a moment ago —
    an entry the index once listed under an earlier spelling must never still
-   authorize it after a rename. A script added to (or renamed within) the
-   directory becomes callable by agent tokens after the next index refresh,
-   milliseconds later — retry a call refused in that window — while
-   administrators see the change immediately); an ambiguous or unusable script is
+   authorize it after a rename. The index authorizes a hit only once its
+   directory timestamp is provably settled — old enough (roughly two
+   seconds, the coarsest directory-timestamp granularity assumed) that no
+   write could still be landing on the same tick unseen — so a matching
+   generation alone is not enough; a script added to (or renamed within) the
+   directory becomes callable by agent tokens only after the index has both
+   refreshed and settled — retry a call refused in that window, up to
+   roughly two seconds — while administrators see the change immediately.
+   On darwin and Windows, where a single-entry platform call reports a
+   path's stored spelling directly, that pre-open probe is only a cheap
+   gate: the authoritative check re-reads the stored spelling of the file
+   descriptor MCPProxy actually opened and refuses on any mismatch, so a
+   rename racing the open itself is caught there too); an ambiguous or unusable script is
    reported by
    name and reason only, without its host path or a raw OS error;
    the REST listing `GET /api/v1/code/scripts` answers an agent token with

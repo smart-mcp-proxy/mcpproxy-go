@@ -83,6 +83,14 @@ var errNonRegular = errors.New("not a regular file")
 // own requested name.
 var errIndexGenerationChanged = errors.New("codescripts: scripts directory changed between the index lookup and the open")
 
+// errSpellingUnproven is what the darwin/Windows verifyUnchanged closure
+// returns when the OPENED descriptor's stored spelling (round 9 MUST-FIX)
+// could not be proven to match the requested name — a mismatch (a
+// case-rename or replacement landed between the pre-open probe and the
+// open) or a failure of the proof call itself; resolve treats either the
+// same as errIndexGenerationChanged, as an ordinary not-found.
+var errSpellingUnproven = errors.New("codescripts: the opened file's stored spelling could not be proven to match the requested name")
+
 // Entry is one listed script (FR-007). Paths holds the single source file, or
 // both candidates when the name is ambiguous.
 type Entry struct {
@@ -394,17 +402,19 @@ func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source [
 	// occupying the exact name (a folded spelling of it, on a case-folding
 	// mount) for the descriptor's entire lifetime; a no-follow open cannot
 	// tell the difference, because it does not compare names, only symlink
-	// status. verifyUnchanged re-reads the directory's generation once more:
-	// gen-before (read for the lookup) == index.gen == gen-after is what
-	// proves the opened entry is the one the index vouched for. A mismatch
-	// closes the descriptor (via the defer above) and refuses rather than
-	// trusting it. Nil for the administrator, and for a scoped resolution
-	// that never reached an index hit (probeCandidates on darwin/Windows
-	// re-verifies per candidate instead and has no directory generation to
-	// recheck).
+	// status. verifyUnchanged proves this AUTHORITATIVELY on f, the
+	// descriptor that will actually be read (round 9 MUST-FIX, the
+	// PROVEN-AT-OPEN rule): on Linux/BSD by re-reading the directory's
+	// generation once more (gen-before == index.gen == gen-after proves the
+	// opened entry is the one the index vouched for); on darwin/Windows by
+	// reading the opened descriptor's own stored spelling (F_GETPATH /
+	// GetFinalPathNameByHandle) and comparing it byte-for-byte to the name
+	// that was requested. Either failure closes the descriptor (via the
+	// defer above) and refuses rather than trusting it. Nil for the
+	// administrator, whose candidatesFor has nothing to recheck against.
 	if verifyUnchanged != nil {
-		if verifyErr := verifyUnchanged(); verifyErr != nil {
-			if errors.Is(verifyErr, errIndexGenerationChanged) {
+		if verifyErr := verifyUnchanged(f, filepath.Base(path)); verifyErr != nil {
+			if errors.Is(verifyErr, errIndexGenerationChanged) || errors.Is(verifyErr, errSpellingUnproven) {
 				return nil, "", notFound()
 			}
 			return nil, "", invalid(path, ReasonUnreadable, verifyErr.Error())
@@ -455,10 +465,10 @@ func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source [
 // the filesystem's matching from the loop entirely, so the two agree on every
 // platform. Resolve's no-follow open remains the authoritative check.
 //
-// The third return is the post-open generation recheck probeCandidates
-// supplies (round 8 MUST-FIX); the administrator's directory-based decision
-// has nothing to recheck against, so it is always nil here.
-func candidatesFor(scriptsDir, name string) ([]string, func() error, error) {
+// The third return is the post-open authoritative recheck probeCandidates
+// supplies (round 8 / round 9 MUST-FIX); the administrator's directory-based
+// decision has nothing to recheck against, so it is always nil here.
+func candidatesFor(scriptsDir, name string) ([]string, func(f *os.File, want string) error, error) {
 	dirEntries, err := readDir(scriptsDir)
 	if err != nil {
 		return nil, nil, err
@@ -500,12 +510,15 @@ func candidatesFor(scriptsDir, name string) ([]string, func() error, error) {
 // change, never per request (storednames_other.go, codex r5 #1). The
 // no-follow open remains the authoritative check.
 //
-// The second return is a post-open recheck (round 8 MUST-FIX, the
-// lookup→open race): storedSpellingsOf's own verify closure, non-nil only
-// where the platform backs a hit with a directory generation to recheck
-// (storednames_other.go); the darwin/Windows probe re-verifies every
-// candidate directly (entryName) and has none, so it returns nil.
-func probeCandidates(scriptsDir, name string) ([]string, func() error, error) {
+// The second return is a post-open AUTHORITATIVE recheck (round 8 / round 9
+// MUST-FIX, the lookup→open race): storedSpellingsOf's own verify closure,
+// run by resolve on the descriptor that was actually opened — on Linux/BSD a
+// directory-generation recheck (storednames_other.go), on darwin/Windows a
+// proof of the opened descriptor's own stored spelling
+// (storedspellings_probe.go). Never nil on either platform: this is what
+// makes the pre-open probe above merely a cheap gate rather than the
+// authoritative decision.
+func probeCandidates(scriptsDir, name string) ([]string, func(f *os.File, want string) error, error) {
 	storedExactly, verifyUnchanged, err := storedSpellingsOf(scriptsDir)
 	if err != nil {
 		return nil, nil, err

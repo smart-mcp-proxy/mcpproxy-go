@@ -655,10 +655,18 @@ for, and the refusal body is unchanged. A call landing while that refresh is
 scheduled or in flight is refused exactly as one against a directory never
 seen before, never served from what the index held a moment ago — a rename
 cannot have a scoped caller's own probe fold onto whatever now occupies the
-old name. A script you have just added or renamed is callable by agent
-tokens after the next refresh (milliseconds; retry a call refused in that
-window) and by administrators at once. mcpproxy never creates the directory
-itself; `mkdir -p` it.
+old name. Even once refreshed, the index only authorizes a hit once its
+directory timestamp is provably SETTLED (old enough — about two seconds —
+that a write could not still be landing on the same coarse tick): a script
+you have just added or renamed is callable by agent tokens only after the
+index has both refreshed AND settled — retry a call refused in that
+window, up to about two seconds — while administrators see the change at
+once; mcpproxy never creates the directory itself, `mkdir -p` it. On darwin
+and Windows the pre-open check is only a cheap gate — the authoritative
+check re-reads the stored spelling of the actually-opened file descriptor
+(`F_GETPATH` / `GetFinalPathNameByHandle`) and refuses on any mismatch, so a
+rename racing the open itself is caught there too, not just by the earlier
+probe.
 
 ---
 

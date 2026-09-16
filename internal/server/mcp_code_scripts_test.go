@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
@@ -42,6 +43,16 @@ func newStoredScriptProxy(t *testing.T, opts ...MCPProxyOption) (*MCPProxyServer
 // instance, so a post-construction edit would not reach initialize).
 func newStoredScriptProxyCfg(t *testing.T, configure func(*config.Config), opts ...MCPProxyOption) (*MCPProxyServer, string) {
 	t.Helper()
+
+	// The stored-name index (Linux/BSD) only authorizes a hit once it is
+	// SETTLED — its generation stamp must predate the listing by at least
+	// codescripts' settle window (round 9 MUST-FIX), because a directory's
+	// ctime cannot be forged from user space to fake settledness. These
+	// fixtures write scripts and resolve them within the same test, so the
+	// clock the settle check reads is moved ahead instead of sleeping out
+	// the real window on every case; darwin/Windows have no settle window
+	// and this is a no-op there.
+	t.Cleanup(codescripts.SetIndexClockForTest(func() time.Time { return time.Now().Add(time.Hour) }))
 
 	tmpDir := t.TempDir()
 	logger := zap.NewNop()

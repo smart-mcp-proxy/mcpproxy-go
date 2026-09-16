@@ -55,15 +55,13 @@ func simulateCaseFoldingLstat(t *testing.T) {
 // spawnIndexRebuild) are process-wide, so a helper that installs or restores
 // one must first let any rebuild still reading them land.
 func quiesceIndexRebuilds() {
-	storedNameIndexes.Range(func(_, v any) bool {
-		idx := v.(*storedNames)
+	forEachIndex(func(idx *storedNames) {
 		idx.mu.Lock()
 		building, landed := idx.building, idx.landed
 		idx.mu.Unlock()
 		if building {
 			<-landed
 		}
-		return true
 	})
 }
 
@@ -215,7 +213,7 @@ func TestResolveScoped_OnAFoldingDirectory(t *testing.T) {
 	t.Run("an absent name and a present case-variant cost the same, cold and warm", func(t *testing.T) {
 		held := holdIndexRebuilds(t)
 		cost := func(name string) (readDirs, lstats int) {
-			storedNameIndexes.Delete(filepath.Clean(dir)) // cold
+			forgetIndex(filepath.Clean(dir)) // cold
 			rd, ls := countDirectoryPrimitives(t)
 			_, _, err := ResolveScoped(dir, name, "")
 			requireScopedNotFound(t, err)
@@ -358,7 +356,7 @@ func TestResolveScoped_ColdRequestCostIsIndependentOfDirectorySize(t *testing.T)
 	held := holdIndexRebuilds(t)
 
 	probe := func(dir string) (readDirs, lstats int) {
-		storedNameIndexes.Delete(filepath.Clean(dir)) // cold: never warmed
+		forgetIndex(filepath.Clean(dir)) // cold: never warmed
 		rd, ls := countDirectoryPrimitives(t)
 		_, _, err := ResolveScoped(dir, "script-00042", "")
 		requireScopedNotFound(t, err)
@@ -557,20 +555,32 @@ func TestStoredNames_UnsettledIndexRefreshesAtMostOncePerWindow(t *testing.T) {
 		}
 	}
 
-	requests("inside the window", "missing", "gamma", "missing")
+	// "alpha" is a genuinely stored script — its generation matches the
+	// index's the whole time — yet it must be refused exactly like "missing"
+	// and "gamma" until the index is SETTLED (round 9 MUST-FIX): a matching
+	// generation alone cannot rule out a coarse-timestamp rename that landed
+	// on the very stamp being trusted, so an unsettled index authorizes
+	// nothing, hit or miss alike.
+	requests("inside the window", "alpha", "missing", "gamma", "missing")
 	assert.Equal(t, 1, held.land(), "the unsettled index schedules ONE refresh per window, not one per request")
 	assert.Equal(t, 1, *readDirs)
-	requests("still inside", "missing", "gamma")
+	requests("still inside", "alpha", "missing", "gamma")
 	assert.Equal(t, 0, held.land(), "the window is open until it elapses")
 
 	// The refresh window elapsed but the stamp is still too young: one more.
 	indexClock = func() time.Time { return stamp.Add(generationSettleTime/2 + generationSettleTime) }
-	requests("next window", "missing")
+	requests("next window", "alpha", "missing")
 	assert.Equal(t, 1, held.land(), "the next window schedules one more refresh")
 	assert.Equal(t, 2, *readDirs)
 	requests("settled", "missing", "gamma", "missing")
 	assert.Equal(t, 0, held.land(), "the listing landed past the stamp's settle time: the index is trusted")
 	assert.Equal(t, 2, *readDirs)
+
+	// Only now — genuinely settled, not merely gen-matching — does the real
+	// hit run (round 9 MUST-FIX).
+	src, _, err := ResolveScoped(dir, "alpha", "")
+	require.NoError(t, err, "once the index is settled, an exact hit runs")
+	assert.Equal(t, "1", string(src))
 }
 
 // TestStoredNames_RebuildAttemptsAreBounded (round 8 SHOULD): a directory
@@ -729,4 +739,99 @@ func TestStoredNames_UnlistableDirectoryRefusesScopedCallers(t *testing.T) {
 	err = Warm(scriptsDir)
 	require.Error(t, err, "Warm reports the failure for the server's log")
 	assert.True(t, errors.Is(err, fs.ErrPermission))
+}
+
+// TestDirGeneration_DeviceIsPartOfIdentity (round 9 MUST-FIX): an inode
+// number is unique only WITHIN its device, so two directories on different
+// devices can legitimately share an inode, size and both timestamps — a
+// bind-mount swap from one filesystem to another is exactly this scenario.
+// Without the device in the tuple such a swap would read as the SAME
+// generation, letting a stale index vouch for a spelling never proven on the
+// filesystem now actually mounted there. Pinned at the generation seam
+// (dirGeneration.equal) rather than a real bind mount, which CI cannot set
+// up portably.
+func TestDirGeneration_DeviceIsPartOfIdentity(t *testing.T) {
+	shared := dirGeneration{modTime: time.Unix(1, 0), changeTime: time.Unix(1, 0), size: 4096, ino: 42}
+	onDeviceA := shared
+	onDeviceA.dev = 1
+	onDeviceB := shared
+	onDeviceB.dev = 2
+
+	assert.False(t, onDeviceA.equal(onDeviceB),
+		"the same inode/size/timestamps on a different device must not compare equal")
+	assert.True(t, onDeviceA.equal(onDeviceA), "a generation always equals itself")
+}
+
+// TestDirGenerationOf_ReadsTheDevice pins that the platform reader actually
+// populates dev from a real Lstat, not just that equal() considers it.
+func TestDirGenerationOf_ReadsTheDevice(t *testing.T) {
+	dir := t.TempDir()
+	info, err := lstat(dir)
+	require.NoError(t, err)
+	gen := dirGenerationOf(info)
+	assert.NotZero(t, gen.dev, "a real directory's device must be read, not left at the zero value")
+}
+
+// TestStoredNames_WarmKeepsOnlyTheActiveDirectory (round 9 SHOULD): the
+// server calls Warm whenever the active scripts directory changes, so Warm
+// itself is where "only the active directory is warm" can be enforced —
+// switching the active config path N times must leave exactly one index,
+// not one per directory the process has ever served.
+func TestStoredNames_WarmKeepsOnlyTheActiveDirectory(t *testing.T) {
+	quiesceIndexRebuilds()
+	settleStoredNamesClock(t)
+
+	const n = 5
+	dirs := make([]string, n)
+	for i := range dirs {
+		dirs[i] = t.TempDir()
+		writeScript(t, dirs[i], "alpha.js", "1")
+	}
+
+	for _, d := range dirs {
+		require.NoError(t, Warm(d))
+	}
+
+	storedIndexesMu.Lock()
+	count := len(storedIndexes)
+	_, activeIsWarm := storedIndexes[filepath.Clean(dirs[n-1])]
+	storedIndexesMu.Unlock()
+
+	assert.Equal(t, 1, count, "switching the active config path %d times must leave one index, not %d", n, n)
+	assert.True(t, activeIsWarm, "the index left behind must be the one Warm was last called for")
+
+	// The still-active directory keeps answering; the abandoned ones are
+	// simply cold again (fail-closed until something warms or requests them
+	// afresh) rather than lost or corrupted.
+	src, _, err := ResolveScoped(dirs[n-1], "alpha", "")
+	require.NoError(t, err)
+	assert.Equal(t, "1", string(src))
+}
+
+// TestStoredNames_BareUseCapsAtLeastRecentlyUsed (round 9 SHOULD): a caller
+// that never calls Warm (a scoped request against a directory the server
+// never warmed) still must not grow storedIndexes without bound — the map
+// caps at maxStoredNameIndexes, evicting the least-recently-used directory.
+func TestStoredNames_BareUseCapsAtLeastRecentlyUsed(t *testing.T) {
+	quiesceIndexRebuilds()
+	storedIndexesMu.Lock()
+	storedIndexes = map[string]*storedNames{}
+	storedIndexesLRU = nil
+	storedIndexesMu.Unlock()
+
+	keys := make([]string, maxStoredNameIndexes+3)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("bare-use-dir-%d", i)
+		storedNamesIndex(keys[i])
+	}
+
+	storedIndexesMu.Lock()
+	count := len(storedIndexes)
+	_, oldestSurvived := storedIndexes[keys[0]]
+	_, newestSurvived := storedIndexes[keys[len(keys)-1]]
+	storedIndexesMu.Unlock()
+
+	assert.Equal(t, maxStoredNameIndexes, count, "bare use is capped at maxStoredNameIndexes")
+	assert.False(t, oldestSurvived, "the least-recently-used directory is evicted first")
+	assert.True(t, newestSurvived, "the most recently touched directory survives")
 }

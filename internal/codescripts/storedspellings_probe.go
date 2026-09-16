@@ -5,8 +5,10 @@ package codescripts
 import (
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Warm is a no-op where storedSpellingsOf is a single-entry platform call:
@@ -14,22 +16,38 @@ import (
 // once, off the request path.
 func Warm(string) error { return nil }
 
+// SetIndexClockForTest is a no-op here: there is no directory-generation
+// index or settle window on darwin/Windows — storedSpellingsOf proves the
+// spelling directly, on the descriptor that is actually opened, rather than
+// trusting a listed generation. Present so a caller outside this package
+// (an internal/server fixture built for every platform) compiles and runs
+// unchanged on darwin and Windows, where there is nothing to settle.
+func SetIndexClockForTest(func() time.Time) (restore func()) { return func() {} }
+
 // storedSpellingsOf answers, for one scoped request, whether scriptsDir holds
 // an entry spelled exactly `want`, by a fixed number of single-path calls and
 // never a listing (Spec 105 FR-012). The default APFS/HFS+ and NTFS volumes
 // are case-insensitive but case-PRESERVING, so the probe alone would accept
 // `backdoor.JS` for `backdoor.js`; a hit is accepted only when the entry's
 // stored spelling (entryName, one single-entry platform call) is
-// byte-for-byte the requested one, exactly as List decides. The no-follow
-// open remains the authoritative check.
+// byte-for-byte the requested one, exactly as List decides.
 //
-// The second return is the shared signature's post-open recheck (round 8
-// MUST-FIX on Linux/BSD, the lookup→open race): here every candidate is
-// already re-verified directly, per call, against the CURRENT filesystem
-// (there is no directory-generation index to fall behind), so there is
-// nothing further to recheck after the open and this is always nil.
-func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool, error), verifyUnchanged func() error, err error) {
-	return func(want string) (bool, error) {
+// This is the CHEAP pre-open gate only — round 9 MUST-FIX: a case-rename or
+// replacement landing between this probe and openScriptFile's own open can
+// leave a different, case-folded file behind the same requested spelling for
+// the descriptor's entire lifetime, and neither a no-follow open nor Stat
+// tells a folded spelling from an exact one. The second return proves the
+// spelling AUTHORITATIVELY, on the descriptor that will actually be read —
+// see below.
+//
+// A platform-call failure here is not a match (round 9 MUST-FIX): earlier
+// rounds let the Lstat verdict alone stand when entryName errored, which
+// fails OPEN on a probe race or platform-call failure. The pre-open probe
+// need not be perfectly precise — the post-open proof is authoritative and
+// would still catch a wrongly admitted candidate — but there is no reason to
+// admit one on a failure this function cannot itself explain.
+func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool, error), verifyUnchanged func(f *os.File, want string) error, err error) {
+	storedExactly = func(want string) (bool, error) {
 		path := filepath.Join(scriptsDir, want)
 		if _, err := lstat(path); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -40,9 +58,7 @@ func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool
 		stored, err := entryName(path)
 		switch {
 		case err != nil:
-			// The platform call failed: the Lstat verdict stays in force and
-			// the no-follow open decides usability.
-			return true, nil
+			return false, nil
 		case stored != want && strings.EqualFold(stored, want):
 			// The filesystem folded the case: the entry is spelled differently
 			// and no discovery surface reports it under this name. Only a
@@ -51,5 +67,17 @@ func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool
 			return false, nil
 		}
 		return true, nil
-	}, nil, nil
+	}
+	verifyUnchanged = func(f *os.File, want string) error {
+		stored, err := openedEntryName(f)
+		if err != nil || stored != want {
+			// Any failure of the proof call, or any mismatch, refuses — the
+			// pre-open probe already decided "true" and the caller is about
+			// to read this descriptor, so an unprovable spelling gets no
+			// benefit of the doubt (round 9 MUST-FIX).
+			return errSpellingUnproven
+		}
+		return nil
+	}
+	return storedExactly, verifyUnchanged, nil
 }
