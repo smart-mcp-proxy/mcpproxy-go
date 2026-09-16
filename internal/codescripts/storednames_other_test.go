@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -256,9 +255,6 @@ func TestStoredNames_RelistsUntilTheStampSettles(t *testing.T) {
 func TestStoredNames_UnlistableDirectoryRefusesScopedCallers(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: directory permissions are not enforced")
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX permission bits are not enforced on Windows")
 	}
 	scriptsDir := filepath.Join(t.TempDir(), "scripts")
 	writeScript(t, scriptsDir, "known.js", "1")
