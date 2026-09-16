@@ -239,11 +239,11 @@ type ContainerMutator struct {
 // intent, when set, is called with that row right before the command so the
 // caller can record what is about to happen with mutation-time evidence.
 func (cm ContainerMutator) Mutate(ctx context.Context, id string, op ContainerMutation, intent func(ContainerRow)) MutationResult {
-	row, ok, err := cm.read(ctx, id)
+	row, ok, err := cm.Verify(ctx, id)
 	if err != nil {
 		return MutationResult{Err: err}
 	}
-	if !ok || !cm.Owns(row.Name, row.Owner) {
+	if !ok {
 		return MutationResult{}
 	}
 	if intent != nil {
@@ -255,6 +255,25 @@ func (cm ContainerMutator) Mutate(ctx context.Context, id string, op ContainerMu
 	}
 	args = append(args, row.ID)
 	return MutationResult{Container: row, Verified: true, Err: cm.Docker(ctx, args...).Run()}
+}
+
+// Verify re-reads container id and reports whether it still satisfies Owns
+// right now — the same read+predicate Mutate applies before running a
+// command, exposed for a caller that only needs to confirm ownership
+// without mutating anything (e.g. a health check re-establishing ownership
+// before trusting `docker inspect`, codex round 8). ok is true only when
+// the read succeeded and the row's label and name pass Owns; row is the
+// meaningful evidence — id, name and owner label as Docker reported them —
+// only when ok is true.
+func (cm ContainerMutator) Verify(ctx context.Context, id string) (ContainerRow, bool, error) {
+	row, ok, err := cm.read(ctx, id)
+	if err != nil {
+		return ContainerRow{}, false, err
+	}
+	if !ok || !cm.Owns(row.Name, row.Owner) {
+		return ContainerRow{}, false, nil
+	}
+	return row, true, nil
 }
 
 // read runs `docker ps -a --no-trunc --filter id=<id>` and returns the row

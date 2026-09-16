@@ -587,6 +587,55 @@ func TestDockerCleanup_CidfileContainerMustPassOwnership(t *testing.T) {
 	}
 }
 
+// Codex round 8 (PR E), finding 1: a cidfile row that fails ownership, or
+// whose ownership Docker read itself fails, must not name any id in EITHER
+// logger. TestDockerCleanup_CidfileContainerMustPassOwnership already covers
+// upLogs (the per-server log); trackCidfileContainer's err!=nil and !ok
+// branches still logged shortContainerID(containerID) into mainLogs (the
+// admin-facing main.log), unlike mutateOwnedContainer's refusal branches
+// which name only the server, cleanup_path and operation.
+func TestDockerCleanup_CidfileRefusal_MainLogRecordsNoID(t *testing.T) {
+	const customID = "c0ffee000002"
+	const customFullID = customID + "0000000000000000000000000000000000000000000000000000"
+
+	t.Run("not owned", func(t *testing.T) {
+		installFakeDocker(t, []fakeContainer{
+			{ID: customFullID, Name: "custom", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{}},
+		})
+		c, mainLogs, _ := newOwnershipClient("a", &config.ServerConfig{
+			Command: "docker", Args: []string{"run", "-i", "--rm", "--name", "custom", "mcp/example"},
+		})
+		cidFile := filepath.Join(t.TempDir(), "cid")
+		require.NoError(t, os.WriteFile(cidFile, []byte(customFullID+"\n"), 0o600))
+		c.readContainerIDWithContext(context.Background(), cidFile)
+
+		require.NotEmpty(t, mainLogs.All(), "expected a refusal record in the main log")
+		for _, entry := range mainLogs.All() {
+			_, has := entry.ContextMap()["container_id"]
+			assert.False(t, has, "unowned container's id recorded in main log: %q", entry.Message)
+		}
+	})
+
+	t.Run("docker read failure", func(t *testing.T) {
+		fd := installFakeDocker(t, []fakeContainer{
+			{ID: customFullID, Name: "mcpproxy-a-wxyz", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}},
+		})
+		fd.failVerbs(t, "ps")
+		c, mainLogs, _ := newOwnershipClient("a", &config.ServerConfig{
+			Command: "docker", Args: []string{"run", "-i", "--rm", "--name", "custom", "mcp/example"},
+		})
+		cidFile := filepath.Join(t.TempDir(), "cid")
+		require.NoError(t, os.WriteFile(cidFile, []byte(customFullID+"\n"), 0o600))
+		c.readContainerIDWithContext(context.Background(), cidFile)
+
+		require.NotEmpty(t, mainLogs.All(), "expected a refusal record in the main log")
+		for _, entry := range mainLogs.All() {
+			_, has := entry.ContextMap()["container_id"]
+			assert.False(t, has, "docker-read-failure recorded a container id in main log: %q", entry.Message)
+		}
+	})
+}
+
 // Codex round 1 (PR E), finding 3: the exact-name paths (cidfile recovery
 // by name and killDockerContainerByNameWithContext) filtered by label and
 // the tracked name only, never applied ownsContainer, and wrote

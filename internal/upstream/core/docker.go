@@ -150,9 +150,12 @@ func (c *Client) trackCidfileContainer(ctx context.Context, containerID string, 
 	owned, ok, err := c.lookupOwnedContainerByID(ctx, containerID)
 	switch {
 	case err != nil:
+		// No id here: the read that would have confirmed this cidfile
+		// row is ours failed outright, so there is no evidence to name
+		// (same refusal rule mutateOwnedContainer applies to every other
+		// mutation path, codex round 8).
 		c.logger.Warn("Could not verify ownership of the container from the cidfile - it will not be managed",
 			zap.String("server", c.config.Name),
-			zap.String("container_id", shortContainerID(containerID)),
 			zap.Error(err))
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Warn("Could not verify ownership of the container from the cidfile - it will not be managed",
@@ -160,9 +163,11 @@ func (c *Client) trackCidfileContainer(ctx context.Context, containerID string, 
 		}
 		return
 	case !ok:
+		// No id here either: the container the cidfile named failed the
+		// ownership predicate, so it is not ours to name in the log any
+		// more than to stop (codex round 8).
 		c.logger.Info("Container from the cidfile is not canonically owned by this server (no com.mcpproxy.server label or non-canonical name) - it will not be stopped on disconnect",
-			zap.String("server", c.config.Name),
-			zap.String("container_id", shortContainerID(containerID)))
+			zap.String("server", c.config.Name))
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Info("Container from the cidfile is not canonically owned by this server - it will not be stopped on disconnect")
 		}

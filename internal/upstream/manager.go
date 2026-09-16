@@ -2210,13 +2210,53 @@ func (m *Manager) verifyContainerHealthy(client *managed.Client) (bool, error) {
 		return false, fmt.Errorf("no container ID available")
 	}
 
+	serverName := ""
+	if cfg := client.GetConfig(); cfg != nil {
+		serverName = cfg.Name
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Check 1: Container exists and is running
-	inspectCmd := exec.CommandContext(ctx, "docker", "inspect",
+	return m.verifyDockerContainerHealthy(ctx, sweepDocker, serverName, containerID)
+}
+
+// verifyDockerContainerHealthy is the pure implementation verifyContainerHealthy
+// delegates to. `docker inspect <id>` answers by id alone, regardless of
+// name or label, so trusting it directly on the tracked id let a container
+// another Docker client relabelled or renamed after tracking still read as
+// Running and skip ForceReconnectAll's recovery even though it is no longer
+// this server's (codex round 8). Ownership is re-established first, through
+// the same read+predicate ContainerMutator.Verify uses before every
+// mutation: a container that fails the predicate now is NOT healthy —
+// recovery (the caller's rebuild) proceeds — and the refusal names no id,
+// only the server. Only a container ownership confirms is named, and then
+// with the container_owner read back at that same moment, never the
+// requesting server's name.
+func (m *Manager) verifyDockerContainerHealthy(ctx context.Context, docker core.DockerCommand, serverName, containerID string) (bool, error) {
+	mutator := core.ContainerMutator{
+		Docker: docker,
+		Owns: func(containerName, ownerLabel string) bool {
+			return core.ContainerOwnedByAny([]string{serverName}, containerName, ownerLabel)
+		},
+	}
+	row, ok, err := mutator.Verify(ctx, containerID)
+	if err != nil {
+		m.logger.Warn("Could not verify container ownership before health check - treating as unhealthy",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return false, fmt.Errorf("could not verify container ownership: %w", err)
+	}
+	if !ok {
+		m.logger.Warn("Tracked container is no longer canonically owned by this server - treating as lost",
+			zap.String("server", serverName))
+		return false, fmt.Errorf("tracked container is no longer canonically owned by this server")
+	}
+
+	// Container exists and is canonically owned NOW: check it is running.
+	inspectCmd := docker(ctx, "inspect",
 		"--format", "{{.State.Running}},{{.State.Status}}",
-		containerID)
+		row.ID)
 
 	output, err := inspectCmd.Output()
 	if err != nil {
@@ -2236,7 +2276,9 @@ func (m *Manager) verifyContainerHealthy(client *managed.Client) (bool, error) {
 	}
 
 	m.logger.Debug("Container health check passed",
-		zap.String("container_id", containerID[:12]),
+		zap.String("server", serverName),
+		zap.String("container_id", row.ID),
+		zap.String("container_owner", row.Owner),
 		zap.String("status", status))
 
 	return true, nil

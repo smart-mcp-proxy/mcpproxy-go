@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -68,6 +69,34 @@ printf '%%s\n' "$*" >> "$LOG"
 if [ -f "$FAIL" ]; then
   read -r failverbs < "$FAIL"
   case " $failverbs " in *" $1 "*) exit 1 ;; esac
+fi
+if [ "$1" = inspect ]; then
+  shift
+  ifmt=''
+  iid=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --format) ifmt="$2"; shift 2 ;;
+      *) iid="$1"; shift ;;
+    esac
+  done
+  row=$(awk -F'\t' -v id="$iid" '$1==id{print; found=1} END{exit !found}' "$PS")
+  if [ -z "$row" ]; then echo "Error: No such object: $iid" >&2; exit 1; fi
+  printf '%%s\n' "$row" | awk -F'\t' -v fmt="$ifmt" '
+  function repl(s, lit, val,    i, out) {
+    out = ""
+    while ((i = index(s, lit)) > 0) { out = out substr(s, 1, i - 1) val; s = substr(s, i + length(lit)) }
+    return out s
+  }
+  {
+    running = ($4 == "1") ? "true" : "false"
+    status = ($4 == "1") ? "running" : "exited"
+    out = fmt
+    out = repl(out, "{{.State.Running}}", running)
+    out = repl(out, "{{.State.Status}}", status)
+    print out
+  }'
+  exit 0
 fi
 [ "$1" = ps ] || exit 0
 shift
@@ -611,4 +640,116 @@ func TestSweeps_ReverifyOwnershipAtMutationTime(t *testing.T) {
 			})
 		}
 	}
+}
+
+// Codex round 8 (PR E), finding 2: verifyContainerHealthy decided health from
+// `docker inspect <stored-id>` alone. inspect answers by id regardless of
+// name or label, so a container another Docker client relabelled or
+// renamed after tracking still reported Running=true under the same id,
+// and ForceReconnectAll treated it as healthy — skipping recovery for a
+// container that is no longer canonically this server's. The health check
+// must re-establish ownership through the same read+predicate
+// ContainerMutator.Verify uses before trusting inspect: a container that
+// fails ownership now is NOT healthy (recovery proceeds) and the health
+// record names no id; a container ownership confirms is named, with
+// container_owner from that same read.
+func TestVerifyDockerContainerHealthy_ReverifiesOwnershipBeforeInspect(t *testing.T) {
+	t.Run("relabelled after tracking - unhealthy, no id recorded", func(t *testing.T) {
+		installManagerFakeDocker(t, []managerFakeContainer{
+			{ID: sweepOwnID, Name: sweepOwnName, Running: true,
+				Labels: map[string]string{"com.mcpproxy.server": "z"}}, // foreign label now
+		})
+		m, mainLogs := newSweepManager(t)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		healthy, err := m.verifyDockerContainerHealthy(ctx, sweepDocker, "a", sweepOwnID)
+
+		assert.False(t, healthy, "a relabelled container must not be reported healthy")
+		require.Error(t, err)
+		for _, entry := range mainLogs.All() {
+			assert.False(t, recordNamesAny(entry.ContextMap(), sweepOwnID, shortContainerID(sweepOwnID)),
+				"record %q names the no-longer-owned container: %v", entry.Message, entry.ContextMap())
+		}
+	})
+
+	t.Run("renamed after tracking - unhealthy, no id recorded", func(t *testing.T) {
+		installManagerFakeDocker(t, []managerFakeContainer{
+			{ID: sweepOwnID, Name: "custom", Running: true, // non-canonical name now
+				Labels: map[string]string{"com.mcpproxy.server": "a"}},
+		})
+		m, mainLogs := newSweepManager(t)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		healthy, err := m.verifyDockerContainerHealthy(ctx, sweepDocker, "a", sweepOwnID)
+
+		assert.False(t, healthy, "a renamed container must not be reported healthy")
+		require.Error(t, err)
+		for _, entry := range mainLogs.All() {
+			assert.False(t, recordNamesAny(entry.ContextMap(), sweepOwnID, shortContainerID(sweepOwnID)),
+				"record %q names the no-longer-owned container: %v", entry.Message, entry.ContextMap())
+		}
+	})
+
+	t.Run("docker read failure - unhealthy, no id recorded", func(t *testing.T) {
+		fd := installManagerFakeDocker(t, []managerFakeContainer{
+			{ID: sweepOwnID, Name: sweepOwnName, Running: true,
+				Labels: map[string]string{"com.mcpproxy.server": "a"}},
+		})
+		fd.failVerbs(t, "ps")
+		m, mainLogs := newSweepManager(t)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		healthy, err := m.verifyDockerContainerHealthy(ctx, sweepDocker, "a", sweepOwnID)
+
+		assert.False(t, healthy)
+		require.Error(t, err)
+		for _, entry := range mainLogs.All() {
+			assert.False(t, recordNamesAny(entry.ContextMap(), sweepOwnID, shortContainerID(sweepOwnID)),
+				"record %q names a container whose ownership read failed: %v", entry.Message, entry.ContextMap())
+		}
+	})
+
+	t.Run("unchanged and running - healthy, record carries id and owner", func(t *testing.T) {
+		installManagerFakeDocker(t, []managerFakeContainer{
+			{ID: sweepOwnID, Name: sweepOwnName, Running: true,
+				Labels: map[string]string{"com.mcpproxy.server": "a"}},
+		})
+		m, mainLogs := newSweepManager(t)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		healthy, err := m.verifyDockerContainerHealthy(ctx, sweepDocker, "a", sweepOwnID)
+
+		require.NoError(t, err)
+		assert.True(t, healthy)
+		var found bool
+		for _, entry := range mainLogs.All() {
+			fields := entry.ContextMap()
+			if !recordNamesAny(fields, sweepOwnID) {
+				continue
+			}
+			found = true
+			assert.Equal(t, "a", fields["container_owner"], "record %q must carry the owner read back: %v", entry.Message, fields)
+		}
+		assert.True(t, found, "the healthy verification is recorded with its subject")
+	})
+
+	t.Run("unchanged but stopped - unhealthy, record still carries id and owner", func(t *testing.T) {
+		installManagerFakeDocker(t, []managerFakeContainer{
+			{ID: sweepOwnID, Name: sweepOwnName, Running: false,
+				Labels: map[string]string{"com.mcpproxy.server": "a"}},
+		})
+		m, _ := newSweepManager(t)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		healthy, err := m.verifyDockerContainerHealthy(ctx, sweepDocker, "a", sweepOwnID)
+
+		assert.False(t, healthy)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not running")
+	})
 }
