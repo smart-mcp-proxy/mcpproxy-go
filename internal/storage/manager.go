@@ -505,6 +505,18 @@ func (m *Manager) SaveToolApproval(record *ToolApprovalRecord) error {
 	return m.db.SaveToolApproval(record)
 }
 
+// StampToolApprovalsIdentityKeyed stamps the named records identity-keyed in
+// one storage transaction under one manager write lock — the same lock every
+// SaveToolApproval takes, so an operator write is either fully before the
+// stamp (and seen by its in-transaction re-read) or fully after it (see
+// BoltDB.StampToolApprovalsIdentityKeyed).
+func (m *Manager) StampToolApprovalsIdentityKeyed(serverName string, toolNames []string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.StampToolApprovalsIdentityKeyed(serverName, toolNames)
+}
+
 // GetToolApproval retrieves a tool approval record by server and tool name
 func (m *Manager) GetToolApproval(serverName, toolName string) (*ToolApprovalRecord, error) {
 	m.mu.RLock()

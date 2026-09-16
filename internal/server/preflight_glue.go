@@ -397,11 +397,20 @@ type preflightApprovalReader struct {
 }
 
 // ToolApproval maps the storage seam onto the evaluator's contract: "no record"
-// is the implicit-approved default and must come back as (nil, nil), while a
-// genuine BBolt failure must come back as an error so the request answers 503
-// instead of silently reporting a tool as approved.
+// must come back as (nil, nil) — the evaluator decides what it means (the
+// implicit-approved default, or pending for a discovered tool under an active
+// gate, Spec 105 FR-009) — while a genuine BBolt failure must come back as an
+// error so the request answers 503 instead of silently reporting a tool as
+// approved.
+//
+// The record is resolved through the SAME reader dispatch uses
+// (readToolApprovalRecord): the exact raw-name record wins, and a legacy
+// collapsed record — a pre-105 "ns:erase" filed under "erase" — lends the
+// namespaced name its lock or user block but never its approval. Reading the
+// exact key alone here made preflight answer `ready` for a tool the retrieve
+// gate refused as pending (gap FR009-G3).
 func (r *preflightApprovalReader) ToolApproval(serverName, toolName string) (*preflight.ApprovalState, error) {
-	record, err := r.storage.GetToolApproval(serverName, toolName)
+	record, err := readToolApprovalRecord(r.storage, serverName, toolName)
 	if err != nil {
 		if errors.Is(err, storage.ErrToolApprovalNotFound) {
 			return nil, nil
@@ -473,11 +482,37 @@ func (p *MCPProxyServer) preflightSnapshot() (preflight.StateReader, func(server
 		}
 		return nil
 	}
-	return &preflightStateSnapshot{servers: servers}, annotations, nil
+	return &preflightStateSnapshot{servers: servers, proxy: p}, annotations, nil
 }
 
 type preflightStateSnapshot struct {
 	servers map[string]*stateview.ServerStatus
+	// proxy supplies the live-connection token comparison the dispatch-side
+	// identity read makes (liveConnectionEpoch); nil for a snapshot a test
+	// injects without a proxy, which then makes no token claim.
+	proxy *MCPProxyServer
+}
+
+// ToolIdentity is the preflight projection of the dispatch-side identity
+// read (resolveExactToolIdentity: Spec 105 FR-009, research D4; astra r2
+// C2), resolved against the SAME snapshot the connection verdict reads, so a
+// batch is judged against one instant and preflight can never disagree with
+// dispatch about what the snapshot lists. Hydration takes the persisted
+// server record, as dispatch does (codex r6 G1); the evaluator has already
+// answered quarantined / disabled from the storage-backed ServerPolicy
+// ahead of this read, so the record here only keeps the identity's own
+// verdict on the same footing as dispatch's.
+func (s *preflightStateSnapshot) ToolIdentity(serverName, toolName string) preflight.ToolIdentity {
+	if s.proxy == nil {
+		return preflight.ToolIdentity{}
+	}
+	identity := s.proxy.resolveExactToolIdentityIn(s.servers, serverName, toolName, s.proxy.persistedServerRecord(serverName))
+	return preflight.ToolIdentity{
+		Known:         identity.ServerKnown,
+		Hydrated:      identity.SnapshotHydrated,
+		DiscoveryDone: identity.DiscoveryDone,
+		Found:         identity.Found,
+	}
 }
 
 func (s *preflightStateSnapshot) ServerRuntime(serverName string) (preflight.ServerRuntime, bool) {

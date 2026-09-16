@@ -153,13 +153,32 @@ func (b *BleveIndex) Close() error {
 	return b.index.Close()
 }
 
-// IndexTool indexes a tool document
-func (b *BleveIndex) IndexTool(toolMeta *config.ToolMetadata) error {
-	// Extract just the tool name (remove server prefix)
-	toolName := toolMeta.Name
-	if parts := strings.SplitN(toolMeta.Name, ":", 2); len(parts) == 2 {
-		toolName = parts[1]
-	}
+// toolDocument projects tool metadata onto the stored document and its docID.
+//
+// Identity (Spec 105 FR-009): the docID is "<server>:<raw name>" where the raw
+// name is the exact upstream-reported name (config.RawToolName), so "erase"
+// and "ns:erase" on one server are two documents. The previous derivation
+// split ToolMetadata.Name at its FIRST colon, which read the namespace prefix
+// of a raw "ns:erase" as if it were a server prefix and collapsed both tools
+// onto "<server>:erase" (last writer wins). A document written under the old
+// derivation is not migrated by hand: the runtime's differential index update
+// (applyDifferentialToolUpdate) keys both sides by raw name, so the first
+// discovery after upgrade re-hashes the collapsed document under its docID
+// and adds the namespaced sibling under its own exact id.
+//
+// The STORED fields are byte-for-byte what they were before FR-009 for every
+// metadata shape that does not carry a colon in its raw name: tool_name is the
+// raw name and full_tool_name is ToolMetadata.Name verbatim (the raw name for
+// discovery-shaped metadata, the canonical id for index-read or fixture
+// metadata). Both are SCORED fields — the exact-match TermQuery on
+// full_tool_name (boost 4.0) and the field-less _all MatchQuery in SearchTools
+// — so storing the canonical id there instead moved every administrator
+// retrieve_tools score for production-shaped documents (SC-005). The tool's
+// identity is therefore never derived from full_tool_name on read-back;
+// readToolMetadata takes it from the docID.
+func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
+	toolName := config.RawToolName(toolMeta)
+	docID := toolDocID(toolMeta.ServerName, toolName)
 
 	// Create combined searchable text for better full-text search
 	searchableText := fmt.Sprintf("%s %s %s %s",
@@ -180,16 +199,56 @@ func (b *BleveIndex) IndexTool(toolMeta *config.ToolMetadata) error {
 		SearchableText:   searchableText,
 	}
 
-	// Use server:tool format as document ID for uniqueness
-	docID := fmt.Sprintf("%s:%s", toolMeta.ServerName, toolName)
+	return docID, doc
+}
 
-	b.logger.Debug("Indexing tool", zap.String("doc_id", docID), zap.String("tool_name", toolName))
+// toolDocID is the single place the "<server>:<raw name>" docID is spelled, so
+// IndexTool, BatchIndex and DeleteTool can never disagree on a tool's identity.
+func toolDocID(serverName, rawName string) string {
+	return config.CanonicalToolName(serverName, rawName)
+}
+
+// readToolMetadata rebuilds tool metadata from a stored hit. Identity comes
+// from the docID alone (Spec 105 FR-009): the docID is "<server>:<raw name>"
+// for documents written by toolDocument, so the canonical Name (#871) IS the
+// docID and RawName is the docID with exactly this server's own prefix
+// trimmed once — never re-derived from the stored tool_name or
+// full_tool_name fields. Those are search fields, not identity: for a
+// document written before FR-009 tool_name holds the collapsed suffix
+// ("erase" for a raw "ns:erase") and full_tool_name the raw name, and a raw
+// name that begins with the server's own prefix ("a:erase" on server "a",
+// docID "a:a:erase") would be mistaken by the CanonicalToolName guard for an
+// already-canonical "a:erase".
+func readToolMetadata(docID string, fields map[string]interface{}) *config.ToolMetadata {
+	serverName := getStringField(fields, "server_name")
+	canonical := docID
+	if canonical == "" {
+		// Defensive only: bleve always reports hit.ID. Fall back to the stored
+		// name so a malformed hit still renders rather than vanishing.
+		canonical = CanonicalToolName(serverName, getStringField(fields, "full_tool_name"))
+	}
+	return &config.ToolMetadata{
+		Name:             canonical,
+		RawName:          strings.TrimPrefix(canonical, serverName+":"),
+		ServerName:       serverName,
+		Description:      getStringField(fields, "description"),
+		ParamsJSON:       getStringField(fields, "params_json"),
+		OutputSchemaJSON: getStringField(fields, "output_schema_json"),
+		Hash:             getStringField(fields, "hash"),
+	}
+}
+
+// IndexTool indexes a tool document
+func (b *BleveIndex) IndexTool(toolMeta *config.ToolMetadata) error {
+	docID, doc := toolDocument(toolMeta)
+
+	b.logger.Debug("Indexing tool", zap.String("doc_id", docID), zap.String("tool_name", doc.ToolName))
 	return b.index.Index(docID, doc)
 }
 
-// DeleteTool removes a tool from the index
+// DeleteTool removes a tool from the index, addressed by its exact raw name.
 func (b *BleveIndex) DeleteTool(serverName, toolName string) error {
-	docID := fmt.Sprintf("%s:%s", serverName, toolName)
+	docID := toolDocID(serverName, toolName)
 
 	b.logger.Debug("Deleting tool from index", zap.String("doc_id", docID))
 	return b.index.Delete(docID)
@@ -294,18 +353,8 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 	// Convert results
 	var results []*config.SearchResult
 	for _, hit := range searchResult.Hits {
-		serverName := getStringField(hit.Fields, "server_name")
-		toolMeta := &config.ToolMetadata{
-			Name:             CanonicalToolName(serverName, getStringField(hit.Fields, "full_tool_name")),
-			ServerName:       serverName,
-			Description:      getStringField(hit.Fields, "description"),
-			ParamsJSON:       getStringField(hit.Fields, "params_json"),
-			OutputSchemaJSON: getStringField(hit.Fields, "output_schema_json"),
-			Hash:             getStringField(hit.Fields, "hash"),
-		}
-
 		results = append(results, &config.SearchResult{
-			Tool:  toolMeta,
+			Tool:  readToolMetadata(hit.ID, hit.Fields),
 			Score: hit.Score,
 		})
 	}
@@ -356,32 +405,7 @@ func (b *BleveIndex) BatchIndex(tools []*config.ToolMetadata) error {
 	batch := b.index.NewBatch()
 
 	for _, toolMeta := range tools {
-		// Extract just the tool name (remove server prefix)
-		toolName := toolMeta.Name
-		if parts := strings.SplitN(toolMeta.Name, ":", 2); len(parts) == 2 {
-			toolName = parts[1]
-		}
-
-		// Create combined searchable text
-		searchableText := fmt.Sprintf("%s %s %s %s",
-			toolName,
-			toolMeta.Name,
-			toolMeta.Description,
-			toolMeta.ParamsJSON)
-
-		doc := &ToolDocument{
-			ToolName:         toolName,
-			FullToolName:     toolMeta.Name,
-			ServerName:       toolMeta.ServerName,
-			Description:      toolMeta.Description,
-			ParamsJSON:       toolMeta.ParamsJSON,
-			OutputSchemaJSON: toolMeta.OutputSchemaJSON,
-			Hash:             toolMeta.Hash,
-			Tags:             "",
-			SearchableText:   searchableText,
-		}
-
-		docID := fmt.Sprintf("%s:%s", toolMeta.ServerName, toolName)
+		docID, doc := toolDocument(toolMeta)
 		_ = batch.Index(docID, doc)
 	}
 
@@ -430,16 +454,7 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 		}
 
 		for _, hit := range searchResult.Hits {
-			serverName := getStringField(hit.Fields, "server_name")
-			toolMeta := &config.ToolMetadata{
-				Name:             CanonicalToolName(serverName, getStringField(hit.Fields, "full_tool_name")),
-				ServerName:       serverName,
-				Description:      getStringField(hit.Fields, "description"),
-				ParamsJSON:       getStringField(hit.Fields, "params_json"),
-				OutputSchemaJSON: getStringField(hit.Fields, "output_schema_json"),
-				Hash:             getStringField(hit.Fields, "hash"),
-			}
-			tools = append(tools, toolMeta)
+			tools = append(tools, readToolMetadata(hit.ID, hit.Fields))
 		}
 
 		if len(searchResult.Hits) < b.searchPageSize {

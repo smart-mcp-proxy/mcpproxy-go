@@ -372,6 +372,52 @@ func (b *BoltDB) SaveToolApproval(record *ToolApprovalRecord) error {
 	})
 }
 
+// StampToolApprovalsIdentityKeyed marks the named records of one server
+// identity-keyed (Spec 105 FR-009) in ONE update transaction, re-reading each
+// record INSIDE the transaction and stamping it only if it is still unstamped
+// and still does not Restricts() at write time. Used by the discovery
+// producer to end the legacy consults for a server's remaining pre-105
+// records after its first pass. The in-transaction re-read is what makes the
+// sweep safe against an operator write (SetToolEnabled / BlockTools) that
+// lands between the caller's listing and this stamp (astra r1 P4): a stale
+// listed copy is never written back, so the operator's Disabled=true is
+// neither discarded nor stamped over — only the IdentityKeyed bit is ever
+// touched. Returns the names actually stamped.
+func (b *BoltDB) StampToolApprovalsIdentityKeyed(serverName string, toolNames []string) ([]string, error) {
+	if len(toolNames) == 0 {
+		return nil, nil
+	}
+	var stamped []string
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		for _, name := range toolNames {
+			key := []byte(ToolApprovalKey(serverName, name))
+			data := bucket.Get(key)
+			if data == nil {
+				continue
+			}
+			record := &ToolApprovalRecord{}
+			if err := record.UnmarshalBinary(data); err != nil {
+				return err
+			}
+			if record.IdentityKeyed || record.Restricts() {
+				continue
+			}
+			record.IdentityKeyed = true
+			out, err := record.MarshalBinary()
+			if err != nil {
+				return err
+			}
+			if err := bucket.Put(key, out); err != nil {
+				return err
+			}
+			stamped = append(stamped, name)
+		}
+		return nil
+	})
+	return stamped, err
+}
+
 // GetToolApproval retrieves a tool approval record by server and tool name.
 // Returns ErrToolApprovalNotFound (wrapped so callers can use errors.Is) when
 // no record exists. Any other error indicates a real read failure (decode

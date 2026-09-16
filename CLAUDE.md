@@ -164,6 +164,6 @@ tail -f ~/Library/Logs/mcpproxy/main.log  # main log (macOS; Linux: ~/.mcpproxy/
 - **Windows installer**: [docs/github-actions-windows-wix-research.md](docs/github-actions-windows-wix-research.md). **Prerelease** (`next` branch + `v*-rc.*` tags, opt-in, off stable channels): [docs/prerelease-builds.md](docs/prerelease-builds.md).
 
 ## Recent Changes
+- 105-agent-scope-hardening: Go 1.26, backend-only, existing deps only — mcp-go v1.0.0 (`WithToolFilter` re-runs at `tools/call`), bleve (`server_name` facet), bbolt, zap/lumberjack. **No new dependencies.**
 - 058-mcp-2026-upgrade: Added Go 1.25.5 (`go.mod` toolchain) + `mark3labs/mcp-go` v0.57.0 → **v1.0.0** (the only dependency change); existing `santhosh-tekuri/jsonschema/v6`, `zap`, Cobra, BBolt, Bleve. **No new dependencies.**
 - 103-token-bench: Go 1.25 (`bench/`) + existing only — tiktoken-go v0.1.8 (cl100k_base), the mcp-go transport already used by `bench/mcpcaller.go`. MCPMark is an external SHA-pinned tool invoked out of process, not a module dependency. **No new dependencies.**
-- 102-schema-deferred: Go 1.25.5 module toolchain (`go.mod`), backend-only + existing only — mark3labs/mcp-go v0.57.0 (tool surface), santhosh-tekuri/jsonschema/v6 (Spec-085 validator reuse), zap, stdlib. **No new dependencies.**

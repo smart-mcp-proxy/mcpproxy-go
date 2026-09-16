@@ -85,12 +85,46 @@ type ServerRuntime struct {
 	Action string
 }
 
+// ToolIdentity is the read-only outcome of resolving one (server, raw tool)
+// pair against the live discovery snapshot — the registration identity every
+// dispatch path authorizes against (Spec 105 FR-009, research D4). It mirrors
+// the dispatch-side resolution without importing it:
+//
+//   - Known: the snapshot holds the server at all. The zero value (Known
+//     false) is "no identity claim" — a pure-unit reader, or a server the
+//     snapshot has never held — and the evaluator then falls through to the
+//     existence test it always ran.
+//   - Hydrated: the server is enabled, not quarantined and CONNECTED, so its
+//     snapshot is the authority on its tool set. A known server that is not
+//     hydrated keeps the server-level connection verdicts.
+//   - DiscoveryDone: a discovery pass has completed for the LIVE connection
+//     (the snapshot's stamp was captured on the connection the client
+//     currently holds).
+//   - Found: the completed result lists the raw name, verbatim.
+type ToolIdentity struct {
+	Known         bool
+	Hydrated      bool
+	DiscoveryDone bool
+	Found         bool
+}
+
+// Unresolved reports the D4 refusal condition dispatch applies: a known,
+// hydrated server whose discovery has not completed for the live connection
+// or whose completed discovery does not list the name.
+func (id ToolIdentity) Unresolved() bool {
+	return id.Known && id.Hydrated && (!id.DiscoveryDone || !id.Found)
+}
+
 // StateReader reads the connection-state snapshot (stateview). It is a snapshot
 // read: lock-free, never blocking, never triggering a connect.
 type StateReader interface {
 	// ServerRuntime returns the runtime view of a server; found=false when the
 	// snapshot has no entry for it.
 	ServerRuntime(serverName string) (rt ServerRuntime, found bool)
+	// ToolIdentity resolves a (server, raw tool) pair against the same
+	// snapshot. A reader with no identity information returns the zero value
+	// (no claim).
+	ToolIdentity(serverName, toolName string) ToolIdentity
 }
 
 // ConfigPolicy reads configuration-derived policy.
@@ -255,6 +289,31 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 			fmt.Sprintf("Server %q is disabled.", serverName)), nil
 	}
 
+	// 4b. Registration identity (Spec 105 FR-009, research D4; astra r2 C2).
+	//     Every dispatch path refuses a name a KNOWN, CONNECTED server's
+	//     completed discovery does not list, and any name on one whose
+	//     discovery has not completed for the live connection — for every
+	//     caller. FR-002 makes preflight one-way consistent with dispatch
+	//     (a refusal must never read as ready), and neither the index (a
+	//     stale document whose delete failed) nor an approval record (a kept
+	//     migration alias) is registration identity, so the existence test
+	//     below cannot be the whole answer. The verdicts stay inside the
+	//     closed FR-003 enum: the discovery window is server_initializing
+	//     (retryable), an absent name is the ONE not_found construction —
+	//     the same bytes at both tiers, so nothing about the server's tool
+	//     set leaks through the shape. A server the snapshot does not hold,
+	//     or holds not connected, makes no identity claim here and keeps
+	//     the chain that always owned it (connectionVerdict).
+	if ec.State != nil {
+		if identity := ec.State.ToolIdentity(serverName, toolName); identity.Unresolved() {
+			if !identity.DiscoveryDone {
+				return unavailable(id, ReasonServerInitializing,
+					fmt.Sprintf("Server %q has not completed tool discovery for its current connection yet.", serverName)), nil
+			}
+			return corpus.notFoundResult(id)
+		}
+	}
+
 	// 5. not_found — exact-id existence. The shared index is the primary
 	//    source, but it is NOT authoritative on its own: the runtime
 	//    de-indexes a tool the moment it becomes blocked, pending, or changed
@@ -291,15 +350,34 @@ func evaluateOne(ec *EvalContext, ref ToolRef, corpus *visibleCorpus) (Result, e
 
 	// 6-9. tool_denied_by_config → tool_blocked_by_user → tool_changed →
 	//      tool_pending_approval, all from the shared classifier so preflight
-	//      and dispatch cannot disagree (FR-002).
+	//      and dispatch cannot disagree (FR-002). The indexed corpus is this
+	//      evaluator's discovery snapshot (step 5 resolved existence against
+	//      it), so an indexed tool with no approval record classifies as
+	//      pending while the quarantine gate applies to its server (Spec 105
+	//      FR-009) — exactly as the dispatch gates classify a snapshot tool
+	//      with no record.
 	class := ClassifyTool(ClassifyInputs{
 		Server:            policy,
 		QuarantineEnabled: ec.Policy.QuarantineEnabled(),
 		ConfigDenied:      configDenied,
 		Approval:          approval,
+		Discovered:        indexed != nil,
 	})
 	if !class.Callable() {
-		return unavailable(id, class.Reason(), classDetail(class, serverName, toolName)), nil
+		res := unavailable(id, class.Reason(), classDetail(class, serverName, toolName))
+		// Spec 105 FR-009 implicit pending (astra r1 R1): no record exists to
+		// approve yet, so the taxonomy's approve remediation is a dead end —
+		// ApproveTools skips a missing record and triggers no rediscovery.
+		// Same per-occurrence override idiom as server_unhealthy, same body as
+		// dispatch and describe_tool; the reason code stays
+		// tool_pending_approval (closed FR-003 enum, exit code and counters
+		// unchanged).
+		if class == ToolClassPendingApproval && approval == nil {
+			res.Action = health.ActionRestart
+			res.Detail = NoApprovalRecordDetail(id)
+			res.Remediation = NoApprovalRecordRemediation(serverName)
+		}
+		return res, nil
 	}
 
 	// 10. hash_mismatch — evaluated only now that the tool is known to exist
@@ -490,7 +568,12 @@ func normalizeHealthAction(action string) string {
 }
 
 // lookupIndexed resolves an exact (server, tool) pair against the shared index.
-// Exact match only — no fuzzy resolution, no live ListTools fallback.
+// Exact match only — no fuzzy resolution, no live ListTools fallback, and the
+// indexed Name is compared against the canonical "<server>:<raw>" id ALONE
+// (Spec 105 FR-009): the index always hands back canonical ids, so a bare-name
+// alternate could only ever match when one tool's raw name equals a sibling's
+// canonical id (raw "a:erase" on server "a" resolving to the raw "erase" doc),
+// which claimed existence for a name dispatch refuses.
 func lookupIndexed(ec *EvalContext, serverName, toolName string) (*IndexedTool, error) {
 	if ec.Index == nil {
 		return nil, fmt.Errorf("preflight: no index reader configured")
@@ -501,7 +584,7 @@ func lookupIndexed(ec *EvalContext, serverName, toolName string) (*IndexedTool, 
 	}
 	full := serverName + ":" + toolName
 	for i := range tools {
-		if tools[i].Name == full || tools[i].Name == toolName {
+		if tools[i].Name == full {
 			t := tools[i]
 			return &t, nil
 		}

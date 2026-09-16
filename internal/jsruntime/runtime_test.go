@@ -681,6 +681,51 @@ func TestExecuteAuthContext_PermissionDenied(t *testing.T) {
 	}
 }
 
+// TestExecuteAuthContext_UnresolvedTierRefusesEveryCaller: Spec 105 FR-009
+// (research D4). When the annotation lookup answers PermissionTierUnresolved —
+// the proxy knows the server but cannot resolve the tool's identity — the call
+// is refused with PERMISSION_DENIED before HasPermission runs, so an
+// administrator AuthInfo (which passes every tier check) is refused exactly
+// like a full-tier agent, and the upstream is never called.
+func TestExecuteAuthContext_UnresolvedTierRefusesEveryCaller(t *testing.T) {
+	code := `
+		var ghost = call_tool("github", "ghost", {});
+		var real = call_tool("github", "list_repos", {});
+		({ ghostOk: ghost.ok, ghostCode: ghost.error ? ghost.error.code : null, realOk: real.ok })
+	`
+	lookup := func(_, toolName string) string {
+		if toolName == "ghost" {
+			return PermissionTierUnresolved
+		}
+		return "read"
+	}
+	for name, authInfo := range map[string]*AuthInfo{
+		"full-tier agent": {Type: "agent", AgentName: "full-bot", AllowedServers: []string{"github"}, Permissions: []string{"read", "write", "destructive"}},
+		"administrator":   {Type: "admin", AgentName: "admin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			caller := newMockToolCaller()
+			result := Execute(context.Background(), caller, code, ExecutionOptions{AuthContext: authInfo, ToolAnnotationFunc: lookup})
+			if !result.Ok {
+				t.Fatalf("expected ok=true, got error: %v", result.Error)
+			}
+			resultMap := result.Value.(map[string]interface{})
+			if resultMap["ghostOk"] != false {
+				t.Errorf("expected the unresolved call to fail, got ok=%v", resultMap["ghostOk"])
+			}
+			if resultMap["ghostCode"] != string(ErrorCodePermissionDenied) {
+				t.Errorf("expected %s, got %v", ErrorCodePermissionDenied, resultMap["ghostCode"])
+			}
+			if resultMap["realOk"] != true {
+				t.Errorf("control: the resolved tool must dispatch, got ok=%v", resultMap["realOk"])
+			}
+			if len(caller.calls) != 1 || caller.calls[0].tool != "list_repos" {
+				t.Errorf("expected exactly the resolved tool to reach the upstream, got %+v", caller.calls)
+			}
+		})
+	}
+}
+
 // TestExecuteAuthContext_PermissionAggregation tests that max permission level is tracked
 func TestExecuteAuthContext_PermissionAggregation(t *testing.T) {
 	caller := newMockToolCaller()
@@ -845,5 +890,42 @@ func TestPermissionLevelTracking(t *testing.T) {
 	ec.updateMaxPermissionLevel("destructive")
 	if ec.GetMaxPermissionLevel() != "destructive" {
 		t.Errorf("expected destructive, got %s", ec.GetMaxPermissionLevel())
+	}
+}
+
+// TestExecuteNoAuthContext_UnresolvedTierStillRefuses: the identity gate
+// (PermissionTierUnresolved) is decided BEFORE the nil-AuthInfo early return
+// in checkDispatchGates, so a stdio / in-process execution with no AuthInfo
+// is held to the same Spec 105 FR-009 rule as every authenticated caller —
+// while, as before, no permission tier is checked or reported for it.
+func TestExecuteNoAuthContext_UnresolvedTierStillRefuses(t *testing.T) {
+	code := `
+		var ghost = call_tool("github", "ghost", {});
+		var real = call_tool("github", "list_repos", {});
+		({ ghostOk: ghost.ok, ghostCode: ghost.error ? ghost.error.code : null, realOk: real.ok })
+	`
+	lookup := func(_, toolName string) string {
+		if toolName == "ghost" {
+			return PermissionTierUnresolved
+		}
+		return "destructive"
+	}
+	caller := newMockToolCaller()
+	result := Execute(context.Background(), caller, code, ExecutionOptions{ToolAnnotationFunc: lookup})
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+	resultMap := result.Value.(map[string]interface{})
+	if resultMap["ghostOk"] != false {
+		t.Errorf("expected the unresolved call to fail without an AuthInfo, got ok=%v", resultMap["ghostOk"])
+	}
+	if resultMap["ghostCode"] != string(ErrorCodePermissionDenied) {
+		t.Errorf("expected %s, got %v", ErrorCodePermissionDenied, resultMap["ghostCode"])
+	}
+	if resultMap["realOk"] != true {
+		t.Errorf("control: the resolved tool must dispatch with no AuthInfo regardless of tier, got ok=%v", resultMap["realOk"])
+	}
+	if len(caller.calls) != 1 || caller.calls[0].tool != "list_repos" {
+		t.Errorf("expected exactly the resolved tool to reach the upstream, got %+v", caller.calls)
 	}
 }

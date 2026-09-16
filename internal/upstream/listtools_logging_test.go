@@ -135,3 +135,44 @@ func TestListToolsFailureIsStillReported(t *testing.T) {
 	}
 	assert.True(t, found, "the sweep miss must still be reported at Warn by the manager")
 }
+
+// Spec 105 FR-009 (round-3 finding 5): the sweep must be able to tell a server
+// whose tools/list SUCCEEDED with zero tools (discovery completed; its names
+// resolve as absent) from one whose list FAILED (discovery did not complete;
+// retried next cycle). DiscoverToolsReport names the former in its listed set
+// and leaves the latter out.
+func TestDiscoverToolsReport_ListsZeroToolServersButNotFailedOnes(t *testing.T) {
+	m, _ := newObservedManager(t)
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	// "server-a": a prompt-only upstream — tools/list succeeds with no tools.
+	okServer := servertest.NewTestStreamableHTTPServer(newTestPromptUpstreamServer(t, "greeting"))
+	t.Cleanup(okServer.Close)
+	require.NoError(t, m.AddServerConfig("srv-a", &config.ServerConfig{
+		Name: "server-a", Protocol: "streamable-http", URL: okServer.URL, Enabled: true,
+	}))
+	// "server-b": connected, then its upstream dies — tools/list fails.
+	deadServer := servertest.NewTestStreamableHTTPServer(newTestPromptUpstreamServer(t, "greeting"))
+	require.NoError(t, m.AddServerConfig("srv-b", &config.ServerConfig{
+		Name: "server-b", Protocol: "streamable-http", URL: deadServer.URL, Enabled: true,
+	}))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, id := range []string{"srv-a", "srv-b"} {
+		client, ok := m.GetClient(id)
+		require.True(t, ok)
+		require.NoError(t, client.Connect(ctx))
+	}
+	deadServer.Close()
+
+	tools, listed, err := m.DiscoverToolsReport(context.Background(), false)
+	require.NoError(t, err)
+	assert.Empty(t, tools, "neither upstream serves a tool")
+	assert.Equal(t, []string{"server-a"}, listed,
+		"only the server whose tools/list completed is reported as listed")
+
+	// The plain wrappers keep their signature and result.
+	plain, err := m.DiscoverTools(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, plain)
+}

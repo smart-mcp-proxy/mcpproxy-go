@@ -19,6 +19,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
@@ -303,145 +304,160 @@ func TestGetMCPServerForMode_NilFallback(t *testing.T) {
 	assert.Same(t, mainServer, proxy.GetMCPServerForMode("retrieve_tools"))
 }
 
-func TestDirectModeHandler_PermissionDenied(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	proxy := &MCPProxyServer{
-		logger: logger,
-		config: &config.Config{},
+// directRoutingFixture is the real direct-surface fixture for the handler
+// cells below (Spec 105 T017, research D15): a proxy with a runtime, one
+// counting upstream per server (the SC-002 zero-upstream-call oracle) and a
+// direct catalog staged from those upstreams' StateView entries, so every
+// cell is driven through the handler mcp-go actually registered for the
+// display name rather than one the test built over a bare MCPProxyServer.
+// The earlier bare fixtures proved an admitted call only by recovering the
+// nil-upstreamManager panic; here an admission is the upstream's own count
+// and the exact raw name the call arrived under.
+type directRoutingFixture struct {
+	proxy *MCPProxyServer
+	rt    *runtime.Runtime
+	ups   map[string]*countingUpstream
+}
+
+// directServerSpec is one upstream of the fixture: its name and the tools it
+// exposes (every one seeded approved).
+type directServerSpec struct {
+	server string
+	tools  []toolSpec
+}
+
+func newDirectRoutingFixture(t *testing.T, servers ...directServerSpec) *directRoutingFixture {
+	t.Helper()
+	cfgs := make([]*config.ServerConfig, 0, len(servers))
+	for _, s := range servers {
+		cfgs = append(cfgs, &config.ServerConfig{Name: s.server, Enabled: true})
 	}
-
-	// Create a handler for a read-only tool
-	readOnlyHint := true
-	annotations := &config.ToolAnnotations{
-		ReadOnlyHint: &readOnlyHint,
+	proxy, rt := createTestProxyWithRuntime(t, cfgs)
+	f := &directRoutingFixture{proxy: proxy, rt: rt, ups: map[string]*countingUpstream{}}
+	ups := make([]*countingUpstream, 0, len(servers))
+	for _, s := range servers {
+		up := startCountingUpstream(t, proxy, rt, s.server, s.tools...)
+		f.ups[s.server] = up
+		ups = append(ups, up)
 	}
-	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: annotations})
+	stageDirectCatalogFor(t, proxy, ups...)
+	return f
+}
 
-	// Create a context with agent token that only has write permission (no read)
-	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
-		Type:           auth.AuthTypeAgent,
-		AgentName:      "test-agent",
-		AllowedServers: []string{"github"},
-		Permissions:    []string{"write"}, // Only write, no read
-	})
-
-	request := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "github__list_repos",
-		},
-	}
-
-	result, err := handler(agentCtx, request)
-	require.NoError(t, err) // Handler returns errors as tool results, not Go errors
+// call drives one (server, raw tool) through the registered direct handler.
+func (f *directRoutingFixture) call(t *testing.T, ctx context.Context, server, rawName string) *mcp.CallToolResult {
+	t.Helper()
+	display := FormatDirectToolName(server, rawName)
+	st, ok := f.proxy.directServer.ListTools()[display]
+	require.Truef(t, ok, "%q must be registered on the direct server", display)
+	req := mcp.CallToolRequest{}
+	req.Params.Name = display
+	req.Params.Arguments = map[string]interface{}{}
+	result, err := st.Handler(ctx, req)
+	require.NoError(t, err, "the direct handler reports refusals as tool results, never as Go errors")
 	require.NotNil(t, result)
-	assert.True(t, result.IsError)
-	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "Permission denied")
+	require.NotEmpty(t, result.Content)
+	return result
+}
+
+// refused asserts an error result carrying want and that NO upstream saw a call.
+func (f *directRoutingFixture) refused(t *testing.T, result *mcp.CallToolResult, want string) {
+	t.Helper()
+	text := result.Content[0].(mcp.TextContent).Text
+	assert.True(t, result.IsError, "a refused cell must be an error result: %s", text)
+	assert.Contains(t, text, want)
+	for server, up := range f.ups {
+		assert.Equal(t, int64(0), up.count.Load(), "a refused cell must never reach upstream %q (dispatched: %v)", server, up.dispatched())
+	}
+}
+
+// admitted asserts a success result and exactly one upstream call under the
+// exact raw name, on the named server alone.
+func (f *directRoutingFixture) admitted(t *testing.T, result *mcp.CallToolResult, server, rawName string) {
+	t.Helper()
+	require.False(t, result.IsError, "an admitted cell must be dispatched: %s", result.Content[0].(mcp.TextContent).Text)
+	for name, up := range f.ups {
+		if name == server {
+			assert.Equal(t, int64(1), up.count.Load(), "the admitted call must reach upstream %q exactly once", server)
+			assert.Equal(t, []string{rawName}, up.dispatched(), "the upstream must receive the exact raw tool name that was authorized")
+			continue
+		}
+		assert.Equal(t, int64(0), up.count.Load(), "no other upstream (%q) may see the call", name)
+	}
+}
+
+// stageDirectCatalogFor renders and registers a direct catalog for the given
+// counting upstreams exactly as RefreshDirectModeTools does (render → SetTools
+// → publish), with the annotations the StateView carries, so the handler
+// mcp-go would dispatch to closes over the same registration identity.
+// Discovery through the stub cannot be used here: the in-process upstream
+// publishes no annotations, so every entry would render as read tier.
+func stageDirectCatalogFor(t *testing.T, p *MCPProxyServer, ups ...*countingUpstream) {
+	t.Helper()
+	p.config.RoutingMode = config.RoutingModeDirect
+	var metas []*config.ToolMetadata
+	for _, up := range ups {
+		for _, tool := range up.Tools {
+			metas = append(metas, &config.ToolMetadata{
+				Name: tool.Name, ServerName: up.Server, Description: tool.Description,
+				ParamsJSON: `{"type":"object"}`, Hash: "h-" + tool.Name, Annotations: tool.Annotations,
+			})
+		}
+	}
+	warmFixtureSignatures(p, metas)
+	cat := directCatalogFor(p, metas)
+	p.directServer.SetTools(p.withDirectBuiltins(p.renderDirectTools(cat))...)
+	p.publishDirectCatalog(cat)
+}
+
+// The four cells below are the direct-surface agent-token gates, rebuilt on
+// the real fixture (Spec 105 T017): a token lacking the target's tier, a
+// token whose server scope excludes the target, a token holding the tier, and
+// a destructive target against a read+write token. Each refusal is proven by
+// zero upstream calls; the admission by one call under the exact raw name.
+
+func TestDirectModeHandler_PermissionDenied(t *testing.T) {
+	f := newDirectRoutingFixture(t, directServerSpec{server: "github", tools: []toolSpec{readSpec("list_repos")}})
+
+	// An agent token that only holds write (no read) against a read-tier tool.
+	result := f.call(t, agentCtx([]string{"github"}, []string{auth.PermWrite}, ""), "github", "list_repos")
+	f.refused(t, result, "Permission denied: token does not have 'read' permission required for tool 'github:list_repos'")
 }
 
 func TestDirectModeHandler_ServerAccessDenied(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	proxy := &MCPProxyServer{
-		logger: logger,
-		config: &config.Config{},
-	}
+	f := newDirectRoutingFixture(t,
+		directServerSpec{server: "github", tools: []toolSpec{readSpec("list_repos")}},
+		directServerSpec{server: "gitlab", tools: []toolSpec{readSpec("list_repos")}},
+	)
 
-	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "gitlab", ToolName: "list_repos", DisplayName: FormatDirectToolName("gitlab", "list_repos"), Annotations: nil})
-
-	// Create a context with agent token that only has access to github
-	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
-		Type:           auth.AuthTypeAgent,
-		AgentName:      "test-agent",
-		AllowedServers: []string{"github"}, // Only github, not gitlab
-		Permissions:    []string{"read"},
-	})
-
-	request := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "gitlab__list_repos",
-		},
-	}
-
-	result, err := handler(agentCtx, request)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.True(t, result.IsError)
-	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "Access denied")
+	// An agent token restricted to github, targeting gitlab's tool of the
+	// same raw name: the server-scope gate refuses before any tier is read,
+	// and neither upstream sees the call.
+	result := f.call(t, agentCtx([]string{"github"}, []string{auth.PermRead}, ""), "gitlab", "list_repos")
+	f.refused(t, result, "Access denied: token does not have access to server 'gitlab'")
 }
 
 func TestDirectModeHandler_AgentWithCorrectPermissions(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	proxy := &MCPProxyServer{
-		logger: logger,
-		config: &config.Config{},
-	}
+	f := newDirectRoutingFixture(t, directServerSpec{server: "github", tools: []toolSpec{readSpec("list_repos")}})
 
-	// A read-only tool requires "read" permission
-	readOnlyHint := true
-	annotations := &config.ToolAnnotations{
-		ReadOnlyHint: &readOnlyHint,
-	}
-	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: annotations})
-
-	// Agent with read permission and github access should pass auth checks
-	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
-		Type:           auth.AuthTypeAgent,
-		AgentName:      "test-agent",
-		AllowedServers: []string{"github"},
-		Permissions:    []string{"read"},
-	})
-
-	request := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "github__list_repos",
-		},
-	}
-
-	// Will panic due to nil upstreamManager, but we use recover to verify
-	// that auth checks passed (if it had failed at auth, result would be returned cleanly)
-	func() {
-		defer func() {
-			r := recover()
-			// If we reach here, the auth check passed and we hit the upstream call
-			// which panics due to nil manager. This is expected behavior.
-			assert.NotNil(t, r, "should panic at upstream call, proving auth checks passed")
-		}()
-		handler(agentCtx, request)
-	}()
+	// An agent token holding read on github reaches the read-tier tool; the
+	// upstream's own count is the proof the gates admitted it (the bare
+	// fixture this replaces could only recover a nil-manager panic).
+	result := f.call(t, agentCtx([]string{"github"}, []string{auth.PermRead}, ""), "github", "list_repos")
+	f.admitted(t, result, "github", "list_repos")
 }
 
 func TestDirectModeHandler_DestructiveToolNeedsDestructivePermission(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	proxy := &MCPProxyServer{
-		logger: logger,
-		config: &config.Config{},
-	}
+	f := newDirectRoutingFixture(t, directServerSpec{server: "github", tools: []toolSpec{destructiveSpec("delete_repo")}})
 
-	destructiveHint := true
-	annotations := &config.ToolAnnotations{
-		DestructiveHint: &destructiveHint,
-	}
-	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "delete_repo", DisplayName: FormatDirectToolName("github", "delete_repo"), Annotations: annotations})
+	// read+write without destructive: refused on the target's tier.
+	result := f.call(t, agentCtx([]string{"github"}, []string{auth.PermRead, auth.PermWrite}, ""), "github", "delete_repo")
+	f.refused(t, result, "Permission denied: token does not have 'destructive' permission required for tool 'github:delete_repo'")
 
-	// Agent with only read+write but no destructive permission
-	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
-		Type:           auth.AuthTypeAgent,
-		AgentName:      "test-agent",
-		AllowedServers: []string{"github"},
-		Permissions:    []string{"read", "write"},
-	})
-
-	request := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "github__delete_repo",
-		},
-	}
-
-	result, err := handler(agentCtx, request)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.True(t, result.IsError)
-	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "Permission denied")
-	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "destructive")
+	// Positive control on the same handler: a token holding destructive is
+	// dispatched, under the exact raw name.
+	result = f.call(t, agentCtx([]string{"github"}, []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}, ""), "github", "delete_repo")
+	f.admitted(t, result, "github", "delete_repo")
 }
 
 func TestRequiredPermissionForDirectTool_MapsAnnotationsToAuthPermissions(t *testing.T) {

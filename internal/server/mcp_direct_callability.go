@@ -193,22 +193,53 @@ func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) direc
 		decision.configDenied = configDenied
 	}
 
-	approval, approvalErr := e.getToolApproval(serverName, toolName)
-	if approvalErr != nil && !errors.Is(approvalErr, storage.ErrToolApprovalNotFound) {
-		decision.storageErr = approvalErr
-		return decision
-	}
-	decision.approval = approval
-
 	// The LIVE config, like evaluateToolGate: a hot-reloaded quarantine_enabled
 	// must take effect on the next call here too, or direct mode would keep
 	// waving through tools the other dispatch paths have started refusing.
 	cfg := e.proxy.currentConfig()
 	quarantineEnabled := cfg == nil || cfg.IsQuarantineEnabled()
+	quarantineGate := quarantineEnabled && !serverConfig.IsQuarantineSkipped()
+
+	// The direct catalog IS the direct surface's discovery snapshot: every
+	// caller of this evaluator holds a pair resolved through a catalog or
+	// registry entry (the registered handler closes over its own entry, the
+	// listing filter and describe resolve theirs), and that catalog is built
+	// from a live tools/list of the server. So the tool is discovered by
+	// construction here, and the classifier's Discovered input is true
+	// regardless of what the StateView holds at this instant. The StateView is
+	// consulted only for the description the pending body carries. Reading
+	// Discovered from the StateView instead re-opened FR009-G5 on this
+	// surface: the catalog is rebuilt on servers.changed, which on (re)connect
+	// races the runtime's own discovery + checkToolApprovals pass, so a newly
+	// added tool sat in the catalog with no record and no StateView entry —
+	// and "not discovered, no record" classified as ready.
+	const discovered = true
+	identity := e.proxy.resolveExactToolIdentity(serverName, toolName)
+
+	approval, approvalErr := e.getToolApproval(serverName, toolName)
+	switch {
+	case approvalErr == nil:
+	case errors.Is(approvalErr, storage.ErrToolApprovalNotFound):
+		// Spec 105 FR-009 (research D4): the same no-record rule as the
+		// retrieve gate — a catalog tool with no record is pending under an
+		// active gate, so /mcp/all cannot admit a name the call_tool_*
+		// variants refuse. The reader (lookupToolApproval) already handed a
+		// legacy collapsed record's lock to the namespaced name; this covers
+		// the record that is genuinely absent.
+		approval = implicitPendingApproval(serverName, toolName, discovered, identity.Description, quarantineGate)
+		if approval != nil {
+			e.proxy.logImplicitPending("direct", serverName, toolName)
+		}
+	default:
+		decision.storageErr = approvalErr
+		return decision
+	}
+	decision.approval = approval
+
 	// approvalStatus drives the RESPONSE shape only, and keeps the pre-098
 	// preference for the pending/changed message over the generic block, so a
 	// refusal reads exactly as it always did.
-	if serverGatesPassed && quarantineEnabled && !serverConfig.IsQuarantineSkipped() && approval != nil {
+	if serverGatesPassed && quarantineGate && approval != nil {
 		switch approval.Status {
 		case storage.ToolApprovalStatusPending, storage.ToolApprovalStatusChanged:
 			decision.approvalStatus = approval.Status
@@ -225,6 +256,7 @@ func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) direc
 		QuarantineEnabled: quarantineEnabled,
 		ConfigDenied:      configDenied,
 		Approval:          approvalStateFor(approval),
+		Discovered:        discovered,
 	})
 	decision.callable = class.Callable()
 	return decision
@@ -241,6 +273,11 @@ func (e *directCallabilityEvaluator) getServerConfig(serverName string) (*config
 	return serverConfig, err
 }
 
+// getToolApproval memoizes the shared FR-009 reader (lookupToolApproval) per
+// (server, raw tool) pair for the lifetime of one evaluator, which runs over a
+// whole listing. It reads the same rule the retrieve gate reads — exact record
+// wins, a legacy collapsed record restricts but never approves — so the two
+// surfaces cannot disagree about one tool.
 func (e *directCallabilityEvaluator) getToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
 	key := serverName + "\x00" + toolName
 	if approval, ok := e.approvals[key]; ok {
@@ -250,7 +287,7 @@ func (e *directCallabilityEvaluator) getToolApproval(serverName, toolName string
 		return nil, err
 	}
 
-	approval, err := e.proxy.storage.GetToolApproval(serverName, toolName)
+	approval, err := e.proxy.lookupToolApproval(serverName, toolName)
 	if approval != nil {
 		e.approvals[key] = approval
 	}

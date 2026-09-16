@@ -119,6 +119,36 @@ func TestClassifyTool_QuarantineFlagsAreHonored(t *testing.T) {
 	}))
 }
 
+// Spec 105 FR-009 (research D4): "no record" is the implicit-approved default
+// only for a tool the proxy has NOT discovered, or while the quarantine gate
+// is off for the server. A discovered tool with no record is pending under an
+// active gate — the classifier consults the gate before letting nil mean ready.
+func TestClassifyTool_DiscoveredToolWithoutRecordIsPendingUnderActiveGate(t *testing.T) {
+	assert.Equal(t, ToolClassPendingApproval, ClassifyTool(ClassifyInputs{
+		Server: enabledServer(), QuarantineEnabled: true, Discovered: true,
+	}), "a discovered tool with no approval record must never classify as callable while the gate is active")
+
+	// The gate is off globally: the pre-105 default survives.
+	assert.Equal(t, ToolClassReady, ClassifyTool(ClassifyInputs{
+		Server: enabledServer(), QuarantineEnabled: false, Discovered: true,
+	}))
+	// The server opted out (trust_mode auto / auto_approve_tool_changes).
+	assert.Equal(t, ToolClassReady, ClassifyTool(ClassifyInputs{
+		Server:            ServerPolicy{Found: true, Enabled: true, AutoApproveToolChanges: true},
+		QuarantineEnabled: true,
+		Discovered:        true,
+	}))
+	// Not discovered: identity resolution's concern, not approval's — the
+	// classifier makes no pending claim for a tool the snapshot does not list.
+	assert.Equal(t, ToolClassReady, ClassifyTool(ClassifyInputs{
+		Server: enabledServer(), QuarantineEnabled: true, Discovered: false,
+	}))
+	// Earlier gates still outrank the rule.
+	assert.Equal(t, ToolClassDeniedByConfig, ClassifyTool(ClassifyInputs{
+		Server: enabledServer(), QuarantineEnabled: true, Discovered: true, ConfigDenied: true,
+	}))
+}
+
 func TestClassifyTool_AutoApproveMakesChangedToolsReady(t *testing.T) {
 	changed := &ApprovalState{Status: ApprovalStatusChanged}
 	assert.Equal(t, ToolClassReady, ClassifyTool(ClassifyInputs{

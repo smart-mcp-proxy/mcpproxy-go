@@ -12,6 +12,8 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Spec 085 US2 — describe_tool (contracts/describe_tool.md):
@@ -446,4 +448,167 @@ func TestDescribeTool_ModeIndependent(t *testing.T) {
 		fullResult.Content[0].(mcp.TextContent).Text,
 		compactResult.Content[0].(mcp.TextContent).Text,
 		"describe_tool must return identical bytes in both response modes (FR-012)")
+}
+
+// Spec 105 FR-009 (adversarial review, critique0 #3 / critique3 #3): the index
+// resolver matches the canonical "<server>:<raw>" id ALONE. Its former
+// bare-name alternate (`tool.Name == toolName`) could only ever match when a
+// raw name equalled a sibling's canonical id — a raw "a:erase" on server "a"
+// resolving to the "erase" document — which rendered one tool's schema under
+// a foreign id and made describe claim existence for a name dispatch refuses.
+// Round-trip: raw "a:erase" on server "a" is docID "a:a:erase" and reads back
+// with RawName "a:erase"; describe "a:a:erase" resolves IT, describe "a:erase"
+// resolves the plain "erase", and when only "erase" exists the raw "a:erase"
+// resolves nothing.
+func TestDescribeTool_SelfPrefixedRawName_ResolvesExactlyNeverAsSibling(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true}))
+	require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
+		ServerName: "a", Name: "erase", RawName: "erase", Description: "Plain erase.",
+		ParamsJSON: `{"type":"object","properties":{"plain":{"type":"boolean"}}}`, Hash: "h-plain",
+	}))
+
+	t.Run("only erase indexed: raw a:erase resolves nothing", func(t *testing.T) {
+		require.NotNil(t, proxy.lookupIndexedTool("a", "erase"))
+		assert.Nil(t, proxy.lookupIndexedTool("a", "a:erase"),
+			"a raw name equal to a sibling's canonical id must not resolve to that sibling")
+
+		resp := callDescribe(t, proxy, context.Background(), []interface{}{"a:a:erase"})
+		assert.Empty(t, resp.Definitions, "describe must not render erase's schema under a foreign id")
+		require.Len(t, resp.Errors, 1)
+	})
+
+	require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
+		ServerName: "a", Name: "a:erase", RawName: "a:erase", Description: "Self-prefixed erase.",
+		ParamsJSON: `{"type":"object","properties":{"self":{"type":"boolean"}}}`, Hash: "h-self",
+	}))
+
+	t.Run("both indexed: each canonical id resolves its own document", func(t *testing.T) {
+		self := proxy.lookupIndexedTool("a", "a:erase")
+		require.NotNil(t, self, "raw a:erase must resolve once its own document exists")
+		assert.Equal(t, "a:a:erase", self.Name)
+		assert.Equal(t, "a:erase", self.RawName)
+		assert.Equal(t, "h-self", self.Hash)
+
+		plain := proxy.lookupIndexedTool("a", "erase")
+		require.NotNil(t, plain)
+		assert.Equal(t, "a:erase", plain.Name)
+		assert.Equal(t, "h-plain", plain.Hash)
+
+		resp := callDescribe(t, proxy, context.Background(), []interface{}{"a:a:erase", "a:erase"})
+		require.Empty(t, resp.Errors)
+		require.Len(t, resp.Definitions, 2)
+		byName := map[string]map[string]interface{}{}
+		for _, def := range resp.Definitions {
+			byName[def["name"].(string)] = def
+		}
+		require.Contains(t, byName, "a:a:erase")
+		require.Contains(t, byName, "a:erase")
+		assert.Equal(t, "Self-prefixed erase.", byName["a:a:erase"]["description"])
+		assert.Equal(t, "Plain erase.", byName["a:erase"]["description"])
+	})
+}
+
+// Spec 105 FR-009 (migration review, parity finding 3): describe_tool must
+// gate a self-prefixed raw name on ITS OWN record. The split id
+// "a:a:erase" → (a, "a:erase") is the raw tool "a:erase" on server "a";
+// re-normalizing that already-split pair stripped the server prefix a second
+// time and gated the suffix sibling "erase" — so a pending "a:erase" rendered
+// its definition on the approved sibling's gate (contract step 4 withholds
+// pending definitions: a TPA exposure), and with the records reversed an
+// approved "a:erase" was withheld on the pending sibling's gate.
+func TestDescribeTool_SelfPrefixedRawName_GatedOnItsOwnRecord(t *testing.T) {
+	seed := func(t *testing.T, eraseStatus, selfStatus string) *MCPProxyServer {
+		t.Helper()
+		proxy := createTestMCPProxyServer(t)
+		require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "a", Enabled: true}))
+		require.True(t, proxy.currentConfig().IsQuarantineEnabled(), "fixture: the tool-level gate must be active")
+		require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
+			ServerName: "a", Name: "erase", RawName: "erase", Description: "Plain erase.",
+			ParamsJSON: `{"type":"object"}`, Hash: "h-plain",
+		}))
+		require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
+			ServerName: "a", Name: "a:erase", RawName: "a:erase", Description: "Self-prefixed erase.",
+			ParamsJSON: `{"type":"object"}`, Hash: "h-self",
+		}))
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "erase", Status: eraseStatus, ApprovedHash: "h", CurrentHash: "h",
+		}))
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "a", ToolName: "a:erase", Status: selfStatus, ApprovedHash: "h", CurrentHash: "h",
+		}))
+		return proxy
+	}
+
+	t.Run("erase approved, a:erase pending: a:a:erase is withheld as pending", func(t *testing.T) {
+		proxy := seed(t, storage.ToolApprovalStatusApproved, storage.ToolApprovalStatusPending)
+		visible, reason := proxy.toolVisibleToSession(context.Background(), "a", "a:erase")
+		assert.False(t, visible, "the pending tool's definition must be withheld")
+		assert.Equal(t, visReasonToolPendingApproval, reason, "gated on its own record, not the approved sibling's")
+
+		resp := callDescribe(t, proxy, context.Background(), []interface{}{"a:a:erase", "a:erase"})
+		require.Len(t, resp.Errors, 1)
+		assert.Equal(t, "a:a:erase", resp.Errors[0]["id"])
+		assert.Equal(t, describeErrPendingApproval, resp.Errors[0]["error"])
+		require.Len(t, resp.Definitions, 1, "the approved sibling renders")
+		assert.Equal(t, "a:erase", resp.Definitions[0]["name"])
+		assert.Equal(t, "Plain erase.", resp.Definitions[0]["description"])
+	})
+
+	t.Run("erase pending, a:erase approved: a:a:erase renders", func(t *testing.T) {
+		proxy := seed(t, storage.ToolApprovalStatusPending, storage.ToolApprovalStatusApproved)
+		visible, reason := proxy.toolVisibleToSession(context.Background(), "a", "a:erase")
+		assert.True(t, visible, "an approved tool must not be withheld on the pending sibling's gate (reason %q)", reason)
+
+		resp := callDescribe(t, proxy, context.Background(), []interface{}{"a:a:erase", "a:erase"})
+		require.Len(t, resp.Errors, 1)
+		assert.Equal(t, "a:erase", resp.Errors[0]["id"], "the pending sibling is the one withheld")
+		assert.Equal(t, describeErrPendingApproval, resp.Errors[0]["error"])
+		require.Len(t, resp.Definitions, 1)
+		assert.Equal(t, "a:a:erase", resp.Definitions[0]["name"])
+		assert.Equal(t, "Self-prefixed erase.", resp.Definitions[0]["description"])
+	})
+
+	t.Run("classifyServerToolStatus counts the raw name a:erase on its own record", func(t *testing.T) {
+		proxy := seed(t, storage.ToolApprovalStatusApproved, storage.ToolApprovalStatusPending)
+		assert.Equal(t, contracts.DisabledStatusPendingApproval, proxy.classifyServerToolStatus("a", "a:erase"))
+		assert.Equal(t, contracts.DisabledToolStatus(""), proxy.classifyServerToolStatus("a", "erase"))
+		counts := proxy.serverToolCounts("a", []string{"erase", "a:erase"})
+		require.NotNil(t, counts)
+		assert.Equal(t, 1, counts.Callable)
+		assert.Equal(t, 1, counts.PendingApproval)
+	})
+}
+
+// Spec 105 FR-009 (migration review, critique NIT): the implicit-pending
+// record (a snapshot tool with NO stored record under an active gate) reaches
+// describe_tool with the same no-record body dispatch answers
+// (toolPendingApprovalResult): the approve-flow remediation would be a dead
+// end because nothing is listed for review yet.
+func TestDescribeTool_NoApprovalRecord_AnswersRediscoveryRemediation(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+	startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
+	requireManualTrustGateActive(t, proxy, "a")
+	require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
+		ServerName: "a", Name: "ns:erase", RawName: "ns:erase", Description: "Read ns:erase",
+		ParamsJSON: `{"type":"object"}`, Hash: "h-ns",
+	}))
+	_, err := proxy.storage.GetToolApproval("a", "ns:erase")
+	require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "fixture: no record")
+
+	gate := proxy.evaluateExactToolGate("a", "ns:erase")
+	require.True(t, isImplicitPendingApproval(gate.approval), "fixture: the gate synthesizes the implicit-pending record")
+
+	visible, reason := proxy.toolVisibleToSession(context.Background(), "a", "ns:erase")
+	assert.False(t, visible)
+	assert.Equal(t, visReasonToolNoApprovalRecord, reason)
+
+	resp := callDescribe(t, proxy, context.Background(), []interface{}{"a:ns:erase"})
+	assert.Empty(t, resp.Definitions, "the definition is withheld exactly like a stored pending record's")
+	require.Len(t, resp.Errors, 1)
+	assert.Equal(t, describeErrPendingApproval, resp.Errors[0]["error"])
+	remediation, _ := resp.Errors[0]["remediation"].(string)
+	assert.Contains(t, remediation, "no approval record", "the no-record body, not the approve flow")
+	assert.Contains(t, remediation, "upstream_servers operation=\"refresh\" name=\"a\"")
+	assert.NotContains(t, remediation, "review and approve it in the mcpproxy UI", "the approve-flow dead end must not be offered")
 }

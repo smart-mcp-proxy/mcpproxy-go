@@ -292,6 +292,51 @@ type ToolApprovalRecord struct {
 	// "tpa.TPA-2026-0001.hidden_instruction" or "phrase.injection". Deduplicated,
 	// order-stable, capped at MaxToolHeldSignals.
 	HeldSignals []string `json:"held_signals,omitempty"`
+
+	// IdentityKeyed marks a record written by a Spec 105 (FR-009) binary,
+	// which keys every record by the tool's exact RAW upstream name. Every
+	// post-105 writer stamps it (internal/runtime/tool_quarantine.go
+	// saveToolApproval: the discovery producer, ApproveTools, BlockTools, the
+	// user toggle). A record WITHOUT the stamp was written by a pre-105
+	// binary, whose discovery producer filed a raw "ns:erase" under the
+	// COLLAPSED key "erase" — so only an unstamped record can be the collapsed
+	// sibling of a namespaced tool, and only unstamped siblings are consulted
+	// by the legacy carry-over in checkToolApprovals and the legacy
+	// re-admission in internal/server/tool_gate.go readToolApprovalRecord.
+	// The stamp bounds that migration logic to the upgrade: once a store has
+	// been rewritten by a post-105 binary, a sibling record is a genuine
+	// sibling and lends nothing to another raw name (FR-009: a record can
+	// neither inherit nor disturb the record of a sibling). Additive and
+	// omitempty: pre-105 records decode with it false.
+	IdentityKeyed bool `json:"identity_keyed,omitempty"`
+}
+
+// Restricts reports whether the record carries a fact that binds the tool
+// beyond a plain approval: a quarantine lock (pending / changed) or the
+// user's Disabled block. It is the shared reader rule for a pre-Spec-105
+// COLLAPSED record — a raw "ns:erase" that an older binary filed under
+// "erase": such a record may approve only the exact raw name it stores, but
+// its lock or block must keep binding the namespaced name it may have been
+// filed for while no exact record exists (internal/server/tool_gate.go
+// readToolApprovalRecord). The discovery producer
+// (internal/runtime/tool_quarantine.go checkToolApprovals) carries the
+// user's Disabled block onto the new exact record and, under an active gate,
+// adopts the lock with its evidence — only from an unstamped sibling
+// (IdentityKeyed) — and its end-of-pass stamping leaves a restricting orphan
+// unstamped so it can be consulted once when its tool reappears.
+func (r *ToolApprovalRecord) Restricts() bool {
+	if r == nil {
+		return false
+	}
+	if r.Disabled {
+		return true
+	}
+	switch r.Status {
+	case ToolApprovalStatusPending, ToolApprovalStatusChanged:
+		return true
+	default:
+		return false
+	}
 }
 
 // SetScanHold records the evidence of a trust_mode: scan hold on the record.

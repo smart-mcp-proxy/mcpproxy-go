@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 )
 
 func evalOne(t *testing.T, w *world, ref ToolRef) Result {
@@ -654,4 +655,116 @@ func TestEvaluate_UsesSharedClassifier(t *testing.T) {
 	// But a user block still applies in both cases.
 	w3 := healthyWorld().autoApprove().approval(func(a *ApprovalState) { a.Disabled = true })
 	assert.Equal(t, ReasonToolBlockedByUser, evalOne(t, w3, ToolRef{ID: id}).Reason)
+}
+
+// Spec 105 FR-009 (adversarial review, critique0 #3): lookupIndexed matches
+// the canonical "<server>:<raw>" id alone. The former bare-name alternate let
+// a raw "a:erase" on server "a" (canonical "a:a:erase", nonexistent) resolve
+// to the sibling "erase" document (canonical "a:erase"), so preflight claimed
+// existence — and, with the gate off, answered `ready` — for a name dispatch
+// refuses as unresolved.
+func TestLookupIndexed_ExactCanonicalOnly_NeverSiblingAlias(t *testing.T) {
+	ec := EvalContext{Index: &fakeIndex{tools: map[string][]IndexedTool{
+		"a": {{Name: "a:erase"}},
+	}}}
+
+	got, err := lookupIndexed(&ec, "a", "erase")
+	require.NoError(t, err)
+	require.NotNil(t, got, "the canonical id resolves")
+	assert.Equal(t, "a:erase", got.Name)
+
+	got, err = lookupIndexed(&ec, "a", "a:erase")
+	require.NoError(t, err)
+	assert.Nil(t, got, "raw a:erase (canonical a:a:erase) must not resolve to the erase document")
+
+	// Once the self-prefixed tool is indexed under its own canonical id it
+	// resolves — and only it does.
+	ec.Index = &fakeIndex{tools: map[string][]IndexedTool{
+		"a": {{Name: "a:erase"}, {Name: "a:a:erase"}},
+	}}
+	got, err = lookupIndexed(&ec, "a", "a:erase")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "a:a:erase", got.Name)
+}
+
+// Spec 105 FR-009, astra r1 R1: an INDEXED tool with NO approval record is
+// pending under an active gate (shared classifier), but there is nothing in
+// the review UI to approve yet — ApproveTools skips a missing record and
+// triggers no rediscovery, so the taxonomy's `approve` remediation is a dead
+// end. Check mode carries the same re-discovery body dispatch and
+// describe_tool answer (one shared source in reasons.go), while the reason
+// code stays tool_pending_approval; a STORED pending record keeps the
+// approve action.
+func TestEvaluate_NoApprovalRecord_PointsAtRediscoveryNotApprove(t *testing.T) {
+	res := evalOne(t, healthyWorld().forget(), ToolRef{ID: id})
+	assert.Equal(t, StatusUnavailable, res.Status)
+	assert.Equal(t, ReasonToolPendingApproval, res.Reason, "the reason code contract is unchanged")
+	assert.Equal(t, health.ActionRestart, res.Action, "no record to approve: the action is re-discovery")
+	assert.Equal(t, NoApprovalRecordDetail(id), res.Detail)
+	assert.Equal(t, NoApprovalRecordRemediation(srv), res.Remediation)
+	assert.Contains(t, res.Remediation, `upstream_servers operation="refresh"`)
+	assert.NotContains(t, res.Remediation, "Review and approve the tool")
+
+	stored := evalOne(t, healthyWorld().approval(func(a *ApprovalState) { a.Status = ApprovalStatusPending }), ToolRef{ID: id})
+	assert.Equal(t, ReasonToolPendingApproval, stored.Reason)
+	assert.Equal(t, health.ActionApprove, stored.Action, "a stored pending record is approvable and keeps the taxonomy default")
+	assert.Equal(t, DefaultRemediation(ReasonToolPendingApproval), stored.Remediation)
+
+	// Gate off: no record does not gate (unchanged).
+	off := healthyWorld().forget()
+	off.policy.quarantine = false
+	assert.Equal(t, StatusReady, evalOne(t, off, ToolRef{ID: id}).Status)
+}
+
+// Spec 105 FR-009 (research D4), astra r2 C2: an indexed tool with an
+// approved record is NOT ready when the served snapshot says the known,
+// connected server does not list it (a stale index document, a kept
+// migration-alias record) or has not completed discovery for its live
+// connection — dispatch refuses both, and FR-002 forbids preflight reading
+// them as ready. The verdicts stay inside the closed enum.
+func TestEvaluate_UnresolvedIdentity_NeverReady(t *testing.T) {
+	withIdentity := func(w *world, ident ToolIdentity) *world {
+		w.state.identities = map[string]ToolIdentity{id: ident}
+		return w
+	}
+
+	t.Run("listed by the live connection: ready (control)", func(t *testing.T) {
+		res := evalOne(t, withIdentity(healthyWorld(), ToolIdentity{Known: true, Hydrated: true, DiscoveryDone: true, Found: true}), ToolRef{ID: id})
+		assert.Equal(t, StatusReady, res.Status)
+	})
+
+	t.Run("no identity claim: the existence chain decides (control)", func(t *testing.T) {
+		assert.Equal(t, StatusReady, evalOne(t, healthyWorld(), ToolRef{ID: id}).Status)
+		assert.Equal(t, StatusReady, evalOne(t, withIdentity(healthyWorld(), ToolIdentity{Known: true, Hydrated: false}), ToolRef{ID: id}).Status,
+			"a known server that is not connected keeps the connection verdicts, not an identity one")
+	})
+
+	t.Run("completed discovery does not list the name: not_found at both tiers", func(t *testing.T) {
+		stale := ToolIdentity{Known: true, Hydrated: true, DiscoveryDone: true, Found: false}
+		operator := evalOne(t, withIdentity(healthyWorld(), stale), ToolRef{ID: id})
+		assert.Equal(t, StatusUnavailable, operator.Status)
+		assert.Equal(t, ReasonNotFound, operator.Reason)
+		assert.Empty(t, operator.Hash)
+
+		agentWorld := withIdentity(healthyWorld(), stale)
+		agentWorld.tier = TierAgentToken
+		agent := evalOne(t, agentWorld, ToolRef{ID: id})
+		assert.Equal(t, operator, agent, "the one not_found construction: byte-identical at both tiers")
+	})
+
+	t.Run("discovery not completed for the live connection: server_initializing", func(t *testing.T) {
+		res := evalOne(t, withIdentity(healthyWorld(), ToolIdentity{Known: true, Hydrated: true, DiscoveryDone: false, Found: true}), ToolRef{ID: id})
+		assert.Equal(t, StatusUnavailable, res.Status)
+		assert.Equal(t, ReasonServerInitializing, res.Reason)
+		assert.True(t, res.Retryable)
+	})
+
+	t.Run("identity outranks the tool-level gates", func(t *testing.T) {
+		// A pending record for a name discovery no longer lists must not
+		// report a lock for a tool that does not exist.
+		w := withIdentity(healthyWorld().approval(func(a *ApprovalState) { a.Status = ApprovalStatusPending }),
+			ToolIdentity{Known: true, Hydrated: true, DiscoveryDone: true, Found: false})
+		assert.Equal(t, ReasonNotFound, evalOne(t, w, ToolRef{ID: id}).Reason)
+	})
 }

@@ -653,6 +653,9 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualSt
 		Timestamp: time.Now(),
 		Version:   s.version,
 	}
+	// Servers whose live connection token moved unobserved (astra r2 C3);
+	// their reactive discovery is kicked once the snapshot is stored.
+	var rediscover []string
 
 	// Add all configured servers
 	for _, srv := range configSnapshot.Config.Servers {
@@ -674,12 +677,52 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualSt
 			state.Connected = actual.Connected
 			state.ConnectionInfo = actual.ConnectionInfo
 			state.ToolCount = actual.ToolCount
+			state.ConnectionEpoch = actual.ConnectionEpoch
 		}
 
 		// Merge with existing snapshot for data only available from events
 		if existing, ok := existingStates[srv.Name]; ok {
 			state.LastSeen = existing.LastSeen
 			state.Tools = existing.Tools // Tools come from background discovery
+			state.ConnectionGeneration = existing.ConnectionGeneration
+			// Reconcile is authoritative for Connected, so it is authoritative
+			// for the per-connection discovery marker too (astra r1 I4): a
+			// disconnect the manager reports but whose event was dropped
+			// (actor_pool.emitEvent drops on a full channel) must not carry
+			// the previous connection's stamp — or its generation — forward.
+			state.ToolsDiscovered = existing.ToolsDiscovered && state.Connected
+			state.DiscoveryEpoch = existing.DiscoveryEpoch
+			if existing.Connected && !state.Connected {
+				state.ConnectionGeneration++
+			}
+			// The live client's connection token is the edge detector the
+			// events are not (astra r2 C3): a disconnect+reconnect whose BOTH
+			// events were dropped leaves the manager reporting "connected"
+			// on both observations, so the marker, tools and generation of
+			// the previous connection would survive until the next sweep
+			// (default 5 min). A token that moved since the last observation
+			// is a missed edge, and a stamp captured under a token other
+			// than the live one is the previous connection's: clear the
+			// marker, move the generation (a result captured on the old
+			// connection is dropped at publish time) and kick the reactive
+			// discovery the dropped connect event would have kicked.
+			if state.Connected && state.ConnectionEpoch != 0 {
+				missedEdge := existing.ConnectionEpoch != 0 && existing.ConnectionEpoch != state.ConnectionEpoch
+				staleStamp := state.ToolsDiscovered && state.DiscoveryEpoch != state.ConnectionEpoch
+				if missedEdge || staleStamp {
+					s.logger.Info("Reconcile observed a connection the events did not report; invalidating the server's discovery stamp and re-listing",
+						zap.String("server", srv.Name),
+						zap.Int64("observed_epoch", existing.ConnectionEpoch),
+						zap.Int64("discovery_epoch", state.DiscoveryEpoch),
+						zap.Int64("live_epoch", state.ConnectionEpoch))
+					state.ToolsDiscovered = false
+					state.ConnectionGeneration++
+					rediscover = append(rediscover, srv.Name)
+				}
+			}
+			if !state.ToolsDiscovered {
+				state.DiscoveryEpoch = 0
+			}
 			// If actual state didn't have tool count but existing does, keep it
 			if state.ToolCount == 0 && existing.ToolCount > 0 {
 				state.ToolCount = existing.ToolCount
@@ -693,6 +736,19 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualSt
 	}
 
 	s.snapshot.Store(newSnapshot)
+
+	if len(rediscover) > 0 {
+		s.callbackMu.RLock()
+		callback := s.onServerConnectedCallback
+		s.callbackMu.RUnlock()
+		if callback != nil {
+			for _, name := range rediscover {
+				// Asynchronous, exactly as the connect event dispatches it:
+				// the caller holds stateMu.
+				go callback(name)
+			}
+		}
+	}
 
 	// Remove servers from stateview that are no longer in config
 	currentView := s.stateView.Snapshot()
@@ -722,6 +778,8 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 
 		// Phase 7.1: Convert ToolMetadata to ToolInfo and cache in StateView
 		status.Tools = toolInfosFromMetadata(state.Tools)
+		status.ToolsDiscovered = state.ToolsDiscovered
+		status.DiscoveryEpoch = state.DiscoveryEpoch
 
 		// Map connection state to string
 		// Use detailed state from ConnectionInfo when available to avoid mislabeling disconnected servers as "connecting"
@@ -1041,11 +1099,68 @@ func toolInfosFromMetadata(tools []*config.ToolMetadata) []stateview.ToolInfo {
 	return infos
 }
 
+// DiscoveryGenerations returns every known server's current
+// DiscoveryCapture — the Supervisor's ConnectionGeneration and the live
+// client's connection token. A discovery caller captures it BEFORE listing
+// tools and hands it back to the publish call, which drops any server whose
+// generation has moved on (Spec 105 FR-009 "stale generation"; astra r1 I2)
+// and stamps the token on the result (astra r2 C3).
+func (s *Supervisor) DiscoveryGenerations() map[string]DiscoveryCapture {
+	// The live tokens come from the adapter (manager lock) and are read
+	// BEFORE stateMu, per the lock-ordering rule reconcile documents.
+	actual := s.upstream.GetAllStates()
+
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	snapshot := s.CurrentSnapshot()
+	gens := make(map[string]DiscoveryCapture, len(snapshot.Servers))
+	for name, state := range snapshot.Servers {
+		if state == nil {
+			continue
+		}
+		capture := DiscoveryCapture{Generation: state.ConnectionGeneration}
+		if live, ok := actual[name]; ok && live != nil {
+			capture.Epoch = live.ConnectionEpoch
+		}
+		gens[name] = capture
+	}
+	return gens
+}
+
+// DiscoveryGeneration returns one server's current DiscoveryCapture (a zero
+// Generation for a server the snapshot does not hold — the live token is
+// still captured, so the StateView write such a server gets carries it); see
+// DiscoveryGenerations.
+func (s *Supervisor) DiscoveryGeneration(serverName string) DiscoveryCapture {
+	var epoch int64
+	if live, err := s.upstream.GetServerState(serverName); err == nil && live != nil {
+		epoch = live.ConnectionEpoch
+	}
+
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	if state, ok := s.CurrentSnapshot().Servers[serverName]; ok && state != nil {
+		return DiscoveryCapture{Generation: state.ConnectionGeneration, Epoch: epoch}
+	}
+	return DiscoveryCapture{Epoch: epoch}
+}
+
 // RefreshToolsFromDiscovery updates both the Supervisor snapshot and StateView with tools from background discovery.
-// This is called after DiscoverAndIndexTools completes to populate the UI cache.
-func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) error {
+// This is called after DiscoverAndIndexTools completes to keep the cached tool lists in sync.
+//
+// Only servers that contributed at least one tool are touched: a server absent
+// from the flat list cannot be told apart from one that listed zero tools, so
+// it keeps whatever the previous pass published. A single server whose
+// discovery completed with ZERO tools is published through
+// RefreshServerToolsFromDiscovery, which names the server explicitly.
+//
+// gens is the DiscoveryGenerations() capture taken before the tools were
+// listed: a server whose connection generation has moved on since is NOT
+// published (its result belongs to a previous connection) and is returned in
+// stale, so the caller can re-list it under the current connection.
+func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata, gens map[string]DiscoveryCapture) (stale []string, err error) {
 	if tools == nil {
-		return nil
+		return nil, nil
 	}
 
 	// Group tools by server name
@@ -1054,8 +1169,145 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 		toolsByServer[tool.ServerName] = append(toolsByServer[tool.ServerName], tool)
 	}
 
-	// Update Supervisor's snapshot first (source of truth for StateView)
+	stale = s.publishDiscoveredTools(toolsByServer, gens)
+	s.logger.Debug("Refreshed tools in Supervisor snapshot and StateView from discovery",
+		zap.Int("server_count", len(toolsByServer)),
+		zap.Int("total_tools", len(tools)),
+		zap.Strings("stale_servers", stale))
+	return stale, nil
+}
+
+// RefreshServerToolsFromDiscovery publishes ONE server's completed discovery
+// result — tools may be empty — into the Supervisor snapshot and the
+// StateView, stamping ToolsDiscovered for it (Spec 105 FR-009, research D4).
+// This is the per-server discovery path (connect, tools/list_changed, the
+// operator's refresh), where an empty result is authoritative: the server
+// really lists no tools, so every name on it must resolve as undiscovered
+// rather than fall through to the connect→discovery window's fallback.
+//
+// gen is the server's DiscoveryGeneration() captured before the tools were
+// listed; published reports whether the result landed (false: the connection
+// generation moved on, the result was dropped and the caller should re-list).
+func (s *Supervisor) RefreshServerToolsFromDiscovery(serverName string, tools []*config.ToolMetadata, gen DiscoveryCapture) (published bool, err error) {
+	if serverName == "" {
+		return false, nil
+	}
+	serverTools := make([]*config.ToolMetadata, 0, len(tools))
+	for _, tool := range tools {
+		if tool != nil && tool.ServerName == serverName {
+			serverTools = append(serverTools, tool)
+		}
+	}
+	stale := s.publishDiscoveredTools(map[string][]*config.ToolMetadata{serverName: serverTools}, map[string]DiscoveryCapture{serverName: gen})
+	s.logger.Debug("Refreshed tools in Supervisor snapshot and StateView from server discovery",
+		zap.String("server", serverName),
+		zap.Int("total_tools", len(serverTools)),
+		zap.Bool("published", len(stale) == 0))
+	return len(stale) == 0, nil
+}
+
+// MarkServersToolsDiscovered stamps ToolsDiscovered on the named servers
+// WITHOUT touching their tool sets (Spec 105 FR-009, research D4). It is the
+// marker for a discovery pass that completed with zero tools on a path that
+// deliberately keeps whatever tool set the server already has — the lenient
+// reactive connect path and the sweep, which must not wipe a server's tools on
+// a transient empty result. A server that has never published a tool set is
+// thereby "discovered, nothing served": every name on it resolves as absent
+// (refused) rather than lingering in the connect→discovery window.
+//
+// A server that still HOLDS a tool set is deliberately NOT stamped (astra r1
+// I1): the disconnect clears the marker but keeps the retained Tools (MCP-2094,
+// restored on reconnect for counts and listings), so an unstamped server with
+// tools is carrying the PREVIOUS connection's discovery result — and this
+// connection listed none of it. Stamping would certify names this connection
+// never served; wiping the set would break the lenient path's "never wipe on
+// a transient empty result" contract. It stays in the discovery window
+// (refusal says "retry") until a non-empty or authoritative pass replaces the
+// set. gens is the DiscoveryGenerations() capture taken before the list; a
+// server whose generation moved on is skipped.
+func (s *Supervisor) MarkServersToolsDiscovered(serverNames []string, gens map[string]DiscoveryCapture) {
+	if len(serverNames) == 0 {
+		return
+	}
 	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+
+	// The StateView is what identity resolution reads, and both sides clear
+	// the marker on every connection edge, so a server needs stamping when
+	// EITHER side lacks the marker. Both reads and both writes happen under
+	// stateMu so a connection event cannot interleave between them.
+	view := s.stateView.Snapshot()
+	currentSnapshot := s.snapshot.Load().(*ServerStateSnapshot)
+	newServers := make(map[string]*ServerState, len(currentSnapshot.Servers))
+	for name, state := range currentSnapshot.Servers {
+		newState := *state
+		newServers[name] = &newState
+	}
+	snapshotChanged := false
+	stampView := make([]string, 0, len(serverNames))
+	var skipped []string
+	for _, name := range serverNames {
+		// The generation and retained-set rules are decided on the retained
+		// Supervisor state; a server the snapshot does not hold (a unit
+		// fixture without reconcile) is judged on the StateView alone, as
+		// publishDiscoveredTools does.
+		if state, exists := newServers[name]; exists {
+			if gen, ok := gens[name]; !ok || gen.Generation != state.ConnectionGeneration {
+				skipped = append(skipped, name)
+				continue
+			}
+			if len(state.Tools) > 0 {
+				// Retained set from a previous connection: see the doc comment.
+				skipped = append(skipped, name)
+				continue
+			}
+			if !state.ToolsDiscovered || state.DiscoveryEpoch != gens[name].Epoch {
+				state.ToolsDiscovered = true
+				state.DiscoveryEpoch = gens[name].Epoch
+				snapshotChanged = true
+			}
+		}
+		if status, ok := view.Servers[name]; ok && status != nil && len(status.Tools) == 0 &&
+			(!status.ToolsDiscovered || status.DiscoveryEpoch != gens[name].Epoch) {
+			stampView = append(stampView, name)
+		}
+	}
+	if snapshotChanged {
+		s.snapshot.Store(&ServerStateSnapshot{
+			Servers:   newServers,
+			Timestamp: time.Now(),
+			Version:   currentSnapshot.Version + 1,
+		})
+		s.version++
+	}
+	for _, name := range stampView {
+		epoch := gens[name].Epoch
+		s.stateView.UpdateServer(name, func(status *stateview.ServerStatus) {
+			status.ToolsDiscovered = true
+			status.DiscoveryEpoch = epoch
+		})
+	}
+	if snapshotChanged || len(stampView) > 0 || len(skipped) > 0 {
+		s.logger.Debug("Stamped discovery completed for servers that listed no tools",
+			zap.Strings("servers", stampView), zap.Bool("snapshot_changed", snapshotChanged),
+			zap.Strings("skipped_retained_or_stale", skipped))
+	}
+}
+
+// publishDiscoveredTools writes a completed discovery result per server into
+// the Supervisor snapshot (source of truth) and the StateView, stamping
+// ToolsDiscovered on both so identity resolution can tell "discovery has not
+// run" from "discovery found nothing". Publication is bound to the connection
+// generation the result was captured under (gens): a server whose generation
+// has moved on since is skipped and returned — the result is the previous
+// connection's and must not land on the new one (astra r1 I2). Both the
+// snapshot and the StateView are written under stateMu, the same lock
+// updateSnapshotFromEvent holds across its own two-sided write, so a
+// disconnect cannot interleave between the two halves and resurrect a marker
+// the snapshot side just cleared.
+func (s *Supervisor) publishDiscoveredTools(toolsByServer map[string][]*config.ToolMetadata, gens map[string]DiscoveryCapture) (stale []string) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	currentSnapshot := s.snapshot.Load().(*ServerStateSnapshot)
 
 	// Clone the snapshot
@@ -1067,11 +1319,31 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 	}
 
 	// Update tool counts and tools for servers with discovered tools
+	accepted := make(map[string][]*config.ToolMetadata, len(toolsByServer))
 	for serverName, serverTools := range toolsByServer {
-		if state, exists := newServers[serverName]; exists {
-			state.ToolCount = len(serverTools)
-			state.Tools = serverTools
+		captured := gens[serverName]
+		state, exists := newServers[serverName]
+		if !exists {
+			// A server the snapshot does not hold (removed from config, or a
+			// unit fixture without reconcile): the StateView is still written
+			// so listings stay consistent, exactly as before.
+			accepted[serverName] = serverTools
+			continue
 		}
+		if _, ok := gens[serverName]; !ok || captured.Generation != state.ConnectionGeneration {
+			s.logger.Debug("Dropping stale discovery result: the server's connection changed while it was captured",
+				zap.String("server", serverName),
+				zap.Uint64("captured_generation", captured.Generation),
+				zap.Uint64("current_generation", state.ConnectionGeneration),
+				zap.Bool("generation_supplied", ok))
+			stale = append(stale, serverName)
+			continue
+		}
+		state.ToolCount = len(serverTools)
+		state.Tools = serverTools
+		state.ToolsDiscovered = true
+		state.DiscoveryEpoch = captured.Epoch
+		accepted[serverName] = serverTools
 	}
 
 	newSnapshot := &ServerStateSnapshot{
@@ -1082,29 +1354,27 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 
 	s.snapshot.Store(newSnapshot)
 	s.version++
-	s.stateMu.Unlock()
 
-	// Update StateView for each server
-	for serverName, serverTools := range toolsByServer {
+	// Update StateView for each accepted server
+	for serverName, serverTools := range accepted {
+		epoch := gens[serverName].Epoch
 		s.stateView.UpdateServer(serverName, func(status *stateview.ServerStatus) {
 			// StateView mirrors the Supervisor snapshot (updated unconditionally
-			// above), so apply discovery results as last-writer-wins. A prior
-			// size-based guard skipped updates whenever the new set was smaller,
-			// which pinned StateView to a stale higher count when a server
-			// legitimately dropped tools — diverging from the snapshot and from
-			// the bleve index. Servers with zero discovered tools never reach
-			// this loop (they're absent from toolsByServer), so a size guard
-			// could not protect against empty/stale discoveries anyway (MCP-2094).
+			// above for every accepted server), so apply discovery results as
+			// last-writer-wins. A prior size-based guard skipped updates
+			// whenever the new set was smaller, which pinned StateView to a
+			// stale higher count when a server legitimately dropped tools —
+			// diverging from the snapshot and from the bleve index. Servers
+			// with zero discovered tools never reach this loop from the sweep
+			// (they're absent from toolsByServer), so a size guard could not
+			// protect against empty/stale discoveries anyway (MCP-2094).
 			status.ToolCount = len(serverTools)
 			status.Tools = toolInfosFromMetadata(serverTools)
+			status.ToolsDiscovered = true
+			status.DiscoveryEpoch = epoch
 		})
 	}
-
-	s.logger.Debug("Refreshed tools in Supervisor snapshot and StateView from discovery",
-		zap.Int("server_count", len(toolsByServer)),
-		zap.Int("total_tools", len(tools)))
-
-	return nil
+	return stale
 }
 
 // forwardUpstreamEvents forwards upstream events to supervisor listeners.
@@ -1146,10 +1416,12 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 	// we create a blocking chain that permanently stalls the reconciliation loop.
 	var toolCount int
 	var connInfo *types.ConnectionInfo
-	if actualState, err := s.upstream.GetServerState(event.ServerName); err == nil {
+	var liveEpoch int64
+	if actualState, err := s.upstream.GetServerState(event.ServerName); err == nil && actualState != nil {
 		toolCount = actualState.ToolCount
 		connInfo = actualState.ConnectionInfo
-	} else {
+		liveEpoch = actualState.ConnectionEpoch
+	} else if err != nil {
 		s.logger.Warn("Failed to get server state for tool count",
 			zap.String("server", event.ServerName),
 			zap.Error(err))
@@ -1164,6 +1436,33 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 		if connected, ok := event.Payload["connected"].(bool); ok {
 			state.Connected = connected
 			state.LastSeen = event.Timestamp
+			// The discovery-completed marker (Spec 105 FR-009, research D4)
+			// is per connection: the next connection needs its own discovery
+			// pass. It is cleared on BOTH edges (astra r1 I4) — on the
+			// disconnect, and again on the connect in case the disconnect
+			// event was dropped (actor_pool.emitEvent drops on a full
+			// channel): a connection has just been established, and the
+			// previous connection's result is not this one's. Discovery for
+			// this connection is kicked off from this very event
+			// (onServerConnectedCallback) and re-stamps it. It is cleared on
+			// the retained Supervisor state as well as on the StateView below
+			// — reconcile copies the retained state back into the StateView,
+			// and the reconnect branch restores the retained tool set from
+			// it, so a stale stamp here would resurrect "discovery completed"
+			// for a connection that has not discovered anything yet. The
+			// retained Tools themselves are kept (MCP-2094). The connection
+			// generation moves on every edge, so a discovery result captured
+			// under the previous connection is dropped at publish time
+			// (publishDiscoveredTools, astra r1 I2).
+			state.ToolsDiscovered = false
+			state.DiscoveryEpoch = 0
+			state.ConnectionGeneration++
+			// The live token this observation was made under (astra r2 C3):
+			// reconcile compares its own observation against it to detect
+			// an edge whose events were dropped.
+			if liveEpoch != 0 {
+				state.ConnectionEpoch = liveEpoch
+			}
 
 			// Update ConnectionInfo from pre-fetched server state
 			if connInfo != nil {
@@ -1200,6 +1499,13 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 				if connected {
 					t := event.Timestamp
 					status.ConnectedAt = &t
+					// A new connection has no completed discovery pass yet,
+					// whatever the StateView held (a dropped disconnect event
+					// leaves the previous stamp and tools in place; astra r1
+					// I4). The retained tools stay for counts and listings;
+					// only the marker is dropped.
+					status.ToolsDiscovered = false
+					status.DiscoveryEpoch = 0
 					// Repopulate the per-server tool set from the retained
 					// Supervisor snapshot so StateView stays the consistent
 					// source of truth across a reconnect/unquarantine. The
@@ -1216,6 +1522,14 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 						if len(state.Tools) > 0 {
 							status.Tools = toolInfosFromMetadata(state.Tools)
 							status.ToolCount = len(state.Tools)
+							// The restored set is the PREVIOUS connection's
+							// discovery result, kept for counts and listings
+							// until discovery re-runs; the discovery-completed
+							// marker is not restored with it — it was cleared
+							// on both sides above, and this connection has not
+							// completed a pass yet (an unlisted name reads as
+							// "discovery not completed, retry", never as
+							// "stale name").
 						} else {
 							status.ToolCount = toolCount
 						}
@@ -1232,6 +1546,8 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					status.DisconnectedAt = &t
 					status.Tools = nil // Clear tools on disconnect
 					status.ToolCount = 0
+					status.ToolsDiscovered = false // the next connection needs its own discovery pass
+					status.DiscoveryEpoch = 0
 				}
 
 				// Update ConnectionInfo for immediate error propagation to UI

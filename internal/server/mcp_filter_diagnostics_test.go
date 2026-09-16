@@ -76,6 +76,7 @@ func seedFilterDiagnosticsFixture(t *testing.T, proxy *MCPProxyServer, rt *runti
 		s.Name = "annot"
 		s.Enabled = true
 		s.Connected = true
+		s.ToolsDiscovered = true
 		s.Tools = []stateview.ToolInfo{
 			{Name: "safe_read", Annotations: &config.ToolAnnotations{
 				ReadOnlyHint: boolPtr(true), DestructiveHint: boolPtr(false), OpenWorldHint: boolPtr(false),

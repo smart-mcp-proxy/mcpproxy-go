@@ -11,6 +11,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 )
 
 // maxDescribeToolIDs caps a describe_tool batch (Spec 085 FR-010). Matches the
@@ -52,6 +53,26 @@ const (
 // the direct surface too, where retrieve_tools is not exposed at all, so the
 // old text told a stuck agent to call a tool it cannot see.
 const describeNotFoundRemediation = "Tool not found or no longer available; list tools again."
+
+// describeDiscoveryPendingRemediation is the not-found remediation for a name
+// on a server whose tool discovery has not completed for the live connection
+// (Spec 105 FR-009, research D4): there is no tool list to refresh from yet,
+// so the caller should retry shortly — the same remediation dispatch answers
+// (unresolvedToolIdentityMessage).
+const describeDiscoveryPendingRemediation = "Tool not found: tool discovery has not completed for this server yet; retry shortly, once its tools have been discovered."
+
+// describeNoApprovalRecordRemediation is the describe_tool answer for a tool
+// the server's discovery snapshot contains that has NO approval record yet
+// while the quarantine gate is active (Spec 105 FR-009 implicit pending). It
+// carries the same instruction as the dispatch body
+// (toolPendingApprovalResult, reason no_approval_record): there is nothing
+// in the review UI to approve yet, the server's next discovery pass files the
+// record, so the agent is pointed at re-discovery rather than at the approve
+// flow.
+func describeNoApprovalRecordRemediation(serverName string) string {
+	return "In the server's tool list but no approval record exists for it yet, so it is withheld while tool-level quarantine is active for the server. " +
+		preflight.NoApprovalRecordRemediation(serverName)
+}
 
 // describeMalformedIDRemediation is the answer to an id that does not parse.
 // Promoted from an inline literal so the surface-neutral wording lives in one
@@ -228,10 +249,25 @@ func (p *MCPProxyServer) describeVisibilityError(reason, serverName, toolName st
 		return describeErrQuarantined, disabledToolRemediation(contracts.DisabledStatusServerQuarantined)
 	case visReasonToolPendingApproval:
 		return describeErrPendingApproval, disabledToolRemediation(contracts.DisabledStatusPendingApproval)
+	case visReasonToolNoApprovalRecord:
+		// Spec 105 FR-009 implicit pending: nothing is listed to approve yet,
+		// so the approve-flow remediation would be a dead end. Same
+		// remediation dispatch answers for this case (toolPendingApprovalResult).
+		return describeErrPendingApproval, describeNoApprovalRecordRemediation(serverName)
 	case visReasonToolChangedApproval:
 		return describeErrChanged, disabledToolRemediation(contracts.DisabledStatusPendingApproval)
 	case visReasonToolNotCallable:
 		return describeErrDisabled, disabledToolRemediation(p.classifyDisabledTool(serverName, toolName))
+	case visReasonToolUnresolved:
+		// Spec 105 FR-009 (research D4), astra r2 C2: the not-found shape
+		// dispatch's refusal maps to. The remediation depends on WHY the
+		// name is unresolved, exactly as unresolvedToolIdentityMessage's does:
+		// no completed discovery for the live connection → retry shortly;
+		// a completed discovery that does not list the name → list again.
+		if !p.resolveExactToolIdentity(serverName, toolName).DiscoveryDone {
+			return describeErrNotFound, describeDiscoveryPendingRemediation
+		}
+		return describeErrNotFound, describeNotFoundRemediation
 	default: // visReasonNotIndexed and anything future
 		return describeErrNotFound, describeNotFoundRemediation
 	}

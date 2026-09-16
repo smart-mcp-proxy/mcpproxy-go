@@ -32,6 +32,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -242,6 +243,33 @@ type MCPProxyServer struct {
 	// would be asserted only by a comment — and the skew suite would have to
 	// keep staging the window by hand instead of observing the real publisher.
 	directRebuildPause func()
+
+	// dispatchGatePause, when non-nil, is invoked by the dispatch paths that
+	// run a live identity certification (handleCallToolVariant, the sandbox
+	// bridge upstreamToolCaller.CallTool) AFTER the shared gate has captured
+	// its ONE persisted server record and BEFORE that certification runs.
+	// Nil in production; the only writer is a test.
+	//
+	// It exists because the "one persisted record per dispatch" invariant
+	// (Spec 105 FR-009; codex r7 H1) is otherwise untestable: an operator's
+	// quarantine / disable that lands between the gate's read and the live
+	// certification is a window no fixture can stage from outside, and a
+	// second, independent read there answered the discovery-window body for
+	// a dispatch the gate's record had already decided.
+	dispatchGatePause func(serverName, toolName string)
+
+	// sandboxPreflightPause, when non-nil, is invoked by the sandbox's
+	// pre-authorization lookup (lookupToolGate, the jsruntime
+	// ToolGateLookup) AFTER it has captured the nested call's ONE persisted
+	// server record and BEFORE the sandbox authorizes and dispatches on it.
+	// Nil in production; the only writer is a test.
+	//
+	// It exists because the nested path's variant of the "one persisted
+	// record per dispatch" invariant (codex r9 I1) is otherwise untestable:
+	// the JavaScript preflight and the bridge's dispatch used to take two
+	// independent reads, and an operator's quarantine / disable landing
+	// between them answered a verdict neither read alone selects.
+	sandboxPreflightPause func(serverName, toolName string)
 
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).
@@ -1758,7 +1786,11 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	droppedCount := 0
 	for _, result := range results {
 		serverName := result.Tool.ServerName
-		toolName := result.Tool.Name
+		// The RAW tool name, derived from the index hit exactly once (Spec 105
+		// FR-009): the index reads identity back from the docID, so a raw
+		// "a:erase" on server "a" (canonical "a:a:erase") is gated below as
+		// itself rather than as the suffix sibling "erase".
+		toolName := config.RawToolName(result.Tool)
 		if serverName == "" {
 			// Fallback: try to extract from "server:tool" format
 			if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
@@ -2272,18 +2304,42 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
-	// Look up the target's annotations from the StateView ONCE. The same read
-	// serves the target-tier gate below and the intent validation after it, so
-	// the tier a token was authorized against and the annotations the variant
-	// is validated against can never come from two different snapshots
-	// (Spec 105 FR-009). found=false means the proxy holds no metadata for the
-	// pair (server unknown, tool undiscovered, or no runtime). The pair was
-	// split from the canonical id above, so it is read EXACTLY: a raw name
-	// that starts with the server's own prefix must not be normalized again.
-	annotations, annotationsFound := p.lookupExactToolAnnotations(serverName, actualToolName)
+	// Spec 098 FR-002: ONE evaluation of the shared policy gates — server
+	// quarantine, tool-level quarantine (Spec 032) and callability — through
+	// the same classifier the preflight evaluator uses, so a tool dispatch
+	// refuses can never preflight as `ready`. It is a pure read, taken HERE,
+	// above every gate that consumes it, and it carries the target's
+	// registration identity resolved against the SAME persisted record its
+	// quarantined / disabled verdicts are decided from (codex r6 G1): the
+	// identity gate, the target-tier gate, the intent validation and the
+	// server-level verdicts below all answer from this one read, so the tier
+	// a token was authorized against, the annotations the variant is
+	// validated against and the server state the identity refusal defers to
+	// can never come from two different snapshots (Spec 105 FR-009). It is
+	// also the dispatch's ONLY persisted read (codex r7 H1): the live
+	// certification further down hydrates from gate.serverConfig rather
+	// than re-reading storage, so an operator's write that lands after this
+	// point owns the NEXT dispatch, not a second verdict for this one.
+	// Found=false means the proxy holds no metadata for the pair (server
+	// unknown, tool undiscovered, or no runtime). The pair was split from the
+	// canonical id above, so it is read EXACTLY: a raw name that starts with
+	// the server's own prefix must not be normalized again. The response
+	// SELECTION further down keeps the long-standing dispatch order
+	// (quarantine → approval lock → generic block).
+	gate := p.evaluateExactToolGate(serverName, actualToolName)
+	identity := gate.identity
+	annotations, annotationsFound := identity.Annotations, identity.Found
+	if p.dispatchGatePause != nil {
+		p.dispatchGatePause(serverName, actualToolName)
+	}
 
-	// Spec 028: Enforce agent token scope restrictions
-	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
+	// Spec 028: Enforce agent token scope restrictions. The server-scope and
+	// variant-permission gates run before the identity gate so a scoped
+	// caller learns nothing about a server outside its scope from the shape
+	// of the refusal.
+	authCtx := auth.AuthContextFromContext(ctx)
+	scopedCaller := authCtx != nil && !authCtx.IsAdmin()
+	if scopedCaller {
 		// Check server scope
 		if !authCtx.CanAccessServer(serverName) {
 			errMsg := fmt.Sprintf("Server '%s' is not in scope for this agent token", serverName)
@@ -2305,6 +2361,46 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
 			return mcp.NewToolResultError(errMsg), nil
 		}
+	}
+
+	// Spec 105 FR-009 (research D4): a name the discovery snapshot of a KNOWN,
+	// CONNECTED server with a POPULATED snapshot does not contain has no
+	// resolvable registration identity, so no permission tier can be
+	// established for it. It is refused with the insufficient-permission body
+	// and zero upstream calls for EVERY caller — administrators included (spec
+	// Edge Case (2), SC-005's named exception): an unverified name must never
+	// reach an upstream on anyone's behalf. Two cases are deliberately NOT
+	// this condition and fall through to the verdicts that always owned them:
+	// a server the snapshot does not hold (server-existence handling below),
+	// and a server whose snapshot is not authoritative because it is
+	// quarantined, disabled, disconnected or still connecting (the shared
+	// gate's quarantine/disabled answers and the not-connected /
+	// reconnect_on_use handling further down, in their pre-105 order).
+	// "Quarantined" and "disabled" are the PERSISTED record's word here, the
+	// same read gate.serverQuarantined() / gate.callable() answer from (codex
+	// r6 G1), so this refusal — which runs first, ahead of the scoped
+	// target-tier gate that must stay ahead of the quarantine verdict — can
+	// be true only when that read cannot answer quarantined or disabled, and
+	// an operator's write that the StateView has not caught up with yet
+	// answers the server-level verdict for every name on the server alike.
+	if identity.Unresolved() {
+		errMsg := unresolvedToolIdentityMessage(serverName, actualToolName, identity.DiscoveryDone)
+		p.logger.Debug("handleCallToolVariant: refusing unresolved tool identity",
+			zap.String("server_name", serverName),
+			zap.String("tool_name", actualToolName),
+			zap.Bool("scoped_caller", scopedCaller))
+		// Logged as tool_not_callable, not token_permission: the refusal is
+		// about the TOOL's identity, not the caller's grant — it fires for
+		// administrators too, and the token_permission bucket would misreport
+		// an identity failure as a scope problem. The telemetry reason enum is
+		// closed (internal/telemetry/preflight_counters.go, the anonymity
+		// contract), so the closest existing non-token member is reused
+		// rather than widening it.
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+		return mcp.NewToolResultError(errMsg), nil
+	}
+
+	if scopedCaller {
 		// Spec 104 FR-016f / Spec 105 FR-009: the variant is the CALLER's
 		// choice, so it is not the tier that matters. Authorize against the
 		// TARGET tool's annotation-derived tier, through the same classifier
@@ -2380,14 +2476,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// (e.g. FastMCP's Pydantic validate_call). See #322.
 	activityArgs := injectAuthMetadata(ctx, args)
 
-	// Spec 098 FR-002: one evaluation of the shared policy gates — server
-	// quarantine, tool-level quarantine (Spec 032) and callability — through the
-	// same classifier the preflight evaluator uses, so a tool dispatch refuses
-	// can never preflight as `ready`. The response SELECTION below keeps the
-	// long-standing dispatch order (quarantine → approval lock → generic block).
-	// The split pair is gated exactly, like the tier read above.
-	gate := p.evaluateExactToolGate(serverName, actualToolName)
-
+	// The shared policy gates, from the ONE evaluation taken above the
+	// identity gate (Spec 098 FR-002; codex r6 G1). The response SELECTION
+	// keeps the long-standing dispatch order (quarantine → approval lock →
+	// generic block).
 	if gate.serverQuarantined() {
 		p.logger.Debug("handleCallToolVariant: server is quarantined",
 			zap.String("server_name", serverName))
@@ -2453,6 +2545,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	}
 
 	// Check connection status before attempting tool call to prevent hanging
+	var certified toolIdentity
 	if client, exists := p.upstreamManager.GetClient(serverName); exists {
 		if !client.IsConnected() {
 			state := client.GetState()
@@ -2471,6 +2564,37 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil
 		}
+		// Spec 105 FR-009 (research D4), astra r1 I3: the identity gate
+		// above deferred because the StateView read the server as not
+		// connected, yet the live client IS connected — the connected event
+		// is still in flight or was dropped. The not-connected verdict the
+		// deferral relied on did not fire, so re-read the snapshot and refuse
+		// anything short of a CERTIFIED name here, with zero upstream calls
+		// — an unlisted name, and equally a name the not-hydrated snapshot
+		// still lists from the previous generation's retained set (codex r4
+		// E1). The tier gate already ran with the destructive fallback (the
+		// strictest tier), so no re-check is needed for scoped callers. The
+		// re-read also runs for a HYDRATED snapshot (astra r2 C3): the live
+		// client found connected here is the authority on which connection
+		// the snapshot's stamp describes, so a name certified by a previous
+		// connection is refused with the discovery-window body. The re-read
+		// covers the StateView and the live client only: the persisted
+		// record is the ONE the gate captured above (codex r7 H1), so an
+		// operator's write since then cannot turn the gate's admission into
+		// an identity refusal — it owns the next dispatch, whose gate reads
+		// it.
+		live, errMsg, refuse := p.liveIdentityRefusal(gate.serverConfig, serverName, actualToolName, identity, client)
+		if refuse {
+			p.logger.Debug("handleCallToolVariant: refusing unresolved tool identity (live client connected, snapshot stale)",
+				zap.String("server_name", serverName),
+				zap.String("tool_name", actualToolName))
+			p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+			return mcp.NewToolResultError(errMsg), nil
+		}
+		// The dispatch below is pinned to the generation this check
+		// certified (codex r3 D2): the managed client re-checks it after
+		// the admission queue and immediately before the transport.
+		certified = live
 	} else {
 		// Get list of available servers for helpful error message
 		availableServers := p.upstreamManager.GetAllServerNames()
@@ -2505,7 +2629,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// tool-call latency/outcome metrics. No-ops when observability is disabled.
 	callCtx, toolSpan := p.startToolCallSpan(ctx, serverName, actualToolName, profileSlug)
 	startTime := time.Now()
-	result, err := p.upstreamManager.CallTool(callCtx, toolName, args)
+	result, err := p.dispatchOnEpoch(callCtx, certified, toolName, args)
 	duration := time.Since(startTime)
 	p.finishToolCall(toolSpan, serverName, actualToolName, duration, err)
 
@@ -2597,6 +2721,31 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, storage.ActivityStatusRejected, shedMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, nil, shedIntentMap, "")
 
 			return shedToolResult(limitErr), nil
+		}
+
+		// Spec 105 FR-009 (codex r3 D2): the connection generation moved
+		// between the identity check above and the transport, so the
+		// managed client refused to send. Nothing reached the upstream; the
+		// answer is the same discovery-window refusal the pre-dispatch gate
+		// gives a name whose generation is not certified, in the same
+		// telemetry bucket, with the started record closed as an error so
+		// the activity funnel sees the call end.
+		if errors.Is(err, managed.ErrConnectionGenerationChanged) {
+			errMsg := unresolvedToolIdentityMessage(serverName, actualToolName, false)
+			toolCallRecord.Error = errMsg
+			if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+				p.logger.Warn("Failed to record refused tool call", zap.Error(storeErr))
+			}
+			p.logger.Debug("handleCallToolVariant: refusing dispatch, connection generation changed since the identity was certified",
+				zap.String("server_name", serverName),
+				zap.String("tool_name", actualToolName))
+			var intentMap map[string]interface{}
+			if intent != nil {
+				intentMap = intent.ToMap()
+			}
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+			p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+			return mcp.NewToolResultError(errMsg), nil
 		}
 
 		// Record error in tool call history
@@ -6404,8 +6553,14 @@ func (p *MCPProxyServer) serverToolCounts(serverName string, toolNames []string)
 // A genuine approval-read failure keeps the historical behavior here (report
 // callable rather than invent a lock): this surface describes state, it does not
 // gate anything, and the gates themselves still fail closed.
+//
+// The pair is a SPLIT (server, RAW tool) pair — StateView / ListTools names
+// from serverToolNames, the retrieve loop's once-derived raw name, describe's
+// split id — and is read through the exact gate (Spec 105 FR-009): a raw
+// name that begins with the server's own prefix must be counted and
+// classified as itself, not as the suffix sibling.
 func (p *MCPProxyServer) classifyServerToolStatus(serverName, toolName string) contracts.DisabledToolStatus {
-	gate := p.evaluateToolGate(serverName, toolName)
+	gate := p.evaluateExactToolGate(serverName, toolName)
 	switch gate.class {
 	case preflight.ToolClassServerNotConfigured:
 		return contracts.DisabledStatusUnknown
@@ -6766,19 +6921,244 @@ func (p *MCPProxyServer) lookupToolAnnotationsFound(serverName, toolName string)
 // strip that segment and classify the pair as the suffix tool "ns:erase"
 // while dispatch still targets "a:ns:erase" (Spec 105 FR-009).
 func (p *MCPProxyServer) lookupExactToolAnnotations(serverName, toolName string) (*config.ToolAnnotations, bool) {
+	identity := p.resolveExactToolIdentity(serverName, toolName)
+	return identity.Annotations, identity.Found
+}
+
+// toolIdentity is the outcome of resolving one split (server, RAW tool) pair
+// against the live discovery snapshot (Spec 105 FR-009, research D4). It is
+// the registration identity every dispatch path authorizes against: the
+// annotations feed the target-tier gate, and the two booleans tell an
+// undiscovered name on a server the proxy knows apart from a server the
+// snapshot has never held.
+type toolIdentity struct {
+	// ServerKnown reports whether the snapshot holds the server at all. False
+	// also covers a proxy with no runtime wired (pure-unit constructions),
+	// which therefore never refuses on identity grounds.
+	ServerKnown bool
+	// SnapshotHydrated reports whether the server is in the state in which
+	// its snapshot is the authority on its tool set: enabled, not quarantined
+	// and CONNECTED. "Enabled" and "not quarantined" are decided by the
+	// PERSISTED server record — the same read the server-level verdicts
+	// (quarantined / disabled) are decided from — never by the StateView's
+	// cached copy of those flags, which lags an operator's write (codex r6
+	// G1). "Connected" is decided by the LIVE client when there is
+	// one (codex r5 F1): the snapshot's Connected flag is written by
+	// best-effort events or the 30s reconcile and can still read true after
+	// the client has dropped, and a snapshot the live client contradicts is
+	// as stale as one that reads Connected=false — it is NOT hydrated. The
+	// StateView registers every configured server; for one that is
+	// disconnected, connecting, OAuth-pending, disabled or quarantined its
+	// tool list is NOT authoritative — usually empty, but the reconcile sweep
+	// republishes a disconnected server's retained set for counts
+	// (supervisor.reconcile), and a lagging disconnect leaves the previous
+	// connection's full stamp and list in place — so neither an absent nor a
+	// present name there says anything about the tool's identity, only about
+	// the server's state, and the server-level verdicts (quarantined /
+	// disabled / not connected / reconnect_on_use) own that answer exactly as
+	// they did before Spec 105, for every name on the server alike (SC-005).
+	SnapshotHydrated bool
+	// DiscoveryDone reports whether a discovery pass has completed for the
+	// LIVE connection: stateview.ServerStatus.ToolsDiscovered is set AND the
+	// connection token the stamp was captured under
+	// (ServerStatus.DiscoveryEpoch) is the live client's current one
+	// (managed.Client.ConnectionEpoch). Then the snapshot's tool list —
+	// possibly EMPTY, for an upstream that lists no tools — is its
+	// authoritative result. A connected server whose discovery has not run
+	// yet is NOT resolvable: its snapshot is empty for want of a pass, not
+	// because the name is absent, and admitting names in that window with
+	// the destructive-tier fallback would let an upstream that hides tools
+	// from tools/list keep them callable with zero approval. Nor is a server
+	// whose stamp belongs to a PREVIOUS connection (astra r2 C3): the
+	// connect/disconnect events that clear the stamp are best-effort, and a
+	// name connection A discovered says nothing about what connection B
+	// serves under it.
+	DiscoveryDone bool
+	// StaleConnection reports that DiscoveryDone was withdrawn because the
+	// live client's connection token differs from the snapshot's stamp: the
+	// discovery result is a previous connection's (astra r2 C3).
+	StaleConnection bool
+	// DiscoveryEpoch is the connection generation the snapshot's discovery
+	// stamp was captured under (stateview.ServerStatus.DiscoveryEpoch). When
+	// DiscoveryDone stands it is the LIVE client's generation too, so it is
+	// the generation a certified identity is valid on — and the one the
+	// dispatch that follows must be pinned to (codex r3 D2; certified).
+	DiscoveryEpoch int64
+	// Found reports whether the server's snapshot lists the raw name, verbatim.
+	Found bool
+	// Description and Annotations are the snapshot's metadata for the tool;
+	// zero when Found is false.
+	Description string
+	Annotations *config.ToolAnnotations
+}
+
+// Unresolved reports the D4 refusal condition: the server is known and
+// CONNECTED, and either its discovery has not completed for this connection
+// or its completed discovery result does not list the raw name — in both
+// cases a name whose permission tier cannot be established, so no caller may
+// dispatch it. Two things are NOT this condition: a server the snapshot does
+// not hold (server-existence handling, which stays with the paths that own
+// it), and a known server whose snapshot is NOT HYDRATED because of its own
+// state (quarantined, disabled, disconnected, connecting) — those keep their
+// pre-105 server-level verdicts, which run in the same order they always did
+// and which the caller's reconnect_on_use path relies on. "Quarantined" and
+// "disabled" are the PERSISTED record's word (codex r6 G1) — the read the
+// server-level verdicts themselves are decided from, so this condition can
+// be true only when that same read cannot answer quarantined or disabled;
+// the StateView's cached flags, which lag an operator's write, never decide
+// it. "Disconnected" is
+// the LIVE client's word where there is one, not the snapshot's flag (codex
+// r5 F1): a snapshot that still reads Connected=true for a dropped client is
+// not hydrated either. A not-hydrated snapshot is not necessarily EMPTY (the
+// reconcile sweep retains a disconnected server's tool set for counts; a
+// lagging disconnect leaves the previous connection's whole list), which is
+// why the deferral is safe only while the live client really is not
+// connected: once it is, liveIdentityRefusal re-reads and admits nothing
+// short of certified().
+func (id toolIdentity) Unresolved() bool {
+	return id.ServerKnown && id.SnapshotHydrated && (!id.DiscoveryDone || !id.Found)
+}
+
+// certified reports that the live snapshot lists the raw name as a completed
+// discovery result of the CURRENT connection generation — the only state in
+// which DiscoveryEpoch names the generation the identity is valid on. A
+// dispatch that follows a certified read is pinned to that generation
+// (managed.Client.CallToolOnEpoch): it reaches the upstream on exactly the
+// connection the name, tier and approval hash were certified against, or not
+// at all (Spec 105 FR-009 "stale generation"; codex r3 D2). On a CONNECTED
+// live client it is also the only admitting outcome of liveIdentityRefusal
+// (codex r4 E1); the unpinned dispatch remains only for the shapes in which
+// that check stands aside (no runtime, server not in the StateView, client
+// not connected) — the server-existence and not-connected handling own it.
+func (id toolIdentity) certified() bool {
+	return id.ServerKnown && id.SnapshotHydrated && id.DiscoveryDone && id.Found
+}
+
+// resolveExactToolIdentity resolves a pair that is ALREADY split into server
+// and raw tool name against the StateView snapshot. It never re-normalizes:
+// a raw tool name may itself begin with the server's own prefix ("a:ns:erase"
+// on server "a"), and normalizeServerTool would strip that segment and
+// classify the pair as the suffix tool "ns:erase" while dispatch still
+// targets "a:ns:erase" (Spec 105 FR-009).
+//
+// It reads the server's PERSISTED record for the hydration verdict (codex
+// r6 G1; see resolveExactToolIdentityIn). A caller that already holds that
+// record — the shared gate, evaluateExactToolGate, and every step of a
+// dispatch that follows the gate (liveIdentityRefusal, the sandbox bridge's
+// hydration) — must resolve through resolveExactToolIdentityWith instead, so
+// its server-level verdicts and the identity derive from ONE read (codex r7
+// H1: one persisted record per dispatch). This convenience is for the
+// non-dispatch readers (describe_tool, visibility, direct callability) and
+// for tests.
+func (p *MCPProxyServer) resolveExactToolIdentity(serverName, toolName string) toolIdentity {
+	return p.resolveExactToolIdentityWith(p.persistedServerRecord(serverName), serverName, toolName)
+}
+
+// resolveExactToolIdentityWith is resolveExactToolIdentity for a caller that
+// already holds the server's persisted record (nil when there is none).
+func (p *MCPProxyServer) resolveExactToolIdentityWith(record *config.ServerConfig, serverName, toolName string) toolIdentity {
 	if p.mainServer == nil || p.mainServer.runtime == nil {
-		return nil, false
+		return toolIdentity{}
 	}
 
 	supervisor := p.mainServer.runtime.Supervisor()
 	if supervisor == nil {
-		return nil, false
+		return toolIdentity{}
 	}
 
-	snapshot := supervisor.StateView().Snapshot()
-	serverStatus, exists := snapshot.Servers[serverName]
-	if !exists {
-		return nil, false
+	return p.resolveExactToolIdentityIn(supervisor.StateView().Snapshot().Servers, serverName, toolName, record)
+}
+
+// persistedServerRecord reads one stored upstream record, the authority the
+// server-level verdicts (quarantined / disabled) are decided from. It
+// returns nil when the proxy has no storage, the server has no record, or
+// the record cannot be read: the identity read then falls back to the
+// StateView's own flags, and a genuine read failure is refused by the shared
+// gate's storageErr (toolGate.callable fails closed) on every dispatch path.
+func (p *MCPProxyServer) persistedServerRecord(serverName string) *config.ServerConfig {
+	if p.storage == nil || serverName == "" {
+		return nil
+	}
+	record, err := p.storage.GetUpstreamServer(serverName)
+	if err != nil {
+		return nil
+	}
+	return record
+}
+
+// resolveExactToolIdentityIn is resolveExactToolIdentity against a
+// caller-supplied StateView snapshot, so a batch reader that already holds
+// one (the preflight glue) resolves every id against the same instant it
+// reads the connection state from, and against a caller-supplied persisted
+// server record.
+//
+// The record, when there is one, decides the enabled / quarantined half of
+// hydration (codex r6 G1). The StateView's Enabled and Quarantined flags are
+// a CACHE of the persisted record, refreshed by the reconcile pass that
+// follows an operator's write (Runtime.EnableServer writes storage and
+// reloads in a goroutine; QuarantineServer writes storage before its
+// reconcile), so a call that interleaves reads a record that says quarantined
+// or disabled while the snapshot still reads enabled, non-quarantined,
+// connected and discovered. The server-level verdicts every dispatch path
+// answers (toolGate.serverQuarantined, ToolClassServerDisabled) come from
+// the record, so hydration must too: otherwise an absent name on the freshly
+// quarantined server was refused as "undiscovered or stale — refresh with
+// retrieve_tools" while the listed sibling answered the quarantine analysis
+// — two names, one server, two verdicts (SC-005 parity), and a remediation
+// that cannot heal a quarantined server. With no record (a StateView-only
+// fixture, a server not in storage) the snapshot's own flags stand.
+func (p *MCPProxyServer) resolveExactToolIdentityIn(servers map[string]*stateview.ServerStatus, serverName, toolName string, record *config.ServerConfig) toolIdentity {
+	serverStatus, exists := servers[serverName]
+	if !exists || serverStatus == nil {
+		return toolIdentity{}
+	}
+	enabled, quarantined := serverStatus.Enabled, serverStatus.Quarantined
+	if record != nil {
+		enabled, quarantined = record.Enabled, record.Quarantined
+	}
+	identity := toolIdentity{
+		ServerKnown:      true,
+		SnapshotHydrated: enabled && !quarantined && serverStatus.Connected,
+		DiscoveryDone:    serverStatus.ToolsDiscovered,
+		DiscoveryEpoch:   serverStatus.DiscoveryEpoch,
+	}
+	// The snapshot's Connected and its discovery stamp are written by
+	// best-effort events (dropped on a full channel, delivered through two
+	// goroutine hops) or the 30s reconcile, so they can lag the live client
+	// in BOTH directions, and the live client is the authority on each:
+	//
+	//   - The client is present and NOT connected while the snapshot still
+	//     reads Connected=true (the disconnect event is in flight or was
+	//     dropped; codex r5 F1): nothing on that snapshot is authoritative
+	//     any more — its Connected is stale, exactly as if it read false —
+	//     so it is NOT hydrated and the not-connected / connecting /
+	//     reconnect_on_use verdicts own every name on the server, listed or
+	//     not, in their pre-105 order (research D4; SC-005 parity: two names
+	//     on one dropped server must not answer different verdicts, and the
+	//     "refresh with retrieve_tools" remediation cannot heal a dropped
+	//     server).
+	//   - The client is connected but a NEW connection while the snapshot
+	//     still carries the previous one's stamp and tools (astra r2 C3):
+	//     the stamp certifies the tool list only for the connection it was
+	//     captured on, so a token mismatch is the discovery window for this
+	//     connection — refused as "discovery has not completed", not as a
+	//     stale name — until its own pass re-stamps the snapshot.
+	//   - No client at all (a pure-unit proxy, or a StateView-only fixture):
+	//     the snapshot stands as read, fail-closed.
+	//
+	// The mirror window — snapshot Connected=false while the live client IS
+	// connected — is closed by liveIdentityRefusal (astra r1 I3), which the
+	// dispatch paths run once they have found the client connected.
+	if identity.SnapshotHydrated {
+		switch live, state := p.liveConnectionState(serverName); state {
+		case liveClientDisconnected:
+			identity.SnapshotHydrated = false
+		case liveClientConnected:
+			if identity.DiscoveryDone && live != serverStatus.DiscoveryEpoch {
+				identity.DiscoveryDone = false
+				identity.StaleConnection = true
+			}
+		}
 	}
 
 	// Only the EXACT raw name — the identity that is dispatched (Spec 105
@@ -6794,11 +7174,163 @@ func (p *MCPProxyServer) lookupExactToolAnnotations(serverName, toolName string)
 	// different tool's hints instead of failing closed.
 	for i := range serverStatus.Tools {
 		if serverStatus.Tools[i].Name == toolName {
-			return serverStatus.Tools[i].Annotations, true
+			identity.Found = true
+			identity.Description = serverStatus.Tools[i].Description
+			identity.Annotations = serverStatus.Tools[i].Annotations
+			return identity
 		}
 	}
 
-	return nil, false
+	return identity
+}
+
+// liveConnectionEpoch returns the live client's connection-instance token
+// for a server, and whether there is a CONNECTED live client to read it from
+// (managed.Client.ConnectionEpoch; astra r2 C3). No upstream manager (a
+// pure-unit proxy), no client, or a client that is not connected reports
+// false, and the caller then makes no token claim.
+func (p *MCPProxyServer) liveConnectionEpoch(serverName string) (int64, bool) {
+	epoch, state := p.liveConnectionState(serverName)
+	return epoch, state == liveClientConnected
+}
+
+// liveClientState is what the live upstream client says about a server,
+// independently of the StateView snapshot (codex r5 F1).
+type liveClientState int
+
+const (
+	// liveClientAbsent: no upstream manager (a pure-unit proxy) or no client
+	// for the server — the live side makes no claim either way.
+	liveClientAbsent liveClientState = iota
+	// liveClientDisconnected: a client exists and is NOT connected
+	// (disconnected, connecting, OAuth-pending, ...): whatever the snapshot
+	// reads, the server is not callable and the server-level verdicts own it.
+	liveClientDisconnected
+	// liveClientConnected: a client exists and is connected; the epoch
+	// returned alongside is its current connection generation.
+	liveClientConnected
+)
+
+// liveConnectionState is liveConnectionEpoch with the not-connected case
+// told apart from the no-client case, so resolveExactToolIdentityIn can
+// overrule a snapshot whose Connected flag the live client contradicts.
+func (p *MCPProxyServer) liveConnectionState(serverName string) (int64, liveClientState) {
+	if p.upstreamManager == nil {
+		return 0, liveClientAbsent
+	}
+	client, ok := p.upstreamManager.GetClient(serverName)
+	if !ok || client == nil {
+		return 0, liveClientAbsent
+	}
+	if !client.IsConnected() {
+		return 0, liveClientDisconnected
+	}
+	return client.ConnectionEpoch(), liveClientConnected
+}
+
+// unresolvedToolIdentityMessage is the insufficient-permission body every
+// dispatch path answers for a name it cannot resolve on a known server
+// (Spec 105 FR-009, research D4). It is worded as a permission refusal —
+// the caller holds no tier for a tool the proxy cannot identify — and
+// deliberately does not echo any upstream answer: the upstream is never
+// asked. The remediation depends on WHY the name is unresolved
+// (toolIdentity.DiscoveryDone): while the server's discovery has not
+// completed for this connection, no tool list exists yet to refresh from and
+// the caller should simply retry shortly; once discovery has completed and
+// the name is absent from its result, the caller must refresh with
+// retrieve_tools and pick a listed name.
+func unresolvedToolIdentityMessage(serverName, toolName string, discoveryDone bool) string {
+	if !discoveryDone {
+		return fmt.Sprintf("Permission denied: tool '%s:%s' cannot be resolved because tool discovery has not completed for server '%s' yet, so no permission tier applies to it; retry shortly, once the server's tools have been discovered",
+			serverName, toolName, serverName)
+	}
+	return fmt.Sprintf("Permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it; refresh the tool list with retrieve_tools and retry with a listed name",
+		serverName, toolName, serverName)
+}
+
+// liveIdentityRefusal closes the D4 deferral window (astra r1 I3). The
+// identity gate stands aside when the StateView reads a known server as not
+// connected (toolIdentity.SnapshotHydrated false) because the pre-105
+// not-connected verdict will refuse — but that verdict consults the LIVE
+// client, and the StateView's Connected flag is written only by the async
+// server_connected event (notifications → actor_pool, which drops on a full
+// channel → supervisor goroutine) or the 30s reconcile. In that window the
+// live client is connected, the not-connected verdict does not fire, and an
+// unlisted name would dispatch with the destructive-tier fallback and, under
+// a lifted quarantine gate or an existing record for a now-stale name, no
+// approval answer either. So, once the live client has been found connected,
+// the snapshot is re-read and the name is refused unless it now lists it. A
+// server whose live client is NOT connected keeps the not-connected /
+// connecting / reconnect_on_use verdicts untouched.
+//
+// The re-read is not limited to the deferred (not-hydrated) case (astra r2
+// C3): a hydrated snapshot that resolved the name at the top of the dispatch
+// may belong to a previous connection, and the live client found connected
+// here is the authority on WHICH connection that is — resolveExactToolIdentity
+// compares the stamp's token with it, so a name certified by connection A is
+// refused on connection B with the discovery-window body.
+//
+// Once the live client is connected, the ONLY admitting outcome is a
+// certified identity (codex r4 E1): hydrated, discovery completed, stamp
+// captured under the live client's own generation, name listed. "Listed" on
+// its own is not enough — a not-connected snapshot is NOT empty in general:
+// the reconcile sweep copies a server's retained tool set forward into a
+// StateView entry that reads Connected=false, ToolsDiscovered=false,
+// DiscoveryEpoch=0 (supervisor.reconcile keeps existing.Tools for counts),
+// so between the next connection becoming Ready and the event or sweep that
+// flips Connected, the snapshot lists the PREVIOUS generation's names
+// without certifying any of them. Admitting Found there sent such a name
+// down the unpinned dispatch to the fresh connection; now it is the
+// discovery window, like every other uncertified shape on a live client.
+//
+// The live identity is returned alongside the verdict (codex r3 D2): when
+// admitted it is certified, and its DiscoveryEpoch is the generation the
+// caller must pin the dispatch to (upstream.Manager.CallToolOnEpoch /
+// managed.Client.CallToolOnEpoch), so a generation change between this
+// check and the transport — a queue wait behind admission control is
+// seconds long — is refused by the client itself with the same
+// discovery-window body. The zero identity comes back only when the check
+// stood aside (no runtime, server not in the StateView, client not
+// connected), and the caller dispatches unpinned as before.
+//
+// The re-read is of the StateView and the live client ONLY. record is the
+// persisted server record the caller's dispatch gate captured (nil when the
+// gate found none) and the live identity is hydrated from THAT record, never
+// from a fresh storage read (codex r7 H1): a dispatch reads the persisted
+// record exactly once, at its gate, and every later identity step reuses
+// it. Otherwise an operator's quarantine / disable landing between the
+// gate's read and this check un-hydrated the live identity, and the dispatch
+// the gate's record had already admitted was refused with the
+// discovery-window body — a verdict neither record selects (the gate's
+// admits; the new one answers quarantine analysis / TOOL_BLOCKED, and does
+// so for the next dispatch, whose gate reads it), with a "retry shortly"
+// remediation that heals nothing. The write owns every later dispatch; this
+// one keeps the pre-105 gate-then-dispatch semantics, pinned to the
+// generation it certified.
+func (p *MCPProxyServer) liveIdentityRefusal(record *config.ServerConfig, serverName, toolName string, deferred toolIdentity, client interface{ IsConnected() bool }) (toolIdentity, string, bool) {
+	if !deferred.ServerKnown || client == nil || !client.IsConnected() {
+		return toolIdentity{}, "", false
+	}
+	live := p.resolveExactToolIdentityWith(record, serverName, toolName)
+	if live.certified() {
+		return live, "", false
+	}
+	// Not hydrated (Connected still false in the snapshot), no stamp, a
+	// previous generation's stamp, or an unlisted name: refused. The
+	// stale-name body applies only to a hydrated, completed pass of THIS
+	// generation that does not list the name; everything else is the
+	// discovery window.
+	return live, unresolvedToolIdentityMessage(serverName, toolName, live.SnapshotHydrated && live.DiscoveryDone), true
+}
+
+// dispatchOnEpoch routes one upstream dispatch through the manager, pinned
+// to the certified identity's generation when there is one and unpinned
+// otherwise (see toolIdentity.certified).
+func (p *MCPProxyServer) dispatchOnEpoch(ctx context.Context, certified toolIdentity, toolName string, args map[string]interface{}) (interface{}, error) {
+	if certified.certified() {
+		return p.upstreamManager.CallToolOnEpoch(ctx, toolName, args, certified.DiscoveryEpoch)
+	}
+	return p.upstreamManager.CallTool(ctx, toolName, args)
 }
 
 // lookupOutputSchema returns the declared output schema (raw JSON) for a tool,

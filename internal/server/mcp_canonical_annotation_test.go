@@ -30,6 +30,7 @@ func TestCanonicalName_AnnotationsResolveOnLivePath(t *testing.T) {
 		s.Name = "github"
 		s.Enabled = true
 		s.Connected = true
+		s.ToolsDiscovered = true
 		s.Tools = []stateview.ToolInfo{
 			{
 				Name:        "create_issue", // BARE, exactly as the live path stores it
