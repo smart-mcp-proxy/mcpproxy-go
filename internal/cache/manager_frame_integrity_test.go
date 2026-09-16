@@ -18,14 +18,16 @@ import (
 // repository ships never lets disagree (MarshalBinary derives one from the
 // other). A value that does disagree was not written by such a binary: it is
 // corrupt or crafted, and must be treated like any other undecodable frame —
-// refused for every caller, invalidated, and never a source of content. In
-// particular the header must not admit a reader to a body stamped under a
-// BROADER authorization (finding 1: an `a`-only header in front of an
-// administrator body handed the body to an `a`-only agent), and a
-// future-expiry header must not admit a reader to an expired body (the
-// admitted decode then evicted the entry on the gated door, work the header
-// verdict never does).
-func TestGetRecordsAs_FrameHeaderBodyDisagreementIsLegacy(t *testing.T) {
+// invalidated, and never a source of content. In particular the header must
+// not admit a reader to a body stamped under a BROADER authorization
+// (finding 1: an `a`-only header in front of an administrator body handed
+// the body to an `a`-only agent), and a future-expiry header must not admit
+// a reader to an expired body (the admitted decode then evicted the entry on
+// the gated door, work the header verdict never does). Every reader here was
+// ADMITTED on the header, so the outcome is the admitted-class
+// ErrEntryUnreadable, not a refusal (codex round 6): the refusal shape is
+// decided on the header only.
+func TestGetRecordsAs_FrameHeaderBodyDisagreementIsUnreadable(t *testing.T) {
 	now := time.Now().Round(0)
 	aOnly := &Authorization{CallerKind: CallerKindAgent, Principal: "narrow", AllowedServers: []string{"a"}, Permissions: []string{"read"}}
 	broad := &Authorization{CallerKind: CallerKindAgent, Principal: "broad", AllowedServers: []string{"a", "b"}, Permissions: []string{"read", "write"}}
@@ -95,8 +97,8 @@ func TestGetRecordsAs_FrameHeaderBodyDisagreementIsLegacy(t *testing.T) {
 			}
 
 			resp, err := m.GetRecordsAs(key, 0, 10, fx.reader)
-			if !errors.Is(err, ErrLegacyProvenance) {
-				t.Fatalf("got err=%v resp=%v, want ErrLegacyProvenance", err, resp)
+			if !errors.Is(err, ErrEntryUnreadable) || errors.Is(err, ErrUnauthorizedRead) {
+				t.Fatalf("got err=%v resp=%v, want ErrEntryUnreadable (admitted on the header, unreadable behind it)", err, resp)
 			}
 			if resp != nil {
 				t.Fatalf("disagreeing frame returned content: %+v", resp)
@@ -461,4 +463,101 @@ func TestCleanup_RecomputesEntriesAndSizeFromTheBucket(t *testing.T) {
 	if got := m.GetStats(); got.TotalEntries != 0 || got.TotalSizeBytes != 0 {
 		t.Fatalf("stats after the sweep = %+v, want entries 0, size 0", *got)
 	}
+}
+
+// Codex round 6, cache finding 1. The header's flag byte and tier byte each
+// have bits no binary of this repository emits (only recordFlagDenyAll; only
+// permBitRead|Write|Destructive|Other). A frame carrying one is not a frame
+// this binary wrote, and the gate must classify it as unrecognised
+// provenance ON THE HEADER — the O(1) refuse-and-invalidate path — never
+// after a body decode: with the digest preserved, an unknown tier bit used
+// to be admitted on digest equality and then caught by the header/body
+// agreement check, a payload-sized decode on a refusal (the timing class
+// round 5 removed), and an unknown flag bit was ignored outright, so the
+// record was served. Pinned through the allocation meter on a 4 MB body:
+// the refusal must sit in the miss's class, for the digest-equal producer
+// and for an administrator alike.
+func TestGetRecordsAs_UnknownHeaderBitsAreUnrecognisedProvenance(t *testing.T) {
+	producer := Authorization{CallerKind: CallerKindAgent, Principal: "p", AllowedServers: []string{"a"}, Permissions: []string{"read"}}
+	admin := Authorization{CallerKind: CallerKindAdmin}
+	const bigPayload = 4 << 20
+	content := `[{"v":"` + strings.Repeat("x", bigPayload) + `"}]`
+
+	tampers := []struct {
+		name   string
+		offset int
+		mutate func(b byte) byte
+	}{
+		{"unknown flag bit", recordHeaderOffFlg, func(b byte) byte { return b | 1<<1 }},
+		{"unknown permission bit", recordHeaderOffPrm, func(byte) byte { return 1 << 6 }},
+		{"every reserved flag bit", recordHeaderOffFlg, func(b byte) byte { return b | ^byte(recordFlagDenyAll) }},
+		{"every reserved permission bit", recordHeaderOffPrm, func(b byte) byte { return b | ^permBitKnown }},
+	}
+	for _, tp := range tampers {
+		for _, rd := range []struct {
+			name   string
+			reader Authorization
+		}{{"digest-equal producer", producer}, {"administrator", admin}} {
+			t.Run(tp.name+"/"+rd.name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "cache.db")
+				m, db := openManagerAt(t, path)
+				const key = "target"
+				if err := m.StoreAs(key, "t", nil, content, "", 1, producer); err != nil {
+					t.Fatal(err)
+				}
+				// Flip the one byte in place; the digest, size, expiry and body
+				// are the genuine entry's.
+				if err := db.Update(func(tx *bbolt.Tx) error {
+					bucket := tx.Bucket([]byte(CacheBucket))
+					value := append([]byte(nil), bucket.Get([]byte(key))...)
+					at := len(recordFrameMagic) + tp.offset
+					value[at] = tp.mutate(value[at])
+					return bucket.Put([]byte(key), value)
+				}); err != nil {
+					t.Fatal(err)
+				}
+				// Probed cold: only the header on disk can decide.
+				m.Close()
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				m, db = openManagerAt(t, path)
+				defer db.Close()
+				defer m.Close()
+
+				allocated, resp, err := allocatedBy(func() (*ReadCacheResponse, error) {
+					return m.GetRecordsAs(key, 0, 10, rd.reader)
+				})
+				if !errors.Is(err, ErrLegacyProvenance) || resp != nil {
+					t.Fatalf("got err=%v resp=%v, want ErrLegacyProvenance decided on the header", err, resp != nil)
+				}
+				if allocated > refusalAllocBudget {
+					t.Fatalf("refusing the tampered 4 MB entry allocated %d bytes (budget %d): the body was decoded before the refusal", allocated, refusalAllocBudget)
+				}
+				if got := onDiskEntryCount(t, db); got != 0 {
+					t.Fatalf("on-disk count after the refusal = %d, want 0 (invalidated)", got)
+				}
+			})
+		}
+	}
+
+	// The decoder itself: every emitted combination round-trips, every
+	// reserved bit is corrupt.
+	t.Run("decoder", func(t *testing.T) {
+		base := (&Record{Version: RecordVersion, Producer: &producer, ExpiresAt: time.Now().Add(time.Hour), TotalSize: 1}).header()
+		for perms := 0; perms <= 0xff; perms++ {
+			for flags := 0; flags <= 0xff; flags++ {
+				raw := base.encode()
+				raw[recordHeaderOffFlg], raw[recordHeaderOffPrm] = byte(flags), byte(perms)
+				_, err := decodeHeaderBytes(raw)
+				emitted := byte(flags)&^recordFlagDenyAll == 0 && byte(perms)&^permBitKnown == 0
+				if emitted && err != nil {
+					t.Fatalf("flags %#x perms %#x: %v, want decodable", flags, perms, err)
+				}
+				if !emitted && !errors.Is(err, errRecordFrameCorrupt) {
+					t.Fatalf("flags %#x perms %#x: err=%v, want errRecordFrameCorrupt", flags, perms, err)
+				}
+			}
+		}
+	})
 }

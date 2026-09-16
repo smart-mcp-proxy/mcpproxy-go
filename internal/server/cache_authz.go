@@ -123,8 +123,12 @@ func childPageProducer(page *cache.ReadCacheResponse, redeemer cache.Authorizati
 // keeps the "cache key not found" substring agents already handle, and the
 // cache commits every refusal the way it commits a miss, so the timing class
 // matches too. Storage failures (a bbolt error) stay distinct: they are
-// operational faults, not answers about the key. A record the cache cannot
-// decode is not one of them — the gated read treats it as unrecognised
+// operational faults, not answers about the key. So is an entry the header
+// ADMITTED the caller to and that then proved unreadable (an undecodable or
+// header-disagreeing body): the caller was entitled to it, the refusal shape
+// is decided on the fixed header only, and every caller kind is told the
+// entry is unreadable and has been invalidated (cache.ErrEntryUnreadable;
+// codex round 6). A frame the header itself cannot vouch for is unrecognised
 // provenance (legacy: refused for every caller, invalidated).
 //
 // Administrators get the reason: legacy provenance (invalidated), an internal
@@ -135,6 +139,8 @@ func readCacheRefusal(err error, reader cache.Authorization) *mcp.CallToolResult
 		err = cache.ErrKeyNotFound
 	}
 	switch {
+	case errors.Is(err, cache.ErrEntryUnreadable):
+		return mcp.NewToolResultError("Cache entry is unreadable: its stored record could not be decoded and it has been invalidated. Re-run the original tool call to obtain a new cache key.")
 	case errors.Is(err, cache.ErrLegacyProvenance):
 		return mcp.NewToolResultError("Cache entry is not readable: it predates provenance stamping and has been invalidated. Re-run the original tool call to obtain a new cache key.")
 	case errors.Is(err, cache.ErrInternalEntry):

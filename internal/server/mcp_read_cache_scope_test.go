@@ -371,6 +371,60 @@ func TestReadCache_AdministratorRefusalBodiesNameTheReason(t *testing.T) {
 	assert.Equal(t, resultText(t, absent), resultText(t, got), "a scoped caller gets the not-found body for a legacy entry too")
 }
 
+// Codex round 6, server finding 1: a reader the header ADMITS (the producing
+// agent, digest-equal) whose entry's body is undecodable pays the body decode
+// — it is entitled to the entry, so that decode is not a refusal oracle —
+// but must not then receive the refusal shape: the only responses sharing
+// the not-found body are the ones decided on the header. It gets a distinct
+// admitted-class body ("unreadable", invalidated) — the same body an
+// administrator gets — and the entry is gone, so the next read is a plain
+// miss.
+func TestReadCache_AdmittedReaderOfUnreadableEntryGetsDistinctBody(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+	agent := agentCtx([]string{"github", "weather"}, []string{auth.PermRead}, "")
+	absentKey := "0000000000000000000000000000000000000000000000000000000000000000"
+
+	for _, tc := range []struct {
+		name   string
+		reader context.Context
+	}{{"digest-equal agent", agent}, {"administrator", adminCtx()}} {
+		t.Run(tc.name, func(t *testing.T) {
+			key, _ := produceTruncatedKey(t, proxy, agent)
+			control := readCachePage(t, proxy, tc.reader, key, 0, 1)
+			require.False(t, control.IsError, "control: the reader is admitted to the intact entry")
+			corruptCacheEntryBody(t, proxy, key)
+
+			got := readCachePage(t, proxy, tc.reader, key, 0, 1)
+			require.True(t, got.IsError)
+			absent := readCachePage(t, proxy, tc.reader, absentKey, 0, 1)
+			require.True(t, absent.IsError)
+			assert.NotEqual(t, resultText(t, absent), resultText(t, got),
+				"an admitted reader's unreadable entry must not wear the not-found shape")
+			assert.Contains(t, resultText(t, got), "unreadable")
+			assert.Contains(t, resultText(t, got), "invalidated")
+			assert.NotContains(t, resultText(t, got), "github:")
+
+			again := readCachePage(t, proxy, tc.reader, key, 0, 1)
+			require.True(t, again.IsError)
+			assert.Equal(t, resultText(t, absent), resultText(t, again), "the entry was invalidated: a second read is a plain miss")
+		})
+	}
+}
+
+// corruptCacheEntryBody truncates the stored value's last byte in place, so
+// the frame header (the prefix) stays intact and admits exactly whom it did,
+// while the JSON body behind it no longer decodes.
+func corruptCacheEntryBody(t *testing.T, proxy *MCPProxyServer, key string) {
+	t.Helper()
+	require.NoError(t, proxy.storage.GetDB().Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(cache.CacheBucket))
+		data := bucket.Get([]byte(key))
+		require.NotNil(t, data, "premise: entry %q exists", key)
+		return bucket.Put([]byte(key), append([]byte(nil), data[:len(data)-1]...))
+	}))
+}
+
 // Codex round 4, finding 1: the user-kind snapshot retained only the user id,
 // and redemption compared only the id — so a user allowed {github} produced a
 // github entry and, once narrowed to {weather} (or bound to a disjoint or

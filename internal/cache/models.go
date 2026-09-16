@@ -141,8 +141,8 @@ func (h recordHeader) expired() bool {
 //
 //	[0]     version
 //	[1]     caller kind code (callerKindCodes; 0 = no producer)
-//	[2]     flags (recordFlagDenyAll)
-//	[3]     producer permission tier bits (permissionBits)
+//	[2]     flags (recordFlagDenyAll; every other bit reserved, must be 0)
+//	[3]     producer permission tier bits (permBitKnown; other bits must be 0)
 //	[4:12]  expires_at, Unix nanoseconds
 //	[12:20] total_size
 //	[20:52] producer effective-authorization digest (Authorization.digest)
@@ -197,8 +197,17 @@ func (h recordHeader) encode() []byte {
 	return out
 }
 
+// decodeHeaderBytes decodes a fixed header. A flag or tier byte carrying a
+// bit no MarshalBinary of this repository emits is a frame this binary did
+// not write: corrupt, so the gate classifies it as unrecognised provenance
+// here — before admission, in O(1) — rather than admitting on the digest
+// and discovering the disagreement after a payload-sized body decode, or
+// (an unknown flag bit) never at all (codex round 6).
 func decodeHeaderBytes(raw []byte) (recordHeader, error) {
 	if len(raw) != recordHeaderSize {
+		return recordHeader{}, errRecordFrameCorrupt
+	}
+	if raw[recordHeaderOffFlg]&^recordFlagDenyAll != 0 || raw[recordHeaderOffPrm]&^permBitKnown != 0 {
 		return recordHeader{}, errRecordFrameCorrupt
 	}
 	h := recordHeader{

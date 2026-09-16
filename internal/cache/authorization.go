@@ -79,6 +79,16 @@ var ErrUnauthorizedRead = errors.New("cache entry was produced under an authoriz
 // ErrUnauthorizedRead) holds.
 var ErrLegacyProvenance = fmt.Errorf("%w: entry predates provenance stamping and has been invalidated", ErrUnauthorizedRead)
 
+// ErrEntryUnreadable is returned by a gated read to a reader the header
+// ADMITTED whose entry then proved unreadable: a body this binary cannot
+// decode, or one that disagrees with the header it sits behind. It is not an
+// ErrUnauthorizedRead — the reader was entitled to the entry, and what it
+// learns (its own entry is corrupt) discloses nothing about another subject
+// — and it is not a miss: the refusal shape is decided on the fixed header
+// only, so an admitted reader never receives it (codex round 6). The entry
+// has been invalidated by the time the caller sees the error.
+var ErrEntryUnreadable = errors.New("cache entry is unreadable and has been invalidated")
+
 // ErrInternalEntry is the ErrUnauthorizedRead a gated read returns for an
 // internal (registry/guesser) entry. The entry is kept: its keys are
 // guessable, and evicting on refusal would let any caller purge what the
@@ -173,6 +183,9 @@ const (
 	permBitWrite
 	permBitDestructive
 	permBitOther uint8 = 1 << 7
+	// permBitKnown is every bit permissionBits can set; a header tier byte
+	// with any other bit was not written by this binary (decodeHeaderBytes).
+	permBitKnown = permBitRead | permBitWrite | permBitDestructive | permBitOther
 )
 
 // permissionBits encodes a permission tier list as header bits.

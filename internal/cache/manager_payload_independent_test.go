@@ -13,6 +13,14 @@ import (
 	"go.etcd.io/bbolt"
 )
 
+// refusalAllocBudget is a refusal's allocation budget: room for the frame
+// header, the stats round-trip and bbolt's own bookkeeping for a commit (an
+// eviction hands the payload's pages to the freelist by id, never by
+// content), and an order of magnitude below the smallest payload that would
+// betray a decode. The 1 KB and 4 MB legs must both fit — a refusal that
+// scaled with the payload fails on the 4 MB leg alone.
+const refusalAllocBudget = 256 << 10
+
 // Codex round 2 (cache finding 3, server finding 1): spec Definitions make a
 // non-disclosing refusal indistinguishable in status, body AND timing CLASS
 // from a miss. Round 1 pinned the commit shape (every refusal commits a stats
@@ -114,14 +122,6 @@ func TestGetRecordsAs_RefusalIsPayloadSizeIndependent(t *testing.T) {
 			})
 		}, ErrLegacyProvenance},
 	}
-
-	// The refusal's allocation budget: room for the frame header, the stats
-	// round-trip and bbolt's own bookkeeping for a commit (an eviction hands
-	// the payload's pages to the freelist by id, never by content), and an
-	// order of magnitude below the smallest payload that would betray a
-	// decode. The 1 KB and 4 MB legs must both fit — a refusal that scaled
-	// with the payload fails on the 4 MB leg alone.
-	const refusalAllocBudget = 256 << 10
 
 	for _, v := range variants {
 		for _, sz := range sizes {

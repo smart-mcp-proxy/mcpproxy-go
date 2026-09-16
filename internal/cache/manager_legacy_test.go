@@ -439,6 +439,12 @@ func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
 		// before the snapshot is ever needed — so they never reach the
 		// shape under test; asserted separately below.
 		skipKinds []string
+		// want is the verdict; ErrLegacyProvenance unless set. A shape the
+		// header ADMITS and only the body betrays is not a refusal
+		// (codex round 6): the reader is entitled to the entry, so it
+		// gets the admitted-class ErrEntryUnreadable — never the shape a
+		// header refusal shares with a miss.
+		want error
 	}
 	fixtures := []fixture{
 		{name: "header: no producer (kind code 0)", header: with(func(h *recordHeader) { h.KindCode, h.Kind = 0, "" }), body: goodBody},
@@ -450,24 +456,26 @@ func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
 		// administrator body. Every reader the header admits — an
 		// administrator on the kind, an unrestricted agent on the
 		// tier-covered digest mismatch rule — then finds a body that
-		// disagrees with the header's digest. A reader of another scoped
-		// kind (a user) is refused on the kind alone, non-disclosingly,
-		// and the entry is kept — see the user assertion below.
+		// disagrees with the header's digest: unreadable, invalidated. A
+		// reader of another scoped kind (a user) is refused on the kind
+		// alone, non-disclosingly, and the entry is kept — see the user
+		// assertion below.
 		{name: "header: agent digest in front of an administrator body",
 			header: with(func(h *recordHeader) {
 				h.KindCode, h.Kind = callerKindCode(CallerKindAgent), CallerKindAgent
 				h.Perms = permissionBits(aOnly.Permissions)
 				h.Digest = aOnly.digest()
-			}), body: goodBody, skipKinds: []string{CallerKindUser}},
+			}), body: goodBody, skipKinds: []string{CallerKindUser}, want: ErrEntryUnreadable},
 		// The one shape the gate admits on the header and only then finds
-		// undecodable: still legacy, still invalidated (after admission, so
-		// the payload-sized decode is the admitted reader's, not a probe's).
-		// Readers the header does NOT admit are refused on the header, with
-		// the non-disclosing verdict, and never reach the body.
+		// undecodable: invalidated, and reported as unreadable (after
+		// admission, so the payload-sized decode is the admitted reader's,
+		// not a probe's). Readers the header does NOT admit are refused on
+		// the header, with the non-disclosing verdict, and never reach the
+		// body.
 		{name: "body: undecodable behind an admitted header",
 			header:       current.encode(),
 			body:         func(string) []byte { return []byte("{not json") },
-			admittedOnly: true},
+			admittedOnly: true, want: ErrEntryUnreadable},
 	}
 	for _, fx := range fixtures {
 		for _, rd := range legacyReaders() {
@@ -496,9 +504,13 @@ func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
 					putFramedRecord(t, db, key, fx.header, fx.body(key))
 				}
 
+				want := fx.want
+				if want == nil {
+					want = ErrLegacyProvenance
+				}
 				resp, err := m.GetRecordsAs(key, 0, 10, rd.reader)
-				if !errors.Is(err, ErrLegacyProvenance) {
-					t.Fatalf("%s: got err=%v resp=%v, want ErrLegacyProvenance", rd.name, err, resp)
+				if !errors.Is(err, want) {
+					t.Fatalf("%s: got err=%v resp=%v, want %v", rd.name, err, resp, want)
 				}
 				if resp != nil {
 					t.Fatalf("refused read returned content: %+v", resp)
@@ -519,6 +531,57 @@ func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
 			})
 		}
 	}
+
+	// Codex round 6, server finding 1: the admitted-then-undecodable shape
+	// for a SCOPED reader. An agent whose digest equals the header's is
+	// admitted on the header — it is entitled to the entry — and only then
+	// finds the body undecodable (or disagreeing with the header). What it
+	// learns is that its own entry is corrupt, which discloses nothing
+	// about any other subject; but the outcome must not wear the refusal
+	// shape, so that every response sharing the not-found shape is one the
+	// header decided: ErrEntryUnreadable, an admitted-class error that is
+	// NOT an ErrUnauthorizedRead (the handler renders it distinctly for
+	// every caller kind), with the entry invalidated all the same.
+	t.Run("body: undecodable behind an admitted header/digest-equal agent gets ErrEntryUnreadable", func(t *testing.T) {
+		for _, body := range []struct {
+			name string
+			body []byte
+		}{
+			{"undecodable", []byte("{not json")},
+			{"disagreeing (administrator body)", goodBody("framed")},
+		} {
+			t.Run(body.name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "cache.db")
+				m, db := openManagerAt(t, path)
+				const key = "framed"
+				putFramedRecord(t, db, key, with(func(h *recordHeader) {
+					h.KindCode, h.Kind = callerKindCode(CallerKindAgent), CallerKindAgent
+					h.Perms = permissionBits(aOnly.Permissions)
+					h.Digest = aOnly.digest()
+				}), body.body)
+				resp, err := m.GetRecordsAs(key, 0, 10, aOnly)
+				if !errors.Is(err, ErrEntryUnreadable) || resp != nil {
+					t.Fatalf("digest-equal agent: got err=%v resp=%v, want ErrEntryUnreadable", err, resp)
+				}
+				if errors.Is(err, ErrUnauthorizedRead) || errors.Is(err, ErrKeyNotFound) || errors.Is(err, ErrKeyExpired) {
+					t.Fatalf("err %v wears a refusal shape; an admitted reader's outcome must not", err)
+				}
+				if got := onDiskEntryCount(t, db); got != 0 {
+					t.Fatalf("on-disk count = %d, want 0: the unreadable entry is invalidated", got)
+				}
+				m.Close()
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				m2, db2 := openManagerAt(t, path)
+				defer db2.Close()
+				defer m2.Close()
+				if got := onDiskEntryCount(t, db2); got != 0 {
+					t.Fatalf("on-disk count after restart = %d, want 0", got)
+				}
+			})
+		}
+	})
 
 	// A user reader is refused on the header's kind alone (caller kind
 	// first: an agent snapshot is never a user's), with the ordinary

@@ -229,6 +229,11 @@ func (m *Manager) Get(key string) (*Record, error) {
 // updated, so a refused read never counts as a hit or marks the entry as
 // accessed.
 //
+// An admitted read whose body then proves undecodable, or disagrees with the
+// header it was admitted on, is invalidated too — but reported as
+// ErrEntryUnreadable, an admitted-class outcome, never as a refusal: the
+// refusal shape is decided on the header only (codex round 6).
+//
 // Every refusal COMMITS, as a miss. A refusal that returned its error from the
 // Update closure made bbolt roll the transaction back without a disk write,
 // while a miss committed a stats write: ~5 µs against ~10 ms, a timing class
@@ -236,12 +241,13 @@ func (m *Manager) Get(key string) (*Record, error) {
 // guard verdict, like every other outcome, is handed out through `verdict`
 // after a committed stats write; the closure returns an error only for a
 // storage fault, and m.update then restores the in-memory stats to the
-// rolled-back state. The two invalidating refusals (legacy provenance, an
-// undecodable frame or body) additionally delete the key — FR-002 requires
-// the legacy entry durably invalidated by the refusal itself, not by a later
-// sweep — and that delete is bounded: bbolt rewrites the leaf minus the entry
-// and frees the value's pages by id range, never reading the payload (pinned
-// by TestGetRecordsAs_EvictingRefusalWritesArePayloadIndependent). It is also
+// rolled-back state. The invalidating outcomes (the legacy-provenance
+// refusal, the admitted unreadable body) additionally delete the key —
+// FR-002 requires the legacy entry durably invalidated by the refusal
+// itself, not by a later sweep — and that delete is bounded: bbolt rewrites
+// the leaf minus the entry and frees the value's pages by id range, never
+// reading the payload (pinned by
+// TestGetRecordsAs_EvictingRefusalWritesArePayloadIndependent). It is also
 // one-shot per key: the entry is gone, so the second probe is a plain miss.
 func (m *Manager) getGuarded(key string, guard func(header recordHeader) error) (*Record, error) {
 	var (
@@ -319,16 +325,20 @@ func (m *Manager) getGuarded(key string, guard func(header recordHeader) error) 
 			// A frame the gate admitted around a body this binary cannot
 			// decode — or one that DISAGREES with the header the gate
 			// admitted on (UnmarshalBinary checks the two agree exactly):
-			// provenance it does not recognise — invalidate, the way
-			// cleanup drops undecodable records, and never return the
-			// body. The reader was admitted, so the decode it paid for is
-			// not a refusal oracle. The size folded out is the header's,
-			// the one the stats were told at store time.
-			m.logger.Info("Invalidated undecodable cache entry on gated read",
+			// invalidate, the way cleanup drops undecodable records, and
+			// never return the body. The reader was ADMITTED — entitled to
+			// the entry — so the decode it paid for is not a refusal
+			// oracle, and its outcome is not a refusal either: the refusal
+			// shape is decided on the fixed header only, and an admitted
+			// reader gets the admitted-class ErrEntryUnreadable, which the
+			// handler renders distinctly for every caller kind (codex round
+			// 6). The size folded out is the header's, the one the stats
+			// were told at store time.
+			m.logger.Info("Invalidated unreadable cache entry on gated read",
 				zap.String("key", key),
 				zap.Error(err))
-			verdict = ErrLegacyProvenance
-			return m.evict(tx, bucket, key, header.TotalSize, "invalidate undecodable cache record")
+			verdict = ErrEntryUnreadable
+			return m.evict(tx, bucket, key, header.TotalSize, "invalidate unreadable cache record")
 		}
 
 		// Expired on the ungated door (the gated door already refused it on
@@ -444,6 +454,11 @@ func (m *Manager) GetRecords(key string, offset, limit int) (*ReadCacheResponse,
 //   - internal entries (CallerKindInternal — the registry and guesser caches):
 //     refused with ErrInternalEntry WITHOUT eviction, since their keys are
 //     guessable and their writers' ungated readers depend on them.
+//
+// Every refusal is decided on the record's fixed header. A reader the header
+// admits whose entry then proves unreadable (undecodable body, or one that
+// disagrees with the header) gets ErrEntryUnreadable — not an
+// ErrUnauthorizedRead — and the entry is invalidated.
 func (m *Manager) GetRecordsAs(key string, offset, limit int, reader Authorization) (*ReadCacheResponse, error) {
 	// The reader's side of the verdict is computed ONCE, here, before the
 	// transaction: its digest, deny-all and tier bits are a function of the
