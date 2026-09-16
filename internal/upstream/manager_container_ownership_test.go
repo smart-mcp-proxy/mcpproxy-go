@@ -38,43 +38,53 @@ import (
 
 // managerFakeDocker is a sh+awk `docker` shim on PATH (the manager sweeps
 // exec the bare name): `ps` answers from a TSV fixture honouring every
-// `--filter label=k[=v]` (joined with `|`, which no label here contains)
-// and `--format` with {{.ID}}, {{.Names}} and
-// {{.Label "k"}}; `ps -q` answers nothing (every container already stopped);
-// stop/kill/rm exit 0. Every invocation is appended to a log.
+// `--filter label=k[=v]` (joined with `|`, which no label here contains),
+// `--filter id=<id>` and `--format` with {{.ID}}, {{.Names}} and
+// {{.Label "k"}}; `ps -q` answers the ids of the rows marked Running
+// (default: every container already stopped); stop/kill/rm exit 0 unless
+// the verb is listed in the fail file (failVerbs). Every invocation is
+// appended to a log.
 type managerFakeDocker struct {
-	logPath string
+	logPath  string
+	failPath string
 }
 
 type managerFakeContainer struct {
-	ID     string
-	Name   string
-	Labels map[string]string
+	ID      string
+	Name    string
+	Labels  map[string]string
+	Running bool
 }
 
 const managerFakeDockerShim = `#!/bin/sh
 LOG=%s
 PS=%s
+FAIL=%s
 printf '%%s\n' "$*" >> "$LOG"
+if [ -f "$FAIL" ]; then
+  read -r failverbs < "$FAIL"
+  case " $failverbs " in *" $1 "*) exit 1 ;; esac
+fi
 [ "$1" = ps ] || exit 0
 shift
 format='{{.ID}}	{{.Names}}'
 quiet=0
 filters=''
+idflt=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --format) format="$2"; shift 2 ;;
-    -q) quiet=1; shift ;;
+    -q) quiet=1; format='{{.ID}}'; shift ;;
     --filter|-f)
       case "$2" in
         label=*) filters="$filters${2#label=}|" ;;
+        id=*) idflt="${2#id=}" ;;
       esac
       shift 2 ;;
     *) shift ;;
   esac
 done
-[ "$quiet" = 1 ] && exit 0
-awk -F'\t' -v fmt="$format" -v flt="$filters" '
+awk -F'\t' -v fmt="$format" -v flt="$filters" -v quiet="$quiet" -v idflt="$idflt" '
 function repl(s, lit, val,    i, out) {
   out = ""
   while ((i = index(s, lit)) > 0) { out = out substr(s, 1, i - 1) val; s = substr(s, i + length(lit)) }
@@ -82,6 +92,8 @@ function repl(s, lit, val,    i, out) {
 }
 BEGIN { nflt = split(flt, fl, "|") }
 {
+  if (idflt != "" && $1 != idflt) next
+  if (quiet == 1 && $4 != "1") next
   delete labels
   n = split($3, pairs, ",")
   for (i = 1; i <= n; i++) { eq = index(pairs[i], "="); if (eq > 0) labels[substr(pairs[i], 1, eq - 1)] = substr(pairs[i], eq + 1) }
@@ -111,7 +123,7 @@ func installManagerFakeDocker(t *testing.T, containers []managerFakeContainer) *
 		t.Skip("unix shell shim")
 	}
 	dir := t.TempDir()
-	fd := &managerFakeDocker{logPath: filepath.Join(dir, "invocations.log")}
+	fd := &managerFakeDocker{logPath: filepath.Join(dir, "invocations.log"), failPath: filepath.Join(dir, "fail")}
 	psPath := filepath.Join(dir, "ps.tsv")
 	var tsv strings.Builder
 	for _, c := range containers {
@@ -119,13 +131,17 @@ func installManagerFakeDocker(t *testing.T, containers []managerFakeContainer) *
 		for k, v := range c.Labels {
 			labels = append(labels, k+"="+v)
 		}
-		fmt.Fprintf(&tsv, "%s\t%s\t%s\n", c.ID, c.Name, strings.Join(labels, ","))
+		running := "0"
+		if c.Running {
+			running = "1"
+		}
+		fmt.Fprintf(&tsv, "%s\t%s\t%s\t%s\n", c.ID, c.Name, strings.Join(labels, ","), running)
 	}
 	require.NoError(t, os.WriteFile(psPath, []byte(tsv.String()), 0o600))
 
 	toolDir := filepath.Join(dir, "path")
 	require.NoError(t, os.Mkdir(toolDir, 0o755))
-	script := fmt.Sprintf(managerFakeDockerShim, shellQuoteForManagerShim(fd.logPath), shellQuoteForManagerShim(psPath))
+	script := fmt.Sprintf(managerFakeDockerShim, shellQuoteForManagerShim(fd.logPath), shellQuoteForManagerShim(psPath), shellQuoteForManagerShim(fd.failPath))
 	require.NoError(t, os.WriteFile(filepath.Join(toolDir, "docker"), []byte(script), 0o755))
 	for _, tool := range []string{"sh", "awk", "printf"} {
 		if real, err := exec.LookPath(tool); err == nil {
@@ -144,6 +160,13 @@ func (fd *managerFakeDocker) invocations(t *testing.T) []string {
 	}
 	require.NoError(t, err)
 	return strings.Split(strings.TrimSpace(string(raw)), "\n")
+}
+
+// failVerbs makes every later invocation of the listed docker verbs
+// (stop, kill, rm, ...) exit 1 without output.
+func (fd *managerFakeDocker) failVerbs(t *testing.T, verbs ...string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(fd.failPath, []byte(strings.Join(verbs, " ")+"\n"), 0o600))
 }
 
 // mutationsOf returns the rm/stop/kill invocations naming id.
@@ -316,4 +339,96 @@ func TestForceCleanupClient_RoutesThroughOwnershipCheckedRemoval(t *testing.T) {
 	target = &fakeForceCleanupTarget{name: "a"}
 	m.forceCleanupClient(target)
 	assert.Empty(t, target.calls, "no stored id, nothing to remove")
+}
+
+// sweepFixtureOwnRunning is sweepFixture with a's own container still
+// running, so the shutdown sweep's force-kill branch fires after `stop`.
+func sweepFixtureOwnRunning(instanceID string) []managerFakeContainer {
+	rows := sweepFixture(instanceID)
+	for i := range rows {
+		if rows[i].ID == sweepOwnID {
+			rows[i].Running = true
+		}
+	}
+	return rows
+}
+
+// recordNamesOwnContainer reports whether any field value of a main.log
+// record carries a's container id (full or short) or name — independent
+// of the key the record files it under.
+func recordNamesOwnContainer(fields map[string]interface{}) bool {
+	for _, v := range fields {
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		if strings.Contains(s, sweepOwnID) || strings.Contains(s, shortContainerID(sweepOwnID)) || strings.Contains(s, sweepOwnName) {
+			return true
+		}
+	}
+	return false
+}
+
+// Codex round 4, docker finding 1 (Spec 105 FR-007 / research D8, D9): the
+// sweeps' intent records carried the read-back owner, but the OUTCOME
+// records — stop succeeded/failed, force-kill intent/succeeded/failed,
+// force-removal succeeded/failed — named the container's id or name with no
+// `container_owner`, so a subject-evidence consumer had to withhold them.
+// Every main.log record a sweep writes that names a container must carry
+// the owner Docker reported for it, on the success and the failure branch
+// alike.
+func TestSweeps_EveryRecordNamingAContainerCarriesContainerOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fail     []string
+		expected []string
+	}{
+		{
+			name: "docker_succeeds",
+			expected: []string{
+				"Stopping container", "Container stopped gracefully",
+				"Force killing container", "Container force killed",
+				"Force removing container", "Container force removed successfully",
+			},
+		},
+		{
+			name: "docker_fails",
+			fail: []string{"stop", "kill", "rm"},
+			expected: []string{
+				"Stopping container", "Graceful stop failed, will force kill",
+				"Force killing container", "Failed to force kill container",
+				"Force removing container", "Failed to force remove container",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fd := installManagerFakeDocker(t, sweepFixtureOwnRunning(core.GetInstanceID()))
+			if len(tc.fail) > 0 {
+				fd.failVerbs(t, tc.fail...)
+			}
+			m, mainLogs := newSweepManager(t)
+
+			m.cleanupAllManagedContainers(context.Background())
+			m.ForceCleanupAllContainers()
+
+			for _, msg := range tc.expected {
+				require.NotEmpty(t, mainLogs.FilterMessage(msg).All(), "branch %q not exercised; invocations:\n%s",
+					msg, strings.Join(fd.invocations(t), "\n"))
+			}
+			naming := 0
+			for _, entry := range mainLogs.All() {
+				fields := entry.ContextMap()
+				if !recordNamesOwnContainer(fields) {
+					continue
+				}
+				naming++
+				assert.Equal(t, "a", fields["container_owner"],
+					"record %q names a's container without the read-back owner: %v", entry.Message, fields)
+			}
+			assert.GreaterOrEqual(t, naming, len(tc.expected), "every expected branch names the container")
+			for _, foreign := range []string{sweepCopiedID, sweepCopiedName, sweepAbID, sweepAbName, sweepCustomID, sweepCustomName} {
+				assert.Empty(t, mainLogMentions(mainLogs, foreign), "foreign %s written into main.log", foreign)
+			}
+		})
+	}
 }

@@ -845,7 +845,10 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 	graceCtx, graceCancel := context.WithTimeout(ctx, gracePeriod)
 	defer graceCancel()
 
-	containerIDs := []string{}
+	// Every record below that names a container carries the owner Docker
+	// reported for it (container_owner from the selection read-back), on the
+	// outcome records as well as the intent ones (Spec 105 D8/D9, codex
+	// round 4).
 	for _, container := range owned {
 		m.logger.Info("Stopping container",
 			zap.String("container_id", container.ID),
@@ -853,45 +856,46 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 			zap.String("server", container.Owner),
 			zap.String("container_owner", container.Owner))
 
-		containerIDs = append(containerIDs, container.ID)
-
 		// Try graceful stop first
 		stopCmd := exec.CommandContext(graceCtx, "docker", "stop", container.ID)
 		if err := stopCmd.Run(); err != nil {
 			m.logger.Warn("Graceful stop failed, will force kill",
 				zap.String("container_id", container.ID),
+				zap.String("container_owner", container.Owner),
 				zap.Error(err))
 		} else {
 			m.logger.Info("Container stopped gracefully",
-				zap.String("container_id", container.ID))
+				zap.String("container_id", container.ID),
+				zap.String("container_owner", container.Owner))
 		}
 	}
 
 	// Force kill any remaining containers after grace period
-	if graceCtx.Err() != nil || len(containerIDs) > 0 {
-		m.logger.Info("Force killing any remaining containers")
+	m.logger.Info("Force killing any remaining containers")
 
-		killCtx, killCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer killCancel()
+	killCtx, killCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer killCancel()
 
-		for _, containerID := range containerIDs {
-			// Check if container is still running
-			psCmd := exec.CommandContext(killCtx, "docker", "ps", "-q",
-				"--filter", "id="+containerID)
-			if output, err := psCmd.Output(); err == nil && len(strings.TrimSpace(string(output))) > 0 {
-				// Still running, force kill
-				m.logger.Info("Force killing container",
-					zap.String("container_id", containerID))
+	for _, container := range owned {
+		// Check if container is still running
+		psCmd := exec.CommandContext(killCtx, "docker", "ps", "-q",
+			"--filter", "id="+container.ID)
+		if output, err := psCmd.Output(); err == nil && len(strings.TrimSpace(string(output))) > 0 {
+			// Still running, force kill
+			m.logger.Info("Force killing container",
+				zap.String("container_id", container.ID),
+				zap.String("container_owner", container.Owner))
 
-				killCmd := exec.CommandContext(killCtx, "docker", "kill", containerID)
-				if err := killCmd.Run(); err != nil {
-					m.logger.Error("Failed to force kill container",
-						zap.String("container_id", containerID),
-						zap.Error(err))
-				} else {
-					m.logger.Info("Container force killed",
-						zap.String("container_id", containerID))
-				}
+			killCmd := exec.CommandContext(killCtx, "docker", "kill", container.ID)
+			if err := killCmd.Run(); err != nil {
+				m.logger.Error("Failed to force kill container",
+					zap.String("container_id", container.ID),
+					zap.String("container_owner", container.Owner),
+					zap.Error(err))
+			} else {
+				m.logger.Info("Container force killed",
+					zap.String("container_id", container.ID),
+					zap.String("container_owner", container.Owner))
 			}
 		}
 	}
@@ -936,17 +940,20 @@ func (m *Manager) ForceCleanupAllContainers() {
 			zap.String("name", container.Name),
 			zap.String("container_owner", container.Owner))
 
-		// Use docker rm -f to force remove (kills and removes in one step)
+		// Use docker rm -f to force remove (kills and removes in one step).
+		// The outcome records carry the read-back owner too (D8/D9).
 		rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", container.ID)
 		if err := rmCmd.Run(); err != nil {
 			m.logger.Error("Failed to force remove container",
 				zap.String("id", shortID),
 				zap.String("name", container.Name),
+				zap.String("container_owner", container.Owner),
 				zap.Error(err))
 		} else {
 			m.logger.Info("Container force removed successfully",
 				zap.String("id", shortID),
-				zap.String("name", container.Name))
+				zap.String("name", container.Name),
+				zap.String("container_owner", container.Owner))
 		}
 	}
 
