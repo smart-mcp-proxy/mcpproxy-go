@@ -60,7 +60,7 @@ The block lives under a server entry in the config file:
 | `resource` | no | RFC 8707 audience the resulting token is scoped to. |
 | `scopes` | no | Scopes requested for the upstream credential. |
 | `client_id` | no¹ | Identifies the gateway to the token/authorization endpoint. |
-| `client_secret` | no | Authenticates a confidential client. A public client may omit it — PKCE still protects the code exchange. Supports `${env:VAR}` so the secret stays out of the file. |
+| `client_secret` | no | Authenticates a confidential client. A public client may omit it — PKCE still protects the code exchange. The value is sent to the token endpoint exactly as written: `${env:VAR}` / `${keyring:NAME}` references are **not** expanded for the connect flow (only the upstream MCP client's own copy of a server config is expanded), so put the literal secret here or use a public client. |
 
 ¹ `client_id` is required at runtime for the connect flow (the connector rejects an empty client ID); it is validated when the connect flow is assembled.
 
