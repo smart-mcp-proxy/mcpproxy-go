@@ -639,16 +639,16 @@ If the directory in the message is not the one you authored in, start the daemon
 with the config file you meant (`mcpproxy serve --config …`) — with
 `~/.mcpproxy/mcp_config.json` the scripts live in `~/.mcpproxy/scripts/`.
 
-**Agent tokens only, on Linux, with the scripts directory on a case-folding
-mount** (a Docker Desktop bind mount from a macOS or Windows host, vfat, an
-ext4 `casefold` directory): the administrator runs the script but every
-agent-token call reports it not found. An agent-token resolution never lists
-the directory (that is what keeps a failed call from serving as an oracle),
-and Linux has no single-entry call that reports how a name is spelled on disk,
-so on a mount where `fetch-pr.js` and `FETCH-PR.JS` are the same entry the
-daemon cannot prove it is running the file the listing reports — it refuses
-rather than guess. Keep the scripts directory on a native, case-sensitive
-filesystem (in Docker, a named volume rather than a host bind mount).
+**Case-insensitive filesystems** (the default macOS and Windows volumes; on
+Linux a Docker Desktop bind mount from a macOS or Windows host, vfat, an ext4
+`casefold` directory): the on-disk spelling still decides, for every caller.
+`FETCH-PR.JS` or `Fetch-pr.js` is not the script `fetch-pr` even where the
+filesystem would open it under that name — the daemon verifies the stored
+spelling before running anything, so the administrator's listing, the
+administrator's call and an agent-token call all agree. On a Linux case-folding
+mount that verification costs one directory listing per existing candidate
+(Linux has no single-entry call that reports how a name is spelled on disk); a
+name that does not exist pays no listing and the refusal body is unchanged.
 mcpproxy never creates the directory itself; `mkdir -p` it.
 
 ---

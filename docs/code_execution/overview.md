@@ -402,7 +402,12 @@ nor the directory, and it is byte-for-byte the same whether the directory is
 empty or full, so a failed call cannot be used to probe what is stored — and
 the proxy does not read the directory on its behalf at all — it probes the
 requested name's two candidate files and nothing else — so the refusal's cost
-does not grow with the number of stored scripts:
+does not grow with the number of stored scripts. One retained exception: on a
+Linux case-folding mount (vfat, an ext4 `casefold` directory, a Docker Desktop
+bind mount from a macOS or Windows host) a candidate that *exists* is verified
+against one directory listing, because Linux has no single-entry call that
+reports how a name is spelled on disk; a missing name still pays no listing,
+and the refusal itself is the same:
 
 ```text
 Cannot execute stored script: stored script "fetch-pr" not found (the stored-script

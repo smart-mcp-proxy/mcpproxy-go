@@ -248,22 +248,9 @@ func TestResolve_CaseDistinctNamesAreDistinctScripts(t *testing.T) {
 
 	for _, r := range bothResolvers {
 		t.Run(r.name, func(t *testing.T) {
-			if r.name == "ResolveScoped" && scopedSpellingUnverifiable(t, filepath.Join(dir, "foo.js")) {
-				// This directory folds case and the platform has no
-				// stored-spelling call (Linux on ext4 casefold / vfat / a
-				// case-insensitive bind mount): the scoped resolver cannot
-				// prove which of the two entries backs either name, so it
-				// refuses both — fail closed (codex r3 #1) — with the ordinary
-				// non-disclosing not-found; the administrator branch below
-				// still resolves each from the directory read.
-				for _, name := range []string{"foo", "FOO"} {
-					_, _, err := r.resolve(dir, name, "")
-					var notFound *NotFoundError
-					require.True(t, errors.As(err, &notFound), "want *NotFoundError, got %T: %v", err, err)
-					assert.True(t, notFound.Undisclosed)
-				}
-				return
-			}
+			// On a Linux case-folding mount the scoped resolver settles each
+			// name by one listing (codex r4 #1), so both resolvers agree
+			// everywhere.
 			src, lang, err := r.resolve(dir, "foo", "")
 			require.NoError(t, err, "foo.js is the only exact-cased match for \"foo\"")
 			assert.Equal(t, "({from: 'js'})", string(src))
@@ -472,7 +459,6 @@ func TestResolveScoped_RefusalsCarryNoHostPath(t *testing.T) {
 		dir := t.TempDir()
 		writeScript(t, dir, "dup.js", "1")
 		writeScript(t, dir, "dup.ts", "1")
-		requireScopedSpellingVerifiable(t, filepath.Join(dir, "dup.js"))
 
 		_, _, err := ResolveScoped(dir, "dup", "")
 		var ambiguous *AmbiguousError
@@ -499,7 +485,6 @@ func TestResolveScoped_RefusalsCarryNoHostPath(t *testing.T) {
 		t.Run(cell.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeScript(t, dir, "bad.js", cell.content)
-			requireScopedSpellingVerifiable(t, filepath.Join(dir, "bad.js"))
 
 			_, _, err := ResolveScoped(dir, "bad", "")
 			var invalid *InvalidError
@@ -874,9 +859,9 @@ func countDirectoryPrimitives(t *testing.T) (readDirs, lstats *int) {
 // case-insensitive, case-preserving directory lookup (APFS, NTFS, ext4
 // casefold, vfat): a path that does not exist as spelled resolves to the
 // entry whose name matches it case-insensitively. The listing it consults is
-// the simulation's own, invisible to the readDir seam. Installed BEFORE
-// countDirectoryPrimitives when both are used, so the counters see the
-// resolver's calls and not the simulation's.
+// the simulation's own (os.ReadDir directly), invisible to the readDir seam.
+// Installed BEFORE countDirectoryPrimitives when both are used, so the
+// counters see the resolver's calls and not the simulation's.
 func simulateCaseFoldingLstat(t *testing.T) {
 	t.Helper()
 	orig := lstat
@@ -899,27 +884,29 @@ func simulateCaseFoldingLstat(t *testing.T) {
 	t.Cleanup(func() { lstat = orig })
 }
 
-// requireScopedSpellingVerifiable skips a test whose scoped-resolver
-// expectations need a resolvable candidate when this directory folds case on a
-// platform without a stored-spelling call: there every scoped candidate is
-// refused, fail closed (codex r3 #1), which TestResolveScoped_FailsClosedOn
-// AFoldingDirectory pins on its own.
-func requireScopedSpellingVerifiable(t *testing.T, path string) {
-	t.Helper()
-	if scopedSpellingUnverifiable(t, path) {
-		t.Skipf("%s: the directory folds case and this platform cannot verify the stored spelling; scoped resolution fails closed here", filepath.Dir(path))
-	}
-}
-
-// scopedSpellingUnverifiable reports whether, on this platform and for this
-// existing entry, the scoped resolver cannot verify the stored spelling and
-// therefore refuses the candidate (Linux on a case-folding mount).
-func scopedSpellingUnverifiable(t *testing.T, path string) bool {
+// requireListingFreeEntryName skips a test that asserts a scoped resolution
+// reads no directory when, on this platform and for this existing entry, the
+// platform's entryName itself must list once: Linux on a case-folding mount,
+// where the listing is the retained cost of such a mount (codex r4 #1) and
+// TestResolveScoped_OnAFoldingDirectory pins the count. darwin (F_GETPATH)
+// and Windows (FindFirstFile) never list, and neither does any platform on a
+// case-sensitive lookup.
+func requireListingFreeEntryName(t *testing.T, path string) {
 	t.Helper()
 	info, err := os.Lstat(path)
 	require.NoError(t, err)
+	listed := false
+	orig := readDir
+	readDir = func(name string) ([]os.DirEntry, error) {
+		listed = true
+		return orig(name)
+	}
 	_, err = entryName(path, info)
-	return errors.Is(err, errSpellingUnverifiable)
+	readDir = orig
+	require.NoError(t, err)
+	if listed {
+		t.Skipf("%s: the directory folds case and this platform verifies the stored spelling by one listing; that count is pinned by TestResolveScoped_OnAFoldingDirectory", filepath.Dir(path))
+	}
 }
 
 // TestFoldsCase pins the constant-cost fold proof the Linux entryName relies
@@ -1023,7 +1010,7 @@ func TestResolveScoped_NeverReadsTheDirectory(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "alpha-SENTINEL.js", "1")
 	writeScript(t, dir, "beta.ts", "1")
-	requireScopedSpellingVerifiable(t, filepath.Join(dir, "beta.ts"))
+	requireListingFreeEntryName(t, filepath.Join(dir, "beta.ts"))
 
 	readDirs, _ := countDirectoryPrimitives(t)
 

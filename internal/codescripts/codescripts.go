@@ -458,9 +458,13 @@ func candidatesFor(scriptsDir, name string) ([]string, error) {
 // (see candidatesFor). So a path that exists is accepted only when the entry's
 // stored spelling (entryName, a single-entry platform call) is byte-for-byte
 // the requested one; a case-folded match is not a stored script, exactly as
-// List decides. Where the platform can only prove that the directory folds
-// case but not what the entry is called (Linux and the BSDs on ext4 casefold,
-// vfat, or a bind mount from a case-insensitive host — codex r3 #1), the
+// List decides. On Linux and the BSDs that call is the probe itself on the
+// case-sensitive filesystems every native volume is, and one directory
+// listing only where a constant-cost probe has proven that the mount folds
+// case (ext4 casefold, vfat, a bind mount from a case-insensitive host —
+// codex r3 #1, r4 #1): there an exactly spelled script still runs for every
+// caller, and the listing is the retained, documented cost of such a mount.
+// Where even that cannot answer (the listing fails, the entry vanished), the
 // candidate is refused: fail closed rather than execute a file the listing
 // does not report. The no-follow open remains the authoritative check.
 func probeCandidates(scriptsDir, name string) ([]string, error) {
@@ -478,12 +482,11 @@ func probeCandidates(scriptsDir, name string) ([]string, error) {
 		stored, err := entryName(path, probed)
 		switch {
 		case errors.Is(err, errSpellingUnverifiable):
-			// The directory folds case and this platform has no single-entry
-			// call that reports the stored spelling (Linux, the BSDs): the
-			// probe cannot tell `backdoor.js` from `backdoor.JS`, so the
-			// candidate is not a stored script to a scoped caller — fail
-			// closed. The administrator's directory read still decides
-			// exactly, so the script keeps working for administrators.
+			// The directory folds case and the platform's one listing could
+			// not read the stored spelling (Linux, the BSDs): the probe cannot
+			// tell `backdoor.js` from `backdoor.JS`, so the candidate is not a
+			// stored script to a scoped caller — fail closed. The
+			// administrator's directory read still decides exactly.
 			continue
 		case err != nil:
 			// The platform call failed for another reason: the Lstat verdict
@@ -516,11 +519,12 @@ var (
 
 // errSpellingUnverifiable is entryName's answer on a platform that has no
 // single-entry call reporting an entry's stored spelling (Linux, the BSDs)
-// when the directory demonstrably folds case: the entry the probe found may be
-// spelled `backdoor.JS`, which no discovery surface reports as a stored script,
-// and the only way to find out is the directory listing the scoped resolver
-// must not perform (Spec 105 FR-012). The scoped resolver fails closed on it.
-var errSpellingUnverifiable = errors.New("the directory folds case and the entry's stored spelling cannot be verified without listing it")
+// when the directory demonstrably folds case and the one listing that could
+// read the spelling cannot be performed (or the fold probe itself failed): the
+// entry the probe found may be spelled `backdoor.JS`, which no discovery
+// surface reports as a stored script, so the scoped resolver fails closed on
+// it (Spec 105 FR-012).
+var errSpellingUnverifiable = errors.New("the directory folds case and the entry's stored spelling could not be read from its listing")
 
 // foldsCase reports whether the directory entry at path, whose Lstat result is
 // probed, is also reachable under a different spelling of its own name — that
@@ -530,8 +534,9 @@ var errSpellingUnverifiable = errors.New("the directory folds case and the entry
 // (the lookup is case-sensitive, so the exact-name Lstat found the exact name),
 // names a different entry (likewise), or is the same entry, which only a
 // case-folding lookup — or a hard link under the swapped spelling, which the
-// scoped resolver may equally refuse — can produce. Script names and
-// extensions are ASCII (ValidateName), so ASCII case is the whole fold set.
+// listing that follows then settles by the exact stored name — can produce.
+// Script names and extensions are ASCII (ValidateName), so ASCII case is the
+// whole fold set.
 //
 // It cannot be replaced by a readlink of /proc/self/fd/N: the Linux dentry is
 // named as looked up, not as stored (ext4 casefold, vfat and bind mounts from

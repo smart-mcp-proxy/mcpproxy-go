@@ -346,6 +346,13 @@ construction and this invariant does not change them; a hidden server can still
   authorized server's prompts are collected.
 - **Shared log rotation and retention** — attribution filters what a token can
   read back, not what history survives rotation.
+- **Stored scripts on a Linux case-folding mount** — a scoped script
+  resolution never lists the scripts directory, except that on a mount where
+  the kernel folds case (vfat, ext4 `casefold`, a Docker Desktop bind mount
+  from macOS or Windows) an existing candidate is verified against one
+  directory listing, Linux having no single-entry call that reports the
+  on-disk spelling. A missing name pays no listing and the refusal body is
+  unchanged; correctly named scripts run for every caller there.
 
 **Operator-published content — keep secrets out.** Two kinds of operator-authored
 content are published to every caller by design and sit outside the invariant:
@@ -359,7 +366,8 @@ content are published to every caller by design and sit outside the invariant:
    cover: a missing-script error never enumerates the other script names, the
    script count or the scripts directory to an agent-token caller (the refusal
    is identical for an empty and a populated directory, and the directory is
-   not even read on the caller's behalf); an ambiguous or unusable script is
+   not even read on the caller's behalf — the one retained exception is listed
+   above); an ambiguous or unusable script is
    reported by name and reason only, without its host path or a raw OS error;
    the REST listing `GET /api/v1/code/scripts` answers an agent token with
    `403`; administrators keep today's listing and paths; and every
