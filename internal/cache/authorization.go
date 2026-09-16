@@ -114,13 +114,15 @@ func (a Authorization) IsAdministrator() bool {
 //   - A non-administrator reader never qualifies for an administrator snapshot,
 //     however broad its own grant, and never for a snapshot of another kind.
 //   - Between agent snapshots every dimension must contain the snapshot's: the
-//     deny-all guards first (a reader with an empty server grant, or bounded
-//     to an empty effective profile — an empty profile, or the scope a stale
-//     pin resolves to — can call no tool and so could not have produced ANY
-//     entry, its own deny-all-stamped one included; an empty AllowedServers
-//     is deny-all on every dispatch gate, so it is deny-all here too rather
-//     than the vacuous coversServers([], []) match), then effective profile
-//     scope compared as server sets (a request bounded
+//     deny-all guards first, on BOTH sides (an empty server grant, or a
+//     binding to an empty effective profile — an empty profile, or the scope
+//     a stale pin resolves to — can call no tool: as a reader it could not
+//     have produced ANY entry, its own deny-all-stamped one included, and as
+//     a producer snapshot it could not have authorized the entry it is
+//     stamped on, so no agent reader qualifies for it however broad; an
+//     empty AllowedServers is deny-all on every dispatch gate, so it is
+//     deny-all here too rather than the vacuous coversServers(x, []) match),
+//     then effective profile scope compared as server sets (a request bounded
 //     to a profile is narrower than an unscoped one; a scoped reader must
 //     currently cover every server the producer's profile exposed, so a profile
 //     deleted or narrowed since no longer reads), pin equality, allowed-server
@@ -144,6 +146,15 @@ func (a Authorization) CouldHaveProduced(reader Authorization) bool {
 	case CallerKindUser:
 		return reader.Principal != "" && reader.Principal == a.Principal
 	case CallerKindAgent:
+		// A deny-all PRODUCER snapshot — an empty server grant, or bounded
+		// to an empty effective profile — could have authorized no tool, so
+		// no entry legitimately carries it; it is provenance the agent gate
+		// does not recognise, refused before containment (which is
+		// vacuously true against an empty set). Administrator readers were
+		// admitted above: they qualify for any snapshot (kind first).
+		if len(a.AllowedServers) == 0 || (a.ProfileScoped && len(a.ProfileServers) == 0) {
+			return false
+		}
 		if len(reader.AllowedServers) == 0 {
 			return false
 		}

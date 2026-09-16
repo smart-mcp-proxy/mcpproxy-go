@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,7 +31,9 @@ var (
 	// ErrKeyNotFound: no entry under the key (or nothing left after an
 	// invalidation).
 	ErrKeyNotFound = errors.New("cache key not found")
-	// ErrKeyExpired: the entry had passed its TTL and was evicted by this read.
+	// ErrKeyExpired: the entry had passed its TTL. The ungated Get evicts it;
+	// the gated read refuses it like a miss and leaves it to the cleanup
+	// sweep (see getGuarded).
 	ErrKeyExpired = errors.New("cache key expired")
 )
 
@@ -40,15 +43,24 @@ type Manager struct {
 	logger *zap.Logger
 	stats  *Stats
 	stopCh chan struct{}
+	// writeMu serialises update: the in-memory stats snapshot it takes must
+	// be the state the transaction started from, and bbolt's own writer lock
+	// is acquired inside db.Update, after that snapshot.
+	writeMu sync.Mutex
+	// dbUpdate runs a write transaction; db.Update in production. It is a
+	// seam so a test can make the COMMIT fail after the closure succeeded
+	// (disk full at fsync), a fault no in-process bbolt setup produces.
+	dbUpdate func(fn func(tx *bbolt.Tx) error) error
 }
 
 // NewManager creates a new cache manager
 func NewManager(db *bbolt.DB, logger *zap.Logger) (*Manager, error) {
 	manager := &Manager{
-		db:     db,
-		logger: logger,
-		stats:  &Stats{},
-		stopCh: make(chan struct{}),
+		db:       db,
+		logger:   logger,
+		stats:    &Stats{},
+		stopCh:   make(chan struct{}),
+		dbUpdate: db.Update,
 	}
 
 	// Initialize buckets
@@ -179,26 +191,39 @@ func (m *Manager) Get(key string) (*Record, error) {
 }
 
 // getGuarded is Get with an optional read gate. A non-nil guard marks the
-// GATED door (read_cache). On that door the entry's provenance class is
-// decided first (Spec 105 FR-002): legacy or unrecognised provenance —
-// including a record this binary cannot decode — is refused for every caller
-// and invalidated; an internal entry is refused for every caller WITHOUT
+// GATED door (read_cache). On that door every verdict short of admission is
+// decided on the record's FRAME HEADER alone (decodeRecordHeader: version,
+// producer, expiry, size — a few hundred bytes) and never on the payload: a
+// refusal that decoded a multi-megabyte FullContent first would take a
+// timing class a nonexistent key does not, and the spec's non-disclosing
+// refusal is indistinguishable in status, body AND timing class (Spec 105
+// Definitions; codex round 2). The order is: provenance class first (Spec 105
+// FR-002) — a value with no frame, a frame this binary cannot decode, or a
+// header with legacy or unrecognised provenance is refused for every caller
+// and invalidated; then an internal entry is refused for every caller WITHOUT
 // eviction, even when it has expired (its writers' ungated readers serve
 // expired entries as stale until cleanup, and a guessable key must not let a
-// probe evict them early). Only then does expiry evict, and only then does
-// the guard run — BEFORE the access-stats update, so a refused read never
-// counts as a hit or marks the entry as accessed.
+// probe evict them early); then an expired entry is refused like a miss and
+// left for the cleanup sweep; then the guard runs on the header's producer
+// snapshot. Only an admitted read decodes the record — and
+// only then are the access stats updated, so a refused read never counts as a
+// hit or marks the entry as accessed.
 //
 // Every refusal COMMITS, as a miss. A refusal that returned its error from the
 // Update closure made bbolt roll the transaction back without a disk write,
 // while a miss committed a stats write: ~5 µs against ~10 ms, a timing class
-// a single probe could read as "a live entry sits behind this key" (spec
-// Definitions: non-disclosing means status, body AND timing class). So the
+// a single probe could read as "a live entry sits behind this key". So the
 // guard verdict, like every other outcome, is handed out through `verdict`
 // after a committed stats write; the closure returns an error only for a
 // storage fault, and m.update then restores the in-memory stats to the
-// rolled-back state.
-func (m *Manager) getGuarded(key string, guard func(*Record) error) (*Record, error) {
+// rolled-back state. The two invalidating refusals (legacy provenance, an
+// undecodable frame or body) additionally delete the key — FR-002 requires
+// the legacy entry durably invalidated by the refusal itself, not by a later
+// sweep — and that delete is bounded: bbolt rewrites the leaf minus the entry
+// and frees the value's pages by id range, never reading the payload (pinned
+// by TestGetRecordsAs_EvictingRefusalWritesArePayloadIndependent). It is also
+// one-shot per key: the entry is gone, so the second probe is a plain miss.
+func (m *Manager) getGuarded(key string, guard func(producer *Authorization) error) (*Record, error) {
 	var (
 		record  *Record
 		verdict error
@@ -206,21 +231,65 @@ func (m *Manager) getGuarded(key string, guard func(*Record) error) (*Record, er
 
 	err := m.update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(CacheBucket))
+		// bbolt hands back a view into its page memory: no copy, whatever
+		// the value's size.
 		data := bucket.Get([]byte(key))
 		if data == nil {
 			verdict = ErrKeyNotFound
 			return m.commitMiss(tx)
 		}
 
+		if guard != nil {
+			header, err := decodeRecordHeader(data)
+			if err != nil || !header.HasCurrentProvenance() {
+				// Legacy or unrecognised provenance: refuse every caller and
+				// invalidate on this first redemption, committed (FR-002).
+				// The size folded into the stats is the header's; a value
+				// with no decodable header has an unknown size (0), the
+				// way cleanup and Invalidate already treat records they
+				// cannot decode.
+				m.logger.Info("Invalidated cache entry with legacy provenance on first redemption",
+					zap.String("key", key),
+					zap.Uint8("version", header.Version),
+					zap.Bool("has_producer", header.Producer != nil),
+					zap.String("caller_kind", headerKind(header)),
+					zap.NamedError("frame", err))
+				verdict = ErrLegacyProvenance
+				return m.evict(tx, bucket, key, header.TotalSize, "invalidate legacy cache record")
+			}
+			// Internal entry: refused for every caller, kept — expired or not.
+			if header.Producer.CallerKind == CallerKindInternal {
+				verdict = ErrInternalEntry
+				return m.commitMiss(tx)
+			}
+			// Expired: refused exactly as a miss and LEFT for the cleanup
+			// sweep (CleanupInterval), which evicts expired entries anyway.
+			// Deleting here would rewrite the entry's leaf — work a miss
+			// never does, and proportional to whatever the leaf's other
+			// values hold — for no gain: nothing requires the gated door
+			// to evict, and the ungated Get keeps doing so for its own
+			// readers.
+			if header.expired() {
+				verdict = ErrKeyExpired
+				return m.commitMiss(tx)
+			}
+			if err := guard(header.Producer); err != nil {
+				verdict = err
+				return m.commitMiss(tx)
+			}
+		}
+
+		// Admitted (or the ungated door): the payload is decoded from here on.
 		record = &Record{}
 		if err := record.UnmarshalBinary(data); err != nil {
 			record = nil
 			if guard == nil {
 				return fmt.Errorf("unmarshal cache record: %w", err)
 			}
-			// Gated door: a record this binary cannot decode is provenance it
-			// does not recognise — refuse and invalidate, the way cleanup
-			// already drops undecodable records. Its size is unknown.
+			// A frame the gate admitted around a body this binary cannot
+			// decode: provenance it does not recognise — invalidate, the
+			// way cleanup drops undecodable records. The reader was
+			// admitted, so the decode it paid for is not a refusal oracle.
 			m.logger.Info("Invalidated undecodable cache entry on gated read",
 				zap.String("key", key),
 				zap.Error(err))
@@ -228,43 +297,13 @@ func (m *Manager) getGuarded(key string, guard func(*Record) error) (*Record, er
 			return m.evict(tx, bucket, key, 0, "invalidate undecodable cache record")
 		}
 
-		if guard != nil {
-			// Legacy provenance: refuse every caller and invalidate on this
-			// first redemption, committed (FR-002).
-			if !record.HasCurrentProvenance() {
-				m.logger.Info("Invalidated cache entry with legacy provenance on first redemption",
-					zap.String("key", key),
-					zap.String("tool", record.ToolName),
-					zap.Uint8("version", record.Version),
-					zap.Bool("has_producer", record.Producer != nil),
-					zap.String("caller_kind", producerKind(record)))
-				size := record.TotalSize
-				record = nil
-				verdict = ErrLegacyProvenance
-				return m.evict(tx, bucket, key, size, "invalidate legacy cache record")
-			}
-			// Internal entry: refused for every caller, kept — expired or not.
-			if record.Producer.CallerKind == CallerKindInternal {
-				record = nil
-				verdict = ErrInternalEntry
-				return m.commitMiss(tx)
-			}
-		}
-
-		// Expired: evict in this transaction and COMMIT the eviction.
+		// Expired on the ungated door (the gated door already refused it on
+		// the header): evict in this transaction and COMMIT the eviction.
 		if record.IsExpired() {
 			size := record.TotalSize
 			record = nil
 			verdict = ErrKeyExpired
 			return m.evict(tx, bucket, key, size, "evict expired cache record")
-		}
-
-		if guard != nil {
-			if err := guard(record); err != nil {
-				record = nil
-				verdict = err
-				return m.commitMiss(tx)
-			}
 		}
 
 		// Update access stats
@@ -292,21 +331,25 @@ func (m *Manager) getGuarded(key string, guard func(*Record) error) (*Record, er
 	return record, nil
 }
 
-// update runs fn inside a bbolt write transaction. bbolt rolls the
-// transaction back when fn returns an error, so the in-memory stats are
-// restored to what they were when the transaction began: the counters never
-// record a mutation the bucket did not commit, and GetStats agrees with the
-// bucket on every path, not only the happy one. bbolt serialises writers, so
-// the snapshot is taken under the same exclusion the mutation runs under.
+// update runs fn inside a bbolt write transaction. The in-memory stats are
+// mutated inside fn but only STAY mutated once the transaction has committed:
+// whether fn returned an error or the commit itself failed afterwards (page
+// write, file grow, fsync — disk full), bbolt rolled the transaction back, and
+// the counters are restored to what they were when it began. So the counters
+// never record a mutation the bucket did not commit, and GetStats agrees with
+// the bucket on every path, not only the happy one. writeMu serialises the
+// snapshot with the transaction: it is taken before bbolt's writer lock is
+// acquired, so without it a concurrent writer's committed delta could be
+// snapshotted away by this one's restore.
 func (m *Manager) update(fn func(tx *bbolt.Tx) error) error {
-	return m.db.Update(func(tx *bbolt.Tx) error {
-		prev := *m.stats
-		if err := fn(tx); err != nil {
-			*m.stats = prev
-			return err
-		}
-		return nil
-	})
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+	prev := *m.stats
+	if err := m.dbUpdate(fn); err != nil {
+		*m.stats = prev
+		return err
+	}
+	return nil
 }
 
 // commitMiss records a miss and persists the stats — the one committing
@@ -329,12 +372,12 @@ func (m *Manager) evict(tx *bbolt.Tx, bucket *bbolt.Bucket, key string, size int
 	return m.saveStats(tx)
 }
 
-// producerKind is the caller kind stamped on the record, "" when unstamped.
-func producerKind(r *Record) string {
-	if r.Producer == nil {
+// headerKind is the caller kind stamped in the header, "" when unstamped.
+func headerKind(h recordHeader) string {
+	if h.Producer == nil {
 		return ""
 	}
-	return r.Producer.CallerKind
+	return h.Producer.CallerKind
 }
 
 // GetRecords retrieves paginated records from a cached response without a
@@ -356,19 +399,20 @@ func (m *Manager) GetRecords(key string, offset, limit int) (*ReadCacheResponse,
 //     refused with ErrInternalEntry WITHOUT eviction, since their keys are
 //     guessable and their writers' ungated readers depend on them.
 func (m *Manager) GetRecordsAs(key string, offset, limit int, reader Authorization) (*ReadCacheResponse, error) {
-	return m.getRecords(key, offset, limit, func(r *Record) error {
+	return m.getRecords(key, offset, limit, func(producer *Authorization) error {
 		// getGuarded has already refused legacy provenance (invalidated) and
-		// internal entries (kept), so a producer of a request kind is
-		// present here; CouldHaveProduced still answers false for internal
-		// as defence in depth.
-		if !r.Producer.CouldHaveProduced(reader) {
+		// internal entries (kept), so the producer is of a request kind
+		// here; CouldHaveProduced still answers false for internal as
+		// defence in depth. It sees the frame header's snapshot, never the
+		// payload.
+		if !producer.CouldHaveProduced(reader) {
 			return ErrUnauthorizedRead
 		}
 		return nil
 	})
 }
 
-func (m *Manager) getRecords(key string, offset, limit int, guard func(*Record) error) (*ReadCacheResponse, error) {
+func (m *Manager) getRecords(key string, offset, limit int, guard func(producer *Authorization) error) (*ReadCacheResponse, error) {
 	record, err := m.getGuarded(key, guard)
 	if err != nil {
 		return nil, err

@@ -291,8 +291,11 @@ Server scoping is enforced at three levels:
    expired entry, an internal entry, a key that never existed — answers with
    the same `cache key not found` body, status and timing (a refusal commits
    the same stats write a miss does), so a key cannot be probed for
-   existence. An expired entry is evicted by the read that finds it expired,
-   so a second read of that key is a plain miss.
+   existence. A refusal also never decodes the entry's payload: the gate
+   reads a small header stored in front of each record, so a multi-megabyte
+   entry is refused as quickly as a one-line one. An expired entry is refused
+   like a miss and left for the periodic cleanup sweep to evict, so the
+   refusing read writes exactly what a miss writes.
 
    **Upgrading.** Entries written by any release before this one — including
    the immediately preceding one, which stamped a producer but no schema

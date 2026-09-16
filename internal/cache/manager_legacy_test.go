@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -313,5 +314,199 @@ func TestGetRecordsAs_LegacyInvalidationIsPerKey(t *testing.T) {
 	}
 	if _, err := m.GetRecordsAs("stamped", 0, 10, admin); err != nil {
 		t.Fatalf("the stamped neighbour must still read: %v", err)
+	}
+}
+
+// Codex round 2, finding 1: a current-version agent snapshot that could have
+// authorized no tool — an empty server grant, or an empty effective profile
+// (an empty profile, or the scope a stale pin resolves to) — is not one any
+// request legitimately produced an entry under. The reader-side deny-all
+// guards (codex round 1) left the PRODUCER side open: containment against an
+// empty set is vacuously true, so any broader agent redeemed such a record.
+// At the door it must be refused for every agent reader with the
+// non-disclosing verdict (a miss to the handler), kept (it is a stamped
+// record, not legacy provenance), and still readable by an administrator
+// (FR-001, kind first).
+func TestGetRecordsAs_DenyAllProducerSnapshotRefusedForAgentReaders(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	m, err := NewManager(db, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	producers := map[string]Authorization{
+		"nil-grant":   {CallerKind: CallerKindAgent, Principal: "rotated", AllowedServers: nil, Permissions: []string{"read"}},
+		"empty-grant": {CallerKind: CallerKindAgent, Principal: "rotated", AllowedServers: []string{}, Permissions: []string{"read"}},
+		"empty-profile": {CallerKind: CallerKindAgent, Principal: "star", AllowedServers: []string{"*"},
+			Permissions: []string{"read", "write", "destructive"}, Profile: "empty", ProfileScoped: true, ProfileServers: []string{}},
+		"stale-pin": {CallerKind: CallerKindAgent, Principal: "star-pinned", AllowedServers: []string{"*"},
+			Permissions: []string{"read", "write", "destructive"}, ProfilePin: "research", Profile: "research",
+			ProfileScoped: true, ProfileServers: nil},
+	}
+	readers := []struct {
+		name   string
+		reader Authorization
+	}{
+		{"broad agent", Authorization{CallerKind: CallerKindAgent, Principal: "broad",
+			AllowedServers: []string{"github", "weather"}, Permissions: []string{"read", "write"}}},
+		{"wildcard agent", Authorization{CallerKind: CallerKindAgent, Principal: "star",
+			AllowedServers: []string{"*"}, Permissions: []string{"read", "write", "destructive"}}},
+		{"pinned wildcard agent", Authorization{CallerKind: CallerKindAgent, Principal: "star-pinned",
+			AllowedServers: []string{"*"}, Permissions: []string{"read", "write", "destructive"},
+			ProfilePin: "research", Profile: "research", ProfileScoped: true, ProfileServers: []string{"github"}}},
+	}
+	for name, producer := range producers {
+		if err := m.StoreAs(name, "t", nil, `[{"name":"SENTINEL_DENY_ALL_PRODUCER"}]`, "", 1, producer); err != nil {
+			t.Fatal(err)
+		}
+		for _, rd := range readers {
+			t.Run(name+"/"+rd.name, func(t *testing.T) {
+				resp, err := m.GetRecordsAs(name, 0, 10, rd.reader)
+				if !errors.Is(err, ErrUnauthorizedRead) || resp != nil {
+					t.Fatalf("%s redeemed a record stamped with a deny-all producer %+v: resp=%+v err=%v", rd.name, producer, resp, err)
+				}
+				if _, ok := m.Peek(name); !ok {
+					t.Fatal("a refused stamped record must not be evicted")
+				}
+			})
+		}
+		t.Run(name+"/admin control", func(t *testing.T) {
+			resp, err := m.GetRecordsAs(name, 0, 10, Authorization{CallerKind: CallerKindAdmin})
+			if err != nil || len(resp.Records) != 1 {
+				t.Fatalf("an administrator qualifies for any snapshot: resp=%+v err=%v", resp, err)
+			}
+		})
+	}
+}
+
+// putFramedRecord writes a value in the framed layout with an arbitrary
+// header and body — the shapes a later or corrupted binary could leave: a
+// header the gate must classify WITHOUT reading the body.
+func putFramedRecord(t *testing.T, db *bbolt.DB, key string, header, body []byte) {
+	t.Helper()
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(CacheBucket)).Put([]byte(key), encodeRecordFrame(header, body))
+	}); err != nil {
+		t.Fatalf("put framed record: %v", err)
+	}
+}
+
+// Codex round 2, finding 3: the gate now decides provenance on the frame
+// header alone, so the unrecognised-provenance rules the raw-JSON fixtures
+// above pin (unknown version, unknown or empty caller kind, undecodable)
+// must hold on the HEADER too — a raw fixture is legacy simply for having no
+// frame, which would let a header-level check go vacuous. Each shape is
+// refused for every caller with ErrLegacyProvenance and durably invalidated;
+// the body is never consulted (a body the gate would have admitted sits
+// behind every bad header here).
+func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
+	now := time.Now()
+	goodBody := func(key string) []byte {
+		rec := &Record{Key: key, ToolName: "t", FullContent: `[{"name":"SENTINEL-FRAMED"}]`, TotalSize: 27,
+			Timestamp: now, ExpiresAt: now.Add(time.Hour), CreatedAt: now, LastAccessed: now,
+			Version: RecordVersion, Producer: &Authorization{CallerKind: CallerKindAdmin}}
+		body, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	headerJSON := func(doc map[string]interface{}) []byte {
+		data, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	current := map[string]interface{}{"version": RecordVersion, "expires_at": now.Add(time.Hour), "total_size": 27}
+	with := func(extra map[string]interface{}) map[string]interface{} {
+		doc := map[string]interface{}{}
+		for k, v := range current {
+			doc[k] = v
+		}
+		for k, v := range extra {
+			doc[k] = v
+		}
+		return doc
+	}
+
+	type fixture struct {
+		name   string
+		header []byte
+		body   func(key string) []byte
+		// admittedOnly restricts the readers to the kinds the header admits
+		// (the body is reached only after admission).
+		admittedOnly bool
+	}
+	fixtures := []fixture{
+		{name: "header: no producer", header: headerJSON(current), body: goodBody},
+		{name: "header: unknown version", header: headerJSON(with(map[string]interface{}{"version": 99, "producer": map[string]interface{}{"caller_kind": CallerKindAdmin}})), body: goodBody},
+		{name: "header: empty caller kind", header: headerJSON(with(map[string]interface{}{"producer": map[string]interface{}{"caller_kind": ""}})), body: goodBody},
+		{name: "header: unknown caller kind", header: headerJSON(with(map[string]interface{}{"producer": map[string]interface{}{"caller_kind": "superadmin"}})), body: goodBody},
+		{name: "header: undecodable version", header: headerJSON(with(map[string]interface{}{"version": 300, "producer": map[string]interface{}{"caller_kind": CallerKindAdmin}})), body: goodBody},
+		{name: "header: not JSON", header: []byte("not a header"), body: goodBody},
+		{name: "header: oversize", header: headerJSON(with(map[string]interface{}{"producer": map[string]interface{}{"caller_kind": CallerKindAdmin},
+			"pad": strings.Repeat("x", maxRecordHeaderLen+1)})), body: goodBody},
+		{name: "header: length beyond the value"},
+		// The one shape the gate admits on the header and only then finds
+		// undecodable: still legacy, still invalidated (after admission, so
+		// the payload-sized decode is the admitted reader's, not a probe's).
+		// Readers the header does NOT admit are refused on the header, with
+		// the non-disclosing verdict, and never reach the body.
+		{name: "body: undecodable behind an admitted header",
+			header:       headerJSON(with(map[string]interface{}{"producer": map[string]interface{}{"caller_kind": CallerKindAdmin}})),
+			body:         func(string) []byte { return []byte("{not json") },
+			admittedOnly: true},
+	}
+	for _, fx := range fixtures {
+		for _, rd := range legacyReaders() {
+			if fx.admittedOnly && !rd.reader.IsAdministrator() {
+				continue
+			}
+			if fx.admittedOnly && rd.reader.CallerKind == CallerKindAnonymous {
+				continue // ranks below an authenticated administrator's snapshot
+			}
+			t.Run(fx.name+"/"+rd.name, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "cache.db")
+				m, db := openManagerAt(t, path)
+				const key = "framed"
+				if fx.name == "header: length beyond the value" {
+					// A frame whose length field promises more header than
+					// the value holds.
+					if err := db.Update(func(tx *bbolt.Tx) error {
+						value := encodeRecordFrame([]byte("{}"), nil)
+						value[len(recordFrameMagic)+recordFrameLenSize-1] = 0xff
+						return tx.Bucket([]byte(CacheBucket)).Put([]byte(key), value)
+					}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					putFramedRecord(t, db, key, fx.header, fx.body(key))
+				}
+
+				resp, err := m.GetRecordsAs(key, 0, 10, rd.reader)
+				if !errors.Is(err, ErrLegacyProvenance) {
+					t.Fatalf("%s: got err=%v resp=%v, want ErrLegacyProvenance", rd.name, err, resp)
+				}
+				if resp != nil {
+					t.Fatalf("refused read returned content: %+v", resp)
+				}
+				if _, ok := m.Peek(key); ok {
+					t.Fatal("record still present after the refused redemption")
+				}
+				m.Close()
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				m2, db2 := openManagerAt(t, path)
+				defer db2.Close()
+				defer m2.Close()
+				if got := onDiskEntryCount(t, db2); got != 0 {
+					t.Fatalf("on-disk count after restart = %d, want 0", got)
+				}
+			})
+		}
 	}
 }

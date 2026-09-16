@@ -319,9 +319,27 @@ func TestAuthorization_CallerKindFirst(t *testing.T) {
 		{"empty-grant agent reads nothing: another empty-grant agent's entry", emptyGrant, emptyGrantWider, false},
 		{"empty-grant agent reads nothing: unscoped agent entry", broad, emptyGrant, false},
 		{"empty-grant agent reads nothing: admin entry", admin, emptyGrant, false},
-		{"broad agent reads an empty-grant agent's entry (it covers the empty set)", emptyGrant, broad, true},
 		{"admin reads an empty-grant agent's entry (kind first)", emptyGrant, admin, true},
 		{"profile-bound admin reads an empty-grant agent's entry (kind first)", emptyGrant, adminInProfile, true},
+
+		// Codex round 2: the deny-all rule is symmetric. A current-version
+		// AGENT snapshot with an empty server grant, or bounded to an empty
+		// effective profile, could not have authorized any tool, so no entry
+		// legitimately carries it as a PRODUCER — such a stamp is provenance
+		// the gate does not recognise, and containment against the empty set
+		// (coversServers(x, []) is vacuously true) must not let a broader
+		// agent redeem it. Administrator readers qualify for any snapshot
+		// (FR-001, kind first); the anonymous administrator-shaped kind too.
+		{"broad agent cannot read an empty-grant (nil) producer snapshot", emptyGrant, broad, false},
+		{"broad agent cannot read an empty-grant ([]) producer snapshot", emptyGrantList, broad, false},
+		{"wildcard agent cannot read an empty-grant producer snapshot", emptyGrant, wildcard, false},
+		{"unscoped agent cannot read an empty-profile producer snapshot", agentInEmptyProfile, wildcard, false},
+		{"unscoped agent cannot read a stale-pin producer snapshot", stalePin, wildcard, false},
+		{"scoped agent cannot read an empty-profile producer snapshot", agentInEmptyProfile, pinnedWildcard, false},
+		{"pinned agent cannot read a stale-pin producer snapshot", stalePin, pinnedWildcard, false},
+		{"admin reads an empty-profile agent's entry (kind first)", agentInEmptyProfile, admin, true},
+		{"admin reads a stale-pin agent's entry (kind first)", stalePin, admin, true},
+		{"anonymous reads an empty-grant agent's entry (kind first)", emptyGrant, Authorization{CallerKind: CallerKindAnonymous}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
