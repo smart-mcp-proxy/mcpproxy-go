@@ -360,13 +360,18 @@ content are published to every caller by design and sit outside the invariant:
    script count or the scripts directory to an agent-token caller (the refusal
    is identical for an empty and a populated directory, and the directory is
    never read on the caller's behalf: on Linux and the BSDs the scoped
-   resolver answers from an exact-name index of the directory that is
-   maintained off the request path — built when the daemon starts and
-   refreshed by a background rebuild whenever a call finds the directory
-   changed — so no call ever lists it, whatever name is asked for and however
-   many scripts are stored; a script added to the directory becomes callable
-   by agent tokens after the next index refresh, milliseconds later, while
-   administrators see it immediately); an ambiguous or unusable script is
+   resolver answers ONLY from an exact-name index of the directory that
+   matches its CURRENT state — built when the daemon starts and refreshed by
+   a background rebuild whenever a call finds the directory changed — so no
+   call ever lists it, whatever name is asked for and however many scripts
+   are stored; a call that lands while that rebuild is scheduled or in
+   flight is refused once, exactly like a call against a directory it has
+   never seen, rather than answered from what the index held a moment ago —
+   an entry the index once listed under an earlier spelling must never still
+   authorize it after a rename. A script added to (or renamed within) the
+   directory becomes callable by agent tokens after the next index refresh,
+   milliseconds later — retry a call refused in that window — while
+   administrators see the change immediately); an ambiguous or unusable script is
    reported by
    name and reason only, without its host path or a raw OS error;
    the REST listing `GET /api/v1/code/scripts` answers an agent token with

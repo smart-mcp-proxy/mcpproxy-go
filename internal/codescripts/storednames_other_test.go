@@ -204,7 +204,7 @@ func TestResolveScoped_OnAFoldingDirectory(t *testing.T) {
 		assert.Equal(t, "({exact: true})", string(src))
 		assert.Equal(t, LanguageJavaScript, lang)
 		assert.Equal(t, 0, *readDirs)
-		assert.Equal(t, 2, *lstats, "the directory Lstat plus the one hit's own probe")
+		assert.Equal(t, 3, *lstats, "the directory Lstat, the hit's own probe, and the post-open generation recheck (round 8 MUST-FIX)")
 
 		src, lang, err = Resolve(dir, "exact", "")
 		require.NoError(t, err)
@@ -236,12 +236,109 @@ func TestResolveScoped_OnAFoldingDirectory(t *testing.T) {
 	})
 
 	t.Run("the index holds the stored spelling, so the fold is settled by an exact lookup", func(t *testing.T) {
-		names, err := storedNamesFor(dir)
+		names, _, err := storedNamesFor(dir)
 		require.NoError(t, err)
 		assert.Contains(t, names, "backdoor.JS")
 		assert.NotContains(t, names, "backdoor.js")
 		assert.Contains(t, names, "exact.js")
 	})
+}
+
+// TestResolveScoped_StaleIndexRefusesARenamedEntry (Spec 105 FR-012, codex r7
+// #1 / round 8 MUST-FIX): earlier rounds scheduled a rebuild when a request
+// found the index behind the directory's generation, but still answered
+// from the index as it stood before — a stale index that once listed an
+// entry under an EARLIER spelling stayed good enough to authorize it. On a
+// case-folding mount that executes the wrong file: warm the index with
+// `report.js`, then rename it to `REPORT.JS` (a real rename, so the
+// directory's generation genuinely moves); the stale index still contains
+// `report.js`, and that entry's own Lstat — simulated through the lstat seam
+// so the fold is exercised on the case-sensitive filesystems CI runs on —
+// folds onto the renamed file and succeeds, which round 7 trusted as a hit.
+// The fix: the index answers ONLY for the generation it was built against,
+// so a request landing while the rebuild is merely scheduled is refused
+// exactly like a never-built index, without ever probing the candidate the
+// stale index used to hold.
+func TestResolveScoped_StaleIndexRefusesARenamedEntry(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "report.js", "({pwned: true})")
+	simulateCaseFoldingLstat(t)
+	warmStoredNames(t, dir)
+	held := holdIndexRebuilds(t)
+
+	outliveStamp(t, dir)
+	before, err := lstat(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.Rename(filepath.Join(dir, "report.js"), filepath.Join(dir, "REPORT.JS")))
+	waitForGenerationChange(t, dir, dirGenerationOf(before))
+
+	readDirs, lstats := countDirectoryPrimitives(t)
+	src, _, err := ResolveScoped(dir, "report", "")
+	requireScopedNotFound(t, err)
+	assert.Nil(t, src, "the stale index must never authorize the renamed file, whatever its own Lstat folds onto")
+	assert.Equal(t, 0, *readDirs, "the refusal lists nothing (it is fail-closed on the generation mismatch alone)")
+	assert.Equal(t, 1, *lstats, "one directory Lstat decides staleness; the stale index's candidate is never probed")
+	assert.Equal(t, 1, held.land(), "the rename moved the generation: one rebuild is scheduled")
+	assert.Equal(t, 1, *readDirs, "which is the one listing, off the request path")
+
+	// The rebuild has landed: the index now holds REPORT.JS, not report.js.
+	// The old spelling is still refused — never executed — for the same
+	// reason the administrator's byte-for-byte decision refuses it too.
+	src, _, err = ResolveScoped(dir, "report", "")
+	requireScopedNotFound(t, err)
+	assert.Nil(t, src)
+
+	var notFound *NotFoundError
+	_, _, err = Resolve(dir, "report", "")
+	require.True(t, errors.As(err, &notFound))
+	assert.False(t, notFound.Undisclosed)
+}
+
+// TestResolveScoped_GenerationChangeBetweenLookupAndOpenRefuses (round 8
+// MUST-FIX, the lookup→open race): an index hit is re-probed by the
+// candidate's own Lstat, but neither that nor a successful no-follow open
+// proves the file just opened is the one the index vouched for — a write
+// landing between the probe and the open can leave a DIFFERENT file
+// occupying the exact name for the descriptor's entire lifetime, and a
+// no-follow open does not compare names, only symlink status. The directory
+// generation is read once more after the open and must still equal the one
+// read before the lookup; a mismatch closes the descriptor and refuses. The
+// race is simulated deterministically through the lstat seam: the
+// directory's SECOND Lstat this request performs (the post-open recheck) is
+// where a real race could land at an arbitrary point, so that is where the
+// swap happens here.
+func TestResolveScoped_GenerationChangeBetweenLookupAndOpenRefuses(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "alpha.js", "({original: true})")
+	warmStoredNames(t, dir)
+
+	orig := lstat
+	seenDirLstats := 0
+	t.Cleanup(func() { lstat = orig })
+	lstat = func(name string) (os.FileInfo, error) {
+		if name == dir {
+			seenDirLstats++
+			if seenDirLstats == 2 {
+				// Races the open: a write lands after the index vouched for
+				// the candidate but before the descriptor is trusted.
+				require.NoError(t, os.Remove(filepath.Join(dir, "alpha.js")))
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "alpha.js"), []byte("({swapped: true})"), 0o644))
+				// A same-name remove-then-recreate can land on the exact
+				// same coarse directory timestamp as the original write (a
+				// container filesystem observed to do this even at
+				// nanosecond "resolution"): force the generation forward so
+				// it is unambiguously the write's, not the clock's
+				// granularity, that the recheck must catch.
+				require.NoError(t, os.Chtimes(dir, time.Now(), time.Now().Add(time.Second)))
+			}
+		}
+		return orig(name)
+	}
+
+	src, _, err := ResolveScoped(dir, "alpha", "")
+	requireScopedNotFound(t, err)
+	assert.Nil(t, src, "a file swapped in during the open's own window must never be read, original or swapped content alike")
+	assert.Equal(t, 2, seenDirLstats, "the directory Lstat before the lookup and the recheck after the open")
 }
 
 // TestResolveScoped_ColdRequestCostIsIndependentOfDirectorySize (codex r6
@@ -285,7 +382,7 @@ func TestResolveScoped_ColdRequestCostIsIndependentOfDirectorySize(t *testing.T)
 	require.NoError(t, err, "after the rebuild lands the same request executes")
 	assert.Equal(t, "1", string(src))
 	assert.Equal(t, 0, *rd)
-	assert.Equal(t, 2, *ls, "the directory Lstat plus the hit's own probe")
+	assert.Equal(t, 3, *ls, "the directory Lstat, the hit's own probe, and the post-open generation recheck (round 8 MUST-FIX)")
 	assert.Equal(t, 0, held.land())
 }
 
@@ -392,10 +489,16 @@ func waitForGenerationChange(t *testing.T, dir string, was dirGeneration) {
 	}
 }
 
-// TestStoredNames_RemovedScriptFailsClosedBeforeTheRebuildLands: an index
-// hit is never trusted on its own — the candidate's Lstat (and the no-follow
-// open) decide — so a script removed after the listing is refused at once,
-// before the rebuild that will drop it from the index has landed.
+// TestStoredNames_RemovedScriptFailsClosedBeforeTheRebuildLands: a stale
+// index — its rebuild scheduled by a generation change but not yet landed —
+// is refused exactly as a never-built index is (round 8 MUST-FIX): a script
+// removed after the last listing is refused at once, before the rebuild
+// that will drop it from the index has even STARTED to run, and WITHOUT
+// probing the candidate the stale index used to hold (earlier rounds still
+// answered from that stale index and let the candidate's own Lstat, which
+// happened to miss here, catch the removal — a stale index is refused on
+// the generation mismatch alone now, so there is nothing left for a
+// candidate probe to catch or miss).
 func TestStoredNames_RemovedScriptFailsClosedBeforeTheRebuildLands(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "alpha.js", "1")
@@ -411,10 +514,10 @@ func TestStoredNames_RemovedScriptFailsClosedBeforeTheRebuildLands(t *testing.T)
 	_, _, err = ResolveScoped(dir, "alpha", "")
 	requireScopedNotFound(t, err)
 	assert.Equal(t, 0, *readDirs, "the refusal lists nothing")
-	assert.Equal(t, 2, *lstats, "the directory Lstat and the stale hit's own probe, which misses")
+	assert.Equal(t, 1, *lstats, "the directory Lstat alone decides staleness; the stale index's candidate is never probed (round 8 MUST-FIX)")
 
 	assert.Equal(t, 1, held.land(), "the removal moved the generation: one rebuild")
-	names, err := storedNamesFor(dir)
+	names, _, err := storedNamesFor(dir)
 	require.NoError(t, err)
 	assert.NotContains(t, names, "alpha.js")
 	_, _, err = ResolveScoped(dir, "alpha", "")
@@ -468,6 +571,98 @@ func TestStoredNames_UnsettledIndexRefreshesAtMostOncePerWindow(t *testing.T) {
 	requests("settled", "missing", "gamma", "missing")
 	assert.Equal(t, 0, held.land(), "the listing landed past the stamp's settle time: the index is trusted")
 	assert.Equal(t, 2, *readDirs)
+}
+
+// TestStoredNames_RebuildAttemptsAreBounded (round 8 SHOULD): a directory
+// whose generation moves on every observation — as another process
+// continuously renaming an entry would leave it — must not keep a rebuild
+// goroutine re-listing forever, and must not keep Warm blocked forever
+// either. rebuild gives up after maxRebuildAttempts listings whatever the
+// directory keeps doing next; what the last attempt installed simply goes
+// stale against the directory's true current generation, and the next
+// request's own check (the MUST-FIX rule above) refuses it rather than this
+// loop spinning to prove something it never can.
+func TestStoredNames_RebuildAttemptsAreBounded(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "alpha.js", "1")
+	quiesceIndexRebuilds()
+
+	origLstat, origReadDir := lstat, readDir
+	var lstats, readDirs int
+	t.Cleanup(func() { lstat, readDir = origLstat, origReadDir })
+	lstat = func(name string) (os.FileInfo, error) {
+		if name == dir {
+			lstats++
+			// Simulate another process continuously changing the directory:
+			// its own generation moves on every observation, so rebuild's
+			// list-then-recheck can never confirm stability.
+			require.NoError(t, os.Chtimes(dir, time.Now(), time.Now().Add(time.Duration(lstats)*time.Second)))
+		}
+		return origLstat(name)
+	}
+	readDir = func(name string) ([]fs.DirEntry, error) {
+		readDirs++
+		return origReadDir(name)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- Warm(dir) }()
+	select {
+	case err := <-done:
+		require.NoError(t, err, "a continuously changing directory must not fail Warm outright")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Warm did not return against a continuously changing directory (round 8 SHOULD)")
+	}
+	assert.Equal(t, maxRebuildAttempts, readDirs, "one rebuild lists at most maxRebuildAttempts times, however long the directory keeps changing")
+}
+
+// TestStoredNames_RebuildBackoffThrottlesReschedules (round 8 SHOULD): once
+// a rebuild ends — landing cleanly or giving up after maxRebuildAttempts —
+// the next one for the same directory may not start until rebuildBackoff has
+// passed, whatever the request rate: without this, a directory that changes
+// on every request would let scheduleRebuildLocked spawn a fresh rebuild the
+// instant the bounded one above gives up, resuming the same unbounded
+// listing cost one goroutine later. A request inside the backoff still
+// costs one Lstat and answers fail-closed from whatever the index holds (or
+// does not); only the new rebuild goroutine is withheld.
+func TestStoredNames_RebuildBackoffThrottlesReschedules(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "alpha.js", "1")
+	warmStoredNames(t, dir)
+
+	quiesceIndexRebuilds()
+	orig := indexClock
+	t.Cleanup(func() { indexClock = orig })
+	base := orig()
+	indexClock = func() time.Time { return base }
+
+	outliveStamp(t, dir)
+	before, err := lstat(dir)
+	require.NoError(t, err)
+	writeScript(t, dir, "beta.ts", "1")
+	waitForGenerationChange(t, dir, dirGenerationOf(before))
+
+	held := holdIndexRebuilds(t)
+	_, _, err = ResolveScoped(dir, "beta", "")
+	requireScopedNotFound(t, err)
+	assert.Equal(t, 1, held.land(), "the generation change schedules the first rebuild")
+	// indexClock is still `base`: rebuild just set nextAttempt to
+	// base+rebuildBackoff.
+
+	outliveStamp(t, dir)
+	before2, err := lstat(dir)
+	require.NoError(t, err)
+	writeScript(t, dir, "gamma.ts", "1")
+	waitForGenerationChange(t, dir, dirGenerationOf(before2))
+
+	_, _, err = ResolveScoped(dir, "gamma", "")
+	requireScopedNotFound(t, err)
+	assert.Equal(t, 0, held.land(), "a request inside the backoff window schedules nothing, though the generation moved again")
+
+	indexClock = func() time.Time { return base.Add(rebuildBackoff) }
+	_, _, err = ResolveScoped(dir, "gamma", "")
+	requireScopedNotFound(t, err)
+	assert.Equal(t, 1, held.land(), "past the backoff, the still-unresolved generation mismatch schedules again")
 }
 
 // TestStoredNames_WarmListsAfterAnInFlightRebuild: Warm is the server's

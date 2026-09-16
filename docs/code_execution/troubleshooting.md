@@ -647,14 +647,18 @@ filesystem would open it under that name — the daemon verifies the stored
 spelling before running anything, so the administrator's listing, the
 administrator's call and an agent-token call all agree. On Linux and the BSDs
 (which have no single-entry call that reports how a name is spelled on disk)
-an agent-token call is answered from an exact-name index of the directory
-maintained off the request path — built at daemon start, validated by one
-stat of the directory per call, refreshed in the background when the
+an agent-token call is answered ONLY from an exact-name index of the
+directory that matches its CURRENT state — built at daemon start, validated
+by one stat of the directory per call, refreshed in the background when the
 directory changes — so no call lists the directory, whatever name is asked
-for, and the refusal body is unchanged. A script you have just added is
-callable by agent tokens after the next refresh (milliseconds; a call in that
-window gets the ordinary not-found refusal) and by administrators at once.
-mcpproxy never creates the directory itself; `mkdir -p` it.
+for, and the refusal body is unchanged. A call landing while that refresh is
+scheduled or in flight is refused exactly as one against a directory never
+seen before, never served from what the index held a moment ago — a rename
+cannot have a scoped caller's own probe fold onto whatever now occupies the
+old name. A script you have just added or renamed is callable by agent
+tokens after the next refresh (milliseconds; retry a call refused in that
+window) and by administrators at once. mcpproxy never creates the directory
+itself; `mkdir -p` it.
 
 ---
 

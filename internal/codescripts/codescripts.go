@@ -75,6 +75,14 @@ const (
 // (Unix maps the kernel's no-follow rejection onto it).
 var errNonRegular = errors.New("not a regular file")
 
+// errIndexGenerationChanged is what a post-open verifyUnchanged closure
+// returns when the scripts directory's generation moved between the index
+// lookup that produced a hit and this open (round 8 MUST-FIX, the
+// lookup→open race): resolve treats it as an ordinary not-found, never as an
+// unreadable-directory error, so it discloses nothing beyond the caller's
+// own requested name.
+var errIndexGenerationChanged = errors.New("codescripts: scripts directory changed between the index lookup and the open")
+
 // Entry is one listed script (FR-007). Paths holds the single source file, or
 // both candidates when the name is ambiguous.
 type Entry struct {
@@ -339,7 +347,7 @@ func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source [
 	if !disclose {
 		candidates = probeCandidates
 	}
-	found, err := candidates(scriptsDir, name)
+	found, verifyUnchanged, err := candidates(scriptsDir, name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, "", notFound()
@@ -378,6 +386,30 @@ func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source [
 		}
 	}
 	defer f.Close()
+
+	// Round 8 MUST-FIX (the lookup→open race): an index hit is re-probed by
+	// the candidate's own Lstat, but neither that nor the open itself proves
+	// the file just opened is the one the index vouched for — a rename
+	// landing between the probe and this open can leave a DIFFERENT file
+	// occupying the exact name (a folded spelling of it, on a case-folding
+	// mount) for the descriptor's entire lifetime; a no-follow open cannot
+	// tell the difference, because it does not compare names, only symlink
+	// status. verifyUnchanged re-reads the directory's generation once more:
+	// gen-before (read for the lookup) == index.gen == gen-after is what
+	// proves the opened entry is the one the index vouched for. A mismatch
+	// closes the descriptor (via the defer above) and refuses rather than
+	// trusting it. Nil for the administrator, and for a scoped resolution
+	// that never reached an index hit (probeCandidates on darwin/Windows
+	// re-verifies per candidate instead and has no directory generation to
+	// recheck).
+	if verifyUnchanged != nil {
+		if verifyErr := verifyUnchanged(); verifyErr != nil {
+			if errors.Is(verifyErr, errIndexGenerationChanged) {
+				return nil, "", notFound()
+			}
+			return nil, "", invalid(path, ReasonUnreadable, verifyErr.Error())
+		}
+	}
 
 	// Re-verify on the open descriptor: this is the file that will actually be
 	// read, whatever the path pointed at a moment ago.
@@ -422,10 +454,14 @@ func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source [
 // entries that both refused to run as ambiguous. Reading the directory removes
 // the filesystem's matching from the loop entirely, so the two agree on every
 // platform. Resolve's no-follow open remains the authoritative check.
-func candidatesFor(scriptsDir, name string) ([]string, error) {
+//
+// The third return is the post-open generation recheck probeCandidates
+// supplies (round 8 MUST-FIX); the administrator's directory-based decision
+// has nothing to recheck against, so it is always nil here.
+func candidatesFor(scriptsDir, name string) ([]string, func() error, error) {
 	dirEntries, err := readDir(scriptsDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	present := make(map[string]bool, 2)
@@ -444,7 +480,7 @@ func candidatesFor(scriptsDir, name string) ([]string, error) {
 			found = append(found, filepath.Join(scriptsDir, name+ext))
 		}
 	}
-	return found, nil
+	return found, nil, nil
 }
 
 // probeCandidates is candidatesFor for the SCOPED resolver: the same two
@@ -463,23 +499,29 @@ func candidatesFor(scriptsDir, name string) ([]string, error) {
 // per-directory index of exact names that is listed once per directory
 // change, never per request (storednames_other.go, codex r5 #1). The
 // no-follow open remains the authoritative check.
-func probeCandidates(scriptsDir, name string) ([]string, error) {
-	storedExactly, err := storedSpellingsOf(scriptsDir)
+//
+// The second return is a post-open recheck (round 8 MUST-FIX, the
+// lookup→open race): storedSpellingsOf's own verify closure, non-nil only
+// where the platform backs a hit with a directory generation to recheck
+// (storednames_other.go); the darwin/Windows probe re-verifies every
+// candidate directly (entryName) and has none, so it returns nil.
+func probeCandidates(scriptsDir, name string) ([]string, func() error, error) {
+	storedExactly, verifyUnchanged, err := storedSpellingsOf(scriptsDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	found := make([]string, 0, 2)
 	for _, ext := range []string{extJS, extTS} {
 		want := name + ext
 		stored, err := storedExactly(want)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if stored {
 			found = append(found, filepath.Join(scriptsDir, want))
 		}
 	}
-	return found, nil
+	return found, verifyUnchanged, nil
 }
 
 // listForNotFound is the directory listing newNotFoundError attaches to the

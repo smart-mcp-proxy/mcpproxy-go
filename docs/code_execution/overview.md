@@ -406,14 +406,18 @@ the proxy does not read the directory on its behalf at all — it probes the
 requested name's two candidate files and nothing else — so the refusal's cost
 does not grow with the number of stored scripts. (On Linux and the BSDs, which
 have no single-entry call reporting how a name is spelled on disk, the scoped
-resolver answers from an exact-name index of the directory maintained off the
-request path: built when the daemon starts, validated by one stat of the
-directory per request, and refreshed by a background rebuild when that stat
-finds the directory changed. No request lists the directory, cold or warm.
-A script added to the directory becomes callable by agent tokens after the
-next index refresh — milliseconds later; a call in that window is refused
-like a missing script — while administrators see it immediately.) The
-refusal itself:
+resolver answers ONLY from an exact-name index of the directory that matches
+its CURRENT state: built when the daemon starts, validated by one stat of
+the directory per request, and refreshed by a background rebuild when that
+stat finds the directory changed. No request lists the directory, cold or
+warm. A call landing while that rebuild is merely scheduled or in flight is
+refused exactly like one against a directory the index has never seen —
+never answered from what the index held before the change — so a rename
+under a scoped caller's feet cannot have that caller's own probe fold onto
+whatever now occupies the old name. A script added to, or renamed within,
+the directory becomes callable by agent tokens after the next index
+refresh — milliseconds later; retry a call refused in that window — while
+administrators see the change immediately.) The refusal itself:
 
 ```text
 Cannot execute stored script: stored script "fetch-pr" not found (the stored-script

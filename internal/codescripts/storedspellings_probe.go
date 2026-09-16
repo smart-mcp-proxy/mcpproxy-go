@@ -22,7 +22,13 @@ func Warm(string) error { return nil }
 // stored spelling (entryName, one single-entry platform call) is
 // byte-for-byte the requested one, exactly as List decides. The no-follow
 // open remains the authoritative check.
-func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool, error), err error) {
+//
+// The second return is the shared signature's post-open recheck (round 8
+// MUST-FIX on Linux/BSD, the lookup→open race): here every candidate is
+// already re-verified directly, per call, against the CURRENT filesystem
+// (there is no directory-generation index to fall behind), so there is
+// nothing further to recheck after the open and this is always nil.
+func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool, error), verifyUnchanged func() error, err error) {
 	return func(want string) (bool, error) {
 		path := filepath.Join(scriptsDir, want)
 		if _, err := lstat(path); err != nil {
@@ -45,5 +51,5 @@ func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool
 			return false, nil
 		}
 		return true, nil
-	}, nil
+	}, nil, nil
 }
