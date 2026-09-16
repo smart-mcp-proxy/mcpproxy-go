@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -151,7 +152,18 @@ func installFakeDocker(t *testing.T, containers []fakeContainer) *fakeDocker {
 	script := fmt.Sprintf(fakeDockerShim, dockerShellQuote(fd.logPath), dockerShellQuote(fd.psPath), dockerShellQuote(fd.runErrPath))
 	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
 
-	t.Setenv("PATH", "/usr/bin:/bin") // sh + awk only; no real docker here
+	// PATH must expose sh and awk (the shim needs them) but never a real
+	// docker: /usr/bin holds one on Ubuntu runners, and the resolver's PATH
+	// lookup would win over the well-known seam below. Build a PATH dir that
+	// links only the tools the shim uses.
+	toolDir := filepath.Join(dir, "path")
+	require.NoError(t, os.Mkdir(toolDir, 0o755))
+	for _, tool := range []string{"sh", "awk", "printf", "cat"} {
+		if real, err := exec.LookPath(tool); err == nil {
+			require.NoError(t, os.Symlink(real, filepath.Join(toolDir, tool)))
+		}
+	}
+	t.Setenv("PATH", toolDir)
 	t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
 
 	useRealDockerResolver(t)
