@@ -21,6 +21,7 @@ package config_test
 // boot door and the raw-document check itself.
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -200,6 +201,35 @@ func TestLegacyKeys_CleanConfigRecordsNoDiagnostics(t *testing.T) {
 	cfg, err := config.LoadFromFile(path)
 	require.NoError(t, err)
 	assert.Empty(t, cfg.LoadDiagnostics())
+}
+
+// Logger-less emit helper for the CLI door (codex round 2 on PR-A): the
+// subcommands that load through cmd/mcpproxy loadCLIConfig and then
+// SaveConfig would otherwise erase the dropped keys silently, so
+// config.WriteLoadDiagnostics prints one `warning:` line per diagnostic,
+// carrying the contract message and the key, and nothing at all for a nil
+// config, a nil writer or a clean load.
+func TestLegacyKeys_WriteLoadDiagnosticsPrintsOneWarningPerDiagnostic(t *testing.T) {
+	cfg, _ := loadLegacyFixture(t)
+	diags := cfg.LoadDiagnostics()
+	require.NotEmpty(t, diags)
+
+	var buf bytes.Buffer
+	config.WriteLoadDiagnostics(cfg, &buf)
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	require.Len(t, lines, len(diags), "one line per diagnostic; got:\n%s", buf.String())
+	for i, d := range diags {
+		assert.Equal(t, "warning: "+d.Message+" (key: "+d.Key+")", lines[i])
+	}
+
+	buf.Reset()
+	config.WriteLoadDiagnostics(nil, &buf)
+	config.WriteLoadDiagnostics(cfg, nil)
+	assert.Empty(t, buf.String(), "nil config / nil writer write nothing")
+
+	clean := config.DefaultConfig()
+	config.WriteLoadDiagnostics(clean, &buf)
+	assert.Empty(t, buf.String(), "a config without diagnostics writes nothing")
 }
 
 // Emit helper: the loader has no logger (loadConfigFile returns only an error

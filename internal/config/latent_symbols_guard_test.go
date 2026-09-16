@@ -122,6 +122,167 @@ var removedDecls = []removedDecl{
 	{Pkg: "config", Recv: "AuthBrokerConfig", Name: "HeaderFormat", Why: "injection header format removed (FR-032)"},
 }
 
+// removedFile is one non-test Go file FR-031 / FR-033 delete outright, with
+// EVERY top-level declaration it held (types, funcs, methods, consts, vars)
+// at the merge base. FR-035 asks for "every Go symbol FR-031 and FR-033
+// delete ... checked by name over the non-test AST", so the table is the
+// mechanical dump of each file's AST at origin/main b39800a89, not a curated
+// highlight list: restoring any one of those files, or a fragment of one,
+// under any file name trips the guard. Methods are scoped to their receiver
+// and every entry to its package, so an unrelated `Error` method or a helper
+// of the same name elsewhere in the walked set is not matched.
+type removedFile struct {
+	File  string
+	FR    string
+	Decls []removedDecl
+}
+
+var removedFiles = []removedFile{
+	{File: "internal/serveredition/auth/idp_subject_token.go", FR: "FR-033", Decls: []removedDecl{
+		{Pkg: "auth", Name: "idpSubjectTokenType"},
+		{Pkg: "auth", Name: "idpRefreshSkew"},
+		{Pkg: "auth", Name: "ErrReauthRequired"},
+		{Pkg: "auth", Recv: "OAuthHandler", Name: "persistIDPSubjectToken"},
+		{Pkg: "auth", Recv: "OAuthHandler", Name: "GetValidIDPSubjectToken"},
+		{Pkg: "auth", Name: "expiryFromExpiresIn"},
+		{Pkg: "auth", Name: "splitScopes"},
+		{Pkg: "auth", Name: "chooseScopes"},
+		{Pkg: "auth", Name: "firstNonEmpty"},
+	}},
+	{File: "internal/serveredition/broker/credential_resolver.go", FR: "FR-031", Decls: []removedDecl{
+		{Pkg: "broker", Name: "defaultRefreshThreshold"},
+		{Pkg: "broker", Name: "ErrUnauthenticated"},
+		{Pkg: "broker", Name: "ErrNoCredential"},
+		{Pkg: "broker", Name: "ErrBrokerNotConfigured"},
+		{Pkg: "broker", Name: "Exchanger"},
+		{Pkg: "broker", Name: "Connector"},
+		{Pkg: "broker", Name: "ConnectorProvider"},
+		{Pkg: "broker", Name: "NotConnectedError"},
+		{Pkg: "broker", Recv: "NotConnectedError", Name: "Error"},
+		{Pkg: "broker", Name: "PolicyDecision"},
+		{Pkg: "broker", Name: "PolicyInput"},
+		{Pkg: "broker", Name: "PolicyHook"},
+		{Pkg: "broker", Name: "PolicyHookFunc"},
+		{Pkg: "broker", Recv: "PolicyHookFunc", Name: "Evaluate"},
+		{Pkg: "broker", Name: "allowAllPolicy"},
+		{Pkg: "broker", Recv: "allowAllPolicy", Name: "Evaluate"},
+		{Pkg: "broker", Name: "PolicyDeniedError"},
+		{Pkg: "broker", Recv: "PolicyDeniedError", Name: "Error"},
+		{Pkg: "broker", Name: "ResolverDeps"},
+		{Pkg: "broker", Name: "CredentialResolver"},
+		{Pkg: "broker", Name: "acquisition"},
+		{Pkg: "broker", Name: "NewCredentialResolver"},
+		{Pkg: "broker", Recv: "CredentialResolver", Name: "Resolve"},
+		{Pkg: "broker", Recv: "CredentialResolver", Name: "emitAudit"},
+		{Pkg: "broker", Name: "auditReason"},
+		{Pkg: "broker", Recv: "CredentialResolver", Name: "acquire"},
+		{Pkg: "broker", Recv: "CredentialResolver", Name: "notConnected"},
+		{Pkg: "broker", Recv: "CredentialResolver", Name: "connectorFor"},
+	}},
+	{File: "internal/serveredition/broker/injector.go", FR: "FR-031", Decls: []removedDecl{
+		{Pkg: "broker", Name: "ErrBrokerStdioUnsupported"},
+		{Pkg: "broker", Name: "fallbackBrokerHeader"},
+		{Pkg: "broker", Name: "fallbackBrokerHeaderFormat"},
+		{Pkg: "broker", Name: "resolver"},
+		{Pkg: "broker", Name: "HeaderInjector"},
+		{Pkg: "broker", Name: "NewHeaderInjector"},
+		{Pkg: "broker", Recv: "HeaderInjector", Name: "InjectFor"},
+		{Pkg: "broker", Name: "ConnectionKey"},
+	}},
+	{File: "internal/serveredition/broker/token_exchanger.go", FR: "FR-031", Decls: []removedDecl{
+		{Pkg: "broker", Name: "grantTypeTokenExchange"},
+		{Pkg: "broker", Name: "grantTypeJWTBearer"},
+		{Pkg: "broker", Name: "tokenTypeAccessToken"},
+		{Pkg: "broker", Name: "entraRequestedTokenUse"},
+		{Pkg: "broker", Name: "defaultExchangeTimeout"},
+		{Pkg: "broker", Name: "TokenExchanger"},
+		{Pkg: "broker", Name: "NewTokenExchanger"},
+		{Pkg: "broker", Name: "tokenResponse"},
+		// tokenErrorResponse is NOT listed: oauth_connector.go kept its own copy of the RFC 6749 error body.
+		{Pkg: "broker", Recv: "TokenExchanger", Name: "Exchange"},
+		{Pkg: "broker", Name: "buildExchangeForm"},
+		{Pkg: "broker", Recv: "TokenExchanger", Name: "post"},
+		{Pkg: "broker", Recv: "TokenExchanger", Name: "sanitizedError"},
+		{Pkg: "broker", Name: "credentialFromResponse"},
+	}},
+	{File: "internal/serveredition/multiuser/router.go", FR: "FR-031", Decls: []removedDecl{
+		{Pkg: "multiuser", Name: "ServerOwnership"},
+		{Pkg: "multiuser", Name: "OwnershipShared"},
+		{Pkg: "multiuser", Name: "OwnershipPersonal"},
+		{Pkg: "multiuser", Name: "ServerInfo"},
+		{Pkg: "multiuser", Name: "Router"},
+		{Pkg: "multiuser", Name: "NewRouter"},
+		{Pkg: "multiuser", Recv: "Router", Name: "GetUserServers"},
+		{Pkg: "multiuser", Recv: "Router", Name: "GetServerForUser"},
+		{Pkg: "multiuser", Recv: "Router", Name: "BrokeredConnectionKey"},
+		{Pkg: "multiuser", Name: "nonUserPoolPrefix"},
+		{Pkg: "multiuser", Name: "brokerPoolIdentity"},
+		{Pkg: "multiuser", Recv: "Router", Name: "IsServerAccessible"},
+		{Pkg: "multiuser", Recv: "Router", Name: "UpdateSharedServers"},
+		{Pkg: "multiuser", Recv: "Router", Name: "GetSharedServerNames"},
+		{Pkg: "multiuser", Recv: "Router", Name: "isSharedServer"},
+	}},
+	{File: "internal/serveredition/multiuser/tool_filter.go", FR: "FR-031", Decls: []removedDecl{
+		{Pkg: "multiuser", Name: "ToolInfo"},
+		{Pkg: "multiuser", Name: "ToolFilter"},
+		{Pkg: "multiuser", Name: "NewToolFilter"},
+		{Pkg: "multiuser", Recv: "ToolFilter", Name: "FilterToolsByUser"},
+		{Pkg: "multiuser", Recv: "ToolFilter", Name: "GetAccessibleServerNames"},
+		{Pkg: "multiuser", Recv: "ToolFilter", Name: "IsToolAccessible"},
+	}},
+	{File: "internal/serveredition/workspace/manager.go", FR: "FR-031", Decls: []removedDecl{
+		{Pkg: "workspace", Name: "Manager"},
+		{Pkg: "workspace", Name: "NewManager"},
+		{Pkg: "workspace", Recv: "Manager", Name: "GetOrCreateWorkspace"},
+		{Pkg: "workspace", Recv: "Manager", Name: "GetWorkspace"},
+		{Pkg: "workspace", Recv: "Manager", Name: "RemoveWorkspace"},
+		{Pkg: "workspace", Recv: "Manager", Name: "ActiveWorkspaceCount"},
+		{Pkg: "workspace", Recv: "Manager", Name: "StartCleanup"},
+		{Pkg: "workspace", Recv: "Manager", Name: "Stop"},
+		{Pkg: "workspace", Recv: "Manager", Name: "cleanupIdle"},
+	}},
+	{File: "internal/serveredition/workspace/workspace.go", FR: "FR-031", Decls: []removedDecl{
+		{Pkg: "workspace", Name: "UserWorkspace"},
+		{Pkg: "workspace", Name: "NewUserWorkspace"},
+		{Pkg: "workspace", Recv: "UserWorkspace", Name: "LoadServers"},
+		{Pkg: "workspace", Recv: "UserWorkspace", Name: "GetServers"},
+		{Pkg: "workspace", Recv: "UserWorkspace", Name: "GetServer"},
+		{Pkg: "workspace", Recv: "UserWorkspace", Name: "AddServer"},
+		{Pkg: "workspace", Recv: "UserWorkspace", Name: "RemoveServer"},
+		{Pkg: "workspace", Recv: "UserWorkspace", Name: "UpdateServer"},
+		{Pkg: "workspace", Recv: "UserWorkspace", Name: "ServerNames"},
+		{Pkg: "workspace", Recv: "UserWorkspace", Name: "Touch"},
+		{Pkg: "workspace", Recv: "UserWorkspace", Name: "LastAccess"},
+		{Pkg: "workspace", Recv: "UserWorkspace", Name: "Shutdown"},
+	}},
+	{File: "internal/transport/broker_auth.go", FR: "FR-031", Decls: []removedDecl{
+		{Pkg: "transport", Name: "BrokeredAuth"},
+		{Pkg: "transport", Name: "tokenPlaceholder"},
+		{Pkg: "transport", Recv: "BrokeredAuth", Name: "HeaderValue"},
+		{Pkg: "transport", Name: "EffectiveHeaders"},
+	}},
+}
+
+// removedPackages are whole Go packages FR-031 deletes. Any non-test file in
+// the walked set that declares one of these package names is a violation on
+// its own, whatever it contains.
+var removedPackages = map[string]string{
+	"workspace": "package internal/serveredition/workspace deleted (FR-031)",
+}
+
+// allRemovedDecls is the curated table plus every declaration of every
+// deleted file, flattened once for the walk.
+func allRemovedDecls() []removedDecl {
+	out := append([]removedDecl(nil), removedDecls...)
+	for _, rf := range removedFiles {
+		for _, d := range rf.Decls {
+			d.Why = fmt.Sprintf("declared in %s at origin/main b39800a89, deleted by %s", rf.File, rf.FR)
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // removedAuthBrokerModes are the never-implemented modes FR-032 removes from
 // the validator's accepted set. They are only forbidden INSIDE the validator
 // functions below; the server-build normaliser (T018) legitimately carries
@@ -316,10 +477,14 @@ func TestLatentSymbolsGuard_RemovedDeclarationsAbsent(t *testing.T) {
 	// was actually found and inspected; a renamed validator must fail the
 	// guard, never pass it vacuously.
 	seenValidators := map[string]bool{}
+	removed := allRemovedDecls()
 	for _, path := range files {
 		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
+		}
+		if why, gone := removedPackages[f.Name.Name]; gone {
+			violations = append(violations, fmt.Sprintf("file %s declares package %s — %s", latentRelPath(root, path), f.Name.Name, why))
 		}
 		decls, funcs := latentCollectDecls(fset, f)
 
@@ -327,9 +492,12 @@ func TestLatentSymbolsGuard_RemovedDeclarationsAbsent(t *testing.T) {
 			if _, exempt := exemptDeclNames[d.Name]; exempt {
 				continue
 			}
-			for _, r := range removedDecls {
+			// One violation per declaration: the curated table and the
+			// per-file dump overlap on the headline symbols by design.
+			for _, r := range removed {
 				if r.matches(d) {
 					violations = append(violations, fmt.Sprintf("%s — %s", latentRel(root, d), r.Why))
+					break
 				}
 			}
 		}
@@ -409,7 +577,7 @@ func TestLatentSymbolsGuard_CompatibilityDeclarationsRetained(t *testing.T) {
 		if d.Kind == "field" && d.Recv == "ServerEditionConfig" && d.Name == "StoreIDPTokens" {
 			found = true
 		}
-		for _, r := range removedDecls {
+		for _, r := range allRemovedDecls() {
 			if r.Name == d.Name {
 				if _, exempt := exemptDeclNames[d.Name]; exempt {
 					t.Errorf("exempt declaration %s is also in the removed table; fix the table", d.Name)
@@ -439,4 +607,29 @@ func latentFuncLabel(vf removedDecl) string {
 		return "(*" + vf.Recv + ")." + vf.Name
 	}
 	return vf.Name
+}
+
+// TestLatentSymbolsGuard_DeletedFilesAbsent pins the file-level half of the
+// cut: every source file the removedFiles table was dumped from is gone, and
+// the deleted workspace package directory with it. The declaration walk above
+// catches a fragment restored under a new name; this catches the whole file
+// coming back verbatim, before anyone reads the longer report.
+func TestLatentSymbolsGuard_DeletedFilesAbsent(t *testing.T) {
+	root := latentGuardRepoRoot(t)
+	seen := map[string]bool{}
+	for _, rf := range removedFiles {
+		if seen[rf.File] {
+			t.Errorf("removedFiles lists %s twice; fix the table", rf.File)
+		}
+		seen[rf.File] = true
+		if len(rf.Decls) == 0 {
+			t.Errorf("removedFiles entry %s has no declarations; the dump is incomplete", rf.File)
+		}
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rf.File))); err == nil {
+			t.Errorf("%s exists again; FR-031/FR-033 delete it (%s)", rf.File, rf.FR)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "internal", "serveredition", "workspace")); err == nil {
+		t.Errorf("internal/serveredition/workspace exists again; FR-031 deletes the package")
+	}
 }

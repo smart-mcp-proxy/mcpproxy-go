@@ -238,8 +238,21 @@ func (s *BBoltAESStore) List(userID string) ([]CredentialEntry, error) {
 // colon (user IDs are ULIDs; the server key is appended with ":") and are
 // never touched. Returns the number of rows removed; idempotent.
 func (s *BBoltAESStore) PurgeLegacyIDPSubjectTokens() (int, error) {
+	return PurgeLegacyIDPSubjectTokens(s.db)
+}
+
+// PurgeLegacyIDPSubjectTokens is the store-less form of the sweep above. It
+// takes the raw database so setup can run it BEFORE NewBBoltAESStore validates
+// the encryption key: a key that is set but malformed fails store construction
+// and with it the whole server-feature setup, which is logged and survived —
+// the sweep must not be lost behind that failure (codex round 2 on PR-A). A
+// nil db is a no-op.
+func PurgeLegacyIDPSubjectTokens(db *bbolt.DB) (int, error) {
+	if db == nil {
+		return 0, nil
+	}
 	var legacy [][]byte
-	if err := s.db.View(func(tx *bbolt.Tx) error {
+	if err := db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(credentialBucket))
 		if b == nil {
 			return nil
@@ -256,7 +269,7 @@ func (s *BBoltAESStore) PurgeLegacyIDPSubjectTokens() (int, error) {
 	if len(legacy) == 0 {
 		return 0, nil
 	}
-	if err := s.db.Update(func(tx *bbolt.Tx) error {
+	if err := db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(credentialBucket))
 		if b == nil {
 			return nil

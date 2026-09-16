@@ -1,6 +1,11 @@
 package config
 
-import "go.uber.org/zap"
+import (
+	"fmt"
+	"io"
+
+	"go.uber.org/zap"
+)
 
 // LoadDiagnostic is one non-fatal finding recorded while a configuration file
 // was loaded: a key the server edition no longer supports and dropped, or a
@@ -40,5 +45,22 @@ func LogLoadDiagnostics(cfg *Config, logger *zap.Logger) {
 	}
 	for _, d := range cfg.loadDiagnostics {
 		logger.Warn(d.Message, zap.String("key", d.Key))
+	}
+}
+
+// WriteLoadDiagnostics prints one `warning: <message> (key: <path>)` line per
+// recorded diagnostic to w. It is the logger-less twin of LogLoadDiagnostics
+// for the CLI subcommands, which have no zap logger but do load the file and
+// — for `upstream add|remove` in standalone mode, `telemetry enable|disable`
+// and the API-key reset — write it back, so a removed key would otherwise be
+// erased with no operator-visible warning (FR-032). Callers pass stderr so
+// `-o json` consumers of stdout are never disturbed. A nil config, a nil
+// writer or no diagnostics writes nothing.
+func WriteLoadDiagnostics(cfg *Config, w io.Writer) {
+	if cfg == nil || w == nil {
+		return
+	}
+	for _, d := range cfg.loadDiagnostics {
+		fmt.Fprintf(w, "warning: %s (key: %s)\n", d.Message, d.Key)
 	}
 }

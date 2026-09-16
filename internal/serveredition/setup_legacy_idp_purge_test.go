@@ -93,3 +93,49 @@ func TestSetupMultiUserOAuth_SweepsLegacyIDPSubjectTokensAtBoot(t *testing.T) {
 	assert.False(t, keys[legacyUser], "the legacy IdP subject-token row must be gone after boot: %v", keys)
 	assert.True(t, keys[legacyUser+":github_0123456789abcdef"], "upstream credentials must survive the sweep: %v", keys)
 }
+
+// TestSetupMultiUserOAuth_SweepsLegacyRowsEvenWhenTheKeyIsInvalid: the
+// release notice promises the sweep on the first start after upgrading
+// "whether or not MCPPROXY_CRED_KEY is still set". A key that is SET but
+// malformed makes NewBBoltAESStore fail and setupMultiUserOAuth return, and
+// SetupAll only logs that error — the server comes up without SSO but WITH
+// the legacy IdP tokens still at rest. The sweep matches rows by key and
+// needs no cipher, so it must run before the store is constructed (codex
+// round 2 on PR-A).
+//
+// BITES: move the purge back behind NewBBoltAESStore.
+func TestSetupMultiUserOAuth_SweepsLegacyRowsEvenWhenTheKeyIsInvalid(t *testing.T) {
+	t.Setenv("MCPPROXY_CRED_KEY", "not-base64-and-not-32-bytes!!")
+
+	tmpDir := t.TempDir()
+	db, err := bbolt.Open(tmpDir+"/test.db", 0600, &bbolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	const legacyUser = "01HTEST0000000000000USERB"
+	seedCredentialRows(t, db, legacyUser, legacyUser+":github_0123456789abcdef")
+
+	err = setupMultiUserOAuth(Dependencies{
+		Router:  chi.NewRouter(),
+		DB:      db,
+		Logger:  zap.NewNop().Sugar(),
+		DataDir: tmpDir,
+		Config: &config.Config{
+			ServerEdition: &config.ServerEditionConfig{
+				Enabled:     true,
+				AdminEmails: []string{"admin@example.com"},
+				OAuth: &config.ServerEditionOAuthConfig{
+					Provider:     "google",
+					ClientID:     "test-client-id",
+					ClientSecret: "test-client-secret",
+				},
+			},
+		},
+	})
+	require.Error(t, err, "an invalid key is still a loud misconfiguration")
+	assert.Contains(t, err.Error(), "credential store")
+
+	keys := credentialRowKeys(t, db)
+	assert.False(t, keys[legacyUser], "the legacy row must be swept before the key is validated: %v", keys)
+	assert.True(t, keys[legacyUser+":github_0123456789abcdef"], "upstream credentials must survive: %v", keys)
+}

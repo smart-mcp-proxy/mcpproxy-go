@@ -70,7 +70,7 @@ Config validation fails with `auth_broker.authorization_endpoint is required for
 
 ## Credential storage and the encryption key
 
-Per-user credentials are encrypted with **AES-256-GCM** before they are written to BBolt (`config.db`), keyed by `server_edition.credential_encryption_key` — a base64-encoded 32-byte key. The environment variable **`MCPPROXY_CRED_KEY`** supplies the key when the config value is empty and is the recommended way to provide it in container or systemd deployments; an explicit config value always wins over the variable.
+Per-user credentials are encrypted with **AES-256-GCM** before they are written to BBolt (`config.db`), keyed by `server_edition.credential_encryption_key` — a base64-encoded 32-byte key. The environment variable **`MCPPROXY_CRED_KEY`** is the recommended way to provide it in container or systemd deployments, and **it takes precedence**: when both are set the variable is used and the config value is ignored (`broker.ResolveMasterKey`), so a credential encrypted under one key is unreadable if the other is later put in front of it. Set exactly one.
 
 ```bash
 # Generate a fresh 32-byte key and base64-encode it
