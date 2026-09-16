@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -621,24 +622,38 @@ func TestProfile_SetProfileUnknown(t *testing.T) {
 // Profiles v2 (T3): per-agent-token profile_pin — server-side URL enforcement
 // ---------------------------------------------------------------------------
 
-// mintPinnedToken creates a stored agent token pinned to the given profile and
-// returns its raw secret. It uses the same HMAC key path the auth middleware
-// reads, so the minted token validates end-to-end.
-func (e *profileTestEnv) mintPinnedToken(name, pin string) string {
-	e.t.Helper()
-	cfg := e.proxyServer.runtime.Config()
+// mintAgentToken creates a stored agent token with the given allowed-server
+// list, permission set and profile pin, and returns its raw secret. It uses the
+// same HMAC key path the auth middleware reads, so the minted token validates
+// end-to-end (Spec 105 T035 — generalised from the pin-only minter so the
+// FR-004 fixtures can mint a RESTRICTED unpinned token; PR H1 reuses it).
+//
+// Fixture semantics mirror internal/server/scope_fixture_test.go: an EMPTY
+// allowed list is deny-all under CanAccessServer, so an unrestricted token must
+// pass []string{"*"}; HasPermission is exact membership, so pass every tier
+// the token holds; an empty pin means unpinned.
+func mintAgentToken(t *testing.T, env *profileTestEnv, name string, allowed, perms []string, pin string) string {
+	t.Helper()
+	cfg := env.proxyServer.runtime.Config()
 	hmacKey, err := auth.GetOrCreateHMACKey(cfg.DataDir)
-	require.NoError(e.t, err)
+	require.NoError(t, err)
 	rawToken, err := auth.GenerateToken()
-	require.NoError(e.t, err)
-	require.NoError(e.t, e.proxyServer.runtime.StorageManager().CreateAgentToken(auth.AgentToken{
+	require.NoError(t, err)
+	require.NoError(t, env.proxyServer.runtime.StorageManager().CreateAgentToken(auth.AgentToken{
 		Name:           name,
-		AllowedServers: []string{"*"},
-		Permissions:    []string{"read"},
+		AllowedServers: allowed,
+		Permissions:    perms,
 		ExpiresAt:      time.Now().Add(24 * time.Hour),
 		ProfilePin:     pin,
 	}, rawToken, hmacKey))
 	return rawToken
+}
+
+// mintPinnedToken mints an unrestricted ("*", read-only) agent token pinned to
+// the given profile — the shape the pre-105 pin tests were written against.
+func (e *profileTestEnv) mintPinnedToken(name, pin string) string {
+	e.t.Helper()
+	return mintAgentToken(e.t, e, name, []string{"*"}, []string{auth.PermRead}, pin)
 }
 
 // TestProfile_PinnedTokenURLEnforcement verifies the T3 server-side guard: an
@@ -810,4 +825,209 @@ func TestProfile_DeletedPinDoesNotEnumerateProfiles(t *testing.T) {
 	require.NoError(t, json.NewDecoder(adminResp.Body).Decode(&adminBody))
 	available, _ := adminBody["available"].([]interface{})
 	assert.Equal(t, []interface{}{"deploy"}, available, "admin still sees the available list")
+}
+
+// ---------------------------------------------------------------------------
+// Spec 105 PR D (FR-004, gaps FR003-G1…G5, G8/D1): the profile URL applies the
+// selectable-profile predicate for every scoped caller and refuses with ONE
+// status+body — no `available` list — whether the slug is missing, deleted,
+// configured-but-not-selectable, a pin mismatch, or the fleet is empty.
+// ---------------------------------------------------------------------------
+
+// profileInitRequest POSTs an MCP initialize to baseURL+path with the given
+// agent token (empty token = unauthenticated / anonymous admin-shaped caller)
+// and returns the status code and the raw body.
+func profileInitRequest(t *testing.T, baseURL, path, rawToken string) (int, string) {
+	t.Helper()
+	const initBody = `{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`
+	req, err := http.NewRequest(http.MethodPost, baseURL+path, strings.NewReader(initBody))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if rawToken != "" {
+		req.Header.Set("Authorization", "Bearer "+rawToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, strings.TrimSpace(string(body))
+}
+
+// profileRefusal captures one refusal so it can be compared with another
+// after slug normalisation: the body may echo the caller's own slug (that is
+// not disclosure), so `'<slug>'` is replaced by a placeholder before the
+// byte comparison. An implementation that emits a slug-free constant body
+// passes the same assertion unchanged.
+type profileRefusal struct {
+	path   string
+	status int
+	body   string
+}
+
+func captureProfileRefusal(t *testing.T, baseURL, path, slug, rawToken string) profileRefusal {
+	t.Helper()
+	status, body := profileInitRequest(t, baseURL, path, rawToken)
+	return profileRefusal{
+		path:   path,
+		status: status,
+		body:   strings.ReplaceAll(body, "'"+slug+"'", "'<slug>'"),
+	}
+}
+
+// assertUniformProfileRefusal checks that every captured refusal is the same
+// 404 (status and slug-normalised body) and that none of them carries an
+// `available` list.
+func assertUniformProfileRefusal(t *testing.T, refusals []profileRefusal) {
+	t.Helper()
+	require.NotEmpty(t, refusals)
+	for _, r := range refusals {
+		assert.Equal(t, http.StatusNotFound, r.status, "%s: a scoped caller must get the uniform 404, got %d %s", r.path, r.status, r.body)
+		var decoded map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(r.body), &decoded), "%s: body must be JSON: %s", r.path, r.body)
+		_, enumerated := decoded["available"]
+		assert.False(t, enumerated, "%s: the refusal must not enumerate profiles: %s", r.path, r.body)
+		assert.Equal(t, refusals[0].body, r.body, "%s must be byte-identical (slug-normalised) to %s", r.path, refusals[0].path)
+	}
+}
+
+// TestProfile_ScopedUnpinnedRefusalUniform (FR003-G1/G2/G5): an unpinned
+// token restricted to research-srv initializes through /mcp/p/research (its
+// only selectable profile) and is refused with ONE status+body — no
+// `available` list — through the disjoint /mcp/p/deploy, the nonexistent
+// /mcp/p/nonexistent, the slug-less /mcp/p and /mcp/p/, and /mcp/p/deploy
+// after the deploy profile has been deleted.
+func TestProfile_ScopedUnpinnedRefusalUniform(t *testing.T) {
+	env := newProfileTestEnv(t)
+	rawToken := mintAgentToken(t, env, "a-only", []string{"research-srv"}, []string{auth.PermRead}, "")
+
+	// Positive control: the selectable profile initializes.
+	status, body := profileInitRequest(t, env.baseURL, "/mcp/p/research", rawToken)
+	require.Equal(t, http.StatusOK, status, "a selectable profile URL must initialize for the restricted token: %s", body)
+
+	refusals := []profileRefusal{
+		captureProfileRefusal(t, env.baseURL, "/mcp/p/deploy", "deploy", rawToken),
+		captureProfileRefusal(t, env.baseURL, "/mcp/p/nonexistent", "nonexistent", rawToken),
+		captureProfileRefusal(t, env.baseURL, "/mcp/p", "", rawToken),
+		captureProfileRefusal(t, env.baseURL, "/mcp/p/", "", rawToken),
+	}
+
+	// Delete the disjoint profile; the same slug must be refused identically.
+	old := env.proxyServer.runtime.Config()
+	cfgCopy := *old
+	cfg := &cfgCopy
+	cfg.Profiles = []config.ProfileConfig{{Name: "research", Servers: []string{"research-srv"}}}
+	env.proxyServer.runtime.UpdateConfig(cfg, "")
+	refusals = append(refusals, captureProfileRefusal(t, env.baseURL, "/mcp/p/deploy", "deploy", rawToken))
+
+	assertUniformProfileRefusal(t, refusals)
+	for _, r := range refusals {
+		assert.NotContains(t, r.body, "deploy-srv", "%s: the refusal must not name servers outside the token's reach", r.path)
+	}
+}
+
+// TestProfile_PinnedRefusalUniform (FR003-G3): a token pinned to research is
+// refused identically — status and slug-normalised body — through a pin
+// mismatch on an existing profile (/mcp/p/deploy), a pin mismatch on a
+// nonexistent one (/mcp/p/nope), and its own pin's URL after the pinned
+// profile has been deleted. HEAD answers 403 / 403 / 404.
+func TestProfile_PinnedRefusalUniform(t *testing.T) {
+	env := newProfileTestEnv(t)
+	rawToken := env.mintPinnedToken("pinned-research", "research")
+
+	status, body := profileInitRequest(t, env.baseURL, "/mcp/p/research", rawToken)
+	require.Equal(t, http.StatusOK, status, "the pin's own URL must initialize while the pin has reach: %s", body)
+
+	refusals := []profileRefusal{
+		captureProfileRefusal(t, env.baseURL, "/mcp/p/deploy", "deploy", rawToken),
+		captureProfileRefusal(t, env.baseURL, "/mcp/p/nope", "nope", rawToken),
+		captureProfileRefusal(t, env.baseURL, "/mcp/p", "", rawToken),
+	}
+
+	old := env.proxyServer.runtime.Config()
+	cfgCopy := *old
+	cfg := &cfgCopy
+	cfg.Profiles = []config.ProfileConfig{{Name: "deploy", Servers: []string{"deploy-srv"}}}
+	env.proxyServer.runtime.UpdateConfig(cfg, "")
+	refusals = append(refusals, captureProfileRefusal(t, env.baseURL, "/mcp/p/research", "research", rawToken))
+
+	assertUniformProfileRefusal(t, refusals)
+	for _, r := range refusals {
+		assert.NotContains(t, r.body, "pinned", "%s: the refusal must not name the pin: %s", r.path, r.body)
+	}
+}
+
+// TestProfile_PinnedRefusalIndependentOfFleet (FR003-G4): pin mismatch and
+// deleted-pin refusals are evaluated independently of fleet population — the
+// "no profiles configured" branch must not run before the gate for a scoped
+// caller. For a token pinned to research, /mcp/p/research and /mcp/p/deploy
+// answer byte-identically whether the fleet is [deploy] or empty. The
+// anonymous (admin-shaped) caller keeps today's distinct branches.
+func TestProfile_PinnedRefusalIndependentOfFleet(t *testing.T) {
+	env := newProfileTestEnv(t)
+	rawToken := env.mintPinnedToken("pinned-research", "research")
+
+	setFleet := func(profiles []config.ProfileConfig) {
+		old := env.proxyServer.runtime.Config()
+		cfgCopy := *old
+		cfg := &cfgCopy
+		cfg.Profiles = profiles
+		env.proxyServer.runtime.UpdateConfig(cfg, "")
+	}
+
+	type fleetRefusals struct {
+		research profileRefusal
+		deploy   profileRefusal
+	}
+	capture := func() fleetRefusals {
+		return fleetRefusals{
+			research: captureProfileRefusal(t, env.baseURL, "/mcp/p/research", "research", rawToken),
+			deploy:   captureProfileRefusal(t, env.baseURL, "/mcp/p/deploy", "deploy", rawToken),
+		}
+	}
+
+	setFleet([]config.ProfileConfig{{Name: "deploy", Servers: []string{"deploy-srv"}}})
+	withDeploy := capture()
+	setFleet(nil)
+	emptyFleet := capture()
+
+	assertUniformProfileRefusal(t, []profileRefusal{withDeploy.research, emptyFleet.research, withDeploy.deploy, emptyFleet.deploy})
+
+	// Admin control: the anonymous caller still distinguishes an empty fleet.
+	status, body := profileInitRequest(t, env.baseURL, "/mcp/p/research", "")
+	require.Equal(t, http.StatusNotFound, status)
+	assert.Contains(t, body, "no profiles configured", "the anonymous caller keeps today's no-profiles branch: %s", body)
+}
+
+// TestProfile_PinnedZeroReachURLRefusedUniformly (FR003-G8, research D1): a
+// token pinned to a profile that exists but has zero reach — an empty profile
+// — is refused through /mcp/p/<pin> with the same uniform body a pin mismatch
+// or a deleted pin produces, so the token cannot observe whether its own pin
+// still exists. HEAD initializes 200 through the empty pin.
+func TestProfile_PinnedZeroReachURLRefusedUniformly(t *testing.T) {
+	env := newProfileTestEnv(t)
+
+	old := env.proxyServer.runtime.Config()
+	cfgCopy := *old
+	cfg := &cfgCopy
+	cfg.Profiles = append(append([]config.ProfileConfig{}, old.Profiles...), config.ProfileConfig{Name: "empty"})
+	env.proxyServer.runtime.UpdateConfig(cfg, "")
+
+	// Unrestricted grant: only the profile's emptiness removes its reach.
+	rawToken := mintAgentToken(t, env, "pinned-empty", []string{"*"}, []string{auth.PermRead}, "empty")
+
+	refusals := []profileRefusal{
+		captureProfileRefusal(t, env.baseURL, "/mcp/p/empty", "empty", rawToken),
+		captureProfileRefusal(t, env.baseURL, "/mcp/p/nope", "nope", rawToken),
+		captureProfileRefusal(t, env.baseURL, "/mcp/p/research", "research", rawToken),
+	}
+	assertUniformProfileRefusal(t, refusals)
+
+	// A disjoint grant is zero reach too: pinned to deploy, allowed research-srv only.
+	disjoint := mintAgentToken(t, env, "pinned-disjoint", []string{"research-srv"}, []string{auth.PermRead}, "deploy")
+	assertUniformProfileRefusal(t, []profileRefusal{
+		captureProfileRefusal(t, env.baseURL, "/mcp/p/deploy", "deploy", disjoint),
+		captureProfileRefusal(t, env.baseURL, "/mcp/p/nope", "nope", disjoint),
+	})
 }

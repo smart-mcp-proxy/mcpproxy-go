@@ -167,3 +167,40 @@ func decodeSetProfilePayload(t *testing.T, result *mcp.CallToolResult) map[strin
 	require.NoError(t, json.Unmarshal([]byte(resultText(t, result)), &payload))
 	return payload
 }
+
+// TestSetProfileClearPinnedReportsEmptyActiveProfile (Spec 105 FR-003,
+// FR003-G7): `active_profile` reports the STORED session selection and the
+// server list reports effective scope. Clearing a pinned token's selection
+// therefore reports active_profile == "" — the pin is not a stored selection —
+// while `servers` still reports the pin's reach (∩ token), or nothing once the
+// pinned profile has been deleted. Inverts TestSetProfileClearReportsPinnedScope,
+// which locked the pin name in `active_profile`.
+func TestSetProfileClearPinnedReportsEmptyActiveProfile(t *testing.T) {
+	proxy, cfg := pinnedProxy(t, []config.ProfileConfig{
+		{Name: "research", Servers: []string{"research-srv"}},
+	})
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	ctx := helper.WithContext(pinnedAgentContext("research"), &fakeClientSession{id: "sess-pin-clear-105"})
+	proxy.sessionStore.SetActiveProfile("sess-pin-clear-105", "research")
+
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]interface{}{"profile": ""}
+
+	result, err := proxy.handleSetProfile(ctx, request)
+	require.NoError(t, err)
+	require.False(t, result.IsError, resultText(t, result))
+	payload := decodeSetProfilePayload(t, result)
+	assert.Equal(t, "", payload["active_profile"], "a cleared selection is reported as cleared, even under a pin")
+	assert.Equal(t, "", proxy.sessionStore.GetActiveProfile("sess-pin-clear-105"))
+	assert.Equal(t, []interface{}{"research-srv"}, payload["servers"],
+		"servers still reports the pin's effective reach")
+
+	// Deleted pin: still cleared, and the honest reach is nothing.
+	cfg.Profiles = nil
+	result, err = proxy.handleSetProfile(ctx, request)
+	require.NoError(t, err)
+	require.False(t, result.IsError, resultText(t, result))
+	payload = decodeSetProfilePayload(t, result)
+	assert.Equal(t, "", payload["active_profile"])
+	assert.Empty(t, payload["servers"])
+}

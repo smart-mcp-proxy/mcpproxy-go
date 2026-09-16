@@ -14,6 +14,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // setProfileCtx builds a request context carrying a stable session id and an
@@ -475,6 +476,104 @@ func TestHandleSetProfile_WildcardTokenRefusesEmptyProfileAdminSelectsIt(t *test
 			require.Equal(t, slug, active)
 			require.Empty(t, servers)
 			require.Equal(t, slug, p.sessionStore.GetActiveProfile("sess-admin-"+slug))
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Spec 105 PR D (FR-003): URL precedence in the set_profile payload (G6) and
+// the pinned zero-reach refusal (G8, research D1).
+// ---------------------------------------------------------------------------
+
+// setProfileURLScopedCtx builds the context of a set_profile call arriving on
+// /mcp/p/<slug>: an unpinned agent token allowed BOTH servers, with the URL
+// profile scope the middleware injects for that request.
+func setProfileURLScopedCtx(p *MCPProxyServer, sessionID, urlSlug string) context.Context {
+	ctx := setProfileScopedCtx(sessionID, "research-srv", "deploy-srv")
+	scope := p.profileScopeForSlug(urlSlug)
+	if scope == nil {
+		panic("setProfileURLScopedCtx: fixture profile " + urlSlug + " is not configured")
+	}
+	return profile.WithProfileScope(ctx, scope)
+}
+
+// TestHandleSetProfile_URLScopeGovernsReportedServers (FR003-G6): on a
+// URL-scoped endpoint the selection is stored, but the URL still governs the
+// request (resolveActiveProfile: pin > URL > session). `active_profile`
+// therefore reports the stored selection while `servers` reports the
+// EFFECTIVE scope — URL profile ∩ token — not the selected profile's servers
+// (spec.md "URL precedence"). Selecting the disjoint `deploy` profile on
+// /mcp/p/research reports research ∩ token, and clearing the selection on the
+// same endpoint reports the same URL scope, never every allowed server.
+func TestHandleSetProfile_URLScopeGovernsReportedServers(t *testing.T) {
+	p := newSetProfileTestServer()
+	ctx := setProfileURLScopedCtx(p, "sess-url-research", "research")
+
+	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "deploy"))
+	require.Equal(t, "deploy", active, "active_profile reports the STORED selection")
+	require.Equal(t, "deploy", p.sessionStore.GetActiveProfile("sess-url-research"), "the selection must still be stored")
+	require.ElementsMatch(t, []string{"research-srv"}, servers,
+		"servers must report the URL profile ∩ token, which governs this request — not the selected profile")
+
+	active, servers = setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
+	require.Equal(t, "", active)
+	require.Equal(t, "", p.sessionStore.GetActiveProfile("sess-url-research"))
+	require.ElementsMatch(t, []string{"research-srv"}, servers,
+		"clearing on a URL-scoped endpoint must still report the URL scope, not all allowed servers")
+
+	// Selecting the URL's own profile is the degenerate case: both agree.
+	active, servers = setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "mixed"))
+	require.Equal(t, "mixed", active)
+	require.ElementsMatch(t, []string{"research-srv"}, servers,
+		"mixed ∩ URL research ∩ token = research-srv only")
+}
+
+// TestHandleSetProfile_PinnedZeroReachRefusedLikeDeletedPin (FR003-G8,
+// research D1): a pinned token whose pin exists but has zero reach — an empty
+// profile, a ghost profile, or a disjoint grant — must not be able to select
+// its pin: the refusal is byte-identical (slug-normalised) to the one a
+// DELETED pin produces, so the token cannot learn whether its pin still
+// exists, and the session is not mutated. Inverts the #1225 F2 admission
+// (`TestHandleSetProfile_PinnedTokenSelectsDisjointPin`).
+func TestHandleSetProfile_PinnedZeroReachRefusedLikeDeletedPin(t *testing.T) {
+	cases := []struct {
+		name    string
+		pin     string
+		allowed []string
+	}{
+		{name: "empty-profile", pin: "empty", allowed: []string{"*"}},
+		{name: "ghost-profile", pin: "ghost", allowed: []string{"*"}},
+		{name: "disjoint-grant", pin: "deploy", allowed: []string{"research-srv"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newSetProfileTestServerWithEmptyProfiles(t)
+			helper := mcpserver.NewMCPServer("test", "1.0.0")
+			sid := "sess-zero-reach-" + tc.name
+			ctx := helper.WithContext(context.Background(), &fakeClientSession{id: sid})
+			ctx = auth.WithAuthContext(ctx, &auth.AuthContext{
+				Type: auth.AuthTypeAgent, ProfilePin: tc.pin, AllowedServers: tc.allowed,
+			})
+			// A prior selection no code path on this request would write, so
+			// "no mutation" cannot be satisfied by re-storing the same value.
+			p.sessionStore.SetActiveProfile(sid, "mixed")
+
+			refused := callSetProfileTool(t, p, ctx, tc.pin)
+			require.True(t, refused.IsError, "a zero-reach pin must not be selectable: %s", setProfileResultText(t, refused))
+			require.Equal(t, "mixed", p.sessionStore.GetActiveProfile(sid),
+				"a refused selection must leave the prior session selection untouched")
+
+			// Oracle: the same token shape with a DELETED pin.
+			deletedCtx := helper.WithContext(context.Background(), &fakeClientSession{id: sid + "-deleted"})
+			deletedCtx = auth.WithAuthContext(deletedCtx, &auth.AuthContext{
+				Type: auth.AuthTypeAgent, ProfilePin: "gone", AllowedServers: tc.allowed,
+			})
+			deleted := callSetProfileTool(t, p, deletedCtx, "gone")
+			require.True(t, deleted.IsError)
+			require.Equal(t,
+				strings.ReplaceAll(setProfileResultText(t, deleted), "'gone'", "'<slug>'"),
+				strings.ReplaceAll(setProfileResultText(t, refused), "'"+tc.pin+"'", "'<slug>'"),
+				"a zero-reach pin must be refused with the deleted-pin body")
 		})
 	}
 }
