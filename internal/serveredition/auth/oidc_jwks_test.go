@@ -189,7 +189,7 @@ func TestJWKToPublicKey_MalformedECRefused(t *testing.T) {
 	mutate := func(f func(k *jwk)) jwk { k := good; f(&k); return k }
 
 	// A point that is not on P-256: keep x, flip one bit of y.
-	offCurveY := p256.PublicKey.Y.FillBytes(make([]byte, 32))
+	offCurveY := p256.Y.FillBytes(make([]byte, 32))
 	offCurveY[31] ^= 0x01
 
 	cases := map[string]jwk{
