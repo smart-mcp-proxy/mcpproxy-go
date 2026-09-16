@@ -27,6 +27,7 @@ type LoginPageData struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	Resource            string
+	Nonce               string // OIDC nonce, carried through the form and echoed in the id_token
 	Scopes              []string
 	Error               string
 }
@@ -55,6 +56,7 @@ func (s *OAuthTestServer) handleAuthorizeGET(w http.ResponseWriter, r *http.Requ
 	codeChallenge := query.Get("code_challenge")
 	codeChallengeMethod := query.Get("code_challenge_method")
 	resource := query.Get("resource")
+	nonce := query.Get("nonce")
 
 	// Validate required parameters
 	if responseType != "code" {
@@ -127,6 +129,7 @@ func (s *OAuthTestServer) handleAuthorizeGET(w http.ResponseWriter, r *http.Requ
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
 		Resource:            resource,
+		Nonce:               nonce,
 		Scopes:              scopes,
 	}
 
@@ -148,6 +151,7 @@ func (s *OAuthTestServer) handleAuthorizePOST(w http.ResponseWriter, r *http.Req
 	codeChallenge := r.FormValue("code_challenge")
 	codeChallengeMethod := r.FormValue("code_challenge_method")
 	resource := r.FormValue("resource")
+	nonce := r.FormValue("nonce") // body field from the form, or query param on a headless POST
 
 	// Get user credentials
 	username := r.FormValue("username")
@@ -191,6 +195,7 @@ func (s *OAuthTestServer) handleAuthorizePOST(w http.ResponseWriter, r *http.Req
 			CodeChallenge:       codeChallenge,
 			CodeChallengeMethod: codeChallengeMethod,
 			Resource:            resource,
+			Nonce:               nonce,
 			Scopes:              s.parseScopes(scope),
 			Error:               "Invalid username or password",
 		}
@@ -211,6 +216,7 @@ func (s *OAuthTestServer) handleAuthorizePOST(w http.ResponseWriter, r *http.Req
 		CodeChallengeMethod: codeChallengeMethod,
 		Resource:            resource,
 		State:               state,
+		Nonce:               nonce,
 		Subject:             username,
 		ExpiresAt:           time.Now().Add(s.options.AuthCodeExpiry),
 		Used:                false,

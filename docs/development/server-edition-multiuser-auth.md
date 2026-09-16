@@ -261,8 +261,46 @@ bucket whose `allowed_servers` contains `"*"` and whose `user_id` is non-empty
 
 ```bash
 go test -tags server ./internal/serveredition/... -v -race  # All server unit + integration tests
-go build -tags server ./cmd/mcpproxy                        # Build server edition
+go build -tags server -o mcpproxy-server ./cmd/mcpproxy     # Build server edition (always -o: a bare build overwrites ./mcpproxy)
 go build ./cmd/mcpproxy                                     # Verify personal edition unaffected
 ```
+
+### Local rig: `scripts/dev-server-edition.sh`
+
+The Spec 107 verification rig runs the whole SSO path against a fake OpenID
+Provider, loopback-only, in a scratch directory — it never touches
+`~/.mcpproxy`, the tray's core or a real IdP. It is the executable form of
+`specs/107-server-edition-sso-hardening/quickstart.md`; the script is the
+source of truth and that page is its narrative.
+
+```bash
+scripts/dev-server-edition.sh                        # phase b: build, fake IdP, boot, headless login, /auth/me
+scripts/dev-server-edition.sh --phase c              # + tenant principal on core REST (PR-C)
+scripts/dev-server-edition.sh --phase d --keep       # + token mint, /mcp gate, audit tail (PR-D); keep the scratch dir
+scripts/dev-server-edition.sh --idp-args "-token-error bad-signature"   # one US2 tamper case: expects a 403, no session
+```
+
+What it does, in order: builds `mcpproxy-server` (`-tags server -o`, never
+bare) and the fake IdP (`tests/oauthserver/cmd/server -oidc`) into the scratch
+dir; runs `npm ci --prefix tests/echo-rugpull-server` once for the stdio
+fixture (`node tests/echo-rugpull-server/index.js`, a deterministic `echo`
+tool while `DESC_FILE` is unset); writes `mcp_config.json` with
+`server_edition.oauth.provider: "oidc"` pointing at the IdP through
+`${env:OIDC_CLIENT_ID}` / `${env:OIDC_CLIENT_SECRET}`; boots the server
+edition with **both** `--config` and `--data-dir` on a free `18xxx` port and
+waits for `/readyz` + `/api/v1/status` (`edition: server`); performs the
+headless login as `alice@example.com` (302 to the IdP with `S256` + `nonce`,
+POST the login form without following redirects, then GET the callback) and
+prints `/api/v1/auth/me`; repeats the login with
+`redirect_uri=https://evil.example/` and asserts the 302 lands on `/ui/`.
+
+Rules it encodes: every wait loop is bounded and every `curl` carries
+`--max-time`, so a missing piece (an older branch without the `oidc` provider
+answers exit 4 at config load) is reported with the reason, never hung on;
+teardown kills only the PIDs it started (never `pkill` by name) and removes
+the scratch dir only when it created it via `mktemp` (`--scratch DIR` and
+`MCPPROXY_RIG_SCRATCH` are always kept, as is any failed run). Gates for the
+script itself: `bash -n scripts/dev-server-edition.sh` and `shellcheck
+scripts/dev-server-edition.sh`.
 
 > Note: server-edition `//go:build server` routes are invisible to `swag` / `verify-oas-coverage.sh` (which don't pass `--build-tags server`), so document endpoints here. CI lints twice — bare and with `--build-tags server` — and race-tests `internal/server`, `internal/httpapi` and `internal/storage` under the tag (Spec 107 FR-047); run both lint passes locally before pushing (see the Lint block in `CLAUDE.md`).
