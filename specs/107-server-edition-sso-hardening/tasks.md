@@ -72,7 +72,7 @@ Gate set for every PR = plan.md §Gates. Never claim a skipped gate passed; writ
 
 - [x] T029 [X] Run the full gate set (plan.md §Gates) including the isolated `test-api-e2e.sh`; record every command and outcome — `verification.md`
 - [x] T030 [X] Cross-model review with codex `gpt-5.6-sol` (briefs split: cut diff / config normaliser + carriers / docs), ≤ 10 rounds, verify each finding before fixing; record rounds and verdicts — `verification.md`
-- [ ] T031 [X] Open PR-A (`--body-file`; `Related #1177`; the six retired tests listed by name; no AI attribution); tick the roadmap task row `pr:`; run `python3 scripts/gen-roadmap.py --check`; repair CI until green; do not merge without instruction — `roadmap.yaml`, `ROADMAP.md`
+- [x] T031 [X] Open PR-A (`--body-file`; `Related #1177`; the six retired tests listed by name; no AI attribution); tick the roadmap task row `pr:`; run `python3 scripts/gen-roadmap.py --check`; repair CI until green; do not merge without instruction — `roadmap.yaml`, `ROADMAP.md`
 
 ---
 

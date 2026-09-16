@@ -812,6 +812,7 @@ epics:
         title: PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6)
         status: in_progress
         depends_on: []
+        pr: "#1287"
       - id: sso-pr-b-oidc-front-door
         title: PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7)
         status: todo
