@@ -64,6 +64,12 @@ func (h *CredentialHandlers) SetAdminServersProvider(provider AdminServersProvid
 	h.adminServers = provider
 }
 
+// SetFrontDoor installs server_edition.public_url and the live trusted-proxy
+// provider the connect flow's base URL is resolved from (Spec 107 FR-025/027).
+func (h *CredentialHandlers) SetFrontDoor(publicURL string, trusted config.TrustedProxiesProvider) {
+	h.connectors.setFrontDoor(publicURL, trusted)
+}
+
 func (h *CredentialHandlers) currentAdminServers() []*config.ServerConfig {
 	if h.adminServers != nil {
 		return h.adminServers()
@@ -234,8 +240,7 @@ func (h *CredentialHandlers) connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.connectors.observeBaseURL(r)
-	conn, err := h.connectors.connector(srv)
+	conn, err := h.connectors.connector(r, srv)
 	if err != nil {
 		h.logger.Errorw("failed to build connector", "user_id", userID, "server", srv.Name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to initiate connect flow")
@@ -272,7 +277,7 @@ func (h *CredentialHandlers) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := h.connectors.connector(srv)
+	conn, err := h.connectors.connector(r, srv)
 	if err != nil {
 		h.logger.Errorw("failed to resolve connector for callback", "server", srv.Name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to complete connect flow")

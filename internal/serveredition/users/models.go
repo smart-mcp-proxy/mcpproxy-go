@@ -77,6 +77,9 @@ type Session struct {
 	ExpiresAt   time.Time `json:"expires_at"`
 	UserAgent   string    `json:"user_agent,omitempty"`
 	IPAddress   string    `json:"ip_address,omitempty"`
+	// CookieSecure records whether the session cookie was set with the Secure
+	// attribute (Spec 107 FR-026) so logout clears it with the same attribute.
+	CookieSecure bool `json:"cookie_secure,omitempty"`
 }
 
 // NewSession creates a new Session with a generated UUID.

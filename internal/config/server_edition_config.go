@@ -32,6 +32,62 @@ type ServerEditionConfig struct {
 	// loading (Spec 107 FR-033). IdP tokens are no longer persisted at login;
 	// `true` records one deprecation LoadDiagnostic at load time.
 	StoreIDPTokens bool `json:"store_idp_tokens" mapstructure:"store-idp-tokens"`
+
+	// PublicURL is the absolute origin (scheme://host[:port], no path) the
+	// deployment is reached at (Spec 107 FR-025). When set it is the sole
+	// source of the OAuth callback URL and the connect-flow base URL; Host and
+	// X-Forwarded-* are then ignored. Env alias: MCPPROXY_PUBLIC_URL.
+	PublicURL string `json:"public_url,omitempty" mapstructure:"public-url"`
+	// SessionCookieSecure is the Secure-attribute policy of the session cookie
+	// (Spec 107 FR-026): "auto" (default — https public_url, in-process TLS or
+	// a trusted X-Forwarded-Proto: https), "true" or "false".
+	SessionCookieSecure string `json:"session_cookie_secure,omitempty" mapstructure:"session-cookie-secure"`
+}
+
+// Session cookie Secure policies (Spec 107 FR-026).
+const (
+	SessionCookieSecureAuto  = "auto"
+	SessionCookieSecureTrue  = "true"
+	SessionCookieSecureFalse = "false"
+)
+
+// Validation messages fixed by contracts/config-keys.md (FR-039: boot, PATCH
+// and /config/apply say the same thing).
+const (
+	msgPublicURLShape            = "server_edition.public_url must be an absolute origin (scheme://host[:port]) with no path"
+	msgSessionCookieSecureFalse  = "server_edition.session_cookie_secure=false cannot be combined with an https public_url or tls.enabled"
+	msgSessionCookieSecurePolicy = "server_edition.session_cookie_secure must be one of: auto, true, false"
+)
+
+// ValidatePublicURL checks the public_url shape: absolute http(s) origin,
+// host present, no userinfo, path, query or fragment. Empty is valid (unset).
+func ValidatePublicURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s (got: %q)", msgPublicURLShape, raw)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
+		u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" ||
+		strings.Contains(raw, "?") || strings.Contains(raw, "#") {
+		return fmt.Errorf("%s (got: %q)", msgPublicURLShape, raw)
+	}
+	return nil
+}
+
+// PublicURLIsHTTPS reports whether the configured public_url uses https.
+func (c *ServerEditionConfig) PublicURLIsHTTPS() bool {
+	return c != nil && strings.HasPrefix(strings.ToLower(c.PublicURL), "https://")
+}
+
+// EffectiveSessionCookieSecure returns the policy with "" read as "auto".
+func (c *ServerEditionConfig) EffectiveSessionCookieSecure() string {
+	if c == nil || c.SessionCookieSecure == "" {
+		return SessionCookieSecureAuto
+	}
+	return c.SessionCookieSecure
 }
 
 // ServerEditionOAuthConfig holds OAuth identity provider configuration for the server edition.
@@ -137,6 +193,9 @@ func (c *ServerEditionConfig) ApplyDefaults() {
 	if c.BearerTokenTTL.Duration() <= 0 {
 		c.BearerTokenTTL = defaultServerEditionTTL
 	}
+	if c.SessionCookieSecure == "" {
+		c.SessionCookieSecure = SessionCookieSecureAuto
+	}
 }
 
 // Validate checks that the ServerEditionConfig is valid for operation. It is
@@ -165,6 +224,17 @@ func (c *ServerEditionConfig) Validate() error {
 	}
 	if err := c.OAuth.validateOIDC(); err != nil {
 		return err
+	}
+	if err := ValidatePublicURL(c.PublicURL); err != nil {
+		return err
+	}
+	switch c.SessionCookieSecure {
+	case "", SessionCookieSecureAuto, SessionCookieSecureTrue, SessionCookieSecureFalse:
+	default:
+		return fmt.Errorf("%s (got: %q)", msgSessionCookieSecurePolicy, c.SessionCookieSecure)
+	}
+	if c.SessionCookieSecure == SessionCookieSecureFalse && c.PublicURLIsHTTPS() {
+		return fmt.Errorf("%s", msgSessionCookieSecureFalse)
 	}
 	if c.SessionTTL.Duration() < 0 {
 		return fmt.Errorf("server_edition.session_ttl must be positive")

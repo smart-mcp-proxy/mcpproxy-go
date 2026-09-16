@@ -384,6 +384,13 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	if !slices.Equal(oldCfg.TrustedHosts, newCfg.TrustedHosts) {
 		result.ChangedFields = append(result.ChangedFields, "trusted_hosts")
 	}
+	// trusted_proxies (Spec 107 FR-027 — live). Every reader evaluates the
+	// config provider per request (config.ForwardedHeaders), so reporting the
+	// change is all the propagation needed; slices.Equal for the same
+	// omitempty reason as trusted_hosts.
+	if !slices.Equal(oldCfg.TrustedProxies, newCfg.TrustedProxies) {
+		result.ChangedFields = append(result.ChangedFields, "trusted_proxies")
+	}
 
 	// Environment configuration (can be hot-reloaded)
 	if !reflect.DeepEqual(oldCfg.Environment, newCfg.Environment) {

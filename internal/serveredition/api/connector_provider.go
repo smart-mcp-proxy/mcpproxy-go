@@ -26,9 +26,15 @@ type connectorProvider struct {
 	logger *zap.Logger
 	audit  broker.AuditSink // connect-flow audit sink (spec 074 T10); nil = no-op
 
-	mu      sync.Mutex
-	baseURL string // gateway public origin, e.g. "https://gw.example.com"
-	cache   map[string]*broker.OAuthConnector
+	// publicURL is server_edition.public_url (restart-pinned): when set it is
+	// the sole source of the gateway origin (Spec 107 FR-025).
+	publicURL string
+	// trustedProxies yields the LIVE trusted_proxies list (FR-027); nil
+	// trusts nobody.
+	trustedProxies config.TrustedProxiesProvider
+
+	mu    sync.Mutex
+	cache map[string]*broker.OAuthConnector // keyed by serverKey + "|" + base URL
 }
 
 // newConnectorProvider constructs an empty provider. A nil audit sink disables
@@ -45,23 +51,39 @@ func newConnectorProvider(store broker.CredentialStore, logger *zap.Logger, audi
 	}
 }
 
-// observeBaseURL records the gateway's public origin the first time it is seen
-// (from an incoming request). The connect callback URL registered with the
-// upstream authorization server is derived from it, and OAuth requires the
-// redirect_uri to be byte-identical between the authorize request and the token
-// exchange — so it is fixed once and reused for the lifetime of a connector.
-func (p *connectorProvider) observeBaseURL(r *http.Request) {
-	base := baseURLFromRequest(r)
+// setFrontDoor installs the public_url and the live trusted-proxy provider.
+func (p *connectorProvider) setFrontDoor(publicURL string, trusted config.TrustedProxiesProvider) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.baseURL == "" {
-		p.baseURL = base
+	p.publicURL = strings.TrimSuffix(publicURL, "/")
+	p.trustedProxies = trusted
+}
+
+// baseURL resolves the gateway's public origin for one request: public_url
+// when set, otherwise the scheme and host a trusted proxy forwarded, otherwise
+// the listener's own scheme and Host. There is NO first-seen latch (Spec 107
+// FR-025): the origin is resolved per request, and the connector cache is
+// keyed by it, so the connect redirect and its callback — shaped identically
+// by the same ingress — share one connector while a hostile first request
+// cannot poison every later one.
+func (p *connectorProvider) baseURL(r *http.Request) string {
+	p.mu.Lock()
+	publicURL, trusted := p.publicURL, p.trustedProxies
+	p.mu.Unlock()
+	if publicURL != "" {
+		return publicURL
 	}
+	var list []string
+	if trusted != nil {
+		list = trusted()
+	}
+	fwd := config.ForwardedHeaders(r, list)
+	return fwd.Scheme + "://" + fwd.Host
 }
 
 // connector returns the cached connector for an oauth_connect upstream, building
 // it on first use. It errors for non-oauth_connect or unbrokered servers.
-func (p *connectorProvider) connector(server *config.ServerConfig) (*broker.OAuthConnector, error) {
+func (p *connectorProvider) connector(r *http.Request, server *config.ServerConfig) (*broker.OAuthConnector, error) {
 	if server == nil || server.AuthBroker == nil {
 		return nil, fmt.Errorf("connector provider: server has no auth_broker configuration")
 	}
@@ -69,7 +91,8 @@ func (p *connectorProvider) connector(server *config.ServerConfig) (*broker.OAut
 		return nil, fmt.Errorf("connector provider: server %q is not an oauth_connect upstream", server.Name)
 	}
 
-	key := oauth.GenerateServerKey(server.Name, server.URL)
+	base := p.baseURL(r)
+	key := oauth.GenerateServerKey(server.Name, server.URL) + "|" + base
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -86,7 +109,7 @@ func (p *connectorProvider) connector(server *config.ServerConfig) (*broker.OAut
 		ClientID:              ab.ClientID,
 		ClientSecret:          ab.ClientSecret,
 		Scopes:                ab.Scopes,
-		RedirectURI:           p.callbackURLLocked(server.Name),
+		RedirectURI:           base + connectCallbackPath(server.Name),
 		Resource:              ab.Resource,
 	}
 	conn, err := broker.NewOAuthConnector(p.store, cfg, p.logger, p.audit)
@@ -97,12 +120,6 @@ func (p *connectorProvider) connector(server *config.ServerConfig) (*broker.OAut
 	return conn, nil
 }
 
-// callbackURLLocked builds the gateway callback URL for a server. Caller holds p.mu.
-func (p *connectorProvider) callbackURLLocked(serverName string) string {
-	base := strings.TrimSuffix(p.baseURL, "/")
-	return base + connectCallbackPath(serverName)
-}
-
 // connectCallbackPath is the relative callback route for a server's connect flow.
 func connectCallbackPath(serverName string) string {
 	return "/api/v1/user/credentials/" + url.PathEscape(serverName) + "/callback"
@@ -111,18 +128,4 @@ func connectCallbackPath(serverName string) string {
 // connectInitiatePath is the relative connect route for a server.
 func connectInitiatePath(serverName string) string {
 	return "/api/v1/user/credentials/" + url.PathEscape(serverName) + "/connect"
-}
-
-// baseURLFromRequest derives the gateway's public origin (scheme://host),
-// honoring X-Forwarded-Proto for reverse-proxy deployments. Mirrors the OAuth
-// login handler's buildCallbackURL scheme detection.
-func baseURLFromRequest(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		scheme = proto
-	}
-	return scheme + "://" + r.Host
 }

@@ -636,37 +636,39 @@ func TestIsDomainAllowed(t *testing.T) {
 	}
 }
 
-func TestBuildCallbackURL(t *testing.T) {
+// TestCallbackURL pins the Spec 107 FR-025/FR-027 callback resolution: Host
+// and the listener scheme by default; X-Forwarded-Proto/-Host only from a
+// trusted proxy; public_url wins over everything.
+func TestCallbackURL(t *testing.T) {
+	oauthCfg := &config.ServerEditionOAuthConfig{Provider: "google", ClientID: "test-client-id", ClientSecret: "test-client-secret"}
 	tests := []struct {
-		name     string
-		host     string
-		tls      bool
-		xProto   string
-		expected string
+		name      string
+		host      string
+		xProto    string
+		trusted   []string
+		publicURL string
+		expected  string
 	}{
-		{
-			name:     "http localhost",
-			host:     "localhost:8080",
-			expected: "http://localhost:8080/api/v1/auth/callback",
-		},
-		{
-			name:     "with X-Forwarded-Proto",
-			host:     "app.example.com",
-			xProto:   "https",
-			expected: "https://app.example.com/api/v1/auth/callback",
-		},
+		{name: "http localhost", host: "localhost:8080", expected: "http://localhost:8080/api/v1/auth/callback"},
+		{name: "untrusted X-Forwarded-Proto is ignored", host: "app.example.com", xProto: "https", expected: "http://app.example.com/api/v1/auth/callback"},
+		{name: "trusted X-Forwarded-Proto is honoured", host: "app.example.com", xProto: "https", trusted: []string{"192.0.2.1"}, expected: "https://app.example.com/api/v1/auth/callback"},
+		{name: "public_url wins", host: "evil.example", xProto: "http", trusted: []string{"192.0.2.1"}, publicURL: "https://sso.example.com", expected: "https://sso.example.com/api/v1/auth/callback"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			handler, _ := setupTestOAuthHandler(t, oauthCfg)
+			handler.publicURL = tt.publicURL
+			handler.SetTrustedProxiesProvider(func() []string { return tt.trusted })
+
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/callback", nil)
 			req.Host = tt.host
+			req.RemoteAddr = "192.0.2.1:4444"
 			if tt.xProto != "" {
 				req.Header.Set("X-Forwarded-Proto", tt.xProto)
 			}
 
-			result := buildCallbackURL(req)
-			assert.Equal(t, tt.expected, result)
+			assert.Equal(t, tt.expected, handler.CallbackURL(req))
 		})
 	}
 }

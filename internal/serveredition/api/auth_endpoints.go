@@ -53,6 +53,38 @@ func (h *AuthEndpoints) RegisterRoutesWithPrefix(r chi.Router, prefix string) {
 	r.Post(prefix+"/auth/token", h.generateToken)
 }
 
+// RegisterPublicRoutesWithPrefix registers the routes that need NO
+// authentication: the edition probe GET {prefix}/auth/provider (Spec 107
+// FR-030). Setup mounts it beside login/callback, outside every auth group,
+// and only on an enabled block — a disabled block registers nothing, so 404
+// falls out of chi exactly as on the personal build.
+func (h *AuthEndpoints) RegisterPublicRoutesWithPrefix(r chi.Router, prefix string) {
+	r.Get(prefix+"/auth/provider", h.getProvider)
+}
+
+// ProviderProbeResponse is the whole body of GET /api/v1/auth/provider
+// (contracts/rest-endpoints.md §1): an operator-chosen label and nothing else.
+type ProviderProbeResponse struct {
+	DisplayName string `json:"display_name"`
+}
+
+// getProvider answers the public edition probe: no authentication, no side
+// effects (no pending login state), only {display_name} — oauth.display_name,
+// falling back to the provider family name. It never returns the issuer,
+// client id, tenant id, scopes, domains or provider family.
+func (h *AuthEndpoints) getProvider(w http.ResponseWriter, _ *http.Request) {
+	label := ""
+	if h.teamsConfig != nil && h.teamsConfig.OAuth != nil {
+		label = h.teamsConfig.OAuth.DisplayName
+		if label == "" {
+			label = h.teamsConfig.OAuth.Provider
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, ProviderProbeResponse{DisplayName: label})
+}
+
 // --- Response types ---
 
 // MeResponse represents the current user's profile.

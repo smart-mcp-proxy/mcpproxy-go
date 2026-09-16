@@ -4,6 +4,7 @@ package serveredition
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -133,12 +134,47 @@ func setupMultiUserOAuth(deps Dependencies) error {
 		return fmt.Errorf("getting HMAC key: %w", err)
 	}
 
+	// The LIVE trusted_proxies list (Spec 107 FR-027, edition-neutral, hot-
+	// reloadable): every forwarded-header reader below evaluates this per
+	// request and never captures the boot slice.
+	trustedProxies := config.TrustedProxiesProvider(func() []string {
+		if deps.ConfigProvider != nil {
+			if live := deps.ConfigProvider(); live != nil {
+				return live.TrustedProxies
+			}
+		}
+		return deps.Config.TrustedProxies
+	})
+
+	// Front door (Spec 107 FR-025/FR-026): public_url is restart-pinned and
+	// resolved here; the Secure policy of the session cookie is auto|true|false
+	// over the public_url scheme, in-process TLS and a trusted X-Forwarded-Proto.
+	publicURL := strings.TrimSuffix(cfg.PublicURL, "/")
+	tlsEnabled := deps.Config.TLS != nil && deps.Config.TLS.Enabled
+	securePolicy := teamsauth.CookieSecurePolicy{
+		Mode:           cfg.EffectiveSessionCookieSecure(),
+		PublicURLHTTPS: cfg.PublicURLIsHTTPS() || tlsEnabled,
+		TrustedProxies: trustedProxies,
+	}
+	if publicURL != "" {
+		deps.Logger.Infow("Server edition front door: public_url resolved",
+			"public_url", publicURL,
+			"callback_url", publicURL+"/api/v1/auth/callback",
+			"session_cookie_secure", securePolicy.Mode)
+	} else if !config.ListenIsLoopback(deps.Config.Listen) {
+		deps.Logger.Warnw("server_edition.public_url is unset while listening on a non-loopback address; set it (or MCPPROXY_PUBLIC_URL) so the OAuth callback URL and the Secure cookie decision do not depend on Host or X-Forwarded-* headers",
+			"listen", deps.Config.Listen)
+	}
+	if securePolicy.Mode == config.SessionCookieSecureFalse {
+		deps.Logger.Warnw("server_edition.session_cookie_secure is explicitly false: the session cookie is sent without the Secure attribute; only a plain-http loopback or test deployment should run this way")
+	}
+
 	// Create session manager
 	sessionTTL := cfg.SessionTTL.Duration()
 	if sessionTTL == 0 {
 		sessionTTL = 24 * time.Hour
 	}
-	sessionManager := teamsauth.NewSessionManager(userStore, sessionTTL, false) // secure=false for localhost
+	sessionManager := teamsauth.NewSessionManagerWithPolicy(userStore, sessionTTL, securePolicy)
 
 	// The LIVE view of the server-edition block, read through the same provider
 	// the admin-servers check uses rather than a second mechanism.
@@ -168,6 +204,7 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// boot block (discovery stays lazy) and derives each login's role from the
 	// LIVE admin_emails through the same provider (Spec 107 T044).
 	oauthHandler := teamsauth.NewOAuthHandler(userStore, sessionManager, serverEditionConfig, hmacKey, deps.Logger)
+	oauthHandler.SetTrustedProxiesProvider(trustedProxies)
 
 	// The per-user credential store backs the oauth_connect flow (spec 074
 	// Path B): credentials a user connects are stored here, encrypted under
@@ -187,6 +224,10 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// These are mounted outside the API key auth group.
 	deps.Router.Get("/api/v1/auth/login", oauthHandler.HandleLogin)
 	deps.Router.Get("/api/v1/auth/callback", oauthHandler.HandleCallback)
+	// The public edition probe (Spec 107 FR-030, T053) is mounted beside
+	// login/callback, outside every auth group, only on this enabled block.
+	authEndpoints := teamsapi.NewAuthEndpoints(userStore, sessionManager, cfg, hmacKey, deps.Logger)
+	authEndpoints.RegisterPublicRoutesWithPrefix(deps.Router, "/api/v1")
 
 	// Shared servers are the main config servers (admin-configured).
 	sharedServers := deps.Config.Servers
@@ -212,7 +253,6 @@ func setupMultiUserOAuth(deps Dependencies) error {
 
 	// All server edition endpoints that require session cookie or JWT authentication.
 	// Mounted outside the API key group so session cookies work.
-	authEndpoints := teamsapi.NewAuthEndpoints(userStore, sessionManager, cfg, hmacKey, deps.Logger)
 	configPath := config.GetConfigPath(deps.Config.DataDir)
 	adminHandlers := teamsapi.NewAdminHandlers(userStore, nil, sessionManager, cfg.AdminEmails, sharedServers, deps.Config, configPath, deps.ManagementService, deps.Logger)
 	adminHandlers.SetSharingUpdater(deps.SetServerShared)
@@ -233,6 +273,7 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	brokerAudit := teamsapi.NewActivityAuditSink(deps.StorageManager, deps.Logger)
 	credentialHandlers := teamsapi.NewCredentialHandlers(credStore, sharedServers, brokerAudit, deps.Logger)
 	credentialHandlers.SetAdminServersProvider(adminServers)
+	credentialHandlers.SetFrontDoor(publicURL, trustedProxies)
 
 	deps.Router.Group(func(r chi.Router) {
 		r.Use(authMiddleware.Middleware())

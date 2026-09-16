@@ -693,6 +693,18 @@ func applyTLSEnvOverrides(cfg *Config) {
 		cfg.TrustedHosts = hosts
 	}
 
+	// Override trusted proxies (Spec 107 FR-027). Comma-separated CIDRs or
+	// IPs; an empty variable leaves the file value. Entries are validated by
+	// validateTrustedProxies exactly like file values (LoadFromFile validates
+	// after the overrides run).
+	if value := os.Getenv("MCPPROXY_TRUSTED_PROXIES"); strings.TrimSpace(value) != "" {
+		cfg.TrustedProxies = parseTrustedProxiesEnv(value)
+	}
+
+	// Spec 107 FR-025: MCPPROXY_PUBLIC_URL, the one nested server_edition.*
+	// key with an env alias. Build-tagged: a no-op on the personal build.
+	applyServerEditionEnvOverrides(cfg)
+
 	// Override the offline TPA signature-bundle path from environment
 	// (spec 086 FR-019). Explicit MCPPROXY_* alias per the loader convention;
 	// the env value wins over the file value, and materializes the security

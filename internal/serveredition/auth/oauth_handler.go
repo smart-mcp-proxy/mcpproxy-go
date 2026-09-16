@@ -126,6 +126,13 @@ type OAuthHandler struct {
 	hmacKey     []byte
 	logger      *zap.SugaredLogger
 
+	// publicURL is server_edition.public_url from the boot block (restart-
+	// pinned): when set it is the sole source of the callback URL (FR-025).
+	publicURL string
+	// trustedProxies yields the LIVE trusted_proxies list (FR-027); nil
+	// trusts nobody. Evaluated per request, never captured.
+	trustedProxies config.TrustedProxiesProvider
+
 	// Fault-injection seams (T044), defaulted to the real implementations.
 	loginStore     loginStore
 	sessionCreator sessionCreator
@@ -183,15 +190,57 @@ func NewOAuthHandler(
 		pendingStates:  make(map[string]*oauthState),
 	}
 	if cfg != nil {
-		if boot := cfg(); boot != nil && boot.OAuth != nil {
-			h.oauthCfg = boot.Clone().OAuth
-			h.provider, h.providerErr = GetProviderFromConfig(h.oauthCfg)
+		if boot := cfg(); boot != nil {
+			h.publicURL = strings.TrimSuffix(boot.PublicURL, "/")
+			if boot.OAuth != nil {
+				h.oauthCfg = boot.Clone().OAuth
+				h.provider, h.providerErr = GetProviderFromConfig(h.oauthCfg)
+			}
 		}
 	}
 	if h.oauthCfg == nil {
 		h.providerErr = errors.New("OAuth not configured")
 	}
 	return h
+}
+
+// SetTrustedProxiesProvider installs the live trusted_proxies provider the
+// callback-URL and scheme resolution read per request (Spec 107 FR-027).
+func (h *OAuthHandler) SetTrustedProxiesProvider(p config.TrustedProxiesProvider) {
+	h.trustedProxies = p
+}
+
+// CallbackURL returns the OAuth callback URL for one request: from public_url
+// when set (Host and X-Forwarded-* are then ignored), otherwise from the
+// forwarded headers of a trusted proxy or the listener's own scheme and Host.
+func (h *OAuthHandler) CallbackURL(r *http.Request) string {
+	if h.publicURL != "" {
+		return h.publicURL + callbackPath
+	}
+	fwd := config.ForwardedHeaders(r, h.currentTrustedProxies())
+	return fwd.Scheme + "://" + fwd.Host + callbackPath
+}
+
+func (h *OAuthHandler) currentTrustedProxies() []string {
+	if h.trustedProxies == nil {
+		return nil
+	}
+	return h.trustedProxies()
+}
+
+// warnSchemeDisagreement logs ONE operator-readable warning, keyed by the
+// request id, when public_url is https but the callback reached the proxy
+// over plain http (an ingress terminating TLS without X-Forwarded-Proto, or
+// with it from an untrusted address). The login is never blocked (FR-025).
+func (h *OAuthHandler) warnSchemeDisagreement(r *http.Request, requestID string) {
+	if !strings.HasPrefix(strings.ToLower(h.publicURL), "https://") {
+		return
+	}
+	if config.ForwardedHeaders(r, h.currentTrustedProxies()).Scheme == "https" {
+		return
+	}
+	h.logger.Warnw("public_url is https but the OAuth callback arrived over http; the callback URL still follows public_url — check the ingress forwards X-Forwarded-Proto from an address in trusted_proxies",
+		"request_id", requestID, "public_url", h.publicURL, "remote_addr", r.RemoteAddr)
 }
 
 // HandleLogin initiates the OAuth login flow by redirecting the user to the
@@ -226,7 +275,7 @@ func (h *OAuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	codeChallenge := base64.RawURLEncoding.EncodeToString(challengeHash[:])
 
 	redirectURI, rejected := sanitizeLoginRedirect(r.URL.Query().Get("redirect_uri"))
-	callbackURL := buildCallbackURL(r)
+	callbackURL := h.CallbackURL(r)
 
 	// Build the authorization URL before allocating the pending state, so a
 	// refused login (discovery rejected, IdP unreachable) leaves none behind.
@@ -305,7 +354,8 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callbackURL := buildCallbackURL(r)
+	h.warnSchemeDisagreement(r, attempt.requestID)
+	callbackURL := h.CallbackURL(r)
 	var (
 		userInfo *OAuthUserInfo
 		err      error
@@ -493,8 +543,8 @@ func (h *OAuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		// Continue with cookie clearing even if revoke fails
 	}
 
-	// Clear session cookie
-	h.sessionManager.ClearSessionCookie(w)
+	// Clear session cookie with the Secure attribute it was set with.
+	h.sessionManager.ClearSessionCookieFor(w, r, session)
 
 	h.logger.Infow("user logged out", "user_id", session.UserID, "session_id", session.ID)
 	h.observe(LoginResult{
@@ -761,15 +811,5 @@ func (h *OAuthHandler) isDomainAllowed(email string) bool {
 	return false
 }
 
-// buildCallbackURL constructs the OAuth callback URL from the HTTP request.
-func buildCallbackURL(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	// Check X-Forwarded-Proto for reverse proxy setups
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		scheme = proto
-	}
-	return fmt.Sprintf("%s://%s/api/v1/auth/callback", scheme, r.Host)
-}
+// callbackPath is the OAuth callback route relative to the public origin.
+const callbackPath = "/api/v1/auth/callback"

@@ -14,5 +14,12 @@ func validateServerEditionConfig(cfg *Config) []ValidationError {
 	if err := cfg.ServerEdition.Validate(); err != nil {
 		return []ValidationError{{Field: "server_edition", Message: err.Error()}}
 	}
+	// The tls.enabled half of the session_cookie_secure=false refusal (Spec
+	// 107 FR-026) needs the top-level TLS block the nested Validate cannot
+	// see; the https-public_url half lives in ServerEditionConfig.Validate.
+	if cfg.ServerEdition.Enabled && cfg.ServerEdition.SessionCookieSecure == SessionCookieSecureFalse &&
+		cfg.TLS != nil && cfg.TLS.Enabled {
+		return []ValidationError{{Field: "server_edition.session_cookie_secure", Message: msgSessionCookieSecureFalse}}
+	}
 	return nil
 }
