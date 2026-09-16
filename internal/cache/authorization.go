@@ -61,7 +61,9 @@ type Authorization struct {
 	// tokens, user id for OAuth users. Empty for administrator kinds.
 	Principal string `json:"principal,omitempty"`
 	// AllowedServers is the agent token's server scope ("*" = every server).
-	// nil means unrestricted (administrator kinds).
+	// nil means unrestricted for administrator kinds; for an agent it is an
+	// empty grant, which the dispatch gates (auth.CanAccessServer) and the
+	// read gate alike treat as deny-all.
 	AllowedServers []string `json:"allowed_servers,omitempty"`
 	// Permissions is the agent token's permission tier list. nil means
 	// unrestricted (administrator kinds).
@@ -112,10 +114,13 @@ func (a Authorization) IsAdministrator() bool {
 //   - A non-administrator reader never qualifies for an administrator snapshot,
 //     however broad its own grant, and never for a snapshot of another kind.
 //   - Between agent snapshots every dimension must contain the snapshot's: the
-//     deny-all guard (a reader bounded to an empty effective profile — an empty
-//     profile, or the scope a stale pin resolves to — can call no tool and so
-//     could not have produced ANY entry, its own deny-all-stamped one included),
-//     then effective profile scope compared as server sets (a request bounded
+//     deny-all guards first (a reader with an empty server grant, or bounded
+//     to an empty effective profile — an empty profile, or the scope a stale
+//     pin resolves to — can call no tool and so could not have produced ANY
+//     entry, its own deny-all-stamped one included; an empty AllowedServers
+//     is deny-all on every dispatch gate, so it is deny-all here too rather
+//     than the vacuous coversServers([], []) match), then effective profile
+//     scope compared as server sets (a request bounded
 //     to a profile is narrower than an unscoped one; a scoped reader must
 //     currently cover every server the producer's profile exposed, so a profile
 //     deleted or narrowed since no longer reads), pin equality, allowed-server
@@ -139,6 +144,9 @@ func (a Authorization) CouldHaveProduced(reader Authorization) bool {
 	case CallerKindUser:
 		return reader.Principal != "" && reader.Principal == a.Principal
 	case CallerKindAgent:
+		if len(reader.AllowedServers) == 0 {
+			return false
+		}
 		if reader.ProfileScoped {
 			if len(reader.ProfileServers) == 0 {
 				return false

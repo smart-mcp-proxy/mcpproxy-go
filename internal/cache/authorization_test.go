@@ -256,6 +256,16 @@ func TestAuthorization_CallerKindFirst(t *testing.T) {
 		Profile: "empty", ProfileScoped: true, ProfileServers: []string{}}
 	stalePin := pinnedWildcard
 	stalePin.ProfileServers = []string{} // pinned profile deleted: deny-all, same name
+	// An agent whose token carries NO server grant. Token creation normalises
+	// an empty list to ["*"], but a server-edition rotation that narrows the
+	// grant persists nil (intersectAllowedServers), and every dispatch gate
+	// (auth.CanAccessServer, serverInScope) treats that as deny-all.
+	emptyGrant := Authorization{CallerKind: CallerKindAgent, Principal: "empty",
+		AllowedServers: nil, Permissions: []string{"read"}}
+	emptyGrantList := emptyGrant
+	emptyGrantList.Principal, emptyGrantList.AllowedServers = "empty-list", []string{}
+	emptyGrantWider := Authorization{CallerKind: CallerKindAgent, Principal: "empty-wider",
+		AllowedServers: nil, Permissions: []string{"read", "write", "destructive"}}
 
 	cases := []struct {
 		name     string
@@ -298,6 +308,20 @@ func TestAuthorization_CallerKindFirst(t *testing.T) {
 		{"empty-profile agent reads nothing: its own deny-all-stamped entry", agentInEmptyProfile, agentInEmptyProfile, false},
 		{"stale pin reads nothing: its own earlier entry", pinnedWildcard, stalePin, false},
 		{"stale pin reads nothing: its own deny-all-stamped entry", stalePin, stalePin, false},
+
+		// Codex round 1: an empty server grant is deny-all everywhere else
+		// (CanAccessServer, serverInScope), so an empty-grant agent could not
+		// have produced ANY entry — coversServers([], []) must not let it
+		// redeem an identically-stamped one.
+		{"empty-grant agent reads nothing: its own identically-stamped entry (nil)", emptyGrant, emptyGrant, false},
+		{"empty-grant agent reads nothing: its own identically-stamped entry ([])", emptyGrantList, emptyGrantList, false},
+		{"empty-grant agent reads nothing: nil vs [] are the same deny-all", emptyGrantList, emptyGrant, false},
+		{"empty-grant agent reads nothing: another empty-grant agent's entry", emptyGrant, emptyGrantWider, false},
+		{"empty-grant agent reads nothing: unscoped agent entry", broad, emptyGrant, false},
+		{"empty-grant agent reads nothing: admin entry", admin, emptyGrant, false},
+		{"broad agent reads an empty-grant agent's entry (it covers the empty set)", emptyGrant, broad, true},
+		{"admin reads an empty-grant agent's entry (kind first)", emptyGrant, admin, true},
+		{"profile-bound admin reads an empty-grant agent's entry (kind first)", emptyGrant, adminInProfile, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

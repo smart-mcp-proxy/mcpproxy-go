@@ -43,7 +43,11 @@ import (
 //	    with the nonexistent-key body (Scope Boundary exception);
 //	(e) held call: the snapshot is the one resolved at dispatch, so a session
 //	    narrowed while the upstream call is in flight neither re-stamps the
-//	    entry nor redeems it (passes on the merge base — regression pin).
+//	    entry nor redeems it (passes on the merge base — regression pin);
+//	(f) empty server grant (codex round 1): an agent token with no allowed
+//	    servers is deny-all on every dispatch gate and must be deny-all on
+//	    redemption too — an identically-stamped record answers with the
+//	    nonexistent-key body on MCP and REST.
 
 // newRestartableProxy builds the minimal proxy on a caller-owned directory
 // and returns it with an explicit close, so a test can stop it and open a
@@ -472,4 +476,76 @@ func TestScopeCacheFixture_HeldCallKeepsDispatchTimeSnapshot(t *testing.T) {
 	wide := readCachePage(t, proxy, agent, key, 0, 50)
 	require.False(t, wide.IsError, "the {a,b} session reads the entry it produced: %s", resultText(t, wide))
 	assert.Contains(t, resultText(t, wide), "SENTINEL_HELD")
+}
+
+// (f) Empty server grant (codex round 1, MUST-FIX). Token creation
+// normalises an empty allowed_servers to ["*"], but a server-edition
+// rotation that narrows the grant persists nil, and auth.CanAccessServer /
+// serverInScope treat that as deny-all: the token can call no upstream tool.
+// Before the fix cache.CouldHaveProduced let coversServers([], []) succeed,
+// so such a token could redeem an agent record whose snapshot also carried
+// an empty grant — content the deny-all gates would never have let it
+// produce. Now the gated predicate refuses an empty-grant agent reader
+// outright, and the refusal is the nonexistent-key body on both doors.
+func TestScopeCacheFixture_EmptyGrantAgentIsDenyAllOnRedemption(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+	proxy.config.Servers = []*config.ServerConfig{{Name: "github", Enabled: true}, {Name: "weather", Enabled: true}}
+
+	for _, grant := range []struct {
+		name    string
+		allowed []string
+	}{
+		{"nil grant", nil},
+		{"empty list grant", []string{}},
+	} {
+		t.Run(grant.name, func(t *testing.T) {
+			denyAll := agentCtx(grant.allowed, []string{auth.PermRead}, "")
+			require.False(t, auth.AuthContextFromContext(denyAll).CanAccessServer("github"),
+				"premise: an empty grant is deny-all on the dispatch gate")
+
+			// Direct dispatch is refused on the REST path — the same door
+			// the redemption below goes through.
+			_, dispatchErr := callToolDirectText(t, proxy, denyAll, contracts.ToolVariantRead,
+				map[string]interface{}{"name": "github:list_repos", "args": map[string]interface{}{}})
+			require.Error(t, dispatchErr, "premise: the empty grant refuses direct dispatch")
+
+			// An identically-stamped deny-all record: the reader's own
+			// snapshot, byte for byte, as a producer.
+			stamp := proxy.cacheAuthorization(denyAll)
+			require.Equal(t, cache.CallerKindAgent, stamp.CallerKind)
+			require.Empty(t, stamp.AllowedServers)
+			key := strings.Repeat("e", 63) + map[bool]string{true: "0", false: "1"}[grant.allowed == nil]
+			require.NoError(t, proxy.cacheManager.StoreAs(key, "retrieve_tools",
+				map[string]interface{}{"query": "manage"}, `[{"name":"SENTINEL_EMPTY_GRANT"}]`, "", 1, stamp))
+			absentKey := strings.Repeat("f", 64)
+
+			// Control: an administrator redeems it (kind first), so the
+			// record is live and readable — the refusal below is the gate.
+			adminPage := readCachePage(t, proxy, adminCtx(), key, 0, 50)
+			require.False(t, adminPage.IsError, "control: administrator reads the empty-grant record: %s", resultText(t, adminPage))
+			require.Contains(t, resultText(t, adminPage), "SENTINEL_EMPTY_GRANT")
+
+			// MCP: live key ≡ absent key for the empty-grant reader.
+			live := readCachePage(t, proxy, denyAll, key, 0, 50)
+			absent := readCachePage(t, proxy, denyAll, absentKey, 0, 50)
+			require.True(t, live.IsError, "the empty-grant agent must not redeem an identically-stamped record: %s", resultText(t, live))
+			require.True(t, absent.IsError)
+			assert.NotContains(t, resultText(t, live), "SENTINEL_EMPTY_GRANT")
+			assert.Equal(t, resultText(t, absent), resultText(t, live), "MCP: live key ≡ absent key for the empty-grant agent")
+			assert.Contains(t, resultText(t, live), "cache key not found")
+
+			// REST (/api/v1/tools/call read_cache branch): same parity.
+			liveText, liveErr := readCacheDirect(t, proxy, denyAll, key)
+			_, absentErr := readCacheDirect(t, proxy, denyAll, absentKey)
+			require.Error(t, liveErr, "REST: the empty-grant agent must not redeem the record: %s", liveText)
+			require.Error(t, absentErr)
+			assert.Equal(t, absentErr.Error(), liveErr.Error(), "REST: live key ≡ absent key for the empty-grant agent")
+			assert.Contains(t, liveErr.Error(), "cache key not found")
+
+			// The refusal does not evict: the administrator still reads it.
+			after := readCachePage(t, proxy, adminCtx(), key, 0, 50)
+			require.False(t, after.IsError, "a refused redemption of a stamped record must not evict it")
+		})
+	}
 }
