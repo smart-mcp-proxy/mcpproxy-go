@@ -458,24 +458,41 @@ func candidatesFor(scriptsDir, name string) ([]string, error) {
 // (see candidatesFor). So a path that exists is accepted only when the entry's
 // stored spelling (entryName, a single-entry platform call) is byte-for-byte
 // the requested one; a case-folded match is not a stored script, exactly as
-// List decides. The no-follow open remains the authoritative check.
+// List decides. Where the platform can only prove that the directory folds
+// case but not what the entry is called (Linux and the BSDs on ext4 casefold,
+// vfat, or a bind mount from a case-insensitive host — codex r3 #1), the
+// candidate is refused: fail closed rather than execute a file the listing
+// does not report. The no-follow open remains the authoritative check.
 func probeCandidates(scriptsDir, name string) ([]string, error) {
 	found := make([]string, 0, 2)
 	for _, ext := range []string{extJS, extTS} {
 		want := name + ext
 		path := filepath.Join(scriptsDir, want)
-		if _, err := lstat(path); err != nil {
+		probed, err := lstat(path)
+		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
 			return nil, err
 		}
-		if stored, err := entryName(path); err == nil && stored != want && strings.EqualFold(stored, want) {
+		stored, err := entryName(path, probed)
+		switch {
+		case errors.Is(err, errSpellingUnverifiable):
+			// The directory folds case and this platform has no single-entry
+			// call that reports the stored spelling (Linux, the BSDs): the
+			// probe cannot tell `backdoor.js` from `backdoor.JS`, so the
+			// candidate is not a stored script to a scoped caller — fail
+			// closed. The administrator's directory read still decides
+			// exactly, so the script keeps working for administrators.
+			continue
+		case err != nil:
+			// The platform call failed for another reason: the Lstat verdict
+			// stays in force and the no-follow open below decides usability.
+		case stored != want && strings.EqualFold(stored, want):
 			// The filesystem folded the case: the entry is spelled differently
 			// and no discovery surface reports it under this name. Only a
 			// case-only difference is a fold; any other answer (a hard link's
-			// other name, or no answer at all) leaves the Lstat verdict in
-			// force, and the no-follow open below still decides usability.
+			// other name) leaves the Lstat verdict in force.
 			continue
 		}
 		found = append(found, path)
@@ -496,6 +513,60 @@ var (
 	readDir = os.ReadDir
 	lstat   = os.Lstat
 )
+
+// errSpellingUnverifiable is entryName's answer on a platform that has no
+// single-entry call reporting an entry's stored spelling (Linux, the BSDs)
+// when the directory demonstrably folds case: the entry the probe found may be
+// spelled `backdoor.JS`, which no discovery surface reports as a stored script,
+// and the only way to find out is the directory listing the scoped resolver
+// must not perform (Spec 105 FR-012). The scoped resolver fails closed on it.
+var errSpellingUnverifiable = errors.New("the directory folds case and the entry's stored spelling cannot be verified without listing it")
+
+// foldsCase reports whether the directory entry at path, whose Lstat result is
+// probed, is also reachable under a different spelling of its own name — that
+// is, whether the filesystem folds case for lookups in that directory. It costs
+// exactly one extra Lstat (the constant-cost class Spec 105 FR-012 requires):
+// the same name with every ASCII letter's case swapped either does not exist
+// (the lookup is case-sensitive, so the exact-name Lstat found the exact name),
+// names a different entry (likewise), or is the same entry, which only a
+// case-folding lookup — or a hard link under the swapped spelling, which the
+// scoped resolver may equally refuse — can produce. Script names and
+// extensions are ASCII (ValidateName), so ASCII case is the whole fold set.
+//
+// It cannot be replaced by a readlink of /proc/self/fd/N: the Linux dentry is
+// named as looked up, not as stored (ext4 casefold, vfat and bind mounts from
+// case-insensitive hosts all echo the caller's spelling back).
+func foldsCase(path string, probed fs.FileInfo) (bool, error) {
+	base := filepath.Base(path)
+	variant := swapASCIICase(base)
+	if variant == base {
+		// Nothing to fold: no other spelling of this name exists.
+		return false, nil
+	}
+	other, err := lstat(filepath.Join(filepath.Dir(path), variant))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return os.SameFile(probed, other), nil
+}
+
+// swapASCIICase flips the case of every ASCII letter in s and leaves every
+// other byte alone.
+func swapASCIICase(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		switch {
+		case 'a' <= c && c <= 'z':
+			b[i] = c - 'a' + 'A'
+		case 'A' <= c && c <= 'Z':
+			b[i] = c - 'A' + 'a'
+		}
+	}
+	return string(b)
+}
 
 // notFoundErrorFor builds the not-found error for one caller kind: the
 // discovery-carrying administrator form (FR-004), or the scoped form that is

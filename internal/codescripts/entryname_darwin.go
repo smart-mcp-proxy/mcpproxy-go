@@ -4,6 +4,7 @@ package codescripts
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -11,15 +12,15 @@ import (
 )
 
 // entryName returns the name the filesystem actually stores for the directory
-// entry at path, without following a symlink and without listing the
-// directory. The default APFS/HFS+ volumes are case-insensitive but
+// entry at path (probed is its Lstat result, unused here), without following
+// a symlink and without listing the directory. The default APFS/HFS+ volumes are case-insensitive but
 // case-PRESERVING: a probe for `backdoor.js` opens `backdoor.JS`, and the
 // on-disk spelling is what F_GETPATH on the descriptor reports.
 //
 // O_SYMLINK opens a symlink itself rather than its target (the no-follow
 // counterpart to Lstat), so a link's own entry name is the one verified;
 // O_NONBLOCK keeps a FIFO from parking the open, as in openScriptFile.
-func entryName(path string) (string, error) {
+func entryName(path string, _ fs.FileInfo) (string, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_SYMLINK|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", err
