@@ -39,11 +39,15 @@ const RecordVersion uint8 = 1
 
 // HasCurrentProvenance reports whether the record carries a producer stamp
 // written under the current provenance schema. Anything else — no producer,
-// no version, a version this binary does not know — is legacy provenance
-// (Spec 105 FR-002): the gated read refuses it for every caller kind and
-// invalidates it.
+// no version, a version this binary does not know, a caller kind it does not
+// know — is legacy provenance (Spec 105 FR-002): the gated read refuses it
+// for every caller kind and invalidates it. The kind is checked structurally
+// rather than trusting the version alone: a later binary that adds a kind
+// without bumping RecordVersion, followed by a rollback, must not leave an
+// entry the administrator gate would wave through (it accepts any
+// non-internal kind for an administrator reader).
 func (c *Record) HasCurrentProvenance() bool {
-	return c.Producer != nil && c.Version == RecordVersion
+	return c.Producer != nil && c.Version == RecordVersion && IsKnownCallerKind(c.Producer.CallerKind)
 }
 
 // Stats represents cache statistics

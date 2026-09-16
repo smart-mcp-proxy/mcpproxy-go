@@ -5828,11 +5828,14 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	// write fails so the resulting "cache key not found" is diagnosable.
 	//
 	// A re-cached page is stamped with the PARENT entry's snapshot, not the
-	// redeemer's (Spec 105 FR-001, monotone recursive provenance): the gate
-	// above proved the redeemer at least as broad as the parent, so the
-	// parent's snapshot is the narrower of the two, and a child never becomes
-	// redeemable by a caller the parent refused — nor unreadable to the
-	// producer whose payload it continues.
+	// redeemer's (Spec 105 FR-001, monotone recursive provenance). Because
+	// the child's snapshot equals the parent's, the child's readers are
+	// exactly the parent's readers: a child never becomes redeemable by a
+	// caller the parent refused, nor unreadable to the producer whose payload
+	// it continues. (Under caller-kind-first ordering the redeemer is not
+	// necessarily broader in reach — a session-profiled administrator passes
+	// the gate — which is why the parent's snapshot, not "the narrower of the
+	// two", is the rule.)
 	text, reTruncated := maybeTruncateAndCacheText(
 		string(jsonResult),
 		"read_cache",

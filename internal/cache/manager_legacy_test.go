@@ -108,6 +108,9 @@ func TestGetRecordsAs_LegacyEntryRefusedForEveryCallerAndInvalidated(t *testing.
 			if !errors.Is(err, ErrUnauthorizedRead) {
 				t.Fatalf("%s reading a legacy (nil-producer) entry: got err=%v resp=%v, want ErrUnauthorizedRead", tc.name, err, resp)
 			}
+			if !errors.Is(err, ErrLegacyProvenance) {
+				t.Fatalf("%s: got %v, want the ErrLegacyProvenance sentinel the handler renders for administrators", tc.name, err)
+			}
 			if resp != nil {
 				t.Fatalf("%s: a refused legacy read must return no content, got %+v", tc.name, resp)
 			}
@@ -195,12 +198,33 @@ func TestGetRecordsAs_UpgradeFixturePreFeatureRecordRefusedAndAbsentAfterReopen(
 		// stamped producers before versions existed is still legacy provenance.
 		{"producer stamped, no version", variant("stamped-no-version", map[string]interface{}{
 			"producer": map[string]interface{}{"caller_kind": CallerKindAdmin}})},
+		// Critique round 1, finding 2: "unrecognised provenance" is decided on
+		// the CALLER KIND as well as the version. A kind this binary does not
+		// know — an empty stamp, or one a later binary added without bumping
+		// RecordVersion and a rollback left behind — is not one an
+		// administrator reader may be handed (CouldHaveProduced answers true
+		// for any non-internal kind once the reader is an administrator, so
+		// an unknown kind failed OPEN for the anonymous and admin readers).
+		{"current version, empty caller kind", variant("empty-kind", map[string]interface{}{
+			"version": RecordVersion, "producer": map[string]interface{}{"caller_kind": ""}})},
+		{"current version, unknown caller kind", variant("unknown-kind", map[string]interface{}{
+			"version": RecordVersion, "producer": map[string]interface{}{"caller_kind": "superadmin"}})},
+		{"current version, versioned-looking caller kind", variant("future-kind", map[string]interface{}{
+			"version": RecordVersion, "producer": map[string]interface{}{"caller_kind": "agent-v2",
+				"allowed_servers": []string{"*"}}})},
+		// Critique round 1 finding 6 / round 2 finding 6: a record this binary
+		// cannot even decode (here: a version that overflows the uint8 field —
+		// a downgrade after a future schema bump) is provenance it does not
+		// recognise. Before this round it surfaced as a distinct "unmarshal
+		// cache record" body for every caller and was never invalidated.
+		{"undecodable version", variant("undecodable", map[string]interface{}{"version": 300})},
 	}
 	readers := []struct {
 		name   string
 		reader Authorization
 	}{
 		{"admin", Authorization{CallerKind: CallerKindAdmin}},
+		{"anonymous", Authorization{CallerKind: CallerKindAnonymous}},
 		{"agent", Authorization{CallerKind: CallerKindAgent, Principal: "bot",
 			AllowedServers: []string{"*"}, Permissions: []string{"read", "write", "destructive"}}},
 	}
@@ -212,13 +236,18 @@ func TestGetRecordsAs_UpgradeFixturePreFeatureRecordRefusedAndAbsentAfterReopen(
 				m, db := openManagerAt(t, path)
 				key := fx.doc["key"].(string)
 				putRawRecord(t, db, key, fx.doc)
-				if _, ok := m.Peek(key); !ok {
-					t.Fatal("premise: the raw record round-trips through the record decoder")
+				if got, want := onDiskEntryCount(t, db), 1; got != want {
+					t.Fatalf("premise: the raw record is on disk (count=%d)", got)
 				}
 
 				resp, err := m.GetRecordsAs(key, 0, 10, rd.reader)
 				if !errors.Is(err, ErrUnauthorizedRead) {
 					t.Fatalf("%s reading a pre-feature record: got err=%v, want ErrUnauthorizedRead", rd.name, err)
+				}
+				// The specific sentinel, not just the parent: the handler keys
+				// the administrator's "predates provenance" body on it.
+				if !errors.Is(err, ErrLegacyProvenance) {
+					t.Fatalf("%s: got %v, want ErrLegacyProvenance", rd.name, err)
 				}
 				if resp != nil {
 					t.Fatalf("refused read returned content: %+v", resp)

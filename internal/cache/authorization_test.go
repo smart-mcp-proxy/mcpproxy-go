@@ -140,7 +140,11 @@ func TestGetRecordsAs_LegacyEntryWithoutProducer(t *testing.T) {
 }
 
 // A refused read must not count as a hit or bump the entry's access stats —
-// otherwise the refusal is visible as "someone read this" in the stats.
+// otherwise the refusal is visible as "someone read this" in the stats. It
+// DOES count as a miss (critique round 1, finding 1 — inverted from "stats
+// byte-identical"): a miss is the one signal an absent key leaves, and taking
+// the same committing branch is what puts the refusal in the miss's timing
+// class; a refusal that committed nothing was a ~3000x timing oracle.
 func TestGetRecordsAs_RefusedReadLeavesStatsUntouched(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
@@ -160,8 +164,12 @@ func TestGetRecordsAs_RefusedReadLeavesStatsUntouched(t *testing.T) {
 		t.Fatalf("got %v, want ErrUnauthorizedRead", err)
 	}
 	after := *m.GetStats()
+	if after.MissCount != before.MissCount+1 {
+		t.Fatalf("a refused read must count as exactly one miss: before=%+v after=%+v", before, after)
+	}
+	after.MissCount = before.MissCount
 	if before != after {
-		t.Fatalf("refused read changed stats: before=%+v after=%+v", before, after)
+		t.Fatalf("refused read changed stats beyond the miss: before=%+v after=%+v", before, after)
 	}
 	rec, ok := m.Peek("k")
 	if !ok || rec.AccessCount != 0 {

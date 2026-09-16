@@ -134,6 +134,16 @@ func TestScopeCacheFixture_UpgradeRecordRefusedAndAbsentAfterRestart(t *testing.
 	_, present := proxy.cacheManager.Peek(key)
 	require.True(t, present, "premise: the pre-feature record is readable by the decoder")
 
+	// Each leg re-seeds the record (critique round 2, finding 3): the first
+	// refused redemption invalidates it, so without re-seeding every later
+	// leg would pass vacuously as a plain miss of an absent key.
+	seed := func() {
+		t.Helper()
+		putPreFeatureRecord(t, proxy.storage.GetDB(), key,
+			`{"tools":[{"name":"github:SENTINEL_UPGRADE"},{"name":"github:second"}]}`, "tools", 2)
+		_, ok := proxy.cacheManager.Peek(key)
+		require.True(t, ok, "premise: the pre-feature record is live before the leg")
+	}
 	for _, tc := range []struct {
 		name string
 		ctx  context.Context
@@ -141,19 +151,24 @@ func TestScopeCacheFixture_UpgradeRecordRefusedAndAbsentAfterRestart(t *testing.
 		{"administrator", adminCtx()},
 		{"agent", agentCtx([]string{"*"}, allPerms, "")},
 	} {
+		seed()
 		result := readCachePage(t, proxy, tc.ctx, key, 0, 50)
 		assert.True(t, result.IsError, "%s must be refused the pre-feature record: %s", tc.name, resultText(t, result))
 		assert.NotContains(t, resultText(t, result), "SENTINEL_UPGRADE", "%s: no content may be returned", tc.name)
 		assert.NotContains(t, resultText(t, result), `"records"`, "%s: no page may be returned", tc.name)
-		// The REST door refuses too.
+		_, present = proxy.cacheManager.Peek(key)
+		assert.False(t, present, "%s on MCP: the pre-feature record must be invalidated on first redemption", tc.name)
+
+		// The REST door refuses too — against a LIVE record.
+		seed()
 		text, err := readCacheDirect(t, proxy, tc.ctx, key)
 		assert.Error(t, err, "%s on REST must be refused, got %q", tc.name, text)
 		if err != nil {
 			assert.NotContains(t, err.Error(), "SENTINEL_UPGRADE")
 		}
+		_, present = proxy.cacheManager.Peek(key)
+		assert.False(t, present, "%s on REST: the pre-feature record must be invalidated on first redemption", tc.name)
 	}
-	_, present = proxy.cacheManager.Peek(key)
-	assert.False(t, present, "the pre-feature record must be invalidated on first redemption")
 
 	// Restart on the same data directory.
 	closeProxy()
@@ -207,6 +222,7 @@ func TestScopeCacheFixture_FreshInternalEntryRefusedForEveryCaller(t *testing.T)
 	require.Error(t, liveErr)
 	require.Error(t, absentErr)
 	assert.Equal(t, absentErr.Error(), liveErr.Error(), "REST: internal key ≡ absent key for an agent")
+	assert.Contains(t, liveErr.Error(), "cache key not found", "REST: the shared body is the not-found one, not some earlier pre-check")
 }
 
 // (c) Recursive child on the REST direct call path: the child page an
@@ -290,6 +306,16 @@ func TestScopeCacheFixture_ProfiledAdminChildNotRedeemableByPinnedAgent(t *testi
 	require.True(t, ok)
 	require.NotNil(t, rec.Producer)
 	assert.Equal(t, cache.CallerKindAdmin, rec.Producer.CallerKind, "the child is an administrator snapshot")
+	// Under D5 the pinned agent below is refused by KIND whichever
+	// administrator snapshot the child carries, so the kind alone does not
+	// pin parent-stamping (critique round 2, finding 1). The parent was
+	// produced UNSCOPED; a child stamped with the redeemer would carry
+	// Profile "research", ProfileScoped true, ProfileServers {github}.
+	// The security assertion for monotone provenance across kinds is
+	// carried by TestReadCache_RecursiveChildInheritsParentProducer.
+	assert.False(t, rec.Producer.ProfileScoped, "the child carries the PARENT's unscoped snapshot, not the session-profiled redeemer's")
+	assert.Empty(t, rec.Producer.Profile)
+	assert.Empty(t, rec.Producer.ProfileServers)
 
 	pinned := agentCtx([]string{"*"}, allPerms, "research")
 	absentKey := "0000000000000000000000000000000000000000000000000000000000000000"
@@ -304,6 +330,7 @@ func TestScopeCacheFixture_ProfiledAdminChildNotRedeemableByPinnedAgent(t *testi
 	require.Error(t, childErr, "REST: a pinned wildcard agent must not redeem the administrator's child")
 	require.Error(t, absentErr)
 	assert.Equal(t, absentErr.Error(), childErr.Error(), "REST: the refusal is the nonexistent-key body")
+	assert.Contains(t, childErr.Error(), "cache key not found", "REST: equality alone would also hold for a shared pre-check error")
 }
 
 // (d) Pinned token on REST (Scope Boundary exception): a token allowing

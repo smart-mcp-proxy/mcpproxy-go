@@ -289,12 +289,24 @@ Server scoping is enforced at three levels:
    *parent's* snapshot, never the redeemer's, so provenance is monotone down
    the chain. For a scoped caller every refusal — an entry it may not read, an
    expired entry, an internal entry, a key that never existed — answers with
-   the same `cache key not found` body, so a key cannot be probed for
-   existence. Entries written before provenance stamping existed (an upgrade
-   from an older release) are refused for **every** caller, administrators
-   included, and are invalidated on the first attempt to read them; the
-   registry and repository-metadata caches mcpproxy keeps for itself are
-   likewise never readable through `read_cache` (they are kept, not evicted).
+   the same `cache key not found` body, status and timing (a refusal commits
+   the same stats write a miss does), so a key cannot be probed for
+   existence. An expired entry is evicted by the read that finds it expired,
+   so a second read of that key is a plain miss.
+
+   **Upgrading.** Entries written by any release before this one — including
+   the immediately preceding one, which stamped a producer but no schema
+   version — are refused for **every** caller, administrators included, and
+   are invalidated on the first attempt to read them (a one-time
+   `cache key not found` on keys minted before the upgrade; re-run the
+   original tool call). The registry and repository-metadata caches mcpproxy
+   keeps for itself are stamped internal from this release on: never readable
+   through `read_cache`, and kept rather than evicted when refused. Registry
+   and repository-metadata entries persisted *before* the upgrade carry no
+   stamp, so the first `read_cache` probe of such a key after upgrading
+   invalidates it once — the next registry search or repository lookup
+   re-fetches and re-stamps it. The no-eviction guarantee applies to entries
+   written after the upgrade.
 
 ## Administrative Operations Are Admin-Only
 

@@ -3,7 +3,9 @@ package cache
 import (
 	"errors"
 	"testing"
+	"time"
 
+	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 )
 
@@ -63,6 +65,9 @@ func TestGetRecordsAs_InternalEntryRefusedForEveryCallerWithoutEviction(t *testi
 				if !errors.Is(err, ErrUnauthorizedRead) {
 					t.Fatalf("%s reading internal entry %q: got err=%v resp=%v, want ErrUnauthorizedRead", rd.name, key, err, resp)
 				}
+				if !errors.Is(err, ErrInternalEntry) {
+					t.Fatalf("%s: got %v, want the ErrInternalEntry sentinel the handler renders for administrators", rd.name, err)
+				}
 				if resp != nil {
 					t.Fatalf("refused internal read returned content: %+v", resp)
 				}
@@ -81,11 +86,81 @@ func TestGetRecordsAs_InternalEntryRefusedForEveryCallerWithoutEviction(t *testi
 		}
 	}
 
-	// Refusals are neither hits nor evictions; only the two Get calls per
-	// reader above count as hits — subtract them to compare the rest.
+	// Refusals are neither hits nor evictions. Each refusal counts as a MISS
+	// — the same stats signal an absent key leaves, so the refusal commits
+	// like a miss and shares its timing class (critique round 1, finding 1);
+	// the Get control calls above are the only hits.
+	refusals := len(readers) * 2
 	after := *m.GetStats()
+	if got, want := after.MissCount, before.MissCount+refusals; got != want {
+		t.Fatalf("MissCount = %d, want %d: every refused internal read counts as a miss", got, want)
+	}
 	after.HitCount = before.HitCount
+	after.MissCount = before.MissCount
 	if before != after {
-		t.Fatalf("refused internal reads changed stats beyond the control Gets: before=%+v after=%+v", before, after)
+		t.Fatalf("refused internal reads changed stats beyond misses and the control Gets: before=%+v after=%+v", before, after)
+	}
+}
+
+// Critique round 2, finding 4: on the gated door the expiry check ran BEFORE
+// the internal-kind check, so a read_cache probe of a guessable internal key
+// whose entry had passed its TTL committed the eviction — exactly the
+// eviction-on-refusal FR-002 forbids for internal entries, bounded only by
+// the cleanup interval. The registry reader (runtime.SearchRegistryServers)
+// deliberately serves an expired entry through Peek as Stale until cleanup
+// runs; the gated door must leave it there.
+func TestGetRecordsAs_ExpiredInternalEntryRefusedWithoutEviction(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	m, err := NewManager(db, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	const key = "registry-servers:official:::10"
+	if err := m.StoreAs(key, "registry-servers", nil, `[{"id":"srv-1"}]`, "", 1, Authorization{CallerKind: internalCallerKindWire}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(CacheBucket))
+		var rec Record
+		if err := rec.UnmarshalBinary(bucket.Get([]byte(key))); err != nil {
+			return err
+		}
+		rec.ExpiresAt = time.Now().Add(-time.Hour)
+		data, err := rec.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(key), data)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := *m.GetStats()
+
+	for _, rd := range []struct {
+		name   string
+		reader Authorization
+	}{
+		{"admin", Authorization{CallerKind: CallerKindAdmin}},
+		{"wildcard agent", Authorization{CallerKind: CallerKindAgent, Principal: "star",
+			AllowedServers: []string{"*"}, Permissions: []string{"read", "write", "destructive"}}},
+	} {
+		resp, err := m.GetRecordsAs(key, 0, 10, rd.reader)
+		if !errors.Is(err, ErrInternalEntry) {
+			t.Fatalf("%s reading an EXPIRED internal entry: got err=%v resp=%v, want ErrInternalEntry (the internal refusal, not the expiry eviction)", rd.name, err, resp)
+		}
+		rec, ok := m.Peek(key)
+		if !ok {
+			t.Fatalf("%s: the expired internal entry was evicted by a gated probe; the registry reader serves it as Stale until cleanup", rd.name)
+		}
+		if !rec.IsExpired() {
+			t.Fatalf("premise lost: %+v", rec)
+		}
+	}
+	after := *m.GetStats()
+	if after.EvictedCount != before.EvictedCount || after.TotalEntries != before.TotalEntries {
+		t.Fatalf("a gated probe of an expired internal key must not evict: before=%+v after=%+v", before, after)
 	}
 }

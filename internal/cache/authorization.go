@@ -22,6 +22,17 @@ const (
 	CallerKindInternal = "internal"
 )
 
+// IsKnownCallerKind reports whether kind is one this binary stamps and
+// gates on. A record carrying any other kind has provenance this binary does
+// not recognise (see Record.HasCurrentProvenance).
+func IsKnownCallerKind(kind string) bool {
+	switch kind {
+	case CallerKindAdmin, CallerKindAdminUser, CallerKindAnonymous, CallerKindAgent, CallerKindUser, CallerKindInternal:
+		return true
+	}
+	return false
+}
+
 // ErrUnauthorizedRead is returned when a reader's authorization could not have
 // produced the entry it asks for (Spec 104 FR-016a), and for the entries no
 // request could have produced: legacy provenance and internal entries (Spec

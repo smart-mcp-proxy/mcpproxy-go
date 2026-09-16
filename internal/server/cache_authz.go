@@ -108,9 +108,12 @@ func childPageProducer(page *cache.ReadCacheResponse, redeemer cache.Authorizati
 // an entry that expired, an internal entry and a key that never existed all
 // answer with ONE body, the not-found one, so the refusal is not an existence
 // oracle (Spec 105 FR-001 "refusal is non-disclosing", FR-010(1)). The body
-// keeps the "cache key not found" substring agents already handle. Storage
-// failures (a corrupt record, a bbolt error) stay distinct: they are
-// operational faults, not answers about the key.
+// keeps the "cache key not found" substring agents already handle, and the
+// cache commits every refusal the way it commits a miss, so the timing class
+// matches too. Storage failures (a bbolt error) stay distinct: they are
+// operational faults, not answers about the key. A record the cache cannot
+// decode is not one of them — the gated read treats it as unrecognised
+// provenance (legacy: refused for every caller, invalidated).
 //
 // Administrators get the reason: legacy provenance (invalidated), an internal
 // entry, or — for the anonymous /mcp caller — an authenticated

@@ -152,7 +152,7 @@ func (m *Manager) storeRecord(key, toolName string, args map[string]interface{},
 		CreatedAt:    time.Now(),
 	}
 
-	return m.db.Update(func(tx *bbolt.Tx) error {
+	return m.update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(CacheBucket))
 		data, err := record.MarshalBinary()
 		if err != nil {
@@ -179,75 +179,91 @@ func (m *Manager) Get(key string) (*Record, error) {
 }
 
 // getGuarded is Get with an optional read gate. A non-nil guard marks the
-// GATED door (read_cache): on that door an entry with legacy provenance is
-// refused for every caller and invalidated (Spec 105 FR-002), and the guard
-// then runs after the expiry check and BEFORE the access-stats update, so a
-// refused read neither counts as a hit nor marks the entry as accessed.
+// GATED door (read_cache). On that door the entry's provenance class is
+// decided first (Spec 105 FR-002): legacy or unrecognised provenance —
+// including a record this binary cannot decode — is refused for every caller
+// and invalidated; an internal entry is refused for every caller WITHOUT
+// eviction, even when it has expired (its writers' ungated readers serve
+// expired entries as stale until cleanup, and a guessable key must not let a
+// probe evict them early). Only then does expiry evict, and only then does
+// the guard run — BEFORE the access-stats update, so a refused read never
+// counts as a hit or marks the entry as accessed.
 //
-// Durable invalidation: bbolt rolls the whole transaction back when the
-// Update closure returns an error, so every path that deletes (expiry, legacy
-// provenance) or records a stat (miss) returns nil from the closure and hands
-// the outcome out through `verdict` instead. m.stats is mutated only on those
-// committing paths, so the in-memory counters agree with the bucket; a guard
-// refusal returns the error from the closure and therefore changes nothing.
+// Every refusal COMMITS, as a miss. A refusal that returned its error from the
+// Update closure made bbolt roll the transaction back without a disk write,
+// while a miss committed a stats write: ~5 µs against ~10 ms, a timing class
+// a single probe could read as "a live entry sits behind this key" (spec
+// Definitions: non-disclosing means status, body AND timing class). So the
+// guard verdict, like every other outcome, is handed out through `verdict`
+// after a committed stats write; the closure returns an error only for a
+// storage fault, and m.update then restores the in-memory stats to the
+// rolled-back state.
 func (m *Manager) getGuarded(key string, guard func(*Record) error) (*Record, error) {
 	var (
 		record  *Record
 		verdict error
 	)
 
-	err := m.db.Update(func(tx *bbolt.Tx) error {
+	err := m.update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(CacheBucket))
 		data := bucket.Get([]byte(key))
 		if data == nil {
-			m.stats.MissCount++
 			verdict = ErrKeyNotFound
-			return m.saveStats(tx)
+			return m.commitMiss(tx)
 		}
 
 		record = &Record{}
 		if err := record.UnmarshalBinary(data); err != nil {
 			record = nil
-			return fmt.Errorf("unmarshal cache record: %w", err)
-		}
-
-		// Expired: evict in this transaction and COMMIT the eviction.
-		if record.IsExpired() {
-			if err := bucket.Delete([]byte(key)); err != nil {
-				record = nil
-				return fmt.Errorf("evict expired cache record: %w", err)
+			if guard == nil {
+				return fmt.Errorf("unmarshal cache record: %w", err)
 			}
-			m.stats.EvictedCount++
-			m.stats.TotalEntries--
-			m.stats.TotalSizeBytes -= record.TotalSize
-			record = nil
-			verdict = ErrKeyExpired
-			return m.saveStats(tx)
+			// Gated door: a record this binary cannot decode is provenance it
+			// does not recognise — refuse and invalidate, the way cleanup
+			// already drops undecodable records. Its size is unknown.
+			m.logger.Info("Invalidated undecodable cache entry on gated read",
+				zap.String("key", key),
+				zap.Error(err))
+			verdict = ErrLegacyProvenance
+			return m.evict(tx, bucket, key, 0, "invalidate undecodable cache record")
 		}
 
 		if guard != nil {
-			// Legacy provenance on the gated door: refuse every caller and
-			// invalidate on this first redemption, committed (FR-002).
+			// Legacy provenance: refuse every caller and invalidate on this
+			// first redemption, committed (FR-002).
 			if !record.HasCurrentProvenance() {
-				if err := bucket.Delete([]byte(key)); err != nil {
-					record = nil
-					return fmt.Errorf("invalidate legacy cache record: %w", err)
-				}
-				m.stats.EvictedCount++
-				m.stats.TotalEntries--
-				m.stats.TotalSizeBytes -= record.TotalSize
 				m.logger.Info("Invalidated cache entry with legacy provenance on first redemption",
 					zap.String("key", key),
 					zap.String("tool", record.ToolName),
 					zap.Uint8("version", record.Version),
-					zap.Bool("has_producer", record.Producer != nil))
+					zap.Bool("has_producer", record.Producer != nil),
+					zap.String("caller_kind", producerKind(record)))
+				size := record.TotalSize
 				record = nil
 				verdict = ErrLegacyProvenance
-				return m.saveStats(tx)
+				return m.evict(tx, bucket, key, size, "invalidate legacy cache record")
 			}
+			// Internal entry: refused for every caller, kept — expired or not.
+			if record.Producer.CallerKind == CallerKindInternal {
+				record = nil
+				verdict = ErrInternalEntry
+				return m.commitMiss(tx)
+			}
+		}
+
+		// Expired: evict in this transaction and COMMIT the eviction.
+		if record.IsExpired() {
+			size := record.TotalSize
+			record = nil
+			verdict = ErrKeyExpired
+			return m.evict(tx, bucket, key, size, "evict expired cache record")
+		}
+
+		if guard != nil {
 			if err := guard(record); err != nil {
 				record = nil
-				return err
+				verdict = err
+				return m.commitMiss(tx)
 			}
 		}
 
@@ -276,6 +292,51 @@ func (m *Manager) getGuarded(key string, guard func(*Record) error) (*Record, er
 	return record, nil
 }
 
+// update runs fn inside a bbolt write transaction. bbolt rolls the
+// transaction back when fn returns an error, so the in-memory stats are
+// restored to what they were when the transaction began: the counters never
+// record a mutation the bucket did not commit, and GetStats agrees with the
+// bucket on every path, not only the happy one. bbolt serialises writers, so
+// the snapshot is taken under the same exclusion the mutation runs under.
+func (m *Manager) update(fn func(tx *bbolt.Tx) error) error {
+	return m.db.Update(func(tx *bbolt.Tx) error {
+		prev := *m.stats
+		if err := fn(tx); err != nil {
+			*m.stats = prev
+			return err
+		}
+		return nil
+	})
+}
+
+// commitMiss records a miss and persists the stats — the one committing
+// branch every refusal shares with an absent key.
+func (m *Manager) commitMiss(tx *bbolt.Tx) error {
+	m.stats.MissCount++
+	return m.saveStats(tx)
+}
+
+// evict deletes key inside tx, folds the eviction into the stats and persists
+// them. size is the record's TotalSize (0 when the record could not be
+// decoded); what names the operation in the storage error.
+func (m *Manager) evict(tx *bbolt.Tx, bucket *bbolt.Bucket, key string, size int, what string) error {
+	if err := bucket.Delete([]byte(key)); err != nil {
+		return fmt.Errorf("%s: %w", what, err)
+	}
+	m.stats.EvictedCount++
+	m.stats.TotalEntries--
+	m.stats.TotalSizeBytes -= size
+	return m.saveStats(tx)
+}
+
+// producerKind is the caller kind stamped on the record, "" when unstamped.
+func producerKind(r *Record) string {
+	if r.Producer == nil {
+		return ""
+	}
+	return r.Producer.CallerKind
+}
+
 // GetRecords retrieves paginated records from a cached response without a
 // read gate. Callers serving a credentialed request use GetRecordsAs.
 func (m *Manager) GetRecords(key string, offset, limit int) (*ReadCacheResponse, error) {
@@ -296,11 +357,10 @@ func (m *Manager) GetRecords(key string, offset, limit int) (*ReadCacheResponse,
 //     guessable and their writers' ungated readers depend on them.
 func (m *Manager) GetRecordsAs(key string, offset, limit int, reader Authorization) (*ReadCacheResponse, error) {
 	return m.getRecords(key, offset, limit, func(r *Record) error {
-		// getGuarded has already refused and invalidated legacy provenance,
-		// so a producer is present here.
-		if r.Producer.CallerKind == CallerKindInternal {
-			return ErrInternalEntry
-		}
+		// getGuarded has already refused legacy provenance (invalidated) and
+		// internal entries (kept), so a producer of a request kind is
+		// present here; CouldHaveProduced still answers false for internal
+		// as defence in depth.
 		if !r.Producer.CouldHaveProduced(reader) {
 			return ErrUnauthorizedRead
 		}
@@ -369,7 +429,7 @@ func (m *Manager) GetStats() *Stats {
 // It is a no-op (nil error) if the key is absent. Used by the registry refresh
 // path (FR-007) to drop cached server lists on demand.
 func (m *Manager) Invalidate(key string) error {
-	return m.db.Update(func(tx *bbolt.Tx) error {
+	return m.update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(CacheBucket))
 		data := bucket.Get([]byte(key))
 		if data == nil {
@@ -401,7 +461,7 @@ func (m *Manager) Refresh(key string) error {
 // a registry's cached results regardless of tag/query/limit (FR-007).
 func (m *Manager) InvalidatePrefix(prefix string) (int, error) {
 	deleted := 0
-	err := m.db.Update(func(tx *bbolt.Tx) error {
+	err := m.update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(CacheBucket))
 		cursor := bucket.Cursor()
 
@@ -479,7 +539,7 @@ func (m *Manager) cleanup() error {
 	cleanupCount := 0
 	totalSizeReduced := 0
 
-	err := m.db.Update(func(tx *bbolt.Tx) error {
+	err := m.update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(CacheBucket))
 		cursor := bucket.Cursor()
 
@@ -545,6 +605,9 @@ func (m *Manager) loadStats() error {
 // saveStats saves cache statistics to database
 func (m *Manager) saveStats(tx *bbolt.Tx) error {
 	bucket := tx.Bucket([]byte(CacheStatsBucket))
+	if bucket == nil {
+		return fmt.Errorf("cache stats bucket %q is missing", CacheStatsBucket)
+	}
 	data, err := m.stats.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("marshal stats: %w", err)

@@ -292,3 +292,59 @@ func TestReadCache_AgentRefusalIsNonDisclosing(t *testing.T) {
 	// Page 1 as well as page 0: the body must not vary with the offset either.
 	assert.Equal(t, resultText(t, absent), resultText(t, readCachePage(t, proxy, narrow, liveKey, 1, 1)))
 }
+
+// Critique round 2, finding 2: the administrator-facing refusal bodies were
+// asserted nowhere (a mutation hiding the reason from administrators too
+// passed the whole suite), and the pre-feature parity body — the anonymous
+// /mcp caller refused an authenticated administrator's entry — lost its only
+// assertion when T031 inverted the agent tests. Administrators get the
+// REASON: legacy provenance (invalidated), an internal entry, or, for the
+// anonymous caller, an authenticated administrator's entry (SC-005 parity
+// control). The same keys answer a scoped caller with the not-found body.
+func TestReadCache_AdministratorRefusalBodiesNameTheReason(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+	anonymous := auth.WithAuthContext(context.Background(), auth.AnonymousContext())
+	agent := agentCtx([]string{"*"}, allPerms, "")
+
+	// Legacy provenance: the administrator is told it predates stamping.
+	const legacyKey = "legacy-entry"
+	require.NoError(t, proxy.cacheManager.Store(legacyKey, "retrieve_tools", map[string]interface{}{"query": "manage"},
+		`{"tools":[{"name":"github:SENTINEL_LEGACY"}]}`, "tools", 1))
+	legacy := readCachePage(t, proxy, adminCtx(), legacyKey, 0, 50)
+	require.True(t, legacy.IsError)
+	assert.Contains(t, resultText(t, legacy), "predates provenance stamping", "the administrator gets the legacy reason")
+	assert.NotContains(t, resultText(t, legacy), "SENTINEL_LEGACY")
+
+	// Internal entry: the administrator is told it is mcpproxy's own.
+	const internalKey = "registry-servers:official:::10"
+	require.NoError(t, proxy.cacheManager.StoreAs(internalKey, "registry-servers", nil,
+		`[{"id":"srv-1","name":"SENTINEL_INTERNAL"}]`, "", 1, cache.Authorization{CallerKind: cache.CallerKindInternal}))
+	internal := readCachePage(t, proxy, adminCtx(), internalKey, 0, 50)
+	require.True(t, internal.IsError)
+	assert.Contains(t, resultText(t, internal), "internal to mcpproxy", "the administrator gets the internal-entry reason")
+	assert.NotContains(t, resultText(t, internal), "SENTINEL_INTERNAL")
+
+	// Anonymous below authenticated administrator: the pre-feature body.
+	adminKey, _ := produceTruncatedKey(t, proxy, adminCtx())
+	control := readCachePage(t, proxy, adminCtx(), adminKey, 0, 1)
+	require.False(t, control.IsError, "control: the producing administrator reads its entry")
+	anon := readCachePage(t, proxy, anonymous, adminKey, 0, 1)
+	require.True(t, anon.IsError, "the anonymous caller ranks below an authenticated administrator")
+	assert.Contains(t, resultText(t, anon), "not readable with this credential", "SC-005 parity: the anonymous caller's body is unchanged")
+	assert.NotContains(t, resultText(t, anon), "github:")
+
+	// The same three keys are plain misses for a scoped caller.
+	absent := readCachePage(t, proxy, agent, "0000000000000000000000000000000000000000000000000000000000000000", 0, 1)
+	require.True(t, absent.IsError)
+	for _, key := range []string{internalKey, adminKey} {
+		got := readCachePage(t, proxy, agent, key, 0, 1)
+		require.True(t, got.IsError)
+		assert.Equal(t, resultText(t, absent), resultText(t, got), "%s: a scoped caller gets the not-found body, never the reason", key)
+	}
+	require.NoError(t, proxy.cacheManager.Store(legacyKey, "retrieve_tools", map[string]interface{}{"query": "manage"},
+		`{"tools":[{"name":"github:SENTINEL_LEGACY"}]}`, "tools", 1))
+	got := readCachePage(t, proxy, agent, legacyKey, 0, 1)
+	require.True(t, got.IsError)
+	assert.Equal(t, resultText(t, absent), resultText(t, got), "a scoped caller gets the not-found body for a legacy entry too")
+}
