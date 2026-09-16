@@ -425,14 +425,14 @@ graph LR
 
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class sso_pr_a_freeze_cut in_progress;
-  class sso_pr_b_oidc_front_door,sso_pr_c_group_allowlist,sso_pr_d_audit_line todo;
+  class sso_pr_a_freeze_cut,sso_pr_b_oidc_front_door in_progress;
+  class sso_pr_c_group_allowlist,sso_pr_d_audit_line todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6) | 🔵 In progress | #1287 |
-| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | ⚪ Todo | — |
+| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | 🔵 In progress | #1292 |
 | PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4) | ⚪ Todo | — |
 | PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3) | ⚪ Todo | — |
 
