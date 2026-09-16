@@ -148,7 +148,7 @@ func installFakeDocker(t *testing.T, containers []fakeContainer) *fakeDocker {
 	require.NoError(t, os.WriteFile(fd.psPath, []byte(tsv.String()), 0o600))
 
 	shim := filepath.Join(dir, "docker")
-	script := fmt.Sprintf(fakeDockerShim, shellQuote(fd.logPath), shellQuote(fd.psPath), shellQuote(fd.runErrPath))
+	script := fmt.Sprintf(fakeDockerShim, dockerShellQuote(fd.logPath), dockerShellQuote(fd.psPath), dockerShellQuote(fd.runErrPath))
 	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
 
 	t.Setenv("PATH", "/usr/bin:/bin") // sh + awk only; no real docker here
@@ -165,7 +165,10 @@ func installFakeDocker(t *testing.T, containers []fakeContainer) *fakeDocker {
 // predicate drops what the daemon did not.
 const fakeDockerIgnoreFiltersEnv = "MCPPROXY_FAKE_DOCKER_IGNORE_FILTERS"
 
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+// dockerShellQuote single-quotes s for the fake-docker shim script. (Not
+// named shellQuote: sandbox_linux_test.go declares that in the same package
+// under the linux build tag.)
+func dockerShellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // invocations returns every docker command line the shim received.
 func (fd *fakeDocker) invocations(t *testing.T) []string {
