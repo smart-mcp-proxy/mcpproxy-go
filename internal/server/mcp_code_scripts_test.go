@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -500,6 +501,9 @@ func TestCodeExecution_StoredScriptSiblingRefusals_AgentTokenNonDisclosing(t *te
 	}
 
 	t.Run("unreadable directory", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("chmod 0 does not make a directory unreadable on Windows")
+		}
 		if os.Geteuid() == 0 {
 			t.Skip("root ignores directory permissions")
 		}

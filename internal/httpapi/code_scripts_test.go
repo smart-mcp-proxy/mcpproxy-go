@@ -169,6 +169,15 @@ func TestHandleListScripts_AgentTokenForbidden(t *testing.T) {
 		recorder := getCodeScripts(t, srv, ctrl.apiKey)
 		require.Equal(t, http.StatusOK, recorder.Code, "body: %s", recorder.Body.String())
 		assert.Contains(t, recorder.Body.String(), sentinel)
-		assert.Contains(t, recorder.Body.String(), scriptsDir)
+		// Compare the decoded field, not the raw body: on Windows the JSON
+		// encoder escapes the path's backslashes, so a raw substring match on
+		// the OS path fails there.
+		var listing struct {
+			Data struct {
+				Dir string `json:"dir"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &listing))
+		assert.Equal(t, scriptsDir, listing.Data.Dir, "the administrator listing keeps the scripts directory")
 	})
 }
