@@ -26,4 +26,12 @@ describe('Settings server-edition wording (MCP-1087)', () => {
       expect(f.key).toMatch(/^server_edition\./)
     }
   })
+
+  // Spec 107 (FR-035, US5): `max_user_servers` is a removed key. The backend
+  // no longer reads it (it only emits a one-line startup warning when present),
+  // so the Settings form must not offer a control that writes a dead key.
+  it('does not expose the removed `server_edition.max_user_servers` key (Spec 107 T022)', () => {
+    const keys = SERVER_EDITION_FIELDS.map((f) => f.key)
+    expect(keys).not.toContain('server_edition.max_user_servers')
+  })
 })

@@ -504,6 +504,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		_ = logger.Sync()
 	}()
 
+	// Spec 107 FR-035: the loader has no logger, so the removed-key /
+	// deprecated-key findings it recorded are emitted here, once, now that
+	// one exists (server build only; the personal build records none).
+	config.LogLoadDiagnostics(cfg, logger)
+
 	// Log startup information including log directory info
 	logDirInfo, err := logs.GetLogDirInfo()
 	if err != nil {

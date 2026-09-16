@@ -20,9 +20,7 @@ import (
 // oauth_connect upstream (keyed by serverKey). The same connector instance must
 // serve both the connect redirect and the callback because the connector holds
 // the in-memory PKCE/state for each pending flow; rebuilding it per request
-// would lose that state. It satisfies broker.ConnectorProvider so the T6
-// CredentialResolver can reuse the same connectors when it needs to produce a
-// connect URL for an unconnected user.
+// would lose that state.
 type connectorProvider struct {
 	store  broker.CredentialStore
 	logger *zap.Logger
@@ -99,11 +97,6 @@ func (p *connectorProvider) connector(server *config.ServerConfig) (*broker.OAut
 	return conn, nil
 }
 
-// ConnectorFor satisfies broker.ConnectorProvider for the credential resolver.
-func (p *connectorProvider) ConnectorFor(server *config.ServerConfig) (broker.Connector, error) {
-	return p.connector(server)
-}
-
 // callbackURLLocked builds the gateway callback URL for a server. Caller holds p.mu.
 func (p *connectorProvider) callbackURLLocked(serverName string) string {
 	base := strings.TrimSuffix(p.baseURL, "/")
@@ -133,6 +126,3 @@ func baseURLFromRequest(r *http.Request) string {
 	}
 	return scheme + "://" + r.Host
 }
-
-// Compile-time assertion that the provider satisfies the resolver's interface.
-var _ broker.ConnectorProvider = (*connectorProvider)(nil)

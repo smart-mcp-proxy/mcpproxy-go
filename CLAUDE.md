@@ -33,7 +33,7 @@ Built in two editions from one codebase via Go build tags:
 | Edition | Build | Binary | Distribution |
 |---------|-------|--------|--------------|
 | **Personal** (default) | `go build ./cmd/mcpproxy` | `mcpproxy` | macOS DMG, Windows installer, Linux tar.gz |
-| **Server** | `go build -tags server ./cmd/mcpproxy` | `mcpproxy-server` | Docker image, .deb, Linux tar.gz |
+| **Server** | `go build -tags server -o mcpproxy-server ./cmd/mcpproxy` | `mcpproxy-server` | Docker image (`ghcr.io`) only — no .deb / tar.gz |
 
 All server code is behind `//go:build server` in `internal/serveredition/`; the personal edition is unaffected. The binary self-identifies (`mcpproxy version`, `/api/v1/status` → `"edition"`). Server multi-user OAuth (Spec 024): see [docs/development/server-edition-multiuser-auth.md](docs/development/server-edition-multiuser-auth.md).
 

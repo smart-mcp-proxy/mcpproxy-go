@@ -60,13 +60,6 @@ func NewCredentialHandlers(store broker.CredentialStore, sharedServers []*config
 	}
 }
 
-// ConnectorProvider exposes the shared, connector cache so the credential
-// resolver (T6) can mint connect URLs through the same connectors that serve the
-// REST connect/callback flow.
-func (h *CredentialHandlers) ConnectorProvider() broker.ConnectorProvider {
-	return h.connectors
-}
-
 func (h *CredentialHandlers) SetAdminServersProvider(provider AdminServersProvider) {
 	h.adminServers = provider
 }

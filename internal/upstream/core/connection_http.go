@@ -18,16 +18,10 @@ type authStrategy struct {
 
 // httpAuthStrategies returns the ordered HTTP auth strategies to attempt.
 //
-// A per-user brokered connection is FAIL-CLOSED (spec 074, security-critical):
-// the ONLY permitted strategy is the brokered headers. It must never fall back
-// to no-auth or shared OAuth — either would connect with the wrong identity and
-// defeat per-user isolation (FR-014/FR-017). Non-brokered connections keep the
-// historical headers -> no-auth -> OAuth chain, except that a configured oauth
-// block makes OAuth the only strategy (see oauthRequiredByConfig).
+// Connections keep the historical headers -> no-auth -> OAuth chain, except
+// that a configured oauth block makes OAuth the only strategy (see
+// oauthRequiredByConfig).
 func (c *Client) httpAuthStrategies() []authStrategy {
-	if c.brokeredAuth != nil {
-		return []authStrategy{{"headers", c.tryHeadersAuth}}
-	}
 	if c.oauthRequiredByConfig() {
 		return []authStrategy{{"OAuth", c.tryOAuthAuth}}
 	}
@@ -39,11 +33,8 @@ func (c *Client) httpAuthStrategies() []authStrategy {
 }
 
 // sseAuthStrategies is the SSE counterpart of httpAuthStrategies, with the same
-// fail-closed guarantee for brokered connections and the same oauth-block rule.
+// oauth-block rule.
 func (c *Client) sseAuthStrategies() []authStrategy {
-	if c.brokeredAuth != nil {
-		return []authStrategy{{"headers", c.trySSEHeadersAuth}}
-	}
 	if c.oauthRequiredByConfig() {
 		return []authStrategy{{"OAuth", c.trySSEOAuthAuth}}
 	}
@@ -105,14 +96,14 @@ func (c *Client) AuthStrategy() string {
 
 // connectHTTP establishes HTTP transport connection with auth fallback
 func (c *Client) connectHTTP(ctx context.Context) error {
-	// Strategy order (and, for brokered connections, the fail-closed single
+	// Strategy order (and, for a configured oauth block, the single OAuth
 	// strategy) is decided by httpAuthStrategies.
 	return c.runAuthStrategies(ctx, c.httpAuthStrategies(), "")
 }
 
 // connectSSE establishes SSE transport connection with auth fallback
 func (c *Client) connectSSE(ctx context.Context) error {
-	// Strategy order (and, for brokered connections, the fail-closed single
+	// Strategy order (and, for a configured oauth block, the single OAuth
 	// strategy) is decided by sseAuthStrategies.
 	return c.runAuthStrategies(ctx, c.sseAuthStrategies(), "SSE ")
 }
@@ -168,37 +159,13 @@ func (c *Client) runAuthStrategies(ctx context.Context, authStrategies []authStr
 	return fmt.Errorf("all "+transportLabel+"authentication strategies failed, last error: %w", lastErr)
 }
 
-// SetBrokeredAuth sets the per-user resolved upstream credential for this
-// connection. When set, the headers-auth strategy injects it into the configured
-// outbound header, replacing any inbound/configured auth (spec 074
-// FR-016/FR-017). Pass nil to clear it (non-brokered behaviour).
-func (c *Client) SetBrokeredAuth(b *transport.BrokeredAuth) {
-	c.brokeredAuth = b
-}
-
-// canUseHeadersStrategy reports whether the headers-auth strategy can run: it
-// needs either statically-configured headers or a per-user brokered credential
-// to inject. A brokered upstream commonly carries no static headers (FR-016).
-func (c *Client) canUseHeadersStrategy() bool {
-	return len(c.config.Headers) > 0 || c.brokeredAuth != nil
-}
-
-// brokeredHTTPConfig builds the HTTP transport config for the headers-auth
-// strategy, threading the per-user brokered credential through so the transport
-// layer injects it (spec 074 FR-016/FR-017).
-func (c *Client) brokeredHTTPConfig() *transport.HTTPTransportConfig {
-	httpConfig := c.httpTransportConfig(c.config, nil)
-	httpConfig.BrokeredAuth = c.brokeredAuth
-	return httpConfig
-}
-
 // tryHeadersAuth attempts authentication using configured headers
 func (c *Client) tryHeadersAuth(ctx context.Context) error {
-	if !c.canUseHeadersStrategy() {
+	if len(c.config.Headers) == 0 {
 		return fmt.Errorf("no headers configured")
 	}
 
-	httpConfig := c.brokeredHTTPConfig()
+	httpConfig := c.httpTransportConfig(c.config, nil)
 	httpClient, err := transport.CreateHTTPClient(httpConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP client with headers: %w", err)
@@ -250,11 +217,11 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 
 // trySSEHeadersAuth attempts SSE authentication using configured headers
 func (c *Client) trySSEHeadersAuth(ctx context.Context) error {
-	if !c.canUseHeadersStrategy() {
+	if len(c.config.Headers) == 0 {
 		return fmt.Errorf("no headers configured")
 	}
 
-	httpConfig := c.brokeredHTTPConfig()
+	httpConfig := c.httpTransportConfig(c.config, nil)
 	sseClient, err := transport.CreateSSEClient(httpConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create SSE client with headers: %w", err)

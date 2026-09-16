@@ -55,7 +55,7 @@ func sampleCred() *UpstreamCredential {
 		Scopes:       []string{"read", "write"},
 		TokenType:    "Bearer",
 		Audience:     "https://api.example.com",
-		ObtainedVia:  "token_exchange",
+		ObtainedVia:  "connect_flow",
 		UpdatedAt:    time.Now().UTC().Truncate(time.Second),
 	}
 }

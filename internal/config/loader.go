@@ -252,6 +252,17 @@ func loadConfigFile(path string, cfg *Config) error {
 		return nil
 	}
 
+	// Spec 107 FR-032/FR-035: the server build drops the removed
+	// server-edition keys / auth_broker modes from the RAW document before the
+	// typed decode and records one LoadDiagnostic each (the loader has no
+	// logger; LogLoadDiagnostics emits them once one exists). The personal
+	// build returns the bytes untouched and records nothing (opaque carriers).
+	data, diagnostics, err := normalizeLoadedDocument(data)
+	if err != nil {
+		return err
+	}
+	cfg.loadDiagnostics = diagnostics
+
 	// First check if api_key is present in the JSON to distinguish between
 	// "not set" vs "explicitly set to empty"
 	var rawConfig map[string]interface{}
@@ -272,8 +283,8 @@ func loadConfigFile(path string, cfg *Config) error {
 	// legacy "teams" key to "server_edition". An existing config that still uses
 	// "teams" is normalized onto ServerEdition on read. The new key always wins;
 	// only fall back to the legacy key when "server_edition" is absent. This
-	// compiles in both editions because ServerEditionConfig is a struct{} stub
-	// in the personal build (it simply unmarshals to an empty value there).
+	// compiles in both editions because ServerEditionConfig is a raw-JSON
+	// carrier in the personal build (it stores the block verbatim there).
 	if _, hasNew := rawConfig["server_edition"]; !hasNew {
 		if legacy, hasLegacy := rawConfig["teams"]; hasLegacy {
 			if raw, err := json.Marshal(legacy); err == nil {

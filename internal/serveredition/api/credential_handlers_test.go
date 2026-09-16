@@ -105,7 +105,7 @@ func serverKeyFor(s *config.ServerConfig) string {
 
 func TestCredentialsList_RedactsSecrets(t *testing.T) {
 	store := credTestStore(t)
-	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeTokenExchange)
+	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeOAuthConnect)
 	require.NoError(t, store.Put(testUserID, serverKeyFor(srv), &broker.UpstreamCredential{
 		Type:         "oauth2",
 		AccessToken:  "SECRET-ACCESS-TOKEN",
@@ -113,7 +113,7 @@ func TestCredentialsList_RedactsSecrets(t *testing.T) {
 		ExpiresAt:    time.Now().Add(time.Hour),
 		Scopes:       []string{"repo"},
 		TokenType:    "Bearer",
-		ObtainedVia:  "token_exchange",
+		ObtainedVia:  "connect_flow",
 	}))
 
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
@@ -135,15 +135,15 @@ func TestCredentialsList_RedactsSecrets(t *testing.T) {
 	got := resp.Credentials[0]
 	assert.Equal(t, "shared-gh", got.Server)
 	assert.Equal(t, credStatusConnected, got.Status)
-	assert.Equal(t, config.AuthBrokerModeTokenExchange, got.Mode)
+	assert.Equal(t, config.AuthBrokerModeOAuthConnect, got.Mode)
 	assert.Equal(t, []string{"repo"}, got.Scopes)
 	assert.NotNil(t, got.ExpiresAt)
 }
 
 func TestCredentialsList_Statuses(t *testing.T) {
 	store := credTestStore(t)
-	connected := brokerHTTPServer("connected-srv", config.AuthBrokerModeTokenExchange)
-	expired := brokerHTTPServer("expired-srv", config.AuthBrokerModeTokenExchange)
+	connected := brokerHTTPServer("connected-srv", config.AuthBrokerModeOAuthConnect)
+	expired := brokerHTTPServer("expired-srv", config.AuthBrokerModeOAuthConnect)
 	fresh := brokerHTTPServer("fresh-srv", config.AuthBrokerModeOAuthConnect)
 
 	require.NoError(t, store.Put(testUserID, serverKeyFor(connected), &broker.UpstreamCredential{
@@ -186,7 +186,7 @@ func TestCredentialsList_StoreDisabled(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, store.Enabled())
 
-	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeTokenExchange)
+	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeOAuthConnect)
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
@@ -203,7 +203,7 @@ func TestCredentialsList_StoreDisabled(t *testing.T) {
 
 func TestCredentialsDelete_Removes(t *testing.T) {
 	store := credTestStore(t)
-	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeTokenExchange)
+	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeOAuthConnect)
 	sk := serverKeyFor(srv)
 	require.NoError(t, store.Put(testUserID, sk, &broker.UpstreamCredential{
 		Type: "oauth2", AccessToken: "a", ExpiresAt: time.Now().Add(time.Hour),
@@ -223,7 +223,7 @@ func TestCredentialsDelete_Removes(t *testing.T) {
 
 func TestCredentialsDelete_UnknownServer404(t *testing.T) {
 	store := credTestStore(t)
-	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeTokenExchange)
+	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeOAuthConnect)
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
@@ -235,7 +235,7 @@ func TestCredentialsDelete_UnknownServer404(t *testing.T) {
 
 func TestCredentials_CrossUserIsolation(t *testing.T) {
 	store := credTestStore(t)
-	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeTokenExchange)
+	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeOAuthConnect)
 	sk := serverKeyFor(srv)
 	// User B has a valid credential.
 	require.NoError(t, store.Put(testUserB, sk, &broker.UpstreamCredential{
@@ -292,7 +292,10 @@ func TestCredentialsConnect_Redirects(t *testing.T) {
 
 func TestCredentialsConnect_NonConnectMode400(t *testing.T) {
 	store := credTestStore(t)
-	srv := brokerHTTPServer("xchg-srv", config.AuthBrokerModeTokenExchange)
+	// A block whose mode is not oauth_connect never reaches the handler on a
+	// validated config (Spec 107 FR-032 made oauth_connect the only accepted
+	// mode); the handler still refuses one defensively.
+	srv := brokerHTTPServer("xchg-srv", "not-a-connect-mode")
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
@@ -447,7 +450,7 @@ func TestCredentialsCallback_Denied_RedirectSanitized(t *testing.T) {
 
 func TestCredentials_Unauthenticated(t *testing.T) {
 	store := credTestStore(t)
-	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeTokenExchange)
+	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeOAuthConnect)
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	// Empty auth context → unauthenticated.
 	r := credRouter(h, &auth.AuthContext{})

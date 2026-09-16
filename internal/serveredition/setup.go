@@ -92,7 +92,10 @@ func setupMultiUserOAuth(deps Dependencies) error {
 		})
 	}
 
-	// Validate server config
+	// Spec 107 FR-039: defaults (TTLs, Microsoft tenant, MCPPROXY_CRED_KEY
+	// fallback) are applied at boot only; Validate itself never mutates, so
+	// the write doors run the same rules without persisting derived values.
+	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("server config validation: %w", err)
 	}
@@ -117,15 +120,15 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// Create OAuth handler
 	oauthHandler := teamsauth.NewOAuthHandler(userStore, sessionManager, cfg, hmacKey, deps.Logger)
 
-	// Wire the per-user credential store so IdP subject tokens can be captured at
-	// login when teams.store_idp_tokens is enabled (spec 074). The store derives
-	// its key from MCPPROXY_CRED_KEY or teams.credential_encryption_key; with no
-	// key it is constructed disabled and token capture is silently skipped.
+	// The per-user credential store backs the oauth_connect flow (spec 074
+	// Path B): credentials a user connects are stored here, encrypted under
+	// MCPPROXY_CRED_KEY or server_edition.credential_encryption_key. With no key
+	// it is constructed disabled and the connect surface reports so. Nothing
+	// injects a stored credential into a proxied request (Spec 107 FR-034).
 	credStore, err := broker.NewBBoltAESStore(deps.DB, broker.ResolveMasterKey(cfg.CredentialEncryptionKey), deps.Logger.Desugar())
 	if err != nil {
 		return fmt.Errorf("creating credential store: %w", err)
 	}
-	oauthHandler.SetCredentialStore(credStore)
 
 	// The LIVE view of the server-edition block, read through the same provider
 	// the admin-servers check uses rather than a second mechanism.

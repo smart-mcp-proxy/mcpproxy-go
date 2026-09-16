@@ -128,15 +128,10 @@ func NewEndpointDeprecatedError(url, message, migrationGuide, newEndpoint string
 
 // HTTPTransportConfig holds configuration for HTTP transport
 type HTTPTransportConfig struct {
-	URL         string
-	Headers     map[string]string
-	OAuthConfig *client.OAuthConfig
-	UseOAuth    bool
-	// BrokeredAuth, when set, injects a per-user resolved credential into the
-	// outbound headers, replacing any configured/inbound auth header (spec 074
-	// FR-016/FR-017). It is edition-neutral plain data so the server-edition
-	// credential broker can drive injection without this package importing it.
-	BrokeredAuth *BrokeredAuth
+	URL          string
+	Headers      map[string]string
+	OAuthConfig  *client.OAuthConfig
+	UseOAuth     bool
 	TraceEnabled bool // Enable detailed HTTP/SSE frame tracing
 	// RetryAfter, when set, receives the `Retry-After` hints observed on this
 	// upstream's rate-limited responses (#1040). mcp-go flattens non-2xx
@@ -170,27 +165,6 @@ func (cfg *HTTPTransportConfig) needsCustomTransport() bool {
 	return cfg.TraceEnabled || cfg.RetryAfter != nil
 }
 
-// effectiveHeaders returns the outbound header set, applying brokered per-user
-// auth injection when configured (spec 074 FR-016/FR-017).
-// refuseBrokeredOAuth fails closed when a per-user brokered credential meets
-// an OAuth transport (spec 074 FR-014/FR-017). The auth ladder never pairs the
-// two — a brokered connection is headers-only — but the OAuth constructors now
-// carry static headers (GH #1271), so this guard keeps a shared OAuth token
-// from ever overwriting, or riding beside, a per-user credential.
-func (cfg *HTTPTransportConfig) refuseBrokeredOAuth() error {
-	if cfg.BrokeredAuth != nil {
-		return fmt.Errorf("brokered per-user auth cannot be combined with an OAuth transport (spec 074)")
-	}
-	return nil
-}
-
-func (cfg *HTTPTransportConfig) effectiveHeaders() map[string]string {
-	if cfg.BrokeredAuth == nil {
-		return cfg.Headers
-	}
-	return EffectiveHeaders(cfg.Headers, cfg.BrokeredAuth)
-}
-
 // CreateHTTPClient creates a new MCP client using HTTP transport
 func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	logger := zap.L().Named("transport")
@@ -210,9 +184,6 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		zap.Bool("has_oauth_config", cfg.OAuthConfig != nil))
 
 	if cfg.UseOAuth && cfg.OAuthConfig != nil {
-		if err := cfg.refuseBrokeredOAuth(); err != nil {
-			return nil, err
-		}
 		// Use OAuth-enabled client with Dynamic Client Registration
 		logger.Info("Creating OAuth-enabled streamable HTTP client with Dynamic Client Registration",
 			zap.String("url", cfg.logSafeURL()),
@@ -284,10 +255,7 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 	logger.Debug("Creating regular HTTP client", zap.String("url", cfg.logSafeURL()))
 
-	// Apply brokered per-user auth injection (spec 074): replaces any configured
-	// auth header with the resolved per-user credential and never forwards the
-	// inbound gateway/IdP token (FR-017).
-	headers := cfg.effectiveHeaders()
+	headers := cfg.Headers
 
 	opts := []transport.StreamableHTTPCOption{}
 	if len(headers) > 0 {
@@ -343,9 +311,6 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		zap.Bool("has_oauth_config", cfg.OAuthConfig != nil))
 
 	if cfg.UseOAuth && cfg.OAuthConfig != nil {
-		if err := cfg.refuseBrokeredOAuth(); err != nil {
-			return nil, err
-		}
 		// Use OAuth-enabled SSE client with Dynamic Client Registration
 		logger.Info("Creating OAuth-enabled SSE client with Dynamic Client Registration",
 			zap.String("url", cfg.logSafeURL()),
@@ -406,10 +371,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 	logger.Debug("Creating regular SSE client", zap.String("url", cfg.logSafeURL()))
 
-	// Apply brokered per-user auth injection (spec 074): replaces any configured
-	// auth header with the resolved per-user credential and never forwards the
-	// inbound gateway/IdP token (FR-017).
-	headers := cfg.effectiveHeaders()
+	headers := cfg.Headers
 
 	// Create custom HTTP client for SSE - NO Timeout field to allow indefinite streaming
 	// The Timeout field covers the entire request duration, which kills long-lived SSE streams

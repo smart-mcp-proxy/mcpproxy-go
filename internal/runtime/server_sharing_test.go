@@ -34,7 +34,8 @@ func TestServerSharingSurvivesConfigurationSave(t *testing.T) {
 	cfg := rt.ConfigSnapshot().Clone()
 	var broker config.AuthBrokerConfig
 	require.NoError(t, json.Unmarshal([]byte(`{
-		"mode":"token_exchange",
+		"mode":"oauth_connect",
+		"authorization_endpoint":"https://issuer.example/authorize",
 		"token_endpoint":"https://issuer.example/token",
 		"client_id":"fixture-client",
 		"client_secret":"fixture-secret"
