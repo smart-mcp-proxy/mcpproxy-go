@@ -19,7 +19,11 @@
 #   --scratch   root for the binary, config, data dir and logs
 #               (default: $MCPPROXY_RIG_SCRATCH or mktemp under $TMPDIR)
 #   --idp-args  extra flags for the fake IdP, e.g. "-token-error bad-signature";
-#               any tamper flag switches the login step to expect a refusal
+#               any tamper flag switches the login step to expect a refusal —
+#               403 (FR-024's closed-reason class) for most flags, but 503
+#               ("Sign-in is temporarily unavailable") for the unavailability
+#               class: -discovery-http-token-endpoint, -token-endpoint-redirect,
+#               and -userinfo-error redirect|non-json|unavailable
 #   --keep      keep the scratch directory on success (always kept on failure)
 #   --skip-build reuse <scratch>/mcpproxy-server and <scratch>/oauthserver
 #
@@ -227,9 +231,19 @@ fi
 c "$IDP_URL/.well-known/openid-configuration" |
 	jq -e '.userinfo_endpoint and .jwks_uri and (.id_token_signing_alg_values_supported|index("RS256"))' >/dev/null ||
 	die "OIDC discovery document lacks userinfo_endpoint / jwks_uri / RS256"
-OIDC_CLIENT_ID="$(sed -n 's/^Confidential ID:[[:space:]]*//p' "$SCRATCH/idp.log" | head -n1)"
-OIDC_CLIENT_SECRET="$(sed -n 's/^Confidential Secret:[[:space:]]*//p' "$SCRATCH/idp.log" | head -n1)"
-[[ -n "$OIDC_CLIENT_ID" && -n "$OIDC_CLIENT_SECRET" ]] || die "could not read Confidential ID/Secret from idp.log"
+# The discovery endpoint answers as soon as the listener is bound — before
+# the startup banner (Confidential ID/Secret included) finishes printing to
+# idp.log — so a single read right after wait_http can race an empty file.
+# Poll the same bounded way wait_http does.
+OIDC_CLIENT_ID=""
+OIDC_CLIENT_SECRET=""
+for ((i = 0; i < 40; i++)); do
+	OIDC_CLIENT_ID="$(sed -n 's/^Confidential ID:[[:space:]]*//p' "$SCRATCH/idp.log" 2>/dev/null | head -n1)"
+	OIDC_CLIENT_SECRET="$(sed -n 's/^Confidential Secret:[[:space:]]*//p' "$SCRATCH/idp.log" 2>/dev/null | head -n1)"
+	[[ -n "$OIDC_CLIENT_ID" && -n "$OIDC_CLIENT_SECRET" ]] && break
+	sleep 0.5
+done
+[[ -n "$OIDC_CLIENT_ID" && -n "$OIDC_CLIENT_SECRET" ]] || die "could not read Confidential ID/Secret from idp.log within 20s"
 export OIDC_CLIENT_ID OIDC_CLIENT_SECRET
 ok "§1 fake IdP up (pid $IDP_PID), client_id=$OIDC_CLIENT_ID, tamper=$TAMPER"
 
@@ -332,9 +346,19 @@ J="$SCRATCH/alice.jar"
 res="$(headless_login "$J" "/my/tokens")"
 code="${res%% *}"; loc="${res#* }"
 if [[ "$TAMPER" == "1" ]]; then
-	[[ "$code" == "403" ]] || die "4c tamper case: expected 403 from the callback, got HTTP $code ($loc)"
+	# FR-024: unavailability (discovery/provider/internal failures) is the one
+	# distinct class — 503, not the 403 closed-reason page — so a tamper flag
+	# that injects one of those must expect 503, never a blanket 403.
+	want="403"
+	case " $IDP_EXTRA " in
+	*" -discovery-http-token-endpoint "*|*" -token-endpoint-redirect "*|\
+	*" -userinfo-error redirect "*|*" -userinfo-error non-json "*|*" -userinfo-error unavailable "*)
+		want="503"
+		;;
+	esac
+	[[ "$code" == "$want" ]] || die "4c tamper case: expected $want from the callback, got HTTP $code ($loc)"
 	[[ "$(grep -c mcpproxy_session "$J" 2>/dev/null || true)" == "0" ]] || die "4c tamper case: a session cookie was issued"
-	ok "4c tamper case refused with 403 and no session (idp-args: $IDP_EXTRA)"
+	ok "4c tamper case refused with $want and no session (idp-args: $IDP_EXTRA)"
 	log "§4 done (tamper run); phases c/d are not exercised under tamper"
 	exit 0
 fi

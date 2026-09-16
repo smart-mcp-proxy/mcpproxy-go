@@ -503,9 +503,12 @@ var (
 //     cleared in the same write); otherwise ErrSubjectMismatch, nothing
 //     written.
 //
-// A successful login while the window is armed always closes it, even when
-// the subject did not change. A missing record is created bound to the
-// presented (provider, subject) (Created).
+// A successful login while the window is armed always closes it (Rebound +
+// RebindConsumed both set), even when the subject did not change: FR-023
+// carries provider_rebound on "the first successful login" while armed
+// unconditionally, and RebindConsumed alone is never logged anywhere, so a
+// same-subject consumption would otherwise leave no audit trace. A missing
+// record is created bound to the presented (provider, subject) (Created).
 func (s *UserStore) UpdateUserLogin(ctx context.Context, claims LoginClaims) (LoginOutcome, error) {
 	if err := ctx.Err(); err != nil {
 		return LoginOutcome{}, err
@@ -553,7 +556,8 @@ func (s *UserStore) UpdateUserLogin(ctx context.Context, claims LoginClaims) (Lo
 			case user.ProviderSubjectID == "":
 				// An upgraded record bound before the IdP exposed a subject: bind.
 			case user.Provider == claims.Provider && user.ProviderSubjectID == claims.Subject:
-				// Plain bind.
+				// Plain bind — no identity change, but see below: consuming an
+				// armed window is itself the reportable event (FR-023).
 			case user.Provider != claims.Provider:
 				out.Rebound = true
 			case armed:
@@ -562,8 +566,15 @@ func (s *UserStore) UpdateUserLogin(ctx context.Context, claims LoginClaims) (Lo
 				return ErrSubjectMismatch
 			}
 			if armed {
+				// FR-023: "the first successful login" while armed "carries
+				// provider_rebound in the line's flags" — unconditionally, not
+				// only when the presented (provider, sub) actually differs from
+				// the stored one. RebindConsumed alone reaches no audit line, so
+				// a same-subject login while armed would otherwise close the
+				// administrator-opened window with no trace at all.
 				user.SubjectRebindArmedAt = nil
 				out.RebindConsumed = true
+				out.Rebound = true
 			}
 			user.Provider = claims.Provider
 			user.ProviderSubjectID = claims.Subject

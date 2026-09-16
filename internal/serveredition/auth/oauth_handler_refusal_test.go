@@ -967,6 +967,33 @@ func TestHandleCallback_Unavailable_InternalErrorRenders503(t *testing.T) {
 		assert.Equal(t, u.ID, res.UserID)
 		assert.Empty(t, res.EmailHash)
 	})
+
+	// The bearer-token-bearing write is a second, separate persist
+	// (sessionCreator.CreateSession already durably wrote a bearer-less row);
+	// when it fails, that row must not survive as an orphan until its TTL
+	// (cross-review round 3, internal/serveredition/auth/oauth_handler.go).
+	t.Run("failing sessionPersist: the bearer-less row is cleaned up, not orphaned", func(t *testing.T) {
+		rig := newOIDCRefusalRig(t, oauthserver.ErrorMode{}, nil)
+		var capturedID string
+		rig.handler.sessionPersist = func(s *users.Session) error {
+			capturedID = s.ID
+			return errors.New("injected: session persistence unavailable")
+		}
+		const rid = "req-internal-session-persist"
+
+		w := rig.approveFlow(rid)
+		res := assertInternal(t, rig, rid, w)
+
+		u, err := rig.store.GetUserByEmail(refusalUser)
+		require.NoError(t, err)
+		require.NotNil(t, u, "the upsert committed before the session was created")
+		assert.Equal(t, u.ID, res.UserID)
+
+		require.NotEmpty(t, capturedID)
+		orphan, err := rig.store.GetSession(capturedID)
+		require.NoError(t, err)
+		assert.Nil(t, orphan, "the bearer-less row from sessionCreator must be deleted, not left until TTL")
+	})
 }
 
 // ---------------------------------------------------------------------------

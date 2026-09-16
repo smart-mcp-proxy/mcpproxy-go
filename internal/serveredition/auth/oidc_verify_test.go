@@ -31,6 +31,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -819,4 +820,29 @@ func TestOIDCVerify_GroupsClaimMissingFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// If the token endpoint answers without an access_token (RFC 6749 §5.1
+// requires it, but a misconfigured or hostile IdP could still omit it) and
+// the ID token lacks the groups claim, the provider cannot attempt the
+// userinfo fetch it is required to try (FR-008/FR-022). That is a fetch that
+// never happened for lack of a credential, not "claim absent" — treated the
+// same as any other userinfo failure class: provider_error, login refused,
+// store untouched (never a silent groups=[] login, cross-review round 3).
+func TestOIDCVerify_ResolveGroups_NoAccessTokenIsProviderError(t *testing.T) {
+	prov := newOIDCProvider(&config.ServerEditionOAuthConfig{GroupsClaim: "groups"})
+	prov.disc = &discoveryDoc{
+		UserinfoEndpoint: "https://idp.example/userinfo",
+		expiresAt:        time.Now().Add(time.Hour),
+	}
+	claims := &idTokenClaims{Subject: "alice", raw: map[string]any{}} // no "groups" claim
+
+	groups, missing, err := prov.resolveGroups(context.Background(), claims, "")
+
+	require.Error(t, err)
+	var oe *oidcError
+	require.ErrorAs(t, err, &oe)
+	assert.Equal(t, LoginProviderError, oe.reason)
+	assert.Nil(t, groups)
+	assert.False(t, missing, "not a fail-closed groups_claim_missing outcome")
 }

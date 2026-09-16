@@ -2780,7 +2780,13 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Wire client connect service
 	if cfg := s.runtime.Config(); cfg != nil {
 		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey).
-			WithRequireMCPAuth(cfg.RequireMCPAuth).
+			// The effective value (Spec 107 FR-029: forced true under an
+			// enabled server_edition regardless of the raw config), never the
+			// raw field — otherwise a server-edition deployment with
+			// require_mcp_auth: false writes credential-less client configs
+			// while /mcp itself still demands one, so every generated client
+			// gets a 401 on its first real call (cross-review round 3).
+			WithRequireMCPAuth(config.EffectiveRequireMCPAuth(cfg)).
 			// Read listen/api_key/require_mcp_auth LIVE so a runtime toggle (the
 			// /mcp middleware already honors require_mcp_auth per-request) is
 			// reflected in what connect writes, instead of the startup snapshot
@@ -2790,7 +2796,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				if c == nil {
 					return "", "", false
 				}
-				return c.Listen, c.APIKey, c.RequireMCPAuth
+				return c.Listen, c.APIKey, config.EffectiveRequireMCPAuth(c)
 			})
 		httpAPIServer.SetConnectService(connectSvc)
 

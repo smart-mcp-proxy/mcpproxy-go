@@ -708,6 +708,31 @@ func TestUpdateUserLogin_Outcomes(t *testing.T) {
 		assert.Equal(t, "sub-B", stored.ProviderSubjectID)
 	})
 
+	// FR-023: "the first successful login" while armed "carries provider_rebound
+	// in the line's flags" — unconditionally, not only when the presented
+	// subject differs from the stored one. A same-subject login while armed
+	// still consumes (and must still flag) the administrator-opened window, or
+	// its consumption leaves no audit trace at all (RebindConsumed is not
+	// logged anywhere; provider_rebound is the only signal, cross-review round 3).
+	t.Run("same subject with the window armed still consumes and flags it", func(t *testing.T) {
+		store := newStore(t)
+		seeded := seedUser(t, store, "alice@example.com", "google", "sub-A")
+		armedAt := time.Now().UTC()
+		seeded.SubjectRebindArmedAt = &armedAt
+		require.NoError(t, store.UpdateUser(seeded))
+
+		out, err := store.UpdateUserLogin(ctx, claims("google", "sub-A"))
+		require.NoError(t, err)
+		assert.True(t, out.Rebound, "the window's consumption is itself the reportable event")
+		assert.True(t, out.RebindConsumed)
+		assert.Equal(t, "sub-A", out.User.ProviderSubjectID)
+		assert.Nil(t, out.User.SubjectRebindArmedAt)
+
+		stored, err := store.GetUserByEmail("alice@example.com")
+		require.NoError(t, err)
+		assert.Nil(t, stored.SubjectRebindArmedAt)
+	})
+
 	t.Run("disabled record is refused untouched", func(t *testing.T) {
 		store := newStore(t)
 		seeded := seedUser(t, store, "alice@example.com", "google", "sub-A")

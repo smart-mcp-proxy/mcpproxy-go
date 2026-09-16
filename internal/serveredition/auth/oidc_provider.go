@@ -560,8 +560,17 @@ func (p *oidcProvider) resolveGroups(ctx context.Context, claims *idTokenClaims,
 	if err != nil {
 		return nil, false, err
 	}
-	if doc.UserinfoEndpoint == "" || accessToken == "" {
+	if doc.UserinfoEndpoint == "" {
 		return []string{}, true, nil
+	}
+	if accessToken == "" {
+		// The token endpoint is required to carry access_token (RFC 6749
+		// §5.1), but a hostile or misconfigured IdP could still omit it.
+		// Userinfo is advertised and required to resolve the missing groups
+		// claim, so an absent credential is a fetch that could not be
+		// attempted, not "claim absent": provider_error, never a silent
+		// groups=[] login (FR-008/FR-022, cross-review round 3).
+		return nil, false, newOIDCError(LoginProviderError, "no access_token to fetch userinfo", nil)
 	}
 	body, _, err := p.get(ctx, "userinfo", doc.UserinfoEndpoint, accessToken)
 	if err != nil {

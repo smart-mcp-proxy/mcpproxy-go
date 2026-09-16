@@ -23,6 +23,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -334,4 +335,33 @@ func TestServerEdition_ForcedMCPAuthBootNotice(t *testing.T) {
 		newForcedAuthTestServer(t, cfg, zap.New(core))
 		assert.Empty(t, notices(logs))
 	})
+}
+
+// TestConnectServiceWiring_UsesEffectiveRequireMCPAuth pins the connect
+// service wiring in server.go to the build-tagged accessor. FR-029 forces
+// /mcp authentication under an enabled server_edition regardless of the
+// configured require_mcp_auth; connect.Service decides whether to embed a
+// credential in generated client configs from exactly the value it is
+// threaded. Wiring it from the raw config.RequireMCPAuth field (as it stood
+// before cross-review round 3) reintroduces credential-less client configs
+// that /mcp then answers 401 to on their first real call — the mirror image
+// of the Spec 078 leak this field exists to prevent.
+//
+// A source guard, not a behavioural one: exercising the real defect needs a
+// listening HTTP server (startCustomHTTPServer, not NewServer alone — see the
+// file comment above), out of proportion for a P2 wiring regression with an
+// accessor already proven correct at every other call site (server.go:378,
+// :475, TestEffectiveRequireMCPAuth_ServerBuild above).
+func TestConnectServiceWiring_UsesEffectiveRequireMCPAuth(t *testing.T) {
+	src, err := os.ReadFile("server.go")
+	require.NoError(t, err)
+	text := string(src)
+
+	require.True(t, strings.Contains(text, "connect.NewService("), "fixture: the connect wiring block must still exist")
+	assert.NotContains(t, text, "WithRequireMCPAuth(cfg.RequireMCPAuth)",
+		"connect must be wired from config.EffectiveRequireMCPAuth(cfg), not the raw field (FR-029)")
+	assert.NotContains(t, text, "c.Listen, c.APIKey, c.RequireMCPAuth",
+		"the live config-provider closure must return config.EffectiveRequireMCPAuth(c), not the raw field (FR-029)")
+	assert.Contains(t, text, "WithRequireMCPAuth(config.EffectiveRequireMCPAuth(cfg))")
+	assert.Contains(t, text, "c.Listen, c.APIKey, config.EffectiveRequireMCPAuth(c)")
 }

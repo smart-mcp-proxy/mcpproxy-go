@@ -137,6 +137,14 @@ type OAuthHandler struct {
 	loginStore     loginStore
 	sessionCreator sessionCreator
 	bearerSigner   bearerSignerFunc
+	// sessionPersist/sessionCleanup isolate the second, bearer-token-bearing
+	// write from sessionCreator.CreateSession's own persist (cross-review
+	// round 3): sessionCleanup best-effort-deletes the bearer-less row
+	// sessionCreator already wrote when sessionPersist fails, so a
+	// persistence fault never leaves an orphan, unusable session sitting
+	// until its TTL expires.
+	sessionPersist func(*users.Session) error
+	sessionCleanup func(string) error
 
 	// LoginResultObserver receives the typed terminal result of every attempt
 	// exactly once (nil = no-op). PR-D installs the auth_event emitter here.
@@ -187,6 +195,8 @@ func NewOAuthHandler(
 		loginStore:     userStore,
 		sessionCreator: sessionManager,
 		bearerSigner:   GenerateBearerToken,
+		sessionPersist: userStore.CreateSession,
+		sessionCleanup: userStore.DeleteSession,
 		pendingStates:  make(map[string]*oauthState),
 	}
 	if cfg != nil {
@@ -442,7 +452,12 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session.BearerToken = bearerToken
-	if err := h.sessionManager.store.CreateSession(session); err != nil {
+	if err := h.sessionPersist(session); err != nil {
+		// The bearer-less row sessionCreator.CreateSession already wrote is
+		// cleaned up best-effort: its own error is discarded, since the
+		// persistence failure above is already reported and a delete failure
+		// here must not mask it (the row then simply expires at its TTL).
+		_ = h.sessionCleanup(session.ID)
 		attempt.unavailable(w, LoginInternalError, "session persistence", err)
 		return
 	}
