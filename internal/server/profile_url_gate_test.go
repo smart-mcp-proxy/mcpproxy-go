@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -251,7 +252,7 @@ func TestProfileMiddleware_GateTouchesOnlyRequestedSlugAndPin(t *testing.T) {
 		var touched []string
 		idx := newProfileIndex(f.cfg)
 		idx.lookupHook = func(slug string) { touched = append(touched, slug) }
-		f.srv.profileIndexes.last.Store(idx)
+		f.srv.profileIndexes.warm.Store(idx)
 		handler := f.handler(next)
 
 		for name, c := range cases {
@@ -302,7 +303,7 @@ func TestProfileMiddleware_RefusalReachCostsTheGrantNotTheFleet(t *testing.T) {
 			for fleet, f := range fleets {
 				idx := newProfileIndex(f.cfg)
 				idx.reachHook = func() { steps[fleet]++ }
-				f.srv.profileIndexes.last.Store(idx)
+				f.srv.profileIndexes.warm.Store(idx)
 				profileGateRefusal(t, f.handler(next), c.agent, c.path)
 			}
 			for fleet, got := range steps {
@@ -349,17 +350,18 @@ func TestProfileMiddleware_RefusesThroughTheSnapshotSeam(t *testing.T) {
 // after startup or a hot reload — that request would pay one insertion per
 // configured profile (4 096 over a hidden fleet, none over an empty one),
 // the fleet-population cost the index exists to remove (FR-004). The Server
-// builds it when it is constructed and again on every config event, so the
-// gate's lazy build is only a fallback for the event-delivery window.
+// builds it when it is constructed and again on every config event (and,
+// since round 5, before every publication — TestProfileIndex_BuiltBefore-
+// Publication), so the gate's lazy build never serves a live runtime.
 func TestProfileIndex_WarmedBeforeFirstRequest(t *testing.T) {
 	srv, _ := newProfileGateTestServer(t)
 
 	// Construction indexes the constructor's snapshot; background
 	// initialization then publishes its own (followed by its config event),
 	// so "covers the current snapshot" is reached, never requested.
-	require.NotNil(t, srv.profileIndexes.last.Load(), "the index must be built at construction, not by the first request")
+	require.NotNil(t, srv.profileIndexes.warm.Load(), "the index must be built at construction, not by the first request")
 	covered := func() bool {
-		idx := srv.profileIndexes.last.Load()
+		idx := srv.profileIndexes.warm.Load()
 		return idx != nil && idx.cfg == srv.runtime.Config()
 	}
 	require.Eventually(t, covered, 5*time.Second, 10*time.Millisecond, "the startup snapshot must be indexed without a request")
@@ -373,5 +375,83 @@ func TestProfileIndex_WarmedBeforeFirstRequest(t *testing.T) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return srv.runtime.Config() != first && covered() },
 		5*time.Second, 10*time.Millisecond, "the reloaded snapshot must be indexed without a request")
-	require.NotNil(t, srv.profileIndexes.last.Load().lookup("extra"))
+	require.NotNil(t, srv.profileIndexes.warm.Load().lookup("extra"))
+}
+
+// TestProfileIndex_BuiltBeforePublication (Spec 105 PR D codex round 5,
+// prior item P): warming from the config EVENT left a window — snapshot
+// stored, event not yet delivered — in which a request built the fleet-sized
+// index inline, and a token with server-write permission can open that
+// window itself (upstream_servers add, then probe). The index is now built
+// by a configsvc pre-publish observer, on the exact snapshot pointer, before
+// it is stored: across N reloads over a live runtime, the request that
+// follows each publication immediately — no event delivered, no wait —
+// finds its index ready, and the request-path build seam never fires.
+func TestProfileIndex_BuiltBeforePublication(t *testing.T) {
+	srv, _ := newProfileGateTestServer(t)
+	agent := &auth.AuthContext{Type: auth.AuthTypeAgent, AllowedServers: []string{"research-srv"}}
+	reached := 0
+	handler := srv.profileMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { reached++ }))
+
+	// Let background initialization publish its startup snapshots first, so
+	// the loop below measures the reloads it drives, not startup.
+	require.Eventually(t, func() bool {
+		idx := srv.profileIndexes.warm.Load()
+		return idx != nil && idx.cfg == srv.runtime.Config()
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Deterministic seam, since the event listener may win the race on a
+	// quiet machine: observers run in registration order, so this one sees
+	// the warm slot right after the Server's observer and before the snapshot
+	// is stored — the index for the config being published must already
+	// cover that exact pointer.
+	var unindexed atomic.Int32
+	srv.runtime.ConfigService().AddPrePublishObserver(func(cfg *config.Config) {
+		if idx := srv.profileIndexes.warm.Load(); idx == nil || idx.cfg != cfg {
+			unindexed.Add(1)
+		}
+	})
+
+	cfgPath := filepath.Join(t.TempDir(), "mcp_config.json")
+	for i := 0; i < 5; i++ {
+		before := srv.runtime.Config()
+		slug := fmt.Sprintf("extra-%d", i)
+		next := *before
+		next.Profiles = append(slices.Clone(before.Profiles), config.ProfileConfig{Name: slug, Servers: []string{"research-srv"}})
+		_, err := srv.ApplyConfig(&next, cfgPath)
+		require.NoError(t, err)
+		require.NotSame(t, before, srv.runtime.Config(), "ApplyConfig publishes synchronously")
+
+		req := httptest.NewRequest(http.MethodPost, "/mcp/p/"+slug, http.NoBody)
+		req = req.WithContext(auth.WithAuthContext(req.Context(), agent))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		require.Equal(t, i+1, reached, "reload %d: the new profile must be admitted through the freshly published snapshot: %s", i, rec.Body.String())
+	}
+	require.Zero(t, unindexed.Load(), "every published snapshot must be indexed before it is stored")
+	require.Zero(t, srv.profileIndexes.lazyBuilds.Load(), "no request may build the index")
+}
+
+// TestProfileIndexCache_StaleRequestCannotEvictTheWarmIndex (Spec 105 PR D
+// codex round 5, finding 1): the single-slot cache could be rolled back by a
+// request — R1 captures snapshot A and stalls; a reload publishes and warms
+// B; R1 resumes, builds A and overwrites the cached B; the next request under
+// B rebuilds the whole fleet inline. The warm slot is written only by the
+// warm path; a request that captured an older snapshot builds into the lazy
+// slot and leaves the warm index where it is.
+func TestProfileIndexCache_StaleRequestCannotEvictTheWarmIndex(t *testing.T) {
+	older := &config.Config{Profiles: []config.ProfileConfig{{Name: "a"}}}
+	current := &config.Config{Profiles: []config.ProfileConfig{{Name: "b"}}}
+
+	var c profileIndexCache
+	warmed := c.warmPublishing(current)
+	require.Same(t, warmed, c.For(current), "the warmed index serves the current snapshot")
+
+	stale := c.For(older) // an in-flight request that captured the previous snapshot
+	require.Same(t, older, stale.cfg)
+	require.Equal(t, int64(1), c.lazyBuilds.Load(), "the stale request builds for itself")
+
+	require.Same(t, warmed, c.For(current), "the stale request must not have evicted the warm index")
+	require.Same(t, stale, c.For(older), "the stale request's own index is retained beside it")
+	require.Equal(t, int64(1), c.lazyBuilds.Load(), "and nothing was rebuilt")
 }

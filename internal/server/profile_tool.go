@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -537,24 +538,90 @@ func (idx *profileIndex) selectableNames(ctx context.Context) []string {
 // profileIndexCache hands out the profileIndex for a config snapshot, built
 // once per snapshot pointer. Config snapshots are replaced, never mutated in
 // place (configsvc copy-on-write; every reload publishes a new *Config), so
-// pointer identity is the cache key; the entry retains the snapshot it was
+// pointer identity is the cache key; an entry retains the snapshot it was
 // built from, so its address cannot be recycled under it. The zero value is
 // ready to use.
+//
+// Two slots, because one was a rollback oracle (codex review, PR D round 5):
+// a request that captured snapshot A, stalled through a reload to B and then
+// built A into the only slot evicted B's warmed index, so the next request
+// under B rebuilt the whole fleet inline. The warm slot is written by the
+// warm path alone — the configsvc pre-publish observer (every published
+// snapshot, in publication order, BEFORE it is stored) or, until that
+// observer has run, construction and the config-event listener — so no
+// request can move it. For's fallback build lands in the lazy slot, which
+// also keeps the snapshot the warm slot just left, so a request that read
+// its snapshot a moment before a publication still finds its index.
 type profileIndexCache struct {
-	last atomic.Pointer[profileIndex]
+	warm atomic.Pointer[profileIndex]
+	lazy atomic.Pointer[profileIndex]
+
+	// warmMu serialises warm-slot writers; observed flips once the
+	// pre-publish observer has warmed a snapshot, after which the event-driven
+	// warm defers to it (a late event's build could otherwise land over a
+	// newer observer build).
+	warmMu   sync.Mutex
+	observed bool
+
+	// lazyBuilds counts For's fallback builds — the seam the tests use to
+	// prove no request over a live runtime pays for the index.
+	lazyBuilds atomic.Int64
 }
 
-// For returns the index for cfg, building it when cfg is not the snapshot
-// the cached one covers. Server.warmProfileIndex builds it ahead of requests
-// (at construction and on every config event); a request that lands before
-// that delivery builds it here instead. Two goroutines racing on that first
-// build may both build; either result is correct and the later Store wins.
-func (c *profileIndexCache) For(cfg *config.Config) *profileIndex {
-	if idx := c.last.Load(); idx != nil && idx.cfg == cfg {
-		return idx
+// warmPublishing indexes cfg as the configsvc pre-publish observer, on the
+// exact snapshot about to be published, and returns the index. It runs under
+// the config update mutex, so it does one insertion per profile and nothing
+// else. The snapshot the warm slot held until now is demoted to the lazy slot
+// for the requests that already captured it.
+func (c *profileIndexCache) warmPublishing(cfg *config.Config) *profileIndex {
+	c.warmMu.Lock()
+	defer c.warmMu.Unlock()
+	c.observed = true
+	prev := c.warm.Load()
+	if prev != nil && prev.cfg == cfg {
+		return prev
 	}
 	idx := newProfileIndex(cfg)
-	c.last.Store(idx)
+	c.warm.Store(idx)
+	if prev != nil {
+		c.lazy.Store(prev)
+	}
+	return idx
+}
+
+// warmCurrent indexes the runtime's current snapshot cfg from outside the
+// publication path (construction, config events). It is the whole warm path
+// for the initial snapshot — NewService stores it without running any
+// observer — and belt-and-braces afterwards: once the observer has warmed a
+// snapshot it is a no-op, so a late event can never roll the slot back.
+func (c *profileIndexCache) warmCurrent(cfg *config.Config) {
+	c.warmMu.Lock()
+	defer c.warmMu.Unlock()
+	if c.observed {
+		return
+	}
+	if idx := c.warm.Load(); idx != nil && idx.cfg == cfg {
+		return
+	}
+	c.warm.Store(newProfileIndex(cfg))
+}
+
+// For returns the index for cfg: the warm slot when it covers cfg, else the
+// lazy slot, else a build of its own into the lazy slot — the fallback for
+// bare test servers (no runtime, no warm path) and for a request that
+// captured a snapshot older than the two the slots hold. It never writes the
+// warm slot. Two goroutines racing on a lazy build may both build; either
+// result is correct and the later Store wins.
+func (c *profileIndexCache) For(cfg *config.Config) *profileIndex {
+	if idx := c.warm.Load(); idx != nil && idx.cfg == cfg {
+		return idx
+	}
+	if idx := c.lazy.Load(); idx != nil && idx.cfg == cfg {
+		return idx
+	}
+	c.lazyBuilds.Add(1)
+	idx := newProfileIndex(cfg)
+	c.lazy.Store(idx)
 	return idx
 }
 

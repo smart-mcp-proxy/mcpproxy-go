@@ -331,9 +331,13 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	routingEvents := server.runtime.SubscribeEvents()
 	go server.listenForRoutingModeRefresh(routingEvents)
 
-	// Spec 105 FR-004: index the startup snapshot now, so the first
-	// /mcp/p/<slug> request does not pay the one-off fleet-sized build (see
-	// warmProfileIndex).
+	// Spec 105 FR-004: index every config snapshot before it is published —
+	// the observer runs on the exact *Config about to be stored — and the
+	// startup snapshot now, which NewService stored without running any
+	// observer (see warmProfileIndex).
+	if svc := server.runtime.ConfigService(); svc != nil {
+		svc.AddPrePublishObserver(func(cfg *config.Config) { server.profileIndexes.warmPublishing(cfg) })
+	}
 	server.warmProfileIndex()
 
 	server.runtime.StartBackgroundInitialization()
@@ -2359,13 +2363,16 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 // leaving the build to the first /mcp/p/<slug> request after startup or a
 // reload made that one request's refusal cost 4 096 insertions over a hidden
 // fleet and none over an empty one (codex review, PR D round 3). Called at
-// construction and on every config event; the gate's own lazy build remains
-// the fallback for a request that lands in the event-delivery window.
+// construction — the initial snapshot is stored without running observers —
+// and on every config event as belt-and-braces; the structural guarantee is
+// the configsvc pre-publish observer wired in NewServer, which indexes every
+// later snapshot before it is stored, so no request lands in a
+// publication-to-event window (round 5, prior item P).
 func (s *Server) warmProfileIndex() {
 	if s.runtime == nil {
 		return
 	}
-	s.profileIndexes.For(s.runtime.Config())
+	s.profileIndexes.warmCurrent(s.runtime.Config())
 }
 
 // serveProfileURL is profileMiddleware over ONE config snapshot — the whole
@@ -2380,10 +2387,10 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, cfg *co
 	slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
 	slug = strings.Trim(slug, "/")
 
-	// One slug → profile index per snapshot (normally already built by
-	// warmProfileIndex): the gate below and the lookup after it resolve the
-	// slug directly, so neither the refusal nor the admission walks
-	// cfg.Profiles.
+	// One slug → profile index per snapshot (built before the snapshot was
+	// published, see warmProfileIndex): the gate below and the lookup after
+	// it resolve the slug directly, so neither the refusal nor the admission
+	// walks cfg.Profiles.
 	profiles := s.profileIndexes.For(cfg)
 
 	// Spec 105 FR-004: the selectable-profile gate for scoped callers. It

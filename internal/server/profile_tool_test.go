@@ -1007,7 +1007,7 @@ func TestHandleSetProfile_ScopedRefusalTouchesOnlySlugAndPin(t *testing.T) {
 		var touched []string
 		idx := newProfileIndex(cfg)
 		idx.lookupHook = func(slug string) { touched = append(touched, slug) }
-		p.profileIndexes.last.Store(idx)
+		p.profileIndexes.warm.Store(idx)
 
 		for name, c := range cases {
 			touched = nil
@@ -1161,7 +1161,7 @@ func TestHandleSetProfile_ScopedRefusalReachCostsTheGrantNotTheFleet(t *testing.
 			p := &MCPProxyServer{config: cfg, logger: zap.NewNop(), sessionStore: NewSessionStore(zap.NewNop())}
 			idx := newProfileIndex(cfg)
 			idx.reachHook = func() { steps[fleet]++ }
-			p.profileIndexes.last.Store(idx)
+			p.profileIndexes.warm.Store(idx)
 
 			res := callSetProfileTool(t, p, c.ctx, c.slug)
 			require.True(t, res.IsError, "%s/%s must be refused", fleet, name)
