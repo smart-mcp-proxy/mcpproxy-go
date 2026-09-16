@@ -695,6 +695,70 @@ func TestProfileMiddleware_InjectsAdmittedSnapshotForDownstreamResolution(t *tes
 		"downstream pin resolution must decide over the snapshot the gate admitted against, not a config that changed after admission")
 }
 
+// TestProfileMiddleware_SetProfileDecidesWithTheAdmittedIndexNotAFreshRead
+// (Spec 105 PR D review round 9, MUST-FIX 1): handleSetProfile must decide
+// with the SAME (index, snapshot) pair serveProfileURL already admitted this
+// request against, not an independent profileIndexCurrent() build — which
+// re-reads currentConfig() and can therefore land on a DIFFERENT snapshot
+// than the one the URL gate used, even within the one request the gate
+// admitted. Sibling of
+// TestProfileMiddleware_InjectsAdmittedSnapshotForDownstreamResolution
+// above, but for the set_profile TOOL call inside the request rather than
+// resolveActiveProfile's pin tier.
+//
+// Both directions of the split are proven with one admin session (SC-005
+// lets an administrator select any configured profile, so the reach
+// predicate is not in play — only which SNAPSHOT the decision reads):
+//   - "existing" is configured in the admitted snapshot (A) only; a reload
+//     that removes it must not retroactively refuse it mid-request.
+//   - "new-profile" is configured in the reloaded snapshot (B) only; it must
+//     not become selectable mid-request just because a reload happened to
+//     land before set_profile ran.
+func TestProfileMiddleware_SetProfileDecidesWithTheAdmittedIndexNotAFreshRead(t *testing.T) {
+	cfgOld := &config.Config{
+		Servers: []*config.ServerConfig{{Name: "deploy-srv"}, {Name: "research-srv"}},
+		Profiles: []config.ProfileConfig{
+			{Name: "deploy", Servers: []string{"deploy-srv"}},
+			{Name: "existing", Servers: []string{"research-srv"}},
+		},
+	}
+	cfgNew := &config.Config{
+		Servers: cfgOld.Servers,
+		Profiles: []config.ProfileConfig{
+			{Name: "deploy", Servers: []string{"deploy-srv"}},
+			{Name: "new-profile", Servers: []string{"research-srv"}},
+		},
+	}
+
+	p := &MCPProxyServer{logger: zap.NewNop(), sessionStore: NewSessionStore(zap.NewNop()), config: cfgOld}
+	srv := &Server{logger: zap.NewNop(), mcpProxy: p}
+	p.mainServer = srv
+
+	idx := srv.profileIndexes.warmPublishing(cfgOld)
+
+	var removedRes, addedRes *mcp.CallToolResult
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// A reload "lands" here, strictly after admission — before the fix
+		// profileIndexCurrent() would re-read currentConfig() (now cfgNew)
+		// instead of the pair the gate injected.
+		p.config = cfgNew
+
+		removedRes = callSetProfileTool(t, p, r.Context(), "existing")
+		addedRes = callSetProfileTool(t, p, r.Context(), "new-profile")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/p/deploy", http.NoBody)
+	req = req.WithContext(setProfileAdminCtx("sess-admitted"))
+	rec := httptest.NewRecorder()
+	srv.serveProfileURL(rec, req, idx, next)
+	require.Equal(t, http.StatusOK, rec.Code, "%s", rec.Body.String())
+
+	require.False(t, removedRes.IsError,
+		"a profile present in the admitted snapshot must stay selectable for the rest of the request, even after a reload removes it live: %s", setProfileResultText(t, removedRes))
+	require.True(t, addedRes.IsError,
+		"a profile that exists only in a reload landing after admission must not become selectable mid-request: %s", setProfileResultText(t, addedRes))
+}
+
 // TestProfileRequests_NeverBuildTheIndexOverARuntime (Spec 105 PR D codex
 // round 6, finding 1): over a live runtime, no request entry — every scoped
 // refusal branch and an admission through the URL gate, scoped and

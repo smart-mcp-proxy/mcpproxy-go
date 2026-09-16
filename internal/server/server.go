@@ -2482,12 +2482,15 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 	effectiveServers := found.EffectiveServers(cfg)
 	scope := profile.NewProfileScope(found.Name, effectiveServers)
 	ctx := profile.WithProfileScope(r.Context(), scope)
-	// Pin the request to the exact snapshot admission decided with (cfg,
-	// profiles.cfg above) so every downstream profile read on this request —
-	// resolveActiveProfile's pin tier included — decides over the same one,
-	// rather than an independent runtime.Config() read that a reload landing
-	// mid-request could have already moved past it (round 8).
-	ctx = withProfileRequestConfig(ctx, cfg)
+	// Pin the request to the exact (index, snapshot) PAIR admission decided
+	// with — profiles itself, not merely its cfg — so every downstream
+	// profile read on this request, resolveActiveProfile's pin tier and
+	// set_profile's own admission alike, decides over that same pair rather
+	// than an independent Published()/runtime.Config() read that a reload
+	// landing mid-request could have already moved past it (round 8; round 9
+	// MUST-FIX 1 extended this to set_profile, which previously ignored the
+	// injected context entirely).
+	ctx = withProfileRequestIndex(ctx, profiles)
 	next.ServeHTTP(w, r.WithContext(ctx))
 }
 

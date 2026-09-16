@@ -35,26 +35,38 @@ func profilePinFromContext(ctx context.Context) string {
 	return ""
 }
 
-// profileRequestConfigKey is an unexported context key for the config
-// snapshot a /mcp/p/<slug> request was admitted and scoped against
+// profileRequestIndexKey is an unexported context key for the (index,
+// snapshot) PAIR a /mcp/p/<slug> request was admitted and scoped against
 // (profileMiddleware / serveProfileURL). It is a package-private companion
 // to profile.WithProfileScope, not exported through the profile package,
 // because both the writer (Server) and the reader (MCPProxyServer) already
 // live in this package.
-type profileRequestConfigKey struct{}
+//
+// Carrying the pair — not merely its cfg — lets every downstream profile
+// decision on this request, set_profile's admission included, reuse the
+// index the gate already built rather than re-resolving cfg's own index
+// through a second Published() lookup: a request that paused between
+// admission and here must still decide with the exact index it was
+// admitted against, never one a later publication's Published() would hand
+// back for the live runtime.Config() read at that later moment (Spec 105 PR
+// D review round 9, MUST-FIX 1 — set_profile on /mcp/p/<slug> read its own
+// independent runtime.Config() and could therefore admit or scope against a
+// config one reload ahead of, or behind, the one the URL gate used).
+type profileRequestIndexKey struct{}
 
-// withProfileRequestConfig returns a context carrying cfg as the exact
-// snapshot downstream profile resolution on this request must decide over.
-func withProfileRequestConfig(ctx context.Context, cfg *config.Config) context.Context {
-	return context.WithValue(ctx, profileRequestConfigKey{}, cfg)
+// withProfileRequestIndex returns a context carrying idx as the exact
+// (index, snapshot) pair downstream profile resolution on this request must
+// decide over.
+func withProfileRequestIndex(ctx context.Context, idx *profileIndex) context.Context {
+	return context.WithValue(ctx, profileRequestIndexKey{}, idx)
 }
 
-// profileRequestConfigFromContext returns the snapshot withProfileRequestConfig
+// profileRequestIndexFromContext returns the pair withProfileRequestIndex
 // injected, or (nil, false) when the request did not enter through a path
 // that pins one (e.g. the base /mcp endpoint, or a bare test server).
-func profileRequestConfigFromContext(ctx context.Context) (*config.Config, bool) {
-	cfg, ok := ctx.Value(profileRequestConfigKey{}).(*config.Config)
-	return cfg, ok
+func profileRequestIndexFromContext(ctx context.Context) (*profileIndex, bool) {
+	idx, ok := ctx.Value(profileRequestIndexKey{}).(*profileIndex)
+	return idx, ok
 }
 
 // currentConfig returns the live configuration snapshot (hot-reload safe),
@@ -142,13 +154,13 @@ func profileScopeForSlugIn(cfg *config.Config, slug string) *profile.ProfileScop
 // through to "none". Resolution reads the live config snapshot once — unless
 // the request came in through /mcp/p/<slug>, in which case that snapshot is
 // the exact one profileMiddleware already admitted the request against
-// (profileRequestConfigFromContext), never a fresh runtime.Config() read: a
+// (profileRequestIndexFromContext), never a fresh runtime.Config() read: a
 // reload landing between admission and this call must not split the two
 // (round 8). Callers that already hold a snapshot use resolveActiveProfileIn.
 func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *profile.ProfileScope) {
 	cfg := p.currentConfig()
-	if injected, ok := profileRequestConfigFromContext(ctx); ok {
-		cfg = injected
+	if injected, ok := profileRequestIndexFromContext(ctx); ok {
+		cfg = injected.cfg
 	}
 	return p.resolveActiveProfileIn(ctx, cfg)
 }

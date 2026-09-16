@@ -77,22 +77,25 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	// selection's server list and the effective scope all read cfg, the
 	// snapshot the index was built from — never the live config, which may
 	// move underneath the call (Spec 105 PR D critique round 1 / codex round 6).
-	profiles := p.profileIndexCurrent()
+	// Over a URL-scoped request (/mcp/p/<slug>) this is the exact pair
+	// serveProfileURL already admitted the request against, injected on the
+	// context — never a fresh, independent read (round 9 MUST-FIX 1).
+	profiles := p.profileIndexCurrent(ctx)
 	cfg := profiles.cfg
-
-	// Profiles v2 T3: a profile-pinned agent token may not switch away from its
-	// pinned profile.
-	pin := profilePinFromContext(ctx)
-	if pin != "" && slug != "" && slug != pin {
-		return mcp.NewToolResultError(fmt.Sprintf("agent token is pinned to profile '%s' and cannot switch to '%s'", pin, slug)), nil
-	}
 
 	// A non-empty slug must name a configured profile the caller may select
 	// (an empty slug clears the selection and is always accepted). The check
 	// runs BEFORE any session mutation or success log, so a profile outside
 	// the caller's reach — including a pinned token's own pin once it has
-	// zero reach (research D1) — is indistinguishable from an unknown one
-	// (FR-016b / FR-003): same error, no state change.
+	// zero reach (research D1), and a pin MISMATCH (the caller's slug names a
+	// different profile than its pin) — is indistinguishable from an unknown
+	// one (FR-016b / FR-003): same error, no state change. A pin mismatch is
+	// simply a non-selectable profile like any other and must never be
+	// decided by an earlier, distinctly-worded branch — that let a pinned
+	// caller confirm from the wording alone that it IS pinned, and to what,
+	// from a refusal aimed at a different slug (Spec 105 PR D review round 9,
+	// MUST-FIX 2; contracts/refusals.md: `set_profile <not selectable>` is
+	// one format string).
 	//
 	// It decides the REQUESTED slug alone, through the per-snapshot index
 	// (profileIndex.selectable: one lookup of the slug, one of the pin, one
@@ -684,8 +687,18 @@ func (p *MCPProxyServer) setProfileServerTool() mcpserver.ServerTool {
 }
 
 // profileIndexCurrent returns the profile index a set_profile call decides
-// with — and, as idx.cfg, the config snapshot it decides over: the two are
-// taken as ONE pair from the main Server's cache, matched against the SAME
+// with — and, as idx.cfg, the config snapshot it decides over.
+//
+// When ctx carries the pair serveProfileURL already admitted this request
+// against (profileRequestIndexFromContext — a /mcp/p/<slug> request), THAT
+// pair is preferred outright: no build, no runtime.Config() read of any
+// kind, because re-reading here is exactly the bug this seam exists to
+// close — a reload landing between the gate's admission and this call could
+// otherwise hand set_profile a different snapshot than the one the URL gate
+// used for the very same request (Spec 105 PR D review round 9, MUST-FIX 1).
+//
+// Otherwise (the plain /mcp endpoint, which admits no snapshot of its own)
+// the pair is taken from the main Server's cache, matched against the SAME
 // runtime.Config() read the /mcp/p/<slug> gate would make right now
 // (Published — round 7/8: taking the cache's unconditional latest pair here
 // let set_profile admit and scope a profile that existed only in the config
@@ -694,7 +707,10 @@ func (p *MCPProxyServer) setProfileServerTool() mcpserver.ServerTool {
 // and never pairs a snapshot with an index built from another one. A proxy
 // with no warmed main Server (bare test servers) falls back to a lazily
 // built index over its construction config, keyed by identity.
-func (p *MCPProxyServer) profileIndexCurrent() *profileIndex {
+func (p *MCPProxyServer) profileIndexCurrent(ctx context.Context) *profileIndex {
+	if injected, ok := profileRequestIndexFromContext(ctx); ok {
+		return injected
+	}
 	if p.mainServer != nil {
 		published := p.currentConfig()
 		if idx := p.mainServer.profileIndexes.Published(published); idx != nil {

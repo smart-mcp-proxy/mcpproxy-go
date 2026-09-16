@@ -75,13 +75,22 @@ func setProfileResultText(t *testing.T, res *mcp.CallToolResult) string {
 
 // TestHandleSetProfile_PinnedRejectsOtherSlug verifies a profile-pinned agent
 // token cannot switch away from its pinned profile via set_profile (Profiles v2 T3).
+// The refusal is the uniform scoped "unknown profile" body (Spec 105 PR D
+// review round 9, MUST-FIX 2): a pin mismatch is a non-selectable profile
+// like any other, decided through the same profileIndex.selectable predicate
+// as a deleted or zero-reach profile — never a distinct "pinned to..."
+// message, which would let a caller confirm the pin's own name from a
+// refusal aimed at a DIFFERENT slug (contracts/refusals.md: `set_profile
+// <not selectable>` is one format string).
 func TestHandleSetProfile_PinnedRejectsOtherSlug(t *testing.T) {
 	p := newSetProfileTestServer()
 	ctx := setProfileCtx("sess-pinned", "research")
 
 	res := callSetProfileTool(t, p, ctx, "deploy")
 	require.True(t, res.IsError, "switching a pinned token to another profile must error")
-	require.Contains(t, setProfileResultText(t, res), "pinned to profile 'research'")
+	require.Equal(t, "unknown profile 'deploy'", setProfileResultText(t, res))
+	require.NotContains(t, setProfileResultText(t, res), "pinned",
+		"a pin-mismatch refusal must not confirm the caller is pinned or to what")
 
 	// The session selection must NOT have been changed by the rejected call.
 	require.Equal(t, "", p.sessionStore.GetActiveProfile("sess-pinned"))
@@ -1001,17 +1010,20 @@ func TestProfileIndex_ReachIsPrecomputedAtBuild(t *testing.T) {
 // string, so neither work nor bytes depend on the hidden fleet.
 func TestHandleSetProfile_ScopedRefusalTouchesOnlySlugAndPin(t *testing.T) {
 	cases := map[string]struct {
-		ctx      context.Context
-		slug     string
-		viaIndex bool // false: stopped by the pin check before any lookup
+		ctx  context.Context
+		slug string
 	}{
-		"deleted pin":                  {setProfilePinnedCtx("s", "gone", "pin-srv"), "gone", true},
-		"zero-reach pin":               {setProfilePinnedCtx("s", "pin", "other-srv"), "pin", true},
-		"scoped, absent slug":          {setProfileScopedCtx("s", "pin-srv"), "nope", true},
-		"scoped, disjoint slug":        {setProfileScopedCtx("s", "pin-srv"), "p0", true},
-		"scoped, empty allowlist":      {setProfileScopedCtx("s"), "pin", true},
-		"scoped wildcard, absent slug": {setProfileScopedCtx("s", "*"), "nope", true},
-		"pin mismatch":                 {setProfilePinnedCtx("s", "pin", "pin-srv"), "p0", false},
+		"deleted pin":                  {setProfilePinnedCtx("s", "gone", "pin-srv"), "gone"},
+		"zero-reach pin":               {setProfilePinnedCtx("s", "pin", "other-srv"), "pin"},
+		"scoped, absent slug":          {setProfileScopedCtx("s", "pin-srv"), "nope"},
+		"scoped, disjoint slug":        {setProfileScopedCtx("s", "pin-srv"), "p0"},
+		"scoped, empty allowlist":      {setProfileScopedCtx("s"), "pin"},
+		"scoped wildcard, absent slug": {setProfileScopedCtx("s", "*"), "nope"},
+		// A pin mismatch is a non-selectable profile like any other (Spec
+		// 105 PR D review round 9, MUST-FIX 2): handleSetProfile no longer
+		// short-circuits it before the index, so it costs — and reads — the
+		// same as every other refusal in this table.
+		"pin mismatch": {setProfilePinnedCtx("s", "pin", "pin-srv"), "p0"},
 	}
 	for fleet, n := range map[string]int{"pin only": 0, "4096 others": 4096} {
 		cfg := selectableProbeConfig(n)
@@ -1033,19 +1045,15 @@ func TestHandleSetProfile_ScopedRefusalTouchesOnlySlugAndPin(t *testing.T) {
 			if pin != "" {
 				allowed[pin] = true
 			}
-			if c.viaIndex {
-				require.Equal(t, fmt.Sprintf("unknown profile '%s'", c.slug), setProfileResultText(t, res),
-					"%s/%s: a scoped refusal carries no available list", fleet, name)
-				require.NotEmpty(t, touched, "%s/%s: the refusal must decide through the index", fleet, name)
-			} else {
-				require.Contains(t, setProfileResultText(t, res), "is pinned to profile 'pin'", "%s/%s", fleet, name)
-			}
+			require.Equal(t, fmt.Sprintf("unknown profile '%s'", c.slug), setProfileResultText(t, res),
+				"%s/%s: a scoped refusal carries no available list, and a pin mismatch carries no distinct wording either", fleet, name)
+			require.NotEmpty(t, touched, "%s/%s: the refusal must decide through the index", fleet, name)
 			require.LessOrEqual(t, len(touched), 2, "%s/%s: at most the slug and the pin: %v", fleet, name, touched)
 			for _, got := range touched {
 				require.True(t, allowed[got], "%s/%s: touched profile %q outside {slug, pin}: %v", fleet, name, got, touched)
 			}
 		}
-		require.Same(t, idx, p.profileIndexCurrent(), "%s: the cached index must be reused for the same snapshot", fleet)
+		require.Same(t, idx, p.profileIndexCurrent(context.Background()), "%s: the cached index must be reused for the same snapshot", fleet)
 	}
 }
 
@@ -1165,6 +1173,9 @@ func TestHandleSetProfile_ScopedRefusalReachCostsTheGrantNotTheFleet(t *testing.
 		"scoped, disjoint slug":        {setProfileScopedCtx("s", "pin-srv", "nowhere"), "p0"},
 		"scoped, empty allowlist":      {setProfileScopedCtx("s"), "pin"},
 		"scoped wildcard, absent slug": {setProfileScopedCtx("s", "*"), "nope"},
+		// Sibling of the round-9 fix: a pin mismatch now reaches the index
+		// too, so it must cost exactly what every other refusal here costs.
+		"pin mismatch": {setProfilePinnedCtx("s", "pin", "pin-srv"), "p0"},
 	}
 	for name, c := range cases {
 		steps := map[string]int{}
