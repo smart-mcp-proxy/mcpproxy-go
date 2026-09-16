@@ -187,6 +187,33 @@ func containerOwnerField(owner string) zap.Field {
 	return zap.String("container_owner", owner)
 }
 
+// dockerContainerLogFields renders the container_name/container_id/
+// container_owner fields for a lifecycle housekeeping line (connection
+// failure, init failure, disconnect) — but only when containerID is
+// non-empty. containerID is assigned exactly by trackCidfileContainer or the
+// cidfile-timeout name-recovery fallback (docker.go), both of which verify
+// ownership via Docker's label/canonical-name read-back before ever setting
+// it, and always pair it with containerOwner (the label value read back)
+// under the same lock, clearing both together on cleanup. containerName
+// alone is set at spawn time from the GENERATED canonical name, before
+// Docker has confirmed anything exists — it is not evidence on its own
+// (Spec 105 D8): another Docker client can have relabelled or reused that
+// exact name for a colliding server between generation and this log line.
+// So an empty containerID here means the record names the server only,
+// never a container; these callers must not perform a Docker read of their
+// own to firm the name up — they run on failure/disconnect paths where the
+// tracked state is all there is to go on.
+func dockerContainerLogFields(containerID, containerName, containerOwner string) []zap.Field {
+	if containerID == "" {
+		return nil
+	}
+	return []zap.Field{
+		zap.String("container_name", containerName),
+		zap.String("container_id", containerID),
+		containerOwnerField(containerOwner),
+	}
+}
+
 // ContainerMutation is one of the docker commands that change a container's
 // state.
 type ContainerMutation string

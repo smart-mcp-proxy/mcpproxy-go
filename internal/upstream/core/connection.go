@@ -326,12 +326,16 @@ func (c *Client) Connect(ctx context.Context) error {
 		// CRITICAL FIX: Cleanup Docker containers when any connection type fails
 		// This prevents container accumulation when connections fail after Docker setup
 		if c.isDockerCommand {
-			c.logger.Warn("Connection failed for Docker command - cleaning up container",
+			// Spec 105 D8: name a container here only with evidence — see
+			// dockerContainerLogFields. c.containerName alone can be a
+			// generated name never observed from Docker.
+			fields := []zap.Field{
 				zap.String("server", c.config.Name),
 				zap.String("transport", c.transportType),
-				zap.String("container_name", c.containerName),
-				zap.String("container_id", c.containerID),
-				zap.Error(err))
+			}
+			fields = append(fields, dockerContainerLogFields(c.containerID, c.containerName, c.containerOwner)...)
+			fields = append(fields, zap.Error(err))
+			c.logger.Warn("Connection failed for Docker command - cleaning up container", fields...)
 
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 			defer cleanupCancel()

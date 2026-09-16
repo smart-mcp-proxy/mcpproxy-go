@@ -495,7 +495,6 @@ func (c *Client) GetConnectionDiagnostics() map[string]interface{} {
 	if c.isDockerCommand {
 		diagnostics["is_docker"] = true
 		diagnostics["docker_args"] = oauth.LiveRedaction.Argv(c.config.Args)
-		diagnostics["container_id"] = c.containerID
 
 		// Check Docker daemon connectivity
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -509,11 +508,29 @@ func (c *Client) GetConnectionDiagnostics() map[string]interface{} {
 			diagnostics["docker_daemon_reachable"] = true
 		}
 
-		// Check if container is still running
+		// Spec 105 D8/D9: `docker inspect <id>` resolves purely by id, so
+		// publishing and inspecting the tracked id directly let a container
+		// another Docker client relabelled or renamed after tracking still
+		// report as this server's and running — the same stale-ownership
+		// failure verifyDockerContainerHealthy fixed for the manager's
+		// health path (codex round 8). Re-verify through the same
+		// ContainerMutator.Verify read+predicate before publishing or
+		// inspecting anything: once the predicate no longer holds (or the
+		// re-read itself fails), the diagnostics name no container id and
+		// report it not running; only a container ownership confirms right
+		// now is published, with the container_owner read back at that
+		// same moment.
 		if c.containerID != "" {
-			inspectCmd := c.newDockerCmd(ctx, "inspect", "--format", "{{.State.Running}}", c.containerID)
-			if output, err := inspectCmd.Output(); err == nil {
-				diagnostics["container_running"] = strings.TrimSpace(string(output)) == "true"
+			row, ok, err := c.containerMutator().Verify(ctx, c.containerID)
+			if err != nil || !ok {
+				diagnostics["container_running"] = false
+			} else {
+				diagnostics["container_id"] = row.ID
+				diagnostics["container_owner"] = row.Owner
+				inspectCmd := c.newDockerCmd(ctx, "inspect", "--format", "{{.State.Running}}", row.ID)
+				if output, err := inspectCmd.Output(); err == nil {
+					diagnostics["container_running"] = strings.TrimSpace(string(output)) == "true"
+				}
 			}
 		}
 	}

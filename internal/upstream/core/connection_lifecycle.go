@@ -53,11 +53,13 @@ func (c *Client) initialize(ctx context.Context) error {
 		// CRITICAL FIX: Additional cleanup for direct initialize() calls
 		// This handles cases where initialize() is called independently
 		if c.isDockerCommand {
-			c.logger.Debug("Direct initialization failed for Docker command - cleanup may be handled by caller",
-				zap.String("server", c.config.Name),
-				zap.String("container_name", c.containerName),
-				zap.String("container_id", c.containerID),
-				logSafeErrorField(err))
+			// Spec 105 D8: name a container here only with evidence — see
+			// dockerContainerLogFields. c.containerName alone can be a
+			// generated name never observed from Docker.
+			fields := []zap.Field{zap.String("server", c.config.Name)}
+			fields = append(fields, dockerContainerLogFields(c.containerID, c.containerName, c.containerOwner)...)
+			fields = append(fields, logSafeErrorField(err))
+			c.logger.Debug("Direct initialization failed for Docker command - cleanup may be handled by caller", fields...)
 		}
 
 		// Surface the useful context that the raw "context deadline exceeded"
@@ -300,6 +302,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	isDocker := c.isDockerCommand
 	containerID := c.containerID
 	containerName := c.containerName
+	containerOwner := c.containerOwner
 	pgid := c.processGroupID
 	processCmd := c.processCmd
 	serverName := c.config.Name
@@ -327,14 +330,23 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 		defer cleanupCancel()
 
 		if containerID != "" {
+			// containerID is only ever set alongside containerOwner, once
+			// trackCidfileContainer or the name-recovery fallback verified
+			// ownership (Spec 105 D8) — safe to name here.
 			c.logger.Debug("Cleaning up Docker container by ID",
 				zap.String("server", serverName),
-				zap.String("container_id", containerID))
+				zap.String("container_id", containerID),
+				containerOwnerField(containerOwner))
 			c.killDockerContainerWithContext(cleanupCtx)
 		} else if containerName != "" {
+			// containerName alone (containerID empty here) is the GENERATED
+			// canonical name, never read back from Docker — not evidence a
+			// container by that name is ours (Spec 105 D8), so the record
+			// names the server only. killDockerContainerByNameWithContext
+			// still re-verifies ownership via ContainerMutator before it
+			// ever stops anything.
 			c.logger.Debug("Cleaning up Docker container by name",
-				zap.String("server", serverName),
-				zap.String("container_name", containerName))
+				zap.String("server", serverName))
 			c.killDockerContainerByNameWithContext(cleanupCtx, containerName)
 		} else {
 			c.logger.Debug("No container ID or name, using pattern-based cleanup",
