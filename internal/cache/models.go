@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"time"
 )
@@ -123,8 +124,21 @@ var (
 )
 
 // encodeRecordFrame lays header and body out as MarshalBinary stores them.
+// The header is bounded by maxRecordHeaderLen (MarshalBinary enforces it
+// before calling here, so the u32 length never truncates) and the body is
+// bounded by the cache's own size limits; the capacity hint is computed
+// with an explicit overflow guard rather than a bare sum so the allocation
+// can never wrap (CodeQL: size computation for allocation may overflow).
 func encodeRecordFrame(header, body []byte) []byte {
-	out := make([]byte, 0, len(recordFrameMagic)+recordFrameLenSize+len(header)+len(body))
+	if len(header) > maxRecordHeaderLen {
+		header = header[:maxRecordHeaderLen] // unreachable through MarshalBinary; keeps the u32 honest
+	}
+	prefix := len(recordFrameMagic) + recordFrameLenSize + len(header)
+	capHint := prefix
+	if len(body) <= math.MaxInt-prefix {
+		capHint += len(body)
+	}
+	out := make([]byte, 0, capHint)
 	out = append(out, recordFrameMagic...)
 	out = binary.BigEndian.AppendUint32(out, uint32(len(header)))
 	out = append(out, header...)
