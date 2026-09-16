@@ -189,6 +189,12 @@ func installFakeDocker(t *testing.T, containers []fakeContainer) *fakeDocker {
 	}
 	t.Setenv("PATH", toolDir)
 	t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
+	// On Linux the spawn keeps the login-shell wrap unless the daemon env is
+	// already in the process env (dockerDaemonEnvGuaranteed); a runner
+	// without DOCKER_HOST (the Landlock job) would then exec the poisoned
+	// SHELL above and fail at start instead of running the shim. Pin the
+	// direct-exec path so every job exercises the same lifecycle sites.
+	t.Setenv("DOCKER_HOST", "unix:///nonexistent/mcpproxy-fake-docker.sock")
 
 	useRealDockerResolver(t)
 	restore := shellwrap.SetWellKnownDockerPathsForTest(func() []string { return []string{shim} })
