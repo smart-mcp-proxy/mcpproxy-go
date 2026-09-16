@@ -698,12 +698,12 @@ func TestStoredNames_WarmListsAfterAnInFlightRebuild(t *testing.T) {
 }
 
 // TestStoredNames_UnlistableDirectoryRefusesScopedCallers: a scripts
-// directory the process cannot list has no index, so the scoped resolver
-// refuses — cold, with the non-disclosing not-found before the build has
-// run; then, the build having failed, with the non-disclosing unreadable
-// form, no path and no OS error — exactly where the administrator's directory
-// read refuses (SC-005), rather than executing out of a directory the
-// listing cannot vouch for.
+// directory the process cannot read is refused with the non-disclosing
+// unreadable form — no path, no OS error — on the very first request, cold
+// or warm, whatever the index holds: the request's own constant-cost open of
+// the directory decides it, exactly where the administrator's directory read
+// refuses (SC-005). (Answering not-found until a rebuild had recorded the
+// error made the refusal shape depend on index state.)
 func TestStoredNames_UnlistableDirectoryRefusesScopedCallers(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: directory permissions are not enforced")
@@ -714,11 +714,6 @@ func TestStoredNames_UnlistableDirectoryRefusesScopedCallers(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(scriptsDir, 0o755) })
 
 	src, _, err := ResolveScoped(scriptsDir, "known", "")
-	require.Nil(t, src)
-	requireScopedNotFound(t, err) // cold: no index yet, fail closed
-	waitForIndexRebuild(t, scriptsDir)
-
-	src, _, err = ResolveScoped(scriptsDir, "known", "")
 	require.Nil(t, src)
 	var invalid *InvalidError
 	require.True(t, errors.As(err, &invalid), "want *InvalidError, got %T: %v", err, err)

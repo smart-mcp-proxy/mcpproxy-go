@@ -5,6 +5,7 @@ package codescripts
 import (
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -270,6 +271,17 @@ func storedNamesFor(scriptsDir string) (names map[string]struct{}, gen dirGenera
 	if err != nil {
 		return nil, dirGeneration{}, err
 	}
+	// A directory the process may not READ is answered with the unreadable
+	// form whatever the index holds — the same reason the administrator's
+	// listing gives (SC-005), and the same answer on every platform. Opening
+	// the directory (no readdir) is one constant-cost syscall; without it a
+	// scripts directory that lost its read bit after the index was built
+	// would be reported not-found until a rebuild recorded the error.
+	dirFile, err := os.Open(key)
+	if err != nil {
+		return nil, dirGeneration{}, err
+	}
+	_ = dirFile.Close()
 	gen = dirGenerationOf(info)
 	now := indexClock()
 
