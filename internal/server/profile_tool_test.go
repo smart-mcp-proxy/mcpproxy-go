@@ -1055,3 +1055,120 @@ func TestHandleSetProfile_AdminUnknownSlugKeepsAvailableList(t *testing.T) {
 	require.True(t, res.IsError)
 	require.Equal(t, "unknown profile 'nope' (available: research, deploy, mixed, empty, ghost)", setProfileResultText(t, res))
 }
+
+// ---------------------------------------------------------------------------
+// Spec 105 PR D codex round 4.
+// ---------------------------------------------------------------------------
+
+// selectableProbeConfigWithHiddenServers is selectableProbeConfig(n) over a
+// fleet with hidden further configured servers that no profile declares and
+// no test token is granted — the population a scoped caller must not be able
+// to measure.
+func selectableProbeConfigWithHiddenServers(n, hidden int) *config.Config {
+	cfg := selectableProbeConfig(n)
+	for i := 0; i < hidden; i++ {
+		cfg.Servers = append(cfg.Servers, &config.ServerConfig{Name: fmt.Sprintf("hidden%d", i)})
+	}
+	return cfg
+}
+
+// TestProfileIndex_ReachCostsTheGrantNotTheFleet (Spec 105 PR D codex round
+// 4, finding 1): the reach test is O(|reader grant|), never O(|fleet|). A
+// reach that walked every configured server and ran the credential check on
+// each cost 36 ns over one server and 25 µs over 4 096 for the same refusal
+// (zero allocations either way, so the allocation guards were blind): the
+// number of servers the operator runs was a timing oracle (FR-004; spec
+// Definitions: timing class).
+//
+// Now a restricted reader performs exactly one membership test per entry of
+// its own allowed_servers against the candidate's precomputed set, and a
+// wildcard (or administrator) reader performs exactly one — "is the set
+// non-empty" — so the count depends on nothing but the reader's own grant:
+// not on the fleet, not on the candidate (present, absent, empty), not on
+// the outcome. The traversal counter is the witness, not a clock; the
+// outcome column pins that the cheaper rule is still the same rule.
+func TestProfileIndex_ReachCostsTheGrantNotTheFleet(t *testing.T) {
+	fleets := map[string]*profileIndex{
+		"2 servers":           newProfileIndex(selectableProbeConfigWithHiddenServers(0, 0)),
+		"4096 hidden servers": newProfileIndex(selectableProbeConfigWithHiddenServers(0, 4096)),
+	}
+	cases := map[string]struct {
+		ctx   context.Context
+		slug  string
+		steps int
+		reach bool
+	}{
+		"restricted, reachable":            {setProfileScopedCtx("s", "pin-srv"), "pin", 1, true},
+		"restricted, disjoint":             {setProfileScopedCtx("s", "other-srv"), "pin", 1, false},
+		"restricted, absent slug":          {setProfileScopedCtx("s", "pin-srv"), "nope", 1, false},
+		"restricted, three-name grant":     {setProfileScopedCtx("s", "nowhere", "pin-srv", "hidden7"), "pin", 3, true},
+		"restricted, unknown names only":   {setProfileScopedCtx("s", "nowhere", "hidden7"), "pin", 2, false},
+		"restricted, empty allowlist":      {setProfileScopedCtx("s"), "pin", 0, false},
+		"wildcard, reachable":              {setProfileScopedCtx("s", "*"), "pin", 1, true},
+		"wildcard, absent slug":            {setProfileScopedCtx("s", "*"), "nope", 1, false},
+		"wildcard among names":             {setProfileScopedCtx("s", "nowhere", "*"), "pin", 2, true},
+		"pinned, reachable":                {selectablePinnedCtx("pin", "pin-srv"), "pin", 1, true},
+		"pinned, zero reach":               {selectablePinnedCtx("pin", "other-srv"), "pin", 1, false},
+		"pinned, deleted pin":              {selectablePinnedCtx("gone", "pin-srv", "other-srv"), "gone", 2, false},
+		"pinned, mismatch":                 {selectablePinnedCtx("pin", "pin-srv"), "p0", 1, false},
+		"restricted, empty-name grant":     {setProfileScopedCtx("s", ""), "pin", 1, false},
+		"restricted, duplicate grant name": {setProfileScopedCtx("s", "pin-srv", "pin-srv"), "pin", 2, true},
+	}
+	for fleet, idx := range fleets {
+		for name, c := range cases {
+			steps := 0
+			idx.reachHook = func() { steps++ }
+			require.Equal(t, c.reach, idx.selectable(c.ctx, c.slug), "%s over %s: outcome", name, fleet)
+			require.Equal(t, c.steps, steps, "%s over %s: reach must cost one membership test per granted server", name, fleet)
+		}
+	}
+	// A profile that declares every hidden server is still reached only
+	// through the reader's own grant: one test per granted name.
+	wide := selectableProbeConfigWithHiddenServers(0, 4096)
+	declared := make([]string, 0, len(wide.Servers))
+	for _, s := range wide.Servers {
+		declared = append(declared, s.Name)
+	}
+	wide.Profiles = append(wide.Profiles, config.ProfileConfig{Name: "wide", Servers: declared})
+	idx := newProfileIndex(wide)
+	steps := 0
+	idx.reachHook = func() { steps++ }
+	require.True(t, idx.selectable(setProfileScopedCtx("s", "hidden4095"), "wide"))
+	require.Equal(t, 1, steps, "a 4 098-server candidate costs one test for a one-server grant")
+}
+
+// TestHandleSetProfile_ScopedRefusalReachCostsTheGrantNotTheFleet is the
+// set_profile leg of the round-4 fix: the scoped unknown-profile refusal
+// shares profileIndex.reach with the URL gate, so its cost is bounded by the
+// token's own allowed_servers over a two-server and a 4 098-server fleet
+// alike, for every refusal branch that reaches the index.
+func TestHandleSetProfile_ScopedRefusalReachCostsTheGrantNotTheFleet(t *testing.T) {
+	cases := map[string]struct {
+		ctx  context.Context
+		slug string
+	}{
+		"deleted pin":                  {setProfilePinnedCtx("s", "gone", "pin-srv"), "gone"},
+		"zero-reach pin":               {setProfilePinnedCtx("s", "pin", "other-srv"), "pin"},
+		"scoped, absent slug":          {setProfileScopedCtx("s", "pin-srv"), "nope"},
+		"scoped, disjoint slug":        {setProfileScopedCtx("s", "pin-srv", "nowhere"), "p0"},
+		"scoped, empty allowlist":      {setProfileScopedCtx("s"), "pin"},
+		"scoped wildcard, absent slug": {setProfileScopedCtx("s", "*"), "nope"},
+	}
+	for name, c := range cases {
+		steps := map[string]int{}
+		for fleet, hidden := range map[string]int{"2 servers": 0, "4096 hidden servers": 4096} {
+			cfg := selectableProbeConfigWithHiddenServers(1, hidden)
+			p := &MCPProxyServer{config: cfg, logger: zap.NewNop(), sessionStore: NewSessionStore(zap.NewNop())}
+			idx := newProfileIndex(cfg)
+			idx.reachHook = func() { steps[fleet]++ }
+			p.profileIndexes.last.Store(idx)
+
+			res := callSetProfileTool(t, p, c.ctx, c.slug)
+			require.True(t, res.IsError, "%s/%s must be refused", fleet, name)
+			require.Equal(t, fmt.Sprintf("unknown profile '%s'", c.slug), setProfileResultText(t, res), "%s/%s", fleet, name)
+			require.Equal(t, len(auth.AuthContextFromContext(c.ctx).AllowedServers), steps[fleet],
+				"%s/%s: reach must cost one membership test per granted server: %v", fleet, name, steps)
+		}
+		require.Equal(t, steps["2 servers"], steps["4096 hidden servers"], "%s: %v", name, steps)
+	}
+}

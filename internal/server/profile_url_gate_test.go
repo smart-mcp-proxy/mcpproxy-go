@@ -85,9 +85,15 @@ func TestProfileMiddleware_ScopedRefusalIsLoggedForOperator(t *testing.T) {
 
 // profileGateFleetConfig builds a config over a fleet of 1+n profiles: "pin"
 // (reaching "pin-srv") followed by n profiles "p0".."p<n-1>" that reach only
-// "other-srv". With n == -1 the fleet has no profiles at all.
-func profileGateFleetConfig(n int) *config.Config {
+// "other-srv". With n == -1 the fleet has no profiles at all. hidden further
+// servers "hidden0".."hidden<hidden-1>" are configured but declared by no
+// profile and granted to no test token — the server population an operator
+// runs and a scoped token must not be able to measure (codex round 4).
+func profileGateFleetConfig(n, hidden int) *config.Config {
 	cfg := &config.Config{Servers: []*config.ServerConfig{{Name: "pin-srv"}, {Name: "other-srv"}}}
+	for i := 0; i < hidden; i++ {
+		cfg.Servers = append(cfg.Servers, &config.ServerConfig{Name: fmt.Sprintf("hidden%d", i)})
+	}
 	if n >= 0 {
 		cfg.Profiles = []config.ProfileConfig{{Name: "pin", Servers: []string{"pin-srv"}}}
 		for i := 0; i < n; i++ {
@@ -113,11 +119,18 @@ func (f profileGateFleet) handler(next http.Handler) http.Handler {
 	})
 }
 
-// profileGateFleets builds the three fleet shapes the gate tests replay.
+// profileGateFleets builds the fleet shapes the gate tests replay: the
+// profile population (none / the pin alone / 4 096 hidden profiles) and the
+// server population (two servers / 4 096 hidden servers behind the same two).
 func profileGateFleets() map[string]profileGateFleet {
 	fleets := map[string]profileGateFleet{}
-	for name, n := range map[string]int{"no profiles": -1, "pin only": 0, "4096 others": 4096} {
-		fleets[name] = profileGateFleet{srv: &Server{logger: zap.NewNop()}, cfg: profileGateFleetConfig(n)}
+	for name, shape := range map[string][2]int{
+		"no profiles":         {-1, 0},
+		"pin only":            {0, 0},
+		"4096 others":         {4096, 0},
+		"4096 hidden servers": {0, 4096},
+	} {
+		fleets[name] = profileGateFleet{srv: &Server{logger: zap.NewNop()}, cfg: profileGateFleetConfig(shape[0], shape[1])}
 	}
 	return fleets
 }
@@ -194,7 +207,11 @@ func TestProfileMiddleware_RefusalWorkIndependentOfFleet(t *testing.T) {
 					handler := f.handler(next)
 					allocs[fleet] = testing.AllocsPerRun(20, func() { profileGateRefusal(t, handler, c.agent, c.path) })
 				}
-				if allocs["pin only"] == allocs["no profiles"] && allocs["4096 others"] == allocs["no profiles"] {
+				same := true
+				for fleet := range fleets {
+					same = same && allocs[fleet] == allocs["no profiles"]
+				}
+				if same {
 					return
 				}
 				time.Sleep(20 * time.Millisecond)
@@ -255,6 +272,46 @@ func TestProfileMiddleware_GateTouchesOnlyRequestedSlugAndPin(t *testing.T) {
 			}
 		}
 		require.Same(t, idx, f.srv.profileIndexes.For(f.cfg), "%s: the cached index must be reused for the same snapshot", fleet)
+	}
+}
+
+// TestProfileMiddleware_RefusalReachCostsTheGrantNotTheFleet (Spec 105 PR D
+// codex round 4, finding 1): the reach test behind every scoped refusal must
+// cost the READER's grant, never the fleet. A reach that walked every
+// configured server and ran the credential check on each did one iteration
+// over a fleet of one server and 4 096 over an otherwise identical fleet with
+// 4 095 hidden servers behind it — same 404, same zero allocations (so the
+// allocation-parity test above was blind to it), 36 ns vs 25 µs — a timing
+// oracle on the number of servers the operator runs (FR-004; spec
+// Definitions: non-disclosing = status, body AND timing class).
+//
+// Traversal-counter seam, not a clock: through the index's reach hook, every
+// scoped refusal branch over every fleet shape performs exactly one
+// membership test per entry of the token's own allowed_servers — a size the
+// agent controls and already knows — and the count is identical across the
+// two-server and the 4 098-server fleet.
+func TestProfileMiddleware_RefusalReachCostsTheGrantNotTheFleet(t *testing.T) {
+	fleets := profileGateFleets()
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		t.Errorf("%s must not reach the MCP handler", r.URL.Path)
+	})
+
+	for name, c := range profileGateRefusalCases {
+		t.Run(name, func(t *testing.T) {
+			steps := map[string]int{}
+			for fleet, f := range fleets {
+				idx := newProfileIndex(f.cfg)
+				idx.reachHook = func() { steps[fleet]++ }
+				f.srv.profileIndexes.last.Store(idx)
+				profileGateRefusal(t, f.handler(next), c.agent, c.path)
+			}
+			for fleet, got := range steps {
+				require.Equal(t, len(c.agent.AllowedServers), got,
+					"%s over fleet %q: reach must test exactly one membership per granted server, never per configured server: %v", name, fleet, steps)
+			}
+			require.Equal(t, steps["no profiles"], steps["4096 hidden servers"],
+				"%s: 4 096 hidden servers must cost exactly what an empty fleet costs: %v", name, steps)
+		})
 	}
 }
 

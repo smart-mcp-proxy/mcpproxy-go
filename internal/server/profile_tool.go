@@ -278,15 +278,22 @@ func forEachProfileSelectable(ctx context.Context, cfg *config.Config, visit fun
 // EffectiveServers per profile over a populated one: same status and body,
 // fleet-population timing oracle (codex review, PR D round 2; FR-004).
 //
-// Reach is precomputed per profile as a bitset over the configured servers'
-// positions (members), built once per snapshot: at request time the reach
-// test reads one bit per configured server, whatever the candidate — a
-// profile the snapshot lacks reads the all-zero placeholder (none) at the
-// same cost. Computing reach from the candidate's declared list instead
-// cost nothing for a missing profile and |servers| × |declared| for an
-// existing one, so a pinned token asking for its own zero-reach pin could
-// tell "deleted" from "exists" by timing (codex review, PR D round 3;
-// research D1).
+// Reach is precomputed per profile as a SET of the configured servers it
+// declares (a bitset over server positions, members, plus a non-empty flag),
+// built once per snapshot: at request time the reach test walks the READER's
+// own allowed_servers and tests each against that set — one O(1) membership
+// test per granted name, or one "is the set non-empty" test for a wildcard
+// or administrator reader — so its cost is the size of the caller's own
+// grant and nothing else. A profile the snapshot lacks reads the all-zero
+// placeholder (none) at the same cost. Computing reach from the candidate's
+// declared list instead cost nothing for a missing profile and |servers| ×
+// |declared| for an existing one, so a pinned token asking for its own
+// zero-reach pin could tell "deleted" from "exists" by timing (codex review,
+// PR D round 3; research D1); walking every configured server and running
+// the credential check on each cost one iteration over a fleet of one server
+// and 4 096 over a fleet with 4 095 hidden ones — same 404, same zero
+// allocations, 36 ns vs 25 µs — so the operator's server population was a
+// timing oracle (codex review, PR D round 4).
 //
 // Duplicate slugs cannot load (ValidateProfiles), but a hand-built config may
 // carry them: the first occurrence wins, exactly like every linear lookup in
@@ -295,19 +302,33 @@ type profileIndex struct {
 	cfg    *config.Config
 	byName map[string]int // slug → position in cfg.Profiles
 
+	// serverPos maps a configured server's name to its position in
+	// cfg.Servers (first named, non-nil occurrence), so a granted name
+	// resolves to its membership bit in O(1).
+	serverPos map[string]int
+
 	// words is the bitset length in uint64 words: ceil(len(cfg.Servers)/64).
 	// members holds len(cfg.Profiles) consecutive bitsets of that length —
 	// bit i of profile p's set is on when cfg.Servers[i] is one of p's
-	// declared servers (EffectiveServers as a set). none is the all-zero
-	// placeholder read for a slug the snapshot has no profile for.
-	words   int
-	members []uint64
-	none    []uint64
+	// declared servers (EffectiveServers as a set). nonEmpty[p] is on when
+	// that set has at least one bit — the whole reach test for a reader
+	// that may see every server. none is the all-zero placeholder read for
+	// a slug the snapshot has no profile for.
+	words    int
+	members  []uint64
+	nonEmpty []bool
+	none     []uint64
 
 	// lookupHook, when set, observes every slug the index resolves. It is the
 	// seam the traversal-counter tests use to prove the gate and set_profile
 	// touch at most the requested slug and the pin; nil in production.
 	lookupHook func(slug string)
+
+	// reachHook, when set, observes every unit of work reach performs — one
+	// call per membership test. It is the seam the fleet-parity tests use to
+	// prove a reach test costs the reader's grant, never the fleet; nil in
+	// production.
+	reachHook func()
 }
 
 func newProfileIndex(cfg *config.Config) *profileIndex {
@@ -323,25 +344,28 @@ func newProfileIndex(cfg *config.Config) *profileIndex {
 	}
 
 	// Reach sets: server name → position once, then one bit per declared
-	// server that exists in the snapshot (the EffectiveServers rule, nil
-	// entries excluded).
-	position := make(map[string]int, len(cfg.Servers))
+	// server that exists in the snapshot (the EffectiveServers rule; nil
+	// entries and empty names excluded — CanAccessServer never grants an
+	// empty name, so such a server is reachable by nobody).
+	idx.serverPos = make(map[string]int, len(cfg.Servers))
 	for i, s := range cfg.Servers {
-		if s == nil {
+		if s == nil || s.Name == "" {
 			continue
 		}
-		if _, dup := position[s.Name]; !dup {
-			position[s.Name] = i
+		if _, dup := idx.serverPos[s.Name]; !dup {
+			idx.serverPos[s.Name] = i
 		}
 	}
 	idx.words = (len(cfg.Servers) + 63) / 64
 	idx.none = make([]uint64, idx.words)
 	idx.members = make([]uint64, len(cfg.Profiles)*idx.words)
+	idx.nonEmpty = make([]bool, len(cfg.Profiles))
 	for p := range cfg.Profiles {
 		set := idx.membersOf(p)
 		for _, name := range cfg.Profiles[p].Servers {
-			if i, ok := position[name]; ok {
+			if i, ok := idx.serverPos[name]; ok {
 				set[i/64] |= 1 << (uint(i) % 64)
+				idx.nonEmpty[p] = true
 			}
 		}
 	}
@@ -378,32 +402,56 @@ func (idx *profileIndex) lookup(slug string) *config.ProfileConfig {
 	return nil
 }
 
-// reach reports whether the caller can enumerate at least one server of the
-// given reach set — the rule behind selectableProfileNames (research D1),
-// i.e. len(callerVisibleServers(ctx, p.EffectiveServers(cfg))) > 0 for the
-// profile whose set it is, without either allocation. It walks every
-// configured server (a per-snapshot constant), never returns early, and
-// evaluates the membership bit and the credential check unconditionally on
-// every step, so the cost is the same for the placeholder set, an empty
-// profile and one declaring every server.
-func (idx *profileIndex) reach(ctx context.Context, members []uint64) bool {
+// hasMember reports whether profile candidate's reach set is non-empty —
+// false for the placeholder (candidate < 0).
+func (idx *profileIndex) hasMember(candidate int) bool {
+	return candidate >= 0 && idx.nonEmpty[candidate]
+}
+
+// reach reports whether the caller can enumerate at least one server of
+// profile candidate (-1: no such profile) — the rule behind
+// selectableProfileNames (research D1), i.e.
+// len(callerVisibleServers(ctx, p.EffectiveServers(cfg))) > 0, without
+// either allocation. Its cost is O(|reader grant|), never O(|fleet|): a
+// reader that may see every server (administrator, absent context, or a
+// wildcard entry) needs one test — is the set non-empty — and a restricted
+// reader needs one membership test per entry of its own AllowedServers
+// (the same "*" / exact-name rule as AuthContext.CanAccessServer; an empty
+// name never matches). It never returns early and does the same work for
+// the placeholder set, an empty profile and one declaring every server, so
+// neither the outcome, the candidate nor the number of configured servers
+// can be told from the work — only the caller's own grant, which it knows.
+func (idx *profileIndex) reach(ctx context.Context, candidate int) bool {
 	if idx.cfg == nil {
 		return false
 	}
-	scoped := auth.IsScopedCaller(ctx)
+	if !auth.IsScopedCaller(ctx) {
+		idx.step()
+		return idx.hasMember(candidate)
+	}
+	members := idx.membersOf(candidate)
 	reach := false
-	for i, s := range idx.cfg.Servers {
-		name := ""
-		if s != nil {
-			name = s.Name
+	// IsScopedCaller guarantees a non-nil, non-admin AuthContext.
+	for _, name := range auth.AuthContextFromContext(ctx).AllowedServers {
+		idx.step()
+		hit := false
+		if name == "*" {
+			hit = idx.hasMember(candidate)
+		} else if i, ok := idx.serverPos[name]; ok {
+			hit = members[i/64]&(1<<(uint(i)%64)) != 0
 		}
-		member := members[i/64]&(1<<(uint(i)%64)) != 0
-		allowed := !scoped || auth.CanEnumerateServer(ctx, name)
-		if member && allowed {
+		if hit {
 			reach = true
 		}
 	}
 	return reach
+}
+
+// step reports one unit of reach work to the test seam.
+func (idx *profileIndex) step() {
+	if idx.reachHook != nil {
+		idx.reachHook()
+	}
 }
 
 // selectable reports whether the caller may select the profile named slug —
@@ -413,10 +461,11 @@ func (idx *profileIndex) reach(ctx context.Context, members []uint64) bool {
 // outcome (slug absent, profile out of reach, pin deleted, pin zero-reach,
 // pin mismatch, empty fleet) it does the same work — one lookup of the slug,
 // one lookup of the pin when the caller is pinned, and exactly one
-// allocation-free reach test over the candidate's precomputed set or the
-// all-zero placeholder when there is none — so no branch can be told from
-// another by its cost, and none of it depends on how many other profiles
-// exist or on how many servers the candidate declares.
+// allocation-free reach test of the caller's own grant against the
+// candidate's precomputed set or the all-zero placeholder when there is none
+// — so no branch can be told from another by its cost, and none of it
+// depends on how many other profiles exist, on how many servers the
+// candidate declares or on how many servers are configured.
 func (idx *profileIndex) selectable(ctx context.Context, slug string) bool {
 	candidate := idx.position(slug)
 	pin := profilePinFromContext(ctx)
@@ -429,7 +478,7 @@ func (idx *profileIndex) selectable(ctx context.Context, slug string) bool {
 			candidate = pinned
 		}
 	}
-	reach := idx.reach(ctx, idx.membersOf(candidate))
+	reach := idx.reach(ctx, candidate)
 	// Administrators (and absent contexts) select any configured profile,
 	// including empty or ghost ones (SC-005); everyone else needs reach.
 	needsReach := pin != "" || auth.IsScopedCaller(ctx)
@@ -461,7 +510,7 @@ func (idx *profileIndex) forEachSelectable(ctx context.Context, visit func(name 
 		p := &idx.cfg.Profiles[i]
 		selectable := true
 		if needsReach {
-			selectable = idx.reach(ctx, idx.membersOf(i))
+			selectable = idx.reach(ctx, i)
 		}
 		if pin != "" && p.Name != pin {
 			selectable = false
