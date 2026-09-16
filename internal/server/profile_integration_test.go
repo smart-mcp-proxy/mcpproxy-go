@@ -657,8 +657,11 @@ func (e *profileTestEnv) mintPinnedToken(name, pin string) string {
 }
 
 // TestProfile_PinnedTokenURLEnforcement verifies the T3 server-side guard: an
-// agent token pinned to "research" is rejected with 403 at /mcp/p/deploy, but
-// reaches its own /mcp/p/research endpoint.
+// agent token pinned to "research" is refused at /mcp/p/deploy, but reaches
+// its own /mcp/p/research endpoint. Inverted for Spec 105 FR-004 (FR003-G3):
+// the pre-105 refusal was a 403 whose body named the pin; a pin mismatch is
+// now the same uniform 404 every non-selectable slug produces, and the body
+// must not name the pin (TestProfile_PinnedRefusalUniform proves the ≡).
 func TestProfile_PinnedTokenURLEnforcement(t *testing.T) {
 	env := newProfileTestEnv(t)
 	rawToken := env.mintPinnedToken("pinned-research", "research")
@@ -676,14 +679,16 @@ func TestProfile_PinnedTokenURLEnforcement(t *testing.T) {
 		return resp
 	}
 
-	// Different profile → 403 with a pin-naming error.
+	// Different profile → the uniform 404, without the pin in the body.
 	resp := post("deploy")
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusForbidden, resp.StatusCode, "pinned token must be 403 on a non-pinned profile URL")
+	require.Equal(t, http.StatusNotFound, resp.StatusCode, "pinned token must get the uniform 404 on a non-pinned profile URL")
 	var body map[string]interface{}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	errMsg, _ := body["error"].(string)
-	assert.Contains(t, errMsg, "pinned to profile 'research'", "403 error must name the pin: %s", errMsg)
+	assert.NotContains(t, errMsg, "pinned", "the refusal must not name the pin: %s", errMsg)
+	_, enumerated := body["available"]
+	assert.False(t, enumerated, "the refusal must not enumerate profiles: %v", body)
 
 	// Its own pinned profile → route matched, not forbidden.
 	resp2 := post("research")
@@ -692,8 +697,10 @@ func TestProfile_PinnedTokenURLEnforcement(t *testing.T) {
 		"pinned token must reach its own profile URL; got %d", resp2.StatusCode)
 }
 
-// TestProfile_UnpinnedTokenUnaffected verifies an unpinned agent token can reach
-// any profile URL (no T3 enforcement applied).
+// TestProfile_UnpinnedTokenUnaffected verifies an unpinned, unrestricted ("*")
+// agent token can reach any profile URL (no T3 enforcement applied; every
+// configured profile intersects its grant, so the FR-004 predicate admits it —
+// a RESTRICTED unpinned token is covered by TestProfile_ScopedUnpinnedRefusalUniform).
 func TestProfile_UnpinnedTokenUnaffected(t *testing.T) {
 	env := newProfileTestEnv(t)
 	rawToken := env.mintPinnedToken("free-agent", "") // empty pin = unpinned
@@ -786,7 +793,9 @@ func TestProfile_EndpointReachability(t *testing.T) {
 // to is deleted, a request to /mcp/p/<pin> passes the pin check and fell into
 // the generic "unknown profile" branch, whose "available" list enumerated
 // every remaining profile — profiles the token may never select (the resolver
-// treats a deleted pin as deny-all). The error must not list them.
+// treats a deleted pin as deny-all). The error must not list them. Under
+// Spec 105 FR-004 the deleted pin takes the single scoped refusal
+// (profileNotSelectable); the anonymous administrator control keeps the list.
 func TestProfile_DeletedPinDoesNotEnumerateProfiles(t *testing.T) {
 	env := newProfileTestEnv(t)
 	rawToken := env.mintPinnedToken("pinned-research", "research")

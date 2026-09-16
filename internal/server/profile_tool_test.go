@@ -341,7 +341,10 @@ func TestHandleSetProfile_StalePinUnknownSlugDisclosesNoProfiles(t *testing.T) {
 }
 
 // TestHandleSetProfile_PinnedTokenClearIntersectsAllowedServers: a pinned token
-// whose AllowedServers is narrower than its pin sees the intersection.
+// whose AllowedServers is narrower than its pin sees the intersection in
+// `servers`, while `active_profile` reports the STORED selection — "" after a
+// clear, not the pin (Spec 105 FR-003, FR003-G7; inverted from the pre-105
+// expectation that the pin name was echoed as the active profile).
 func TestHandleSetProfile_PinnedTokenClearIntersectsAllowedServers(t *testing.T) {
 	p := newSetProfileTestServer()
 	helper := mcpserver.NewMCPServer("test", "1.0.0")
@@ -351,7 +354,7 @@ func TestHandleSetProfile_PinnedTokenClearIntersectsAllowedServers(t *testing.T)
 	})
 
 	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
-	require.Equal(t, "mixed", active)
+	require.Equal(t, "", active, "a cleared selection is reported as cleared even under a pin")
 	require.ElementsMatch(t, []string{"deploy-srv"}, servers)
 }
 
@@ -391,10 +394,12 @@ func TestHandleSetProfile_WildcardTokenUnchanged(t *testing.T) {
 	require.Contains(t, setProfileResultText(t, res), "deploy")
 }
 
-// TestHandleSetProfile_PinnedTokenSelectsDisjointPin locks the admission
-// decision: a configured pin is always selectable by its own token (the token
-// already knows its pin exists), even when the pin's servers are disjoint from
-// the token's AllowedServers — the reach is then correctly empty.
+// TestHandleSetProfile_PinnedTokenSelectsDisjointPin is the INVERTED #1225 F2
+// admission decision (Spec 105 FR-003, research D1): a configured pin whose
+// servers are disjoint from the token's AllowedServers has zero reach and is
+// NOT selectable by its own token — admitting it (with an empty reach) told the
+// token that its pin still exists, an existence oracle a deleted pin does not
+// give. The refusal is the deleted-pin body and the session is not mutated.
 func TestHandleSetProfile_PinnedTokenSelectsDisjointPin(t *testing.T) {
 	p := newSetProfileTestServer()
 	helper := mcpserver.NewMCPServer("test", "1.0.0")
@@ -403,10 +408,14 @@ func TestHandleSetProfile_PinnedTokenSelectsDisjointPin(t *testing.T) {
 		Type: auth.AuthTypeAgent, ProfilePin: "deploy", AllowedServers: []string{"research-srv"},
 	})
 
-	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "deploy"))
-	require.Equal(t, "deploy", active)
-	require.Empty(t, servers)
-	require.Equal(t, "deploy", p.sessionStore.GetActiveProfile("sess-pin-disjoint"))
+	res := callSetProfileTool(t, p, ctx, "deploy")
+	require.True(t, res.IsError, "a zero-reach pin must not be selectable: %s", setProfileResultText(t, res))
+	text := setProfileResultText(t, res)
+	require.Contains(t, text, "unknown profile 'deploy'")
+	require.NotContains(t, text, "deploy-srv", "the refusal must not name servers outside the token's reach")
+	require.NotContains(t, text, "pinned", "the refusal must not confirm the pin")
+	require.Equal(t, "", p.sessionStore.GetActiveProfile("sess-pin-disjoint"),
+		"a refused selection must leave the session untouched")
 }
 
 // TestSetProfileFixtureIsLoadable guards the shared fixture against slugs that

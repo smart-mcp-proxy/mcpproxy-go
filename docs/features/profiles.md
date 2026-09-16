@@ -67,9 +67,9 @@ The `set_profile` MCP tool switches the active profile **inside a live session**
 
 - The selection is keyed by the MCP session id (stable per streamable-HTTP / SSE connection) and persists for the lifetime of that session.
 - It applies to subsequent `retrieve_tools`, `call_tool_*`, `code_execution` and direct-mode (`server__tool`) calls on the base `/mcp` endpoint — `retrieve_tools` searches the profile's per-profile index directly.
-- Passing an empty string (`""`) clears the selection and returns to all servers (the result lists every configured server). A token with a [`profile_pin`](./agent-tokens.md#profile-pinning) keeps its pin — the result then lists the pinned profile's servers, since that is what the session can still reach.
-- The `servers` list is always bounded by the caller's credential, using the same rule that scopes `retrieve_tools`: for an [agent token](./agent-tokens.md) scoped to specific servers it is the intersection of the selection (all servers, the chosen profile, or the pin) with the token's `allowed_servers`, so a token restricted to one server is never told about the others. API-key and socket callers see the full lists.
-- An unknown slug is rejected: `unknown profile '<slug>' (available: research, deploy)`. For an agent token the `available:` list names only the profiles that token may select — its pin, or the profiles overlapping its `allowed_servers` — not the whole catalogue, and a profile entirely outside the token's reach is rejected with that same error rather than confirmed as existing.
+- Passing an empty string (`""`) clears the selection and returns to all servers. `active_profile` always reports the **stored session selection** — `""` after a clear, even for a token with a [`profile_pin`](./agent-tokens.md#profile-pinning) — while `servers` reports the **effective scope** the session can actually reach after the update: the pin's servers for a pinned token (nothing once the pinned profile has been deleted), the URL profile on a `/mcp/p/<slug>` endpoint, otherwise the selection or every configured server.
+- The `servers` list is always bounded by the caller's credential, using the same rule that scopes `retrieve_tools`: for an [agent token](./agent-tokens.md) scoped to specific servers it is the intersection of the effective profile (resolved pin > URL > session, see [Resolution precedence](#resolution-precedence)) with the token's `allowed_servers`, so a token restricted to one server is never told about the others. On a `/mcp/p/<slug>` endpoint the URL still governs the request, so `set_profile("other")` there stores `other` as `active_profile` but reports `<slug> ∩ allowed_servers` in `servers`. API-key and socket callers see the full lists.
+- An unknown slug is rejected: `unknown profile '<slug>' (available: research, deploy)`. For an agent token the `available:` list names only the profiles that token may select — the profiles overlapping its `allowed_servers`, or its pin while the pin still has reach — not the whole catalogue, and a profile entirely outside the token's reach (an empty profile, a profile whose servers are all outside `allowed_servers`, or a pin that no longer exists or no longer overlaps the token's servers) is rejected with that same error rather than confirmed as existing.
 - Session state is cleared automatically on session close.
 
 `set_profile` is available on the default `/mcp` server and the `call_tool` / `code_execution` routing-mode servers.
@@ -136,7 +136,11 @@ Profile changes take effect for new connections on the next config reload. In-fl
 
 ## 404 responses
 
+For API-key, socket and (when `require_mcp_auth` is off) unauthenticated callers:
+
 | Condition | Body |
 |-----------|------|
 | No profiles configured | `{"error":"no profiles configured"}` |
 | Unknown slug | `{"error":"unknown profile '<slug>'","available":["research","deploy"]}` |
+
+An [agent token](./agent-tokens.md) (or a server-edition user) may initialize through `/mcp/p/<slug>` only when that profile is one it could select with `set_profile` — its servers overlap the token's `allowed_servers`, or it is the token's pin and the pin still has reach. Every other request — a missing or deleted slug, a configured profile outside the token's reach, an empty profile, a pin mismatch, the slug-less `/mcp/p` and `/mcp/p/`, and an empty fleet — receives one and the same `404 {"error":"unknown profile '<slug>'"}` with no `available` list, so a scoped caller cannot learn which profiles exist from the profile URL.

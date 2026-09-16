@@ -49,7 +49,13 @@ func buildSetProfileTool() mcp.Tool {
 
 // handleSetProfile implements the set_profile tool. It validates the requested
 // slug against live config, records it on the session (mutex-guarded, cleared
-// on session close), and returns the resolved {active_profile, servers}.
+// on session close), and returns {active_profile, servers} where
+// `active_profile` is the STORED session selection and `servers` is the
+// EFFECTIVE scope after the update — resolveActiveProfile (pin > URL > session)
+// intersected with the caller's credential (Spec 105 FR-003). On a URL-scoped
+// endpoint the URL therefore governs the reported servers, and clearing a
+// pinned token's selection reports active_profile == "" while servers still
+// reports the pin's reach.
 func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	slug := strings.TrimSpace(request.GetString("profile", ""))
 
@@ -67,45 +73,38 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 		return mcp.NewToolResultError(fmt.Sprintf("agent token is pinned to profile '%s' and cannot switch to '%s'", pin, slug)), nil
 	}
 
-	// Empty slug clears the session selection (back to all servers).
-	if slug == "" {
-		p.sessionStore.SetActiveProfile(sessionID, "")
-		// A pinned token keeps its pin: clearing only drops the session tier,
-		// which the pin outranks anyway. Report what the session can actually
-		// reach — the pin's servers, or NOTHING when the pinned profile has been
-		// deleted — instead of the full server list, which would advertise a
-		// reach the resolver denies.
-		if pin != "" {
-			pinnedName, pinnedScope := p.resolveActiveProfile(ctx)
-			return setProfileResult(pinnedName, callerVisibleServers(ctx, pinnedScope.AllowedServerNames()))
-		}
-		return setProfileResult("", callerVisibleServers(ctx, allServerNames(cfg)))
-	}
-
-	// Validate the slug names a configured profile the caller may select. The
+	// A non-empty slug must name a configured profile the caller may select
+	// (an empty slug clears the selection and is always accepted). The
 	// selectable set is computed BEFORE any session mutation or success log, so
-	// a profile outside the caller's reach is indistinguishable from an unknown
-	// one (FR-016b): same error, same `available:` list, no state change.
-	selectable := selectableProfileNames(ctx, cfg)
-	var match *config.ProfileConfig
-	if cfg != nil && slices.Contains(selectable, slug) {
-		for i := range cfg.Profiles {
-			if cfg.Profiles[i].Name == slug {
-				match = &cfg.Profiles[i]
-				break
-			}
+	// a profile outside the caller's reach — including a pinned token's own
+	// pin once it has zero reach (research D1) — is indistinguishable from an
+	// unknown one (FR-016b / FR-003): same error, same `available:` list, no
+	// state change.
+	if slug != "" {
+		selectable := selectableProfileNames(ctx, cfg)
+		if !slices.Contains(selectable, slug) {
+			return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s' (available: %s)", slug, strings.Join(selectable, ", "))), nil
 		}
-	}
-	if match == nil {
-		return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s' (available: %s)", slug, strings.Join(selectable, ", "))), nil
 	}
 
 	p.sessionStore.SetActiveProfile(sessionID, slug)
-	p.logger.Info("set_profile: session profile updated",
-		zap.String("session_id", sessionID),
-		zap.String("profile", slug),
-	)
-	return setProfileResult(slug, callerVisibleServers(ctx, match.EffectiveServers(cfg)))
+	if slug != "" {
+		p.logger.Info("set_profile: session profile updated",
+			zap.String("session_id", sessionID),
+			zap.String("profile", slug),
+		)
+	}
+
+	// Report what the session can actually reach after the update: the
+	// resolver's effective profile (a pin outranks the URL, which outranks the
+	// stored selection; a deleted pin is deny-all) bounded by the credential —
+	// never the stored selection's own servers when something else governs.
+	_, effective := p.resolveActiveProfile(ctx)
+	servers := effective.AllowedServerNames()
+	if effective == nil {
+		servers = allServerNames(cfg)
+	}
+	return setProfileResult(slug, callerVisibleServers(ctx, servers))
 }
 
 // setProfileResult renders the standard set_profile success payload.
@@ -178,20 +177,24 @@ func callerVisibleServers(ctx context.Context, servers []string) []string {
 
 // selectableProfileNames returns the profile slugs the caller may select. An
 // unrestricted caller may select any configured profile; a profile-pinned
-// token only its pin (and nothing when the pin no longer exists); a scoped
-// caller only the profiles that overlap the servers it can enumerate.
+// token only its pin, and only while the pin has reach (it exists and its
+// server set intersects the token's allowed servers — a deleted pin, an empty
+// or ghost profile and a disjoint grant all yield nothing, Spec 105 research
+// D1); a scoped caller only the profiles that overlap the servers it can
+// enumerate.
 //
 // This is both the `available:` list of the unknown-slug error and the
-// admission rule for a selection: a profile entirely outside the caller's
-// reach is treated exactly like a nonexistent one, so the error text cannot be
-// used to confirm which profiles the operator has configured (FR-016b).
+// admission rule for a selection — on set_profile AND on the /mcp/p/<slug>
+// URL (profileMiddleware): a profile entirely outside the caller's reach is
+// treated exactly like a nonexistent one, so the error text cannot be used to
+// confirm which profiles the operator has configured (FR-016b, FR-003/004).
 func selectableProfileNames(ctx context.Context, cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
 	}
 	if pin := profilePinFromContext(ctx); pin != "" {
 		for i := range cfg.Profiles {
-			if cfg.Profiles[i].Name == pin {
+			if cfg.Profiles[i].Name == pin && len(callerVisibleServers(ctx, cfg.Profiles[i].EffectiveServers(cfg))) > 0 {
 				return []string{pin}
 			}
 		}

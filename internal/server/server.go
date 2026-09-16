@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	gruntime "runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -2308,21 +2309,36 @@ func withHSTS(next http.Handler) http.Handler {
 // injects it into the request context, then delegates to the retrieve_tools-mode
 // MCP handler (next). Auth has already run at this point via mcpAuthMiddleware.
 //
-// 404 responses:
-//   - No profiles configured at all → {"error":"no profiles configured"}
-//   - Slug not found               → {"error":"unknown profile '<slug>'","available":[...]}
+// Scoped callers (auth.IsScopedCaller — agent tokens and server-edition users)
+// are admitted only through a profile the same selectable-profile predicate
+// set_profile applies (selectableProfileNames: reach ∩ token, pin honoured,
+// zero-reach pin refused — Spec 105 FR-004, research D1). Every other outcome
+// — slug missing, profile deleted, configured but not selectable, pin
+// mismatch, empty fleet, slug-less /mcp/p — is answered by ONE constructor
+// (profileNotSelectable) so status, body and timing class cannot tell them
+// apart; the "no profiles configured" branch deliberately runs AFTER this gate.
 //
-// "available" is an administrator affordance. A profile-pinned agent token
-// reaches this branch only when its pinned profile has been deleted, and the
-// resolver treats that pin as deny-all (resolveActiveProfile) — so the error
-// omits the list rather than enumerate profiles the token may never select
-// (Spec 104 FR-016b).
+// Administrator-shaped callers (API key, socket, anonymous back-compat) keep
+// the pre-105 branches unchanged (SC-005):
+//   - No profiles configured at all → 404 {"error":"no profiles configured"}
+//   - Slug not found               → 404 {"error":"unknown profile '<slug>'","available":[...]}
 func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.runtime.Config()
 
-		// FR-008: no profiles configured.
-		if cfg == nil || len(cfg.Profiles) == 0 {
+		// Strip the /mcp/p/ prefix to obtain the slug.
+		slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
+		slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
+		slug = strings.Trim(slug, "/")
+
+		// Spec 105 FR-004: the selectable-profile gate for scoped callers.
+		if auth.IsScopedCaller(r.Context()) {
+			if !slices.Contains(selectableProfileNames(r.Context(), cfg), slug) {
+				profileNotSelectable(w, slug)
+				return
+			}
+		} else if cfg == nil || len(cfg.Profiles) == 0 {
+			// FR-008: no profiles configured (administrator affordance).
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2331,25 +2347,9 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Strip the /mcp/p/ prefix to obtain the slug.
-		slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
-		slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
-		slug = strings.Trim(slug, "/")
-
-		// Profiles v2 T3: a profile-pinned agent token may only operate within its
-		// pinned profile. A request to any other /mcp/p/<slug> is forbidden (403),
-		// regardless of whether that slug is a real profile. Auth has already run
-		// (mcpAuthMiddleware wraps this handler), so the pin is on the context.
-		if pin := profilePinFromContext(r.Context()); pin != "" && pin != slug {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"error": fmt.Sprintf("agent token is pinned to profile '%s' and cannot access profile '%s'", pin, slug),
-			})
-			return
-		}
-
-		// Look up profile by slug (lock-free snapshot).
+		// Look up profile by slug (lock-free snapshot). A scoped caller that
+		// passed the gate always resolves here — the predicate only admits
+		// configured profiles.
 		var found *config.ProfileConfig
 		for i := range cfg.Profiles {
 			if cfg.Profiles[i].Name == slug {
@@ -2358,21 +2358,19 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// FR-009: slug not found.
+		// FR-009: slug not found — administrator callers only, with the
+		// discovery affordance.
 		if found == nil {
-			body := map[string]interface{}{
-				"error": fmt.Sprintf("unknown profile '%s'", slug),
-			}
-			if profilePinFromContext(r.Context()) == "" {
-				available := make([]string, 0, len(cfg.Profiles))
-				for _, p := range cfg.Profiles {
-					available = append(available, p.Name)
-				}
-				body["available"] = available
+			available := make([]string, 0, len(cfg.Profiles))
+			for _, p := range cfg.Profiles {
+				available = append(available, p.Name)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(body)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":     fmt.Sprintf("unknown profile '%s'", slug),
+				"available": available,
+			})
 			return
 		}
 
@@ -2381,6 +2379,20 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 		scope := profile.NewProfileScope(found.Name, effectiveServers)
 		ctx := profile.WithProfileScope(r.Context(), scope)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// profileNotSelectable writes the single refusal a scoped caller receives from
+// the profile URL whenever the requested slug is not one it may select. The
+// body echoes the caller's own slug (not a disclosure) and never carries an
+// `available` list or the pin, so a missing, deleted, unreachable or
+// pin-mismatched profile — and an empty fleet — are indistinguishable
+// (Spec 105 FR-004).
+func profileNotSelectable(w http.ResponseWriter, slug string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": fmt.Sprintf("unknown profile '%s'", slug),
 	})
 }
 

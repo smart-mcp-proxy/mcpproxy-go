@@ -132,7 +132,10 @@ func TestDirectModeHonorsTokenProfilePin(t *testing.T) {
 }
 
 // set_profile("") clears the session tier, which a pin outranks anyway. The
-// response must describe the scope that remains, not the full server list.
+// response must describe the scope that remains, not the full server list —
+// and, since Spec 105 FR-003 (G7), report the STORED selection ("") as
+// `active_profile` rather than echoing the pin (inverted from the pre-105
+// expectation; the pin is a credential restriction, not a session selection).
 func TestSetProfileClearReportsPinnedScope(t *testing.T) {
 	proxy, cfg := pinnedProxy(t, []config.ProfileConfig{
 		{Name: "research", Servers: []string{"research-srv"}},
@@ -147,7 +150,7 @@ func TestSetProfileClearReportsPinnedScope(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, result.IsError)
 	payload := decodeSetProfilePayload(t, result)
-	assert.Equal(t, "research", payload["active_profile"])
+	assert.Equal(t, "", payload["active_profile"], "the pin is not a stored selection")
 	assert.Equal(t, []interface{}{"research-srv"}, payload["servers"],
 		"clearing must not advertise servers the pin still denies")
 
@@ -157,7 +160,7 @@ func TestSetProfileClearReportsPinnedScope(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, result.IsError)
 	payload = decodeSetProfilePayload(t, result)
-	assert.Equal(t, "research", payload["active_profile"])
+	assert.Equal(t, "", payload["active_profile"])
 	assert.Empty(t, payload["servers"])
 }
 
