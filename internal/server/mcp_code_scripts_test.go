@@ -14,10 +14,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -294,8 +296,10 @@ func TestCodeExecution_ScriptLanguageContradiction(t *testing.T) {
 	assert.False(t, ok.IsError, "an agreeing language must not be rejected: %s", resultText(t, ok))
 }
 
-// TestCodeExecution_ScriptNotFoundListsAvailable pins FR-004: the not-found
-// error IS the MCP discovery mechanism.
+// TestCodeExecution_ScriptNotFoundListsAvailable pins Spec 097 FR-004: the
+// not-found error IS the MCP discovery mechanism — for the in-process caller
+// with no auth context (an administrator). Kept as the Spec 105 FR-012 ADMIN
+// CONTROL; the agent-token cell is TestCodeExecution_ScriptNotFound_AgentTokenNonDisclosing.
 func TestCodeExecution_ScriptNotFoundListsAvailable(t *testing.T) {
 	proxy, scriptsDir := newStoredScriptProxy(t)
 	writeStoredScript(t, scriptsDir, "alpha.js", "1")
@@ -312,6 +316,154 @@ func TestCodeExecution_ScriptNotFoundListsAvailable(t *testing.T) {
 		result := callCodeExecution(t, proxy, map[string]interface{}{"script": "../../etc/passwd"})
 		require.True(t, result.IsError)
 		assert.Contains(t, resultText(t, result), "invalid script name")
+	})
+}
+
+// callCodeExecutionAs is callCodeExecution under an explicit caller context.
+func callCodeExecutionAs(t *testing.T, ctx context.Context, proxy *MCPProxyServer, args map[string]interface{}) *mcp.CallToolResult {
+	t.Helper()
+	request := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "code_execution", Arguments: args}}
+	result, err := proxy.handleCodeExecution(ctx, request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	return result
+}
+
+// callCodeExecutionOnWire drives a routing-mode server through the JSON-RPC
+// seam (initialize, then tools/call code_execution) under ctx and returns the
+// decoded tools/call result object — the exact bytes an HTTP caller of that
+// surface receives.
+func callCodeExecutionOnWire(t *testing.T, ctx context.Context, srv interface {
+	HandleMessage(context.Context, json.RawMessage) mcp.JSONRPCMessage
+}, args map[string]interface{}) (isError bool, text string) {
+	t.Helper()
+	require.NotNil(t, srv.HandleMessage(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`)))
+	rawArgs, err := json.Marshal(args)
+	require.NoError(t, err)
+	encoded, err := json.Marshal(srv.HandleMessage(ctx, []byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"code_execution","arguments":`+string(rawArgs)+`}}`)))
+	require.NoError(t, err)
+	var envelope struct {
+		Error  *json.RawMessage `json:"error"`
+		Result *struct {
+			IsError bool `json:"isError"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(encoded, &envelope))
+	require.Nil(t, envelope.Error, "tools/call must answer with a result, not a JSON-RPC error: %s", encoded)
+	require.NotNil(t, envelope.Result)
+	require.NotEmpty(t, envelope.Result.Content)
+	return envelope.Result.IsError, envelope.Result.Content[0].Text
+}
+
+// TestCodeExecution_ScriptNotFound_AgentTokenNonDisclosing (Spec 105 T062,
+// FR01x-G1, spec.md:116): a missing-script request under an agent token is
+// a NON-DISCLOSING refusal — it names neither the other stored scripts nor
+// how many there are — and it is byte-equal to the refusal the same caller
+// gets when the directory is empty, so a failed call is not an oracle for
+// what is stored. The administrator keeps today's enumeration (SC-005).
+//
+// The unrestricted ["*"] token is the strongest cell: server scope plays no
+// part, the caller KIND alone decides.
+func TestCodeExecution_ScriptNotFound_AgentTokenNonDisclosing(t *testing.T) {
+	const sentinel = "SENTINEL"
+	scoped := agentCtx([]string{"*"}, []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}, "")
+
+	t.Run("agent token: no enumeration, byte-equal to the empty directory", func(t *testing.T) {
+		proxy, scriptsDir := newStoredScriptProxy(t)
+
+		// Same proxy, same directory path, same caller: first with nothing
+		// stored, then with two scripts — the two refusals must not differ.
+		empty := callCodeExecutionAs(t, scoped, proxy, map[string]interface{}{"script": "gamma"})
+		require.True(t, empty.IsError, "a missing script is an error for every caller")
+		emptyText := resultText(t, empty)
+
+		writeStoredScript(t, scriptsDir, "alpha-"+sentinel+".js", "1")
+		writeStoredScript(t, scriptsDir, "beta.ts", "1")
+
+		populated := callCodeExecutionAs(t, scoped, proxy, map[string]interface{}{"script": "gamma"})
+		require.True(t, populated.IsError)
+		text := resultText(t, populated)
+		assert.Contains(t, text, "gamma", "the caller's own requested name may be echoed")
+		assert.NotContains(t, text, sentinel, "an agent-token caller must not learn other script names (FR-012)")
+		assert.NotContains(t, text, "beta", "an agent-token caller must not learn other script names (FR-012)")
+		assert.NotContains(t, text, "Available scripts", "an agent-token caller must not be handed an enumeration (FR-012)")
+		assert.NotContains(t, text, "(2)", "an agent-token caller must not learn the script count (FR-012)")
+		assert.Equal(t, emptyText, text,
+			"the agent-token refusal must be byte-equal whether the directory is empty or populated (no oracle)")
+	})
+
+	t.Run("administrator control: still enumerates", func(t *testing.T) {
+		proxy, scriptsDir := newStoredScriptProxy(t)
+		writeStoredScript(t, scriptsDir, "alpha-"+sentinel+".js", "1")
+		writeStoredScript(t, scriptsDir, "beta.ts", "1")
+
+		result := callCodeExecutionAs(t, adminCtx(), proxy, map[string]interface{}{"script": "gamma"})
+		require.True(t, result.IsError)
+		text := resultText(t, result)
+		assert.Contains(t, text, "alpha-"+sentinel)
+		assert.Contains(t, text, "beta")
+		assert.Contains(t, text, "Available scripts (2)", "the administrator keeps the Spec 097 FR-004 enumeration (SC-005)")
+	})
+
+	t.Run("wire level: /mcp/code and /mcp carry the same non-disclosing refusal", func(t *testing.T) {
+		proxy, scriptsDir := newStoredScriptProxy(t)
+		writeStoredScript(t, scriptsDir, "alpha-"+sentinel+".js", "1")
+		writeStoredScript(t, scriptsDir, "beta.ts", "1")
+		require.NotNil(t, proxy.codeExecServer, "fixture: the /mcp/code server must exist")
+
+		for label, srv := range map[string]interface {
+			HandleMessage(context.Context, json.RawMessage) mcp.JSONRPCMessage
+		}{"code-exec": proxy.codeExecServer, "default": proxy.server} {
+			label, srv := label, srv
+			t.Run(label, func(t *testing.T) {
+				isError, text := callCodeExecutionOnWire(t, scoped, srv, map[string]interface{}{"script": "gamma"})
+				require.True(t, isError, "%s: a missing script is an error: %s", label, text)
+				assert.NotContains(t, text, sentinel, "%s: agent-token refusal leaks a script name (FR-012)", label)
+				assert.NotContains(t, text, "Available scripts", "%s: agent-token refusal leaks the enumeration (FR-012)", label)
+
+				adminErr, adminText := callCodeExecutionOnWire(t, adminCtx(), srv, map[string]interface{}{"script": "gamma"})
+				require.True(t, adminErr)
+				assert.Contains(t, adminText, sentinel, "%s: the administrator keeps the enumeration", label)
+			})
+		}
+	})
+}
+
+// TestCodeExecution_StoredScript_ScopedPositiveControls pins the two
+// documented, PUBLISHED behaviours of spec.md:116 that bound FR-012: stored
+// scripts are operator-published content — a scoped token may run one and
+// receive any constant it returns without an upstream call — while every
+// upstream call the script makes stays scope-checked, so a nested call to a
+// server outside the token's scope is refused at the nested call (FR-009).
+// Both cells hold on the merge base and are kept as regression pins.
+func TestCodeExecution_StoredScript_ScopedPositiveControls(t *testing.T) {
+	aOnly := agentCtx([]string{"a"}, []string{auth.PermRead}, "")
+
+	t.Run("a-only token runs a constant-returning script and gets the constant", func(t *testing.T) {
+		proxy, scriptsDir := newStoredScriptProxy(t)
+		writeStoredScript(t, scriptsDir, "constant.js", `({published: "operator-constant"})`)
+
+		result := callCodeExecutionAs(t, aOnly, proxy, map[string]interface{}{"script": "constant"})
+		require.False(t, result.IsError, resultText(t, result))
+		assert.Contains(t, resultText(t, result), `"published":"operator-constant"`,
+			"a constant a stored script returns is published content, visible to a scoped caller (spec.md:116)")
+	})
+
+	t.Run("a stored script calling b is refused at the nested call", func(t *testing.T) {
+		proxy, scriptsDir := newStoredScriptProxy(t)
+		writeStoredScript(t, scriptsDir, "reach-b.js",
+			`var r = call_tool('b', 'private_search', {q: 'x'}); ({ok: r.ok, code: r.ok ? null : r.error.code, message: r.ok ? null : r.error.message})`)
+
+		result := callCodeExecutionAs(t, aOnly, proxy, map[string]interface{}{"script": "reach-b"})
+		require.False(t, result.IsError, "the script itself runs; only its nested call is refused: %s", resultText(t, result))
+		text := resultText(t, result)
+		assert.Contains(t, text, `"ok":false`)
+		assert.Contains(t, text, `"code":"`+string(jsruntime.ErrorCodeAccessDenied)+`"`,
+			"the nested call must be refused by the token's server scope, before any upstream lookup (FR-009): %s", text)
 	})
 }
 
