@@ -401,9 +401,11 @@ func putFramedRecord(t *testing.T, db *bbolt.DB, key string, header, body []byte
 // refused for every caller with ErrLegacyProvenance and durably invalidated;
 // the body is never consulted (a body the gate would have admitted sits
 // behind every bad header here). Round 4 made the header fixed-size with the
-// producer referenced by content hash, so the shapes are: no producer
-// (kind code 0), unknown version, unknown kind code, a truncated frame, and
-// a header naming a snapshot the snapshots bucket does not hold.
+// producer named by digest, so the shapes are: no producer (kind code 0),
+// unknown version, unknown kind code, a truncated frame, and an agent
+// header in front of an administrator body (the digest the gate admits on
+// and the body's producer disagree; the snapshots bucket is diagnostics
+// only and its content never decides — research D16).
 func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
 	now := time.Now()
 	adminProducer := &Authorization{CallerKind: CallerKindAdmin}
@@ -443,17 +445,19 @@ func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
 		{name: "header: unknown version", header: with(func(h *recordHeader) { h.Version = 99 }), body: goodBody},
 		{name: "header: unknown caller kind code", header: with(func(h *recordHeader) { h.KindCode, h.Kind = 200, "" }), body: goodBody},
 		{name: "header: truncated frame"},
-		// A well-formed agent header whose snapshot the bucket never
-		// received (a crafted or torn write: storeRecord persists the two
-		// in one transaction). A same-kind reader must load the snapshot
-		// and finds none; an administrator is admitted on the kind, and
-		// the body then disagrees with the header's hash. A reader of
-		// another scoped kind (a user) is refused on the kind alone and
-		// never asks for the snapshot — see the user assertion below.
-		{name: "header: snapshot missing from the bucket",
+		// A well-formed a-only agent header (its digest in the snapshots
+		// bucket or not — the gate never looks) in front of an
+		// administrator body. Every reader the header admits — an
+		// administrator on the kind, an unrestricted agent on the
+		// tier-covered digest mismatch rule — then finds a body that
+		// disagrees with the header's digest. A reader of another scoped
+		// kind (a user) is refused on the kind alone, non-disclosingly,
+		// and the entry is kept — see the user assertion below.
+		{name: "header: agent digest in front of an administrator body",
 			header: with(func(h *recordHeader) {
 				h.KindCode, h.Kind = callerKindCode(CallerKindAgent), CallerKindAgent
-				h.Snapshot = snapshotHash(snapshotBytes(aOnly))
+				h.Perms = permissionBits(aOnly.Permissions)
+				h.Digest = aOnly.digest()
 			}), body: goodBody, skipKinds: []string{CallerKindUser}},
 		// The one shape the gate admits on the header and only then finds
 		// undecodable: still legacy, still invalidated (after admission, so
@@ -518,16 +522,17 @@ func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
 
 	// A user reader is refused on the header's kind alone (caller kind
 	// first: an agent snapshot is never a user's), with the ordinary
-	// non-disclosing verdict, and the entry is kept — the snapshot the
-	// header names is never loaded, so its absence is not observed.
-	t.Run("header: snapshot missing from the bucket/user refused on kind, kept", func(t *testing.T) {
+	// non-disclosing verdict, and the entry is kept — the body is never
+	// decoded, so its disagreement is not observed.
+	t.Run("header: agent digest in front of an administrator body/user refused on kind, kept", func(t *testing.T) {
 		m, db := openManagerAt(t, filepath.Join(t.TempDir(), "cache.db"))
 		defer db.Close()
 		defer m.Close()
 		const key = "framed"
 		putFramedRecord(t, db, key, with(func(h *recordHeader) {
 			h.KindCode, h.Kind = callerKindCode(CallerKindAgent), CallerKindAgent
-			h.Snapshot = snapshotHash(snapshotBytes(aOnly))
+			h.Perms = permissionBits(aOnly.Permissions)
+			h.Digest = aOnly.digest()
 		}), goodBody(key))
 		user := Authorization{CallerKind: CallerKindUser, Principal: "u1", AllowedServers: []string{"*"}, Permissions: []string{"read"}}
 		resp, err := m.GetRecordsAs(key, 0, 10, user)

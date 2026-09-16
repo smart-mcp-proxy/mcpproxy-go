@@ -377,9 +377,13 @@ func TestReadCache_AdministratorRefusalBodiesNameTheReason(t *testing.T) {
 // deleted profile), still redeemed it because the id matched, although the
 // dispatch gates refuse that user's own call to github. A user is scoped by
 // AllowedServers/Permissions/profile like an agent (profile_tool_test.go),
-// so the snapshot carries them and the read gate contains them; identity
+// so the snapshot carries them and the read gate holds it to them; identity
 // equality is necessary, not sufficient. Non-disclosing for the user like
-// any scoped refusal; the administrator and the wider same user still read.
+// any scoped refusal; the administrator still reads. Research D16 (codex
+// round 5): the door decides on the header digest alone, so the SAME user
+// with a WIDER grant is refused too — the header carries no identity an
+// unrestricted-user rule could check, and FR-001 does not oblige admitting
+// a strictly wider bounded reader — fail-closed, and non-disclosing.
 func TestReadCache_UserSnapshotIsContainedLikeAnAgent(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
 	seedEntryBuilderFixture(t, proxy)
@@ -411,6 +415,7 @@ func TestReadCache_UserSnapshotIsContainedLikeAnAgent(t *testing.T) {
 		{"same user narrowed to weather", weather},
 		{"same user, production no-grant context", userCtx(id)},
 		{"other user with a wider grant", otherUser},
+		{"same user with a wider grant is refused (D16: digest-equal only)", wider},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			live := readCachePage(t, proxy, tc.ctx, key, 0, 50)
@@ -422,7 +427,7 @@ func TestReadCache_UserSnapshotIsContainedLikeAnAgent(t *testing.T) {
 			assert.Contains(t, resultText(t, live), "cache key not found")
 		})
 	}
-	// Refusals do not evict: the wider same user and the administrator read.
-	require.False(t, readCachePage(t, proxy, wider, key, 0, 50).IsError, "a wider grant for the same user reads")
+	// Refusals do not evict: the producer and the administrator still read.
+	require.False(t, readCachePage(t, proxy, github, key, 0, 50).IsError, "the producing user still reads after the refusals")
 	require.False(t, readCachePage(t, proxy, adminCtx(), key, 0, 50).IsError, "the administrator reads any snapshot")
 }

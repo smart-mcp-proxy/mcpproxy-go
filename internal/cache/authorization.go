@@ -1,8 +1,11 @@
 package cache
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // Caller kinds recorded on a cache entry. They mirror the auth context types
@@ -122,11 +125,7 @@ type Authorization struct {
 // KIND, not reach — an administrator request can still be bounded to a
 // profile, and the read gate ignores that binding (Spec 105 FR-001, D5).
 func (a Authorization) IsAdministrator() bool {
-	switch a.CallerKind {
-	case CallerKindAdmin, CallerKindAdminUser, CallerKindAnonymous:
-		return true
-	}
-	return false
+	return kindIsAdministrator(a.CallerKind)
 }
 
 // IsScoped reports whether the caller kind is bounded by the dispatch gates
@@ -137,7 +136,7 @@ func (a Authorization) IsAdministrator() bool {
 // visibility, set_profile), so the read gate bounds it the same way
 // (codex round 4).
 func (a Authorization) IsScoped() bool {
-	return a.CallerKind == CallerKindAgent || a.CallerKind == CallerKindUser
+	return kindIsScoped(a.CallerKind)
 }
 
 // DenyAll reports whether a SCOPED snapshot could have authorized no tool
@@ -157,121 +156,212 @@ func (a Authorization) DenyAll() bool {
 	return len(a.AllowedServers) == 0 || (a.ProfileScoped && len(a.ProfileServers) == 0)
 }
 
-// kindVerdict is the CALLER-KIND-FIRST part of CouldHaveProduced, decided on
-// the producer's KIND alone (Spec 105 FR-001, research D5) — so the gated
-// read can decide it on the fixed frame header without loading the producer
-// snapshot. decided is false only when both sides are the same scoped kind,
-// where the snapshot's dimensions must be compared.
-func kindVerdict(producerKind string, reader Authorization) (admit, decided bool) {
+// Permission tiers, mirrored from internal/auth (which this package does not
+// import). The frame header records a producer's tier set as bits so an
+// unrestricted reader's coverage of it is decided on the header alone; a
+// tier this table does not name sets permBitOther, which no header-only
+// coverage check can cover — only digest equality (or an administrator)
+// admits such a producer.
+const (
+	permRead        = "read"
+	permWrite       = "write"
+	permDestructive = "destructive"
+)
+
+const (
+	permBitRead uint8 = 1 << iota
+	permBitWrite
+	permBitDestructive
+	permBitOther uint8 = 1 << 7
+)
+
+// permissionBits encodes a permission tier list as header bits.
+func permissionBits(perms []string) uint8 {
+	var bits uint8
+	for _, p := range perms {
+		switch p {
+		case permRead:
+			bits |= permBitRead
+		case permWrite:
+			bits |= permBitWrite
+		case permDestructive:
+			bits |= permBitDestructive
+		default:
+			bits |= permBitOther
+		}
+	}
+	return bits
+}
+
+// canonicalAuthorization is the shape the digest hashes: the effective
+// authorization with every list sorted and deduplicated, and WITHOUT the
+// profile name — the gate compares server sets, not names (a renamed profile
+// with the same servers is the same authorization; a stale pin keeps its
+// name while resolving to deny-all). Principal is included: for a user it is
+// the identity the gate requires, and for an agent it makes "digest-equal"
+// mean the same credential.
+type canonicalAuthorization struct {
+	CallerKind     string   `json:"k"`
+	Principal      string   `json:"p,omitempty"`
+	AllowedServers []string `json:"s,omitempty"`
+	Permissions    []string `json:"t,omitempty"`
+	ProfilePin     string   `json:"pin,omitempty"`
+	ProfileScoped  bool     `json:"ps,omitempty"`
+	ProfileServers []string `json:"pss,omitempty"`
+}
+
+func sortedSet(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := slices.Clone(in)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// digest is the content address of an effective authorization: the SHA-256
+// of its canonical encoding. It is what the frame header stores for the
+// producer and what a reader is compared by, so the gate's same-kind verdict
+// is one 32-byte comparison whatever the snapshot names (research D16).
+func (a Authorization) digest() [sha256.Size]byte {
+	data, err := json.Marshal(canonicalAuthorization{
+		CallerKind:     a.CallerKind,
+		Principal:      a.Principal,
+		AllowedServers: sortedSet(a.AllowedServers),
+		Permissions:    sortedSet(a.Permissions),
+		ProfilePin:     a.ProfilePin,
+		ProfileScoped:  a.ProfileScoped,
+		ProfileServers: sortedSet(a.ProfileServers),
+	})
+	if err != nil {
+		// Strings, string slices and a bool: json.Marshal cannot fail.
+		panic(fmt.Sprintf("cache: marshal canonical authorization: %v", err))
+	}
+	return sha256.Sum256(data)
+}
+
+// unrestricted reports whether an AGENT reader is a superset of every agent
+// snapshot on the server and profile dimensions: a wildcard grant, no pin
+// and no effective profile. Tier coverage is checked separately, on the
+// header's bits. A user is never unrestricted here: the header carries no
+// identity, and a user reader must be the same user.
+func (a Authorization) unrestricted() bool {
+	return a.CallerKind == CallerKindAgent && !a.ProfileScoped && a.ProfilePin == "" &&
+		slices.Contains(a.AllowedServers, "*")
+}
+
+// producerFacts is everything the gate knows about a producer: exactly the
+// fields the fixed frame header carries. Derived from a stored header on the
+// gated door and from the Authorization itself in CouldHaveProduced, so the
+// two cannot disagree.
+type producerFacts struct {
+	Kind    string
+	DenyAll bool
+	Perms   uint8
+	Digest  [sha256.Size]byte
+}
+
+func (a Authorization) facts() producerFacts {
+	return producerFacts{Kind: a.CallerKind, DenyAll: a.DenyAll(), Perms: permissionBits(a.Permissions), Digest: a.digest()}
+}
+
+// readerFacts is the reader's side of the verdict, computed ONCE per request
+// from the reader's own authorization — before the transaction, so a miss
+// and a refusal do the same work — and compared against any number of
+// headers in O(1).
+type readerFacts struct {
+	Kind         string
+	DenyAll      bool
+	Unrestricted bool
+	Perms        uint8
+	Digest       [sha256.Size]byte
+}
+
+func newReaderFacts(reader Authorization) readerFacts {
+	return readerFacts{
+		Kind:         reader.CallerKind,
+		DenyAll:      reader.DenyAll(),
+		Unrestricted: reader.unrestricted(),
+		Perms:        permissionBits(reader.Permissions),
+		Digest:       reader.digest(),
+	}
+}
+
+func kindIsAdministrator(kind string) bool {
+	switch kind {
+	case CallerKindAdmin, CallerKindAdminUser, CallerKindAnonymous:
+		return true
+	}
+	return false
+}
+
+func kindIsScoped(kind string) bool {
+	return kind == CallerKindAgent || kind == CallerKindUser
+}
+
+// kindVerdict is the CALLER-KIND-FIRST part of the read gate, decided on
+// the two kinds alone (Spec 105 FR-001, research D5). decided is false only
+// when both sides are the same scoped kind, where the header's remaining
+// facts decide.
+func kindVerdict(producerKind, readerKind string) (admit, decided bool) {
 	if producerKind == CallerKindInternal {
 		return false, true
 	}
-	if reader.IsAdministrator() {
-		if reader.CallerKind == CallerKindAnonymous {
+	if kindIsAdministrator(readerKind) {
+		if readerKind == CallerKindAnonymous {
 			return producerKind != CallerKindAdmin && producerKind != CallerKindAdminUser, true
 		}
 		return true, true
 	}
-	if !reader.IsScoped() || reader.CallerKind != producerKind {
+	if !kindIsScoped(readerKind) || readerKind != producerKind {
 		return false, true
 	}
 	return false, false
 }
 
-// CouldHaveProduced reports whether reader is at least as broad as the
-// producing authorization a — i.e. whether the reader could have generated
-// the entry itself. That is the read gate for read_cache: a reader never sees
-// a payload it could not have obtained by calling the tool.
+// admits is THE read gate (research D16): a verdict from the producer's
+// fixed header facts and the reader's precomputed facts, in O(1) — it never
+// loads a producer snapshot, so a refusal does no work proportional to what
+// it refuses, and a nonexistent key is indistinguishable from it in timing
+// class (Spec 105 Definitions, non-disclosing refusal). In order:
 //
-// Superset is ordered by CALLER KIND FIRST (Spec 105 FR-001, research D5):
+//   - caller kind first (FR-001, D5): an administrator reader is admitted to
+//     any request-kind snapshot (the anonymous kind never to an authenticated
+//     administrator's); a reader of another kind, or an internal producer,
+//     is refused;
+//   - the deny-all bits, on both sides: a scoped snapshot that could have
+//     authorized no call is no producer, and a deny-all reader could have
+//     produced nothing;
+//   - digest equality: the reader IS the effective authorization the entry
+//     was produced under — kind, identity, server grant, tier set, pin and
+//     profile server set, compared as sets;
+//   - else, for an agent snapshot only, an UNRESTRICTED agent reader
+//     (wildcard grant, no pin, no profile) whose tier set covers the
+//     producer's — a superset of anything an agent could have produced.
 //
-//   - An administrator reader qualifies for any snapshot, whatever its own
-//     profile binding — unscoped, narrower, wider, empty, or a profile deleted
-//     since. The anonymous kind is administrator-shaped for tool calls but is
-//     not an identity (auth.AnonymousContext), so it ranks below an
-//     authenticated administrator: it reads anonymous, agent and user entries,
-//     never an authenticated administrator's.
-//   - A non-administrator reader never qualifies for an administrator snapshot,
-//     however broad its own grant, and never for a snapshot of another kind.
-//   - Between snapshots of the same scoped kind (agent, or server-edition
-//     user) every dimension must contain the snapshot's: the deny-all guards
-//     first, on BOTH sides (DenyAll: an empty server grant, or a binding to an
-//     empty effective profile, can call no tool — as a reader it could not
-//     have produced ANY entry, as a producer snapshot it could not have
-//     authorized the entry it is stamped on; an empty AllowedServers is
-//     deny-all on every dispatch gate, so it is deny-all here too rather than
-//     the vacuous coversServers(x, []) match), then effective profile scope
-//     compared as server sets (a request bounded to a profile is narrower
-//     than an unscoped one; a scoped reader must currently cover every server
-//     the producer's profile exposed, so a profile deleted or narrowed since
-//     no longer reads), pin equality, allowed-server set and permission set.
-//     A user snapshot is additionally bound to its identity: the reader must
-//     be the SAME user — necessary, never sufficient, since a user's grant
-//     and profile can be narrowed after the entry was produced exactly like
-//     an agent's (codex round 4).
-//   - Internal entries (CallerKindInternal) were produced by no request and
-//     match no reader (Spec 105 FR-002).
-func (a Authorization) CouldHaveProduced(reader Authorization) bool {
-	if admit, decided := kindVerdict(a.CallerKind, reader); decided {
+// A reader that is strictly wider than the producer but bounded (a {a,b}
+// grant over an {a} entry, an unscoped session over its own profiled entry,
+// a user whose grant grew) is REFUSED: FR-001 obliges the door to refuse
+// non-supersets; it does not oblige it to admit every superset, and deciding
+// that shape would mean loading the snapshot. Fail-closed by design.
+func admits(p producerFacts, r readerFacts) bool {
+	if admit, decided := kindVerdict(p.Kind, r.Kind); decided {
 		return admit
 	}
-	if a.CallerKind == CallerKindUser && (reader.Principal == "" || reader.Principal != a.Principal) {
+	if p.DenyAll || r.DenyAll {
 		return false
 	}
-	return a.containedBy(reader)
-}
-
-// containedBy is the dimension-by-dimension containment between two
-// snapshots of the same scoped kind: deny-all guards on both sides, then
-// effective profile scope, pin, server grant and permission set.
-func (a Authorization) containedBy(reader Authorization) bool {
-	if a.DenyAll() || reader.DenyAll() {
-		return false
-	}
-	if reader.ProfileScoped {
-		if !a.ProfileScoped || !coversAll(reader.ProfileServers, a.ProfileServers) {
-			return false
-		}
-	}
-	if reader.ProfilePin != "" && reader.ProfilePin != a.ProfilePin {
-		return false
-	}
-	return coversServers(reader.AllowedServers, a.AllowedServers) &&
-		coversAll(reader.Permissions, a.Permissions)
-}
-
-// coversServers reports whether the reader's server scope includes every
-// server in the producer's scope. A "*" wildcard covers everything; only a
-// wildcard covers a wildcard.
-func coversServers(reader, producer []string) bool {
-	readerAll := false
-	for _, s := range reader {
-		if s == "*" {
-			readerAll = true
-			break
-		}
-	}
-	if readerAll {
+	if p.Digest == r.Digest {
 		return true
 	}
-	for _, s := range producer {
-		if s == "*" {
-			return false
-		}
-	}
-	return coversAll(reader, producer)
+	return p.Kind == CallerKindAgent && r.Unrestricted &&
+		p.Perms&permBitOther == 0 && p.Perms&^r.Perms == 0
 }
 
-// coversAll reports whether every element of want is present in have.
-func coversAll(have, want []string) bool {
-	set := make(map[string]struct{}, len(have))
-	for _, s := range have {
-		set[s] = struct{}{}
-	}
-	for _, s := range want {
-		if _, ok := set[s]; !ok {
-			return false
-		}
-	}
-	return true
+// CouldHaveProduced reports whether reader may redeem an entry produced
+// under a: it is admits over the facts a stored header carries for a, so the
+// predicate and the gated door (Manager.GetRecordsAs) return one verdict.
+// See admits for the ordering.
+func (a Authorization) CouldHaveProduced(reader Authorization) bool {
+	return admits(a.facts(), newReaderFacts(reader))
 }

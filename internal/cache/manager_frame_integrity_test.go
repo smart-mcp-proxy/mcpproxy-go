@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -139,14 +140,17 @@ func TestGetRecordsAs_FrameHeaderBodyDisagreementIsLegacy(t *testing.T) {
 // the server count nor the name length — could not be cached at all, and
 // (b) every live-key refusal JSON-decoded the whole header while a
 // nonexistent key decoded nothing: a fleet-sized timing oracle. The frame
-// header is now FIXED-SIZE (version, kind, deny-all bit, expiry, size,
-// snapshot hash) and each distinct snapshot is stored once, by content hash,
-// in the snapshots bucket. This pins (a): a snapshot naming 5,000 servers in
-// both its grant and its profile round-trips, is redeemed by its producer
-// (FR-001: same authorization, same entry) — warm and after a restart (cold
-// in-memory cache, bucket read) — is stored once across entries, and is
-// refused to a narrower agent on a plain scope refusal. The timing half is
-// TestGetRecordsAs_RefusalIsSnapshotSizeIndependent.
+// header is now FIXED-SIZE (version, kind, deny-all bit, tier bits, expiry,
+// size, producer DIGEST) and the snapshot is kept once, under its digest, in
+// the snapshots bucket for diagnostics. This pins (a): a snapshot naming
+// 5,000 servers in both its grant and its profile round-trips, is redeemed
+// by its producer (FR-001: same authorization, same entry) — through the
+// storing manager and after a restart, where nothing but the header on disk
+// can decide (research D16) — by a reader presenting the same authorization
+// with its lists in another order (the digest is canonical) and by an
+// unrestricted agent covering its tier (the header's bits), is stored once
+// across entries, and is refused to a narrower agent on a plain scope
+// refusal. The timing half is TestGetRecordsAs_RefusalIsSnapshotSizeIndependent.
 func TestStoreAs_LargeSnapshotRoundTrips(t *testing.T) {
 	const content = `[{"name":"SENTINEL-LARGE"}]`
 	producer := fleetSnapshot(5000, 112)
@@ -154,6 +158,15 @@ func TestStoreAs_LargeSnapshotRoundTrips(t *testing.T) {
 		t.Fatalf("fixture snapshot is %d bytes; want over the former 1 MiB header bound, which refused it at write time", n)
 	}
 	narrow := Authorization{CallerKind: CallerKindAgent, Principal: "narrow", AllowedServers: []string{"srv-000001"}, Permissions: []string{"read"}}
+	reordered := producer
+	reordered.AllowedServers = append([]string(nil), producer.AllowedServers...)
+	reordered.ProfileServers = append([]string(nil), producer.ProfileServers...)
+	slices.Reverse(reordered.AllowedServers)
+	slices.Reverse(reordered.ProfileServers)
+	reordered.Profile = "fleet-renamed" // the name is not part of the digest
+	// Unrestricted (wildcard grant, no pin, no profile) with the producer's
+	// one tier: admitted on the header's tier bits, without the snapshot.
+	star := Authorization{CallerKind: CallerKindAgent, Principal: "star", AllowedServers: []string{"*"}, Permissions: []string{"read"}}
 
 	path := filepath.Join(t.TempDir(), "cache.db")
 	m, db := openManagerAt(t, path)
@@ -165,9 +178,9 @@ func TestStoreAs_LargeSnapshotRoundTrips(t *testing.T) {
 	if got := onDiskSnapshotCount(t, db); got != 1 {
 		t.Fatalf("snapshots on disk = %d, want 1: two entries under one authorization must share one snapshot", got)
 	}
-	redeem := func(t *testing.T, m *Manager, key string) {
+	redeem := func(t *testing.T, m *Manager, key string, reader Authorization) {
 		t.Helper()
-		resp, err := m.GetRecordsAs(key, 0, 10, producer)
+		resp, err := m.GetRecordsAs(key, 0, 10, reader)
 		if err != nil {
 			t.Fatalf("producer's own redemption refused: %v", err)
 		}
@@ -181,7 +194,9 @@ func TestStoreAs_LargeSnapshotRoundTrips(t *testing.T) {
 			t.Fatal("entry deleted by its producer's redemption")
 		}
 	}
-	redeem(t, m, "large-1")
+	redeem(t, m, "large-1", producer)
+	redeem(t, m, "large-1", reordered)
+	redeem(t, m, "large-1", star)
 	if _, err := m.GetRecordsAs("large-1", 0, 10, narrow); !errors.Is(err, ErrUnauthorizedRead) {
 		t.Fatalf("narrow agent: err = %v, want ErrUnauthorizedRead", err)
 	}
@@ -193,17 +208,61 @@ func TestStoreAs_LargeSnapshotRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Cold: a fresh manager has an empty snapshot cache, so the first
-	// redemption resolves the hash through the bucket.
+	// After a restart nothing is in memory: the header on disk decides.
 	m2, db2 := openManagerAt(t, path)
 	defer db2.Close()
 	defer m2.Close()
-	if _, ok := m2.snapshots.get(snapshotHash(snapshotBytes(producer))); ok {
-		t.Fatal("premise: the snapshot cache must be cold after a restart")
+	redeem(t, m2, "large-2", producer)
+	redeem(t, m2, "large-2", reordered)
+	redeem(t, m2, "large-2", star)
+	if _, err := m2.GetRecordsAs("large-2", 0, 10, narrow); !errors.Is(err, ErrUnauthorizedRead) {
+		t.Fatalf("narrow agent after restart: err = %v, want ErrUnauthorizedRead", err)
 	}
-	redeem(t, m2, "large-2")
-	if _, ok := m2.snapshots.get(snapshotHash(snapshotBytes(producer))); !ok {
-		t.Fatal("the cold load must warm the snapshot cache")
+}
+
+// Research D16: the snapshots bucket is administrator diagnostics, not an
+// input to the verdict. Deleting a producer's snapshot from it changes
+// nothing on the gated door: the producer still redeems (digest-equal on the
+// header), an unrestricted agent still redeems, a narrower agent is still
+// refused without eviction, and the next store re-persists the snapshot.
+func TestGetRecordsAs_SnapshotBucketIsDiagnosticsOnly(t *testing.T) {
+	m, db := openManagerAt(t, filepath.Join(t.TempDir(), "cache.db"))
+	defer db.Close()
+	defer m.Close()
+	producer := Authorization{CallerKind: CallerKindAgent, Principal: "p", AllowedServers: []string{"a", "b"}, Permissions: []string{"read"}}
+	narrow := Authorization{CallerKind: CallerKindAgent, Principal: "n", AllowedServers: []string{"a"}, Permissions: []string{"read"}}
+	star := Authorization{CallerKind: CallerKindAgent, Principal: "star", AllowedServers: []string{"*"}, Permissions: []string{"read"}}
+	if err := m.StoreAs("k", "t", nil, `[1]`, "", 1, producer); err != nil {
+		t.Fatal(err)
+	}
+	if got := onDiskSnapshotCount(t, db); got != 1 {
+		t.Fatalf("premise: snapshots = %d, want 1", got)
+	}
+	digest := producer.digest()
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(CacheSnapshotBucket)).Delete(digest[:])
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := onDiskSnapshotCount(t, db); got != 0 {
+		t.Fatalf("premise: snapshots = %d, want 0", got)
+	}
+	for name, reader := range map[string]Authorization{"producer": producer, "unrestricted agent": star, "administrator": {CallerKind: CallerKindAdmin}} {
+		if resp, err := m.GetRecordsAs("k", 0, 10, reader); err != nil || len(resp.Records) != 1 {
+			t.Fatalf("%s: resp=%v err=%v, want the entry served without its diagnostic snapshot", name, resp, err)
+		}
+	}
+	if _, err := m.GetRecordsAs("k", 0, 10, narrow); !errors.Is(err, ErrUnauthorizedRead) {
+		t.Fatalf("narrow: err = %v, want ErrUnauthorizedRead", err)
+	}
+	if _, ok := m.Peek("k"); !ok {
+		t.Fatal("the entry must survive")
+	}
+	if err := m.StoreAs("k2", "t", nil, `[1]`, "", 1, producer); err != nil {
+		t.Fatal(err)
+	}
+	if got := onDiskSnapshotCount(t, db); got != 1 {
+		t.Fatalf("snapshots after re-store = %d, want 1", got)
 	}
 }
 
@@ -277,69 +336,20 @@ func TestCleanup_PrunesUnreferencedSnapshots(t *testing.T) {
 	}
 }
 
-// Codex round 3, finding 3: invalidating a pre-frame (bare JSON) record on
-// the gated door folded a size of 0 into TotalSizeBytes because the header
-// could not be decoded, so a 5 MiB pre-upgrade entry left the cache size
-// inflated by 5 MiB for good. The value's length IS known without decoding
-// and bounds the content from above (the bare JSON body carries the escaped
-// content), so the invalidation folds that in instead, clamped at zero.
-func TestGetRecordsAs_PreFrameLegacyInvalidationFoldsValueSize(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "cache.db")
-	m, db := openManagerAt(t, path)
-	content := `[{"v":"` + strings.Repeat("x", 1<<20) + `"}]`
-	const key = "pre-frame"
-	// A pre-upgrade binary stored the entry (stats folded in) as bare JSON.
-	if err := m.Store(key, "t", nil, content, "", 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Update(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket([]byte(CacheBucket))
-		var rec Record
-		if err := rec.UnmarshalBinary(bucket.Get([]byte(key))); err != nil {
-			return err
-		}
-		raw, err := json.Marshal(&rec)
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(key), raw)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if got := m.GetStats().TotalSizeBytes; got != len(content) {
-		t.Fatalf("seed: TotalSizeBytes = %d, want %d", got, len(content))
-	}
-
-	if _, err := m.GetRecordsAs(key, 0, 10, Authorization{CallerKind: CallerKindAdmin}); !errors.Is(err, ErrLegacyProvenance) {
-		t.Fatalf("err = %v, want ErrLegacyProvenance", err)
-	}
-	if _, ok := m.Peek(key); ok {
-		t.Fatal("pre-frame record still present")
-	}
-	if got := m.GetStats(); got.TotalEntries != 0 || got.TotalSizeBytes != 0 {
-		t.Fatalf("stats after invalidation = %+v, want the payload folded out (entries 0, size 0)", *got)
-	}
-	m.Close()
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	m2, db2 := openManagerAt(t, path)
-	defer db2.Close()
-	defer m2.Close()
-	if got := m2.GetStats(); got.TotalEntries != 0 || got.TotalSizeBytes != 0 {
-		t.Fatalf("stats after restart = %+v, want entries 0, size 0", *got)
-	}
-}
-
-// Codex round 4, finding 3: round 3 folded the pre-frame value's whole
-// length out of TotalSizeBytes — the escaped JSON body, not the payload the
-// store folded in — and clamped the aggregate at zero, so invalidating one
-// legacy entry whose content escapes heavily could zero the accounting of
-// unrelated live entries. The invalidation now folds out exactly
-// len(FullContent), read by decoding the value on that one-shot path, and
-// nothing is clamped: the live neighbour keeps its exact size, in memory and
-// after a restart.
-func TestGetRecordsAs_PreFrameInvalidationSubtractsOnlyItsPayload(t *testing.T) {
+// Codex rounds 3, 4 and 5 on the pre-frame (bare JSON) record's size. Round 3
+// folded the value's length out (an over-count of the escaped body, clamped
+// against unrelated entries); round 4 decoded the value to fold out exactly
+// len(FullContent) — a payload-sized decode on a refusal path, the one
+// documented exception to payload independence — and round 5 pointed out
+// that the exception IS the timing oracle FR-001 forbids. Research D16: the
+// invalidation folds out NOTHING for a value without a decodable header (the
+// entry count is exact without decoding, the size is not), and the cleanup
+// sweep, which walks and decodes every record anyway, recomputes
+// TotalEntries and TotalSizeBytes from the bucket. So the statistics are
+// eventually consistent: over-counting by exactly the legacy payload until
+// the sweep, exact after it — the live neighbour's, and nothing clamped — in
+// memory and after a restart.
+func TestGetRecordsAs_PreFrameInvalidationLeavesSizeToTheSweep(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.db")
 	m, db := openManagerAt(t, path)
 	broad := Authorization{CallerKind: CallerKindAgent, Principal: "b", AllowedServers: []string{"a"}, Permissions: []string{"read"}}
@@ -347,12 +357,12 @@ func TestGetRecordsAs_PreFrameInvalidationSubtractsOnlyItsPayload(t *testing.T) 
 	if err := m.StoreAs("live", "t", nil, live, "", 1, broad); err != nil {
 		t.Fatal(err)
 	}
-	// Content whose JSON encoding is far longer than the content itself.
+	// Content whose JSON encoding is far longer than the content itself, so
+	// any estimate from the value's length would be visibly wrong.
 	legacy := `["` + strings.Repeat(`\"`, 200) + `"]`
 	if err := m.Store("legacy", "t", nil, legacy, "", 1); err != nil {
 		t.Fatal(err)
 	}
-	var rawLen int
 	if err := db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(CacheBucket))
 		var rec Record
@@ -363,13 +373,9 @@ func TestGetRecordsAs_PreFrameInvalidationSubtractsOnlyItsPayload(t *testing.T) 
 		if err != nil {
 			return err
 		}
-		rawLen = len(raw)
 		return bucket.Put([]byte("legacy"), raw)
 	}); err != nil {
 		t.Fatal(err)
-	}
-	if rawLen <= len(legacy)+len(live) {
-		t.Fatalf("fixture: the raw record (%d bytes) must exceed both payloads together (%d) for the overshoot to be observable", rawLen, len(legacy)+len(live))
 	}
 	if got := m.GetStats().TotalSizeBytes; got != len(live)+len(legacy) {
 		t.Fatalf("seed: TotalSizeBytes = %d, want %d", got, len(live)+len(legacy))
@@ -378,8 +384,19 @@ func TestGetRecordsAs_PreFrameInvalidationSubtractsOnlyItsPayload(t *testing.T) 
 	if _, err := m.GetRecordsAs("legacy", 0, 10, Authorization{CallerKind: CallerKindAdmin}); !errors.Is(err, ErrLegacyProvenance) {
 		t.Fatalf("err = %v, want ErrLegacyProvenance", err)
 	}
+	if _, ok := m.Peek("legacy"); ok {
+		t.Fatal("pre-frame record still present")
+	}
+	// Documented drift: the entry is gone and counted out, the size waits
+	// for the sweep — nothing was read from the payload to find it.
+	if got := m.GetStats(); got.TotalEntries != 1 || got.TotalSizeBytes != len(live)+len(legacy) || got.EvictedCount != 1 {
+		t.Fatalf("stats after invalidation = %+v, want entries 1, evicted 1, size still %d (the legacy payload waits for the sweep)", *got, len(live)+len(legacy))
+	}
+	if err := m.cleanup(); err != nil {
+		t.Fatal(err)
+	}
 	if got := m.GetStats(); got.TotalEntries != 1 || got.TotalSizeBytes != len(live) {
-		t.Fatalf("stats after invalidation = %+v, want entries 1, size %d (the live neighbour's, exactly)", *got, len(live))
+		t.Fatalf("stats after the sweep = %+v, want entries 1, size %d (the live neighbour's, exactly)", *got, len(live))
 	}
 	if _, err := m.GetRecordsAs("live", 0, 10, broad); err != nil {
 		t.Fatalf("live neighbour: %v", err)
@@ -393,5 +410,55 @@ func TestGetRecordsAs_PreFrameInvalidationSubtractsOnlyItsPayload(t *testing.T) 
 	defer m2.Close()
 	if got := m2.GetStats(); got.TotalEntries != 1 || got.TotalSizeBytes != len(live) {
 		t.Fatalf("stats after restart = %+v, want entries 1, size %d", *got, len(live))
+	}
+}
+
+// The sweep's recomputation is from the bucket, whatever the counters held:
+// a 1 MiB pre-frame entry invalidated on the gated door leaves TotalSizeBytes
+// inflated by 1 MiB (round 3's original complaint) for at most one
+// CleanupInterval, and drift of any other origin is reconciled the same way.
+func TestCleanup_RecomputesEntriesAndSizeFromTheBucket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	m, db := openManagerAt(t, path)
+	defer db.Close()
+	defer m.Close()
+	content := `[{"v":"` + strings.Repeat("x", 1<<20) + `"}]`
+	if err := m.Store("pre-frame", "t", nil, content, "", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(CacheBucket))
+		var rec Record
+		if err := rec.UnmarshalBinary(bucket.Get([]byte("pre-frame"))); err != nil {
+			return err
+		}
+		raw, err := json.Marshal(&rec)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte("pre-frame"), raw)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.GetRecordsAs("pre-frame", 0, 10, Authorization{CallerKind: CallerKindAdmin}); !errors.Is(err, ErrLegacyProvenance) {
+		t.Fatalf("err = %v, want ErrLegacyProvenance", err)
+	}
+	if got := m.GetStats(); got.TotalEntries != 0 || got.TotalSizeBytes != len(content) {
+		t.Fatalf("stats after invalidation = %+v, want entries 0 and the 1 MiB still counted until the sweep", *got)
+	}
+	// Arbitrary drift on top, as a crashed transaction or an older binary
+	// could have left.
+	if err := m.update(func(tx *bbolt.Tx) error {
+		m.stats.TotalEntries = 7
+		m.stats.TotalSizeBytes += 12345
+		return m.saveStats(tx)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.GetStats(); got.TotalEntries != 0 || got.TotalSizeBytes != 0 {
+		t.Fatalf("stats after the sweep = %+v, want entries 0, size 0", *got)
 	}
 }

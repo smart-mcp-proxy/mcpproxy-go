@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"go.uber.org/zap"
@@ -68,7 +69,28 @@ func couldHaveProducedCases() []authorizationCase {
 		{"narrower server scope", broad, narrow, false},
 		{"narrower permission tier", broad, Authorization{CallerKind: CallerKindAgent,
 			AllowedServers: []string{"github", "weather"}, Permissions: []string{"read"}}, false},
-		{"broader agent may read narrower", narrow, broad, true},
+		// Research D16 (codex round 5): the door decides on the fixed header
+		// alone, so a scoped reader is admitted only when its effective
+		// authorization DIGEST equals the producer's, or it is unrestricted
+		// (wildcard grant, no pin, no profile, every tier the producer
+		// held). A strictly wider but bounded reader is refused — FR-001
+		// obliges refusing non-supersets, never admitting supersets, so the
+		// rare shape is fail-closed. Before D16 these cells admitted.
+		{"strictly wider bounded agent is refused (D16: digest-equal or unrestricted only)", narrow, broad, false},
+		{"same effective authorization, server list in another order: digest-equal", broad, Authorization{CallerKind: CallerKindAgent, Principal: "broad",
+			AllowedServers: []string{"weather", "github", "github"}, Permissions: []string{"write", "read"}}, true},
+		{"same scope under another agent principal is refused (D16: identity is in the digest)", broad, Authorization{CallerKind: CallerKindAgent, Principal: "twin",
+			AllowedServers: []string{"github", "weather"}, Permissions: []string{"read", "write"}}, false},
+		{"same scope under another profile NAME is digest-equal (sets, not names)", pinnedByName("research"), pinnedByName("renamed"), true},
+		{"unrestricted agent with a narrower tier set cannot read a write-tier entry", broad, Authorization{CallerKind: CallerKindAgent, Principal: "star-ro",
+			AllowedServers: []string{"*"}, Permissions: []string{"read"}}, false},
+		{"unrestricted agent whose tier set covers the entry's reads it", narrow, Authorization{CallerKind: CallerKindAgent, Principal: "star-rw",
+			AllowedServers: []string{"*"}, Permissions: []string{"read", "write"}}, true},
+		{"unrestricted agent cannot read a producer holding a tier this binary does not name", Authorization{CallerKind: CallerKindAgent, Principal: "odd",
+			AllowedServers: []string{"github"}, Permissions: []string{"read", "audit"}}, wildcard, false},
+		{"digest equality admits a producer holding a tier this binary does not name", Authorization{CallerKind: CallerKindAgent, Principal: "odd",
+			AllowedServers: []string{"github"}, Permissions: []string{"read", "audit"}}, Authorization{CallerKind: CallerKindAgent, Principal: "odd",
+			AllowedServers: []string{"github"}, Permissions: []string{"audit", "read"}}, true},
 		{"wildcard server scope covers everything", broad, wildcard, true},
 		{"explicit list does not cover wildcard", wildcard, broad, false},
 		{"admin reads agent entry", broad, admin, true},
@@ -80,7 +102,7 @@ func couldHaveProducedCases() []authorizationCase {
 		{"anonymous reads agent entry", broad, anonymous, true},
 		{"same profile pin", pinned, pinned, true},
 		{"different profile pin", pinned, otherPin, false},
-		{"unpinned reader is broader than pinned producer", pinned, broad, true},
+		{"unpinned bounded reader of a pinned producer is refused (D16: not unrestricted, not digest-equal)", pinned, broad, false},
 		{"pinned reader is narrower than unpinned producer", broad, pinned, false},
 		// Spec 105 FR-001 (D5, task T031): superset is ordered by caller kind
 		// first, so an administrator's own profile binding never narrows what
@@ -104,45 +126,59 @@ func couldHaveProducedCases() []authorizationCase {
 	return append(cases, userContainmentCases(alice, bob)...)
 }
 
-// The gated door decides what it can on the fixed frame header (caller kind
-// first, the deny-all bits) and loads the producer snapshot only for
-// same-kind containment; CouldHaveProduced is the one predicate all of that
-// must agree with. Every cell of the matrix is stored and probed through
-// GetRecordsAs — an internal producer aside, which the door refuses before
-// the guard — twice: once cold and once with the snapshot cache warm, so a
+// pinnedByName is a pinned agent whose effective profile carries name; the
+// server set is the same whatever the name.
+func pinnedByName(name string) Authorization {
+	return Authorization{CallerKind: CallerKindAgent, Principal: "pinned",
+		AllowedServers: []string{"github", "weather"}, Permissions: []string{"read", "write"},
+		ProfilePin: "research", Profile: name, ProfileScoped: true, ProfileServers: []string{"github"}}
+}
+
+// The gated door decides every verdict on the fixed frame header (caller
+// kind first, the deny-all bits, the producer digest and tier bits — research
+// D16) and CouldHaveProduced is the same function over the same facts. Every
+// cell of the matrix is stored and probed through GetRecordsAs — an internal
+// producer aside, which the door refuses before the guard — twice: through
+// the manager that stored it, and through a REOPENED manager with nothing in
+// memory, so the verdict is proven to come from the header on disk and a
 // short-cut can never admit what the predicate refuses or refuse what it
-// admits, on either path.
+// admits.
 func TestGetRecordsAs_DoorAgreesWithPredicate(t *testing.T) {
-	db := setupTestDB(t)
-	defer db.Close()
-	m, err := NewManager(db, zap.NewNop())
-	if err != nil {
+	path := filepath.Join(t.TempDir(), "cache.db")
+	m, db := openManagerAt(t, path)
+	cases := couldHaveProducedCases()
+	for i, tc := range cases {
+		if err := m.StoreAs(fmt.Sprintf("cell-%d", i), "t", nil, `[{"v":1}]`, "", 1, tc.producer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	probe := func(t *testing.T, m *Manager, pass string, i int, tc authorizationCase) {
+		t.Helper()
+		key := fmt.Sprintf("cell-%d", i)
+		resp, err := m.GetRecordsAs(key, 0, 10, tc.reader)
+		admitted := err == nil && resp != nil && len(resp.Records) == 1
+		if admitted != tc.want {
+			t.Fatalf("%s: door admitted=%v (err=%v), predicate says %v", pass, admitted, err, tc.want)
+		}
+		if !admitted && !errors.Is(err, ErrUnauthorizedRead) {
+			t.Fatalf("%s: refusal must be ErrUnauthorizedRead, got %v", pass, err)
+		}
+		if _, ok := m.Peek(key); !ok {
+			t.Fatalf("%s: the entry must survive the read", pass)
+		}
+	}
+	for i, tc := range cases {
+		t.Run(tc.name+"/same manager", func(t *testing.T) { probe(t, m, "same manager", i, tc) })
+	}
+	m.Close()
+	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	m, db = openManagerAt(t, path)
+	defer db.Close()
 	defer m.Close()
-	for i, tc := range couldHaveProducedCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			key := fmt.Sprintf("cell-%d", i)
-			if err := m.StoreAs(key, "t", nil, `[{"v":1}]`, "", 1, tc.producer); err != nil {
-				t.Fatal(err)
-			}
-			for _, pass := range []string{"cold", "warm"} {
-				if pass == "cold" {
-					m.snapshots = newSnapshotCache(snapshotCacheSize)
-				}
-				resp, err := m.GetRecordsAs(key, 0, 10, tc.reader)
-				admitted := err == nil && resp != nil && len(resp.Records) == 1
-				if admitted != tc.want {
-					t.Fatalf("%s: door admitted=%v (err=%v), predicate says %v", pass, admitted, err, tc.want)
-				}
-				if !admitted && !errors.Is(err, ErrUnauthorizedRead) {
-					t.Fatalf("%s: refusal must be ErrUnauthorizedRead, got %v", pass, err)
-				}
-				if _, ok := m.Peek(key); !ok {
-					t.Fatalf("%s: the entry must survive the read", pass)
-				}
-			}
-		})
+	for i, tc := range cases {
+		t.Run(tc.name+"/reopened", func(t *testing.T) { probe(t, m, "reopened", i, tc) })
 	}
 }
 
@@ -356,7 +392,7 @@ func TestAuthorization_CallerKindFirst(t *testing.T) {
 		{"pinned wildcard agent cannot read an unpinned agent entry", broad, pinnedWildcard, false},
 		{"pinned wildcard agent cannot read an unpinned wildcard entry", wildcard, pinnedWildcard, false},
 		{"session-profiled agent cannot read an unscoped agent entry", broad, agentInSessionProfile, false},
-		{"unscoped agent reads its session-profiled entry", agentInSessionProfile, broad, true},
+		{"unscoped bounded agent is refused its own session-profiled entry (D16: the digest differs, the grant is not unrestricted)", agentInSessionProfile, broad, false},
 		{"wildcard agent reads a narrower agent entry", broad, wildcard, true},
 
 		// Deny-all guard applies to AGENT readers only.
@@ -440,10 +476,13 @@ func userContainmentCases(alice, bob Authorization) []authorizationCase {
 		{"user: same id, grant narrowed since", alice, narrowed, false},
 		{"user: same id, grant reassigned to a disjoint server", alice, reassigned, false},
 		{"user: same id, permission tier dropped", alice, readOnly, false},
-		{"user: same id, wider grant reads", alice, wider, true},
-		{"user: narrower own entry read with the wider grant", narrowed, alice, true},
+		// Research D16: a user is admitted on digest equality only — the
+		// header cannot carry the identity an unrestricted-user rule would
+		// need, so a wider grant for the same user is refused, fail-closed.
+		{"user: same id, wider grant is refused (D16: digest-equal only)", alice, wider, false},
+		{"user: same id, own narrower entry with the wider grant is refused (D16)", narrowed, alice, false},
 		{"user: same id, now bound to a profile that does not cover the entry", alice, inProfile, false},
-		{"user: same id, profile entry read unscoped (unscoped is broader)", inProfile, alice, true},
+		{"user: same id, profile entry read unscoped is refused (D16: wider, not digest-equal)", inProfile, alice, false},
 		{"user: same id, disjoint profile", inProfile, inDisjointProfile, false},
 		{"user: same id, deny-all profile (deleted since)", alice, inDenyAllProfile, false},
 		{"user: same id, no grant (production user context) reads nothing", alice, noGrant, false},

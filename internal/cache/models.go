@@ -57,19 +57,20 @@ func (c *Record) HasCurrentProvenance() bool {
 }
 
 // recordHeader is the FIXED-SIZE, payload-free part of a stored record:
-// everything the gated read needs to refuse — provenance class (version,
-// caller kind), the deny-all bit, expiry, the size the eviction stats fold
-// out, and the content hash of the producer snapshot. MarshalBinary writes it
-// in front of the record body so the gate can decode it alone
-// (decodeRecordHeader): a refusal must not do work proportional to the
-// payload it refuses, or to the producer snapshot (an authorization naming
-// thousands of servers) — a nonexistent key does neither, and a
-// non-disclosing refusal is indistinguishable from it in timing class (Spec
-// 105 Definitions; codex rounds 2 and 4). The snapshot itself lives once per
-// distinct authorization in the snapshots bucket, keyed by that hash, and is
-// loaded through a small in-memory cache only when the same-kind containment
-// check needs it. The header is derived from the Record at marshal time, so
-// the two never disagree on a record this binary wrote — and UnmarshalBinary
+// everything the gated read needs to decide — provenance class (version,
+// caller kind), the deny-all bit, the producer's permission tier bits, expiry,
+// the size the eviction stats fold out, and the DIGEST of the producer's
+// effective authorization. MarshalBinary writes it in front of the record
+// body so the gate can decode it alone (decodeRecordHeader) and decide every
+// verdict from it in O(1) (research D16): a refusal must not do work
+// proportional to the payload it refuses, nor to the producer snapshot (an
+// authorization naming thousands of servers) — a nonexistent key does
+// neither, and a non-disclosing refusal is indistinguishable from it in
+// timing class (Spec 105 Definitions; codex rounds 2, 4 and 5). The snapshot
+// itself is kept once per distinct authorization in the snapshots bucket,
+// keyed by the same digest, for administrator diagnostics only: no read path
+// consults it. The header is derived from the Record at marshal time, so the
+// two never disagree on a record this binary wrote — and UnmarshalBinary
 // refuses a value on which they do.
 type recordHeader struct {
 	Version  uint8
@@ -80,12 +81,15 @@ type recordHeader struct {
 	// DenyAll is Producer.DenyAll() at marshal time: a scoped snapshot that
 	// could have authorized nothing, refused for scoped readers on the
 	// header alone.
-	DenyAll   bool
+	DenyAll bool
+	// Perms is permissionBits(Producer.Permissions): the tier set an
+	// unrestricted reader must cover.
+	Perms     uint8
 	ExpiresAt time.Time
 	TotalSize int
-	// Snapshot is the SHA-256 of snapshotBytes(*Producer); zero for an
-	// unstamped record.
-	Snapshot [sha256.Size]byte
+	// Digest is Producer.digest(): the content address of the producer's
+	// effective authorization; zero for an unstamped record.
+	Digest [sha256.Size]byte
 }
 
 func (c *Record) header() recordHeader {
@@ -94,16 +98,22 @@ func (c *Record) header() recordHeader {
 		h.KindCode = callerKindCode(c.Producer.CallerKind)
 		h.Kind = callerKindFromCode(h.KindCode)
 		h.DenyAll = c.Producer.DenyAll()
-		h.Snapshot = snapshotHash(snapshotBytes(*c.Producer))
+		h.Perms = permissionBits(c.Producer.Permissions)
+		h.Digest = c.Producer.digest()
 	}
 	return h
 }
 
-// snapshotBytes is the canonical encoding of a producer snapshot: the JSON
-// of the Authorization, which is deterministic for a given value (fixed
-// field order, lists in the order the request carried them). It is what the
-// snapshots bucket stores and what the frame header hashes. It is never
-// bounded: any authorization the proxy can mint fits.
+// facts is the producer side of the read gate as this header carries it.
+func (h recordHeader) facts() producerFacts {
+	return producerFacts{Kind: h.Kind, DenyAll: h.DenyAll, Perms: h.Perms, Digest: h.Digest}
+}
+
+// snapshotBytes is the diagnostic encoding of a producer snapshot: the JSON
+// of the Authorization as the request carried it (profile name and list
+// order included). It is what the snapshots bucket stores under the
+// producer's digest, for an administrator to inspect; the gate never reads
+// it. It is never bounded: any authorization the proxy can mint fits.
 func snapshotBytes(a Authorization) []byte {
 	data, err := json.Marshal(a)
 	if err != nil {
@@ -112,11 +122,6 @@ func snapshotBytes(a Authorization) []byte {
 		panic(fmt.Sprintf("cache: marshal authorization snapshot: %v", err))
 	}
 	return data
-}
-
-// snapshotHash is the content address of a canonical snapshot encoding.
-func snapshotHash(data []byte) [sha256.Size]byte {
-	return sha256.Sum256(data)
 }
 
 // HasCurrentProvenance is Record.HasCurrentProvenance decided on the header.
@@ -137,17 +142,18 @@ func (h recordHeader) expired() bool {
 //	[0]     version
 //	[1]     caller kind code (callerKindCodes; 0 = no producer)
 //	[2]     flags (recordFlagDenyAll)
-//	[3]     reserved, 0
+//	[3]     producer permission tier bits (permissionBits)
 //	[4:12]  expires_at, Unix nanoseconds
 //	[12:20] total_size
-//	[20:52] producer snapshot SHA-256
+//	[20:52] producer effective-authorization digest (Authorization.digest)
 //
 // The magic starts with a NUL byte, which no JSON document does, so a value
 // without it is a record a pre-frame binary wrote as bare JSON: UnmarshalBinary
 // still decodes it (the ungated readers and the cleanup sweep keep working
 // across the upgrade), while the gated read treats the missing header as the
-// legacy provenance it is (Spec 105 FR-002).
-var recordFrameMagic = []byte("\x00mcpproxy-cache-record\x02")
+// legacy provenance it is (Spec 105 FR-002). The magic's last byte is the
+// frame layout version: a frame with another one is unrecognised provenance.
+var recordFrameMagic = []byte("\x00mcpproxy-cache-record\x03")
 
 const (
 	recordHeaderSize   = 4 + 8 + 8 + sha256.Size
@@ -155,16 +161,16 @@ const (
 	recordHeaderOffVer = 0
 	recordHeaderOffKnd = 1
 	recordHeaderOffFlg = 2
+	recordHeaderOffPrm = 3
 	recordHeaderOffExp = 4
 	recordHeaderOffSiz = 12
-	recordHeaderOffSnp = 20
+	recordHeaderOffDig = 20
 )
 
 var (
-	errRecordUnframed        = errors.New("cache record has no frame header (written before frame headers existed)")
-	errRecordFrameCorrupt    = errors.New("cache record frame header is corrupt")
-	errRecordFrameMismatch   = fmt.Errorf("%w: header disagrees with the record body", errRecordFrameCorrupt)
-	errRecordSnapshotMissing = fmt.Errorf("%w: producer snapshot is not in the snapshots bucket", errRecordFrameCorrupt)
+	errRecordUnframed      = errors.New("cache record has no frame header (written before frame headers existed)")
+	errRecordFrameCorrupt  = errors.New("cache record frame header is corrupt")
+	errRecordFrameMismatch = fmt.Errorf("%w: header disagrees with the record body", errRecordFrameCorrupt)
 )
 
 // encodeExpiry is the header's encoding of an expiry instant. A zero time
@@ -184,9 +190,10 @@ func (h recordHeader) encode() []byte {
 	if h.DenyAll {
 		out[recordHeaderOffFlg] |= recordFlagDenyAll
 	}
+	out[recordHeaderOffPrm] = h.Perms
 	binary.BigEndian.PutUint64(out[recordHeaderOffExp:], uint64(encodeExpiry(h.ExpiresAt)))
 	binary.BigEndian.PutUint64(out[recordHeaderOffSiz:], uint64(int64(h.TotalSize)))
-	copy(out[recordHeaderOffSnp:], h.Snapshot[:])
+	copy(out[recordHeaderOffDig:], h.Digest[:])
 	return out
 }
 
@@ -198,6 +205,7 @@ func decodeHeaderBytes(raw []byte) (recordHeader, error) {
 		Version:  raw[recordHeaderOffVer],
 		KindCode: raw[recordHeaderOffKnd],
 		DenyAll:  raw[recordHeaderOffFlg]&recordFlagDenyAll != 0,
+		Perms:    raw[recordHeaderOffPrm],
 	}
 	h.Kind = callerKindFromCode(h.KindCode)
 	h.ExpiresAt = time.Unix(0, int64(binary.BigEndian.Uint64(raw[recordHeaderOffExp:])))
@@ -206,7 +214,7 @@ func decodeHeaderBytes(raw []byte) (recordHeader, error) {
 		return recordHeader{}, errRecordFrameCorrupt
 	}
 	h.TotalSize = int(size)
-	copy(h.Snapshot[:], raw[recordHeaderOffSnp:])
+	copy(h.Digest[:], raw[recordHeaderOffDig:])
 	return h, nil
 }
 
@@ -241,33 +249,14 @@ func splitRecordFrame(data []byte) (header, body []byte, err error) {
 // fixed number of bytes, never O(payload) and never O(snapshot). A value
 // without a frame, or with a frame this binary cannot decode, is reported as
 // an error with a zero header (TotalSize 0: the size of such a record is
-// unknown without decoding it, which the gate must not do).
+// unknown without decoding it, which the gate must not do — the cleanup
+// sweep reconciles the size statistics from the bucket instead).
 func decodeRecordHeader(data []byte) (recordHeader, error) {
 	raw, _, err := splitRecordFrame(data)
 	if err != nil {
 		return recordHeader{}, err
 	}
 	return decodeHeaderBytes(raw)
-}
-
-// preFramePayloadSize is the size a pre-frame (bare JSON) record folded into
-// TotalSizeBytes when it was stored: len(FullContent). It DECODES the value —
-// work proportional to the payload — and is called on exactly one path: the
-// gated read's invalidation of a legacy entry, which is one-shot per key
-// (the entry is deleted by that same transaction; the second probe is a
-// plain miss) and a refusal for EVERY caller, so it reveals only that a
-// pre-upgrade entry once existed under the key, which the committed delete
-// already reveals (codex round 4, finding 3: the value's length over-counted
-// the escaped body and clamped unrelated entries out of the statistics). 0
-// for a value that does not decode, as cleanup and Invalidate account it.
-func preFramePayloadSize(data []byte) int {
-	var rec struct {
-		FullContent string `json:"full_content"`
-	}
-	if err := json.Unmarshal(data, &rec); err != nil {
-		return 0
-	}
-	return len(rec.FullContent)
 }
 
 // Stats represents cache statistics
@@ -305,32 +294,27 @@ type Meta struct {
 
 // MarshalBinary implements encoding.BinaryMarshaler for Record: the fixed
 // frame header (derived from the record) followed by the record as JSON.
-// There is no size bound: the header is fixed-size and the producer snapshot
-// is referenced by hash, so any authorization the proxy can mint fits (codex
-// round 4). The snapshot the header references is persisted by the store
-// path (Manager.storeRecord) in the same transaction — see marshalFrame.
+// There is no size bound: the header is fixed-size and names the producer
+// by digest, so any authorization the proxy can mint fits (codex round 4).
+// The diagnostic snapshot is persisted by the store path
+// (Manager.storeRecord) in the same transaction — see marshalFrame.
 func (c *Record) MarshalBinary() ([]byte, error) {
 	data, _, err := c.marshalFrame()
 	return data, err
 }
 
-// marshalFrame is MarshalBinary plus the canonical snapshot bytes the frame
-// header hashes (nil for an unstamped record), so a store can persist both
-// from one encoding.
+// marshalFrame is MarshalBinary plus the diagnostic snapshot bytes for the
+// producer the header names (nil for an unstamped record), so a store can
+// persist both from one encoding.
 func (c *Record) marshalFrame() (data, snapshot []byte, err error) {
 	body, err := json.Marshal(c)
 	if err != nil {
 		return nil, nil, err
 	}
-	h := recordHeader{Version: c.Version, ExpiresAt: c.ExpiresAt, TotalSize: c.TotalSize}
 	if c.Producer != nil {
 		snapshot = snapshotBytes(*c.Producer)
-		h.KindCode = callerKindCode(c.Producer.CallerKind)
-		h.Kind = callerKindFromCode(h.KindCode)
-		h.DenyAll = c.Producer.DenyAll()
-		h.Snapshot = snapshotHash(snapshot)
 	}
-	return encodeRecordFrame(h.encode(), body), snapshot, nil
+	return encodeRecordFrame(c.header().encode(), body), snapshot, nil
 }
 
 // UnmarshalBinary implements encoding.BinaryUnmarshaler for Record. It
@@ -368,18 +352,19 @@ func (c *Record) UnmarshalBinary(data []byte) error {
 }
 
 // agreesWith reports whether two headers are equal field for field: the same
-// version, kind, deny-all bit, expiry instant and size, and the same producer
-// snapshot — by content hash, so every dimension (kind, principal, server
-// grant, permissions, pin, profile name, profile scope and profile server
-// set) must match; an unstamped record hashes to zero and agrees only with an
-// unstamped header.
+// version, kind, deny-all bit, tier bits, expiry instant and size, and the
+// same producer digest — so every dimension the gate decides on (kind,
+// principal, server grant, permissions, pin, profile scope and profile
+// server set) must match; an unstamped record digests to zero and agrees
+// only with an unstamped header.
 func (h recordHeader) agreesWith(o recordHeader) bool {
 	return h.Version == o.Version &&
 		h.KindCode == o.KindCode &&
 		h.DenyAll == o.DenyAll &&
+		h.Perms == o.Perms &&
 		encodeExpiry(h.ExpiresAt) == encodeExpiry(o.ExpiresAt) &&
 		h.TotalSize == o.TotalSize &&
-		h.Snapshot == o.Snapshot
+		h.Digest == o.Digest
 }
 
 // MarshalBinary implements encoding.BinaryMarshaler for Stats

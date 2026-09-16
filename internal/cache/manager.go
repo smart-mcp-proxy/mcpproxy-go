@@ -20,17 +20,14 @@ const (
 	CacheBucket      = "cache"
 	CacheStatsBucket = "cache_stats"
 	// CacheSnapshotBucket holds each distinct producer authorization snapshot
-	// ONCE, keyed by the SHA-256 of its canonical encoding (snapshotBytes);
-	// records reference it from their fixed frame header. Written in the same
+	// ONCE, keyed by the digest its records' frame headers carry, for
+	// ADMINISTRATOR DIAGNOSTICS only: no read path consults it — the gate
+	// decides on the header alone (research D16). Written in the same
 	// transaction as the record that first references it; unreferenced
 	// snapshots are dropped by the cleanup sweep.
 	CacheSnapshotBucket = "cache_snapshots"
 	DefaultTTL          = 2 * time.Hour
 	CleanupInterval     = 10 * time.Minute
-	// snapshotCacheSize bounds the in-memory snapshot cache: distinct
-	// authorizations in play at once are few (one per token × profile), and
-	// a miss costs one bucket read plus a decode of that snapshot alone.
-	snapshotCacheSize = 128
 )
 
 // Read outcomes a caller can act on with errors.Is. The messages are part of
@@ -61,23 +58,16 @@ type Manager struct {
 	// seam so a test can make the COMMIT fail after the closure succeeded
 	// (disk full at fsync), a fault no in-process bbolt setup produces.
 	dbUpdate func(fn func(tx *bbolt.Tx) error) error
-	// snapshots caches decoded producer snapshots by content hash, so the
-	// gated read's same-kind containment check decodes a given snapshot once
-	// and every later probe of any entry stamped with it is O(1) — the work a
-	// refusal does must not grow with the fleet any more than with the
-	// payload (codex round 4).
-	snapshots *snapshotCache
 }
 
 // NewManager creates a new cache manager
 func NewManager(db *bbolt.DB, logger *zap.Logger) (*Manager, error) {
 	manager := &Manager{
-		db:        db,
-		logger:    logger,
-		stats:     &Stats{},
-		stopCh:    make(chan struct{}),
-		dbUpdate:  db.Update,
-		snapshots: newSnapshotCache(snapshotCacheSize),
+		db:       db,
+		logger:   logger,
+		stats:    &Stats{},
+		stopCh:   make(chan struct{}),
+		dbUpdate: db.Update,
 	}
 
 	// Initialize buckets
@@ -190,12 +180,11 @@ func (m *Manager) storeRecord(key, toolName string, args map[string]interface{},
 		if err != nil {
 			return fmt.Errorf("marshal cache record: %w", err)
 		}
-		// The producer snapshot the frame header references is persisted
-		// in THIS transaction, once per distinct snapshot: a record whose
-		// header names a snapshot the bucket does not hold is refused as
-		// unrecognised provenance, so the two must commit together.
+		// The diagnostic snapshot is persisted in THIS transaction, once per
+		// distinct producer digest, so the snapshots bucket never describes
+		// an entry the cache bucket does not hold.
 		if producer != nil {
-			if err := m.putSnapshot(tx, producer, snapshot); err != nil {
+			if err := m.putSnapshot(tx, producer.digest(), snapshot); err != nil {
 				return err
 			}
 		}
@@ -220,27 +209,25 @@ func (m *Manager) Get(key string) (*Record, error) {
 }
 
 // getGuarded is Get with an optional read gate. A non-nil guard marks the
-// GATED door (read_cache). On that door every verdict short of admission is
-// decided on the record's FIXED-SIZE FRAME HEADER (decodeRecordHeader:
-// version, caller kind, deny-all bit, expiry, size, snapshot hash — 52
-// bytes) and never on the payload, nor on the producer snapshot except
-// through the in-memory snapshot cache: a refusal that decoded a
-// multi-megabyte FullContent, or a snapshot naming thousands of servers,
+// GATED door (read_cache). On that door EVERY verdict is decided on the
+// record's FIXED-SIZE FRAME HEADER (decodeRecordHeader: version, caller kind,
+// deny-all bit, tier bits, expiry, size, producer digest — 52 bytes) and
+// never on the payload nor on the producer snapshot: a refusal that decoded
+// a multi-megabyte FullContent, or a snapshot naming thousands of servers,
 // first would take a timing class a nonexistent key does not, and the spec's
 // non-disclosing refusal is indistinguishable in status, body AND timing
-// class (Spec 105 Definitions; codex rounds 2 and 4). The order is:
-// provenance class first (Spec 105 FR-002) — a value with no frame, a frame
-// this binary cannot decode, or a header with legacy or unrecognised
-// provenance is refused for every caller and invalidated; then an internal
-// entry is refused for every caller WITHOUT eviction, even when it has
-// expired (its writers' ungated readers serve expired entries as stale until
-// cleanup, and a guessable key must not let a probe evict them early); then
-// an expired entry is refused like a miss and left for the cleanup sweep;
-// then the guard runs on the header's kind and deny-all bit and, for
-// same-kind containment only, on the producer snapshot it loads by hash
-// (see producerView). Only an admitted read decodes the record — and only
-// then are the access stats updated, so a refused read never counts as a hit
-// or marks the entry as accessed.
+// class (Spec 105 Definitions; codex rounds 2, 4 and 5; research D16). The
+// order is: provenance class first (Spec 105 FR-002) — a value with no
+// frame, a frame this binary cannot decode, or a header with legacy or
+// unrecognised provenance is refused for every caller and invalidated; then
+// an internal entry is refused for every caller WITHOUT eviction, even when
+// it has expired (its writers' ungated readers serve expired entries as
+// stale until cleanup, and a guessable key must not let a probe evict them
+// early); then an expired entry is refused like a miss and left for the
+// cleanup sweep; then the guard runs on the header's facts (admits). Only an
+// admitted read decodes the record — and only then are the access stats
+// updated, so a refused read never counts as a hit or marks the entry as
+// accessed.
 //
 // Every refusal COMMITS, as a miss. A refusal that returned its error from the
 // Update closure made bbolt roll the transaction back without a disk write,
@@ -256,7 +243,7 @@ func (m *Manager) Get(key string) (*Record, error) {
 // and frees the value's pages by id range, never reading the payload (pinned
 // by TestGetRecordsAs_EvictingRefusalWritesArePayloadIndependent). It is also
 // one-shot per key: the entry is gone, so the second probe is a plain miss.
-func (m *Manager) getGuarded(key string, guard func(producer producerView) error) (*Record, error) {
+func (m *Manager) getGuarded(key string, guard func(header recordHeader) error) (*Record, error) {
 	var (
 		record  *Record
 		verdict error
@@ -278,20 +265,17 @@ func (m *Manager) getGuarded(key string, guard func(producer producerView) error
 			header, err = decodeRecordHeader(data)
 			if err != nil || !header.HasCurrentProvenance() {
 				// Legacy or unrecognised provenance: refuse every caller and
-				// invalidate on this first redemption, committed (FR-002).
-				// The size folded out of the stats is exactly what the
-				// store folded in — the header's TotalSize, or, for a
-				// pre-frame bare-JSON value that has no header, the payload
-				// length read by decoding it here and only here (the
-				// one-shot legacy path; see preFramePayloadSize). A corrupt
-				// frame has no recoverable size and folds out 0, as cleanup
-				// and Invalidate account an undecodable record; nothing is
-				// ever over-subtracted from the entries that remain (codex
-				// rounds 3 and 4).
-				size := header.TotalSize
-				if errors.Is(err, errRecordUnframed) {
-					size = preFramePayloadSize(data)
-				}
+				// invalidate on this first redemption, committed (FR-002),
+				// WITHOUT decoding the value. The size folded out of the
+				// stats is the header's TotalSize — what the store folded
+				// in — and 0 for a pre-frame bare-JSON value or a corrupt
+				// frame, whose size is unknown without a payload-sized
+				// decode the refusal must not do (codex round 5). Until
+				// the next cleanup sweep TotalSizeBytes then over-counts
+				// by that entry's payload; the sweep recomputes
+				// TotalEntries and TotalSizeBytes exactly from the bucket
+				// it walks anyway, so the statistics are eventually
+				// consistent while the refusal stays O(1) (research D16).
 				m.logger.Info("Invalidated cache entry with legacy provenance on first redemption",
 					zap.String("key", key),
 					zap.Uint8("version", header.Version),
@@ -299,7 +283,7 @@ func (m *Manager) getGuarded(key string, guard func(producer producerView) error
 					zap.String("caller_kind", header.Kind),
 					zap.NamedError("frame", err))
 				verdict = ErrLegacyProvenance
-				return m.evict(tx, bucket, key, size, "invalidate legacy cache record")
+				return m.evict(tx, bucket, key, header.TotalSize, "invalidate legacy cache record")
 			}
 			// Internal entry: refused for every caller, kept — expired or not.
 			if header.Kind == CallerKindInternal {
@@ -317,22 +301,9 @@ func (m *Manager) getGuarded(key string, guard func(producer producerView) error
 				verdict = ErrKeyExpired
 				return m.commitMiss(tx)
 			}
-			// The guard sees the header's kind and deny-all bit, and loads
-			// the producer snapshot — through the in-memory cache, else
-			// from the snapshots bucket — only when same-kind containment
-			// needs it. A header naming a snapshot this database does not
-			// hold is provenance this binary cannot verify: legacy,
-			// invalidated like an undecodable frame.
-			view := producerView{header: header, load: func() (*Authorization, error) {
-				return m.loadSnapshot(tx, header.Snapshot)
-			}}
-			if err := guard(view); err != nil {
-				if errors.Is(err, errRecordFrameCorrupt) {
-					m.logger.Info("Invalidated cache entry whose producer snapshot is missing or corrupt",
-						zap.String("key", key), zap.Error(err))
-					verdict = ErrLegacyProvenance
-					return m.evict(tx, bucket, key, header.TotalSize, "invalidate cache record without snapshot")
-				}
+			// The guard sees the header and nothing else: kind, deny-all
+			// bit, tier bits and the producer digest decide (admits).
+			if err := guard(header); err != nil {
 				verdict = err
 				return m.commitMiss(tx)
 			}
@@ -423,9 +394,10 @@ func (m *Manager) commitMiss(tx *bbolt.Tx) error {
 }
 
 // evict deletes key inside tx, folds the eviction into the stats and persists
-// them. size is what the store folded in for the entry — the record's
-// TotalSize, or the pre-frame payload length — never an estimate, so the
-// entries that remain keep their exact accounting. what names the operation
+// them. size is what the store folded in for the entry — the header's
+// TotalSize — or 0 when the value has no decodable header (a pre-frame or
+// corrupt record): never an estimate read from the payload. The cleanup
+// sweep reconciles TotalSizeBytes from the bucket. what names the operation
 // in the storage error.
 func (m *Manager) evict(tx *bbolt.Tx, bucket *bbolt.Bucket, key string, size int, what string) error {
 	if err := bucket.Delete([]byte(key)); err != nil {
@@ -437,65 +409,21 @@ func (m *Manager) evict(tx *bbolt.Tx, bucket *bbolt.Bucket, key string, size int
 	return m.saveStats(tx)
 }
 
-// producerView is what the gated read hands its guard: the producer facts
-// the fixed frame header carries (kind, deny-all bit), and a loader for the
-// full snapshot. The guard decides everything it can on the header and calls
-// load only for same-kind containment, so a refusal on kind alone — an
-// administrator snapshot probed by an agent, a user's by another user — never
-// touches the snapshot, and one that does touches it through the cache.
-type producerView struct {
-	header recordHeader
-	load   func() (*Authorization, error)
-}
-
-// putSnapshot persists the canonical snapshot under its content hash unless
-// the bucket already holds it (identical bytes: the key IS the hash) and
-// warms the in-memory cache with the decoded value.
-func (m *Manager) putSnapshot(tx *bbolt.Tx, producer *Authorization, snapshot []byte) error {
-	hash := snapshotHash(snapshot)
+// putSnapshot persists the diagnostic snapshot under the producer's digest
+// unless the bucket already holds one (first writer wins; every snapshot
+// under a digest is the same effective authorization).
+func (m *Manager) putSnapshot(tx *bbolt.Tx, digest [sha256.Size]byte, snapshot []byte) error {
 	bucket := tx.Bucket([]byte(CacheSnapshotBucket))
 	if bucket == nil {
 		return fmt.Errorf("cache snapshots bucket %q is missing", CacheSnapshotBucket)
 	}
-	if bucket.Get(hash[:]) == nil {
-		if err := bucket.Put(hash[:], snapshot); err != nil {
-			return fmt.Errorf("store producer snapshot: %w", err)
-		}
+	if bucket.Get(digest[:]) != nil {
+		return nil
 	}
-	// The cached value is shared by every later probe and must not alias
-	// the caller's slices.
-	stored := *producer
-	stored.AllowedServers = append([]string(nil), producer.AllowedServers...)
-	stored.Permissions = append([]string(nil), producer.Permissions...)
-	stored.ProfileServers = append([]string(nil), producer.ProfileServers...)
-	m.snapshots.put(hash, &stored)
+	if err := bucket.Put(digest[:], snapshot); err != nil {
+		return fmt.Errorf("store producer snapshot: %w", err)
+	}
 	return nil
-}
-
-// loadSnapshot resolves a frame header's snapshot hash to the decoded
-// authorization: from the in-memory cache when warm (O(1)), else from the
-// snapshots bucket — a read and a decode proportional to that snapshot alone,
-// verified against its hash, and cached for every later probe. A hash the
-// bucket does not hold, or a value that does not decode or hash to its key,
-// is errRecordSnapshotMissing (an errRecordFrameCorrupt).
-func (m *Manager) loadSnapshot(tx *bbolt.Tx, hash [sha256.Size]byte) (*Authorization, error) {
-	if a, ok := m.snapshots.get(hash); ok {
-		return a, nil
-	}
-	bucket := tx.Bucket([]byte(CacheSnapshotBucket))
-	if bucket == nil {
-		return nil, errRecordSnapshotMissing
-	}
-	data := bucket.Get(hash[:])
-	if data == nil || snapshotHash(data) != hash {
-		return nil, errRecordSnapshotMissing
-	}
-	a := &Authorization{}
-	if err := json.Unmarshal(data, a); err != nil {
-		return nil, fmt.Errorf("%w: %w", errRecordSnapshotMissing, err)
-	}
-	m.snapshots.put(hash, a)
-	return a, nil
 }
 
 // GetRecords retrieves paginated records from a cached response without a
@@ -517,37 +445,27 @@ func (m *Manager) GetRecords(key string, offset, limit int) (*ReadCacheResponse,
 //     refused with ErrInternalEntry WITHOUT eviction, since their keys are
 //     guessable and their writers' ungated readers depend on them.
 func (m *Manager) GetRecordsAs(key string, offset, limit int, reader Authorization) (*ReadCacheResponse, error) {
-	return m.getRecords(key, offset, limit, func(view producerView) error {
-		// getGuarded has already refused legacy provenance (invalidated) and
-		// internal entries (kept), so the producer is of a request kind
-		// here. Caller kind first (FR-001): decided on the header's kind
-		// alone — an administrator reader is admitted, a reader of another
-		// kind refused, without the snapshot. Then the deny-all bits, on
-		// both sides, still without it. Only same-kind containment loads
-		// the snapshot, and CouldHaveProduced re-derives the whole verdict
-		// from it so the header short-cuts can never admit what the
-		// predicate would refuse. It never sees the payload.
-		if admit, decided := kindVerdict(view.header.Kind, reader); decided {
-			if admit {
-				return nil
-			}
-			return ErrUnauthorizedRead
-		}
-		if view.header.DenyAll || reader.DenyAll() {
-			return ErrUnauthorizedRead
-		}
-		producer, err := view.load()
-		if err != nil {
-			return err
-		}
-		if !producer.CouldHaveProduced(reader) {
+	// The reader's side of the verdict is computed ONCE, here, before the
+	// transaction: its digest, deny-all and tier bits are a function of the
+	// caller's own credential, and computing them outside the door means a
+	// miss and a refusal do the same work (research D16).
+	r := newReaderFacts(reader)
+	return m.getRecords(key, offset, limit, func(header recordHeader) error {
+		// getGuarded has already refused legacy provenance (invalidated)
+		// and internal entries (kept), so the producer is of a request
+		// kind here. The verdict is admits over the header's facts — kind
+		// first (FR-001), the deny-all bits, digest equality, then the
+		// unrestricted-agent rule — in O(1), with no snapshot loaded and
+		// no payload seen. CouldHaveProduced is the same function over the
+		// same facts, so the door and the predicate cannot disagree.
+		if !admits(header.facts(), r) {
 			return ErrUnauthorizedRead
 		}
 		return nil
 	})
 }
 
-func (m *Manager) getRecords(key string, offset, limit int, guard func(producer producerView) error) (*ReadCacheResponse, error) {
+func (m *Manager) getRecords(key string, offset, limit int, guard func(header recordHeader) error) (*ReadCacheResponse, error) {
 	record, err := m.getGuarded(key, guard)
 	if err != nil {
 		return nil, err
@@ -712,7 +630,14 @@ func (m *Manager) startCleanup() {
 	}
 }
 
-// cleanup removes expired cache entries
+// cleanup removes expired cache entries (and records it cannot decode), prunes
+// the snapshots no surviving entry references, and RECOMPUTES TotalEntries
+// and TotalSizeBytes from the entries that survive — the sweep walks and
+// decodes every record anyway, so the exact figures are free here, and the
+// gated read's legacy invalidation, which must not decode the value it
+// deletes, leaves the size to this sweep (research D16). Between an
+// invalidation and the next sweep the statistics may over-count by that
+// entry's payload; they are never wrong for longer than CleanupInterval.
 func (m *Manager) cleanup() error {
 	now := time.Now()
 	cleanupCount := 0
@@ -723,9 +648,10 @@ func (m *Manager) cleanup() error {
 		cursor := bucket.Cursor()
 
 		var keysToDelete [][]byte
-		// Snapshot hashes the surviving entries reference; the rest of the
+		// Snapshot digests the surviving entries reference; the rest of the
 		// snapshots bucket is garbage once the expired entries are gone.
 		referenced := map[[sha256.Size]byte]struct{}{}
+		survivors, survivingSize := 0, 0
 
 		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
 			var record Record
@@ -742,8 +668,10 @@ func (m *Manager) cleanup() error {
 				totalSizeReduced += record.TotalSize
 				continue
 			}
+			survivors++
+			survivingSize += record.TotalSize
 			if header, err := decodeRecordHeader(value); err == nil && header.KindCode != 0 {
-				referenced[header.Snapshot] = struct{}{}
+				referenced[header.Digest] = struct{}{}
 			}
 		}
 
@@ -758,10 +686,12 @@ func (m *Manager) cleanup() error {
 			return err
 		}
 
-		// Update stats
+		// Update stats: the counters are set from the bucket, not
+		// decremented, so any drift a header-only eviction left behind is
+		// reconciled here.
 		m.stats.CleanupCount += cleanupCount
-		m.stats.TotalEntries -= cleanupCount
-		m.stats.TotalSizeBytes -= totalSizeReduced
+		m.stats.TotalEntries = survivors
+		m.stats.TotalSizeBytes = survivingSize
 
 		return m.saveStats(tx)
 	})
@@ -779,9 +709,8 @@ func (m *Manager) cleanup() error {
 	return nil
 }
 
-// pruneSnapshots deletes every snapshot no surviving entry references. The
-// in-memory cache may keep a decoded copy: it is content-addressed, so a
-// later entry stamped with the same snapshot re-persists identical bytes.
+// pruneSnapshots deletes every snapshot no surviving entry references; a
+// later entry under the same digest re-persists it.
 func (m *Manager) pruneSnapshots(tx *bbolt.Tx, referenced map[[sha256.Size]byte]struct{}) error {
 	bucket := tx.Bucket([]byte(CacheSnapshotBucket))
 	if bucket == nil {

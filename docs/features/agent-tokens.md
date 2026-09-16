@@ -272,18 +272,25 @@ Server scoping is enforced at three levels:
    permission tier, profile pin, effective profile, caller kind), captured when
    the call was authorized — a profile narrowed while the call was in flight
    does not re-stamp the response. `read_cache` — on every MCP surface and on
-   the REST direct call path (`POST /api/v1/tools/call`) — refuses, on every
-   page, any request whose current authorization is neither equal to nor a
-   superset of that snapshot, so a narrower token sharing the same MCP session
-   cannot page a broader token's response. Superset is ordered by **caller kind
-   first**: an administrator may read any entry regardless of its own profile
-   binding; an agent token never reads an administrator's entry; between agent
-   entries the allowed-server set, permission set and effective profile scope
-   must each contain the entry's. Profile scope is compared as a server set, so
-   deleting or narrowing a profile after the entry was produced revokes cached
-   access as well (a stale pin resolves to a deny-all scope and reads nothing).
-   An unauthenticated `/mcp` caller ranks below an authenticated admin: it
-   cannot page an entry an API-key admin produced.
+   the REST direct call path (`POST /api/v1/tools/call`) — admits, on every
+   page, exactly three kinds of request and refuses every other, so a
+   narrower token sharing the same MCP session cannot page a broader token's
+   response. Ordered by **caller kind first**: an administrator may read any
+   entry regardless of its own profile binding (an unauthenticated `/mcp`
+   caller ranks below an authenticated admin and cannot page an entry an
+   API-key admin produced); an agent token never reads an administrator's
+   entry. Between agent entries a reader is admitted when it presents the
+   **same effective authorization** the entry was produced under — the same
+   token, server grant, permission tiers, pin and effective profile server
+   set (compared as sets, so list order and the profile's name do not
+   matter) — or when it is **unrestricted**: a `*` server grant, no pin, no
+   effective profile, and every permission tier the entry's producer held. A
+   token that is wider than the producer but still bounded (an `{a,b}` grant
+   over an `{a}` entry, a session that left the profile it produced under)
+   is refused: it re-runs the call under its own credential instead. Profile
+   scope is compared as a server set, so deleting or narrowing a profile
+   after the entry was produced revokes cached access as well (a stale pin
+   resolves to a deny-all scope and reads nothing).
 
    A page that `read_cache` itself has to truncate again is stamped with its
    *parent's* snapshot, never the redeemer's, so provenance is monotone down
@@ -299,19 +306,25 @@ Server scoping is enforced at three levels:
    behind it are two encodings of the same stamp; an entry on which they
    disagree (a corrupt or hand-edited database) is treated as unreadable —
    refused for every caller, invalidated, never served. The header is
-   fixed-size: it names the producer's authorization snapshot by content
-   hash, and each distinct snapshot is stored once, shared by every entry
-   produced under it. Any authorization mcpproxy can mint fits, however many
-   servers it names, and a refusal's cost does not grow with the fleet
-   either — the snapshot is decoded once and cached in memory, so repeated
-   probes of a live key cost what a miss costs.
+   fixed-size and decides the whole verdict by itself: it carries the caller
+   kind, the permission tiers and a digest of the producer's effective
+   authorization, and the reader's own digest is compared against it — so a
+   refusal never loads the producer's snapshot, a pre-upgrade entry is
+   invalidated without being decoded, and a probe costs what a miss costs on
+   the first request after a restart as much as on the thousandth, however
+   many servers the producer's authorization names. Each distinct snapshot
+   is still stored once, under that digest, for administrator diagnostics;
+   nothing reads it to decide. The size statistics are reconciled from the
+   store by the periodic cleanup sweep, which is why an invalidated
+   pre-upgrade entry can leave `total_size_bytes` over-counting for at most
+   one sweep interval.
 
    Server-edition OAuth **users** are bounded by the same dispatch gates as
    agent tokens (server allowlist, permission tier, effective profile), so a
    user's cached entry is stamped with those dimensions as well as the user
-   id, and redemption requires the same user *and* an authorization that
-   contains the entry's: a grant narrowed or a profile changed since the entry
-   was produced revokes cached access exactly as it does for an agent token.
+   id, and redemption requires the same user *with the same* authorization:
+   a grant changed or a profile changed since the entry was produced revokes
+   cached access exactly as it does for an agent token.
 
    **Upgrading.** Entries written by any release before this one — including
    the immediately preceding one, which stamped a producer but no schema
