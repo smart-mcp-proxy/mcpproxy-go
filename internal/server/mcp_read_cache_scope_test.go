@@ -30,10 +30,24 @@ import (
 var allPerms = []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}
 
 // userCtx returns a context authenticated as a server-edition OAuth user —
-// the `user` caller kind, bounded to its own identity (Spec 024).
+// the `user` caller kind, bounded to its own identity (Spec 024) — in the
+// shape auth.UserContext mints in production: no server grant, which every
+// dispatch gate treats as deny-all. userCtxScoped is the allowlist-scoped
+// shape the set_profile tests use.
 func userCtx(id string) context.Context {
 	return auth.WithAuthContext(context.Background(), &auth.AuthContext{
 		Type: auth.AuthTypeUser, UserID: id, Email: id + "@example.com", Role: "user",
+	})
+}
+
+// userCtxScoped is userCtx with a server allowlist and permission set — a
+// user context is scoped by auth.CanAccessServer / HasPermission at every
+// dispatch gate exactly like an agent token (profile_tool_test.go, "server
+// edition user scoped like visibility").
+func userCtxScoped(id string, allowed []string, perms []string) context.Context {
+	return auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeUser, UserID: id, Email: id + "@example.com", Role: "user",
+		AllowedServers: allowed, Permissions: perms,
 	})
 }
 
@@ -347,4 +361,60 @@ func TestReadCache_AdministratorRefusalBodiesNameTheReason(t *testing.T) {
 	got := readCachePage(t, proxy, agent, legacyKey, 0, 1)
 	require.True(t, got.IsError)
 	assert.Equal(t, resultText(t, absent), resultText(t, got), "a scoped caller gets the not-found body for a legacy entry too")
+}
+
+// Codex round 4, finding 1: the user-kind snapshot retained only the user id,
+// and redemption compared only the id — so a user allowed {github} produced a
+// github entry and, once narrowed to {weather} (or bound to a disjoint or
+// deleted profile), still redeemed it because the id matched, although the
+// dispatch gates refuse that user's own call to github. A user is scoped by
+// AllowedServers/Permissions/profile like an agent (profile_tool_test.go),
+// so the snapshot carries them and the read gate contains them; identity
+// equality is necessary, not sufficient. Non-disclosing for the user like
+// any scoped refusal; the administrator and the wider same user still read.
+func TestReadCache_UserSnapshotIsContainedLikeAnAgent(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+	const id = "01HUSER"
+	github := userCtxScoped(id, []string{"github"}, []string{auth.PermRead})
+	weather := userCtxScoped(id, []string{"weather"}, []string{auth.PermRead})
+	wider := userCtxScoped(id, []string{"github", "weather"}, []string{auth.PermRead, auth.PermWrite})
+	otherUser := userCtxScoped("01HOTHER", []string{"github", "weather"}, allPerms)
+	// Premise: the narrowed user cannot dispatch to github.
+	require.False(t, auth.AuthContextFromContext(weather).CanAccessServer("github"))
+
+	key, full := produceTruncatedKey(t, proxy, github)
+	stamp := proxy.cacheAuthorization(github)
+	require.Equal(t, cache.CallerKindUser, stamp.CallerKind)
+	require.Equal(t, []string{"github"}, stamp.AllowedServers, "the user snapshot must carry the server grant")
+	require.Equal(t, []string{auth.PermRead}, stamp.Permissions, "the user snapshot must carry the permission set")
+
+	own := readCachePage(t, proxy, github, key, 0, 50)
+	require.False(t, own.IsError, "the producing user reads its own entry: %s", resultText(t, own))
+	var page cache.ReadCacheResponse
+	require.NoError(t, json.Unmarshal([]byte(resultText(t, own)), &page))
+	require.Len(t, page.Records, len(full.Tools))
+
+	absentKey := "0000000000000000000000000000000000000000000000000000000000000000"
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"same user narrowed to weather", weather},
+		{"same user, production no-grant context", userCtx(id)},
+		{"other user with a wider grant", otherUser},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live := readCachePage(t, proxy, tc.ctx, key, 0, 50)
+			absent := readCachePage(t, proxy, tc.ctx, absentKey, 0, 50)
+			require.True(t, live.IsError, "must be refused: %s", resultText(t, live))
+			require.True(t, absent.IsError)
+			assert.NotContains(t, resultText(t, live), "github:")
+			assert.Equal(t, resultText(t, absent), resultText(t, live), "the refusal must not disclose the key's existence")
+			assert.Contains(t, resultText(t, live), "cache key not found")
+		})
+	}
+	// Refusals do not evict: the wider same user and the administrator read.
+	require.False(t, readCachePage(t, proxy, wider, key, 0, 50).IsError, "a wider grant for the same user reads")
+	require.False(t, readCachePage(t, proxy, adminCtx(), key, 0, 50).IsError, "the administrator reads any snapshot")
 }

@@ -45,8 +45,18 @@ func (p *MCPProxyServer) cacheAuthorizationWith(ctx context.Context, profileName
 			a.Permissions = append([]string(nil), ac.Permissions...)
 			a.ProfilePin = ac.ProfilePin
 		case ac.Type == auth.AuthTypeUser:
+			// A server-edition user is bounded by the SAME dispatch gates
+			// as an agent token — CanAccessServer, HasPermission and the
+			// effective profile all apply to any non-admin context — so its
+			// snapshot carries the same dimensions and the read gate
+			// applies the same containment on top of the identity check
+			// (codex round 4: a snapshot of the user id alone let a user
+			// narrowed to {b} redeem the {a} entry it produced earlier).
 			a.CallerKind = cache.CallerKindUser
 			a.Principal = ac.UserID
+			a.AllowedServers = append([]string(nil), ac.AllowedServers...)
+			a.Permissions = append([]string(nil), ac.Permissions...)
+			a.ProfilePin = ac.ProfilePin
 		case ac.Type == auth.AuthTypeAdminUser:
 			a.CallerKind = cache.CallerKindAdminUser
 			a.Principal = ac.UserID

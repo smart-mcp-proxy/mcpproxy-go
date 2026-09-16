@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 
@@ -400,37 +400,31 @@ func putFramedRecord(t *testing.T, db *bbolt.DB, key string, header, body []byte
 // frame, which would let a header-level check go vacuous. Each shape is
 // refused for every caller with ErrLegacyProvenance and durably invalidated;
 // the body is never consulted (a body the gate would have admitted sits
-// behind every bad header here).
+// behind every bad header here). Round 4 made the header fixed-size with the
+// producer referenced by content hash, so the shapes are: no producer
+// (kind code 0), unknown version, unknown kind code, a truncated frame, and
+// a header naming a snapshot the snapshots bucket does not hold.
 func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
 	now := time.Now()
+	adminProducer := &Authorization{CallerKind: CallerKindAdmin}
 	goodBody := func(key string) []byte {
 		rec := &Record{Key: key, ToolName: "t", FullContent: `[{"name":"SENTINEL-FRAMED"}]`, TotalSize: 27,
 			Timestamp: now, ExpiresAt: now.Add(time.Hour), CreatedAt: now, LastAccessed: now,
-			Version: RecordVersion, Producer: &Authorization{CallerKind: CallerKindAdmin}}
+			Version: RecordVersion, Producer: adminProducer}
 		body, err := json.Marshal(rec)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return body
 	}
-	headerJSON := func(doc map[string]interface{}) []byte {
-		data, err := json.Marshal(doc)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return data
+	// current is the header goodBody's record would carry.
+	current := (&Record{Version: RecordVersion, Producer: adminProducer, ExpiresAt: now.Add(time.Hour), TotalSize: 27}).header()
+	with := func(mutate func(h *recordHeader)) []byte {
+		h := current
+		mutate(&h)
+		return h.encode()
 	}
-	current := map[string]interface{}{"version": RecordVersion, "expires_at": now.Add(time.Hour), "total_size": 27}
-	with := func(extra map[string]interface{}) map[string]interface{} {
-		doc := map[string]interface{}{}
-		for k, v := range current {
-			doc[k] = v
-		}
-		for k, v := range extra {
-			doc[k] = v
-		}
-		return doc
-	}
+	aOnly := Authorization{CallerKind: CallerKindAgent, Principal: "a", AllowedServers: []string{"a"}, Permissions: []string{"read"}}
 
 	type fixture struct {
 		name   string
@@ -439,24 +433,35 @@ func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
 		// admittedOnly restricts the readers to the kinds the header admits
 		// (the body is reached only after admission).
 		admittedOnly bool
+		// skipKinds names reader kinds the header refuses on KIND alone —
+		// before the snapshot is ever needed — so they never reach the
+		// shape under test; asserted separately below.
+		skipKinds []string
 	}
 	fixtures := []fixture{
-		{name: "header: no producer", header: headerJSON(current), body: goodBody},
-		{name: "header: unknown version", header: headerJSON(with(map[string]interface{}{"version": 99, "producer": map[string]interface{}{"caller_kind": CallerKindAdmin}})), body: goodBody},
-		{name: "header: empty caller kind", header: headerJSON(with(map[string]interface{}{"producer": map[string]interface{}{"caller_kind": ""}})), body: goodBody},
-		{name: "header: unknown caller kind", header: headerJSON(with(map[string]interface{}{"producer": map[string]interface{}{"caller_kind": "superadmin"}})), body: goodBody},
-		{name: "header: undecodable version", header: headerJSON(with(map[string]interface{}{"version": 300, "producer": map[string]interface{}{"caller_kind": CallerKindAdmin}})), body: goodBody},
-		{name: "header: not JSON", header: []byte("not a header"), body: goodBody},
-		{name: "header: oversize", header: headerJSON(with(map[string]interface{}{"producer": map[string]interface{}{"caller_kind": CallerKindAdmin},
-			"pad": strings.Repeat("x", maxRecordHeaderLen+1)})), body: goodBody},
-		{name: "header: length beyond the value"},
+		{name: "header: no producer (kind code 0)", header: with(func(h *recordHeader) { h.KindCode, h.Kind = 0, "" }), body: goodBody},
+		{name: "header: unknown version", header: with(func(h *recordHeader) { h.Version = 99 }), body: goodBody},
+		{name: "header: unknown caller kind code", header: with(func(h *recordHeader) { h.KindCode, h.Kind = 200, "" }), body: goodBody},
+		{name: "header: truncated frame"},
+		// A well-formed agent header whose snapshot the bucket never
+		// received (a crafted or torn write: storeRecord persists the two
+		// in one transaction). A same-kind reader must load the snapshot
+		// and finds none; an administrator is admitted on the kind, and
+		// the body then disagrees with the header's hash. A reader of
+		// another scoped kind (a user) is refused on the kind alone and
+		// never asks for the snapshot — see the user assertion below.
+		{name: "header: snapshot missing from the bucket",
+			header: with(func(h *recordHeader) {
+				h.KindCode, h.Kind = callerKindCode(CallerKindAgent), CallerKindAgent
+				h.Snapshot = snapshotHash(snapshotBytes(aOnly))
+			}), body: goodBody, skipKinds: []string{CallerKindUser}},
 		// The one shape the gate admits on the header and only then finds
 		// undecodable: still legacy, still invalidated (after admission, so
 		// the payload-sized decode is the admitted reader's, not a probe's).
 		// Readers the header does NOT admit are refused on the header, with
 		// the non-disclosing verdict, and never reach the body.
 		{name: "body: undecodable behind an admitted header",
-			header:       headerJSON(with(map[string]interface{}{"producer": map[string]interface{}{"caller_kind": CallerKindAdmin}})),
+			header:       current.encode(),
 			body:         func(string) []byte { return []byte("{not json") },
 			admittedOnly: true},
 	}
@@ -468,16 +473,17 @@ func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
 			if fx.admittedOnly && rd.reader.CallerKind == CallerKindAnonymous {
 				continue // ranks below an authenticated administrator's snapshot
 			}
+			if slices.Contains(fx.skipKinds, rd.reader.CallerKind) {
+				continue
+			}
 			t.Run(fx.name+"/"+rd.name, func(t *testing.T) {
 				path := filepath.Join(t.TempDir(), "cache.db")
 				m, db := openManagerAt(t, path)
 				const key = "framed"
-				if fx.name == "header: length beyond the value" {
-					// A frame whose length field promises more header than
-					// the value holds.
+				if fx.name == "header: truncated frame" {
+					// The magic followed by fewer bytes than a header.
 					if err := db.Update(func(tx *bbolt.Tx) error {
-						value := encodeRecordFrame([]byte("{}"), nil)
-						value[len(recordFrameMagic)+recordFrameLenSize-1] = 0xff
+						value := append(append([]byte(nil), recordFrameMagic...), current.encode()[:recordHeaderSize/2]...)
 						return tx.Bucket([]byte(CacheBucket)).Put([]byte(key), value)
 					}); err != nil {
 						t.Fatal(err)
@@ -509,4 +515,29 @@ func TestGetRecordsAs_FramedRecordWithUnrecognisedHeaderIsLegacy(t *testing.T) {
 			})
 		}
 	}
+
+	// A user reader is refused on the header's kind alone (caller kind
+	// first: an agent snapshot is never a user's), with the ordinary
+	// non-disclosing verdict, and the entry is kept — the snapshot the
+	// header names is never loaded, so its absence is not observed.
+	t.Run("header: snapshot missing from the bucket/user refused on kind, kept", func(t *testing.T) {
+		m, db := openManagerAt(t, filepath.Join(t.TempDir(), "cache.db"))
+		defer db.Close()
+		defer m.Close()
+		const key = "framed"
+		putFramedRecord(t, db, key, with(func(h *recordHeader) {
+			h.KindCode, h.Kind = callerKindCode(CallerKindAgent), CallerKindAgent
+			h.Snapshot = snapshotHash(snapshotBytes(aOnly))
+		}), goodBody(key))
+		user := Authorization{CallerKind: CallerKindUser, Principal: "u1", AllowedServers: []string{"*"}, Permissions: []string{"read"}}
+		resp, err := m.GetRecordsAs(key, 0, 10, user)
+		if !errors.Is(err, ErrUnauthorizedRead) || errors.Is(err, ErrLegacyProvenance) || resp != nil {
+			t.Fatalf("user: got err=%v resp=%v, want the plain ErrUnauthorizedRead", err, resp)
+		}
+		// Peek cannot decode the crafted value (its body disagrees with
+		// the header), so count the bucket directly.
+		if got := onDiskEntryCount(t, db); got != 1 {
+			t.Fatalf("on-disk count = %d, want 1: a kind refusal must not evict", got)
+		}
+	})
 }

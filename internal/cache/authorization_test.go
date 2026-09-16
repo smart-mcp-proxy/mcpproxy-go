@@ -3,6 +3,7 @@ package cache
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"go.uber.org/zap"
@@ -14,6 +15,28 @@ import (
 // unrestricted admin could have produced anything, a weather-only token could
 // not have produced a github listing.
 func TestAuthorization_CouldHaveProduced(t *testing.T) {
+	for _, tc := range couldHaveProducedCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.producer.CouldHaveProduced(tc.reader); got != tc.want {
+				t.Fatalf("producer=%+v reader=%+v: got %v want %v", tc.producer, tc.reader, got, tc.want)
+			}
+		})
+	}
+}
+
+// authorizationCase is one (producer, reader) cell of the read-gate matrix.
+type authorizationCase struct {
+	name     string
+	producer Authorization
+	reader   Authorization
+	want     bool
+}
+
+// couldHaveProducedCases is the read-gate matrix, shared by the predicate
+// test and by TestGetRecordsAs_DoorAgreesWithPredicate, which drives every
+// cell through the gated door (fixed header short-cuts, snapshot cache and
+// all) and requires the same verdict.
+func couldHaveProducedCases() []authorizationCase {
 	admin := Authorization{CallerKind: CallerKindAdmin}
 	anonymous := Authorization{CallerKind: CallerKindAnonymous}
 	broad := Authorization{CallerKind: CallerKindAgent, Principal: "broad",
@@ -35,15 +58,12 @@ func TestAuthorization_CouldHaveProduced(t *testing.T) {
 		ProfileScoped: true, ProfileServers: []string{"github", "weather"}}
 	adminInDenyAll := Authorization{CallerKind: CallerKindAdmin, Profile: "research",
 		ProfileScoped: true, ProfileServers: []string{}}
-	alice := Authorization{CallerKind: CallerKindUser, Principal: "user-alice"}
-	bob := Authorization{CallerKind: CallerKindUser, Principal: "user-bob"}
+	alice := Authorization{CallerKind: CallerKindUser, Principal: "user-alice",
+		AllowedServers: []string{"github", "weather"}, Permissions: []string{"read", "write"}}
+	bob := Authorization{CallerKind: CallerKindUser, Principal: "user-bob",
+		AllowedServers: []string{"github", "weather"}, Permissions: []string{"read", "write"}}
 
-	cases := []struct {
-		name     string
-		producer Authorization
-		reader   Authorization
-		want     bool
-	}{
+	cases := []authorizationCase{
 		{"same agent token", broad, broad, true},
 		{"narrower server scope", broad, narrow, false},
 		{"narrower permission tier", broad, Authorization{CallerKind: CallerKindAgent,
@@ -81,10 +101,46 @@ func TestAuthorization_CouldHaveProduced(t *testing.T) {
 		{"agent cannot read a user's entry", alice, wildcard, false},
 		{"admin reads a user's entry", alice, admin, true},
 	}
-	for _, tc := range cases {
+	return append(cases, userContainmentCases(alice, bob)...)
+}
+
+// The gated door decides what it can on the fixed frame header (caller kind
+// first, the deny-all bits) and loads the producer snapshot only for
+// same-kind containment; CouldHaveProduced is the one predicate all of that
+// must agree with. Every cell of the matrix is stored and probed through
+// GetRecordsAs — an internal producer aside, which the door refuses before
+// the guard — twice: once cold and once with the snapshot cache warm, so a
+// short-cut can never admit what the predicate refuses or refuse what it
+// admits, on either path.
+func TestGetRecordsAs_DoorAgreesWithPredicate(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+	m, err := NewManager(db, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	for i, tc := range couldHaveProducedCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.producer.CouldHaveProduced(tc.reader); got != tc.want {
-				t.Fatalf("producer=%+v reader=%+v: got %v want %v", tc.producer, tc.reader, got, tc.want)
+			key := fmt.Sprintf("cell-%d", i)
+			if err := m.StoreAs(key, "t", nil, `[{"v":1}]`, "", 1, tc.producer); err != nil {
+				t.Fatal(err)
+			}
+			for _, pass := range []string{"cold", "warm"} {
+				if pass == "cold" {
+					m.snapshots = newSnapshotCache(snapshotCacheSize)
+				}
+				resp, err := m.GetRecordsAs(key, 0, 10, tc.reader)
+				admitted := err == nil && resp != nil && len(resp.Records) == 1
+				if admitted != tc.want {
+					t.Fatalf("%s: door admitted=%v (err=%v), predicate says %v", pass, admitted, err, tc.want)
+				}
+				if !admitted && !errors.Is(err, ErrUnauthorizedRead) {
+					t.Fatalf("%s: refusal must be ErrUnauthorizedRead, got %v", pass, err)
+				}
+				if _, ok := m.Peek(key); !ok {
+					t.Fatalf("%s: the entry must survive the read", pass)
+				}
 			}
 		})
 	}
@@ -347,5 +403,53 @@ func TestAuthorization_CallerKindFirst(t *testing.T) {
 				t.Fatalf("producer=%+v reader=%+v: got %v want %v", tc.producer, tc.reader, got, tc.want)
 			}
 		})
+	}
+}
+
+// userContainmentCases: a server-edition user is allowlist-scoped at every
+// dispatch gate exactly like an agent token (auth.CanAccessServer,
+// HasPermission and the effective profile bound AuthTypeUser too), so the
+// read gate bounds a user snapshot the same way. Identity equality is
+// NECESSARY, never sufficient: a user allowed only {a} produces an `a`
+// entry, is later narrowed to {b}, or enters a disjoint or deny-all profile,
+// and must not redeem the old entry on the strength of the user id alone
+// (codex round 4, finding 1).
+func userContainmentCases(alice, bob Authorization) []authorizationCase {
+	narrowed := alice
+	narrowed.AllowedServers = []string{"weather"}
+	reassigned := alice
+	reassigned.AllowedServers = []string{"deploy"}
+	readOnly := alice
+	readOnly.Permissions = []string{"read"}
+	wider := alice
+	wider.AllowedServers = []string{"*"}
+	wider.Permissions = []string{"read", "write", "destructive"}
+	inProfile := alice
+	inProfile.Profile, inProfile.ProfileScoped, inProfile.ProfileServers = "research", true, []string{"github"}
+	inDisjointProfile := alice
+	inDisjointProfile.Profile, inDisjointProfile.ProfileScoped, inDisjointProfile.ProfileServers = "deploy", true, []string{"weather"}
+	inDenyAllProfile := alice
+	inDenyAllProfile.Profile, inDenyAllProfile.ProfileScoped, inDenyAllProfile.ProfileServers = "research", true, []string{}
+	// The production shape of a plain OAuth user context (auth.UserContext):
+	// no server grant at all — deny-all on every dispatch gate.
+	noGrant := Authorization{CallerKind: CallerKindUser, Principal: alice.Principal}
+	bobWider := bob
+	bobWider.AllowedServers = []string{"*"}
+	bobWider.Permissions = []string{"read", "write", "destructive"}
+	return []authorizationCase{
+		{"user: same id, grant narrowed since", alice, narrowed, false},
+		{"user: same id, grant reassigned to a disjoint server", alice, reassigned, false},
+		{"user: same id, permission tier dropped", alice, readOnly, false},
+		{"user: same id, wider grant reads", alice, wider, true},
+		{"user: narrower own entry read with the wider grant", narrowed, alice, true},
+		{"user: same id, now bound to a profile that does not cover the entry", alice, inProfile, false},
+		{"user: same id, profile entry read unscoped (unscoped is broader)", inProfile, alice, true},
+		{"user: same id, disjoint profile", inProfile, inDisjointProfile, false},
+		{"user: same id, deny-all profile (deleted since)", alice, inDenyAllProfile, false},
+		{"user: same id, no grant (production user context) reads nothing", alice, noGrant, false},
+		{"user: no-grant producer snapshot is deny-all, its own id included", noGrant, noGrant, false},
+		{"user: no-grant producer snapshot, wider same user still refused", noGrant, wider, false},
+		{"user: no-grant producer snapshot, administrator reads (kind first)", noGrant, Authorization{CallerKind: CallerKindAdmin}, true},
+		{"user: other id with a wider grant is still another identity", alice, bobWider, false},
 	}
 }

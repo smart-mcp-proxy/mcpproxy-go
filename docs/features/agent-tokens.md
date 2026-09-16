@@ -298,12 +298,20 @@ Server scoping is enforced at three levels:
    refusing read writes exactly what a miss writes. The header and the record
    behind it are two encodings of the same stamp; an entry on which they
    disagree (a corrupt or hand-edited database) is treated as unreadable —
-   refused for every caller, invalidated, never served. The header has a
-   fixed size bound (1 MiB — room for an authorization naming several
-   thousand servers in both its grant and its profile), enforced when the
-   entry is written: a response produced under a snapshot too large to fit is
-   returned truncated with a logged error and no cache entry, never stored as
-   an entry every later read would refuse.
+   refused for every caller, invalidated, never served. The header is
+   fixed-size: it names the producer's authorization snapshot by content
+   hash, and each distinct snapshot is stored once, shared by every entry
+   produced under it. Any authorization mcpproxy can mint fits, however many
+   servers it names, and a refusal's cost does not grow with the fleet
+   either — the snapshot is decoded once and cached in memory, so repeated
+   probes of a live key cost what a miss costs.
+
+   Server-edition OAuth **users** are bounded by the same dispatch gates as
+   agent tokens (server allowlist, permission tier, effective profile), so a
+   user's cached entry is stamped with those dimensions as well as the user
+   id, and redemption requires the same user *and* an authorization that
+   contains the entry's: a grant narrowed or a profile changed since the entry
+   was produced revokes cached access exactly as it does for an agent token.
 
    **Upgrading.** Entries written by any release before this one — including
    the immediately preceding one, which stamped a producer but no schema

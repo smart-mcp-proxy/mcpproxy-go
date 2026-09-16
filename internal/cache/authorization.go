@@ -22,15 +22,46 @@ const (
 	CallerKindInternal = "internal"
 )
 
+// callerKindCodes is the one-byte encoding of each kind in the fixed frame
+// header a stored record carries (see recordHeader). Code 0 is reserved for
+// "no producer" (an unstamped record); a code this table does not name is
+// provenance this binary does not recognise. Never renumber: the codes are
+// persisted.
+var callerKindCodes = map[string]uint8{
+	CallerKindAdmin:     1,
+	CallerKindAdminUser: 2,
+	CallerKindAnonymous: 3,
+	CallerKindAgent:     4,
+	CallerKindUser:      5,
+	CallerKindInternal:  6,
+}
+
+var callerKindNames = func() map[uint8]string {
+	names := make(map[uint8]string, len(callerKindCodes))
+	for kind, code := range callerKindCodes {
+		names[code] = kind
+	}
+	return names
+}()
+
 // IsKnownCallerKind reports whether kind is one this binary stamps and
 // gates on. A record carrying any other kind has provenance this binary does
 // not recognise (see Record.HasCurrentProvenance).
 func IsKnownCallerKind(kind string) bool {
-	switch kind {
-	case CallerKindAdmin, CallerKindAdminUser, CallerKindAnonymous, CallerKindAgent, CallerKindUser, CallerKindInternal:
-		return true
-	}
-	return false
+	_, ok := callerKindCodes[kind]
+	return ok
+}
+
+// callerKindCode is the frame-header code for kind; 0 for the empty kind
+// (an unstamped record), which HasCurrentProvenance refuses.
+func callerKindCode(kind string) uint8 {
+	return callerKindCodes[kind]
+}
+
+// callerKindFromCode is the inverse of callerKindCode; "" for a code this
+// binary does not know (0 included).
+func callerKindFromCode(code uint8) string {
+	return callerKindNames[code]
 }
 
 // ErrUnauthorizedRead is returned when a reader's authorization could not have
@@ -98,6 +129,55 @@ func (a Authorization) IsAdministrator() bool {
 	return false
 }
 
+// IsScoped reports whether the caller kind is bounded by the dispatch gates
+// — auth.CanAccessServer, HasPermission and the effective profile — rather
+// than admitted as an administrator: agent tokens and server-edition OAuth
+// users. A user is allowlist-scoped exactly like an agent at every dispatch
+// gate (call_tool_*, direct dispatch, retrieve_tools/describe_tool
+// visibility, set_profile), so the read gate bounds it the same way
+// (codex round 4).
+func (a Authorization) IsScoped() bool {
+	return a.CallerKind == CallerKindAgent || a.CallerKind == CallerKindUser
+}
+
+// DenyAll reports whether a SCOPED snapshot could have authorized no tool
+// call at all: an empty server grant (deny-all on every dispatch gate — an
+// agent or user AuthContext with no AllowedServers reaches nothing), or a
+// binding to an empty effective profile (an empty profile, or the scope a
+// stale pin resolves to). As a producer snapshot it could not have authorized
+// the entry it is stamped on, so no scoped reader qualifies for it however
+// broad; as a reader it could not have produced ANY entry, its own
+// deny-all-stamped one included. Administrator kinds are never deny-all here:
+// the read gate admits them on kind alone. The frame header records this bit
+// so the gated read can refuse a scoped reader without loading the snapshot.
+func (a Authorization) DenyAll() bool {
+	if !a.IsScoped() {
+		return false
+	}
+	return len(a.AllowedServers) == 0 || (a.ProfileScoped && len(a.ProfileServers) == 0)
+}
+
+// kindVerdict is the CALLER-KIND-FIRST part of CouldHaveProduced, decided on
+// the producer's KIND alone (Spec 105 FR-001, research D5) — so the gated
+// read can decide it on the fixed frame header without loading the producer
+// snapshot. decided is false only when both sides are the same scoped kind,
+// where the snapshot's dimensions must be compared.
+func kindVerdict(producerKind string, reader Authorization) (admit, decided bool) {
+	if producerKind == CallerKindInternal {
+		return false, true
+	}
+	if reader.IsAdministrator() {
+		if reader.CallerKind == CallerKindAnonymous {
+			return producerKind != CallerKindAdmin && producerKind != CallerKindAdminUser, true
+		}
+		return true, true
+	}
+	if !reader.IsScoped() || reader.CallerKind != producerKind {
+		return false, true
+	}
+	return false, false
+}
+
 // CouldHaveProduced reports whether reader is at least as broad as the
 // producing authorization a — i.e. whether the reader could have generated
 // the entry itself. That is the read gate for read_cache: a reader never sees
@@ -113,66 +193,51 @@ func (a Authorization) IsAdministrator() bool {
 //     never an authenticated administrator's.
 //   - A non-administrator reader never qualifies for an administrator snapshot,
 //     however broad its own grant, and never for a snapshot of another kind.
-//   - Between agent snapshots every dimension must contain the snapshot's: the
-//     deny-all guards first, on BOTH sides (an empty server grant, or a
-//     binding to an empty effective profile — an empty profile, or the scope
-//     a stale pin resolves to — can call no tool: as a reader it could not
-//     have produced ANY entry, its own deny-all-stamped one included, and as
-//     a producer snapshot it could not have authorized the entry it is
-//     stamped on, so no agent reader qualifies for it however broad; an
-//     empty AllowedServers is deny-all on every dispatch gate, so it is
-//     deny-all here too rather than the vacuous coversServers(x, []) match),
-//     then effective profile scope compared as server sets (a request bounded
-//     to a profile is narrower than an unscoped one; a scoped reader must
-//     currently cover every server the producer's profile exposed, so a profile
-//     deleted or narrowed since no longer reads), pin equality, allowed-server
-//     set and permission set.
+//   - Between snapshots of the same scoped kind (agent, or server-edition
+//     user) every dimension must contain the snapshot's: the deny-all guards
+//     first, on BOTH sides (DenyAll: an empty server grant, or a binding to an
+//     empty effective profile, can call no tool — as a reader it could not
+//     have produced ANY entry, as a producer snapshot it could not have
+//     authorized the entry it is stamped on; an empty AllowedServers is
+//     deny-all on every dispatch gate, so it is deny-all here too rather than
+//     the vacuous coversServers(x, []) match), then effective profile scope
+//     compared as server sets (a request bounded to a profile is narrower
+//     than an unscoped one; a scoped reader must currently cover every server
+//     the producer's profile exposed, so a profile deleted or narrowed since
+//     no longer reads), pin equality, allowed-server set and permission set.
+//     A user snapshot is additionally bound to its identity: the reader must
+//     be the SAME user — necessary, never sufficient, since a user's grant
+//     and profile can be narrowed after the entry was produced exactly like
+//     an agent's (codex round 4).
 //   - Internal entries (CallerKindInternal) were produced by no request and
 //     match no reader (Spec 105 FR-002).
 func (a Authorization) CouldHaveProduced(reader Authorization) bool {
-	if a.CallerKind == CallerKindInternal {
+	if admit, decided := kindVerdict(a.CallerKind, reader); decided {
+		return admit
+	}
+	if a.CallerKind == CallerKindUser && (reader.Principal == "" || reader.Principal != a.Principal) {
 		return false
 	}
-	if reader.IsAdministrator() {
-		if reader.CallerKind == CallerKindAnonymous {
-			return a.CallerKind != CallerKindAdmin && a.CallerKind != CallerKindAdminUser
-		}
-		return true
-	}
-	if a.IsAdministrator() || reader.CallerKind != a.CallerKind {
+	return a.containedBy(reader)
+}
+
+// containedBy is the dimension-by-dimension containment between two
+// snapshots of the same scoped kind: deny-all guards on both sides, then
+// effective profile scope, pin, server grant and permission set.
+func (a Authorization) containedBy(reader Authorization) bool {
+	if a.DenyAll() || reader.DenyAll() {
 		return false
 	}
-	switch a.CallerKind {
-	case CallerKindUser:
-		return reader.Principal != "" && reader.Principal == a.Principal
-	case CallerKindAgent:
-		// A deny-all PRODUCER snapshot — an empty server grant, or bounded
-		// to an empty effective profile — could have authorized no tool, so
-		// no entry legitimately carries it; it is provenance the agent gate
-		// does not recognise, refused before containment (which is
-		// vacuously true against an empty set). Administrator readers were
-		// admitted above: they qualify for any snapshot (kind first).
-		if len(a.AllowedServers) == 0 || (a.ProfileScoped && len(a.ProfileServers) == 0) {
+	if reader.ProfileScoped {
+		if !a.ProfileScoped || !coversAll(reader.ProfileServers, a.ProfileServers) {
 			return false
 		}
-		if len(reader.AllowedServers) == 0 {
-			return false
-		}
-		if reader.ProfileScoped {
-			if len(reader.ProfileServers) == 0 {
-				return false
-			}
-			if !a.ProfileScoped || !coversAll(reader.ProfileServers, a.ProfileServers) {
-				return false
-			}
-		}
-		if reader.ProfilePin != "" && reader.ProfilePin != a.ProfilePin {
-			return false
-		}
-		return coversServers(reader.AllowedServers, a.AllowedServers) &&
-			coversAll(reader.Permissions, a.Permissions)
 	}
-	return false
+	if reader.ProfilePin != "" && reader.ProfilePin != a.ProfilePin {
+		return false
+	}
+	return coversServers(reader.AllowedServers, a.AllowedServers) &&
+		coversAll(reader.Permissions, a.Permissions)
 }
 
 // coversServers reports whether the reader's server scope includes every

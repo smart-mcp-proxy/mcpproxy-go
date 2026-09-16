@@ -67,12 +67,19 @@ func TestGetRecordsAs_RefusalIsPayloadSizeIndependent(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, ErrInternalEntry},
-		{"legacy provenance (pre-feature record), evicted", func(t *testing.T, _ *Manager, db *bbolt.DB, key, body string) {
+		{"legacy provenance (framed, unstamped), evicted", func(t *testing.T, _ *Manager, db *bbolt.DB, key, body string) {
 			now := time.Now()
-			putRawRecord(t, db, key, map[string]interface{}{
-				"key": key, "tool_name": "t", "timestamp": now, "full_content": body,
-				"total_size": len(body), "expires_at": now.Add(time.Hour), "created_at": now, "last_accessed": now,
-			})
+			rec := &Record{Key: key, ToolName: "t", Timestamp: now, FullContent: body, TotalSize: len(body),
+				ExpiresAt: now.Add(time.Hour), CreatedAt: now, LastAccessed: now}
+			data, err := rec.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Update(func(tx *bbolt.Tx) error {
+				return tx.Bucket([]byte(CacheBucket)).Put([]byte(key), data)
+			}); err != nil {
+				t.Fatal(err)
+			}
 		}, ErrLegacyProvenance},
 		{"undecodable record, evicted", func(t *testing.T, _ *Manager, db *bbolt.DB, key, body string) {
 			if err := db.Update(func(tx *bbolt.Tx) error {
@@ -137,6 +144,48 @@ func TestGetRecordsAs_RefusalIsPayloadSizeIndependent(t *testing.T) {
 		}
 		if allocated > refusalAllocBudget {
 			t.Fatalf("a miss next to a 4 MB neighbour allocated %d bytes (budget %d)", allocated, refusalAllocBudget)
+		}
+	})
+
+	// The ONE documented exception: a pre-frame bare-JSON record (written by
+	// a release before frame headers existed) has no header to read its size
+	// from, and its invalidation must fold out exactly what its store folded
+	// in (codex round 4, finding 3), so that path — and only that path —
+	// decodes the value. It is one-shot per key: the same transaction deletes
+	// the entry, the refusal is for EVERY caller, and the second probe is a
+	// plain miss inside the budget. What the first probe can reveal is that a
+	// pre-upgrade entry existed under the key, which its committed delete
+	// already reveals (round 3, prior-3).
+	t.Run("pre-frame legacy record: one-shot payload decode, then a miss", func(t *testing.T) {
+		m, db := openManagerAt(t, filepath.Join(t.TempDir(), "cache.db"))
+		defer db.Close()
+		defer m.Close()
+		now := time.Now()
+		body := payload(bigPayload)
+		putRawRecord(t, db, "target", map[string]interface{}{
+			"key": "target", "tool_name": "t", "timestamp": now, "full_content": body,
+			"total_size": len(body), "expires_at": now.Add(time.Hour), "created_at": now, "last_accessed": now,
+		})
+		first, resp, err := allocatedBy(func() (*ReadCacheResponse, error) {
+			return m.GetRecordsAs("target", 0, 10, narrow)
+		})
+		if !errors.Is(err, ErrLegacyProvenance) || resp != nil {
+			t.Fatalf("premise: resp=%v err=%v", resp != nil, err)
+		}
+		if first < bigPayload {
+			t.Fatalf("the documented one-shot decode allocated only %d bytes; the size accounting cannot have read the payload", first)
+		}
+		if _, ok := m.Peek("target"); ok {
+			t.Fatal("the invalidating refusal must delete the entry")
+		}
+		second, _, err := allocatedBy(func() (*ReadCacheResponse, error) {
+			return m.GetRecordsAs("target", 0, 10, narrow)
+		})
+		if !errors.Is(err, ErrKeyNotFound) {
+			t.Fatalf("second probe: %v", err)
+		}
+		if second > refusalAllocBudget {
+			t.Fatalf("second probe allocated %d bytes (budget %d): the exception is not one-shot", second, refusalAllocBudget)
 		}
 	})
 
@@ -304,5 +353,85 @@ func TestRecord_BinaryRoundTripAcceptsFramedAndRawJSON(t *testing.T) {
 		if got.Key != "k" || got.FullContent != `[1]` || !got.HasCurrentProvenance() || got.Producer.Principal != "p" {
 			t.Fatalf("%s: round trip lost fields: %+v", name, got)
 		}
+	}
+}
+
+// Codex round 4 (cache finding 2, server finding 1): with the whole producer
+// snapshot in the frame header, every live-key refusal decoded it — a
+// snapshot naming thousands of servers cost ~1 MB of allocation and a third
+// more latency than a miss, on every probe, for as long as the entry lived —
+// while a nonexistent key decoded nothing. The header is now fixed-size and
+// the snapshot is loaded through an in-memory cache keyed by its content
+// hash: the FIRST probe of a snapshot decodes it (bounded by that snapshot,
+// never by the payload), and every probe after that is O(1) whatever the
+// snapshot names. This pins, after warm-up: a containment refusal against
+// a 5,000-server snapshot allocates no more than one against a 2-server
+// snapshot, and no more than a miss beyond a small constant. The measure is
+// the minimum over several runs so bbolt's occasional page growth on a
+// commit does not read as a decode. A positive control proves the meter
+// sees the cold load.
+func TestGetRecordsAs_RefusalIsSnapshotSizeIndependent(t *testing.T) {
+	wide := fleetSnapshot(5000, 112)
+	small := Authorization{CallerKind: CallerKindAgent, Principal: "small", AllowedServers: []string{"a", "b"}, Permissions: []string{"read"}}
+	// Same kind, not deny-all, and disjoint from both: the refusal needs
+	// the containment check, i.e. the snapshot.
+	narrow := Authorization{CallerKind: CallerKindAgent, Principal: "narrow", AllowedServers: []string{"zzz"}, Permissions: []string{"read"}}
+
+	path := filepath.Join(t.TempDir(), "cache.db")
+	m, db := openManagerAt(t, path)
+	for key, p := range map[string]Authorization{"wide": wide, "small": small} {
+		if err := m.StoreAs(key, "t", nil, `[{"v":1}]`, "", 1, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Reopen so the snapshot cache is cold: the store path warms it.
+	m, db = openManagerAt(t, path)
+	defer db.Close()
+	defer m.Close()
+
+	probe := func(key string, want error) uint64 {
+		t.Helper()
+		allocated, resp, err := allocatedBy(func() (*ReadCacheResponse, error) {
+			return m.GetRecordsAs(key, 0, 10, narrow)
+		})
+		if !errors.Is(err, want) || resp != nil {
+			t.Fatalf("%s: resp=%v err=%v, want %v", key, resp != nil, err, want)
+		}
+		return allocated
+	}
+	// Positive control: the cold first probe loads the 5,000-server
+	// snapshot from the bucket — the meter sees at least its bytes.
+	if cold := probe("wide", ErrUnauthorizedRead); cold < uint64(len(snapshotBytes(wide))) {
+		t.Fatalf("meter blind: the cold probe of a %d-byte snapshot allocated only %d bytes", len(snapshotBytes(wide)), cold)
+	}
+	probe("small", ErrUnauthorizedRead) // warm the small one too
+
+	// Interleaved rounds, minimum per key: bbolt's commit-time allocations
+	// (page buffers, freelist) vary by a few pages between commits and
+	// under the race detector, and the interleaving spreads that noise
+	// over all three keys alike.
+	const rounds = 12
+	wideWarm, smallWarm, miss := ^uint64(0), ^uint64(0), ^uint64(0)
+	for i := 0; i < rounds; i++ {
+		wideWarm = min(wideWarm, probe("wide", ErrUnauthorizedRead))
+		smallWarm = min(smallWarm, probe("small", ErrUnauthorizedRead))
+		miss = min(miss, probe("absent", ErrKeyNotFound))
+	}
+	t.Logf("warm refusal: wide=%d small=%d; miss=%d bytes", wideWarm, smallWarm, miss)
+
+	// Room for the guard's closures, the error path and bbolt's commit
+	// noise (a freelist rewrite shows up as a ~16 KiB step that can persist
+	// across a run of commits on one key); still ~18x below the snapshot a
+	// decode would betray.
+	const constant = 64 << 10
+	if wideWarm > smallWarm+constant {
+		t.Fatalf("a warm refusal against a 5,000-server snapshot allocated %d bytes, against a 2-server one %d: the refusal still scales with the snapshot", wideWarm, smallWarm)
+	}
+	if wideWarm > miss+constant {
+		t.Fatalf("a warm refusal allocated %d bytes, a miss %d: not the same class", wideWarm, miss)
 	}
 }
