@@ -178,18 +178,6 @@ func setProfileResult(activeProfile string, servers []string) (*mcp.CallToolResu
 	return mcp.NewToolResultText(string(body)), nil
 }
 
-// profileNames returns all configured profile slugs (for error messages).
-func profileNames(cfg *config.Config) []string {
-	if cfg == nil {
-		return nil
-	}
-	names := make([]string, 0, len(cfg.Profiles))
-	for i := range cfg.Profiles {
-		names = append(names, cfg.Profiles[i].Name)
-	}
-	return names
-}
-
 // allServerNames returns the names of every configured server (the "all
 // servers" set returned when a profile selection is cleared).
 func allServerNames(cfg *config.Config) []string {
@@ -243,28 +231,54 @@ func callerVisibleServers(ctx context.Context, servers []string) []string {
 // URL (profileMiddleware): a profile entirely outside the caller's reach is
 // treated exactly like a nonexistent one, so the error text cannot be used to
 // confirm which profiles the operator has configured (FR-016b, FR-003/004).
+//
+// The result is accumulated by forEachProfileSelectable in configured order;
+// see there for why it never returns early.
 func selectableProfileNames(ctx context.Context, cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
 	}
-	if pin := profilePinFromContext(ctx); pin != "" {
-		for i := range cfg.Profiles {
-			if cfg.Profiles[i].Name == pin && len(callerVisibleServers(ctx, cfg.Profiles[i].EffectiveServers(cfg))) > 0 {
-				return []string{pin}
-			}
-		}
-		return nil
-	}
-	if !auth.IsScopedCaller(ctx) {
-		return profileNames(cfg)
-	}
 	names := make([]string, 0, len(cfg.Profiles))
-	for i := range cfg.Profiles {
-		if len(callerVisibleServers(ctx, cfg.Profiles[i].EffectiveServers(cfg))) > 0 {
-			names = append(names, cfg.Profiles[i].Name)
+	forEachProfileSelectable(ctx, cfg, func(name string, selectable bool) {
+		if selectable {
+			names = append(names, name)
 		}
-	}
+	})
 	return names
+}
+
+// forEachProfileSelectable visits EVERY configured profile, in configured
+// order, and reports to visit whether the caller may select it (the rule
+// documented on selectableProfileNames).
+//
+// It deliberately has no early return and does the same per-profile work
+// whatever the outcome: a scoped caller's reach is computed for each profile
+// even when a pin already rules it out, and a pinned caller keeps walking
+// after its pin is found. A refusal must be non-disclosing in status, body
+// AND timing class (spec Definitions; FR-003/004), and profileMiddleware /
+// handleSetProfile consult this predicate before refusing — a version that
+// answered after one iteration for a live pin and after the whole slice for
+// a deleted or zero-reach pin let a pinned caller tell those apart by the
+// work its own refusal cost (codex review, PR D round 1).
+func forEachProfileSelectable(ctx context.Context, cfg *config.Config, visit func(name string, selectable bool)) {
+	if cfg == nil {
+		return
+	}
+	pin := profilePinFromContext(ctx)
+	// Administrators (and absent contexts) select any configured profile,
+	// including empty or ghost ones (SC-005); everyone else needs reach.
+	needsReach := pin != "" || auth.IsScopedCaller(ctx)
+	for i := range cfg.Profiles {
+		p := &cfg.Profiles[i]
+		selectable := true
+		if needsReach {
+			selectable = len(callerVisibleServers(ctx, p.EffectiveServers(cfg))) > 0
+		}
+		if pin != "" && p.Name != pin {
+			selectable = false
+		}
+		visit(p.Name, selectable)
+	}
 }
 
 // setProfileServerTool wraps buildSetProfileTool as a ServerTool for routing-mode registration.

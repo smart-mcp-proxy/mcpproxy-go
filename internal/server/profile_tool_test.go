@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -707,4 +708,104 @@ func TestResolveActiveProfileIn_UsesGivenSnapshot(t *testing.T) {
 	name, scope = p.resolveActiveProfileIn(pinned, snapshot)
 	require.Equal(t, "research", name)
 	require.Equal(t, []string{"research-srv"}, scope.AllowedServerNames())
+}
+
+// selectableProbeConfig builds a fleet of n+1 profiles: "pin" (reaching
+// "pin-srv") FIRST, followed by n profiles that reach only "other-srv". Placing
+// the pin first is the adversarial layout for an early-returning predicate:
+// a reachable pin would answer after one iteration while a deleted or
+// zero-reach pin would walk the whole slice.
+func selectableProbeConfig(n int) *config.Config {
+	cfg := &config.Config{Servers: []*config.ServerConfig{{Name: "pin-srv"}, {Name: "other-srv"}}}
+	cfg.Profiles = append(cfg.Profiles, config.ProfileConfig{Name: "pin", Servers: []string{"pin-srv"}})
+	for i := 0; i < n; i++ {
+		cfg.Profiles = append(cfg.Profiles, config.ProfileConfig{Name: fmt.Sprintf("p%d", i), Servers: []string{"other-srv"}})
+	}
+	return cfg
+}
+
+func selectablePinnedCtx(pin string, allowed ...string) context.Context {
+	return auth.WithAuthContext(context.Background(), &auth.AuthContext{Type: auth.AuthTypeAgent, ProfilePin: pin, AllowedServers: allowed})
+}
+
+// TestSelectableProfileNames_PinOutcomesDoSameWork (Spec 105 PR D codex round
+// 1, finding 1): profileMiddleware answers every scoped refusal through one
+// constructor so status and body cannot tell "pin exists but the URL names
+// another slug" from "pin deleted" or "pin has zero reach" — but the predicate
+// it consults must not tell them apart by the WORK it does either (spec
+// Definitions: non-disclosing = status, body AND timing class). An early
+// return on the first reachable pin made a pinned caller's refusal cost one
+// iteration when the pin was alive and a full slice walk when it was gone.
+//
+// The oracle here is deterministic, not wall-clock: the allocation profile of
+// one predicate call is identical for every pin outcome over the same fleet
+// (the early-returning version allocated 2 / 0 / 1 times respectively).
+func TestSelectableProfileNames_PinOutcomesDoSameWork(t *testing.T) {
+	const n = 64
+	alive := selectableProbeConfig(n)
+	deleted := selectableProbeConfig(n)
+	deleted.Profiles[0].Name = "was-the-pin" // same fleet size, the pin is gone
+
+	cases := map[string]struct {
+		ctx context.Context
+		cfg *config.Config
+	}{
+		"reachable pin first":  {selectablePinnedCtx("pin", "pin-srv"), alive},
+		"zero-reach pin first": {selectablePinnedCtx("pin", "other-srv"), alive},
+		"deleted pin":          {selectablePinnedCtx("pin", "pin-srv"), deleted},
+	}
+	allocs := map[string]float64{}
+	for name, c := range cases {
+		allocs[name] = testing.AllocsPerRun(20, func() { selectableProfileNames(c.ctx, c.cfg) })
+	}
+	for name, got := range allocs {
+		require.Equal(t, allocs["reachable pin first"], got, "%s must allocate exactly like a reachable pin: %v", name, allocs)
+	}
+}
+
+// TestForEachProfileSelectable_VisitsEveryProfileRegardlessOfOutcome pins the
+// structural guarantee behind the allocation parity above: the predicate
+// visits every configured profile, in order, for every caller kind and every
+// pin outcome — never one iteration for a live pin and the whole slice for a
+// dead one. A traversal counter, not a clock.
+func TestForEachProfileSelectable_VisitsEveryProfileRegardlessOfOutcome(t *testing.T) {
+	const n = 8
+	cfg := selectableProbeConfig(n) // "pin" first, then p0..p7 reaching other-srv
+	want := make([]string, 0, n+1)
+	for i := range cfg.Profiles {
+		want = append(want, cfg.Profiles[i].Name)
+	}
+
+	cases := map[string]struct {
+		ctx        context.Context
+		selectable []string
+	}{
+		"admin":                    {auth.WithAuthContext(context.Background(), auth.AdminContext()), want},
+		"absent context":           {context.Background(), want},
+		"scoped, pin-srv only":     {setProfileScopedCtx("s", "pin-srv"), []string{"pin"}},
+		"scoped, empty allowlist":  {setProfileScopedCtx("s"), []string{}},
+		"reachable pin first":      {selectablePinnedCtx("pin", "pin-srv"), []string{"pin"}},
+		"zero-reach pin first":     {selectablePinnedCtx("pin", "other-srv"), []string{}},
+		"deleted pin":              {selectablePinnedCtx("gone", "pin-srv", "other-srv"), []string{}},
+		"wildcard pin on last one": {selectablePinnedCtx("p7", "*"), []string{"p7"}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			visited := make([]string, 0, n+1)
+			picked := []string{}
+			forEachProfileSelectable(c.ctx, cfg, func(profileName string, selectable bool) {
+				visited = append(visited, profileName)
+				if selectable {
+					picked = append(picked, profileName)
+				}
+			})
+			require.Equal(t, want, visited, "every profile must be visited exactly once, in configured order")
+			require.Equal(t, c.selectable, picked)
+			require.Equal(t, c.selectable, selectableProfileNames(c.ctx, cfg))
+		})
+	}
+
+	// A nil config visits nothing (and selectableProfileNames stays nil).
+	forEachProfileSelectable(context.Background(), nil, func(string, bool) { t.Fatal("visited a profile of a nil config") })
+	require.Nil(t, selectableProfileNames(context.Background(), nil))
 }
