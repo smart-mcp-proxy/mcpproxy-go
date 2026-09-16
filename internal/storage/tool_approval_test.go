@@ -345,3 +345,58 @@ func TestToolApprovalRecord_GetToolApprovals_OneSnapshot(t *testing.T) {
 		assert.Nil(t, records, "a partial map must not be handed back as if it were a snapshot")
 	})
 }
+
+// Spec 105 FR-009, astra r1 P4: the identity stamp re-reads each record
+// inside its own write transaction and touches ONLY the IdentityKeyed bit of
+// a record that is still unstamped and still unrestricting — a record that
+// restricts at write time (disabled / pending / changed), an already-stamped
+// one and an absent key are all left exactly as they are.
+func TestToolApprovalRecord_StampIdentityKeyed_ReChecksAtWriteTime(t *testing.T) {
+	manager, cleanup := setupTestStorageForToolApproval(t)
+	defer cleanup()
+
+	seed := []*ToolApprovalRecord{
+		{ServerName: "a", ToolName: "plain", Status: ToolApprovalStatusApproved, ApprovedBy: "user", CurrentDescription: "keep me"},
+		{ServerName: "a", ToolName: "disabled", Status: ToolApprovalStatusApproved, ApprovedBy: "user", Disabled: true},
+		{ServerName: "a", ToolName: "pending", Status: ToolApprovalStatusPending},
+		{ServerName: "a", ToolName: "changed", Status: ToolApprovalStatusChanged, PreviousDescription: "before"},
+		{ServerName: "a", ToolName: "stamped", Status: ToolApprovalStatusApproved, IdentityKeyed: true},
+		{ServerName: "b", ToolName: "plain", Status: ToolApprovalStatusApproved},
+	}
+	for _, rec := range seed {
+		require.NoError(t, manager.SaveToolApproval(rec))
+	}
+
+	stamped, err := manager.StampToolApprovalsIdentityKeyed("a", []string{"plain", "disabled", "pending", "changed", "stamped", "absent"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"plain"}, stamped, "only the unstamped, unrestricting record is stamped")
+
+	get := func(server, tool string) *ToolApprovalRecord {
+		t.Helper()
+		rec, err := manager.GetToolApproval(server, tool)
+		require.NoError(t, err)
+		return rec
+	}
+	plain := get("a", "plain")
+	assert.True(t, plain.IdentityKeyed)
+	assert.Equal(t, "keep me", plain.CurrentDescription, "nothing but the stamp changes")
+	assert.Equal(t, "user", plain.ApprovedBy)
+	for _, name := range []string{"disabled", "pending", "changed"} {
+		rec := get("a", name)
+		assert.False(t, rec.IdentityKeyed, "%q restricts at write time and must stay unstamped", name)
+	}
+	assert.True(t, get("a", "disabled").Disabled)
+	assert.Equal(t, "before", get("a", "changed").PreviousDescription)
+	assert.True(t, get("a", "stamped").IdentityKeyed)
+	assert.False(t, get("b", "plain").IdentityKeyed, "another server's record is untouched")
+	_, err = manager.GetToolApproval("a", "absent")
+	require.ErrorIs(t, err, ErrToolApprovalNotFound, "an absent key is never created")
+
+	// Idempotent and empty-safe.
+	again, err := manager.StampToolApprovalsIdentityKeyed("a", []string{"plain"})
+	require.NoError(t, err)
+	assert.Empty(t, again)
+	none, err := manager.StampToolApprovalsIdentityKeyed("a", nil)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}

@@ -366,26 +366,36 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 
 	r.logger.Info("Discovering and indexing tools...", zap.Bool("due_only", dueOnly))
 
-	var tools []*config.ToolMetadata
-	var err error
-	if dueOnly {
-		tools, err = r.upstreamManager.DiscoverToolsDue(ctx)
-	} else {
-		tools, err = r.upstreamManager.DiscoverTools(ctx)
-	}
+	// Capture every server's connection generation AND live connection
+	// token BEFORE listing: the publish below is bound to the generation, so
+	// a result whose capture straddled a reconnect is dropped rather than
+	// landing on the new connection (Spec 105 FR-009 "stale generation";
+	// astra r1 I2), and stamped with the token so an identity read can tell
+	// whether it still describes the live connection (astra r2 C3).
+	gens := r.discoveryGenerations()
+
+	tools, listed, err := r.upstreamManager.DiscoverToolsReport(ctx, dueOnly)
 	if err != nil {
 		return fmt.Errorf("failed to discover tools: %w", err)
-	}
-
-	if len(tools) == 0 {
-		r.logger.Warn("No tools discovered from upstream servers")
-		return nil
 	}
 
 	// Group tools by server name for differential updates
 	toolsByServer := make(map[string][]*config.ToolMetadata)
 	for _, tool := range tools {
 		toolsByServer[tool.ServerName] = append(toolsByServer[tool.ServerName], tool)
+	}
+
+	// A server whose tools/list SUCCEEDED with zero tools has completed its
+	// discovery just as surely as one that listed ten: stamp it so its names
+	// resolve as absent instead of lingering in the connect→discovery window
+	// (Spec 105 FR-009, research D4). Its tool set is left alone — the sweep
+	// never wipes a server on an empty result — and servers the sweep skipped
+	// or that failed to list are not stamped.
+	r.markZeroToolServersDiscovered(listed, toolsByServer, gens)
+
+	if len(tools) == 0 {
+		r.logger.Warn("No tools discovered from upstream servers")
+		return nil
 	}
 
 	// Snapshot the set of currently-known servers so we can prune entries for
@@ -467,11 +477,25 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 
 	// Update StateView with discovered tools
 	if r.supervisor != nil {
-		if err := r.supervisor.RefreshToolsFromDiscovery(tools); err != nil {
+		stale, err := r.supervisor.RefreshToolsFromDiscovery(tools, gens)
+		if err != nil {
 			r.logger.Warn("Failed to refresh tools in StateView", zap.Error(err))
 			// Don't fail the entire operation if StateView update fails
 		} else {
 			r.logger.Debug("Successfully refreshed tools in StateView", zap.Int("tool_count", len(tools)))
+		}
+		// A server whose connection changed while the sweep was listing had
+		// its result dropped: re-list it under its current connection so it
+		// does not linger in the connect→discovery window until the next
+		// sweep tick (the reactive connect discovery may have been skipped by
+		// the in-progress dedup).
+		for _, serverName := range stale {
+			r.logger.Info("Sweep discovery result was captured under a superseded connection; re-listing the server",
+				zap.String("server", serverName))
+			if err := r.discoverAndIndexToolsForServer(ctx, serverName, false); err != nil {
+				r.logger.Warn("Failed to re-list server after a stale sweep result",
+					zap.String("server", serverName), zap.Error(err))
+			}
 		}
 	}
 
@@ -520,8 +544,30 @@ func (r *Runtime) RefreshServerTools(ctx context.Context, serverName string) err
 }
 
 func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName string, authoritative bool) error {
+	// A result captured under a connection that changed before it was
+	// published is dropped by the supervisor (Spec 105 FR-009 "stale
+	// generation"; astra r1 I2). Re-list under the current connection a
+	// bounded number of times rather than leave the server in the
+	// connect→discovery window until the next sweep — the reactive connect
+	// discovery for the new connection may have been skipped by the
+	// in-progress dedup while this one was still listing.
+	const maxStaleRelists = 2
+	for attempt := 0; ; attempt++ {
+		published, err := r.discoverAndIndexToolsForServerOnce(ctx, serverName, authoritative)
+		if err != nil || published || attempt >= maxStaleRelists {
+			return err
+		}
+		r.logger.Info("Discovery result was captured under a superseded connection; re-listing the server",
+			zap.String("server", serverName), zap.Int("attempt", attempt+1))
+	}
+}
+
+// discoverAndIndexToolsForServerOnce is one list→index→publish attempt; it
+// reports whether the result was published (false only when the server's
+// connection generation moved on while it was captured).
+func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, serverName string, authoritative bool) (published bool, err error) {
 	if r.upstreamManager == nil || r.indexManager == nil {
-		return fmt.Errorf("runtime managers not initialized")
+		return false, fmt.Errorf("runtime managers not initialized")
 	}
 
 	// SECURITY-CRITICAL GUARD (issue #873): never (re)index a quarantined or
@@ -535,7 +581,7 @@ func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName
 	if !r.serverEligibleForIndexing(serverName) {
 		r.logger.Info("Skipping single-server tool discovery for ineligible server (disabled or quarantined)",
 			zap.String("server", serverName))
-		return nil
+		return true, nil
 	}
 
 	r.logger.Info("Discovering and indexing tools for server", zap.String("server", serverName))
@@ -543,13 +589,18 @@ func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName
 	// Get the upstream client for this server
 	client, ok := r.upstreamManager.GetClient(serverName)
 	if !ok {
-		return fmt.Errorf("client not found for server %s", serverName)
+		return false, fmt.Errorf("client not found for server %s", serverName)
 	}
+
+	// The connection generation and live connection token this result will
+	// be published under: captured BEFORE the list so a reconnect during it
+	// is detected at publish time (generation) or at identity-read time
+	// (token, astra r2 C3).
+	gen := r.discoveryGeneration(serverName)
 
 	// Retry logic: Sometimes connection events fire slightly before the server is fully ready
 	// We retry up to 3 times with exponential backoff (500ms, 1s, 2s)
 	var tools []*config.ToolMetadata
-	var err error
 	maxRetries := 3
 	baseDelay := 500 * time.Millisecond
 
@@ -564,7 +615,7 @@ func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
-				return fmt.Errorf("context cancelled during retry backoff: %w", ctx.Err())
+				return false, fmt.Errorf("context cancelled during retry backoff: %w", ctx.Err())
 			}
 		}
 
@@ -583,23 +634,30 @@ func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName
 
 		// Don't retry on context cancellation
 		if ctx.Err() != nil {
-			return fmt.Errorf("context cancelled during tool discovery: %w", ctx.Err())
+			return false, fmt.Errorf("context cancelled during tool discovery: %w", ctx.Err())
 		}
 	}
 
 	// After all retries, check if we still have an error
 	if err != nil {
-		return fmt.Errorf("failed to list tools for server %s after %d attempts: %w", serverName, maxRetries, err)
+		return false, fmt.Errorf("failed to list tools for server %s after %d attempts: %w", serverName, maxRetries, err)
 	}
 
 	if len(tools) == 0 {
 		if !authoritative {
 			// Lenient path (reactive discovery): a transient empty result must
 			// not wipe a server's tools. Leave the index and last-good snapshot
-			// untouched; the next sweep or a real change will reconcile.
+			// untouched; the next sweep or a real change will reconcile. The
+			// discovery itself did complete, though: stamp the server so a
+			// genuinely tool-less one does not stay in the connect→discovery
+			// window (Spec 105 FR-009). A server still holding a RETAINED set
+			// (the previous connection's, restored on reconnect) is not
+			// stamped — this connection listed none of it — and stays in the
+			// window until a non-empty or authoritative pass (astra r1 I1).
 			r.logger.Warn("No tools discovered from server; keeping existing index (lenient path)",
 				zap.String("server", serverName))
-			return nil
+			r.markZeroToolServersDiscovered([]string{serverName}, nil, map[string]supervisor.DiscoveryCapture{serverName: gen})
+			return true, nil
 		}
 		// Authoritative path (explicit refresh/discover, issue #873): zero tools
 		// is the truth. Fall through with an empty toolset so the differential
@@ -632,34 +690,79 @@ func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName
 	if !r.serverEligibleForIndexing(serverName) {
 		r.logger.Info("Server became ineligible during discovery (quarantined or disabled); skipping index write",
 			zap.String("server", serverName))
-		return nil
+		return true, nil
 	}
 
 	// Apply differential update: compare new tools with existing indexed tools
 	if err := r.applyDifferentialToolUpdate(ctx, serverName, tools); err != nil {
-		return fmt.Errorf("failed to apply differential tool update for server %s: %w", serverName, err)
+		return false, fmt.Errorf("failed to apply differential tool update for server %s: %w", serverName, err)
 	}
 
 	// Invalidate tool count caches since tools may have changed
 	r.upstreamManager.InvalidateAllToolCountCaches()
 
-	// Update StateView with discovered tools
+	// Update StateView with discovered tools. The per-server variant stamps
+	// the server's discovery as completed even when the result is EMPTY, so
+	// a tool-less server is not left in the connect→discovery window (Spec
+	// 105 FR-009, research D4). The publish is bound to the generation
+	// captured before the list; a dropped (stale) result is reported to the
+	// caller, which re-lists.
+	published = true
 	if r.supervisor != nil {
-		if err := r.supervisor.RefreshToolsFromDiscovery(tools); err != nil {
+		ok, err := r.supervisor.RefreshServerToolsFromDiscovery(serverName, tools, gen)
+		if err != nil {
 			r.logger.Warn("Failed to refresh tools in StateView for server",
 				zap.String("server", serverName),
 				zap.Error(err))
 		} else {
-			r.logger.Debug("Successfully refreshed tools in StateView for server",
+			published = ok
+			r.logger.Debug("Refreshed tools in StateView for server",
 				zap.String("server", serverName),
-				zap.Int("tool_count", len(tools)))
+				zap.Int("tool_count", len(tools)),
+				zap.Bool("published", ok))
 		}
 	}
 
 	r.logger.Info("Successfully indexed tools for server",
 		zap.String("server", serverName),
 		zap.Int("count", len(tools)))
-	return nil
+	return published, nil
+}
+
+// discoveryGenerations is supervisor.DiscoveryGenerations, nil-safe for
+// fixtures without a supervisor.
+func (r *Runtime) discoveryGenerations() map[string]supervisor.DiscoveryCapture {
+	if r.supervisor == nil {
+		return nil
+	}
+	return r.supervisor.DiscoveryGenerations()
+}
+
+// discoveryGeneration is supervisor.DiscoveryGeneration, nil-safe.
+func (r *Runtime) discoveryGeneration(serverName string) supervisor.DiscoveryCapture {
+	if r.supervisor == nil {
+		return supervisor.DiscoveryCapture{}
+	}
+	return r.supervisor.DiscoveryGeneration(serverName)
+}
+
+// markZeroToolServersDiscovered stamps ToolsDiscovered on every server in
+// listed that contributed no tools to toolsByServer — a completed tools/list
+// that returned nothing — without touching its tool set (Spec 105 FR-009,
+// research D4; supervisor.MarkServersToolsDiscovered, which also refuses to
+// stamp a server still holding a previous connection's retained set). gens
+// is the generation capture taken before the list.
+func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer map[string][]*config.ToolMetadata, gens map[string]supervisor.DiscoveryCapture) {
+	if r.supervisor == nil {
+		return
+	}
+	zeroTool := make([]string, 0, len(listed))
+	for _, serverName := range listed {
+		if _, hasTools := toolsByServer[serverName]; !hasTools {
+			zeroTool = append(zeroTool, serverName)
+		}
+	}
+	r.supervisor.MarkServersToolsDiscovered(zeroTool, gens)
 }
 
 // applyDifferentialToolUpdate performs differential update of tools for a server.
@@ -696,26 +799,24 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		return nil
 	}
 
-	// Build maps for efficient lookup
-	// Extract tool name without server prefix for comparison
+	// Build maps for efficient lookup, keyed by the tool's RAW upstream name
+	// (Spec 105 FR-009). The index hands back canonical "<server>:<raw>" ids and
+	// discovery hands in raw names; config.RawToolName maps both onto the same
+	// exact key, so "erase" and "ns:erase" stay two entries on both sides and a
+	// rediscovery of an unchanged set diffs to nothing. The previous
+	// first-colon strip collapsed "ns:erase" to "erase" here, which both lost
+	// one of the two tools and — because the OLD key (read back from the
+	// canonical name) never matched the NEW collapsed key — mis-reported
+	// "ns:erase" as removed on every pass, deleting its exact-name approval
+	// record (the operator's Disabled toggle) in step 1 below.
 	oldToolsMap := make(map[string]*config.ToolMetadata)
 	for _, tool := range existingTools {
-		toolName := tool.Name
-		// Remove server prefix if present (format: "server:tool")
-		if idx := strings.Index(tool.Name, ":"); idx != -1 {
-			toolName = tool.Name[idx+1:]
-		}
-		oldToolsMap[toolName] = tool
+		oldToolsMap[config.RawToolName(tool)] = tool
 	}
 
 	newToolsMap := make(map[string]*config.ToolMetadata)
 	for _, tool := range newTools {
-		toolName := tool.Name
-		// Remove server prefix if present
-		if idx := strings.Index(tool.Name, ":"); idx != -1 {
-			toolName = tool.Name[idx+1:]
-		}
-		newToolsMap[toolName] = tool
+		newToolsMap[config.RawToolName(tool)] = tool
 	}
 
 	// Detect changes
@@ -740,6 +841,33 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 	for toolName := range oldToolsMap {
 		if _, exists := newToolsMap[toolName]; !exists {
 			removedTools = append(removedTools, toolName)
+		}
+	}
+
+	// Spec 105 FR-009 migration (astra r1 P2): an unmatched OLD key that is
+	// the collapsed (after-first-colon) suffix of a raw name the server still
+	// serves is not a removed tool — it is the pre-105 docID the old
+	// derivation keyed the namespaced tool by ("erase" for a live "ns:erase"),
+	// and its approval record is the server's pre-105 baseline evidence for
+	// that tool. Its index document is still replaced below (the healed
+	// a:ns:erase document takes over), but the record must survive: deleting
+	// it made the NEXT discovery a trust-baseline pass when it was the
+	// server's only approved/changed record (checkToolApprovals'
+	// serverHasBaseline), which promoted the still-pending ns:erase — held
+	// on this pass precisely because its contract did not match the
+	// baseline — to approved with ApprovedBy "auto-baseline". A rug pull
+	// across the upgrade thereby dispatched on the second discovery. An
+	// unrestricting alias record is stamped inert for the legacy consults by
+	// the pass that filed ns:erase, so retaining it changes nothing else; a
+	// restricting one (user-disabled, pending, changed) keeps binding every
+	// tool that collapses to it, exactly as pre-105 (stampConsultedLegacySibling).
+	// A genuinely removed bare "erase" whose "ns:erase" sibling is still
+	// served keeps an orphan record, consistent with #873's "the record
+	// survives eviction".
+	migrationAliasOfServed := make(map[string]bool)
+	for rawName := range newToolsMap {
+		if _, suffix, ok := strings.Cut(rawName, ":"); ok && suffix != "" {
+			migrationAliasOfServed[suffix] = true
 		}
 	}
 
@@ -781,9 +909,15 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 			}
 		}
 
-		// Clean up tool approval records for removed tools
+		// Clean up tool approval records for removed tools — unless the key
+		// is a pre-105 collapsed alias of a namespaced tool still served
+		// (see migrationAliasOfServed above).
 		if r.storageManager != nil {
-			if err := r.storageManager.DeleteToolApproval(serverName, toolName); err != nil {
+			if migrationAliasOfServed[toolName] {
+				r.logger.Info("Keeping approval record for a pre-105 collapsed docID whose namespaced tool is still served (Spec 105 FR-009)",
+					zap.String("server", serverName),
+					zap.String("legacy_key", toolName))
+			} else if err := r.storageManager.DeleteToolApproval(serverName, toolName); err != nil {
 				r.logger.Debug("Failed to delete tool approval for removed tool",
 					zap.String("tool", fullToolName),
 					zap.Error(err))
@@ -831,7 +965,7 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 			r.logger.Debug("Tool schema changed",
 				zap.String("server", serverName),
 				zap.String("tool", tool.Name),
-				zap.String("old_hash", oldToolsMap[extractToolName(tool.Name)].Hash),
+				zap.String("old_hash", oldToolsMap[config.RawToolName(tool)].Hash),
 				zap.String("new_hash", tool.Hash))
 		}
 
@@ -963,20 +1097,13 @@ func filterBlockedTools(tools []*config.ToolMetadata, blocked map[string]bool) [
 	}
 	var allowed []*config.ToolMetadata
 	for _, tool := range tools {
-		toolName := extractToolName(tool.Name)
-		if !blocked[toolName] {
+		// BlockedTools is keyed by raw name (checkToolApprovals), so the
+		// lookup must use the same exact identity (Spec 105 FR-009).
+		if !blocked[config.RawToolName(tool)] {
 			allowed = append(allowed, tool)
 		}
 	}
 	return allowed
-}
-
-// extractToolName removes the server prefix from a tool name if present
-func extractToolName(fullName string) string {
-	if idx := strings.Index(fullName, ":"); idx != -1 {
-		return fullName[idx+1:]
-	}
-	return fullName
 }
 
 // boolPtrEqual reports whether two tri-state *bool overrides carry the same

@@ -391,9 +391,16 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		// no-op (FR-A7).
 		outputSchemaJSON := captureOutputSchemaJSON(tool)
 
+		// Spec 105 FR-009: stamp the exact upstream-reported name as RawName.
+		// Name carries the same raw string for the index/search seams (#871),
+		// but only RawName is an unambiguous identity — a raw name may itself
+		// contain colons ("ns:erase") or even begin with this server's own
+		// prefix, and every producer downstream (approval records, index
+		// docIDs) keys on it via config.RawToolName.
 		toolMeta := &config.ToolMetadata{
 			ServerName:       c.config.Name,
 			Name:             tool.Name,
+			RawName:          tool.Name,
 			Description:      tool.Description,
 			ParamsJSON:       paramsJSON,
 			OutputSchemaJSON: outputSchemaJSON,

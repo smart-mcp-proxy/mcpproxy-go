@@ -354,11 +354,17 @@ func TestDirectToolCallabilityBlockWithReason_Quarantine(t *testing.T) {
 	require.Equal(t, telemetry.BlockReasonServerQuarantined, reasonKey)
 }
 
-// A callable tool yields no block and no reason key.
+// A callable tool yields no block and no reason key. The tool is approved
+// under its own name: on the direct surface a catalog tool with NO record is
+// pending while the quarantine gate is active (Spec 105 FR-009), so "no
+// record" no longer stands in for "callable" here.
 func TestDirectToolCallabilityBlockWithReason_CallableIsSilent(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
 	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
 		Name: "github", Enabled: true,
+	}))
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github", ToolName: "list_repos", Status: storage.ToolApprovalStatusApproved,
 	}))
 
 	result, reasonKey := proxy.directToolCallabilityBlockWithReason(

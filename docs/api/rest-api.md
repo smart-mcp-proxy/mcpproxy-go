@@ -774,6 +774,14 @@ see the feature page).
 | `not_found` | false | `configure` | `unknown_ids` | 12 |
 | `server_not_configured` | false | `configure` | `unknown_ids` | 12 |
 
+A `tool_pending_approval` occurrence for a tool the server's discovery
+snapshot contains but that has **no stored approval record yet** carries
+`action: "restart"` instead of `approve`, with a detail/remediation that
+points at re-discovering the server (`upstream_servers operation="refresh"`
+or `mcpproxy upstream restart <server>`): nothing is listed to approve until
+the server's next discovery pass files the record. The reason code, exit code
+and telemetry counter are unchanged.
+
 The set-level `verdict` is the worst class present:
 `unknown_ids` > `blocked` > `degraded_retryable` > `ready`.
 

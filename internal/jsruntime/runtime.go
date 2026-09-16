@@ -32,6 +32,14 @@ type ExecutionOptions struct {
 	// Auth enforcement (Spec 031)
 	AuthContext        *AuthInfo            // Auth context for permission enforcement (nil = no restrictions)
 	ToolAnnotationFunc ToolAnnotationLookup // Function to look up tool annotations for permission checking
+
+	// ToolGateFunc is the gate-capturing form of ToolAnnotationFunc (Spec
+	// 105 FR-009; codex r9 I1): it answers the same tier AND hands back the
+	// opaque per-call gate the host resolved it from, which the dispatch
+	// that follows consumes through GatedToolCaller instead of taking a
+	// second, independent read. When set it takes precedence over
+	// ToolAnnotationFunc; leave nil to keep the tier-only contract.
+	ToolGateFunc ToolGateLookup
 }
 
 // AuthInfo carries authentication context for permission enforcement in JS execution.
@@ -73,12 +81,60 @@ func (a *AuthInfo) HasPermission(perm string) bool {
 }
 
 // ToolAnnotationLookup is a function that returns the permission tier required for a tool.
-// Returns one of "read", "write", "destructive".
+// Returns one of "read", "write", "destructive" — or PermissionTierUnresolved
+// when the tool's identity cannot be resolved on a server the proxy knows, in
+// which case the call is refused rather than authorized against any tier.
 type ToolAnnotationLookup func(serverName, toolName string) string
+
+// PermissionTierUnresolved is the ToolAnnotationLookup outcome for a name the
+// populated discovery snapshot of a KNOWN, CONNECTED server does not contain
+// (Spec 105 FR-009, research D4). It is not a tier: no permission set — not
+// even an administrator's, which passes every tier check — may dispatch a
+// tool the proxy cannot identify, so checkDispatchGates refuses the call with
+// PERMISSION_DENIED and the upstream is never asked. A lookup that has no
+// opinion (server unknown, no runtime, or a snapshot emptied by the server's
+// own state — quarantined, disabled, disconnected) keeps answering with a
+// tier so the server-level verdicts downstream answer as they always did.
+const PermissionTierUnresolved = "unresolved"
+
+// ToolGate is the opaque per-call capture a ToolGateLookup hands back beside
+// the tier: whatever the host read to authorize the call, so the dispatch
+// that follows runs on THAT read rather than on a second one that may
+// disagree with it (Spec 105 FR-009; codex r9 I1). jsruntime never inspects
+// it — it only carries it, unchanged, from the lookup to the dispatch of the
+// same call. A nil gate means the lookup captured nothing and the dispatch
+// falls back to ToolCaller.CallTool.
+type ToolGate interface{}
+
+// ToolGateLookup is ToolAnnotationLookup with the gate it decided the tier
+// from: the tier follows the ToolAnnotationLookup contract exactly
+// (including PermissionTierUnresolved), and the gate is handed to
+// GatedToolCaller.CallToolWithGate if the call is authorized.
+type ToolGateLookup func(serverName, toolName string) (tier string, gate ToolGate)
 
 // ToolCaller is an interface for calling upstream MCP tools
 type ToolCaller interface {
 	CallTool(ctx context.Context, serverName, toolName string, args map[string]interface{}) (interface{}, error)
+}
+
+// GatedToolCaller is the optional extension of ToolCaller a host implements
+// to dispatch on the gate its ToolGateLookup captured for the same call. The
+// sandbox uses it only when both are wired and the lookup returned a non-nil
+// gate; every other combination dispatches through CallTool, unchanged.
+type GatedToolCaller interface {
+	ToolCaller
+	CallToolWithGate(ctx context.Context, serverName, toolName string, args map[string]interface{}, gate ToolGate) (interface{}, error)
+}
+
+// dispatchTool performs one upstream call on the gate captured for it when
+// the caller can consume one, and through the plain ToolCaller otherwise.
+func dispatchTool(ctx context.Context, caller ToolCaller, serverName, toolName string, args map[string]interface{}, gate ToolGate) (interface{}, error) {
+	if gate != nil {
+		if gated, ok := caller.(GatedToolCaller); ok {
+			return gated.CallToolWithGate(ctx, serverName, toolName, args, gate)
+		}
+	}
+	return caller.CallTool(ctx, serverName, toolName, args)
 }
 
 // ExecutionContext tracks the state of a single JavaScript execution
@@ -111,7 +167,8 @@ type ExecutionContext struct {
 	// Auth enforcement (Spec 031)
 	authInfo           *AuthInfo
 	toolAnnotationFunc ToolAnnotationLookup
-	maxPermissionLevel string // Tracks highest permission used: read < write < destructive
+	toolGateFunc       ToolGateLookup // gate-capturing lookup; takes precedence over toolAnnotationFunc
+	maxPermissionLevel string         // Tracks highest permission used: read < write < destructive
 }
 
 // ToolCallRecord represents a single call_tool() invocation
@@ -141,6 +198,7 @@ func newExecutionContext(caller ToolCaller, opts ExecutionOptions) *ExecutionCon
 		restrictToAllowed:  opts.RestrictToAllowed,
 		authInfo:           opts.AuthContext,
 		toolAnnotationFunc: opts.ToolAnnotationFunc,
+		toolGateFunc:       opts.ToolGateFunc,
 		maxPermissionLevel: "",
 	}
 
@@ -382,34 +440,71 @@ func successEnvelope(result interface{}) map[string]interface{} {
 // effect stay with the callers, because the batch path accounts for both
 // across a whole batch before dispatching any of it.
 func (ec *ExecutionContext) checkDispatchGates(serverName, toolName string) (gateErr map[string]interface{}, requiredPerm string) {
+	gateErr, requiredPerm, _ = ec.resolveDispatchGates(serverName, toolName)
+	return gateErr, requiredPerm
+}
+
+// resolveDispatchGates is checkDispatchGates plus the ToolGate the tier
+// lookup captured (nil unless ToolGateFunc is wired and answered one). The
+// gate is returned only for a call that passed every check: the dispatch
+// that follows consumes it so the call runs on the read that authorized it
+// (Spec 105 FR-009; codex r9 I1).
+func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string) (gateErr map[string]interface{}, requiredPerm string, gate ToolGate) {
 	// Check allowed servers. When restrictToAllowed is set (active Spec 057
 	// profile), the map is enforced even when empty — an empty effective set
 	// means "deny everything". Otherwise an empty map means "no restriction".
 	if (ec.restrictToAllowed || len(ec.allowedServerMap) > 0) && !ec.allowedServerMap[serverName] {
-		return errorEnvelope(ErrorCodeServerNotAllowed, fmt.Sprintf("server not allowed: %s", serverName)), ""
+		return errorEnvelope(ErrorCodeServerNotAllowed, fmt.Sprintf("server not allowed: %s", serverName)), "", nil
 	}
 
-	// Auth context enforcement (Spec 031)
-	if ec.authInfo == nil {
-		return nil, ""
+	// Auth context enforcement (Spec 031): the token's server scope answers
+	// before anything about the tool is looked up, so an out-of-scope server
+	// is refused without disclosing whether the name resolves on it.
+	if ec.authInfo != nil && !ec.authInfo.CanAccessServer(serverName) {
+		return errorEnvelope(ErrorCodeAccessDenied, fmt.Sprintf("token does not have access to server '%s'", serverName)), "", nil
 	}
 
-	if !ec.authInfo.CanAccessServer(serverName) {
-		return errorEnvelope(ErrorCodeAccessDenied, fmt.Sprintf("token does not have access to server '%s'", serverName)), ""
-	}
-
-	// Determine required permission via annotation lookup
+	// Determine required permission via annotation lookup. The gate-capturing
+	// form is the ONE read of the nested call: its tier decides the checks
+	// below and its gate is what the dispatch runs on.
 	requiredPerm = "read" // Default to read
-	if ec.toolAnnotationFunc != nil {
+	lookedUp := false
+	switch {
+	case ec.toolGateFunc != nil:
+		requiredPerm, gate = ec.toolGateFunc(serverName, toolName)
+		lookedUp = true
+	case ec.toolAnnotationFunc != nil:
 		requiredPerm = ec.toolAnnotationFunc(serverName, toolName)
+		lookedUp = true
+	}
+	if lookedUp {
+		// Spec 105 FR-009 (research D4): an identity the lookup could not
+		// resolve on a known server has no tier to hold, so the refusal is
+		// decided BEFORE HasPermission — which an administrator AuthInfo
+		// always passes — and BEFORE the nil-AuthInfo return below, so a
+		// stdio / in-process caller that carries no AuthInfo at all is held
+		// to the same identity rule as every HTTP caller. It answers with the
+		// permission envelope, never with an upstream's own "tool not found".
+		if requiredPerm == PermissionTierUnresolved {
+			return errorEnvelope(ErrorCodePermissionDenied,
+				fmt.Sprintf("permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it",
+					serverName, toolName, serverName)), "", nil
+		}
+	}
+
+	// No AuthInfo (stdio / in-process administrator): no permission tier to
+	// check, and no tier reported for the max-permission tracking either —
+	// exactly as before the identity check moved above this return.
+	if ec.authInfo == nil {
+		return nil, "", gate
 	}
 
 	if !ec.authInfo.HasPermission(requiredPerm) {
 		return errorEnvelope(ErrorCodePermissionDenied,
-			fmt.Sprintf("token does not have '%s' permission for tool '%s:%s'", requiredPerm, serverName, toolName)), ""
+			fmt.Sprintf("token does not have '%s' permission for tool '%s:%s'", requiredPerm, serverName, toolName)), "", nil
 	}
 
-	return nil, requiredPerm
+	return nil, requiredPerm, gate
 }
 
 // makeCallToolFunction creates the call_tool() function bound to this execution context
@@ -436,9 +531,11 @@ func (ec *ExecutionContext) makeCallToolFunction(vm *goja.Runtime) func(goja.Fun
 				fmt.Sprintf("exceeded max tool calls limit: %d", ec.maxToolCalls)))
 		}
 
-		if gateErr, requiredPerm := ec.checkDispatchGates(serverName, toolName); gateErr != nil {
+		gateErr, requiredPerm, gate := ec.resolveDispatchGates(serverName, toolName)
+		if gateErr != nil {
 			return vm.ToValue(gateErr)
-		} else if requiredPerm != "" {
+		}
+		if requiredPerm != "" {
 			// Track highest permission level
 			ec.updateMaxPermissionLevel(requiredPerm)
 		}
@@ -453,8 +550,10 @@ func (ec *ExecutionContext) makeCallToolFunction(vm *goja.Runtime) func(goja.Fun
 
 		// Call the upstream tool under the execution's timeout context so a
 		// call still in flight when the script is cut off is cancelled with
-		// it, exactly as call_tools() batch workers already are.
-		result, err := ec.toolCaller.CallTool(ec.executionCtx(), serverName, toolName, args)
+		// it, exactly as call_tools() batch workers already are — and on the
+		// gate the checks above were decided from, so the dispatch never
+		// takes a second read of its own.
+		result, err := dispatchTool(ec.executionCtx(), ec.toolCaller, serverName, toolName, args, gate)
 
 		// Record duration
 		record.DurationMs = time.Since(record.StartTime).Milliseconds()
@@ -509,6 +608,9 @@ type batchRequest struct {
 	server string
 	tool   string
 	args   map[string]interface{}
+	// gate is the ToolGate the pre-dispatch pass captured for this element
+	// (nil when none); the worker dispatches on it.
+	gate ToolGate
 }
 
 // makeCallToolsFunction creates the call_tools() function bound to this
@@ -679,13 +781,14 @@ func (ec *ExecutionContext) runBatch(requests []batchRequest, maxParallelOverrid
 			continue
 		}
 
-		gateErr, requiredPerm := ec.checkDispatchGates(req.server, req.tool)
+		gateErr, requiredPerm, gate := ec.resolveDispatchGates(req.server, req.tool)
 		if gateErr != nil {
 			slots[i] = gateErr
 			continue
 		}
 
 		perms[i] = requiredPerm
+		requests[i].gate = gate
 		dispatch = append(dispatch, i)
 	}
 
@@ -764,7 +867,7 @@ func dispatchBatchElement(ctx context.Context, caller ToolCaller, req batchReque
 			fmt.Sprintf("execution ended before the call was dispatched: %v", err)), record
 	}
 
-	result, err := caller.CallTool(ctx, req.server, req.tool, req.args)
+	result, err := dispatchTool(ctx, caller, req.server, req.tool, req.args, req.gate)
 	record.DurationMs = time.Since(record.StartTime).Milliseconds()
 
 	if err != nil {

@@ -1366,8 +1366,17 @@ func ConvertFromCursorFormat(cursorConfig *CursorMCPConfig) []*ServerConfig {
 
 // ToolMetadata represents tool information stored in the index
 type ToolMetadata struct {
-	Name             string           `json:"name"`
-	ServerName       string           `json:"server_name"`
+	// Name is the tool's display/lookup name. Discovery stores the RAW upstream
+	// name here (no server prefix); index reads return the canonical
+	// "<server>:<raw>" id (#871). Consumers that need the exact upstream name
+	// must go through RawToolName, never strip a prefix by hand (Spec 105 FR-009).
+	Name       string `json:"name"`
+	ServerName string `json:"server_name"`
+	// RawName is the exact upstream-reported tool name, stamped at discovery
+	// (Spec 105 FR-009). It is the identity every producer keys on — approval
+	// records, index docIDs — so "ns:erase" never collapses to "erase". Empty
+	// on metadata built outside discovery; RawToolName derives it from Name.
+	RawName          string           `json:"raw_name,omitempty"`
 	Description      string           `json:"description"`
 	ParamsJSON       string           `json:"params_json"`
 	OutputSchemaJSON string           `json:"output_schema_json,omitempty"` // declared output schema, raw JSON bytes (Spec 056)

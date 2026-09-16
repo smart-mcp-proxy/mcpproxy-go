@@ -240,15 +240,24 @@ func (s stubIndex) IndexedServerNames() ([]string, error) {
 	return names, nil
 }
 
+// stubApprovals is the approved world: every tool the stub index lists carries
+// the approved record discovery would have filed for it. Since Spec 105 FR-009
+// an indexed tool with NO record is pending while the quarantine gate is on
+// (stubPolicy keeps it on), so answering nil here would turn every cell into
+// tool_pending_approval instead of the state each cell injects.
 type stubApprovals struct{}
 
-func (stubApprovals) ToolApproval(_, _ string) (*preflight.ApprovalState, error) { return nil, nil }
+func (stubApprovals) ToolApproval(_, _ string) (*preflight.ApprovalState, error) {
+	return &preflight.ApprovalState{Status: preflight.ApprovalStatusApproved}, nil
+}
 
 type stubState struct{ state preflight.ServerRuntimeState }
 
 func (s stubState) ServerRuntime(_ string) (preflight.ServerRuntime, bool) {
 	return preflight.ServerRuntime{State: s.state}, true
 }
+
+func (stubState) ToolIdentity(_, _ string) preflight.ToolIdentity { return preflight.ToolIdentity{} }
 
 type stubPolicy struct{ enabled map[string]bool }
 

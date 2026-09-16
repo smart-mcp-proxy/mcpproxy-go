@@ -127,6 +127,13 @@ type Client struct {
 	// machine back at Ready — indistinguishable from "never left". A stale
 	// verdict must not be applied to a brand-new healthy session (GH #965
 	// review).
+	//
+	// Values are drawn from the PROCESS-WIDE counter below, never restarted per
+	// client: a replacement client instance installed under the same server
+	// name (remove + re-add, config reload) must not restart at the epoch a
+	// discovery stamp was certified against, or an epoch-pinned dispatch would
+	// match the new instance's first connection and send a stale name to it
+	// (Spec 105 FR-009, codex review round 8).
 	connectionEpoch atomic.Int64
 
 	// epochMu serializes the probe goroutine's final epoch-check-and-SetError
@@ -386,7 +393,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// the state-change callback synchronously (types.go), and epochMu must
 	// never be held across foreign code (GH #965 review, rounds 2-3).
 	mc.epochMu.Lock()
-	mc.connectionEpoch.Add(1)
+	mc.connectionEpoch.Store(nextConnectionEpoch())
 	mc.epochMu.Unlock()
 
 	// Transition to ready state only if not already ready
@@ -477,7 +484,7 @@ func (mc *Client) Disconnect() error {
 	// flip the freshly Disconnected state back to Error (GH #965 review,
 	// round 4).
 	mc.epochMu.Lock()
-	mc.connectionEpoch.Add(1)
+	mc.connectionEpoch.Store(nextConnectionEpoch())
 	mc.epochMu.Unlock()
 
 	// Reset state
@@ -504,6 +511,20 @@ func (mc *Client) classifyConnectFailure(err error) (diagnostics.Code, bool) {
 // IsConnected returns whether the client is ready for operations
 func (mc *Client) IsConnected() bool {
 	return mc.StateManager.IsReady()
+}
+
+// ConnectionEpoch returns the client's connection-instance token: a
+// monotonically increasing counter bumped on every successful Connect and on
+// every Disconnect (see connectionEpoch), so two observations that read the
+// same value were made on the SAME live connection. The runtime captures it
+// before listing a server's tools and the supervisor stamps it on the
+// discovery snapshot with ToolsDiscovered (stateview.ServerStatus.
+// DiscoveryEpoch); every tool-identity read compares the stamp with the live
+// value, so a discovery result that belongs to a previous connection can
+// never certify a name on the current one when the connection events were
+// dropped or lag (Spec 105 FR-009 "stale generation"; astra r2 C3).
+func (mc *Client) ConnectionEpoch() int64 {
+	return mc.connectionEpoch.Load()
 }
 
 // IsConnecting returns whether the client is in a connecting state
@@ -812,8 +833,58 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 	return tools, nil
 }
 
+// ErrConnectionGenerationChanged is CallToolOnEpoch's refusal: the client's
+// connection generation is no longer the one the caller certified the tool
+// identity against, so the call was NOT sent. It is returned verbatim (never
+// wrapped with server context) so the dispatch paths can map it onto their
+// own unresolved-identity refusal with errors.Is.
+var ErrConnectionGenerationChanged = errors.New("connection generation changed since the tool identity was resolved")
+
 // CallTool executes a tool with error handling
 func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
+	return mc.callTool(ctx, toolName, args, nil)
+}
+
+// CallToolOnEpoch is CallTool pinned to the connection generation the caller
+// certified the tool identity against (Spec 105 FR-009 "stale generation";
+// codex r3 D2). The server-side identity check (resolveExactToolIdentity /
+// liveIdentityRefusal) validates a name, its tier and its approval hash on
+// ONE generation (ConnectionEpoch); this entry point makes the dispatch reach
+// the transport on that same generation, or not at all. The generation is
+// re-checked twice: cheaply on entry, and again AFTER the admission-control
+// queue wait — where a call can sit for seconds while a disconnect and a
+// reconnect complete — immediately before the transport, under epochMu, the
+// mutex Connect's and Disconnect's bumps take. A mismatch is refused with
+// ErrConnectionGenerationChanged and zero transport calls. A disconnected
+// client is refused the same way (Disconnect closes the generation), so a
+// reconnect can never happen inside a pinned dispatch.
+//
+// epochMu is never held across the transport (Client.epochMu's invariant), so
+// check→invoke is not atomic; the residual gap is the scheduling instant
+// between the unlock and the transport's own send, which no lock-free design
+// can close without holding the mutex across foreign code.
+func (mc *Client) CallToolOnEpoch(ctx context.Context, toolName string, args map[string]interface{}, expectedEpoch int64) (*mcp.CallToolResult, error) {
+	return mc.callTool(ctx, toolName, args, &expectedEpoch)
+}
+
+// generationIs reports whether the client is connected on exactly the
+// expected generation, read under epochMu so it cannot interleave with
+// Connect's or Disconnect's bump.
+func (mc *Client) generationIs(expectedEpoch int64) bool {
+	mc.epochMu.Lock()
+	defer mc.epochMu.Unlock()
+	return mc.IsConnected() && mc.connectionEpoch.Load() == expectedEpoch
+}
+
+// callTool is the shared body of CallTool and CallToolOnEpoch; expectedEpoch
+// nil means unpinned.
+func (mc *Client) callTool(ctx context.Context, toolName string, args map[string]interface{}, expectedEpoch *int64) (*mcp.CallToolResult, error) {
+	// A pinned call on a moved generation is refused before the connection
+	// check: a Disconnect bumps the epoch, so a dropped client fails here
+	// too, with the generation verdict rather than the not-connected one.
+	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
+		return nil, ErrConnectionGenerationChanged
+	}
 	if !mc.IsConnected() {
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
@@ -827,6 +898,13 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 		return nil, err
 	}
 	defer releaseSlot()
+
+	// The queue wait is the window D2 names: re-check the generation after
+	// it, immediately before the transport (the deferred release returns the
+	// slot on refusal).
+	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
+		return nil, ErrConnectionGenerationChanged
+	}
 
 	invoker := mc.toolInvoker
 	if invoker == nil {
@@ -2022,3 +2100,11 @@ func (mc *Client) setToolCountCache(count int) {
 func (mc *Client) isDockerServer() bool {
 	return containsString(mc.GetConfig().Command, "docker")
 }
+
+// connectionEpochCounter hands out connection epochs to every managed client
+// in the process. It is process-wide so an epoch never repeats across client
+// instances that share a server name (see Client.connectionEpoch).
+var connectionEpochCounter atomic.Int64
+
+// nextConnectionEpoch returns a fresh, strictly increasing epoch.
+func nextConnectionEpoch() int64 { return connectionEpochCounter.Add(1) }

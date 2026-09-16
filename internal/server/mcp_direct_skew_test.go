@@ -203,6 +203,13 @@ func TestSkew_AddedNameBeforeItsCatalogEntry(t *testing.T) {
 
 	added := append(skewBase(), skewTool("fs", "stat", "Stat a path", `{"type":"object"}`,
 		&config.ToolAnnotations{ReadOnlyHint: boolPtr(true)}))
+	// The added tool is approved under its own name: on the direct surface a
+	// catalog tool with NO approval record is pending while the quarantine
+	// gate is active (Spec 105 FR-009), which would hide it from the scoped
+	// session for a reason unrelated to the skew ordering under test.
+	require.NoError(t, f.proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "fs", ToolName: "stat", Status: storage.ToolApprovalStatusApproved,
+	}))
 
 	f.rebuildPaused(t, added, func() {
 		assert.NotContains(t, f.listed(scoped), "fs__stat",

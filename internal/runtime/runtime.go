@@ -195,6 +195,19 @@ type Runtime struct {
 	lastGoodToolsMu sync.RWMutex
 	lastGoodTools   map[string][]*config.ToolMetadata
 
+	// legacyStampBeforeWrite is a test-only interleaving seam for
+	// stampRemainingLegacyToolApprovals (Spec 105 FR-009, astra r1 P4): when
+	// set, it runs between the sweep's listing of a server's unstamped
+	// pre-105 records and the stamp write, so a test can land an operator
+	// write in that window and assert it survives. Nil in production.
+	legacyStampBeforeWrite func()
+
+	// consultStampBeforeWrite is the same kind of seam for
+	// stampConsultedLegacySibling (astra r2 C1): when set, it runs between
+	// the consult's read of the collapsed sibling record and its stamp
+	// write. Nil in production.
+	consultStampBeforeWrite func()
+
 	// Profiles v2 (Spec 057, T1): tracks the last-synced effective server set per
 	// profile so a config reload can rebuild only the profiles whose membership
 	// actually changed and drop profiles removed from config. Guards the

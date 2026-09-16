@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -272,6 +273,64 @@ func TestCheckToolApprovals_TrustedServer_NewToolPending(t *testing.T) {
 	record, err := rt.storageManager.GetToolApproval("github", "new_malicious_tool")
 	require.NoError(t, err)
 	assert.Equal(t, storage.ToolApprovalStatusPending, record.Status)
+}
+
+// astra r1 P1 (pre-existing latent bug on the ordinary rug-pull path): a
+// tool approved for description D + output schema O1 that starts serving
+// D + O2 was marked changed on pass 1 — and restored to approved on pass 2,
+// because the changed-record revert predicate compared the DESCRIPTION alone
+// (D == D) and baselined the changed schema. It must stay held on every pass
+// until the operator approves it or the upstream reverts to O1.
+func TestCheckToolApprovals_OutputSchemaOnlyChange_StaysChangedAcrossPasses(t *testing.T) {
+	const (
+		desc     = "Creates a GitHub issue"
+		schema   = `{"type":"object"}`
+		outputV1 = `{"type":"object","properties":{"id":{"type":"integer"}}}`
+		outputV2 = `{"type":"object","properties":{"id":{"type":"integer"},"token":{"type":"string"}}}`
+	)
+	tool := func(output string) []*config.ToolMetadata {
+		return []*config.ToolMetadata{
+			{ServerName: "github", Name: "create_issue", RawName: "create_issue", Description: desc, ParamsJSON: schema, OutputSchemaJSON: output},
+		}
+	}
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true, TrustMode: string(config.TrustModeManual)},
+	})
+
+	// Baseline pass on the trusted server: approved for D + O1.
+	result, err := rt.checkToolApprovals("github", tool(outputV1))
+	require.NoError(t, err)
+	require.Empty(t, result.BlockedTools)
+	baseline, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	require.Equal(t, storage.ToolApprovalStatusApproved, baseline.Status)
+
+	// Pass 1 with O2: marked changed, blocked.
+	result, err = rt.checkToolApprovals("github", tool(outputV2))
+	require.NoError(t, err)
+	assert.True(t, result.BlockedTools["create_issue"])
+	assert.Equal(t, 1, result.ChangedCount)
+
+	// Pass 2 with O2: the description alone still matches the previous one,
+	// which must NOT read as a revert.
+	result, err = rt.checkToolApprovals("github", tool(outputV2))
+	require.NoError(t, err)
+	assert.True(t, result.BlockedTools["create_issue"], "a schema-only change must stay held on the second pass")
+	assert.Equal(t, 1, result.ChangedCount)
+	rec, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
+	assert.Equal(t, baseline.ApprovedHash, rec.ApprovedHash, "the changed schema must not be baselined")
+	assert.Equal(t, normalizeJSON(outputV1), normalizeJSON(rec.PreviousOutputSchema))
+
+	// A genuine revert to O1 restores it.
+	result, err = rt.checkToolApprovals("github", tool(outputV1))
+	require.NoError(t, err)
+	assert.Empty(t, result.BlockedTools, "the approved contract is back")
+	rec, err = rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+	assert.Empty(t, rec.PreviousOutputSchema)
 }
 
 func TestCheckToolApprovals_AutoApproved_ThenChanged_StillBlocked(t *testing.T) {
@@ -791,30 +850,119 @@ func TestSetToolEnabled_TogglesVisibility(t *testing.T) {
 // the common case when QuarantineEnabled is false globally or SkipQuarantine
 // is on for the server. Without on-demand record creation, the per-tool
 // enable/disable UI is dead for any non-quarantined deployment.
+//
+// Spec 105 FR-009 (research D4): the synthesized record never mints an
+// approval nobody made. Under an ACTIVE tool-level gate a record-less tool is
+// pending at every gate, so the toggle files it pending (with the toggle's
+// Disabled flag); a disable → enable round trip leaves it pending — it stays
+// refused until an operator approves it by its own name. Under a LIFTED gate
+// a new tool auto-approves anyway, so the record is approved.
 func TestSetToolEnabled_CreatesRecordWhenMissing(t *testing.T) {
-	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
-		{Name: "github", Enabled: true},
+	t.Run("active gate: filed pending, the toggle flips only Disabled", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+			{Name: "github", Enabled: true},
+		})
+
+		// No SaveToolApproval before this — the tool has never been seen by the
+		// approval bucket. SetToolEnabled must synthesize a record.
+		err := rt.SetToolEnabled("github", "create_issue", false, "admin")
+		require.NoError(t, err)
+
+		record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+		require.NoError(t, err)
+		assert.True(t, record.Disabled, "synthesized record must reflect the disable intent")
+		assert.Equal(t, storage.ToolApprovalStatusPending, record.Status,
+			"under an active gate the toggle is a visibility decision, not an approval: the tool stays pending under its own name")
+		assert.Empty(t, record.ApprovedHash)
+
+		// Re-enabling clears the flag without minting an approval.
+		err = rt.SetToolEnabled("github", "create_issue", true, "admin")
+		require.NoError(t, err)
+
+		record, err = rt.storageManager.GetToolApproval("github", "create_issue")
+		require.NoError(t, err)
+		assert.False(t, record.Disabled)
+		assert.Equal(t, storage.ToolApprovalStatusPending, record.Status, "a disable → enable round trip approves nothing")
+
+		// Approved by its own name it is callable and baselined by discovery.
+		require.NoError(t, rt.ApproveTools("github", []string{"create_issue"}, "user"))
+		record, err = rt.storageManager.GetToolApproval("github", "create_issue")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
 	})
 
-	// No SaveToolApproval before this — the tool has never been seen by the
-	// approval bucket. SetToolEnabled must synthesize a record.
-	err := rt.SetToolEnabled("github", "create_issue", false, "admin")
-	require.NoError(t, err)
+	t.Run("active gate: the snapshot's current contract is recorded on the pending record", func(t *testing.T) {
+		rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+			{Name: "github", Enabled: true},
+		})
+		rt.Supervisor().StateView().UpdateServer("github", func(s *stateview.ServerStatus) {
+			s.Name, s.Enabled, s.Connected, s.ToolsDiscovered = "github", true, true, true
+			s.Tools = []stateview.ToolInfo{{
+				Name: "ns:create_issue", Description: "Creates an issue",
+				InputSchema: map[string]interface{}{"type": "object"},
+			}}
+		})
+		require.NoError(t, rt.SetToolEnabled("github", "ns:create_issue", false, "admin"))
+		record, err := rt.storageManager.GetToolApproval("github", "ns:create_issue")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusPending, record.Status)
+		assert.True(t, record.Disabled)
+		assert.Equal(t, "Creates an issue", record.CurrentDescription)
+		assert.Equal(t, `{"type":"object"}`, record.CurrentSchema)
+		assert.Equal(t, calculateToolApprovalHashWithOutputSchema("ns:create_issue", "Creates an issue", `{"type":"object"}`, "", nil), record.CurrentHash)
+		assert.Empty(t, record.ApprovedHash, "pending: no approved contract")
+		_, err = rt.storageManager.GetToolApproval("github", "create_issue")
+		require.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "the toggle files under the exact raw name only")
+	})
 
-	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
-	require.NoError(t, err)
-	assert.True(t, record.Disabled, "synthesized record must reflect the disable intent")
-	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status,
-		"synthesized record must be approved — the toggle is a visibility decision, not a quarantine one")
+	t.Run("lifted gate: approved and baselined to the snapshot's current contract", func(t *testing.T) {
+		for label, servers := range map[string][]*config.ServerConfig{
+			"trust_mode auto": {{Name: "github", Enabled: true, TrustMode: string(config.TrustModeAuto)}},
+		} {
+			t.Run(label, func(t *testing.T) {
+				rt := setupQuarantineRuntime(t, nil, servers)
+				rt.Supervisor().StateView().UpdateServer("github", func(s *stateview.ServerStatus) {
+					s.Name, s.Enabled, s.Connected, s.ToolsDiscovered = "github", true, true, true
+					s.Tools = []stateview.ToolInfo{{Name: "create_issue", Description: "Creates an issue"}}
+				})
+				require.NoError(t, rt.SetToolEnabled("github", "create_issue", false, "admin"))
+				record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+				require.NoError(t, err)
+				assert.True(t, record.Disabled)
+				assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+				assert.Equal(t, calculateToolApprovalHashWithOutputSchema("create_issue", "Creates an issue", "{}", "", nil), record.ApprovedHash,
+					"baselined to the snapshot's contract so rug-pull detection works from the first discovery")
+				assert.Equal(t, record.CurrentHash, record.ApprovedHash)
 
-	// Re-enabling should clear the flag without re-resetting status.
-	err = rt.SetToolEnabled("github", "create_issue", true, "admin")
-	require.NoError(t, err)
+				// The discovery pass sees the same contract: hash matches, nothing held.
+				result, err := rt.checkToolApprovals("github", []*config.ToolMetadata{
+					{ServerName: "github", Name: "create_issue", RawName: "create_issue", Description: "Creates an issue"},
+				})
+				require.NoError(t, err)
+				assert.True(t, result.BlockedTools["create_issue"], "blocked by the user's toggle only")
+				assert.Equal(t, 0, result.PendingCount)
+				assert.Equal(t, 0, result.ChangedCount)
+				record, err = rt.storageManager.GetToolApproval("github", "create_issue")
+				require.NoError(t, err)
+				assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+			})
+		}
+		t.Run("quarantine disabled globally, tool not in the snapshot", func(t *testing.T) {
+			rt := setupQuarantineRuntime(t, boolP(false), []*config.ServerConfig{{Name: "github", Enabled: true}})
+			require.NoError(t, rt.SetToolEnabled("github", "create_issue", false, "admin"))
+			record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+			require.NoError(t, err)
+			assert.True(t, record.Disabled)
+			assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+			assert.Empty(t, record.ApprovedHash, "no contract to baseline to; the next discovery pass baselines it")
 
-	record, err = rt.storageManager.GetToolApproval("github", "create_issue")
-	require.NoError(t, err)
-	assert.False(t, record.Disabled)
-	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+			require.NoError(t, rt.SetToolEnabled("github", "create_issue", true, "admin"))
+			record, err = rt.storageManager.GetToolApproval("github", "create_issue")
+			require.NoError(t, err)
+			assert.False(t, record.Disabled)
+			assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+		})
+	})
 }
 
 // SetToolEnabled is a visibility toggle, not an approval decision. The
@@ -980,10 +1128,13 @@ func TestSetAllToolsEnabled_NoEventOnNoOp(t *testing.T) {
 }
 
 func TestFilterBlockedTools(t *testing.T) {
+	// Canonical-named metadata (as read back from the index) must carry its
+	// ServerName: config.RawToolName trims exactly that server's prefix, never
+	// "whatever precedes the first colon" (Spec 105 FR-009).
 	tools := []*config.ToolMetadata{
-		{Name: "server:tool_a"},
-		{Name: "server:tool_b"},
-		{Name: "server:tool_c"},
+		{ServerName: "server", Name: "server:tool_a"},
+		{ServerName: "server", Name: "server:tool_b"},
+		{ServerName: "server", Name: "server:tool_c"},
 	}
 
 	blocked := map[string]bool{
@@ -995,7 +1146,7 @@ func TestFilterBlockedTools(t *testing.T) {
 
 	names := make([]string, len(filtered))
 	for i, t := range filtered {
-		names[i] = extractToolName(t.Name)
+		names[i] = config.RawToolName(t)
 	}
 	assert.Contains(t, names, "tool_a")
 	assert.Contains(t, names, "tool_c")

@@ -236,16 +236,14 @@ func (s *Service) SetDeepScan(enabled bool, scanners []string) {
 	if s.engine == nil {
 		return
 	}
-	s.engine.deepScanEnabled = enabled
+	var allow map[string]bool
 	if len(scanners) > 0 {
-		allow := make(map[string]bool, len(scanners))
+		allow = make(map[string]bool, len(scanners))
 		for _, id := range scanners {
 			allow[id] = true
 		}
-		s.engine.deepScanScanners = allow
-	} else {
-		s.engine.deepScanScanners = nil
 	}
+	s.engine.setDeepScan(enabled, allow)
 	// Spec 077 US3: published-package-source extraction is part of the opt-in
 	// deep-scan layer, so it must never run (and never cause network egress)
 	// while deep scan is off. Force the resolver's fetch fallback off here as
@@ -265,7 +263,7 @@ func (s *Service) SetDeepScan(enabled bool, scanners []string) {
 
 // deepScanEnabled reports whether the opt-in deep-scan layer is currently on.
 func (s *Service) deepScanEnabled() bool {
-	return s.engine != nil && s.engine.deepScanEnabled
+	return s.engine != nil && s.engine.deepScanIsEnabled()
 }
 
 // DeepScanEnabled reports whether the opt-in deep-scan layer is currently on.
