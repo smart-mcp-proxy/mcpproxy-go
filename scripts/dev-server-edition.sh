@@ -220,9 +220,25 @@ if [[ -n "$IDP_EXTRA" ]]; then
 	read -r -a extra <<<"$IDP_EXTRA"
 	IDP_ARGS+=("${extra[@]}")
 	case " $IDP_EXTRA " in
+	*" -groups-error non-array "*)
+		# tests/oauthserver's GroupsNonArray knob renders the groups value as
+		# a comma-joined STRING (token.go's joinGroups), and oidc_provider.go's
+		# groupsFromClaims explicitly accepts a bare string as one valid group
+		# name (`case string:`) — it is not a "non-array/non-string shape"
+		# under FR-008's own wording, so it does NOT fail closed: the login
+		# succeeds with that string as the caller's one group, exactly like
+		# TestOIDCVerify_GroupsClaimMissingFailsClosed's
+		# "single_string_is_one_group" case. Neither TAMPER nor GROUPS_TAMPER
+		# — this falls through to the normal §4c assertions below, which the
+		# caller must point at the expected joined-string group name instead
+		# of the default ["eng"] (cross-review round 6, chunk 4 P2: an
+		# earlier version of this script folded "non-array" into the
+		# fail-closed GROUPS_TAMPER bucket alongside absent/overage and
+		# asserted groups==[], which this claim shape never produces).
+		;;
 	*" -groups-error "*)
-		# FR-008 fail-closed groups fixtures (absent/non-array/overage): the
-		# login still SUCCEEDS (groups land as [] and groups_claim_missing is
+		# FR-008 fail-closed groups fixtures (absent/overage): the login
+		# still SUCCEEDS (groups land as [] and groups_claim_missing is
 		# logged) — this is NOT a login-refusal tamper case (cross-review
 		# round 5, chunk 4 P3).
 		GROUPS_TAMPER="1"

@@ -177,6 +177,24 @@ func (s *OAuthTestServer) handleAuthorizePOST(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Same injected authorization-time errors as handleAuthorizeGET, mirrored
+	// here: a real IdP decides these at the authorization request, before any
+	// login form is shown, so they apply the same way whether a caller GETs
+	// the authorize endpoint (renders the form) or POSTs straight to it — a
+	// caller that never performed the intermediate GET (a headless script
+	// simulating the form submission directly, as scripts/dev-server-edition.sh
+	// does) must still observe them (cross-review round 6, chunk 4 P3: they
+	// were checked on GET only, so `-auth-error access_denied`/`invalid_request`
+	// were silently bypassed by any POST-only caller).
+	if s.options.ErrorMode.AuthInvalidRequest {
+		s.authorizeError(w, redirectURI, state, "invalid_request", "Injected error")
+		return
+	}
+	if s.options.ErrorMode.AuthAccessDenied {
+		s.authorizeError(w, redirectURI, state, "access_denied", "Injected error")
+		return
+	}
+
 	// Check if user denied
 	if action == "deny" || consent != "on" {
 		s.authorizeRedirect(w, redirectURI, "", state, "access_denied", "User denied the authorization request")

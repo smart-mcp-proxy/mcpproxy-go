@@ -84,46 +84,33 @@ func ValidatePublicURL(raw string) error {
 	return nil
 }
 
-// expandServerEditionSecrets expands `${env:...}` / `${keyring:...}` refs in
-// server_edition.oauth.client_id and client_secret in place (cross-review
-// round 1, chunk 3 P2): every doc page for this block —
+// resolveOAuthSecretRef resolves a `${env:...}` / `${keyring:...}` reference
+// (or returns a literal value unchanged) WITHOUT mutating the caller's
+// config — deliberately, unlike an earlier design (cross-review round 6,
+// chunk 3 P2): resolving `server_edition.oauth.client_id`/`client_secret` in
+// place at Load time meant the resolved plaintext secret lived in the same
+// Config object that GetDesiredConfig/ApplyConfig round-trip through
+// SaveConfig on every PATCH /api/v1/config or /config/apply — even one
+// editing an unrelated field — permanently overwriting the operator's
+// `${env:...}` reference in mcp_config.json with the resolved secret and
+// defeating docs/configuration/config-file.md's documented purpose of
+// keeping it out of the file. Every doc page for this block —
 // docs/configuration/config-file.md, docs/getting-started/installation.md,
-// docs/development/server-edition-multiuser-auth.md, scripts/dev-server-edition.sh
-// — tells the operator to write `${env:OIDC_CLIENT_SECRET}` so the secret
-// stays out of the file, but nothing expanded it: the literal placeholder
-// string reached the token endpoint as the client secret and every OAuth
-// login failed. This runs before ValidateOIDC / the required checks, so a
-// missing env var must be refused by "client_secret is required" rather than
-// silently authenticating with the placeholder text — which means a failed
-// resolution must clear the field, not keep the unresolved `${...}` text: a
-// literal `${env:MISSING}` is itself non-empty, so keeping it would pass the
-// non-empty check (cross-review round 2, chunk 3 P2: the original fix kept
-// the original value "exactly like expandDataDir", but DataDir has its own
-// downstream "still contains ${" skip that client_id/client_secret have no
-// equivalent of, so that pattern silently defeated this function's own
-// documented contract). Failures are still logged to stderr.
-func expandServerEditionSecrets(cfg *Config) {
-	if cfg == nil || cfg.ServerEdition == nil || cfg.ServerEdition.OAuth == nil {
-		return
+// docs/development/server-edition-multiuser-auth.md,
+// scripts/dev-server-edition.sh — tells the operator to write
+// `${env:OIDC_CLIENT_SECRET}`; ServerEditionConfig.Validate() calls this to
+// enforce the "required" check against the RESOLVED value (so a missing env
+// var is refused by "client_secret is required", never silently accepted as
+// the non-empty placeholder text — cross-review rounds 1 and 2), and
+// auth.NewOAuthHandler calls the identical `secret.Resolver` on its own
+// private, never-persisted config clone to get the actual value for the
+// token endpoint. An empty input resolves to "" with no error (client_id and
+// client_secret share the same "is required" check for the empty case).
+func resolveOAuthSecretRef(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
 	}
-	resolver := secret.NewResolver()
-	oauth := cfg.ServerEdition.OAuth
-	if oauth.ClientSecret != "" {
-		if resolved, err := resolver.ExpandSecretRefs(context.Background(), oauth.ClientSecret); err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: Failed to resolve secret ref in server_edition.oauth.client_secret, treating as unset: err=%v\n", err)
-			oauth.ClientSecret = ""
-		} else {
-			oauth.ClientSecret = resolved
-		}
-	}
-	if oauth.ClientID != "" {
-		if resolved, err := resolver.ExpandSecretRefs(context.Background(), oauth.ClientID); err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: Failed to resolve secret ref in server_edition.oauth.client_id, treating as unset: err=%v\n", err)
-			oauth.ClientID = ""
-		} else {
-			oauth.ClientID = resolved
-		}
-	}
+	return secret.NewResolver().ExpandSecretRefs(context.Background(), raw)
 }
 
 // PublicURLIsHTTPS reports whether the configured public_url uses https.
@@ -265,10 +252,24 @@ func (c *ServerEditionConfig) Validate() error {
 	if !validProviders[c.OAuth.Provider] {
 		return fmt.Errorf("server_edition.oauth.provider must be one of: google, github, microsoft, oidc (got: %s)", c.OAuth.Provider)
 	}
-	if c.OAuth.ClientID == "" {
+	// Resolved (never mutated — c.OAuth.ClientID/ClientSecret keep the
+	// operator's literal text, `${env:...}` reference included, for the
+	// "required" check below and for every other reader, including
+	// SaveConfig's persistence path (cross-review round 6, chunk 3 P2: an
+	// earlier design resolved the reference into ClientID/ClientSecret
+	// in place at Load time, so ANY later PATCH /api/v1/config or
+	// /config/apply — even one editing an unrelated field — round-tripped
+	// that already-resolved value back through SaveConfig and permanently
+	// overwrote the operator's `${env:...}` reference in mcp_config.json
+	// with the plaintext secret, defeating docs/configuration/config-file.md's
+	// documented purpose of keeping the secret out of the file). The actual
+	// runtime resolution now happens once, at the one place that needs the
+	// live secret for the token endpoint: auth.NewOAuthHandler, on its own
+	// private, never-persisted config clone.
+	if _, err := resolveOAuthSecretRef(c.OAuth.ClientID); err != nil || c.OAuth.ClientID == "" {
 		return fmt.Errorf("server_edition.oauth.client_id is required")
 	}
-	if c.OAuth.ClientSecret == "" {
+	if _, err := resolveOAuthSecretRef(c.OAuth.ClientSecret); err != nil || c.OAuth.ClientSecret == "" {
 		return fmt.Errorf("server_edition.oauth.client_secret is required")
 	}
 	if err := c.OAuth.validateOIDC(); err != nil {
@@ -321,7 +322,13 @@ func (c *ServerEditionConfig) Clone() *ServerEditionConfig {
 func (o *ServerEditionOAuthConfig) applyOIDCDefaults() {
 	if len(o.Scopes) == 0 {
 		o.Scopes = defaultOIDCScopes()
-	} else if !containsFold(o.Scopes, "openid") {
+	} else if !containsExact(o.Scopes, "openid") {
+		// Exact-case match only: OAuth/OIDC scope values are case-sensitive
+		// (RFC 6749 §3.3), so an operator-configured "OpenID"/"OPENID" is a
+		// different scope value to a compliant IdP and must not be treated
+		// as satisfying the FR-020 requirement — the literal "openid" scope
+		// is always appended, even if a differently-cased lookalike is
+		// already present (cross-review round 6, chunk 1 P2).
 		o.Scopes = append(append([]string(nil), o.Scopes...), "openid")
 	}
 	if o.GroupsClaim == "" {
@@ -362,6 +369,21 @@ func (o *ServerEditionOAuthConfig) validateOIDC() error {
 	if !IsAllowedOIDCEndpoint(o.IssuerURL, o.AllowInsecureIssuer) {
 		return fmt.Errorf("server_edition.oauth.issuer_url must use https (http is allowed only for a loopback host with allow_insecure_issuer: true)")
 	}
+	// OpenID Connect Discovery 1.0 §2: the Issuer Identifier "MUST NOT
+	// contain query or fragment components". IsAllowedOIDCEndpoint admits
+	// them (it also gates the discovered endpoints, which the spec does not
+	// restrict this way), so an issuer_url carrying either passed validation
+	// and reached fetchDiscovery, which builds the discovery request by
+	// string-appending "/.well-known/openid-configuration" to issuer_url
+	// (oidc_provider.go) — for
+	// "https://idp.example/issuer?tenant=x" that produces
+	// ".../issuer?tenant=x/.well-known/openid-configuration", a request whose
+	// well-known suffix lands inside the query string instead of the path,
+	// so every login for that (accepted-at-boot) config failed discovery
+	// (cross-review round 6, chunk 3 P2).
+	if u, err := url.Parse(o.IssuerURL); err == nil && (u.RawQuery != "" || u.Fragment != "" || u.RawFragment != "") {
+		return fmt.Errorf("server_edition.oauth.issuer_url must not contain a query or fragment component (got: %q)", o.IssuerURL)
+	}
 	return nil
 }
 
@@ -393,9 +415,9 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func containsFold(list []string, want string) bool {
+func containsExact(list []string, want string) bool {
 	for _, s := range list {
-		if strings.EqualFold(s, want) {
+		if s == want {
 			return true
 		}
 	}

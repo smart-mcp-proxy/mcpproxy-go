@@ -601,6 +601,30 @@ func TestOIDC_ErrorModeKnobs(t *testing.T) {
 		assert.Equal(t, "access_denied", loc.Query().Get("error"))
 		assert.Equal(t, "st-123", loc.Query().Get("state"))
 	})
+
+	// A real IdP decides an injected authorization-time error at the
+	// authorization request, before any login form is shown, so it must
+	// apply the same way to a caller that POSTs straight to the authorize
+	// endpoint (simulating the form submission) without ever GETting it
+	// first — scripts/dev-server-edition.sh's headless_login does exactly
+	// that. Before this fix, handleAuthorizePOST never checked
+	// ErrorMode.AuthAccessDenied/AuthInvalidRequest at all, so a POST-only
+	// caller silently bypassed both knobs (cross-review round 6, chunk 4 P3).
+	t.Run("AuthAccessDenied on a POST-only caller (no preceding GET)", func(t *testing.T) {
+		r := startOIDC(t, ErrorMode{AuthAccessDenied: true})
+		_, challenge := pkcePair()
+		loc := r.authorizePOST("n", challenge)
+		assert.Equal(t, "access_denied", loc.Query().Get("error"))
+		assert.Equal(t, "st-123", loc.Query().Get("state"))
+	})
+
+	t.Run("AuthInvalidRequest on a POST-only caller (no preceding GET)", func(t *testing.T) {
+		r := startOIDC(t, ErrorMode{AuthInvalidRequest: true})
+		_, challenge := pkcePair()
+		loc := r.authorizePOST("n", challenge)
+		assert.Equal(t, "invalid_request", loc.Query().Get("error"))
+		assert.Equal(t, "st-123", loc.Query().Get("state"))
+	})
 }
 
 // TestOIDC_ExistingBehaviourUntouched: with OIDC off nothing changes — no

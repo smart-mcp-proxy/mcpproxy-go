@@ -21,6 +21,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
 )
 
@@ -204,7 +205,36 @@ func NewOAuthHandler(
 			h.publicURL = strings.TrimSuffix(boot.PublicURL, "/")
 			if boot.OAuth != nil {
 				h.oauthCfg = boot.Clone().OAuth
-				h.provider, h.providerErr = GetProviderFromConfig(h.oauthCfg)
+				// Resolve `${env:...}`/`${keyring:...}` refs HERE, on this
+				// handler-private clone, never on the config object
+				// LoadFromFile/GetDesiredConfig hand out — cross-review
+				// round 6, chunk 3 P2: config.LoadFromFile deliberately
+				// stops short of resolving oauth.client_id/client_secret in
+				// place, because that object is round-tripped back to disk
+				// by SaveConfig on every later PATCH /api/v1/config or
+				// /config/apply (even one editing an unrelated field),
+				// which used to persist the resolved plaintext secret over
+				// the operator's `${env:...}` reference. This clone is
+				// never persisted, so it is the one safe place to hold the
+				// live value the token endpoint actually needs.
+				// config.ServerEditionConfig.Validate() already proved both
+				// refs resolve to a non-empty value at boot/PATCH time; a
+				// failure here (the env var was unset in between) is
+				// treated as "not configured" rather than sending the
+				// literal placeholder text to the IdP.
+				resolvedID, idErr := secret.NewResolver().ExpandSecretRefs(context.Background(), h.oauthCfg.ClientID)
+				resolvedSecret, secretErr := secret.NewResolver().ExpandSecretRefs(context.Background(), h.oauthCfg.ClientSecret)
+				if idErr != nil || secretErr != nil || resolvedID == "" || resolvedSecret == "" {
+					if logger != nil {
+						logger.Errorw("server_edition.oauth.client_id/client_secret failed to resolve at handler construction",
+							"client_id_err", idErr, "client_secret_err", secretErr)
+					}
+					h.oauthCfg = nil
+				} else {
+					h.oauthCfg.ClientID = resolvedID
+					h.oauthCfg.ClientSecret = resolvedSecret
+					h.provider, h.providerErr = GetProviderFromConfig(h.oauthCfg)
+				}
 			}
 		}
 	}

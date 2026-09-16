@@ -119,6 +119,40 @@ func TestServerEditionOIDC_IssuerURLSchemeRule(t *testing.T) {
 	}
 }
 
+// Spec 107 cross-review round 6, chunk 3 P2: OpenID Connect Discovery 1.0 §2
+// requires the Issuer Identifier to carry no query or fragment component.
+// IsAllowedOIDCEndpoint (shared with the discovered endpoints, which have no
+// such restriction) does not reject them, so an issuer_url carrying either
+// used to pass validation and only fail later, at login time, when
+// fetchDiscovery string-appended "/.well-known/openid-configuration" to it
+// and produced a malformed request URL (the suffix landing inside the query
+// string).
+func TestServerEditionOIDC_IssuerURLRejectsQueryAndFragment(t *testing.T) {
+	cases := []struct {
+		name   string
+		issuer string
+	}{
+		{name: "query", issuer: "https://idp.example.com/issuer?tenant=x"},
+		{name: "fragment", issuer: "https://idp.example.com/issuer#frag"},
+		{name: "query and fragment", issuer: "https://idp.example.com/issuer?tenant=x#frag"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := oidcBlock()
+			cfg.OAuth.IssuerURL = tc.issuer
+			err := cfg.Validate()
+			require.Error(t, err, "a query or fragment component must be refused at Validate, not left to fail discovery at login time")
+			assert.Contains(t, err.Error(), "must not contain a query or fragment component")
+		})
+	}
+}
+
+func TestServerEditionOIDC_IssuerURLWithoutQueryOrFragmentStillAdmitted(t *testing.T) {
+	cfg := oidcBlock()
+	cfg.OAuth.IssuerURL = "https://idp.example.com/realms/dev"
+	assert.NoError(t, cfg.Validate())
+}
+
 func TestServerEditionOIDC_EmailVerifiedPolicyEnum(t *testing.T) {
 	for _, policy := range []string{"", "refuse_false", "require_true", "ignore"} {
 		t.Run("admits "+policy, func(t *testing.T) {

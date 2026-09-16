@@ -85,7 +85,7 @@ func newGenericOIDCProvider(c *config.ServerEditionOAuthConfig) *OAuthProvider {
 	cfg.AllowedDomains = append([]string(nil), c.AllowedDomains...)
 	if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{"openid", "profile", "email"}
-	} else if !containsFoldOIDC(cfg.Scopes, "openid") {
+	} else if !containsExactOIDC(cfg.Scopes, "openid") {
 		// FR-020 requires "openid" on every oidc authorization request. This
 		// factory must not assume its input already passed through
 		// config.ServerEditionConfig.ApplyDefaults() — the OAuthHandler is
@@ -482,11 +482,15 @@ func parseIDToken(idToken string) (*OAuthUserInfo, error) {
 	}, nil
 }
 
-// containsFoldOIDC reports whether list contains want, case-insensitively.
-// Mirrors config.containsFold (unexported in another package).
-func containsFoldOIDC(list []string, want string) bool {
+// containsExactOIDC reports whether list contains want by exact string
+// match. OAuth/OIDC scope values are case-sensitive (RFC 6749 §3.3), so an
+// operator-configured lookalike of a different case must not be treated as
+// satisfying the FR-020 requirement that "openid" be present on every oidc
+// authorization request (cross-review round 6, chunk 1 P2). Mirrors
+// config.containsExact (unexported in another package).
+func containsExactOIDC(list []string, want string) bool {
 	for _, v := range list {
-		if strings.EqualFold(v, want) {
+		if v == want {
 			return true
 		}
 	}

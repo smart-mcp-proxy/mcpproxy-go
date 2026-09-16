@@ -46,11 +46,17 @@ func LoadFromFile(configPath string) (*Config, error) {
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
-	// Expand secret/env refs in server_edition.oauth.client_id/client_secret
-	// (cross-review round 1, chunk 3 P2): must run before Validate so a
-	// missing env var reports "client_secret is required", not a silent
-	// placeholder-string login failure at the IdP.
-	expandServerEditionSecrets(cfg)
+	// server_edition.oauth.client_id/client_secret are deliberately NOT
+	// expanded here (cross-review round 6, chunk 3 P2, superseding round 1's
+	// in-place expansion): this cfg is what becomes r.cfg/r.desiredCfg and is
+	// round-tripped back to disk by SaveConfig on every later PATCH
+	// /api/v1/config or /config/apply, so resolving the secret into it here
+	// would persist the plaintext value instead of the operator's
+	// `${env:...}` reference. ServerEditionConfig.Validate() (reached just
+	// below) resolves it itself, read-only, to enforce the "required" check
+	// against the actual value; auth.NewOAuthHandler resolves it again on its
+	// own private, never-persisted config clone to get the live secret for
+	// the token endpoint.
 
 	// Create data directory if it doesn't exist.
 	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —
@@ -160,11 +166,9 @@ func Load() (*Config, error) {
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
-	// Expand secret/env refs in server_edition.oauth.client_id/client_secret
-	// (cross-review round 1, chunk 3 P2): must run before Validate so a
-	// missing env var reports "client_secret is required", not a silent
-	// placeholder-string login failure at the IdP.
-	expandServerEditionSecrets(cfg)
+	// server_edition.oauth.client_id/client_secret are deliberately NOT
+	// expanded here — see the matching comment in LoadFromFile (cross-review
+	// round 6, chunk 3 P2).
 
 	// Create data directory if it doesn't exist.
 	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —

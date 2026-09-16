@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -671,4 +672,41 @@ func TestCallbackURL(t *testing.T) {
 			assert.Equal(t, tt.expected, handler.CallbackURL(req))
 		})
 	}
+}
+
+// Spec 107 cross-review round 6, chunk 3 P2: NewOAuthHandler must resolve a
+// `${env:...}` server_edition.oauth.client_secret/client_id reference into
+// its own private, never-persisted h.oauthCfg clone — config.LoadFromFile
+// deliberately stops short of resolving it into the Config object that is
+// round-tripped back to disk by SaveConfig on every later PATCH/apply, so
+// this handler-construction step is the only place the actual secret is
+// produced for the token endpoint. Proved by driving a real authorization
+// code exchange through mockOAuthProviderServer's /token endpoint, which
+// only succeeds if the handler sent the resolved value, not the literal
+// "${env:...}" text.
+func TestNewOAuthHandler_ResolvesEnvSecretRefForTokenExchange(t *testing.T) {
+	t.Setenv("MCPPROXY_TEST_HANDLER_OIDC_SECRET", "resolved-secret-value")
+
+	provider := mockOAuthProviderServer(t, "alice@example.com", "Alice", "alice-sub")
+	defer provider.Close()
+
+	oauthCfg := &config.ServerEditionOAuthConfig{
+		Provider:     "google",
+		ClientID:     "${env:MCPPROXY_TEST_HANDLER_OIDC_SECRET}", // exercise both fields
+		ClientSecret: "${env:MCPPROXY_TEST_HANDLER_OIDC_SECRET}",
+	}
+	handler, _ := setupTestOAuthHandler(t, oauthCfg)
+	require.NoError(t, handler.providerErr, "the handler must resolve the reference, not fail construction")
+	require.NotNil(t, handler.oauthCfg)
+	assert.Equal(t, "resolved-secret-value", handler.oauthCfg.ClientSecret,
+		"the handler's own clone must carry the resolved value")
+	assert.Equal(t, "resolved-secret-value", handler.oauthCfg.ClientID)
+
+	handler.provider.TokenURL = provider.URL + "/token"
+	handler.provider.UserInfoURL = provider.URL + "/userinfo"
+
+	tokenResp, err := handler.provider.ExchangeCode(context.Background(), "test-code", "http://localhost/callback",
+		handler.oauthCfg.ClientID, handler.oauthCfg.ClientSecret, "")
+	require.NoError(t, err, "the token exchange must succeed with the resolved secret")
+	assert.Equal(t, "mock-access-token", tokenResp.AccessToken)
 }
