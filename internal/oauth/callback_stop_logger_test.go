@@ -87,20 +87,24 @@ func assertStopRoutedToOwner(t *testing.T, mgr *CallbackServerManager, observed 
 	own := observed[stopped]
 	foreign := observed[other]
 	// The serve goroutine ALSO emits "OAuth callback server stopped" through
-	// the server's own logger once Serve returns; wait for it so the count
-	// below is deterministic: goroutine record + manager record = 2 in the
-	// owner's log, 0 anywhere else.
+	// the server's own logger once Serve returns, and it races the manager's
+	// record; wait for both so the count below is deterministic: goroutine
+	// record + manager record = 2 in the owner's log, 0 anywhere else.
 	require.Eventually(t, func() bool {
-		return len(own.FilterMessage("OAuth callback server stopped").All()) >= 1
-	}, 2*time.Second, 10*time.Millisecond, "serve goroutine's own stop record never arrived")
+		return len(own.FilterMessage("OAuth callback server stopped").All()) >= 2
+	}, 2*time.Second, 10*time.Millisecond,
+		"%s's manager stop record must be written through %s's recorded logger (goroutine record + manager record)", stopped, stopped)
 	assert.Len(t, own.FilterMessage("OAuth callback server stopped").All(), 2,
 		"%s's manager stop record must be written through %s's recorded logger (goroutine record + manager record)", stopped, stopped)
 	assert.Len(t, own.FilterMessage("Stopped OAuth callback server while flows were still waiting").All(), 1,
 		"%s's dropped-waiter record must be written through %s's recorded logger", stopped, stopped)
 
-	assert.Empty(t, foreign.FilterMessage("OAuth callback server stopped").All(),
+	// The other server's observer keeps its OWN tear-down records from an
+	// earlier round; only records about `stopped` are forbidden there.
+	aboutStopped := foreign.FilterField(zap.String("server", stopped))
+	assert.Empty(t, aboutStopped.FilterMessage("OAuth callback server stopped").All(),
 		"%s's stop record landed in %s's log", stopped, other)
-	assert.Empty(t, foreign.FilterMessage("Stopped OAuth callback server while flows were still waiting").All(),
+	assert.Empty(t, aboutStopped.FilterMessage("Stopped OAuth callback server while flows were still waiting").All(),
 		"%s's dropped-waiter record landed in %s's log", stopped, other)
 	assert.Empty(t, mentionsServer(foreign, stopped, stoppedPort),
 		"%s's name/port written into %s's log", stopped, other)

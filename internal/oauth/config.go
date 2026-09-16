@@ -1687,21 +1687,45 @@ func (m *CallbackServerManager) StopCallbackServer(serverName string) error {
 	return m.StopCallbackServerWithLogger(serverName, nil)
 }
 
-// StopCallbackServerWithLogger is StopCallbackServer with the caller's logger,
-// so the tear-down (and any waiter it drops) is actually recorded.
+// StopCallbackServerWithLogger is StopCallbackServer with the caller's logger.
+// The signature is kept for its callers; the tear-down records are written
+// through the stopped server's OWN recorded logger (Spec 105 FR-007,
+// subject-bound routing), and the caller's logger is only the fallback for a
+// server that recorded none. Stopping never adopts a logger as the manager
+// logger: the manager serves every server, and the last-installed logger is a
+// tee into whichever server's log file ran a flow last — pre-105 that is where
+// another server's name, bind host, port and dropped-waiter count landed.
 func (m *CallbackServerManager) StopCallbackServerWithLogger(serverName string, logger *zap.Logger) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return m.stopCallbackServerLocked(serverName, m.adoptLoggerLocked(logger))
+	return m.stopCallbackServerLocked(serverName, logger)
 }
 
 // stopCallbackServerLocked shuts the server down and removes it from the map.
-// m.mu must be held.
-func (m *CallbackServerManager) stopCallbackServerLocked(serverName string, logger *zap.Logger) error {
+// m.mu must be held. fallback is consulted only when the server recorded no
+// logger of its own (every server started through StartCallbackServerOnHost
+// records one); a nil fallback resolves to the manager logger.
+func (m *CallbackServerManager) stopCallbackServerLocked(serverName string, fallback *zap.Logger) error {
 	server, exists := m.servers[serverName]
 	if !exists {
 		return nil // Already stopped or never started
+	}
+
+	// Subject-bound (FR-007): the record concerns `server`, so it is written
+	// through the logger recorded for that server at start — the tee into
+	// ITS per-server log — never through whichever logger was installed last.
+	// The recorded logger already carries server, bind_host and port as
+	// context fields.
+	logger := server.logger
+	if logger == nil {
+		logger = fallback
+	}
+	if logger == nil {
+		logger = m.logger
+	}
+	if logger == nil {
+		logger = zap.L().Named(oauthCallbackLoggerName)
 	}
 
 	// Shutdown the server

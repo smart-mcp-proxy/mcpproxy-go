@@ -76,6 +76,7 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 		c.upstreamLogger.Info("Docker isolation configured",
 			zap.String("runtime_type", runtimeType),
 			zap.String("container_name", c.containerName),
+			containerOwnerField(c.config.Name),
 			zap.String("container_command", containerCommand))
 	}
 

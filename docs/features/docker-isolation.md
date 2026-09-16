@@ -348,7 +348,24 @@ When MCPProxy stops, containers are cleaned up with a 30-second timeout:
 1. **Graceful Stop**: `docker stop` (sends SIGTERM to container)
 2. **Force Kill**: `docker kill` if container doesn't stop gracefully
 
-Containers are labeled with `mcpproxy.managed=true` for identification.
+Containers are labeled with `com.mcpproxy.managed=true` for identification
+and `com.mcpproxy.server=<server name>` (the raw, unsanitised name) for
+ownership.
+
+### Container ownership
+
+Every container mcpproxy creates is named
+`mcpproxy-<sanitised server name>-<4 random chars>`. The name alone does not
+identify the server — `a/b` and `a-b` both sanitise to `a-b` — so every
+cleanup path (the pre-start sweep for stale containers, the disconnect
+fallback by name pattern, and the fallback by image name) removes only
+containers whose `com.mcpproxy.server` label **and** canonical name both
+match the server being cleaned up. Containers you started yourself with
+`docker run --name mcpproxy-…`, or that pre-date the label, are never touched
+by these sweeps, and a container that merely shares an image with a server's
+is never stopped on that server's behalf. Housekeeping records in the
+per-server log carry `container_owner` (the label value) so
+[`tail_log`](/features/agent-tokens) can attribute them to the right server.
 
 ### Manual Cleanup
 
@@ -356,10 +373,10 @@ If containers remain after MCPProxy stops:
 
 ```bash
 # List MCPProxy-managed containers
-docker ps --filter "label=mcpproxy.managed=true"
+docker ps --filter "label=com.mcpproxy.managed=true"
 
 # Remove all MCPProxy containers
-docker rm -f $(docker ps -q --filter "label=mcpproxy.managed=true")
+docker rm -f $(docker ps -q --filter "label=com.mcpproxy.managed=true")
 ```
 
 See [Shutdown Behavior](/operations/shutdown-behavior) for detailed subprocess lifecycle documentation.

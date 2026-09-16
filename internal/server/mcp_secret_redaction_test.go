@@ -285,6 +285,14 @@ func TestScrubUpstreamText_ConnectionErrors(t *testing.T) {
 // attempt, and connection_launcher.go pipes the child process's own stdout into
 // the same file. `tail_log` returned those lines verbatim and recorded them
 // into the activity store.
+//
+// The fixture records carry the writer stamp `server=leaky` in both encoder
+// shapes (Spec 105 FR-007: a scoped caller receives only attributable
+// records, so an unstamped fixture line would now be withheld before the
+// scrubber ever saw it and the scoped assertions would pass vacuously). They
+// are written by hand rather than through the per-server writer because that
+// writer's own sanitizer would mask the credentials at write time — the point
+// here is the scrub on the READ path, for scoped and administrator callers.
 func TestTailLog_ScrubsLogLines(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
 
@@ -301,20 +309,34 @@ func TestTailLog_ScrubsLogLines(t *testing.T) {
 	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
 		Name: "leaky", Protocol: "http", Enabled: true,
 	}))
+	const childToken = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 	require.NoError(t, os.WriteFile(filepath.Join(logDir, "server-leaky.log"), []byte(
-		`{"level":"info","msg":"Starting connection attempt","url":"https://host/mcp?token=`+leakySecrets["url"]+`"}`+"\n"+
-			`child stdout: using ghp_abcdefghijklmnopqrstuvwxyz0123456789`+"\n"), 0o600))
+		// JSON-encoder shape: the connection logger's URL record.
+		`{"level":"info","msg":"Starting connection attempt","server":"leaky","url":"https://host/mcp?token=`+leakySecrets["url"]+`"}`+"\n"+
+			// Console-encoder shape: the launcher-pumped child stdout line is the MESSAGE.
+			`2026-01-01T00:00:00.000Z | INFO | core/connection_launcher.go:1 | [launcher stdout] child stdout: using `+childToken+` | {"server": "leaky"}`+"\n"), 0o600))
 
-	request := mcp.CallToolRequest{}
-	request.Params.Arguments = map[string]interface{}{"name": "leaky"}
+	for name, ctx := range map[string]context.Context{
+		"scoped agent token":    agentCtx([]string{"leaky"}, []string{auth.PermRead}, ""),
+		"administrator":         adminCtx(),
+		"no auth ctx (in-proc)": context.Background(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := mcp.CallToolRequest{}
+			request.Params.Arguments = map[string]interface{}{"name": "leaky"}
 
-	result, err := proxy.handleTailLog(context.Background(), request)
-	require.NoError(t, err)
-	body := toolResultText(t, result)
+			result, err := proxy.handleTailLog(ctx, request)
+			require.NoError(t, err)
+			body := toolResultText(t, result)
+			require.False(t, result.IsError, body)
 
-	assert.NotContains(t, body, leakySecrets["url"], "tail_log leaks the URL credential mcpproxy itself logged")
-	assert.NotContains(t, body, "ghp_abcdefghijklmnopqrstuvwxyz0123456789")
-	assert.Contains(t, body, "Starting connection attempt", "the diagnostic content must survive")
+			assert.NotContains(t, body, leakySecrets["url"], "tail_log leaks the URL credential mcpproxy itself logged")
+			assert.NotContains(t, body, childToken)
+			assert.Contains(t, body, "Starting connection attempt", "the diagnostic content must survive")
+			assert.Contains(t, body, "child stdout: using", "the child's own line must survive (scrubbed)")
+			assert.Contains(t, body, `"lines_returned":2`, "both stamped records are attributable to leaky: %s", body)
+		})
+	}
 }
 
 // TestArgvMaskEcho_GuardsTheWritePath is the write-path counterpart to masking

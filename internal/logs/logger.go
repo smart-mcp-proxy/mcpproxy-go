@@ -546,18 +546,3 @@ func ReadUpstreamServerLogTail(config *config.LogConfig, serverName string, line
 
 	return allLines[len(allLines)-lines:], nil
 }
-
-// ReadUpstreamServerLogTailAttributed reads the last N records of an upstream
-// server log that are attributable to serverName (Spec 105 FR-007, research
-// D8). Two raw names can share one file (`a/b` and `a_b` both sanitise to
-// server-a_b.log), so scoped callers must receive only the records whose
-// writer stamp (`server=<raw>`) is exactly serverName, filtered BEFORE the
-// tail limit; records with no accepted stamp are non-attributable and
-// withheld. Administrators keep ReadUpstreamServerLogTail (whole file).
-//
-// Red-phase scaffold (PR E, T054): the signature is fixed here so the
-// attribution tests compile against HEAD and fail by assertion; the body is
-// the unfiltered whole-file reader until T054 lands the attributed reader.
-func ReadUpstreamServerLogTailAttributed(config *config.LogConfig, serverName string, lines int) ([]string, error) {
-	return ReadUpstreamServerLogTail(config, serverName, lines)
-}

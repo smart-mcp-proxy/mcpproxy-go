@@ -19,9 +19,17 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
-// tailLogCanary is written into every fixture server's log. Its presence in a
-// tool response proves the log was disclosed.
+// tailLogCanary is written into every fixture server's log through the REAL
+// stamped per-server writer. Its presence in a tool response proves the log
+// was disclosed.
 const tailLogCanary = "CANARY-upstream-log-line-7f3a"
+
+// tailLogLegacyLine is appended to every fixture server's log WITHOUT a
+// writer stamp (a pre-105 record). Spec 105 FR-007: a record with no
+// attribution is withheld from scoped callers and kept for administrators —
+// pre-105 this fixture's canary was itself an unstamped line served to the
+// scoped token, which the attributed reader now (correctly) withholds.
+const tailLogLegacyLine = "LEGACY-unstamped-log-line-2b61"
 
 // newTailLogScopeProxy builds a proxy with two upstreams, "github" and
 // "secret", each with a per-server log file AND a registered (never
@@ -62,8 +70,15 @@ func newTailLogScopeProxy(t *testing.T) *MCPProxyServer {
 		// served response includes connection_status (otherwise the
 		// "connection status not disclosed" assertions would pass vacuously).
 		require.NoError(t, proxy.upstreamManager.AddServerConfig(name, sc))
+		// A pre-105 unstamped record first, then the canary through the real
+		// stamped writer (the one internal/upstream/core installs).
 		require.NoError(t, os.WriteFile(filepath.Join(logDir, "server-"+name+".log"),
-			[]byte(tailLogCanary+" "+name+"\n"), 0o600))
+			[]byte(tailLogLegacyLine+" "+name+"\n"), 0o600))
+		writer, closer, err := logs.NewUpstreamServerLogger(cfg.Logging, name)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = closer.Close() })
+		writer.Info(tailLogCanary + " " + name)
+		_ = writer.Sync()
 	}
 	return proxy
 }
@@ -107,15 +122,34 @@ func assertTailLogHidden(t *testing.T, proxy *MCPProxyServer, ctx context.Contex
 	assert.NotContains(t, body, "connection_status", "connection status disclosed")
 }
 
-// assertTailLogServed asserts the in-scope / admin path returns the log,
-// the stored flags and the live connection status.
-func assertTailLogServed(t *testing.T, proxy *MCPProxyServer, ctx context.Context, name string) {
+// assertTailLogServed asserts the in-scope / admin path returns the stamped
+// log record, the stored flags and the live connection status, and returns
+// the body for the caller's attribution assertions.
+func assertTailLogServed(t *testing.T, proxy *MCPProxyServer, ctx context.Context, name string) string {
 	t.Helper()
 	result, body := tailLogVia(t, proxy, ctx, name)
 	assert.False(t, result.IsError, "in-scope tail_log must succeed: %s", body)
 	assert.Contains(t, body, tailLogCanary+" "+name)
 	assert.Contains(t, body, "server_status")
 	assert.Contains(t, body, "connection_status", "fixture must register a client, or the non-disclosure assertions prove nothing")
+	return body
+}
+
+// assertTailLogServedScoped is assertTailLogServed for a scoped caller: the
+// stamped record is served, the unstamped legacy record is withheld
+// (Spec 105 FR-007 — attribution is uniform, co-owner or not).
+func assertTailLogServedScoped(t *testing.T, proxy *MCPProxyServer, ctx context.Context, name string) {
+	t.Helper()
+	body := assertTailLogServed(t, proxy, ctx, name)
+	assert.NotContains(t, body, tailLogLegacyLine, "unattributed legacy record served to a scoped caller")
+}
+
+// assertTailLogServedWholeFile is assertTailLogServed for an administrator:
+// the whole file, legacy record included (SC-005).
+func assertTailLogServedWholeFile(t *testing.T, proxy *MCPProxyServer, ctx context.Context, name string) {
+	t.Helper()
+	body := assertTailLogServed(t, proxy, ctx, name)
+	assert.Contains(t, body, tailLogLegacyLine+" "+name, "administrators keep the whole file")
 }
 
 func TestTailLog_ServerRestrictedToken_HidesOutOfScopeServer(t *testing.T) {
@@ -128,7 +162,7 @@ func TestTailLog_ServerRestrictedToken_HidesOutOfScopeServer(t *testing.T) {
 	})
 
 	assertTailLogHidden(t, proxy, ctx, "secret")
-	assertTailLogServed(t, proxy, ctx, "github")
+	assertTailLogServedScoped(t, proxy, ctx, "github")
 }
 
 func TestTailLog_ProfilePinnedToken_HidesServerOutsideProfile(t *testing.T) {
@@ -142,7 +176,7 @@ func TestTailLog_ProfilePinnedToken_HidesServerOutsideProfile(t *testing.T) {
 	})
 
 	assertTailLogHidden(t, proxy, ctx, "secret")
-	assertTailLogServed(t, proxy, ctx, "github")
+	assertTailLogServedScoped(t, proxy, ctx, "github")
 }
 
 // A pin whose profile no longer exists resolves to a deny-all scope (see
@@ -166,18 +200,18 @@ func TestTailLog_AdminUnchanged(t *testing.T) {
 	proxy := newTailLogScopeProxy(t)
 
 	adminCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{Type: auth.AuthTypeAdmin})
-	assertTailLogServed(t, proxy, adminCtx, "secret")
-	assertTailLogServed(t, proxy, adminCtx, "github")
+	assertTailLogServedWholeFile(t, proxy, adminCtx, "secret")
+	assertTailLogServedWholeFile(t, proxy, adminCtx, "github")
 
 	// No AuthContext at all (in-process / stdio caller) is treated as admin by
 	// the shared server-op policy; unchanged here.
-	assertTailLogServed(t, proxy, context.Background(), "secret")
+	assertTailLogServedWholeFile(t, proxy, context.Background(), "secret")
 
 	// An admin's AllowedServers is never consulted, even when populated.
 	narrowAdmin := auth.WithAuthContext(context.Background(), &auth.AuthContext{
 		Type: auth.AuthTypeAdmin, AllowedServers: []string{"github"},
 	})
-	assertTailLogServed(t, proxy, narrowAdmin, "secret")
+	assertTailLogServedWholeFile(t, proxy, narrowAdmin, "secret")
 }
 
 // An explicit URL profile (/mcp/p/<slug>) bounds tail_log for every caller,
@@ -187,14 +221,16 @@ func TestTailLog_URLProfileScope_AppliesToAllCallers(t *testing.T) {
 	proxy := newTailLogScopeProxy(t)
 	scope := profile.NewProfileScope("gh", []string{"github"})
 
+	// A profile bounds WHICH server an administrator may name, not which
+	// records of it they see: still the whole file.
 	adminInProfile := profile.WithProfileScope(
 		auth.WithAuthContext(context.Background(), &auth.AuthContext{Type: auth.AuthTypeAdmin}), scope)
 	assertTailLogHidden(t, proxy, adminInProfile, "secret")
-	assertTailLogServed(t, proxy, adminInProfile, "github")
+	assertTailLogServedWholeFile(t, proxy, adminInProfile, "github")
 
 	anonInProfile := profile.WithProfileScope(context.Background(), scope)
 	assertTailLogHidden(t, proxy, anonInProfile, "secret")
-	assertTailLogServed(t, proxy, anonInProfile, "github")
+	assertTailLogServedWholeFile(t, proxy, anonInProfile, "github")
 }
 
 // ---------------------------------------------------------------------------
@@ -265,9 +301,10 @@ func newTailLogCollidingProxy(t *testing.T) *tailLogCollidingFixture {
 	return f
 }
 
-// write emits one record through name's real stamped writer. One call site
-// for every record keeps the console encoder's caller segment constant, so
-// two fixtures' lines differ only by timestamp (see tailLogLineSignature).
+// write emits one record through name's real stamped writer. The writer
+// records its CALLER's caller (NewUpstreamServerLogger adds one frame of
+// skip), i.e. the test line that called write, so two fixtures' lines differ
+// by timestamp and caller segment — both stripped by tailLogLineSignature.
 func (f *tailLogCollidingFixture) write(name, msg string) {
 	f.writers[name].Info(msg)
 	_ = f.writers[name].Sync()
@@ -296,14 +333,15 @@ func tailLogLinesVia(t *testing.T, proxy *MCPProxyServer, ctx context.Context, n
 	return parsed, body
 }
 
-// tailLogLineSignature strips the leading timestamp segment of a console
-// record (`ts | LEVEL | caller | msg | {fields}`) so records from two
-// fixtures written through the same call site compare equal.
+// tailLogLineSignature strips the timestamp and caller segments of a console
+// record (`ts | LEVEL | caller | msg | {fields}`) so records written by two
+// fixtures compare on level, message and fields only.
 func tailLogLineSignature(line string) string {
-	if _, rest, ok := strings.Cut(line, " | "); ok {
-		return rest
+	parts := strings.SplitN(line, " | ", 4)
+	if len(parts) < 4 {
+		return line
 	}
-	return line
+	return parts[1] + " | " + parts[3]
 }
 
 func tailLogSignatures(lines []string) []string {

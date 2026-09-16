@@ -341,9 +341,22 @@ func newLoggerWriter(primary, fallback *zap.Logger) io.Writer {
 }
 
 func (w *loggerWriter) Write(p []byte) (int, error) {
-	line := strings.TrimRight(string(p), "\n")
+	// One record per line. pumpLines already writes one line per call; the
+	// split is the guarantee for any other producer, because the child's text
+	// becomes the console-encoder MESSAGE of its record and a message must
+	// never carry a line break — a break would start a new line whose text
+	// the child controls, and the attributed log reader (Spec 105 FR-007,
+	// internal/logs research D8 rule 2) keys on line boundaries.
+	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+		w.writeLine(strings.TrimRight(line, "\r"))
+	}
+	return len(p), nil
+}
+
+// writeLine records one child output line through the per-server logger.
+func (w *loggerWriter) writeLine(line string) {
 	if line == "" {
-		return len(p), nil
+		return
 	}
 	// Issue #1158 (review round 2, investigation 3). This is the child
 	// process's own stdout/stderr, written verbatim into
@@ -366,5 +379,4 @@ func (w *loggerWriter) Write(p []byte) (int, error) {
 	case w.fallback != nil:
 		w.fallback.Info(line)
 	}
-	return len(p), nil
 }

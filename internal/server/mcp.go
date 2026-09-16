@@ -5932,8 +5932,22 @@ func (p *MCPProxyServer) handleTailLog(ctx context.Context, request mcp.CallTool
 		}
 	}
 
-	// Read log tail
-	logLines, err := logs.ReadUpstreamServerLogTail(logConfig, name, lines)
+	// Read log tail. Spec 105 FR-007 (research D8): two raw names can share
+	// one log file (`a/b` and `a_b` both sanitise to server-a_b.log), so a
+	// scoped caller receives only the records attributable to the server it
+	// asked for — filtered BEFORE the tail limit, so an interleaved co-owner
+	// record never displaces an authorized one, and lines_returned counts the
+	// authorized tail. The policy is uniform whether or not a co-owner exists:
+	// legacy records with no writer stamp are withheld either way, never a
+	// whole-file refusal. Administrators (nil AuthContext, API key, socket)
+	// keep the whole file exactly as before (SC-005) — a profile scope bounds
+	// WHICH server they may name (above), not which records of it they see.
+	var logLines []string
+	if authCtx == nil || authCtx.IsAdmin() {
+		logLines, err = logs.ReadUpstreamServerLogTail(logConfig, name, lines)
+	} else {
+		logLines, err = logs.ReadUpstreamServerLogTailAttributed(logConfig, name, lines)
+	}
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to read log for server '%s': %v", name, err)), nil
 	}
