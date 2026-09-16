@@ -184,3 +184,97 @@ func TestGetRecordsAs_SameAuthorizationIsByteIdentical(t *testing.T) {
 		}
 	}
 }
+
+// Spec 105 FR-001 (`spec.md:124`, research D5, gap FR001-G6): superset is
+// ordered by CALLER KIND FIRST. An administrator reader qualifies for any
+// snapshot regardless of its own profile binding — unscoped, narrower, wider,
+// empty, or a profile deleted since — where before this feature the profile
+// comparison ran first and refused a profile-bound administrator every
+// unscoped or wider entry (#1226 R1-F2). An agent reader never qualifies for
+// an administrator-produced snapshot, however broad the agent. Between agent
+// snapshots nothing changes: the deny-all guard (an empty effective profile
+// reads nothing, not even its own deny-all-stamped entry) applies to agent
+// readers only, and pin equality, server set and permission set must each
+// contain the snapshot's.
+//
+// The pre-D5 table above (TestAuthorization_CouldHaveProduced) pins the
+// profile-first order for administrators; task T031 inverts those cells.
+func TestAuthorization_CallerKindFirst(t *testing.T) {
+	admin := Authorization{CallerKind: CallerKindAdmin}
+	adminUser := Authorization{CallerKind: CallerKindAdminUser, Principal: "u9"}
+	adminInProfile := Authorization{CallerKind: CallerKindAdmin, Profile: "research",
+		ProfileScoped: true, ProfileServers: []string{"github"}}
+	adminInWiderProfile := Authorization{CallerKind: CallerKindAdmin, Profile: "everything",
+		ProfileScoped: true, ProfileServers: []string{"github", "weather"}}
+	adminInEmptyProfile := Authorization{CallerKind: CallerKindAdmin, Profile: "empty",
+		ProfileScoped: true, ProfileServers: []string{}}
+	adminInDeletedProfile := Authorization{CallerKind: CallerKindAdmin, Profile: "research",
+		ProfileScoped: true, ProfileServers: nil} // the URL/session profile vanished: same name, deny-all scope
+	adminUserInProfile := Authorization{CallerKind: CallerKindAdminUser, Principal: "u9", Profile: "research",
+		ProfileScoped: true, ProfileServers: []string{"github"}}
+	broad := Authorization{CallerKind: CallerKindAgent, Principal: "broad",
+		AllowedServers: []string{"github", "weather"}, Permissions: []string{"read", "write"}}
+	wildcard := Authorization{CallerKind: CallerKindAgent, Principal: "star",
+		AllowedServers: []string{"*"}, Permissions: []string{"read", "write", "destructive"}}
+	pinnedWildcard := Authorization{CallerKind: CallerKindAgent, Principal: "star-pinned",
+		AllowedServers: []string{"*"}, Permissions: []string{"read", "write", "destructive"},
+		ProfilePin: "research", Profile: "research", ProfileScoped: true, ProfileServers: []string{"github"}}
+	agentInSessionProfile := Authorization{CallerKind: CallerKindAgent, Principal: "broad",
+		AllowedServers: []string{"github", "weather"}, Permissions: []string{"read", "write"},
+		Profile: "research", ProfileScoped: true, ProfileServers: []string{"github"}}
+	agentInEmptyProfile := Authorization{CallerKind: CallerKindAgent, Principal: "star",
+		AllowedServers: []string{"*"}, Permissions: []string{"read", "write", "destructive"},
+		Profile: "empty", ProfileScoped: true, ProfileServers: []string{}}
+	stalePin := pinnedWildcard
+	stalePin.ProfileServers = []string{} // pinned profile deleted: deny-all, same name
+
+	cases := []struct {
+		name     string
+		producer Authorization
+		reader   Authorization
+		want     bool
+	}{
+		// Administrator reader qualifies for ANY snapshot, whatever its profile.
+		{"profile-bound admin reads an unscoped admin entry", admin, adminInProfile, true},
+		{"narrower-profile admin reads a wider-profile admin entry", adminInWiderProfile, adminInProfile, true},
+		{"wider-profile admin reads a narrower-profile admin entry", adminInProfile, adminInWiderProfile, true},
+		{"empty-profile admin reads an unscoped admin entry", admin, adminInEmptyProfile, true},
+		{"empty-profile admin reads a profile-bound admin entry", adminInProfile, adminInEmptyProfile, true},
+		{"deleted-profile admin reads an unscoped admin entry", admin, adminInDeletedProfile, true},
+		{"deleted-profile admin reads its own earlier profile-bound entry", adminInProfile, adminInDeletedProfile, true},
+		{"empty-profile admin reads its own deny-all-stamped entry", adminInEmptyProfile, adminInEmptyProfile, true},
+		{"profile-bound admin reads an unscoped agent entry", broad, adminInProfile, true},
+		{"profile-bound admin reads a wildcard agent entry", wildcard, adminInProfile, true},
+		{"empty-profile admin reads a pinned agent entry", pinnedWildcard, adminInEmptyProfile, true},
+		{"profile-bound admin_user reads an unscoped admin entry", admin, adminUserInProfile, true},
+		{"profile-bound admin_user reads an unscoped admin_user entry", adminUser, adminUserInProfile, true},
+		{"unscoped admin reads a profile-bound admin entry (unchanged)", adminInProfile, admin, true},
+
+		// Agent reader never qualifies for an administrator snapshot.
+		{"wildcard full-permission agent cannot read an unscoped admin entry", admin, wildcard, false},
+		{"wildcard agent cannot read a profile-bound admin entry", adminInProfile, wildcard, false},
+		{"pinned wildcard agent cannot read an admin entry bound to the same profile", adminInProfile, pinnedWildcard, false},
+		{"wildcard agent cannot read an admin_user entry", adminUser, wildcard, false},
+		{"wildcard agent cannot read an empty-profile admin entry", adminInEmptyProfile, wildcard, false},
+
+		// Between agent snapshots the dimension checks are unchanged.
+		{"pinned wildcard agent cannot read an unpinned agent entry", broad, pinnedWildcard, false},
+		{"pinned wildcard agent cannot read an unpinned wildcard entry", wildcard, pinnedWildcard, false},
+		{"session-profiled agent cannot read an unscoped agent entry", broad, agentInSessionProfile, false},
+		{"unscoped agent reads its session-profiled entry", agentInSessionProfile, broad, true},
+		{"wildcard agent reads a narrower agent entry", broad, wildcard, true},
+
+		// Deny-all guard applies to AGENT readers only.
+		{"empty-profile agent reads nothing: unscoped agent entry", broad, agentInEmptyProfile, false},
+		{"empty-profile agent reads nothing: its own deny-all-stamped entry", agentInEmptyProfile, agentInEmptyProfile, false},
+		{"stale pin reads nothing: its own earlier entry", pinnedWildcard, stalePin, false},
+		{"stale pin reads nothing: its own deny-all-stamped entry", stalePin, stalePin, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.producer.CouldHaveProduced(tc.reader); got != tc.want {
+				t.Fatalf("producer=%+v reader=%+v: got %v want %v", tc.producer, tc.reader, got, tc.want)
+			}
+		})
+	}
+}
