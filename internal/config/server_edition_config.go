@@ -92,10 +92,16 @@ func ValidatePublicURL(raw string) error {
 // — tells the operator to write `${env:OIDC_CLIENT_SECRET}` so the secret
 // stays out of the file, but nothing expanded it: the literal placeholder
 // string reached the token endpoint as the client secret and every OAuth
-// login failed. Failures are logged to stderr and the original value is kept,
-// exactly like expandDataDir — this runs before ValidateOIDC / the required
-// checks so a missing env var is refused by "client_secret is required"
-// rather than silently authenticating with the placeholder text.
+// login failed. This runs before ValidateOIDC / the required checks, so a
+// missing env var must be refused by "client_secret is required" rather than
+// silently authenticating with the placeholder text — which means a failed
+// resolution must clear the field, not keep the unresolved `${...}` text: a
+// literal `${env:MISSING}` is itself non-empty, so keeping it would pass the
+// non-empty check (cross-review round 2, chunk 3 P2: the original fix kept
+// the original value "exactly like expandDataDir", but DataDir has its own
+// downstream "still contains ${" skip that client_id/client_secret have no
+// equivalent of, so that pattern silently defeated this function's own
+// documented contract). Failures are still logged to stderr.
 func expandServerEditionSecrets(cfg *Config) {
 	if cfg == nil || cfg.ServerEdition == nil || cfg.ServerEdition.OAuth == nil {
 		return
@@ -104,14 +110,16 @@ func expandServerEditionSecrets(cfg *Config) {
 	oauth := cfg.ServerEdition.OAuth
 	if oauth.ClientSecret != "" {
 		if resolved, err := resolver.ExpandSecretRefs(context.Background(), oauth.ClientSecret); err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: Failed to resolve secret ref in server_edition.oauth.client_secret, using original value: err=%v\n", err)
+			fmt.Fprintf(os.Stderr, "WARN: Failed to resolve secret ref in server_edition.oauth.client_secret, treating as unset: err=%v\n", err)
+			oauth.ClientSecret = ""
 		} else {
 			oauth.ClientSecret = resolved
 		}
 	}
 	if oauth.ClientID != "" {
 		if resolved, err := resolver.ExpandSecretRefs(context.Background(), oauth.ClientID); err != nil {
-			fmt.Fprintf(os.Stderr, "WARN: Failed to resolve secret ref in server_edition.oauth.client_id, using original value: err=%v\n", err)
+			fmt.Fprintf(os.Stderr, "WARN: Failed to resolve secret ref in server_edition.oauth.client_id, treating as unset: err=%v\n", err)
+			oauth.ClientID = ""
 		} else {
 			oauth.ClientID = resolved
 		}

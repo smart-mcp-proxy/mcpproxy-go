@@ -265,17 +265,27 @@ func (p *oidcProvider) authorizationURL(ctx context.Context, callbackURL, state,
 	if err != nil {
 		return "", err
 	}
-	params := url.Values{
-		"client_id":             {p.cfg.ClientID},
-		"redirect_uri":          {callbackURL},
-		"response_type":         {"code"},
-		"scope":                 {strings.Join(p.cfg.Scopes, " ")},
-		"state":                 {state},
-		"nonce":                 {nonce},
-		"code_challenge":        {codeChallenge},
-		"code_challenge_method": {"S256"},
+	// Parse and merge into the endpoint's own query rather than blindly
+	// appending "?" + params.Encode(): an authorization_endpoint that already
+	// carries a query component (e.g. a tenant/realm selector) would otherwise
+	// produce "?tenant=acme?client_id=..." — a single malformed query string
+	// the IdP cannot parse, so client_id/state/nonce/PKCE never arrive
+	// (cross-review round 2, chunk 1 P2).
+	u, err := url.Parse(doc.AuthorizationEndpoint)
+	if err != nil {
+		return "", newOIDCError(LoginDiscoveryFailed, "authorization_endpoint is not a valid URL", err)
 	}
-	return doc.AuthorizationEndpoint + "?" + params.Encode(), nil
+	q := u.Query()
+	q.Set("client_id", p.cfg.ClientID)
+	q.Set("redirect_uri", callbackURL)
+	q.Set("response_type", "code")
+	q.Set("scope", strings.Join(p.cfg.Scopes, " "))
+	q.Set("state", state)
+	q.Set("nonce", nonce)
+	q.Set("code_challenge", codeChallenge)
+	q.Set("code_challenge_method", "S256")
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 // exchangeCode redeems the authorization code once, with the client
