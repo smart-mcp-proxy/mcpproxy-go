@@ -139,6 +139,25 @@ Merge-readiness caveat (found while fetching `origin/main` for the gofmt row): `
 
 ### Real instance
 
+Run 2026-09-17 on HEAD `5ad3a080d` (`fix(spec-107): cross-review round 6 for PR-B`), server binaries built fresh from this tree into session-scratchpad rigs (never `~/.mcpproxy`); every instance ran on its own high port with **both** `--config` and `--data-dir`, started as its own background process, readiness polled on `/readyz`, and torn down by PID at the end (`kill 15669 15668 15642 15640 15774`; the unrelated foreign `oauthserver -port 19271 -per-method-auth`, pid 88569, and Comet/Chrome renderer processes were left untouched).
+
+**T062 §0–§4 (quickstart/`scripts/dev-server-edition.sh --phase b`), happy path** — `bash scripts/dev-server-edition.sh --phase b --scratch <rig>/prb-happy --keep`: built server edition + fake IdP, booted on port 18264/idp 19273, boot notices confirmed (`require_mcp_auth: false is overridden to true because server_edition.enabled is true`; `public_url resolved`), headless login as alice (`/auth/login` → 302 to the IdP with `code_challenge_method=S256` and `nonce=`; form POST; callback → 302 → `/my/tokens`; exactly one `mcpproxy_session` cookie), `GET /api/v1/auth/me` → `{"email":"alice@example.com","groups":["eng"],...}`, open-redirect check (`redirect_uri=https://evil.example/` → 302 → `/ui/`, US2.7) — all `ok`, script exited 0 at "phase b complete".
+
+**Discrepancy (rule 9, code wins)**: the task text asked for "§0–§4 + §6", but §6 (mint token, call `/mcp`) is gated behind `--phase d`, which runs §5 first (`/servers` entitlement filtering, `/auth/provider`, `/user/servers`) — §5 is PR-C work (entitlement predicate, group grants) not yet on this branch. `--phase d` against the current tree fails exactly there: `FAIL 5 /servers as alice must list exactly [a] (entitlement-filtered)` (server returns `{"servers":null}` — no entitlement filtering implemented yet, as expected for a PR-B-only tree). So §6 was verified directly with curl against a manually-restarted instance from the same rig binaries, skipping only the §5 entitlement assertions:
+- JWT/cookie on `/mcp` → 401 (`{"error":"Unauthorized","message":"Authentication required. Provide a valid session cookie or Bearer token."}`), no-credential `/mcp` → 401 (FR-029, `require_mcp_auth:false` overridden), a minted user JWT (`POST /api/v1/auth/token`) on `/mcp` → also 401 (FR-003: only agent tokens/API keys work on `/mcp`, never session credentials).
+- `POST /api/v1/user/tokens` as alice → `201` with `"token":"mcp_agt_..."` (note: the response field is `token`, not `raw_token` as quickstart §6 names it — quickstart's field name is stale from an earlier response shape; the code wins).
+- `initialize` with `Authorization: Bearer <token>` → **200**, `Mcp-Session-Id` header returned; `tools/list` on that session → **200** with the full built-in tool surface (`retrieve_tools`, `call_tool_read/write/destructive`, `code_execution`, `upstream_servers`, `quarantine_security`, etc.) — confirms the T062 requirement ("initialize + tools/list → 200").
+
+**Tamper matrix** (`--idp-args`, each its own `--phase b` run): `-token-error bad-signature|wrong-iss|wrong-aud|no-nonce` → each `ok 4c tamper case refused with 403 and no session`; `-token-endpoint-redirect` → `ok 4c tamper case refused with 503 and no session` (unavailability class, FR-024); `-discovery-http-token-endpoint` → the script's own `4a` assertion (expects a redirect) doesn't fit this knob, since discovery is resolved synchronously inside `/auth/login` itself (before any redirect is issued) when the discovered `token_endpoint` isn't `https`: `/auth/login` answered `503` directly, and `main.log` shows the typed reason `ERROR auth/oauth_handler.go:691 login unavailable {"reason": "discovery_failed", "check": "discovery token_endpoint is not an absolute https URL"}` — a generic refusal (503, no IdP detail leaked) plus a typed reason in the log, matching what the task asked for even though the script's own `--phase b` harness (built for the callback-stage knobs) reports it as a script-assertion mismatch rather than a `die`. All four fixed-403 cases and the two 503 cases confirm `ErrorMode` fails closed with no session cookie issued in every case.
+
+**Cookie Secure matrix behind a simulated proxy** — two fresh instances, identical except `trusted_proxies`: one `["127.0.0.1/32"]` (trusted), one `[]` (untrusted), both `session_cookie_secure: "auto"`, `public_url` http. Full login flow against each, `X-Forwarded-Proto` set only on the final callback request:
+  - trusted proxy + `X-Forwarded-Proto: https` → `Set-Cookie: mcpproxy_session=...; HttpOnly; **Secure**; SameSite=Lax`.
+  - trusted proxy, no `X-Forwarded-Proto` header (plain http) → `Set-Cookie: ...; HttpOnly; SameSite=Lax` (no `Secure`).
+  - untrusted proxy (`trusted_proxies: []`) + `X-Forwarded-Proto: https` from the same loopback address → header is **ignored**, no `Secure` — confirms FR-027's fail-closed behavior: an untrusted peer cannot spoof `https` to force (or, the inverse risk, avoid) the `Secure` attribute.
+
+**T063 telemetry payload** — `GET /api/v1/telemetry/payload -H "X-API-Key: <key>"` on the server-edition instance (secure-trusted rig): `feature_flags.server_edition_enabled=true`, `feature_flags.idp_provider="oidc"`, `member_count_bucket="1-10"` present. Same call on a personal binary (`go build -o mcpproxy ./cmd/mcpproxy`, no `server_edition` config): `edition="personal"`, `feature_flags.server_edition_enabled=false`, `feature_flags.idp_provider="none"`, `member_count_bucket="0"`.
+  - **Discrepancy (rule 9)**: the task/spec FR-038 wording says `user_count_bucket` and "false/absent" for the personal payload; the shipped wire keys are `member_count_bucket` (deliberate rename — documented and defended in cross-review round 6, rejected as a finding: `user`-prefixed keys would trip the PII scanner's home-dir-basename substring match against every `USER user`-topology server container) and, for personal, explicit sentinel values (`idp_provider="none"`, `member_count_bucket="0"`) rather than field absence — `TestPayloadV13_PassesScanWithCommonUsernameBlocked` pins the rename, and the personal defaults are the existing `FeatureFlagSnapshot` zero-value behavior, not a PR-B regression.
+
 ### Automated checks
 
 Run 2026-09-16 on branch `107-b-oidc-front-door` (HEAD `45d302a47` = the six PR-B commits on top of PR-A's `c741f82f2`; `origin/main` at `8acb506de`, merge-base `b1777e865`) from the worktree root, in plan.md §Gates order plus the rows the PR-B brief adds (`go test ./cmd/...`, `./tests/oauthserver/...`, `npm run build`, the OAuth E2E job's commands). Go `go1.26.0 darwin/arm64`. Logs in the session scratchpad `gates-prb/`. Baseline for "pre-existing": `gh pr checks 1287` (PR-A) — every job `pass` except the 4-second `CodeQL` row (the known config-URL false positive, memory `project_codeql_req`). The machine was shared with three other sessions running `go test -race -count=3 -shuffle=on` sweeps and a Docker build throughout (load average 6.5–7.2), which matters for row 13.
@@ -174,6 +193,36 @@ Tooling note: as in PR-A, `/opt/homebrew/bin/golangci-lint` (2.5.0, built with g
 Gate fixes (commit `4b8baa3bb` `fix(spec-107): gate fixes for PR-B`): `internal/serveredition/auth/oidc_jwks_test.go` (row 12b), `native/macos/MCPProxy/MCPProxy/Settings/SettingsCatalog.swift`, `native/macos/MCPProxy/MCPProxy/Settings/ConfigSettingsView.swift`, new `native/macos/MCPProxy/MCPProxyTests/SettingsTrustedProxiesFieldTests.swift` (rows 19–20). No Go production file changed, so rows 1–11 and 13–18 were not re-run after the fixes; row 12b, 19 and 20 were.
 
 Not run: none of the plan.md §Gates rows was skipped. PR-C/PR-D-only gates (Playwright tenant spec, SC-009 benchmark) do not apply to PR-B.
+
+**T064 — full gate re-run post cross-review round 6.** Rounds 3–6 changed `internal/config/{loader.go,server_edition_config.go,serveredition_accessors*.go}`, `internal/serveredition/auth/{oauth_handler.go,oauth_providers.go,oidc_provider.go}`, `internal/telemetry/telemetry.go`, `tests/oauthserver/authorize.go`, and `scripts/dev-server-edition.sh` after the table above was recorded (at gate-fix commit `4b8baa3bb`), so the whole gate set was re-run from HEAD `5ad3a080d` rather than trusting the stale table. `wc -l internal/serveredition/auth/oidc_jwks.go` = **142** (budget 150). Logs: session scratchpad `gates-prb-r6/`.
+
+| # | Command | Outcome |
+|---|---------|---------|
+| 1 | `go build -o /dev/null ./cmd/mcpproxy` | pass |
+| 2 | `go build -tags server -o ./mcpproxy-server ./cmd/mcpproxy` | pass |
+| 3 | `go vet ./...` and `go vet -tags server ./...` | pass (both exit 0) |
+| 4 | `go test -race -tags server -timeout 20m ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/storage/...` | pass — 9 packages `ok` |
+| 5 | `go test -race -tags server -timeout 20m -skip '<CI regex>' ./internal/server/... ./internal/httpapi/...` | pass — `internal/server` 348.1s, `internal/server/tokens`, `internal/httpapi` `ok` |
+| 6 | personal race sweep, split: 66 non-`internal/server` packages, then `./internal/server` alone, both with the CI `-skip` regex | pass — 66 packages `ok` + `internal/server` `ok` 296.4s |
+| 7 | `go test -race -timeout 10m ./cmd/mcpproxy` and `… -tags server …` | pass (both `ok`) |
+| 8 | frozen tool-surface goldens (4 tests, unregenerated) | pass — all 4 `--- PASS` |
+| 9 | `go test ./cmd/release-gate/` | pass |
+| 10 | `go test ./cmd/...` | pass — 9 packages `ok` |
+| 11 | `go test ./tests/oauthserver/...` | pass |
+| 12 | golangci-lint v2.9.0 (module-cache pinned, same tooling note as PR-A row: the local `/opt/homebrew` binary is v2.5.0/go1.25.1 and refuses the go1.26 module) `run --config .github/.golangci.yml --timeout=10m ./...` | pass — `0 issues` |
+| 12b | `… --build-tags server --timeout=10m ./...` | pass — `0 issues` (the round-6 `oidc_jwks_test.go` fix from the earlier gate run held) |
+| 13 | `scripts/test-api-e2e.sh` — isolated (`pgrep -f test-api-e2e.sh` and `pgrep -fl 'mcpproxy serve --config\|launcher-server'` both empty first), `LISTEN_PORT=18196` | pass — **65/65**, no flake this run |
+| 14 | `make swagger-verify` | pass — `OpenAPI artifacts are up to date` |
+| 15 | `go run ./cmd/generate-types && go test ./cmd/generate-types/ -run TestContractsInSync` | pass — `contracts.ts` unchanged, `git status` shows only `verification.md` touched |
+| 16 | `python3 scripts/gen-roadmap.py --check` | pass |
+| 17 | `cd frontend && npx vitest run` | pass — 123 files, 1284 tests |
+| 17b | `cd frontend && npm run build` | pass — `✓ built in 639ms` (same pre-existing `INEFFECTIVE_DYNAMIC_IMPORT` warning on `src/stores/auth.ts`) |
+| 18 | `gofmt -l` over the 145 touched Go files still on disk (`git diff --name-only origin/main -- '*.go'`, filtered to files that still exist — the removed latent-code files from PR-A's cut no longer resolve and were excluded, not silently skipped) | pass — empty list |
+| 19 | `python3 scripts/check-settings-parity.py` | pass — `Settings parity OK: 61 setting(s) consistent across web + native` |
+| 20 | `(cd native/macos/MCPProxy && swift test)` | **1166/1167** — the one failure is `AppLifecycleTests.testTheSharedJournalNeverWritesToTheRealInstanceRootUnderTests`, the same pre-existing environmental red herring as the earlier gate run and PR-A (live tray's `~/.mcpproxy/tray-lifecycle.jsonl` present) |
+| 21 | OAuth E2E job commands: `go test -race -timeout 5m ./tests/oauthserver/...` and `OAUTH_INTEGRATION_TESTS=1 go test -race -timeout 5m ./tests/oauthserver/... -run TestIntegration -v` | pass — both `ok`; 8 `TestIntegration_*` `--- PASS` |
+
+`git checkout -- test/e2e-config.json` restored the tracked config after row 13 (it was rewritten in place by the run, as expected). Every row 1–21 is green on the round-6 tree; nothing skipped.
 
 ### Cross-review
 
