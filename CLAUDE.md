@@ -78,8 +78,14 @@ go test -tags server ./internal/serveredition/... -race   # server edition
 
 # Lint — CI uses golangci-lint v2 with .github/.golangci.yml, which is STRICTER
 # than the local scripts/run-linter.sh (v1.x) and catches things it misses.
-# Run the v2 binary before pushing:
+# CI runs it TWICE: bare, and with --build-tags server (server-edition code is
+# invisible to the bare run). Run both before pushing:
 /opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...
+/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml --build-tags server ./...
+# CI also race-tests internal/server, httpapi and storage under -tags server
+# with the unit-tests.yml -skip regex (bare `go test ./internal/server/...`
+# hangs to the timeout on the binary-spawning tests):
+go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...
 
 # Run
 ./mcpproxy serve [--listen :8080] [--log-level=debug]     # core (localhost:8080)
