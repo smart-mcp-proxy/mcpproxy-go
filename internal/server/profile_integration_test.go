@@ -886,7 +886,9 @@ func captureProfileRefusal(t *testing.T, baseURL, path, slug, rawToken string) p
 }
 
 // assertUniformProfileRefusal checks that every captured refusal is the same
-// 404 (status and slug-normalised body) and that none of them carries an
+// 404 (status and slug-normalised body), that its `error` is the documented
+// `unknown profile '<slug>'` text (contracts/refusals.md — uniformity alone
+// would also accept a uniform `forbidden`), and that none of them carries an
 // `available` list.
 func assertUniformProfileRefusal(t *testing.T, refusals []profileRefusal) {
 	t.Helper()
@@ -895,6 +897,7 @@ func assertUniformProfileRefusal(t *testing.T, refusals []profileRefusal) {
 		assert.Equal(t, http.StatusNotFound, r.status, "%s: a scoped caller must get the uniform 404, got %d %s", r.path, r.status, r.body)
 		var decoded map[string]interface{}
 		require.NoError(t, json.Unmarshal([]byte(r.body), &decoded), "%s: body must be JSON: %s", r.path, r.body)
+		assert.Equal(t, "unknown profile '<slug>'", decoded["error"], "%s: the refusal must be the documented unknown-profile text", r.path)
 		_, enumerated := decoded["available"]
 		assert.False(t, enumerated, "%s: the refusal must not enumerate profiles: %s", r.path, r.body)
 		assert.Equal(t, refusals[0].body, r.body, "%s must be byte-identical (slug-normalised) to %s", r.path, refusals[0].path)
@@ -930,10 +933,9 @@ func TestProfile_ScopedUnpinnedRefusalUniform(t *testing.T) {
 	env.proxyServer.runtime.UpdateConfig(cfg, "")
 	refusals = append(refusals, captureProfileRefusal(t, env.baseURL, "/mcp/p/deploy", "deploy", rawToken))
 
+	// Byte-equality with the nonexistent-slug refusal is the disclosure
+	// oracle: a slug that names no profile has no servers to leak.
 	assertUniformProfileRefusal(t, refusals)
-	for _, r := range refusals {
-		assert.NotContains(t, r.body, "deploy-srv", "%s: the refusal must not name servers outside the token's reach", r.path)
-	}
 }
 
 // TestProfile_PinnedRefusalUniform (FR003-G3): a token pinned to research is

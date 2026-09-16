@@ -102,8 +102,8 @@
 
 ### Implementation
 
-- [x] T041 [US1] `profileMiddleware` evaluates `selectableProfileNames` (keyed on `auth.IsScopedCaller`) for `/mcp/p/<slug>`, `/mcp/p`, `/mcp/p/`; ONE refusal constructor (`profileNotSelectable(w)`) for missing/deleted/not-selectable/pin-mismatch/no-profiles/zero-reach; no-profiles branch moved after the gate; admin/anonymous branches unchanged — `internal/server/server.go:2320-2384,2703-2705`
-- [x] T042 [US1] `handleSetProfile`: pin branch requires reach (D1); `servers` = effective scope after the update via `resolveActiveProfile` (pin > URL > session) ∩ token — on a URL-scoped endpoint that is the URL profile, not the stored selection; `active_profile` = stored selection; cleared pinned selection reports `active_profile == ""` — `internal/server/profile_tool.go:72-108,188-210`
+- [x] T041 [US1] `profileMiddleware` evaluates `selectableProfileNames` (keyed on `auth.IsScopedCaller`) for `/mcp/p/<slug>`, `/mcp/p`, `/mcp/p/`; ONE refusal constructor (`profileNotSelectable(w)`) for missing/deleted/not-selectable/pin-mismatch/no-profiles/zero-reach; no-profiles branch moved after the gate; admin/anonymous branches unchanged; every scoped refusal logs one operator-facing line (`profile URL refused for scoped caller`: agent_name, profile, remote_addr — critique round 1, S1) — `internal/server/server.go`
+- [x] T042 [US1] `handleSetProfile`: pin branch requires reach (D1); for scoped callers `servers` = effective scope after the update via `resolveActiveProfileIn` (pin > URL > session, same config snapshot as the admission check) ∩ token, rendered in profile-declared order — on a URL-scoped endpoint that is the URL profile, not the stored selection; `active_profile` = stored selection; cleared pinned selection reports `active_profile == ""`. Administrators short-circuit to the pre-105 payload (selected profile's servers / all servers on clear) — SC-005 names no FR-003 exception, so the URL-precedence reporting is agent-only (critique round 1, A1/A2) — `internal/server/profile_tool.go`
 - [x] T043 [P] [US1] Update the cleared-selection line in `docs/features/profiles.md:70-72`
 
 ### Inverted pinned tests

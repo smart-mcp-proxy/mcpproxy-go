@@ -88,11 +88,14 @@ func (p *MCPProxyServer) effectiveDirectToolResponseMode() string {
 // profileScopeForSlug builds a ProfileScope for the named profile from the live
 // config, or returns nil when the slug does not match a configured profile.
 func (p *MCPProxyServer) profileScopeForSlug(slug string) *profile.ProfileScope {
-	if slug == "" {
-		return nil
-	}
-	cfg := p.currentConfig()
-	if cfg == nil {
+	return profileScopeForSlugIn(p.currentConfig(), slug)
+}
+
+// profileScopeForSlugIn is profileScopeForSlug against an explicit config
+// snapshot, for callers that must not re-read the live config between a
+// check and the scope they build from it.
+func profileScopeForSlugIn(cfg *config.Config, slug string) *profile.ProfileScope {
+	if slug == "" || cfg == nil {
 		return nil
 	}
 	for i := range cfg.Profiles {
@@ -114,8 +117,19 @@ func (p *MCPProxyServer) profileScopeForSlug(slug string) *profile.ProfileScope 
 // It returns the resolved profile slug ("" when none) and the matching
 // ProfileScope ("" ⇒ nil). A session selection that no longer matches any
 // configured profile is treated as stale: it is cleared and resolution falls
-// through to "none".
+// through to "none". Resolution reads the live config snapshot once; callers
+// that already hold a snapshot use resolveActiveProfileIn.
 func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *profile.ProfileScope) {
+	return p.resolveActiveProfileIn(ctx, p.currentConfig())
+}
+
+// resolveActiveProfileIn is resolveActiveProfile against an explicit config
+// snapshot. handleSetProfile admits a selection against one snapshot and must
+// report the effective scope from that same snapshot: re-reading the live
+// config here would let a hot reload between the two hand back a payload whose
+// `active_profile` and `servers` disagree (or drop the just-stored selection
+// as stale) — Spec 105 PR D critique round 1.
+func (p *MCPProxyServer) resolveActiveProfileIn(ctx context.Context, cfg *config.Config) (string, *profile.ProfileScope) {
 	// 1. Agent-token pin (T3). When present it is authoritative and bounds
 	//    everything below — including the case where the pinned profile has been
 	//    removed from config since the token was minted.
@@ -130,7 +144,7 @@ func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *pro
 	//    pin against an empty server set for the same reason, so the session and
 	//    preflight paths cannot disagree about what a pinned token may see.
 	if pin := profilePinFromContext(ctx); pin != "" {
-		if scope := p.profileScopeForSlug(pin); scope != nil {
+		if scope := profileScopeForSlugIn(cfg, pin); scope != nil {
 			return pin, scope
 		}
 		if p.logger != nil {
@@ -150,7 +164,7 @@ func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *pro
 	if p.sessionStore != nil {
 		if sid := sessionIDFromContext(ctx); sid != "" {
 			if name := p.sessionStore.GetActiveProfile(sid); name != "" {
-				if scope := p.profileScopeForSlug(name); scope != nil {
+				if scope := profileScopeForSlugIn(cfg, name); scope != nil {
 					return name, scope
 				}
 				// Stored profile vanished from config — drop the stale selection.

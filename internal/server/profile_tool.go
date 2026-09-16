@@ -13,6 +13,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // buildSetProfileTool constructs the set_profile MCP tool definition (Profiles
@@ -48,14 +49,20 @@ func buildSetProfileTool() mcp.Tool {
 }
 
 // handleSetProfile implements the set_profile tool. It validates the requested
-// slug against live config, records it on the session (mutex-guarded, cleared
-// on session close), and returns {active_profile, servers} where
-// `active_profile` is the STORED session selection and `servers` is the
-// EFFECTIVE scope after the update — resolveActiveProfile (pin > URL > session)
-// intersected with the caller's credential (Spec 105 FR-003). On a URL-scoped
-// endpoint the URL therefore governs the reported servers, and clearing a
-// pinned token's selection reports active_profile == "" while servers still
-// reports the pin's reach.
+// slug against ONE live-config snapshot, records it on the session
+// (mutex-guarded, cleared on session close), and returns {active_profile,
+// servers} where `active_profile` is the STORED session selection and
+// `servers` is what the session can reach after the update.
+//
+// For a scoped caller (agent token) `servers` is the EFFECTIVE scope —
+// resolveActiveProfileIn (pin > URL > session) over the same snapshot,
+// intersected with the credential (Spec 105 FR-003): on a URL-scoped endpoint
+// the URL governs the reported servers, and clearing a pinned token's
+// selection reports active_profile == "" while servers still reports the
+// pin's reach. Administrators (API key, socket, anonymous back-compat) keep
+// the pre-105 payload byte-for-byte — the selected profile's servers, or every
+// configured server on clear — because SC-005 names no FR-003 exception for
+// them (an administrator is never pinned, so only the URL tier could differ).
 func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	slug := strings.TrimSpace(request.GetString("profile", ""))
 
@@ -95,16 +102,64 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 		)
 	}
 
-	// Report what the session can actually reach after the update: the
-	// resolver's effective profile (a pin outranks the URL, which outranks the
-	// stored selection; a deleted pin is deny-all) bounded by the credential —
-	// never the stored selection's own servers when something else governs.
-	_, effective := p.resolveActiveProfile(ctx)
-	servers := effective.AllowedServerNames()
-	if effective == nil {
-		servers = allServerNames(cfg)
+	// SC-005: administrators report the stored selection's own servers.
+	if !auth.IsScopedCaller(ctx) {
+		return setProfileResult(slug, profileServersIn(cfg, slug))
 	}
-	return setProfileResult(slug, callerVisibleServers(ctx, servers))
+
+	// Scoped caller: report what the session can actually reach after the
+	// update — the resolver's effective profile (a pin outranks the URL, which
+	// outranks the stored selection; a deleted pin is deny-all) bounded by the
+	// credential — never the stored selection's own servers when something
+	// else governs. Same snapshot as the admission check above.
+	_, effective := p.resolveActiveProfileIn(ctx, cfg)
+	return setProfileResult(slug, callerVisibleServers(ctx, scopeServersIn(cfg, effective)))
+}
+
+// profileServersIn renders the pre-105 set_profile server list for a stored
+// selection: the named profile's effective servers in profile-declared order
+// (duplicates kept, exactly as EffectiveServers returns them), every
+// configured server in config order for an empty slug, and nothing for a slug
+// cfg does not know.
+func profileServersIn(cfg *config.Config, slug string) []string {
+	if slug == "" {
+		return allServerNames(cfg)
+	}
+	if cfg == nil {
+		return nil
+	}
+	for i := range cfg.Profiles {
+		if cfg.Profiles[i].Name == slug {
+			return cfg.Profiles[i].EffectiveServers(cfg)
+		}
+	}
+	return nil
+}
+
+// scopeServersIn renders a resolved ProfileScope as a deterministic server
+// list: nil scope ⇒ every configured server (config order); otherwise the
+// scope's profile in its declared order filtered by the scope, so the payload
+// carries the order every other EffectiveServers consumer uses rather than
+// map-iteration order. A scope whose profile cfg no longer names (a deleted
+// pin — deny-all — or a URL scope built from an older snapshot) falls back to
+// the scope's own set, sorted.
+func scopeServersIn(cfg *config.Config, scope *profile.ProfileScope) []string {
+	if scope == nil {
+		return allServerNames(cfg)
+	}
+	declared := profileServersIn(cfg, scope.Name)
+	if declared == nil {
+		names := scope.AllowedServerNames()
+		slices.Sort(names)
+		return names
+	}
+	out := make([]string, 0, len(declared))
+	for _, name := range declared {
+		if scope.Allows(name) {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // setProfileResult renders the standard set_profile success payload.

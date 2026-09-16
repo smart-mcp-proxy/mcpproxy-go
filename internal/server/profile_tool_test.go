@@ -358,40 +358,124 @@ func TestHandleSetProfile_PinnedTokenClearIntersectsAllowedServers(t *testing.T)
 	require.ElementsMatch(t, []string{"deploy-srv"}, servers)
 }
 
+// newSetProfileOrderingTestServer is the SC-005 byte-parity fixture: five
+// servers declared in a non-alphabetical order and a profile that lists a
+// subset in ITS OWN order (with one repeated name — a legal, unvalidated
+// configuration). The pre-105 payload rendered `match.EffectiveServers(cfg)`
+// (profile-declared order, duplicates kept) on select and `allServerNames`
+// (config order) on clear; a set-backed rendering (Go map iteration) is
+// nondeterministic on ≥3 names and dedupes, so `require.Equal` against these
+// exact slices is what an ElementsMatch on a 2-server profile could not catch
+// (PR D critique round 1, finding A1).
+func newSetProfileOrderingTestServer() *MCPProxyServer {
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{
+			{Name: "zeta-srv"},
+			{Name: "alpha-srv"},
+			{Name: "mid-srv"},
+			{Name: "beta-srv"},
+			{Name: "omega-srv"},
+		},
+		Profiles: []config.ProfileConfig{
+			{Name: "wide", Servers: []string{"omega-srv", "alpha-srv", "mid-srv", "alpha-srv", "zeta-srv"}},
+			{Name: "narrow", Servers: []string{"mid-srv"}},
+		},
+	}
+	return &MCPProxyServer{
+		config:       cfg,
+		logger:       zap.NewNop(),
+		sessionStore: NewSessionStore(zap.NewNop()),
+	}
+}
+
+// Exact pre-105 renderings for the ordering fixture.
+var (
+	orderingAllServers  = []string{"zeta-srv", "alpha-srv", "mid-srv", "beta-srv", "omega-srv"}
+	orderingWideServers = []string{"omega-srv", "alpha-srv", "mid-srv", "alpha-srv", "zeta-srv"}
+)
+
 // TestHandleSetProfile_AdminUnchanged pins the administrator (API-key / socket)
-// behaviour: full server list on clear, the profile's complete set on select,
-// and every configured profile in the unknown-slug error.
+// behaviour byte-for-byte (SC-005): config-ordered full server list on clear,
+// the profile's complete set in profile-declared order (duplicates kept) on
+// select, and every configured profile in the unknown-slug error.
 func TestHandleSetProfile_AdminUnchanged(t *testing.T) {
-	p := newSetProfileTestServer()
+	p := newSetProfileOrderingTestServer()
 	ctx := setProfileAdminCtx("sess-admin")
 
 	_, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
-	require.ElementsMatch(t, []string{"research-srv", "deploy-srv"}, servers)
+	require.Equal(t, orderingAllServers, servers, "clear must report every server in config order")
 
-	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "mixed"))
-	require.Equal(t, "mixed", active)
-	require.ElementsMatch(t, []string{"research-srv", "deploy-srv"}, servers)
+	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "wide"))
+	require.Equal(t, "wide", active)
+	require.Equal(t, orderingWideServers, servers, "select must report the profile's servers in profile-declared order")
 
 	res := callSetProfileTool(t, p, ctx, "nope")
 	require.True(t, res.IsError)
 	text := setProfileResultText(t, res)
-	for _, name := range []string{"research", "deploy", "mixed"} {
+	for _, name := range []string{"wide", "narrow"} {
 		require.Contains(t, text, name)
 	}
 }
 
+// TestHandleSetProfile_AdminURLScopeUnchanged (SC-005, PR D critique round 1
+// finding A2): FR-003's "URL still governs the reported servers" is an
+// agent-token rule. An administrator (or anonymous back-compat caller) on a
+// /mcp/p/<slug> endpoint keeps the pre-105 payload — the SELECTED profile's
+// servers on select and every server on clear — because SC-005 names no
+// FR-003 exception for administrators.
+func TestHandleSetProfile_AdminURLScopeUnchanged(t *testing.T) {
+	p := newSetProfileOrderingTestServer()
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	ctx := helper.WithContext(context.Background(), &fakeClientSession{id: "sess-admin-url"})
+	ctx = auth.WithAuthContext(ctx, auth.AdminContext())
+	ctx = profile.WithProfileScope(ctx, p.profileScopeForSlug("narrow"))
+
+	active, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "wide"))
+	require.Equal(t, "wide", active)
+	require.Equal(t, "wide", p.sessionStore.GetActiveProfile("sess-admin-url"))
+	require.Equal(t, orderingWideServers, servers, "an administrator keeps the selected profile's servers on a URL-scoped endpoint")
+
+	active, servers = setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
+	require.Equal(t, "", active)
+	require.Equal(t, orderingAllServers, servers, "an administrator keeps the full server list on clear, URL or not")
+}
+
 // TestHandleSetProfile_WildcardTokenUnchanged: an agent token with the "*"
-// wildcard is unrestricted by servers and keeps the full listings.
+// wildcard is unrestricted by servers and keeps the full listings — in the
+// same deterministic order an administrator sees (SC-005 control).
 func TestHandleSetProfile_WildcardTokenUnchanged(t *testing.T) {
-	p := newSetProfileTestServer()
+	p := newSetProfileOrderingTestServer()
 	ctx := setProfileScopedCtx("sess-wild", "*")
 
 	_, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
-	require.ElementsMatch(t, []string{"research-srv", "deploy-srv"}, servers)
+	require.Equal(t, orderingAllServers, servers)
+
+	_, servers = setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "wide"))
+	require.Equal(t, orderingWideServers, servers)
 
 	res := callSetProfileTool(t, p, ctx, "nope")
 	require.True(t, res.IsError)
-	require.Contains(t, setProfileResultText(t, res), "deploy")
+	require.Contains(t, setProfileResultText(t, res), "narrow")
+}
+
+// TestHandleSetProfile_ScopedServersKeepProfileOrder: a restricted token's
+// effective list is the profile's servers ∩ allowed_servers rendered in the
+// profile-declared order every other consumer of EffectiveServers uses — not
+// set iteration order — including on a URL-scoped endpoint where the URL
+// profile governs.
+func TestHandleSetProfile_ScopedServersKeepProfileOrder(t *testing.T) {
+	p := newSetProfileOrderingTestServer()
+	ctx := setProfileScopedCtx("sess-scoped-order", "zeta-srv", "mid-srv", "omega-srv", "beta-srv")
+
+	_, servers := setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, "wide"))
+	require.Equal(t, []string{"omega-srv", "mid-srv", "zeta-srv"}, servers)
+
+	_, servers = setProfileScopedPayload(t, callSetProfileTool(t, p, ctx, ""))
+	require.Equal(t, []string{"zeta-srv", "mid-srv", "beta-srv", "omega-srv"}, servers, "clear reports allowed servers in config order")
+
+	urlCtx := profile.WithProfileScope(ctx, p.profileScopeForSlug("wide"))
+	_, servers = setProfileScopedPayload(t, callSetProfileTool(t, p, urlCtx, "narrow"))
+	require.Equal(t, []string{"omega-srv", "mid-srv", "zeta-srv"}, servers, "the URL profile governs, in its declared order")
 }
 
 // TestHandleSetProfile_PinnedTokenSelectsDisjointPin is the INVERTED #1225 F2
@@ -585,4 +669,42 @@ func TestHandleSetProfile_PinnedZeroReachRefusedLikeDeletedPin(t *testing.T) {
 				"a zero-reach pin must be refused with the deleted-pin body")
 		})
 	}
+}
+
+// TestResolveActiveProfileIn_UsesGivenSnapshot (PR D critique round 1,
+// findings S4/N7): handleSetProfile captures ONE config snapshot for the
+// admission check and must render its payload from that same snapshot, so a
+// hot reload between the two cannot report `active_profile: "<slug>"` beside
+// a scope (or a stale-drop) computed from a different config. The resolver
+// therefore takes the snapshot explicitly: a session selection present in the
+// given snapshot resolves from it even when the live config no longer has it,
+// and the selection is not dropped as stale.
+func TestResolveActiveProfileIn_UsesGivenSnapshot(t *testing.T) {
+	p := newSetProfileTestServer()
+	snapshot := p.config
+	live := &config.Config{Servers: snapshot.Servers} // profiles gone from the live config
+	p.config = live
+
+	ctx := setProfileScopedCtx("sess-snapshot", "*")
+	p.sessionStore.SetActiveProfile("sess-snapshot", "mixed")
+
+	name, scope := p.resolveActiveProfileIn(ctx, snapshot)
+	require.Equal(t, "mixed", name)
+	require.NotNil(t, scope)
+	require.ElementsMatch(t, []string{"research-srv", "deploy-srv"}, scope.AllowedServerNames())
+	require.Equal(t, "mixed", p.sessionStore.GetActiveProfile("sess-snapshot"),
+		"a selection the snapshot still knows must not be dropped as stale")
+
+	// The live-config entry point keeps its behaviour: the profile is gone
+	// there, so the selection is stale and resolution falls through to none.
+	name, scope = p.resolveActiveProfile(ctx)
+	require.Equal(t, "", name)
+	require.Nil(t, scope)
+	require.Equal(t, "", p.sessionStore.GetActiveProfile("sess-snapshot"))
+
+	// A pinned token resolves its pin from the snapshot too.
+	pinned := setProfileCtx("sess-snapshot-pin", "research")
+	name, scope = p.resolveActiveProfileIn(pinned, snapshot)
+	require.Equal(t, "research", name)
+	require.Equal(t, []string{"research-srv"}, scope.AllowedServerNames())
 }

@@ -389,7 +389,14 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 		if strings.HasPrefix(token, auth.TokenPrefixStr) {
 			cfg := s.runtime.Config()
 			if cfg == nil {
-				next.ServeHTTP(w, r)
+				// Fail closed. Forwarding here would hand the request on with NO
+				// AuthContext, and every scope predicate downstream reads an
+				// absent context as an administrator (auth.IsScopedCaller) —
+				// the one path where an unvalidated agent token could take the
+				// administrator branches (Spec 105 PR D critique round 1).
+				s.logger.Error("Agent token presented before any configuration was published; refusing",
+					zap.String("remote_addr", r.RemoteAddr))
+				http.Error(w, `{"error":"Server not ready"}`, http.StatusServiceUnavailable)
 				return
 			}
 
@@ -2309,8 +2316,10 @@ func withHSTS(next http.Handler) http.Handler {
 // injects it into the request context, then delegates to the retrieve_tools-mode
 // MCP handler (next). Auth has already run at this point via mcpAuthMiddleware.
 //
-// Scoped callers (auth.IsScopedCaller — agent tokens and server-edition users)
-// are admitted only through a profile the same selectable-profile predicate
+// Scoped callers (auth.IsScopedCaller — in practice agent tokens: the only
+// non-admin identity mcpAuthMiddleware mints on /mcp*; the server edition's
+// user contexts are minted on the REST router only) are admitted only through
+// a profile the same selectable-profile predicate
 // set_profile applies (selectableProfileNames: reach ∩ token, pin honoured,
 // zero-reach pin refused — Spec 105 FR-004, research D1). Every other outcome
 // — slug missing, profile deleted, configured but not selectable, pin
@@ -2334,6 +2343,17 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 		// Spec 105 FR-004: the selectable-profile gate for scoped callers.
 		if auth.IsScopedCaller(r.Context()) {
 			if !slices.Contains(selectableProfileNames(r.Context(), cfg), slug) {
+				// Silent towards the agent, not towards the operator: the gate
+				// answers before the logging handler mounted inside it, so this
+				// line is the only trace a token probing the slug space leaves.
+				var agentName string
+				if ac := auth.AuthContextFromContext(r.Context()); ac != nil {
+					agentName = ac.AgentName
+				}
+				s.logger.Info("profile URL refused for scoped caller",
+					zap.String("agent_name", agentName),
+					zap.String("profile", slug),
+					zap.String("remote_addr", r.RemoteAddr))
 				profileNotSelectable(w, slug)
 				return
 			}
