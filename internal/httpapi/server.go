@@ -5836,6 +5836,17 @@ func (s *Server) handleAddFromRegistry(w http.ResponseWriter, r *http.Request) {
 		s.writeRegistryAddError(w, r, status, rerr)
 		return
 	}
+	if cfg == nil {
+		// A controller that reports success without a server config (the
+		// test doubles do) used to be dereferenced here; chi's recoverer
+		// turned that into a bare 500 — and on windows/amd64 the recovered
+		// hardware fault corrupts the Go heap under Go 1.26 (golang/go#81238),
+		// so the httpapi test binary then died in a later GC. Same
+		// nil-tolerance as redactedRegistrySummary.
+		logger.Errorw("Add from registry returned no server config", "registry", registryID, "server", serverID)
+		s.writeError(w, r, http.StatusInternalServerError, "registry returned no server configuration")
+		return
+	}
 
 	// Issue #1148, round 8: the MCP twin of this handler
 	// (`upstream_servers add_from_registry`) has sourced this echo from the

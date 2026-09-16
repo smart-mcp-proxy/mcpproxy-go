@@ -54,3 +54,21 @@ func TestAddFromRegistry_SlashServerIDUnescaped(t *testing.T) {
 	assert.Equal(t, "microsoft/markitdown", controller.gotServerID, "serverId must be percent-decoded before registry lookup")
 	assert.Equal(t, "github-mcp", controller.gotRegistryID, "registry id must be percent-decoded before lookup")
 }
+
+// TestAddFromRegistry_NilConfigIsAnError pins the nil-tolerance of the success
+// branch: a controller that returns no config and no error yields a JSON 500,
+// never a recovered nil-pointer panic (which corrupts the heap on
+// windows/amd64 under Go 1.26 — golang/go#81238 — and took the whole test
+// binary down with it).
+func TestAddFromRegistry_NilConfigIsAnError(t *testing.T) {
+	ctrl := &adminConfigController{ServerController: &MockServerController{}, apiKey: "admin-secret"}
+	srv := NewServer(ctrl, zaptest.NewLogger(t).Sugar(), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/registries/reg1/servers/srv1/add", nil)
+	req.Header.Set("X-API-Key", "admin-secret")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "no server configuration")
+}
