@@ -634,9 +634,10 @@ func TestForceRemoveTrackedContainerIfOwned_AppliesOwnership(t *testing.T) {
 		fd := installFakeDocker(t, ownAndForeignFixture())
 		c, mainLogs, upLogs := newOwnershipClient("a", nil)
 
-		owned, err := c.ForceRemoveTrackedContainerIfOwned(context.Background(), foreignContainerID)
+		owner, owned, err := c.ForceRemoveTrackedContainerIfOwned(context.Background(), foreignContainerID)
 		require.NoError(t, err)
 		assert.False(t, owned, "a foreign container under the tracked id must not be admitted")
+		assert.Empty(t, owner, "no owner evidence for a container that was not admitted")
 		assert.Empty(t, fd.mutationsOf(t, foreignContainerID), "foreign container %s was mutated", foreignContainerID)
 		for _, line := range fd.invocations(t) {
 			assert.False(t, strings.HasPrefix(line, "rm "), "rm invoked without ownership: %s", line)
@@ -655,9 +656,10 @@ func TestForceRemoveTrackedContainerIfOwned_AppliesOwnership(t *testing.T) {
 		fd := installFakeDocker(t, ownAndForeignFixture())
 		c, _, upLogs := newOwnershipClient("a", nil)
 
-		owned, err := c.ForceRemoveTrackedContainerIfOwned(context.Background(), ownContainerID)
+		owner, owned, err := c.ForceRemoveTrackedContainerIfOwned(context.Background(), ownContainerID)
 		require.NoError(t, err)
 		assert.True(t, owned)
+		assert.Equal(t, "a", owner, "the owner handed back is the label read back at the mutation")
 		assert.Equal(t, []string{"rm -f " + ownContainerID}, fd.mutationsOf(t, ownContainerID))
 		removed := upLogs.FilterMessage("Owned container force removed").All()
 		require.Len(t, removed, 1)
@@ -667,9 +669,10 @@ func TestForceRemoveTrackedContainerIfOwned_AppliesOwnership(t *testing.T) {
 	t.Run("no tracked id", func(t *testing.T) {
 		fd := installFakeDocker(t, ownAndForeignFixture())
 		c, _, _ := newOwnershipClient("a", nil)
-		owned, err := c.ForceRemoveTrackedContainerIfOwned(context.Background(), "")
+		owner, owned, err := c.ForceRemoveTrackedContainerIfOwned(context.Background(), "")
 		require.NoError(t, err)
 		assert.False(t, owned)
+		assert.Empty(t, owner)
 		assert.Empty(t, fd.invocations(t), "nothing to remove, docker never invoked")
 	})
 }

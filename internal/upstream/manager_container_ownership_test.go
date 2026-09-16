@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,9 +44,12 @@ import (
 // {{.Label "k"}}; `ps -q` answers the ids of the rows marked Running
 // (default: every container already stopped); stop/kill/rm exit 0 unless
 // the verb is listed in the fail file (failVerbs). Every invocation is
-// appended to a log.
+// appended to a log. A `ps.tsv.next` fixture (swapFixtureAfterNextPs)
+// replaces the fixture right after the next `ps` answers, so a container
+// can change between the sweep's listing and its mutation.
 type managerFakeDocker struct {
 	logPath  string
+	psPath   string
 	failPath string
 }
 
@@ -113,6 +117,7 @@ BEGIN { nflt = split(flt, fl, "|") }
   }
   print out
 }' "$PS"
+if [ -f "$PS.next" ]; then mv "$PS.next" "$PS"; fi
 `
 
 func shellQuoteForManagerShim(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
@@ -123,8 +128,29 @@ func installManagerFakeDocker(t *testing.T, containers []managerFakeContainer) *
 		t.Skip("unix shell shim")
 	}
 	dir := t.TempDir()
-	fd := &managerFakeDocker{logPath: filepath.Join(dir, "invocations.log"), failPath: filepath.Join(dir, "fail")}
-	psPath := filepath.Join(dir, "ps.tsv")
+	fd := &managerFakeDocker{
+		logPath:  filepath.Join(dir, "invocations.log"),
+		psPath:   filepath.Join(dir, "ps.tsv"),
+		failPath: filepath.Join(dir, "fail"),
+	}
+	psPath := fd.psPath
+	require.NoError(t, os.WriteFile(psPath, managerFakeFixtureTSV(containers), 0o600))
+
+	toolDir := filepath.Join(dir, "path")
+	require.NoError(t, os.Mkdir(toolDir, 0o755))
+	script := fmt.Sprintf(managerFakeDockerShim, shellQuoteForManagerShim(fd.logPath), shellQuoteForManagerShim(psPath), shellQuoteForManagerShim(fd.failPath))
+	require.NoError(t, os.WriteFile(filepath.Join(toolDir, "docker"), []byte(script), 0o755))
+	for _, tool := range []string{"sh", "awk", "printf", "mv"} {
+		if real, err := exec.LookPath(tool); err == nil {
+			require.NoError(t, os.Symlink(real, filepath.Join(toolDir, tool)))
+		}
+	}
+	t.Setenv("PATH", toolDir)
+	return fd
+}
+
+// managerFakeFixtureTSV renders the `ps` fixture the shim reads.
+func managerFakeFixtureTSV(containers []managerFakeContainer) []byte {
 	var tsv strings.Builder
 	for _, c := range containers {
 		labels := make([]string, 0, len(c.Labels))
@@ -137,19 +163,15 @@ func installManagerFakeDocker(t *testing.T, containers []managerFakeContainer) *
 		}
 		fmt.Fprintf(&tsv, "%s\t%s\t%s\t%s\n", c.ID, c.Name, strings.Join(labels, ","), running)
 	}
-	require.NoError(t, os.WriteFile(psPath, []byte(tsv.String()), 0o600))
+	return []byte(tsv.String())
+}
 
-	toolDir := filepath.Join(dir, "path")
-	require.NoError(t, os.Mkdir(toolDir, 0o755))
-	script := fmt.Sprintf(managerFakeDockerShim, shellQuoteForManagerShim(fd.logPath), shellQuoteForManagerShim(psPath), shellQuoteForManagerShim(fd.failPath))
-	require.NoError(t, os.WriteFile(filepath.Join(toolDir, "docker"), []byte(script), 0o755))
-	for _, tool := range []string{"sh", "awk", "printf"} {
-		if real, err := exec.LookPath(tool); err == nil {
-			require.NoError(t, os.Symlink(real, filepath.Join(toolDir, tool)))
-		}
-	}
-	t.Setenv("PATH", toolDir)
-	return fd
+// swapFixtureAfterNextPs makes the shim answer the NEXT `ps` from the
+// current fixture and every later one from containers — the state of the
+// daemon after another client changed it between listing and mutation.
+func (fd *managerFakeDocker) swapFixtureAfterNextPs(t *testing.T, containers []managerFakeContainer) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(fd.psPath+".next", managerFakeFixtureTSV(containers), 0o600))
 }
 
 func (fd *managerFakeDocker) invocations(t *testing.T) []string {
@@ -306,20 +328,34 @@ func TestSweeps_NoConfiguredServers_MutateNothing(t *testing.T) {
 
 // fakeForceCleanupTarget stands in for a managed client on the
 // disconnect-timeout path: it records whether the manager went through the
-// ownership-checked removal instead of a bare `docker rm -f`.
+// ownership-checked removal instead of a bare `docker rm -f`, answers it
+// with the configured verdict (owner/owned/err), and snapshots the main.log
+// records written BEFORE the verdict existed.
 type fakeForceCleanupTarget struct {
 	name        string
 	containerID string
 	calls       []string
+
+	owner string
+	owned bool
+	err   error
+
+	mainLogs        *observer.ObservedLogs
+	recordsAtCall   []observer.LoggedEntry
+	recordsCaptured bool
 }
 
 func (f *fakeForceCleanupTarget) GetConfig() *config.ServerConfig {
 	return &config.ServerConfig{Name: f.name}
 }
 func (f *fakeForceCleanupTarget) GetContainerID() string { return f.containerID }
-func (f *fakeForceCleanupTarget) ForceRemoveTrackedContainerIfOwned(_ context.Context, id string) (bool, error) {
+func (f *fakeForceCleanupTarget) ForceRemoveTrackedContainerIfOwned(_ context.Context, id string) (string, bool, error) {
 	f.calls = append(f.calls, id)
-	return false, nil
+	if f.mainLogs != nil {
+		f.recordsAtCall = f.mainLogs.All()
+		f.recordsCaptured = true
+	}
+	return f.owner, f.owned, f.err
 }
 
 // Codex round 3, docker finding 1: forceCleanupClient must route through the
@@ -357,13 +393,21 @@ func sweepFixtureOwnRunning(instanceID string) []managerFakeContainer {
 // record carries a's container id (full or short) or name — independent
 // of the key the record files it under.
 func recordNamesOwnContainer(fields map[string]interface{}) bool {
+	return recordNamesAny(fields, sweepOwnID, shortContainerID(sweepOwnID), sweepOwnName)
+}
+
+// recordNamesAny reports whether any string field value of a record carries
+// one of needles.
+func recordNamesAny(fields map[string]interface{}, needles ...string) bool {
 	for _, v := range fields {
 		s, ok := v.(string)
 		if !ok {
 			continue
 		}
-		if strings.Contains(s, sweepOwnID) || strings.Contains(s, shortContainerID(sweepOwnID)) || strings.Contains(s, sweepOwnName) {
-			return true
+		for _, needle := range needles {
+			if strings.Contains(s, needle) {
+				return true
+			}
 		}
 	}
 	return false
@@ -430,5 +474,131 @@ func TestSweeps_EveryRecordNamingAContainerCarriesContainerOwner(t *testing.T) {
 				assert.Empty(t, mainLogMentions(mainLogs, foreign), "foreign %s written into main.log", foreign)
 			}
 		})
+	}
+}
+
+// Codex round 5, docker finding 1 (Spec 105 D8 subject-evidence rule): the
+// disconnect-timeout path named the tracked id in its intent record before
+// ownership was verified and in every outcome record without
+// `container_owner`. A record written before the verdict exists must name
+// no container id — the server only; the outcomes that name the id carry
+// the owner the core read back at the mutation; a rejected or unverifiable
+// container is never named by id at all.
+func TestForceCleanupClient_NamesTheContainerOnlyWithOwnershipEvidence(t *testing.T) {
+	const trackedID = "f0e1d2c3b4a5968778695a4b3c2d1e0ff0e1d2c3b4a5968778695a4b3c2d1e0f"
+	needles := []string{trackedID, shortContainerID(trackedID)}
+	for _, tc := range []struct {
+		name      string
+		owner     string
+		owned     bool
+		err       error
+		wantNamed bool // some outcome record names the id (with the owner)
+	}{
+		{name: "removed", owner: "a", owned: true, wantNamed: true},
+		{name: "removal failed after verification", owner: "a", owned: true, err: errors.New("rm: exit status 1"), wantNamed: true},
+		{name: "not owned any more", owned: false},
+		{name: "ownership unverifiable", owned: false, err: errors.New("ps: exit status 1")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installManagerFakeDocker(t, nil)
+			m, mainLogs := newSweepManager(t)
+			target := &fakeForceCleanupTarget{name: "a", containerID: trackedID, owner: tc.owner, owned: tc.owned, err: tc.err, mainLogs: mainLogs}
+
+			m.forceCleanupClient(target)
+
+			require.True(t, target.recordsCaptured, "the ownership-checked removal must run")
+			for _, entry := range target.recordsAtCall {
+				assert.False(t, recordNamesAny(entry.ContextMap(), needles...),
+					"record %q names the tracked id before ownership was verified: %v", entry.Message, entry.ContextMap())
+			}
+			named := 0
+			for _, entry := range mainLogs.All() {
+				fields := entry.ContextMap()
+				if !recordNamesAny(fields, needles...) {
+					continue
+				}
+				named++
+				assert.True(t, tc.owned, "record %q names the container although ownership was not established: %v", entry.Message, fields)
+				assert.Equal(t, tc.owner, fields["container_owner"], "record %q names the container without the read-back owner: %v", entry.Message, fields)
+			}
+			if tc.wantNamed {
+				assert.NotZero(t, named, "the outcome of a verified removal names the container with its owner")
+			}
+			assert.NotEmpty(t, mainLogMentions(mainLogs, "a"), "the server is still named on every path")
+		})
+	}
+}
+
+// Codex round 5, docker finding 2 (Spec 105 D9 moment-of-mutation rule):
+// the sweeps stopped, killed and removed containers on the ownership their
+// initial `docker ps` established. Another Docker client can rename or
+// relabel a container between that listing and the mutation, so the name
+// and label are re-read immediately before each stop/kill/rm: a container
+// that no longer satisfies the predicate is left alone and the refusal is
+// recorded without its id or name; one that still does is mutated, and the
+// owner every record carries is the one read at mutation time.
+func TestSweeps_ReverifyOwnershipAtMutationTime(t *testing.T) {
+	relabelled := func(name, owner string) []managerFakeContainer {
+		labels := map[string]string{"com.mcpproxy.managed": "true", "com.mcpproxy.instance": core.GetInstanceID()}
+		if owner != "" {
+			labels["com.mcpproxy.server"] = owner
+		}
+		return []managerFakeContainer{{ID: sweepOwnID, Name: name, Labels: labels, Running: true}}
+	}
+	sweeps := []struct {
+		name string
+		run  func(m *Manager)
+		verb string
+	}{
+		{name: "shutdown", run: func(m *Manager) { m.cleanupAllManagedContainers(context.Background()) }, verb: "stop"},
+		{name: "emergency", run: func(m *Manager) { m.ForceCleanupAllContainers() }, verb: "rm -f"},
+	}
+	arms := []struct {
+		name      string
+		after     []managerFakeContainer
+		wantOwner string // "" — the container must be left alone
+	}{
+		{name: "relabelled foreign between listing and mutation", after: relabelled("postgres", "")},
+		{name: "renamed to an unconfigured server's shape", after: relabelled("mcpproxy-a-b-xk3q", "a-b")},
+		{name: "unchanged", after: relabelled(sweepOwnName, "a"), wantOwner: "a"},
+		{name: "re-owned by another configured server", after: relabelled("mcpproxy-a-b-xk3q", "a/b"), wantOwner: "a/b"},
+	}
+	for _, sw := range sweeps {
+		for _, arm := range arms {
+			t.Run(sw.name+"/"+arm.name, func(t *testing.T) {
+				fd := installManagerFakeDocker(t, relabelled(sweepOwnName, "a"))
+				fd.swapFixtureAfterNextPs(t, arm.after)
+				m, mainLogs := newSweepManager(t)
+
+				sw.run(m)
+
+				mutations := fd.mutationsOf(t, sweepOwnID)
+				if arm.wantOwner == "" {
+					assert.Empty(t, mutations, "a container whose ownership changed was mutated; invocations:\n%s",
+						strings.Join(fd.invocations(t), "\n"))
+					for _, entry := range mainLogs.All() {
+						assert.False(t, recordNamesAny(entry.ContextMap(), sweepOwnID, shortContainerID(sweepOwnID), arm.after[0].Name),
+							"record %q names a container that is no longer owned: %v", entry.Message, entry.ContextMap())
+					}
+					assert.NotEmpty(t, mainLogMentions(mainLogs, "no longer canonically owned"), "the refusal is recorded")
+					return
+				}
+				assert.Contains(t, mutations, sw.verb+" "+sweepOwnID, "an owned container is still swept")
+				named := 0
+				for _, entry := range mainLogs.All() {
+					fields := entry.ContextMap()
+					if !recordNamesAny(fields, sweepOwnID, shortContainerID(sweepOwnID), arm.after[0].Name) {
+						continue
+					}
+					named++
+					assert.Equal(t, arm.wantOwner, fields["container_owner"],
+						"record %q must carry the owner read at mutation time: %v", entry.Message, fields)
+					if server, ok := fields["server"]; ok {
+						assert.Equal(t, arm.wantOwner, server, "record %q attributes the container to the listing-time owner: %v", entry.Message, fields)
+					}
+				}
+				assert.NotZero(t, named, "the mutation is recorded with its subject")
+			})
+		}
 	}
 }

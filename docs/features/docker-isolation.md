@@ -390,7 +390,9 @@ Two consequences of the ownership rule are worth knowing:
 - **The shutdown and emergency sweeps** (every `com.mcpproxy.managed`
   container on shutdown; every one carrying this instance's id when
   shutdown fails) apply the same rule: only containers canonically owned by
-  a server in the current configuration are stopped or removed, and the
+  a server in the current configuration are stopped or removed — each one
+  re-inspected immediately before its stop, kill or removal, so a container
+  renamed or relabelled after the sweep listed it is left alone — and the
   disconnect-timeout path re-checks the ownership of the id it tracked
   before `docker rm -f`. A container that merely carries the mcpproxy
   labels — one you labelled yourself, or an orphan of a server that is no

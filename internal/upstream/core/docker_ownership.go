@@ -267,13 +267,15 @@ func ContainerOwnedByAny(serverNames []string, containerName, ownerLabel string)
 // predicate killDockerContainerWithContext applies at the moment of the
 // mutation — so a container renamed, relabelled or reused under that id since
 // it was tracked is left alone (codex round 3). owned reports whether the
-// predicate admitted the container (removal was attempted); err is the docker
-// error when removal ran and failed, or the lookup error. Records carry
-// container_owner from the label read back; an unowned container is never
-// named in the per-server log.
-func (c *Client) ForceRemoveTrackedContainerIfOwned(ctx context.Context, containerID string) (owned bool, err error) {
+// predicate admitted the container (removal was attempted) and owner is then
+// the com.mcpproxy.server label read back at that moment — the evidence the
+// caller's own records must carry when they name the container (D8, codex
+// round 5); err is the docker error when removal ran and failed, or the
+// lookup error. Records carry container_owner from the label read back; an
+// unowned container is never named in the per-server log.
+func (c *Client) ForceRemoveTrackedContainerIfOwned(ctx context.Context, containerID string) (owner string, owned bool, err error) {
 	if containerID == "" {
-		return false, nil
+		return "", false, nil
 	}
 	container, ok, err := c.lookupOwnedContainerByID(ctx, containerID)
 	switch {
@@ -285,7 +287,7 @@ func (c *Client) ForceRemoveTrackedContainerIfOwned(ctx context.Context, contain
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Warn("Could not verify ownership of the tracked container for force removal - leaving it alone", zap.Error(err))
 		}
-		return false, err
+		return "", false, err
 	case !ok:
 		c.logger.Info("Tracked container is not canonically owned by this server - not force removed",
 			zap.String("server", c.config.Name),
@@ -293,7 +295,7 @@ func (c *Client) ForceRemoveTrackedContainerIfOwned(ctx context.Context, contain
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Info("Tracked container is not canonically owned by this server - not force removed")
 		}
-		return false, nil
+		return "", false, nil
 	}
 
 	c.logger.Warn("Force removing owned container",
@@ -323,7 +325,7 @@ func (c *Client) ForceRemoveTrackedContainerIfOwned(ctx context.Context, contain
 				containerOwnerField(container.Owner),
 				zap.Error(err))
 		}
-		return true, err
+		return container.Owner, true, err
 	}
 	c.logger.Info("Owned container force removed",
 		zap.String("server", c.config.Name),
@@ -336,5 +338,5 @@ func (c *Client) ForceRemoveTrackedContainerIfOwned(ctx context.Context, contain
 			zap.String("container_id", container.ID),
 			containerOwnerField(container.Owner))
 	}
-	return true, nil
+	return container.Owner, true, nil
 }
