@@ -400,8 +400,9 @@ server scope, even `--servers "*"` — must already know the script name. Its
 not-found error names neither the other stored scripts, nor how many there are,
 nor the directory, and it is byte-for-byte the same whether the directory is
 empty or full, so a failed call cannot be used to probe what is stored — and
-the proxy does not even read the directory listing on its behalf, so the
-refusal's cost does not grow with the number of stored scripts:
+the proxy does not read the directory on its behalf at all — it probes the
+requested name's two candidate files and nothing else — so the refusal's cost
+does not grow with the number of stored scripts:
 
 ```text
 Cannot execute stored script: stored script "fetch-pr" not found (the stored-script

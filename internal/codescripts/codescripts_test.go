@@ -774,3 +774,88 @@ func TestResolveEmptyScriptsDirNeverTouchesCWD(t *testing.T) {
 		t.Fatalf("empty scriptsDir must report no scripts, got %+v", nf)
 	}
 }
+
+// countDirectoryPrimitives routes the package's two directory-touching
+// primitives through counters for the duration of the test.
+func countDirectoryPrimitives(t *testing.T) (readDirs, lstats *int) {
+	t.Helper()
+	var rd, ls int
+	origReadDir, origLstat := readDir, lstat
+	readDir = func(name string) ([]os.DirEntry, error) {
+		rd++
+		return origReadDir(name)
+	}
+	lstat = func(name string) (os.FileInfo, error) {
+		ls++
+		return origLstat(name)
+	}
+	t.Cleanup(func() { readDir, lstat = origReadDir, origLstat })
+	return &rd, &ls
+}
+
+// TestResolveScoped_NeverReadsTheDirectory (Spec 105 FR-012, codex r1 #1):
+// a scoped resolution — hit or miss — never enumerates the scripts directory.
+// Skipping the not-found LISTING is not enough: an os.ReadDir on the way to
+// the refusal still costs time and allocation proportional to what is stored,
+// and the spec's non-disclosing refusal is indistinguishable in timing class,
+// not only in body. The administrator's miss is the one place a listing is
+// paid for, and exactly once.
+func TestResolveScoped_NeverReadsTheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "alpha-SENTINEL.js", "1")
+	writeScript(t, dir, "beta.ts", "1")
+
+	readDirs, _ := countDirectoryPrimitives(t)
+
+	_, _, err := ResolveScoped(dir, "missing", "")
+	var notFound *NotFoundError
+	require.True(t, errors.As(err, &notFound), "want *NotFoundError, got %T: %v", err, err)
+	assert.True(t, notFound.Undisclosed)
+	assert.Equal(t, 0, *readDirs, "a scoped miss must not read the directory")
+
+	src, _, err := ResolveScoped(dir, "beta", "")
+	require.NoError(t, err)
+	assert.Equal(t, "1", string(src))
+	assert.Equal(t, 0, *readDirs, "a scoped hit must not read the directory either")
+
+	_, _, err = Resolve(dir, "beta", "")
+	require.NoError(t, err)
+	assert.Equal(t, 0, *readDirs, "an administrator hit has no listing to pay for")
+
+	_, _, err = Resolve(dir, "missing", "")
+	require.True(t, errors.As(err, &notFound))
+	assert.Equal(t, 2, notFound.Total)
+	assert.Equal(t, 1, *readDirs, "the administrator's miss is built from exactly one listing")
+}
+
+// TestResolveScoped_MissCostIsIndependentOfDirectorySize pins the timing
+// class directly: the same scoped miss against an empty directory and against
+// one holding ten thousand unrelated scripts performs the same filesystem
+// calls — a fixed number of path probes and no enumeration — so the refusal's
+// latency and allocation cannot serve as a count oracle.
+func TestResolveScoped_MissCostIsIndependentOfDirectorySize(t *testing.T) {
+	empty := t.TempDir()
+	crowded := t.TempDir()
+	for i := 0; i < 10_000; i++ {
+		f, err := os.Create(filepath.Join(crowded, fmt.Sprintf("script-%05d.js", i)))
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+	}
+
+	probe := func(dir string) (readDirs, lstats int) {
+		rd, ls := countDirectoryPrimitives(t)
+		_, _, err := ResolveScoped(dir, "gamma", "")
+		var notFound *NotFoundError
+		require.True(t, errors.As(err, &notFound), "want *NotFoundError, got %T: %v", err, err)
+		assert.True(t, notFound.Undisclosed)
+		return *rd, *ls
+	}
+
+	emptyReadDirs, emptyLstats := probe(empty)
+	crowdedReadDirs, crowdedLstats := probe(crowded)
+
+	assert.Equal(t, 0, emptyReadDirs)
+	assert.Equal(t, 0, crowdedReadDirs, "ten thousand entries must not be enumerated on a scoped caller's behalf")
+	assert.Equal(t, emptyLstats, crowdedLstats, "the number of path probes is independent of the directory's contents")
+	assert.Greater(t, crowdedLstats, 0, "the candidate paths are probed directly")
+}

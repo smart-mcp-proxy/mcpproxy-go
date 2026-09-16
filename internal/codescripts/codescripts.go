@@ -285,9 +285,10 @@ func DeriveLanguage(name, ext, explicitLanguage string) (string, error) {
 // (FR-004) and every other refusal names the host path it is about.
 //
 // Order matters: the name is validated BEFORE any filesystem call (SC-003),
-// then the directory decides which candidates exist, then the surviving
-// candidate is opened with the platform's no-follow idiom and read through a
-// bounded reader. Exactly one open and one read per call — no cache, no re-read.
+// then the two candidate paths are probed directly (never a directory
+// listing), then the surviving candidate is opened with the platform's
+// no-follow idiom and read through a bounded reader. Exactly one open and one
+// read per call — no cache, no re-read.
 func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language string, err error) {
 	return resolve(scriptsDir, name, explicitLanguage, true)
 }
@@ -295,8 +296,9 @@ func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language
 // ResolveScoped is Resolve for a scoped (agent-token) caller — Spec 105
 // FR-012. It reads the script exactly as Resolve does, but every refusal it
 // returns is already the non-disclosing form: a not-found error is built
-// WITHOUT listing the directory (no per-entry stat for a caller that is never
-// shown the result — the refusal's cost does not grow with what is stored),
+// WITHOUT listing the directory — neither the discovery listing nor a
+// directory read on the way to the miss; the two candidate paths are probed
+// and nothing else, so the refusal's cost does not grow with what is stored —
 // and the ambiguous / invalid forms carry the caller's own name and the
 // reason but no host path and no raw OS error. Typed identities are the
 // same, so the REST classifier does not tell the two callers apart.
@@ -395,39 +397,42 @@ func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source [
 }
 
 // candidatesFor returns the paths of the script files backing `name`, in
-// extension order (.js then .ts), by reading the directory and comparing entry
-// names BYTE FOR BYTE — the same rule List applies.
+// extension order (.js then .ts), by probing the two constructed paths
+// directly. The cost is a fixed number of single-path calls whatever the
+// directory holds: a scoped caller's refusal must not grow with the number of
+// stored scripts (Spec 105 FR-012 — timing class is part of a non-disclosing
+// refusal), so the directory is never listed here.
 //
-// The obvious implementation, stat-ing the two constructed paths, delegates the
-// name→file decision to the filesystem, and on the default macOS and Windows
-// volumes that decision is case-insensitive. `backdoor.JS` then satisfied a
-// probe for `backdoor.js` and executed, while every discovery surface — the
-// listing, GET /api/v1/code/scripts, the not-found error — skipped it as an
-// unknown extension; conversely `foo.js` plus `FOO.ts` were two ok listing
-// entries that both refused to run as ambiguous. Reading the directory removes
-// the filesystem's matching from the loop entirely, so the two agree on every
-// platform. Resolve's no-follow open remains the authoritative check.
+// The probe alone would delegate the name→file decision to the filesystem, and
+// on the default macOS and Windows volumes that decision is case-insensitive:
+// `backdoor.JS` satisfied a probe for `backdoor.js` and executed, while every
+// discovery surface — the listing, GET /api/v1/code/scripts, the not-found
+// error — skipped it as an unknown extension; conversely `foo.js` plus
+// `FOO.ts` were two ok listing entries that both refused to run as ambiguous.
+// So a path that exists is accepted only when the entry's stored spelling
+// (entryName, a single-entry platform call) is byte-for-byte the requested
+// one; a case-folded match is not a stored script, exactly as List decides.
+// Resolve's no-follow open remains the authoritative check.
 func candidatesFor(scriptsDir, name string) ([]string, error) {
-	dirEntries, err := os.ReadDir(scriptsDir)
-	if err != nil {
-		return nil, err
-	}
-
-	present := make(map[string]bool, 2)
-	for _, d := range dirEntries {
-		switch d.Name() {
-		case name + extJS:
-			present[extJS] = true
-		case name + extTS:
-			present[extTS] = true
-		}
-	}
-
 	found := make([]string, 0, 2)
 	for _, ext := range []string{extJS, extTS} {
-		if present[ext] {
-			found = append(found, filepath.Join(scriptsDir, name+ext))
+		want := name + ext
+		path := filepath.Join(scriptsDir, want)
+		if _, err := lstat(path); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, err
 		}
+		if stored, err := entryName(path); err == nil && stored != want && strings.EqualFold(stored, want) {
+			// The filesystem folded the case: the entry is spelled differently
+			// and no discovery surface reports it under this name. Only a
+			// case-only difference is a fold; any other answer (a hard link's
+			// other name, or no answer at all) leaves the Lstat verdict in
+			// force, and the no-follow open below still decides usability.
+			continue
+		}
+		found = append(found, path)
 	}
 	return found, nil
 }
@@ -436,6 +441,15 @@ func candidatesFor(scriptsDir, name string) ([]string, error) {
 // administrator's error. A variable so the package's tests can witness that
 // the scoped form never invokes it.
 var listForNotFound = List
+
+// readDir and lstat are the package's two directory-touching primitives,
+// variables so the tests can count them: a scoped resolution must never
+// enumerate the directory (readDir) and must probe a fixed number of paths
+// (lstat) whatever the directory holds (Spec 105 FR-012 timing class).
+var (
+	readDir = os.ReadDir
+	lstat   = os.Lstat
+)
 
 // notFoundErrorFor builds the not-found error for one caller kind: the
 // discovery-carrying administrator form (FR-004), or the scoped form that is
@@ -479,7 +493,7 @@ func List(scriptsDir string) ([]Entry, error) {
 	if scriptsDir == "" {
 		return []Entry{}, nil
 	}
-	dirEntries, err := os.ReadDir(scriptsDir)
+	dirEntries, err := readDir(scriptsDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return []Entry{}, nil
