@@ -859,8 +859,29 @@ func (s *Service) SetCurrentErrorCodesProvider(fn func() map[string]int) {
 // member_count_bucket (schema v13, Spec 107 US7). Only the count crosses this
 // seam; the closure must never expose user records. nil-safe: passing nil (or
 // never calling this) reports "0", the personal-edition value.
+//
+// Guarded by s.mu (cross-review round 4, chunk 4 P2): Start() launches the
+// heartbeat loop on its own goroutine (runtime/lifecycle.go
+// "go r.telemetryService.Start(...)") from StartBackgroundInitialization,
+// while SetUserCounter is called later, from a different call chain
+// (server.startCustomHTTPServer -> serveredition_wire.go), with no ordering
+// guarantee between the two relative to each other. An unsynchronized write
+// here racing the unsynchronized read in BuildPayload is a real data race
+// under the Go memory model, not merely a theoretical one — the same class
+// the file's own s.mu already protects for resolvedEnabled/config/endpoint
+// and the anonymous-id/funnel fields.
 func (s *Service) SetUserCounter(fn func() (int, error)) {
+	s.mu.Lock()
 	s.userCounter = fn
+	s.mu.Unlock()
+}
+
+// userCounterFunc returns the currently installed user counter (or nil)
+// under s.mu, so BuildPayload never reads s.userCounter directly.
+func (s *Service) userCounterFunc() func() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.userCounter
 }
 
 // resolveLaunchSource returns the LaunchSource to emit in the current
@@ -1439,8 +1460,8 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 	// helper. No counter installed → "0"; counter error → field omitted for
 	// this heartbeat (the error text never reaches the payload).
 	payload.UserCountBucket = bucketUpstream(0)
-	if s.userCounter != nil {
-		if n, err := s.userCounter(); err != nil {
+	if counter := s.userCounterFunc(); counter != nil {
+		if n, err := counter(); err != nil {
 			if s.logger != nil {
 				s.logger.Debug("telemetry: user counter failed; omitting member_count_bucket", zap.Error(err))
 			}
