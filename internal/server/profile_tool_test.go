@@ -809,3 +809,110 @@ func TestForEachProfileSelectable_VisitsEveryProfileRegardlessOfOutcome(t *testi
 	forEachProfileSelectable(context.Background(), nil, func(string, bool) { t.Fatal("visited a profile of a nil config") })
 	require.Nil(t, selectableProfileNames(context.Background(), nil))
 }
+
+// TestProfileIndex_SelectableAllocatesNothing (Spec 105 PR D codex round 2,
+// finding 1): the URL gate's predicate does constant, allocation-free work —
+// zero allocations for every refusal and admission branch, over a fleet of
+// one profile and of 4 097 — so a scoped caller's refusal cannot reveal how
+// many other profiles exist. Pure function, so exact and retry-free.
+func TestProfileIndex_SelectableAllocatesNothing(t *testing.T) {
+	fleets := map[string]*profileIndex{
+		"no profiles": newProfileIndex(&config.Config{Servers: []*config.ServerConfig{{Name: "pin-srv"}, {Name: "other-srv"}}}),
+		"pin only":    newProfileIndex(selectableProbeConfig(0)),
+		"4096 others": newProfileIndex(selectableProbeConfig(4096)),
+		"nil config":  newProfileIndex(nil),
+	}
+	cases := map[string]struct {
+		ctx  context.Context
+		slug string
+	}{
+		"pin mismatch, absent slug":   {selectablePinnedCtx("pin", "pin-srv"), "nope"},
+		"pin mismatch, existing slug": {selectablePinnedCtx("pin", "pin-srv"), "p0"},
+		"deleted pin":                 {selectablePinnedCtx("gone", "pin-srv"), "gone"},
+		"zero-reach pin":              {selectablePinnedCtx("pin", "other-srv"), "pin"},
+		"reachable pin":               {selectablePinnedCtx("pin", "pin-srv"), "pin"},
+		"scoped, absent slug":         {setProfileScopedCtx("s", "pin-srv"), "nope"},
+		"scoped, disjoint slug":       {setProfileScopedCtx("s", "pin-srv"), "p0"},
+		"scoped, reachable slug":      {setProfileScopedCtx("s", "pin-srv"), "pin"},
+		"scoped, empty allowlist":     {setProfileScopedCtx("s"), "pin"},
+		"admin":                       {auth.WithAuthContext(context.Background(), auth.AdminContext()), "p0"},
+		"absent context":              {context.Background(), "nope"},
+		"empty slug":                  {selectablePinnedCtx("pin", "pin-srv"), ""},
+	}
+	for fleet, idx := range fleets {
+		for name, c := range cases {
+			allocs := testing.AllocsPerRun(50, func() { idx.selectable(c.ctx, c.slug) })
+			require.Zero(t, allocs, "%s over fleet %q must not allocate", name, fleet)
+		}
+	}
+}
+
+// TestProfileIndex_SelectableMatchesSelectableProfileNames pins the O(1)
+// predicate to the list predicate it replaces on the URL gate: for every
+// caller kind and every slug (configured, absent, empty, the pin, an empty
+// and a ghost profile), profileIndex.selectable answers exactly
+// "slug ∈ selectableProfileNames" — the two are one rule, so the gate and
+// set_profile can never disagree on admission. (Duplicate slugs are outside
+// the contract: ValidateProfiles refuses to load them; the index resolves the
+// first occurrence like every other lookup in this package.)
+func TestProfileIndex_SelectableMatchesSelectableProfileNames(t *testing.T) {
+	cfg := selectableProbeConfig(4) // pin, p0..p3
+	cfg.Profiles = append(cfg.Profiles,
+		config.ProfileConfig{Name: "empty"},
+		config.ProfileConfig{Name: "ghost", Servers: []string{"missing-srv"}},
+		config.ProfileConfig{Name: "both", Servers: []string{"pin-srv", "other-srv"}},
+	)
+	_, err := config.ValidateProfiles(cfg)
+	require.NoError(t, err, "fixture must be a loadable profile set")
+	idx := newProfileIndex(cfg)
+
+	callers := map[string]context.Context{
+		"admin":                   auth.WithAuthContext(context.Background(), auth.AdminContext()),
+		"absent context":          context.Background(),
+		"scoped, pin-srv":         setProfileScopedCtx("s", "pin-srv"),
+		"scoped, other-srv":       setProfileScopedCtx("s", "other-srv"),
+		"scoped, wildcard":        setProfileScopedCtx("s", "*"),
+		"scoped, empty allowlist": setProfileScopedCtx("s"),
+		"reachable pin":           selectablePinnedCtx("pin", "pin-srv"),
+		"zero-reach pin":          selectablePinnedCtx("pin", "other-srv"),
+		"deleted pin":             selectablePinnedCtx("gone", "*"),
+		"pinned to empty":         selectablePinnedCtx("empty", "*"),
+		"pinned to ghost":         selectablePinnedCtx("ghost", "*"),
+	}
+	slugs := []string{"pin", "p0", "p1", "p3", "empty", "ghost", "both", "nope", "", "gone", "missing-srv"}
+	for caller, ctx := range callers {
+		list := selectableProfileNames(ctx, cfg)
+		for _, slug := range slugs {
+			require.Equal(t, slices.Contains(list, slug), idx.selectable(ctx, slug), "%s asking for %q (list: %v)", caller, slug, list)
+		}
+	}
+
+	// A nil snapshot selects nothing for anyone.
+	nilIdx := newProfileIndex(nil)
+	for caller, ctx := range callers {
+		require.False(t, nilIdx.selectable(ctx, "pin"), "%s over a nil config", caller)
+	}
+	require.Nil(t, nilIdx.lookup("pin"))
+}
+
+// TestProfileIndexCache_BuiltOncePerSnapshot: the cache keys on the snapshot
+// pointer — the same *Config hands back the same index, a new snapshot (a
+// reload always publishes a new pointer) rebuilds it, and the index reflects
+// the snapshot it was built from.
+func TestProfileIndexCache_BuiltOncePerSnapshot(t *testing.T) {
+	var cache profileIndexCache
+	first := selectableProbeConfig(2)
+	idx := cache.For(first)
+	require.Same(t, idx, cache.For(first))
+	require.Equal(t, &first.Profiles[0], idx.lookup("pin"))
+	require.Equal(t, &first.Profiles[2], idx.lookup("p1"))
+	require.Nil(t, idx.lookup("p2"))
+
+	second := selectableProbeConfig(3)
+	next := cache.For(second)
+	require.NotSame(t, idx, next, "a new snapshot must rebuild the index")
+	require.Equal(t, &second.Profiles[3], next.lookup("p2"))
+	require.Same(t, next, cache.For(second))
+
+	require.Nil(t, cache.For(nil).lookup("pin"), "a nil snapshot yields an empty index")
+}

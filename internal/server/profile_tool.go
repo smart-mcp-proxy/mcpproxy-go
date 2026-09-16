@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -272,13 +273,142 @@ func forEachProfileSelectable(ctx context.Context, cfg *config.Config, visit fun
 		p := &cfg.Profiles[i]
 		selectable := true
 		if needsReach {
-			selectable = len(callerVisibleServers(ctx, p.EffectiveServers(cfg))) > 0
+			selectable = profileHasReach(ctx, cfg, p)
 		}
 		if pin != "" && p.Name != pin {
 			selectable = false
 		}
 		visit(p.Name, selectable)
 	}
+}
+
+// profileHasReach reports whether the caller can enumerate at least one of
+// p's declared servers that exists in cfg — the reach rule behind
+// selectableProfileNames (research D1), i.e.
+// len(callerVisibleServers(ctx, p.EffectiveServers(cfg))) > 0, but without
+// either allocation, so a profile's reach costs the same whether it has one
+// declared server or none. It walks every configured server (a per-snapshot
+// constant) and never returns early; a nil p is an empty profile. Only the
+// declared-server membership test scales with p's own list — a property of
+// the profile the caller asked about, not of the rest of the fleet.
+func profileHasReach(ctx context.Context, cfg *config.Config, p *config.ProfileConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	var declared []string
+	if p != nil {
+		declared = p.Servers
+	}
+	scoped := auth.IsScopedCaller(ctx)
+	reach := false
+	for _, s := range cfg.Servers {
+		if s == nil || !slices.Contains(declared, s.Name) {
+			continue
+		}
+		if !scoped || auth.CanEnumerateServer(ctx, s.Name) {
+			reach = true
+		}
+	}
+	return reach
+}
+
+// profileIndex is an immutable slug → profile index over ONE config snapshot.
+// It lets the /mcp/p/<slug> gate resolve the requested profile (and a pinned
+// caller's pin) directly instead of walking cfg.Profiles, so the work a
+// scoped refusal costs does not grow with the number of OTHER profiles the
+// operator has configured — the whole selectable list is fleet-sized, and a
+// refusal that computed it did zero iterations over an empty fleet and one
+// EffectiveServers per profile over a populated one: same status and body,
+// fleet-population timing oracle (codex review, PR D round 2; FR-004).
+//
+// Duplicate slugs cannot load (ValidateProfiles), but a hand-built config may
+// carry them: the first occurrence wins, exactly like every linear lookup in
+// this package (profileServersIn, the middleware's own scan).
+type profileIndex struct {
+	cfg    *config.Config
+	byName map[string]int // slug → position in cfg.Profiles
+
+	// lookupHook, when set, observes every slug the index resolves. It is the
+	// seam the traversal-counter test uses to prove the gate touches at most
+	// the requested slug and the pin; nil in production.
+	lookupHook func(slug string)
+}
+
+func newProfileIndex(cfg *config.Config) *profileIndex {
+	idx := &profileIndex{cfg: cfg, byName: map[string]int{}}
+	if cfg == nil {
+		return idx
+	}
+	idx.byName = make(map[string]int, len(cfg.Profiles))
+	for i := range cfg.Profiles {
+		if _, dup := idx.byName[cfg.Profiles[i].Name]; !dup {
+			idx.byName[cfg.Profiles[i].Name] = i
+		}
+	}
+	return idx
+}
+
+// lookup resolves one slug in O(1), or nil when the snapshot has no such
+// profile.
+func (idx *profileIndex) lookup(slug string) *config.ProfileConfig {
+	if idx.lookupHook != nil {
+		idx.lookupHook(slug)
+	}
+	if i, ok := idx.byName[slug]; ok {
+		return &idx.cfg.Profiles[i]
+	}
+	return nil
+}
+
+// selectable reports whether the caller may select the profile named slug —
+// the rule forEachProfileSelectable applies to every profile, evaluated for
+// this ONE profile. It is the URL gate's predicate and must never consult the
+// selectable list: whatever the outcome (slug absent, profile out of reach,
+// pin deleted, pin zero-reach, pin mismatch, empty fleet) it does the same
+// work — one lookup of the slug, one lookup of the pin when the caller is
+// pinned, and exactly one allocation-free reach computation, over the
+// candidate profile or an empty placeholder when there is none — so no
+// branch can be told from another by its cost, and none of it depends on
+// how many other profiles exist.
+func (idx *profileIndex) selectable(ctx context.Context, slug string) bool {
+	candidate := idx.lookup(slug)
+	pin := profilePinFromContext(ctx)
+	if pin != "" {
+		// The pin is the only profile a pinned caller may select; resolve it
+		// whether or not the URL named it so a mismatch costs what a match does.
+		pinned := idx.lookup(pin)
+		candidate = nil
+		if slug == pin {
+			candidate = pinned
+		}
+	}
+	reach := profileHasReach(ctx, idx.cfg, candidate)
+	// Administrators (and absent contexts) select any configured profile,
+	// including empty or ghost ones (SC-005); everyone else needs reach.
+	needsReach := pin != "" || auth.IsScopedCaller(ctx)
+	return candidate != nil && (!needsReach || reach)
+}
+
+// profileIndexCache hands out the profileIndex for a config snapshot, built
+// once per snapshot pointer. Config snapshots are replaced, never mutated in
+// place (configsvc copy-on-write; every reload publishes a new *Config), so
+// pointer identity is the cache key; the entry retains the snapshot it was
+// built from, so its address cannot be recycled under it. The zero value is
+// ready to use.
+type profileIndexCache struct {
+	last atomic.Pointer[profileIndex]
+}
+
+// For returns the index for cfg, building it on the first request after a
+// snapshot change. Two goroutines racing on that first request may both
+// build; either result is correct and the later Store wins.
+func (c *profileIndexCache) For(cfg *config.Config) *profileIndex {
+	if idx := c.last.Load(); idx != nil && idx.cfg == cfg {
+		return idx
+	}
+	idx := newProfileIndex(cfg)
+	c.last.Store(idx)
+	return idx
 }
 
 // setProfileServerTool wraps buildSetProfileTool as a ServerTool for routing-mode registration.
