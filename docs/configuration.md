@@ -1253,6 +1253,8 @@ You can edit this from the Web UI under **Settings → Advanced → MCP server i
 
 **Note:** Applied at startup / on the next client connect — editing this value does not hot-reload into already-connected MCP sessions.
 
+**Warning:** the text is operator-published content, returned verbatim to **every** client that initializes — including [agent tokens](https://docs.mcpproxy.app/features/agent-tokens/#what-a-scoped-token-cannot-learn) scoped to a subset of servers. Do not put server names, hostnames, credentials or other secrets in it.
+
 ---
 
 ## Tool-Level Quarantine

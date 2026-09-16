@@ -377,15 +377,37 @@ curl -H "X-API-Key: $KEY" http://127.0.0.1:8080/api/v1/code/scripts
 ```
 
 MCP clients do not get a listing tool — registrations are static, so an embedded
-list would go stale. Discovery is **error-driven** instead: invoking a name that
-does not exist returns an error listing the first 20 available names
-alphabetically plus the total, so an agent recovers the current name set from a
-single failed call.
+list would go stale. For **administrators** (the admin API key, the tray over the
+local socket, or an in-process caller) discovery is **error-driven** instead:
+invoking a name that does not exist returns an error listing the first 20
+available names alphabetically plus the total, so the current name set is
+recovered from a single failed call.
 
 ```text
 Cannot execute stored script: stored script "fetch-pr" not found in
 /Users/me/.mcpproxy/scripts. Available scripts (3): daily-report, fetch-prs, triage
 ```
+
+**Enumeration is administrator-only.** An
+[agent token](https://docs.mcpproxy.app/features/agent-tokens/) — whatever its
+server scope, even `--servers "*"` — must already know the script name. Its
+not-found error names neither the other stored scripts, nor how many there are,
+nor the directory, and it is byte-for-byte the same whether the directory is
+empty or full, so a failed call cannot be used to probe what is stored:
+
+```text
+Cannot execute stored script: stored script "fetch-pr" not found (the stored-script
+listing is available to administrators only; an agent-token caller must already
+know the script name)
+```
+
+Stored scripts are operator-published content: any caller allowed to run
+`code_execution` can run a script it knows the name of and receive whatever the
+script returns without an upstream call, while every `call_tool()` the script
+makes is still checked against the caller's server scope and permission tier.
+Do not put server names, credentials or other secrets in a script's source or
+its constant return values — see the
+[agent-token invariant](https://docs.mcpproxy.app/features/agent-tokens/#what-a-scoped-token-cannot-learn).
 
 ### No write path
 

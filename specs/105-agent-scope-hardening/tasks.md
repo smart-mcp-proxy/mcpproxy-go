@@ -159,18 +159,18 @@
 
 ### Failing tests
 
-- [ ] T062 [US1] FR01x-G1: agent ctx `["*"]`, script `gamma`, `alpha-SENTINEL.js` present → IsError, no `SENTINEL`/`Available scripts`, byte-equal to empty-dir proxy; admin control kept; positive controls per `spec.md:116`: `a`-only token runs a stored script returning a constant (no upstream call) and gets the constant; a stored script calling `b` is refused at the nested call; scoped initialization publishes custom `instructions` mentioning `b:private_search` (documented) — `internal/server/mcp_code_scripts_test.go` + `internal/server/mcp_instructions_scope_test.go` (new)
-- [ ] T063 [P] [US1] FR01x-G2: `TestCodeExecutionDescriptions_EnumerationIsAdminOnly` asserting `code_execution.description` and `script.description` no longer advertise enumeration, and a golden-delta assertion that only those two strings changed — `internal/server/toolslist_snapshot_test.go`
+- [x] T062 [US1] FR01x-G1: agent ctx `["*"]`, script `gamma`, `alpha-SENTINEL.js` present → IsError, no `SENTINEL`/`Available scripts`, byte-equal to empty-dir proxy; admin control kept; positive controls per `spec.md:116`: `a`-only token runs a stored script returning a constant (no upstream call) and gets the constant; a stored script calling `b` is refused at the nested call; scoped initialization publishes custom `instructions` mentioning `b:private_search` (documented) — `internal/server/mcp_code_scripts_test.go` + `internal/server/mcp_instructions_scope_test.go` (new)
+- [x] T063 [P] [US1] FR01x-G2: `TestCodeExecutionDescriptions_EnumerationIsAdminOnly` asserting `code_execution.description` and `script.description` no longer advertise enumeration, and a golden-delta assertion that only those two strings changed — `internal/server/toolslist_snapshot_test.go`
 
 ### Implementation
 
-- [ ] T064 [US1] Caller-kind branch: enumeration only for non-scoped callers — `internal/server/mcp_code_execution.go:473-499` (or `internal/codescripts/codescripts.go:338-356` with a caller flag)
-- [ ] T065 [US1] Reword `internal/server/mcp_code_execution.go:52-53,73-74`; regenerate goldens with `MCPPROXY_WRITE_TOOLSLIST_GOLDENS=testdata/toolslist_goldens go test -run TestToolsListSnapshot ./internal/server/` (the variable is the OUTPUT DIRECTORY, `toolslist_snapshot_test.go:151-158`), then rerun with it unset; diff limited to `internal/server/testdata/toolslist_goldens/{default_server,retrieve_tools_mode,code_execution_mode}.json`
-- [ ] T066 [P] [US1] Docs: enumeration is admin-only in `docs/code_execution/overview.md:379-387`, `cookbook.md:141`, `troubleshooting.md:604-613`, `api-reference.md:591`; add invariant sentence, covered-surface list (`/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<slug>`, aliases), retained-effects list and custom-instructions/stored-scripts secrets warning to `docs/features/agent-tokens.md` (FR01x-G3)
+- [x] T064 [US1] Caller-kind branch: enumeration only for non-scoped callers — `internal/server/mcp_code_execution.go:473-499` (or `internal/codescripts/codescripts.go:338-356` with a caller flag)
+- [x] T065 [US1] Reword `internal/server/mcp_code_execution.go:52-53,73-74`; regenerate goldens with `MCPPROXY_WRITE_TOOLSLIST_GOLDENS=testdata/toolslist_goldens go test -run TestToolsListSnapshot ./internal/server/` (the variable is the OUTPUT DIRECTORY, `toolslist_snapshot_test.go:151-158`), then rerun with it unset; diff limited to `internal/server/testdata/toolslist_goldens/{default_server,retrieve_tools_mode,code_execution_mode}.json`
+- [x] T066 [P] [US1] Docs: enumeration is admin-only in `docs/code_execution/overview.md:379-387`, `cookbook.md:141`, `troubleshooting.md:604-613`, `api-reference.md:591`; add invariant sentence, covered-surface list (`/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<slug>`, aliases), retained-effects list and custom-instructions/stored-scripts secrets warning to `docs/features/agent-tokens.md` (FR01x-G3)
 
 ### Verification
 
-- [ ] T067 [US1] Common verification; `git diff --stat -- internal/server/testdata` shows only the three goldens
+- [x] T067 [US1] Common verification; `git diff --stat -- internal/server/testdata` shows only the three goldens
 - [~] T068 [US1] Astra rounds on FR-012 + FR01x-G1…G3; quote final `VERDICT:`
 
 ---

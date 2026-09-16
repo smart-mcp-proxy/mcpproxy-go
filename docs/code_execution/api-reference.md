@@ -588,8 +588,9 @@ executed source under `code` and additionally carry `script: "<name>"`.
 | Situation | Message (abbreviated) |
 |-----------|-----------------------|
 | Both or neither of `code` / `script` | `Provide exactly one of 'code' (inline source) or 'script' (the name of a script stored in the 'scripts' directory next to mcpproxy's config file) — not both, not neither.` |
-| Unknown name | `stored script "X" not found in <dir>. Available scripts (N): a, b, c …` |
-| No scripts at all | `stored script "X" not found: no stored scripts in <dir> (create X.js or X.ts there)` |
+| Unknown name (administrator) | `stored script "X" not found in <dir>. Available scripts (N): a, b, c …` |
+| No scripts at all (administrator) | `stored script "X" not found: no stored scripts in <dir> (create X.js or X.ts there)` |
+| Unknown name ([agent token](https://docs.mcpproxy.app/features/agent-tokens/), any scope) | `stored script "X" not found (the stored-script listing is available to administrators only; an agent-token caller must already know the script name)` — identical for an empty and a populated directory; the listing is administrator-only |
 | Invalid name | `invalid script name "…": character "/" is not allowed …` |
 | Both extensions present | `stored script "X" is ambiguous: <dir>/X.js and <dir>/X.ts both exist — remove one` |
 | Empty / oversized / unreadable / non-regular | `stored script "X" (<path>) is oversized: scripts are limited to 262144 bytes` |
@@ -633,7 +634,7 @@ never re-sends a request that cannot succeed:
 | Situation | Status | `error.code` |
 |-----------|--------|--------------|
 | `enable_code_execution` is `false` | 403 | `FEATURE_DISABLED` |
-| Unknown script name (carries the available names) | 404 | `SCRIPT_NOT_FOUND` |
+| Unknown script name (carries the available names for an administrator; an agent token gets the non-disclosing message) | 404 | `SCRIPT_NOT_FOUND` |
 | Invalid script name | 400 | `INVALID_SCRIPT_NAME` |
 | Ambiguous, empty, oversized, unreadable or non-regular | 400 | `SCRIPT_UNUSABLE` |
 | `language` contradicts the extension | 400 | `INVALID_LANGUAGE` |

@@ -613,15 +613,24 @@ Or, with an empty/absent directory:
 Cannot execute stored script: stored script "fetch-pr" not found: no stored scripts in /Users/me/.mcpproxy/scripts (create fetch-pr.js or fetch-pr.ts there)
 ```
 
+Or, when the caller is an [agent token](https://docs.mcpproxy.app/features/agent-tokens/)
+rather than an administrator — the listing, the count and the directory are
+withheld, and the message is the same whether the directory is empty or full:
+```
+Cannot execute stored script: stored script "fetch-pr" not found (the stored-script listing is available to administrators only; an agent-token caller must already know the script name)
+```
+
 **Cause**: No `<name>.js` / `<name>.ts` in the scripts directory. Usually a typo
 (names are **case-sensitive**), a file that is not a script (uppercase or other
 extension: `.JS`, `.mjs`, `.jsx` are ignored), or the wrong directory — the
 scripts directory follows the **active config file**, not `--data-dir`.
 
-**Solution**: This error *is* the discovery mechanism — it lists the first 20
-available names alphabetically plus the total, so an MCP client can recover the
-name set from the failed call. For the full picture, including where the daemon
-looked:
+**Solution**: For an administrator this error *is* the discovery mechanism — it
+lists the first 20 available names alphabetically plus the total, so the name
+set is recovered from the failed call. An agent token gets no listing: give the
+agent the script names out of band (or in its custom instructions) and check
+them against the administrator's view. For the full picture, including where
+the daemon looked:
 ```bash
 mcpproxy code scripts list
 mcpproxy code scripts list --config /etc/mcpproxy/mcp_config.json   # a non-default config

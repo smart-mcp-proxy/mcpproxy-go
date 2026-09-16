@@ -280,6 +280,72 @@ Server scoping is enforced at three levels:
    below an authenticated admin: it cannot page an entry an API-key admin
    produced.
 
+### What a scoped token cannot learn
+
+**Invariant.** No proxy-produced response to an agent-token caller — a tool
+result, a refusal, a listing, a count, a suggestion, a notification, a cached
+page or a log line — names, counts or otherwise discloses a server, tool,
+prompt, profile or stored resource outside the caller's effective scope, and an
+out-of-scope resource is refused exactly as a nonexistent one would be.
+Administrators (the admin API key, the tray over the local socket, and native
+stdio) keep every capability they have today; the exceptions where an
+administrator's answer deliberately differs from a token's are named and tested
+one by one.
+
+**Covered surfaces.** The invariant holds for agent-token requests on every
+HTTP MCP surface — `/mcp`, `/mcp/all`, `/mcp/call`, `/mcp/code`,
+`/mcp/p/<slug>` and the trailing-slash alias of each (see
+[Routing Modes](https://docs.mcpproxy.app/features/routing-modes/)) — and on
+the REST doors listed above. Native stdio is local-administrator-only and is
+not a token surface.
+
+**Retained, documented effects.** Some shared resources are fleet-wide by
+construction and this invariant does not change them; a hidden server can still
+*affect* what an authorized caller experiences, without being *named*:
+
+- **Display-name collision admission on `/mcp/all`** — two servers exposing the
+  same display name collide fleet-wide, so a hidden server can withhold an
+  authorized entry from the direct listing.
+- **Prompt collision rule and the global prompt cap** — evaluated over the whole
+  fleet.
+- **Fleet-wide `list_changed` notifications** on the fixed surfaces — a hidden
+  server's change still emits the (content-free) notification.
+- **Shared call limiter** — the proxy-wide concurrency limit is global, so calls
+  held on a hidden server can make a call to an authorized server fail with the
+  existing "proxy-wide limit saturated" response.
+- **Cross-server security-scan admission** — under `trust_mode: scan`, a
+  same-name near-identical tool on a hidden server can hold an authorized
+  server's newly added tool pending as a shadowing finding, changing that
+  tool's discovery and dispatch outcome (see
+  [Security Quarantine](https://docs.mcpproxy.app/features/security-quarantine/)).
+- **Shared prompt-refresh deadline** — prompts are collected under one
+  fleet-wide deadline, so a slow hidden server can exhaust it before an
+  authorized server's prompts are collected.
+- **Shared log rotation and retention** — attribution filters what a token can
+  read back, not what history survives rotation.
+
+**Operator-published content — keep secrets out.** Two kinds of operator-authored
+content are published to every caller by design and sit outside the invariant:
+
+1. **Custom initialization `instructions`** (the `instructions` key in the
+   [config file](https://docs.mcpproxy.app/configuration/)) are returned
+   verbatim to every client that initializes, scoped or not.
+2. **Stored code-execution scripts** — any caller allowed to run
+   `code_execution` can run a script it knows the name of and receive whatever
+   the script returns without an upstream call. What the invariant *does*
+   cover: a missing-script error never enumerates the other script names, the
+   script count or the scripts directory to an agent-token caller (the refusal
+   is identical for an empty and a populated directory), while administrators
+   keep today's listing; and every `call_tool()` a script makes is checked
+   against the caller's server scope and permission tier. The published
+   `code_execution` definition says so — enumeration is administrator-only and
+   an agent-token caller must already know the script name. See
+   [Stored scripts](https://docs.mcpproxy.app/code_execution/overview/#stored-scripts).
+
+Do **not** place server names, hostnames, credentials, tokens or any other
+secret in either — a scoped agent can read them, and a script's constant return
+value is as public as its name.
+
 ## Administrative Operations Are Admin-Only
 
 Agent tokens can **discover and call** tools (within their scope and permission tier) but can **never administer servers**. Server-mutating operations require the admin API key (or a local tray/socket connection, which is admin by OS-level auth) on **every** surface — the MCP tools and the REST API share one policy (`internal/auth`), so an agent cannot do over HTTP what it is blocked from doing over MCP.

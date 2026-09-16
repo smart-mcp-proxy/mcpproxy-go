@@ -97,14 +97,40 @@ func (e *InvalidNameError) Error() string {
 
 // NotFoundError reports a name with no script file behind it, carrying the
 // available names so the caller can recover in one round trip (FR-004).
+//
+// The enumeration is administrator-only (Spec 105 FR-012): a scoped caller
+// receives the same error with Undisclosed set, whose text names neither
+// the other scripts, their count nor the directory — see NonDisclosing().
 type NotFoundError struct {
 	Name      string
 	Dir       string
 	Available []string // first MaxErrorNames ok names, alphabetical
 	Total     int      // total ok scripts in the directory
+
+	// Undisclosed marks the agent-token form of the error: the listing is
+	// withheld and the message is independent of the directory's contents,
+	// so a failed call cannot serve as an oracle for what is stored.
+	Undisclosed bool
+}
+
+// nonDisclosingNotFoundFormat is the agent-token refusal text. It carries only
+// the caller's own requested name and must never depend on the directory's
+// contents (Spec 105 FR-012: byte-equal for an empty and a populated
+// directory).
+const nonDisclosingNotFoundFormat = "stored script %q not found (the stored-script listing is available to administrators only; an agent-token caller must already know the script name)"
+
+// NonDisclosing returns a copy of the error stripped of everything that
+// discloses the directory's contents — names, count and path — for delivery
+// to a scoped (agent-token) caller. The typed identity is preserved, so the
+// REST surface still classifies it as SCRIPT_NOT_FOUND.
+func (e *NotFoundError) NonDisclosing() *NotFoundError {
+	return &NotFoundError{Name: e.Name, Undisclosed: true}
 }
 
 func (e *NotFoundError) Error() string {
+	if e.Undisclosed {
+		return fmt.Sprintf(nonDisclosingNotFoundFormat, e.Name)
+	}
 	if e.Total == 0 {
 		return fmt.Sprintf("stored script %q not found: no stored scripts in %s (create %s%s or %s%s there)",
 			e.Name, e.Dir, e.Name, extJS, e.Name, extTS)

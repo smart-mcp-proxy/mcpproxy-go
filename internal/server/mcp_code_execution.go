@@ -50,8 +50,9 @@ const (
 		"**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. " +
 		"Types are automatically stripped before execution.\n\n" +
 		"**Stored scripts**: Instead of `code`, pass `script: \"<name>\"` to run a script stored server-side in the `scripts/` directory next to mcpproxy's config file — " +
-		"a long workflow then costs a name per run instead of its full source. Provide exactly one of `code` or `script`. Naming a script that does not exist returns the " +
-		"available names, which is how you discover what is stored.\n\n" +
+		"a long workflow then costs a name per run instead of its full source. Provide exactly one of `code` or `script`. The stored-script listing is administrator-only " +
+		"(`mcpproxy code scripts list`, or the not-found error under the admin API key); an agent-token caller must already know the script name — " +
+		"a name that does not exist is refused without naming what is stored.\n\n" +
 		"**Important runtime rules**:\n" +
 		"- `call_tool` and `call_tools` are strictly SYNCHRONOUS. Do not use `await`.\n" +
 		"- Upstream tools usually return an MCP content array. To parse JSON results: `const data = JSON.parse(res.result.content[0].text);`\n" +
@@ -71,8 +72,9 @@ const (
 		"directory next to mcpproxy's active config file and are read fresh on every invocation, so an edited script takes effect immediately. " +
 		"Provide EXACTLY ONE of `code` or `script`. The name is a bare identifier (letters, digits, '-' and '_'; 1-64 chars) — never a path. " +
 		"The language comes from the file extension (.js → javascript, .ts → typescript); an explicit `language` that contradicts it is an error. " +
-		"DISCOVERY: calling with a name that does not exist returns an error listing the available script names (first 20 alphabetically, plus the total), " +
-		"so the current set can always be recovered from a single failed call. Everything else — `input`, options, sandbox limits, results — behaves exactly as for inline code."
+		"ENUMERATION IS ADMINISTRATOR-ONLY: for an administrator (the admin API key, the tray, an in-process caller) a name that does not exist returns an error listing " +
+		"the available script names (first 20 alphabetically, plus the total); an agent-token caller must already know the script name — its not-found error " +
+		"names neither the stored scripts nor how many there are. Everything else — `input`, options, sandbox limits, results — behaves exactly as for inline code."
 
 	codeExecutionInputDescription = "Input data accessible as global `input` variable in code (default: {})"
 
@@ -497,6 +499,7 @@ func (p *MCPProxyServer) resolveCodeExecutionSource(ctx context.Context, args ma
 
 	source, language, err := codescripts.Resolve(p.scriptsDir(), scriptName, options.Language)
 	if err != nil {
+		err = p.scopeStoredScriptRefusal(ctx, scriptName, err)
 		// Keep the typed identity reachable for the REST surface (404 for a
 		// name that is not there, 400 for one that cannot run) — the text alone
 		// would force it to classify these by prose.
@@ -505,6 +508,31 @@ func (p *MCPProxyServer) resolveCodeExecutionSource(ctx context.Context, args ma
 	}
 	options.Language = language
 	return string(source), scriptName, ""
+}
+
+// scopeStoredScriptRefusal applies the Spec 105 FR-012 caller-kind rule to a
+// stored-script resolution failure. The Spec 097 FR-004 not-found error
+// enumerates the stored names and their count so an administrator recovers
+// the set from one failed call; for a scoped caller (an agent token, whatever
+// its server scope — the caller KIND decides, never AllowedServers) that
+// listing is withheld and the refusal is made independent of the directory's
+// contents, so a failed call is not an oracle for what is stored. Every other
+// refusal (invalid name, ambiguous, unreadable, language mismatch) already
+// speaks only about the caller's own request and passes through unchanged.
+// An absent auth context (in-process caller) or an administrator keeps the
+// enumeration (SC-005: the named FR-012 admin exception).
+func (p *MCPProxyServer) scopeStoredScriptRefusal(ctx context.Context, scriptName string, err error) error {
+	if !auth.IsScopedCaller(ctx) {
+		return err
+	}
+	var notFound *codescripts.NotFoundError
+	if !errors.As(err, &notFound) || notFound.Undisclosed {
+		return err
+	}
+	p.logger.Debug("Withholding stored-script enumeration from scoped caller (Spec 105 FR-012)",
+		zap.String("script", scriptName),
+		zap.Int("available_total", notFound.Total))
+	return notFound.NonDisclosing()
 }
 
 // activeConfigFilePath returns the configuration FILE this server belongs to:

@@ -339,6 +339,49 @@ func TestResolve_NotFoundEmptyDirectory(t *testing.T) {
 	assert.Contains(t, err.Error(), "no stored scripts")
 }
 
+// TestNotFoundError_NonDisclosing pins the Spec 105 FR-012 agent-token form:
+// the text carries only the requested name — no listing, no count, no
+// directory — and is identical for an empty and a populated directory, while
+// the typed identity survives errors.As (the REST surface still answers 404).
+func TestNotFoundError_NonDisclosing(t *testing.T) {
+	populated := t.TempDir()
+	writeScript(t, populated, "alpha-SENTINEL.js", "1")
+	writeScript(t, populated, "beta.ts", "1")
+
+	_, _, errPopulated := Resolve(populated, "missing", "")
+	_, _, errEmpty := Resolve(t.TempDir(), "missing", "")
+
+	var full, none *NotFoundError
+	require.True(t, errors.As(errPopulated, &full))
+	require.True(t, errors.As(errEmpty, &none))
+	require.Equal(t, 2, full.Total, "fixture: the administrator form enumerates")
+
+	stripped := full.NonDisclosing()
+	require.NotNil(t, stripped)
+	assert.True(t, stripped.Undisclosed)
+	assert.Empty(t, stripped.Available)
+	assert.Zero(t, stripped.Total)
+	assert.Empty(t, stripped.Dir, "the directory path is not disclosed either")
+	assert.Equal(t, "missing", stripped.Name)
+
+	msg := stripped.Error()
+	assert.Contains(t, msg, `"missing"`, "the caller's own requested name is echoed")
+	assert.NotContains(t, msg, "SENTINEL")
+	assert.NotContains(t, msg, "beta")
+	assert.NotContains(t, msg, "Available scripts")
+	assert.NotContains(t, msg, populated, "the directory path is not disclosed")
+	assert.Contains(t, strings.ToLower(msg), "administrator")
+	assert.Equal(t, none.NonDisclosing().Error(), msg,
+		"the non-disclosing text must not depend on the directory's contents")
+
+	// The original is untouched: the administrator keeps the enumeration.
+	assert.Equal(t, 2, full.Total)
+	assert.Contains(t, full.Error(), "alpha-SENTINEL")
+
+	var typed *NotFoundError
+	assert.True(t, errors.As(error(stripped), &typed), "typed identity is preserved for the REST classifier")
+}
+
 func TestResolve_Ambiguous(t *testing.T) {
 	dir := t.TempDir()
 	jsPath := writeScript(t, dir, "dup.js", "1")
