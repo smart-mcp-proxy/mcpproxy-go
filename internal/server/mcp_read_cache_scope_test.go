@@ -17,6 +17,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 )
 
 // Spec 105 FR-001/FR-002 at the read_cache handler (tasks T021, T022, T024,
@@ -162,6 +163,13 @@ func TestReadCache_InternalEntriesRefusedWithoutEviction(t *testing.T) {
 	}))
 	defer registry.Close()
 
+	// AllowPrivateRegistryFetch flips the process-wide SSRF allow-policy when
+	// the runtime loads this config (registries.SetRegistriesFromConfig);
+	// restore the default catalog and policy so an order-shuffled
+	// TestBuildRegistrySourceEntry_RejectsSSRFLiteralIP still rejects literal
+	// IPs (same fix as #1222). Registered before the write so LIFO cleanup
+	// runs it while the httptest registry is still serving.
+	t.Cleanup(func() { registries.SetRegistriesFromConfig(nil) })
 	proxy, rt := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
 		cfg.Registries = []config.RegistryEntry{{
 			ID: "scope-reg", Name: "Scope Reg", URL: registry.URL, ServersURL: registry.URL,
