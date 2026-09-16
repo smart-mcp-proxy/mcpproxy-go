@@ -319,6 +319,19 @@ The pin is shown by `token list` (PROFILE PIN column) and `token show` (Profile 
 
 ## Managing Tokens
 
+### Token Limit
+
+Each owner can hold at most **100 agent tokens**. Revoked tokens still occupy a
+slot until they are deleted, so once you hit the limit, creating another token
+answers `409 Conflict` with a message about *your* count — delete one of your
+own tokens to free a slot.
+
+The limit is **per owner**, not per deployment: in the personal edition every
+token belongs to the one operator, and in the server edition each signed-in
+user gets their own 100 while the operator's tokens are counted as a separate
+owner. Another user's tokens never count against yours, and the error never
+reveals how many tokens anyone else holds.
+
 ### List All Tokens
 
 ```bash

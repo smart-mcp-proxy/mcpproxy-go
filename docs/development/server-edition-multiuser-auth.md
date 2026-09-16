@@ -122,12 +122,18 @@ there is cosmetic. Do not grow an authorization check on top of it.
   back in front: it opens a TOCTOU window on delete-then-recreate, and its
   fall-through 500 used to interpolate the storage sentinel into the body.
 - The token cap answers **409** on both editions' surfaces
-  (`ErrAgentTokenLimitReached`). One storage condition, one status. The **body
-  differs by edition on purpose**: `auth.MaxTokens` is counted across the whole
-  `agent_tokens` bucket, so in the server edition it is a *deployment-wide* cap
-  a tenant may be unable to clear, and the message says so and points at an
-  administrator. Do not copy the personal edition's "you have reached the
-  maximum" wording here. A per-owner quota is issue #1177.
+  (`ErrAgentTokenLimitReached`). One storage condition, one status. The cap is
+  **per owner** (Spec 107 FR-037, issue #1177): `CreateAgentToken` counts only
+  the records whose `UserID` matches the new token's, so each tenant gets
+  `auth.MaxTokens` (100) of their own and the operator's ownerless tokens form
+  one owner of their own. One tenant can never exhaust another's slots, and the
+  409 body names **only the caller's own count** ("you have reached your
+  maximum of 100 agent tokens; delete one of your tokens") — never the
+  deployment, other users or a fleet total, which the old global
+  `Stats().KeyN` count leaked as a cross-tenant oracle. There is no owner
+  index (records are keyed by hash), so the count is a full bucket walk that
+  decodes every row and stops early only once `MaxTokens` *matches* are found,
+  never after `MaxTokens` rows.
 - **A token is only as live as its owner.** `storage.Manager.SetAgentTokenOwnerGate`
   is installed in `setup.go` over the user store, and `ValidateAgentToken`
   consults it for every *owned* token (ownerless personal-edition tokens are

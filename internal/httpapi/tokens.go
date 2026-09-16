@@ -221,7 +221,10 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, storage.ErrAgentTokenLimitReached) {
-			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("Maximum number of agent tokens (%d) reached", auth.MaxTokens))
+			// The cap is per owner (Spec 107 FR-037, #1177). Every token on
+			// this surface is ownerless, so the caller owns all of them and
+			// the body may — must — speak of the caller's own count only.
+			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("You have reached your maximum of %d agent tokens; delete one of your tokens to free a slot", auth.MaxTokens))
 			return
 		}
 		s.logger.Errorf("Failed to create agent token: %v", err)

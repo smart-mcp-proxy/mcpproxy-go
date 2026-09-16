@@ -51,8 +51,10 @@ var (
 	// of a different tenant's token.
 	ErrAgentTokenNameExists = errors.New("agent token with this name already exists")
 
-	// ErrAgentTokenLimitReached is returned when the deployment-wide token cap
-	// is reached.
+	// ErrAgentTokenLimitReached is returned when the OWNER's token cap
+	// (auth.MaxTokens) is reached. The cap is per owner (token.UserID), never
+	// deployment-wide: one tenant cannot exhaust another's slots, and the
+	// error tells the caller nothing about anyone else's tokens (issue #1177).
 	ErrAgentTokenLimitReached = errors.New("maximum number of agent tokens reached")
 
 	// ErrAgentTokenOwnerInactive is returned by ValidateAgentToken when a
@@ -84,11 +86,13 @@ var (
 // consulting the legacy owner-blind name index. Returns (nil, nil) when the
 // pair does not resolve.
 //
-// A scan is correct and cheap here: the bucket is capped at auth.MaxTokens
-// entries and only low-frequency management operations resolve by name (the
-// authentication hot path resolves by hash). It is also constant-time with
-// respect to ownership — the whole bucket is walked regardless — so it adds no
-// timing oracle for "does another tenant own this name?".
+// A scan is correct and cheap here: the bucket holds at most auth.MaxTokens
+// entries PER OWNER (the cap is per owner, issue #1177), so it is bounded by
+// the number of token owners times the cap, and only low-frequency management
+// operations resolve by name (the authentication hot path resolves by hash).
+// It is also constant-time with respect to ownership — the whole bucket is
+// walked regardless — so it adds no timing oracle for "does another tenant
+// own this name?".
 //
 // The caller must complete this scan before mutating the bucket: bbolt forbids
 // mutating a bucket while iterating it.
@@ -151,8 +155,14 @@ func (m *Manager) findAgentTokenHashLocked(tx *bbolt.Tx, userID, name string) ([
 // personal-edition token) additionally get a bare-name entry in the legacy
 // "agent_token_names" index so the personal edition is unchanged on disk.
 //
+// The auth.MaxTokens cap is likewise PER OWNER (issue #1177): tokens with the
+// same UserID count together, and the ownerless operator tokens form one owner
+// of their own. One tenant can therefore never exhaust another's slots, and
+// the personal edition — where every token is ownerless — behaves exactly as
+// it did under the old global count.
+//
 // Returns ErrAgentTokenNameExists if the same owner already has that name, or
-// ErrAgentTokenLimitReached if the deployment-wide cap is reached.
+// ErrAgentTokenLimitReached if that owner is at the cap.
 func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacKey []byte) error {
 	if token.Name == "" {
 		return fmt.Errorf("agent token name cannot be empty")
@@ -191,8 +201,13 @@ func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacK
 			return ErrAgentTokenNameExists
 		}
 
-		// Enforce max token limit
-		count := tokenBucket.Stats().KeyN
+		// Enforce the cap for THIS OWNER. This is a second full walk of the
+		// bucket rather than Stats().KeyN: the key count is the deployment
+		// total, which is exactly the cross-tenant oracle #1177 removes.
+		count, err := m.countAgentTokensForOwnerLocked(tx, token.UserID, auth.MaxTokens)
+		if err != nil {
+			return err
+		}
 		if count >= auth.MaxTokens {
 			return ErrAgentTokenLimitReached
 		}
@@ -229,6 +244,56 @@ func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacK
 
 		return nil
 	})
+}
+
+// errStopAgentTokenWalk is the sentinel countAgentTokensForOwnerLocked returns
+// from its ForEach callback to end the walk early; it never escapes.
+var errStopAgentTokenWalk = errors.New("stop agent token walk")
+
+// countAgentTokensForOwnerLocked counts the records in agent_tokens whose
+// UserID equals userID, inside the given transaction, stopping early once
+// `limit` matches have been found (the caller only needs to know whether the
+// owner is at the cap). Revoked-but-not-deleted tokens still count: they hold
+// a slot until deleted, exactly as they did under the old global count.
+//
+// There is no owner index — records are keyed by token hash and UserID lives
+// inside the JSON — and because the cap is per owner the bucket may hold far
+// more than auth.MaxTokens rows. So this is a FULL bucket walk that decodes
+// each record; it must never give up after `limit` ROWS, only after `limit`
+// MATCHES, or an owner whose rows sort late in key order would be uncapped.
+//
+// An unparseable row is skipped and logged, for the reason given on
+// findAgentTokenHashLocked: aborting would turn every owner's create into a
+// 500 over one corrupt record. A skipped row counts for nobody.
+func (m *Manager) countAgentTokensForOwnerLocked(tx *bbolt.Tx, userID string, limit int) (int, error) {
+	tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
+	if tokenBucket == nil {
+		return 0, nil
+	}
+
+	count := 0
+	err := tokenBucket.ForEach(func(k, v []byte) error {
+		var token auth.AgentToken
+		if err := json.Unmarshal(v, &token); err != nil {
+			if m.logger != nil {
+				m.logger.Warnw("skipping unparseable agent token record",
+					"bucket", AgentTokensBucket, "key", string(k), "error", err)
+			}
+			return nil
+		}
+		if token.UserID != userID {
+			return nil
+		}
+		count++
+		if count >= limit {
+			return errStopAgentTokenWalk
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errStopAgentTokenWalk) {
+		return 0, fmt.Errorf("failed to count agent tokens for owner: %w", err)
+	}
+	return count, nil
 }
 
 // claimAgentTokenNameSlot reports whether the legacy owner-blind name index may
