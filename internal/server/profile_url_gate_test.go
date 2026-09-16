@@ -468,51 +468,83 @@ func TestProfileIndexCache_StaleRequestCannotEvictTheWarmIndex(t *testing.T) {
 	require.Equal(t, int64(1), c.lazyBuilds.Load(), "and nothing was rebuilt")
 }
 
-// TestProfileRequests_ServeTheIndexAboutToBePublished (Spec 105 PR D codex
-// round 6, finding 1): a request takes the (index, snapshot) PAIR from the
-// cache's warm slot and decides with it — it never captures a snapshot of its
-// own and then asks the cache for an index of that snapshot. The warm slot is
-// written by the pre-publish observer BEFORE the snapshot is stored, so the
-// request that runs inside a publication decides over the config about to be
-// published (its index ready) while runtime.Config() still answers the
-// previous one: through both entries, the URL gate and set_profile, a profile
-// that exists only in the config being published is admitted, and the
-// request-path build seam never fires. (A request that paired runtime.Config()
-// with For() refused it — the slug is not in the stored snapshot — or, once
-// two publications had passed it by, rebuilt its snapshot's index inline.)
-func TestProfileRequests_ServeTheIndexAboutToBePublished(t *testing.T) {
+// TestProfileRequests_ServeThePublishedSnapshotDuringObserverWindow (Spec 105
+// PR D review round 8, MUST-FIX; supersedes round 6's
+// TestProfileRequests_ServeTheIndexAboutToBePublished, which pinned the
+// opposite — and wrong — behaviour): the request-visible (index, snapshot)
+// pair must track the PUBLISHED snapshot exactly, with runtime.Config() as
+// the one atomic publication boundary every reader agrees on — never a pair
+// merely prepared ahead of it. Taking the cache's unconditional latest pair
+// let a request be admitted (and, for a pinned caller, scoped) against the
+// config about to be published while resolveActiveProfileIn's pin tier,
+// reading runtime.Config() independently a moment later, still answered the
+// previous one: admission and the effective scope could disagree within one
+// request (codex round 7).
+//
+// During the observer-to-Store window a request must instead be served from
+// the PUBLISHED pair — the old index, the old cfg — so a profile that exists
+// only in the config about to be published is refused exactly as it would be
+// a moment before or after the reload (not admitted early), and a profile
+// being WIDENED reports its still-published, narrower server set through
+// BOTH the URL gate's injected scope and a pinned caller's downstream
+// resolveActiveProfile — proving admission and pin resolution decide over the
+// same snapshot rather than splitting across it. After Store, the very next
+// request gets the new pair — admitted, widened — with zero index builds
+// throughout.
+func TestProfileRequests_ServeThePublishedSnapshotDuringObserverWindow(t *testing.T) {
 	srv, _ := newProfileGateTestServer(t)
 	require.Eventually(t, func() bool {
 		idx := srv.profileIndexes.warm.Load()
 		return idx != nil && idx.cfg == srv.runtime.Config()
 	}, 5*time.Second, 10*time.Millisecond)
 
-	agent := &auth.AuthContext{Type: auth.AuthTypeAgent, AllowedServers: []string{"research-srv"}}
-	var scoped []string
+	pinnedAgent := &auth.AuthContext{Type: auth.AuthTypeAgent, ProfilePin: "deploy", AllowedServers: []string{"*"}}
+	scopedAgent := &auth.AuthContext{Type: auth.AuthTypeAgent, AllowedServers: []string{"research-srv"}}
+	var scopedFromURL, scopedFromResolver []string
 	handler := srv.profileMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		scoped = append(scoped, profile.ProfileScopeFromContext(r.Context()).Name)
+		scopedFromURL = profile.ProfileScopeFromContext(r.Context()).AllowedServerNames()
+		_, resolved := srv.mcpProxy.resolveActiveProfile(r.Context())
+		scopedFromResolver = resolved.AllowedServerNames()
 	}))
 
 	// Registered after the Server's own observer, so it runs on the same
-	// publication with the warm slot already covering cfg and the snapshot not
-	// yet stored.
+	// publication with the warm slot already covering the NEXT cfg and the
+	// snapshot not yet stored.
 	type observation struct {
-		stored       bool
-		urlStatus    int
-		setProfile   *mcp.CallToolResult
-		lazyBuilds   int64
-		proxyBuilds  int64
-		runtimeAhead bool
+		stored           bool
+		onlyInNextStatus int
+		onlyInNextResult *mcp.CallToolResult
+		deployStatus     int
+		deployURLScope   []string
+		deployResolved   []string
+		lazyBuilds       int64
+		proxyBuilds      int64
 	}
 	observed := make(chan observation, 1)
 	srv.runtime.ConfigService().AddPrePublishObserver(func(cfg *config.Config) {
 		o := observation{stored: srv.runtime.Config() == cfg}
+
+		// A slug that exists ONLY in the config about to be published must
+		// not be admitted before it actually is.
 		req := httptest.NewRequest(http.MethodPost, "/mcp/p/only-in-next", http.NoBody)
-		req = req.WithContext(auth.WithAuthContext(req.Context(), agent))
+		req = req.WithContext(auth.WithAuthContext(req.Context(), scopedAgent))
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
-		o.urlStatus = rec.Code
-		o.setProfile = callSetProfileTool(t, srv.mcpProxy, setProfileScopedCtx("s", "research-srv"), "only-in-next")
+		o.onlyInNextStatus = rec.Code
+		o.onlyInNextResult = callSetProfileTool(t, srv.mcpProxy, setProfileScopedCtx("s", "research-srv"), "only-in-next")
+
+		// "deploy" exists in both snapshots but is being WIDENED in the next
+		// one; during this window a pinned request must see the still-
+		// published (narrow) set through both the URL gate and the resolver.
+		scopedFromURL, scopedFromResolver = nil, nil
+		req2 := httptest.NewRequest(http.MethodPost, "/mcp/p/deploy", http.NoBody)
+		req2 = req2.WithContext(auth.WithAuthContext(req2.Context(), pinnedAgent))
+		rec2 := httptest.NewRecorder()
+		handler.ServeHTTP(rec2, req2)
+		o.deployStatus = rec2.Code
+		o.deployURLScope = scopedFromURL
+		o.deployResolved = scopedFromResolver
+
 		o.lazyBuilds = srv.profileIndexes.lazyBuilds.Load()
 		o.proxyBuilds = srv.mcpProxy.profileIndexes.lazyBuilds.Load()
 		observed <- o
@@ -521,17 +553,50 @@ func TestProfileRequests_ServeTheIndexAboutToBePublished(t *testing.T) {
 	before := srv.runtime.Config()
 	next := *before
 	next.Profiles = append(slices.Clone(before.Profiles), config.ProfileConfig{Name: "only-in-next", Servers: []string{"research-srv"}})
+	for i := range next.Profiles {
+		if next.Profiles[i].Name == "deploy" {
+			next.Profiles[i].Servers = []string{"deploy-srv", "research-srv"}
+		}
+	}
 	_, err := srv.ApplyConfig(&next, filepath.Join(t.TempDir(), "mcp_config.json"))
 	require.NoError(t, err)
 
 	o := <-observed
 	require.False(t, o.stored, "the observer runs before the snapshot is stored")
-	require.Equal(t, http.StatusOK, o.urlStatus, "the URL gate must admit the profile of the config about to be published")
-	require.Equal(t, []string{"only-in-next"}, scoped, "the admitted request is scoped by the published-next snapshot")
-	require.False(t, o.setProfile.IsError, "set_profile must admit the profile of the config about to be published: %s", setProfileResultText(t, o.setProfile))
-	require.Contains(t, setProfileResultText(t, o.setProfile), `"active_profile":"only-in-next"`)
+
+	require.Equal(t, http.StatusNotFound, o.onlyInNextStatus,
+		"a profile that exists only in the config about to be published must not be admitted before it is published")
+	require.True(t, o.onlyInNextResult.IsError,
+		"set_profile must not admit a profile that exists only in the config about to be published: %s", setProfileResultText(t, o.onlyInNextResult))
+
+	require.Equal(t, http.StatusOK, o.deployStatus, "the still-published 'deploy' profile stays admitted through the window")
+	require.Equal(t, []string{"deploy-srv"}, o.deployURLScope,
+		"the URL gate must scope by the still-published (narrow) snapshot, not the one about to replace it")
+	require.Equal(t, []string{"deploy-srv"}, o.deployResolved,
+		"downstream pin resolution must agree with the URL gate's own snapshot, not an independently-read one")
+
 	require.Zero(t, o.lazyBuilds, "no request may build the index")
 	require.Zero(t, o.proxyBuilds, "set_profile over a runtime decides with the main Server's index")
+
+	// After Store, the very next request gets the NEW pair: "only-in-next" is
+	// admitted and "deploy" reports its widened set, with zero further builds.
+	req := httptest.NewRequest(http.MethodPost, "/mcp/p/only-in-next", http.NoBody)
+	req = req.WithContext(auth.WithAuthContext(req.Context(), scopedAgent))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "after Store the next request must be admitted through the newly published snapshot: %s", rec.Body.String())
+
+	scopedFromURL, scopedFromResolver = nil, nil
+	req2 := httptest.NewRequest(http.MethodPost, "/mcp/p/deploy", http.NoBody)
+	req2 = req2.WithContext(auth.WithAuthContext(req2.Context(), pinnedAgent))
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	require.ElementsMatch(t, []string{"deploy-srv", "research-srv"}, scopedFromURL, "the next request must see the newly published, widened snapshot")
+	require.ElementsMatch(t, []string{"deploy-srv", "research-srv"}, scopedFromResolver)
+
+	require.Zero(t, srv.profileIndexes.lazyBuilds.Load(), "no request may build the index")
+	require.Zero(t, srv.mcpProxy.profileIndexes.lazyBuilds.Load())
 }
 
 // TestProfileIndexCache_PausedRequestKeepsTheIndexItWasHanded (Spec 105 PR D
@@ -575,6 +640,52 @@ func TestProfileIndexCache_PausedRequestKeepsTheIndexItWasHanded(t *testing.T) {
 
 	require.Zero(t, srv.profileIndexes.lazyBuilds.Load(), "the resumed request builds nothing")
 	require.Same(t, idxC, srv.profileIndexes.Current(), "and moves nothing")
+}
+
+// TestProfileMiddleware_InjectsAdmittedSnapshotForDownstreamResolution (Spec
+// 105 PR D review round 8, MUST-FIX): serveProfileURL must pin the request to
+// the exact snapshot admission decided with, so a pinned caller's downstream
+// resolveActiveProfile (tier 1, pin resolution) decides over that same
+// snapshot rather than an independent runtime.Config() read — one a reload
+// landing strictly BETWEEN admission and the handler running could otherwise
+// have already moved past. The bare MCPProxyServer here has no runtime, so
+// currentConfig() falls back to reading p.config directly; mutating it inside
+// the downstream handler simulates exactly that landing.
+func TestProfileMiddleware_InjectsAdmittedSnapshotForDownstreamResolution(t *testing.T) {
+	cfgOld := &config.Config{
+		Servers:  []*config.ServerConfig{{Name: "deploy-srv"}, {Name: "research-srv"}},
+		Profiles: []config.ProfileConfig{{Name: "deploy", Servers: []string{"deploy-srv"}}},
+	}
+	cfgNew := &config.Config{
+		Servers:  cfgOld.Servers,
+		Profiles: []config.ProfileConfig{{Name: "deploy", Servers: []string{"deploy-srv", "research-srv"}}},
+	}
+
+	p := &MCPProxyServer{logger: zap.NewNop(), sessionStore: NewSessionStore(zap.NewNop())}
+	srv := &Server{logger: zap.NewNop(), mcpProxy: p}
+	p.mainServer = srv
+
+	idx := srv.profileIndexes.warmPublishing(cfgOld)
+	pin := &auth.AuthContext{Type: auth.AuthTypeAgent, ProfilePin: "deploy", AllowedServers: []string{"*"}}
+
+	var resolvedServers []string
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		// A reload "lands" here, strictly after admission: without the
+		// context injection, resolveActiveProfile's fresh currentConfig()
+		// read would see the widened profile instead of the one the gate
+		// admitted this request against.
+		p.config = cfgNew
+		_, scope := p.resolveActiveProfile(r.Context())
+		resolvedServers = scope.AllowedServerNames()
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp/p/deploy", http.NoBody)
+	req = req.WithContext(auth.WithAuthContext(req.Context(), pin))
+	rec := httptest.NewRecorder()
+	srv.serveProfileURL(rec, req, idx, next)
+	require.Equal(t, http.StatusOK, rec.Code, "%s", rec.Body.String())
+	require.Equal(t, []string{"deploy-srv"}, resolvedServers,
+		"downstream pin resolution must decide over the snapshot the gate admitted against, not a config that changed after admission")
 }
 
 // TestProfileRequests_NeverBuildTheIndexOverARuntime (Spec 105 PR D codex

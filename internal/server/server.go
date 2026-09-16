@@ -2353,13 +2353,28 @@ func withHSTS(next http.Handler) http.Handler {
 //   - Slug not found               → 404 {"error":"unknown profile '<slug>'","available":[...]}
 func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The (index, snapshot) pair is taken together from the warm slot —
-		// the request never reads the live config and then asks for an
-		// index of it, so it never builds one (profileIndexCache). Nil only
-		// on a Server no warm path has run on (bare test servers).
-		profiles := s.profileIndexes.Current()
-		if profiles == nil {
-			profiles = s.profileIndexes.For(s.runtimeConfig())
+		// Over a live runtime the (index, snapshot) pair must match this
+		// request's own runtime.Config() read exactly — Published, never the
+		// cache's unconditional latest pair, which can sit one publication
+		// AHEAD of runtime.Config() for the microseconds between the
+		// pre-publish observer warming it and configsvc storing it (round
+		// 7/8: admitting against that ahead snapshot let a scoped caller's
+		// effective scope split from what resolveActiveProfileIn would
+		// independently resolve moments later against the still-published
+		// one). A bare Server with no runtime (tests) has no runtime.Config()
+		// to match, so it falls back to whatever the warm path last set.
+		var profiles *profileIndex
+		if s.runtime != nil {
+			published := s.runtime.Config()
+			profiles = s.profileIndexes.Published(published)
+			if profiles == nil {
+				profiles = s.profileIndexes.For(published)
+			}
+		} else {
+			profiles = s.profileIndexes.Current()
+			if profiles == nil {
+				profiles = s.profileIndexes.For(s.runtimeConfig())
+			}
 		}
 		s.serveProfileURL(w, r, profiles, next)
 	})
@@ -2467,6 +2482,12 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 	effectiveServers := found.EffectiveServers(cfg)
 	scope := profile.NewProfileScope(found.Name, effectiveServers)
 	ctx := profile.WithProfileScope(r.Context(), scope)
+	// Pin the request to the exact snapshot admission decided with (cfg,
+	// profiles.cfg above) so every downstream profile read on this request —
+	// resolveActiveProfile's pin tier included — decides over the same one,
+	// rather than an independent runtime.Config() read that a reload landing
+	// mid-request could have already moved past it (round 8).
+	ctx = withProfileRequestConfig(ctx, cfg)
 	next.ServeHTTP(w, r.WithContext(ctx))
 }
 

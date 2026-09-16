@@ -35,6 +35,28 @@ func profilePinFromContext(ctx context.Context) string {
 	return ""
 }
 
+// profileRequestConfigKey is an unexported context key for the config
+// snapshot a /mcp/p/<slug> request was admitted and scoped against
+// (profileMiddleware / serveProfileURL). It is a package-private companion
+// to profile.WithProfileScope, not exported through the profile package,
+// because both the writer (Server) and the reader (MCPProxyServer) already
+// live in this package.
+type profileRequestConfigKey struct{}
+
+// withProfileRequestConfig returns a context carrying cfg as the exact
+// snapshot downstream profile resolution on this request must decide over.
+func withProfileRequestConfig(ctx context.Context, cfg *config.Config) context.Context {
+	return context.WithValue(ctx, profileRequestConfigKey{}, cfg)
+}
+
+// profileRequestConfigFromContext returns the snapshot withProfileRequestConfig
+// injected, or (nil, false) when the request did not enter through a path
+// that pins one (e.g. the base /mcp endpoint, or a bare test server).
+func profileRequestConfigFromContext(ctx context.Context) (*config.Config, bool) {
+	cfg, ok := ctx.Value(profileRequestConfigKey{}).(*config.Config)
+	return cfg, ok
+}
+
 // currentConfig returns the live configuration snapshot (hot-reload safe),
 // falling back to the construction-time config if the runtime is unavailable.
 func (p *MCPProxyServer) currentConfig() *config.Config {
@@ -117,10 +139,18 @@ func profileScopeForSlugIn(cfg *config.Config, slug string) *profile.ProfileScop
 // It returns the resolved profile slug ("" when none) and the matching
 // ProfileScope ("" ⇒ nil). A session selection that no longer matches any
 // configured profile is treated as stale: it is cleared and resolution falls
-// through to "none". Resolution reads the live config snapshot once; callers
-// that already hold a snapshot use resolveActiveProfileIn.
+// through to "none". Resolution reads the live config snapshot once — unless
+// the request came in through /mcp/p/<slug>, in which case that snapshot is
+// the exact one profileMiddleware already admitted the request against
+// (profileRequestConfigFromContext), never a fresh runtime.Config() read: a
+// reload landing between admission and this call must not split the two
+// (round 8). Callers that already hold a snapshot use resolveActiveProfileIn.
 func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *profile.ProfileScope) {
-	return p.resolveActiveProfileIn(ctx, p.currentConfig())
+	cfg := p.currentConfig()
+	if injected, ok := profileRequestConfigFromContext(ctx); ok {
+		cfg = injected
+	}
+	return p.resolveActiveProfileIn(ctx, cfg)
 }
 
 // resolveActiveProfileIn is resolveActiveProfile against an explicit config

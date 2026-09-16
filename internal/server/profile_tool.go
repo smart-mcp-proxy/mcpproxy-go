@@ -546,29 +546,33 @@ func (idx *profileIndex) selectableNames(ctx context.Context) []string {
 // it was built from (idx.cfg), so its address cannot be recycled under it.
 // The zero value is ready to use.
 //
-// A request takes the (index, snapshot) PAIR from the warm slot, Current(),
-// and holds it: it never captures a snapshot of its own and then asks for an
-// index of that snapshot, so no request ever builds one — a request that did
-// was first a rollback oracle (round 5: its build of an old snapshot evicted
-// the warmed current one) and then, with the demoted-previous slot of round
-// 5, still a fleet-population timing oracle once TWO publications had passed
-// it by (codex review, PR D round 6). The warm slot is written by the warm
-// path alone — the configsvc pre-publish observer (every published snapshot,
-// in publication order, BEFORE it is stored) or, until that observer has
-// run, construction and the config-event listener. Because the observer
-// writes it before snapshot.Store, a request may hold the index of the
-// config that is about to be published — one publication ahead of
-// runtime.Config() for the microseconds between the two — which is the
-// gated config (the admission hook has already run) and the one every
-// reader is about to see; acceptable, and not a disclosure: the request
-// decides over one consistent snapshot either way.
+// A request must decide over the snapshot that is actually PUBLISHED —
+// runtime.Config() is the one atomic publication boundary every reader
+// agrees on — never over a snapshot merely prepared ahead of it. Published
+// returns the prepared pair whose cfg equals the caller's own read of
+// runtime.Config(): the latest pair when it already covers it, or the
+// previous one during the narrow window in which the pre-publish observer
+// has warmed the NEXT snapshot but configsvc has not yet stored it (warm
+// already points past runtime.Config(); previous still matches it). Round 7
+// (codex) found that taking the unconditional warm slot — always the latest
+// prepared pair, whether or not it was stored yet — let a request be
+// admitted against the next config while resolveActiveProfileIn's pin tier,
+// reading runtime.Config() independently, still answered the previous one:
+// admission and the effective scope could disagree within one request.
+// Keeping the last TWO prepared pairs closes that window without ever
+// building: the observer runs under updateMu, so at most one
+// prepared-but-not-yet-stored pair can exist at any time, and "latest, else
+// previous" is therefore always either the published pair or the one about
+// to replace it — never a third, older one a request could still be reading
+// runtime.Config() as.
 //
 // For is the fallback for bare test servers (no runtime, so no warm path):
 // it never writes the warm slot and builds into the lazy slot, so even a
 // caller that reached it with a runtime could not roll the warm index back.
 type profileIndexCache struct {
-	warm atomic.Pointer[profileIndex]
-	lazy atomic.Pointer[profileIndex]
+	warm     atomic.Pointer[profileIndex] // latest prepared pair
+	previous atomic.Pointer[profileIndex] // second-latest prepared pair (see Published)
+	lazy     atomic.Pointer[profileIndex]
 
 	// warmMu serialises warm-slot writers; observed flips once the
 	// pre-publish observer has warmed a snapshot, after which the event-driven
@@ -582,25 +586,56 @@ type profileIndexCache struct {
 	lazyBuilds atomic.Int64
 }
 
-// Current returns the warm index — the (index, snapshot) pair a request
-// decides with — or nil before any warm path has run (bare test servers).
+// Current returns the latest warmed (index, snapshot) pair — the one the
+// warm path most recently prepared, whether or not it has been published
+// yet — or nil before any warm path has run. Cache-mechanics callers only
+// (bare-cache tests, and callers with no runtime.Config() to match against);
+// request paths that must stay consistent with a specific runtime.Config()
+// read use Published instead, which is what production wires through
+// profileMiddleware and profileIndexCurrent.
 func (c *profileIndexCache) Current() *profileIndex {
 	return c.warm.Load()
+}
+
+// Published returns the prepared pair whose snapshot is published — cfg ==
+// the caller's own runtime.Config() read — or nil when neither the latest
+// nor the previous prepared pair covers it: a bare cache with no warm path
+// (no runtime behind it), or, should the pre-publish observer ever not have
+// run on a stored snapshot (it always does — every publication path funnels
+// through updateLocked), a snapshot more than one publication further back
+// than what warmPublishing has seen. Callers fall back to For(published) in
+// that case, counted on lazyBuilds; over a live runtime with the observer
+// wired the fallback must never fire.
+func (c *profileIndexCache) Published(published *config.Config) *profileIndex {
+	if idx := c.warm.Load(); idx != nil && idx.cfg == published {
+		return idx
+	}
+	if idx := c.previous.Load(); idx != nil && idx.cfg == published {
+		return idx
+	}
+	return nil
 }
 
 // warmPublishing indexes cfg as the configsvc pre-publish observer, on the
 // exact snapshot about to be published, and returns the index. It runs under
 // the config update mutex, so it does one insertion per profile and nothing
-// else. Requests that already hold the previous index keep it (Current
-// hands out the pointer, not the slot).
+// else. The prior warm pair is demoted to previous (never dropped outright)
+// so a request whose own runtime.Config() read still answers it — because
+// this snapshot has not been Store'd yet — can still find it via Published.
+// Requests that already hold either pair keep it (Current/Published hand out
+// the pointer, not the slot).
 func (c *profileIndexCache) warmPublishing(cfg *config.Config) *profileIndex {
 	c.warmMu.Lock()
 	defer c.warmMu.Unlock()
 	c.observed = true
-	if idx := c.warm.Load(); idx != nil && idx.cfg == cfg {
-		return idx
+	old := c.warm.Load()
+	if old != nil && old.cfg == cfg {
+		return old
 	}
 	idx := newProfileIndex(cfg)
+	if old != nil {
+		c.previous.Store(old)
+	}
 	c.warm.Store(idx)
 	return idx
 }
@@ -650,17 +685,22 @@ func (p *MCPProxyServer) setProfileServerTool() mcpserver.ServerTool {
 
 // profileIndexCurrent returns the profile index a set_profile call decides
 // with — and, as idx.cfg, the config snapshot it decides over: the two are
-// taken as ONE pair from the main Server's warm slot (production — the same
-// index the /mcp/p/<slug> gate serves with), so the call never builds an
-// index and never pairs a snapshot with an index built from another one. A
-// proxy with no warmed main Server (bare test servers) falls back to a
-// lazily built index over its construction config, keyed by identity.
+// taken as ONE pair from the main Server's cache, matched against the SAME
+// runtime.Config() read the /mcp/p/<slug> gate would make right now
+// (Published — round 7/8: taking the cache's unconditional latest pair here
+// let set_profile admit and scope a profile that existed only in the config
+// about to be published, one publication ahead of what resolveActiveProfileIn
+// would independently read moments later), so the call never builds an index
+// and never pairs a snapshot with an index built from another one. A proxy
+// with no warmed main Server (bare test servers) falls back to a lazily
+// built index over its construction config, keyed by identity.
 func (p *MCPProxyServer) profileIndexCurrent() *profileIndex {
 	if p.mainServer != nil {
-		if idx := p.mainServer.profileIndexes.Current(); idx != nil {
+		published := p.currentConfig()
+		if idx := p.mainServer.profileIndexes.Published(published); idx != nil {
 			return idx
 		}
-		return p.mainServer.profileIndexes.For(p.currentConfig())
+		return p.mainServer.profileIndexes.For(published)
 	}
 	return p.profileIndexes.For(p.currentConfig())
 }
