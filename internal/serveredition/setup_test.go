@@ -16,6 +16,37 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
+func TestCredentialMasterKey_ExplicitConfigWinsOverEnv(t *testing.T) {
+	// docs/configuration/config-file.md documents server_edition.
+	// credential_encryption_key as "An explicit value wins over the
+	// environment" — the same precedence config.ServerEditionConfig.
+	// ApplyDefaults() already gives it (falls back to MCPPROXY_CRED_KEY
+	// only when the config value is empty). broker.ResolveMasterKey has
+	// the OPPOSITE precedence by its own separate, deliberate design
+	// (env wins, TestResolveMasterKey); calling it again on the
+	// already-defaulted config value at the credential-store call site
+	// would silently discard an explicit config value whenever
+	// MCPPROXY_CRED_KEY is also set (cross-review round 5, chunk 3 P2).
+	t.Setenv("MCPPROXY_CRED_KEY", "from-env")
+	got := credentialMasterKey(&config.ServerEditionConfig{CredentialEncryptionKey: "from-config"})
+	if got != "from-config" {
+		t.Errorf("explicit config value must win over MCPPROXY_CRED_KEY, got %q", got)
+	}
+}
+
+func TestCredentialMasterKey_FallsBackToApplyDefaultsEnvCopy(t *testing.T) {
+	// When the config value is empty, ApplyDefaults() already copied the
+	// env var into it — credentialMasterKey must not re-derive from the
+	// environment a second time, just pass through what ApplyDefaults set.
+	cfg := &config.ServerEditionConfig{}
+	t.Setenv("MCPPROXY_CRED_KEY", "from-env")
+	cfg.ApplyDefaults()
+	got := credentialMasterKey(cfg)
+	if got != "from-env" {
+		t.Errorf("expected the ApplyDefaults-resolved env fallback %q, got %q", "from-env", got)
+	}
+}
+
 func TestSetupMultiUserOAuth_Disabled(t *testing.T) {
 	// When server edition is not enabled, setup should be a no-op
 	logger := zap.NewNop().Sugar()

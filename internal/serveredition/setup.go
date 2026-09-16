@@ -24,6 +24,23 @@ func init() {
 	})
 }
 
+// credentialMasterKey resolves the credential-store master key from the
+// already-defaulted ServerEditionConfig. It deliberately does NOT call
+// broker.ResolveMasterKey: cfg.CredentialEncryptionKey already went through
+// config.ServerEditionConfig.ApplyDefaults(), which gives the explicit
+// config value precedence and falls back to MCPPROXY_CRED_KEY only when the
+// config value is empty — matching docs/configuration/config-file.md's
+// "An explicit value wins over the environment" for this key.
+// broker.ResolveMasterKey has the OPPOSITE precedence (env wins) by its own
+// separate, deliberate design for its own callers; calling it again here on
+// top of the already-resolved value would silently discard an explicit
+// server_edition.credential_encryption_key whenever MCPPROXY_CRED_KEY is
+// also set, contradicting the documented precedence for this key
+// (cross-review round 5, chunk 3 P2).
+func credentialMasterKey(cfg *config.ServerEditionConfig) string {
+	return cfg.CredentialEncryptionKey
+}
+
 func setupMultiUserOAuth(deps Dependencies) error {
 	if deps.Config == nil || deps.Config.ServerEdition == nil || !deps.Config.ServerEdition.Enabled {
 		deps.Logger.Debug("Server multi-user OAuth: not enabled, skipping setup")
@@ -211,7 +228,7 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// MCPPROXY_CRED_KEY or server_edition.credential_encryption_key. With no key
 	// it is constructed disabled and the connect surface reports so. Nothing
 	// injects a stored credential into a proxied request (Spec 107 FR-034).
-	credStore, err := broker.NewBBoltAESStore(deps.DB, broker.ResolveMasterKey(cfg.CredentialEncryptionKey), deps.Logger.Desugar())
+	credStore, err := broker.NewBBoltAESStore(deps.DB, credentialMasterKey(cfg), deps.Logger.Desugar())
 	if err != nil {
 		return fmt.Errorf("creating credential store: %w", err)
 	}

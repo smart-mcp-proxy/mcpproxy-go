@@ -215,10 +215,22 @@ IDP_ARGS=(
 	-groups-claim groups
 )
 TAMPER="0"
+GROUPS_TAMPER="0"
 if [[ -n "$IDP_EXTRA" ]]; then
 	read -r -a extra <<<"$IDP_EXTRA"
 	IDP_ARGS+=("${extra[@]}")
-	TAMPER="1"
+	case " $IDP_EXTRA " in
+	*" -groups-error "*)
+		# FR-008 fail-closed groups fixtures (absent/non-array/overage): the
+		# login still SUCCEEDS (groups land as [] and groups_claim_missing is
+		# logged) — this is NOT a login-refusal tamper case (cross-review
+		# round 5, chunk 4 P3).
+		GROUPS_TAMPER="1"
+		;;
+	*)
+		TAMPER="1"
+		;;
+	esac
 fi
 IDP_URL="http://127.0.0.1:$IDP_PORT"
 log "§1 starting fake IdP: $IDP_BIN ${IDP_ARGS[*]}"
@@ -352,7 +364,15 @@ if [[ "$TAMPER" == "1" ]]; then
 	want="403"
 	case " $IDP_EXTRA " in
 	*" -discovery-http-token-endpoint "*|*" -token-endpoint-redirect "*|\
-	*" -userinfo-error redirect "*|*" -userinfo-error non-json "*|*" -userinfo-error unavailable "*)
+	*" -userinfo-error redirect "*|*" -userinfo-error non-json "*|*" -userinfo-error unavailable "*|\
+	*" -token-error invalid_client "*|*" -token-error invalid_grant "*|\
+	*" -token-error invalid_scope "*|*" -token-error server_error "*)
+		# These are HTTP-level token-endpoint failures (ExchangeCode returns
+		# an error on a non-200 response), not ID-token content defects: the
+		# callback maps them to provider_error, not authorization_denied
+		# (cross-review round 5, chunk 4 P3). The other -token-error values
+		# are id_token defects checked after a successful exchange and stay
+		# in the 403 bucket (bad-signature, wrong-iss, wrong-aud, etc.).
 		want="503"
 		;;
 	esac
@@ -365,6 +385,15 @@ fi
 [[ "$code" == "302" && "$loc" == "$BASE/my/tokens" ]] || die "4c callback: expected 302 -> $BASE/my/tokens, got HTTP $code -> '$loc'"
 [[ "$(grep -c mcpproxy_session "$J")" == "1" ]] || die "4c expected exactly one mcpproxy_session cookie in $J"
 ME="$(c -b "$J" "$BASE/api/v1/auth/me")"
+if [[ "$GROUPS_TAMPER" == "1" ]]; then
+	# FR-008 fail-closed: a missing/non-array/oversized groups claim stores
+	# [] (never the pre-existing value) rather than refusing the login.
+	echo "$ME" | jq -e '.email=="alice@example.com" and .groups==[]' >/dev/null ||
+		die "4c groups-error tamper case: expected alice with groups [] (fail-closed): $ME"
+	ok "4c groups-error tamper case: alice logged in with groups [] (fail-closed, idp-args: $IDP_EXTRA)"
+	log "§4 done (groups-tamper run); phases c/d are not exercised under tamper"
+	exit 0
+fi
 echo "$ME" | jq -e '.email=="alice@example.com" and .groups==["eng"]' >/dev/null ||
 	die "4c /auth/me is not alice with groups [eng]: $ME"
 ok "§4 alice logged in; /api/v1/auth/me:"

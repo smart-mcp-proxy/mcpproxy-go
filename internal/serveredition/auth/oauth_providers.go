@@ -85,6 +85,17 @@ func newGenericOIDCProvider(c *config.ServerEditionOAuthConfig) *OAuthProvider {
 	cfg.AllowedDomains = append([]string(nil), c.AllowedDomains...)
 	if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{"openid", "profile", "email"}
+	} else if !containsFoldOIDC(cfg.Scopes, "openid") {
+		// FR-020 requires "openid" on every oidc authorization request. This
+		// factory must not assume its input already passed through
+		// config.ServerEditionConfig.ApplyDefaults() — the OAuthHandler is
+		// constructed from the LIVE, non-defaulted block whenever a
+		// ConfigProvider is wired (internal/serveredition/setup.go's
+		// serverEditionConfig provider prefers live.ServerEdition over the
+		// defaulted clone), so an explicit `scopes` list missing "openid"
+		// would otherwise reach the authorization request unchanged and a
+		// compliant IdP would return no ID token.
+		cfg.Scopes = append(append([]string(nil), cfg.Scopes...), "openid")
 	}
 	if cfg.GroupsClaim == "" {
 		cfg.GroupsClaim = "groups"
@@ -469,6 +480,17 @@ func parseIDToken(idToken string) (*OAuthUserInfo, error) {
 		DisplayName: claims.Name,
 		AvatarURL:   claims.Picture,
 	}, nil
+}
+
+// containsFoldOIDC reports whether list contains want, case-insensitively.
+// Mirrors config.containsFold (unexported in another package).
+func containsFoldOIDC(list []string, want string) bool {
+	for _, v := range list {
+		if strings.EqualFold(v, want) {
+			return true
+		}
+	}
+	return false
 }
 
 // base64URLDecode decodes a base64url-encoded string with optional padding.

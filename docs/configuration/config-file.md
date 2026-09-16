@@ -248,7 +248,8 @@ in the repository.
 ### Server Edition (`server_edition`) {#server-edition}
 
 The `server_edition` block configures multi-user SSO in the **Server edition**
-(`mcpproxy-server`, the Docker image / `.deb`). The Personal edition carries the
+(`mcpproxy-server`, distributed as the Docker image only — no `.deb`/tar.gz).
+The Personal edition carries the
 block as opaque JSON: it is preserved key-for-key and value-for-value through load, save and
 `PATCH /api/v1/config`, never validated and never acted on. The block is not
 part of the OpenAPI schema; this section is its reference. Development notes
