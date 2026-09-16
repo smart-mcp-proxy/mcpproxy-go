@@ -46,6 +46,11 @@ func LoadFromFile(configPath string) (*Config, error) {
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
+	// Expand secret/env refs in server_edition.oauth.client_id/client_secret
+	// (cross-review round 1, chunk 3 P2): must run before Validate so a
+	// missing env var reports "client_secret is required", not a silent
+	// placeholder-string login failure at the IdP.
+	expandServerEditionSecrets(cfg)
 
 	// Create data directory if it doesn't exist.
 	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —
@@ -155,6 +160,11 @@ func Load() (*Config, error) {
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
+	// Expand secret/env refs in server_edition.oauth.client_id/client_secret
+	// (cross-review round 1, chunk 3 P2): must run before Validate so a
+	// missing env var reports "client_secret is required", not a silent
+	// placeholder-string login failure at the IdP.
+	expandServerEditionSecrets(cfg)
 
 	// Create data directory if it doesn't exist.
 	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —

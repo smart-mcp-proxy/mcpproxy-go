@@ -318,12 +318,15 @@ func (p *oidcProvider) exchangeCode(ctx context.Context, code, callbackURL, code
 		return nil, newOIDCError(LoginProviderError, "token endpoint answered a redirect", fmt.Errorf("status %d", resp.StatusCode))
 	}
 	if resp.StatusCode != http.StatusOK {
-		// Only the RFC 6749 error code is surfaced; the body may echo inputs.
+		// Only a known RFC 6749 §5.2 error code is surfaced — never the raw
+		// field, which is IdP-controlled and could carry log-injection
+		// content (control characters, multi-line text) or echo request
+		// inputs (cross-review round 1, chunk 1 P2).
 		var oauthErr struct {
 			Error string `json:"error"`
 		}
 		_ = json.Unmarshal(body, &oauthErr)
-		return nil, newOIDCError(LoginProviderError, "token endpoint status", fmt.Errorf("status %d error %q", resp.StatusCode, oauthErr.Error))
+		return nil, newOIDCError(LoginProviderError, "token endpoint status", fmt.Errorf("status %d error %q", resp.StatusCode, sanitizeOAuthErrorCode(oauthErr.Error)))
 	}
 	var tok TokenResponse
 	if err := json.Unmarshal(body, &tok); err != nil {
@@ -333,6 +336,27 @@ func (p *oidcProvider) exchangeCode(ctx context.Context, code, callbackURL, code
 		return nil, newOIDCError(LoginIDTokenInvalid, "token response carries no id_token", nil)
 	}
 	return &tok, nil
+}
+
+// oauthErrorCodes is the closed RFC 6749 §5.2 token-endpoint error vocabulary.
+// sanitizeOAuthErrorCode clamps anything else to "unknown" so an IdP-controlled
+// `error` field can never reach the log or the wire verbatim (cross-review
+// round 1, chunk 1 P2: the raw field could carry control characters or echo
+// request inputs).
+var oauthErrorCodes = map[string]bool{
+	"invalid_request":        true,
+	"invalid_client":         true,
+	"invalid_grant":          true,
+	"unauthorized_client":    true,
+	"unsupported_grant_type": true,
+	"invalid_scope":          true,
+}
+
+func sanitizeOAuthErrorCode(code string) string {
+	if oauthErrorCodes[code] {
+		return code
+	}
+	return "unknown"
 }
 
 // --- JWKS -----------------------------------------------------------------
@@ -397,11 +421,21 @@ func (p *oidcProvider) verifyIDToken(ctx context.Context, raw, nonce string) (*i
 		}
 		return nil, newOIDCError(LoginIDTokenInvalid, "id_token exp/nbf/iat", err)
 	}
+	// jwt.WithIssuedAt() validates iat only when present; it does not make
+	// the claim mandatory (there is no WithIssuedAtRequired in v5). `iat` is
+	// a REQUIRED ID Token claim per OIDC Core §2, so its absence must be
+	// refused explicitly (cross-review round 1, chunk 1 P2).
+	if _, hasIat := claims["iat"]; !hasIat {
+		return nil, newOIDCError(LoginIDTokenInvalid, "id_token has no iat", nil)
+	}
 
 	if iss, _ := claims["iss"].(string); iss != p.cfg.IssuerURL {
 		return nil, newOIDCError(LoginIssuerMismatch, "id_token iss does not equal issuer_url", nil)
 	}
-	auds := audienceList(claims["aud"])
+	auds, audOK := audienceList(claims["aud"])
+	if !audOK {
+		return nil, newOIDCError(LoginAudienceMismatch, "id_token aud contains a non-string entry", nil)
+	}
 	if !slices.Contains(auds, p.cfg.ClientID) {
 		return nil, newOIDCError(LoginAudienceMismatch, "id_token aud does not contain client_id", nil)
 	}
@@ -431,23 +465,29 @@ func (p *oidcProvider) verifyIDToken(ctx context.Context, raw, nonce string) (*i
 	return out, nil
 }
 
-// audienceList normalises the `aud` claim (string or array of strings).
-func audienceList(v any) []string {
+// audienceList normalises the `aud` claim (string or array of strings). ok is
+// false when the claim is an array containing a non-string entry: silently
+// dropping such an entry would undercount the audience and could let a
+// malformed multi-aud token skip the azp check that array length is meant to
+// trigger (cross-review round 1, chunk 1 P2) — the token is refused instead.
+func audienceList(v any) (auds []string, ok bool) {
 	switch a := v.(type) {
 	case string:
-		return []string{a}
+		return []string{a}, true
 	case []any:
 		out := make([]string, 0, len(a))
 		for _, item := range a {
-			if s, ok := item.(string); ok {
-				out = append(out, s)
+			s, isString := item.(string)
+			if !isString {
+				return nil, false
 			}
+			out = append(out, s)
 		}
-		return out
+		return out, true
 	case []string:
-		return a
+		return a, true
 	}
-	return nil
+	return nil, true
 }
 
 // --- groups -----------------------------------------------------------------
@@ -520,6 +560,13 @@ func (p *oidcProvider) resolveGroups(ctx context.Context, claims *idTokenClaims,
 	var info map[string]any
 	if err := json.Unmarshal(body, &info); err != nil {
 		return nil, false, newOIDCError(LoginProviderError, "userinfo response is not JSON", err)
+	}
+	if info == nil {
+		// A JSON scalar (`null`, a number, a string, an array) decodes to a
+		// nil map without an Unmarshal error; that is not a JSON object and
+		// must fail closed as provider_error (FR-022), never be read as
+		// "sub absent" (cross-review round 1, chunk 1 P3).
+		return nil, false, newOIDCError(LoginProviderError, "userinfo response is not a JSON object", nil)
 	}
 	// No userinfo claim is read before its sub is compared with the verified
 	// token's sub (FR-022).

@@ -604,3 +604,68 @@ func (s *UserStore) UpdateUserLogin(ctx context.Context, claims LoginClaims) (Lo
 	}
 	return out, nil
 }
+
+// SetUserDisabled atomically toggles the Disabled flag (and, for an enable,
+// the FR-023 rebind window) inside ONE db.Update transaction: the record is
+// re-read by id INSIDE the transaction, not handed in pre-mutated.
+//
+// A blind GetUser (View) + mutate + UpdateUser (Put), which is what the admin
+// handlers used before, has a lost-update window: a concurrent successful
+// login can run its own UpdateUserLogin transaction — writing Groups,
+// GroupsUpdatedAt, Provider, ProviderSubjectID, LastLoginAt and clearing
+// SubjectRebindArmedAt — entirely between the admin's read and its write, and
+// the admin's blind Put then overwrites the record back to the stale
+// snapshot, reopening a just-consumed rebind window or discarding a
+// concurrent subject rebind (cross-review round 1, chunk 2 P1).
+//
+// Returns (nil, false, nil) when the user does not exist (GetUser's own
+// not-found convention), and armed reports whether a real disabled→enabled
+// transition opened the FR-023 rebind window (mirrors the enableUser
+// semantics: enabling an already-enabled record is not a transition).
+func (s *UserStore) SetUserDisabled(id string, disabled bool) (user *User, armed bool, err error) {
+	now := time.Now().UTC()
+	txErr := s.db.Update(func(tx *bbolt.Tx) error {
+		usersBucket := tx.Bucket([]byte(BucketUsers))
+		if usersBucket == nil {
+			return fmt.Errorf("bucket %s not found", BucketUsers)
+		}
+		data := usersBucket.Get([]byte(id))
+		if data == nil {
+			return nil // not found; user stays nil
+		}
+		u := &User{}
+		if err := json.Unmarshal(data, u); err != nil {
+			return fmt.Errorf("failed to unmarshal user: %w", err)
+		}
+
+		if disabled {
+			u.Disabled = true
+			// Disabling closes any open rebind window (FR-023); the binding
+			// itself (ProviderSubjectID) is kept.
+			u.SubjectRebindArmedAt = nil
+		} else {
+			if u.Disabled {
+				u.SubjectRebindArmedAt = &now
+				armed = true
+			}
+			u.Disabled = false
+		}
+
+		if err := u.Validate(); err != nil {
+			return fmt.Errorf("invalid user: %w", err)
+		}
+		out, err := json.Marshal(u)
+		if err != nil {
+			return fmt.Errorf("failed to marshal user: %w", err)
+		}
+		if err := usersBucket.Put([]byte(id), out); err != nil {
+			return fmt.Errorf("failed to store user: %w", err)
+		}
+		user = u
+		return nil
+	})
+	if txErr != nil {
+		return nil, false, txErr
+	}
+	return user, armed, nil
+}

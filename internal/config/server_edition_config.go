@@ -3,12 +3,15 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
 
 // ServerEditionConfig holds configuration for the server edition multi-user features.
@@ -69,12 +72,50 @@ func ValidatePublicURL(raw string) error {
 	if err != nil {
 		return fmt.Errorf("%s (got: %q)", msgPublicURLShape, raw)
 	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil ||
+	// u.Host == "" alone does not catch "https://:443": Go's url.Parse leaves
+	// a non-empty Host (":443") with an EMPTY Hostname() when only a port is
+	// given, and that value went on to build a malformed OAuth callback /
+	// connect-flow URL (cross-review round 1, chunk 3 P2).
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Hostname() == "" || u.User != nil ||
 		u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" ||
 		strings.Contains(raw, "?") || strings.Contains(raw, "#") {
 		return fmt.Errorf("%s (got: %q)", msgPublicURLShape, raw)
 	}
 	return nil
+}
+
+// expandServerEditionSecrets expands `${env:...}` / `${keyring:...}` refs in
+// server_edition.oauth.client_id and client_secret in place (cross-review
+// round 1, chunk 3 P2): every doc page for this block —
+// docs/configuration/config-file.md, docs/getting-started/installation.md,
+// docs/development/server-edition-multiuser-auth.md, scripts/dev-server-edition.sh
+// — tells the operator to write `${env:OIDC_CLIENT_SECRET}` so the secret
+// stays out of the file, but nothing expanded it: the literal placeholder
+// string reached the token endpoint as the client secret and every OAuth
+// login failed. Failures are logged to stderr and the original value is kept,
+// exactly like expandDataDir — this runs before ValidateOIDC / the required
+// checks so a missing env var is refused by "client_secret is required"
+// rather than silently authenticating with the placeholder text.
+func expandServerEditionSecrets(cfg *Config) {
+	if cfg == nil || cfg.ServerEdition == nil || cfg.ServerEdition.OAuth == nil {
+		return
+	}
+	resolver := secret.NewResolver()
+	oauth := cfg.ServerEdition.OAuth
+	if oauth.ClientSecret != "" {
+		if resolved, err := resolver.ExpandSecretRefs(context.Background(), oauth.ClientSecret); err != nil {
+			fmt.Fprintf(os.Stderr, "WARN: Failed to resolve secret ref in server_edition.oauth.client_secret, using original value: err=%v\n", err)
+		} else {
+			oauth.ClientSecret = resolved
+		}
+	}
+	if oauth.ClientID != "" {
+		if resolved, err := resolver.ExpandSecretRefs(context.Background(), oauth.ClientID); err != nil {
+			fmt.Fprintf(os.Stderr, "WARN: Failed to resolve secret ref in server_edition.oauth.client_id, using original value: err=%v\n", err)
+		} else {
+			oauth.ClientID = resolved
+		}
+	}
 }
 
 // PublicURLIsHTTPS reports whether the configured public_url uses https.
@@ -285,17 +326,27 @@ func (o *ServerEditionOAuthConfig) applyOIDCDefaults() {
 
 // validateOIDC holds the `oidc`-specific and provider-neutral rules of the new
 // keys (FR-020). Non-mutating: unset defaulted keys are admitted (FR-039).
+//
+// display_name is provider-neutral (FR-020/FR-030: the login-button label for
+// ANY provider, falling back to the provider family name), so its length
+// check runs unconditionally. email_verified_policy is an `oidc`-only concern
+// — the struct doc above says so, and only oidcIdentity (oauth_handler.go)
+// ever reads it, legacyIdentity never does — so its check must run only for
+// `oidc`; checking it unconditionally rejected an otherwise-valid legacy
+// (google/github/microsoft) config that carried a leftover or mistyped value
+// in that field, instead of ignoring it as documented (cross-review round 1,
+// chunk 3 P2).
 func (o *ServerEditionOAuthConfig) validateOIDC() error {
 	if len(o.DisplayName) > maxOAuthDisplayNameLen {
 		return fmt.Errorf("server_edition.oauth.display_name must be at most %d characters", maxOAuthDisplayNameLen)
+	}
+	if o.Provider != "oidc" {
+		return nil
 	}
 	switch o.EmailVerifiedPolicy {
 	case "", EmailVerifiedPolicyRefuseFalse, EmailVerifiedPolicyRequireTrue, EmailVerifiedPolicyIgnore:
 	default:
 		return fmt.Errorf("server_edition.oauth.email_verified_policy must be one of: refuse_false, require_true, ignore")
-	}
-	if o.Provider != "oidc" {
-		return nil
 	}
 	if o.IssuerURL == "" {
 		return fmt.Errorf("server_edition.oauth.issuer_url is required when provider is oidc")

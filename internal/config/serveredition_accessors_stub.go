@@ -43,3 +43,17 @@ func ServerEditionAdminEmails(_ *Config) []string { return nil }
 func ServerEditionRestartReason(_, _ *Config) string {
 	return "server_edition changed - the block is opaque on the personal edition and is read at startup"
 }
+
+// expandServerEditionSecrets is a no-op on the personal build: the block is
+// an opaque, uninterpreted carrier here (FR-040), so there is no
+// oauth.client_secret field to expand.
+func expandServerEditionSecrets(_ *Config) {}
+
+// MergeServerEditionRestartGated pins the WHOLE opaque carrier to `live` on
+// the personal build (cross-review round 1, chunk 3 P1): nothing inside it is
+// interpreted, so every key is restart-pinned by the same rule
+// ServerEditionRestartProjection uses — there is no hot admin_emails
+// exception here (that is server-build-only, #1169).
+func MergeServerEditionRestartGated(live, _ *ServerEditionConfig) *ServerEditionConfig {
+	return live
+}

@@ -143,3 +143,44 @@ func serverEditionOrZero(cfg *Config) ServerEditionConfig {
 	}
 	return *cfg.ServerEdition
 }
+
+// MergeServerEditionRestartGated returns the ServerEdition block the running
+// process can actually adopt for one config apply (Spec 107 FR-039 part 2;
+// cross-review round 1, chunk 3 P1): the exact restart-pinned subset
+// ServerEditionRestartProjection/ServerEditionRestartReason name — enabled,
+// oauth.*, public_url, session_cookie_secure, session_ttl, bearer_token_ttl,
+// credential_encryption_key — pinned to `live`, so the process can never
+// silently adopt a change DetectConfigChanges reports as restart-required
+// (before this, internal/runtime's pinRestartGated did not pin ServerEdition
+// at all, so e.g. disabling server_edition.enabled took effect immediately —
+// restoring anonymous /mcp access — while the API still reported "requires
+// restart"). admin_emails (and the deprecated store_idp_tokens no-op) pass
+// through from `desired`, which is what makes admin_emails hot (#1169,
+// setup.go's ServerEditionConfigProvider).
+func MergeServerEditionRestartGated(live, desired *ServerEditionConfig) *ServerEditionConfig {
+	if live == nil && desired == nil {
+		return nil
+	}
+	out := &ServerEditionConfig{}
+	if desired != nil {
+		*out = *desired
+	}
+	if live != nil {
+		out.Enabled = live.Enabled
+		out.OAuth = live.OAuth
+		out.SessionTTL = live.SessionTTL
+		out.BearerTokenTTL = live.BearerTokenTTL
+		out.CredentialEncryptionKey = live.CredentialEncryptionKey
+		out.PublicURL = live.PublicURL
+		out.SessionCookieSecure = live.SessionCookieSecure
+	} else {
+		out.Enabled = false
+		out.OAuth = nil
+		out.SessionTTL = 0
+		out.BearerTokenTTL = 0
+		out.CredentialEncryptionKey = ""
+		out.PublicURL = ""
+		out.SessionCookieSecure = ""
+	}
+	return out
+}

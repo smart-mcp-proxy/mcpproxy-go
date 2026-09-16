@@ -229,17 +229,28 @@ func (h *OAuthHandler) currentTrustedProxies() []string {
 }
 
 // warnSchemeDisagreement logs ONE operator-readable warning, keyed by the
-// request id, when public_url is https but the callback reached the proxy
-// over plain http (an ingress terminating TLS without X-Forwarded-Proto, or
-// with it from an untrusted address). The login is never blocked (FR-025).
+// request id, when the observed callback scheme disagrees with public_url's
+// scheme in EITHER direction (FR-025: "the observed request scheme ...
+// disagrees with it"; cross-review round 1, chunk 3 P3 — this used to check
+// only the https-configured/http-observed direction, so an http public_url
+// behind an ingress that terminates TLS and forwards a trusted
+// X-Forwarded-Proto: https produced no warning at all). The login is never
+// blocked either way.
 func (h *OAuthHandler) warnSchemeDisagreement(r *http.Request, requestID string) {
-	if !strings.HasPrefix(strings.ToLower(h.publicURL), "https://") {
+	if h.publicURL == "" {
 		return
 	}
-	if config.ForwardedHeaders(r, h.currentTrustedProxies()).Scheme == "https" {
+	publicIsHTTPS := strings.HasPrefix(strings.ToLower(h.publicURL), "https://")
+	observedIsHTTPS := config.ForwardedHeaders(r, h.currentTrustedProxies()).Scheme == "https"
+	if publicIsHTTPS == observedIsHTTPS {
 		return
 	}
-	h.logger.Warnw("public_url is https but the OAuth callback arrived over http; the callback URL still follows public_url — check the ingress forwards X-Forwarded-Proto from an address in trusted_proxies",
+	if publicIsHTTPS {
+		h.logger.Warnw("public_url is https but the OAuth callback arrived over http; the callback URL still follows public_url — check the ingress forwards X-Forwarded-Proto from an address in trusted_proxies",
+			"request_id", requestID, "public_url", h.publicURL, "remote_addr", r.RemoteAddr)
+		return
+	}
+	h.logger.Warnw("public_url is http but the OAuth callback arrived over https; the callback URL still follows public_url — the Secure cookie decision and redirect_uri may not match the deployment's real scheme",
 		"request_id", requestID, "public_url", h.publicURL, "remote_addr", r.RemoteAddr)
 }
 

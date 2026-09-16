@@ -259,24 +259,18 @@ func (h *AdminHandlers) disableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.userStore.GetUser(userID)
+	// SetUserDisabled re-reads and writes the record inside one transaction
+	// (cross-review round 1, chunk 2 P1): a blind GetUser+UpdateUser here
+	// could overwrite a concurrent login's own atomic write (groups, subject,
+	// last-login, or its own clearing of this same rebind flag).
+	user, _, err := h.userStore.SetUserDisabled(userID, true)
 	if err != nil {
-		h.logger.Errorw("failed to get user for disable", "user_id", userID, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to get user")
+		h.logger.Errorw("failed to disable user", "user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to disable user")
 		return
 	}
 	if user == nil {
 		writeError(w, http.StatusNotFound, "User not found")
-		return
-	}
-
-	user.Disabled = true
-	// Disabling closes any open rebind window (Spec 107 FR-023); the binding
-	// itself (ProviderSubjectID) is kept.
-	user.SubjectRebindArmedAt = nil
-	if err := h.userStore.UpdateUser(user); err != nil {
-		h.logger.Errorw("failed to disable user", "user_id", userID, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to disable user")
 		return
 	}
 
@@ -318,31 +312,22 @@ func (h *AdminHandlers) enableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.userStore.GetUser(userID)
-	if err != nil {
-		h.logger.Errorw("failed to get user for enable", "user_id", userID, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to get user")
-		return
-	}
-	if user == nil {
-		writeError(w, http.StatusNotFound, "User not found")
-		return
-	}
-
 	// Spec 107 FR-023: a REAL disabled→enabled transition opens the
 	// single-use rebind window — the next successful login for this record
 	// may present a new provider subject. Enabling an already-enabled user is
 	// not a transition and neither re-arms nor closes an open window.
-	armed := false
-	if user.Disabled {
-		now := time.Now().UTC()
-		user.SubjectRebindArmedAt = &now
-		armed = true
-	}
-	user.Disabled = false
-	if err := h.userStore.UpdateUser(user); err != nil {
+	// SetUserDisabled re-reads and writes the record inside one transaction
+	// (cross-review round 1, chunk 2 P1): a blind GetUser+UpdateUser here
+	// could overwrite a concurrent login's own atomic write, including its
+	// own consumption of this same rebind flag.
+	user, armed, err := h.userStore.SetUserDisabled(userID, false)
+	if err != nil {
 		h.logger.Errorw("failed to enable user", "user_id", userID, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to enable user")
+		return
+	}
+	if user == nil {
+		writeError(w, http.StatusNotFound, "User not found")
 		return
 	}
 
