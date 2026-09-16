@@ -801,12 +801,29 @@ epics:
     note: "PARKED. Migrate to the v1 MCP Go SDK surface."
 
   - id: sso
-    title: SSO (server edition)
-    status: todo
-    parked: true
-    priority: P3
+    title: Spec 107 server edition SSO front door hardened for real IdPs
+    status: in_progress
+    priority: P2
+    spec: specs/107-server-edition-sso-hardening
     depends_on: []
-    note: "PARKED. Single sign-on for the multi-user server edition."
+    note: "Generic OIDC, IdP-group -> server allowlist, attributable JSONL audit line; freeze the latent multiuser/credential-injection code. Research: docs/research/server-edition-2026-09-14 (#1281)."
+    tasks:
+      - id: sso-pr-a-freeze-cut
+        title: PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6)
+        status: in_progress
+        depends_on: []
+      - id: sso-pr-b-oidc-front-door
+        title: PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7)
+        status: todo
+        depends_on: [sso-pr-a-freeze-cut]
+      - id: sso-pr-c-group-allowlist
+        title: PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4)
+        status: todo
+        depends_on: [sso-pr-b-oidc-front-door]
+      - id: sso-pr-d-audit-line
+        title: PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3)
+        status: todo
+        depends_on: [sso-pr-c-group-allowlist]
 
   # ── MERGED-BUT-UNIMPLEMENTED specs (cross-spec audit 2026-07-01) ───────────
   # These specs are checked into specs/ but materially absent from code. Most
