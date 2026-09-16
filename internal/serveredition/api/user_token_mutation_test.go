@@ -111,9 +111,7 @@ func TestCreateUserToken_CapExhaustionIsConflict(t *testing.T) {
 
 	// Fill to one below the cap through storage, which is far faster than the
 	// HTTP route and exercises the same counter.
-	for i := 0; i < auth.MaxTokens-1; i++ {
-		rig.seedToken(t, tokenUserA, fmt.Sprintf("filler-%03d", i))
-	}
+	seedDeploymentTokenFiller(t, rig, auth.MaxTokens-1)
 
 	// Positive control: the last slot below the cap still mints.
 	last := rig.createToken(t, "last-slot", nil)
@@ -128,12 +126,9 @@ func TestCreateUserToken_CapExhaustionIsConflict(t *testing.T) {
 	assert.Contains(t, msg, fmt.Sprintf("%d", auth.MaxTokens),
 		"the cap message must say what the limit is")
 
-	// The cap is DEPLOYMENT-wide (auth.MaxTokens is counted across the whole
-	// agent_tokens bucket, all owners together), and there is no per-owner
-	// quota — that is issue #1177. So the body must not read as the caller's
-	// own quota: a tenant who holds none of the tokens filling it would go
-	// hunting for tokens of theirs to delete, and deleting every one of them
-	// need not free a slot. It has to say whose limit it is and who can act.
+	// This branch is still the DEPLOYMENT-wide cap, not the new owner quota.
+	// The body must not tell this caller that deleting one of their own tokens
+	// necessarily frees a slot.
 	assert.Contains(t, strings.ToLower(msg), "administrator",
 		"the cap body must point the caller at someone who can actually act on it")
 	assert.NotRegexp(t, `(?i)\byou(r)? have reached|delete (one of )?your`, msg,
@@ -161,10 +156,9 @@ func TestCreateUserToken_CapExhaustionDoesNotBlameTheCaller(t *testing.T) {
 	require.Equal(t, http.StatusCreated, ctrl.Code,
 		"positive control: user B must be able to mint before the cap fills (%s)", ctrl.Body.String())
 
-	// User A fills the rest of the DEPLOYMENT-wide cap.
-	for i := 0; i < auth.MaxTokens-1; i++ {
-		rig.seedToken(t, tokenUserA, fmt.Sprintf("a-filler-%03d", i))
-	}
+	// Other tenants fill the rest of the DEPLOYMENT-wide cap without any one
+	// owner reaching the per-owner quota first.
+	seedDeploymentTokenFiller(t, rig, auth.MaxTokens-1)
 
 	over := rig.createToken(t, "b-second", nil)
 	require.Equal(t, http.StatusConflict, over.Code,
@@ -178,6 +172,40 @@ func TestCreateUserToken_CapExhaustionDoesNotBlameTheCaller(t *testing.T) {
 		"the body must say the limit is not the caller's own")
 	assert.Contains(t, strings.ToLower(msg), "administrator",
 		"the body must name who can act on a deployment-wide limit")
+}
+
+// Issue #1177: the server-edition door must expose the owner's own quota as
+// an actionable 409 while leaving another tenant able to mint.
+func TestCreateUserToken_OwnerQuotaDoesNotExhaustOtherTenants(t *testing.T) {
+	rig := newTokenTestRig(t)
+	rig.actAs(userACtx())
+	for i := 0; i < auth.MaxTokensPerOwner; i++ {
+		rig.seedToken(t, tokenUserA, fmt.Sprintf("a-owned-%02d", i))
+	}
+
+	over := rig.createToken(t, "one-too-many", nil)
+	require.Equal(t, http.StatusConflict, over.Code,
+		"the owner quota must be a standing conflict (%s)", over.Body.String())
+	msg := errorMessage(t, over)
+	assert.Contains(t, msg, fmt.Sprintf("%d", auth.MaxTokensPerOwner))
+	assert.Contains(t, strings.ToLower(msg), "your limit")
+	assert.Contains(t, strings.ToLower(msg), "permanently delete")
+
+	rig.actAs(userBCtx())
+	other := rig.createToken(t, "b-first", nil)
+	require.Equal(t, http.StatusCreated, other.Code,
+		"one tenant's quota must not consume another tenant's slots (%s)", other.Body.String())
+}
+
+// seedDeploymentTokenFiller fills the shared cap while staying below every
+// synthetic owner's quota, ensuring deployment-cap tests exercise that branch.
+func seedDeploymentTokenFiller(t *testing.T, rig *tokenTestRig, n int) {
+	t.Helper()
+	perOwner := auth.MaxTokensPerOwner - 1
+	for i := 0; i < n; i++ {
+		owner := fmt.Sprintf("deployment-filler-%02d", i/perOwner)
+		rig.seedToken(t, owner, fmt.Sprintf("filler-%03d", i))
+	}
 }
 
 // TestRegenerateUserToken_ReNarrowsScopeToCurrentEntitlement pins the one

@@ -112,13 +112,14 @@ there is cosmetic. Do not grow an authorization check on top of it.
   error (`storage.ErrAgentTokenNotFound` → 404). Do not put a `Get…` preflight
   back in front: it opens a TOCTOU window on delete-then-recreate, and its
   fall-through 500 used to interpolate the storage sentinel into the body.
-- The token cap answers **409** on both editions' surfaces
-  (`ErrAgentTokenLimitReached`). One storage condition, one status. The **body
-  differs by edition on purpose**: `auth.MaxTokens` is counted across the whole
-  `agent_tokens` bucket, so in the server edition it is a *deployment-wide* cap
-  a tenant may be unable to clear, and the message says so and points at an
-  administrator. Do not copy the personal edition's "you have reached the
-  maximum" wording here. A per-owner quota is issue #1177.
+- The token cap answers **409** on both editions' surfaces. The deployment-wide
+  `auth.MaxTokens` bound counts every stored record, including revoked records,
+  and its server-edition message points at an administrator. Server edition also
+  enforces `auth.MaxTokensPerOwner` for non-empty owners, preventing one tenant
+  from exhausting the shared pool. That owner-specific message tells the caller
+  to permanently delete an unused token; soft revocation deliberately does not
+  free storage or quota. Ownerless personal-edition tokens retain the original
+  deployment-only limit.
 - **A token is only as live as its owner.** `storage.Manager.SetAgentTokenOwnerGate`
   is installed in `setup.go` over the user store, and `ValidateAgentToken`
   consults it for every *owned* token (ownerless personal-edition tokens are

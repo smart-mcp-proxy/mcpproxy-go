@@ -55,6 +55,12 @@ var (
 	// is reached.
 	ErrAgentTokenLimitReached = errors.New("maximum number of agent tokens reached")
 
+	// ErrAgentTokenOwnerLimitReached is returned when one owner reaches the
+	// server edition's per-owner quota. It is distinct from the deployment cap
+	// because the caller can remedy this condition by permanently deleting one
+	// of their own unused tokens.
+	ErrAgentTokenOwnerLimitReached = errors.New("maximum number of agent tokens for this owner reached")
+
 	// ErrAgentTokenOwnerInactive is returned by ValidateAgentToken when a
 	// token's OWNER is no longer allowed to authenticate — disabled, or gone
 	// from the user store entirely. The token record itself may be perfectly
@@ -142,6 +148,40 @@ func (m *Manager) findAgentTokenHashLocked(tx *bbolt.Tx, userID, name string) ([
 	return foundHash, foundToken, nil
 }
 
+// countAgentTokensForOwnerLocked counts stored records belonging to userID.
+// Revoked tokens count deliberately: revocation is a soft delete, so excluding
+// them would let repeated mint-and-revoke cycles grow the bucket without bound.
+// Permanent deletion is the operation that frees both storage and quota.
+//
+// The bucket is bounded by auth.MaxTokens, and this runs only on the
+// low-frequency management path inside the same transaction as creation.
+func (m *Manager) countAgentTokensForOwnerLocked(tx *bbolt.Tx, userID string) (int, error) {
+	tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
+	if tokenBucket == nil || userID == "" {
+		return 0, nil
+	}
+
+	count := 0
+	err := tokenBucket.ForEach(func(k, v []byte) error {
+		var token auth.AgentToken
+		if err := json.Unmarshal(v, &token); err != nil {
+			if m.logger != nil {
+				m.logger.Warnw("skipping unparseable agent token record while counting owner quota",
+					"bucket", AgentTokensBucket, "key", string(k), "error", err)
+			}
+			return nil
+		}
+		if token.UserID == userID {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // CreateAgentToken stores a new agent token. It hashes the raw token using
 // the provided HMAC key and stores the AgentToken record keyed by hash in the
 // "agent_tokens" bucket.
@@ -191,7 +231,22 @@ func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacK
 			return ErrAgentTokenNameExists
 		}
 
-		// Enforce max token limit
+		// Enforce the per-owner server-edition quota before the deployment cap,
+		// so a caller who has filled their own allocation gets the actionable
+		// owner-specific error. Ownerless personal-edition tokens retain the
+		// long-standing deployment-only limit.
+		if token.UserID != "" {
+			ownerCount, err := m.countAgentTokensForOwnerLocked(tx, token.UserID)
+			if err != nil {
+				return err
+			}
+			if ownerCount >= auth.MaxTokensPerOwner {
+				return ErrAgentTokenOwnerLimitReached
+			}
+		}
+
+		// Preserve the deployment-wide storage bound. This is intentionally a
+		// raw record count: revoked records remain stored until permanent delete.
 		count := tokenBucket.Stats().KeyN
 		if count >= auth.MaxTokens {
 			return ErrAgentTokenLimitReached
