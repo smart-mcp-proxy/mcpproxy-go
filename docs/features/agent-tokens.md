@@ -330,12 +330,14 @@ creating another token answers `409 Conflict`:
   your limit; permanently delete one of your unused tokens to free a slot. The
   quota keeps one user from taking the whole pool, but every stored token still
   counts toward the deployment limit below, so a deployment whose records add
-  up to 100 refuses the next token for everyone.
+  up to 100 refuses the next token for everyone. The quota is checked first: a
+  user already at 25 always sees this message, whatever the deployment total.
 - **The deployment limit (100 stored records).** In the personal edition every
   token belongs to the one operator, so this is the only limit and deleting one
-  of your tokens frees a slot. In the server edition the message says the limit
-  is shared and points at an administrator, because deleting your own tokens
-  may not free a slot that other users' records are filling.
+  of your tokens frees a slot. In the server edition a caller who is still under
+  their own quota gets this message; it says the limit is shared and points at
+  an administrator, because deleting your own tokens may not free a slot that
+  other users' records are filling.
 
 ### List All Tokens
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -264,9 +265,16 @@ func loadConfigFile(path string, cfg *Config) error {
 	cfg.loadDiagnostics = diagnostics
 
 	// First check if api_key is present in the JSON to distinguish between
-	// "not set" vs "explicitly set to empty"
+	// "not set" vs "explicitly set to empty". Decoded with UseNumber: the
+	// legacy "teams" alias below is re-marshaled FROM this map into the
+	// server-edition block, and in the personal build that block is an opaque
+	// carrier whose numbers must keep their decimal text (Spec 107 FR-040) —
+	// a float64 detour would round 2^53+1 or a long decimal before the
+	// carrier ever saw it. Only key presence is read from the map otherwise.
 	var rawConfig map[string]interface{}
-	if err := json.Unmarshal(data, &rawConfig); err != nil {
+	rawDec := json.NewDecoder(bytes.NewReader(data))
+	rawDec.UseNumber()
+	if err := rawDec.Decode(&rawConfig); err != nil {
 		return fmt.Errorf("failed to parse config file for api_key detection: %w", err)
 	}
 

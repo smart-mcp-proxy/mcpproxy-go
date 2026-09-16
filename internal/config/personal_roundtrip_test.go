@@ -270,3 +270,47 @@ func captureStderr(t *testing.T, into *bytes.Buffer, fn func()) {
 		t.Logf("stderr during load/save:\n%s", strings.TrimSpace(s))
 	}
 }
+
+// TestPersonalBuild_LegacyTeamsAliasKeepsNumberText: the legacy `teams` key
+// (MCP-1086 alias of `server_edition`) reaches the personal carrier through
+// the loader's alias step, which re-marshals the block from the generic
+// api_key-detection map. That map must be decoded with UseNumber, or a
+// 2^53+1 integer / a long decimal inside an old `teams` block is rounded
+// through float64 BEFORE the carrier ever sees it, and the next write-back
+// persists the rounded value under `server_edition` — an FR-040 violation on
+// the one input shape the alias exists for (codex round 3 on PR-A).
+//
+// BITES: decode rawConfig in loadConfigFile with plain json.Unmarshal.
+func TestPersonalBuild_LegacyTeamsAliasKeepsNumberText(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "teams.json")
+	doc := fmt.Sprintf(`{
+  "listen": "127.0.0.1:0",
+  "data_dir": %q,
+  "teams": {
+    "enabled": true,
+    "admin_emails": ["legacy@example.com"],
+    "oauth": {"provider": "github", "client_id": "Iv1.abc", "client_secret": "ghp_x"},
+    %q: %s,
+    %q: %s
+  }
+}`, filepath.ToSlash(dir), probeIntKey, probeInt, probeDecKey, probeDec)
+	require.NoError(t, os.WriteFile(src, []byte(doc), 0o600))
+
+	cfg, err := LoadFromFile(src)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.ServerEdition, "legacy teams block must land on the carrier")
+
+	saved := filepath.Join(dir, "saved.json")
+	require.NoError(t, SaveConfig(cfg, saved))
+	out, err := os.ReadFile(saved)
+	require.NoError(t, err)
+
+	want := decodeUseNumber(t, []byte(doc))["teams"]
+	got := decodeUseNumber(t, out)
+	_, stillLegacy := got["teams"]
+	require.False(t, stillLegacy, "write-back must emit the block under server_edition, not teams")
+	if diff := structuralDiff("server_edition", want, got["server_edition"]); diff != "" {
+		t.Errorf("legacy teams block changed on personal write-back: %s", diff)
+	}
+}

@@ -102,7 +102,10 @@ mcpproxy credential rm github
 All read commands honor the global `-o table|json|yaml` flag and the
 `MCPPROXY_OUTPUT` environment variable (table is the default). With `json` or
 `yaml` the "stored, not injected" statement goes to **stderr** so stdout stays
-machine-parseable; the payload itself is the REST response unchanged.
+machine-parseable. The payload is the REST data with the envelope removed:
+`credential list` emits the bare array from the REST `credentials` field and
+`credential status <server>` emits that server's single object; every field
+keeps its REST name and meaning, and no secret values are ever included.
 
 ## Related REST endpoints (spec 074 T8)
 
