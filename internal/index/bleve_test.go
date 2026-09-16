@@ -217,6 +217,50 @@ func TestBleveIndex_SearchTokenization(t *testing.T) {
 	}
 }
 
+func TestBleveIndex_SearchUnderscoreSegments(t *testing.T) {
+	idx, err := NewBleveIndex(t.TempDir(), zap.NewNop())
+	require.NoError(t, err)
+	defer idx.Close()
+
+	require.NoError(t, idx.BatchIndex([]*config.ToolMetadata{
+		{
+			Name:        "work_start_task_attachment_upload",
+			ServerName:  "fixture",
+			Description: "Create a signed request for a local file.",
+			ParamsJSON:  `{"type":"object","properties":{}}`,
+			Hash:        "target",
+		},
+		{
+			Name:        "network_upload_attachment",
+			ServerName:  "fixture",
+			Description: "Create a signed request for a remote file.",
+			ParamsJSON:  `{"type":"object","properties":{}}`,
+			Hash:        "substring-decoy",
+		},
+	}))
+
+	t.Run("matches non-contiguous segments in any order", func(t *testing.T) {
+		for _, query := range []string{
+			"work_upload_attachment",
+			"attachment_work_upload",
+			"work_start_task_attachment_upload",
+		} {
+			results, err := idx.SearchTools(query, 10)
+			require.NoError(t, err)
+			require.NotEmpty(t, results, query)
+			assert.Equal(t, "fixture:work_start_task_attachment_upload", results[0].Tool.Name, query)
+		}
+	})
+
+	t.Run("requires segment boundaries and every query segment", func(t *testing.T) {
+		for _, query := range []string{"network_work_upload_attachment", "work_missing_attachment"} {
+			results, err := idx.SearchTools(query, 10)
+			require.NoError(t, err)
+			assert.Empty(t, results, query)
+		}
+	})
+}
+
 func TestBleveIndex_FieldMapping(t *testing.T) {
 	// Test that all fields are properly indexed and searchable
 	tool := &config.ToolMetadata{
