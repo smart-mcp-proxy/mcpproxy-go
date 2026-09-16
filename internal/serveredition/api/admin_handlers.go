@@ -144,13 +144,37 @@ func (h *AdminHandlers) RegisterRoutesWithPrefix(r chi.Router, prefix string) {
 // --- Response types ---
 
 // UserProfileResponse represents a user profile in admin responses.
+//
+// Spec 107 FR-008/FR-023 (contracts/rest-endpoints.md §4): groups is always
+// an array (never null), groups_updated_at and subject_rebind_armed_at are
+// RFC 3339 or null — the keys are present on every row.
 type UserProfileResponse struct {
-	ID          string `json:"id"`
-	Email       string `json:"email"`
-	DisplayName string `json:"display_name"`
-	Provider    string `json:"provider"`
-	LastLoginAt string `json:"last_login_at"`
-	Disabled    bool   `json:"disabled"`
+	ID                   string   `json:"id"`
+	Email                string   `json:"email"`
+	DisplayName          string   `json:"display_name"`
+	Provider             string   `json:"provider"`
+	LastLoginAt          string   `json:"last_login_at"`
+	Disabled             bool     `json:"disabled"`
+	Groups               []string `json:"groups"`
+	GroupsUpdatedAt      *string  `json:"groups_updated_at"`
+	SubjectRebindArmedAt *string  `json:"subject_rebind_armed_at"`
+}
+
+// rfc3339OrNil renders a timestamp for the wire: nil for the zero time.
+func rfc3339OrNil(t time.Time) *string {
+	if t.IsZero() {
+		return nil
+	}
+	s := t.UTC().Format(time.RFC3339)
+	return &s
+}
+
+// rfc3339PtrOrNil renders an optional timestamp for the wire.
+func rfc3339PtrOrNil(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	return rfc3339OrNil(*t)
 }
 
 // SessionResponse represents a session in admin responses.
@@ -182,13 +206,20 @@ func (h *AdminHandlers) listUsers(w http.ResponseWriter, r *http.Request) {
 
 	profiles := make([]*UserProfileResponse, 0, len(allUsers))
 	for _, u := range allUsers {
+		groups := u.Groups
+		if groups == nil {
+			groups = []string{}
+		}
 		profiles = append(profiles, &UserProfileResponse{
-			ID:          u.ID,
-			Email:       u.Email,
-			DisplayName: u.DisplayName,
-			Provider:    u.Provider,
-			LastLoginAt: u.LastLoginAt.Format("2006-01-02T15:04:05Z"),
-			Disabled:    u.Disabled,
+			ID:                   u.ID,
+			Email:                u.Email,
+			DisplayName:          u.DisplayName,
+			Provider:             u.Provider,
+			LastLoginAt:          u.LastLoginAt.Format("2006-01-02T15:04:05Z"),
+			Disabled:             u.Disabled,
+			Groups:               groups,
+			GroupsUpdatedAt:      rfc3339OrNil(u.GroupsUpdatedAt),
+			SubjectRebindArmedAt: rfc3339PtrOrNil(u.SubjectRebindArmedAt),
 		})
 	}
 
@@ -240,6 +271,9 @@ func (h *AdminHandlers) disableUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user.Disabled = true
+	// Disabling closes any open rebind window (Spec 107 FR-023); the binding
+	// itself (ProviderSubjectID) is kept.
+	user.SubjectRebindArmedAt = nil
 	if err := h.userStore.UpdateUser(user); err != nil {
 		h.logger.Errorw("failed to disable user", "user_id", userID, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to disable user")
@@ -295,6 +329,16 @@ func (h *AdminHandlers) enableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Spec 107 FR-023: a REAL disabled→enabled transition opens the
+	// single-use rebind window — the next successful login for this record
+	// may present a new provider subject. Enabling an already-enabled user is
+	// not a transition and neither re-arms nor closes an open window.
+	armed := false
+	if user.Disabled {
+		now := time.Now().UTC()
+		user.SubjectRebindArmedAt = &now
+		armed = true
+	}
 	user.Disabled = false
 	if err := h.userStore.UpdateUser(user); err != nil {
 		h.logger.Errorw("failed to enable user", "user_id", userID, "error", err)
@@ -302,7 +346,7 @@ func (h *AdminHandlers) enableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Infow("user enabled", "user_id", userID, "email", user.Email)
+	h.logger.Infow("user enabled", "user_id", userID, "email", user.Email, "subject_rebind_armed", armed)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "User enabled"})
 }
 

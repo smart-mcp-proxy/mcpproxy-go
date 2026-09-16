@@ -56,12 +56,17 @@ func (h *AuthEndpoints) RegisterRoutesWithPrefix(r chi.Router, prefix string) {
 // --- Response types ---
 
 // MeResponse represents the current user's profile.
+//
+// Spec 107 FR-008 (contracts/rest-endpoints.md §2): groups is the caller's
+// own stored groups ([] when none), groups_updated_at RFC 3339 or null.
 type MeResponse struct {
-	ID          string `json:"id"`
-	Email       string `json:"email"`
-	DisplayName string `json:"display_name"`
-	Role        string `json:"role"`
-	Provider    string `json:"provider"`
+	ID              string   `json:"id"`
+	Email           string   `json:"email"`
+	DisplayName     string   `json:"display_name"`
+	Role            string   `json:"role"`
+	Provider        string   `json:"provider"`
+	Groups          []string `json:"groups"`
+	GroupsUpdatedAt *string  `json:"groups_updated_at"`
 }
 
 // TokenResponse contains a generated bearer token.
@@ -93,12 +98,18 @@ func (h *AuthEndpoints) getMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	groups := user.Groups
+	if groups == nil {
+		groups = []string{}
+	}
 	writeJSON(w, http.StatusOK, MeResponse{
-		ID:          user.ID,
-		Email:       user.Email,
-		DisplayName: user.DisplayName,
-		Role:        ac.Role,
-		Provider:    user.Provider,
+		ID:              user.ID,
+		Email:           user.Email,
+		DisplayName:     user.DisplayName,
+		Role:            ac.Role,
+		Provider:        user.Provider,
+		Groups:          groups,
+		GroupsUpdatedAt: rfc3339OrNil(user.GroupsUpdatedAt),
 	})
 }
 

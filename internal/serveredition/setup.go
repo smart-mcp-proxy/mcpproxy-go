@@ -140,19 +140,6 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	}
 	sessionManager := teamsauth.NewSessionManager(userStore, sessionTTL, false) // secure=false for localhost
 
-	// Create OAuth handler
-	oauthHandler := teamsauth.NewOAuthHandler(userStore, sessionManager, cfg, hmacKey, deps.Logger)
-
-	// The per-user credential store backs the oauth_connect flow (spec 074
-	// Path B): credentials a user connects are stored here, encrypted under
-	// MCPPROXY_CRED_KEY or server_edition.credential_encryption_key. With no key
-	// it is constructed disabled and the connect surface reports so. Nothing
-	// injects a stored credential into a proxied request (Spec 107 FR-034).
-	credStore, err := broker.NewBBoltAESStore(deps.DB, broker.ResolveMasterKey(cfg.CredentialEncryptionKey), deps.Logger.Desugar())
-	if err != nil {
-		return fmt.Errorf("creating credential store: %w", err)
-	}
-
 	// The LIVE view of the server-edition block, read through the same provider
 	// the admin-servers check uses rather than a second mechanism.
 	//
@@ -176,6 +163,21 @@ func setupMultiUserOAuth(deps Dependencies) error {
 		}
 		return cfg
 	})
+
+	// Create OAuth handler. It resolves the identity provider once from the
+	// boot block (discovery stays lazy) and derives each login's role from the
+	// LIVE admin_emails through the same provider (Spec 107 T044).
+	oauthHandler := teamsauth.NewOAuthHandler(userStore, sessionManager, serverEditionConfig, hmacKey, deps.Logger)
+
+	// The per-user credential store backs the oauth_connect flow (spec 074
+	// Path B): credentials a user connects are stored here, encrypted under
+	// MCPPROXY_CRED_KEY or server_edition.credential_encryption_key. With no key
+	// it is constructed disabled and the connect surface reports so. Nothing
+	// injects a stored credential into a proxied request (Spec 107 FR-034).
+	credStore, err := broker.NewBBoltAESStore(deps.DB, broker.ResolveMasterKey(cfg.CredentialEncryptionKey), deps.Logger.Desugar())
+	if err != nil {
+		return fmt.Errorf("creating credential store: %w", err)
+	}
 
 	// Create auth middleware
 	authMiddleware := teamsauth.NewServerEditionAuthMiddleware(sessionManager, userStore, serverEditionConfig, hmacKey, deps.Logger)

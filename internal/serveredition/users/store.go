@@ -3,7 +3,9 @@
 package users
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -467,4 +469,138 @@ func (s *UserStore) CleanupExpiredSessions() (int, error) {
 	})
 
 	return count, err
+}
+
+// Sentinel errors of UpdateUserLogin. The caller maps them to the FR-013
+// closed reasons (subject_mismatch, user_disabled).
+var (
+	// ErrSubjectMismatch: same provider, same email, a different subject and
+	// no administrator-armed rebind window (Spec 107 FR-023).
+	ErrSubjectMismatch = errors.New("provider subject does not match the stored binding")
+	// ErrUserDisabled: the record is disabled; nothing is written.
+	ErrUserDisabled = errors.New("user is disabled")
+)
+
+// UpdateUserLogin applies one successful login to the user record keyed by
+// the claims' normalised email, atomically (Spec 107 FR-008/FR-023).
+//
+// It is transaction-owned: the record is re-read by the email index INSIDE
+// one db.Update, the subject rule is evaluated there, and groups, subject,
+// provider, display name and last-login are written in that same
+// transaction. Two concurrent logins therefore serialise on the store: when
+// the rebind window is armed and both present different subjects, exactly
+// one rebinds (and clears the window) and the other sees the consumed window
+// and is refused with ErrSubjectMismatch. A pre-mutated *User handed to
+// UpdateUser could not provide this — both callers would observe the armed
+// flag.
+//
+// Subject rule on an existing record:
+//   - Disabled → ErrUserDisabled, nothing written.
+//   - stored subject empty, or same (provider, subject) → bind.
+//   - stored provider differs from the presented one → rebind (Rebound).
+//   - same provider, different subject: rebind only while
+//     SubjectRebindArmedAt is set (Rebound + RebindConsumed, the flag is
+//     cleared in the same write); otherwise ErrSubjectMismatch, nothing
+//     written.
+//
+// A successful login while the window is armed always closes it, even when
+// the subject did not change. A missing record is created bound to the
+// presented (provider, subject) (Created).
+func (s *UserStore) UpdateUserLogin(ctx context.Context, claims LoginClaims) (LoginOutcome, error) {
+	if err := ctx.Err(); err != nil {
+		return LoginOutcome{}, err
+	}
+	email := strings.ToLower(strings.TrimSpace(claims.Email))
+	if email == "" {
+		return LoginOutcome{}, fmt.Errorf("login claims: email is required")
+	}
+	if claims.Subject == "" {
+		return LoginOutcome{}, fmt.Errorf("login claims: subject is required")
+	}
+	now := time.Now().UTC()
+
+	var out LoginOutcome
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		usersBucket := tx.Bucket([]byte(BucketUsers))
+		if usersBucket == nil {
+			return fmt.Errorf("bucket %s not found", BucketUsers)
+		}
+		emailBucket := tx.Bucket([]byte(BucketUsersByEmail))
+		if emailBucket == nil {
+			return fmt.Errorf("bucket %s not found", BucketUsersByEmail)
+		}
+
+		var user *User
+		if id := emailBucket.Get([]byte(email)); id != nil {
+			if data := usersBucket.Get(id); data != nil {
+				user = &User{}
+				if err := json.Unmarshal(data, user); err != nil {
+					return fmt.Errorf("failed to unmarshal user: %w", err)
+				}
+			}
+		}
+
+		if user == nil {
+			user = NewUser(email, claims.Name, claims.Provider, claims.Subject)
+			user.CreatedAt = now
+			out.Created = true
+		} else {
+			if user.Disabled {
+				return ErrUserDisabled
+			}
+			armed := user.SubjectRebindArmedAt != nil
+			switch {
+			case user.ProviderSubjectID == "":
+				// An upgraded record bound before the IdP exposed a subject: bind.
+			case user.Provider == claims.Provider && user.ProviderSubjectID == claims.Subject:
+				// Plain bind.
+			case user.Provider != claims.Provider:
+				out.Rebound = true
+			case armed:
+				out.Rebound = true
+			default:
+				return ErrSubjectMismatch
+			}
+			if armed {
+				user.SubjectRebindArmedAt = nil
+				out.RebindConsumed = true
+			}
+			user.Provider = claims.Provider
+			user.ProviderSubjectID = claims.Subject
+			if claims.Name != "" {
+				user.DisplayName = claims.Name
+			}
+		}
+		user.LastLoginAt = now
+		if claims.GroupsKnown {
+			groups := claims.Groups
+			if groups == nil {
+				groups = []string{}
+			}
+			user.Groups = groups
+			user.GroupsUpdatedAt = now
+		}
+
+		if err := user.Validate(); err != nil {
+			return fmt.Errorf("invalid user: %w", err)
+		}
+		data, err := json.Marshal(user)
+		if err != nil {
+			return fmt.Errorf("failed to marshal user: %w", err)
+		}
+		if err := usersBucket.Put([]byte(user.ID), data); err != nil {
+			return fmt.Errorf("failed to store user: %w", err)
+		}
+		if out.Created {
+			if err := emailBucket.Put([]byte(email), []byte(user.ID)); err != nil {
+				return fmt.Errorf("failed to store email index: %w", err)
+			}
+		}
+		out.User = user
+		return nil
+	})
+	if err != nil {
+		return LoginOutcome{}, err
+	}
+	return out, nil
 }

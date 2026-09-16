@@ -5,6 +5,7 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -46,7 +47,7 @@ func setupTestOAuthHandler(t *testing.T, oauthCfg *config.ServerEditionOAuthConf
 	logger := zap.NewNop().Sugar()
 	hmacKey := []byte("test-hmac-key-for-jwt-signing-32b")
 
-	handler := NewOAuthHandler(store, sessionMgr, teamsCfg, hmacKey, logger)
+	handler := NewOAuthHandler(store, sessionMgr, StaticServerEditionConfig(teamsCfg), hmacKey, logger)
 	return handler, store
 }
 
@@ -99,7 +100,7 @@ func registerMockProvider(t *testing.T, mockServer *httptest.Server) {
 
 	originalFactory := providerRegistry["google"]
 
-	providerRegistry["google"] = func(_ string) *OAuthProvider {
+	providerRegistry["google"] = func(_ *config.ServerEditionOAuthConfig) *OAuthProvider {
 		return &OAuthProvider{
 			Name:         "google",
 			AuthURL:      mockServer.URL + "/authorize",
@@ -175,7 +176,7 @@ func TestHandleLogin_StoreIDPTokensTrueStillNeverRequestsOfflineAccess(t *testin
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
 	})
-	handler.config.StoreIDPTokens = true
+	handler.config().StoreIDPTokens = true
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil)
 	w := httptest.NewRecorder()
@@ -318,12 +319,13 @@ func TestHandleCallback_InvalidState(t *testing.T) {
 	resp := w.Result()
 	defer resp.Body.Close()
 
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-
-	var errResp map[string]interface{}
-	err := json.NewDecoder(resp.Body).Decode(&errResp)
+	// Spec 107 FR-024: every refusal (here state_invalid) renders the one
+	// generic 403 page; the reason reaches the log only.
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, errResp["message"], "invalid or expired state")
+	assert.Contains(t, string(body), "Sign-in was not permitted")
+	assert.NotContains(t, string(body), "state_invalid")
 }
 
 func TestHandleCallback_MissingCode(t *testing.T) {
@@ -345,12 +347,12 @@ func TestHandleCallback_MissingCode(t *testing.T) {
 	resp := w.Result()
 	defer resp.Body.Close()
 
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-
-	var errResp map[string]interface{}
-	err := json.NewDecoder(resp.Body).Decode(&errResp)
+	// Spec 107 FR-024: an unknown state is state_invalid on the generic 403
+	// page, never a distinct 400 that discloses which parameter was missing.
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, errResp["message"], "missing code")
+	assert.Contains(t, string(body), "Sign-in was not permitted")
 }
 
 func TestHandleCallback_DomainNotAllowed(t *testing.T) {
@@ -384,12 +386,13 @@ func TestHandleCallback_DomainNotAllowed(t *testing.T) {
 	resp := w.Result()
 	defer resp.Body.Close()
 
+	// Spec 107 FR-024: domain_not_allowed renders the generic 403 page; the
+	// reason is never disclosed to the caller.
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
-
-	var errResp map[string]interface{}
-	err := json.NewDecoder(resp.Body).Decode(&errResp)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, errResp["message"], "domain not allowed")
+	assert.Contains(t, string(body), "Sign-in was not permitted")
+	assert.NotContains(t, string(body), "domain")
 }
 
 func TestHandleCallback_ExistingUser(t *testing.T) {

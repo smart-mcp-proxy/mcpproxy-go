@@ -147,13 +147,15 @@ func TestSetupMultiUserOAuth_RegistersRoutes(t *testing.T) {
 		t.Errorf("expected login to redirect (302), got %d", loginRec.Code)
 	}
 
-	// Callback without params should return 400
+	// Callback without params is state_invalid: the one generic 403 page
+	// (Spec 107 FR-024; a distinct 400 would disclose which parameter was
+	// missing).
 	callbackReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/callback", nil)
 	callbackReq.Host = "localhost:8080"
 	callbackRec := httptest.NewRecorder()
 	router.ServeHTTP(callbackRec, callbackReq)
-	if callbackRec.Code != http.StatusBadRequest {
-		t.Errorf("expected callback without params to return 400, got %d", callbackRec.Code)
+	if callbackRec.Code != http.StatusForbidden {
+		t.Errorf("expected callback without params to return 403, got %d", callbackRec.Code)
 	}
 
 	// Logout without auth should return 401
