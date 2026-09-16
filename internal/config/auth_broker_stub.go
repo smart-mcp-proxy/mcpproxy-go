@@ -7,8 +7,10 @@ import "encoding/json"
 // AuthBrokerConfig is the personal-edition carrier for a server's
 // `auth_broker` block. The connect flow is a server-edition feature (spec
 // 074); the personal edition keeps the field on ServerConfig so configs round
-// trip (Spec 107 FR-040): the block is held as the raw JSON it was read from,
-// never decoded, never validated and never warned about.
+// trip (Spec 107 FR-040): the block is held as the canonical JSON of what was
+// read (canonicalRawJSON — every key and value kept, key order and whitespace
+// normalised so jsonEqual-based change detection stays quiet), never
+// interpreted, never validated and never warned about.
 //
 // Omission is the parent pointer's job: ServerConfig.AuthBroker is
 // `*T,omitempty`, so a server without the key leaves the pointer nil and the
@@ -18,13 +20,18 @@ type AuthBrokerConfig struct {
 	raw json.RawMessage
 }
 
-// UnmarshalJSON stores the document verbatim.
+// UnmarshalJSON stores the document in canonical form (every key and value
+// kept; key order and whitespace are not part of the contract).
 func (a *AuthBrokerConfig) UnmarshalJSON(data []byte) error {
-	a.raw = append(json.RawMessage(nil), data...)
+	raw, err := canonicalRawJSON(data)
+	if err != nil {
+		return err
+	}
+	a.raw = raw
 	return nil
 }
 
-// MarshalJSON emits the stored document verbatim; an empty carrier is `{}`.
+// MarshalJSON emits the stored document; an empty carrier is `{}`.
 func (a AuthBrokerConfig) MarshalJSON() ([]byte, error) {
 	if len(a.raw) == 0 {
 		return []byte("{}"), nil

@@ -16,7 +16,50 @@ import (
 // carrier is `{}`, and Clone() never aliases the source's backing array (the
 // value copy CopyServerConfig used to make would have).
 
+// carrierProbe is deliberately NOT in lexical key order: the carrier must
+// canonicalise what it stores (sorted keys, compact, numbers verbatim) so two
+// documents that differ only in key order or whitespace marshal identically
+// — DetectConfigChanges compares mcpServers with jsonEqual (bytes of
+// json.Marshal), and the PATCH path re-emits the block from a sorted map, so a
+// verbatim carrier would report a spurious "mcpServers" change on the first
+// unrelated PATCH after boot and reconnect every upstream (codex round 1).
 const carrierProbe = `{"mode":"oauth_connect","n":9007199254740993,"d":0.1000000000000000055511151231257827}`
+
+// carrierProbeCanonical is carrierProbe as the carrier emits it.
+const carrierProbeCanonical = `{"d":0.1000000000000000055511151231257827,"mode":"oauth_connect","n":9007199254740993}`
+
+func TestPersonalCarriers_CanonicalFormIsKeyOrderAndWhitespaceIndependent(t *testing.T) {
+	spaced := "{\n  \"n\": 9007199254740993,\n  \"mode\": \"oauth_connect\",\n  \"d\": 0.1000000000000000055511151231257827\n}"
+
+	var a, b ServerConfig
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"s","auth_broker":`+carrierProbe+`}`), &a))
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"s","auth_broker":`+spaced+`}`), &b))
+	ab, err := json.Marshal(a.AuthBroker)
+	require.NoError(t, err)
+	bb, err := json.Marshal(b.AuthBroker)
+	require.NoError(t, err)
+	assert.Equal(t, carrierProbeCanonical, string(ab), "sorted keys, compact, numbers verbatim")
+	assert.Equal(t, string(ab), string(bb), "key order and whitespace must not leak into the carrier's bytes")
+
+	var c, d Config
+	require.NoError(t, json.Unmarshal([]byte(`{"server_edition":`+carrierProbe+`}`), &c))
+	require.NoError(t, json.Unmarshal([]byte(`{"server_edition":`+spaced+`}`), &d))
+	cb, err := json.Marshal(c.ServerEdition)
+	require.NoError(t, err)
+	db, err := json.Marshal(d.ServerEdition)
+	require.NoError(t, err)
+	assert.Equal(t, carrierProbeCanonical, string(cb))
+	assert.Equal(t, string(cb), string(db))
+
+	// Nested objects canonicalise too (the PATCH path sorts recursively).
+	var e, f Config
+	require.NoError(t, json.Unmarshal([]byte(`{"server_edition":{"oauth":{"provider":"google","client_id":"x"},"enabled":true}}`), &e))
+	require.NoError(t, json.Unmarshal([]byte(`{"server_edition":{"enabled":true,"oauth":{"client_id":"x","provider":"google"}}}`), &f))
+	eb, _ := json.Marshal(e.ServerEdition)
+	fb, _ := json.Marshal(f.ServerEdition)
+	assert.Equal(t, `{"enabled":true,"oauth":{"client_id":"x","provider":"google"}}`, string(eb))
+	assert.Equal(t, string(eb), string(fb))
+}
 
 func TestPersonalCarriers_CopyServerConfigDoesNotAliasAuthBroker(t *testing.T) {
 	var src ServerConfig
@@ -29,7 +72,7 @@ func TestPersonalCarriers_CopyServerConfigDoesNotAliasAuthBroker(t *testing.T) {
 
 	before, err := json.Marshal(dst.AuthBroker)
 	require.NoError(t, err)
-	assert.Equal(t, carrierProbe, string(before))
+	assert.Equal(t, carrierProbeCanonical, string(before))
 
 	// Mutate the SOURCE carrier's bytes in place; an aliased backing array
 	// would leak the change into the copy.
@@ -50,7 +93,7 @@ func TestPersonalCarriers_ServerEditionCloneDoesNotAlias(t *testing.T) {
 
 	before, err := json.Marshal(dst)
 	require.NoError(t, err)
-	assert.Equal(t, carrierProbe, string(before))
+	assert.Equal(t, carrierProbeCanonical, string(before))
 
 	src.ServerEdition.raw[2] = 'X'
 	after, err := json.Marshal(dst)

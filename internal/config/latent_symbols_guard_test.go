@@ -70,6 +70,18 @@ var removedDecls = []removedDecl{
 	// FR-031 class A: broker exchange / resolve / inject chain.
 	{Name: "TokenExchanger", Why: "broker.TokenExchanger deleted (FR-031)"},
 	{Name: "CredentialResolver", Why: "broker.CredentialResolver deleted (FR-031)"},
+	// FR-031 names "CredentialResolver with its interfaces/errors": the
+	// resolver's collaborator interfaces, its not-connected error type, the
+	// policy hook and the three sentinel errors (credential_resolver.go at
+	// origin/main b39800a89). Scoped to package broker.
+	{Pkg: "broker", Name: "Exchanger", Why: "resolver collaborator interface deleted with the resolver (FR-031)"},
+	{Pkg: "broker", Name: "Connector", Why: "resolver collaborator interface deleted with the resolver (FR-031)"},
+	{Pkg: "broker", Name: "NotConnectedError", Why: "resolver error type deleted with the resolver (FR-031)"},
+	{Pkg: "broker", Name: "PolicyHook", Why: "resolver policy hook deleted with the resolver (FR-031)"},
+	{Pkg: "broker", Name: "PolicyHookFunc", Why: "resolver policy hook deleted with the resolver (FR-031)"},
+	{Pkg: "broker", Name: "ErrUnauthenticated", Why: "resolver sentinel error deleted with the resolver (FR-031)"},
+	{Pkg: "broker", Name: "ErrNoCredential", Why: "resolver sentinel error deleted with the resolver (FR-031)"},
+	{Pkg: "broker", Name: "ErrBrokerNotConfigured", Why: "resolver sentinel error deleted with the resolver (FR-031)"},
 	{Name: "HeaderInjector", Why: "broker.HeaderInjector deleted (FR-031)"},
 	{Name: "ConnectionKey", Why: "broker.ConnectionKey deleted (FR-031)"},
 	{Name: "AuditActionInject", Why: "dead audit constant (FR-031)"},
@@ -83,6 +95,7 @@ var removedDecls = []removedDecl{
 	{Name: "ErrReauthRequired", Why: "IdP subject-token reader deleted (FR-033)"},
 	{Name: "persistIDPSubjectToken", Why: "IdP subject-token writer deleted (FR-033, T015)"},
 	{Recv: "OAuthHandler", Name: "SetCredentialStore", Why: "the login handler no longer holds a credential store to write IdP tokens into (FR-033, T015)"},
+	{Recv: "OAuthHandler", Name: "credStore", Why: "the login handler's credential-store field left with the IdP subject-token writer (FR-033, T015)"},
 	{Name: "OfflineAuthParams", Why: "offline-access authorization parameters deleted; login never requests a refresh token (FR-033, T015)"},
 	{Name: "OfflineAccessScopes", Why: "offline_access scope set deleted; login never requests a refresh token (FR-033, T015)"},
 	{Name: "RefreshAccessToken", Why: "OAuthProvider.RefreshAccessToken deleted (FR-031)"},
@@ -96,6 +109,12 @@ var removedDecls = []removedDecl{
 	{Name: "BrokeredAuth", Why: "transport.BrokeredAuth type + HTTPTransportConfig.BrokeredAuth deleted (FR-031)"},
 	{Name: "EffectiveHeaders", Why: "transport.EffectiveHeaders deleted (FR-031)"},
 	{Name: "refuseBrokeredOAuth", Why: "transport brokered branch deleted (FR-031)"},
+	// FR-031 deletes "every brokered branch" in transport/http.go:178-192 and
+	// upstream/core/connection_http.go:171-192; these are the helpers those
+	// branches were (origin/main b39800a89), not just the exported seam.
+	{Pkg: "transport", Recv: "HTTPTransportConfig", Name: "effectiveHeaders", Why: "transport brokered header merge deleted (FR-031, T016)"},
+	{Pkg: "core", Recv: "Client", Name: "canUseHeadersStrategy", Why: "brokered strategy gate deleted (FR-031, T016)"},
+	{Pkg: "core", Recv: "Client", Name: "brokeredHTTPConfig", Why: "brokered transport-config builder deleted (FR-031, T016)"},
 	// FR-032: dead config knobs.
 	{Pkg: "config", Recv: "ServerEditionConfig", Name: "MaxUserServers", Why: "dead knob removed (FR-032)"},
 	{Pkg: "config", Recv: "ServerEditionConfig", Name: "WorkspaceIdleTimeout", Why: "dead knob removed (FR-032)"},
@@ -293,6 +312,10 @@ func TestLatentSymbolsGuard_RemovedDeclarationsAbsent(t *testing.T) {
 	fset := token.NewFileSet()
 
 	var violations []string
+	// The mode-literal scan is only meaningful if every validator it targets
+	// was actually found and inspected; a renamed validator must fail the
+	// guard, never pass it vacuously.
+	seenValidators := map[string]bool{}
 	for _, path := range files {
 		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 		if err != nil {
@@ -316,9 +339,15 @@ func TestLatentSymbolsGuard_RemovedDeclarationsAbsent(t *testing.T) {
 				continue
 			}
 			fn, ok := funcs[vf.Recv+"."+vf.Name]
-			if !ok || fn.Body == nil {
+			if !ok {
+				// A validator that is not in THIS file may live in a sibling;
+				// seenValidators proves each one was inspected somewhere.
 				continue
 			}
+			if fn.Body == nil {
+				continue
+			}
+			seenValidators[latentFuncLabel(vf)] = true
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				switch x := n.(type) {
 				case *ast.BasicLit:
@@ -347,6 +376,12 @@ func TestLatentSymbolsGuard_RemovedDeclarationsAbsent(t *testing.T) {
 				}
 				return true
 			})
+		}
+	}
+
+	for _, vf := range authBrokerValidatorFuncs {
+		if !seenValidators[latentFuncLabel(vf)] {
+			t.Errorf("auth_broker validator %s (package %s) was not found in the walked files; the accepted-mode scan cannot run without it — update authBrokerValidatorFuncs if it moved", latentFuncLabel(vf), vf.Pkg)
 		}
 	}
 

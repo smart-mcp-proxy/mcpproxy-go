@@ -389,3 +389,40 @@ func TestLegacyKeys_TypedDecodeDropsThemWithoutTrace(t *testing.T) {
 			"the typed struct has no field for a removed key, so nothing downstream of the decode can refuse it")
 	}
 }
+
+// The normaliser re-encodes the raw document only when it dropped something,
+// and that re-encode must not make the loader MORE lenient than the strict
+// json.Unmarshal that follows on a clean file: a document with trailing
+// content after the first JSON value is a parse error on both paths (codex
+// round 1 on PR-A — a single Decoder.Decode accepted the first object and
+// silently discarded the rest).
+func TestLegacyKeys_NormaliserRejectsTrailingContentLikeTheStrictPath(t *testing.T) {
+	dir := t.TempDir()
+	doc := readLegacyFixture(t)
+	doc["data_dir"] = dir
+	data, err := json.MarshalIndent(doc, "", "  ")
+	require.NoError(t, err)
+
+	for name, trailer := range map[string]string{
+		"second object": "\n{\"listen\": \"127.0.0.1:1\"}\n",
+		"garbage":       "\nnot json\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-")+".json")
+			require.NoError(t, os.WriteFile(path, append(append([]byte(nil), data...), []byte(trailer)...), 0600))
+			_, err := config.LoadFromFile(path)
+			require.Error(t, err, "a legacy document with trailing content must not load")
+			assert.Contains(t, err.Error(), "failed to parse config file")
+		})
+	}
+
+	// The same trailer on the CLEAN sibling (nothing to drop, original bytes
+	// reach the strict decoder) is refused too — the two paths agree.
+	cleanData, err := json.MarshalIndent(cleanSibling(t, doc), "", "  ")
+	require.NoError(t, err)
+	cleanPath := filepath.Join(dir, "clean-trailer.json")
+	require.NoError(t, os.WriteFile(cleanPath, append(cleanData, []byte("\n{}\n")...), 0600))
+	_, err = config.LoadFromFile(cleanPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse config file")
+}

@@ -265,4 +265,4 @@ go build -tags server ./cmd/mcpproxy                        # Build server editi
 go build ./cmd/mcpproxy                                     # Verify personal edition unaffected
 ```
 
-> Note: server-edition `//go:build server` routes are invisible to `swag` / `verify-oas-coverage.sh` / CI lint (which don't pass `--build-tags server`). Lint locally with the tag and document endpoints here.
+> Note: server-edition `//go:build server` routes are invisible to `swag` / `verify-oas-coverage.sh` (which don't pass `--build-tags server`), so document endpoints here. CI lints twice — bare and with `--build-tags server` — and race-tests `internal/server`, `internal/httpapi` and `internal/storage` under the tag (Spec 107 FR-047); run both lint passes locally before pushing (see the Lint block in `CLAUDE.md`).

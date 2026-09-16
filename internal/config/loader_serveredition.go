@@ -5,7 +5,9 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 )
 
 // normalizeLoadedDocument is the server-build boot normaliser (Spec 107
@@ -23,6 +25,17 @@ func normalizeLoadedDocument(data []byte) ([]byte, []LoadDiagnostic, error) {
 	dec.UseNumber()
 	var raw map[string]any
 	if err := dec.Decode(&raw); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	// Decoder.Decode stops after the first value. The strict json.Unmarshal
+	// that follows on the untouched path refuses trailing content, and the
+	// re-encoded path must be exactly as strict, or a file with a second
+	// object / trailing garbage after a removed key would boot on the first
+	// object alone.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("unexpected trailing content after the top-level object")
+		}
 		return nil, nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 

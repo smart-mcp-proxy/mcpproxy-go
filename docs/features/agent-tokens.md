@@ -327,8 +327,10 @@ occupy a slot until they are permanently deleted, so once a limit is reached,
 creating another token answers `409 Conflict`:
 
 - **Your own quota (server edition, 25 per user).** The message tells you it is
-  your limit; permanently delete one of your unused tokens to free a slot. One
-  user filling their quota never blocks another user from creating theirs.
+  your limit; permanently delete one of your unused tokens to free a slot. The
+  quota keeps one user from taking the whole pool, but every stored token still
+  counts toward the deployment limit below, so a deployment whose records add
+  up to 100 refuses the next token for everyone.
 - **The deployment limit (100 stored records).** In the personal edition every
   token belongs to the one operator, so this is the only limit and deleting one
   of your tokens frees a slot. In the server edition the message says the limit

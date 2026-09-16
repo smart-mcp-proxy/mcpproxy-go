@@ -40,6 +40,14 @@ var injectionClaimSentences = []string{
 	"JWT bearer token for MCP",
 	"nothing re-validates at use time",
 	"per-user connections",
+	// The three FR-036 corrections T013's list left implicit (codex round 1
+	// on PR-A): the activity-log row that named the never-emitted broker
+	// events (`activity-log.md:28` at origin/main), the upstream-servers row
+	// that called the block "per-user token brokering" (`:112`), and the
+	// architecture line that listed the JWT as an MCP credential (`:53`).
+	"acquire/refresh/inject",
+	"per-user token brokering",
+	"JWT bearer (MCP/API)",
 }
 
 // removedTableRowCells are the first-cell literals of the Markdown table rows
