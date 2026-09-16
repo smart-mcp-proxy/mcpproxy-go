@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
@@ -193,4 +195,205 @@ func TestTailLog_URLProfileScope_AppliesToAllCallers(t *testing.T) {
 	anonInProfile := profile.WithProfileScope(context.Background(), scope)
 	assertTailLogHidden(t, proxy, anonInProfile, "secret")
 	assertTailLogServed(t, proxy, anonInProfile, "github")
+}
+
+// ---------------------------------------------------------------------------
+// Spec 105 FR-007 (gaps FR007-G1, G3): colliding log files. `a/b` and `a_b`
+// both sanitise to server-a_b.log, so an `a_b`-only token must receive only
+// the records `a_b` wrote (filtered BEFORE the tail limit, lines_returned =
+// filtered length) and administrators must keep the whole file byte-for-byte.
+// ---------------------------------------------------------------------------
+
+// tailLogCollidingFixture is a proxy whose storage knows `a/b` and `a_b` and
+// whose log directory holds their SHARED file, plus the two real stamped
+// writers (logs.NewUpstreamServerLogger — the writer internal/upstream/core
+// installs) so every record carries the `server=<raw>` stamp.
+type tailLogCollidingFixture struct {
+	proxy   *MCPProxyServer
+	logCfg  *config.LogConfig
+	writers map[string]*zap.Logger
+}
+
+const (
+	collidingHidden = "a/b"
+	collidingOwn    = "a_b"
+)
+
+// newTailLogCollidingProxy builds the fixture. Every returned io.Closer is
+// closed at cleanup (CI "directory not empty" otherwise). The shared file is
+// pre-created so both lumberjack sinks open it O_APPEND — lumberjack creates
+// a NEW file O_TRUNC without O_APPEND, and two writers on one fresh file
+// overwrite each other (the torn-fragment corruption gap-map FR007-G3 probed,
+// a retained effect that is not what these tests are about).
+func newTailLogCollidingProxy(t *testing.T) *tailLogCollidingFixture {
+	t.Helper()
+	require.Equal(t, logs.ServerLogFilename(collidingHidden), logs.ServerLogFilename(collidingOwn),
+		"fixture premise: the two raw names must share one log file")
+
+	proxy := createTestMCPProxyServer(t)
+
+	logDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.Logging.LogDir = logDir
+	cfg.Logging.EnableFile = true
+	cfg.Logging.EnableConsole = false
+	cfg.Logging.Compress = false
+	cfg.Servers = []*config.ServerConfig{
+		{Name: collidingHidden, Protocol: "http", Enabled: false},
+		{Name: collidingOwn, Protocol: "http", Enabled: false},
+	}
+	mainSrv, err := NewServer(cfg, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mainSrv.Shutdown() })
+	proxy.mainServer = mainSrv
+
+	require.NoError(t, os.WriteFile(filepath.Join(logDir, logs.ServerLogFilename(collidingOwn)), nil, 0o600))
+
+	f := &tailLogCollidingFixture{proxy: proxy, logCfg: cfg.Logging, writers: map[string]*zap.Logger{}}
+	for _, name := range []string{collidingHidden, collidingOwn} {
+		sc := &config.ServerConfig{Name: name, Protocol: "http", URL: "http://127.0.0.1:1/mcp", Enabled: true}
+		require.NoError(t, proxy.storage.SaveUpstreamServer(sc))
+		require.NoError(t, proxy.upstreamManager.AddServerConfig(name, sc))
+
+		writer, closer, err := logs.NewUpstreamServerLogger(cfg.Logging, name)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = closer.Close() })
+		f.writers[name] = writer
+	}
+	return f
+}
+
+// write emits one record through name's real stamped writer. One call site
+// for every record keeps the console encoder's caller segment constant, so
+// two fixtures' lines differ only by timestamp (see tailLogLineSignature).
+func (f *tailLogCollidingFixture) write(name, msg string) {
+	f.writers[name].Info(msg)
+	_ = f.writers[name].Sync()
+}
+
+// tailLogResponse is the parsed tail_log payload.
+type tailLogResponse struct {
+	ServerName     string   `json:"server_name"`
+	LinesRequested int      `json:"lines_requested"`
+	LinesReturned  int      `json:"lines_returned"`
+	LogLines       []string `json:"log_lines"`
+}
+
+// tailLogLinesVia drives the real dispatcher with an explicit `lines` and
+// parses the payload.
+func tailLogLinesVia(t *testing.T, proxy *MCPProxyServer, ctx context.Context, name string, lines int) (tailLogResponse, string) {
+	t.Helper()
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]interface{}{"operation": "tail_log", "name": name, "lines": float64(lines)}
+	result, err := proxy.handleUpstreamServers(ctx, request)
+	require.NoError(t, err)
+	body := toolResultText(t, result)
+	require.False(t, result.IsError, "tail_log must succeed for the in-scope server: %s", body)
+	var parsed tailLogResponse
+	require.NoError(t, json.Unmarshal([]byte(body), &parsed), body)
+	return parsed, body
+}
+
+// tailLogLineSignature strips the leading timestamp segment of a console
+// record (`ts | LEVEL | caller | msg | {fields}`) so records from two
+// fixtures written through the same call site compare equal.
+func tailLogLineSignature(line string) string {
+	if _, rest, ok := strings.Cut(line, " | "); ok {
+		return rest
+	}
+	return line
+}
+
+func tailLogSignatures(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = tailLogLineSignature(l)
+	}
+	return out
+}
+
+// FR007-G1 + G3 at the tool surface: interleaved own/foreign records, an
+// `a_b`-only token asks for the last 2 → exactly [own1, own2],
+// lines_returned == 2, nothing from `a/b`.
+func TestTailLog_CollidingLogFile_ScopedTokenGetsOnlyOwnRecords(t *testing.T) {
+	f := newTailLogCollidingProxy(t)
+	const sentinel = "SENTINEL-a-slash-b-only-4e2d"
+	f.write(collidingOwn, "own1")
+	f.write(collidingHidden, sentinel+"-1")
+	f.write(collidingOwn, "own2")
+	f.write(collidingHidden, sentinel+"-2")
+
+	ctx := agentCtx([]string{collidingOwn}, []string{auth.PermRead}, "")
+	resp, body := tailLogLinesVia(t, f.proxy, ctx, collidingOwn, 2)
+
+	assert.NotContains(t, body, sentinel, "a/b's records disclosed to an a_b-only token")
+	assert.Equal(t, 2, resp.LinesReturned, "lines_returned must count the authorized tail")
+	require.Len(t, resp.LogLines, 2, "the window must hold the two OWN records, got: %v", resp.LogLines)
+	assert.Contains(t, resp.LogLines[0], "own1", "foreign line displaced own1 from the window")
+	assert.Contains(t, resp.LogLines[1], "own2")
+	assert.Equal(t, len(resp.LogLines), resp.LinesReturned)
+
+	// The default window (50) has the same property: no foreign record at all.
+	resp, body = tailLogLinesVia(t, f.proxy, ctx, collidingOwn, 50)
+	assert.NotContains(t, body, sentinel)
+	assert.Len(t, resp.LogLines, 2)
+	assert.Equal(t, 2, resp.LinesReturned)
+}
+
+// FR007-G1 SC-001 differential: the `a_b`-only token's view must be the same
+// whether or not hidden `a/b` shares the file (uniform and independent of
+// hidden co-owners — never a whole-file refusal that depends on a co-owner).
+func TestTailLog_CollidingLogFile_DifferentialWithHiddenCoOwner(t *testing.T) {
+	ctx := agentCtx([]string{collidingOwn}, []string{auth.PermRead}, "")
+
+	with := newTailLogCollidingProxy(t)
+	with.write(collidingOwn, "own1")
+	with.write(collidingHidden, "foreign1")
+	with.write(collidingOwn, "own2")
+	with.write(collidingHidden, "foreign2")
+	withResp, _ := tailLogLinesVia(t, with.proxy, ctx, collidingOwn, 50)
+
+	without := newTailLogCollidingProxy(t)
+	without.write(collidingOwn, "own1")
+	without.write(collidingOwn, "own2")
+	withoutResp, _ := tailLogLinesVia(t, without.proxy, ctx, collidingOwn, 50)
+
+	assert.Equal(t, tailLogSignatures(withoutResp.LogLines), tailLogSignatures(withResp.LogLines),
+		"scoped view must not depend on whether a hidden co-owner shares the file")
+	assert.Equal(t, withoutResp.LinesReturned, withResp.LinesReturned)
+	assert.Equal(t, 2, withResp.LinesReturned)
+}
+
+// SC-005 administrator control: the administrator payload is the whole-file
+// tail exactly as before the feature — log_lines byte-equal to the scrubbed
+// whole-file reader, lines_returned its length, co-owner records included.
+// Expected green on HEAD; it pins the whole-file path for the fix.
+func TestTailLog_CollidingLogFile_AdminWholeFileUnchanged(t *testing.T) {
+	f := newTailLogCollidingProxy(t)
+	f.write(collidingOwn, "own1")
+	f.write(collidingHidden, "foreign1")
+	f.write(collidingOwn, "own2")
+	f.write(collidingHidden, "foreign2")
+
+	whole, err := logs.ReadUpstreamServerLogTail(f.logCfg, collidingOwn, 2)
+	require.NoError(t, err)
+	require.Len(t, whole, 2)
+
+	for name, ctx := range map[string]context.Context{
+		"api-key admin": adminCtx(),
+		"no auth ctx":   context.Background(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, body := tailLogLinesVia(t, f.proxy, ctx, collidingOwn, 2)
+			assert.Equal(t, scrubUpstreamLines(whole), resp.LogLines, "administrator log_lines must be the raw whole-file tail")
+			assert.Equal(t, 2, resp.LinesReturned)
+			assert.Contains(t, body, "foreign2", "administrators keep co-owner records")
+			assert.Contains(t, body, "own2")
+			for _, key := range []string{"server_name", "lines_requested", "lines_returned", "log_lines", "server_status", "connection_status"} {
+				assert.Contains(t, body, `"`+key+`"`, "administrator payload shape unchanged")
+			}
+		})
+	}
 }
