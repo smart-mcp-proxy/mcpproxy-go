@@ -128,3 +128,33 @@ func TestRedactURLCredentialsInError_RunsTheValueShapedDetector(t *testing.T) {
 		"the connect paths classify on this substring; masking must not eat it")
 	assert.ErrorIs(t, got, err, "the original must stay reachable through Unwrap")
 }
+
+// Spec 105 FR-007 (critique round 1, finding C2.2): the child's text becomes
+// the console-encoder MESSAGE of its record, and the attributed log reader
+// (internal/logs research D8 rule 2) keys on line boundaries. A message that
+// carried a line break would start a physical line whose text the child
+// controls — a forged stamp for another server. launcher.pumpLines delivers
+// one line per Write today, so this is the producer-side guarantee for any
+// other producer: a multi-line chunk becomes N records, none containing a
+// line break, CRLF handled, blank lines dropped.
+func TestLoggerWriter_SplitsMultiLineChunks(t *testing.T) {
+	core, logs := observer.New(zap.DebugLevel)
+	w := newLoggerWriter(zap.New(core), nil)
+
+	const forged = `2026-01-01T00:00:00.000Z | INFO | x/y.go:1 | FORGED-for-a_b | {"server": "a_b"}`
+	chunk := "first line\r\n" + forged + "\n\nlast line\n"
+	n, err := w.Write([]byte(chunk))
+	require.NoError(t, err)
+	assert.Equal(t, len(chunk), n, "the writer must report the bytes it consumed")
+
+	var rendered []string
+	for _, entry := range logs.All() {
+		rendered = append(rendered, entry.Message)
+	}
+	require.Equal(t, []string{"first line", forged, "last line"}, rendered,
+		"one record per child line: a forged line is its own record, stamped by the real writer")
+	for _, msg := range rendered {
+		assert.NotContains(t, msg, "\n", "a message must never carry a line break")
+		assert.NotContains(t, msg, "\r", "CRLF is stripped, not logged")
+	}
+}

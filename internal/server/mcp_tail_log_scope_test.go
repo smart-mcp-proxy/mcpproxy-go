@@ -263,6 +263,15 @@ const (
 // a retained effect that is not what these tests are about).
 func newTailLogCollidingProxy(t *testing.T) *tailLogCollidingFixture {
 	t.Helper()
+	return newTailLogProxyWithServers(t, collidingHidden, collidingOwn)
+}
+
+// newTailLogProxyWithServers is newTailLogCollidingProxy for an explicit set
+// of registered servers, so a differential can run a TRUE absent-co-owner
+// arm (only `a_b` configured, no `a/b` anywhere: not in storage, not in the
+// upstream manager, no writer) against the colliding one.
+func newTailLogProxyWithServers(t *testing.T, names ...string) *tailLogCollidingFixture {
+	t.Helper()
 	require.Equal(t, logs.ServerLogFilename(collidingHidden), logs.ServerLogFilename(collidingOwn),
 		"fixture premise: the two raw names must share one log file")
 
@@ -276,9 +285,8 @@ func newTailLogCollidingProxy(t *testing.T) *tailLogCollidingFixture {
 	cfg.Logging.EnableFile = true
 	cfg.Logging.EnableConsole = false
 	cfg.Logging.Compress = false
-	cfg.Servers = []*config.ServerConfig{
-		{Name: collidingHidden, Protocol: "http", Enabled: false},
-		{Name: collidingOwn, Protocol: "http", Enabled: false},
+	for _, name := range names {
+		cfg.Servers = append(cfg.Servers, &config.ServerConfig{Name: name, Protocol: "http", Enabled: false})
 	}
 	mainSrv, err := NewServer(cfg, zap.NewNop())
 	require.NoError(t, err)
@@ -288,7 +296,7 @@ func newTailLogCollidingProxy(t *testing.T) *tailLogCollidingFixture {
 	require.NoError(t, os.WriteFile(filepath.Join(logDir, logs.ServerLogFilename(collidingOwn)), nil, 0o600))
 
 	f := &tailLogCollidingFixture{proxy: proxy, logCfg: cfg.Logging, writers: map[string]*zap.Logger{}}
-	for _, name := range []string{collidingHidden, collidingOwn} {
+	for _, name := range names {
 		sc := &config.ServerConfig{Name: name, Protocol: "http", URL: "http://127.0.0.1:1/mcp", Enabled: true}
 		require.NoError(t, proxy.storage.SaveUpstreamServer(sc))
 		require.NoError(t, proxy.upstreamManager.AddServerConfig(name, sc))
@@ -383,6 +391,11 @@ func TestTailLog_CollidingLogFile_ScopedTokenGetsOnlyOwnRecords(t *testing.T) {
 // FR007-G1 SC-001 differential: the `a_b`-only token's view must be the same
 // whether or not hidden `a/b` shares the file (uniform and independent of
 // hidden co-owners — never a whole-file refusal that depends on a co-owner).
+// Three arms (critique round 1, finding C2.6): co-owner present and writing;
+// co-owner configured but silent; co-owner ABSENT (not configured at all) —
+// the last is the spec's literal "without hidden a/b present", and it is the
+// arm that catches an implementation refusing the whole file whenever a
+// config co-owner exists.
 func TestTailLog_CollidingLogFile_DifferentialWithHiddenCoOwner(t *testing.T) {
 	ctx := agentCtx([]string{collidingOwn}, []string{auth.PermRead}, "")
 
@@ -393,21 +406,33 @@ func TestTailLog_CollidingLogFile_DifferentialWithHiddenCoOwner(t *testing.T) {
 	with.write(collidingHidden, "foreign2")
 	withResp, _ := tailLogLinesVia(t, with.proxy, ctx, collidingOwn, 50)
 
-	without := newTailLogCollidingProxy(t)
-	without.write(collidingOwn, "own1")
-	without.write(collidingOwn, "own2")
-	withoutResp, _ := tailLogLinesVia(t, without.proxy, ctx, collidingOwn, 50)
+	silent := newTailLogCollidingProxy(t)
+	silent.write(collidingOwn, "own1")
+	silent.write(collidingOwn, "own2")
+	silentResp, _ := tailLogLinesVia(t, silent.proxy, ctx, collidingOwn, 50)
 
-	assert.Equal(t, tailLogSignatures(withoutResp.LogLines), tailLogSignatures(withResp.LogLines),
+	absent := newTailLogProxyWithServers(t, collidingOwn)
+	absent.write(collidingOwn, "own1")
+	absent.write(collidingOwn, "own2")
+	absentResp, _ := tailLogLinesVia(t, absent.proxy, ctx, collidingOwn, 50)
+
+	assert.Equal(t, tailLogSignatures(absentResp.LogLines), tailLogSignatures(withResp.LogLines),
 		"scoped view must not depend on whether a hidden co-owner shares the file")
-	assert.Equal(t, withoutResp.LinesReturned, withResp.LinesReturned)
-	assert.Equal(t, 2, withResp.LinesReturned)
+	assert.Equal(t, tailLogSignatures(absentResp.LogLines), tailLogSignatures(silentResp.LogLines),
+		"scoped view must not depend on whether a hidden co-owner is configured")
+	assert.Equal(t, absentResp.LinesReturned, withResp.LinesReturned)
+	assert.Equal(t, absentResp.LinesReturned, silentResp.LinesReturned)
+	assert.Equal(t, 2, absentResp.LinesReturned)
 }
 
 // SC-005 administrator control: the administrator payload is the whole-file
 // tail exactly as before the feature — log_lines byte-equal to the scrubbed
 // whole-file reader, lines_returned its length, co-owner records included.
-// Expected green on HEAD; it pins the whole-file path for the fix.
+// Expected green on HEAD; it pins the whole-file path for the fix. The
+// oracle is HEAD's logs.ReadUpstreamServerLogTail rather than a frozen
+// capture (tasks.md T048): that is valid because internal/logs/logger.go is
+// untouched by the Spec 105 PR E diff — if a later change edits the
+// whole-file reader, this oracle moves with it and must be re-justified.
 func TestTailLog_CollidingLogFile_AdminWholeFileUnchanged(t *testing.T) {
 	f := newTailLogCollidingProxy(t)
 	f.write(collidingOwn, "own1")

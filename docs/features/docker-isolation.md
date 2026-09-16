@@ -367,6 +367,20 @@ is never stopped on that server's behalf. Housekeeping records in the
 per-server log carry `container_owner` (the label value) so
 [`tail_log`](/features/agent-tokens) can attribute them to the right server.
 
+Two consequences of the ownership rule are worth knowing:
+
+- **Servers you configure as `docker run …` yourself** (no isolation) get no
+  `com.mcpproxy.server` label — MCPProxy only labels the containers it
+  builds for isolation — so the sweeps above never match them. Their
+  container is tracked through the `--cidfile` MCPProxy injects into your
+  command; if that capture fails, the container is left running for you to
+  stop by hand (earlier versions would stop every container on the same
+  image, yours or not).
+- **Renaming a server** changes the label value a container must carry. A
+  container created under the old name is no longer owned by the new one,
+  so it is left alone by the pre-start sweep and must be removed manually
+  (`docker rm -f`).
+
 ### Manual Cleanup
 
 If containers remain after MCPProxy stops:

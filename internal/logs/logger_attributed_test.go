@@ -469,3 +469,122 @@ func TestReadUpstreamServerLogTail_AttributedOnly_ForcedRotationSharedHistory(t 
 	}
 	assert.Zero(t, foreign, "%d of %d lines served to a_b after rotation are not a_b's (co-owner filler disclosed)", foreign, len(got))
 }
+
+// Critique round 1, finding C1.2: one over-long record ANYWHERE in the shared
+// file must not abort the scoped read. bufio.Scanner returns ErrTooLong for a
+// line past its cap and the reader turned that into a tool error, so a hidden
+// co-owner (or its child, whose lines pumpLines allows up to 1 MiB) could
+// make `a_b`'s own tail fail until rotation — a response class that depends
+// on the co-owner (SC-001). An over-long line is non-attributable and skipped,
+// never fatal; the admin whole-file reader is untouched (SC-005).
+func TestReadUpstreamServerLogTail_AttributedOnly_OverlongLineSkippedNotFatal(t *testing.T) {
+	cfg := newAttributedLogDir(t, false)
+	under := openStampedWriter(t, cfg, "a_b")
+
+	writeRecord(under, "own-before-overlong")
+
+	// A co-owner's over-long line, appended O_APPEND exactly as its sink
+	// would leave it: stamped for a/b, longer than the reader's line cap.
+	logPath := filepath.Join(cfg.LogDir, ServerLogFilename("a_b"))
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	overlong := `2026-09-16T00:00:00.000Z | INFO | x/y.go:1 | ` + strings.Repeat("Q", 2*1024*1024) + ` | {"server": "a/b"}` + "\n"
+	_, err = f.WriteString(overlong)
+	require.NoError(t, err)
+	// And an over-long line stamped for a_b itself: withheld (non-attributable
+	// past the cap), still not fatal.
+	_, err = f.WriteString(`2026-09-16T00:00:00.000Z | INFO | x/y.go:1 | ` + strings.Repeat("R", 2*1024*1024) + ` | {"server": "a_b"}` + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	writeRecord(under, "own-after-overlong")
+
+	got, err := ReadUpstreamServerLogTailAttributed(cfg, "a_b", 50)
+	require.NoError(t, err, "an over-long co-owner line must be skipped, not turned into a scoped-caller error")
+	body := joinLines(got)
+	require.Len(t, got, 2, "exactly the two own records, got %d lines", len(got))
+	assert.Contains(t, body, "own-before-overlong")
+	assert.Contains(t, body, "own-after-overlong")
+	assert.NotContains(t, body, "QQQQ", "co-owner's over-long line disclosed")
+	assert.NotContains(t, body, "RRRR", "over-long own line must be withheld, not partially served")
+}
+
+// Critique round 1, finding C1.5: `container_count` is a container subject
+// too. A pre-105 "Cleaning up existing containers before creating new one"
+// record carries only a count — a count larger than the server's own
+// container count hints at a hidden co-owner — so a record naming a count
+// without `container_owner` is withheld like any other ownerless container
+// record; with `container_owner` == the requested server it is served.
+func TestReadUpstreamServerLogTail_AttributedOnly_ContainerCountIsSubjectEvidence(t *testing.T) {
+	for _, enc := range encoderCases() {
+		t.Run(enc.name, func(t *testing.T) {
+			cfg := newAttributedLogDir(t, enc.json)
+			a := openStampedWriter(t, cfg, "a")
+
+			writeRecord(a, "own ordinary record")
+			writeRecord(a, "Cleaning up existing containers before creating new one",
+				zap.Int("container_count", 7))
+			writeRecord(a, "Cleaning up existing containers before creating new one",
+				zap.Int("container_count", 1),
+				zap.String("container_owner", "a"))
+			writeRecord(a, "Cleaning up existing containers before creating new one",
+				zap.Int("container_count", 3),
+				zap.String("container_owner", "a-b"))
+
+			got := attributedTail(t, cfg, "a", 50)
+			body := joinLines(got)
+			assert.Contains(t, body, "own ordinary record")
+			assert.NotContains(t, body, `"container_count": 7`, "ownerless container_count record served to a's scoped reader")
+			assert.NotContains(t, body, `"container_count":7`)
+			assert.NotContains(t, body, `"container_owner": "a-b"`, "container_count record owned by a-b served to a")
+			assert.NotContains(t, body, `"container_owner":"a-b"`)
+			assert.Len(t, got, 2, "exactly: own ordinary + own-owned count record; got:\n%s", body)
+
+			whole := joinLines(wholeFileTail(t, cfg, "a", 50))
+			for _, s := range []string{"container_count", "a-b"} {
+				assert.Contains(t, whole, s, "administrator whole-file read must keep every record")
+			}
+		})
+	}
+}
+
+// Critique round 1, finding C2.2: the reader keys on LINE boundaries and the
+// console encoder writes a message verbatim, so a message carrying a line
+// break starts a new line whose text the message author controls. The reader
+// cannot defend against that by construction; the guarantee is the
+// PRODUCER's (internal/upstream/core loggerWriter splits child output on
+// '\n' before logging; monitoring.go keeps stderr as a field value). This
+// test pins that division of labour: a line break inside a message DOES
+// forge a record for another server under the console encoder, so any new
+// producer that logs child text as a message must split on '\n' first.
+func TestReadUpstreamServerLogTail_AttributedOnly_LineBreakInMessageIsProducerGuarantee(t *testing.T) {
+	cfg := newAttributedLogDir(t, false)
+	slash := openStampedWriter(t, cfg, "a/b")
+	under := openStampedWriter(t, cfg, "a_b")
+
+	writeRecord(under, "own-record")
+	const forged = `2026-01-01T00:00:00.000Z | INFO | x/y.go:1 | FORGED-for-a_b | {"server": "a_b"}`
+	// Bypasses every producer guard on purpose: the raw zap message. The
+	// forged line sits in the MIDDLE of the message: the encoder appends its
+	// own fields object to the message's last line, so a trailing forged line
+	// would carry the real stamp as trailing bytes and be rejected; a middle
+	// line stands alone.
+	slash.Info("harmless-prefix\n" + forged + "\nharmless-trailer")
+	_ = slash.Sync()
+
+	got := attributedTail(t, cfg, "a_b", 50)
+	body := joinLines(got)
+	assert.Contains(t, body, "FORGED-for-a_b",
+		"the reader is expected to be unable to reject a forged line the producer let through — "+
+			"if this now fails, the reader grew a defence and the producer-side comment in attribution.go should be revisited")
+	assert.Len(t, got, 2, "own record + the forged line, got:\n%s", body)
+
+	// The JSON encoder escapes the break inside the message string, so the
+	// same input yields exactly one a/b record and nothing for a_b.
+	cfgJSON := newAttributedLogDir(t, true)
+	slashJSON := openStampedWriter(t, cfgJSON, "a/b")
+	slashJSON.Info("harmless-prefix\n" + forged + "\nharmless-trailer")
+	_ = slashJSON.Sync()
+	assert.Empty(t, attributedTail(t, cfgJSON, "a_b", 50), "JSON encoder must not let a message line break forge a record")
+	assert.Len(t, attributedTail(t, cfgJSON, "a/b", 50), 1)
+}

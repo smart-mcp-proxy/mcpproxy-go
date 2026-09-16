@@ -62,6 +62,7 @@ const (
 	attributionContainerOwnerField = "container_owner"
 	attributionContainerIDField    = "container_id"
 	attributionContainerNameField  = "container_name"
+	attributionContainerCountField = "container_count"
 )
 
 // ReadUpstreamServerLogTailAttributed reads the last N records of an upstream
@@ -97,17 +98,24 @@ func ReadUpstreamServerLogTailAttributed(config *config.LogConfig, serverName st
 	defer file.Close()
 
 	// Filter first, limit second: only attributable records enter the window.
+	// A line past the cap is skipped as non-attributable rather than aborting
+	// the read: a shared file means a co-owner (or its child, whose lines the
+	// launcher pumps up to 1 MiB) could otherwise make the scoped caller's
+	// own tail fail until rotation — a response class that would depend on
+	// the hidden co-owner (SC-001). The whole-file reader is untouched.
 	var attributed []string
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
+	reader := bufio.NewReaderSize(file, 64*1024)
+	for {
+		line, ok, err := readBoundedLine(reader, attributedLineCap)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read log file for server %s: %w", serverName, err)
+		}
+		if !ok {
+			break
+		}
 		if recordAttributableTo(line, serverName) {
 			attributed = append(attributed, line)
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("failed to read log file for server %s: %w", serverName, err)
 	}
 
 	if attributed == nil {
@@ -117,6 +125,50 @@ func ReadUpstreamServerLogTailAttributed(config *config.LogConfig, serverName st
 		return attributed, nil
 	}
 	return attributed[len(attributed)-lines:], nil
+}
+
+// attributedLineCap bounds one rendered record the attributed reader will
+// consider; longer lines are non-attributable (skipped), never fatal.
+const attributedLineCap = 1024 * 1024
+
+// readBoundedLine returns the next line (without its terminator) and
+// ok=true, or ok=false at end of input. A line longer than limit is consumed
+// to its terminator and returned as an empty, non-attributable line so the
+// caller keeps reading; only a genuine read error is returned.
+func readBoundedLine(r *bufio.Reader, limit int) (string, bool, error) {
+	var buf []byte
+	overlong := false
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if !overlong {
+			if len(buf)+len(chunk) > limit {
+				overlong = true
+				buf = nil
+			} else {
+				buf = append(buf, chunk...)
+			}
+		}
+		switch {
+		case err == nil:
+			// Terminator reached.
+			if overlong {
+				return "", true, nil
+			}
+			return strings.TrimSuffix(string(buf), "\n"), true, nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue // more of the same line follows
+		case errors.Is(err, io.EOF):
+			if len(buf) == 0 && !overlong {
+				return "", false, nil
+			}
+			if overlong {
+				return "", true, nil
+			}
+			return string(buf), true, nil
+		default:
+			return "", false, err
+		}
+	}
 }
 
 // recordAttributableTo reports whether one rendered log line is attributable
@@ -237,7 +289,9 @@ func decodeExactlyOneObject(s string) (attributionFields, bool) {
 				return attributionFields{}, false
 			}
 			fields.containerOwners = append(fields.containerOwners, value)
-		case attributionContainerIDField, attributionContainerNameField:
+		case attributionContainerIDField, attributionContainerNameField, attributionContainerCountField:
+			// A count is a container subject too: a pre-105 sweep record's
+			// count of "existing containers" included a co-owner's.
 			fields.namesContainer = true
 		}
 	}

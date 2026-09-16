@@ -80,6 +80,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+if [ -n "$MCPPROXY_FAKE_DOCKER_IGNORE_FILTERS" ]; then namefilter=''; labelkey=''; fi
 awk -F'\t' -v fmt="$format" -v nf="$namefilter" -v lk="$labelkey" -v lv="$labelval" -v ls="$labelset" '
 function repl(s, lit, val,    i, out) {
   out = ""
@@ -142,6 +143,11 @@ func installFakeDocker(t *testing.T, containers []fakeContainer) *fakeDocker {
 	t.Cleanup(restore)
 	return fd
 }
+
+// fakeDockerIgnoreFiltersEnv makes the shim answer `ps` with EVERY fixture
+// row regardless of --filter, so a test can prove the Go-side ownership
+// predicate drops what the daemon did not.
+const fakeDockerIgnoreFiltersEnv = "MCPPROXY_FAKE_DOCKER_IGNORE_FILTERS"
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
@@ -351,4 +357,83 @@ func TestDockerCleanup_OwnershipMatcherTable(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Critique round 1, finding C1.5: the pre-start sweep's count record is a
+// container subject (internal/logs D8 rule 3 treats `container_count` like
+// `container_id`), so the record written to the per-server log must carry
+// `container_owner` == this server or the attributed reader withholds it
+// from the server's own scoped agent.
+func TestDockerCleanup_CountRecordCarriesContainerOwner(t *testing.T) {
+	installFakeDocker(t, ownAndForeignFixture())
+	c, _, upLogs := newOwnershipClient("a", nil)
+
+	require.NoError(t, c.ensureNoExistingContainers(context.Background()))
+
+	counts := upLogs.FilterMessage("Cleaning up existing containers before creating new one").All()
+	require.Len(t, counts, 1)
+	fields := counts[0].ContextMap()
+	assert.EqualValues(t, 1, fields["container_count"], "the count is of a's own containers only")
+	assert.Equal(t, "a", fields["container_owner"], "count record must carry container_owner so a's scoped reader can attribute it")
+}
+
+// Critique round 1, finding C2.3: ownsContainer is the Go-side half of the
+// D9 belt-and-braces (docker filters server-side, Go re-checks). The table
+// above drives it through the shim, which honours the same filters, so a
+// predicate that returned true for everything still passed. This is the
+// direct table, plus a filter-blind shim mode below.
+func TestOwnsContainer_Predicate(t *testing.T) {
+	cases := []struct {
+		name   string
+		server string
+		cname  string
+		label  string
+		owned  bool
+	}{
+		{"own label and canonical name", "a", "mcpproxy-a-wxyz", "a", true},
+		{"docker-style leading slash is not canonical", "a", "/mcpproxy-a-wxyz", "a", false},
+		{"a-b container, server a", "a", "mcpproxy-a-b-wxyz", "a-b", false},
+		{"a/b container, server a", "a", "mcpproxy-a-b-wxyz", "a/b", false},
+		{"case-different label", "a", "mcpproxy-a-wxyz", "A", false},
+		{"pre-label container", "a", "mcpproxy-a-wxyz", "", false},
+		{"label mismatch, canonical name", "a", "mcpproxy-a-wxyz", "a-b", false},
+		{"own label, name with extra segment", "a", "mcpproxy-a-wxyz-extra", "a", false},
+		{"own label, uppercase suffix", "a", "mcpproxy-a-WXYZ", "a", false},
+		{"own label, short suffix", "a", "mcpproxy-a-wxy", "a", false},
+		{"own label, long suffix", "a", "mcpproxy-a-wxyz1", "a", false},
+		{"own label, wrong prefix", "a", "other-a-wxyz", "a", false},
+		{"server a/b owns its container", "a/b", "mcpproxy-a-b-wxyz", "a/b", true},
+		{"server a/b vs a-b's container", "a/b", "mcpproxy-a-b-wxyz", "a-b", false},
+		{"server a-b owns its container", "a-b", "mcpproxy-a-b-wxyz", "a-b", true},
+		{"server a-b vs a/b's container", "a-b", "mcpproxy-a-b-wxyz", "a/b", false},
+		{"server A vs a's container", "A", "mcpproxy-a-wxyz", "a", false},
+		// The sanitiser keeps '.', so a.b names mcpproxy-a.b-*; QuoteMeta keeps
+		// the dot literal in the pattern rather than a wildcard.
+		{"regex metacharacters in the name are literal", "a.b", "mcpproxy-a.b-wxyz", "a.b", true},
+		{"regex metacharacters do not widen the match", "a.b", "mcpproxy-aXb-wxyz", "a.b", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.owned, ownsContainer(tc.server, tc.cname, tc.label))
+		})
+	}
+}
+
+// Critique round 1, finding C2.3: with the shim ignoring every --filter (a
+// daemon that returned rows the filters should have dropped), listOwnedContainers
+// must drop them itself; the pre-start sweep then still removes only a's own
+// container and never names the foreign one.
+func TestDockerCleanup_GoPredicateDropsRowsTheDaemonDidNotFilter(t *testing.T) {
+	fd := installFakeDocker(t, ownAndForeignFixture())
+	t.Setenv(fakeDockerIgnoreFiltersEnv, "1")
+	c, mainLogs, upLogs := newOwnershipClient("a", nil)
+
+	owned, err := c.listOwnedContainers(context.Background(), true)
+	require.NoError(t, err)
+	require.Len(t, owned, 1, "only a's own container survives the Go-side predicate; got %+v", owned)
+	assert.Equal(t, ownContainerID, owned[0].ID)
+
+	require.NoError(t, c.ensureNoExistingContainers(context.Background()))
+	assertForeignUntouched(t, fd, mainLogs, upLogs)
+	assert.NotEmpty(t, fd.mutationsOf(t, ownContainerID))
 }

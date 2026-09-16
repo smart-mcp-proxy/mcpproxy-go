@@ -148,3 +148,43 @@ func TestCallbackStop_WithLogger_StillSubjectBound(t *testing.T) {
 	assert.NotEmpty(t, observed["a"].FilterMessage("OAuth callback server stopped").All())
 	assert.Empty(t, mentionsServer(observed["b"], "a", a.Port), "a's name/port written into b's log")
 }
+
+// Critique round 1, finding C2.5: the recorded server logger already carries
+// server, bind_host and port as context fields (StartCallbackServerOnHost),
+// so the stop and dropped-waiter records must not add them again — a JSON
+// consumer keeps the last duplicate key, and the attributed reader's
+// all-values-agree rule only tolerates the duplication. Exactly one
+// bind_host and one port per manager stop record; `server` appears once from
+// the recorded logger's With (the upstream tee's own stamp, which the
+// observer fixture mimics, is a second, agreeing occurrence).
+func TestCallbackStop_RecordFieldsNotDuplicated(t *testing.T) {
+	mgr, observed, loggers := newObservedManager(t, "a")
+	a := startObserved(t, mgr, "a", loggers["a"])
+
+	require.NoError(t, mgr.StopCallbackServer("a"))
+
+	own := observed["a"]
+	require.Eventually(t, func() bool {
+		return len(own.FilterMessage("OAuth callback server stopped").All()) >= 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	countKey := func(entry observer.LoggedEntry, key string) int {
+		n := 0
+		for _, f := range entry.Context {
+			if f.Key == key {
+				n++
+			}
+		}
+		return n
+	}
+	for _, msg := range []string{"OAuth callback server stopped", "Stopped OAuth callback server while flows were still waiting"} {
+		for _, entry := range own.FilterMessage(msg).All() {
+			assert.Equal(t, 1, countKey(entry, "bind_host"), "%q: bind_host duplicated: %v", msg, entry.Context)
+			assert.Equal(t, 1, countKey(entry, "port"), "%q: port duplicated: %v", msg, entry.Context)
+			// fixture stamp (mimics the upstream tee) + recorded logger's With
+			assert.Equal(t, 2, countKey(entry, "server"), "%q: server stamped more than by the two loggers: %v", msg, entry.Context)
+			assert.Equal(t, int64(a.Port), entry.ContextMap()["port"], "%q must still name the port", msg)
+			assert.Equal(t, a.BindHost, entry.ContextMap()["bind_host"], "%q must still name the bind host", msg)
+		}
+	}
+}

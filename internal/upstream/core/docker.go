@@ -459,8 +459,12 @@ func (c *Client) ensureNoExistingContainers(ctx context.Context) error {
 		zap.Int("container_count", len(owned)))
 
 	if c.upstreamLogger != nil {
+		// container_owner: the count is of THIS server's owned containers
+		// (D8 rule 3 treats a count as a container subject, since the pre-105
+		// sweep counted co-owners' containers too).
 		c.upstreamLogger.Warn("Cleaning up existing containers before creating new one",
-			zap.Int("container_count", len(owned)))
+			zap.Int("container_count", len(owned)),
+			containerOwnerField(c.config.Name))
 	}
 
 	for _, container := range owned {

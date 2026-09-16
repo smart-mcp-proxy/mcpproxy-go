@@ -1716,16 +1716,21 @@ func (m *CallbackServerManager) stopCallbackServerLocked(serverName string, fall
 	// through the logger recorded for that server at start — the tee into
 	// ITS per-server log — never through whichever logger was installed last.
 	// The recorded logger already carries server, bind_host and port as
-	// context fields.
+	// context fields (StartCallbackServerOnHost), so the records below add
+	// none of them; a fallback logger gets the same three fields once.
 	logger := server.logger
 	if logger == nil {
 		logger = fallback
-	}
-	if logger == nil {
-		logger = m.logger
-	}
-	if logger == nil {
-		logger = zap.L().Named(oauthCallbackLoggerName)
+		if logger == nil {
+			logger = m.logger
+		}
+		if logger == nil {
+			logger = zap.L().Named(oauthCallbackLoggerName)
+		}
+		logger = logger.With(
+			zap.String("server", serverName),
+			zap.String("bind_host", server.BindHost),
+			zap.Int("port", server.Port))
 	}
 
 	// Shutdown the server
@@ -1733,9 +1738,7 @@ func (m *CallbackServerManager) stopCallbackServerLocked(serverName string, fall
 	defer cancel()
 
 	if err := server.Server.Shutdown(ctx); err != nil {
-		logger.Error("Error shutting down OAuth callback server",
-			zap.String("server", serverName),
-			zap.Error(err))
+		logger.Error("Error shutting down OAuth callback server", zap.Error(err))
 	}
 
 	// Drop any registered waiters. They unblock on their own context deadline;
@@ -1743,17 +1746,13 @@ func (m *CallbackServerManager) stopCallbackServerLocked(serverName string, fall
 	// zero-value receive for a real callback.
 	if dropped := server.dropAllWaiters(); dropped > 0 {
 		logger.Warn("Stopped OAuth callback server while flows were still waiting",
-			zap.String("server", serverName),
 			zap.Int("waiters", dropped))
 	}
 
 	// Remove from map
 	delete(m.servers, serverName)
 
-	logger.Info("OAuth callback server stopped",
-		zap.String("server", serverName),
-		zap.String("bind_host", server.BindHost),
-		zap.Int("port", server.Port))
+	logger.Info("OAuth callback server stopped")
 
 	return nil
 }
