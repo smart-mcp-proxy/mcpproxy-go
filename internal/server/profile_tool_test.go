@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -760,9 +761,20 @@ func TestSelectableProfileNames_PinOutcomesDoSameWork(t *testing.T) {
 		"zero-reach pin first": {selectablePinnedCtx("pin", "other-srv"), alive},
 		"deleted pin":          {selectablePinnedCtx("pin", "pin-srv"), deleted},
 	}
+	// AllocsPerRun counts process-wide mallocs, so a goroutine still winding
+	// down from an earlier test (a runtime fixture's shutdown, an index
+	// observer) inflates whichever case it overlaps — CI once read 48 for
+	// one case and 12 for the others. Noise only ever ADDS, so the minimum
+	// over a few samples of the predicate alone (index built outside the
+	// window) is the deterministic figure this test is about.
 	allocs := map[string]float64{}
 	for name, c := range cases {
-		allocs[name] = testing.AllocsPerRun(20, func() { selectableProfileNames(c.ctx, c.cfg) })
+		idx := newProfileIndex(c.cfg)
+		best := math.Inf(1)
+		for i := 0; i < 7; i++ {
+			best = math.Min(best, testing.AllocsPerRun(50, func() { idx.selectableNames(c.ctx) }))
+		}
+		allocs[name] = best
 	}
 	for name, got := range allocs {
 		require.Equal(t, allocs["reachable pin first"], got, "%s must allocate exactly like a reachable pin: %v", name, allocs)
