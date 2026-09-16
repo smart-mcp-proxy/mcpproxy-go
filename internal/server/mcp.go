@@ -157,6 +157,13 @@ type MCPProxyServer struct {
 	// whole Runtime (mirrors workSessionResolver).
 	preflightRecorder func(runtime.PreflightActivity) error
 
+	// profileIndexes is the slug → profile index cache set_profile consults
+	// when no mainServer stands behind this proxy (tests build a bare
+	// MCPProxyServer). In production profileIndexFor routes to the main
+	// Server's cache so one index per config snapshot serves both the
+	// /mcp/p/<slug> gate and set_profile (Spec 105 FR-003/FR-004).
+	profileIndexes profileIndexCache
+
 	// preflightStateSource overrides the connection-state snapshot the
 	// preflight glue reads (Spec 099). Nil in production, where
 	// preflightSnapshot resolves it from the supervisor's StateView; tests

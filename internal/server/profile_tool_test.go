@@ -131,10 +131,12 @@ func TestHandleSetProfile_DeletedPinDoesNotEnumerateProfiles(t *testing.T) {
 	require.Contains(t, text, "unknown profile 'research'")
 	require.NotContains(t, text, "deploy", "a pinned token must not learn the other profiles' names: %s", text)
 
-	// Unpinned callers keep the discovery affordance — proven with an actual
-	// unpinned AGENT identity (ProfilePin ""), not merely the absence of an
-	// auth context, which is administrator-shaped and would leave the agent
-	// contract unproven (cross-review round 2).
+	// An unpinned AGENT identity (ProfilePin "") is a scoped caller too and
+	// gets the same list-free refusal (Spec 105 PR D codex round 3: the
+	// selectable list is fleet-sized work, so no scoped refusal carries it;
+	// inverted from the pre-105 "unpinned callers keep the discovery
+	// affordance" assertion). Proven with a real agent identity, not merely
+	// the absence of an auth context, which is administrator-shaped.
 	unpinnedAgent := auth.WithAuthContext(setProfileCtx("sess-unpinned", ""), &auth.AuthContext{
 		Type:           auth.AuthTypeAgent,
 		AgentName:      "unpinned-bot",
@@ -143,9 +145,10 @@ func TestHandleSetProfile_DeletedPinDoesNotEnumerateProfiles(t *testing.T) {
 	})
 	res = callSetProfileTool(t, p, unpinnedAgent, "research")
 	require.True(t, res.IsError)
-	require.Contains(t, setProfileResultText(t, res), "available: deploy")
+	require.Equal(t, "unknown profile 'research'", setProfileResultText(t, res))
 
-	// And an administrator-shaped caller (no auth context) likewise.
+	// An administrator-shaped caller (no auth context) keeps the discovery
+	// affordance (SC-005).
 	res = callSetProfileTool(t, p, setProfileCtx("sess-admin", ""), "research")
 	require.True(t, res.IsError)
 	require.Contains(t, setProfileResultText(t, res), "available: deploy")
@@ -302,8 +305,13 @@ func TestHandleSetProfile_ServerEditionUserScopedLikeVisibility(t *testing.T) {
 }
 
 // TestHandleSetProfile_ScopedTokenUnknownSlugDoesNotEnumerateAllProfiles: the
-// invalid-selection error for an agent token names only the profiles the token
-// may select — never profiles entirely outside its reach (Spec 104 FR-016b).
+// invalid-selection error for an agent token never names a profile outside
+// its reach (Spec 104 FR-016b) — and since Spec 105 PR D (codex round 3) it
+// names no profile at all: the selectable list is one reach computation per
+// configured profile, fleet-sized work a non-disclosing refusal may not do,
+// so the pre-105 "profiles overlapping the token's scope stay listed"
+// assertion is inverted here. Administrators keep the list (SC-005,
+// TestHandleSetProfile_AdminUnknownSlugKeepsAvailableList).
 func TestHandleSetProfile_ScopedTokenUnknownSlugDoesNotEnumerateAllProfiles(t *testing.T) {
 	p := newSetProfileTestServer()
 	ctx := setProfileScopedCtx("sess-scoped-unknown", "research-srv")
@@ -312,8 +320,7 @@ func TestHandleSetProfile_ScopedTokenUnknownSlugDoesNotEnumerateAllProfiles(t *t
 	res := callSetProfileTool(t, p, ctx, "nope")
 	require.True(t, res.IsError)
 	text := setProfileResultText(t, res)
-	require.Contains(t, text, "unknown profile 'nope'")
-	require.Contains(t, text, "research", "profiles overlapping the token's scope stay selectable")
+	require.Equal(t, "unknown profile 'nope'", text, "a scoped refusal names no profile, selectable or not")
 	require.NotContains(t, text, "deploy", "a profile fully outside the token's scope must not be disclosed")
 	require.Equal(t, "mixed", p.sessionStore.GetActiveProfile("sess-scoped-unknown"),
 		"a refused selection must leave the prior session selection untouched")
@@ -332,8 +339,7 @@ func TestHandleSetProfile_StalePinUnknownSlugDisclosesNoProfiles(t *testing.T) {
 	res := callSetProfileTool(t, p, ctx, "gone")
 	require.True(t, res.IsError)
 	text := setProfileResultText(t, res)
-	require.Contains(t, text, "unknown profile 'gone'")
-	require.NotContains(t, text, "available: gone", "a removed pin is not a selectable profile")
+	require.Equal(t, "unknown profile 'gone'", text, "a removed pin is refused with the list-free scoped body")
 	for _, name := range []string{"research", "deploy", "mixed"} {
 		require.NotContains(t, text, name)
 	}
@@ -443,7 +449,10 @@ func TestHandleSetProfile_AdminURLScopeUnchanged(t *testing.T) {
 
 // TestHandleSetProfile_WildcardTokenUnchanged: an agent token with the "*"
 // wildcard is unrestricted by servers and keeps the full listings — in the
-// same deterministic order an administrator sees (SC-005 control).
+// same deterministic order an administrator sees (SC-005 control). Its
+// REFUSAL body is a scoped caller's (spec "Unrestricted agent tokens": their
+// refusal bodies change where this spec changes error shapes): list-free
+// since PR D codex round 3, inverted from the pre-105 `available:` form.
 func TestHandleSetProfile_WildcardTokenUnchanged(t *testing.T) {
 	p := newSetProfileOrderingTestServer()
 	ctx := setProfileScopedCtx("sess-wild", "*")
@@ -456,7 +465,7 @@ func TestHandleSetProfile_WildcardTokenUnchanged(t *testing.T) {
 
 	res := callSetProfileTool(t, p, ctx, "nope")
 	require.True(t, res.IsError)
-	require.Contains(t, setProfileResultText(t, res), "narrow")
+	require.Equal(t, "unknown profile 'nope'", setProfileResultText(t, res))
 }
 
 // TestHandleSetProfile_ScopedServersKeepProfileOrder: a restricted token's
@@ -555,13 +564,10 @@ func TestHandleSetProfile_WildcardTokenRefusesEmptyProfileAdminSelectsIt(t *test
 				strings.ReplaceAll(setProfileResultText(t, unknown), "'nope'", "'"+slug+"'"),
 				setProfileResultText(t, refused),
 				"an empty profile must be refused exactly like a nonexistent one")
-			// The error echoes the caller's own slug; non-disclosure is about
-			// the `available:` list, which must name neither empty profile.
-			_, available, found := strings.Cut(setProfileResultText(t, refused), "available:")
-			require.True(t, found)
-			for _, name := range []string{"empty", "ghost"} {
-				require.NotContains(t, available, name)
-			}
+			// The error echoes the caller's own slug and nothing else: a
+			// scoped refusal carries no `available:` list at all (Spec 105
+			// PR D codex round 3; inverted from the list-carrying form).
+			require.Equal(t, "unknown profile '"+slug+"'", setProfileResultText(t, refused))
 			require.Equal(t, "research", p.sessionStore.GetActiveProfile("sess-wild-"+slug),
 				"a refused selection must leave the prior session selection untouched")
 
@@ -915,4 +921,137 @@ func TestProfileIndexCache_BuiltOncePerSnapshot(t *testing.T) {
 	require.Same(t, next, cache.For(second))
 
 	require.Nil(t, cache.For(nil).lookup("pin"), "a nil snapshot yields an empty index")
+}
+
+// ---------------------------------------------------------------------------
+// Spec 105 PR D codex round 3.
+// ---------------------------------------------------------------------------
+
+// setProfilePinnedCtx builds a session-bearing request context for an agent
+// token pinned to pin with the given AllowedServers.
+func setProfilePinnedCtx(sessionID, pin string, allowed ...string) context.Context {
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	ctx := helper.WithContext(context.Background(), &fakeClientSession{id: sessionID})
+	return auth.WithAuthContext(ctx, &auth.AuthContext{Type: auth.AuthTypeAgent, ProfilePin: pin, AllowedServers: allowed})
+}
+
+// TestProfileIndex_ReachIsPrecomputedAtBuild (Spec 105 PR D codex round 3,
+// finding 1): the reach behind the selectable predicate must be fixed when
+// the index is built, never derived from the candidate profile's declared
+// list at request time. A reach that scanned the declared list for every
+// configured server cost nothing for a profile the snapshot lacks (nil list)
+// and |servers| × |declared| for one it has — so a pinned token asking for
+// its own zero-reach pin could tell "pin deleted" from "pin exists" by the
+// work its uniform refusal cost (9.3 ms vs 3.2 µs over 4 096 servers on the
+// tree before this fix), which research D1 forbids.
+//
+// The witness is the mechanism, not a clock: once the index is built, the
+// declared list is not consulted any more — emptying it changes nothing for
+// the built index and everything for a fresh one.
+func TestProfileIndex_ReachIsPrecomputedAtBuild(t *testing.T) {
+	const n = 4096
+	cfg := &config.Config{}
+	declared := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("srv%d", i)
+		cfg.Servers = append(cfg.Servers, &config.ServerConfig{Name: name})
+		declared = append(declared, name)
+	}
+	cfg.Profiles = []config.ProfileConfig{{Name: "pin", Servers: declared}}
+	idx := newProfileIndex(cfg)
+
+	reachable := selectablePinnedCtx("pin", "srv4095")
+	zeroReach := selectablePinnedCtx("pin", "nowhere")
+	require.True(t, idx.selectable(reachable, "pin"))
+	require.False(t, idx.selectable(zeroReach, "pin"))
+
+	cfg.Profiles[0].Servers = nil
+	require.True(t, idx.selectable(reachable, "pin"),
+		"reach must be read from the index built at snapshot time, not from the declared list walked per request")
+	require.False(t, newProfileIndex(cfg).selectable(reachable, "pin"),
+		"sanity: a fresh index over the emptied profile has no reach")
+}
+
+// TestHandleSetProfile_ScopedRefusalTouchesOnlySlugAndPin (Spec 105 PR D
+// codex round 3, finding 2): a scoped caller's set_profile refusal must not
+// enumerate the fleet. Deciding the requested slug through the whole
+// selectable list — one reach computation per configured profile — cost
+// 0.3 µs over a one-profile fleet and 63 µs over 4 097 on the tree before
+// this fix, with a byte-identical body: a fleet-population timing oracle
+// (spec Definitions: non-disclosing = status, body AND timing class). The
+// refusal now decides the requested slug alone through the per-snapshot
+// index and carries no `available:` list for scoped callers (the list is
+// fleet-sized work by definition; administrators keep it, SC-005).
+//
+// Traversal-counter seam: through the index's lookup hook, every scoped
+// refusal over every fleet resolves at most the requested slug and the
+// caller's pin — never a third profile — and the body is the one format
+// string, so neither work nor bytes depend on the hidden fleet.
+func TestHandleSetProfile_ScopedRefusalTouchesOnlySlugAndPin(t *testing.T) {
+	cases := map[string]struct {
+		ctx      context.Context
+		slug     string
+		viaIndex bool // false: stopped by the pin check before any lookup
+	}{
+		"deleted pin":                  {setProfilePinnedCtx("s", "gone", "pin-srv"), "gone", true},
+		"zero-reach pin":               {setProfilePinnedCtx("s", "pin", "other-srv"), "pin", true},
+		"scoped, absent slug":          {setProfileScopedCtx("s", "pin-srv"), "nope", true},
+		"scoped, disjoint slug":        {setProfileScopedCtx("s", "pin-srv"), "p0", true},
+		"scoped, empty allowlist":      {setProfileScopedCtx("s"), "pin", true},
+		"scoped wildcard, absent slug": {setProfileScopedCtx("s", "*"), "nope", true},
+		"pin mismatch":                 {setProfilePinnedCtx("s", "pin", "pin-srv"), "p0", false},
+	}
+	for fleet, n := range map[string]int{"pin only": 0, "4096 others": 4096} {
+		cfg := selectableProbeConfig(n)
+		p := &MCPProxyServer{config: cfg, logger: zap.NewNop(), sessionStore: NewSessionStore(zap.NewNop())}
+		var touched []string
+		idx := newProfileIndex(cfg)
+		idx.lookupHook = func(slug string) { touched = append(touched, slug) }
+		p.profileIndexes.last.Store(idx)
+
+		for name, c := range cases {
+			touched = nil
+			p.sessionStore.SetActiveProfile("s", "prior")
+			res := callSetProfileTool(t, p, c.ctx, c.slug)
+			require.True(t, res.IsError, "%s/%s must be refused", fleet, name)
+			require.Equal(t, "prior", p.sessionStore.GetActiveProfile("s"), "%s/%s: a refusal must not mutate the session", fleet, name)
+
+			pin := profilePinFromContext(c.ctx)
+			allowed := map[string]bool{c.slug: true}
+			if pin != "" {
+				allowed[pin] = true
+			}
+			if c.viaIndex {
+				require.Equal(t, fmt.Sprintf("unknown profile '%s'", c.slug), setProfileResultText(t, res),
+					"%s/%s: a scoped refusal carries no available list", fleet, name)
+				require.NotEmpty(t, touched, "%s/%s: the refusal must decide through the index", fleet, name)
+			} else {
+				require.Contains(t, setProfileResultText(t, res), "is pinned to profile 'pin'", "%s/%s", fleet, name)
+			}
+			require.LessOrEqual(t, len(touched), 2, "%s/%s: at most the slug and the pin: %v", fleet, name, touched)
+			for _, got := range touched {
+				require.True(t, allowed[got], "%s/%s: touched profile %q outside {slug, pin}: %v", fleet, name, got, touched)
+			}
+		}
+		require.Same(t, idx, p.profileIndexFor(cfg), "%s: the cached index must be reused for the same snapshot", fleet)
+	}
+}
+
+// TestHandleSetProfile_AdminUnknownSlugKeepsAvailableList is the SC-005
+// control for the refusal above: an administrator's unknown-slug error keeps
+// the pre-105 discovery affordance byte-for-byte — every configured profile,
+// in configured order, empty and ghost ones included.
+func TestHandleSetProfile_AdminUnknownSlugKeepsAvailableList(t *testing.T) {
+	p := newSetProfileTestServerWithEmptyProfiles(t)
+	p.sessionStore.SetActiveProfile("sess-admin-unknown", "research")
+
+	res := callSetProfileTool(t, p, setProfileAdminCtx("sess-admin-unknown"), "nope")
+	require.True(t, res.IsError)
+	require.Equal(t, "unknown profile 'nope' (available: research, deploy, mixed, empty, ghost)", setProfileResultText(t, res))
+	require.Equal(t, "research", p.sessionStore.GetActiveProfile("sess-admin-unknown"))
+
+	// Anonymous back-compat callers are administrator-shaped and keep it too.
+	res = callSetProfileTool(t, p, setProfileCtx("sess-anon-unknown", ""), "nope")
+	require.True(t, res.IsError)
+	require.Equal(t, "unknown profile 'nope' (available: research, deploy, mixed, empty, ghost)", setProfileResultText(t, res))
 }

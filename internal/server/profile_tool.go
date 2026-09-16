@@ -82,16 +82,30 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	}
 
 	// A non-empty slug must name a configured profile the caller may select
-	// (an empty slug clears the selection and is always accepted). The
-	// selectable set is computed BEFORE any session mutation or success log, so
-	// a profile outside the caller's reach — including a pinned token's own
-	// pin once it has zero reach (research D1) — is indistinguishable from an
-	// unknown one (FR-016b / FR-003): same error, same `available:` list, no
-	// state change.
+	// (an empty slug clears the selection and is always accepted). The check
+	// runs BEFORE any session mutation or success log, so a profile outside
+	// the caller's reach — including a pinned token's own pin once it has
+	// zero reach (research D1) — is indistinguishable from an unknown one
+	// (FR-016b / FR-003): same error, no state change.
+	//
+	// It decides the REQUESTED slug alone, through the per-snapshot index
+	// (profileIndex.selectable: one lookup of the slug, one of the pin, one
+	// precomputed-reach test), never through the selectable list — that list
+	// is one reach computation per configured profile, so a refusal that
+	// built it cost 0.3 µs over a one-profile fleet and 63 µs over 4 097 with
+	// a byte-identical body: a fleet-population timing oracle (codex review,
+	// PR D round 3; spec Definitions: non-disclosing = status, body AND
+	// timing class). For the same reason a scoped caller's refusal carries no
+	// `available:` list at all; administrators keep the pre-105 discovery
+	// affordance (every configured profile — SC-005), the one path that may
+	// legitimately enumerate.
 	if slug != "" {
-		selectable := selectableProfileNames(ctx, cfg)
-		if !slices.Contains(selectable, slug) {
-			return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s' (available: %s)", slug, strings.Join(selectable, ", "))), nil
+		profiles := p.profileIndexFor(cfg)
+		if !profiles.selectable(ctx, slug) {
+			if auth.IsScopedCaller(ctx) {
+				return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug)), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s' (available: %s)", slug, strings.Join(profiles.selectableNames(ctx), ", "))), nil
 		}
 	}
 
@@ -227,99 +241,52 @@ func callerVisibleServers(ctx context.Context, servers []string) []string {
 // D1); a scoped caller only the profiles that overlap the servers it can
 // enumerate.
 //
-// This is both the `available:` list of the unknown-slug error and the
-// admission rule for a selection — on set_profile AND on the /mcp/p/<slug>
-// URL (profileMiddleware): a profile entirely outside the caller's reach is
-// treated exactly like a nonexistent one, so the error text cannot be used to
-// confirm which profiles the operator has configured (FR-016b, FR-003/004).
+// This is the same rule profileIndex.selectable evaluates for ONE profile —
+// the admission rule on set_profile AND on the /mcp/p/<slug> URL
+// (profileMiddleware): a profile entirely outside the caller's reach is
+// treated exactly like a nonexistent one (FR-016b, FR-003/004). The LIST is
+// fleet-sized work, so only the administrator's `available:` affordance
+// renders it; no refusal a scoped caller receives is allowed to compute it.
 //
 // The result is accumulated by forEachProfileSelectable in configured order;
-// see there for why it never returns early.
+// see there for why it never returns early. Both build a throwaway index
+// over cfg; production callers hold a per-snapshot one and use its methods.
 func selectableProfileNames(ctx context.Context, cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
 	}
-	names := make([]string, 0, len(cfg.Profiles))
-	forEachProfileSelectable(ctx, cfg, func(name string, selectable bool) {
-		if selectable {
-			names = append(names, name)
-		}
-	})
-	return names
+	return newProfileIndex(cfg).selectableNames(ctx)
 }
 
 // forEachProfileSelectable visits EVERY configured profile, in configured
 // order, and reports to visit whether the caller may select it (the rule
-// documented on selectableProfileNames).
-//
-// It deliberately has no early return and does the same per-profile work
-// whatever the outcome: a scoped caller's reach is computed for each profile
-// even when a pin already rules it out, and a pinned caller keeps walking
-// after its pin is found. A refusal must be non-disclosing in status, body
-// AND timing class (spec Definitions; FR-003/004), and profileMiddleware /
-// handleSetProfile consult this predicate before refusing — a version that
-// answered after one iteration for a live pin and after the whole slice for
-// a deleted or zero-reach pin let a pinned caller tell those apart by the
-// work its own refusal cost (codex review, PR D round 1).
+// documented on selectableProfileNames). See profileIndex.forEachSelectable.
 func forEachProfileSelectable(ctx context.Context, cfg *config.Config, visit func(name string, selectable bool)) {
 	if cfg == nil {
 		return
 	}
-	pin := profilePinFromContext(ctx)
-	// Administrators (and absent contexts) select any configured profile,
-	// including empty or ghost ones (SC-005); everyone else needs reach.
-	needsReach := pin != "" || auth.IsScopedCaller(ctx)
-	for i := range cfg.Profiles {
-		p := &cfg.Profiles[i]
-		selectable := true
-		if needsReach {
-			selectable = profileHasReach(ctx, cfg, p)
-		}
-		if pin != "" && p.Name != pin {
-			selectable = false
-		}
-		visit(p.Name, selectable)
-	}
+	newProfileIndex(cfg).forEachSelectable(ctx, visit)
 }
 
-// profileHasReach reports whether the caller can enumerate at least one of
-// p's declared servers that exists in cfg — the reach rule behind
-// selectableProfileNames (research D1), i.e.
-// len(callerVisibleServers(ctx, p.EffectiveServers(cfg))) > 0, but without
-// either allocation, so a profile's reach costs the same whether it has one
-// declared server or none. It walks every configured server (a per-snapshot
-// constant) and never returns early; a nil p is an empty profile. Only the
-// declared-server membership test scales with p's own list — a property of
-// the profile the caller asked about, not of the rest of the fleet.
-func profileHasReach(ctx context.Context, cfg *config.Config, p *config.ProfileConfig) bool {
-	if cfg == nil {
-		return false
-	}
-	var declared []string
-	if p != nil {
-		declared = p.Servers
-	}
-	scoped := auth.IsScopedCaller(ctx)
-	reach := false
-	for _, s := range cfg.Servers {
-		if s == nil || !slices.Contains(declared, s.Name) {
-			continue
-		}
-		if !scoped || auth.CanEnumerateServer(ctx, s.Name) {
-			reach = true
-		}
-	}
-	return reach
-}
-
-// profileIndex is an immutable slug → profile index over ONE config snapshot.
-// It lets the /mcp/p/<slug> gate resolve the requested profile (and a pinned
-// caller's pin) directly instead of walking cfg.Profiles, so the work a
-// scoped refusal costs does not grow with the number of OTHER profiles the
+// profileIndex is an immutable index over ONE config snapshot: slug →
+// profile, plus each profile's precomputed reach set. It lets the
+// /mcp/p/<slug> gate and set_profile decide the requested profile (and a
+// pinned caller's pin) directly instead of walking cfg.Profiles, so the work
+// a scoped refusal costs does not grow with the number of OTHER profiles the
 // operator has configured — the whole selectable list is fleet-sized, and a
 // refusal that computed it did zero iterations over an empty fleet and one
 // EffectiveServers per profile over a populated one: same status and body,
 // fleet-population timing oracle (codex review, PR D round 2; FR-004).
+//
+// Reach is precomputed per profile as a bitset over the configured servers'
+// positions (members), built once per snapshot: at request time the reach
+// test reads one bit per configured server, whatever the candidate — a
+// profile the snapshot lacks reads the all-zero placeholder (none) at the
+// same cost. Computing reach from the candidate's declared list instead
+// cost nothing for a missing profile and |servers| × |declared| for an
+// existing one, so a pinned token asking for its own zero-reach pin could
+// tell "deleted" from "exists" by timing (codex review, PR D round 3;
+// research D1).
 //
 // Duplicate slugs cannot load (ValidateProfiles), but a hand-built config may
 // carry them: the first occurrence wins, exactly like every linear lookup in
@@ -328,9 +295,18 @@ type profileIndex struct {
 	cfg    *config.Config
 	byName map[string]int // slug → position in cfg.Profiles
 
+	// words is the bitset length in uint64 words: ceil(len(cfg.Servers)/64).
+	// members holds len(cfg.Profiles) consecutive bitsets of that length —
+	// bit i of profile p's set is on when cfg.Servers[i] is one of p's
+	// declared servers (EffectiveServers as a set). none is the all-zero
+	// placeholder read for a slug the snapshot has no profile for.
+	words   int
+	members []uint64
+	none    []uint64
+
 	// lookupHook, when set, observes every slug the index resolves. It is the
-	// seam the traversal-counter test uses to prove the gate touches at most
-	// the requested slug and the pin; nil in production.
+	// seam the traversal-counter tests use to prove the gate and set_profile
+	// touch at most the requested slug and the pin; nil in production.
 	lookupHook func(slug string)
 }
 
@@ -345,48 +321,168 @@ func newProfileIndex(cfg *config.Config) *profileIndex {
 			idx.byName[cfg.Profiles[i].Name] = i
 		}
 	}
+
+	// Reach sets: server name → position once, then one bit per declared
+	// server that exists in the snapshot (the EffectiveServers rule, nil
+	// entries excluded).
+	position := make(map[string]int, len(cfg.Servers))
+	for i, s := range cfg.Servers {
+		if s == nil {
+			continue
+		}
+		if _, dup := position[s.Name]; !dup {
+			position[s.Name] = i
+		}
+	}
+	idx.words = (len(cfg.Servers) + 63) / 64
+	idx.none = make([]uint64, idx.words)
+	idx.members = make([]uint64, len(cfg.Profiles)*idx.words)
+	for p := range cfg.Profiles {
+		set := idx.membersOf(p)
+		for _, name := range cfg.Profiles[p].Servers {
+			if i, ok := position[name]; ok {
+				set[i/64] |= 1 << (uint(i) % 64)
+			}
+		}
+	}
 	return idx
+}
+
+// membersOf returns profile p's reach bitset, or the all-zero placeholder
+// for p < 0 (no such profile).
+func (idx *profileIndex) membersOf(p int) []uint64 {
+	if p < 0 {
+		return idx.none
+	}
+	return idx.members[p*idx.words : (p+1)*idx.words]
+}
+
+// position resolves one slug to its position in cfg.Profiles in O(1), or -1
+// when the snapshot has no such profile.
+func (idx *profileIndex) position(slug string) int {
+	if idx.lookupHook != nil {
+		idx.lookupHook(slug)
+	}
+	if i, ok := idx.byName[slug]; ok {
+		return i
+	}
+	return -1
 }
 
 // lookup resolves one slug in O(1), or nil when the snapshot has no such
 // profile.
 func (idx *profileIndex) lookup(slug string) *config.ProfileConfig {
-	if idx.lookupHook != nil {
-		idx.lookupHook(slug)
-	}
-	if i, ok := idx.byName[slug]; ok {
+	if i := idx.position(slug); i >= 0 {
 		return &idx.cfg.Profiles[i]
 	}
 	return nil
 }
 
+// reach reports whether the caller can enumerate at least one server of the
+// given reach set — the rule behind selectableProfileNames (research D1),
+// i.e. len(callerVisibleServers(ctx, p.EffectiveServers(cfg))) > 0 for the
+// profile whose set it is, without either allocation. It walks every
+// configured server (a per-snapshot constant), never returns early, and
+// evaluates the membership bit and the credential check unconditionally on
+// every step, so the cost is the same for the placeholder set, an empty
+// profile and one declaring every server.
+func (idx *profileIndex) reach(ctx context.Context, members []uint64) bool {
+	if idx.cfg == nil {
+		return false
+	}
+	scoped := auth.IsScopedCaller(ctx)
+	reach := false
+	for i, s := range idx.cfg.Servers {
+		name := ""
+		if s != nil {
+			name = s.Name
+		}
+		member := members[i/64]&(1<<(uint(i)%64)) != 0
+		allowed := !scoped || auth.CanEnumerateServer(ctx, name)
+		if member && allowed {
+			reach = true
+		}
+	}
+	return reach
+}
+
 // selectable reports whether the caller may select the profile named slug —
-// the rule forEachProfileSelectable applies to every profile, evaluated for
-// this ONE profile. It is the URL gate's predicate and must never consult the
-// selectable list: whatever the outcome (slug absent, profile out of reach,
-// pin deleted, pin zero-reach, pin mismatch, empty fleet) it does the same
-// work — one lookup of the slug, one lookup of the pin when the caller is
-// pinned, and exactly one allocation-free reach computation, over the
-// candidate profile or an empty placeholder when there is none — so no
-// branch can be told from another by its cost, and none of it depends on
-// how many other profiles exist.
+// the rule forEachSelectable applies to every profile, evaluated for this
+// ONE profile. It is the predicate of the URL gate and of set_profile's
+// admission, and must never consult the selectable list: whatever the
+// outcome (slug absent, profile out of reach, pin deleted, pin zero-reach,
+// pin mismatch, empty fleet) it does the same work — one lookup of the slug,
+// one lookup of the pin when the caller is pinned, and exactly one
+// allocation-free reach test over the candidate's precomputed set or the
+// all-zero placeholder when there is none — so no branch can be told from
+// another by its cost, and none of it depends on how many other profiles
+// exist or on how many servers the candidate declares.
 func (idx *profileIndex) selectable(ctx context.Context, slug string) bool {
-	candidate := idx.lookup(slug)
+	candidate := idx.position(slug)
 	pin := profilePinFromContext(ctx)
 	if pin != "" {
 		// The pin is the only profile a pinned caller may select; resolve it
 		// whether or not the URL named it so a mismatch costs what a match does.
-		pinned := idx.lookup(pin)
-		candidate = nil
+		pinned := idx.position(pin)
+		candidate = -1
 		if slug == pin {
 			candidate = pinned
 		}
 	}
-	reach := profileHasReach(ctx, idx.cfg, candidate)
+	reach := idx.reach(ctx, idx.membersOf(candidate))
 	// Administrators (and absent contexts) select any configured profile,
 	// including empty or ghost ones (SC-005); everyone else needs reach.
 	needsReach := pin != "" || auth.IsScopedCaller(ctx)
-	return candidate != nil && (!needsReach || reach)
+	return candidate >= 0 && (!needsReach || reach)
+}
+
+// forEachSelectable visits EVERY configured profile, in configured order,
+// and reports to visit whether the caller may select it — the same rule as
+// selectable, applied to each profile.
+//
+// It deliberately has no early return and does the same per-profile work
+// whatever the outcome: a scoped caller's reach is computed for each profile
+// even when a pin already rules it out, and a pinned caller keeps walking
+// after its pin is found — a version that answered after one iteration for
+// a live pin and after the whole slice for a deleted or zero-reach pin let a
+// pinned caller tell those apart by the work its own refusal cost (codex
+// review, PR D round 1). It is fleet-sized by nature, so no scoped refusal
+// may run it (round 3): it feeds the administrator's `available:` list and
+// the tests that pin selectable to it.
+func (idx *profileIndex) forEachSelectable(ctx context.Context, visit func(name string, selectable bool)) {
+	if idx.cfg == nil {
+		return
+	}
+	pin := profilePinFromContext(ctx)
+	// Administrators (and absent contexts) select any configured profile,
+	// including empty or ghost ones (SC-005); everyone else needs reach.
+	needsReach := pin != "" || auth.IsScopedCaller(ctx)
+	for i := range idx.cfg.Profiles {
+		p := &idx.cfg.Profiles[i]
+		selectable := true
+		if needsReach {
+			selectable = idx.reach(ctx, idx.membersOf(i))
+		}
+		if pin != "" && p.Name != pin {
+			selectable = false
+		}
+		visit(p.Name, selectable)
+	}
+}
+
+// selectableNames accumulates forEachSelectable into a pre-sized slice, in
+// configured order.
+func (idx *profileIndex) selectableNames(ctx context.Context) []string {
+	if idx.cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(idx.cfg.Profiles))
+	idx.forEachSelectable(ctx, func(name string, selectable bool) {
+		if selectable {
+			names = append(names, name)
+		}
+	})
+	return names
 }
 
 // profileIndexCache hands out the profileIndex for a config snapshot, built
@@ -399,9 +495,11 @@ type profileIndexCache struct {
 	last atomic.Pointer[profileIndex]
 }
 
-// For returns the index for cfg, building it on the first request after a
-// snapshot change. Two goroutines racing on that first request may both
-// build; either result is correct and the later Store wins.
+// For returns the index for cfg, building it when cfg is not the snapshot
+// the cached one covers. Server.warmProfileIndex builds it ahead of requests
+// (at construction and on every config event); a request that lands before
+// that delivery builds it here instead. Two goroutines racing on that first
+// build may both build; either result is correct and the later Store wins.
 func (c *profileIndexCache) For(cfg *config.Config) *profileIndex {
 	if idx := c.last.Load(); idx != nil && idx.cfg == cfg {
 		return idx
@@ -414,4 +512,14 @@ func (c *profileIndexCache) For(cfg *config.Config) *profileIndex {
 // setProfileServerTool wraps buildSetProfileTool as a ServerTool for routing-mode registration.
 func (p *MCPProxyServer) setProfileServerTool() mcpserver.ServerTool {
 	return mcpserver.ServerTool{Tool: buildSetProfileTool(), Handler: p.handleSetProfile}
+}
+
+// profileIndexFor returns the profile index for cfg: the main Server's
+// per-snapshot cache when one is wired (production — the same index the
+// /mcp/p/<slug> gate uses), otherwise this proxy's own (bare test servers).
+func (p *MCPProxyServer) profileIndexFor(cfg *config.Config) *profileIndex {
+	if p.mainServer != nil {
+		return p.mainServer.profileIndexes.For(cfg)
+	}
+	return p.profileIndexes.For(cfg)
 }

@@ -331,6 +331,11 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	routingEvents := server.runtime.SubscribeEvents()
 	go server.listenForRoutingModeRefresh(routingEvents)
 
+	// Spec 105 FR-004: index the startup snapshot now, so the first
+	// /mcp/p/<slug> request does not pay the one-off fleet-sized build (see
+	// warmProfileIndex).
+	server.warmProfileIndex()
+
 	server.runtime.StartBackgroundInitialization()
 
 	return server, nil
@@ -586,6 +591,14 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 	defer s.runtime.UnsubscribeEvents(eventCh)
 
 	for evt := range eventCh {
+		// Every config event follows a snapshot publication (config.saved,
+		// config.reloaded and servers.changed are all emitted after the new
+		// *Config is current), so index the new snapshot here rather than in
+		// the first request that reads it (Spec 105 FR-004, warmProfileIndex).
+		switch evt.Type {
+		case runtime.EventTypeServersChanged, runtime.EventTypeConfigReloaded, runtime.EventTypeConfigSaved:
+			s.warmProfileIndex()
+		}
 		switch evt.Type {
 		case runtime.EventTypeServersChanged:
 			s.logger.Debug("servers changed, refreshing routing mode tools",
@@ -2340,6 +2353,21 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// warmProfileIndex builds the profile index for the runtime's current config
+// snapshot ahead of any request. The index is fleet-sized to build (one
+// insertion per profile, one reach bitset per profile) and constant to use;
+// leaving the build to the first /mcp/p/<slug> request after startup or a
+// reload made that one request's refusal cost 4 096 insertions over a hidden
+// fleet and none over an empty one (codex review, PR D round 3). Called at
+// construction and on every config event; the gate's own lazy build remains
+// the fallback for a request that lands in the event-delivery window.
+func (s *Server) warmProfileIndex() {
+	if s.runtime == nil {
+		return
+	}
+	s.profileIndexes.For(s.runtime.Config())
+}
+
 // serveProfileURL is profileMiddleware over ONE config snapshot — the whole
 // gate after the snapshot read, so it can be exercised against any fleet
 // shape without a runtime behind it (the fleet-parity tests build a bare
@@ -2352,9 +2380,10 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, cfg *co
 	slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
 	slug = strings.Trim(slug, "/")
 
-	// One slug → profile index per snapshot: the gate below and the lookup
-	// after it resolve the slug directly, so neither the refusal nor the
-	// admission walks cfg.Profiles.
+	// One slug → profile index per snapshot (normally already built by
+	// warmProfileIndex): the gate below and the lookup after it resolve the
+	// slug directly, so neither the refusal nor the admission walks
+	// cfg.Profiles.
 	profiles := s.profileIndexes.For(cfg)
 
 	// Spec 105 FR-004: the selectable-profile gate for scoped callers. It

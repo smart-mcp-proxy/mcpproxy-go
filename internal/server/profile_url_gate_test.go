@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -283,4 +285,36 @@ func TestProfileMiddleware_RefusesThroughTheSnapshotSeam(t *testing.T) {
 		entry.handler.ServeHTTP(rec, req)
 		require.Equal(t, before+1, reached, "%s must admit the selectable profile", entry.name)
 	}
+}
+
+// TestProfileIndex_WarmedBeforeFirstRequest (Spec 105 PR D codex round 3,
+// prior item): the per-snapshot index must not be built by the first request
+// after startup or a hot reload — that request would pay one insertion per
+// configured profile (4 096 over a hidden fleet, none over an empty one),
+// the fleet-population cost the index exists to remove (FR-004). The Server
+// builds it when it is constructed and again on every config event, so the
+// gate's lazy build is only a fallback for the event-delivery window.
+func TestProfileIndex_WarmedBeforeFirstRequest(t *testing.T) {
+	srv, _ := newProfileGateTestServer(t)
+
+	// Construction indexes the constructor's snapshot; background
+	// initialization then publishes its own (followed by its config event),
+	// so "covers the current snapshot" is reached, never requested.
+	require.NotNil(t, srv.profileIndexes.last.Load(), "the index must be built at construction, not by the first request")
+	covered := func() bool {
+		idx := srv.profileIndexes.last.Load()
+		return idx != nil && idx.cfg == srv.runtime.Config()
+	}
+	require.Eventually(t, covered, 5*time.Second, 10*time.Millisecond, "the startup snapshot must be indexed without a request")
+	first := srv.runtime.Config()
+
+	// A hot reload publishes a new snapshot; its config event rebuilds the
+	// index before any request arrives.
+	next := *first
+	next.Profiles = append(slices.Clone(first.Profiles), config.ProfileConfig{Name: "extra", Servers: []string{"research-srv"}})
+	_, err := srv.ApplyConfig(&next, filepath.Join(t.TempDir(), "mcp_config.json"))
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return srv.runtime.Config() != first && covered() },
+		5*time.Second, 10*time.Millisecond, "the reloaded snapshot must be indexed without a request")
+	require.NotNil(t, srv.profileIndexes.last.Load().lookup("extra"))
 }
