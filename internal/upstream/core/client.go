@@ -151,6 +151,7 @@ type Client struct {
 
 	// Docker container tracking
 	containerID     string
+	containerOwner  string // com.mcpproxy.server label read back when containerID was verified (Spec 105 D9)
 	containerName   string // Store container name for cleanup via docker container commands
 	isDockerCommand bool
 

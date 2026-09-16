@@ -108,6 +108,7 @@ func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string)
 		if ok {
 			c.mu.Lock()
 			c.containerID = found.ID
+			c.containerOwner = found.Owner
 			c.mu.Unlock()
 
 			c.logger.Info("Successfully recovered container ID via name lookup",
@@ -170,6 +171,7 @@ func (c *Client) trackCidfileContainer(ctx context.Context, containerID string, 
 
 	c.mu.Lock()
 	c.containerID = containerID
+	c.containerOwner = owned.Owner
 	c.mu.Unlock()
 
 	c.logger.Info("Docker container ID captured for cleanup",
@@ -191,10 +193,10 @@ func (c *Client) trackCidfileContainer(ctx context.Context, containerID string, 
 
 // killDockerContainerWithContext stops (then kills) the tracked container
 // during disconnect. The id was adopted through trackCidfileContainer or the
-// name recovery, but ownership is re-established here, at the moment of the
-// mutation — `docker rename` or a foreign container reusing an id prefix
-// could have changed the answer — so no path stops a container the
-// predicate does not admit now.
+// name recovery, but ownership is re-established by stopOwnedContainer at
+// the moment of each mutation — `docker rename` or a foreign container
+// reusing the id could have changed the answer — so no path stops a
+// container the predicate does not admit now.
 // NOTE: This function expects the caller to already hold the mutex lock
 func (c *Client) killDockerContainerWithContext(ctx context.Context) {
 	c.logger.Debug("Starting Docker container kill process",
@@ -213,36 +215,9 @@ func (c *Client) killDockerContainerWithContext(ctx context.Context) {
 	// container is either stopped or deliberately left alone.
 	// Note: Caller already holds the mutex lock
 	c.containerID = ""
+	c.containerOwner = ""
 
-	owned, ok, err := c.lookupOwnedContainerByID(ctx, containerID)
-	switch {
-	case err != nil:
-		c.logger.Warn("Could not verify ownership of the tracked container - leaving it alone",
-			zap.String("server", c.config.Name),
-			zap.String("container_id", shortContainerID(containerID)),
-			zap.Error(err))
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Warn("Could not verify ownership of the tracked container - leaving it alone", zap.Error(err))
-		}
-		return
-	case !ok:
-		c.logger.Info("Tracked container is not canonically owned by this server - leaving it alone",
-			zap.String("server", c.config.Name),
-			zap.String("container_id", shortContainerID(containerID)))
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Info("Tracked container is not canonically owned by this server - leaving it alone")
-		}
-		return
-	}
-
-	c.logger.Info("Killing Docker container during disconnect",
-		zap.String("server", c.config.Name),
-		zap.String("container_id", shortContainerID(containerID)),
-		zap.String("full_container_id", containerID),
-		zap.String("container_name", owned.Name),
-		containerOwnerField(owned.Owner))
-
-	c.stopOwnedContainer(ctx, owned, "cidfile")
+	c.stopOwnedContainer(ctx, containerID, "cidfile")
 
 	c.logger.Debug("Container cleanup process finished",
 		zap.String("server", c.config.Name))
@@ -283,6 +258,13 @@ func (c *Client) killDockerContainerByCommandWithContext(ctx context.Context) {
 		return
 	}
 
+	c.killDockerContainersByImageWithContext(ctx, imageName)
+}
+
+// killDockerContainersByImageWithContext is the image-name fallback: it stops
+// the running containers this server canonically owns whose image is
+// imageName.
+func (c *Client) killDockerContainersByImageWithContext(ctx context.Context, imageName string) {
 	c.logger.Debug("Searching for owned containers by image name",
 		zap.String("server", c.config.Name),
 		zap.String("image_name", imageName))
@@ -304,12 +286,6 @@ func (c *Client) killDockerContainerByCommandWithContext(ctx context.Context) {
 		// Check if this container matches our image
 		if container.Image == imageName {
 			containersToKill = append(containersToKill, container)
-			c.logger.Info("Found matching owned container for cleanup",
-				zap.String("server", c.config.Name),
-				zap.String("container_id", container.ID),
-				zap.String("container_name", container.Name),
-				containerOwnerField(container.Owner),
-				zap.String("image", container.Image))
 		}
 	}
 
@@ -320,9 +296,14 @@ func (c *Client) killDockerContainerByCommandWithContext(ctx context.Context) {
 		return
 	}
 
-	// Kill matching containers
+	// The listing is a snapshot: stopOwnedContainer re-reads each container
+	// right before its stop, and only that read names it in the records.
+	c.logger.Info("Found matching owned containers for cleanup",
+		zap.String("server", c.config.Name),
+		zap.String("image_name", imageName),
+		zap.Int("container_count", len(containersToKill)))
 	for _, container := range containersToKill {
-		c.stopOwnedContainer(ctx, container, "image")
+		c.stopOwnedContainer(ctx, container.ID, "image")
 	}
 }
 
@@ -347,14 +328,6 @@ func (c *Client) killDockerContainersByNamePatternWithContext(ctx context.Contex
 		return false
 	}
 
-	for _, container := range owned {
-		c.logger.Info("Found owned container by name pattern",
-			zap.String("server", c.config.Name),
-			zap.String("container_id", container.ID),
-			zap.String("container_name", container.Name),
-			containerOwnerField(container.Owner))
-	}
-
 	if len(owned) == 0 {
 		c.logger.Debug("No owned containers found by name pattern",
 			zap.String("server", c.config.Name),
@@ -362,9 +335,14 @@ func (c *Client) killDockerContainersByNamePatternWithContext(ctx context.Contex
 		return false
 	}
 
-	// Kill owned containers
+	// The listing is a snapshot: stopOwnedContainer re-reads each container
+	// right before its stop, and only that read names it in the records.
+	c.logger.Info("Found owned containers by name pattern",
+		zap.String("server", c.config.Name),
+		zap.String("name_pattern", namePattern),
+		zap.Int("container_count", len(owned)))
 	for _, container := range owned {
-		c.stopOwnedContainer(ctx, container, "name pattern")
+		c.stopOwnedContainer(ctx, container.ID, "name pattern")
 	}
 
 	return true // We found and processed containers
@@ -395,7 +373,7 @@ func (c *Client) killDockerContainerByNameWithContext(ctx context.Context, conta
 		return false
 	}
 
-	return c.stopOwnedContainer(ctx, found, "exact name")
+	return c.stopOwnedContainer(ctx, found.ID, "exact name")
 }
 
 // ensureNoExistingContainers removes all existing containers this server
@@ -442,39 +420,45 @@ func (c *Client) ensureNoExistingContainers(ctx context.Context) error {
 			containerOwnerField(owned[0].Owner))
 	}
 
-	for _, container := range owned {
-		c.logger.Info("Removing existing container",
-			zap.String("server", c.config.Name),
-			zap.String("container_id", container.ID),
-			zap.String("container_name", container.Name),
-			containerOwnerField(container.Owner),
-			zap.String("status", container.Status))
-
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Info("Removing existing container",
+	// The listing is a snapshot: each row is re-verified right before its
+	// own rm -f (a later row may have been relabelled to a co-tenant's —
+	// `a-b`'s for `a/b`, same name — while an earlier one was removed), and
+	// every record naming a container carries the id and owner read then.
+	for _, listed := range owned {
+		status := listed.Status
+		// Force remove (works for running and stopped containers)
+		res := c.mutateOwnedContainer(ctx, listed.ID, ContainerRemove, "pre-creation", func(container ContainerRow) {
+			c.logger.Info("Removing existing container",
+				zap.String("server", c.config.Name),
 				zap.String("container_id", container.ID),
 				zap.String("container_name", container.Name),
-				containerOwnerField(container.Owner))
-		}
-
-		// Force remove (works for running and stopped containers)
-		rmCmd := c.newDockerCmd(ctx, "rm", "-f", container.ID)
-		if err := rmCmd.Run(); err != nil {
-			c.logger.Error("Failed to remove existing container",
-				zap.String("container_id", container.ID),
 				containerOwnerField(container.Owner),
-				zap.Error(err))
-			// Continue anyway - try to remove others
-		} else {
-			c.logger.Info("Successfully removed existing container",
-				zap.String("container_id", container.ID),
-				containerOwnerField(container.Owner))
-
+				zap.String("status", status))
 			if c.upstreamLogger != nil {
-				c.upstreamLogger.Info("Successfully removed existing container",
+				c.upstreamLogger.Info("Removing existing container",
 					zap.String("container_id", container.ID),
+					zap.String("container_name", container.Name),
 					containerOwnerField(container.Owner))
 			}
+		})
+		if !res.Verified {
+			continue
+		}
+		if res.Err != nil {
+			c.logger.Error("Failed to remove existing container",
+				zap.String("container_id", res.Container.ID),
+				containerOwnerField(res.Container.Owner),
+				zap.Error(res.Err))
+			// Continue anyway - try to remove others
+			continue
+		}
+		c.logger.Info("Successfully removed existing container",
+			zap.String("container_id", res.Container.ID),
+			containerOwnerField(res.Container.Owner))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Info("Successfully removed existing container",
+				zap.String("container_id", res.Container.ID),
+				containerOwnerField(res.Container.Owner))
 		}
 	}
 

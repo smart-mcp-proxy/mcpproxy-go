@@ -361,7 +361,10 @@ cleanup path (the pre-start sweep for stale containers, the container
 captured from `--cidfile`, the disconnect fallbacks by exact name, by name
 pattern and by image name) inspects the container and stops or removes it
 only when its `com.mcpproxy.server` label **and** canonical name both match
-the server being cleaned up. Containers you started yourself with
+the server being cleaned up — and it re-inspects the container immediately
+before every `docker stop`, `kill` or `rm -f` (the kill after a failed stop
+included), never acting on an earlier listing, so a container renamed,
+relabelled or replaced in between is left alone. Containers you started yourself with
 `docker run --name …`, or that pre-date the label, are never touched by any
 of these paths, and a container that merely shares an image with a server's
 is never stopped on that server's behalf. Housekeeping records in the
@@ -391,8 +394,9 @@ Two consequences of the ownership rule are worth knowing:
   container on shutdown; every one carrying this instance's id when
   shutdown fails) apply the same rule: only containers canonically owned by
   a server in the current configuration are stopped or removed — each one
-  re-inspected immediately before its stop, kill or removal, so a container
-  renamed or relabelled after the sweep listed it is left alone — and the
+  re-inspected immediately before its stop, kill or removal through the
+  same check every per-server cleanup uses, so a container renamed or
+  relabelled after the sweep listed it is left alone — and the
   disconnect-timeout path re-checks the ownership of the id it tracked
   before `docker rm -f`. A container that merely carries the mcpproxy
   labels — one you labelled yourself, or an orphan of a server that is no

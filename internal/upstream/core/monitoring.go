@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -250,15 +249,23 @@ func (c *Client) monitorStderr(ctx context.Context, stderr io.Reader) {
 	}
 }
 
-// monitorDockerLogsWithContext monitors Docker container logs using `docker logs` with context cancellation
+// dockerLogsWaitTimeout bounds how long monitorDockerLogsWithContext waits
+// for the container id to be tracked. A variable so tests can shorten it.
+var dockerLogsWaitTimeout = 10 * time.Second
+
+// monitorDockerLogsWithContext monitors Docker container logs using `docker
+// logs` with context cancellation. The container it names is only ever the
+// one trackCidfileContainer verified (id and owner read back from Docker):
+// it never reads the cidfile itself, since a cidfile can name a container
+// that is not this server's (Spec 105 D9, codex round 6).
 func (c *Client) monitorDockerLogsWithContext(ctx context.Context, cidFile string) {
 	waitTicker := time.NewTicker(100 * time.Millisecond)
 	defer waitTicker.Stop()
 
-	waitTimeout := time.NewTimer(10 * time.Second)
+	waitTimeout := time.NewTimer(dockerLogsWaitTimeout)
 	defer waitTimeout.Stop()
 
-	var containerID string
+	var containerID, containerOwner string
 
 waitLoop:
 	for {
@@ -269,20 +276,13 @@ waitLoop:
 				zap.String("cid_file", cidFile))
 			return
 		case <-waitTimeout.C:
-			// Fall back to reading the cid file one time in case tracking goroutine failed
-			if data, err := os.ReadFile(cidFile); err == nil {
-				containerID = strings.TrimSpace(string(data))
-				if containerID != "" {
-					break waitLoop
-				}
-			}
-			c.logger.Debug("Docker logs monitoring timed out waiting for container ID",
+			c.logger.Debug("Docker logs monitoring timed out before a verified container ID was tracked",
 				zap.String("server", c.config.Name),
 				zap.String("cid_file", cidFile))
 			return
 		case <-waitTicker.C:
 			c.mu.RLock()
-			containerID = c.containerID
+			containerID, containerOwner = c.containerID, c.containerOwner
 			c.mu.RUnlock()
 			if containerID != "" {
 				break waitLoop
@@ -296,7 +296,8 @@ waitLoop:
 	c.logger.Debug("Docker container started - logs available via 'docker logs' command",
 		zap.String("server", c.config.Name),
 		zap.String("container_id", shortContainerID(containerID)),
-		zap.String("command", fmt.Sprintf("docker logs -f %s", containerID[:12])))
+		containerOwnerField(containerOwner),
+		zap.String("command", fmt.Sprintf("docker logs -f %s", shortContainerID(containerID))))
 
 	// Note: We intentionally do NOT stream container logs to mcpproxy logs because:
 	// 1. It causes massive log file bloat (multiple GB per day with active containers)
@@ -310,7 +311,8 @@ waitLoop:
 	<-ctx.Done()
 	c.logger.Debug("Docker logs monitoring ended",
 		zap.String("server", c.config.Name),
-		zap.String("container_id", shortContainerID(containerID)))
+		zap.String("container_id", shortContainerID(containerID)),
+		containerOwnerField(containerOwner))
 }
 
 // recordRecentStderr appends a stderr line to the bounded ring buffer.

@@ -36,7 +36,10 @@ import (
 // invocation log, answers `ps` from a TSV fixture honouring
 // --filter name=<ERE> / id=<prefix> / label=<k>[=<v>] and --format templates ({{.ID}},
 // {{.Names}}, {{.Image}}, {{.Status}}, {{.CreatedAt}}, {{.Labels}},
-// {{.Label "k"}}), and exits 0 for rm/stop/kill/version.
+// {{.Label "k"}}), and exits 0 for rm/stop/kill/version unless the verb is
+// listed in the fail file (failVerbs). A `ps.tsv.next` fixture replaces the
+// fixture after the Nth `ps` answers (swapFixtureAfterPs), so the daemon's
+// state can change between a listing and the mutation that follows it.
 // ---------------------------------------------------------------------------
 
 // fakeContainer is one `docker ps` row of the fixture.
@@ -56,6 +59,23 @@ type fakeDocker struct {
 	logPath    string
 	psPath     string
 	runErrPath string
+	failPath   string
+}
+
+// failVerbs makes every later invocation of the listed docker verbs (stop,
+// kill, rm, ...) exit 1 without output.
+func (fd *fakeDocker) failVerbs(t *testing.T, verbs ...string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(fd.failPath, []byte(strings.Join(verbs, " ")+"\n"), 0o600))
+}
+
+// swapFixtureAfterPs makes the shim answer the first n `ps` invocations from
+// the current fixture and every later one from containers — the state of
+// the daemon after another client changed it in between.
+func (fd *fakeDocker) swapFixtureAfterPs(t *testing.T, n int, containers []fakeContainer) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(fd.psPath+".next", fakeFixtureTSV(containers), 0o600))
+	require.NoError(t, os.WriteFile(fd.psPath+".swapcount", []byte(fmt.Sprintf("%d\n", n)), 0o600))
 }
 
 // failRunWith makes every `docker run` print stderr and exit 125.
@@ -68,8 +88,13 @@ const fakeDockerShim = `#!/bin/sh
 LOG=%s
 PS=%s
 RUNERR=%s
+FAIL=%s
 printf '%%s\n' "$*" >> "$LOG"
 if [ "$1" = run ] && [ -s "$RUNERR" ]; then cat "$RUNERR" >&2; exit 125; fi
+if [ -f "$FAIL" ]; then
+  read -r failverbs < "$FAIL"
+  case " $failverbs " in *" $1 "*) exit 1 ;; esac
+fi
 [ "$1" = ps ] || exit 0
 shift
 format='{{.ID}}	{{.Names}}'
@@ -122,6 +147,12 @@ function repl(s, lit, val,    i, out) {
   }
   print out
 }' "$PS"
+if [ -f "$PS.next" ]; then
+  n=1
+  [ -f "$PS.swapcount" ] && read -r n < "$PS.swapcount"
+  n=$((n - 1))
+  if [ "$n" -le 0 ]; then mv "$PS.next" "$PS"; rm -f "$PS.swapcount"; else printf '%%s\n' "$n" > "$PS.swapcount"; fi
+fi
 `
 
 // installFakeDocker writes the shim, points the REAL resolver at it
@@ -137,19 +168,12 @@ func installFakeDocker(t *testing.T, containers []fakeContainer) *fakeDocker {
 		logPath:    filepath.Join(dir, "invocations.log"),
 		psPath:     filepath.Join(dir, "ps.tsv"),
 		runErrPath: filepath.Join(dir, "run.stderr"),
+		failPath:   filepath.Join(dir, "fail.verbs"),
 	}
-	var tsv strings.Builder
-	for _, c := range containers {
-		labels := make([]string, 0, len(c.Labels))
-		for k, v := range c.Labels {
-			labels = append(labels, k+"="+v)
-		}
-		fmt.Fprintf(&tsv, "%s\t%s\t%s\t%s\t%s\n", c.ID, c.Name, c.Image, c.Status, strings.Join(labels, ","))
-	}
-	require.NoError(t, os.WriteFile(fd.psPath, []byte(tsv.String()), 0o600))
+	require.NoError(t, os.WriteFile(fd.psPath, fakeFixtureTSV(containers), 0o600))
 
 	shim := filepath.Join(dir, "docker")
-	script := fmt.Sprintf(fakeDockerShim, dockerShellQuote(fd.logPath), dockerShellQuote(fd.psPath), dockerShellQuote(fd.runErrPath))
+	script := fmt.Sprintf(fakeDockerShim, dockerShellQuote(fd.logPath), dockerShellQuote(fd.psPath), dockerShellQuote(fd.runErrPath), dockerShellQuote(fd.failPath))
 	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
 
 	// PATH must expose sh and awk (the shim needs them) but never a real
@@ -158,7 +182,7 @@ func installFakeDocker(t *testing.T, containers []fakeContainer) *fakeDocker {
 	// links only the tools the shim uses.
 	toolDir := filepath.Join(dir, "path")
 	require.NoError(t, os.Mkdir(toolDir, 0o755))
-	for _, tool := range []string{"sh", "awk", "printf", "cat"} {
+	for _, tool := range []string{"sh", "awk", "printf", "cat", "mv", "rm"} {
 		if real, err := exec.LookPath(tool); err == nil {
 			require.NoError(t, os.Symlink(real, filepath.Join(toolDir, tool)))
 		}
@@ -170,6 +194,19 @@ func installFakeDocker(t *testing.T, containers []fakeContainer) *fakeDocker {
 	restore := shellwrap.SetWellKnownDockerPathsForTest(func() []string { return []string{shim} })
 	t.Cleanup(restore)
 	return fd
+}
+
+// fakeFixtureTSV renders the `ps` fixture the shim reads.
+func fakeFixtureTSV(containers []fakeContainer) []byte {
+	var tsv strings.Builder
+	for _, c := range containers {
+		labels := make([]string, 0, len(c.Labels))
+		for k, v := range c.Labels {
+			labels = append(labels, k+"="+v)
+		}
+		fmt.Fprintf(&tsv, "%s\t%s\t%s\t%s\t%s\n", c.ID, c.Name, c.Image, c.Status, strings.Join(labels, ","))
+	}
+	return []byte(tsv.String())
 }
 
 // fakeDockerIgnoreFiltersEnv makes the shim answer `ps` with EVERY fixture
@@ -497,7 +534,9 @@ func shortenCidfilePoll(t *testing.T) {
 // container_owner=a, and stopped/killed it on disconnect. Under D9 a
 // user-`--name` container is not ours: the id captured from the cidfile
 // must be inspected, and a container that fails ownership is left alone and
-// never named in a's per-server log.
+// never named in a's per-server log. The fixture holds the FULL id, as
+// `docker ps --no-trunc` reports it (codex round 6: every read is matched
+// back by the full id exactly).
 func TestDockerCleanup_CidfileContainerMustPassOwnership(t *testing.T) {
 	const customID = "c0ffee000001"
 	const customFullID = customID + "0000000000000000000000000000000000000000000000000000"
@@ -506,10 +545,10 @@ func TestDockerCleanup_CidfileContainerMustPassOwnership(t *testing.T) {
 		row   fakeContainer
 		owned bool
 	}{
-		{"user --name custom, no label", fakeContainer{ID: customID, Name: "custom", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{}}, false},
-		{"own label, user --name custom via extra_args", fakeContainer{ID: customID, Name: "custom", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}}, false},
-		{"foreign label, canonical-looking name", fakeContainer{ID: customID, Name: "mcpproxy-a-wxyz", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a-b"}}, false},
-		{"own label and canonical name", fakeContainer{ID: customID, Name: "mcpproxy-a-wxyz", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}}, true},
+		{"user --name custom, no label", fakeContainer{ID: customFullID, Name: "custom", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{}}, false},
+		{"own label, user --name custom via extra_args", fakeContainer{ID: customFullID, Name: "custom", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}}, false},
+		{"foreign label, canonical-looking name", fakeContainer{ID: customFullID, Name: "mcpproxy-a-wxyz", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a-b"}}, false},
+		{"own label and canonical name", fakeContainer{ID: customFullID, Name: "mcpproxy-a-wxyz", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

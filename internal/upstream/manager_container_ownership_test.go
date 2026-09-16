@@ -40,7 +40,7 @@ import (
 // managerFakeDocker is a sh+awk `docker` shim on PATH (the manager sweeps
 // exec the bare name): `ps` answers from a TSV fixture honouring every
 // `--filter label=k[=v]` (joined with `|`, which no label here contains),
-// `--filter id=<id>` and `--format` with {{.ID}}, {{.Names}} and
+// `--filter id=<id>` (a prefix match, as docker's is) and `--format` with {{.ID}}, {{.Names}} and
 // {{.Label "k"}}; `ps -q` answers the ids of the rows marked Running
 // (default: every container already stopped); stop/kill/rm exit 0 unless
 // the verb is listed in the fail file (failVerbs). Every invocation is
@@ -96,7 +96,7 @@ function repl(s, lit, val,    i, out) {
 }
 BEGIN { nflt = split(flt, fl, "|") }
 {
-  if (idflt != "" && $1 != idflt) next
+  if (idflt != "" && index($1, idflt) != 1) next
   if (quiet == 1 && $4 != "1") next
   delete labels
   n = split($3, pairs, ",")
@@ -560,6 +560,12 @@ func TestSweeps_ReverifyOwnershipAtMutationTime(t *testing.T) {
 	}{
 		{name: "relabelled foreign between listing and mutation", after: relabelled("postgres", "")},
 		{name: "renamed to an unconfigured server's shape", after: relabelled("mcpproxy-a-b-xk3q", "a-b")},
+		// A different container whose id extends the listed one: `--filter
+		// id=` is a prefix match, so only an exact full-id comparison
+		// tells it apart (codex round 6).
+		{name: "replaced by a container whose id extends the listed one", after: []managerFakeContainer{{
+			ID: sweepOwnID + "ffffffffffffffffffffffffffffffffffffffffffffffffffff", Name: sweepOwnName, Running: true,
+			Labels: map[string]string{"com.mcpproxy.managed": "true", "com.mcpproxy.instance": core.GetInstanceID(), "com.mcpproxy.server": "a"}}}},
 		{name: "unchanged", after: relabelled(sweepOwnName, "a"), wantOwner: "a"},
 		{name: "re-owned by another configured server", after: relabelled("mcpproxy-a-b-xk3q", "a/b"), wantOwner: "a/b"},
 	}
@@ -576,6 +582,10 @@ func TestSweeps_ReverifyOwnershipAtMutationTime(t *testing.T) {
 				if arm.wantOwner == "" {
 					assert.Empty(t, mutations, "a container whose ownership changed was mutated; invocations:\n%s",
 						strings.Join(fd.invocations(t), "\n"))
+					for _, line := range fd.invocations(t) {
+						verb := strings.Fields(line)[0]
+						assert.NotContains(t, []string{"stop", "kill", "rm"}, verb, "nothing may be mutated: %q", line)
+					}
 					for _, entry := range mainLogs.All() {
 						assert.False(t, recordNamesAny(entry.ContextMap(), sweepOwnID, shortContainerID(sweepOwnID), arm.after[0].Name),
 							"record %q names a container that is no longer owned: %v", entry.Message, entry.ContextMap())

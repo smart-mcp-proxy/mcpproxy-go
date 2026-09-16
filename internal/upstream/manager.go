@@ -774,17 +774,22 @@ func (m *Manager) configuredServerNames() []string {
 	return names
 }
 
-// readManagedContainers runs `docker ps -a` with the given filters and
-// returns every row — id, name and owner label as Docker reports them —
-// with no ownership applied; a row the format could not be parsed is
-// returned with an empty name and owner so it fails the predicate.
+// sweepDocker is how the sweeps run docker: the bare name on PATH.
+func sweepDocker(ctx context.Context, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, "docker", args...)
+}
+
+// readManagedContainers runs `docker ps -a --no-trunc` with the given
+// filters and returns every row — full id, name and owner label as Docker
+// reports them — with no ownership applied; a row the format could not be
+// parsed is returned with an empty name and owner so it fails the predicate.
 func (m *Manager) readManagedContainers(ctx context.Context, filters ...string) ([]managedContainer, error) {
-	args := []string{"ps", "-a"}
+	args := []string{"ps", "-a", "--no-trunc"}
 	for _, filter := range filters {
 		args = append(args, "--filter", filter)
 	}
 	args = append(args, "--format", managedContainerFormat)
-	output, err := exec.CommandContext(ctx, "docker", args...).Output()
+	output, err := sweepDocker(ctx, args...).Output()
 	if err != nil {
 		return nil, err
 	}
@@ -835,35 +840,39 @@ func (m *Manager) listOwnedManagedContainers(ctx context.Context, filters ...str
 	return owned, nil
 }
 
-// reverifyOwnedManagedContainer re-reads one selected container's name and
-// owner label immediately before a sweep mutates it: the selection `docker
-// ps` is a snapshot, and another Docker client can rename or relabel the
-// container between that listing and the stop/kill/rm, so ownership is
-// re-established at the moment of the mutation — the same rule the core
-// applies to a tracked container (Spec 105 FR-007 / D9, codex round 5). ok
-// is false, and the refusal recorded without the id or name, when the
-// re-read fails or the container no longer satisfies the predicate; the row
-// returned is the one read NOW, so its Owner is what the mutation's records
-// carry.
-func (m *Manager) reverifyOwnedManagedContainer(ctx context.Context, container managedContainer) (managedContainer, bool) {
-	// `--filter id=` is a prefix match on the full id; the listed id is the
-	// short one, so the row is matched back by that id exactly.
-	rows, err := m.readManagedContainers(ctx, "id="+container.ID)
-	if err != nil {
+// mutateOwnedManagedContainer runs op on one selected container through
+// core.ContainerMutator — the one verify-then-mutate implementation the
+// core client's cleanup paths use too (Spec 105 FR-007 / D9, codex rounds 5
+// and 6): the selection `docker ps` is a snapshot, and another Docker client
+// can rename or relabel the container between that listing and the
+// stop/kill/rm, so its full id, name and label are re-read immediately
+// before the command and core.ContainerOwnedByAny re-applied over the
+// configured servers. A refusal — the re-read failed, or the container no
+// longer satisfies the predicate — is recorded naming only the listing-time
+// server, never the id or name; the row handed back is the one read NOW, so
+// its Owner is what the mutation's records carry. intent is called with
+// that row right before the command.
+func (m *Manager) mutateOwnedManagedContainer(ctx context.Context, selected managedContainer, op core.ContainerMutation, intent func(core.ContainerRow)) core.MutationResult {
+	mutator := core.ContainerMutator{
+		Docker: sweepDocker,
+		Owns: func(containerName, ownerLabel string) bool {
+			return core.ContainerOwnedByAny(m.configuredServerNames(), containerName, ownerLabel)
+		},
+	}
+	res := mutator.Mutate(ctx, selected.ID, op, intent)
+	switch {
+	case res.Verified:
+	case res.Err != nil:
 		m.logger.Warn("Could not re-verify ownership of a selected container - leaving it alone",
-			zap.String("server", container.Owner),
-			zap.Error(err))
-		return managedContainer{}, false
+			zap.String("server", selected.Owner),
+			zap.String("operation", string(op)),
+			zap.Error(res.Err))
+	default:
+		m.logger.Warn("Selected container is no longer canonically owned by a configured server - leaving it alone",
+			zap.String("server", selected.Owner),
+			zap.String("operation", string(op)))
 	}
-	configured := m.configuredServerNames()
-	for _, row := range rows {
-		if row.ID == container.ID && core.ContainerOwnedByAny(configured, row.Name, row.Owner) {
-			return row, true
-		}
-	}
-	m.logger.Warn("Selected container is no longer canonically owned by a configured server - leaving it alone",
-		zap.String("server", container.Owner))
-	return managedContainer{}, false
+	return res
 }
 
 // cleanupAllManagedContainers finds and stops all Docker containers managed by mcpproxy
@@ -893,32 +902,31 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 	defer graceCancel()
 
 	// Ownership is re-established right before each mutation
-	// (reverifyOwnedManagedContainer), and every record below that names a
+	// (mutateOwnedManagedContainer), and every record below that names a
 	// container carries the owner Docker reported for it at that moment
 	// (container_owner), on the outcome records as well as the intent ones
 	// (Spec 105 D8/D9, codex rounds 4 and 5).
 	for _, selected := range owned {
-		container, ok := m.reverifyOwnedManagedContainer(graceCtx, selected)
-		if !ok {
+		// Try graceful stop first
+		res := m.mutateOwnedManagedContainer(graceCtx, selected, core.ContainerStop, func(container core.ContainerRow) {
+			m.logger.Info("Stopping container",
+				zap.String("container_id", container.ID),
+				zap.String("container_name", container.Name),
+				zap.String("server", container.Owner),
+				zap.String("container_owner", container.Owner))
+		})
+		if !res.Verified {
 			continue
 		}
-		m.logger.Info("Stopping container",
-			zap.String("container_id", container.ID),
-			zap.String("container_name", container.Name),
-			zap.String("server", container.Owner),
-			zap.String("container_owner", container.Owner))
-
-		// Try graceful stop first
-		stopCmd := exec.CommandContext(graceCtx, "docker", "stop", container.ID)
-		if err := stopCmd.Run(); err != nil {
+		if res.Err != nil {
 			m.logger.Warn("Graceful stop failed, will force kill",
-				zap.String("container_id", container.ID),
-				zap.String("container_owner", container.Owner),
-				zap.Error(err))
+				zap.String("container_id", res.Container.ID),
+				zap.String("container_owner", res.Container.Owner),
+				zap.Error(res.Err))
 		} else {
 			m.logger.Info("Container stopped gracefully",
-				zap.String("container_id", container.ID),
-				zap.String("container_owner", container.Owner))
+				zap.String("container_id", res.Container.ID),
+				zap.String("container_owner", res.Container.Owner))
 		}
 	}
 
@@ -930,28 +938,26 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 
 	for _, selected := range owned {
 		// Check if container is still running
-		psCmd := exec.CommandContext(killCtx, "docker", "ps", "-q",
-			"--filter", "id="+selected.ID)
+		psCmd := sweepDocker(killCtx, "ps", "-q", "--filter", "id="+selected.ID)
 		if output, err := psCmd.Output(); err == nil && len(strings.TrimSpace(string(output))) > 0 {
-			container, ok := m.reverifyOwnedManagedContainer(killCtx, selected)
-			if !ok {
-				continue
-			}
 			// Still running, force kill
-			m.logger.Info("Force killing container",
-				zap.String("container_id", container.ID),
-				zap.String("container_owner", container.Owner))
-
-			killCmd := exec.CommandContext(killCtx, "docker", "kill", container.ID)
-			if err := killCmd.Run(); err != nil {
-				m.logger.Error("Failed to force kill container",
-					zap.String("container_id", container.ID),
-					zap.String("container_owner", container.Owner),
-					zap.Error(err))
-			} else {
-				m.logger.Info("Container force killed",
+			res := m.mutateOwnedManagedContainer(killCtx, selected, core.ContainerKill, func(container core.ContainerRow) {
+				m.logger.Info("Force killing container",
 					zap.String("container_id", container.ID),
 					zap.String("container_owner", container.Owner))
+			})
+			if !res.Verified {
+				continue
+			}
+			if res.Err != nil {
+				m.logger.Error("Failed to force kill container",
+					zap.String("container_id", res.Container.ID),
+					zap.String("container_owner", res.Container.Owner),
+					zap.Error(res.Err))
+			} else {
+				m.logger.Info("Container force killed",
+					zap.String("container_id", res.Container.ID),
+					zap.String("container_owner", res.Container.Owner))
 			}
 		}
 	}
@@ -989,32 +995,30 @@ func (m *Manager) ForceCleanupAllContainers() {
 		zap.Int("count", len(owned)))
 
 	// Force remove each container (skip graceful stop), re-establishing
-	// ownership right before the rm (D9 moment-of-mutation rule).
+	// ownership right before the rm (D9 moment-of-mutation rule). Use docker
+	// rm -f to force remove (kills and removes in one step). The outcome
+	// records carry the owner read at mutation time (D8/D9).
 	for _, selected := range owned {
-		container, ok := m.reverifyOwnedManagedContainer(ctx, selected)
-		if !ok {
-			continue
-		}
-		shortID := shortContainerID(container.ID)
-		m.logger.Warn("Force removing container",
-			zap.String("id", shortID),
-			zap.String("name", container.Name),
-			zap.String("container_owner", container.Owner))
-
-		// Use docker rm -f to force remove (kills and removes in one step).
-		// The outcome records carry the owner read at mutation time (D8/D9).
-		rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", container.ID)
-		if err := rmCmd.Run(); err != nil {
-			m.logger.Error("Failed to force remove container",
-				zap.String("id", shortID),
-				zap.String("name", container.Name),
-				zap.String("container_owner", container.Owner),
-				zap.Error(err))
-		} else {
-			m.logger.Info("Container force removed successfully",
-				zap.String("id", shortID),
+		res := m.mutateOwnedManagedContainer(ctx, selected, core.ContainerRemove, func(container core.ContainerRow) {
+			m.logger.Warn("Force removing container",
+				zap.String("id", shortContainerID(container.ID)),
 				zap.String("name", container.Name),
 				zap.String("container_owner", container.Owner))
+		})
+		if !res.Verified {
+			continue
+		}
+		if res.Err != nil {
+			m.logger.Error("Failed to force remove container",
+				zap.String("id", shortContainerID(res.Container.ID)),
+				zap.String("name", res.Container.Name),
+				zap.String("container_owner", res.Container.Owner),
+				zap.Error(res.Err))
+		} else {
+			m.logger.Info("Container force removed successfully",
+				zap.String("id", shortContainerID(res.Container.ID)),
+				zap.String("name", res.Container.Name),
+				zap.String("container_owner", res.Container.Owner))
 		}
 	}
 
