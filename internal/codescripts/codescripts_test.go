@@ -378,8 +378,124 @@ func TestNotFoundError_NonDisclosing(t *testing.T) {
 	assert.Equal(t, 2, full.Total)
 	assert.Contains(t, full.Error(), "alpha-SENTINEL")
 
+	// The dispatch layer wraps the error before the REST classifier sees it,
+	// so the identity must survive a %w wrapper — asserting errors.As on the
+	// bare *NotFoundError would be vacuous.
 	var typed *NotFoundError
-	assert.True(t, errors.As(error(stripped), &typed), "typed identity is preserved for the REST classifier")
+	wrapped := fmt.Errorf("tool call failed: %w", stripped)
+	require.True(t, errors.As(wrapped, &typed), "typed identity is preserved for the REST classifier")
+	assert.True(t, typed.Undisclosed)
+}
+
+// TestResolveScoped_NeverListsTheDirectory (Spec 105 FR-012, critique r1 #2):
+// the scoped not-found refusal is constructed without the directory listing
+// the administrator's error carries. The listing is a per-entry stat the
+// scoped caller is never shown, so it must not be paid for on its behalf —
+// otherwise the refusal's latency grows with the number of stored scripts
+// (the spec's "timing class" is part of a non-disclosing refusal).
+func TestResolveScoped_NeverListsTheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "alpha-SENTINEL.js", "1")
+	writeScript(t, dir, "beta.ts", "1")
+
+	var listings int
+	original := listForNotFound
+	listForNotFound = func(scriptsDir string) ([]Entry, error) {
+		listings++
+		return original(scriptsDir)
+	}
+	t.Cleanup(func() { listForNotFound = original })
+
+	_, _, err := ResolveScoped(dir, "missing", "")
+	var notFound *NotFoundError
+	require.True(t, errors.As(err, &notFound), "want *NotFoundError, got %T: %v", err, err)
+	assert.True(t, notFound.Undisclosed)
+	assert.Zero(t, notFound.Total)
+	assert.Empty(t, notFound.Available)
+	assert.Empty(t, notFound.Dir)
+	assert.Equal(t, 0, listings, "the scoped refusal must not list the directory it will never disclose")
+	assert.NotContains(t, err.Error(), "SENTINEL")
+
+	// Administrator control: the same miss on the same directory enumerates.
+	_, _, adminErr := Resolve(dir, "missing", "")
+	require.True(t, errors.As(adminErr, &notFound))
+	assert.Equal(t, 2, notFound.Total)
+	assert.Equal(t, 1, listings, "the administrator's error is built from one listing")
+	assert.Contains(t, adminErr.Error(), "alpha-SENTINEL")
+}
+
+// TestResolveScoped_RefusalsCarryNoHostPath (Spec 105 FR-012, critique r1
+// #3): the sibling refusals — ambiguous, unusable, unreadable directory —
+// name the caller's own script and the reason, never the scripts directory,
+// a host path or a raw OS error; the administrator form keeps them. The
+// typed identity survives a %w wrapper for the REST classifier in both forms.
+func TestResolveScoped_RefusalsCarryNoHostPath(t *testing.T) {
+	t.Run("ambiguous", func(t *testing.T) {
+		dir := t.TempDir()
+		writeScript(t, dir, "dup.js", "1")
+		writeScript(t, dir, "dup.ts", "1")
+
+		_, _, err := ResolveScoped(dir, "dup", "")
+		var ambiguous *AmbiguousError
+		require.True(t, errors.As(fmt.Errorf("wrap: %w", err), &ambiguous), "want *AmbiguousError, got %T: %v", err, err)
+		assert.True(t, ambiguous.Undisclosed)
+		assert.Empty(t, ambiguous.Paths)
+		assert.Contains(t, err.Error(), `"dup"`)
+		assert.Contains(t, err.Error(), "ambiguous")
+		assert.NotContains(t, err.Error(), dir)
+
+		_, _, adminErr := Resolve(dir, "dup", "")
+		assert.Contains(t, adminErr.Error(), dir, "the administrator keeps the paths")
+	})
+
+	for _, cell := range []struct {
+		name    string
+		content string
+		reason  string
+	}{
+		{"empty", "", ReasonEmpty},
+		{"oversized", strings.Repeat("x", MaxSizeBytes+1), ReasonOversized},
+	} {
+		cell := cell
+		t.Run(cell.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeScript(t, dir, "bad.js", cell.content)
+
+			_, _, err := ResolveScoped(dir, "bad", "")
+			var invalid *InvalidError
+			require.True(t, errors.As(fmt.Errorf("wrap: %w", err), &invalid), "want *InvalidError, got %T: %v", err, err)
+			assert.True(t, invalid.Undisclosed)
+			assert.Equal(t, cell.reason, invalid.Reason, "the reason is the caller's recovery path and stays")
+			assert.Empty(t, invalid.Path)
+			assert.Contains(t, err.Error(), cell.reason)
+			assert.NotContains(t, err.Error(), dir)
+
+			_, _, adminErr := Resolve(dir, "bad", "")
+			assert.Contains(t, adminErr.Error(), dir, "the administrator keeps the path")
+		})
+	}
+
+	t.Run("unreadable directory withholds the OS error", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("directory permission bits are not enforced here")
+		}
+		dir := t.TempDir()
+		writeScript(t, dir, "x.js", "1")
+		require.NoError(t, os.Chmod(dir, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+		_, _, err := ResolveScoped(dir, "x", "")
+		var invalid *InvalidError
+		require.True(t, errors.As(err, &invalid), "want *InvalidError, got %T: %v", err, err)
+		assert.Equal(t, ReasonUnreadable, invalid.Reason)
+		assert.Empty(t, invalid.Detail)
+		assert.NotContains(t, err.Error(), dir)
+		assert.NotContains(t, err.Error(), "permission denied")
+
+		_, _, adminErr := Resolve(dir, "x", "")
+		assert.Contains(t, adminErr.Error(), dir)
+		assert.Contains(t, adminErr.Error(), "permission denied", "the administrator keeps the OS error")
+	})
 }
 
 func TestResolve_Ambiguous(t *testing.T) {

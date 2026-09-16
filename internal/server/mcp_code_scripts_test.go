@@ -32,6 +32,15 @@ import (
 // returns it with the scripts directory that authority implies.
 func newStoredScriptProxy(t *testing.T, opts ...MCPProxyOption) (*MCPProxyServer, string) {
 	t.Helper()
+	return newStoredScriptProxyCfg(t, nil, opts...)
+}
+
+// newStoredScriptProxyCfg is newStoredScriptProxy with a hook to edit the
+// config BEFORE the proxy is constructed, for fixtures that need a
+// construction-time setting (mcp-go fixes WithInstructions on the server
+// instance, so a post-construction edit would not reach initialize).
+func newStoredScriptProxyCfg(t *testing.T, configure func(*config.Config), opts ...MCPProxyOption) (*MCPProxyServer, string) {
+	t.Helper()
 
 	tmpDir := t.TempDir()
 	logger := zap.NewNop()
@@ -48,6 +57,9 @@ func newStoredScriptProxy(t *testing.T, opts ...MCPProxyOption) (*MCPProxyServer
 	cfg.DataDir = tmpDir
 	cfg.EnableCodeExecution = true
 	cfg.CodeExecutionPoolSize = 1
+	if configure != nil {
+		configure(cfg)
+	}
 
 	um := upstream.NewManager(logger, cfg, sm.GetBoltDB(), secret.NewResolver(), sm)
 
@@ -333,9 +345,7 @@ func callCodeExecutionAs(t *testing.T, ctx context.Context, proxy *MCPProxyServe
 // seam (initialize, then tools/call code_execution) under ctx and returns the
 // decoded tools/call result object — the exact bytes an HTTP caller of that
 // surface receives.
-func callCodeExecutionOnWire(t *testing.T, ctx context.Context, srv interface {
-	HandleMessage(context.Context, json.RawMessage) mcp.JSONRPCMessage
-}, args map[string]interface{}) (isError bool, text string) {
+func callCodeExecutionOnWire(t *testing.T, ctx context.Context, srv jsonRPCHandler, args map[string]interface{}) (isError bool, text string) {
 	t.Helper()
 	require.NotNil(t, srv.HandleMessage(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`)))
 	rawArgs, err := json.Marshal(args)
@@ -415,9 +425,7 @@ func TestCodeExecution_ScriptNotFound_AgentTokenNonDisclosing(t *testing.T) {
 		writeStoredScript(t, scriptsDir, "beta.ts", "1")
 		require.NotNil(t, proxy.codeExecServer, "fixture: the /mcp/code server must exist")
 
-		for label, srv := range map[string]interface {
-			HandleMessage(context.Context, json.RawMessage) mcp.JSONRPCMessage
-		}{"code-exec": proxy.codeExecServer, "default": proxy.server} {
+		for label, srv := range map[string]jsonRPCHandler{"code-exec": proxy.codeExecServer, "default": proxy.server} {
 			label, srv := label, srv
 			t.Run(label, func(t *testing.T) {
 				isError, text := callCodeExecutionOnWire(t, scoped, srv, map[string]interface{}{"script": "gamma"})
@@ -430,6 +438,88 @@ func TestCodeExecution_ScriptNotFound_AgentTokenNonDisclosing(t *testing.T) {
 				assert.Contains(t, adminText, sentinel, "%s: the administrator keeps the enumeration", label)
 			})
 		}
+	})
+}
+
+// TestCodeExecution_StoredScriptSiblingRefusals_AgentTokenNonDisclosing
+// (critique r1 #3): the refusals that are NOT "not found" — an ambiguous
+// name, a present-but-unusable file, an unreadable directory — speak about
+// the operator's filesystem (the scripts directory and full host paths), and
+// that is the same class of disclosure NonDisclosing strips from the
+// not-found form. A scoped caller gets the name and the reason only; the
+// administrator keeps the paths (SC-005).
+func TestCodeExecution_StoredScriptSiblingRefusals_AgentTokenNonDisclosing(t *testing.T) {
+	scoped := agentCtx([]string{"*"}, []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}, "")
+
+	cells := []struct {
+		name    string
+		prepare func(t *testing.T, scriptsDir string)
+		reason  string // a fragment of the reason the scoped caller may still see
+	}{
+		{
+			name: "ambiguous name",
+			prepare: func(t *testing.T, scriptsDir string) {
+				writeStoredScript(t, scriptsDir, "dup.js", "1")
+				writeStoredScript(t, scriptsDir, "dup.ts", "1")
+			},
+			reason: "ambiguous",
+		},
+		{
+			name: "empty file",
+			prepare: func(t *testing.T, scriptsDir string) {
+				writeStoredScript(t, scriptsDir, "dup.js", "")
+			},
+			reason: codescripts.ReasonEmpty,
+		},
+		{
+			name: "oversized file",
+			prepare: func(t *testing.T, scriptsDir string) {
+				writeStoredScript(t, scriptsDir, "dup.js", strings.Repeat("x", codescripts.MaxSizeBytes+1))
+			},
+			reason: codescripts.ReasonOversized,
+		},
+	}
+	for _, cell := range cells {
+		cell := cell
+		t.Run(cell.name, func(t *testing.T) {
+			proxy, scriptsDir := newStoredScriptProxy(t)
+			cell.prepare(t, scriptsDir)
+
+			result := callCodeExecutionAs(t, scoped, proxy, map[string]interface{}{"script": "dup"})
+			require.True(t, result.IsError)
+			text := resultText(t, result)
+			assert.Contains(t, text, "dup", "the caller's own requested name may be echoed")
+			assert.Contains(t, text, cell.reason, "the reason is the caller's recovery path and stays")
+			assert.NotContains(t, text, scriptsDir,
+				"an agent-token refusal must not disclose the scripts directory or a host path (FR-012): %s", text)
+
+			admin := callCodeExecutionAs(t, adminCtx(), proxy, map[string]interface{}{"script": "dup"})
+			require.True(t, admin.IsError)
+			assert.Contains(t, resultText(t, admin), scriptsDir, "the administrator keeps the host path (SC-005)")
+		})
+	}
+
+	t.Run("unreadable directory", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores directory permissions")
+		}
+		proxy, scriptsDir := newStoredScriptProxy(t)
+		writeStoredScript(t, scriptsDir, "dup.js", "1")
+		require.NoError(t, os.Chmod(scriptsDir, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(scriptsDir, 0o755) })
+
+		result := callCodeExecutionAs(t, scoped, proxy, map[string]interface{}{"script": "dup"})
+		require.True(t, result.IsError)
+		text := resultText(t, result)
+		assert.Contains(t, text, codescripts.ReasonUnreadable)
+		assert.NotContains(t, text, scriptsDir,
+			"an agent-token refusal must not disclose the scripts directory (FR-012): %s", text)
+		assert.NotContains(t, text, "permission denied",
+			"the raw OS error is withheld from an agent-token caller: %s", text)
+
+		admin := callCodeExecutionAs(t, adminCtx(), proxy, map[string]interface{}{"script": "dup"})
+		require.True(t, admin.IsError)
+		assert.Contains(t, resultText(t, admin), scriptsDir, "the administrator keeps the directory and the OS error (SC-005)")
 	})
 }
 
@@ -453,17 +543,47 @@ func TestCodeExecution_StoredScript_ScopedPositiveControls(t *testing.T) {
 			"a constant a stored script returns is published content, visible to a scoped caller (spec.md:116)")
 	})
 
+	// reachB is the stored script both nested-call cells run: it reports the
+	// nested call's outcome as data so the refusal can be compared byte for
+	// byte between a hidden and a nonexistent b.
+	const reachB = `var r = call_tool('b', 'private_search', {q: 'x'}); ({ok: r.ok, code: r.ok ? null : r.error.code, message: r.ok ? null : r.error.message})`
+
 	t.Run("a stored script calling b is refused at the nested call", func(t *testing.T) {
+		// Cell 1 — b does not exist at all.
 		proxy, scriptsDir := newStoredScriptProxy(t)
-		writeStoredScript(t, scriptsDir, "reach-b.js",
-			`var r = call_tool('b', 'private_search', {q: 'x'}); ({ok: r.ok, code: r.ok ? null : r.error.code, message: r.ok ? null : r.error.message})`)
+		writeStoredScript(t, scriptsDir, "reach-b.js", reachB)
 
 		result := callCodeExecutionAs(t, aOnly, proxy, map[string]interface{}{"script": "reach-b"})
 		require.False(t, result.IsError, "the script itself runs; only its nested call is refused: %s", resultText(t, result))
-		text := resultText(t, result)
-		assert.Contains(t, text, `"ok":false`)
-		assert.Contains(t, text, `"code":"`+string(jsruntime.ErrorCodeAccessDenied)+`"`,
-			"the nested call must be refused by the token's server scope, before any upstream lookup (FR-009): %s", text)
+		nonexistent := resultText(t, result)
+		assert.Contains(t, nonexistent, `"ok":false`)
+		assert.Contains(t, nonexistent, `"code":"`+string(jsruntime.ErrorCodeAccessDenied)+`"`,
+			"the nested call must be refused by the token's server scope, before any upstream lookup (FR-009): %s", nonexistent)
+
+		// Cell 2 — b EXISTS, is connected and serves private_search (the
+		// spec fixture's hidden server). The a-only token's refusal must be
+		// byte-equal to cell 1 (a hidden b is indistinguishable from a
+		// nonexistent one) and b must witness zero calls; the administrator
+		// control proves the upstream is reachable.
+		hidden, rt := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
+			cfg.EnableCodeExecution = true
+			cfg.CodeExecutionPoolSize = 1
+		})
+		b := startCountingUpstream(t, hidden, rt, "b", readSpec("private_search"))
+		hiddenScripts := hidden.scriptsDir()
+		require.NoError(t, os.MkdirAll(hiddenScripts, 0o755))
+		writeStoredScript(t, hiddenScripts, "reach-b.js", reachB)
+
+		result = callCodeExecutionAs(t, aOnly, hidden, map[string]interface{}{"script": "reach-b"})
+		require.False(t, result.IsError, resultText(t, result))
+		assert.Equal(t, nonexistent, resultText(t, result),
+			"a hidden b must be refused exactly as a nonexistent b (non-disclosing refusal)")
+		assert.Zero(t, b.count.Load(), "the refused nested call must never reach the hidden upstream")
+
+		admin := callCodeExecutionAs(t, adminCtx(), hidden, map[string]interface{}{"script": "reach-b"})
+		require.False(t, admin.IsError, resultText(t, admin))
+		assert.Contains(t, resultText(t, admin), `"ok":true`, "administrator control: the same script reaches b: %s", resultText(t, admin))
+		assert.Equal(t, int64(1), b.count.Load(), "administrator control: b witnesses the call")
 	})
 }
 

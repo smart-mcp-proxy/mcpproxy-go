@@ -497,9 +497,8 @@ func (p *MCPProxyServer) resolveCodeExecutionSource(ctx context.Context, args ma
 		return code, "", ""
 	}
 
-	source, language, err := codescripts.Resolve(p.scriptsDir(), scriptName, options.Language)
+	source, language, err := p.resolveStoredScript(ctx, scriptName, options.Language)
 	if err != nil {
-		err = p.scopeStoredScriptRefusal(ctx, scriptName, err)
 		// Keep the typed identity reachable for the REST surface (404 for a
 		// name that is not there, 400 for one that cannot run) — the text alone
 		// would force it to classify these by prose.
@@ -510,29 +509,32 @@ func (p *MCPProxyServer) resolveCodeExecutionSource(ctx context.Context, args ma
 	return string(source), scriptName, ""
 }
 
-// scopeStoredScriptRefusal applies the Spec 105 FR-012 caller-kind rule to a
-// stored-script resolution failure. The Spec 097 FR-004 not-found error
-// enumerates the stored names and their count so an administrator recovers
-// the set from one failed call; for a scoped caller (an agent token, whatever
-// its server scope — the caller KIND decides, never AllowedServers) that
-// listing is withheld and the refusal is made independent of the directory's
-// contents, so a failed call is not an oracle for what is stored. Every other
-// refusal (invalid name, ambiguous, unreadable, language mismatch) already
-// speaks only about the caller's own request and passes through unchanged.
-// An absent auth context (in-process caller) or an administrator keeps the
+// resolveStoredScript applies the Spec 105 FR-012 caller-kind rule to
+// stored-script resolution. The Spec 097 FR-004 not-found error enumerates
+// the stored names and their count so an administrator recovers the set from
+// one failed call, and its sibling refusals (ambiguous, unusable, unreadable)
+// name the host path they are about; for a scoped caller (an agent token,
+// whatever its server scope — the caller KIND decides, never AllowedServers)
+// the listing is never even computed and every refusal is the non-disclosing
+// form (codescripts.ResolveScoped): the caller's own name and the reason,
+// independent of the directory's contents and location, so a failed call is
+// not an oracle for what is stored or where. An absent auth context
+// (in-process caller) or an administrator — including the anonymous,
+// admin-shaped /mcp caller under require_mcp_auth=false — keeps the
 // enumeration (SC-005: the named FR-012 admin exception).
-func (p *MCPProxyServer) scopeStoredScriptRefusal(ctx context.Context, scriptName string, err error) error {
+func (p *MCPProxyServer) resolveStoredScript(ctx context.Context, scriptName, explicitLanguage string) ([]byte, string, error) {
 	if !auth.IsScopedCaller(ctx) {
-		return err
+		return codescripts.Resolve(p.scriptsDir(), scriptName, explicitLanguage)
 	}
-	var notFound *codescripts.NotFoundError
-	if !errors.As(err, &notFound) || notFound.Undisclosed {
-		return err
+	source, language, err := codescripts.ResolveScoped(p.scriptsDir(), scriptName, explicitLanguage)
+	if err != nil {
+		// The refusal deliberately carries no count or path; the log line
+		// records only that a scoped probe was refused, for the same reason.
+		p.logger.Debug("Stored-script refusal delivered in non-disclosing form to scoped caller (Spec 105 FR-012)",
+			zap.String("script", scriptName),
+			zap.String("refusal", fmt.Sprintf("%T", err)))
 	}
-	p.logger.Debug("Withholding stored-script enumeration from scoped caller (Spec 105 FR-012)",
-		zap.String("script", scriptName),
-		zap.Int("available_total", notFound.Total))
-	return notFound.NonDisclosing()
+	return source, language, err
 }
 
 // activeConfigFilePath returns the configuration FILE this server belongs to:

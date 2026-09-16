@@ -234,6 +234,11 @@ Server scoping is enforced at three levels:
      masked, so this is a credential *inventory* rather than a disclosure, but
      it names the secrets of servers the caller may not enumerate. A strictly
      narrower view of the document `GET /api/v1/config` already denies.
+   - `GET /api/v1/code/scripts` — the stored-script listing (every name, its
+     host path and the scripts directory) is exactly the enumeration the
+     missing-script error withholds from a scoped caller, so the door is
+     closed on the REST surface too (see
+     [What a scoped token cannot learn](#what-a-scoped-token-cannot-learn)).
 
    **Withheld rather than denied.** `GET /api/v1/status` stays open — agents
    legitimately poll it for liveness — but its `activation` block is omitted for
@@ -292,6 +297,24 @@ stdio) keep every capability they have today; the exceptions where an
 administrator's answer deliberately differs from a token's are named and tested
 one by one.
 
+> **Rollout status.** This invariant is being landed surface by surface as the
+> agent-scope hardening series (Spec 105) merges; each release's notes list the
+> surfaces it closes. The rules on this page that are stated as present-tense
+> guarantees — the stored-script rules below, the REST doors listed above and
+> the `read_cache` rule — are enforced by the version that documents them. Until
+> the series is complete, a listing or suggestion on a surface not yet covered
+> can still name an out-of-scope resource; treat that as a known gap, not a
+> configuration mistake.
+
+> **Who counts as an administrator.** The admin API key, the tray over the
+> local socket, native stdio, an in-process caller — and, under the default
+> `require_mcp_auth: false`, an **unauthenticated** `/mcp` client, which the
+> proxy has always treated as an administrator for backward compatibility. Only
+> an agent token is a scoped caller; if unauthenticated clients must not see
+> administrator answers, set
+> [`require_mcp_auth: true`](https://docs.mcpproxy.app/configuration/) so every
+> `/mcp` request carries a key or a token.
+
 **Covered surfaces.** The invariant holds for agent-token requests on every
 HTTP MCP surface — `/mcp`, `/mcp/all`, `/mcp/call`, `/mcp/code`,
 `/mcp/p/<slug>` and the trailing-slash alias of each (see
@@ -335,11 +358,16 @@ content are published to every caller by design and sit outside the invariant:
    the script returns without an upstream call. What the invariant *does*
    cover: a missing-script error never enumerates the other script names, the
    script count or the scripts directory to an agent-token caller (the refusal
-   is identical for an empty and a populated directory), while administrators
-   keep today's listing; and every `call_tool()` a script makes is checked
-   against the caller's server scope and permission tier. The published
-   `code_execution` definition says so — enumeration is administrator-only and
-   an agent-token caller must already know the script name. See
+   is identical for an empty and a populated directory, and the directory is
+   not even read on the caller's behalf); an ambiguous or unusable script is
+   reported by name and reason only, without its host path or a raw OS error;
+   the REST listing `GET /api/v1/code/scripts` answers an agent token with
+   `403`; administrators keep today's listing and paths; and every
+   `call_tool()` a script makes is checked against the caller's server scope
+   and permission tier — a hidden server is refused exactly as a nonexistent
+   one. The published `code_execution` definition says so — enumeration is
+   administrator-only and an agent-token caller must already know the script
+   name. See
    [Stored scripts](https://docs.mcpproxy.app/code_execution/overview/#stored-scripts).
 
 Do **not** place server names, hostnames, credentials, tokens or any other

@@ -376,9 +376,15 @@ mcpproxy code scripts list -o json  # {"dir": "...", "scripts": [{"name","paths"
 curl -H "X-API-Key: $KEY" http://127.0.0.1:8080/api/v1/code/scripts
 ```
 
+Both are administrator views: the REST listing answers only the admin API key
+(or the tray over the local socket) and refuses an agent token with `403`.
+
 MCP clients do not get a listing tool — registrations are static, so an embedded
 list would go stale. For **administrators** (the admin API key, the tray over the
-local socket, or an in-process caller) discovery is **error-driven** instead:
+local socket, an in-process caller — and, under the default
+`require_mcp_auth: false`, an unauthenticated `/mcp` client, which the proxy
+treats as an administrator for backward compatibility) discovery is
+**error-driven** instead:
 invoking a name that does not exist returns an error listing the first 20
 available names alphabetically plus the total, so the current name set is
 recovered from a single failed call.
@@ -393,13 +399,19 @@ Cannot execute stored script: stored script "fetch-pr" not found in
 server scope, even `--servers "*"` — must already know the script name. Its
 not-found error names neither the other stored scripts, nor how many there are,
 nor the directory, and it is byte-for-byte the same whether the directory is
-empty or full, so a failed call cannot be used to probe what is stored:
+empty or full, so a failed call cannot be used to probe what is stored — and
+the proxy does not even read the directory listing on its behalf, so the
+refusal's cost does not grow with the number of stored scripts:
 
 ```text
 Cannot execute stored script: stored script "fetch-pr" not found (the stored-script
 listing is available to administrators only; an agent-token caller must already
 know the script name)
 ```
+
+The same rule covers the other refusals: an ambiguous, empty, oversized or
+unreadable script is reported to an agent token by name and reason only — no
+host path, no raw OS error — while an administrator sees the full path.
 
 Stored scripts are operator-published content: any caller allowed to run
 `code_execution` can run a script it knows the name of and receive whatever the

@@ -139,3 +139,36 @@ func TestHandleListScripts_RequiresAPIKey(t *testing.T) {
 	recorder := getCodeScripts(t, srv, "")
 	assert.Equal(t, http.StatusUnauthorized, recorder.Code, "body: %s", recorder.Body.String())
 }
+
+// TestHandleListScripts_AgentTokenForbidden (Spec 105 FR-012, critique r1 #1):
+// the listing is the enumeration the missing-script refusal withholds from a
+// scoped caller, so it must be administrator-only on the REST surface too —
+// otherwise `GET /api/v1/code/scripts` is the oracle a failed call no longer
+// is. The unrestricted ["*"] token is the strongest cell: the caller KIND
+// decides, never its server scope. The admin API key keeps the listing
+// (SC-005); the socket/tray and nil-context callers share requireAdminRead's
+// one definition of "not an administrator".
+func TestHandleListScripts_AgentTokenForbidden(t *testing.T) {
+	const sentinel = "alpha-SENTINEL"
+	ctrl := &codeScriptsController{apiKey: "admin-secret", configPath: filepath.Join(t.TempDir(), "mcp_config.json")}
+	scriptsDir := codescripts.DirFor(ctrl.configPath)
+	require.NoError(t, os.MkdirAll(scriptsDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(scriptsDir, sentinel+".js"), []byte("1"), 0o600))
+
+	srv, agentToken := agentTokenServer(t, ctrl)
+
+	t.Run("agent token is refused without the listing", func(t *testing.T) {
+		recorder := getCodeScripts(t, srv, agentToken)
+		assert.Equal(t, http.StatusForbidden, recorder.Code, "body: %s", recorder.Body.String())
+		body := recorder.Body.String()
+		assert.NotContains(t, body, sentinel, "an agent-token caller must not learn stored script names (FR-012)")
+		assert.NotContains(t, body, scriptsDir, "an agent-token caller must not learn the scripts directory (FR-012)")
+	})
+
+	t.Run("administrator control keeps the listing", func(t *testing.T) {
+		recorder := getCodeScripts(t, srv, ctrl.apiKey)
+		require.Equal(t, http.StatusOK, recorder.Code, "body: %s", recorder.Body.String())
+		assert.Contains(t, recorder.Body.String(), sentinel)
+		assert.Contains(t, recorder.Body.String(), scriptsDir)
+	})
+}

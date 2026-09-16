@@ -744,7 +744,9 @@ running in the sandbox has no filesystem access either.
 
 **Solution**: Author scripts with your normal filesystem tooling (editor, `scp`,
 configuration management). `GET /api/v1/code/scripts` and `mcpproxy code scripts
-list` are read-only views of the result.
+list` are read-only, administrator-only views of the result (an
+[agent token](https://docs.mcpproxy.app/features/agent-tokens/) is refused with
+`403`).
 
 ---
 

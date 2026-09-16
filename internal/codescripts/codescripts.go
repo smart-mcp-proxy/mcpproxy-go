@@ -144,26 +144,66 @@ func (e *NotFoundError) Error() string {
 }
 
 // AmbiguousError reports a name backed by both a .js and a .ts file.
+//
+// The paths are host filesystem locations (they reveal the config directory),
+// so the scoped form withholds them — see NonDisclosing().
 type AmbiguousError struct {
 	Name  string
 	Paths []string
+
+	// Undisclosed marks the agent-token form: the message names the caller's
+	// own script and the reason only, never a host path (Spec 105 FR-012).
+	Undisclosed bool
+}
+
+// NonDisclosing returns a copy stripped of the host paths, for delivery to a
+// scoped (agent-token) caller. The typed identity is preserved, so the REST
+// surface still classifies it as SCRIPT_UNUSABLE.
+func (e *AmbiguousError) NonDisclosing() *AmbiguousError {
+	return &AmbiguousError{Name: e.Name, Undisclosed: true}
 }
 
 func (e *AmbiguousError) Error() string {
+	if e.Undisclosed {
+		return fmt.Sprintf("stored script %q is ambiguous: both a %s and a %s file exist — ask an administrator to remove one",
+			e.Name, extJS, extTS)
+	}
 	return fmt.Sprintf("stored script %q is ambiguous: %s both exist — remove one",
 		e.Name, strings.Join(e.Paths, " and "))
 }
 
 // InvalidError reports a script file that exists but cannot be executed.
+//
+// Path is a host filesystem location and Detail is frequently a raw OS error
+// carrying another one, so the scoped form withholds both — see
+// NonDisclosing().
 type InvalidError struct {
 	Name   string
 	Path   string
 	Reason string
 	Detail string
+
+	// Undisclosed marks the agent-token form: the message names the caller's
+	// own script and the reason only — no path, no OS error (Spec 105 FR-012).
+	Undisclosed bool
+}
+
+// NonDisclosing returns a copy stripped of the host path and the raw detail,
+// for delivery to a scoped (agent-token) caller. The typed identity and the
+// reason are preserved, so the REST surface still classifies it as
+// SCRIPT_UNUSABLE and the caller still learns what is wrong with its own
+// script.
+func (e *InvalidError) NonDisclosing() *InvalidError {
+	return &InvalidError{Name: e.Name, Reason: e.Reason, Undisclosed: true}
 }
 
 func (e *InvalidError) Error() string {
-	msg := fmt.Sprintf("stored script %q (%s) is %s", e.Name, e.Path, e.Reason)
+	var msg string
+	if e.Undisclosed {
+		msg = fmt.Sprintf("stored script %q is %s", e.Name, e.Reason)
+	} else {
+		msg = fmt.Sprintf("stored script %q (%s) is %s", e.Name, e.Path, e.Reason)
+	}
 	switch e.Reason {
 	case ReasonOversized:
 		msg += fmt.Sprintf(": scripts are limited to %d bytes", MaxSizeBytes)
@@ -240,38 +280,71 @@ func DeriveLanguage(name, ext, explicitLanguage string) (string, error) {
 }
 
 // Resolve reads the stored script `name` from scriptsDir and returns its
-// source together with the language derived from its extension.
+// source together with the language derived from its extension. This is the
+// ADMINISTRATOR form: a not-found error carries the directory's listing
+// (FR-004) and every other refusal names the host path it is about.
 //
 // Order matters: the name is validated BEFORE any filesystem call (SC-003),
 // then the directory decides which candidates exist, then the surviving
 // candidate is opened with the platform's no-follow idiom and read through a
 // bounded reader. Exactly one open and one read per call — no cache, no re-read.
 func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language string, err error) {
+	return resolve(scriptsDir, name, explicitLanguage, true)
+}
+
+// ResolveScoped is Resolve for a scoped (agent-token) caller — Spec 105
+// FR-012. It reads the script exactly as Resolve does, but every refusal it
+// returns is already the non-disclosing form: a not-found error is built
+// WITHOUT listing the directory (no per-entry stat for a caller that is never
+// shown the result — the refusal's cost does not grow with what is stored),
+// and the ambiguous / invalid forms carry the caller's own name and the
+// reason but no host path and no raw OS error. Typed identities are the
+// same, so the REST classifier does not tell the two callers apart.
+func ResolveScoped(scriptsDir, name, explicitLanguage string) (source []byte, language string, err error) {
+	return resolve(scriptsDir, name, explicitLanguage, false)
+}
+
+// resolve is the shared body of Resolve and ResolveScoped; disclose selects
+// the administrator (true) or the scoped (false) refusal forms.
+func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source []byte, language string, err error) {
 	if err := ValidateName(name); err != nil {
 		return nil, "", err
+	}
+
+	notFound := func() error { return notFoundErrorFor(scriptsDir, name, disclose) }
+	invalid := func(path, reason, detail string) error {
+		e := &InvalidError{Name: name, Path: path, Reason: reason, Detail: detail}
+		if !disclose {
+			return e.NonDisclosing()
+		}
+		return e
 	}
 
 	// An empty scripts dir would make filepath.Join produce a bare relative
 	// path resolved against the process CWD — never that. No authority means
 	// no scripts.
 	if scriptsDir == "" {
-		return nil, "", newNotFoundError(scriptsDir, name)
+		return nil, "", notFound()
 	}
 
 	found, err := candidatesFor(scriptsDir, name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, "", newNotFoundError(scriptsDir, name)
+			return nil, "", notFound()
 		}
-		return nil, "", &InvalidError{Name: name, Path: scriptsDir, Reason: ReasonUnreadable, Detail: err.Error()}
+		return nil, "", invalid(scriptsDir, ReasonUnreadable, err.Error())
 	}
 
 	switch len(found) {
 	case 0:
-		return nil, "", newNotFoundError(scriptsDir, name)
+		return nil, "", notFound()
 	case 1:
 	default:
-		return nil, "", &AmbiguousError{Name: name, Paths: found}
+		ambiguous := &AmbiguousError{Name: name, Paths: found}
+		if !disclose {
+			return nil, "", ambiguous.NonDisclosing()
+		}
+		return nil, "", ambiguous
 	}
 
 	path := found[0]
@@ -284,12 +357,12 @@ func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language
 	if err != nil {
 		switch {
 		case errors.Is(err, errNonRegular):
-			return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonNonRegular}
+			return nil, "", invalid(path, ReasonNonRegular, "")
 		case errors.Is(err, fs.ErrNotExist):
 			// Removed between the probe and the open.
-			return nil, "", newNotFoundError(scriptsDir, name)
+			return nil, "", notFound()
 		default:
-			return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonUnreadable, Detail: err.Error()}
+			return nil, "", invalid(path, ReasonUnreadable, err.Error())
 		}
 	}
 	defer f.Close()
@@ -298,10 +371,10 @@ func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language
 	// read, whatever the path pointed at a moment ago.
 	info, err := f.Stat()
 	if err != nil {
-		return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonUnreadable, Detail: err.Error()}
+		return nil, "", invalid(path, ReasonUnreadable, err.Error())
 	}
 	if !info.Mode().IsRegular() {
-		return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonNonRegular}
+		return nil, "", invalid(path, ReasonNonRegular, "")
 	}
 
 	// Bound the read itself rather than trusting the stat size: a file that
@@ -309,13 +382,13 @@ func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language
 	// One extra byte is requested purely to detect the overflow.
 	data, err := io.ReadAll(io.LimitReader(f, MaxSizeBytes+1))
 	if err != nil {
-		return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonUnreadable, Detail: err.Error()}
+		return nil, "", invalid(path, ReasonUnreadable, err.Error())
 	}
 	if len(data) > MaxSizeBytes {
-		return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonOversized}
+		return nil, "", invalid(path, ReasonOversized, "")
 	}
 	if len(data) == 0 {
-		return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonEmpty}
+		return nil, "", invalid(path, ReasonEmpty, "")
 	}
 
 	return data, lang, nil
@@ -359,6 +432,23 @@ func candidatesFor(scriptsDir, name string) ([]string, error) {
 	return found, nil
 }
 
+// listForNotFound is the directory listing newNotFoundError attaches to the
+// administrator's error. A variable so the package's tests can witness that
+// the scoped form never invokes it.
+var listForNotFound = List
+
+// notFoundErrorFor builds the not-found error for one caller kind: the
+// discovery-carrying administrator form (FR-004), or the scoped form that is
+// constructed without touching the directory at all (Spec 105 FR-012 — the
+// listing would only be thrown away, and its per-entry stat would make the
+// refusal's latency grow with the number of stored scripts).
+func notFoundErrorFor(scriptsDir, name string, disclose bool) *NotFoundError {
+	if !disclose {
+		return &NotFoundError{Name: name, Undisclosed: true}
+	}
+	return newNotFoundError(scriptsDir, name)
+}
+
 // newNotFoundError builds the discovery-carrying not-found error (FR-004).
 // A listing failure is not fatal here: the caller still gets "not found".
 func newNotFoundError(scriptsDir, name string) *NotFoundError {
@@ -366,7 +456,7 @@ func newNotFoundError(scriptsDir, name string) *NotFoundError {
 	if scriptsDir == "" {
 		return err
 	}
-	entries, listErr := List(scriptsDir)
+	entries, listErr := listForNotFound(scriptsDir)
 	if listErr != nil {
 		return err
 	}

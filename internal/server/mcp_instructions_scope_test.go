@@ -8,16 +8,9 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 // Spec 105 FR-012 (PR H0, spec.md:116 "Operator-published content"): custom
@@ -29,37 +22,13 @@ import (
 // documented behaviour so a later "scrub instructions per caller" change is
 // a deliberate spec decision, not drift. It holds on the merge base.
 
-// newCustomInstructionsProxy builds a bare proxy whose config carries the
-// operator's `instructions` at CONSTRUCTION time (mcp-go fixes
-// WithInstructions on the server instance, so a post-construction edit would
-// not reach initialize).
+// newCustomInstructionsProxy builds a proxy whose config carries the
+// operator's `instructions` at CONSTRUCTION time, on the shared stored-script
+// fixture (mcp-go fixes WithInstructions on the server instance, so a
+// post-construction edit would not reach initialize).
 func newCustomInstructionsProxy(t *testing.T, instructions string) *MCPProxyServer {
 	t.Helper()
-
-	tmpDir := t.TempDir()
-	logger := zap.NewNop()
-
-	sm, err := storage.NewManager(tmpDir, logger.Sugar())
-	require.NoError(t, err)
-	t.Cleanup(func() { sm.Close() })
-
-	idx, err := index.NewManager(tmpDir, logger)
-	require.NoError(t, err)
-	t.Cleanup(func() { idx.Close() })
-
-	cfg := config.DefaultConfig()
-	cfg.DataDir = tmpDir
-	cfg.Instructions = instructions
-
-	um := upstream.NewManager(logger, cfg, nil, secret.NewResolver(), nil)
-
-	cm, err := cache.NewManager(sm.GetDB(), logger)
-	require.NoError(t, err)
-	t.Cleanup(func() { cm.Close() })
-
-	tr := truncate.NewTruncator(0)
-	proxy := NewMCPProxyServer(sm, idx, um, cm, func() *truncate.Truncator { return tr }, logger, nil, false, cfg, nil)
-	t.Cleanup(func() { proxy.Close() })
+	proxy, _ := newStoredScriptProxyCfg(t, func(cfg *config.Config) { cfg.Instructions = instructions })
 	return proxy
 }
 

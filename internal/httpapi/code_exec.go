@@ -182,11 +182,12 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	result, err := h.toolCaller.CallTool(ctx, "code_execution", args)
 	if err != nil {
 		// A refusal the caller could have avoided is not a server fault. Naming
-		// a script that does not exist is the documented discovery path, and a
-		// mistyped or ambiguous name is a caller mistake; answered as 500 they
-		// look retryable to an agent's retry policy and count as server errors
-		// in monitoring. The tool's own explanation is what travels, since that
-		// text is how the caller recovers.
+		// a script that does not exist is the administrator's documented
+		// discovery path (an agent token gets the non-disclosing form, Spec
+		// 105 FR-012), and a mistyped or ambiguous name is a caller mistake;
+		// answered as 500 they look retryable to an agent's retry policy and
+		// count as server errors in monitoring. The tool's own explanation is
+		// what travels, since that text is how the caller recovers.
 		if status, code, message, ok := classifyCodeExecError(err); ok {
 			h.logger.Debugw("Code execution refused", "status", status, "code", code, "error", err)
 			h.writeError(w, r, status, code, message)
@@ -229,7 +230,10 @@ func classifyCodeExecError(err error) (status int, code, message string, ok bool
 	var notFound *codescripts.NotFoundError
 	if errors.As(err, &notFound) {
 		// 404 rather than 400: the request is well formed, the script is not
-		// there — and the message carries the available names (FR-004).
+		// there. The message is the error's own: the available names for an
+		// administrator (FR-004), the non-disclosing text for an agent token
+		// (Spec 105 FR-012) — the same typed identity either way, which is why
+		// the status is decided here and the wording is not rebuilt.
 		return http.StatusNotFound, "SCRIPT_NOT_FOUND", notFound.Error(), true
 	}
 

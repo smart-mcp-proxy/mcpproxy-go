@@ -164,13 +164,13 @@
 
 ### Implementation
 
-- [x] T064 [US1] Caller-kind branch: enumeration only for non-scoped callers — `internal/server/mcp_code_execution.go:473-499` (or `internal/codescripts/codescripts.go:338-356` with a caller flag)
+- [x] T064 [US1] Caller-kind branch: enumeration only for non-scoped callers — `internal/server/mcp_code_execution.go:473-499` (or `internal/codescripts/codescripts.go:338-356` with a caller flag). Critique r1: the scoped form (`codescripts.ResolveScoped`) never lists the directory and strips host paths / OS errors from the ambiguous and unusable refusals too; `GET /api/v1/code/scripts` is gated with `requireAdminRead` (403 for agent tokens)
 - [x] T065 [US1] Reword `internal/server/mcp_code_execution.go:52-53,73-74`; regenerate goldens with `MCPPROXY_WRITE_TOOLSLIST_GOLDENS=testdata/toolslist_goldens go test -run TestToolsListSnapshot ./internal/server/` (the variable is the OUTPUT DIRECTORY, `toolslist_snapshot_test.go:151-158`), then rerun with it unset; diff limited to `internal/server/testdata/toolslist_goldens/{default_server,retrieve_tools_mode,code_execution_mode}.json`
 - [x] T066 [P] [US1] Docs: enumeration is admin-only in `docs/code_execution/overview.md:379-387`, `cookbook.md:141`, `troubleshooting.md:604-613`, `api-reference.md:591`; add invariant sentence, covered-surface list (`/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<slug>`, aliases), retained-effects list and custom-instructions/stored-scripts secrets warning to `docs/features/agent-tokens.md` (FR01x-G3)
 
 ### Verification
 
-- [x] T067 [US1] Common verification; `git diff --stat -- internal/server/testdata` shows only the three goldens
+- [x] T067 [US1] Common verification; `git diff --stat -- internal/server/testdata` shows only the three live goldens plus their deliberately frozen pre-105 copies (`toolslist_goldens/pre105/*.json`, byte-identical to the merge base — the baseline the golden-delta assertion diffs against)
 - [~] T068 [US1] Astra rounds on FR-012 + FR01x-G1…G3; quote final `VERDICT:`
 
 ---
