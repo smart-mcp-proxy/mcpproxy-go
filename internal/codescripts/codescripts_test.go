@@ -3,7 +3,6 @@ package codescripts
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -248,9 +247,9 @@ func TestResolve_CaseDistinctNamesAreDistinctScripts(t *testing.T) {
 
 	for _, r := range bothResolvers {
 		t.Run(r.name, func(t *testing.T) {
-			// On a Linux case-folding mount the scoped resolver settles each
-			// name by one listing (codex r4 #1), so both resolvers agree
-			// everywhere.
+			// On Linux and the BSDs the scoped resolver settles each name
+			// from the directory's exact-name index (codex r5 #1), so both
+			// resolvers agree everywhere.
 			src, lang, err := r.resolve(dir, "foo", "")
 			require.NoError(t, err, "foo.js is the only exact-cased match for \"foo\"")
 			assert.Equal(t, "({from: 'js'})", string(src))
@@ -855,149 +854,6 @@ func countDirectoryPrimitives(t *testing.T) (readDirs, lstats *int) {
 	return &rd, &ls
 }
 
-// simulateCaseFoldingLstat makes the package's lstat seam behave like a
-// case-insensitive, case-preserving directory lookup (APFS, NTFS, ext4
-// casefold, vfat): a path that does not exist as spelled resolves to the
-// entry whose name matches it case-insensitively. The listing it consults is
-// the simulation's own (os.ReadDir directly), invisible to the readDir seam.
-// Installed BEFORE countDirectoryPrimitives when both are used, so the
-// counters see the resolver's calls and not the simulation's.
-func simulateCaseFoldingLstat(t *testing.T) {
-	t.Helper()
-	orig := lstat
-	lstat = func(name string) (os.FileInfo, error) {
-		info, err := orig(name)
-		if err == nil || !errors.Is(err, fs.ErrNotExist) {
-			return info, err
-		}
-		entries, readErr := os.ReadDir(filepath.Dir(name))
-		if readErr != nil {
-			return nil, err
-		}
-		for _, e := range entries {
-			if strings.EqualFold(e.Name(), filepath.Base(name)) {
-				return orig(filepath.Join(filepath.Dir(name), e.Name()))
-			}
-		}
-		return nil, err
-	}
-	t.Cleanup(func() { lstat = orig })
-}
-
-// requireListingFreeEntryName skips a test that asserts a scoped resolution
-// reads no directory when, on this platform and for this existing entry, the
-// platform's entryName itself must list once: Linux on a case-folding mount,
-// where the listing is the retained cost of such a mount (codex r4 #1) and
-// TestResolveScoped_OnAFoldingDirectory pins the count. darwin (F_GETPATH)
-// and Windows (FindFirstFile) never list, and neither does any platform on a
-// case-sensitive lookup.
-func requireListingFreeEntryName(t *testing.T, path string) {
-	t.Helper()
-	info, err := os.Lstat(path)
-	require.NoError(t, err)
-	listed := false
-	orig := readDir
-	readDir = func(name string) ([]os.DirEntry, error) {
-		listed = true
-		return orig(name)
-	}
-	_, err = entryName(path, info)
-	readDir = orig
-	require.NoError(t, err)
-	if listed {
-		t.Skipf("%s: the directory folds case and this platform verifies the stored spelling by one listing; that count is pinned by TestResolveScoped_OnAFoldingDirectory", filepath.Dir(path))
-	}
-}
-
-// TestFoldsCase pins the constant-cost fold proof the Linux entryName relies
-// on (codex r3 #1): one extra Lstat of the case-swapped spelling, and only the
-// SAME entry answering under both spellings counts as a fold.
-func TestFoldsCase(t *testing.T) {
-	dir := t.TempDir()
-	writeScript(t, dir, "exact.js", "1")
-	writeScript(t, dir, "digits.js", "1")
-	path := filepath.Join(dir, "exact.js")
-	info, err := os.Lstat(path)
-	require.NoError(t, err)
-
-	t.Run("real directory", func(t *testing.T) {
-		// Independent oracle: is a differently spelled sibling name reachable?
-		_, err := os.Lstat(filepath.Join(dir, "DIGITS.js"))
-		dirFolds := err == nil
-
-		folds, err := foldsCase(path, info)
-		require.NoError(t, err)
-		assert.Equal(t, dirFolds, folds)
-	})
-
-	t.Run("simulated folding lookup", func(t *testing.T) {
-		simulateCaseFoldingLstat(t)
-		_, lstats := countDirectoryPrimitives(t)
-		folds, err := foldsCase(path, info)
-		require.NoError(t, err)
-		assert.True(t, folds, "the swapped spelling reaches the same entry")
-		assert.Equal(t, 1, *lstats, "exactly one extra probe")
-	})
-
-	t.Run("case-sensitive lookup, variant absent", func(t *testing.T) {
-		orig := lstat
-		lstat = func(name string) (os.FileInfo, error) {
-			if filepath.Base(name) == "EXACT.JS" {
-				return nil, &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrNotExist}
-			}
-			return orig(name)
-		}
-		t.Cleanup(func() { lstat = orig })
-		folds, err := foldsCase(path, info)
-		require.NoError(t, err)
-		assert.False(t, folds)
-	})
-
-	t.Run("case-sensitive lookup, variant is a different entry", func(t *testing.T) {
-		other := filepath.Join(dir, "digits.js")
-		orig := lstat
-		lstat = func(name string) (os.FileInfo, error) {
-			if filepath.Base(name) == "EXACT.JS" {
-				return orig(other)
-			}
-			return orig(name)
-		}
-		t.Cleanup(func() { lstat = orig })
-		folds, err := foldsCase(path, info)
-		require.NoError(t, err)
-		assert.False(t, folds, "two distinct entries under two spellings is a case-sensitive directory")
-	})
-
-	t.Run("a name with no letters has no other spelling", func(t *testing.T) {
-		p := filepath.Join(dir, "123")
-		writeScript(t, dir, "123", "1")
-		i, err := os.Lstat(p)
-		require.NoError(t, err)
-		_, lstats := countDirectoryPrimitives(t)
-		folds, err := foldsCase(p, i)
-		require.NoError(t, err)
-		assert.False(t, folds)
-		assert.Equal(t, 0, *lstats, "nothing to probe")
-	})
-
-	t.Run("a failing variant probe is reported, not swallowed", func(t *testing.T) {
-		orig := lstat
-		boom := errors.New("boom")
-		lstat = func(name string) (os.FileInfo, error) {
-			if filepath.Base(name) == "EXACT.JS" {
-				return nil, boom
-			}
-			return orig(name)
-		}
-		t.Cleanup(func() { lstat = orig })
-		_, err := foldsCase(path, info)
-		assert.ErrorIs(t, err, boom)
-	})
-
-	assert.Equal(t, "BACKDOOR.js", swapASCIICase("backdoor.JS"))
-	assert.Equal(t, "fetch-PRS_2.TS", swapASCIICase("FETCH-prs_2.ts"))
-}
-
 // TestResolveScoped_NeverReadsTheDirectory (Spec 105 FR-012, codex r1 #1):
 // a scoped resolution — hit or miss — never enumerates the scripts directory.
 // Skipping the not-found LISTING is not enough: an os.ReadDir on the way to
@@ -1006,11 +862,16 @@ func TestFoldsCase(t *testing.T) {
 // not only in body. The administrator keeps the pre-105 directory-based
 // decision (SC-005, codex r2 #1): one directory read decides the candidates
 // on every call, and a miss pays for the discovery listing on top.
+//
+// On Linux and the BSDs the scoped resolver answers from the directory's
+// stored-name index (codex r5 #1), whose one listing is paid when the
+// directory changes, never per request: the index is warmed first here, and
+// storednames_other_test.go pins its cost rule.
 func TestResolveScoped_NeverReadsTheDirectory(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "alpha-SENTINEL.js", "1")
 	writeScript(t, dir, "beta.ts", "1")
-	requireListingFreeEntryName(t, filepath.Join(dir, "beta.ts"))
+	warmStoredNames(t, dir)
 
 	readDirs, _ := countDirectoryPrimitives(t)
 
@@ -1050,6 +911,7 @@ func TestResolveScoped_MissCostIsIndependentOfDirectorySize(t *testing.T) {
 	}
 
 	probe := func(dir string) (readDirs, lstats int) {
+		warmStoredNames(t, dir)
 		rd, ls := countDirectoryPrimitives(t)
 		_, _, err := ResolveScoped(dir, "gamma", "")
 		var notFound *NotFoundError

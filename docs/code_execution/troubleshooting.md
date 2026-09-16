@@ -645,10 +645,12 @@ Linux a Docker Desktop bind mount from a macOS or Windows host, vfat, an ext4
 `FETCH-PR.JS` or `Fetch-pr.js` is not the script `fetch-pr` even where the
 filesystem would open it under that name — the daemon verifies the stored
 spelling before running anything, so the administrator's listing, the
-administrator's call and an agent-token call all agree. On a Linux case-folding
-mount that verification costs one directory listing per existing candidate
-(Linux has no single-entry call that reports how a name is spelled on disk); a
-name that does not exist pays no listing and the refusal body is unchanged.
+administrator's call and an agent-token call all agree. On Linux and the BSDs
+(which have no single-entry call that reports how a name is spelled on disk)
+an agent-token call is answered from an exact-name index of the directory,
+validated by one stat of the directory per call: a listing is paid when the
+directory changes, never per call, whatever name is asked for, and the
+refusal body is unchanged.
 mcpproxy never creates the directory itself; `mkdir -p` it.
 
 ---
