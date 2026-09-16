@@ -1033,7 +1033,7 @@ func TestHandleSetProfile_ScopedRefusalTouchesOnlySlugAndPin(t *testing.T) {
 				require.True(t, allowed[got], "%s/%s: touched profile %q outside {slug, pin}: %v", fleet, name, got, touched)
 			}
 		}
-		require.Same(t, idx, p.profileIndexFor(cfg), "%s: the cached index must be reused for the same snapshot", fleet)
+		require.Same(t, idx, p.profileIndexCurrent(), "%s: the cached index must be reused for the same snapshot", fleet)
 	}
 }
 

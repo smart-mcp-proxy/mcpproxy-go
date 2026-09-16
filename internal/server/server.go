@@ -2353,8 +2353,25 @@ func withHSTS(next http.Handler) http.Handler {
 //   - Slug not found               → 404 {"error":"unknown profile '<slug>'","available":[...]}
 func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.serveProfileURL(w, r, s.runtime.Config(), next)
+		// The (index, snapshot) pair is taken together from the warm slot —
+		// the request never reads the live config and then asks for an
+		// index of it, so it never builds one (profileIndexCache). Nil only
+		// on a Server no warm path has run on (bare test servers).
+		profiles := s.profileIndexes.Current()
+		if profiles == nil {
+			profiles = s.profileIndexes.For(s.runtimeConfig())
+		}
+		s.serveProfileURL(w, r, profiles, next)
 	})
+}
+
+// runtimeConfig returns the runtime's current config snapshot, or nil on a
+// Server built without a runtime (bare test servers).
+func (s *Server) runtimeConfig() *config.Config {
+	if s.runtime == nil {
+		return nil
+	}
+	return s.runtime.Config()
 }
 
 // warmProfileIndex builds the profile index for the runtime's current config
@@ -2367,7 +2384,8 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 // and on every config event as belt-and-braces; the structural guarantee is
 // the configsvc pre-publish observer wired in NewServer, which indexes every
 // later snapshot before it is stored, so no request lands in a
-// publication-to-event window (round 5, prior item P).
+// publication-to-event window (round 5, prior item P), and every request
+// takes the index and its snapshot as one pair (round 6).
 func (s *Server) warmProfileIndex() {
 	if s.runtime == nil {
 		return
@@ -2375,13 +2393,16 @@ func (s *Server) warmProfileIndex() {
 	s.profileIndexes.warmCurrent(s.runtime.Config())
 }
 
-// serveProfileURL is profileMiddleware over ONE config snapshot — the whole
-// gate after the snapshot read, so it can be exercised against any fleet
-// shape without a runtime behind it (the fleet-parity tests build a bare
-// Server; a live runtime over thousands of profiles spends the test building
-// per-profile indexes in the background). Same split as resolveActiveProfile
-// / resolveActiveProfileIn.
-func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, cfg *config.Config, next http.Handler) {
+// serveProfileURL is profileMiddleware over ONE (index, snapshot) pair — the
+// whole gate after the pair is taken, so it can be exercised against any
+// fleet shape without a runtime behind it (the fleet-parity tests build a
+// bare Server; a live runtime over thousands of profiles spends the test
+// building per-profile indexes in the background). The snapshot it decides
+// over is the one the index was built from, profiles.cfg; it never reads
+// the live config. Same split as resolveActiveProfile / resolveActiveProfileIn.
+func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profiles *profileIndex, next http.Handler) {
+	cfg := profiles.cfg
+
 	// Strip the /mcp/p/ prefix to obtain the slug.
 	slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
 	slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
@@ -2391,7 +2412,6 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, cfg *co
 	// published, see warmProfileIndex): the gate below and the lookup after
 	// it resolve the slug directly, so neither the refusal nor the admission
 	// walks cfg.Profiles.
-	profiles := s.profileIndexes.For(cfg)
 
 	// Spec 105 FR-004: the selectable-profile gate for scoped callers. It
 	// evaluates the requested profile (and the pin) ONLY — never the

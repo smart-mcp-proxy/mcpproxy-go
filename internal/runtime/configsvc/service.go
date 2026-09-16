@@ -3,6 +3,7 @@ package configsvc
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -122,7 +123,15 @@ func (s *Service) SetPrePublishHook(hook func(*config.Config) *config.Config) {
 // build of one insertion per entry, not I/O). Distinct from the single
 // SetPrePublishHook slot, which the #937 admission gate owns.
 //
-// Nil observers and a nil service are ignored. Safe to call at any time.
+// Observers run with the update mutex held and MUST NOT publish: a call to
+// Update, UpdateIfCurrent or ReloadFromFile from inside an observer is a
+// re-entrant publish and deadlocks by design, exactly like the pre-publish
+// hook. Registering a further observer from inside one is allowed — the
+// list is not locked while observers run — and that observer first runs on
+// the next publication.
+//
+// Nil observers and a nil service are ignored. Safe to call at any time,
+// including from an observer.
 func (s *Service) AddPrePublishObserver(observe func(*config.Config)) {
 	if s == nil || observe == nil {
 		return
@@ -132,12 +141,15 @@ func (s *Service) AddPrePublishObserver(observe func(*config.Config)) {
 	s.prePublishObservers = append(s.prePublishObservers, observe)
 }
 
-// runPrePublishObservers runs every registered observer on cfg (called with
-// updateMu held, before the snapshot is stored).
+// runPrePublishObservers runs every observer registered when it is called on
+// cfg (called with updateMu held, before the snapshot is stored). The list is
+// copied under the read lock and released before any observer runs, so an
+// observer may register another without deadlocking.
 func (s *Service) runPrePublishObservers(cfg *config.Config) {
 	s.observersMu.RLock()
-	defer s.observersMu.RUnlock()
-	for _, observe := range s.prePublishObservers {
+	observers := slices.Clone(s.prePublishObservers)
+	s.observersMu.RUnlock()
+	for _, observe := range observers {
 		observe(cfg)
 	}
 }

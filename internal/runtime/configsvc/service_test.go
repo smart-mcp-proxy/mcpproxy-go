@@ -471,3 +471,38 @@ func TestService_PrePublishObserverNilSafe(t *testing.T) {
 	require.NoError(t, svc.Update(&config.Config{Listen: "b"}, UpdateTypeModify, "two"))
 	require.Equal(t, 4, runs, "each observer runs once per update; nil ones are skipped")
 }
+
+// TestService_PrePublishObserverMayRegisterAnObserver (Spec 105 PR D codex
+// round 6, finding 2): observers run under the update mutex, so the observer
+// list must not be held locked while they run — an observer that registers a
+// follow-up observer deadlocked on observersMu. The list is copied under the
+// read lock and released before any observer is invoked; an observer added
+// during a publication first runs on the NEXT one.
+func TestService_PrePublishObserverMayRegisterAnObserver(t *testing.T) {
+	svc := NewService(&config.Config{Listen: "127.0.0.1:8080"}, "/tmp/config.json", zap.NewNop())
+
+	var registered sync.Once
+	innerRuns := 0
+	svc.AddPrePublishObserver(func(*config.Config) {
+		registered.Do(func() {
+			svc.AddPrePublishObserver(func(*config.Config) { innerRuns++ })
+		})
+	})
+
+	update := func(listen string) {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- svc.Update(&config.Config{Listen: listen}, UpdateTypeModify, "test") }()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Update deadlocked: an observer registering another observer must not block publication")
+		}
+	}
+
+	update("one")
+	require.Equal(t, 0, innerRuns, "an observer registered during a publication runs from the next one on")
+	update("two")
+	require.Equal(t, 1, innerRuns, "the observer registered by another observer must run on the next publication")
+}

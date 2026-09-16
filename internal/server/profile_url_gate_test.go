@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,12 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // newProfileGateTestServer builds a Server whose logger is observed, with two
@@ -105,10 +108,12 @@ func profileGateFleetConfig(n, hidden int) *config.Config {
 }
 
 // profileGateFleet is one fleet shape driven through serveProfileURL — the
-// whole gate after the snapshot read — on a bare Server. No runtime stands
-// behind it on purpose: a live runtime over thousands of profiles spends the
-// test building per-profile indexes in the background, which both inflates
-// allocation readings and races the TempDir cleanup.
+// whole gate after the (index, snapshot) pair is taken — on a bare Server.
+// No runtime stands behind it on purpose: a live runtime over thousands of
+// profiles spends the test building per-profile indexes in the background,
+// which both inflates allocation readings and races the TempDir cleanup. The
+// pair comes from the bare Server's cache (For: the warm slot when a test
+// stored an instrumented index there, else the lazily built one).
 type profileGateFleet struct {
 	srv *Server
 	cfg *config.Config
@@ -116,7 +121,7 @@ type profileGateFleet struct {
 
 func (f profileGateFleet) handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f.srv.serveProfileURL(w, r, f.cfg, next)
+		f.srv.serveProfileURL(w, r, f.srv.profileIndexes.For(f.cfg), next)
 	})
 }
 
@@ -193,8 +198,9 @@ func TestProfileMiddleware_RefusalWorkIndependentOfFleet(t *testing.T) {
 	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		t.Errorf("%s must not reach the MCP handler", r.URL.Path)
 	})
-	// Build every index up front: the first request after a snapshot change
-	// pays the one-off index build, which is not part of a refusal's cost.
+	// Build every index up front: on a bare Server the first request pays the
+	// one-off lazy build, which is not part of a refusal's cost (over a
+	// runtime the warm path pays it before publication).
 	for _, f := range fleets {
 		f.srv.profileIndexes.For(f.cfg)
 	}
@@ -318,10 +324,14 @@ func TestProfileMiddleware_RefusalReachCostsTheGrantNotTheFleet(t *testing.T) {
 
 // TestProfileMiddleware_RefusesThroughTheSnapshotSeam pins the production
 // wiring the fleet tests bypass: profileMiddleware over a live runtime reaches
-// the same gate (serveProfileURL) with the runtime's current snapshot — a
+// the same gate (serveProfileURL) with the warm (index, snapshot) pair — a
 // scoped refusal and an admission behave identically through either entry.
 func TestProfileMiddleware_RefusesThroughTheSnapshotSeam(t *testing.T) {
 	srv, _ := newProfileGateTestServer(t)
+	require.Eventually(t, func() bool {
+		idx := srv.profileIndexes.warm.Load()
+		return idx != nil && idx.cfg == srv.runtime.Config()
+	}, 5*time.Second, 10*time.Millisecond)
 	agent := &auth.AuthContext{Type: auth.AuthTypeAgent, AllowedServers: []string{"research-srv"}}
 	reached := 0
 	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { reached++ })
@@ -437,8 +447,10 @@ func TestProfileIndex_BuiltBeforePublication(t *testing.T) {
 // request — R1 captures snapshot A and stalls; a reload publishes and warms
 // B; R1 resumes, builds A and overwrites the cached B; the next request under
 // B rebuilds the whole fleet inline. The warm slot is written only by the
-// warm path; a request that captured an older snapshot builds into the lazy
-// slot and leaves the warm index where it is.
+// warm path; For's fallback build lands in the lazy slot and leaves the warm
+// index where it is. Since round 6 no request over a runtime reaches For at
+// all (it holds the pair Current handed it); this pins the defence in depth
+// for a caller that would.
 func TestProfileIndexCache_StaleRequestCannotEvictTheWarmIndex(t *testing.T) {
 	older := &config.Config{Profiles: []config.ProfileConfig{{Name: "a"}}}
 	current := &config.Config{Profiles: []config.ProfileConfig{{Name: "b"}}}
@@ -454,4 +466,185 @@ func TestProfileIndexCache_StaleRequestCannotEvictTheWarmIndex(t *testing.T) {
 	require.Same(t, warmed, c.For(current), "the stale request must not have evicted the warm index")
 	require.Same(t, stale, c.For(older), "the stale request's own index is retained beside it")
 	require.Equal(t, int64(1), c.lazyBuilds.Load(), "and nothing was rebuilt")
+}
+
+// TestProfileRequests_ServeTheIndexAboutToBePublished (Spec 105 PR D codex
+// round 6, finding 1): a request takes the (index, snapshot) PAIR from the
+// cache's warm slot and decides with it — it never captures a snapshot of its
+// own and then asks the cache for an index of that snapshot. The warm slot is
+// written by the pre-publish observer BEFORE the snapshot is stored, so the
+// request that runs inside a publication decides over the config about to be
+// published (its index ready) while runtime.Config() still answers the
+// previous one: through both entries, the URL gate and set_profile, a profile
+// that exists only in the config being published is admitted, and the
+// request-path build seam never fires. (A request that paired runtime.Config()
+// with For() refused it — the slug is not in the stored snapshot — or, once
+// two publications had passed it by, rebuilt its snapshot's index inline.)
+func TestProfileRequests_ServeTheIndexAboutToBePublished(t *testing.T) {
+	srv, _ := newProfileGateTestServer(t)
+	require.Eventually(t, func() bool {
+		idx := srv.profileIndexes.warm.Load()
+		return idx != nil && idx.cfg == srv.runtime.Config()
+	}, 5*time.Second, 10*time.Millisecond)
+
+	agent := &auth.AuthContext{Type: auth.AuthTypeAgent, AllowedServers: []string{"research-srv"}}
+	var scoped []string
+	handler := srv.profileMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		scoped = append(scoped, profile.ProfileScopeFromContext(r.Context()).Name)
+	}))
+
+	// Registered after the Server's own observer, so it runs on the same
+	// publication with the warm slot already covering cfg and the snapshot not
+	// yet stored.
+	type observation struct {
+		stored       bool
+		urlStatus    int
+		setProfile   *mcp.CallToolResult
+		lazyBuilds   int64
+		proxyBuilds  int64
+		runtimeAhead bool
+	}
+	observed := make(chan observation, 1)
+	srv.runtime.ConfigService().AddPrePublishObserver(func(cfg *config.Config) {
+		o := observation{stored: srv.runtime.Config() == cfg}
+		req := httptest.NewRequest(http.MethodPost, "/mcp/p/only-in-next", http.NoBody)
+		req = req.WithContext(auth.WithAuthContext(req.Context(), agent))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		o.urlStatus = rec.Code
+		o.setProfile = callSetProfileTool(t, srv.mcpProxy, setProfileScopedCtx("s", "research-srv"), "only-in-next")
+		o.lazyBuilds = srv.profileIndexes.lazyBuilds.Load()
+		o.proxyBuilds = srv.mcpProxy.profileIndexes.lazyBuilds.Load()
+		observed <- o
+	})
+
+	before := srv.runtime.Config()
+	next := *before
+	next.Profiles = append(slices.Clone(before.Profiles), config.ProfileConfig{Name: "only-in-next", Servers: []string{"research-srv"}})
+	_, err := srv.ApplyConfig(&next, filepath.Join(t.TempDir(), "mcp_config.json"))
+	require.NoError(t, err)
+
+	o := <-observed
+	require.False(t, o.stored, "the observer runs before the snapshot is stored")
+	require.Equal(t, http.StatusOK, o.urlStatus, "the URL gate must admit the profile of the config about to be published")
+	require.Equal(t, []string{"only-in-next"}, scoped, "the admitted request is scoped by the published-next snapshot")
+	require.False(t, o.setProfile.IsError, "set_profile must admit the profile of the config about to be published: %s", setProfileResultText(t, o.setProfile))
+	require.Contains(t, setProfileResultText(t, o.setProfile), `"active_profile":"only-in-next"`)
+	require.Zero(t, o.lazyBuilds, "no request may build the index")
+	require.Zero(t, o.proxyBuilds, "set_profile over a runtime decides with the main Server's index")
+}
+
+// TestProfileIndexCache_PausedRequestKeepsTheIndexItWasHanded (Spec 105 PR D
+// codex round 6, finding 1): a request holds the index it took from the warm
+// slot, so however many publications pass while it is paused it decides with
+// that index and builds nothing — the two-slot cache of round 5 still rebuilt
+// snapshot A inline for a request that captured A and resumed after warm had
+// moved to C (lazy B). Cache level: Current() hands out the warm index and
+// later publications leave the handed one untouched; gate level: the gate
+// decides with the index it is handed — A's profile is admitted from A's
+// index while the warm slot already holds C — and the build seam stays 0.
+func TestProfileIndexCache_PausedRequestKeepsTheIndexItWasHanded(t *testing.T) {
+	cfgA := &config.Config{Servers: []*config.ServerConfig{{Name: "srv"}}, Profiles: []config.ProfileConfig{{Name: "only-in-a", Servers: []string{"srv"}}}}
+	cfgB := &config.Config{Servers: []*config.ServerConfig{{Name: "srv"}}, Profiles: []config.ProfileConfig{{Name: "only-in-b", Servers: []string{"srv"}}}}
+	cfgC := &config.Config{Servers: []*config.ServerConfig{{Name: "srv"}}, Profiles: []config.ProfileConfig{{Name: "only-in-c", Servers: []string{"srv"}}}}
+
+	srv := &Server{logger: zap.NewNop()}
+	require.Nil(t, srv.profileIndexes.Current(), "no warm index before the first publication")
+	idxA := srv.profileIndexes.warmPublishing(cfgA)
+	held := srv.profileIndexes.Current() // the request takes its (index, snapshot) pair here and pauses
+	require.Same(t, idxA, held)
+	require.Same(t, cfgA, held.cfg)
+
+	srv.profileIndexes.warmPublishing(cfgB)
+	idxC := srv.profileIndexes.warmPublishing(cfgC)
+	require.Same(t, idxC, srv.profileIndexes.Current(), "later publications move the warm slot")
+	require.Same(t, idxA, held, "and leave the handed index where it is")
+	require.Same(t, cfgA, held.cfg)
+
+	agent := &auth.AuthContext{Type: auth.AuthTypeAgent, AllowedServers: []string{"srv"}}
+	var scoped []string
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		scoped = append(scoped, profile.ProfileScopeFromContext(r.Context()).Name)
+	})
+	req := httptest.NewRequest(http.MethodPost, "/mcp/p/only-in-a", http.NoBody)
+	req = req.WithContext(auth.WithAuthContext(req.Context(), agent))
+	rec := httptest.NewRecorder()
+	srv.serveProfileURL(rec, req, held, next)
+	require.Equal(t, http.StatusOK, rec.Code, "the resumed request decides with the index it was handed: %s", rec.Body.String())
+	require.Equal(t, []string{"only-in-a"}, scoped)
+
+	require.Zero(t, srv.profileIndexes.lazyBuilds.Load(), "the resumed request builds nothing")
+	require.Same(t, idxC, srv.profileIndexes.Current(), "and moves nothing")
+}
+
+// TestProfileRequests_NeverBuildTheIndexOverARuntime (Spec 105 PR D codex
+// round 6, finding 1): over a live runtime, no request entry — every scoped
+// refusal branch and an admission through the URL gate, scoped and
+// administrator set_profile refusals and admissions — builds a profile index,
+// before or after reloads it drives itself. The request path takes the
+// (index, snapshot) pair the pre-publish observer prepared; the build seam on
+// both caches (the Server's and the proxy's own) stays at zero.
+func TestProfileRequests_NeverBuildTheIndexOverARuntime(t *testing.T) {
+	srv, _ := newProfileGateTestServer(t)
+	require.Eventually(t, func() bool {
+		idx := srv.profileIndexes.warm.Load()
+		return idx != nil && idx.cfg == srv.runtime.Config()
+	}, 5*time.Second, 10*time.Millisecond)
+
+	reached := 0
+	handler := srv.profileMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { reached++ }))
+	admin := auth.AdminContext()
+	drive := func(round int) {
+		t.Helper()
+		for _, c := range profileGateRefusalCases {
+			profileGateRefusal(t, handler, c.agent, c.path)
+		}
+		for _, c := range []struct {
+			agent *auth.AuthContext
+			path  string
+			code  int
+		}{
+			{&auth.AuthContext{Type: auth.AuthTypeAgent, AllowedServers: []string{"research-srv"}}, "/mcp/p/research", http.StatusOK},
+			{&auth.AuthContext{Type: auth.AuthTypeAgent, ProfilePin: "deploy", AllowedServers: []string{"*"}}, "/mcp/p/deploy", http.StatusOK},
+			{admin, "/mcp/p/research", http.StatusOK},
+			{admin, "/mcp/p/nope", http.StatusNotFound},
+		} {
+			req := httptest.NewRequest(http.MethodPost, c.path, http.NoBody)
+			req = req.WithContext(auth.WithAuthContext(req.Context(), c.agent))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			require.Equal(t, c.code, rec.Code, "round %d: %s: %s", round, c.path, rec.Body.String())
+		}
+		for _, c := range []struct {
+			ctx   context.Context
+			slug  string
+			isErr bool
+		}{
+			{setProfileScopedCtx("s", "research-srv"), "research", false},
+			{setProfileScopedCtx("s", "research-srv"), "deploy", true},
+			{setProfileScopedCtx("s", "research-srv"), "nope", true},
+			{setProfilePinnedCtx("s", "deploy", "deploy-srv"), "deploy", false},
+			{setProfilePinnedCtx("s", "gone", "deploy-srv"), "gone", true},
+			{setProfileAdminCtx("s"), "deploy", false},
+			{setProfileAdminCtx("s"), "nope", true},
+			{setProfileAdminCtx("s"), "", false},
+		} {
+			res := callSetProfileTool(t, srv.mcpProxy, c.ctx, c.slug)
+			require.Equal(t, c.isErr, res.IsError, "round %d: set_profile %q: %s", round, c.slug, setProfileResultText(t, res))
+		}
+	}
+
+	cfgPath := filepath.Join(t.TempDir(), "mcp_config.json")
+	for round := 0; round < 3; round++ {
+		drive(round)
+		before := srv.runtime.Config()
+		next := *before
+		next.Profiles = append(slices.Clone(before.Profiles), config.ProfileConfig{Name: fmt.Sprintf("extra-%d", round), Servers: []string{"research-srv"}})
+		_, err := srv.ApplyConfig(&next, cfgPath)
+		require.NoError(t, err)
+		drive(round) // immediately after the publication, before any config event
+	}
+	require.Positive(t, reached)
+	require.Zero(t, srv.profileIndexes.lazyBuilds.Load(), "no request over a runtime may build the index")
+	require.Zero(t, srv.mcpProxy.profileIndexes.lazyBuilds.Load(), "set_profile over a runtime decides with the main Server's index, never its own")
 }
