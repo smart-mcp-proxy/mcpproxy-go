@@ -2088,6 +2088,17 @@ func (mc *Client) GetContainerID() string {
 	return mc.coreClient.GetContainerID()
 }
 
+// ForceRemoveTrackedContainerIfOwned is the manager's disconnect-timeout
+// path: it removes the container tracked as containerID only after the core
+// client re-establishes canonical ownership (Spec 105 FR-007 / D9, codex
+// round 3). See core.Client.ForceRemoveTrackedContainerIfOwned.
+func (mc *Client) ForceRemoveTrackedContainerIfOwned(ctx context.Context, containerID string) (bool, error) {
+	if mc.coreClient == nil {
+		return false, nil
+	}
+	return mc.coreClient.ForceRemoveTrackedContainerIfOwned(ctx, containerID)
+}
+
 // setToolCountCache records the latest tool count and timestamp for non-blocking consumers.
 func (mc *Client) setToolCountCache(count int) {
 	mc.toolCountMu.Lock()

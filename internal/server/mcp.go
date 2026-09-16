@@ -3926,7 +3926,9 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 	}
 
 	// Spec 028: Filter servers to only those the agent token can access
-	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
+	authCtx := auth.AuthContextFromContext(ctx)
+	scopedCaller := authCtx != nil && !authCtx.IsAdmin()
+	if scopedCaller {
 		var filtered []*config.ServerConfig
 		for _, s := range servers {
 			if authCtx.CanAccessServer(s.Name) {
@@ -4046,6 +4048,14 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 				// reaches connection_status.last_error and health.detail.
 				if !revealHeaders {
 					lastError = scrubUpstreamText(lastError)
+				}
+				// Spec 105 FR-007 (codex round 3): the error re-emits the
+				// child's stderr, which on a `docker run` name collision
+				// names another server's container. Redacted for scoped
+				// callers before it reaches connection_status.last_error and
+				// health.detail; administrators keep it (SC-005).
+				if scopedCaller {
+					lastError = logs.RedactContainerMentions(lastError)
 				}
 			}
 			isConnected = connInfo.State.String() == "connected"
@@ -5975,7 +5985,18 @@ func (p *MCPProxyServer) handleTailLog(ctx context.Context, request mcp.CallTool
 		connectionStatus := client.GetConnectionStatus()
 		// last_error commonly echoes the upstream URL, credentials included.
 		if lastError, ok := connectionStatus["last_error"].(string); ok {
-			connectionStatus["last_error"] = scrubUpstreamText(lastError)
+			lastError = scrubUpstreamText(lastError)
+			// Spec 105 FR-007 (codex round 3): a connect error re-emits the
+			// child's stderr, and on a `docker run` name collision that names
+			// another server's container (`a/b` and `a-b` generate the same
+			// name). Scoped callers get container mentions redacted — the
+			// same predicate the attributed reader applies to the log record
+			// — uniformly, whether or not a co-owner exists; administrators
+			// keep the text (SC-005).
+			if authCtx != nil && !authCtx.IsAdmin() {
+				lastError = logs.RedactContainerMentions(lastError)
+			}
+			connectionStatus["last_error"] = lastError
 		}
 		result["connection_status"] = connectionStatus
 	}

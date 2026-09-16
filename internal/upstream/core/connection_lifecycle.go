@@ -67,7 +67,7 @@ func (c *Client) initialize(ctx context.Context) error {
 			waited := time.Since(initStart).Round(100 * time.Millisecond)
 			stderrBlock := c.formatRecentStderr()
 			if stderrBlock != "" {
-				return fmt.Errorf("server did not respond to MCP initialize within %s (subprocess may have crashed or printed to stderr instead of stdout); recent stderr:\n%s", waited, stderrBlock)
+				return &childOutputError{msg: fmt.Sprintf("server did not respond to MCP initialize within %s (subprocess may have crashed or printed to stderr instead of stdout); recent stderr:\n%s", waited, stderrBlock)}
 			}
 			return fmt.Errorf("server did not respond to MCP initialize within %s and produced no stderr output (check that the command starts an MCP server and not a help banner)", waited)
 		}
@@ -151,9 +151,36 @@ func shouldEnrichStdioPrematureExit(transportType string, err error) bool {
 
 func enrichTransportClosedError(stderrBlock string, cause error) error {
 	if stderrBlock != "" {
-		return fmt.Errorf("server process exited before completing the MCP initialize handshake; recent stderr:\n%s: %w", stderrBlock, cause)
+		return &childOutputError{
+			msg:   fmt.Sprintf("server process exited before completing the MCP initialize handshake; recent stderr:\n%s: %v", stderrBlock, cause),
+			cause: cause,
+		}
 	}
 	return fmt.Errorf("server process exited before completing the MCP initialize handshake and produced no stderr output (transport closed before the handshake): %w", cause)
+}
+
+// childOutputError is a connect error whose text re-emits the child
+// process's own stderr (the recent-stderr buffer). It is the provenance the
+// per-server log needs: a record that renders such an error carries child
+// text and is stamped child_output=true (recordConnectionFailure), so the
+// attributed reader (internal/logs, D8 rules 1 and 3) treats it exactly like
+// the direct stderr record — on a `docker run` name collision that text
+// names another server's container. It unwraps to its cause so errors.Is /
+// errors.As keep working through the wrappers connectStdio and Connect add
+// (Spec 105 FR-007, codex round 3).
+type childOutputError struct {
+	msg   string
+	cause error
+}
+
+func (e *childOutputError) Error() string { return e.msg }
+func (e *childOutputError) Unwrap() error { return e.cause }
+
+// embedsChildOutput reports whether err, anywhere in its chain, re-emits the
+// child's stderr.
+func embedsChildOutput(err error) bool {
+	var target *childOutputError
+	return errors.As(err, &target)
 }
 
 // isTransportClosedErr reports whether an initialize() failure indicates the

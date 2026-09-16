@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -223,4 +225,88 @@ func TestSetupDockerIsolation_ConfiguredRecordCarriesNoOwnerForUnverifiedName(t 
 	assert.NotEmpty(t, fields["container_name"], "the generated name is still recorded")
 	_, hasOwner := fields["container_owner"]
 	assert.False(t, hasOwner, "container_owner asserted for a container that does not exist yet: %v", fields)
+}
+
+// Codex round 3, logs finding 1: the child's stderr is re-emitted INSIDE the
+// connection error. monitorStderr keeps every line in the recent-stderr
+// buffer, initialize() splices that buffer into the error it returns
+// (enrichTransportClosedError / the initialize-timeout branch) and Connect
+// writes that error into the per-server log as the "Connection failed"
+// record. The direct stderr record is a child-output record and withheld;
+// the "Connection failed" record repeats the same foreign name and id and,
+// without the child-output provenance, was attributed to a/b.
+//
+// The chain here is the production one minus the process spawn: the real
+// stderr pump, the real buffer formatter, the real enrichment and the real
+// per-server record write, into a real file read by the real reader.
+func TestDockerRunCollision_ConnectionFailedRecord_NeverAttributedToRequester(t *testing.T) {
+	requireCollisionPremise(t)
+	const name = collisionRequester
+	upstreamLogger, logCfg := newRealPerServerLogger(t, name)
+	c := &Client{
+		config:         &config.ServerConfig{Name: name},
+		logger:         zap.NewNop(),
+		upstreamLogger: upstreamLogger,
+		transportType:  transportStdio,
+	}
+	upstreamLogger.Info("ordinary-record-of-a-b")
+
+	c.monitorStderr(context.Background(), strings.NewReader(dockerCollisionStderr+"\n"))
+	err := enrichTransportClosedError(c.formatRecentStderr(), io.EOF)
+	require.Contains(t, err.Error(), collisionForeignID, "fixture premise: the enriched error embeds the child's stderr")
+	c.recordConnectionFailure(fmt.Errorf("stdio transport (command=%q, docker_isolation=%t): %w", "docker", true, err))
+	_ = upstreamLogger.Sync()
+
+	whole, readErr := logs.ReadUpstreamServerLogTail(logCfg, name, 50)
+	require.NoError(t, readErr)
+	var failed []string
+	for _, line := range whole {
+		if strings.Contains(line, "Connection failed") {
+			failed = append(failed, line)
+		}
+	}
+	require.Len(t, failed, 1, "fixture premise: one Connection failed record:\n%s", strings.Join(whole, "\n"))
+	require.Contains(t, failed[0], collisionForeignID, "fixture premise: the record embeds the foreign id")
+
+	assertCollisionWithheldFromScopedReader(t, logCfg, name)
+}
+
+// The same producer with ordinary child stderr (no container mention): the
+// "Connection failed" record stays attributable to its own writer — the
+// child-output provenance only makes it a container SUBJECT when it names one.
+func TestConnectionFailedRecord_OrdinaryChildStderrStaysAttributed(t *testing.T) {
+	const name = collisionRequester
+	upstreamLogger, logCfg := newRealPerServerLogger(t, name)
+	c := &Client{
+		config:         &config.ServerConfig{Name: name},
+		logger:         zap.NewNop(),
+		upstreamLogger: upstreamLogger,
+		transportType:  transportStdio,
+	}
+	c.monitorStderr(context.Background(), strings.NewReader("Error: --brave-api-key is required\n"))
+	c.recordConnectionFailure(enrichTransportClosedError(c.formatRecentStderr(), io.EOF))
+	_ = upstreamLogger.Sync()
+
+	scoped, err := logs.ReadUpstreamServerLogTailAttributed(logCfg, name, 50)
+	require.NoError(t, err)
+	body := strings.Join(scoped, "\n")
+	assert.Contains(t, body, "Connection failed", "an ordinary connect failure must stay readable by its own server")
+	assert.Contains(t, body, "brave-api-key is required")
+}
+
+// An HTTP transport failure embeds no child output; the record must not be
+// stamped child_output (the marker is provenance, not decoration).
+func TestConnectionFailedRecord_NoChildOutputMarkerWithoutChildText(t *testing.T) {
+	perServerCore, perServerLogs := observer.New(zap.DebugLevel)
+	c := &Client{
+		config:         &config.ServerConfig{Name: "alpha"},
+		logger:         zap.NewNop(),
+		upstreamLogger: zap.New(perServerCore),
+		transportType:  transportHTTP,
+	}
+	c.recordConnectionFailure(fmt.Errorf("failed to start HTTP client: connection refused"))
+	entries := perServerLogs.FilterMessage("Connection failed").All()
+	require.Len(t, entries, 1)
+	_, stamped := entries[0].ContextMap()["child_output"]
+	assert.False(t, stamped, "no child text in the error, no child_output marker: %v", entries[0].ContextMap())
 }

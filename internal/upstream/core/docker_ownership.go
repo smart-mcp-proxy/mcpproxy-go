@@ -243,3 +243,98 @@ func (c *Client) stopOwnedContainer(ctx context.Context, container ownedContaine
 	}
 	return true
 }
+
+// ContainerOwnedByAny is the whole-manager predicate: a container (its name
+// and its com.mcpproxy.server label as Docker reported them) is canonically
+// owned by one of serverNames — the configured servers — under the same
+// label-AND-name rule ownsContainer applies per server. The manager's
+// shutdown and emergency sweeps select containers by the shared
+// com.mcpproxy.managed / com.mcpproxy.instance labels, which any foreign
+// container can copy; only the rows this admits may be stopped, removed or
+// named (codex round 3).
+func ContainerOwnedByAny(serverNames []string, containerName, ownerLabel string) bool {
+	for _, serverName := range serverNames {
+		if ownsContainer(serverName, containerName, ownerLabel) {
+			return true
+		}
+	}
+	return false
+}
+
+// ForceRemoveTrackedContainerIfOwned is the manager's emergency path for a
+// client whose Disconnect hung: `docker rm -f` the container tracked as
+// containerID, but only after re-establishing canonical ownership NOW — the
+// predicate killDockerContainerWithContext applies at the moment of the
+// mutation — so a container renamed, relabelled or reused under that id since
+// it was tracked is left alone (codex round 3). owned reports whether the
+// predicate admitted the container (removal was attempted); err is the docker
+// error when removal ran and failed, or the lookup error. Records carry
+// container_owner from the label read back; an unowned container is never
+// named in the per-server log.
+func (c *Client) ForceRemoveTrackedContainerIfOwned(ctx context.Context, containerID string) (owned bool, err error) {
+	if containerID == "" {
+		return false, nil
+	}
+	container, ok, err := c.lookupOwnedContainerByID(ctx, containerID)
+	switch {
+	case err != nil:
+		c.logger.Warn("Could not verify ownership of the tracked container for force removal - leaving it alone",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", shortContainerID(containerID)),
+			zap.Error(err))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Warn("Could not verify ownership of the tracked container for force removal - leaving it alone", zap.Error(err))
+		}
+		return false, err
+	case !ok:
+		c.logger.Info("Tracked container is not canonically owned by this server - not force removed",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", shortContainerID(containerID)))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Info("Tracked container is not canonically owned by this server - not force removed")
+		}
+		return false, nil
+	}
+
+	c.logger.Warn("Force removing owned container",
+		zap.String("server", c.config.Name),
+		zap.String("cleanup_path", "force"),
+		zap.String("container_id", container.ID),
+		zap.String("container_name", container.Name),
+		containerOwnerField(container.Owner))
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Warn("Force removing owned container",
+			zap.String("cleanup_path", "force"),
+			zap.String("container_id", container.ID),
+			zap.String("container_name", container.Name),
+			containerOwnerField(container.Owner))
+	}
+	if err := c.newDockerCmd(ctx, "rm", "-f", container.ID).Run(); err != nil {
+		c.logger.Error("Failed to force remove owned container",
+			zap.String("server", c.config.Name),
+			zap.String("cleanup_path", "force"),
+			zap.String("container_id", container.ID),
+			containerOwnerField(container.Owner),
+			zap.Error(err))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Error("Failed to force remove owned container",
+				zap.String("cleanup_path", "force"),
+				zap.String("container_id", container.ID),
+				containerOwnerField(container.Owner),
+				zap.Error(err))
+		}
+		return true, err
+	}
+	c.logger.Info("Owned container force removed",
+		zap.String("server", c.config.Name),
+		zap.String("cleanup_path", "force"),
+		zap.String("container_id", container.ID),
+		containerOwnerField(container.Owner))
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("Owned container force removed",
+			zap.String("cleanup_path", "force"),
+			zap.String("container_id", container.ID),
+			containerOwnerField(container.Owner))
+	}
+	return true, nil
+}

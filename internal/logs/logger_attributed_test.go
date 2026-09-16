@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -451,6 +452,14 @@ func TestReadUpstreamServerLogTail_AttributedOnly_CaseOnlyNames(t *testing.T) {
 // the readable history; the attributed reader then returns only what is still
 // attributable in the current file — and never the co-owner's records.
 func TestReadUpstreamServerLogTail_AttributedOnly_ForcedRotationSharedHistory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The fixture needs two lumberjack sinks on one file and a rotation by
+		// the co-owner; Windows refuses the rename while the other sink holds
+		// the file open ("being used by another process"), so the premise
+		// cannot be established there. The reader logic under test is
+		// platform-neutral and is covered by the other cells.
+		t.Skip("shared-file rotation between two sinks cannot happen on Windows")
+	}
 	cfg := newAttributedLogDir(t, false)
 	cfg.MaxSize = 1 // MB — lumberjack's minimum; the co-owner forces one rotation
 	cfg.MaxBackups = 1
@@ -782,5 +791,37 @@ func TestReadUpstreamServerLogTail_AttributedOnly_ChildOutputNamingContainerIsSu
 				assert.Contains(t, whole, foreignName)
 			})
 		}
+	}
+}
+
+// Codex round 3, logs finding 2: the container check ran over the WHOLE
+// serialized record, so the writer stamp itself could match — a server
+// legitimately named like a canonical container (`mcpproxy-tenant-abcd`
+// matches mcpproxy-<x>-<4 alnum>) had every child-output record, even a
+// plain "ready", classified as a container subject and withheld. Only the
+// decoded child-controlled value is the subject; the stamp fields never are.
+func TestReadUpstreamServerLogTail_AttributedOnly_ContainerShapedServerNameIsNotASubject(t *testing.T) {
+	const name = "mcpproxy-tenant-abcd"
+	require.Regexp(t, containerMentionPattern, name, "fixture premise: the server name matches the container pattern")
+
+	for _, enc := range encoderCases() {
+		t.Run(enc.name, func(t *testing.T) {
+			cfg := newAttributedLogDir(t, enc.json)
+			w := openStampedWriter(t, cfg, name)
+
+			writeRecord(w, "own ordinary record")
+			writeChildStderr(w, "ready")
+			writeChildLauncherLine(w, "[launcher stdout] listening on 127.0.0.1:9331")
+			// A child line that DOES name a container is still a subject.
+			writeChildStderr(w, `Conflict. The container name "/mcpproxy-tenant-zzzz" is already in use by container "f0e1d2c3b4a5968778695a4b3c2d1e0ff0e1d2c3b4a5968778695a4b3c2d1e0f".`)
+
+			got := attributedTail(t, cfg, name, 50)
+			body := joinLines(got)
+			assert.Contains(t, body, "own ordinary record")
+			assert.Contains(t, body, "ready", "ordinary child output of a container-shaped server name must stay attributable")
+			assert.Contains(t, body, "listening on 127.0.0.1:9331")
+			assert.NotContains(t, body, "already in use by container")
+			assert.Len(t, got, 3, "own ordinary + two ordinary child lines; got:\n%s", body)
+		})
 	}
 }

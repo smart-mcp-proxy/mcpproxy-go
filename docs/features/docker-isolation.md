@@ -387,6 +387,15 @@ Two consequences of the ownership rule are worth knowing:
   container created under the old name is no longer owned by the new one,
   so it is left alone by the pre-start sweep and must be removed manually
   (`docker rm -f`).
+- **The shutdown and emergency sweeps** (every `com.mcpproxy.managed`
+  container on shutdown; every one carrying this instance's id when
+  shutdown fails) apply the same rule: only containers canonically owned by
+  a server in the current configuration are stopped or removed, and the
+  disconnect-timeout path re-checks the ownership of the id it tracked
+  before `docker rm -f`. A container that merely carries the mcpproxy
+  labels — one you labelled yourself, or an orphan of a server that is no
+  longer configured — is left alone and only counted in a warning, never
+  named. Remove such orphans by hand (see below).
 
 ### Manual Cleanup
 

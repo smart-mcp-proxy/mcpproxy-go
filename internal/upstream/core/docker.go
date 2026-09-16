@@ -432,10 +432,14 @@ func (c *Client) ensureNoExistingContainers(ctx context.Context) error {
 	if c.upstreamLogger != nil {
 		// container_owner: the count is of THIS server's owned containers
 		// (D8 rule 3 treats a count as a container subject, since the pre-105
-		// sweep counted co-owners' containers too).
+		// sweep counted co-owners' containers too). Like every other
+		// container record, the owner is the label Docker reported
+		// (ownedContainer.Owner — one value for every row, since
+		// ownsContainer admits only rows whose label equals this server's
+		// raw name), never the requesting server's name (D9, codex round 3).
 		c.upstreamLogger.Warn("Cleaning up existing containers before creating new one",
 			zap.Int("container_count", len(owned)),
-			containerOwnerField(c.config.Name))
+			containerOwnerField(owned[0].Owner))
 	}
 
 	for _, container := range owned {

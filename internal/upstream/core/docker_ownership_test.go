@@ -406,6 +406,16 @@ func TestDockerCleanup_CountRecordCarriesContainerOwner(t *testing.T) {
 	fields := counts[0].ContextMap()
 	assert.EqualValues(t, 1, fields["container_count"], "the count is of a's own containers only")
 	assert.Equal(t, "a", fields["container_owner"], "count record must carry container_owner so a's scoped reader can attribute it")
+
+	// Codex round 3, docker finding 3: the value is the label Docker
+	// reported for the counted rows (D9: never the requesting name). The
+	// predicate makes the two equal byte-for-byte, so this pins provenance
+	// by construction: the count record's owner must be the readback value
+	// the row records carry.
+	owned, err := c.listOwnedContainers(context.Background(), true)
+	require.NoError(t, err)
+	require.NotEmpty(t, owned)
+	assert.Equal(t, owned[0].Owner, fields["container_owner"], "count record owner must be the label read back from Docker")
 }
 
 // Critique round 1, finding C2.3: ownsContainer is the Go-side half of the
@@ -610,4 +620,82 @@ func TestDockerCleanup_ExactNamePathsApplyOwnership(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Codex round 3, docker finding 1: the manager's emergency path (a client
+// whose Disconnect hung) ran `docker rm -f <tracked id>` with no ownership
+// check, while every other stop/kill/rm path re-establishes ownership at the
+// moment of the mutation. The tracked id is re-inspected here: a container
+// that is no longer canonically a's — renamed to a-b's shape, or a foreign
+// container under that id — is left alone and never named in a's log; a's
+// own container is removed with container_owner from the label read back.
+func TestForceRemoveTrackedContainerIfOwned_AppliesOwnership(t *testing.T) {
+	t.Run("tracked id now foreign", func(t *testing.T) {
+		fd := installFakeDocker(t, ownAndForeignFixture())
+		c, mainLogs, upLogs := newOwnershipClient("a", nil)
+
+		owned, err := c.ForceRemoveTrackedContainerIfOwned(context.Background(), foreignContainerID)
+		require.NoError(t, err)
+		assert.False(t, owned, "a foreign container under the tracked id must not be admitted")
+		assert.Empty(t, fd.mutationsOf(t, foreignContainerID), "foreign container %s was mutated", foreignContainerID)
+		for _, line := range fd.invocations(t) {
+			assert.False(t, strings.HasPrefix(line, "rm "), "rm invoked without ownership: %s", line)
+		}
+		// The per-server log (tail_log) never names it; main.log keeps the
+		// short TRACKED id in the "not owned" diagnostic, as the disconnect
+		// path does — that id was a's own knowledge (the fixture ids are
+		// already short) — but never the name read back.
+		for _, needle := range []string{foreignContainerID, foreignContainerName, shortContainerID(foreignContainerID)} {
+			assert.Empty(t, recordsMentioning(upLogs, needle), "foreign %q written into a's per-server log", needle)
+		}
+		assert.Empty(t, recordsMentioning(mainLogs, foreignContainerName), "foreign name read back written into main log under server=a")
+	})
+
+	t.Run("tracked id owned", func(t *testing.T) {
+		fd := installFakeDocker(t, ownAndForeignFixture())
+		c, _, upLogs := newOwnershipClient("a", nil)
+
+		owned, err := c.ForceRemoveTrackedContainerIfOwned(context.Background(), ownContainerID)
+		require.NoError(t, err)
+		assert.True(t, owned)
+		assert.Equal(t, []string{"rm -f " + ownContainerID}, fd.mutationsOf(t, ownContainerID))
+		removed := upLogs.FilterMessage("Owned container force removed").All()
+		require.Len(t, removed, 1)
+		assert.Equal(t, "a", removed[0].ContextMap()["container_owner"], "owner is the label read back")
+	})
+
+	t.Run("no tracked id", func(t *testing.T) {
+		fd := installFakeDocker(t, ownAndForeignFixture())
+		c, _, _ := newOwnershipClient("a", nil)
+		owned, err := c.ForceRemoveTrackedContainerIfOwned(context.Background(), "")
+		require.NoError(t, err)
+		assert.False(t, owned)
+		assert.Empty(t, fd.invocations(t), "nothing to remove, docker never invoked")
+	})
+}
+
+// ContainerOwnedByAny is the whole-manager sweep predicate (codex round 3,
+// docker finding 2): label AND canonical name for the SAME configured server.
+func TestContainerOwnedByAny_Predicate(t *testing.T) {
+	configured := []string{"a", "a/b"}
+	cases := []struct {
+		name  string
+		cname string
+		label string
+		owned bool
+	}{
+		{"a's canonical container", "mcpproxy-a-wxyz", "a", true},
+		{"a/b's canonical container", "mcpproxy-a-b-wxyz", "a/b", true},
+		{"a-b's container: a-b not configured", "mcpproxy-a-b-wxyz", "a-b", false},
+		{"copied managed label, no server label", "postgres", "", false},
+		{"configured label, non-canonical name", "custom", "a", false},
+		{"canonical name for a, label of a/b", "mcpproxy-a-wxyz", "a/b", false},
+		{"canonical name for a, no label", "mcpproxy-a-wxyz", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.owned, ContainerOwnedByAny(configured, tc.cname, tc.label))
+		})
+	}
+	assert.False(t, ContainerOwnedByAny(nil, "mcpproxy-a-wxyz", "a"), "no configured servers, nothing is owned")
 }

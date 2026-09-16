@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -512,4 +513,80 @@ func TestTailLog_DockerCollisionChildOutput_ForeignContainerWithheldFromScopedCa
 			assert.Equal(t, 4, resp.LinesReturned)
 		})
 	}
+}
+
+// Codex round 3, logs finding 1, at the tool surface. The collision text
+// reaches an a/b-scoped caller by two more routes than the direct stderr
+// record: the per-server "Connection failed" record, whose error re-emits
+// the recent-stderr buffer (internal/upstream/core recordConnectionFailure
+// stamps it child_output=true, so the reader withholds it when it names a
+// container), and `connection_status.last_error`, the same error rendered
+// from the state manager — served by tail_log AND by `list` (with the health
+// detail derived from it) — which is redacted for scoped callers
+// (logs.RedactContainerMentions). Administrators keep both verbatim
+// (SC-005). Registered co-tenant a-b is silent; the requester is a/b.
+func TestTailLog_DockerCollisionConnectError_ForeignContainerWithheldFromScopedCaller(t *testing.T) {
+	const foreignID = "f0e1d2c3b4a5968778695a4b3c2d1e0ff0e1d2c3b4a5968778695a4b3c2d1e0f"
+	const foreignName = "mcpproxy-a-b-wxyz"
+	collision := `docker: Error response from daemon: Conflict. The container name "/` + foreignName +
+		`" is already in use by container "` + foreignID + `". You have to remove (or rename) that container to be able to reuse that name.`
+	const hiddenOwner = "a-b"
+	require.Equal(t, "mcpproxy-"+dockernaming.SanitizeServerName(collidingHidden)+"-wxyz", foreignName,
+		"fixture premise: the foreign name is a/b's (and a-b's) canonical container shape")
+
+	f := newTailLogProxyWithServers(t, collidingHidden, hiddenOwner)
+
+	// The connect error in the producer's shape: the premature-exit
+	// enrichment's text with the stderr block, wrapped by connectStdio.
+	connectErr := fmt.Errorf("stdio transport (command=%q, docker_isolation=%t): %w", "docker", true,
+		fmt.Errorf("server process exited before completing the MCP initialize handshake; recent stderr:\n  | %s: EOF", collision))
+	client, ok := f.proxy.upstreamManager.GetClient(collidingHidden)
+	require.True(t, ok)
+	client.StateManager.SetError(connectErr)
+
+	w := f.writers[collidingHidden]
+	w.Info("own-ordinary-record")
+	w.Error("Connection failed", zap.String("transport", "stdio"), zap.Error(connectErr), logs.ChildOutputField())
+	_ = w.Sync()
+
+	scoped := agentCtx([]string{collidingHidden}, []string{auth.PermRead}, "")
+	resp, body := tailLogLinesVia(t, f.proxy, scoped, collidingHidden, 50)
+	assert.NotContains(t, body, foreignID, "foreign container id disclosed to an a/b-scoped token (log record or last_error)")
+	assert.NotContains(t, body, foreignName, "foreign container name disclosed to an a/b-scoped token (log record or last_error)")
+	assert.NotContains(t, body, "already in use by container")
+	assert.Contains(t, body, "own-ordinary-record")
+	assert.Contains(t, body, `"last_error"`, "the status field itself stays present, redacted")
+	assert.Equal(t, 1, resp.LinesReturned, "lines_returned counts the authorized tail: %s", body)
+
+	// `list` renders the same error into connection_status.last_error and health.
+	listBody := listUpstreamsBodyVia(t, f.proxy, scoped)
+	assert.Contains(t, listBody, collidingHidden)
+	assert.NotContains(t, listBody, foreignID, "foreign container id disclosed through list")
+	assert.NotContains(t, listBody, foreignName, "foreign container name disclosed through list")
+	assert.NotContains(t, listBody, "already in use by container")
+
+	for name, ctx := range map[string]context.Context{
+		"api-key admin": adminCtx(),
+		"no auth ctx":   context.Background(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, body := tailLogLinesVia(t, f.proxy, ctx, collidingHidden, 50)
+			assert.Contains(t, body, foreignID, "administrators keep the connect error verbatim (SC-005)")
+			assert.Equal(t, 2, resp.LinesReturned)
+			assert.Contains(t, listUpstreamsBodyVia(t, f.proxy, ctx), foreignID)
+		})
+	}
+}
+
+// listUpstreamsBodyVia drives `upstream_servers` `list` through the real
+// dispatcher and returns the response text.
+func listUpstreamsBodyVia(t *testing.T, proxy *MCPProxyServer, ctx context.Context) string {
+	t.Helper()
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]interface{}{"operation": "list"}
+	result, err := proxy.handleUpstreamServers(ctx, request)
+	require.NoError(t, err)
+	body := toolResultText(t, result)
+	require.False(t, result.IsError, "list must succeed: %s", body)
+	return body
 }

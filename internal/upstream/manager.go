@@ -745,30 +745,100 @@ func (m *Manager) ShutdownAll(ctx context.Context) error {
 	return nil
 }
 
+// managedContainerFormat is the `docker ps --format` both sweeps read: id,
+// name and the owner label, tab-separated, label last so an empty label
+// leaves the column empty.
+const managedContainerFormat = "{{.ID}}\t{{.Names}}\t{{.Label \"com.mcpproxy.server\"}}"
+
+// managedContainer is one `docker ps` row of a sweep.
+type managedContainer struct {
+	ID    string
+	Name  string
+	Owner string // the com.mcpproxy.server label value as Docker reported it
+}
+
+// configuredServerNames returns the raw name of every configured server
+// (enabled or not) — the set of possible canonical owners for a sweep.
+func (m *Manager) configuredServerNames() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	names := make([]string, 0, len(m.clients))
+	for _, client := range m.clients {
+		if client == nil {
+			continue
+		}
+		if cfg := client.GetConfig(); cfg != nil {
+			names = append(names, cfg.Name)
+		}
+	}
+	return names
+}
+
+// listOwnedManagedContainers runs `docker ps -a` with the given label filters
+// and returns only the rows canonically owned by a configured server:
+// com.mcpproxy.server=<raw> AND name ^mcpproxy-<sanitised(raw)>-[a-z0-9]{4}$
+// for the SAME configured server (core.ContainerOwnedByAny). The managed and
+// instance labels a sweep selects on are shared and copyable, so on their own
+// they are not ownership (Spec 105 FR-007 / D9, codex round 3): a foreign
+// container carrying them is neither mutated nor named — the skipped rows
+// are counted once at Warn, without ids or names.
+func (m *Manager) listOwnedManagedContainers(ctx context.Context, filters ...string) ([]managedContainer, error) {
+	args := []string{"ps", "-a"}
+	for _, filter := range filters {
+		args = append(args, "--filter", filter)
+	}
+	args = append(args, "--format", managedContainerFormat)
+	output, err := exec.CommandContext(ctx, "docker", args...).Output()
+	if err != nil {
+		return nil, err
+	}
+
+	configured := m.configuredServerNames()
+	var owned []managedContainer
+	skipped := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 3 {
+			skipped++
+			continue
+		}
+		row := managedContainer{ID: parts[0], Name: parts[1], Owner: parts[2]}
+		if !core.ContainerOwnedByAny(configured, row.Name, row.Owner) {
+			skipped++
+			continue
+		}
+		owned = append(owned, row)
+	}
+	if skipped > 0 {
+		m.logger.Warn("Skipping containers carrying the mcpproxy labels that no configured server canonically owns",
+			zap.Int("count", skipped))
+	}
+	return owned, nil
+}
+
 // cleanupAllManagedContainers finds and stops all Docker containers managed by mcpproxy
-// Uses labels to identify containers across all instances
+// Uses labels to identify containers across all instances, then keeps only
+// the ones a configured server canonically owns (listOwnedManagedContainers).
 func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 	m.logger.Info("Cleaning up all mcpproxy-managed Docker containers")
 
 	// Find all containers with our management label
-	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a",
-		"--filter", "label=com.mcpproxy.managed=true",
-		"--format", "{{.ID}}\t{{.Names}}\t{{.Label \"com.mcpproxy.server\"}}")
-
-	output, err := listCmd.Output()
+	owned, err := m.listOwnedManagedContainers(ctx, "label=com.mcpproxy.managed=true")
 	if err != nil {
 		m.logger.Debug("No Docker containers found or Docker unavailable", zap.Error(err))
 		return
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) == 0 || lines[0] == "" {
+	if len(owned) == 0 {
 		m.logger.Debug("No mcpproxy-managed containers found")
 		return
 	}
 
 	m.logger.Info("Found mcpproxy-managed containers to cleanup",
-		zap.Int("count", len(lines)))
+		zap.Int("count", len(owned)))
 
 	// Grace period for graceful shutdown
 	gracePeriod := 10 * time.Second
@@ -776,39 +846,24 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 	defer graceCancel()
 
 	containerIDs := []string{}
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) >= 1 {
-			containerID := parts[0]
-			containerName := ""
-			serverName := ""
-			if len(parts) >= 2 {
-				containerName = parts[1]
-			}
-			if len(parts) >= 3 {
-				serverName = parts[2]
-			}
+	for _, container := range owned {
+		m.logger.Info("Stopping container",
+			zap.String("container_id", container.ID),
+			zap.String("container_name", container.Name),
+			zap.String("server", container.Owner),
+			zap.String("container_owner", container.Owner))
 
-			m.logger.Info("Stopping container",
-				zap.String("container_id", containerID),
-				zap.String("container_name", containerName),
-				zap.String("server", serverName))
+		containerIDs = append(containerIDs, container.ID)
 
-			containerIDs = append(containerIDs, containerID)
-
-			// Try graceful stop first
-			stopCmd := exec.CommandContext(graceCtx, "docker", "stop", containerID)
-			if err := stopCmd.Run(); err != nil {
-				m.logger.Warn("Graceful stop failed, will force kill",
-					zap.String("container_id", containerID),
-					zap.Error(err))
-			} else {
-				m.logger.Info("Container stopped gracefully",
-					zap.String("container_id", containerID))
-			}
+		// Try graceful stop first
+		stopCmd := exec.CommandContext(graceCtx, "docker", "stop", container.ID)
+		if err := stopCmd.Run(); err != nil {
+			m.logger.Warn("Graceful stop failed, will force kill",
+				zap.String("container_id", container.ID),
+				zap.Error(err))
+		} else {
+			m.logger.Info("Container stopped gracefully",
+				zap.String("container_id", container.ID))
 		}
 	}
 
@@ -846,7 +901,8 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 
 // ForceCleanupAllContainers is a public wrapper for emergency container cleanup
 // This is called when graceful shutdown fails and containers must be force-removed
-// Only removes containers owned by THIS instance (matching instance ID)
+// Only removes containers owned by THIS instance (matching instance ID) AND
+// canonically owned by a configured server (listOwnedManagedContainers).
 func (m *Manager) ForceCleanupAllContainers() {
 	m.logger.Warn("Force cleanup requested - removing all managed containers for this instance")
 
@@ -856,65 +912,70 @@ func (m *Manager) ForceCleanupAllContainers() {
 
 	// Find all containers with our management label AND our instance ID
 	instanceID := core.GetInstanceID()
-	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a",
-		"--filter", "label=com.mcpproxy.managed=true",
-		"--filter", fmt.Sprintf("label=com.mcpproxy.instance=%s", instanceID),
-		"--format", "{{.ID}}\t{{.Names}}")
-
-	output, err := listCmd.Output()
+	owned, err := m.listOwnedManagedContainers(ctx,
+		"label=com.mcpproxy.managed=true",
+		fmt.Sprintf("label=com.mcpproxy.instance=%s", instanceID))
 	if err != nil {
 		m.logger.Warn("Failed to list managed containers for force cleanup", zap.Error(err))
 		return
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) == 0 || lines[0] == "" {
+	if len(owned) == 0 {
 		m.logger.Info("No managed containers found during force cleanup")
 		return
 	}
 
 	m.logger.Warn("Force removing managed containers",
-		zap.Int("count", len(lines)))
+		zap.Int("count", len(owned)))
 
 	// Force remove each container (skip graceful stop)
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) < 1 {
-			continue
-		}
-
-		containerID := parts[0]
-		containerName := ""
-		if len(parts) >= 2 {
-			containerName = parts[1]
-		}
-
+	for _, container := range owned {
+		shortID := shortContainerID(container.ID)
 		m.logger.Warn("Force removing container",
-			zap.String("id", containerID[:12]),
-			zap.String("name", containerName))
+			zap.String("id", shortID),
+			zap.String("name", container.Name),
+			zap.String("container_owner", container.Owner))
 
 		// Use docker rm -f to force remove (kills and removes in one step)
-		rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
+		rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", container.ID)
 		if err := rmCmd.Run(); err != nil {
 			m.logger.Error("Failed to force remove container",
-				zap.String("id", containerID[:12]),
-				zap.String("name", containerName),
+				zap.String("id", shortID),
+				zap.String("name", container.Name),
 				zap.Error(err))
 		} else {
 			m.logger.Info("Container force removed successfully",
-				zap.String("id", containerID[:12]),
-				zap.String("name", containerName))
+				zap.String("id", shortID),
+				zap.String("name", container.Name))
 		}
 	}
 
 	m.logger.Info("Force cleanup completed")
 }
 
+// shortContainerID renders the 12-character short form of a container id.
+func shortContainerID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
+}
+
+// forceCleanupTarget is what forceCleanupClient needs from a managed client:
+// its configuration, the container id it tracks, and the ownership-checked
+// removal the core client performs.
+type forceCleanupTarget interface {
+	GetConfig() *config.ServerConfig
+	GetContainerID() string
+	ForceRemoveTrackedContainerIfOwned(ctx context.Context, containerID string) (bool, error)
+}
+
 // forceCleanupClient forces cleanup of a specific client's Docker container
-func (m *Manager) forceCleanupClient(client *managed.Client) {
+// when its Disconnect timed out. The stored id is not removed blindly: the
+// core client re-establishes canonical ownership at the moment of the
+// mutation (Spec 105 FR-007 / D9, codex round 3), so a container renamed or
+// reused under that id since it was tracked is left alone.
+func (m *Manager) forceCleanupClient(client forceCleanupTarget) {
 	containerID := client.GetContainerID()
 	if containerID == "" {
 		m.logger.Debug("No container ID for force cleanup",
@@ -924,22 +985,26 @@ func (m *Manager) forceCleanupClient(client *managed.Client) {
 
 	m.logger.Warn("Force cleaning up container for client",
 		zap.String("server", client.GetConfig().Name),
-		zap.String("container_id", containerID[:12]))
+		zap.String("container_id", shortContainerID(containerID)))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Force remove container
-	rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
-	if err := rmCmd.Run(); err != nil {
+	owned, err := client.ForceRemoveTrackedContainerIfOwned(ctx, containerID)
+	switch {
+	case err != nil:
 		m.logger.Error("Failed to force remove container",
 			zap.String("server", client.GetConfig().Name),
-			zap.String("container_id", containerID[:12]),
+			zap.String("container_id", shortContainerID(containerID)),
 			zap.Error(err))
-	} else {
+	case !owned:
+		m.logger.Info("Tracked container not canonically owned by the client - left alone",
+			zap.String("server", client.GetConfig().Name),
+			zap.String("container_id", shortContainerID(containerID)))
+	default:
 		m.logger.Info("Container force removed successfully",
 			zap.String("server", client.GetConfig().Name),
-			zap.String("container_id", containerID[:12]))
+			zap.String("container_id", shortContainerID(containerID)))
 	}
 }
 

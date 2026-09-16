@@ -76,7 +76,15 @@ import (
 //     (ChildOutputField), and a child-output record that mentions a container
 //     id, a canonical container name or Docker's name-conflict phrase
 //     (containerMentionPattern) is withheld unless it carries a matching
-//     `container_owner` — which child output never does.
+//     `container_owner` — which child output never does. The check runs over
+//     the decoded CHILD-CONTROLLED values only (attributionChildMessageField
+//     / attributionChildErrorField: the `message` field the stderr and
+//     launcher producers write the child's line into, and the `error` field
+//     of a record whose error re-emits the recent-stderr buffer — the
+//     "Connection failed" record, codex round 3), never over the serialized
+//     line: the writer stamp of a server that is
+//     itself named like a container (`mcpproxy-tenant-abcd`) is not a
+//     subject, so its ordinary child output stays attributable.
 //
 // Administrators, REST and the CLI keep the whole file (SC-005).
 
@@ -96,10 +104,28 @@ var consoleHeaderPattern = regexp.MustCompile(
 // containerMentionPattern matches text that names a container: a full
 // 64-hex container id (what the daemon's messages carry), a canonical
 // mcpproxy container name (generateContainerName: mcpproxy-<sanitised>-<4
-// alphanumerics>), or Docker's name-conflict phrase. Applied to child-output
-// records only.
+// alphanumerics>), or Docker's name-conflict phrase. Applied to the
+// child-controlled values of child-output records only, and by
+// RedactContainerMentions to status text served to scoped callers.
 var containerMentionPattern = regexp.MustCompile(
 	`\b[0-9a-f]{64}\b|\bmcpproxy-[A-Za-z0-9_.-]+-[a-z0-9]{4}\b|already in use by container`)
+
+// containerMentionRedacted replaces every containerMentionPattern match in
+// RedactContainerMentions.
+const containerMentionRedacted = "[container]"
+
+// RedactContainerMentions blanks every container id, canonical container
+// name and Docker name-conflict phrase in s. The MCP status surface
+// (`upstream_servers` tail_log / list `connection_status.last_error`, and
+// the health detail derived from it) renders a connect error that re-emits
+// the child's stderr — on a `docker run` name collision that text names the
+// colliding container, which belongs to another server (`a/b` and `a-b`
+// generate the same name). A scoped caller gets the same redaction whether
+// or not a co-owner exists (FR-007: uniform, non-disclosing); administrators
+// see the text unchanged (SC-005).
+func RedactContainerMentions(s string) string {
+	return containerMentionPattern.ReplaceAllLiteralString(s, containerMentionRedacted)
+}
 
 // Field names the attribution rules key on.
 const (
@@ -109,6 +135,12 @@ const (
 	attributionContainerNameField  = "container_name"
 	attributionContainerCountField = "container_count"
 	attributionChildOutputField    = "child_output"
+	// Child-controlled values on a child-output record: the child's line
+	// (stderr / launcher producers) and an error that re-emits the
+	// recent-stderr buffer (recordConnectionFailure). Only these are
+	// searched for a container mention.
+	attributionChildMessageField = "message"
+	attributionChildErrorField   = "error"
 
 	// JSON-encoder entry keys (getJSONEncoder / zap.NewProductionEncoderConfig).
 	// A console fields object never carries all three; a suffix that does is
@@ -263,9 +295,7 @@ func recordFields(line string) (attributionFields, bool) {
 		if !ok {
 			return attributionFields{}, false
 		}
-		if fields.childOutput && containerMentionPattern.MatchString(line) {
-			fields.namesContainer = true
-		}
+		fields.applyChildOutputSubject()
 		return fields, true
 	}
 
@@ -293,12 +323,7 @@ func recordFields(line string) (attributionFields, bool) {
 		// record appended after a fragment torn right behind its separator.
 		return attributionFields{}, false
 	}
-	if fields.childOutput && containerMentionPattern.MatchString(line) {
-		// Child text naming a container (Docker's own name-conflict error
-		// carries the colliding container's id and name) is a container
-		// subject, so the record needs container_owner like any other.
-		fields.namesContainer = true
-	}
+	fields.applyChildOutputSubject()
 	return fields, true
 }
 
@@ -312,13 +337,32 @@ type attributionFields struct {
 	containerOwners []string
 	namesContainer  bool
 	// childOutput marks a record whose payload is child process output
-	// (ChildOutputField); such a record is a container subject when its
-	// text mentions a container.
-	childOutput bool
+	// (ChildOutputField); such a record is a container subject when one of
+	// its child-controlled values (childPayload) mentions a container.
+	childOutput  bool
+	childPayload []string
 	// jsonEncoderRecord is set when the object carries all three JSON-encoder
 	// entry keys, i.e. it is a whole JSON-encoder record rather than a console
 	// record's fields object.
 	jsonEncoderRecord bool
+}
+
+// applyChildOutputSubject marks a child-output record as a container subject
+// when a child-controlled value names a container: Docker's own name-conflict
+// error carries the colliding container's id and name, so the record needs
+// container_owner like any other container record. The stamp fields and the
+// serialized line are never searched — a server named like a container is
+// not a subject (codex round 3).
+func (f *attributionFields) applyChildOutputSubject() {
+	if !f.childOutput {
+		return
+	}
+	for _, value := range f.childPayload {
+		if containerMentionPattern.MatchString(value) {
+			f.namesContainer = true
+			return
+		}
+	}
 }
 
 // attributableTo applies the stamp and subject-evidence rules.
@@ -400,6 +444,12 @@ func decodeExactlyOneObject(s string) (attributionFields, bool) {
 				return attributionFields{}, false
 			}
 			fields.childOutput = fields.childOutput || flag
+		case attributionChildMessageField, attributionChildErrorField:
+			// Only string values are child payload; anything else is not a
+			// child line and is left out of the subject check.
+			if value, ok := decodeStringValue(raw); ok {
+				fields.childPayload = append(fields.childPayload, value)
+			}
 		case jsonEncoderLevelKey:
 			hasLevel = true
 		case jsonEncoderTimeKey:

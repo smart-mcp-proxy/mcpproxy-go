@@ -315,7 +315,13 @@ through the wrong server's logger), and a child process's own output line
 that names a container — Docker's `docker run` name-conflict error, for
 instance, quotes the *other* container's name and id when two servers'
 generated container names collide (`a/b` and `a-b` both produce
-`mcpproxy-a-b-…`). Retained effects: rotation and retention
+`mcpproxy-a-b-…`) — the same rule covers the "Connection failed" record
+whose error re-emits that stderr. For the same reason a scoped token's
+`connection_status.last_error` (on `tail_log` and `list`, and the health
+detail derived from it) has container ids, canonical container names and
+Docker's name-conflict phrase replaced by `[container]`; a server that is
+itself *named* like a container (`mcpproxy-tenant-abcd`) is not a container
+mention, so its ordinary child output stays attributable. Retained effects: rotation and retention
 of a shared file stay shared, so a co-owner's output can rotate an authorized
 record out of the readable history; and child process output is attributed
 to the server whose process wrote it — a child cannot forge another server's
