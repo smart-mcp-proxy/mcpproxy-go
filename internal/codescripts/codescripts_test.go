@@ -199,19 +199,36 @@ func TestResolve_ValidatesNameBeforeReadingTheDirectory(t *testing.T) {
 // not-found error all omit, because they compare extensions exactly. A name
 // that executes but no discovery surface reports is worse than no listing at
 // all, so the resolver has to agree with the listing on every platform.
+// bothResolvers runs a case through the administrator and the scoped
+// resolver: since codex r2 #1 they decide their candidates differently
+// (directory read vs. constant-cost path probe), so a rule about which entry
+// backs a name has to hold on each.
+var bothResolvers = []struct {
+	name    string
+	resolve func(scriptsDir, name, explicitLanguage string) ([]byte, string, error)
+}{
+	{"Resolve", Resolve},
+	{"ResolveScoped", ResolveScoped},
+}
+
 func TestResolve_ExtensionCaseIsExact(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "backdoor.JS", "({pwned: true})")
 	writeScript(t, dir, "shouty.TS", "({pwned: true})")
 
-	for _, name := range []string{"backdoor", "shouty"} {
-		t.Run(name, func(t *testing.T) {
-			src, _, err := Resolve(dir, name, "")
-			require.Error(t, err, "an uppercase extension is not a stored script")
-			var notFound *NotFoundError
-			require.True(t, errors.As(err, &notFound), "want *NotFoundError, got %T: %v", err, err)
-			assert.NotContains(t, string(src), "pwned")
-		})
+	// Both resolvers decide their candidates differently (the administrator
+	// reads the directory, the scoped caller probes the paths), so each is
+	// pinned on its own.
+	for _, r := range bothResolvers {
+		for _, name := range []string{"backdoor", "shouty"} {
+			t.Run(r.name+"/"+name, func(t *testing.T) {
+				src, _, err := r.resolve(dir, name, "")
+				require.Error(t, err, "an uppercase extension is not a stored script")
+				var notFound *NotFoundError
+				require.True(t, errors.As(err, &notFound), "want *NotFoundError, got %T: %v", err, err)
+				assert.NotContains(t, string(src), "pwned")
+			})
+		}
 	}
 
 	entries, err := List(dir)
@@ -228,15 +245,19 @@ func TestResolve_CaseDistinctNamesAreDistinctScripts(t *testing.T) {
 	writeScript(t, dir, "foo.js", "({from: 'js'})")
 	writeScript(t, dir, "FOO.ts", "({from: 'ts'})")
 
-	src, lang, err := Resolve(dir, "foo", "")
-	require.NoError(t, err, "foo.js is the only exact-cased match for \"foo\"")
-	assert.Equal(t, "({from: 'js'})", string(src))
-	assert.Equal(t, LanguageJavaScript, lang)
+	for _, r := range bothResolvers {
+		t.Run(r.name, func(t *testing.T) {
+			src, lang, err := r.resolve(dir, "foo", "")
+			require.NoError(t, err, "foo.js is the only exact-cased match for \"foo\"")
+			assert.Equal(t, "({from: 'js'})", string(src))
+			assert.Equal(t, LanguageJavaScript, lang)
 
-	src, lang, err = Resolve(dir, "FOO", "")
-	require.NoError(t, err, "FOO.ts is the only exact-cased match for \"FOO\"")
-	assert.Equal(t, "({from: 'ts'})", string(src))
-	assert.Equal(t, LanguageTypeScript, lang)
+			src, lang, err = r.resolve(dir, "FOO", "")
+			require.NoError(t, err, "FOO.ts is the only exact-cased match for \"FOO\"")
+			assert.Equal(t, "({from: 'ts'})", string(src))
+			assert.Equal(t, LanguageTypeScript, lang)
+		})
+	}
 
 	entries, err := List(dir)
 	require.NoError(t, err)
@@ -536,6 +557,43 @@ func TestResolve_EmptyAndOversized(t *testing.T) {
 	})
 }
 
+// TestResolve_SearchableUnreadableDirectoryIsStillUnreadableForAdmins (Spec
+// 105 SC-005, codex r2 #1) is the administrator-parity control: a scripts
+// directory that is searchable but not listable (0111) refused every
+// administrator run before Spec 105 — the directory read that decided the
+// candidates returned permission denied, and that was the verdict. The scoped
+// resolver's constant-cost path probe must not leak into the administrator
+// path and turn that refusal into an execution, so Resolve keeps deciding its
+// candidates from the directory listing exactly as it did on origin/main.
+func TestResolve_SearchableUnreadableDirectoryIsStillUnreadableForAdmins(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+
+	scriptsDir := filepath.Join(t.TempDir(), "scripts")
+	require.NoError(t, os.MkdirAll(scriptsDir, 0o755))
+	writeScript(t, scriptsDir, "known.js", "1")
+	require.NoError(t, os.Chmod(scriptsDir, 0o111))
+	t.Cleanup(func() { _ = os.Chmod(scriptsDir, 0o755) })
+
+	// Control for the control: the file itself IS reachable through the
+	// searchable directory, so a refusal below is the directory's doing.
+	direct, err := os.ReadFile(filepath.Join(scriptsDir, "known.js"))
+	require.NoError(t, err)
+	require.Equal(t, "1", string(direct))
+
+	src, _, err := Resolve(scriptsDir, "known", "")
+	require.Nil(t, src, "an administrator must not execute out of a directory it cannot list")
+	var invalid *InvalidError
+	require.True(t, errors.As(err, &invalid), "want *InvalidError, got %T: %v", err, err)
+	assert.Equal(t, ReasonUnreadable, invalid.Reason)
+	assert.Equal(t, scriptsDir, invalid.Path, "the administrator's refusal names the directory, as before")
+	assert.Contains(t, err.Error(), "permission denied", "the administrator keeps the OS error")
+}
+
 func TestResolve_Unreadable(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: permissions are not enforced")
@@ -798,8 +856,9 @@ func countDirectoryPrimitives(t *testing.T) (readDirs, lstats *int) {
 // Skipping the not-found LISTING is not enough: an os.ReadDir on the way to
 // the refusal still costs time and allocation proportional to what is stored,
 // and the spec's non-disclosing refusal is indistinguishable in timing class,
-// not only in body. The administrator's miss is the one place a listing is
-// paid for, and exactly once.
+// not only in body. The administrator keeps the pre-105 directory-based
+// decision (SC-005, codex r2 #1): one directory read decides the candidates
+// on every call, and a miss pays for the discovery listing on top.
 func TestResolveScoped_NeverReadsTheDirectory(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "alpha-SENTINEL.js", "1")
@@ -820,12 +879,12 @@ func TestResolveScoped_NeverReadsTheDirectory(t *testing.T) {
 
 	_, _, err = Resolve(dir, "beta", "")
 	require.NoError(t, err)
-	assert.Equal(t, 0, *readDirs, "an administrator hit has no listing to pay for")
+	assert.Equal(t, 1, *readDirs, "the administrator's candidates are decided by one directory read, as before Spec 105")
 
 	_, _, err = Resolve(dir, "missing", "")
 	require.True(t, errors.As(err, &notFound))
 	assert.Equal(t, 2, notFound.Total)
-	assert.Equal(t, 1, *readDirs, "the administrator's miss is built from exactly one listing")
+	assert.Equal(t, 3, *readDirs, "the administrator's miss adds exactly one listing to its candidate read")
 }
 
 // TestResolveScoped_MissCostIsIndependentOfDirectorySize pins the timing
