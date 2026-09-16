@@ -4,10 +4,12 @@ package codescripts
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 // counters see the resolver's calls and not the simulation's.
 func simulateCaseFoldingLstat(t *testing.T) {
 	t.Helper()
+	quiesceIndexRebuilds()
 	orig := lstat
 	lstat = func(name string) (os.FileInfo, error) {
 		info, err := orig(name)
@@ -41,7 +44,27 @@ func simulateCaseFoldingLstat(t *testing.T) {
 		}
 		return nil, err
 	}
-	t.Cleanup(func() { lstat = orig })
+	t.Cleanup(func() {
+		quiesceIndexRebuilds()
+		lstat = orig
+	})
+}
+
+// quiesceIndexRebuilds waits for every rebuild goroutine the tests so far
+// have left in flight. The package's seams (readDir, lstat, indexClock,
+// spawnIndexRebuild) are process-wide, so a helper that installs or restores
+// one must first let any rebuild still reading them land.
+func quiesceIndexRebuilds() {
+	storedNameIndexes.Range(func(_, v any) bool {
+		idx := v.(*storedNames)
+		idx.mu.Lock()
+		building, landed := idx.building, idx.landed
+		idx.mu.Unlock()
+		if building {
+			<-landed
+		}
+		return true
+	})
 }
 
 // settleStoredNamesClock moves the index clock far past any directory the
@@ -50,28 +73,90 @@ func simulateCaseFoldingLstat(t *testing.T) {
 // directory's generation moves. Restored on cleanup.
 func settleStoredNamesClock(t *testing.T) {
 	t.Helper()
+	quiesceIndexRebuilds()
 	orig := indexClock
 	indexClock = func() time.Time { return orig().Add(time.Hour) }
-	t.Cleanup(func() { indexClock = orig })
+	t.Cleanup(func() {
+		quiesceIndexRebuilds()
+		indexClock = orig
+	})
 }
 
-// warmStoredNames takes the stored-name index of dir once, with the clock
+// warmStoredNames builds the stored-name index of dir once, with the clock
 // settled, so the shared tests that count a scoped resolution's directory
-// reads start from a warm index: the one listing is paid per directory
-// change (pinned below), never per request.
+// reads start from a warm index — as the server does at construction. The
+// one listing is paid off the request path (pinned below), never per request.
 func warmStoredNames(t *testing.T, dir string) {
 	t.Helper()
 	settleStoredNamesClock(t)
-	_, err := storedNamesFor(dir)
-	require.NoError(t, err)
+	require.NoError(t, Warm(dir))
 }
 
-// latestStamp is the later of a directory generation's two timestamps.
-func latestStamp(gen dirGeneration) time.Time {
-	if gen.changeTime.After(gen.modTime) {
-		return gen.changeTime
+// heldRebuilds is the test's grip on the rebuild goroutines: while installed,
+// a request that schedules a rebuild hands it here instead of spawning it, so
+// what the request does on its OWN goroutine is exactly what the counters
+// see, and the rebuild lands only when the test says so.
+type heldRebuilds struct {
+	mu   sync.Mutex
+	held []func()
+}
+
+// holdIndexRebuilds installs the grip for the test's duration; whatever is
+// still held at cleanup is landed so no index is left claimed.
+func holdIndexRebuilds(t *testing.T) *heldRebuilds {
+	t.Helper()
+	h := &heldRebuilds{}
+	quiesceIndexRebuilds()
+	orig := spawnIndexRebuild
+	spawnIndexRebuild = func(rebuild func()) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.held = append(h.held, rebuild)
 	}
-	return gen.modTime
+	t.Cleanup(func() {
+		spawnIndexRebuild = orig
+		h.land()
+	})
+	return h
+}
+
+// land runs every held rebuild on the test goroutine and reports how many
+// there were — how many the requests since the last land scheduled.
+func (h *heldRebuilds) land() int {
+	h.mu.Lock()
+	held := h.held
+	h.held = nil
+	h.mu.Unlock()
+	for _, rebuild := range held {
+		rebuild()
+	}
+	return len(held)
+}
+
+// waitForIndexRebuild blocks until the rebuild goroutine of dir, if one is in
+// flight, has landed: the seam a test waits on instead of sleeping.
+func waitForIndexRebuild(t *testing.T, dir string) {
+	t.Helper()
+	idx := storedNamesIndex(filepath.Clean(dir))
+	idx.mu.Lock()
+	building, landed := idx.building, idx.landed
+	idx.mu.Unlock()
+	if !building {
+		return
+	}
+	select {
+	case <-landed:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s: the index rebuild did not land", dir)
+	}
+}
+
+// requireScopedNotFound asserts the ordinary non-disclosing not-found refusal.
+func requireScopedNotFound(t *testing.T, err error) {
+	t.Helper()
+	var notFound *NotFoundError
+	require.True(t, errors.As(err, &notFound), "want *NotFoundError, got %T: %v", err, err)
+	assert.True(t, notFound.Undisclosed, "the refusal is the ordinary non-disclosing form")
 }
 
 // TestResolveScoped_OnAFoldingDirectory (Spec 105 FR-012, codex r3 #1, r4 #1
@@ -84,11 +169,11 @@ func latestStamp(gen dirGeneration) time.Time {
 // O(1): a timing oracle on the stored names (round 5). The contract now: the
 // scoped resolver answers from the directory's stored-name index, so a
 // folded spelling is refused with the ordinary non-disclosing not-found, an
-// exact name runs for every caller, and no request lists the directory while
-// the index is current. The folding lookup is simulated through the lstat
-// seam so the rule is pinned on the case-sensitive filesystems CI runs on;
-// the same test on a real folding mount (TMPDIR and GOTMPDIR on a Docker
-// Desktop bind mount of an APFS directory) exercises the kernel's own fold.
+// exact name runs for every caller, and no request lists the directory —
+// warm or cold. The folding lookup is simulated through the lstat seam so
+// the rule is pinned on the case-sensitive filesystems CI runs on; the same
+// test on a real folding mount (TMPDIR and GOTMPDIR on a Docker Desktop bind
+// mount of an APFS directory) exercises the kernel's own fold.
 func TestResolveScoped_OnAFoldingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "backdoor.JS", "({pwned: true})")
@@ -99,15 +184,14 @@ func TestResolveScoped_OnAFoldingDirectory(t *testing.T) {
 	t.Run("a folded spelling is not a stored script, and settling it lists nothing", func(t *testing.T) {
 		readDirs, lstats := countDirectoryPrimitives(t)
 		src, _, err := ResolveScoped(dir, "backdoor", "")
-		var notFound *NotFoundError
-		require.True(t, errors.As(err, &notFound), "want *NotFoundError, got %T: %v", err, err)
-		assert.True(t, notFound.Undisclosed, "the refusal is the ordinary non-disclosing form")
+		requireScopedNotFound(t, err)
 		assert.NotContains(t, string(src), "pwned")
 		assert.Equal(t, 0, *readDirs, "a warm index answers the fold without a listing (codex r5 #1)")
 		assert.Equal(t, 1, *lstats, "one directory Lstat validates the index; the candidate itself is never probed")
 
 		// The administrator's directory read agrees: byte-for-byte, .JS is
 		// not an extension of a stored script.
+		var notFound *NotFoundError
 		_, _, err = Resolve(dir, "backdoor", "")
 		require.True(t, errors.As(err, &notFound))
 		assert.False(t, notFound.Undisclosed)
@@ -129,17 +213,21 @@ func TestResolveScoped_OnAFoldingDirectory(t *testing.T) {
 	})
 
 	t.Run("an absent name and a present case-variant cost the same, cold and warm", func(t *testing.T) {
+		held := holdIndexRebuilds(t)
 		cost := func(name string) (readDirs, lstats int) {
 			storedNameIndexes.Delete(filepath.Clean(dir)) // cold
 			rd, ls := countDirectoryPrimitives(t)
 			_, _, err := ResolveScoped(dir, name, "")
-			var notFound *NotFoundError
-			require.True(t, errors.As(err, &notFound), "want *NotFoundError, got %T: %v", err, err)
-			cold := *rd
-			assert.Equal(t, 1, cold, "%s: a cold index is one listing, whatever the name", name)
-			_, _, _ = ResolveScoped(dir, name, "")
+			requireScopedNotFound(t, err)
+			assert.Equal(t, 0, *rd, "%s: a cold request lists nothing itself (codex r6 #1)", name)
+			assert.Equal(t, 1, held.land(), "%s: it schedules the one rebuild", name)
+			assert.Equal(t, 1, *rd, "%s: which is the one listing, off the request path", name)
+			cold := *ls
+			_, _, err = ResolveScoped(dir, name, "")
+			requireScopedNotFound(t, err)
 			assert.Equal(t, 1, *rd, "%s: the second request finds the index warm", name)
-			return cold, *ls
+			assert.Equal(t, 0, held.land(), "%s: and schedules nothing", name)
+			return *rd, cold
 		}
 		absentReadDirs, absentLstats := cost("missing")
 		variantReadDirs, variantLstats := cost("backdoor")
@@ -156,47 +244,133 @@ func TestResolveScoped_OnAFoldingDirectory(t *testing.T) {
 	})
 }
 
-// TestStoredNames_ListedOncePerDirectoryGeneration pins the cost rule of the
-// index: a directory that does not change is listed once, however many
-// requests are answered from it and whatever they ask for; a change (an
-// entry added) is one more listing, and the next requests are warm again.
-func TestStoredNames_ListedOncePerDirectoryGeneration(t *testing.T) {
-	dir := t.TempDir()
-	writeScript(t, dir, "alpha.js", "1")
-	settleStoredNamesClock(t)
-	readDirs, _ := countDirectoryPrimitives(t)
-
-	requests := func(names ...string) {
-		for i := 0; i < 20; i++ {
-			_, _, _ = ResolveScoped(dir, names[i%len(names)], "")
-		}
+// TestResolveScoped_ColdRequestCostIsIndependentOfDirectorySize (codex r6
+// #1): the FIRST scoped request against a directory — before any index
+// exists — must cost the same for an empty directory and for one holding ten
+// thousand scripts. It lists nothing on its own goroutine, performs the same
+// one directory Lstat, schedules the one rebuild and is refused fail-closed;
+// the listing happens when the rebuild lands, and the next request is
+// answered from it.
+func TestResolveScoped_ColdRequestCostIsIndependentOfDirectorySize(t *testing.T) {
+	empty := t.TempDir()
+	crowded := t.TempDir()
+	for i := 0; i < 10_000; i++ {
+		writeScript(t, crowded, fmt.Sprintf("script-%05d.js", i), "1")
 	}
-	requests("alpha", "missing", "ALPHA")
-	assert.Equal(t, 1, *readDirs, "an unchanged directory is listed exactly once")
+	settleStoredNamesClock(t)
+	held := holdIndexRebuilds(t)
 
-	before, err := lstat(dir)
-	require.NoError(t, err)
-	// The write must land on a later stamp than the one recorded, whatever
-	// the filesystem's timestamp granularity: past generationSettleTime is
-	// the guarantee the index itself relies on.
-	time.Sleep(time.Until(latestStamp(dirGenerationOf(before)).Add(generationSettleTime)))
-	writeScript(t, dir, "beta.ts", "1")
-	waitForGenerationChange(t, dir, dirGenerationOf(before))
+	probe := func(dir string) (readDirs, lstats int) {
+		storedNameIndexes.Delete(filepath.Clean(dir)) // cold: never warmed
+		rd, ls := countDirectoryPrimitives(t)
+		_, _, err := ResolveScoped(dir, "script-00042", "")
+		requireScopedNotFound(t, err)
+		assert.Equal(t, 0, *rd, "%s: a cold request must not list on its own goroutine", dir)
+		lstats = *ls
+		assert.Equal(t, 1, held.land(), "%s: the cold request schedules exactly one rebuild", dir)
+		return *rd, lstats
+	}
 
-	src, lang, err := ResolveScoped(dir, "beta", "")
-	require.NoError(t, err, "a script added after the listing is found on the next request")
+	emptyReadDirs, emptyLstats := probe(empty)
+	crowdedReadDirs, crowdedLstats := probe(crowded)
+	assert.Equal(t, 1, emptyReadDirs, "the rebuild is the one listing")
+	assert.Equal(t, 1, crowdedReadDirs, "ten thousand entries are listed once, off the request path")
+	assert.Equal(t, emptyLstats, crowdedLstats, "the number of Lstats is independent of the directory's contents")
+	assert.Equal(t, 1, emptyLstats, "the request's own directory Lstat")
+
+	// Landed: the script that was refused a moment ago now runs, with no
+	// listing on the request goroutine and none scheduled.
+	rd, ls := countDirectoryPrimitives(t)
+	src, _, err := ResolveScoped(crowded, "script-00042", "")
+	require.NoError(t, err, "after the rebuild lands the same request executes")
 	assert.Equal(t, "1", string(src))
-	assert.Equal(t, LanguageTypeScript, lang)
-	assert.Equal(t, 2, *readDirs, "the change is one more listing")
+	assert.Equal(t, 0, *rd)
+	assert.Equal(t, 2, *ls, "the directory Lstat plus the hit's own probe")
+	assert.Equal(t, 0, held.land())
+}
 
-	requests("alpha", "beta", "missing")
-	assert.Equal(t, 2, *readDirs, "and the directory is warm again")
+// TestStoredNames_GenerationChangeRebuildsOffTheRequestPath pins the cost
+// rule of the index: an unchanged directory is never listed again, however
+// many requests are answered from it and whatever they ask for; a change (an
+// entry added) is one asynchronous listing that no request performs — the
+// request that notices it is refused fail-closed and the next one sees the
+// new script.
+func TestStoredNames_GenerationChangeRebuildsOffTheRequestPath(t *testing.T) {
+	t.Run("held: the request lists nothing and the landed rebuild serves the next", func(t *testing.T) {
+		dir := t.TempDir()
+		writeScript(t, dir, "alpha.js", "1")
+		warmStoredNames(t, dir)
+		held := holdIndexRebuilds(t)
+		readDirs, lstats := countDirectoryPrimitives(t)
 
-	require.NoError(t, os.Remove(filepath.Join(dir, "alpha.js")))
-	_, _, err = ResolveScoped(dir, "alpha", "")
-	var notFound *NotFoundError
-	require.True(t, errors.As(err, &notFound), "a removed script is not found on the next request (%T: %v)", err, err)
-	assert.True(t, notFound.Undisclosed)
+		for i, name := range []string{"alpha", "missing", "ALPHA"} {
+			for j := 0; j < 20; j++ {
+				_, _, _ = ResolveScoped(dir, name, "")
+			}
+			assert.Equal(t, 0, *readDirs, "%d: an unchanged directory is never listed", i)
+			assert.Equal(t, 0, held.land(), "%d: nor is a rebuild scheduled", i)
+		}
+
+		outliveStamp(t, dir)
+		before, err := lstat(dir)
+		require.NoError(t, err)
+		writeScript(t, dir, "beta.ts", "1")
+		waitForGenerationChange(t, dir, dirGenerationOf(before))
+
+		*lstats = 0
+		_, _, err = ResolveScoped(dir, "beta", "")
+		requireScopedNotFound(t, err) // fail closed until the rebuild lands
+		assert.Equal(t, 0, *readDirs, "the request that finds the generation moved lists nothing itself (codex r6 #1)")
+		assert.Equal(t, 1, *lstats, "one directory Lstat, no candidate probe")
+		assert.Equal(t, 1, held.land(), "it schedules the one rebuild")
+		assert.Equal(t, 1, *readDirs, "which is the one listing")
+
+		src, lang, err := ResolveScoped(dir, "beta", "")
+		require.NoError(t, err, "the script added is found once the rebuild has landed")
+		assert.Equal(t, "1", string(src))
+		assert.Equal(t, LanguageTypeScript, lang)
+		assert.Equal(t, 1, *readDirs)
+		assert.Equal(t, 0, held.land(), "the directory is warm again")
+	})
+
+	t.Run("live: the rebuild goroutine lands and the next request sees the script", func(t *testing.T) {
+		dir := t.TempDir()
+		writeScript(t, dir, "alpha.js", "1")
+		warmStoredNames(t, dir)
+
+		outliveStamp(t, dir)
+		before, err := lstat(dir)
+		require.NoError(t, err)
+		writeScript(t, dir, "beta.ts", "1")
+		waitForGenerationChange(t, dir, dirGenerationOf(before))
+
+		readDirs, _ := countDirectoryPrimitives(t)
+		_, _, err = ResolveScoped(dir, "beta", "")
+		requireScopedNotFound(t, err)
+		waitForIndexRebuild(t, dir)
+		assert.Equal(t, 1, *readDirs, "the rebuild is the one listing")
+
+		src, _, err := ResolveScoped(dir, "beta", "")
+		require.NoError(t, err, "a script added to the directory is callable after the rebuild lands")
+		assert.Equal(t, "1", string(src))
+		assert.Equal(t, 1, *readDirs)
+
+		// The administrator's directory read never waited for anything.
+		_, _, err = Resolve(dir, "beta", "")
+		require.NoError(t, err)
+	})
+}
+
+// outliveStamp sleeps until the directory's latest stamp is
+// generationSettleTime old, so the next write lands on a later stamp whatever
+// the filesystem's timestamp granularity (Linux stamps files with the coarse
+// tick clock, so a write in the same tick as the index's listing would not
+// move the generation — the guarantee the index itself relies on).
+func outliveStamp(t *testing.T, dir string) {
+	t.Helper()
+	info, err := lstat(dir)
+	require.NoError(t, err)
+	time.Sleep(time.Until(dirGenerationOf(info).latest().Add(generationSettleTime)))
 }
 
 // waitForGenerationChange confirms the directory's stamp moved with the
@@ -218,40 +392,123 @@ func waitForGenerationChange(t *testing.T, dir string, was dirGeneration) {
 	}
 }
 
-// TestStoredNames_RelistsUntilTheStampSettles pins the coarse-timestamp
-// guard: an index taken within generationSettleTime of the directory's stamp
-// is retaken on every request (a write in the same tick would not move the
-// stamp) — for every name alike, the bound depends on the clock only — and
-// once the stamp is old enough the next listing is the last.
-func TestStoredNames_RelistsUntilTheStampSettles(t *testing.T) {
+// TestStoredNames_RemovedScriptFailsClosedBeforeTheRebuildLands: an index
+// hit is never trusted on its own — the candidate's Lstat (and the no-follow
+// open) decide — so a script removed after the listing is refused at once,
+// before the rebuild that will drop it from the index has landed.
+func TestStoredNames_RemovedScriptFailsClosedBeforeTheRebuildLands(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "alpha.js", "1")
+	warmStoredNames(t, dir)
+	held := holdIndexRebuilds(t)
+
+	outliveStamp(t, dir)
+	before, err := lstat(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(filepath.Join(dir, "alpha.js")))
+	waitForGenerationChange(t, dir, dirGenerationOf(before))
+	readDirs, lstats := countDirectoryPrimitives(t)
+	_, _, err = ResolveScoped(dir, "alpha", "")
+	requireScopedNotFound(t, err)
+	assert.Equal(t, 0, *readDirs, "the refusal lists nothing")
+	assert.Equal(t, 2, *lstats, "the directory Lstat and the stale hit's own probe, which misses")
+
+	assert.Equal(t, 1, held.land(), "the removal moved the generation: one rebuild")
+	names, err := storedNamesFor(dir)
+	require.NoError(t, err)
+	assert.NotContains(t, names, "alpha.js")
+	_, _, err = ResolveScoped(dir, "alpha", "")
+	requireScopedNotFound(t, err)
+}
+
+// TestStoredNames_UnsettledIndexRefreshesAtMostOncePerWindow pins the
+// coarse-timestamp guard: an index taken within generationSettleTime of the
+// directory's stamp cannot rule out a write in the same tick, so requests
+// keep scheduling a refresh — at most one per window, off the request path,
+// for every name alike — and once a listing lands past the window the index
+// is trusted until the stamp moves. The request's own cost never changes.
+func TestStoredNames_UnsettledIndexRefreshesAtMostOncePerWindow(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "alpha.js", "1")
 	info, err := lstat(dir)
 	require.NoError(t, err)
-	stamp := latestStamp(dirGenerationOf(info))
+	stamp := dirGenerationOf(info).latest()
 
+	quiesceIndexRebuilds()
 	orig := indexClock
 	t.Cleanup(func() { indexClock = orig })
 	indexClock = func() time.Time { return stamp.Add(generationSettleTime / 2) }
-	readDirs, _ := countDirectoryPrimitives(t)
-	for i, name := range []string{"alpha", "missing", "alpha"} {
-		_, _, _ = ResolveScoped(dir, name, "")
-		assert.Equal(t, i+1, *readDirs, "within the settle window every request re-lists")
+	held := holdIndexRebuilds(t)
+	require.NoError(t, Warm(dir), "warmed inside the window: the index is not settled")
+	readDirs, lstats := countDirectoryPrimitives(t)
+
+	// requests issues scoped misses and pins each one's own cost: no listing,
+	// one directory Lstat — the landed rebuilds' calls are counted between.
+	requests := func(label string, names ...string) {
+		for i, name := range names {
+			rd, ls := *readDirs, *lstats
+			_, _, err := ResolveScoped(dir, name, "")
+			requireScopedNotFound(t, err)
+			assert.Equal(t, rd, *readDirs, "%s %d: a request never lists", label, i)
+			assert.Equal(t, ls+1, *lstats, "%s %d: one directory Lstat per request", label, i)
+		}
 	}
 
-	indexClock = func() time.Time { return stamp.Add(generationSettleTime) }
-	_, _, _ = ResolveScoped(dir, "missing", "")
-	assert.Equal(t, 4, *readDirs, "the first request past the window lists once more")
-	_, _, _ = ResolveScoped(dir, "alpha", "")
-	_, _, _ = ResolveScoped(dir, "missing", "")
-	assert.Equal(t, 4, *readDirs, "and the settled index is trusted")
+	requests("inside the window", "missing", "gamma", "missing")
+	assert.Equal(t, 1, held.land(), "the unsettled index schedules ONE refresh per window, not one per request")
+	assert.Equal(t, 1, *readDirs)
+	requests("still inside", "missing", "gamma")
+	assert.Equal(t, 0, held.land(), "the window is open until it elapses")
+
+	// The refresh window elapsed but the stamp is still too young: one more.
+	indexClock = func() time.Time { return stamp.Add(generationSettleTime/2 + generationSettleTime) }
+	requests("next window", "missing")
+	assert.Equal(t, 1, held.land(), "the next window schedules one more refresh")
+	assert.Equal(t, 2, *readDirs)
+	requests("settled", "missing", "gamma", "missing")
+	assert.Equal(t, 0, held.land(), "the listing landed past the stamp's settle time: the index is trusted")
+	assert.Equal(t, 2, *readDirs)
+}
+
+// TestStoredNames_WarmListsAfterAnInFlightRebuild: Warm is the server's
+// promise that the index reflects the directory as it was when Warm was
+// called, so a rebuild already in flight — which may have listed before the
+// latest write — is waited for and then Warm lists again.
+func TestStoredNames_WarmListsAfterAnInFlightRebuild(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "alpha.js", "1")
+	settleStoredNamesClock(t)
+	held := holdIndexRebuilds(t)
+	readDirs, _ := countDirectoryPrimitives(t)
+
+	_, _, err := ResolveScoped(dir, "alpha", "")
+	requireScopedNotFound(t, err) // cold: the rebuild is scheduled and held
+	writeScript(t, dir, "beta.ts", "1")
+
+	warmed := make(chan error, 1)
+	go func() { warmed <- Warm(dir) }()
+	select {
+	case err := <-warmed:
+		t.Fatalf("Warm returned %v while the rebuild it must wait for was still held", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	assert.Equal(t, 1, held.land(), "the held rebuild lands")
+	require.NoError(t, <-warmed)
+	assert.Equal(t, 2, *readDirs, "Warm listed again after the in-flight rebuild landed")
+
+	src, _, err := ResolveScoped(dir, "beta", "")
+	require.NoError(t, err, "the script written before Warm is in the index Warm returned")
+	assert.Equal(t, "1", string(src))
+	assert.Equal(t, 0, held.land())
 }
 
 // TestStoredNames_UnlistableDirectoryRefusesScopedCallers: a scripts
 // directory the process cannot list has no index, so the scoped resolver
-// refuses — with the non-disclosing unreadable form, no path and no OS error
-// — exactly where the administrator's directory read refuses (SC-005),
-// rather than executing out of a directory the listing cannot vouch for.
+// refuses — cold, with the non-disclosing not-found before the build has
+// run; then, the build having failed, with the non-disclosing unreadable
+// form, no path and no OS error — exactly where the administrator's directory
+// read refuses (SC-005), rather than executing out of a directory the
+// listing cannot vouch for.
 func TestStoredNames_UnlistableDirectoryRefusesScopedCallers(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: directory permissions are not enforced")
@@ -263,6 +520,11 @@ func TestStoredNames_UnlistableDirectoryRefusesScopedCallers(t *testing.T) {
 
 	src, _, err := ResolveScoped(scriptsDir, "known", "")
 	require.Nil(t, src)
+	requireScopedNotFound(t, err) // cold: no index yet, fail closed
+	waitForIndexRebuild(t, scriptsDir)
+
+	src, _, err = ResolveScoped(scriptsDir, "known", "")
+	require.Nil(t, src)
 	var invalid *InvalidError
 	require.True(t, errors.As(err, &invalid), "want *InvalidError, got %T: %v", err, err)
 	assert.True(t, invalid.Undisclosed)
@@ -273,4 +535,8 @@ func TestStoredNames_UnlistableDirectoryRefusesScopedCallers(t *testing.T) {
 	_, _, err = Resolve(scriptsDir, "known", "")
 	require.True(t, errors.As(err, &invalid))
 	assert.Equal(t, ReasonUnreadable, invalid.Reason, "the administrator is refused for the same reason")
+
+	err = Warm(scriptsDir)
+	require.Error(t, err, "Warm reports the failure for the server's log")
+	assert.True(t, errors.Is(err, fs.ErrPermission))
 }

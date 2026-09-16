@@ -215,6 +215,7 @@ func TestResolve_ExtensionCaseIsExact(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "backdoor.JS", "({pwned: true})")
 	writeScript(t, dir, "shouty.TS", "({pwned: true})")
+	warmStoredNames(t, dir) // the scoped verdict must come from a built index, not from its absence
 
 	// Both resolvers decide their candidates differently (the administrator
 	// reads the directory, the scoped caller probes the paths), so each is
@@ -244,6 +245,7 @@ func TestResolve_CaseDistinctNamesAreDistinctScripts(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "foo.js", "({from: 'js'})")
 	writeScript(t, dir, "FOO.ts", "({from: 'ts'})")
+	warmStoredNames(t, dir)
 
 	for _, r := range bothResolvers {
 		t.Run(r.name, func(t *testing.T) {
@@ -421,6 +423,7 @@ func TestResolveScoped_NeverListsTheDirectory(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "alpha-SENTINEL.js", "1")
 	writeScript(t, dir, "beta.ts", "1")
+	warmStoredNames(t, dir)
 
 	var listings int
 	original := listForNotFound
@@ -458,6 +461,7 @@ func TestResolveScoped_RefusalsCarryNoHostPath(t *testing.T) {
 		dir := t.TempDir()
 		writeScript(t, dir, "dup.js", "1")
 		writeScript(t, dir, "dup.ts", "1")
+		warmStoredNames(t, dir)
 
 		_, _, err := ResolveScoped(dir, "dup", "")
 		var ambiguous *AmbiguousError
@@ -484,6 +488,7 @@ func TestResolveScoped_RefusalsCarryNoHostPath(t *testing.T) {
 		t.Run(cell.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeScript(t, dir, "bad.js", cell.content)
+			warmStoredNames(t, dir)
 
 			_, _, err := ResolveScoped(dir, "bad", "")
 			var invalid *InvalidError
@@ -505,6 +510,7 @@ func TestResolveScoped_RefusalsCarryNoHostPath(t *testing.T) {
 		}
 		dir := t.TempDir()
 		writeScript(t, dir, "x.js", "1")
+		warmStoredNames(t, dir)
 		require.NoError(t, os.Chmod(dir, 0o000))
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
@@ -837,10 +843,12 @@ func TestResolveEmptyScriptsDirNeverTouchesCWD(t *testing.T) {
 }
 
 // countDirectoryPrimitives routes the package's two directory-touching
-// primitives through counters for the duration of the test.
+// primitives through counters for the duration of the test. Any index
+// rebuild still in flight lands before the seams change hands.
 func countDirectoryPrimitives(t *testing.T) (readDirs, lstats *int) {
 	t.Helper()
 	var rd, ls int
+	quiesceIndexRebuilds()
 	origReadDir, origLstat := readDir, lstat
 	readDir = func(name string) ([]os.DirEntry, error) {
 		rd++
@@ -850,7 +858,10 @@ func countDirectoryPrimitives(t *testing.T) (readDirs, lstats *int) {
 		ls++
 		return origLstat(name)
 	}
-	t.Cleanup(func() { readDir, lstat = origReadDir, origLstat })
+	t.Cleanup(func() {
+		quiesceIndexRebuilds()
+		readDir, lstat = origReadDir, origLstat
+	})
 	return &rd, &ls
 }
 

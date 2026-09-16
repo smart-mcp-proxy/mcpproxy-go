@@ -24,25 +24,52 @@ import (
 // names.
 //
 // So the scoped resolver answers from a stored-name INDEX instead: the exact
-// spellings a scripts directory holds, listed once per directory GENERATION
-// and validated on every request by one Lstat of the directory itself. Every
-// request — hit, miss or case-variant alike — then costs the same: a
-// directory Lstat and an O(1) set lookup while the index is current, one
-// listing when the directory has changed since it was taken. The cost follows
-// the administrator's writes, never the requested name.
+// spellings a scripts directory holds, maintained OFF the request path. The
+// index is built when the server learns its scripts directory (Warm) and
+// rebuilt by a single-flight goroutine whenever a request finds it behind the
+// directory's GENERATION (one Lstat of the directory itself). No request ever
+// lists: it answers from the index that exists — an exact hit is re-probed by
+// the candidate's own Lstat and opened no-follow, so a removed or replaced
+// file fails closed; a script added since the listing is refused until the
+// rebuild lands, milliseconds later (the administrator's directory read sees
+// it at once). Every request — hit, miss or case-variant, cold or warm, in a
+// directory of ten thousand entries or none — costs a directory Lstat and an
+// O(1) set lookup (codex r6 #1). Listing cost follows the administrator's
+// writes, never the requested name, and never lands on a caller's goroutine.
 
 // storedNames is the exact-spelling index of one scripts directory. names is
 // replaced, never mutated, so a set handed out under the lock stays valid
 // after it is released.
 type storedNames struct {
 	mu      sync.Mutex
-	gen     dirGeneration // the directory's stamp when names was listed
-	settled bool          // gen predates the listing by more than any timestamp tick
-	names   map[string]struct{}
+	names   map[string]struct{} // nil until a build has landed, or when it failed
+	err     error               // the last build's failure; nil when names is valid
+	gen     dirGeneration       // the directory's stamp when names was listed
+	settled bool                // gen predates the listing by more than any timestamp tick
+
+	// building is the single-flight flag: at most one rebuild goroutine per
+	// directory. landed is closed when that rebuild has finished, so Warm
+	// and the tests can wait for it without polling.
+	building bool
+	landed   chan struct{}
+
+	// refreshAfter bounds how often an UNSETTLED index schedules a refresh:
+	// at most once per generationSettleTime, whatever the request rate.
+	refreshAfter time.Time
 }
 
 // storedNameIndexes holds one *storedNames per cleaned scripts directory.
 var storedNameIndexes sync.Map
+
+// storedNamesIndex returns the index of one cleaned scripts directory,
+// creating an empty (never built) one on first use.
+func storedNamesIndex(key string) *storedNames {
+	v, ok := storedNameIndexes.Load(key)
+	if !ok {
+		v, _ = storedNameIndexes.LoadOrStore(key, &storedNames{})
+	}
+	return v.(*storedNames)
+}
 
 // dirGeneration is the Lstat tuple that moves whenever a directory's entry
 // set can have changed: adding, removing or renaming an entry updates its
@@ -68,16 +95,51 @@ func (g dirGeneration) latest() time.Time {
 }
 
 // generationSettleTime is how far a directory's stamp must predate a listing
-// for the index to be trusted without re-listing. Timestamps can be coarse
+// for the index to be trusted until the stamp moves. Timestamps can be coarse
 // (vfat: two seconds), so a write landing in the same tick as the recorded
 // stamp would leave it unchanged; until the stamp is older than the coarsest
-// tick, every request re-lists. The bound depends on the clock alone, never
-// on the requested name.
+// tick, requests keep scheduling a refresh — at most one per window, and off
+// the request path. The bound depends on the clock alone, never on the
+// requested name.
 const generationSettleTime = 2 * time.Second
 
 // indexClock is time.Now, a variable so the tests can settle an index
 // without waiting.
 var indexClock = time.Now
+
+// spawnIndexRebuild runs one index rebuild on its own goroutine. A variable
+// so the tests can hold a rebuild back and prove what a request does on its
+// own goroutine, then land it deliberately.
+var spawnIndexRebuild = func(rebuild func()) { go rebuild() }
+
+// Warm builds the stored-name index of scriptsDir on the caller's goroutine,
+// so the first scoped request finds it ready. The server calls it when it
+// learns its scripts directory; it is never called on a request's behalf.
+// The listing is taken after Warm was called (a rebuild already in flight is
+// waited for, then Warm lists again), so the index reflects the directory as
+// it was at the call. A directory that cannot be stat-ed or listed leaves a
+// failed index (scoped callers are refused as unreadable until the directory
+// changes) and the failure is returned for logging. On darwin and Windows
+// there is no index and Warm is a no-op.
+func Warm(scriptsDir string) error {
+	key := filepath.Clean(scriptsDir)
+	idx := storedNamesIndex(key)
+	for {
+		idx.mu.Lock()
+		if !idx.building {
+			idx.beginRebuildLocked()
+			idx.mu.Unlock()
+			break
+		}
+		landed := idx.landed
+		idx.mu.Unlock()
+		<-landed
+	}
+	idx.rebuild(key)
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	return idx.err
+}
 
 // storedSpellingsOf answers, for one scoped request, whether scriptsDir holds
 // an entry spelled exactly `want`: an index hit, confirmed by the candidate's
@@ -106,20 +168,17 @@ func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool
 	}, nil
 }
 
-// storedNamesFor returns the current exact-name set of scriptsDir, re-listing
-// it under the directory's lock when its generation has moved or the last
-// listing was taken too soon after a write to be trusted. The lock covers
-// the validation and the rebuild only; callers never hold it across an open.
+// storedNamesFor returns the exact-name set of scriptsDir as the index holds
+// it — never listing on the caller's behalf. One Lstat of the directory reads
+// its generation; when the index is behind it (or was never built, or is
+// still inside the settle window) a single-flight ASYNCHRONOUS rebuild is
+// scheduled and the request is answered from the index that exists: nil for
+// a directory never listed, which every name misses (fail closed), the last
+// build's error for one that could not be listed.
 func storedNamesFor(scriptsDir string) (map[string]struct{}, error) {
 	key := filepath.Clean(scriptsDir)
-	v, ok := storedNameIndexes.Load(key)
-	if !ok {
-		v, _ = storedNameIndexes.LoadOrStore(key, &storedNames{})
-	}
-	idx := v.(*storedNames)
+	idx := storedNamesIndex(key)
 
-	// Stamped before the listing, so a write that lands during it moves the
-	// stamp the next validation compares against.
 	info, err := lstat(key)
 	if err != nil {
 		return nil, err
@@ -129,18 +188,87 @@ func storedNamesFor(scriptsDir string) (map[string]struct{}, error) {
 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	if idx.names != nil && idx.settled && idx.gen.equal(gen) {
-		return idx.names, nil
+	switch {
+	case idx.names == nil && idx.err == nil: // never built
+		idx.scheduleRebuildLocked(key, now)
+	case !idx.gen.equal(gen):
+		idx.scheduleRebuildLocked(key, now)
+	case !idx.settled && !now.Before(idx.refreshAfter):
+		idx.scheduleRebuildLocked(key, now)
 	}
-	entries, err := readDir(key)
-	if err != nil {
-		return nil, err
+	if idx.names == nil {
+		return nil, idx.err
 	}
-	names := make(map[string]struct{}, len(entries))
-	for _, e := range entries {
-		names[e.Name()] = struct{}{}
+	return idx.names, nil
+}
+
+// scheduleRebuildLocked starts the directory's rebuild goroutine unless one
+// is already in flight, and opens the next refresh window either way.
+func (idx *storedNames) scheduleRebuildLocked(key string, now time.Time) {
+	idx.refreshAfter = now.Add(generationSettleTime)
+	if idx.building {
+		return
 	}
-	idx.gen, idx.names = gen, names
-	idx.settled = now.Sub(gen.latest()) >= generationSettleTime
-	return names, nil
+	idx.beginRebuildLocked()
+	spawnIndexRebuild(func() { idx.rebuild(key) })
+}
+
+// beginRebuildLocked claims the single-flight slot.
+func (idx *storedNames) beginRebuildLocked() {
+	idx.building = true
+	idx.landed = make(chan struct{})
+}
+
+// rebuild lists the directory and installs the result, holding no lock across
+// the listing. The stamp is read BEFORE the listing and re-read after it
+// under the lock: a write that lands during the listing moves the stamp, and
+// the listing is taken again rather than trusted (list-then-stamp race).
+// Requests that arrive while a rebuild is in flight see building set and
+// schedule nothing; their generation read precedes this re-check, so the
+// re-check covers whatever they saw. Ends by releasing the slot and closing
+// landed.
+func (idx *storedNames) rebuild(key string) {
+	for {
+		gen, err := idx.build(key)
+		idx.mu.Lock()
+		if err == nil {
+			if info, statErr := lstat(key); statErr == nil && !dirGenerationOf(info).equal(gen) {
+				idx.mu.Unlock()
+				continue
+			}
+		}
+		idx.building = false
+		close(idx.landed)
+		idx.mu.Unlock()
+		return
+	}
+}
+
+// build takes one listing of key and installs it — or the failure — as the
+// index, replacing names atomically under the lock.
+func (idx *storedNames) build(key string) (dirGeneration, error) {
+	var (
+		gen   dirGeneration
+		names map[string]struct{}
+	)
+	info, err := lstat(key)
+	now := indexClock()
+	if err == nil {
+		gen = dirGenerationOf(info)
+		var entries []fs.DirEntry
+		if entries, err = readDir(key); err == nil {
+			names = make(map[string]struct{}, len(entries))
+			for _, e := range entries {
+				names[e.Name()] = struct{}{}
+			}
+		}
+	}
+
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.names, idx.err, idx.gen = names, err, gen
+	// Settled means no write can still land on this stamp: the tick was over
+	// before the listing began, so nothing the listing missed shares it.
+	idx.settled = err == nil && now.Sub(gen.latest()) >= generationSettleTime
+	return gen, err
 }

@@ -9,6 +9,11 @@ import (
 	"strings"
 )
 
+// Warm is a no-op where storedSpellingsOf is a single-entry platform call:
+// there is no index to build. The Linux/BSD counterpart lists the directory
+// once, off the request path.
+func Warm(string) error { return nil }
+
 // storedSpellingsOf answers, for one scoped request, whether scriptsDir holds
 // an entry spelled exactly `want`, by a fixed number of single-path calls and
 // never a listing (Spec 105 FR-012). The default APFS/HFS+ and NTFS volumes

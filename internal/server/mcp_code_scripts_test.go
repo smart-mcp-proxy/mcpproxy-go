@@ -81,9 +81,16 @@ func newStoredScriptProxyCfg(t *testing.T, configure func(*config.Config), opts 
 	return proxy, scriptsDir
 }
 
+// writeStoredScript publishes one script and lets the scoped resolver's
+// stored-name index catch up with it (Spec 105 FR-012): in production the
+// index is refreshed off the request path milliseconds after the directory
+// changes, and a scoped call in that window is refused fail-closed; the
+// fixture lands that refresh deterministically instead of racing it. The
+// administrator's resolution reads the directory itself and never waits.
 func writeStoredScript(t *testing.T, scriptsDir, filename, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(filepath.Join(scriptsDir, filename), []byte(content), 0o644))
+	require.NoError(t, codescripts.Warm(scriptsDir))
 }
 
 // callCodeExecution runs the code_execution handler and returns the result.

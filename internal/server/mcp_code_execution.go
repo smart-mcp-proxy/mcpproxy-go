@@ -559,7 +559,26 @@ func (p *MCPProxyServer) scriptsDir() string {
 	if configFilePath == "" && p.config != nil {
 		configFilePath = config.GetConfigPath(p.config.DataDir)
 	}
-	return codescripts.DirFor(configFilePath)
+	dir := codescripts.DirFor(configFilePath)
+	if warmed := p.warmedScriptsDir.Load(); warmed != nil && *warmed != dir && p.warmedScriptsDir.CompareAndSwap(warmed, &dir) {
+		// The active config file moved: warm the new directory's index off
+		// this (possibly scoped) request's goroutine, once.
+		go p.warmStoredScripts(dir)
+	}
+	return dir
+}
+
+// warmStoredScripts builds the stored-name index of dir the scoped resolver
+// answers from (Spec 105 FR-012) — synchronously on the caller's goroutine,
+// which is never a request's: construction, or a goroutine of its own when
+// the directory moves. A directory that cannot be indexed (usually: not
+// created yet) refuses scoped callers until it changes; the administrator's
+// resolution does not depend on the index at all.
+func (p *MCPProxyServer) warmStoredScripts(dir string) {
+	if err := codescripts.Warm(dir); err != nil {
+		p.logger.Debug("Stored-script index not built; scoped callers are refused until the directory changes (Spec 105 FR-012)",
+			zap.String("dir", dir), zap.Error(err))
+	}
 }
 
 // codeExecRecordArguments builds the argument payload recorded for a

@@ -361,7 +361,9 @@ JS
 mv "$tmp" ~/.mcpproxy/scripts/fetch-prs.js   # atomic within the same filesystem
 ```
 
-Adding or deleting a file is reflected on the next invocation or listing.
+Adding or deleting a file is reflected on the next invocation or listing
+(for an agent token on Linux, after the next index refresh — see
+[Discovering script names](#discovering-script-names)).
 Editing a script **in place** while it is being invoked is the one unsupported
 case: the run gets whatever the read returned (validated, but unspecified).
 
@@ -404,9 +406,13 @@ the proxy does not read the directory on its behalf at all — it probes the
 requested name's two candidate files and nothing else — so the refusal's cost
 does not grow with the number of stored scripts. (On Linux and the BSDs, which
 have no single-entry call reporting how a name is spelled on disk, the scoped
-resolver answers from an exact-name index of the directory that is validated
-by one stat of the directory per request; a listing is paid when the directory
-changes, never per request, and never depends on the name asked for.) The
+resolver answers from an exact-name index of the directory maintained off the
+request path: built when the daemon starts, validated by one stat of the
+directory per request, and refreshed by a background rebuild when that stat
+finds the directory changed. No request lists the directory, cold or warm.
+A script added to the directory becomes callable by agent tokens after the
+next index refresh — milliseconds later; a call in that window is refused
+like a missing script — while administrators see it immediately.) The
 refusal itself:
 
 ```text

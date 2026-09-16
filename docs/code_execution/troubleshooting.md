@@ -647,10 +647,13 @@ filesystem would open it under that name — the daemon verifies the stored
 spelling before running anything, so the administrator's listing, the
 administrator's call and an agent-token call all agree. On Linux and the BSDs
 (which have no single-entry call that reports how a name is spelled on disk)
-an agent-token call is answered from an exact-name index of the directory,
-validated by one stat of the directory per call: a listing is paid when the
-directory changes, never per call, whatever name is asked for, and the
-refusal body is unchanged.
+an agent-token call is answered from an exact-name index of the directory
+maintained off the request path — built at daemon start, validated by one
+stat of the directory per call, refreshed in the background when the
+directory changes — so no call lists the directory, whatever name is asked
+for, and the refusal body is unchanged. A script you have just added is
+callable by agent tokens after the next refresh (milliseconds; a call in that
+window gets the ordinary not-found refusal) and by administrators at once.
 mcpproxy never creates the directory itself; `mkdir -p` it.
 
 ---
