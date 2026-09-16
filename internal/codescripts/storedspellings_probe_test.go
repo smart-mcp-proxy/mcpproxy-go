@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -61,14 +62,42 @@ func TestStoredSpellingsOf_PostOpenProofCatchesARaceOnTheOpenedDescriptor(t *tes
 	require.NoError(t, err)
 	require.NotNil(t, verifyUnchanged)
 
+	// The race: the file is case-renamed between the pre-open probe and the
+	// open. APFS and NTFS fold the requested spelling onto the renamed entry,
+	// so the open succeeds — and F_GETPATH / GetFinalPathNameByHandle on the
+	// opened descriptor report the RENAMED spelling, proving the descriptor
+	// is not the exact name that was requested and probed.
+	require.NoError(t, os.Rename(path, filepath.Join(dir, "ALPHA.JS")))
+
+	f, err := openScriptFile(path)
+	require.NoError(t, err, "a case-folding filesystem opens the renamed entry under the old spelling")
+	defer f.Close()
+
+	verifyErr := verifyUnchanged(f, "alpha.js")
+	require.Error(t, verifyErr, "the opened descriptor's spelling no longer matches what was requested")
+	assert.True(t, errors.Is(verifyErr, errSpellingUnproven))
+}
+
+// TestStoredSpellingsOf_PostOpenProofCatchesARenameAfterOpen is the same
+// proof taken after the open: the descriptor is already reading the file when
+// it is case-renamed. Windows refuses to rename a file another handle holds
+// open (no FILE_SHARE_DELETE on the executed handle), so that half of the race
+// cannot occur there; the test is darwin-only.
+func TestStoredSpellingsOf_PostOpenProofCatchesARenameAfterOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses to rename a file held open by another handle")
+	}
+	dir := t.TempDir()
+	path := writeScript(t, dir, "alpha.js", "1")
+
+	_, verifyUnchanged, err := storedSpellingsOf(dir)
+	require.NoError(t, err)
+	require.NotNil(t, verifyUnchanged)
+
 	f, err := openScriptFile(path)
 	require.NoError(t, err)
 	defer f.Close()
 
-	// The race: case-rename the file the descriptor is already reading.
-	// F_GETPATH / GetFinalPathNameByHandle on the open descriptor now report
-	// the RENAMED spelling — proving the descriptor is no longer the exact
-	// name that was requested and probed.
 	require.NoError(t, os.Rename(path, filepath.Join(dir, "ALPHA.JS")))
 
 	verifyErr := verifyUnchanged(f, "alpha.js")
