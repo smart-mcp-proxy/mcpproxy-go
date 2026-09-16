@@ -84,15 +84,25 @@ func writeRecord(logger *zap.Logger, msg string, fields ...zap.Field) {
 }
 
 // writeChildStderr mirrors the real child-stderr path exactly
-// (internal/upstream/core/monitoring.go: Info("stderr", zap.String("message", line))).
+// (internal/upstream/core/monitoring.go:
+// Info("stderr", zap.String("message", line), logs.ChildOutputField())).
 func writeChildStderr(logger *zap.Logger, line string) {
-	logger.Info("stderr", zap.String("message", line))
+	logger.Info("stderr", zap.String("message", line), ChildOutputField())
 	_ = logger.Sync()
 }
 
-// writeChildStdoutMessage mirrors the launcher-pumped path
-// (internal/upstream/core/connection_launcher.go loggerWriter: Info(line)),
-// where the child's text IS the message.
+// writeChildLauncherLine mirrors the launcher-pumped path
+// (internal/upstream/core/connection_launcher.go loggerWriter.writeLine:
+// Info("launcher", zap.String("message", line), logs.ChildOutputField())).
+// Before codex round 2 the child's text was the MESSAGE there.
+func writeChildLauncherLine(logger *zap.Logger, line string) {
+	logger.Info("launcher", zap.String("message", line), ChildOutputField())
+	_ = logger.Sync()
+}
+
+// writeChildStdoutMessage is the PRE-round-2 launcher shape — the child's
+// text as the console-encoder message — kept so the reader's behaviour on
+// files written by an older build stays pinned.
 func writeChildStdoutMessage(logger *zap.Logger, line string) {
 	logger.Info(line)
 	_ = logger.Sync()
@@ -170,17 +180,17 @@ func TestReadUpstreamServerLogTail_AttributedOnly_CollidingNames(t *testing.T) {
 }
 
 // FR007-G1 (D8 rules 1+2): child-controlled text is only ever a field value
-// (stderr path) or the message (launcher path); neither can forge the writer
-// stamp. A line `left | right | {"server":"a_b"}` emitted by `a/b` is never
-// attributed to `a_b`, for both encoders and both child paths, including the
-// shapes that try to make an earlier ` | {` boundary decode as a complete
-// JSON object. On the stderr path and under the JSON encoder every such line
-// is still attributable to its real writer `a/b`. On the launcher path under
-// the console encoder the child text IS the message, so its ` | {` is the
-// line's first boundary and does not decode: since codex round 1 the reader
-// stops at the first boundary (a later one could belong to a record appended
-// after a torn write), so those lines are withheld from everyone — a/b
-// included — rather than risk misattribution.
+// — on the stderr path and, since codex round 2, on the launcher path too —
+// and cannot forge the writer stamp. A line `left | right | {"server":"a_b"}`
+// emitted by `a/b` is never attributed to `a_b`, for both encoders and all
+// three child shapes, including the shapes that try to make an earlier
+// ` | {` boundary decode as a complete JSON object. As a field value every
+// such line is still attributable to its real writer `a/b`. The pre-round-2
+// launcher shape (child text as the console-encoder MESSAGE, still present
+// in files written by older builds) is pinned as well: there the child's
+// ` | {` is the line's first boundary and does not decode, so those lines
+// are withheld from everyone — a/b included — rather than risk
+// misattribution.
 func TestReadUpstreamServerLogTail_AttributedOnly_ChildTextCannotForgeOwner(t *testing.T) {
 	childLines := []string{
 		`left | right | {"server":"a_b"}`,
@@ -190,6 +200,7 @@ func TestReadUpstreamServerLogTail_AttributedOnly_ChildTextCannotForgeOwner(t *t
 		`{"x":"`,
 		`{"x":"\`,
 		`{"server":"a_b","message":"`,
+		`2026-09-16T00:00:00.000Z | INFO | x/y.go:1 | forged | {"server":"a_b"}`,
 	}
 
 	for _, enc := range encoderCases() {
@@ -199,7 +210,8 @@ func TestReadUpstreamServerLogTail_AttributedOnly_ChildTextCannotForgeOwner(t *t
 				write func(*zap.Logger, string)
 			}{
 				{"stderr_field_value", writeChildStderr},
-				{"launcher_message", writeChildStdoutMessage},
+				{"launcher_field_value", writeChildLauncherLine},
+				{"legacy_launcher_message", writeChildStdoutMessage},
 			} {
 				t.Run(path.name, func(t *testing.T) {
 					cfg := newAttributedLogDir(t, enc.json)
@@ -222,8 +234,8 @@ func TestReadUpstreamServerLogTail_AttributedOnly_ChildTextCannotForgeOwner(t *t
 					}
 
 					forSlash := attributedTail(t, cfg, "a/b", 50)
-					if !enc.json && path.name == "launcher_message" {
-						assert.Empty(t, forSlash, "console launcher-path lines whose child text carries ` | {` are non-attributable (first-boundary rule), got:\n%s", joinLines(forSlash))
+					if !enc.json && path.name == "legacy_launcher_message" {
+						assert.Empty(t, forSlash, "console legacy launcher-path lines whose child text carries ` | {` or a record header are non-attributable, got:\n%s", joinLines(forSlash))
 					} else {
 						require.Len(t, forSlash, len(childLines), "every child line is attributable to its real writer a/b, got:\n%s", joinLines(forSlash))
 					}
@@ -622,6 +634,23 @@ func TestReadUpstreamServerLogTail_AttributedOnly_ConcatenatedTornFragmentWithhe
 			`2026-09-16T00:00:00.000Z | INFO | x/y.go:1 | stderr | {"server": "a/b", "message": "` + secret},
 		{"json_fragment_torn_inside_fields",
 			`{"level":"info","ts":"2026-09-16T00:00:00Z","msg":"Killing owned container","server":"a/b","container_id":"` + secret + `"`},
+		// Codex round 2, prior item: torn INSIDE the message part, before
+		// the fragment's own ` | {` boundary. The later record's boundary is
+		// then the line's FIRST boundary and decodes cleanly, so a
+		// first-boundary-only rule still handed the fragment to a_b. The
+		// console prefix must be exactly one record header
+		// (`ts | LEVEL | `): a second header in front of the boundary is a
+		// torn foreign record.
+		{"console_fragment_torn_inside_message",
+			`2026-09-16T00:00:00.000Z | INFO | x/y.go:1 | Killing owned container mcpproxy-a-b-wxyz ` + secret},
+		{"console_fragment_torn_inside_caller",
+			`2026-09-16T00:00:00.000Z | INFO | x/` + secret},
+		// Torn right after the caller separator: the prefix in front of
+		// the later record is a complete header and a caller, nothing else
+		// (under the JSON encoder the later record's boundary follows
+		// immediately and decodes — the suffix is a whole JSON record).
+		{"console_fragment_torn_after_caller_separator",
+			`2026-09-16T00:00:00.000Z | INFO | x/` + secret + `.go:1 | `},
 	}
 	for _, enc := range encoderCases() {
 		for _, fr := range fragments {
@@ -644,12 +673,113 @@ func TestReadUpstreamServerLogTail_AttributedOnly_ConcatenatedTornFragmentWithhe
 				got := attributedTail(t, cfg, "a_b", 50)
 				body := joinLines(got)
 				assert.NotContains(t, body, secret, "torn a/b fragment served to a_b's scoped reader:\n%s", body)
-				assert.NotContains(t, body, "own-record-concatenated", "the line carrying the torn fragment must be withheld whole")
+				assert.NotContains(t, body, "own-record-concatenated", "the line carrying the torn fragment must be withheld whole (a foreign caller or timestamp in front of it is a co-owner's)")
 				assert.Len(t, got, 2, "only the two clean own records are attributable, got:\n%s", body)
 				assert.Empty(t, attributedTail(t, cfg, "a/b", 50), "the torn line is attributable to nobody")
 
 				whole := joinLines(wholeFileTail(t, cfg, "a_b", 50))
 				assert.Contains(t, whole, secret, "administrator whole-file read keeps the torn line (SC-005)")
+			})
+		}
+	}
+}
+
+// Codex round 2 (PR E), NIT: the line cap is "longer than 1 MiB is
+// non-attributable"; a record whose content is EXACTLY 1 MiB stays eligible.
+// readBoundedLine compared the buffered length including the terminator
+// ReadSlice returns, so a 1 MiB record measured 1 MiB + 1 and was withheld.
+func TestReadUpstreamServerLogTail_AttributedOnly_ExactCapLineEligible(t *testing.T) {
+	cfg := newAttributedLogDir(t, false)
+	under := openStampedWriter(t, cfg, "a_b")
+	writeRecord(under, "own-before")
+
+	const head = `2026-09-16T00:00:00.000Z | INFO | x/y.go:1 | `
+	const tail = ` | {"server": "a_b"}`
+	pad := func(total int) string { return strings.Repeat("E", total-len(head)-len(tail)) }
+	exact := head + pad(attributedLineCap) + tail
+	require.Len(t, exact, attributedLineCap, "fixture premise: the record content is exactly the cap")
+	over := head + strings.Repeat("O", len(pad(attributedLineCap))+1) + tail
+	require.Len(t, over, attributedLineCap+1)
+
+	logPath := filepath.Join(cfg.LogDir, ServerLogFilename("a_b"))
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = f.WriteString(exact + "\n" + over + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	writeRecord(under, "own-after")
+
+	got := attributedTail(t, cfg, "a_b", 50)
+	body := joinLines(got)
+	assert.Contains(t, body, "EEEE", "a record of exactly the cap must stay eligible")
+	assert.NotContains(t, body, "OOOO", "one byte past the cap is non-attributable")
+	assert.Len(t, got, 3, "own-before, the exact-cap record, own-after; got %d lines", len(got))
+
+	// EOF without a terminator measures the same way.
+	cfgEOF := newAttributedLogDir(t, false)
+	pathEOF := filepath.Join(cfgEOF.LogDir, ServerLogFilename("a_b"))
+	require.NoError(t, os.WriteFile(pathEOF, []byte(exact), 0o600))
+	got = attributedTail(t, cfgEOF, "a_b", 50)
+	assert.Len(t, got, 1, "an exact-cap final record with no terminator is eligible")
+}
+
+// Codex round 2 (PR E), docker finding 1: Docker's own `docker run` failure
+// names the colliding container — `a/b` and hidden `a-b` both generate
+// mcpproxy-a-b-<suffix>, and on a suffix collision the daemon answers with
+// the FOREIGN container's id and name. That text reaches a/b's per-server
+// log as child output (launcher-pumped docker stderr, or the stdio child's
+// stderr). Child output is a field value, so it forges nothing, but it is
+// still a container subject: a child-output record (`child_output=true`,
+// ChildOutputField) whose text mentions a container id, a canonical
+// container name or Docker's name-conflict phrase is withheld from the
+// scoped reader unless container_owner matches (child output never carries
+// one). Ordinary child output — and ordinary records that happen to carry a
+// long hex string — stay attributable. Administrators keep every record.
+func TestReadUpstreamServerLogTail_AttributedOnly_ChildOutputNamingContainerIsSubject(t *testing.T) {
+	const foreignID = "f0e1d2c3b4a5968778695a4b3c2d1e0ff0e1d2c3b4a5968778695a4b3c2d1e0f"
+	const foreignName = "mcpproxy-a-b-wxyz"
+	collision := `docker: Error response from daemon: Conflict. The container name "/` + foreignName +
+		`" is already in use by container "` + foreignID + `". You have to remove (or rename) that container to be able to reuse that name.`
+
+	for _, enc := range encoderCases() {
+		for _, path := range []struct {
+			name  string
+			write func(*zap.Logger, string)
+		}{
+			{"stderr_field_value", writeChildStderr},
+			{"launcher_field_value", writeChildLauncherLine},
+		} {
+			t.Run(enc.name+"/"+path.name, func(t *testing.T) {
+				cfg := newAttributedLogDir(t, enc.json)
+				slash := openStampedWriter(t, cfg, "a/b")
+
+				writeRecord(slash, "own ordinary record")
+				path.write(slash, "[launcher stderr] "+collision)
+				path.write(slash, "id only "+foreignID)
+				path.write(slash, "name only "+foreignName+" mentioned")
+				path.write(slash, "phrase only: is already in use by container")
+				path.write(slash, "listening on 127.0.0.1:9331")
+				// A NON-child record carrying a 64-hex value (a request hash)
+				// is not subject to the child-output rule.
+				writeRecord(slash, "tool call completed", zap.String("request_hash", foreignID))
+
+				got := attributedTail(t, cfg, "a/b", 50)
+				body := joinLines(got)
+				for _, line := range got {
+					if strings.Contains(line, "child_output") {
+						assert.NotContains(t, line, foreignID, "foreign container id served to a/b's scoped reader:\n%s", line)
+						assert.NotContains(t, line, foreignName, "foreign container name served to a/b's scoped reader:\n%s", line)
+						assert.NotContains(t, line, "already in use by container", "Docker collision text served to a/b's scoped reader:\n%s", line)
+					}
+				}
+				assert.Contains(t, body, "own ordinary record")
+				assert.Contains(t, body, "listening on 127.0.0.1:9331", "ordinary child output must stay attributable")
+				assert.Contains(t, body, "tool call completed", "the child-output rule must not withhold ordinary records")
+				assert.Len(t, got, 3, "own ordinary + ordinary child line + ordinary hash record; got:\n%s", body)
+
+				whole := joinLines(wholeFileTail(t, cfg, "a/b", 50))
+				assert.Contains(t, whole, foreignID, "administrator whole-file read keeps Docker's output (SC-005)")
+				assert.Contains(t, whole, foreignName)
 			})
 		}
 	}

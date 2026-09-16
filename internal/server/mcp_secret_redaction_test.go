@@ -313,8 +313,9 @@ func TestTailLog_ScrubsLogLines(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(logDir, "server-leaky.log"), []byte(
 		// JSON-encoder shape: the connection logger's URL record.
 		`{"level":"info","msg":"Starting connection attempt","server":"leaky","url":"https://host/mcp?token=`+leakySecrets["url"]+`"}`+"\n"+
-			// Console-encoder shape: the launcher-pumped child stdout line is the MESSAGE.
-			`2026-01-01T00:00:00.000Z | INFO | core/connection_launcher.go:1 | [launcher stdout] child stdout: using `+childToken+` | {"server": "leaky"}`+"\n"), 0o600))
+			// Console-encoder shape: the launcher-pumped child stdout line is the
+			// `message` field of a child_output record (Spec 105 PR E, codex round 2).
+			`2026-01-01T00:00:00.000Z | INFO | core/connection_launcher.go:1 | launcher | {"server": "leaky", "message": "[launcher stdout] child stdout: using `+childToken+`", "child_output": true}`+"\n"), 0o600))
 
 	for name, ctx := range map[string]context.Context{
 		"scoped agent token":    agentCtx([]string{"leaky"}, []string{auth.PermRead}, ""),

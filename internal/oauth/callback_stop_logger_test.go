@@ -188,3 +188,32 @@ func TestCallbackStop_RecordFieldsNotDuplicated(t *testing.T) {
 		}
 	}
 }
+
+// Codex round 2 (PR E), finding 2: the deprecated StartCallbackServer
+// supplies no logger, and StartCallbackServerOnHost resolved a nil binding
+// logger through adoptLoggerLocked(nil) — whichever server's logger was
+// installed LAST. Starting b with loggerB and then a through the deprecated
+// API recorded loggerB.With(server=a) as a's logger, so a's start records and
+// its stop record (port, dropped waiters) were written into b's log. A
+// server started without a logger of its own must record a subject-safe
+// logger — never another server's — for its start AND stop records.
+func TestCallbackStop_DeprecatedStartNeverAdoptsAnotherServersLogger(t *testing.T) {
+	mgr, observed, loggers := newObservedManager(t, "a", "b")
+
+	b := startObserved(t, mgr, "b", loggers["b"])
+
+	a, err := mgr.StartCallbackServer("a", 0)
+	require.NoError(t, err)
+	a.RegisterState("state-a")
+
+	assert.Empty(t, mentionsServer(observed["b"], "a", a.Port),
+		"a's start records (deprecated no-logger API) written through b's logger")
+
+	require.NoError(t, mgr.StopCallbackServer("a"))
+	aboutA := observed["b"].FilterField(zap.String("server", "a"))
+	assert.Empty(t, aboutA.All(), "a's records landed in b's log")
+	assert.Empty(t, mentionsServer(observed["b"], "a", a.Port), "a's name/port written into b's log")
+
+	// b's own tear-down still routes to b.
+	assertStopRoutedToOwner(t, mgr, observed, "b", "a", b.Port)
+}

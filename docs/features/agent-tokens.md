@@ -311,7 +311,11 @@ name or count — that do not prove the container's owner (`container_owner`,
 written by container housekeeping since this rule — earlier housekeeping
 records are treated as non-attributable), and records whose subject is
 another server (an OAuth callback tear-down that an earlier version routed
-through the wrong server's logger). Retained effects: rotation and retention
+through the wrong server's logger), and a child process's own output line
+that names a container — Docker's `docker run` name-conflict error, for
+instance, quotes the *other* container's name and id when two servers'
+generated container names collide (`a/b` and `a-b` both produce
+`mcpproxy-a-b-…`). Retained effects: rotation and retention
 of a shared file stay shared, so a co-owner's output can rotate an authorized
 record out of the readable history; and child process output is attributed
 to the server whose process wrote it — a child cannot forge another server's

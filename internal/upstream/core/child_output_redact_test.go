@@ -40,7 +40,8 @@ func TestLoggerWriter_ScrubsChildOutput(t *testing.T) {
 
 	var rendered []string
 	for _, entry := range logs.All() {
-		rendered = append(rendered, entry.Message)
+		line, _ := entry.ContextMap()["message"].(string)
+		rendered = append(rendered, entry.Message+" "+line)
 	}
 	joined := strings.Join(rendered, "\n")
 
@@ -129,14 +130,13 @@ func TestRedactURLCredentialsInError_RunsTheValueShapedDetector(t *testing.T) {
 	assert.ErrorIs(t, got, err, "the original must stay reachable through Unwrap")
 }
 
-// Spec 105 FR-007 (critique round 1, finding C2.2): the child's text becomes
-// the console-encoder MESSAGE of its record, and the attributed log reader
-// (internal/logs research D8 rule 2) keys on line boundaries. A message that
-// carried a line break would start a physical line whose text the child
-// controls — a forged stamp for another server. launcher.pumpLines delivers
-// one line per Write today, so this is the producer-side guarantee for any
-// other producer: a multi-line chunk becomes N records, none containing a
-// line break, CRLF handled, blank lines dropped.
+// Spec 105 FR-007 (critique round 1, finding C2.2): one record per child
+// line. launcher.pumpLines delivers one line per Write today, so this is the
+// guarantee for any other producer: a multi-line chunk becomes N records,
+// CRLF handled, blank lines dropped. Since codex round 2 the child's text is
+// the `message` field value of a constant-message record (zap escapes a
+// line break there under both encoders), so the split is about record
+// shape, not attribution; a forged header inside the text is inert.
 func TestLoggerWriter_SplitsMultiLineChunks(t *testing.T) {
 	core, logs := observer.New(zap.DebugLevel)
 	w := newLoggerWriter(zap.New(core), nil)
@@ -149,12 +149,14 @@ func TestLoggerWriter_SplitsMultiLineChunks(t *testing.T) {
 
 	var rendered []string
 	for _, entry := range logs.All() {
-		rendered = append(rendered, entry.Message)
+		assert.Equal(t, "launcher", entry.Message, "the record message is constant; child text is a field value")
+		line, _ := entry.ContextMap()["message"].(string)
+		rendered = append(rendered, line)
 	}
 	require.Equal(t, []string{"first line", forged, "last line"}, rendered,
 		"one record per child line: a forged line is its own record, stamped by the real writer")
 	for _, msg := range rendered {
-		assert.NotContains(t, msg, "\n", "a message must never carry a line break")
+		assert.NotContains(t, msg, "\n", "a child line must never carry a line break")
 		assert.NotContains(t, msg, "\r", "CRLF is stripped, not logged")
 	}
 }

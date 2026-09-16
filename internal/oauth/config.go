@@ -118,6 +118,22 @@ func (m *CallbackServerManager) adoptLoggerLocked(logger *zap.Logger) *zap.Logge
 	return m.logger
 }
 
+// subjectLoggerLocked returns the logger one server's callback records are
+// written through (Spec 105 FR-007, subject-bound routing): the caller's own
+// logger — the tee into that server's per-server log — or, for a caller that
+// supplies none (the deprecated StartCallbackServer), the zap global. It is
+// never the manager logger: that is whichever server's logger was installed
+// last, so resolving a nil logger through it recorded loggerB.With(server=a)
+// for a server started without a logger and wrote a's start and stop records
+// into b's log (codex round 2). A caller's logger is still adopted as the
+// manager logger for the manager's own records. m.mu must be held.
+func (m *CallbackServerManager) subjectLoggerLocked(logger *zap.Logger) *zap.Logger {
+	if logger == nil {
+		return zap.L().Named(oauthCallbackLoggerName)
+	}
+	return m.adoptLoggerLocked(logger)
+}
+
 // CallbackServer represents an active OAuth callback server.
 //
 // Callback parameters are dispatched by the `state` parameter (issue #975):
@@ -1273,7 +1289,10 @@ func (b CallbackBinding) host() string {
 // Falls back to dynamic allocation if the preferred port is unavailable.
 //
 // Deprecated in favour of StartCallbackServerOnHost, which can bind IPv6
-// loopback and carries the caller's logger. Kept for callers that have neither.
+// loopback and carries the caller's logger. Kept for callers that have
+// neither; a server started here records the zap global as its logger (its
+// records are not routed into any per-server log — never into another
+// server's, Spec 105 FR-007).
 func (m *CallbackServerManager) StartCallbackServer(serverName string, preferredPort int) (*CallbackServer, error) {
 	return m.StartCallbackServerOnHost(serverName, CallbackBinding{Port: preferredPort})
 }
@@ -1300,7 +1319,7 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	logger := m.adoptLoggerLocked(binding.Logger)
+	logger := m.subjectLoggerLocked(binding.Logger)
 	bindHost := binding.host()
 	preferredPort := binding.Port
 

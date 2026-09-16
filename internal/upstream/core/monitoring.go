@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
@@ -209,9 +210,13 @@ func (c *Client) monitorStderr(ctx context.Context, stderr io.Reader) {
 				zap.String("server", c.config.Name),
 				zap.String("message", line))
 
-			// Log to server-specific logger if available
+			// Log to server-specific logger if available. The child's text is
+			// a field value stamped child_output=true (Spec 105 FR-007, D8
+			// rules 1 and 3): a docker CLI failure on the isolation path names
+			// a colliding container — another server's — and the attributed
+			// reader withholds child-output records that mention a container.
 			if c.upstreamLogger != nil {
-				c.upstreamLogger.Info("stderr", zap.String("message", line))
+				c.upstreamLogger.Info("stderr", zap.String("message", line), logs.ChildOutputField())
 			}
 
 			c.recordRecentStderr(line)

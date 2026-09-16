@@ -27,10 +27,9 @@ import (
 // not only `upstreamLogger`, because the per-server file is also written
 // through `oauthLogger()`'s tee (client.go) from internal/oauth, through
 // loggerWriter's `primary`/`fallback` here, and through any local alias a
-// future edit introduces. The one allowed non-constant message is
-// loggerWriter.writeLine (the launcher-pumped child line IS the message —
-// D8 rule 1 amendment: safe under rule 2 plus the newline split
-// loggerWriter.Write performs, pinned by TestLoggerWriter_SplitsMultiLineChunks).
+// future edit introduces. Since codex round 2 loggerWriter.writeLine writes
+// the launcher-pumped child line as a field value too (it used to be the one
+// allowed non-constant message), so every child path is under rule 1.
 
 // auditedLogPackages are the directories, relative to this package, whose
 // production files write into the per-server log.
@@ -39,14 +38,10 @@ var auditedLogPackages = []string{".", "../launcher", "../../oauth"}
 // auditAllowedNonConstant lists the call sites permitted to pass a
 // non-constant message, as "<file>:<enclosing func>". Each entry is a
 // reviewed exception, not child-controlled text:
-//   - connection_launcher.go:writeLine — the launcher-pumped child line IS
-//     the message (D8 rule 1 amendment; safe under rule 2 + the newline
-//     split in loggerWriter.Write).
 //   - connection_http.go:runAuthStrategies — "🔐 Trying "+transportLabel+…
 //     where transportLabel is one of two string literals chosen by
 //     connectHTTP/connectSSE, never data from the upstream.
 var auditAllowedNonConstant = map[string]bool{
-	"connection_launcher.go:writeLine":     true,
 	"connection_http.go:runAuthStrategies": true,
 }
 

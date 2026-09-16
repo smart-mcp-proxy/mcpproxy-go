@@ -15,6 +15,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/dockernaming"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
@@ -457,6 +458,58 @@ func TestTailLog_CollidingLogFile_AdminWholeFileUnchanged(t *testing.T) {
 			for _, key := range []string{"server_name", "lines_requested", "lines_returned", "log_lines", "server_status", "connection_status"} {
 				assert.Contains(t, body, `"`+key+`"`, "administrator payload shape unchanged")
 			}
+		})
+	}
+}
+
+// Codex round 2 (PR E), docker finding 1, at the tool surface: `a/b` and
+// hidden `a-b` both generate mcpproxy-a-b-<suffix>, and on a suffix
+// collision Docker's own `docker run` failure names the FOREIGN container's
+// name and full id. That text reaches a/b's per-server log as child output
+// — through the stdio child's stderr (monitoring.go) and the launcher pump
+// (connection_launcher.go), both of which write it as the `message` field
+// of a record stamped child_output=true (logs.ChildOutputField). tail_log
+// for an a/b-scoped token must never show the foreign id or name; the
+// administrator keeps the whole file (SC-005). The records are written here
+// through the real stamped writer in exactly the producers' shape
+// (internal/upstream/core/docker_collision_output_test.go drives the real
+// producers against a fake docker and the same reader).
+func TestTailLog_DockerCollisionChildOutput_ForeignContainerWithheldFromScopedCaller(t *testing.T) {
+	const foreignID = "f0e1d2c3b4a5968778695a4b3c2d1e0ff0e1d2c3b4a5968778695a4b3c2d1e0f"
+	const foreignName = "mcpproxy-a-b-wxyz"
+	collision := `docker: Error response from daemon: Conflict. The container name "/` + foreignName +
+		`" is already in use by container "` + foreignID + `". You have to remove (or rename) that container to be able to reuse that name.`
+
+	const hiddenOwner = "a-b" // the container's owner, a co-tenant of the container namespace only
+	require.Equal(t, dockernaming.SanitizeServerName(collidingHidden), dockernaming.SanitizeServerName(hiddenOwner),
+		"fixture premise: a/b and a-b generate the same container-name stem")
+	require.Equal(t, "mcpproxy-"+dockernaming.SanitizeServerName(hiddenOwner)+"-wxyz", foreignName)
+
+	f := newTailLogProxyWithServers(t, collidingHidden, hiddenOwner) // "a/b" reads; "a-b" is registered and silent
+	w := f.writers[collidingHidden]
+	w.Info("own-ordinary-record")
+	w.Info("stderr", zap.String("message", collision), logs.ChildOutputField())
+	w.Info("launcher", zap.String("message", "[launcher stderr] "+collision), logs.ChildOutputField())
+	w.Info("stderr", zap.String("message", "listening on 127.0.0.1:9331"), logs.ChildOutputField())
+	_ = w.Sync()
+
+	scoped := agentCtx([]string{collidingHidden}, []string{auth.PermRead}, "")
+	resp, body := tailLogLinesVia(t, f.proxy, scoped, collidingHidden, 50)
+	assert.NotContains(t, body, foreignID, "foreign container id disclosed to an a/b-scoped token")
+	assert.NotContains(t, body, foreignName, "foreign container name disclosed to an a/b-scoped token")
+	assert.NotContains(t, body, "already in use by container")
+	assert.Contains(t, body, "own-ordinary-record")
+	assert.Contains(t, body, "listening on 127.0.0.1:9331", "ordinary child output stays served")
+	assert.Equal(t, 2, resp.LinesReturned, "lines_returned counts the authorized tail: %s", body)
+
+	for name, ctx := range map[string]context.Context{
+		"api-key admin": adminCtx(),
+		"no auth ctx":   context.Background(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp, body := tailLogLinesVia(t, f.proxy, ctx, collidingHidden, 50)
+			assert.Contains(t, body, foreignID, "administrators keep Docker's output (SC-005)")
+			assert.Equal(t, 4, resp.LinesReturned)
 		})
 	}
 }

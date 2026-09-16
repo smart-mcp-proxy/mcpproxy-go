@@ -367,7 +367,12 @@ of these paths, and a container that merely shares an image with a server's
 is never stopped on that server's behalf. Housekeeping records in the
 per-server log carry `container_owner` (the label value read back from
 Docker) so [`tail_log`](/features/agent-tokens) can attribute them to the
-right server.
+right server; the pre-start "Docker isolation configured" record names the
+generated container name before Docker has created anything and carries no
+owner. The child process's own output lines (the docker CLI's stderr
+included) are written to the per-server log as the `message` field of a
+`stderr` or `launcher` record marked `child_output`, never as the record
+text.
 
 Two consequences of the ownership rule are worth knowing:
 

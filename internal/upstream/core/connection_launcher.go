@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/launcher"
 )
@@ -341,12 +342,9 @@ func newLoggerWriter(primary, fallback *zap.Logger) io.Writer {
 }
 
 func (w *loggerWriter) Write(p []byte) (int, error) {
-	// One record per line. pumpLines already writes one line per call; the
-	// split is the guarantee for any other producer, because the child's text
-	// becomes the console-encoder MESSAGE of its record and a message must
-	// never carry a line break — a break would start a new line whose text
-	// the child controls, and the attributed log reader (Spec 105 FR-007,
-	// internal/logs research D8 rule 2) keys on line boundaries.
+	// One record per line: pumpLines already writes one line per call, and
+	// the split keeps that shape for any other producer (one record per
+	// child line is what `mcpproxy upstream logs` shows).
 	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
 		w.writeLine(strings.TrimRight(line, "\r"))
 	}
@@ -354,6 +352,13 @@ func (w *loggerWriter) Write(p []byte) (int, error) {
 }
 
 // writeLine records one child output line through the per-server logger.
+// The child's text is the `message` FIELD of a constant-message record
+// stamped child_output=true, never the record message (Spec 105 FR-007,
+// internal/logs research D8 rule 1): the console encoder writes a message
+// unescaped, so child text there could carry a record header or boundary,
+// and a docker CLI failure names another server's container — the
+// attributed reader withholds child-output records that mention a container
+// (codex round 2).
 func (w *loggerWriter) writeLine(line string) {
 	if line == "" {
 		return
@@ -375,8 +380,8 @@ func (w *loggerWriter) writeLine(line string) {
 	line = oauth.ScrubUpstreamText(line)
 	switch {
 	case w.primary != nil:
-		w.primary.Info(line)
+		w.primary.Info("launcher", zap.String("message", line), logs.ChildOutputField())
 	case w.fallback != nil:
-		w.fallback.Info(line)
+		w.fallback.Info("launcher", zap.String("message", line), logs.ChildOutputField())
 	}
 }

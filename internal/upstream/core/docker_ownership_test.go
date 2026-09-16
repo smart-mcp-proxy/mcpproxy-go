@@ -47,17 +47,28 @@ type fakeContainer struct {
 	Labels map[string]string
 }
 
-// fakeDocker is one installed fake docker: the invocation log and the
-// fixture file the shim reads.
+// fakeDocker is one installed fake docker: the invocation log, the `ps`
+// fixture file the shim reads, and the file whose text makes `docker run`
+// fail (printed to stderr, exit 125 — the docker CLI's own status for a
+// daemon error) when non-empty.
 type fakeDocker struct {
-	logPath string
-	psPath  string
+	logPath    string
+	psPath     string
+	runErrPath string
+}
+
+// failRunWith makes every `docker run` print stderr and exit 125.
+func (fd *fakeDocker) failRunWith(t *testing.T, stderr string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(fd.runErrPath, []byte(stderr+"\n"), 0o600))
 }
 
 const fakeDockerShim = `#!/bin/sh
 LOG=%s
 PS=%s
+RUNERR=%s
 printf '%%s\n' "$*" >> "$LOG"
+if [ "$1" = run ] && [ -s "$RUNERR" ]; then cat "$RUNERR" >&2; exit 125; fi
 [ "$1" = ps ] || exit 0
 shift
 format='{{.ID}}	{{.Names}}'
@@ -122,8 +133,9 @@ func installFakeDocker(t *testing.T, containers []fakeContainer) *fakeDocker {
 	}
 	dir := t.TempDir()
 	fd := &fakeDocker{
-		logPath: filepath.Join(dir, "invocations.log"),
-		psPath:  filepath.Join(dir, "ps.tsv"),
+		logPath:    filepath.Join(dir, "invocations.log"),
+		psPath:     filepath.Join(dir, "ps.tsv"),
+		runErrPath: filepath.Join(dir, "run.stderr"),
 	}
 	var tsv strings.Builder
 	for _, c := range containers {
@@ -136,7 +148,7 @@ func installFakeDocker(t *testing.T, containers []fakeContainer) *fakeDocker {
 	require.NoError(t, os.WriteFile(fd.psPath, []byte(tsv.String()), 0o600))
 
 	shim := filepath.Join(dir, "docker")
-	script := fmt.Sprintf(fakeDockerShim, shellQuote(fd.logPath), shellQuote(fd.psPath))
+	script := fmt.Sprintf(fakeDockerShim, shellQuote(fd.logPath), shellQuote(fd.psPath), shellQuote(fd.runErrPath))
 	require.NoError(t, os.WriteFile(shim, []byte(script), 0o755))
 
 	t.Setenv("PATH", "/usr/bin:/bin") // sh + awk only; no real docker here
