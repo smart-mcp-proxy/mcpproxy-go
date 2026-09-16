@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,7 +33,7 @@ import (
 // Fake docker: a sh+awk shim (no re-exec of the race-instrumented test
 // binary, which costs ~1s per call). It appends every invocation to the
 // invocation log, answers `ps` from a TSV fixture honouring
-// --filter name=<ERE> / label=<k>[=<v>] and --format templates ({{.ID}},
+// --filter name=<ERE> / id=<prefix> / label=<k>[=<v>] and --format templates ({{.ID}},
 // {{.Names}}, {{.Image}}, {{.Status}}, {{.CreatedAt}}, {{.Labels}},
 // {{.Label "k"}}), and exits 0 for rm/stop/kill/version.
 // ---------------------------------------------------------------------------
@@ -61,6 +62,7 @@ printf '%%s\n' "$*" >> "$LOG"
 shift
 format='{{.ID}}	{{.Names}}'
 namefilter=''
+idfilter=''
 labelkey=''
 labelval=''
 labelset=0
@@ -70,6 +72,7 @@ while [ $# -gt 0 ]; do
     --filter|-f)
       case "$2" in
         name=*) namefilter="${2#name=}" ;;
+        id=*) idfilter="${2#id=}" ;;
         label=*)
           l="${2#label=}"
           labelkey="${l%%%%=*}"
@@ -80,8 +83,8 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
-if [ -n "$MCPPROXY_FAKE_DOCKER_IGNORE_FILTERS" ]; then namefilter=''; labelkey=''; fi
-awk -F'\t' -v fmt="$format" -v nf="$namefilter" -v lk="$labelkey" -v lv="$labelval" -v ls="$labelset" '
+if [ -n "$MCPPROXY_FAKE_DOCKER_IGNORE_FILTERS" ]; then namefilter=''; idfilter=''; labelkey=''; fi
+awk -F'\t' -v fmt="$format" -v nf="$namefilter" -v idf="$idfilter" -v lk="$labelkey" -v lv="$labelval" -v ls="$labelset" '
 function repl(s, lit, val,    i, out) {
   out = ""
   while ((i = index(s, lit)) > 0) { out = out substr(s, 1, i - 1) val; s = substr(s, i + length(lit)) }
@@ -89,6 +92,7 @@ function repl(s, lit, val,    i, out) {
 }
 {
   if (nf != "" && $2 !~ nf) next
+  if (idf != "" && index(idf, $1) != 1 && index($1, idf) != 1) next
   delete labels
   n = split($5, pairs, ",")
   for (i = 1; i <= n; i++) { eq = index(pairs[i], "="); if (eq > 0) labels[substr(pairs[i], 1, eq - 1)] = substr(pairs[i], eq + 1) }
@@ -436,4 +440,147 @@ func TestDockerCleanup_GoPredicateDropsRowsTheDaemonDidNotFilter(t *testing.T) {
 	require.NoError(t, c.ensureNoExistingContainers(context.Background()))
 	assertForeignUntouched(t, fd, mainLogs, upLogs)
 	assert.NotEmpty(t, fd.mutationsOf(t, ownContainerID))
+}
+
+// shortenCidfilePoll makes readContainerIDWithContext give up on the cidfile
+// almost immediately (the production wait is 10 s) so the name-recovery
+// fallback is reachable in a unit test.
+func shortenCidfilePoll(t *testing.T) {
+	t.Helper()
+	attempts, interval := cidfileReadAttempts, cidfileReadInterval
+	cidfileReadAttempts, cidfileReadInterval = 2, time.Millisecond
+	t.Cleanup(func() { cidfileReadAttempts, cidfileReadInterval = attempts, interval })
+}
+
+// Codex round 1 (PR E), finding 2: the cidfile path. A user-configured
+// direct `docker run --name custom image` upstream gets --cidfile injected
+// but carries neither the com.mcpproxy.server label nor a canonical name, so
+// it fails ownsContainer on both halves. The pre-fix code recorded its id as
+// owned, wrote it into a's per-server log with a fabricated
+// container_owner=a, and stopped/killed it on disconnect. Under D9 a
+// user-`--name` container is not ours: the id captured from the cidfile
+// must be inspected, and a container that fails ownership is left alone and
+// never named in a's per-server log.
+func TestDockerCleanup_CidfileContainerMustPassOwnership(t *testing.T) {
+	const customID = "c0ffee000001"
+	const customFullID = customID + "0000000000000000000000000000000000000000000000000000"
+	cases := []struct {
+		name  string
+		row   fakeContainer
+		owned bool
+	}{
+		{"user --name custom, no label", fakeContainer{ID: customID, Name: "custom", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{}}, false},
+		{"own label, user --name custom via extra_args", fakeContainer{ID: customID, Name: "custom", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}}, false},
+		{"foreign label, canonical-looking name", fakeContainer{ID: customID, Name: "mcpproxy-a-wxyz", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a-b"}}, false},
+		{"own label and canonical name", fakeContainer{ID: customID, Name: "mcpproxy-a-wxyz", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fd := installFakeDocker(t, []fakeContainer{tc.row})
+			c, _, upLogs := newOwnershipClient("a", &config.ServerConfig{
+				Command: "docker", Args: []string{"run", "-i", "--rm", "--name", "custom", "mcp/example"},
+			})
+
+			cidFile := filepath.Join(t.TempDir(), "cid")
+			require.NoError(t, os.WriteFile(cidFile, []byte(customFullID+"\n"), 0o600))
+			c.readContainerIDWithContext(context.Background(), cidFile)
+
+			c.mu.Lock()
+			c.killDockerContainerWithContext(context.Background())
+			c.mu.Unlock()
+
+			mutated := append(fd.mutationsOf(t, customFullID), fd.mutationsOf(t, customID)...)
+			if tc.owned {
+				assert.NotEmpty(t, mutated, "a's own container must still be stopped; invocations:\n%s", strings.Join(fd.invocations(t), "\n"))
+				for _, entry := range upLogs.All() {
+					if owner, ok := entry.ContextMap()["container_owner"]; ok {
+						assert.Equal(t, "a", owner, "container_owner must be the label read back")
+					}
+				}
+				return
+			}
+			assert.Empty(t, mutated, "container that fails ownership was stopped/killed: %v", mutated)
+			for _, needle := range []string{customFullID, customID, tc.row.Name} {
+				assert.Empty(t, recordsMentioning(upLogs, needle), "unowned %q written into a's per-server log", needle)
+			}
+			for _, entry := range upLogs.All() {
+				_, has := entry.ContextMap()["container_owner"]
+				assert.False(t, has, "container_owner fabricated on record %q", entry.Message)
+			}
+		})
+	}
+}
+
+// Codex round 1 (PR E), finding 3: the exact-name paths (cidfile recovery
+// by name and killDockerContainerByNameWithContext) filtered by label and
+// the tracked name only, never applied ownsContainer, and wrote
+// container_owner from the REQUESTED server rather than the label read
+// back. A foreign `--label com.mcpproxy.server=a --name custom` container
+// whose name is the tracked one must be neither stopped nor named in a's
+// log; an owned canonical container on the same paths still is, with
+// container_owner equal to its label.
+func TestDockerCleanup_ExactNamePathsApplyOwnership(t *testing.T) {
+	const foreignID = "f0e1d2c3b4a5"
+	cases := []struct {
+		name    string
+		tracked string
+		row     fakeContainer
+		owned   bool
+	}{
+		{"foreign label=a --name custom", "custom",
+			fakeContainer{ID: foreignID, Name: "custom", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}}, false},
+		{"foreign label=a-b canonical-looking name", ownContainerName,
+			fakeContainer{ID: foreignID, Name: ownContainerName, Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a-b"}}, false},
+		{"own label and canonical name", ownContainerName,
+			fakeContainer{ID: ownContainerID, Name: ownContainerName, Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}}, true},
+	}
+	for _, tc := range cases {
+		t.Run("recovery/"+tc.name, func(t *testing.T) {
+			fd := installFakeDocker(t, []fakeContainer{tc.row})
+			c, _, upLogs := newOwnershipClient("a", nil)
+			c.containerName = tc.tracked
+
+			// A cidfile that never appears: the read times out and recovers by name.
+			shortenCidfilePoll(t)
+			c.readContainerIDWithContext(context.Background(), filepath.Join(t.TempDir(), "never-written"))
+
+			if tc.owned {
+				assert.Equal(t, tc.row.ID, c.containerID, "own container must be recovered by name")
+				for _, entry := range upLogs.All() {
+					if owner, ok := entry.ContextMap()["container_owner"]; ok {
+						assert.Equal(t, "a", owner)
+					}
+				}
+				return
+			}
+			assert.Empty(t, c.containerID, "foreign container recorded as owned via name recovery")
+			assert.Empty(t, recordsMentioning(upLogs, tc.row.ID), "foreign id written into a's per-server log")
+			assert.Empty(t, fd.mutationsOf(t, tc.row.ID))
+		})
+		t.Run("kill_by_name/"+tc.name, func(t *testing.T) {
+			fd := installFakeDocker(t, []fakeContainer{tc.row})
+			c, mainLogs, upLogs := newOwnershipClient("a", nil)
+
+			ok := c.killDockerContainerByNameWithContext(context.Background(), tc.tracked)
+
+			if tc.owned {
+				assert.True(t, ok)
+				assert.NotEmpty(t, fd.mutationsOf(t, tc.row.ID), "own container must be stopped; invocations:\n%s", strings.Join(fd.invocations(t), "\n"))
+				for _, entry := range upLogs.All() {
+					if owner, has := entry.ContextMap()["container_owner"]; has {
+						assert.Equal(t, "a", owner, "container_owner must be the label read back")
+					}
+				}
+				return
+			}
+			assert.False(t, ok)
+			assert.Empty(t, fd.mutationsOf(t, tc.row.ID), "foreign container stopped/killed by exact name")
+			assert.Empty(t, recordsMentioning(upLogs, tc.row.ID), "foreign id written into a's per-server log")
+			assert.Empty(t, recordsMentioning(mainLogs, tc.row.ID), "foreign id written into main log under server=a")
+			for _, entry := range upLogs.All() {
+				_, has := entry.ContextMap()["container_owner"]
+				assert.False(t, has, "container_owner fabricated on record %q", entry.Message)
+			}
+		})
+	}
 }

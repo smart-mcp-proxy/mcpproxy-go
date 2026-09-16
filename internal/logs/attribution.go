@@ -30,15 +30,26 @@ import (
 //     record as the MESSAGE; rule 2 handles that shape and loggerWriter never
 //     lets a newline into a message.
 //  2. Reader rule: a console-encoder record is
-//     `ts | LEVEL | caller | msg | {fields}`. The reader scans ` | {`
-//     boundaries LEFT TO RIGHT and accepts the first whose suffix decodes as
-//     exactly one complete JSON object with no trailing bytes. Child text that
-//     contains ` | {` sits to the left of the encoder's own boundary, so its
-//     suffix always carries the real fields object as trailing bytes and is
-//     rejected; child text inside a field value is escaped and cannot close
-//     the object early. A JSON-encoder record is the whole line. Lines with
-//     no accepted boundary (pre-stamp records, torn fragments from two sinks
-//     on one file) are non-attributable and withheld from scoped callers.
+//     `ts | LEVEL | caller | msg | {fields}`. The reader takes the FIRST
+//     ` | {` boundary on the line and accepts the record only if that
+//     boundary's suffix decodes as exactly one complete JSON object with no
+//     trailing bytes. Child text that contains ` | {` sits to the left of the
+//     encoder's own boundary, so its suffix carries the real fields object as
+//     trailing bytes and the line is non-attributable (withheld from its own
+//     writer too — never misattributed); child text inside a field value is
+//     escaped and cannot close the object early. The reader never scans past
+//     a failed boundary: a torn record with no terminator (partial final
+//     write) followed by an appended complete record shares one physical
+//     line, and the later record's boundary would otherwise attribute the
+//     whole line — foreign fragment included — to the later writer (codex
+//     round 1; a record torn INSIDE its message part, before its own
+//     boundary, leaves only message text in front of the later record and
+//     is indistinguishable from that record's message — a retained effect
+//     of the encoder's shape). A line that starts with `{` is a
+//     JSON-encoder record (or a torn one) and is judged as that single
+//     object, never by the console scan. Lines with no accepted boundary
+//     (pre-stamp records, torn fragments) are non-attributable and withheld
+//     from scoped callers.
 //  3. Subject-evidence rule (historical records): a stamp proves who WROTE a
 //     record, not that every subject it names is that server's. A record
 //     that names a container is attributable only when it carries
@@ -187,27 +198,24 @@ func recordAttributableTo(line, serverName string) bool {
 // recordFields extracts the fields object of a rendered record, or ok=false
 // when the line carries no accepted fields object.
 func recordFields(line string) (attributionFields, bool) {
-	// JSON encoder: the whole line is the record.
+	// JSON encoder: the whole line is the record. A `{`-prefixed line that is
+	// not exactly one object is torn or foreign; it never falls through to the
+	// console scan, whose boundary could belong to a record appended after
+	// the tear.
 	if strings.HasPrefix(line, "{") {
-		if fields, ok := decodeExactlyOneObject(line); ok {
-			return fields, true
-		}
+		return decodeExactlyOneObject(line)
 	}
 
-	// Console encoder: the first ` | {` boundary, scanning left to right,
-	// whose suffix is exactly one complete JSON object.
-	from := 0
-	for {
-		idx := strings.Index(line[from:], consoleFieldsBoundary)
-		if idx < 0 {
-			return attributionFields{}, false
-		}
-		start := from + idx + len(consoleFieldsBoundary) - 1 // at the '{'
-		if fields, ok := decodeExactlyOneObject(line[start:]); ok {
-			return fields, true
-		}
-		from = start
+	// Console encoder: the FIRST ` | {` boundary decides. A boundary whose
+	// suffix does not decode is evidence of a torn or foreign prefix, so the
+	// whole line is non-attributable; scanning on to a later boundary would
+	// hand the prefix to whoever wrote the later record.
+	idx := strings.Index(line, consoleFieldsBoundary)
+	if idx < 0 {
+		return attributionFields{}, false
 	}
+	start := idx + len(consoleFieldsBoundary) - 1 // at the '{'
+	return decodeExactlyOneObject(line[start:])
 }
 
 // attributionFields is the subset of a record's top-level fields the

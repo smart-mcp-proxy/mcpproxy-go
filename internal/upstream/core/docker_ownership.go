@@ -28,10 +28,18 @@ import (
 // match, `--filter name=` a regexp match) and ownsContainer re-checks them in
 // Go, so no container that fails either is ever mutated or logged. Pre-label
 // containers and user-`--name` containers are left alone: they never were ours
-// by this rule. Every housekeeping record that names a container carries
-// `container_owner` — the label value — so the attributed log reader
-// (internal/logs, D8 rule 3) can prove the subject belongs to the requested
-// server; that field is the only administrator-visible change (SC-005).
+// by this rule. That holds on EVERY stop/kill/rm path, including the two that
+// start from a single known container rather than a listing (codex round 1):
+// the id read from the cidfile of this server's own `docker run` — a
+// user-configured direct `docker run --name custom` gets a cidfile but no
+// label and no canonical name — and the exact tracked name. Both look the
+// container up (lookupOwnedContainerByID / lookupOwnedContainerByName) and
+// apply ownsContainer before acting and before writing a record. Every
+// housekeeping record that names a container carries `container_owner` — the
+// label value READ BACK from Docker, never the requesting server's name — so
+// the attributed log reader (internal/logs, D8 rule 3) can prove the subject
+// belongs to the requested server; that field is the only
+// administrator-visible change (SC-005).
 
 // containerOwnerLabel is the Docker label carrying the RAW server name of the
 // mcpproxy server a container was created for (formatContainerLabels).
@@ -74,14 +82,65 @@ const ownedContainerFormat = "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.L
 // includeStopped adds `-a` (stopped containers too). Rows that fail the
 // Go-side predicate are dropped before anything is logged or mutated.
 func (c *Client) listOwnedContainers(ctx context.Context, includeStopped bool) ([]ownedContainer, error) {
+	return c.listOwnedContainersFiltered(ctx, includeStopped,
+		"label="+containerOwnerLabel+"="+c.config.Name,
+		"name="+ownedContainerNamePattern(c.config.Name))
+}
+
+// lookupOwnedContainerByID resolves one container id (a full cidfile id or a
+// short id) to an owned container. ok is false when Docker knows no such
+// container or it fails ownsContainer — a user-`--name` container, a
+// pre-label one, a foreign one — in which case the caller leaves it alone.
+// The returned ID is the id the caller passed, so stop/kill/rm and the
+// records name the id that was tracked.
+func (c *Client) lookupOwnedContainerByID(ctx context.Context, id string) (ownedContainer, bool, error) {
+	// `--filter id=` is a prefix match on the full id.
+	rows, err := c.listOwnedContainersFiltered(ctx, true, "id="+id)
+	if err != nil {
+		return ownedContainer{}, false, err
+	}
+	for _, row := range rows {
+		if strings.HasPrefix(id, row.ID) || strings.HasPrefix(row.ID, id) {
+			row.ID = id
+			return row, true, nil
+		}
+	}
+	return ownedContainer{}, false, nil
+}
+
+// lookupOwnedContainerByName resolves one exact container name to an owned
+// container. ok is false when no container of that name is canonically owned
+// by this server: a foreign `--label com.mcpproxy.server=<name> --name
+// custom` container matches the label filter but not the name half of
+// ownsContainer and is left alone.
+func (c *Client) lookupOwnedContainerByName(ctx context.Context, name string) (ownedContainer, bool, error) {
+	rows, err := c.listOwnedContainersFiltered(ctx, true,
+		"label="+containerOwnerLabel+"="+c.config.Name,
+		"name=^"+regexp.QuoteMeta(name)+"$")
+	if err != nil {
+		return ownedContainer{}, false, err
+	}
+	for _, row := range rows {
+		if row.Name == name {
+			return row, true, nil
+		}
+	}
+	return ownedContainer{}, false, nil
+}
+
+// listOwnedContainersFiltered runs `docker ps [-a] --filter <f>...` with the
+// ownership --format and returns only the rows that pass ownsContainer with
+// the label value Docker reported. Every lookup goes through here so no path
+// can act on, or log, a container the predicate did not admit.
+func (c *Client) listOwnedContainersFiltered(ctx context.Context, includeStopped bool, filters ...string) ([]ownedContainer, error) {
 	args := []string{"ps"}
 	if includeStopped {
 		args = append(args, "-a")
 	}
-	args = append(args,
-		"--filter", "label="+containerOwnerLabel+"="+c.config.Name,
-		"--filter", "name="+ownedContainerNamePattern(c.config.Name),
-		"--format", ownedContainerFormat)
+	for _, filter := range filters {
+		args = append(args, "--filter", filter)
+	}
+	args = append(args, "--format", ownedContainerFormat)
 
 	output, err := c.newDockerCmd(ctx, args...).Output()
 	if err != nil {
@@ -108,17 +167,20 @@ func (c *Client) listOwnedContainers(ctx context.Context, includeStopped bool) (
 
 // containerOwnerField is the housekeeping-record field that lets the
 // attributed log reader (D8 rule 3) verify the record's subject: the value of
-// the container's com.mcpproxy.server label. For a container identified by
-// the cidfile of this server's own `docker run`, the launching server is the
-// owner by construction.
+// the container's com.mcpproxy.server label as Docker reported it
+// (ownedContainer.Owner). It is never derived from the requesting server's
+// name: a container identified by the cidfile of this server's own `docker
+// run` is inspected first, since a direct `docker run --name custom` upstream
+// gets a cidfile but no label.
 func containerOwnerField(owner string) zap.Field {
 	return zap.String("container_owner", owner)
 }
 
 // stopOwnedContainer stops (then force-kills) one owned container and
 // records the outcome in both loggers. cleanupPath names the path that found
-// the container ("name pattern", "image") for the records.
-func (c *Client) stopOwnedContainer(ctx context.Context, container ownedContainer, cleanupPath string) {
+// the container ("name pattern", "image", "cidfile", "exact name") for the
+// records. It reports whether the container was stopped or killed.
+func (c *Client) stopOwnedContainer(ctx context.Context, container ownedContainer, cleanupPath string) bool {
 	c.logger.Info("Killing owned container",
 		zap.String("server", c.config.Name),
 		zap.String("cleanup_path", cleanupPath),
@@ -146,18 +208,38 @@ func (c *Client) stopOwnedContainer(ctx context.Context, container ownedContaine
 				zap.String("container_id", container.ID),
 				containerOwnerField(container.Owner),
 				zap.Error(err))
-			return
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Error("Failed to kill owned container",
+					zap.String("cleanup_path", cleanupPath),
+					zap.String("container_id", container.ID),
+					containerOwnerField(container.Owner),
+					zap.Error(err))
+			}
+			return false
 		}
 		c.logger.Info("Successfully force killed owned container",
 			zap.String("server", c.config.Name),
 			zap.String("cleanup_path", cleanupPath),
 			zap.String("container_id", container.ID),
 			containerOwnerField(container.Owner))
-		return
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Info("Owned container force killed",
+				zap.String("cleanup_path", cleanupPath),
+				zap.String("container_id", container.ID),
+				containerOwnerField(container.Owner))
+		}
+		return true
 	}
 	c.logger.Info("Successfully stopped owned container",
 		zap.String("server", c.config.Name),
 		zap.String("cleanup_path", cleanupPath),
 		zap.String("container_id", container.ID),
 		containerOwnerField(container.Owner))
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("Owned container stopped gracefully",
+			zap.String("cleanup_path", cleanupPath),
+			zap.String("container_id", container.ID),
+			containerOwnerField(container.Owner))
+	}
+	return true
 }

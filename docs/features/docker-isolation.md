@@ -357,25 +357,27 @@ ownership.
 Every container mcpproxy creates is named
 `mcpproxy-<sanitised server name>-<4 random chars>`. The name alone does not
 identify the server — `a/b` and `a-b` both sanitise to `a-b` — so every
-cleanup path (the pre-start sweep for stale containers, the disconnect
-fallback by name pattern, and the fallback by image name) removes only
-containers whose `com.mcpproxy.server` label **and** canonical name both
-match the server being cleaned up. Containers you started yourself with
-`docker run --name mcpproxy-…`, or that pre-date the label, are never touched
-by these sweeps, and a container that merely shares an image with a server's
+cleanup path (the pre-start sweep for stale containers, the container
+captured from `--cidfile`, the disconnect fallbacks by exact name, by name
+pattern and by image name) inspects the container and stops or removes it
+only when its `com.mcpproxy.server` label **and** canonical name both match
+the server being cleaned up. Containers you started yourself with
+`docker run --name …`, or that pre-date the label, are never touched by any
+of these paths, and a container that merely shares an image with a server's
 is never stopped on that server's behalf. Housekeeping records in the
-per-server log carry `container_owner` (the label value) so
-[`tail_log`](/features/agent-tokens) can attribute them to the right server.
+per-server log carry `container_owner` (the label value read back from
+Docker) so [`tail_log`](/features/agent-tokens) can attribute them to the
+right server.
 
 Two consequences of the ownership rule are worth knowing:
 
 - **Servers you configure as `docker run …` yourself** (no isolation) get no
   `com.mcpproxy.server` label — MCPProxy only labels the containers it
-  builds for isolation — so the sweeps above never match them. Their
-  container is tracked through the `--cidfile` MCPProxy injects into your
-  command; if that capture fails, the container is left running for you to
-  stop by hand (earlier versions would stop every container on the same
-  image, yours or not).
+  builds for isolation — so MCPProxy never stops or removes their
+  container, not even through the `--cidfile` it injects into your command.
+  Use `--rm` (and let the container exit when its stdin closes) or stop it
+  by hand; earlier versions would stop it via the cidfile and, if that
+  capture failed, every container on the same image, yours or not.
 - **Renaming a server** changes the label value a container must carry. A
   container created under the old name is no longer owned by the new one,
   so it is left alone by the pre-start sweep and must be removed manually

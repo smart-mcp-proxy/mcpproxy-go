@@ -40,6 +40,14 @@ func (c *Client) newDockerCmd(ctx context.Context, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// cidfileReadAttempts × cidfileReadInterval bounds how long the cidfile is
+// polled for (10 s by default: image pulls take a while). Variables so tests
+// can shorten the wait.
+var (
+	cidfileReadAttempts = 100
+	cidfileReadInterval = 100 * time.Millisecond
+)
+
 // readContainerIDWithContext reads the container ID from cidfile for tracking with context cancellation
 func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string) {
 	c.logger.Debug("Starting container ID tracking",
@@ -47,7 +55,7 @@ func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string)
 		zap.String("cid_file", cidFile))
 
 	// Wait for container to start and write CID file - longer timeout for image pulls
-	for attempt := 0; attempt < 100; attempt++ { // Wait up to 10 seconds
+	for attempt := 0; attempt < cidfileReadAttempts; attempt++ {
 		select {
 		case <-ctx.Done():
 			c.logger.Debug("Container ID tracking canceled",
@@ -55,31 +63,15 @@ func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string)
 				zap.String("cid_file", cidFile))
 			return
 		default:
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(cidfileReadInterval)
 
 			cidBytes, err := os.ReadFile(cidFile)
 			if err == nil {
 				containerID := strings.TrimSpace(string(cidBytes))
 				if containerID != "" {
-					c.mu.Lock()
-					c.containerID = containerID
-					c.mu.Unlock()
-
-					c.logger.Info("Docker container ID captured for cleanup",
-						zap.String("server", c.config.Name),
-						zap.String("container_id", containerID[:12]), // Show short ID
-						zap.String("full_container_id", containerID),
-						zap.Int("attempt", attempt))
-
-					if c.upstreamLogger != nil {
-						c.upstreamLogger.Info("Container ID captured",
-							zap.String("container_id", containerID),
-							containerOwnerField(c.config.Name),
-							zap.Int("attempt", attempt))
-					}
-
 					// Clean up the cidfile now that we have the ID
 					os.Remove(cidFile)
+					c.trackCidfileContainer(ctx, containerID, attempt)
 					return
 				}
 			} else if attempt%10 == 0 { // Log every 1 second
@@ -101,36 +93,40 @@ func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string)
 		c.upstreamLogger.Warn("cidfile read timeout - attempting name lookup recovery")
 	}
 
-	// Fallback: Find container by name
+	// Fallback: find the container by its exact tracked name. Only a
+	// container that passes ownsContainer (label read back AND canonical
+	// name) is adopted; a foreign `--label com.mcpproxy.server=<us> --name
+	// <tracked>` container is left alone and never named in our log.
 	if c.containerName != "" {
-		listCmd := c.newDockerCmd(ctx, "ps",
-			"--filter", "label="+containerOwnerLabel+"="+c.config.Name,
-			"--filter", fmt.Sprintf("name=^%s$", c.containerName),
-			"--format", "{{.ID}}")
+		found, ok, err := c.lookupOwnedContainerByName(ctx, c.containerName)
+		if err != nil {
+			c.logger.Debug("Failed to look up container by name",
+				zap.String("server", c.config.Name),
+				zap.String("container_name", c.containerName),
+				zap.Error(err))
+		}
+		if ok {
+			c.mu.Lock()
+			c.containerID = found.ID
+			c.mu.Unlock()
 
-		if output, err := listCmd.Output(); err == nil {
-			foundID := strings.TrimSpace(string(output))
-			if foundID != "" {
-				c.mu.Lock()
-				c.containerID = foundID
-				c.mu.Unlock()
+			c.logger.Info("Successfully recovered container ID via name lookup",
+				zap.String("server", c.config.Name),
+				zap.String("container_id", shortContainerID(found.ID)),
+				zap.String("full_container_id", found.ID),
+				zap.String("container_name", found.Name),
+				containerOwnerField(found.Owner))
 
-				c.logger.Info("Successfully recovered container ID via name lookup",
-					zap.String("server", c.config.Name),
-					zap.String("container_id", foundID[:12]),
-					zap.String("full_container_id", foundID),
-					zap.String("container_name", c.containerName))
-
-				if c.upstreamLogger != nil {
-					c.upstreamLogger.Info("Container ID recovered via name lookup",
-						zap.String("container_id", foundID),
-						containerOwnerField(c.config.Name))
-				}
-
-				// Clean up the cidfile since we got the ID
-				os.Remove(cidFile)
-				return
+			if c.upstreamLogger != nil {
+				c.upstreamLogger.Info("Container ID recovered via name lookup",
+					zap.String("container_id", found.ID),
+					zap.String("container_name", found.Name),
+					containerOwnerField(found.Owner))
 			}
+
+			// Clean up the cidfile since we got the ID
+			os.Remove(cidFile)
+			return
 		}
 	}
 
@@ -143,7 +139,62 @@ func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string)
 	}
 }
 
-// killDockerContainerWithContext kills the Docker container if one is running with context timeout
+// trackCidfileContainer adopts the id our `docker run` wrote to its cidfile
+// — but only after inspecting it: a user-configured direct `docker run
+// --name custom` upstream gets a cidfile too, yet carries neither the
+// ownership label nor a canonical name, and under D9 such a container is not
+// ours to stop or to name in our log (codex round 1). container_owner is the
+// label read back, never this server's name.
+func (c *Client) trackCidfileContainer(ctx context.Context, containerID string, attempt int) {
+	owned, ok, err := c.lookupOwnedContainerByID(ctx, containerID)
+	switch {
+	case err != nil:
+		c.logger.Warn("Could not verify ownership of the container from the cidfile - it will not be managed",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", shortContainerID(containerID)),
+			zap.Error(err))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Warn("Could not verify ownership of the container from the cidfile - it will not be managed",
+				zap.Error(err))
+		}
+		return
+	case !ok:
+		c.logger.Info("Container from the cidfile is not canonically owned by this server (no com.mcpproxy.server label or non-canonical name) - it will not be stopped on disconnect",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", shortContainerID(containerID)))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Info("Container from the cidfile is not canonically owned by this server - it will not be stopped on disconnect")
+		}
+		return
+	}
+
+	c.mu.Lock()
+	c.containerID = containerID
+	c.mu.Unlock()
+
+	c.logger.Info("Docker container ID captured for cleanup",
+		zap.String("server", c.config.Name),
+		zap.String("container_id", shortContainerID(containerID)),
+		zap.String("full_container_id", containerID),
+		zap.String("container_name", owned.Name),
+		containerOwnerField(owned.Owner),
+		zap.Int("attempt", attempt))
+
+	if c.upstreamLogger != nil {
+		c.upstreamLogger.Info("Container ID captured",
+			zap.String("container_id", containerID),
+			zap.String("container_name", owned.Name),
+			containerOwnerField(owned.Owner),
+			zap.Int("attempt", attempt))
+	}
+}
+
+// killDockerContainerWithContext stops (then kills) the tracked container
+// during disconnect. The id was adopted through trackCidfileContainer or the
+// name recovery, but ownership is re-established here, at the moment of the
+// mutation — `docker rename` or a foreign container reusing an id prefix
+// could have changed the answer — so no path stops a container the
+// predicate does not admit now.
 // NOTE: This function expects the caller to already hold the mutex lock
 func (c *Client) killDockerContainerWithContext(ctx context.Context) {
 	c.logger.Debug("Starting Docker container kill process",
@@ -158,78 +209,40 @@ func (c *Client) killDockerContainerWithContext(ctx context.Context) {
 		return
 	}
 
-	c.logger.Info("Killing Docker container during disconnect",
-		zap.String("server", c.config.Name),
-		zap.String("container_id", containerID[:12]),
-		zap.String("full_container_id", containerID))
-
-	if c.upstreamLogger != nil {
-		c.upstreamLogger.Info("Killing Docker container",
-			zap.String("container_id", containerID),
-			containerOwnerField(c.config.Name))
-	}
-
-	// First try graceful stop (SIGTERM)
-	c.logger.Debug("Attempting graceful stop",
-		zap.String("server", c.config.Name),
-		zap.String("container_id", containerID[:12]))
-
-	stopCmd := c.newDockerCmd(ctx, "stop", containerID)
-	c.logger.Debug("Executing docker stop command",
-		zap.String("server", c.config.Name),
-		zap.String("container_id", containerID[:12]))
-
-	if err := stopCmd.Run(); err != nil {
-		c.logger.Warn("Failed to stop Docker container gracefully, trying force kill",
-			zap.String("server", c.config.Name),
-			zap.String("container_id", containerID[:12]),
-			zap.Error(err))
-
-		// Force kill (SIGKILL)
-		c.logger.Debug("Attempting force kill",
-			zap.String("server", c.config.Name),
-			zap.String("container_id", containerID[:12]))
-
-		killCmd := c.newDockerCmd(ctx, "kill", containerID)
-		c.logger.Debug("Executing docker kill command",
-			zap.String("server", c.config.Name),
-			zap.String("container_id", containerID[:12]))
-
-		if err := killCmd.Run(); err != nil {
-			c.logger.Error("Failed to force kill Docker container",
-				zap.String("server", c.config.Name),
-				zap.String("container_id", containerID[:12]),
-				zap.Error(err))
-
-			if c.upstreamLogger != nil {
-				c.upstreamLogger.Error("Failed to kill container", zap.Error(err))
-			}
-		} else {
-			c.logger.Info("Docker container force killed successfully",
-				zap.String("server", c.config.Name),
-				zap.String("container_id", containerID[:12]))
-
-			if c.upstreamLogger != nil {
-				c.upstreamLogger.Info("Container force killed successfully")
-			}
-		}
-	} else {
-		c.logger.Info("Docker container stopped gracefully",
-			zap.String("server", c.config.Name),
-			zap.String("container_id", containerID[:12]))
-
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Info("Container stopped gracefully")
-		}
-	}
-
-	c.logger.Debug("Docker stop/kill commands completed, clearing container ID",
-		zap.String("server", c.config.Name),
-		zap.String("container_id", containerID[:12]))
-
-	// Clear the container ID after cleanup attempt
+	// Clear the tracked id whatever happens below: after this call the
+	// container is either stopped or deliberately left alone.
 	// Note: Caller already holds the mutex lock
 	c.containerID = ""
+
+	owned, ok, err := c.lookupOwnedContainerByID(ctx, containerID)
+	switch {
+	case err != nil:
+		c.logger.Warn("Could not verify ownership of the tracked container - leaving it alone",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", shortContainerID(containerID)),
+			zap.Error(err))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Warn("Could not verify ownership of the tracked container - leaving it alone", zap.Error(err))
+		}
+		return
+	case !ok:
+		c.logger.Info("Tracked container is not canonically owned by this server - leaving it alone",
+			zap.String("server", c.config.Name),
+			zap.String("container_id", shortContainerID(containerID)))
+		if c.upstreamLogger != nil {
+			c.upstreamLogger.Info("Tracked container is not canonically owned by this server - leaving it alone")
+		}
+		return
+	}
+
+	c.logger.Info("Killing Docker container during disconnect",
+		zap.String("server", c.config.Name),
+		zap.String("container_id", shortContainerID(containerID)),
+		zap.String("full_container_id", containerID),
+		zap.String("container_name", owned.Name),
+		containerOwnerField(owned.Owner))
+
+	c.stopOwnedContainer(ctx, owned, "cidfile")
 
 	c.logger.Debug("Container cleanup process finished",
 		zap.String("server", c.config.Name))
@@ -357,21 +370,17 @@ func (c *Client) killDockerContainersByNamePatternWithContext(ctx context.Contex
 	return true // We found and processed containers
 }
 
-// killDockerContainerByNameWithContext kills a specific Docker container by its exact name
+// killDockerContainerByNameWithContext kills the container this server
+// tracks by its exact name (the one setupDockerIsolation generated). The
+// lookup applies ownsContainer — label read back AND canonical name — so a
+// foreign `--label com.mcpproxy.server=<us> --name <tracked>` container is
+// neither stopped nor named in our log (Spec 105 FR-007 / D9; codex round 1).
 func (c *Client) killDockerContainerByNameWithContext(ctx context.Context, containerName string) bool {
-	c.logger.Debug("Searching for container by exact name",
+	c.logger.Debug("Searching for owned container by exact name",
 		zap.String("server", c.config.Name),
 		zap.String("container_name", containerName))
 
-	// Get container ID by exact name match. The name is the one this server
-	// generated for its own container (setupDockerIsolation), and the label
-	// filter keeps a same-named foreign container out of the result
-	// (Spec 105 FR-007 / D9).
-	listCmd := c.newDockerCmd(ctx, "ps", "-a",
-		"--filter", "label="+containerOwnerLabel+"="+c.config.Name,
-		"--filter", "name=^"+containerName+"$",
-		"--format", "{{.ID}}")
-	output, err := listCmd.Output()
+	found, ok, err := c.lookupOwnedContainerByName(ctx, containerName)
 	if err != nil {
 		c.logger.Debug("Failed to find Docker container by name",
 			zap.String("server", c.config.Name),
@@ -379,52 +388,14 @@ func (c *Client) killDockerContainerByNameWithContext(ctx context.Context, conta
 			zap.Error(err))
 		return false
 	}
-
-	containerID := strings.TrimSpace(string(output))
-	if containerID == "" {
-		c.logger.Debug("No container found with exact name",
+	if !ok {
+		c.logger.Debug("No owned container found with exact name",
 			zap.String("server", c.config.Name),
 			zap.String("container_name", containerName))
 		return false
 	}
 
-	c.logger.Info("Found container by name, attempting to kill",
-		zap.String("server", c.config.Name),
-		zap.String("container_name", containerName),
-		zap.String("container_id", containerID))
-
-	if c.upstreamLogger != nil {
-		c.upstreamLogger.Info("Killing container by name",
-			zap.String("container_name", containerName),
-			zap.String("container_id", containerID),
-			containerOwnerField(c.config.Name))
-	}
-
-	// First try graceful stop
-	stopCmd := c.newDockerCmd(ctx, "stop", containerID)
-	if err := stopCmd.Run(); err != nil {
-		// Force kill if graceful stop fails
-		killCmd := c.newDockerCmd(ctx, "kill", containerID)
-		if err := killCmd.Run(); err != nil {
-			c.logger.Error("Failed to kill container by name",
-				zap.String("server", c.config.Name),
-				zap.String("container_name", containerName),
-				zap.String("container_id", containerID),
-				zap.Error(err))
-			return false
-		}
-		c.logger.Info("Successfully force killed container by name",
-			zap.String("server", c.config.Name),
-			zap.String("container_name", containerName),
-			zap.String("container_id", containerID))
-		return true
-	}
-	c.logger.Info("Successfully stopped container by name",
-		zap.String("server", c.config.Name),
-		zap.String("container_name", containerName),
-		zap.String("container_id", containerID))
-
-	return true
+	return c.stopOwnedContainer(ctx, found, "exact name")
 }
 
 // ensureNoExistingContainers removes all existing containers this server

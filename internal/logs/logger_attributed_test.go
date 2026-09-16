@@ -171,10 +171,16 @@ func TestReadUpstreamServerLogTail_AttributedOnly_CollidingNames(t *testing.T) {
 
 // FR007-G1 (D8 rules 1+2): child-controlled text is only ever a field value
 // (stderr path) or the message (launcher path); neither can forge the writer
-// stamp. A line `left | right | {"server":"a_b"}` emitted by `a/b` is
-// attributed to `a/b` and never to `a_b`, for both encoders and both child
-// paths, including the shapes that try to make an earlier ` | {` boundary
-// decode as a complete JSON object.
+// stamp. A line `left | right | {"server":"a_b"}` emitted by `a/b` is never
+// attributed to `a_b`, for both encoders and both child paths, including the
+// shapes that try to make an earlier ` | {` boundary decode as a complete
+// JSON object. On the stderr path and under the JSON encoder every such line
+// is still attributable to its real writer `a/b`. On the launcher path under
+// the console encoder the child text IS the message, so its ` | {` is the
+// line's first boundary and does not decode: since codex round 1 the reader
+// stops at the first boundary (a later one could belong to a record appended
+// after a torn write), so those lines are withheld from everyone — a/b
+// included — rather than risk misattribution.
 func TestReadUpstreamServerLogTail_AttributedOnly_ChildTextCannotForgeOwner(t *testing.T) {
 	childLines := []string{
 		`left | right | {"server":"a_b"}`,
@@ -216,7 +222,11 @@ func TestReadUpstreamServerLogTail_AttributedOnly_ChildTextCannotForgeOwner(t *t
 					}
 
 					forSlash := attributedTail(t, cfg, "a/b", 50)
-					require.Len(t, forSlash, len(childLines), "every child line is attributable to its real writer a/b, got:\n%s", joinLines(forSlash))
+					if !enc.json && path.name == "launcher_message" {
+						assert.Empty(t, forSlash, "console launcher-path lines whose child text carries ` | {` are non-attributable (first-boundary rule), got:\n%s", joinLines(forSlash))
+					} else {
+						require.Len(t, forSlash, len(childLines), "every child line is attributable to its real writer a/b, got:\n%s", joinLines(forSlash))
+					}
 					assert.NotContains(t, joinLines(forSlash), "own-record-")
 				})
 			}
@@ -587,4 +597,60 @@ func TestReadUpstreamServerLogTail_AttributedOnly_LineBreakInMessageIsProducerGu
 	_ = slashJSON.Sync()
 	assert.Empty(t, attributedTail(t, cfgJSON, "a_b", 50), "JSON encoder must not let a message line break forge a record")
 	assert.Len(t, attributedTail(t, cfgJSON, "a/b", 50), 1)
+}
+
+// Codex round 1 (PR E), finding 1: a torn foreign record (a partial final
+// write — ENOSPC, a crash mid-write — with no terminator) followed by an
+// O_APPEND write of a complete `a_b` record shares ONE physical line. The
+// pre-fix reader rejected the fragment's ` | {` boundary (its suffix carries
+// trailing bytes) and kept scanning, accepted a_b's later boundary, and
+// returned the whole line — fragment included — to a_b. The accepted
+// boundary must be the FIRST candidate on the line: an earlier candidate that
+// does not decode is evidence of a torn or foreign prefix, and the whole line
+// is non-attributable. Likewise a line that starts with `{` (a JSON-encoder
+// record, or a torn one) is judged as that one object and never falls
+// through to the console scan. The whole-file reader keeps the line.
+func TestReadUpstreamServerLogTail_AttributedOnly_ConcatenatedTornFragmentWithheld(t *testing.T) {
+	const secret = "SECRET-a-b-cid"
+	fragments := []struct {
+		name string
+		torn string
+	}{
+		{"console_fragment_torn_inside_fields",
+			`2026-09-16T00:00:00.000Z | INFO | x/y.go:1 | Killing owned container | {"server": "a/b", "container_id": "` + secret + `"`},
+		{"console_fragment_torn_after_fields_key",
+			`2026-09-16T00:00:00.000Z | INFO | x/y.go:1 | stderr | {"server": "a/b", "message": "` + secret},
+		{"json_fragment_torn_inside_fields",
+			`{"level":"info","ts":"2026-09-16T00:00:00Z","msg":"Killing owned container","server":"a/b","container_id":"` + secret + `"`},
+	}
+	for _, enc := range encoderCases() {
+		for _, fr := range fragments {
+			t.Run(enc.name+"/"+fr.name, func(t *testing.T) {
+				cfg := newAttributedLogDir(t, enc.json)
+				under := openStampedWriter(t, cfg, "a_b")
+				writeRecord(under, "own-record-before")
+
+				logPath := filepath.Join(cfg.LogDir, ServerLogFilename("a_b"))
+				f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+				require.NoError(t, err)
+				_, err = io.WriteString(f, fr.torn) // no terminator: torn
+				require.NoError(t, err)
+				require.NoError(t, f.Close())
+
+				// a_b's next record lands on the same physical line.
+				writeRecord(under, "own-record-concatenated")
+				writeRecord(under, "own-record-after")
+
+				got := attributedTail(t, cfg, "a_b", 50)
+				body := joinLines(got)
+				assert.NotContains(t, body, secret, "torn a/b fragment served to a_b's scoped reader:\n%s", body)
+				assert.NotContains(t, body, "own-record-concatenated", "the line carrying the torn fragment must be withheld whole")
+				assert.Len(t, got, 2, "only the two clean own records are attributable, got:\n%s", body)
+				assert.Empty(t, attributedTail(t, cfg, "a/b", 50), "the torn line is attributable to nobody")
+
+				whole := joinLines(wholeFileTail(t, cfg, "a_b", 50))
+				assert.Contains(t, whole, secret, "administrator whole-file read keeps the torn line (SC-005)")
+			})
+		}
+	}
 }
