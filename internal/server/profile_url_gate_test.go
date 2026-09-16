@@ -20,6 +20,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // newProfileGateTestServer builds a Server whose logger is observed, with two
@@ -41,6 +42,12 @@ func newProfileGateTestServer(t *testing.T) (*Server, *observer.ObservedLogs) {
 	srv, err := NewServer(cfg, zap.New(core))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Shutdown() })
+	// Background initialization writes the search index under DataDir; let it
+	// finish before the test body runs, or its writes race the TempDir
+	// cleanup (a "directory not empty" / open-handle failure on CI).
+	require.Eventually(t, func() bool {
+		return srv.runtime.CurrentPhase() == runtime.PhaseReady
+	}, 10*time.Second, 10*time.Millisecond, "runtime never reached PhaseReady")
 	return srv, logs
 }
 
