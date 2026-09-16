@@ -295,7 +295,15 @@ Server scoping is enforced at three levels:
    reads a small header stored in front of each record, so a multi-megabyte
    entry is refused as quickly as a one-line one. An expired entry is refused
    like a miss and left for the periodic cleanup sweep to evict, so the
-   refusing read writes exactly what a miss writes.
+   refusing read writes exactly what a miss writes. The header and the record
+   behind it are two encodings of the same stamp; an entry on which they
+   disagree (a corrupt or hand-edited database) is treated as unreadable —
+   refused for every caller, invalidated, never served. The header has a
+   fixed size bound (1 MiB — room for an authorization naming several
+   thousand servers in both its grant and its profile), enforced when the
+   entry is written: a response produced under a snapshot too large to fit is
+   returned truncated with a logged error and no cache entry, never stored as
+   an entry every later read would refuse.
 
    **Upgrading.** Entries written by any release before this one — including
    the immediately preceding one, which stamped a producer but no schema

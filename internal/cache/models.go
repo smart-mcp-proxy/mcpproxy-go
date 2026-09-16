@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 )
 
@@ -62,7 +63,8 @@ func (c *Record) HasCurrentProvenance() bool {
 // proportional to the payload it refuses, or a nonexistent key and a refused
 // one fall into different timing classes (Spec 105 Definitions,
 // "non-disclosing refusal"). It is derived from the Record at marshal time,
-// so the two never disagree on a record this binary wrote.
+// so the two never disagree on a record this binary wrote — and
+// UnmarshalBinary refuses a value on which they do.
 type recordHeader struct {
 	Version   uint8          `json:"version,omitempty"`
 	Producer  *Authorization `json:"producer,omitempty"`
@@ -96,18 +98,28 @@ var recordFrameMagic = []byte("\x00mcpproxy-cache-record\x01")
 
 const (
 	recordFrameLenSize = 4
-	// maxRecordHeaderLen bounds the header decode: a header is a version, a
-	// producer snapshot (a few server names and permissions) and two small
-	// scalars — kilobytes at the very most. A frame claiming more is
+	// maxRecordHeaderLen bounds the header on BOTH sides of the frame: the
+	// reader refuses to decode a longer one (a frame claiming more is
 	// corrupt, and decoding it would be work proportional to a caller-chosen
-	// length rather than to the header.
-	maxRecordHeaderLen = 64 << 10
+	// length rather than to the header), and MarshalBinary refuses to
+	// persist one (a record the reader would classify as corrupt must never
+	// be written, or a legitimate entry is stored and then refused and
+	// deleted on its producer's own first redemption — codex round 3). So
+	// the bound must fit every authorization snapshot the proxy can mint: a
+	// version, two small scalars, and a producer whose AllowedServers and
+	// ProfileServers lists can each name every configured server. Sized from
+	// the realistic maximum — two lists of ~5,000 names of 64 characters are
+	// ~0.7 MiB of JSON — with headroom; a fleet beyond that gets an explicit
+	// store error (the truncator logs it and serves the payload uncached)
+	// rather than a poisoned entry.
+	maxRecordHeaderLen = 1 << 20
 )
 
 var (
 	errRecordUnframed       = errors.New("cache record has no frame header (written before frame headers existed)")
 	errRecordFrameCorrupt   = errors.New("cache record frame header is corrupt")
 	errRecordHeaderOversize = fmt.Errorf("%w: header length exceeds %d bytes", errRecordFrameCorrupt, maxRecordHeaderLen)
+	errRecordFrameMismatch  = fmt.Errorf("%w: header disagrees with the record body", errRecordFrameCorrupt)
 )
 
 // encodeRecordFrame lays header and body out as MarshalBinary stores them.
@@ -192,11 +204,17 @@ type Meta struct {
 }
 
 // MarshalBinary implements encoding.BinaryMarshaler for Record: the frame
-// header (derived from the record) followed by the record as JSON.
+// header (derived from the record) followed by the record as JSON. A header
+// the reader would refuse (longer than maxRecordHeaderLen) is refused HERE,
+// before anything is persisted: the caller gets errRecordHeaderOversize and
+// no entry, never an entry every redemption classifies as corrupt.
 func (c *Record) MarshalBinary() ([]byte, error) {
 	header, err := json.Marshal(c.header())
 	if err != nil {
 		return nil, err
+	}
+	if len(header) > maxRecordHeaderLen {
+		return nil, fmt.Errorf("%w (%d bytes: the producer authorization snapshot is too large to cache)", errRecordHeaderOversize, len(header))
 	}
 	body, err := json.Marshal(c)
 	if err != nil {
@@ -206,14 +224,48 @@ func (c *Record) MarshalBinary() ([]byte, error) {
 }
 
 // UnmarshalBinary implements encoding.BinaryUnmarshaler for Record. It
-// accepts both the framed layout and the bare JSON a pre-frame binary wrote;
-// the header, when present, is skipped — the body carries every field.
+// accepts both the framed layout and the bare JSON a pre-frame binary wrote.
+// The body carries every field; the header, when present, must AGREE with
+// it — exactly, on every field it carries — or the value is corrupt. The
+// gated read admits a reader on the header alone, so a header that promised
+// a narrower producer, a later expiry or another size than the body it
+// fronts would hand that reader a body the header never authorized (codex
+// round 3, finding 1). No binary of this repository writes such a value
+// (MarshalBinary derives the header from the record), so it is refused like
+// any other undecodable frame: errRecordFrameMismatch, and the record is
+// left zero — a caller never sees the body.
 func (c *Record) UnmarshalBinary(data []byte) error {
-	_, body, err := splitRecordFrame(data)
+	header, body, err := splitRecordFrame(data)
 	if err != nil && !errors.Is(err, errRecordUnframed) {
 		return err
 	}
-	return json.Unmarshal(body, c)
+	if err := json.Unmarshal(body, c); err != nil {
+		return err
+	}
+	if header == nil {
+		return nil
+	}
+	var h recordHeader
+	if err := json.Unmarshal(header, &h); err != nil {
+		*c = Record{}
+		return fmt.Errorf("%w: %w", errRecordFrameCorrupt, err)
+	}
+	if !h.agreesWith(c.header()) {
+		*c = Record{}
+		return errRecordFrameMismatch
+	}
+	return nil
+}
+
+// agreesWith reports whether two headers are equal field for field: the same
+// version, expiry instant and size, and the same producer snapshot in every
+// dimension (kind, principal, server grant, permissions, pin, profile name,
+// profile scope and profile server set — a nil snapshot equal only to nil).
+func (h recordHeader) agreesWith(o recordHeader) bool {
+	return h.Version == o.Version &&
+		h.ExpiresAt.Equal(o.ExpiresAt) &&
+		h.TotalSize == o.TotalSize &&
+		reflect.DeepEqual(h.Producer, o.Producer)
 }
 
 // MarshalBinary implements encoding.BinaryMarshaler for Stats

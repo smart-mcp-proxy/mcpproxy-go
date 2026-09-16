@@ -239,15 +239,25 @@ func (m *Manager) getGuarded(key string, guard func(producer *Authorization) err
 			return m.commitMiss(tx)
 		}
 
+		var header recordHeader
 		if guard != nil {
-			header, err := decodeRecordHeader(data)
+			var err error
+			header, err = decodeRecordHeader(data)
 			if err != nil || !header.HasCurrentProvenance() {
 				// Legacy or unrecognised provenance: refuse every caller and
 				// invalidate on this first redemption, committed (FR-002).
-				// The size folded into the stats is the header's; a value
-				// with no decodable header has an unknown size (0), the
-				// way cleanup and Invalidate already treat records they
-				// cannot decode.
+				// The size folded into the stats is the header's. A value
+				// with no decodable header (pre-frame bare JSON, or a
+				// corrupt frame) has no exact size short of decoding it,
+				// which the gate must not do; the value's own length is
+				// known for free and bounds the content from above (a bare
+				// JSON body carries the escaped content), so that is folded
+				// out instead of 0 — a 5 MiB pre-upgrade entry must not
+				// stay in TotalSizeBytes forever (codex round 3).
+				size := header.TotalSize
+				if err != nil {
+					size = len(data)
+				}
 				m.logger.Info("Invalidated cache entry with legacy provenance on first redemption",
 					zap.String("key", key),
 					zap.Uint8("version", header.Version),
@@ -255,7 +265,7 @@ func (m *Manager) getGuarded(key string, guard func(producer *Authorization) err
 					zap.String("caller_kind", headerKind(header)),
 					zap.NamedError("frame", err))
 				verdict = ErrLegacyProvenance
-				return m.evict(tx, bucket, key, header.TotalSize, "invalidate legacy cache record")
+				return m.evict(tx, bucket, key, size, "invalidate legacy cache record")
 			}
 			// Internal entry: refused for every caller, kept — expired or not.
 			if header.Producer.CallerKind == CallerKindInternal {
@@ -287,14 +297,18 @@ func (m *Manager) getGuarded(key string, guard func(producer *Authorization) err
 				return fmt.Errorf("unmarshal cache record: %w", err)
 			}
 			// A frame the gate admitted around a body this binary cannot
-			// decode: provenance it does not recognise — invalidate, the
-			// way cleanup drops undecodable records. The reader was
-			// admitted, so the decode it paid for is not a refusal oracle.
+			// decode — or one that DISAGREES with the header the gate
+			// admitted on (UnmarshalBinary checks the two agree exactly):
+			// provenance it does not recognise — invalidate, the way
+			// cleanup drops undecodable records, and never return the
+			// body. The reader was admitted, so the decode it paid for is
+			// not a refusal oracle. The size folded out is the header's,
+			// the one the stats were told at store time.
 			m.logger.Info("Invalidated undecodable cache entry on gated read",
 				zap.String("key", key),
 				zap.Error(err))
 			verdict = ErrLegacyProvenance
-			return m.evict(tx, bucket, key, 0, "invalidate undecodable cache record")
+			return m.evict(tx, bucket, key, header.TotalSize, "invalidate undecodable cache record")
 		}
 
 		// Expired on the ungated door (the gated door already refused it on
@@ -360,8 +374,11 @@ func (m *Manager) commitMiss(tx *bbolt.Tx) error {
 }
 
 // evict deletes key inside tx, folds the eviction into the stats and persists
-// them. size is the record's TotalSize (0 when the record could not be
-// decoded); what names the operation in the storage error.
+// them. size is the record's TotalSize, or an upper-bound estimate (the
+// stored value's length) for a record whose header could not be decoded;
+// since an estimate can overshoot what was folded in at store time,
+// TotalSizeBytes is clamped at zero. what names the operation in the storage
+// error.
 func (m *Manager) evict(tx *bbolt.Tx, bucket *bbolt.Bucket, key string, size int, what string) error {
 	if err := bucket.Delete([]byte(key)); err != nil {
 		return fmt.Errorf("%s: %w", what, err)
@@ -369,6 +386,9 @@ func (m *Manager) evict(tx *bbolt.Tx, bucket *bbolt.Bucket, key string, size int
 	m.stats.EvictedCount++
 	m.stats.TotalEntries--
 	m.stats.TotalSizeBytes -= size
+	if m.stats.TotalSizeBytes < 0 {
+		m.stats.TotalSizeBytes = 0
+	}
 	return m.saveStats(tx)
 }
 
