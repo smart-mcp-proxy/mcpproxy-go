@@ -1160,15 +1160,22 @@ func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 			// standing conflict with the deployment's state, not a transient
 			// outage a client should sit and retry the way a 503 invites.
 			//
-			// The cap is PER OWNER (Spec 107 FR-037, issue #1177): storage
-			// counts only records with the caller's own UserID, so this is
-			// the caller's own quota, and deleting one of their own tokens
-			// always frees a slot. The body therefore speaks of the caller's
-			// tokens only. It must never describe the deployment, other
-			// users or a fleet total — that was the cross-tenant oracle the
-			// old global count and its "shared by all users" wording leaked.
+			// The WORDING, though, cannot be the personal edition's. There, the
+			// caller owns every token and "you have reached the maximum" is
+			// both true and actionable. auth.MaxTokens is a DEPLOYMENT-wide cap
+			// counted across all tenants (internal/storage/agent_tokens.go), so
+			// here the caller may hold none of the tokens filling it, and a
+			// message that reads as their own quota sends them to delete tokens
+			// that will not free a slot — or to look for tokens they are not
+			// allowed to see. Say whose limit it is and who can act on it.
+			// The per-owner quota is handled separately below. Reaching this
+			// branch means the caller is within their quota but the shared
+			// deployment storage bound is full.
 			writeError(w, http.StatusConflict,
-				fmt.Sprintf("You have reached your maximum of %d agent tokens; delete one of your tokens to free a slot.", auth.MaxTokens))
+				fmt.Sprintf("This deployment has reached its limit of %d agent tokens. The limit is shared by all users, so deleting your own tokens may not free a slot; ask an administrator.", auth.MaxTokens))
+		case errors.Is(err, storage.ErrAgentTokenOwnerLimitReached):
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("You have reached your limit of %d agent tokens. Permanently delete one you no longer use to free a slot.", auth.MaxTokensPerOwner))
 		default:
 			writeError(w, http.StatusInternalServerError, "Failed to create token")
 		}

@@ -6,128 +6,56 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/bbolt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 )
 
-// Spec 107 FR-037 (issue #1177): auth.MaxTokens is a PER-OWNER cap, not a
-// deployment-wide one. Tokens with the same UserID count together; ownerless
-// operator tokens (UserID == "", every personal-edition token) form one owner.
+// Issue #1177 (merged as #1286; Spec 107 FR-037 records the outcome): the
+// agent-token cap is two bounds, not one. Every OWNED token (non-empty UserID)
+// is counted against auth.MaxTokensPerOwner for its owner, and every stored
+// record — owned or ownerless, live or revoked — still counts against the
+// deployment-wide auth.MaxTokens storage bound. Ownerless personal-edition
+// tokens are exempt from the owner quota, so the personal edition is unchanged.
+//
+// agent_token_owner_quota_test.go pins the headline properties (26th owned
+// token refused, another tenant still mints, permanent delete frees the slot,
+// ownerless tokens keep the deployment cap). The tests here pin the SHAPE of
+// the count — there is no owner index, so it is a decode-every-row walk — and
+// the interaction between the two bounds.
 //
 // Oracle discipline for every test below: a positive control mints the token
-// immediately BELOW the cap for the same owner, so the ErrAgentTokenLimitReached
-// that follows is the cap and not a name collision or an unwired store.
+// immediately BELOW the bound for the same owner, so the sentinel that follows
+// is the bound and not a name collision or an unwired store.
 
-// fillOwnerToCap mints exactly auth.MaxTokens tokens for one owner and
+// fillOwnerQuota mints exactly auth.MaxTokensPerOwner tokens for one owner and
 // requires every one of them to land.
-func fillOwnerToCap(t *testing.T, mgr *Manager, owner string) {
+func fillOwnerQuota(t *testing.T, mgr *Manager, owner string) {
 	t.Helper()
-	for i := 0; i < auth.MaxTokens; i++ {
-		token, raw := makeOwnedTestToken(t, fmt.Sprintf("%s-fill-%03d", ownerLabel(owner), i), owner)
+	for i := 0; i < auth.MaxTokensPerOwner; i++ {
+		token, raw := makeOwnedTestToken(t, fmt.Sprintf("%s-fill-%03d", owner, i), owner)
 		require.NoError(t, mgr.CreateAgentToken(token, raw, testHMACKey),
-			"owner %q token %d must land below the cap", owner, i)
+			"owner %q token %d must land below the owner quota", owner, i)
 	}
 }
 
-func ownerLabel(owner string) string {
-	if owner == "" {
-		return "ownerless"
-	}
-	return owner
-}
-
-// TestAgentTokenCap_PerOwner: owner A at the cap cannot mint a 101st token,
-// and owner B — who holds nothing — can still mint their first.
-//
-// BITES: with the global `tokenBucket.Stats().KeyN >= auth.MaxTokens` count,
-// A's 100 tokens fill the bucket and B's first create fails.
-func TestAgentTokenCap_PerOwner(t *testing.T) {
-	mgr, cleanup := setupTestStorageForAgentTokens(t)
-	defer cleanup()
-
-	const ownerA = "01HTEST0000000000000USERA"
-	const ownerB = "01HTEST0000000000000USERB"
-
-	fillOwnerToCap(t, mgr, ownerA)
-
-	over, raw := makeOwnedTestToken(t, "a-one-too-many", ownerA)
-	err := mgr.CreateAgentToken(over, raw, testHMACKey)
-	require.ErrorIs(t, err, ErrAgentTokenLimitReached, "A's 101st token must hit A's own cap")
-
-	first, raw := makeOwnedTestToken(t, "b-first", ownerB)
-	require.NoError(t, mgr.CreateAgentToken(first, raw, testHMACKey),
-		"B holds no tokens; A's cap must not block B's first")
-
-	// The bucket now holds MaxTokens+1 rows: the cap is per owner, so the
-	// bucket itself is no longer bounded by auth.MaxTokens.
-	count, err := mgr.GetAgentTokenCount()
-	require.NoError(t, err)
-	assert.Equal(t, auth.MaxTokens+1, count)
-}
-
-// TestAgentTokenCap_OwnerlessTokensAreOneOwner: the operator's ownerless
-// tokens count together as ONE owner (so the personal edition is unchanged),
-// and they do not count against a user's quota nor a user's against theirs.
-//
-// BITES: with the global count, 100 ownerless tokens block the user's first.
-func TestAgentTokenCap_OwnerlessTokensAreOneOwner(t *testing.T) {
-	mgr, cleanup := setupTestStorageForAgentTokens(t)
-	defer cleanup()
-
-	const ownerA = "01HTEST0000000000000USERA"
-
-	fillOwnerToCap(t, mgr, "")
-
-	over, raw := makeOwnedTestToken(t, "ownerless-one-too-many", "")
-	require.ErrorIs(t, mgr.CreateAgentToken(over, raw, testHMACKey), ErrAgentTokenLimitReached,
-		"the ownerless owner is capped like any other")
-
-	first, raw := makeOwnedTestToken(t, "a-first", ownerA)
-	require.NoError(t, mgr.CreateAgentToken(first, raw, testHMACKey),
-		"the operator's ownerless tokens must not consume a user's quota")
-
-	// And the other direction: A at the cap does not stop an ownerless mint
-	// once a slot is free in the ownerless quota.
-	require.NoError(t, mgr.DeleteAgentToken("ownerless-fill-000"))
-	freed, raw := makeOwnedTestToken(t, "ownerless-after-delete", "")
-	require.NoError(t, mgr.CreateAgentToken(freed, raw, testHMACKey),
-		"deleting one of the owner's own tokens must free a slot for that owner")
-}
-
-// TestAgentTokenCap_CountsWholeBucketNotFirstMaxTokensRows pins the walk
-// shape. There is no owner index — records are keyed by HMAC hash and UserID
-// lives inside the JSON — and once the cap is per owner the bucket can hold
-// far more than auth.MaxTokens rows. So the count must decode EVERY row and
-// count only the new token's owner; it may stop early once MaxTokens matches
-// are found, never after MaxTokens rows.
-//
-// The fixture writes more than MaxTokens other-owner rows directly into the
-// bucket under keys that sort BEFORE every hex hash key ('!' < '0'), so a
-// walk that gives up after MaxTokens rows sees only strangers, counts zero
-// for the target owner, and lets a 101st token through; a walk that counts
-// rows instead of owners blocks the target owner's first.
-func TestAgentTokenCap_CountsWholeBucketNotFirstMaxTokensRows(t *testing.T) {
-	mgr, cleanup := setupTestStorageForAgentTokens(t)
-	defer cleanup()
-
-	const ownerA = "01HTEST0000000000000USERA"
-	const stranger = "01HTEST00000000000STRANGER"
-	const strangerRows = auth.MaxTokens + 50
-
+// seedRawAgentTokenRows writes records straight into the agent_tokens bucket
+// under keys that sort BEFORE every hex HMAC key ('!' is 0x21, below '0'), so
+// they are the first rows any cursor yields.
+func seedRawAgentTokenRows(t *testing.T, mgr *Manager, owner string, n int) {
+	t.Helper()
 	require.NoError(t, mgr.db.db.Update(func(tx *bbolt.Tx) error {
 		bucket, err := tx.CreateBucketIfNotExists([]byte(AgentTokensBucket))
 		if err != nil {
 			return err
 		}
-		for i := 0; i < strangerRows; i++ {
+		for i := 0; i < n; i++ {
 			rec := auth.AgentToken{
-				Name:        fmt.Sprintf("stranger-%03d", i),
-				UserID:      stranger,
-				TokenHash:   fmt.Sprintf("!stranger-%03d", i),
-				TokenPrefix: "mcp_agt_strang",
+				Name:        fmt.Sprintf("%s-%03d", owner, i),
+				UserID:      owner,
+				TokenHash:   fmt.Sprintf("!%s-%03d", owner, i),
+				TokenPrefix: "mcp_agt_seeded",
 				Permissions: []string{auth.PermRead},
 				CreatedAt:   time.Now().UTC(),
 			}
@@ -135,33 +63,49 @@ func TestAgentTokenCap_CountsWholeBucketNotFirstMaxTokensRows(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			// '!' (0x21) sorts before every hex digit, so these rows are the
-			// first MaxTokens+50 the cursor yields.
 			if err := bucket.Put([]byte(rec.TokenHash), data); err != nil {
 				return err
 			}
 		}
 		return nil
 	}))
+}
+
+// TestAgentTokenOwnerQuota_CountsMatchesNotRows pins the walk shape. Records
+// are keyed by HMAC hash and UserID lives inside the JSON, so the owner count
+// must decode EVERY row and count only the new token's owner. The fixture puts
+// more than auth.MaxTokensPerOwner rows of a stranger's at the FRONT of key
+// order: a walk that counted rows instead of owners would refuse the target
+// owner's first token, and one that gave up after MaxTokensPerOwner rows would
+// see only strangers, count zero, and let the 26th through.
+func TestAgentTokenOwnerQuota_CountsMatchesNotRows(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	const ownerA = "01HTEST0000000000000USERA"
+	const stranger = "01HTEST00000000000STRANGER"
+	const strangerRows = auth.MaxTokensPerOwner + 5
+
+	seedRawAgentTokenRows(t, mgr, stranger, strangerRows)
 
 	// Positive control on the fixture: the strangers really are in the bucket
-	// and really do outnumber the cap.
+	// and really do outnumber the owner quota.
 	count, err := mgr.GetAgentTokenCount()
 	require.NoError(t, err)
 	require.Equal(t, strangerRows, count)
 
 	// The target owner's full quota still mints ...
-	fillOwnerToCap(t, mgr, ownerA)
+	fillOwnerQuota(t, mgr, ownerA)
 
-	// ... and the 101st is refused, even though the first MaxTokens rows in
-	// key order belong to someone else.
+	// ... and the next one is refused as THE OWNER's quota, even though the
+	// first rows in key order belong to someone else.
 	over, raw := makeOwnedTestToken(t, "a-one-too-many", ownerA)
-	require.ErrorIs(t, mgr.CreateAgentToken(over, raw, testHMACKey), ErrAgentTokenLimitReached)
+	require.ErrorIs(t, mgr.CreateAgentToken(over, raw, testHMACKey), ErrAgentTokenOwnerLimitReached)
 }
 
-// TestAgentTokenCap_UnparseableRowIsSkippedNotCounted: a corrupt row must
-// neither abort the create for every tenant nor be counted against anyone.
-func TestAgentTokenCap_UnparseableRowIsSkippedNotCounted(t *testing.T) {
+// TestAgentTokenOwnerQuota_UnparseableRowIsSkippedNotCounted: a corrupt row
+// must neither abort the create for every tenant nor be counted against anyone.
+func TestAgentTokenOwnerQuota_UnparseableRowIsSkippedNotCounted(t *testing.T) {
 	mgr, cleanup := setupTestStorageForAgentTokens(t)
 	defer cleanup()
 
@@ -175,8 +119,62 @@ func TestAgentTokenCap_UnparseableRowIsSkippedNotCounted(t *testing.T) {
 		return bucket.Put([]byte("!corrupt"), []byte("{not json"))
 	}))
 
-	fillOwnerToCap(t, mgr, ownerA)
+	fillOwnerQuota(t, mgr, ownerA)
 
 	over, raw := makeOwnedTestToken(t, "a-one-too-many", ownerA)
-	require.ErrorIs(t, mgr.CreateAgentToken(over, raw, testHMACKey), ErrAgentTokenLimitReached)
+	require.ErrorIs(t, mgr.CreateAgentToken(over, raw, testHMACKey), ErrAgentTokenOwnerLimitReached)
+}
+
+// TestAgentTokenOwnerQuota_OwnerlessAndOwnedDoNotShareAQuota: the operator's
+// ownerless tokens are exempt from the owner quota and never count against a
+// user's, and a user at their quota does not stop an ownerless mint.
+func TestAgentTokenOwnerQuota_OwnerlessAndOwnedDoNotShareAQuota(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	const ownerA = "01HTEST0000000000000USERA"
+
+	// More ownerless tokens than any single owner may hold.
+	for i := 0; i < auth.MaxTokensPerOwner+5; i++ {
+		token, raw := makeOwnedTestToken(t, fmt.Sprintf("ownerless-%03d", i), "")
+		require.NoError(t, mgr.CreateAgentToken(token, raw, testHMACKey),
+			"ownerless tokens are exempt from the owner quota")
+	}
+
+	fillOwnerQuota(t, mgr, ownerA)
+	over, raw := makeOwnedTestToken(t, "a-one-too-many", ownerA)
+	require.ErrorIs(t, mgr.CreateAgentToken(over, raw, testHMACKey), ErrAgentTokenOwnerLimitReached,
+		"the ownerless rows must not have been counted for the user, and the user's own quota still binds")
+
+	after, raw := makeOwnedTestToken(t, "ownerless-after", "")
+	require.NoError(t, mgr.CreateAgentToken(after, raw, testHMACKey),
+		"a user at their quota must not block an ownerless mint below the deployment cap")
+}
+
+// TestAgentTokenCap_DeploymentBoundStillApplies: the owner quota is enforced
+// in ADDITION to the deployment-wide storage bound, not instead of it. Enough
+// owners at their quota fill the deployment, and the next owner's FIRST token
+// is refused with the deployment sentinel — the owner quota was not reached.
+func TestAgentTokenCap_DeploymentBoundStillApplies(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	owners := auth.MaxTokens / auth.MaxTokensPerOwner
+	require.Equal(t, auth.MaxTokens, owners*auth.MaxTokensPerOwner,
+		"fixture assumes the deployment cap is a whole number of owner quotas")
+	for i := 0; i < owners; i++ {
+		fillOwnerQuota(t, mgr, fmt.Sprintf("01HTEST000000000000OWNER%02d", i))
+	}
+
+	count, err := mgr.GetAgentTokenCount()
+	require.NoError(t, err)
+	require.Equal(t, auth.MaxTokens, count, "positive control: the deployment is exactly full")
+
+	first, raw := makeOwnedTestToken(t, "late-first", "01HTEST0000000000000LATE")
+	require.ErrorIs(t, mgr.CreateAgentToken(first, raw, testHMACKey), ErrAgentTokenLimitReached,
+		"a full deployment refuses with the deployment sentinel, not the owner one")
+
+	ownerless, raw := makeOwnedTestToken(t, "ownerless-late", "")
+	require.ErrorIs(t, mgr.CreateAgentToken(ownerless, raw, testHMACKey), ErrAgentTokenLimitReached,
+		"the deployment bound applies to ownerless tokens too")
 }

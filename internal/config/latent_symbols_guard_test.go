@@ -81,6 +81,10 @@ var removedDecls = []removedDecl{
 	// FR-031/FR-033: IdP subject-token capture and refresh.
 	{Name: "GetValidIDPSubjectToken", Why: "IdP subject-token reader deleted (FR-033)"},
 	{Name: "ErrReauthRequired", Why: "IdP subject-token reader deleted (FR-033)"},
+	{Name: "persistIDPSubjectToken", Why: "IdP subject-token writer deleted (FR-033, T015)"},
+	{Recv: "OAuthHandler", Name: "SetCredentialStore", Why: "the login handler no longer holds a credential store to write IdP tokens into (FR-033, T015)"},
+	{Name: "OfflineAuthParams", Why: "offline-access authorization parameters deleted; login never requests a refresh token (FR-033, T015)"},
+	{Name: "OfflineAccessScopes", Why: "offline_access scope set deleted; login never requests a refresh token (FR-033, T015)"},
 	{Name: "RefreshAccessToken", Why: "OAuthProvider.RefreshAccessToken deleted (FR-031)"},
 	{Recv: "OAuthConnector", Name: "Refresh", Why: "(*OAuthConnector).Refresh deleted (FR-031)"},
 	// FR-031: resolver-only seams on the credential handlers.

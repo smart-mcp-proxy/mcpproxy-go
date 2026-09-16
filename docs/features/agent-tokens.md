@@ -321,16 +321,19 @@ The pin is shown by `token list` (PROFILE PIN column) and `token show` (Profile 
 
 ### Token Limit
 
-Each owner can hold at most **100 agent tokens**. Revoked tokens still occupy a
-slot until they are deleted, so once you hit the limit, creating another token
-answers `409 Conflict` with a message about *your* count — delete one of your
-own tokens to free a slot.
+A deployment stores at most **100 agent tokens**, and in the server edition
+each signed-in user may hold at most **25** of them. Revoked tokens still
+occupy a slot until they are permanently deleted, so once a limit is reached,
+creating another token answers `409 Conflict`:
 
-The limit is **per owner**, not per deployment: in the personal edition every
-token belongs to the one operator, and in the server edition each signed-in
-user gets their own 100 while the operator's tokens are counted as a separate
-owner. Another user's tokens never count against yours, and the error never
-reveals how many tokens anyone else holds.
+- **Your own quota (server edition, 25 per user).** The message tells you it is
+  your limit; permanently delete one of your unused tokens to free a slot. One
+  user filling their quota never blocks another user from creating theirs.
+- **The deployment limit (100 stored records).** In the personal edition every
+  token belongs to the one operator, so this is the only limit and deleting one
+  of your tokens frees a slot. In the server edition the message says the limit
+  is shared and points at an administrator, because deleting your own tokens
+  may not free a slot that other users' records are filling.
 
 ### List All Tokens
 

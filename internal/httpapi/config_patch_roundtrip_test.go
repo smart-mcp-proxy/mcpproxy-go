@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -90,6 +94,62 @@ func TestConfigPatch_OpaqueBlocksSurviveUnrelatedPatch(t *testing.T) {
 	for _, name := range names {
 		if diff := patchStructuralDiff("mcpServers["+name+"].auth_broker", want[name], have[name]); diff != "" {
 			t.Errorf("auth_broker block for server %q damaged by an unrelated PATCH: %s", name, diff)
+		}
+	}
+}
+
+// TestConfigPatch_HandlerPreservesOpaqueBlocks is the same property driven
+// through the PRODUCTION door: an HTTP PATCH of an unrelated key reaches
+// handlePatchConfig, whose own decoders (patch body and marshalled base) must
+// both be UseNumber for the planted 9007199254740993 /
+// 0.1000000000000000055511151231257827 to survive into the *config.Config
+// handed to ApplyConfig. The test above calls MergeConfigPatch with its own
+// UseNumber decode and so cannot see the handler's decoders at all.
+//
+// BITES: drop either `.UseNumber()` in handlePatchConfig — the base decoder
+// turns 9007199254740993 into 9007199254740992 and the decimal into
+// 0.1 — and the structural diff names the damaged key.
+func TestConfigPatch_HandlerPreservesOpaqueBlocks(t *testing.T) {
+	dir := t.TempDir()
+	original, planted := plantPatchProbes(t, patchRoundTripFixture, dir)
+
+	src := filepath.Join(dir, "planted.json")
+	require.NoError(t, os.WriteFile(src, planted, 0o600))
+	live, err := config.LoadFromFile(src)
+	require.NoError(t, err)
+
+	// The mock returns the loaded document as the live config and captures
+	// exactly what the handler hands to ApplyConfig.
+	ctrl := &mockPatchConfigController{apiKey: "test-key", live: live}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	const patchedListen = "127.0.0.1:19108"
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/config", strings.NewReader(`{"listen":"`+patchedListen+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.NotNil(t, ctrl.captured, "ApplyConfig must have been reached")
+	require.Equal(t, patchedListen, ctrl.captured.Listen, "the unrelated patch must have been applied")
+
+	// Persist what the handler produced, the way ApplyConfig would, and
+	// compare the opaque blocks against the planted originals.
+	saved := filepath.Join(dir, "after_handler_patch.json")
+	require.NoError(t, config.SaveConfig(ctrl.captured, saved))
+	data, err := os.ReadFile(saved)
+	require.NoError(t, err)
+	got := decodePatchUseNumber(t, data)
+
+	if diff := patchStructuralDiff("server_edition", original["server_edition"], got["server_edition"]); diff != "" {
+		t.Errorf("server_edition block damaged by PATCH /api/v1/config: %s", diff)
+	}
+	want := patchAuthBrokersByName(original)
+	have := patchAuthBrokersByName(got)
+	require.NotEmpty(t, want, "fixture must carry auth_broker blocks")
+	for name, block := range want {
+		if diff := patchStructuralDiff("mcpServers["+name+"].auth_broker", block, have[name]); diff != "" {
+			t.Errorf("auth_broker block for server %q damaged by PATCH /api/v1/config: %s", name, diff)
 		}
 	}
 }

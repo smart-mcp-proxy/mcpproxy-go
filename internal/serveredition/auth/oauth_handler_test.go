@@ -156,6 +156,47 @@ func TestHandleLogin_Redirects(t *testing.T) {
 	assert.Empty(t, params.Get("prompt"))
 }
 
+// TestHandleLogin_StoreIDPTokensTrueStillNeverRequestsOfflineAccess pins the
+// Spec 107 FR-033 no-op where it matters: with the deprecated flag ON, the
+// authorization URL is byte-for-byte free of every offline-access marker the
+// retired capture path used to add (`access_type=offline`, `prompt=consent`,
+// the `offline_access` scope). TestHandleLogin_Redirects runs with the flag
+// off, so on its own it could not catch the capture path coming back behind
+// the flag.
+//
+// BITES: re-add OfflineAuthParams / OfflineAccessScopes gated on
+// h.config.StoreIDPTokens in HandleLogin.
+func TestHandleLogin_StoreIDPTokensTrueStillNeverRequestsOfflineAccess(t *testing.T) {
+	mockServer := mockOAuthProviderServer(t, "user@example.com", "Test User", "sub-123")
+	registerMockProvider(t, mockServer)
+
+	handler, _ := setupTestOAuthHandler(t, &config.ServerEditionOAuthConfig{
+		Provider:     "google",
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+	})
+	handler.config.StoreIDPTokens = true
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil)
+	w := httptest.NewRecorder()
+	handler.HandleLogin(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	redirectURL, err := url.Parse(resp.Header.Get("Location"))
+	require.NoError(t, err)
+	params := redirectURL.Query()
+	// Positive control: this is the real authorization request.
+	assert.Equal(t, "test-client-id", params.Get("client_id"))
+	assert.Equal(t, "code", params.Get("response_type"))
+
+	assert.Empty(t, params.Get("access_type"), "store_idp_tokens must not request offline access")
+	assert.Empty(t, params.Get("prompt"), "store_idp_tokens must not force a consent prompt")
+	assert.NotContains(t, params.Get("scope"), "offline_access", "store_idp_tokens must not add the offline_access scope")
+}
+
 func TestHandleLogin_StateInURL(t *testing.T) {
 	mockServer := mockOAuthProviderServer(t, "user@example.com", "Test User", "sub-123")
 	registerMockProvider(t, mockServer)

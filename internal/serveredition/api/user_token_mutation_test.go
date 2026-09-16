@@ -4,8 +4,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -92,11 +94,119 @@ func TestUserTokenMutators_NotFoundLeaksNoStorageSentinel(t *testing.T) {
 	}
 }
 
-// The two cap-exhaustion tests that used to live here
-// (TestCreateUserToken_CapExhaustionIsConflict and
-// TestCreateUserToken_CapExhaustionDoesNotBlameTheCaller) pinned the
-// deployment-wide 409 wording; the cap is per owner since Spec 107 FR-037
-// (#1177) and their replacements live in user_token_cap_test.go.
+// TestCreateUserToken_CapExhaustionIsConflict pins the status the token cap
+// answers with. The same storage condition (storage.ErrAgentTokenLimitReached)
+// used to map to 409 on the personal-edition surface and 503 on this one, so a
+// client's retry behaviour depended on which door it knocked on — and 503
+// invites a retry loop against a condition that will never clear on its own.
+//
+// Oracle discipline: a positive control mints the token immediately BELOW the
+// cap on the same router, so the 409 that follows is exhaustion and not a
+// malformed body or an unwired store.
+//
+// BITES: restore http.StatusServiceUnavailable in createUserToken.
+func TestCreateUserToken_CapExhaustionIsConflict(t *testing.T) {
+	rig := newTokenTestRig(t)
+	rig.actAs(userACtx())
+
+	// Fill to one below the cap through storage, which is far faster than the
+	// HTTP route and exercises the same counter.
+	seedDeploymentTokenFiller(t, rig, auth.MaxTokens-1)
+
+	// Positive control: the last slot below the cap still mints.
+	last := rig.createToken(t, "last-slot", nil)
+	require.Equal(t, http.StatusCreated, last.Code,
+		"positive control: the final slot below the cap must still mint (%s)", last.Body.String())
+
+	over := rig.createToken(t, "one-too-many", nil)
+	require.Equal(t, http.StatusConflict, over.Code,
+		"the token cap must answer 409, matching the personal edition (%s)", over.Body.String())
+
+	msg := errorMessage(t, over)
+	assert.Contains(t, msg, fmt.Sprintf("%d", auth.MaxTokens),
+		"the cap message must say what the limit is")
+
+	// This branch is still the DEPLOYMENT-wide cap, not the new owner quota.
+	// The body must not tell this caller that deleting one of their own tokens
+	// necessarily frees a slot.
+	assert.Contains(t, strings.ToLower(msg), "administrator",
+		"the cap body must point the caller at someone who can actually act on it")
+	assert.NotRegexp(t, `(?i)\byou(r)? have reached|delete (one of )?your`, msg,
+		"the cap body must not instruct the caller to free a slot they may not control")
+}
+
+// TestCreateUserToken_CapExhaustionDoesNotBlameTheCaller is the Q3 property on
+// its own, with the victim being someone who holds NO tokens at all: the cap is
+// filled entirely by another tenant.
+//
+// Oracle discipline: user B mints successfully at the start (positive control on
+// the same router), so the 409 that follows is the deployment cap and not an
+// unwired store; and the message is asserted for what it must NOT claim, since
+// the defect is a true statement about the wrong subject.
+//
+// BITES: with the old body this fails on "administrator", because the message
+// read "Maximum number of agent tokens (100) reached" — the personal edition's
+// wording, where the caller does own every token.
+func TestCreateUserToken_CapExhaustionDoesNotBlameTheCaller(t *testing.T) {
+	rig := newTokenTestRig(t)
+
+	// Positive control: user B can mint before the cap is filled.
+	rig.actAs(userBCtx())
+	ctrl := rig.createToken(t, "b-first", nil)
+	require.Equal(t, http.StatusCreated, ctrl.Code,
+		"positive control: user B must be able to mint before the cap fills (%s)", ctrl.Body.String())
+
+	// Other tenants fill the rest of the DEPLOYMENT-wide cap without any one
+	// owner reaching the per-owner quota first.
+	seedDeploymentTokenFiller(t, rig, auth.MaxTokens-1)
+
+	over := rig.createToken(t, "b-second", nil)
+	require.Equal(t, http.StatusConflict, over.Code,
+		"the cap must be reported to the blocked tenant (%s)", over.Body.String())
+
+	// User B holds exactly one token. Deleting it frees one slot out of a cap
+	// filled by someone else's 99 — which is precisely why the body must not
+	// tell them to.
+	msg := errorMessage(t, over)
+	assert.Contains(t, strings.ToLower(msg), "shared by all users",
+		"the body must say the limit is not the caller's own")
+	assert.Contains(t, strings.ToLower(msg), "administrator",
+		"the body must name who can act on a deployment-wide limit")
+}
+
+// Issue #1177: the server-edition door must expose the owner's own quota as
+// an actionable 409 while leaving another tenant able to mint.
+func TestCreateUserToken_OwnerQuotaDoesNotExhaustOtherTenants(t *testing.T) {
+	rig := newTokenTestRig(t)
+	rig.actAs(userACtx())
+	for i := 0; i < auth.MaxTokensPerOwner; i++ {
+		rig.seedToken(t, tokenUserA, fmt.Sprintf("a-owned-%02d", i))
+	}
+
+	over := rig.createToken(t, "one-too-many", nil)
+	require.Equal(t, http.StatusConflict, over.Code,
+		"the owner quota must be a standing conflict (%s)", over.Body.String())
+	msg := errorMessage(t, over)
+	assert.Contains(t, msg, fmt.Sprintf("%d", auth.MaxTokensPerOwner))
+	assert.Contains(t, strings.ToLower(msg), "your limit")
+	assert.Contains(t, strings.ToLower(msg), "permanently delete")
+
+	rig.actAs(userBCtx())
+	other := rig.createToken(t, "b-first", nil)
+	require.Equal(t, http.StatusCreated, other.Code,
+		"one tenant's quota must not consume another tenant's slots (%s)", other.Body.String())
+}
+
+// seedDeploymentTokenFiller fills the shared cap while staying below every
+// synthetic owner's quota, ensuring deployment-cap tests exercise that branch.
+func seedDeploymentTokenFiller(t *testing.T, rig *tokenTestRig, n int) {
+	t.Helper()
+	perOwner := auth.MaxTokensPerOwner - 1
+	for i := 0; i < n; i++ {
+		owner := fmt.Sprintf("deployment-filler-%02d", i/perOwner)
+		rig.seedToken(t, owner, fmt.Sprintf("filler-%03d", i))
+	}
+}
 
 // TestRegenerateUserToken_ReNarrowsScopeToCurrentEntitlement pins the one
 // re-check a token's server scope ever gets.

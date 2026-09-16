@@ -67,8 +67,10 @@ func (c *ServerEditionConfig) IsAdminEmail(email string) bool {
 // TTLs, the Microsoft multi-tenant "common" tenant, and the MCPPROXY_CRED_KEY
 // fallback for credential_encryption_key (an explicit config value always wins
 // over the environment). It is the boot-time companion of Validate (Spec 107
-// FR-039): setup calls ApplyDefaults then Validate, while the write doors call
-// only Validate so nothing derived is ever persisted into the config file.
+// FR-039): setup calls ApplyDefaults then Validate on a Clone of the live
+// block — never on the runtime's own pointer, which is the PATCH merge base
+// and the next write-back — while the write doors call only Validate, so
+// nothing derived is ever persisted into the config file.
 func (c *ServerEditionConfig) ApplyDefaults() {
 	if c == nil {
 		return

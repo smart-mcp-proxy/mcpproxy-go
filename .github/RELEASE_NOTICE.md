@@ -1,3 +1,15 @@
+## 🔒 Colon-named tools are approved by their exact name — one-time review after upgrade
+
+A tool's approval record, search-index entry and callability are now keyed by the **exact name its server reports**, colons included. Earlier releases filed a namespaced tool such as `ns:erase` under the text after its first colon, so it shared — and silently inherited — the approval of a sibling `erase` on the same server. Every dispatch path (`call_tool_*`, direct-name dispatch on `/mcp/all`, `call_tool()` inside code execution), preflight and `describe_tool` now resolve exactly the `server:tool` pair they dispatch.
+
+**What changes for you**
+
+- **On `manual` (default) and `scan` trust, colon-named tools on a server that already has an approved baseline become pending once, under their own names, on the first discovery after upgrade.** They stay uncallable and out of `retrieve_tools` until you approve them: `mcpproxy upstream inspect <server>` to review, `mcpproxy upstream approve <server> <tool>`, the `quarantine_security` MCP tool, or the Web UI. `trust_mode: auto` servers and installs with `quarantine_enabled: false` auto-approve them; no other tool is affected.
+- **Blocks carry over.** A tool you had disabled under the old collapsed name stays disabled under its own name until you enable it there; the log records the carry-over at `WARN` with both names. A tool that was locked pending review is pending under its own name and is unlocked by approving it by that name — nothing else is needed, and nothing is deleted. A namespaced tool you had toggled in the UI keeps its old review lock (with the before/after evidence) under its own name until you approve it; if its old record approved a *different* definition than the server reports now, it is held as changed for review, and if it had no old record it is pending under an active gate — a toggle never approves a definition nobody reviewed.
+- **Unresolved names are refused for everyone.** A call to a tool that a connected server's discovered tool set does not contain is refused before any upstream call, for administrators too — while the server's discovery has not completed, retry shortly; afterwards, refresh with `retrieve_tools` and retry with a listed name. Quarantined, disabled and disconnected servers keep their existing answers: a call to a disconnected server still gets the not-connected / `reconnect_on_use` answer, and once the server reconnects and completes discovery, a name that result does not list is refused as unresolved — it is never dispatched.
+
+Details: [Security Quarantine → Namespaced tool names](https://docs.mcpproxy.app/features/security-quarantine#namespaced-tool-names) and [Agent Tokens → Target tool tier](https://docs.mcpproxy.app/features/agent-tokens#target-tool-tier).
+
 ## Server edition: configuration keys and modes that never did anything are gone
 
 This release removes the server-edition knobs and `auth_broker` modes that were accepted by the validator but had no reader in production. An old `mcp_config.json` still loads; what changes is how the removed keys are treated. Personal-edition users are not affected unless the file carries a `server_edition` or `auth_broker` block.
@@ -23,7 +35,7 @@ This release removes the server-edition knobs and `auth_broker` modes that were 
 `server_edition.store_idp_tokens` no longer stores anything. The identity-provider access and refresh tokens it used to persist at login existed only to feed the never-implemented `token_exchange`/`entra_obo` modes, which left a long-lived IdP refresh token at rest with nothing reading it. The writer, the reader and the offline-access scope and authorization parameters that asked the IdP for a refresh token (`offline_access`, `access_type=offline`) are removed (FR-033), so a fresh login no longer requests a refresh token from the IdP.
 
 - The key is still accepted so an old file loads. `"store_idp_tokens": true` logs one warning at boot — `server_edition.store_idp_tokens is deprecated and no longer stores IdP tokens; remove it` — and does nothing else.
-- Remove it from your configuration. Nothing in this release reads the IdP tokens an earlier release stored.
+- Remove it from your configuration. Nothing in this release reads the IdP tokens an earlier release stored, and the first start of `mcpproxy-server` after upgrading **deletes them** from `config.db` (the rows are removed by key, so this happens whether or not `MCPPROXY_CRED_KEY` is still set; the log line `purged legacy IdP subject-token rows` reports the count). Credentials connected through the `oauth_connect` flow are not touched.
 - The former [IdP Token Storage](https://docs.mcpproxy.app/features/idp-token-storage/) page is now a tombstone.
 
 ## Auth broker: a stored credential is stored, not injected
@@ -35,10 +47,10 @@ The `oauth_connect` connect flow, its REST routes, the `mcpproxy credential` com
 - Upstream calls keep using whatever the server's own configuration provides (static headers, the server's own OAuth). If you deployed the broker expecting per-user credentials on upstream calls, that expectation was never met, and this release says so rather than fixing it.
 - Historical `credential_broker` activity rows remain readable and labelled.
 
-## Agent tokens: the cap is now per owner
+## Agent tokens: a per-user quota inside the deployment cap
 
-The 100-token limit on agent tokens is now counted **per owner** instead of across the whole deployment ([#1177](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1177), FR-037). Tokens with the same owner count together; operator tokens with no owner form one owner of their own.
+The server edition now enforces a **25-token quota per signed-in user** on top of the existing 100-record deployment cap ([#1177](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1177)). Revoked tokens keep their slot until they are permanently deleted.
 
-- Server edition: one user reaching 100 tokens no longer blocks every other user from creating theirs, and the `409 Conflict` body from `POST /user/tokens` now refers only to the caller's own count — deleting your own tokens does free a slot.
-- Personal edition: every token is ownerless, so the limit is unchanged in practice (100), and the `409` body keeps its meaning.
+- Server edition: a user at 25 tokens gets a `409 Conflict` from `POST /user/tokens` that names *their* quota — permanently deleting one of their unused tokens frees a slot — and no longer consumes the slots every other user shares. The 100-record deployment cap remains, and its `409` still says the limit is shared and points at an administrator. A user who already holds more than 25 tokens keeps them; they cannot create another until they are back under the quota.
+- Personal edition: every token is ownerless, so the quota does not apply and the 100-token limit is unchanged.
 - No configuration change is needed. Details: [agent tokens](https://docs.mcpproxy.app/features/agent-tokens/).
