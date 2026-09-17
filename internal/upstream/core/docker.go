@@ -131,9 +131,13 @@ func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string)
 		}
 	}
 
+	// c.containerName is the GENERATED name, never read back from Docker
+	// here: the lookup above already rejected it (or errored), so under a
+	// suffix collision it can currently belong to a different, colliding
+	// server. Name only the server, as the round-9 lifecycle fixes do for
+	// every other generated-name-only state (codex round 11).
 	c.logger.Error("Failed to recover container ID - container will be orphaned on disconnect",
-		zap.String("server", c.config.Name),
-		zap.String("container_name", c.containerName))
+		zap.String("server", c.config.Name))
 
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Error("Failed to recover container ID - may be orphaned")
@@ -303,10 +307,16 @@ func (c *Client) killDockerContainersByImageWithContext(ctx context.Context, ima
 
 	// The listing is a snapshot: stopOwnedContainer re-reads each container
 	// right before its stop, and only that read names it in the records.
+	// container_owner: D8 rule 3 treats a count as container-subject
+	// evidence, so it is paired with the label Docker reported on the
+	// listed rows (one value for every row: ownsContainer admits only rows
+	// whose label equals this server's raw name) — never the requesting
+	// server's name (codex round 11).
 	c.logger.Info("Found matching owned containers for cleanup",
 		zap.String("server", c.config.Name),
 		zap.String("image_name", imageName),
-		zap.Int("container_count", len(containersToKill)))
+		zap.Int("container_count", len(containersToKill)),
+		containerOwnerField(containersToKill[0].Owner))
 	for _, container := range containersToKill {
 		c.stopOwnedContainer(ctx, container.ID, "image")
 	}
@@ -342,10 +352,16 @@ func (c *Client) killDockerContainersByNamePatternWithContext(ctx context.Contex
 
 	// The listing is a snapshot: stopOwnedContainer re-reads each container
 	// right before its stop, and only that read names it in the records.
+	// container_owner: D8 rule 3 treats a count as container-subject
+	// evidence, so it is paired with the label Docker reported on the
+	// listed rows (one value for every row: ownsContainer admits only rows
+	// whose label equals this server's raw name) — never the requesting
+	// server's name (codex round 11).
 	c.logger.Info("Found owned containers by name pattern",
 		zap.String("server", c.config.Name),
 		zap.String("name_pattern", namePattern),
-		zap.Int("container_count", len(owned)))
+		zap.Int("container_count", len(owned)),
+		containerOwnerField(owned[0].Owner))
 	for _, container := range owned {
 		c.stopOwnedContainer(ctx, container.ID, "name pattern")
 	}
@@ -408,9 +424,16 @@ func (c *Client) ensureNoExistingContainers(ctx context.Context) error {
 	}
 
 	// Found existing containers - clean them up first
+	// container_owner: D8 rule 3 treats a count as container-subject
+	// evidence, so it is paired with the label Docker reported on the
+	// listed rows (one value for every row: ownsContainer admits only rows
+	// whose label equals this server's raw name) — never the requesting
+	// server's name (codex round 11; mirrors the upstreamLogger record
+	// below, already fixed).
 	c.logger.Warn("Found existing owned containers - cleaning up before creating new one",
 		zap.String("server", c.config.Name),
-		zap.Int("container_count", len(owned)))
+		zap.Int("container_count", len(owned)),
+		containerOwnerField(owned[0].Owner))
 
 	if c.upstreamLogger != nil {
 		// container_owner: the count is of THIS server's owned containers
