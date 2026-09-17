@@ -2385,8 +2385,13 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	}
 
 	// Arguments were parsed above the first gate (audit attempt); a parse
-	// failure is answered here, where it always was.
+	// failure is answered here, where it always was. The attempt already
+	// exists on ctx, so this still owes the count invariant its pair: an
+	// `authz allow` (every gate above it passed) plus the `tool_call error`
+	// that reports the refusal (round-1 cross-review finding, PR-D) — never
+	// a silent return that leaves the dispatch unaudited.
 	if argsErrMsg != "" {
+		p.auditToolCall(ctx, "error", "", audit.ErrorClassValidation, 0, nil, nil)
 		return mcp.NewToolResultError(argsErrMsg), nil
 	}
 

@@ -102,6 +102,16 @@ func encodeCanonical(buf *bytes.Buffer, v interface{}) error {
 		if !ok {
 			return fmt.Errorf("audit.CanonicalizeArgs: unsupported type %T", v)
 		}
+		// RFC 8785 numbers are defined only over finite values (ES6
+		// Number::toString has no representation for NaN/Infinity as a JSON
+		// number token); a non-finite value reaching here (e.g. a
+		// code_execution script computing 0/0 or 1/0 before the call is
+		// dispatched) MUST be refused, never silently coerced to "null" —
+		// that would make args_sha256 collide across distinguishable inputs
+		// (round-1 cross-review finding, PR-D).
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return fmt.Errorf("audit.CanonicalizeArgs: non-finite number cannot be canonicalised")
+		}
 		buf.WriteString(formatNumberJCS(f))
 	}
 	return nil

@@ -99,6 +99,12 @@ type LoginResult struct {
 	Role     string
 	Provider string
 	Flags    []LoginFlag
+	// ClientIP is the FR-027 trusted-proxy-resolved client address (never a
+	// raw, unvalidated X-Forwarded-For): schema `client.ip` on the
+	// auth_event line (round-1 cross-review finding, PR-D — this field did
+	// not exist before, so every auth_event line lost request-origin
+	// attribution).
+	ClientIP string
 }
 
 // loginStore is the narrow user-store seam the callback writes through.
@@ -636,6 +642,9 @@ func (h *OAuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		UserID:    session.UserID,
 		Role:      role,
 		Provider:  provider,
+		// FR-027: same trusted-proxy resolution as login (round-1
+		// cross-review finding, PR-D).
+		ClientIP: config.ForwardedHeaders(r, h.currentTrustedProxies()).ClientIP,
 	})
 
 	w.Header().Set("Content-Type", "application/json")
@@ -650,6 +659,7 @@ func (h *OAuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 type loginAttempt struct {
 	h                  *OAuthHandler
 	requestID          string
+	clientIP           string
 	userID             string
 	emailHash          string
 	role               string // set only alongside userID
@@ -660,7 +670,13 @@ type loginAttempt struct {
 }
 
 func (h *OAuthHandler) newAttempt(r *http.Request) *loginAttempt {
-	return &loginAttempt{h: h, requestID: reqcontext.GetRequestID(r.Context())}
+	return &loginAttempt{
+		h:         h,
+		requestID: reqcontext.GetRequestID(r.Context()),
+		// FR-027: believed only from a trusted proxy, same resolution
+		// CreateSession uses for session.IPAddress.
+		clientIP: config.ForwardedHeaders(r, h.currentTrustedProxies()).ClientIP,
+	}
 }
 
 func (a *loginAttempt) flag(f LoginFlag) { a.flags = append(a.flags, f) }
@@ -696,6 +712,7 @@ func (a *loginAttempt) result(reason LoginRefusal) LoginResult {
 		Role:      a.role,
 		Provider:  a.provider,
 		Flags:     append([]LoginFlag(nil), a.flags...),
+		ClientIP:  a.clientIP,
 	}
 }
 

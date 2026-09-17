@@ -40,6 +40,13 @@ const (
 	// audit_log.enabled: false under the server edition.
 	MsgAuditLogDisabledNotice = "audit attribution is off"
 
+	// MsgAuditLogDefaultActive is the startup notice for the server-edition
+	// default (audit_log absent, non-stdio transport): FR-014 requires one
+	// startup line naming that the default sink (stdout) is active so an
+	// operator relying on a silent config file is not surprised by lines on
+	// stdout (round-1 cross-review finding, PR-D).
+	MsgAuditLogDefaultActive = "audit_log is not configured; the server-edition default is active (enabled, stdout) — set audit_log to override"
+
 	// MsgAuditLogNoSink is the validation message for enabled:true with
 	// neither stdout nor a path set.
 	MsgAuditLogNoSink = "audit_log is enabled but has no sink (set stdout: true or a path)"
@@ -133,7 +140,7 @@ func EffectiveAuditLog(cfg *Config, transport string) (resolved ResolvedAuditLog
 		}
 		resolved.Enabled = true
 		resolved.Stdout = true
-		return resolved, "", nil
+		return resolved, MsgAuditLogDefaultActive, nil
 	}
 
 	stdoutExplicit := block.Stdout != nil
@@ -165,7 +172,12 @@ func EffectiveAuditLog(cfg *Config, transport string) (resolved ResolvedAuditLog
 	}
 
 	if !resolved.Enabled {
-		return resolved, "", nil
+		// Only reachable with an explicit `enabled: false` (the absent-block
+		// default above never resolves Enabled:false for HTTP, and stdio's
+		// own default-suppression path returns earlier): FR-014 requires a
+		// startup warning naming that audit attribution is off (round-1
+		// cross-review finding, PR-D).
+		return resolved, MsgAuditLogDisabledNotice, nil
 	}
 
 	if transport == TransportStdio {

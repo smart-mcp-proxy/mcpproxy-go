@@ -109,7 +109,13 @@ func (s *writerSink) Write(line []byte) error {
 		buf = append(buf, '\n')
 	}
 
-	_, err := s.w.Write(buf)
+	n, err := s.w.Write(buf)
+	if err == nil && n != len(buf) {
+		// io.Writer permits a short write with a nil error; treated as a
+		// failure here so a partial JSON record never counts as a
+		// successfully written line (round-1 cross-review finding, PR-D).
+		err = io.ErrShortWrite
+	}
 	if err != nil {
 		atomic.AddUint64(&s.failures, 1)
 		s.maybeLogFailure(err)

@@ -107,6 +107,7 @@ const sidebars = {
             'features/tool-scanner',
             'features/security-scanner-plugins',
             'features/sensitive-data-detection',
+            'features/audit-log',
             'features/output-sanitisation',
             'features/output-schema-validation',
             'features/agent-tokens',

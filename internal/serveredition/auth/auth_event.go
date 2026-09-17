@@ -38,12 +38,13 @@ func NewAuditEmitter(sink audit.Sink, logger *zap.SugaredLogger) func(LoginResul
 			// Login/logout are REST-only, always over the listener (never
 			// the tray socket or stdio) — contracts/audit-line-events.md's
 			// auth_event fixtures fix origin:local, source:api.
-			Origin:  "local",
-			Source:  "api",
-			Surface: res.Surface,
-			Reason:  string(res.Reason),
-			Caller:  auditCallerFor(res),
-			Flags:   auditFlagsFor(res.Flags),
+			Origin:   "local",
+			Source:   "api",
+			Surface:  res.Surface,
+			Reason:   string(res.Reason),
+			Caller:   auditCallerFor(res),
+			Flags:    auditFlagsFor(res.Flags),
+			ClientIP: res.ClientIP,
 		})
 		if err != nil {
 			if logger != nil {

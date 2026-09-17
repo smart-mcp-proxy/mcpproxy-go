@@ -136,12 +136,22 @@ func (p *MCPProxyServer) installAuditAttempt(ctx context.Context, spec auditAtte
 		clientIP = meta.ClientIP
 	}
 
+	// work_session_id (round-1 cross-review finding, PR-D): the attempt is
+	// the only place this is stamped, never re-resolved by a gate or the
+	// completion path. p.sessionStore is nil-safe for an unresolved or
+	// unknown session id (returns "").
+	var workSessionID string
+	if p != nil && p.sessionStore != nil {
+		workSessionID = p.sessionStore.WorkSessionID(spec.SessionID)
+	}
+
 	d := &auditDispatch{
 		attempt: audit.Attempt{
 			RequestID:          spec.RequestID,
 			TransportRequestID: auditTransportRequestID(ctx),
 			ParentID:           spec.ParentID,
 			SessionID:          spec.SessionID,
+			WorkSessionID:      workSessionID,
 			Server:             server,
 			Tool:               tool,
 			Operation:          op,

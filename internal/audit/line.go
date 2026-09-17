@@ -77,7 +77,7 @@ func setClient(f map[string]interface{}, name, version, ip string) {
 		c["name"] = maskCredential(name)
 	}
 	if version != "" {
-		c["version"] = version
+		c["version"] = maskCredential(version)
 	}
 	if ip != "" {
 		c["ip"] = ip

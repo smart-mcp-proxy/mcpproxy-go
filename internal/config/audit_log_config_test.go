@@ -15,8 +15,11 @@ func TestEffectiveAuditLog_AbsentBlock_ServerEdition(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if warn != "" {
-			t.Fatalf("unexpected warning: %q", warn)
+		// FR-014's "one startup line" requirement: the block is absent, so
+		// the server-edition default silently activates a stdout sink an
+		// operator relying on a blank config might not expect.
+		if warn != MsgAuditLogDefaultActive {
+			t.Fatalf("warning = %q, want %q", warn, MsgAuditLogDefaultActive)
 		}
 		if !resolved.Enabled || !resolved.Stdout {
 			t.Fatalf("expected {Enabled:true, Stdout:true}, got %+v", resolved)
@@ -75,6 +78,24 @@ func TestEffectiveAuditLog_ExplicitPath_Stdio_Honoured(t *testing.T) {
 	}
 	if !resolved.Enabled || resolved.Stdout || resolved.Path != "/tmp/audit.jsonl" {
 		t.Fatalf("resolved = %+v, want enabled file sink with stdout dropped", resolved)
+	}
+}
+
+// TestEffectiveAuditLog_ExplicitDisabled_WarnsAttributionOff covers FR-014's
+// startup notice for an explicit `enabled: false` under the server edition
+// (round-1 cross-review finding, PR-D): MsgAuditLogDisabledNotice was
+// defined but never returned by EffectiveAuditLog before this fix.
+func TestEffectiveAuditLog_ExplicitDisabled_WarnsAttributionOff(t *testing.T) {
+	cfg := &Config{AuditLog: &AuditLogConfig{Enabled: boolPtr(false)}}
+	resolved, warn, err := EffectiveAuditLog(cfg, TransportHTTP)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if warn != MsgAuditLogDisabledNotice {
+		t.Fatalf("warning = %q, want %q", warn, MsgAuditLogDisabledNotice)
+	}
+	if resolved.Enabled {
+		t.Fatalf("expected disabled sink, got %+v", resolved)
 	}
 }
 
