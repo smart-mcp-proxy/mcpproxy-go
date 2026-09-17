@@ -305,8 +305,11 @@ func mainLogMentions(logs *observer.ObservedLogs, needle string) []string {
 
 // assertSweepTouchesOnlyOwned is the shared oracle for both sweeps: a's own
 // canonical container is mutated; the three foreign rows are neither
-// mutated nor named (id or name) anywhere in main.log; the skipped rows are
-// counted once at Warn.
+// mutated nor named (id or name) anywhere in main.log. The rejected rows'
+// labels are untrusted (they failed canonical ownership), so no owner can
+// be attributed to them; per Spec 105 D8/D9 (codex round 11) a count that
+// cannot be bound to a subject is not evidence, so listOwnedManagedContainers
+// logs nothing about the rejected-row tally at all.
 func assertSweepTouchesOnlyOwned(t *testing.T, fd *managerFakeDocker, mainLogs *observer.ObservedLogs) {
 	t.Helper()
 	assert.NotEmpty(t, fd.mutationsOf(t, sweepOwnID), "a's own container must still be cleaned up; invocations:\n%s",
@@ -319,9 +322,7 @@ func assertSweepTouchesOnlyOwned(t *testing.T, fd *managerFakeDocker, mainLogs *
 		assert.Empty(t, mainLogMentions(mainLogs, foreign.name), "foreign name %s written into main.log", foreign.name)
 	}
 	skipped := mainLogs.FilterMessage("Skipping containers carrying the mcpproxy labels that no configured server canonically owns").All()
-	require.Len(t, skipped, 1, "the skipped foreign rows are reported once")
-	assert.Equal(t, zap.WarnLevel, skipped[0].Level)
-	assert.EqualValues(t, 3, skipped[0].ContextMap()["count"])
+	assert.Empty(t, skipped, "the rejected-row tally must not be logged: no owner can be attributed to it")
 }
 
 func TestCleanupAllManagedContainers_TouchesOnlyCanonicallyOwned(t *testing.T) {

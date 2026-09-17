@@ -826,9 +826,14 @@ func (m *Manager) readManagedContainers(ctx context.Context, includeStopped bool
 // (core.ContainerOwnedByAny). The managed and instance labels a sweep
 // selects on are shared and copyable, so on their own they are not
 // ownership (Spec 105 FR-007 / D9, codex round 3): a foreign container
-// carrying them is neither mutated nor named — the skipped rows are counted
-// once at Warn, without ids or names. includeStopped is passed straight
-// through to readManagedContainers.
+// carrying them is neither mutated nor named. A row that fails the
+// predicate is also not counted: its label is untrusted (that is exactly
+// why it was rejected), so no owner can be attributed to it, and D8's
+// evidence rule requires every container count to carry the owner it
+// counts (codex round 11) — there is no non-fabricated owner to put on a
+// tally of rejected rows, so listOwnedManagedContainers logs nothing about
+// them at all. includeStopped is passed straight through to
+// readManagedContainers.
 func (m *Manager) listOwnedManagedContainers(ctx context.Context, includeStopped bool, filters ...string) ([]managedContainer, error) {
 	rows, err := m.readManagedContainers(ctx, includeStopped, filters...)
 	if err != nil {
@@ -837,17 +842,11 @@ func (m *Manager) listOwnedManagedContainers(ctx context.Context, includeStopped
 
 	configured := m.configuredServerNames()
 	var owned []managedContainer
-	skipped := 0
 	for _, row := range rows {
 		if !core.ContainerOwnedByAny(configured, row.Name, row.Owner) {
-			skipped++
 			continue
 		}
 		owned = append(owned, row)
-	}
-	if skipped > 0 {
-		m.logger.Warn("Skipping containers carrying the mcpproxy labels that no configured server canonically owns",
-			zap.Int("count", skipped))
 	}
 	return owned, nil
 }
