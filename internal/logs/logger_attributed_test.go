@@ -825,3 +825,117 @@ func TestReadUpstreamServerLogTail_AttributedOnly_ContainerShapedServerNameIsNot
 		})
 	}
 }
+
+// Codex round 16 (PR E), finding 2 (SC-005 timing class): the pre-fix reader
+// scanned the WHOLE shared file from byte 0 before taking the last N
+// attributable records, so a scoped caller's response time was proportional
+// to a hidden co-owner's entire earlier history in that file — a
+// response-time side channel disclosing its volume, which the
+// non-disclosing-refusal definition (status, body AND timing class)
+// forbids. scopedBackwardStartOffset caps the scan to at most
+// scopedBackwardReadBudget bytes before EOF regardless of the file's total
+// size. This is the literal proof: for every fileSize tried — including
+// values far larger than anything exercised elsewhere in this package — the
+// bytes the scan will read (fileSize minus the returned offset) never
+// exceeds the budget, so the read is provably NOT proportional to total
+// file size.
+func TestScopedBackwardStartOffset_BoundsReadRegardlessOfFileSize(t *testing.T) {
+	sizes := []int64{
+		0,
+		1,
+		scopedBackwardReadBudget - 1,
+		scopedBackwardReadBudget,
+		scopedBackwardReadBudget + 1,
+		2 * scopedBackwardReadBudget,
+		10 * 1024 * 1024 * 1024, // 10 GiB, far beyond any file this package writes
+	}
+	for _, size := range sizes {
+		start := scopedBackwardStartOffset(size)
+		assert.GreaterOrEqualf(t, start, int64(0), "start offset must never be negative for fileSize=%d", size)
+		assert.LessOrEqualf(t, size-start, int64(scopedBackwardReadBudget),
+			"bytes read (fileSize-start) must never exceed the budget regardless of file size: fileSize=%d start=%d", size, start)
+		if size <= scopedBackwardReadBudget {
+			assert.Zerof(t, start, "a file at or under the budget is read in full from byte 0: fileSize=%d", size)
+		}
+	}
+}
+
+// hugeCoOwnerFillerLine is one giant a/b-stamped console record: well past
+// attributedLineCap (so it is non-attributable even when read whole) and
+// well past scopedBackwardReadBudget in byte size — a hidden co-owner
+// dominating the shared file exactly the way SC-005 forbids a scoped
+// caller's timing from depending on.
+func hugeCoOwnerFillerLine() string {
+	const fillerSize = 20 * 1024 * 1024 // > scopedBackwardReadBudget (16 MiB)
+	return `2026-09-16T00:00:00.000Z | INFO | x/y.go:1 | ` + strings.Repeat("F", fillerSize) + ` | {"server": "a/b"}` + "\n"
+}
+
+// A hidden co-owner's tens-of-MB run sitting BEFORE this server's own recent
+// records must not change the result: a scoped read of the shared file
+// returns exactly what a scoped read of an otherwise-identical DEDICATED
+// file (no co-owner at all) returns, because both sit well within
+// scopedBackwardReadBudget of EOF.
+func TestReadUpstreamServerLogTail_AttributedOnly_ScopedReadUnaffectedByHiddenCoOwnerBeyondBudget(t *testing.T) {
+	cfg := newAttributedLogDir(t, false)
+	under := openStampedWriter(t, cfg, "a_b")
+
+	logPath := filepath.Join(cfg.LogDir, ServerLogFilename("a_b"))
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = f.WriteString(hugeCoOwnerFillerLine())
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	writeRecord(under, "own-1")
+	writeRecord(under, "own-2")
+	writeRecord(under, "own-3")
+
+	got := attributedTail(t, cfg, "a_b", 50)
+	body := joinLines(got)
+	require.Len(t, got, 3, "own-1, own-2, own-3 only; got %d lines", len(got))
+	assert.Contains(t, body, "own-1")
+	assert.Contains(t, body, "own-2")
+	assert.Contains(t, body, "own-3")
+	assert.NotContains(t, body, "FFFF", "the hidden co-owner's filler must never be disclosed")
+
+	cfgDedicated := newAttributedLogDir(t, false)
+	dedicated := openStampedWriter(t, cfgDedicated, "a_b")
+	writeRecord(dedicated, "own-1")
+	writeRecord(dedicated, "own-2")
+	writeRecord(dedicated, "own-3")
+	wantDedicated := attributedTail(t, cfgDedicated, "a_b", 50)
+
+	// Same count and payload as the dedicated file — not a literal string
+	// comparison, since each writeRecord call site's own caller (file:line)
+	// legitimately differs between the two fixtures.
+	require.Len(t, wantDedicated, 3, "fixture premise: the dedicated-file control returns exactly the three own records")
+	for i, want := range []string{"own-1", "own-2", "own-3"} {
+		assert.Contains(t, wantDedicated[i], want)
+		assert.Contains(t, got[i], want,
+			"a scoped read of a small dedicated file and of an otherwise-identical shared file dominated by a hidden co-owner must return the same own records, in the same order")
+	}
+}
+
+// A record buried more than scopedBackwardReadBudget bytes before EOF —
+// behind a huge co-owner run written after it — is not found: the scan
+// returns fewer records than requested rather than reading further.
+// Bounded and fail-closed, not incorrect (per this fix's documented
+// trade-off), and never an error.
+func TestReadUpstreamServerLogTail_AttributedOnly_ScopedReadFailsClosedBeyondBudget(t *testing.T) {
+	cfg := newAttributedLogDir(t, false)
+	under := openStampedWriter(t, cfg, "a_b")
+	writeRecord(under, "own-buried")
+
+	logPath := filepath.Join(cfg.LogDir, ServerLogFilename("a_b"))
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = f.WriteString(hugeCoOwnerFillerLine())
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	got, err := ReadUpstreamServerLogTailAttributed(cfg, "a_b", 50)
+	require.NoError(t, err, "a request whose own recent records sit beyond the budget must return fewer records, never an error")
+	assert.NotContains(t, joinLines(got), "own-buried",
+		"the buried record sits outside the budget window: correctly withheld, not a bug")
+	assert.Empty(t, got)
+}

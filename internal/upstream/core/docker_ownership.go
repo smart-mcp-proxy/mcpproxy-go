@@ -228,16 +228,41 @@ const (
 // binary through newDockerCmd, the manager execs the bare name.
 type DockerCommand func(ctx context.Context, args ...string) *exec.Cmd
 
-// ContainerRow is a container's identity as Docker reported it in one read:
-// full id, name and com.mcpproxy.server label value.
+// ContainerRow is a container's identity AND running state as Docker
+// reported them in one read: full id, name, com.mcpproxy.server label value
+// and `docker ps`'s own human status text (e.g. "Up 5 minutes",
+// "Exited (0) 2 minutes ago", "Up 5 minutes (Paused)"). Status, not just
+// identity, comes from this same read (codex round 16 finding 1): a caller
+// that re-read state with a SEPARATE `docker inspect <id>` after Verify
+// trusted whatever container held that id at the LATER moment, which another
+// Docker client can have relabelled or renamed in between.
 type ContainerRow struct {
-	ID    string
-	Name  string
-	Owner string
+	ID     string
+	Name   string
+	Owner  string
+	Status string
+}
+
+// Running reports whether the container was up — running or paused, exactly
+// `docker inspect`'s State.Running — at the read that produced this row.
+// `docker ps --format` has no `.Running` boolean field (verified against a
+// live daemon: only `.State`, the short State.Status word, and `.Status`,
+// the human text `docker ps` prints in its STATUS column); `.State` is
+// State.Status, not State.Running, so a paused container (State.Status
+// "paused", State.Running true) would misreport as not running through it.
+// Docker's own convention for that STATUS text prefixes "Up" precisely when
+// State.Running is true — including while paused ("Up 5 minutes (Paused)")
+// — so Status carries the same information State.Running would, without a
+// second command.
+func (r ContainerRow) Running() bool {
+	return strings.HasPrefix(r.Status, "Up")
 }
 
 // containerRowFormat is the `docker ps --format` a mutation's re-read uses.
-const containerRowFormat = "{{.ID}}\t{{.Names}}\t{{.Label \"" + containerOwnerLabel + "\"}}"
+// {{.Status}} rides along with identity so a caller deciding running/healthy
+// state never needs a second, separately-timed `docker inspect` (codex round
+// 16 finding 1): ownership and state come from the identical read.
+const containerRowFormat = "{{.ID}}\t{{.Names}}\t{{.Label \"" + containerOwnerLabel + "\"}}\t{{.Status}}"
 
 // MutationResult is what ContainerMutator.Mutate reports. Verified is true
 // when ownership held at the re-read and the command ran, in which case
@@ -312,11 +337,15 @@ func (cm ContainerMutator) read(ctx context.Context, id string) (ContainerRow, b
 		return ContainerRow{}, false, err
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		parts := strings.Split(line, "\t")
-		if len(parts) < 3 || parts[0] != id {
+		// SplitN(4): Status (the last field) is `docker ps`'s own human text
+		// and may itself be empty (a pre-label container docker never
+		// started, though that never reaches here) — keep it as whatever
+		// remains rather than dropping the row for a short split.
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 || parts[0] != id {
 			continue
 		}
-		return ContainerRow{ID: parts[0], Name: parts[1], Owner: parts[2]}, true, nil
+		return ContainerRow{ID: parts[0], Name: parts[1], Owner: parts[2], Status: parts[3]}, true, nil
 	}
 	return ContainerRow{}, false, nil
 }

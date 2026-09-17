@@ -514,12 +514,19 @@ func (c *Client) GetConnectionDiagnostics() map[string]interface{} {
 		// report as this server's and running — the same stale-ownership
 		// failure verifyDockerContainerHealthy fixed for the manager's
 		// health path (codex round 8). Re-verify through the same
-		// ContainerMutator.Verify read+predicate before publishing or
-		// inspecting anything: once the predicate no longer holds (or the
-		// re-read itself fails), the diagnostics name no container id and
-		// report it not running; only a container ownership confirms right
-		// now is published, with the container_owner read back at that
-		// same moment.
+		// ContainerMutator.Verify read+predicate before publishing anything:
+		// once the predicate no longer holds (or the re-read itself fails),
+		// the diagnostics name no container id and report it not running;
+		// only a container ownership confirms right now is published, with
+		// the container_owner read back at that same moment.
+		//
+		// Running state comes from that SAME read, never a follow-up
+		// `docker inspect` (codex round 16 finding 1): a second, separately
+		// timed command by id alone would report whatever container holds
+		// that id AT THAT LATER MOMENT — which ownership may no longer
+		// belong to — while the diagnostics kept attributing it to this
+		// server. ContainerRow.Running derives it from the ps row Verify
+		// already read.
 		if c.containerID != "" {
 			row, ok, err := c.containerMutator().Verify(ctx, c.containerID)
 			if err != nil || !ok {
@@ -527,10 +534,7 @@ func (c *Client) GetConnectionDiagnostics() map[string]interface{} {
 			} else {
 				diagnostics["container_id"] = row.ID
 				diagnostics["container_owner"] = row.Owner
-				inspectCmd := c.newDockerCmd(ctx, "inspect", "--format", "{{.State.Running}}", row.ID)
-				if output, err := inspectCmd.Output(); err == nil {
-					diagnostics["container_running"] = strings.TrimSpace(string(output)) == "true"
-				}
+				diagnostics["container_running"] = row.Running()
 			}
 		}
 	}

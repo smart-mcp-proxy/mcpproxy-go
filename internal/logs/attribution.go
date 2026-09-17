@@ -167,6 +167,20 @@ func ChildOutputField() zap.Field {
 // Records with no accepted stamp, records stamped for another server and
 // records failing the subject-evidence rule are withheld. Administrators use
 // ReadUpstreamServerLogTail (whole file, byte-identical to pre-105).
+//
+// The scan starts at scopedBackwardStartOffset, at most
+// scopedBackwardReadBudget bytes before EOF (codex round 16 finding 2):
+// scanning from byte 0 made a request's cost proportional to whatever a
+// hidden co-owner had written earlier in this shared file — a response-time
+// side channel disclosing its volume, which SC-005's non-disclosing-refusal
+// definition (status, body AND timing class) forbids. Below the budget (the
+// common case) this reads and returns exactly what a whole-file scan from
+// byte 0 would; past it, a request whose own most recent `lines` records sit
+// further back returns fewer than `lines` records rather than reading
+// further — bounded and fail-closed, not incorrect. The append-ordering
+// this relies on (newest records nearest EOF), the boundary/subject-evidence
+// rules (readBoundedLine, recordAttributableTo) and the per-record cap are
+// all unchanged; only where the scan starts is new.
 func ReadUpstreamServerLogTailAttributed(config *config.LogConfig, serverName string, lines int) ([]string, error) {
 	if lines <= 0 {
 		lines = 50
@@ -190,6 +204,16 @@ func ReadUpstreamServerLogTailAttributed(config *config.LogConfig, serverName st
 		return nil, fmt.Errorf("failed to open log file for server %s: %w", serverName, err)
 	}
 	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat log file for server %s: %w", serverName, err)
+	}
+	if start := scopedBackwardStartOffset(info.Size()); start > 0 {
+		if _, err := file.Seek(start, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("failed to seek log file for server %s: %w", serverName, err)
+		}
+	}
 
 	// Filter first, limit second: only attributable records enter the window.
 	// A line past the cap is skipped as non-attributable rather than aborting
@@ -225,6 +249,38 @@ func ReadUpstreamServerLogTailAttributed(config *config.LogConfig, serverName st
 // consider: a record whose content (terminator excluded) is longer than the
 // cap is non-attributable (skipped), never fatal; exactly the cap is eligible.
 const attributedLineCap = 1024 * 1024
+
+// scopedBackwardReadBudget bounds how many bytes before EOF
+// ReadUpstreamServerLogTailAttributed will read (scopedBackwardStartOffset),
+// independent of the file's total size or a hidden co-owner's share of it
+// (SC-005: a non-disclosing response must not vary in timing class with what
+// the requester cannot see). A flat ceiling rather than a multiple of
+// `lines`: at the highest request (500) and attributedLineCap-sized (1 MiB)
+// records, lines*attributedLineCap would itself be hundreds of MiB — as
+// unbounded in practice as no budget at all. 16 MiB comfortably covers the
+// realistic case (this server's own most recent `lines` records are
+// ordinary log lines, a few hundred bytes to a few KiB each, however deep a
+// co-owner's own history runs before them) while keeping the worst-case
+// scoped read small and constant regardless of the file's total size. A
+// request whose own most recent `lines` records sit further back than this
+// budget (thin recent history behind a huge co-owner run) returns fewer than
+// `lines` records rather than reading further: bounded and fail-closed, not
+// incorrect.
+const scopedBackwardReadBudget = 16 * 1024 * 1024
+
+// scopedBackwardStartOffset returns the byte offset
+// ReadUpstreamServerLogTailAttributed starts reading from for a file of
+// fileSize bytes: at most scopedBackwardReadBudget bytes before EOF, never
+// negative. The bytes the scan then reads (fileSize minus the returned
+// offset) is therefore bounded by scopedBackwardReadBudget for any
+// fileSize — provably not proportional to the file's total size.
+func scopedBackwardStartOffset(fileSize int64) int64 {
+	start := fileSize - scopedBackwardReadBudget
+	if start < 0 {
+		return 0
+	}
+	return start
+}
 
 // readBoundedLine returns the next line (without its terminator) and
 // ok=true, or ok=false at end of input. A line whose content exceeds limit is

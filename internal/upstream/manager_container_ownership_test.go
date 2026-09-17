@@ -41,12 +41,17 @@ import (
 // managerFakeDocker is a sh+awk `docker` shim on PATH (the manager sweeps
 // exec the bare name): `ps` answers from a TSV fixture honouring every
 // `--filter label=k[=v]` (joined with `|`, which no label here contains),
-// `--filter id=<id>` (a prefix match, as docker's is) and `--format` with {{.ID}}, {{.Names}} and
-// {{.Label "k"}}; without `-a` only rows marked Running are answered — same
-// as real `docker ps` — regardless of `-q` (default: every container
-// already stopped, so a plain `ps` with no `-a` answers nothing until a row
-// sets Running: true); stop/kill/rm exit 0 unless
-// the verb is listed in the fail file (failVerbs). Every invocation is
+// `--filter id=<id>` (a prefix match, as docker's is) and `--format` with {{.ID}}, {{.Names}},
+// {{.Status}} and {{.Label "k"}}; without `-a` only rows marked Running are
+// answered — same as real `docker ps` — regardless of `-q` (default: every
+// container already stopped, so a plain `ps` with no `-a` answers nothing
+// until a row sets Running: true). {{.Status}} synthesises a plausible
+// `docker ps` human STATUS text from the fixture's Running bool alone ("Up 1
+// second" / "Exited (0) 1 second ago") — the same "Up" prefix real Docker
+// uses regardless of state (codex round 16 finding 1: ContainerRow.Running
+// reads it), so this fixture needs no separate paused/restarting case.
+// stop/kill/rm exit 0 unless the verb is listed in the fail file
+// (failVerbs). Every invocation is
 // appended to a log. A `ps.tsv.next` fixture (swapFixtureAfterNextPs)
 // replaces the fixture right after the next `ps` answers, so a container
 // can change between the sweep's listing and its mutation.
@@ -144,6 +149,7 @@ BEGIN { nflt = split(flt, fl, "|") }
   out = fmt
   out = repl(out, "{{.ID}}", $1)
   out = repl(out, "{{.Names}}", $2)
+  out = repl(out, "{{.Status}}", ($4 == "1") ? "Up 1 second" : "Exited (0) 1 second ago")
   while (match(out, /\{\{\.Label "[^"]*"\}\}/)) {
     key = substr(out, RSTART + 10, RLENGTH - 13)
     out = substr(out, 1, RSTART - 1) labels[key] substr(out, RSTART + RLENGTH)
@@ -885,4 +891,66 @@ func TestVerifyDockerContainerHealthy_ReverifiesOwnershipBeforeInspect(t *testin
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not running")
 	})
+}
+
+// TestVerifyDockerContainerHealthy_RunningComesFromTheVerifyReadAlone is
+// codex round 16 finding 1: the health check re-verified ownership with one
+// `docker ps` read (ContainerMutator.Verify) and THEN issued a second,
+// separately-timed `docker inspect <id>` to decide running/status. Between
+// the two, another Docker client can rename or relabel the container into a
+// colliding server's namespace; the inspect would then report the
+// NOW-FOREIGN container's state while ForceReconnectAll kept treating it as
+// this server's (a TOCTOU gap the round-8 ownership re-verification did not
+// close, because it only re-verified identity, not state). Running and
+// status must come from the Verify read itself (ContainerRow.Running /
+// .Status), never a follow-up command: the fixture is swapped to a
+// relabelled, stopped container right after the fix's one `ps` call, so any
+// further read of this id — if a second command were reintroduced — would
+// see that swapped data and this test would catch it.
+func TestVerifyDockerContainerHealthy_RunningComesFromTheVerifyReadAlone(t *testing.T) {
+	fd := installManagerFakeDocker(t, []managerFakeContainer{
+		{ID: sweepOwnID, Name: sweepOwnName, Running: true,
+			Labels: map[string]string{"com.mcpproxy.server": "a"}},
+	})
+	// After the fix's one `ps` read answers, swap to a relabelled, stopped
+	// container: any FURTHER read of this id would see foreign, not-running
+	// data.
+	fd.swapFixtureAfterNextPs(t, []managerFakeContainer{
+		{ID: sweepOwnID, Name: sweepOwnName, Running: false,
+			Labels: map[string]string{"com.mcpproxy.server": "a-b"}},
+	})
+	m, mainLogs := newSweepManager(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	healthy, err := m.verifyDockerContainerHealthy(ctx, sweepDocker, "a", sweepOwnID)
+
+	require.NoError(t, err)
+	assert.True(t, healthy, "healthy must come from the one ps row Verify already has, not a second command that could see the swapped-in relabel/stop")
+	var found bool
+	for _, entry := range mainLogs.All() {
+		fields := entry.ContextMap()
+		if !recordNamesAny(fields, sweepOwnID) {
+			continue
+		}
+		found = true
+		assert.Equal(t, "a", fields["container_owner"], "record %q must carry the owner from the SAME read as the running state: %v", entry.Message, fields)
+	}
+	assert.True(t, found, "the healthy verification is recorded with its subject")
+
+	var psCalls, inspectCalls int
+	for _, line := range fd.invocations(t) {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		switch fields[0] {
+		case "ps":
+			psCalls++
+		case "inspect":
+			inspectCalls++
+		}
+	}
+	assert.Equal(t, 1, psCalls, "the health check must issue exactly one docker ps for this container, invocations:\n%s", strings.Join(fd.invocations(t), "\n"))
+	assert.Zero(t, inspectCalls, "the health check must never issue a separate docker inspect, invocations:\n%s", strings.Join(fd.invocations(t), "\n"))
 }

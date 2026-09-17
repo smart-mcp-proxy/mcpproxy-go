@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -343,4 +344,56 @@ func TestGetConnectionDiagnostics_ReverifiesOwnershipBeforePublishing(t *testing
 		assert.Equal(t, ownContainerID, diag["container_id"])
 		assert.Equal(t, "a", diag["container_owner"])
 	})
+}
+
+// TestGetConnectionDiagnostics_RunningComesFromTheVerifyReadAlone is codex
+// round 16 finding 1: GetConnectionDiagnostics verified ownership with one
+// `docker ps` read (ContainerMutator.Verify) and THEN ran a second,
+// separately-timed `docker inspect <id>` to decide container_running.
+// Between the two, another Docker client can relabel or rename the
+// container into a colliding server's namespace; the inspect would then
+// report the NOW-FOREIGN container's state while diagnostics kept
+// attributing it to this server (a TOCTOU gap, not merely a stale read).
+// Running must come from the Verify read itself (ContainerRow.Running),
+// never a follow-up command: the fixture is swapped to a relabelled,
+// stopped container right after the one `ps` call the fix makes, so a
+// second read — if the fix regressed and one was reintroduced — would see
+// that swapped data and this test would catch it either by a changed
+// result or by a second invocation showing up in the log.
+func TestGetConnectionDiagnostics_RunningComesFromTheVerifyReadAlone(t *testing.T) {
+	dockerCfg := &config.ServerConfig{Command: "docker", Args: []string{"run", "-i", "--rm", "mcp/example"}}
+
+	fd := installFakeDocker(t, ownFixtureNamed(ownContainerID, ownContainerName, "a"))
+	// After the fix's one `ps` read answers, swap to a relabelled, stopped
+	// container: any FURTHER read of this id would see foreign, not-running
+	// data.
+	fd.swapFixtureAfterPs(t, 1, ownFixtureNamed(ownContainerID, ownContainerName, "a-b"))
+
+	c, _, _ := newOwnershipClient("a", dockerCfg)
+	c.isDockerCommand = true
+	c.containerID = ownContainerID
+
+	diag := c.GetConnectionDiagnostics()
+
+	assert.Equal(t, ownContainerID, diag["container_id"])
+	assert.Equal(t, "a", diag["container_owner"],
+		"container_owner must come from the SAME read as container_running, not a later one that could see the swapped-in relabel")
+	assert.Equal(t, true, diag["container_running"],
+		"running must be read.Running() from the one ps row Verify already has, not a second command")
+
+	var psCalls, inspectCalls int
+	for _, line := range fd.invocations(t) {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		switch fields[0] {
+		case "ps":
+			psCalls++
+		case "inspect":
+			inspectCalls++
+		}
+	}
+	assert.Equal(t, 1, psCalls, "diagnostics must issue exactly one docker ps for this container, invocations:\n%s", strings.Join(fd.invocations(t), "\n"))
+	assert.Zero(t, inspectCalls, "diagnostics must never issue a separate docker inspect, invocations:\n%s", strings.Join(fd.invocations(t), "\n"))
 }

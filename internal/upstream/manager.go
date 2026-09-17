@@ -2266,6 +2266,14 @@ func (m *Manager) verifyContainerHealthy(client *managed.Client) (bool, error) {
 // only the server. Only a container ownership confirms is named, and then
 // with the container_owner read back at that same moment, never the
 // requesting server's name.
+//
+// Running state is decided from that SAME read, never a follow-up `docker
+// inspect` (codex round 16 finding 1): a second, separately timed command by
+// id alone reports whatever container holds that id AT THAT LATER MOMENT —
+// which can by then belong to someone else — while this function kept
+// treating it as healthy for serverName. ContainerRow.Running derives it
+// from the ps row Verify already read; row.Status (its human STATUS text)
+// is what the log/error messages below report.
 func (m *Manager) verifyDockerContainerHealthy(ctx context.Context, docker core.DockerCommand, serverName, containerID string) (bool, error) {
 	mutator := core.ContainerMutator{
 		Docker: docker,
@@ -2286,23 +2294,10 @@ func (m *Manager) verifyDockerContainerHealthy(ctx context.Context, docker core.
 		return false, fmt.Errorf("tracked container is no longer canonically owned by this server")
 	}
 
-	// Container exists and is canonically owned NOW: check it is running.
-	inspectCmd := docker(ctx, "inspect",
-		"--format", "{{.State.Running}},{{.State.Status}}",
-		row.ID)
-
-	output, err := inspectCmd.Output()
-	if err != nil {
-		return false, fmt.Errorf("container not found or unreachable: %w", err)
-	}
-
-	parts := strings.Split(strings.TrimSpace(string(output)), ",")
-	if len(parts) < 2 {
-		return false, fmt.Errorf("unexpected docker inspect output: %s", string(output))
-	}
-
-	running := parts[0] == "true"
-	status := parts[1]
+	// Container exists and is canonically owned NOW: check it is running,
+	// from the row this same Verify read — not a second command.
+	running := row.Running()
+	status := row.Status
 
 	if !running {
 		return false, fmt.Errorf("container not running (status: %s)", status)
