@@ -779,12 +779,22 @@ func sweepDocker(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, "docker", args...)
 }
 
-// readManagedContainers runs `docker ps -a --no-trunc` with the given
+// readManagedContainers runs `docker ps [-a] --no-trunc` with the given
 // filters and returns every row — full id, name and owner label as Docker
 // reports them — with no ownership applied; a row the format could not be
 // parsed is returned with an empty name and owner so it fails the predicate.
-func (m *Manager) readManagedContainers(ctx context.Context, filters ...string) ([]managedContainer, error) {
-	args := []string{"ps", "-a", "--no-trunc"}
+// includeStopped adds `-a`; without it only rows Docker reports as running
+// come back — the same includeStopped convention core.Client's own
+// listOwnedContainersFiltered uses (codex round 10, docker finding 1): a
+// caller that only cares whether something is CURRENTLY running, such as
+// HasDockerContainers, must not see an already-stopped row and misreport it
+// as still running.
+func (m *Manager) readManagedContainers(ctx context.Context, includeStopped bool, filters ...string) ([]managedContainer, error) {
+	args := []string{"ps"}
+	if includeStopped {
+		args = append(args, "-a")
+	}
+	args = append(args, "--no-trunc")
 	for _, filter := range filters {
 		args = append(args, "--filter", filter)
 	}
@@ -809,16 +819,18 @@ func (m *Manager) readManagedContainers(ctx context.Context, filters ...string) 
 	return rows, nil
 }
 
-// listOwnedManagedContainers runs `docker ps -a` with the given label filters
-// and returns only the rows canonically owned by a configured server:
-// com.mcpproxy.server=<raw> AND name ^mcpproxy-<sanitised(raw)>-[a-z0-9]{4}$
-// for the SAME configured server (core.ContainerOwnedByAny). The managed and
-// instance labels a sweep selects on are shared and copyable, so on their own
-// they are not ownership (Spec 105 FR-007 / D9, codex round 3): a foreign
-// container carrying them is neither mutated nor named — the skipped rows
-// are counted once at Warn, without ids or names.
-func (m *Manager) listOwnedManagedContainers(ctx context.Context, filters ...string) ([]managedContainer, error) {
-	rows, err := m.readManagedContainers(ctx, filters...)
+// listOwnedManagedContainers runs `docker ps [-a]` with the given label
+// filters and returns only the rows canonically owned by a configured
+// server: com.mcpproxy.server=<raw> AND name
+// ^mcpproxy-<sanitised(raw)>-[a-z0-9]{4}$ for the SAME configured server
+// (core.ContainerOwnedByAny). The managed and instance labels a sweep
+// selects on are shared and copyable, so on their own they are not
+// ownership (Spec 105 FR-007 / D9, codex round 3): a foreign container
+// carrying them is neither mutated nor named — the skipped rows are counted
+// once at Warn, without ids or names. includeStopped is passed straight
+// through to readManagedContainers.
+func (m *Manager) listOwnedManagedContainers(ctx context.Context, includeStopped bool, filters ...string) ([]managedContainer, error) {
+	rows, err := m.readManagedContainers(ctx, includeStopped, filters...)
 	if err != nil {
 		return nil, err
 	}
@@ -838,6 +850,23 @@ func (m *Manager) listOwnedManagedContainers(ctx context.Context, filters ...str
 			zap.Int("count", skipped))
 	}
 	return owned, nil
+}
+
+// logOwnerGroupedCounts writes one record per container_owner represented
+// in owned, each carrying that owner and how many rows it accounts for —
+// never a single aggregate. A sweep can select containers belonging to more
+// than one configured server, so one bare count cannot be bound to a
+// subject (Spec 105 D8, codex round 10 finding 2); level is m.logger.Info or
+// m.logger.Warn, matching the call site's own level for the record it
+// replaces.
+func (m *Manager) logOwnerGroupedCounts(msg string, level func(msg string, fields ...zap.Field), owned []managedContainer) {
+	counts := make(map[string]int, len(owned))
+	for _, row := range owned {
+		counts[row.Owner]++
+	}
+	for owner, count := range counts {
+		level(msg, zap.String("container_owner", owner), zap.Int("count", count))
+	}
 }
 
 // mutateOwnedManagedContainer runs op on one selected container through
@@ -882,7 +911,7 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 	m.logger.Info("Cleaning up all mcpproxy-managed Docker containers")
 
 	// Find all containers with our management label
-	owned, err := m.listOwnedManagedContainers(ctx, "label=com.mcpproxy.managed=true")
+	owned, err := m.listOwnedManagedContainers(ctx, true, "label=com.mcpproxy.managed=true")
 	if err != nil {
 		m.logger.Debug("No Docker containers found or Docker unavailable", zap.Error(err))
 		return
@@ -893,8 +922,7 @@ func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 		return
 	}
 
-	m.logger.Info("Found mcpproxy-managed containers to cleanup",
-		zap.Int("count", len(owned)))
+	m.logOwnerGroupedCounts("Found mcpproxy-managed containers to cleanup", m.logger.Info, owned)
 
 	// Grace period for graceful shutdown
 	gracePeriod := 10 * time.Second
@@ -978,7 +1006,7 @@ func (m *Manager) ForceCleanupAllContainers() {
 
 	// Find all containers with our management label AND our instance ID
 	instanceID := core.GetInstanceID()
-	owned, err := m.listOwnedManagedContainers(ctx,
+	owned, err := m.listOwnedManagedContainers(ctx, true,
 		"label=com.mcpproxy.managed=true",
 		fmt.Sprintf("label=com.mcpproxy.instance=%s", instanceID))
 	if err != nil {
@@ -991,8 +1019,7 @@ func (m *Manager) ForceCleanupAllContainers() {
 		return
 	}
 
-	m.logger.Warn("Force removing managed containers",
-		zap.Int("count", len(owned)))
+	m.logOwnerGroupedCounts("Force removing managed containers", m.logger.Warn, owned)
 
 	// Force remove each container (skip graceful stop), re-establishing
 	// ownership right before the rm (D9 moment-of-mutation rule). Use docker
@@ -1865,26 +1892,33 @@ func (m *Manager) DisconnectAll() error {
 	return nil
 }
 
-// HasDockerContainers checks if any Docker containers owned by THIS instance are actually running
+// HasDockerContainers reports whether any RUNNING Docker container this
+// instance manages (com.mcpproxy.managed=true, com.mcpproxy.instance=<this
+// instance>) is also canonically owned by a configured server —
+// core.ContainerOwnedByAny over listOwnedManagedContainers, the same
+// selection the shutdown and emergency sweeps apply. The instance/managed
+// labels alone are shared and copyable (Spec 105 D9): a foreign container
+// that copies them, or one whose owning server was since removed from
+// config, must not be reported as still running — that false positive drove
+// the runtime/server shutdown path into its 15-second cleanup-verification
+// wait, a second force-clean, and a false "still running after force
+// cleanup" report for a container mcpproxy neither started nor can act on
+// (codex round 10, docker finding 1). includeStopped is false: an
+// already-stopped row must not read as still running either.
 func (m *Manager) HasDockerContainers() bool {
-	// Check if any containers with our labels AND our instance ID are running
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	instanceID := core.GetInstanceID()
-	listCmd := exec.CommandContext(ctx, "docker", "ps", "-q",
-		"--filter", "label=com.mcpproxy.managed=true",
-		"--filter", fmt.Sprintf("label=com.mcpproxy.instance=%s", instanceID))
-
-	output, err := listCmd.Output()
+	owned, err := m.listOwnedManagedContainers(ctx, false,
+		"label=com.mcpproxy.managed=true",
+		fmt.Sprintf("label=com.mcpproxy.instance=%s", instanceID))
 	if err != nil {
 		// Docker not available or error listing - assume no containers
 		return false
 	}
 
-	// If output is not empty, we have running containers
-	containerIDs := strings.TrimSpace(string(output))
-	return containerIDs != ""
+	return len(owned) > 0
 }
 
 // GetStats returns statistics about upstream connections

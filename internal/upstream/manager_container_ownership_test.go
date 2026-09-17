@@ -42,8 +42,10 @@ import (
 // exec the bare name): `ps` answers from a TSV fixture honouring every
 // `--filter label=k[=v]` (joined with `|`, which no label here contains),
 // `--filter id=<id>` (a prefix match, as docker's is) and `--format` with {{.ID}}, {{.Names}} and
-// {{.Label "k"}}; `ps -q` answers the ids of the rows marked Running
-// (default: every container already stopped); stop/kill/rm exit 0 unless
+// {{.Label "k"}}; without `-a` only rows marked Running are answered — same
+// as real `docker ps` — regardless of `-q` (default: every container
+// already stopped, so a plain `ps` with no `-a` answers nothing until a row
+// sets Running: true); stop/kill/rm exit 0 unless
 // the verb is listed in the fail file (failVerbs). Every invocation is
 // appended to a log. A `ps.tsv.next` fixture (swapFixtureAfterNextPs)
 // replaces the fixture right after the next `ps` answers, so a container
@@ -102,12 +104,14 @@ fi
 shift
 format='{{.ID}}	{{.Names}}'
 quiet=0
+all=0
 filters=''
 idflt=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --format) format="$2"; shift 2 ;;
     -q) quiet=1; format='{{.ID}}'; shift ;;
+    -a) all=1; shift ;;
     --filter|-f)
       case "$2" in
         label=*) filters="$filters${2#label=}|" ;;
@@ -117,7 +121,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
-awk -F'\t' -v fmt="$format" -v flt="$filters" -v quiet="$quiet" -v idflt="$idflt" '
+awk -F'\t' -v fmt="$format" -v flt="$filters" -v all="$all" -v idflt="$idflt" '
 function repl(s, lit, val,    i, out) {
   out = ""
   while ((i = index(s, lit)) > 0) { out = out substr(s, 1, i - 1) val; s = substr(s, i + length(lit)) }
@@ -126,7 +130,7 @@ function repl(s, lit, val,    i, out) {
 BEGIN { nflt = split(flt, fl, "|") }
 {
   if (idflt != "" && index($1, idflt) != 1) next
-  if (quiet == 1 && $4 != "1") next
+  if (all == 0 && $4 != "1") next
   delete labels
   n = split($3, pairs, ",")
   for (i = 1; i <= n; i++) { eq = index(pairs[i], "="); if (eq > 0) labels[substr(pairs[i], 1, eq - 1)] = substr(pairs[i], eq + 1) }
@@ -338,6 +342,134 @@ func TestForceCleanupAllContainers_TouchesOnlyCanonicallyOwned(t *testing.T) {
 
 	assertSweepTouchesOnlyOwned(t, fd, mainLogs)
 	assert.Contains(t, fd.mutationsOf(t, sweepOwnID), "rm -f "+sweepOwnID)
+}
+
+// ownerCountsFromLog reduces a set of owner-grouped count records (each
+// carrying container_owner and count) to a map, failing the test if any
+// record in entries is missing either field — an aggregate with no owner
+// must never be among them (D8, codex round 10 finding 2).
+func ownerCountsFromLog(t *testing.T, entries []observer.LoggedEntry) map[string]int {
+	t.Helper()
+	counts := make(map[string]int, len(entries))
+	for _, entry := range entries {
+		fields := entry.ContextMap()
+		owner, _ := fields["container_owner"].(string)
+		require.NotEmpty(t, owner, "record %q carries no container_owner: %v", entry.Message, fields)
+		switch v := fields["count"].(type) {
+		case int64:
+			counts[owner] = int(v)
+		case int:
+			counts[owner] = v
+		default:
+			t.Fatalf("record %q carries no numeric count: %v", entry.Message, fields)
+		}
+	}
+	return counts
+}
+
+// twoOwnerSweepFixture: two containers, canonically owned by two DIFFERENT
+// configured servers (a and a/b — sanitised to a-b in the name, per
+// dockernaming.SanitizeServerName). Used to prove a sweep's "found"/"force
+// removing" count is owner-grouped rather than a single aggregate that
+// cannot be bound to either subject.
+func twoOwnerSweepFixture(instanceID string) []managerFakeContainer {
+	shared := func(server string) map[string]string {
+		return map[string]string{"com.mcpproxy.managed": "true", "com.mcpproxy.instance": instanceID, "com.mcpproxy.server": server}
+	}
+	return []managerFakeContainer{
+		{ID: "e5e5e5e5e5e5", Name: "mcpproxy-a-yz12", Labels: shared("a")},
+		{ID: "f6f6f6f6f6f6", Name: "mcpproxy-a-b-yz34", Labels: shared("a/b")},
+	}
+}
+
+// Codex round 10, docker finding 2 (D8): a sweep can select containers
+// belonging to more than one configured server, so a bare aggregate count
+// cannot be bound to a subject. The shutdown sweep's "Found ... to cleanup"
+// and the emergency sweep's "Force removing ..." records must instead be
+// owner-grouped: one record per Docker-read owner, each carrying its
+// container_owner and count — never a bare count with no owner.
+func TestSweepCounts_AreOwnerGrouped(t *testing.T) {
+	t.Run("cleanupAllManagedContainers", func(t *testing.T) {
+		installManagerFakeDocker(t, twoOwnerSweepFixture(core.GetInstanceID()))
+		m, mainLogs := newSweepManager(t)
+
+		m.cleanupAllManagedContainers(context.Background())
+
+		found := mainLogs.FilterMessage("Found mcpproxy-managed containers to cleanup").All()
+		require.Len(t, found, 2, "one record per Docker-read owner, not one aggregate")
+		assert.Equal(t, map[string]int{"a": 1, "a/b": 1}, ownerCountsFromLog(t, found))
+	})
+
+	t.Run("ForceCleanupAllContainers", func(t *testing.T) {
+		installManagerFakeDocker(t, twoOwnerSweepFixture(core.GetInstanceID()))
+		m, mainLogs := newSweepManager(t)
+
+		m.ForceCleanupAllContainers()
+
+		found := mainLogs.FilterMessage("Force removing managed containers").All()
+		require.Len(t, found, 2, "one record per Docker-read owner, not one aggregate")
+		assert.Equal(t, map[string]int{"a": 1, "a/b": 1}, ownerCountsFromLog(t, found))
+	})
+}
+
+// Codex round 10, docker finding 1 (D9): HasDockerContainers drove the
+// runtime/server shutdown wait and the "still running" report off the
+// shared, copyable managed/instance labels alone — it must instead apply
+// the same selection as the sweeps (listOwnedManagedContainers /
+// core.ContainerOwnedByAny), so a foreign container that copies those
+// labels, or one whose owning server was removed from config, is not
+// reported as still running.
+func TestHasDockerContainers_AppliesCanonicalOwnership(t *testing.T) {
+	t.Run("foreign container copying the shared labels - not reported", func(t *testing.T) {
+		installManagerFakeDocker(t, []managerFakeContainer{
+			{ID: sweepCopiedID, Name: sweepCopiedName, Running: true,
+				Labels: map[string]string{"com.mcpproxy.managed": "true", "com.mcpproxy.instance": core.GetInstanceID()}},
+		})
+		m, _ := newSweepManager(t)
+
+		assert.False(t, m.HasDockerContainers(), "a foreign container carrying only the shared labels must not count")
+	})
+
+	t.Run("orphaned container (server no longer configured) - not reported", func(t *testing.T) {
+		installManagerFakeDocker(t, []managerFakeContainer{
+			{ID: sweepAbID, Name: sweepAbName, Running: true,
+				Labels: map[string]string{"com.mcpproxy.managed": "true", "com.mcpproxy.instance": core.GetInstanceID(), "com.mcpproxy.server": "a-b"}},
+		})
+		m, _ := newSweepManager(t)
+
+		assert.False(t, m.HasDockerContainers(), "a-b is not configured; its container must not count")
+	})
+
+	t.Run("canonically owned and running - reported", func(t *testing.T) {
+		installManagerFakeDocker(t, []managerFakeContainer{
+			{ID: sweepOwnID, Name: sweepOwnName, Running: true,
+				Labels: map[string]string{"com.mcpproxy.managed": "true", "com.mcpproxy.instance": core.GetInstanceID(), "com.mcpproxy.server": "a"}},
+		})
+		m, _ := newSweepManager(t)
+
+		assert.True(t, m.HasDockerContainers(), "a's own canonically owned, running container must count")
+	})
+
+	t.Run("canonically owned but stopped - not reported", func(t *testing.T) {
+		installManagerFakeDocker(t, []managerFakeContainer{
+			{ID: sweepOwnID, Name: sweepOwnName, Running: false,
+				Labels: map[string]string{"com.mcpproxy.managed": "true", "com.mcpproxy.instance": core.GetInstanceID(), "com.mcpproxy.server": "a"}},
+		})
+		m, _ := newSweepManager(t)
+
+		assert.False(t, m.HasDockerContainers(), "a stopped container must not read as still running")
+	})
+
+	t.Run("docker unavailable - not reported", func(t *testing.T) {
+		fd := installManagerFakeDocker(t, []managerFakeContainer{
+			{ID: sweepOwnID, Name: sweepOwnName, Running: true,
+				Labels: map[string]string{"com.mcpproxy.managed": "true", "com.mcpproxy.instance": core.GetInstanceID(), "com.mcpproxy.server": "a"}},
+		})
+		fd.failVerbs(t, "ps")
+		m, _ := newSweepManager(t)
+
+		assert.False(t, m.HasDockerContainers())
+	})
 }
 
 // With nothing configured, the sweeps mutate nothing at all.
