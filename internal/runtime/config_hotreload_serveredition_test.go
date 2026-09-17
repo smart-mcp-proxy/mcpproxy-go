@@ -206,3 +206,78 @@ func TestDetectConfigChanges_ServerEditionNoFalsePositives(t *testing.T) {
 		assert.True(t, result.RequiresRestart)
 	})
 }
+
+// TestDetectConfigChanges_ServerEditionAccessLive pins
+// contracts/config-keys.md:67 (`server_edition.access` -> jsonEqual ->
+// `ChangedFields+="server_edition.access"` (live)) ahead of T074, which adds
+// `ServerEditionAccessConfig` (US1, T069, compile-red until T074).
+func TestDetectConfigChanges_ServerEditionAccessLive(t *testing.T) {
+	t.Run("group_servers edit is live", func(t *testing.T) {
+		oldCfg := serverEditionBase()
+		oldCfg.ServerEdition.Access = &config.ServerEditionAccessConfig{
+			GroupServers: map[string][]string{"eng": {"a"}},
+		}
+		newCfg := serverEditionBase()
+		newCfg.ServerEdition.Access = &config.ServerEditionAccessConfig{
+			GroupServers: map[string][]string{"eng": {"a"}, "ops": {"a", "b"}},
+		}
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		require.True(t, result.Success)
+		assert.Equal(t, []string{"server_edition.access"}, result.ChangedFields)
+		assert.False(t, result.RequiresRestart, "server_edition.access is read live through ServerEditionConfigProvider")
+		assert.True(t, result.AppliedImmediately)
+	})
+
+	t.Run("default_servers edit is live", func(t *testing.T) {
+		oldCfg := serverEditionBase()
+		oldCfg.ServerEdition.Access = &config.ServerEditionAccessConfig{DefaultServers: []string{"a"}}
+		newCfg := serverEditionBase()
+		newCfg.ServerEdition.Access = &config.ServerEditionAccessConfig{DefaultServers: []string{"a", "b"}}
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		assert.Equal(t, []string{"server_edition.access"}, result.ChangedFields)
+		assert.False(t, result.RequiresRestart)
+	})
+
+	t.Run("block added or removed", func(t *testing.T) {
+		oldCfg := serverEditionBase()
+		newCfg := serverEditionBase()
+		newCfg.ServerEdition.Access = &config.ServerEditionAccessConfig{DefaultServers: []string{"a"}}
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		assert.Equal(t, []string{"server_edition.access"}, result.ChangedFields)
+		assert.False(t, result.RequiresRestart)
+	})
+
+	t.Run("nil vs empty access not reported", func(t *testing.T) {
+		oldCfg := serverEditionBase()
+		oldCfg.ServerEdition.Access = nil
+		newCfg := serverEditionBase()
+		newCfg.ServerEdition.Access = &config.ServerEditionAccessConfig{}
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		assert.NotContains(t, result.ChangedFields, "server_edition.access")
+		assert.NotContains(t, result.ChangedFields, "server_edition")
+	})
+
+	t.Run("access edit alone does not pin the block-level restart key", func(t *testing.T) {
+		oldCfg := serverEditionBase()
+		newCfg := serverEditionBase()
+		newCfg.ServerEdition.Access = &config.ServerEditionAccessConfig{DefaultServers: []string{"a"}}
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		assert.NotContains(t, result.ChangedFields, "server_edition")
+	})
+
+	t.Run("access edit beside a restart-pinned key reports both", func(t *testing.T) {
+		oldCfg := serverEditionBase()
+		newCfg := serverEditionBase()
+		newCfg.ServerEdition.Access = &config.ServerEditionAccessConfig{DefaultServers: []string{"a"}}
+		newCfg.ServerEdition.PublicURL = "https://mcp2.example.com"
+
+		result := DetectConfigChanges(oldCfg, newCfg)
+		assert.ElementsMatch(t, []string{"server_edition", "server_edition.access"}, result.ChangedFields)
+		assert.True(t, result.RequiresRestart)
+	})
+}
