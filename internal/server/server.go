@@ -20,6 +20,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
@@ -168,11 +169,26 @@ type Server struct {
 	// MCP-32: observability manager (Prometheus /metrics + OTLP tracing).
 	// Nil when disabled; config-gated and off by default.
 	observability *observability.Manager
+
+	// auditSink is the Spec 107 audit line writer (WithAuditSink); nil in the
+	// personal-edition default and whenever audit_log is off.
+	auditSink audit.Sink
+}
+
+// ServerOption customises a Server at construction time (Spec 107 T103).
+// Distinct from MCPProxyOption (mcp.go), which customises the MCP proxy the
+// Server owns. Every existing caller passes none.
+type ServerOption func(*Server)
+
+// WithAuditSink installs the Spec 107 audit sink. nil (the personal-edition
+// default when audit_log is off) keeps every audit funnel a no-op.
+func WithAuditSink(sink audit.Sink) ServerOption {
+	return func(s *Server) { s.auditSink = sink }
 }
 
 // NewServer creates a new server instance
-func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
-	return NewServerWithConfigPath(cfg, "", logger)
+func NewServer(cfg *config.Config, logger *zap.Logger, opts ...ServerOption) (*Server, error) {
+	return NewServerWithConfigPath(cfg, "", logger, opts...)
 }
 
 // buildObservabilityConfig maps the file-level observability config (MCP-32)
@@ -209,7 +225,7 @@ func buildObservabilityConfig(cfg *config.Config) observability.Config {
 }
 
 // NewServerWithConfigPath creates a new server instance with explicit config path tracking
-func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.Logger) (*Server, error) {
+func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.Logger, opts ...ServerOption) (*Server, error) {
 	rt, err := runtime.New(cfg, configPath, logger)
 	if err != nil {
 		return nil, err
@@ -287,6 +303,11 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		infoScanSettleTimeout: informationalScanSettleTimeout,
 		infoScanSweepDelay:    baselineSweepStartDelay,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(server)
+		}
+	}
 	// Record the servers this process started with: they are the baseline
 	// sweep's job, and anything that shows up later is a NEW admission that gets
 	// its own informational scan. Seeded from the startup config (available
@@ -319,6 +340,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// MCP-32: give the MCP proxy access to observability for tool-call metrics
 	// and OTLP spans.
 	mcpProxy.SetObservability(obsManager)
+	// Spec 107 T103: the audit sink reaches the dispatch funnels through the
+	// proxy; nil keeps them no-ops.
+	mcpProxy.auditSink = server.auditSink
 
 	server.mcpProxy = mcpProxy
 
@@ -1070,7 +1094,12 @@ func (s *Server) Start(ctx context.Context) error {
 //	  mcp_describe_direct.go, mcp_visibility.go,
 //	  observability_edition_server.go, auth.AuthorizeServerOp and the
 //	  `authCtx != nil && !authCtx.IsAdmin()` gates in mcp.go.
+//
+// Spec 107 T103: the context is also tagged transport.ConnectionSourceStdio.
+// Without the tag GetConnectionSource defaults to TCP and the audit line
+// would report the stdio operator as caller.kind: api_key.
 func stdioAuthContext(ctx context.Context) context.Context {
+	ctx = transport.TagConnectionContext(ctx, transport.ConnectionSourceStdio)
 	return auth.WithAuthContext(ctx, auth.AdminContext())
 }
 

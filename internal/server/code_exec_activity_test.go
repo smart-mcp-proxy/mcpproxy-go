@@ -130,7 +130,7 @@ func TestSubCallActivityOutcome_ClassifiesEveryExit(t *testing.T) {
 func TestEmitSubCallActivity_NoProxyIsANoOp(t *testing.T) {
 	u := &upstreamToolCaller{logger: zap.NewNop()}
 	assert.NotPanics(t, func() {
-		u.emitSubCallActivity("time", "now", "req-test", nil, nil, errors.New("boom"), time.Now(), time.Millisecond)
+		u.emitSubCallActivity(context.Background(), "time", "now", "req-test", nil, nil, errors.New("boom"), time.Now(), time.Millisecond)
 	})
 }
 
@@ -202,7 +202,7 @@ func TestSubCallActivityDoesNotExposeDetectionSourceToSubscribers(t *testing.T) 
 	defer rt.UnsubscribeEvents(events)
 	caller := &upstreamToolCaller{proxy: proxy, parentCallID: "parent"}
 	response := strings.Repeat("x", subCallActivityResponseLimit+100) + " secret AKIA1234567890ABCDEF"
-	caller.emitSubCallActivity("github", "echo", "request", nil, mcp.NewToolResultText(response), nil, time.Now(), time.Millisecond)
+	caller.emitSubCallActivity(context.Background(), "github", "echo", "request", nil, mcp.NewToolResultText(response), nil, time.Now(), time.Millisecond)
 	select {
 	case event := <-events:
 		assert.NotContains(t, event.Payload["response"], "AKIA1234567890ABCDEF")

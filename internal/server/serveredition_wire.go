@@ -49,6 +49,10 @@ func wireServerEditionOAuth(s *Server, httpAPIServer *httpapi.Server) {
 		// Spec 107 T086: the same convert+mask composition core GET /activity
 		// applies, for GET /api/v1/user/activity to reuse.
 		ProjectActivity: httpAPIServer.ActivityProjector(),
+
+		// Spec 107 T103: the same sink the dispatch funnels write through,
+		// for the auth_event emitter (T107). nil when audit_log is off.
+		AuditSink: s.auditSink,
 	}
 
 	if err := serveredition.SetupAll(deps); err != nil {

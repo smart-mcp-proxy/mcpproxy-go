@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
@@ -278,6 +279,11 @@ type MCPProxyServer struct {
 	// MCP-32: observability manager for tool-call metrics + OTLP tracing. Nil
 	// when observability is disabled; all use sites must nil-guard.
 	observability *observability.Manager
+
+	// auditSink is the Spec 107 audit line writer (audit_funnel.go), copied
+	// from Server.auditSink at construction. nil = every funnel is a no-op
+	// (the personal-edition default and audit_log off).
+	auditSink audit.Sink
 
 	// Issue #969 (Phase 0): per-session note of the last retrieve_tools call
 	// that carried a spec-094 filter_diagnostics block, used to detect whether
@@ -772,7 +778,14 @@ func (p *MCPProxyServer) recordRealToolCallSuccess() {
 
 // emitActivityEvent safely emits an activity event if runtime is available
 // source indicates how the call was triggered: "mcp", "cli", or "api"
-func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, source string, args map[string]any) {
+//
+// Spec 107 (FR-012): ctx is the request context carrying the audit.Attempt.
+// Every dispatch path emits Started after its last pre-dispatch gate and
+// before the upstream call, so this is where the attempt's `authz allow`
+// line is written — ahead of the upstream call, so a crash mid-call keeps
+// the authorization record (research.md D6).
+func (p *MCPProxyServer) emitActivityToolCallStarted(ctx context.Context, serverName, toolName, sessionID, requestID, source string, args map[string]any) {
+	p.auditAuthz(ctx, "allow", "")
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		p.mainServer.runtime.EmitActivityToolCallStarted(serverName, toolName, sessionID, requestID, source, args)
 	}
@@ -790,10 +803,47 @@ func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessi
 // parentID is the correlation id of the code_execution whose sandbox issued this
 // sub-call (issue C) — empty for every top-level dispatch. It is the LAST
 // parameter on purpose: TestActivityCompletionNeverHardcodesSuccess pins the
-// position of `status`, so new parameters have to go after it.
-func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonDecisions []toonenc.Decision, parentID string) {
+// position of `status` (index 6 since ctx became the first parameter, Spec
+// 107 FR-012), so new parameters have to go after it.
+//
+// ctx is the request context carrying the audit.Attempt (Spec 107): this is
+// the funnel every dispatched call completes through, so it writes the
+// attempt's ONE `tool_call` line — outcome from status, the bounded
+// error_class from the typed error the path noted (auditNoteError), never
+// from errorMsg. A post-dispatch output block already wrote the line as
+// outcome:blocked; the attempt's dedup makes this call a no-op then.
+func (p *MCPProxyServer) emitActivityToolCallCompleted(ctx context.Context, serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonDecisions []toonenc.Decision, parentID string) {
+	p.auditToolCallFromStatus(ctx, status, durationMs, requestBytes, responseBytes)
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutputMetadata(toonDecisions), parentID)
+	}
+}
+
+// auditToolCallFromStatus maps an activity completion status onto the
+// tool_call outcome vocabulary and writes the line. A "blocked" completion
+// (the sandbox bridge's pre-dispatch policy refusal, emitSubCallRefused) is
+// an `authz deny` — the bridge wrote it before emitting — so only the
+// activity row is left to write here.
+func (p *MCPProxyServer) auditToolCallFromStatus(ctx context.Context, status string, durationMs int64, requestBytes, responseBytes int) {
+	if auditDispatchFromContext(ctx) == nil {
+		return
+	}
+	var reqBytes, respBytes *int
+	if requestBytes > 0 {
+		reqBytes = &requestBytes
+	}
+	if responseBytes > 0 {
+		respBytes = &responseBytes
+	}
+	switch status {
+	case storage.ActivityStatusSuccess:
+		p.auditToolCall(ctx, "success", "", "", durationMs, reqBytes, respBytes)
+	case storage.ActivityStatusError:
+		p.auditToolCall(ctx, "error", "", "", durationMs, reqBytes, respBytes)
+	case storage.ActivityStatusBlocked, storage.ActivityStatusRejected:
+		// Pre-dispatch refusals reach this funnel only from the sandbox
+		// bridge, which already wrote the authz deny; sheds are written by
+		// auditToolCallShed at the shed site. Nothing to add.
 	}
 }
 
@@ -812,7 +862,21 @@ func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, ses
 // the classification comes from the gate that fired rather than from parsing
 // the message it wrote. A key outside the enum is folded into "other" by the
 // store.
-func (p *MCPProxyServer) emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, reasonKey string) {
+//
+// ctx is the request context carrying the audit.Attempt (Spec 107 FR-012).
+// A "blocked" decision at a pre-dispatch gate is the attempt's `authz deny`
+// line (reasonKey is the line's reason; the prose never reaches it); a
+// "blocked" output_sanitisation / output_schema decision is post-dispatch
+// and becomes the attempt's `tool_call outcome:blocked` line — never a
+// second authz (FR-043(j)). Warnings and redactions write no audit line.
+func (p *MCPProxyServer) emitActivityPolicyDecision(ctx context.Context, serverName, toolName, sessionID, requestID, decision, reason, reasonKey string) {
+	if decision == "blocked" {
+		if isPostDispatchBlockKey(reasonKey) {
+			p.auditToolCall(ctx, "blocked", reasonKey, "", auditDurationMs(ctx), nil, nil)
+		} else {
+			p.auditAuthz(ctx, "deny", reasonKey)
+		}
+	}
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		p.mainServer.runtime.EmitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason)
 	}
@@ -2227,6 +2291,66 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// timestamp alone keeps the id unique.
 	requestID := mintActivityRequestID(serverName, actualToolName)
 
+	// Get optional args parameter - handle both new JSON string format and
+	// legacy object format. Parsed HERE, above the first gate, because the
+	// audit attempt below hashes the arguments (Spec 107 FR-015); a parse
+	// failure is still answered at the same point it always was (after the
+	// intent gates), so the refusal order is unchanged.
+	var args map[string]interface{}
+	var argsErrMsg string
+	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			args = nil
+			argsErrMsg = fmt.Sprintf("Invalid args_json format: %v", err)
+		}
+	}
+
+	// Fallback to legacy object format for backward compatibility
+	if args == nil && argsErrMsg == "" && request.Params.Arguments != nil {
+		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
+			if argsParam, ok := argumentsMap["args"]; ok {
+				if argsMap, ok := argsParam.(map[string]interface{}); ok {
+					args = argsMap
+				}
+			}
+		}
+	}
+
+	// Spec 057 / Profiles v2: the active profile (token pin > URL > session
+	// set_profile). Resolved once, up here, because the audit attempt stamps
+	// it; the profile-scope GATE itself still runs below, after the intent
+	// gates, exactly where it always did.
+	profileSlug, profileScope := p.resolveActiveProfile(ctx)
+
+	// Spec 107 T103: the audit attempt, installed BEFORE the first gate so
+	// every refusal below — the intent gates included — writes its `authz
+	// deny` line from it. Surface is the variant, or `rest` when the call
+	// entered through /api/v1/tools/call (the mount decides, never a header).
+	{
+		auditSurface := toolVariant
+		if meta, ok := reqcontext.GetRequestMeta(ctx); ok && meta.Mount == reqcontext.MountAPI {
+			auditSurface = auditSurfaceREST
+		}
+		var auditClientName, auditClientVersion string
+		if sid := getSessionID(); sid != "" {
+			if sessInfo := p.sessionStore.GetSession(sid); sessInfo != nil {
+				auditClientName, auditClientVersion = sessInfo.ClientName, sessInfo.ClientVersion
+			}
+		}
+		ctx = p.installAuditAttempt(ctx, auditAttemptSpec{
+			RequestID:     requestID,
+			SessionID:     getSessionID(),
+			Server:        serverName,
+			Tool:          actualToolName,
+			Operation:     contracts.ToolVariantToOperationType[toolVariant],
+			Surface:       auditSurface,
+			ClientName:    auditClientName,
+			ClientVersion: auditClientVersion,
+			Profile:       profileSlug,
+			Args:          args,
+		})
+	}
+
 	// Extract intent (optional - operation_type is inferred from tool variant)
 	intent, err := p.extractIntent(request)
 	if err != nil {
@@ -2240,7 +2364,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if logTool == "" {
 			logTool = toolName
 		}
-		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonIntentInvalid)
+		p.emitActivityPolicyDecision(ctx, logServer, logTool, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonIntentInvalid)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2256,27 +2380,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if logTool == "" {
 			logTool = toolName
 		}
-		p.emitActivityPolicyDecision(logServer, logTool, getSessionID(), requestID, "blocked", "Intent validation failed", telemetry.BlockReasonIntentRejected)
+		p.emitActivityPolicyDecision(ctx, logServer, logTool, getSessionID(), requestID, "blocked", "Intent validation failed", telemetry.BlockReasonIntentRejected)
 		return errResult, nil
 	}
 
-	// Get optional args parameter - handle both new JSON string format and legacy object format
-	var args map[string]interface{}
-	if argsJSON := request.GetString("args_json", ""); argsJSON != "" {
-		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Invalid args_json format: %v", err)), nil
-		}
-	}
-
-	// Fallback to legacy object format for backward compatibility
-	if args == nil && request.Params.Arguments != nil {
-		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
-			if argsParam, ok := argumentsMap["args"]; ok {
-				if argsMap, ok := argsParam.(map[string]interface{}); ok {
-					args = argsMap
-				}
-			}
-		}
+	// Arguments were parsed above the first gate (audit attempt); a parse
+	// failure is answered here, where it always was.
+	if argsErrMsg != "" {
+		return mcp.NewToolResultError(argsErrMsg), nil
 	}
 
 	// Handle upstream tools via upstream manager (requires server:tool format)
@@ -2292,15 +2403,15 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Spec 057 / Profiles v2: profile filter — runs independently of agent-scope
 	// so that unauthenticated /mcp/p/<slug> connections (AdminContext) are still
 	// filtered, and so a base /mcp session that ran set_profile is bounded too.
-	// The same resolution is the read_cache producer stamp (Spec 104
-	// FR-016a), captured here — at authorization time, before the upstream
-	// call — so a profile deleted or narrowed while the call is in flight
-	// cannot re-stamp a response that was authorized under the wider scope.
-	profileSlug, profileScope := p.resolveActiveProfile(ctx)
+	// The same resolution (taken once, above the intent gates, for the audit
+	// attempt) is the read_cache producer stamp (Spec 104 FR-016a), captured
+	// here — at authorization time, before the upstream call — so a profile
+	// deleted or narrowed while the call is in flight cannot re-stamp a
+	// response that was authorized under the wider scope.
 	producer := p.cacheAuthorizationWith(ctx, profileSlug, profileScope)
 	if profileScope != nil && !profileScope.Allows(serverName) {
 		errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2343,7 +2454,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// Check server scope
 		if !authCtx.CanAccessServer(serverName) {
 			errMsg := fmt.Sprintf("Server '%s' is not in scope for this agent token", serverName)
-			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenScope)
+			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenScope)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 		// Check permission scope — map tool variant to required permission
@@ -2358,7 +2469,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 		if requiredPerm != "" && !authCtx.HasPermission(requiredPerm) {
 			errMsg := fmt.Sprintf("Insufficient permissions: '%s' requires '%s' permission", toolVariant, requiredPerm)
-			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
+			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	}
@@ -2396,7 +2507,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// closed (internal/telemetry/preflight_counters.go, the anonymity
 		// contract), so the closest existing non-token member is reused
 		// rather than widening it.
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2413,7 +2524,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		targetPerm := tierForAnnotations(annotations, annotationsFound)
 		if targetPerm != "" && !authCtx.HasPermission(targetPerm) {
 			errMsg := fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", targetPerm, serverName, actualToolName)
-			p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
+			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	}
@@ -2437,7 +2548,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if errResult := p.validateIntentAgainstServer(intent, toolVariant, serverName, actualToolName, annotations); errResult != nil {
 		// Record activity error for server annotation mismatch
 		reason := fmt.Sprintf("Intent rejected: tool variant '%s' conflicts with server annotations for %s:%s", toolVariant, serverName, actualToolName)
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", reason, telemetry.BlockReasonIntentRejected)
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", reason, telemetry.BlockReasonIntentRejected)
 		return errResult, nil
 	}
 
@@ -2485,7 +2596,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			zap.String("server_name", serverName))
 
 		// Emit policy decision event for quarantine block
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", "Server is quarantined for security review", telemetry.BlockReasonServerQuarantined)
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", "Server is quarantined for security review", telemetry.BlockReasonServerQuarantined)
 
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, activityArgs), nil
@@ -2497,7 +2608,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			zap.String("server_name", serverName),
 			zap.String("tool_name", actualToolName))
 
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked",
 			"Tool is pending approval (new unapproved tool)", telemetry.BlockReasonToolPendingApproval)
 
 		return toolPendingApprovalResult(serverName, actualToolName, gate.approval), nil
@@ -2506,7 +2617,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			zap.String("server_name", serverName),
 			zap.String("tool_name", actualToolName))
 
-		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked",
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked",
 			"Tool description/schema changed since last approval", telemetry.BlockReasonToolChanged)
 
 		return toolChangedApprovalResult(serverName, actualToolName, gate.approval), nil
@@ -2514,7 +2625,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	if !gate.callable() {
 		errMsg := gate.blockedMessage()
-		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2538,8 +2649,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 				intentMap = intent.ToMap()
 			}
 			errMsg := fmt.Sprintf("invalid arguments for %s: %s", toolName, detail)
-			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+			auditNoteErrorClass(ctx, audit.ErrorClassValidation)
+			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
+			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 			return invalidParamsErrorResult(toolName, meta.ParamsJSON, detail), nil
 		}
 	}
@@ -2560,8 +2672,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			if intent != nil {
 				intentMap = intent.ToMap()
 			}
-			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+			auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
+			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
+			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil
 		}
 		// Spec 105 FR-009 (research D4), astra r1 I3: the identity gate
@@ -2588,7 +2701,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			p.logger.Debug("handleCallToolVariant: refusing unresolved tool identity (live client connected, snapshot stale)",
 				zap.String("server_name", serverName),
 				zap.String("tool_name", actualToolName))
-			p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 		// The dispatch below is pinned to the generation this check
@@ -2616,13 +2729,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if intent != nil {
 			intentMap = intent.ToMap()
 		}
-		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+		auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
+		p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
+		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	// Emit activity started event with determined source
-	p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
+	p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 
 	// Call tool via upstream manager — use original args without auth metadata.
 	// MCP-32: wrap with an OTLP span (tool call + upstream hop) and record
@@ -2712,6 +2826,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 				zap.String("reason", string(limitErr.Reason)),
 				zap.Int("limit", limitErr.Limit))
 			recordShed(ctx, limitErr)
+			// Spec 107: the shed is this attempt's tool_call (outcome
+			// rejected) — the limiter runs after every gate, so never a
+			// second authz (research.md D6).
+			p.auditToolCallShed(ctx, limitErr, duration.Milliseconds())
 
 			var shedIntentMap map[string]interface{}
 			if intent != nil {
@@ -2743,8 +2861,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			if intent != nil {
 				intentMap = intent.ToMap()
 			}
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
-			p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+			auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
+			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 
@@ -2775,7 +2894,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if intent != nil {
 			intentMap = intent.ToMap()
 		}
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+		auditNoteError(ctx, err)
+		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
 
 		// Spec 024: Emit internal tool call event for error
 		internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
@@ -2905,7 +3025,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if intent != nil {
 		intentMap = intent.ToMap()
 	}
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes, toonDetectionText, toonDecisions, "")
+	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes, toonDetectionText, toonDecisions, "")
 
 	// Spec 024: Emit internal tool call event. It carries the SAME classification
 	// as the tool_call record above (issue #935) — the two describe one dispatch,
@@ -3058,7 +3178,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.String("server_name", serverName))
 
 		// Emit policy decision event for quarantine block
-		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", "Server is quarantined for security review", telemetry.BlockReasonServerQuarantined)
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", "Server is quarantined for security review", telemetry.BlockReasonServerQuarantined)
 
 		// Server is in quarantine - return security warning with tool analysis
 		return p.handleQuarantinedToolCall(ctx, serverName, actualToolName, args), nil
@@ -3069,18 +3189,18 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	switch gate.lockStatus {
 	case storage.ToolApprovalStatusPending:
-		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked",
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked",
 			"Tool is pending approval (new unapproved tool)", telemetry.BlockReasonToolPendingApproval)
 		return toolPendingApprovalResult(serverName, actualToolName, gate.approval), nil
 	case storage.ToolApprovalStatusChanged:
-		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked",
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked",
 			"Tool description/schema changed since last approval", telemetry.BlockReasonToolChanged)
 		return toolChangedApprovalResult(serverName, actualToolName, gate.approval), nil
 	}
 
 	if !gate.callable() {
 		errMsg := gate.blockedMessage()
-		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -3104,8 +3224,8 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 				errMsg = fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
 			}
 			// Log the early failure to activity (Spec 024)
-			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil, "")
+			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
+			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil, "")
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	} else {
@@ -3113,8 +3233,8 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.String("server_name", serverName))
 		errMsg := fmt.Sprintf("No client found for server: %s", serverName)
 		// Log the early failure to activity (Spec 024)
-		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil, "")
+		p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
+		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil, "")
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -3123,7 +3243,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		zap.String("server_name", serverName))
 
 	// Emit activity started event with determined source
-	p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
+	p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 
 	// Call tool via upstream manager with circuit breaker pattern
 	startTime := time.Now()
@@ -3250,7 +3370,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 
 		// Emit activity completed event for error with determined source (legacy - no intent)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "", "", 0, 0, "", nil, "")
+		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "", "", 0, 0, "", nil, "")
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -3346,7 +3466,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Emit activity completed event with determined source (legacy - no intent).
 	// Status comes from the upstream result, not from err alone (issue #935).
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil, "")
+	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil, "")
 
 	return forwarded, nil
 }
@@ -7401,7 +7521,7 @@ func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, 
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
-	p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, d.decision, d.reason, telemetry.BlockReasonOutputSchema)
+	p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, d.decision, d.reason, telemetry.BlockReasonOutputSchema)
 	if d.block {
 		return mcp.NewToolResultError("output schema validation failed: " + d.reason)
 	}

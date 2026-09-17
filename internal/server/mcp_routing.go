@@ -15,6 +15,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -416,15 +417,44 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			requestID = mintActivityRequestID(serverName, toolName)
 		}
 
+		// Get arguments from the request (pure; read here so the audit
+		// attempt below can hash them before the first gate).
+		args := request.GetArguments()
+
+		// Spec 107 T103: the audit attempt, installed BEFORE the first gate.
+		// The operation is the tier this catalog entry's annotations derive
+		// (the same tier the permission gate below authorizes against).
+		profileSlug, profileScope := p.resolveActiveProfile(ctx)
+		{
+			var auditClientName, auditClientVersion string
+			if sessionID != "" {
+				if sessInfo := p.sessionStore.GetSession(sessionID); sessInfo != nil {
+					auditClientName, auditClientVersion = sessInfo.ClientName, sessInfo.ClientVersion
+				}
+			}
+			ctx = p.installAuditAttempt(ctx, auditAttemptSpec{
+				RequestID:     requestID,
+				SessionID:     sessionID,
+				Server:        serverName,
+				Tool:          toolName,
+				Operation:     contracts.ToolVariantToOperationType[contracts.DeriveCallWith(annotations)],
+				Surface:       auditSurfaceDirect,
+				ClientName:    auditClientName,
+				ClientVersion: auditClientVersion,
+				Profile:       profileSlug,
+				Args:          args,
+			})
+		}
+
 		// Spec 057 / Profiles v2: the active profile (token pin > URL > session
 		// set_profile) gates direct-mode dispatch exactly as it gates
 		// call_tool_* (mcp.go handleCallToolVariant). It runs independently of
 		// the agent-token gates below so an unauthenticated /mcp/p/<slug>
 		// connection is filtered too, and it runs FIRST so a profile-pinned
 		// token cannot reach a server outside its pin through this routing mode.
-		if _, profileScope := p.resolveActiveProfile(ctx); profileScope != nil && !profileScope.Allows(serverName) {
+		if profileScope != nil && !profileScope.Allows(serverName) {
 			errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
-			p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
+			p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 
@@ -438,7 +468,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 				// since issue #969, no availability counter either. Emit the
 				// same policy decision the call_tool_* variants emit at the
 				// equivalent gate so the funnel has no blind spot.
-				p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonTokenScope)
+				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonTokenScope)
 				return mcp.NewToolResultError(errMsg), nil
 			}
 
@@ -451,13 +481,11 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 
 			if !authCtx.HasPermission(requiredPerm) {
 				errMsg := fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", requiredPerm, serverName, toolName)
-				p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
+				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
 				return mcp.NewToolResultError(errMsg), nil
 			}
 		}
 
-		// Get arguments from the request
-		args := request.GetArguments()
 		enrichedArgs := injectAuthMetadata(ctx, args)
 
 		// Enforce direct-mode callability before emitting a tool-started event or
@@ -467,7 +495,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// pending/changed approval, or plain not-callable) rather than from
 		// this one funnel site — see directBlockReasonKey.
 		if blocked, reasonKey := p.directToolCallabilityBlockWithReason(ctx, serverName, toolName, enrichedArgs); blocked != nil {
-			p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable", reasonKey)
+			p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable", reasonKey)
 			return blocked, nil
 		}
 
@@ -501,6 +529,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 				zap.String("server_name", serverName),
 				zap.String("tool_name", toolName),
 				zap.String("detail", detail))
+			auditNoteErrorClass(ctx, audit.ErrorClassValidation)
 
 			// The started/completed-error PAIR, not a bare rejection. A call
 			// rejected here never reaches the unconditional
@@ -509,8 +538,8 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			// observability blind spot issue #969 established this handler must
 			// not have. Shapes match the sibling upstream-error emission a few
 			// lines down, so the two are one series to a consumer.
-			p.emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
-			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", errMsg,
+			p.emitActivityToolCallStarted(ctx, serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
+			p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", errMsg,
 				time.Since(startTime).Milliseconds(), enrichedArgs, "", false, "", nil,
 				contracts.ContentTrustForTool(annotations), "", 0, 0, "", nil, "")
 
@@ -527,7 +556,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		p.markSessionWorked(ctx, sessionID)
 
 		// Emit activity event
-		p.emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
+		p.emitActivityToolCallStarted(ctx, serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
 
 		// Call upstream. Spec 105 FR-009 "stale generation" (codex r3 D2):
 		// the callability gate above ran against the server's LIVE client;
@@ -561,6 +590,9 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			// limiter seam already wrote the "rejected" one).
 			if limitErr, isShed := asShed(err); isShed {
 				recordShed(ctx, limitErr)
+				// Spec 107: the shed is this attempt's tool_call
+				// (outcome rejected), never a second authz.
+				p.auditToolCallShed(ctx, limitErr, durationMs)
 				return shedToolResult(limitErr), nil
 			}
 			// The generation moved before the transport: nothing reached
@@ -568,12 +600,14 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			// as the call_tool_* refusal, with the started record closed.
 			if errors.Is(err, managed.ErrConnectionGenerationChanged) {
 				errMsg := unresolvedToolIdentityMessage(serverName, toolName, false)
-				p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", errMsg, durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
-				p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+				auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
+				p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", errMsg, durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
+				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 				return mcp.NewToolResultError(errMsg), nil
 			}
 			// Emit error activity
-			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
+			auditNoteError(ctx, err)
+			p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
 			return mcp.NewToolResultError(fmt.Sprintf("Error calling %s:%s: %v", serverName, toolName, err)), nil
 		}
 
@@ -653,7 +687,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// Spec 069 A1: pre-truncation sizes; result was measured before the truncation loop above.
 		routingResponseBytes := rawByteSize(result)
 		routingRequestBytes := rawByteSize(enrichedArgs)
-		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil, "")
+		p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil, "")
 
 		return forwarded, nil
 	}
