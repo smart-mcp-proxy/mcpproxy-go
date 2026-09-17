@@ -830,3 +830,130 @@ func TestProfileRequests_NeverBuildTheIndexOverARuntime(t *testing.T) {
 	require.Zero(t, srv.profileIndexes.lazyBuilds.Load(), "no request over a runtime may build the index")
 	require.Zero(t, srv.mcpProxy.profileIndexes.lazyBuilds.Load(), "set_profile over a runtime decides with the main Server's index, never its own")
 }
+
+// TestProfileIndexCache_Acquire_RecoversAfterConfigMovesBetweenReads (Spec 105
+// PR D review round 11, MUST-FIX): profileMiddleware and set_profile's
+// base-endpoint path used to read runtime.Config() ONCE and only then call
+// Published against that frozen read — a request paused across two
+// publications between those two steps found neither the latest nor the
+// previous prepared pair and fell back to For, which builds the whole fleet
+// inline. Acquire closes the window structurally by re-reading readCfg() on
+// EVERY retry instead of matching one frozen read: here the first call
+// observes A, but by the time Acquire checks Published(A) two publications
+// have already landed (B, then C) so the match misses; the retry re-reads
+// readCfg(), which now answers the settled C, and Acquire returns C's own
+// pair — without ever falling through to a build.
+func TestProfileIndexCache_Acquire_RecoversAfterConfigMovesBetweenReads(t *testing.T) {
+	cfgA := &config.Config{Profiles: []config.ProfileConfig{{Name: "a"}}}
+	cfgB := &config.Config{Profiles: []config.ProfileConfig{{Name: "b"}}}
+	cfgC := &config.Config{Profiles: []config.ProfileConfig{{Name: "c"}}}
+
+	var c profileIndexCache
+	c.warmPublishing(cfgA)
+
+	calls := 0
+	readCfg := func() *config.Config {
+		calls++
+		if calls == 1 {
+			// Simulate two publications racing between this request's own
+			// runtime.Config() read (which returned A) and Acquire's match
+			// against it: by the time the caller's first read is used, warm
+			// and previous have already moved past A entirely.
+			c.warmPublishing(cfgB)
+			c.warmPublishing(cfgC)
+			return cfgA
+		}
+		return cfgC
+	}
+
+	idx := c.Acquire(readCfg)
+	require.NotNil(t, idx, "Acquire must recover once readCfg answers a snapshot the cache still has a pair for")
+	require.Same(t, cfgC, idx.cfg)
+	require.Equal(t, 2, calls, "the first (stale) read misses; the second (fresh) read hits")
+	require.Zero(t, c.lazyBuilds.Load(), "a recovered match must never fall through to a build")
+}
+
+// TestProfileIndexCache_Acquire_ExhaustsBoundedRetriesWithoutBuilding (Spec
+// 105 PR D review round 11, MUST-FIX): when readCfg keeps answering a
+// snapshot the cache never warmed a pair for — a publication storm that
+// outruns the retry loop entirely — Acquire gives up after its bounded
+// budget and returns nil. It must NEVER fall through to For: a miss is for
+// the caller to fail closed (scoped) or rebuild explicitly (administrator),
+// never something Acquire itself pays fleet-sized cost for.
+func TestProfileIndexCache_Acquire_ExhaustsBoundedRetriesWithoutBuilding(t *testing.T) {
+	neverWarmed := &config.Config{Profiles: []config.ProfileConfig{{Name: "never-published"}}}
+
+	var c profileIndexCache
+	c.warmPublishing(&config.Config{Profiles: []config.ProfileConfig{{Name: "other"}}})
+
+	calls := 0
+	idx := c.Acquire(func() *config.Config {
+		calls++
+		return neverWarmed
+	})
+
+	require.Nil(t, idx, "Acquire must give up, not build, once its retry budget is exhausted")
+	require.Equal(t, profileIndexAcquireRetries, calls, "Acquire must retry exactly its bounded budget, no more and no less")
+	require.Zero(t, c.lazyBuilds.Load(), "Acquire must never build — a miss is the caller's to handle")
+}
+
+// TestProfileMiddleware_AcquireMissFailsClosedForScopedFallsBackForAdmin
+// (Spec 105 PR D review round 11, MUST-FIX): when Acquire cannot pair a
+// config with its index at all (profiles == nil reaching serveProfileURL —
+// the same shape as a publication storm outrunning it), a scoped caller must
+// be refused with the uniform, fleet-independent, zero-build refusal; only
+// an administrator-shaped caller — not timing-contract-bound, SC-005 —
+// falls back to a fresh build so its pre-105 behaviour (including the "no
+// profiles configured" branch here, since the bare Server this test drives
+// has no runtime config to build from) is unchanged.
+func TestProfileMiddleware_AcquireMissFailsClosedForScopedFallsBackForAdmin(t *testing.T) {
+	srv := &Server{logger: zap.NewNop()}
+	reached := false
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { reached = true })
+
+	scoped := &auth.AuthContext{Type: auth.AuthTypeAgent, AllowedServers: []string{"srv"}}
+	req := httptest.NewRequest(http.MethodPost, "/mcp/p/anything", http.NoBody)
+	req = req.WithContext(auth.WithAuthContext(req.Context(), scoped))
+	rec := httptest.NewRecorder()
+	srv.serveProfileURL(rec, req, nil, next)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.False(t, reached, "a scoped caller must fail closed when no (index, snapshot) pair could be acquired")
+	require.Zero(t, srv.profileIndexes.lazyBuilds.Load(), "the fail-closed refusal must never build an index")
+
+	admin := auth.AdminContext()
+	req2 := httptest.NewRequest(http.MethodPost, "/mcp/p/anything", http.NoBody)
+	req2 = req2.WithContext(auth.WithAuthContext(req2.Context(), admin))
+	rec2 := httptest.NewRecorder()
+	srv.serveProfileURL(rec2, req2, nil, next)
+	require.Equal(t, http.StatusNotFound, rec2.Code)
+	require.Contains(t, rec2.Body.String(), "no profiles configured",
+		"an administrator falls back to a fresh build (pre-105 behaviour), not the uniform scoped refusal")
+}
+
+// TestHandleSetProfile_AcquireMissFailsClosedForScopedFallsBackForAdmin
+// (Spec 105 PR D review round 11, MUST-FIX): the base /mcp endpoint's
+// set_profile mirrors the URL gate's fail-closed/fall-back split when
+// profileIndexCurrent's Acquire call cannot pair a config with its index — a
+// scoped caller gets nil back and refuses uniformly (no build), while an
+// administrator falls back to a fresh build and proceeds normally.
+func TestHandleSetProfile_AcquireMissFailsClosedForScopedFallsBackForAdmin(t *testing.T) {
+	cfg := &config.Config{
+		Servers:  []*config.ServerConfig{{Name: "research-srv"}},
+		Profiles: []config.ProfileConfig{{Name: "research", Servers: []string{"research-srv"}}},
+	}
+	p := &MCPProxyServer{logger: zap.NewNop(), sessionStore: NewSessionStore(zap.NewNop()), config: cfg}
+	srv := &Server{logger: zap.NewNop()} // no runtime: currentConfig() falls back to p.config
+	p.mainServer = srv
+	// srv.profileIndexes is never warmed for cfg, so Acquire(p.currentConfig)
+	// misses on every one of its bounded retries — the exhaustion path.
+
+	scopedRes := callSetProfileTool(t, p, setProfileScopedCtx("s-scoped", "research-srv"), "research")
+	require.True(t, scopedRes.IsError, "a scoped caller must fail closed when Acquire cannot pair a config with its index")
+	require.Contains(t, setProfileResultText(t, scopedRes), "unknown profile",
+		"the fail-closed refusal must be the same uniform wording any other non-selectable slug gets")
+	require.Zero(t, srv.profileIndexes.lazyBuilds.Load(), "the scoped fail-closed path must never build an index")
+
+	adminRes := callSetProfileTool(t, p, setProfileAdminCtx("s-admin"), "research")
+	require.False(t, adminRes.IsError, "an administrator falls back to a fresh build (pre-105 behaviour), not the uniform scoped refusal")
+	require.Positive(t, srv.profileIndexes.lazyBuilds.Load(), "the administrator fallback builds explicitly, distinct from the scoped path above")
+}

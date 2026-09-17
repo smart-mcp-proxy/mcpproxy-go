@@ -81,6 +81,15 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	// serveProfileURL already admitted the request against, injected on the
 	// context — never a fresh, independent read (round 9 MUST-FIX 1).
 	profiles := p.profileIndexCurrent(ctx)
+	if profiles == nil {
+		// Acquire's bounded retries could not pair a config snapshot with its
+		// index (a publication storm outran them); profileIndexCurrent only
+		// ever returns nil for a scoped caller — an administrator falls back
+		// to a fresh build instead. Fail closed with the exact uniform
+		// refusal every other non-selectable slug gets: no state change, no
+		// disclosure, no build (Spec 105 PR D review round 11, MUST-FIX).
+		return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug)), nil
+	}
 	cfg := profiles.cfg
 
 	// A non-empty slug must name a configured profile the caller may select
@@ -681,6 +690,49 @@ func (c *profileIndexCache) For(cfg *config.Config) *profileIndex {
 	return idx
 }
 
+// profileIndexAcquireRetries bounds Acquire's read-and-match loop. Each
+// iteration is O(1) (Published never builds), so the bound caps the cost of
+// even a publication storm at O(retries) — never a profile-index build.
+const profileIndexAcquireRetries = 8
+
+// Acquire returns the prepared pair whose snapshot equals readCfg()'s OWN
+// result, read and matched atomically inside the cache — never a separate
+// read-then-match at the call site, which a publication landing strictly
+// between the two steps could invalidate before Published ever ran (Spec 105
+// PR D review round 11, MUST-FIX). profileMiddleware and profileIndexCurrent
+// previously read runtime.Config() once, then called Published against that
+// stale read; a request paused across two publications between those two
+// steps found neither the latest nor the previous prepared pair, and fell
+// back to For, which builds the whole fleet inline — fleet-sized work behind
+// a status/body identical to the constant-cost refusal every other miss
+// gets, exactly the timing-class disclosure D17 exists to close.
+//
+// Acquire closes it structurally: each iteration re-reads readCfg() (never
+// reusing a prior read) and asks Published for THAT read's own snapshot, so
+// a publication racing the previous iteration is simply observed on the
+// next one — the loop chases a moving config instead of freezing a read
+// that may already be stale by the time it is used. It returns nil only
+// when readCfg keeps outrunning the bounded retry budget, which the
+// pre-publish observer makes structurally near-impossible on any snapshot a
+// reader actually reaches (Published matches on the very first iteration in
+// the overwhelmingly common case — no race in flight).
+//
+// Callers decide what a miss means for their own caller shape: production
+// call sites (profileMiddleware, profileIndexCurrent for the base /mcp
+// endpoint) refuse a scoped caller uniformly on nil (fail closed, O(1),
+// never a build) and fall back to For for an administrator-shaped caller,
+// whose timing is not contract-bound (SC-005). For itself remains the
+// fallback for bare test servers with no runtime to read atomically at all.
+func (c *profileIndexCache) Acquire(readCfg func() *config.Config) *profileIndex {
+	for i := 0; i < profileIndexAcquireRetries; i++ {
+		cfg := readCfg()
+		if idx := c.Published(cfg); idx != nil {
+			return idx
+		}
+	}
+	return nil
+}
+
 // setProfileServerTool wraps buildSetProfileTool as a ServerTool for routing-mode registration.
 func (p *MCPProxyServer) setProfileServerTool() mcpserver.ServerTool {
 	return mcpserver.ServerTool{Tool: buildSetProfileTool(), Handler: p.handleSetProfile}
@@ -698,25 +750,37 @@ func (p *MCPProxyServer) setProfileServerTool() mcpserver.ServerTool {
 // used for the very same request (Spec 105 PR D review round 9, MUST-FIX 1).
 //
 // Otherwise (the plain /mcp endpoint, which admits no snapshot of its own)
-// the pair is taken from the main Server's cache, matched against the SAME
-// runtime.Config() read the /mcp/p/<slug> gate would make right now
-// (Published — round 7/8: taking the cache's unconditional latest pair here
-// let set_profile admit and scope a profile that existed only in the config
-// about to be published, one publication ahead of what resolveActiveProfileIn
-// would independently read moments later), so the call never builds an index
-// and never pairs a snapshot with an index built from another one. A proxy
-// with no warmed main Server (bare test servers) falls back to a lazily
-// built index over its construction config, keyed by identity.
+// the pair is taken from the main Server's cache via Acquire, which reads
+// currentConfig() and matches it atomically inside the cache (round 7/8:
+// taking the cache's unconditional latest pair here let set_profile admit
+// and scope a profile that existed only in the config about to be
+// published, one publication ahead of what resolveActiveProfileIn would
+// independently read moments later; round 11: reading currentConfig() and
+// matching it in two separate steps — as a bare Published(currentConfig())
+// call did — left a window in which a request paused between the two steps
+// missed both prepared pairs and fell back to For, building the whole fleet
+// inline for a scoped caller's refusal), so the call never builds an index
+// on a scoped path and never pairs a snapshot with an index built from
+// another one. On the rare exhaustion of Acquire's bounded retries (a
+// publication storm outrunning the loop), a scoped caller gets nil here —
+// handleSetProfile fails closed with the same uniform refusal any other
+// non-selectable slug gets, O(1), never a build; an administrator-shaped
+// caller is not timing-contract-bound (SC-005) and falls back to a fresh
+// build over currentConfig(). A proxy with no warmed main Server (bare test
+// servers) falls back to a lazily built index over its construction config,
+// keyed by identity.
 func (p *MCPProxyServer) profileIndexCurrent(ctx context.Context) *profileIndex {
 	if injected, ok := profileRequestIndexFromContext(ctx); ok {
 		return injected
 	}
 	if p.mainServer != nil {
-		published := p.currentConfig()
-		if idx := p.mainServer.profileIndexes.Published(published); idx != nil {
+		if idx := p.mainServer.profileIndexes.Acquire(p.currentConfig); idx != nil {
 			return idx
 		}
-		return p.mainServer.profileIndexes.For(published)
+		if auth.IsScopedCaller(ctx) {
+			return nil
+		}
+		return p.mainServer.profileIndexes.For(p.currentConfig())
 	}
 	return p.profileIndexes.For(p.currentConfig())
 }

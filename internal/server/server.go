@@ -2354,22 +2354,26 @@ func withHSTS(next http.Handler) http.Handler {
 func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Over a live runtime the (index, snapshot) pair must match this
-		// request's own runtime.Config() read exactly — Published, never the
-		// cache's unconditional latest pair, which can sit one publication
-		// AHEAD of runtime.Config() for the microseconds between the
-		// pre-publish observer warming it and configsvc storing it (round
-		// 7/8: admitting against that ahead snapshot let a scoped caller's
-		// effective scope split from what resolveActiveProfileIn would
-		// independently resolve moments later against the still-published
-		// one). A bare Server with no runtime (tests) has no runtime.Config()
-		// to match, so it falls back to whatever the warm path last set.
+		// request's own runtime.Config() read exactly — Acquire, never a
+		// separate read-then-match. The cache's unconditional latest pair
+		// can sit one publication AHEAD of runtime.Config() for the
+		// microseconds between the pre-publish observer warming it and
+		// configsvc storing it (round 7/8: admitting against that ahead
+		// snapshot let a scoped caller's effective scope split from what
+		// resolveActiveProfileIn would independently resolve moments later
+		// against the still-published one). Reading runtime.Config() once
+		// and matching it afterward has its own window: a request paused
+		// between those two steps across two publications misses both
+		// prepared pairs and falls back to For, building the whole fleet
+		// inline for a scoped caller's refusal (round 11 MUST-FIX). Acquire
+		// closes it by re-reading runtime.Config() on every retry instead of
+		// freezing one read that may already be stale by the time it is
+		// matched. A bare Server with no runtime (tests) has no
+		// runtime.Config() to match, so it falls back to whatever the warm
+		// path last set.
 		var profiles *profileIndex
 		if s.runtime != nil {
-			published := s.runtime.Config()
-			profiles = s.profileIndexes.Published(published)
-			if profiles == nil {
-				profiles = s.profileIndexes.For(published)
-			}
+			profiles = s.profileIndexes.Acquire(s.runtime.Config)
 		} else {
 			profiles = s.profileIndexes.Current()
 			if profiles == nil {
@@ -2416,12 +2420,40 @@ func (s *Server) warmProfileIndex() {
 // over is the one the index was built from, profiles.cfg; it never reads
 // the live config. Same split as resolveActiveProfile / resolveActiveProfileIn.
 func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profiles *profileIndex, next http.Handler) {
-	cfg := profiles.cfg
-
-	// Strip the /mcp/p/ prefix to obtain the slug.
+	// Strip the /mcp/p/ prefix to obtain the slug. Computed before profiles
+	// is dereferenced: a nil profiles (Acquire's bounded retries exhausted,
+	// below) still needs it to log and refuse a scoped caller uniformly.
 	slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
 	slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
 	slug = strings.Trim(slug, "/")
+
+	if profiles == nil {
+		// Acquire could not pair this request's own runtime.Config() read
+		// with a prepared index within its bounded retry budget — a
+		// publication storm outran the loop faster than it could catch up
+		// (structurally rare: the pre-publish observer means Acquire matches
+		// on its first iteration in the overwhelmingly common case). A
+		// scoped caller fails closed here, O(1): the uniform refusal never
+		// depends on a slug lookup or the fleet's population, so it stays
+		// non-disclosing even without a paired snapshot to evaluate against
+		// (Spec 105 PR D review round 11, MUST-FIX). An administrator-shaped
+		// caller is not timing-contract-bound (SC-005) and falls back to a
+		// fresh build over the live config, matching pre-105 behaviour.
+		if auth.IsScopedCaller(r.Context()) {
+			var agentName string
+			if ac := auth.AuthContextFromContext(r.Context()); ac != nil {
+				agentName = ac.AgentName
+			}
+			s.logger.Info("profile URL refused for scoped caller",
+				zap.String("agent_name", agentName),
+				zap.String("profile", slug),
+				zap.String("remote_addr", r.RemoteAddr))
+			profileNotSelectable(w, slug)
+			return
+		}
+		profiles = s.profileIndexes.For(s.runtimeConfig())
+	}
+	cfg := profiles.cfg
 
 	// One slug → profile index per snapshot (built before the snapshot was
 	// published, see warmProfileIndex): the gate below and the lookup after
