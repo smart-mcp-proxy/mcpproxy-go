@@ -92,6 +92,39 @@ describe('auth store: concurrent checkAuth shares one in-flight probe', () => {
     expect(store.loading).toBe(false)
   })
 
+  it('fresh: true queues a new probe behind the in-flight one instead of joining it', async () => {
+    // Probe 1 was issued before the key was repaired (/auth/me says signed
+    // out); probe 2 is the recovery read and must see the tenant.
+    const status = [deferred<{ data: { edition: string } }>(), deferred<{ data: { edition: string } }>()]
+    const me = [deferred<typeof tenant | null>(), deferred<typeof tenant | null>()]
+    statusSpy.mockImplementation(() => status[statusSpy.mock.calls.length - 1].promise)
+    meSpy.mockImplementation(() => me[meSpy.mock.calls.length - 1].promise)
+    const store = useAuthStore()
+
+    const first = store.checkAuth()
+    await Promise.resolve() // let probe 1 issue its /status call
+    expect(statusSpy).toHaveBeenCalledTimes(1)
+
+    const recovery = store.checkAuth({ fresh: true }) // reloadAfterAuth
+    expect(statusSpy).toHaveBeenCalledTimes(1) // queued, not joined and not issued yet
+
+    status[0].resolve({ data: { edition: 'server' } })
+    me[0].resolve(null)
+    await first
+    // The stale run settled, but the store is not "settled" until the fresh
+    // probe behind it has too.
+    expect(store.loading).toBe(true)
+    expect(statusSpy).toHaveBeenCalledTimes(2)
+
+    status[1].resolve({ data: { edition: 'server' } })
+    me[1].resolve(tenant)
+    await recovery
+
+    expect(store.loading).toBe(false)
+    expect(store.isAuthenticated).toBe(true)
+    expect(meSpy).toHaveBeenCalledTimes(2)
+  })
+
   it('re-probes once the previous run has settled (reloadAfterAuth relies on a fresh read)', async () => {
     const first = serverEdition(tenant)
     const store = useAuthStore()
