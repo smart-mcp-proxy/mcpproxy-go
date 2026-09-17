@@ -152,17 +152,28 @@ func profileScopeForSlugIn(cfg *config.Config, slug string) *profile.ProfileScop
 // ProfileScope ("" ⇒ nil). A session selection that no longer matches any
 // configured profile is treated as stale: it is cleared and resolution falls
 // through to "none". Resolution reads the live config snapshot once — unless
-// the request came in through /mcp/p/<slug>, in which case that snapshot is
-// the exact one profileMiddleware already admitted the request against
-// (profileRequestIndexFromContext), never a fresh runtime.Config() read: a
-// reload landing between admission and this call must not split the two
-// (round 8). Callers that already hold a snapshot use resolveActiveProfileIn.
+// the request came in through /mcp/p/<slug>, in which case it decides with the
+// exact (index, snapshot) PAIR profileMiddleware already admitted the request
+// against (profileRequestIndexFromContext), consumed directly via
+// resolveActiveProfileFromIndex — never a fresh runtime.Config() read, and
+// never a second, independent index lookup of its own. Extracting only the
+// pair's cfg and handing it to resolveActiveProfileIn (which resolves the
+// index again through profileIndexFor(cfg): an O(1) Published(cfg) match that
+// falls back to a fleet-sized For(cfg) build on a miss) would let a request
+// that paused across two publications between admission and this call land on
+// a snapshot neither of profileIndexFor's two warmed slots covers any more —
+// exactly the pair-acquisition bypass rounds 11/13 closed on the admission
+// path (profileIndexCurrent/Acquire), reopened here on the downstream
+// resolution path a paused request reaches next (round 15 MUST-FIX). Using
+// the already-resolved pair outright cannot miss: there is no lookup to fall
+// back from. Callers that hold only a snapshot — never an admitted pair —
+// use resolveActiveProfileIn, which still resolves the index via
+// profileIndexFor(cfg).
 func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *profile.ProfileScope) {
-	cfg := p.currentConfig()
 	if injected, ok := profileRequestIndexFromContext(ctx); ok {
-		cfg = injected.cfg
+		return p.resolveActiveProfileFromIndex(ctx, injected)
 	}
-	return p.resolveActiveProfileIn(ctx, cfg)
+	return p.resolveActiveProfileIn(ctx, p.currentConfig())
 }
 
 // resolveActiveProfileIn is resolveActiveProfile against an explicit config
