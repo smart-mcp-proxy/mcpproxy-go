@@ -2035,7 +2035,14 @@ const viewParentCall = async (child: ActivityRecord) => {
     parent = activities.value.find(a => a.request_id === parentId)
   }
 
-  if (!parent) {
+  // Spec 107 FR-041 / cross-review round 2, chunk 4 P2: GET /api/v1/activity
+  // is the core, admin-only door (named must-refuse) — even after
+  // loadActivities() above has already used the tenant-scoped
+  // GET /user/activity, this fallback unconditionally called the forbidden
+  // one when the parent was not among the loaded rows. GET /user/activity
+  // has no request_id filter (T086), so there is nothing scoped to fall
+  // back to for a tenant: skip straight to the "not found" toast below.
+  if (!parent && authStore.principalKind !== 'tenant') {
     const response = await api.getActivities({ request_id: parentId, limit: 1 })
     const fetched = response.success ? response.data?.activities?.[0] : undefined
     if (fetched) {

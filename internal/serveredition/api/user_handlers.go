@@ -42,6 +42,28 @@ import (
 // snapshot rather than a defensive deep copy, so nothing may write through it.
 type AdminServersProvider func() []*config.ServerConfig
 
+// EntitlementSnapshotProvider returns the admin-config servers and the
+// server-edition access block from ONE live-configuration read (Spec 107
+// FR-004 "one predicate, one decision"; FR-039 part 3 hot reload).
+//
+// entitledServerNamesFor reads both values on every decision, and each was
+// originally read through its own independent provider (AdminServersProvider
+// and ServerEditionConfigProvider below): a hot reload landing between those
+// two separate live calls could splice a servers snapshot from one
+// configuration version to an access snapshot from another, entitling a
+// server that was granted in NEITHER version alone (cross-review round 2,
+// chunk 1 P1). This provider closes that window by returning both values
+// from a single underlying read; setup.go installs it from one liveConfig()
+// call, the same closure AdminServersProvider and ServerEditionConfigProvider
+// each independently call today.
+//
+// nil = no combined provider installed (tests, embedders with no config
+// service): entitledServerNamesFor then falls back to the two separate
+// providers, matching the pre-fix behaviour. Production wiring always
+// installs this provider (see setup.go, pinned by
+// TestSetupMultiUserOAuth_WiresEntitlementSnapshotProvider).
+type EntitlementSnapshotProvider func() ([]*config.ServerConfig, *config.ServerEditionAccessConfig)
+
 // UserHandlers provides REST endpoints for user server management.
 type UserHandlers struct {
 	userStore    *users.UserStore
@@ -57,6 +79,12 @@ type UserHandlers struct {
 	// Shared-only semantics — never as an error; an installed provider that
 	// answers nil is a missing configuration and fails closed.
 	serverEditionConfig teamsauth.ServerEditionConfigProvider
+
+	// entitlementSnapshot, when installed, is the single-read source for
+	// BOTH adminConfigServers() and the access block inside the entitlement
+	// predicate — see EntitlementSnapshotProvider. nil falls back to the two
+	// separate providers above.
+	entitlementSnapshot EntitlementSnapshotProvider
 }
 
 // tokenStore defines the interface for agent token storage operations.
@@ -114,6 +142,16 @@ func (h *UserHandlers) SetHMACKey(key []byte) {
 // live admin role from.
 func (h *UserHandlers) SetServerEditionConfigProvider(p teamsauth.ServerEditionConfigProvider) {
 	h.serverEditionConfig = p
+}
+
+// SetEntitlementSnapshotProvider installs the combined single-read source for
+// the entitlement predicate's servers+access snapshot (see
+// EntitlementSnapshotProvider). setup.go installs this alongside (not
+// instead of) SetServerEditionConfigProvider/the AdminServersProvider passed
+// to NewUserHandlers, which stay in use for callers that need only one of
+// the two values (e.g. the createServer collision check).
+func (h *UserHandlers) SetEntitlementSnapshotProvider(p EntitlementSnapshotProvider) {
+	h.entitlementSnapshot = p
 }
 
 // StaticAdminServers adapts a fixed slice to AdminServersProvider. It is for
@@ -893,29 +931,49 @@ var errUserRecordMissing = errors.New("user record not found")
 // live rather than snapshotted at boot. Excluding it costs the tenant only a
 // token scope, never their server.
 func (h *UserHandlers) entitledServerNamesFor(user *users.User, isAdmin bool) ([]string, error) {
-	return h.entitledServerNamesForSnapshot(user, isAdmin, h.adminConfigServers())
+	adminServers, access, err := h.liveEntitlementSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, err)
+	}
+	return h.entitledServerNamesForSnapshot(user, isAdmin, adminServers, access)
+}
+
+// liveEntitlementSnapshot returns the admin-config servers and the access
+// block from ONE live-configuration read via EntitlementSnapshotProvider,
+// when installed (production wiring always installs it — see setup.go).
+// Falling back to the two separate providers is tolerated only for tests and
+// embedders with no config service; it reopens the split-read window
+// EntitlementSnapshotProvider exists to close, so production code must never
+// rely on the fallback.
+func (h *UserHandlers) liveEntitlementSnapshot() ([]*config.ServerConfig, *config.ServerEditionAccessConfig, error) {
+	if h.entitlementSnapshot != nil {
+		servers, access := h.entitlementSnapshot()
+		return servers, access, nil
+	}
+	access, err := h.liveAccessConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+	return h.adminConfigServers(), access, nil
 }
 
 // entitledServerNamesForSnapshot is entitledServerNamesFor's core, taking the
-// admin-config servers as a parameter instead of reading them live. It exists
-// so a caller that must also disclose full ServerConfig objects for the names
-// this predicate returns (visibleSharedServers, visibleSharedServer) can
-// fetch h.adminConfigServers() exactly ONCE and use that single snapshot for
-// both the entitlement decision and the disclosure: a second, independent
-// live read between the two would open a hot-reload race where a server is
-// entitled against an old snapshot (e.g. still Shared) and then disclosed
-// from a new one, defeating the "one predicate, one decision" contract
-// (FR-004) and contradicting FR-039's live-reload guarantee. Every other
-// caller (which only needs the name set) keeps calling entitledServerNamesFor
-// / entitledServerNames.
-func (h *UserHandlers) entitledServerNamesForSnapshot(user *users.User, isAdmin bool, adminServers []*config.ServerConfig) ([]string, error) {
+// admin-config servers and the access block as parameters instead of reading
+// them live. It exists so a caller that must also disclose full ServerConfig
+// objects for the names this predicate returns (visibleSharedServers,
+// visibleSharedServer) can fetch liveEntitlementSnapshot() exactly ONCE and
+// use that single snapshot for the entitlement decision, the disclosure AND
+// the access-vs-servers consistency the predicate itself needs: any
+// independent, separate live read of either value between two uses of this
+// function would open a hot-reload race where a decision is made against a
+// servers snapshot from one configuration version and an access snapshot
+// from another, defeating the "one predicate, one decision" contract
+// (FR-004) and contradicting FR-039's live-reload guarantee (cross-review
+// round 2, chunk 1 P1). Every other caller (which only needs the name set)
+// keeps calling entitledServerNamesFor / entitledServerNames.
+func (h *UserHandlers) entitledServerNamesForSnapshot(user *users.User, isAdmin bool, adminServers []*config.ServerConfig, access *config.ServerEditionAccessConfig) ([]string, error) {
 	if user == nil {
 		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, errUserRecordMissing)
-	}
-
-	access, err := h.liveAccessConfig()
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, err)
 	}
 
 	personal, err := h.userStore.ListUserServers(user.ID)
@@ -1017,35 +1075,24 @@ func (h *UserHandlers) entitledServerNames(userID string, isAdmin bool) ([]strin
 	return h.entitledServerNamesFor(user, isAdmin)
 }
 
-// tenantEntitled wraps entitledServerNames for the door handlers: the
-// caller's entitlement as a set, plus whether the caller is an administrator
-// (whose list doors render the unchanged shared projection instead).
-func (h *UserHandlers) tenantEntitled(r *http.Request, userID string) (set map[string]struct{}, isAdmin bool, err error) {
-	ac := auth.AuthContextFromContext(r.Context())
-	isAdmin = ac != nil && ac.IsAdmin()
-	names, err := h.entitledServerNames(userID, isAdmin)
-	if err != nil {
-		return nil, isAdmin, err
-	}
-	set = make(map[string]struct{}, len(names))
-	for _, n := range names {
-		set[n] = struct{}{}
-	}
-	return set, isAdmin, nil
-}
-
-// tenantEntitledSnapshot is tenantEntitled's sibling for callers that must
-// also disclose full ServerConfig objects for the entitled names: it fetches
-// h.adminConfigServers() exactly ONCE and threads that snapshot through
-// entitledServerNamesForSnapshot, so the set the caller checks membership
+// tenantEntitledSnapshot is the door handlers' caller: entitlement as a set,
+// whether the caller is an administrator (whose list doors render the
+// unchanged shared projection instead), and the admin-config servers, all
+// from the SAME live-configuration read. It fetches liveEntitlementSnapshot()
+// exactly ONCE and threads that snapshot through entitledServerNamesForSnapshot,
+// so the set the caller checks membership
 // against and the server objects it then reads are guaranteed to come from
-// the same configuration version — closing the hot-reload race
-// tenantEntitled + a second h.adminConfigServers() call would otherwise open
-// (see entitledServerNamesForSnapshot's doc comment).
+// the same configuration version — closing the hot-reload races
+// entitledServerNamesForSnapshot's doc comment describes.
 func (h *UserHandlers) tenantEntitledSnapshot(r *http.Request, userID string) (set map[string]struct{}, isAdmin bool, adminServers []*config.ServerConfig, err error) {
 	ac := auth.AuthContextFromContext(r.Context())
 	isAdmin = ac != nil && ac.IsAdmin()
-	adminServers = h.adminConfigServers()
+
+	var access *config.ServerEditionAccessConfig
+	adminServers, access, err = h.liveEntitlementSnapshot()
+	if err != nil {
+		return nil, isAdmin, adminServers, fmt.Errorf("%w: %v", errServerScopeLookup, err)
+	}
 
 	user, err := h.userStore.GetUser(userID)
 	if err != nil {
@@ -1055,7 +1102,7 @@ func (h *UserHandlers) tenantEntitledSnapshot(r *http.Request, userID string) (s
 		return nil, isAdmin, adminServers, fmt.Errorf("%w: %v", errServerScopeLookup, errUserRecordMissing)
 	}
 
-	names, err := h.entitledServerNamesForSnapshot(user, isAdmin, adminServers)
+	names, err := h.entitledServerNamesForSnapshot(user, isAdmin, adminServers, access)
 	if err != nil {
 		return nil, isAdmin, adminServers, err
 	}

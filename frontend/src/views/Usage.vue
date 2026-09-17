@@ -180,6 +180,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import api from '@/services/api'
+import { useAuthStore } from '@/stores/auth'
 import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
 import { formatNumber, partitionUsageTools, usageHeadline } from '@/utils/usageFormat'
 import CallHistogram from '@/components/usage/CallHistogram.vue'
@@ -201,6 +202,8 @@ const data = ref<UsageAggregateResponse | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 let refreshTimer: ReturnType<typeof setInterval> | null = null
+
+const authStore = useAuthStore()
 
 const windowLabel = computed(() => {
   switch (window.value) {
@@ -247,6 +250,13 @@ const freshnessLabel = computed(() => {
 let reloadSeq = 0
 
 async function reload() {
+  // Spec 107 FR-041 / cross-review round 2, chunk 4 P1: GET /activity/usage
+  // is an admin-only core door (named must-refuse, rest-endpoints.md §8).
+  // Usage is the tenant dashboard's DEFAULT landing panel, so an unguarded
+  // reload() here drew a 403 on every tenant page load and every 30s
+  // refresh, regardless of entry point (mount, interval, window/filter
+  // change) — guard the fetch itself rather than each caller.
+  if (authStore.principalKind === 'tenant') return
   const seq = ++reloadSeq
   loading.value = true
   error.value = null

@@ -1107,7 +1107,14 @@ onMounted(() => {
   loadSessions()
   loadSecurityStatus()
   // Populate security scanner totals for the Security Scan chip (F-12).
-  void refreshSecurityScannerStatus()
+  // Spec 107 FR-041 / cross-review round 2, chunk 4 P1: /security/overview
+  // is an admin-only core door (named must-refuse, rest-endpoints.md §8) —
+  // unlike its five sibling loaders above, this call had no
+  // `principalKind === 'tenant'` guard, so a tenant drew a 403 here on every
+  // mount and every 30s refresh.
+  if (authStore.principalKind !== 'tenant') {
+    void refreshSecurityScannerStatus()
+  }
   serversStore.fetchServers().then(() => {
     serversFetchSettled.value = true
     loadPendingTools()
@@ -1120,7 +1127,9 @@ onMounted(() => {
     loadActivitySummary()
     loadSessions()
     loadSecurityStatus()
-    void refreshSecurityScannerStatus()
+    if (authStore.principalKind !== 'tenant') {
+      void refreshSecurityScannerStatus()
+    }
     loadPendingTools()
   }, 30000)
 

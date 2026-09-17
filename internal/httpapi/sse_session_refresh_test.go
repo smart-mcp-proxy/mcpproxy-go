@@ -210,3 +210,63 @@ func TestSSE_SessionPrincipalDisabledEndsStream(t *testing.T) {
 	}
 	require.True(t, sawEOF, "the SSE stream must close once the session principal's resolver reports it disabled")
 }
+
+// TestSSE_HeartbeatReResolvesSessionPrincipal pins cross-review round 2,
+// chunk 3's P2 finding: the heartbeat ("ping") branch of the /events stream
+// loop (server.go) never called refreshCallerContext(), unlike the status
+// and runtime-event branches right next to it. FR-005 requires the session
+// principal to be re-resolved "before each frame" specifically so "a
+// disabled user's stream ends" without the caller having to reconnect — a
+// heartbeat IS a frame, and on an otherwise-idle connection (no status
+// update, no runtime event) it is the ONLY frame the server sends, so a
+// disabled tenant's stream stayed open indefinitely, silently, as long as
+// nothing else happened to trigger a refresh.
+//
+// The test shrinks sseHeartbeatInterval so a tick fires quickly, disables
+// the session principal, and asserts the stream closes on the next
+// heartbeat alone — no status update or runtime event is published.
+//
+// BITES: reverting the heartbeat case to skip refreshCallerContext() makes
+// this test time out waiting for EOF (the stream stays open forever on
+// heartbeats only).
+func TestSSE_HeartbeatReResolvesSessionPrincipal(t *testing.T) {
+	orig := sseHeartbeatInterval
+	sseHeartbeatInterval = 50 * time.Millisecond
+	t.Cleanup(func() { sseHeartbeatInterval = orig })
+
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	state := &carolSessionResolverState{}
+	state.setAllowed("alpha", "beta")
+	srv.SetSessionPrincipalResolver(newCarolSessionResolver(state))
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	body, closeConn := sseSubscribeBearer(t, ts.URL, carolSessionToken)
+	defer closeConn()
+
+	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 1 }, 5*time.Second, 20*time.Millisecond,
+		"precondition: the session-principal SSE connection must be subscribed")
+
+	// Consume the initial status frame so the connection is past its opening
+	// handshake before disabling Carol.
+	readSSEUntil(t, body, "status", time.Now().Add(5*time.Second))
+
+	state.disable()
+
+	// No status update and no runtime event is published from here on: only
+	// the (now fast) heartbeat ticks. The stream must still close.
+	deadline := time.Now().Add(10 * time.Second)
+	sawEOF := false
+	for time.Now().Before(deadline) {
+		if _, err := body.ReadString('\n'); err != nil {
+			sawEOF = true
+			break
+		}
+	}
+	require.True(t, sawEOF, "the SSE stream must close on a heartbeat tick alone once the session "+
+		"principal's resolver reports it disabled — the heartbeat branch must re-resolve the caller "+
+		"context exactly like the status and runtime-event branches")
+}

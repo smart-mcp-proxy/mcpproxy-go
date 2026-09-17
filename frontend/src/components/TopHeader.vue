@@ -88,8 +88,19 @@
         <!-- Routing + serialization mode switcher. Was a read-only badge whose
              `cursor-help` promised an explanation the browser only produced
              after a long hover (audit F31 follow-up); now it explains and
-             switches, like the profile switcher beside it. -->
-        <ModeSwitcher />
+             switches, like the profile switcher beside it.
+
+             Spec 107 FR-041 / cross-review round 2, chunk 4 P1: routing_mode
+             lives under PATCH /config, an admin-only core door (named
+             must-refuse, rest-endpoints.md §8), and routing_mode itself is
+             read from GET /routing (also must-refuse). A tenant session has
+             nothing to switch — the panel would open on a permanently
+             unresolved state and every selection would draw a fixed 403.
+             Hidden entirely, matching the FR-041 promise for tenant-
+             inapplicable chips (round 1 already suppressed the fetch this
+             component would otherwise issue on mount; this hides the
+             control itself, including its mutation path). -->
+        <ModeSwitcher v-if="authStore.principalKind !== 'tenant'" />
 
         <!-- MCP Endpoints Dropdown -->
         <div v-if="systemStore.listenAddr" class="relative">

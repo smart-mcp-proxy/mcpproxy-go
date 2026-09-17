@@ -104,6 +104,48 @@ func TestTenantProfiles_OmitsHiddenOnlyProfile(t *testing.T) {
 	assert.Equal(t, "research", pm["name"])
 }
 
+// TestTenantProfiles_OmitsAlreadyEmptyProfile pins cross-review round 2,
+// chunk 3's P3 finding: handleListProfiles only omitted a profile when
+// scoping NARROWED a non-empty effective server set down to empty
+// (len(scoped) == 0 && len(eff) > 0). A profile whose effective server set
+// was ALREADY empty before scoping — e.g. it names only a server that no
+// longer exists in the admin configuration, or an operator misconfigured it
+// with no servers at all — fell through that guard and was still shown to a
+// tenant, with `servers: []` and `tool_count: 0`, even though its
+// intersection with her entitlement is trivially empty. FR-002 requires
+// omitting every profile whose effective-set ∩ entitlement intersection is
+// empty, with no carve-out for "the effective set was already empty".
+func TestTenantProfiles_OmitsAlreadyEmptyProfile(t *testing.T) {
+	cfg := &config.Config{
+		APIKey: "test-key",
+		Servers: []*config.ServerConfig{
+			{Name: "research-srv"},
+			{Name: "deploy-srv"},
+		},
+		Profiles: []config.ProfileConfig{
+			{Name: "research", Servers: []string{"research-srv"}},
+			// "retired" names only a server absent from the admin
+			// configuration, so EffectiveServers returns [] BEFORE scoping —
+			// the case the len(eff) > 0 guard let slip through.
+			{Name: "retired", Servers: []string{"gone-srv"}},
+		},
+	}
+	ctrl := &mockProfilesController{apiKey: "test-key", cfg: cfg}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	w, resp := doProfilesJSONAs(t, srv, carolSessionContext(), http.MethodGet, "/api/v1/profiles")
+	require.Equal(t, http.StatusOK, w.Code)
+
+	data, _ := resp["data"].(map[string]interface{})
+	require.NotNil(t, data)
+	profiles, _ := data["profiles"].([]interface{})
+
+	require.Len(t, profiles, 1, "retired must be omitted for Carol (its effective set was already "+
+		"empty, which still intersects her entitlement in nothing): %#v", profiles)
+	pm, _ := profiles[0].(map[string]interface{})
+	assert.Equal(t, "research", pm["name"])
+}
+
 func TestTenantProfiles_ActiveProfileHiddenReadsEmpty(t *testing.T) {
 	srv := newTenantProfilesTestServer()
 

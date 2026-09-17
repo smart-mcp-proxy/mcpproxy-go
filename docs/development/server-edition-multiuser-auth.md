@@ -486,8 +486,12 @@ except `CanRevealSecrets`, which stays API-key/socket-only — `GET
 /config?reveal=…` and `/info`'s `web_ui_url` return masked values even for an
 administrator's session. This is the one place a session/JWT principal is
 deliberately weaker than the API key, and it is why the Web UI login alone is
-enough for a tenant to use the Configuration and Servers pages, but not enough
-to read a raw secret.
+enough for an **administrator** session to use the Configuration and Servers
+pages, but not enough to read a raw secret. A **tenant** session is a
+different, narrower principal: `/config` (GET and PATCH) is on the core
+must-refuse list above regardless of session kind, so a tenant's Web UI never
+has a Configuration page to show, and the Servers page it does have is the
+scoped `/user/servers*` surface (see the table above), not core `/servers`.
 
 ## Key Directories
 

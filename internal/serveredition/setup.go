@@ -119,6 +119,24 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// tolerate that (token doors answer "not available").
 	userHandlers := teamsapi.NewUserHandlers(userStore, adminServers, deps.StorageManager, nil, deps.Logger)
 	userHandlers.SetServerEditionConfigProvider(serverEditionConfig)
+	// entitledServerNamesFor's access read and adminServers read must never
+	// straddle a hot reload (cross-review round 2, chunk 1 P1): this
+	// provider derives BOTH values from ONE liveConfig() call, unlike
+	// serverEditionConfig and adminServers above, which each call
+	// liveConfig() independently and stay in use only for callers that need
+	// a single value on its own (e.g. the createServer collision check).
+	userHandlers.SetEntitlementSnapshotProvider(func() ([]*config.ServerConfig, *config.ServerEditionAccessConfig) {
+		live := liveConfig()
+		access := cfg.Access
+		var servers []*config.ServerConfig
+		if live != nil {
+			servers = live.Servers
+			if live.ServerEdition != nil {
+				access = live.ServerEdition.Access
+			}
+		}
+		return servers, access
+	})
 
 	// Agent tokens outlive the sessions of the user who minted them, and
 	// nothing re-checked that user afterwards: a disabled account's tokens

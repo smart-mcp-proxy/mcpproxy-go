@@ -64,6 +64,13 @@ const (
 	codeExecRequestTimeout = 630 * time.Second
 )
 
+// sseHeartbeatInterval is how often /events sends a keep-alive "ping" frame.
+// A var, not a const, so tests can shrink it and observe a session-principal
+// refresh landing on a heartbeat tick specifically (Spec 107 FR-005 — the
+// refresher runs "before each frame", heartbeats included) without waiting
+// out the real interval.
+var sseHeartbeatInterval = 30 * time.Second
+
 // longRunningAPIBudgets lists the /api/v1 paths that need more than
 // defaultAPIRequestTimeout, keyed by request path.
 func longRunningAPIBudgets() map[string]time.Duration {
@@ -3991,7 +3998,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		"events_channel_nil", eventsCh == nil)
 
 	// Create heartbeat ticker to keep connection alive
-	heartbeat := time.NewTicker(30 * time.Second)
+	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
 
 	// Send initial status
@@ -4026,6 +4033,18 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-heartbeat.C:
+			// FR-005: the heartbeat is a frame like any other. On an
+			// otherwise-idle connection (no status update, no runtime event)
+			// it is the ONLY frame the server sends, so it must re-resolve
+			// the caller context too — otherwise a disabled tenant's stream
+			// never closes as long as nothing else happens to trigger a
+			// refresh (cross-review round 2, chunk 3 P2). The ping payload
+			// itself carries no identity data, so nothing here needs the
+			// resolved context beyond the failure check.
+			if _, err := refreshCallerContext(); err != nil {
+				s.logger.Warnw("Closing SSE stream after caller revalidation failed", "error", err)
+				return
+			}
 			// Send heartbeat ping to keep connection alive
 			pingData := map[string]interface{}{
 				"timestamp": time.Now().Unix(),

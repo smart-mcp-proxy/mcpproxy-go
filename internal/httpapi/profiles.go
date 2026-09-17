@@ -89,7 +89,14 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 					scoped = append(scoped, name)
 				}
 			}
-			if omitHiddenProfiles && len(scoped) == 0 && len(eff) > 0 {
+			// FR-002: omit whenever the intersection is empty — including
+			// when the profile's effective server set was ALREADY empty
+			// before scoping (a profile naming only a server absent from the
+			// admin configuration, or configured with no servers at all).
+			// There is no carve-out for that case: an empty intersection is
+			// an empty intersection regardless of which side was empty
+			// (cross-review round 2, chunk 3 P3).
+			if omitHiddenProfiles && len(scoped) == 0 {
 				continue
 			}
 			eff = scoped

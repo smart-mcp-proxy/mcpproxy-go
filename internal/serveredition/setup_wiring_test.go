@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -460,4 +461,85 @@ func TestSetupMultiUserOAuth_GroupGrantWiredThroughProductionSetup(t *testing.T)
 	tf.A.h.setLiveServers([]*config.ServerConfig{{Name: "a", Protocol: "http", Shared: false, Enabled: true}})
 	_, unshared := listAs(func(fx *fixtureHarness) *users.User { return fx.alice })(tf.A)
 	assert.Empty(t, sharedNamesOf(unshared))
+}
+
+// TestSetupMultiUserOAuth_WiresEntitlementSnapshotProvider proves production
+// setup installs teamsapi.UserHandlers' combined EntitlementSnapshotProvider
+// (see TestEntitledServerNamesFor_ServersAndAccessFromOneSnapshot in
+// internal/serveredition/api/entitlement_group_test.go for the split-read
+// race it closes) rather than leaving the entitlement predicate on the two
+// independent providers, which read the live configuration separately.
+//
+// Oracle: wrap Dependencies.ConfigProvider in a counter and drive one
+// GET /api/v1/user/servers request through it. Two components read the live
+// configuration on this request: the auth middleware (role derivation via
+// its own ServerEditionConfigProvider call) and the entitlement predicate.
+// With the combined provider, the predicate makes exactly ONE call for
+// both its servers and access values, for a total of 2; without it (the two
+// separate providers, each read independently), the predicate makes 2 calls
+// on its own, for a total of 3.
+//
+// BITES: removing the SetEntitlementSnapshotProvider call from
+// setupMultiUserOAuth makes this test observe 3 calls instead of 2.
+func TestSetupMultiUserOAuth_WiresEntitlementSnapshotProvider(t *testing.T) {
+	tmpDir := t.TempDir()
+	db, err := bbolt.Open(tmpDir+"/test.db", 0600, &bbolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	logger := zap.NewNop().Sugar()
+	tokens, err := storage.NewManager(t.TempDir(), logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { tokens.Close() })
+
+	baseConfig := &config.Config{
+		ServerEdition: &config.ServerEditionConfig{
+			Enabled:     true,
+			AdminEmails: []string{"admin@example.com"},
+			OAuth: &config.ServerEditionOAuthConfig{
+				Provider:     "google",
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+	}
+
+	var calls int32
+	countingConfigProvider := func() *config.Config {
+		atomic.AddInt32(&calls, 1)
+		return baseConfig
+	}
+
+	router := chi.NewRouter()
+	require.NoError(t, setupMultiUserOAuth(Dependencies{
+		Router:         router,
+		DB:             db,
+		Logger:         logger,
+		DataDir:        tmpDir,
+		Config:         baseConfig,
+		ConfigProvider: countingConfigProvider,
+		StorageManager: tokens,
+	}))
+
+	userStore := users.NewUserStore(db)
+	hmacKey, err := auth.GetOrCreateHMACKey(tmpDir)
+	require.NoError(t, err)
+
+	alice := users.NewUser("alice@example.com", "Alice", "google", "sub-alice")
+	require.NoError(t, userStore.CreateUser(alice))
+
+	bearer, err := teamsauth.GenerateBearerToken(hmacKey, alice.ID, alice.Email, alice.DisplayName, "user", alice.Provider, time.Hour)
+	require.NoError(t, err)
+
+	atomic.StoreInt32(&calls, 0)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/servers", nil)
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(&calls),
+		"GET /user/servers must read the live configuration once for auth-middleware role "+
+			"derivation and exactly once (not twice) for its entitlement decision through the "+
+			"combined EntitlementSnapshotProvider")
 }

@@ -779,3 +779,73 @@ func TestVisibleSharedServerDoor_ReadsAdminServersExactlyOnce(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&calls),
 		"GET /user/servers must read the live admin server snapshot exactly once")
 }
+
+// TestEntitledServerNamesFor_ServersAndAccessFromOneSnapshot pins cross-review
+// round 2's P1 finding: entitledServerNamesFor (and, through it,
+// tenantEntitledSnapshot) reads the admin-config servers exactly once
+// (round 1's fix), but entitledServerNamesForSnapshot then read the
+// `access` block through a SEPARATE, independent live call
+// (h.liveAccessConfig(), which called h.serverEditionConfig()). A
+// server-edition config hot reload landing between those two reads (FR-039
+// part 3: `server_edition.access`, and the shared server list, both apply
+// without a restart) could combine a servers snapshot from one
+// configuration version with an access snapshot from another, authorizing a
+// server that was entitled in NEITHER version alone.
+//
+// The fix: a combined EntitlementSnapshotProvider (installed once in
+// setup.go from a single liveConfig() read) that returns the admin servers
+// and the access block together. Its absence (nil) is a genuine
+// configuration bug in production wiring but is tolerated here only to
+// exercise the split-provider path directly; production always installs it
+// (setup.go, verified by TestSetupMultiUserOAuth_WiresEntitlementSnapshotProvider
+// in setup_wiring_test.go).
+//
+// Concrete scenario pinned here, driven directly through the combined
+// provider: the OLD configuration shares server "x" but its access map
+// denies it; the NEW configuration unshares "x" but grants it through
+// `default_servers`. Neither state alone entitles "x"; splicing servers
+// from one and access from the other must not either — and, with the
+// combined provider, cannot, because both values now come from the SAME
+// call.
+func TestEntitledServerNamesFor_ServersAndAccessFromOneSnapshot(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+
+	dbPath := t.TempDir()
+	db, err := bbolt.Open(filepath.Join(dbPath, "users.db"), 0600, &bbolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	userStore := users.NewUserStore(db)
+	require.NoError(t, userStore.EnsureBuckets())
+
+	alice := users.NewUser("alice@example.com", "Alice", "google", "sub-alice")
+	require.NoError(t, userStore.CreateUser(alice))
+
+	oldServers := []*config.ServerConfig{{Name: "x", Shared: true}}
+	oldAccess := &config.ServerEditionAccessConfig{GroupServers: map[string][]string{"eng": {}}}
+
+	newServers := []*config.ServerConfig{{Name: "x", Shared: false}}
+	newAccess := &config.ServerEditionAccessConfig{DefaultServers: []string{"x"}}
+
+	userHandlers := NewUserHandlers(userStore, nil, nil, nil, logger)
+
+	// A reload flag flips both halves of the snapshot together, as a single
+	// atomic config swap would: the combined provider must never observe
+	// servers from one side and access from the other.
+	var reloaded atomic.Bool
+	userHandlers.SetEntitlementSnapshotProvider(func() ([]*config.ServerConfig, *config.ServerEditionAccessConfig) {
+		if reloaded.Load() {
+			return newServers, newAccess
+		}
+		return oldServers, oldAccess
+	})
+
+	namesBefore, err := userHandlers.entitledServerNamesFor(alice, false)
+	require.NoError(t, err)
+	assert.NotContains(t, namesBefore, "x", "pre-reload: access denies x")
+
+	reloaded.Store(true)
+
+	namesAfter, err := userHandlers.entitledServerNamesFor(alice, false)
+	require.NoError(t, err)
+	assert.NotContains(t, namesAfter, "x", "post-reload: x is no longer shared")
+}
