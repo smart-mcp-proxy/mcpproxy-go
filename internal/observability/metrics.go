@@ -305,6 +305,34 @@ func (mm *MetricsManager) registerMetrics() {
 	mm.registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 }
 
+// auditFailureSource is the minimal surface RegisterAuditSink needs from
+// audit.Sink (declared locally to avoid an import cycle risk between
+// internal/observability and internal/audit).
+type auditFailureSource interface {
+	WriteFailures() uint64
+}
+
+// RegisterAuditSink wires the Spec 107 audit sink's always-on write-failure
+// counter into Prometheus as mcpproxy_audit_write_failures_total (T109,
+// FR-018). It is a CounterFunc reading sink.WriteFailures() directly -
+// monotonic by construction, so it can never regress into looking like a
+// gauge, and it needs no separate bookkeeping to stay in sync with the sink's
+// own atomic counter. Safe to call at most once per sink (a second call on
+// the same registry panics via MustRegister, same as every other metric
+// here); server.go only calls it when a sink exists.
+func (mm *MetricsManager) RegisterAuditSink(sink auditFailureSource) {
+	if sink == nil {
+		return
+	}
+	mm.registry.MustRegister(prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Name: "mcpproxy_audit_write_failures_total",
+			Help: "Total number of audit-log lines that failed to write since the sink was constructed",
+		},
+		func() float64 { return float64(sink.WriteFailures()) },
+	))
+}
+
 // Handler returns an HTTP handler for the /metrics endpoint
 func (mm *MetricsManager) Handler() http.Handler {
 	return promhttp.HandlerFor(mm.registry, promhttp.HandlerOpts{

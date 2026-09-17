@@ -92,7 +92,13 @@ type LoginResult struct {
 	Reason    LoginRefusal
 	UserID    string
 	EmailHash string // hex SHA-256 of the normalised email
-	Flags     []LoginFlag
+	// Role and Provider are set only alongside UserID (the store was reached
+	// and a record exists): Role is "admin"|"user", derived from the LIVE
+	// admin_emails at the moment identity was established; Provider is the
+	// record's stored provider. Both are zero whenever UserID is empty.
+	Role     string
+	Provider string
+	Flags    []LoginFlag
 }
 
 // loginStore is the narrow user-store seam the callback writes through.
@@ -453,10 +459,14 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, users.ErrSubjectMismatch):
-			attempt.setUserID(h.lookupUserID(userInfo.Email))
+			if u := h.lookupUser(userInfo.Email); u != nil {
+				attempt.setUserID(u.ID, h.roleFor(u.Email), u.Provider)
+			}
 			attempt.refuse(w, LoginSubjectMismatch, "provider subject differs from the stored binding")
 		case errors.Is(err, users.ErrUserDisabled):
-			attempt.setUserID(h.lookupUserID(userInfo.Email))
+			if u := h.lookupUser(userInfo.Email); u != nil {
+				attempt.setUserID(u.ID, h.roleFor(u.Email), u.Provider)
+			}
 			attempt.refuse(w, LoginUserDisabled, "user record disabled")
 		default:
 			// The store WAS consulted here (the upsert itself failed), so
@@ -470,15 +480,11 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := outcome.User
-	attempt.setUserID(user.ID)
+	// Role from the CURRENT admin_emails.
+	role := h.roleFor(user.Email)
+	attempt.setUserID(user.ID, role, user.Provider)
 	if outcome.Rebound {
 		attempt.flag(FlagProviderRebound)
-	}
-
-	// Role from the CURRENT admin_emails.
-	role := "user"
-	if live := h.liveConfig(); live != nil && live.IsAdminEmail(user.Email) {
-		role = "admin"
 	}
 
 	bearerToken, err := h.bearerSigner(h.hmacKey, user.ID, user.Email, user.DisplayName, role, user.Provider, h.bearerTokenTTL())
@@ -614,11 +620,22 @@ func (h *OAuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	h.sessionManager.ClearSessionCookieFor(w, r, session)
 
 	h.logger.Infow("user logged out", "user_id", session.UserID, "session_id", session.ID)
+	// Role/Provider are best-effort: a session with no surviving user record
+	// (deleted between login and logout) still reports the logout with its
+	// UserID, just without Role/Provider (the emitter then falls back to the
+	// "user" role default, never blocking the observer on a lookup miss).
+	role, provider := "user", ""
+	if u, err := h.userStore.GetUser(session.UserID); err == nil && u != nil {
+		provider = u.Provider
+		role = h.roleFor(u.Email)
+	}
 	h.observe(LoginResult{
 		RequestID: reqcontext.GetRequestID(r.Context()),
 		Surface:   LoginSurfaceLogout,
 		Reason:    LoginLogout,
 		UserID:    session.UserID,
+		Role:      role,
+		Provider:  provider,
 	})
 
 	w.Header().Set("Content-Type", "application/json")
@@ -635,6 +652,8 @@ type loginAttempt struct {
 	requestID          string
 	userID             string
 	emailHash          string
+	role               string // set only alongside userID
+	provider           string // set only alongside userID
 	flags              []LoginFlag
 	groupsClaimMissing bool
 	reported           bool
@@ -647,12 +666,16 @@ func (h *OAuthHandler) newAttempt(r *http.Request) *loginAttempt {
 func (a *loginAttempt) flag(f LoginFlag) { a.flags = append(a.flags, f) }
 
 // setUserID records that the store was reached and a record exists; the
-// email hash is dropped, the two never appear together (FR-013).
-func (a *loginAttempt) setUserID(id string) {
+// email hash is dropped, the two never appear together (FR-013). role and
+// provider travel with the identity so the auth_event caller.kind
+// (session_user|session_admin) and caller.role/provider can be derived
+// without a second store lookup downstream.
+func (a *loginAttempt) setUserID(id, role, provider string) {
 	if id == "" {
 		return
 	}
 	a.userID, a.emailHash = id, ""
+	a.role, a.provider = role, provider
 }
 
 // clearEmailHash drops a provisional email hash once the store has been
@@ -670,6 +693,8 @@ func (a *loginAttempt) result(reason LoginRefusal) LoginResult {
 		Reason:    reason,
 		UserID:    a.userID,
 		EmailHash: a.emailHash,
+		Role:      a.role,
+		Provider:  a.provider,
 		Flags:     append([]LoginFlag(nil), a.flags...),
 	}
 }
@@ -749,14 +774,23 @@ func (h *OAuthHandler) bearerTokenTTL() time.Duration {
 	return 24 * time.Hour
 }
 
-// lookupUserID resolves the record id for a refused login that reached the
-// store (subject_mismatch, user_disabled); best effort.
-func (h *OAuthHandler) lookupUserID(email string) string {
+// lookupUser resolves the record for a refused login that reached the store
+// (subject_mismatch, user_disabled); best effort — nil on any error or miss.
+func (h *OAuthHandler) lookupUser(email string) *users.User {
 	u, err := h.loginStore.GetUserByEmail(email)
-	if err != nil || u == nil {
-		return ""
+	if err != nil {
+		return nil
 	}
-	return u.ID
+	return u
+}
+
+// roleFor derives the FR-013/auth_event caller role from the LIVE
+// admin_emails, never a boot-time snapshot (#1169).
+func (h *OAuthHandler) roleFor(email string) string {
+	if live := h.liveConfig(); live != nil && live.IsAdminEmail(email) {
+		return "admin"
+	}
+	return "user"
 }
 
 // emailHash is the FR-013 email_hash: hex SHA-256 of the normalised email.

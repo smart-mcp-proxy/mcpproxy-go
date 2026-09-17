@@ -1,5 +1,27 @@
 components:
   schemas:
+    config.AuditLogConfig:
+      description: |-
+        AuditLog configures the Spec 107 edition-neutral audit sink
+        (internal/audit). nil means "use the per-edition/per-transport
+        default" (EffectiveAuditLog); restart-pinned (bound at sink
+        construction). See audit_log.go.
+      properties:
+        compress:
+          type: boolean
+        enabled:
+          type: boolean
+        max_age_days:
+          type: integer
+        max_backups:
+          type: integer
+        max_size_mb:
+          type: integer
+        path:
+          type: string
+        stdout:
+          type: boolean
+      type: object
     config.ConcurrencyDefaults:
       description: |-
         ServerConcurrencyDefaults is scope (b) of FR-020: the blanket per-server
@@ -68,6 +90,8 @@ components:
         api_key:
           description: Security settings
           type: string
+        audit_log:
+          $ref: '#/components/schemas/config.AuditLogConfig'
         call_tool_timeout:
           type: string
         check_server_repo:

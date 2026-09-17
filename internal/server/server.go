@@ -308,6 +308,23 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 			opt(server)
 		}
 	}
+
+	// Spec 107 T109: the audit sink's always-on write-failure counter, mirrored
+	// to both `mcpproxy doctor` (works with metrics disabled) and Prometheus
+	// (metrics enabled only). Registered only when a sink exists - nil means
+	// audit_log is off, so there is nothing to report.
+	if server.auditSink != nil {
+		mgmtService.AddRuntimeWarningSource(func() []string {
+			if n := server.auditSink.WriteFailures(); n > 0 {
+				return []string{fmt.Sprintf("audit_log: %d write failures since start", n)}
+			}
+			return nil
+		})
+		if obsManager != nil && obsManager.Metrics() != nil {
+			obsManager.Metrics().RegisterAuditSink(server.auditSink)
+		}
+	}
+
 	// Record the servers this process started with: they are the baseline
 	// sweep's job, and anything that shows up later is a NEW admission that gets
 	// its own informational scan. Seeded from the startup config (available

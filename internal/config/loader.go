@@ -719,6 +719,30 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// key with an env alias. Build-tagged: a no-op on the personal build.
 	applyServerEditionEnvOverrides(cfg)
 
+	// Spec 107 FR-019: audit_log env overrides. An explicit env value wins
+	// over the file value and materializes the block so a config with no
+	// `audit_log` key can still be steered from the environment.
+	if value, ok := os.LookupEnv("MCPPROXY_AUDIT_LOG_ENABLED"); ok {
+		if cfg.AuditLog == nil {
+			cfg.AuditLog = &AuditLogConfig{}
+		}
+		enabled := value == trueValue || value == "1"
+		cfg.AuditLog.Enabled = &enabled
+	}
+	if value := os.Getenv("MCPPROXY_AUDIT_LOG_PATH"); value != "" {
+		if cfg.AuditLog == nil {
+			cfg.AuditLog = &AuditLogConfig{}
+		}
+		cfg.AuditLog.Path = value
+	}
+	if value, ok := os.LookupEnv("MCPPROXY_AUDIT_LOG_STDOUT"); ok {
+		if cfg.AuditLog == nil {
+			cfg.AuditLog = &AuditLogConfig{}
+		}
+		stdout := value == trueValue || value == "1"
+		cfg.AuditLog.Stdout = &stdout
+	}
+
 	// Override the offline TPA signature-bundle path from environment
 	// (spec 086 FR-019). Explicit MCPPROXY_* alias per the loader convention;
 	// the env value wins over the file value, and materializes the security

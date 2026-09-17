@@ -38,6 +38,7 @@ import (
 	bbolterrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
@@ -639,7 +640,57 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// When using default config, still track the actual path used
 		actualConfigPath = config.GetConfigPath(cfg.DataDir)
 	}
-	srv, err := server.NewServerWithConfigPath(cfg, actualConfigPath, logger)
+	// Spec 107 T109: construct the audit sink before the server so a bad
+	// audit_log configuration fails startup with exit code 4 (classifyError,
+	// below) rather than silently running without attribution. Transport is
+	// derived exactly as internal/server.Server.Start does (Listen empty or
+	// ":0" means the native stdio MCP transport, where stdout carries
+	// JSON-RPC and can never double as a log sink - FR-014).
+	transport := config.TransportHTTP
+	if cfg.Listen == "" || cfg.Listen == ":0" {
+		transport = config.TransportStdio
+	}
+	resolvedAudit, auditWarning, err := config.EffectiveAuditLog(cfg, transport)
+	if err != nil {
+		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err))
+		return err
+	}
+	if auditWarning != "" {
+		logger.Warn(auditWarning)
+	}
+
+	var auditSink audit.Sink
+	if resolvedAudit.Enabled {
+		if resolvedAudit.Path != "" {
+			auditSink, err = audit.NewFileSink(
+				resolvedAudit.Path,
+				resolvedAudit.MaxSizeMB,
+				resolvedAudit.MaxBackups,
+				resolvedAudit.MaxAgeDays,
+				resolvedAudit.Compress,
+				audit.WithFailureLogger(func(werr error) {
+					logger.Warn("audit_log write failed", zap.Error(werr))
+				}),
+			)
+			if err != nil {
+				startupErr := config.NewStartupError(config.ExitCodeAuditLogError,
+					fmt.Sprintf("audit_log.path %q cannot be opened for append: %v", resolvedAudit.Path, err))
+				recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(startupErr))
+				return startupErr
+			}
+		} else if resolvedAudit.Stdout {
+			auditSink = audit.NewStdoutSink(os.Stdout,
+				audit.WithFailureLogger(func(werr error) {
+					logger.Warn("audit_log write failed", zap.Error(werr))
+				}),
+			)
+		}
+	}
+	if auditSink != nil {
+		defer func() { _ = auditSink.Close() }()
+	}
+
+	srv, err := server.NewServerWithConfigPath(cfg, actualConfigPath, logger, server.WithAuditSink(auditSink))
 	if err != nil {
 		// Spec 042: classify the failure into a startup outcome enum.
 		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err))
@@ -830,6 +881,16 @@ func classifyError(err error) int {
 	var preflightGeneralErr *preflightGeneralError
 	if errors.As(err, &preflightGeneralErr) {
 		return preflightGeneralErr.ExitCode()
+	}
+
+	// Spec 107 FR-014: a typed configuration StartupError (e.g. an unwritable
+	// audit_log.path, or audit_log.stdout refused under the stdio transport)
+	// carries its own exit code, matched here BEFORE the string heuristics
+	// below - a wrapped "permission denied" underneath must classify as exit
+	// 4 (config error), never fall through to exit 5.
+	var startupErr *config.StartupError
+	if errors.As(err, &startupErr) {
+		return startupErr.ExitCode
 	}
 
 	// Check for port conflict errors

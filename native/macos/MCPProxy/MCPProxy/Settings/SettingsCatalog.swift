@@ -359,6 +359,21 @@ enum SettingsCatalog {
             ]
         ),
         ConfigSection(
+            id: "audit-log",
+            title: "Audit log",
+            help: "Edition-neutral JSONL record of authorization decisions and tool calls. Changes take effect after a restart (the sink is bound at startup).",
+            docs: "/features/audit-log",
+            fields: [
+                ConfigField(key: "audit_log.enabled", label: "Enable audit logging", help: "Writes one JSONL line per authorization decision and tool call. On by default under the server edition; the personal edition defaults to off.", control: .toggle, restart: true),
+                ConfigField(key: "audit_log.stdout", label: "Write to stdout", help: "Server edition default when no path is set — not used under the native stdio transport (stdout carries JSON-RPC there); set a path instead.", control: .toggle, restart: true),
+                ConfigField(key: "audit_log.path", label: "File path", help: "Where to write the rotating audit log file. Leave blank to use stdout instead.", control: .text, restart: true, optional: true, placeholder: "/var/log/mcpproxy/audit.jsonl"),
+                ConfigField(key: "audit_log.max_size_mb", label: "Rotate after (MB)", control: .number, min: 1, restart: true),
+                ConfigField(key: "audit_log.max_backups", label: "Rotated files to keep", control: .number, min: 1, restart: true),
+                ConfigField(key: "audit_log.max_age_days", label: "Delete rotated logs after (days)", control: .number, min: 1, restart: true),
+                ConfigField(key: "audit_log.compress", label: "Compress rotated files", control: .toggle, restart: true),
+            ]
+        ),
+        ConfigSection(
             id: "discovery",
             title: "Tool discovery & health checks",
             help: "How often mcpproxy probes upstream servers for liveness and re-discovers their tools. Lower these to reduce background traffic to chatty servers.",
