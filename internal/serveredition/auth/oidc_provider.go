@@ -455,7 +455,17 @@ func (p *oidcProvider) verifyIDToken(ctx context.Context, raw, nonce string) (*i
 	if !slices.Contains(auds, p.cfg.ClientID) {
 		return nil, newOIDCError(LoginAudienceMismatch, "id_token aud does not contain client_id", nil)
 	}
-	azp, hasAzp := claims["azp"].(string)
+	azpClaim, azpPresent := claims["azp"]
+	azp, azpIsString := azpClaim.(string)
+	// A present-but-non-string azp (e.g. a number or object) must never be
+	// treated as absent: OIDC defines azp as a string that, when present,
+	// must identify this client, so a malformed value is refused outright
+	// rather than silently falling through the "no azp" branches below
+	// (cross-review round 8, chunk 1 P2).
+	if azpPresent && azpClaim != nil && !azpIsString {
+		return nil, newOIDCError(LoginAudienceMismatch, "id_token azp is not a string", nil)
+	}
+	hasAzp := azpIsString
 	if len(auds) > 1 && !hasAzp {
 		return nil, newOIDCError(LoginAudienceMismatch, "id_token has multiple aud values and no azp", nil)
 	}

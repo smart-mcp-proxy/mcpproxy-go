@@ -130,13 +130,33 @@ func (p *connectorProvider) connector(r *http.Request, server *config.ServerConf
 		return nil, err
 	}
 	if len(p.order) >= connectorCacheCap {
-		oldest := p.order[0]
-		p.order = p.order[1:]
-		delete(p.cache, oldest)
+		p.evictOneLocked()
 	}
 	p.cache[key] = conn
 	p.order = append(p.order, key)
 	return conn, nil
+}
+
+// evictOneLocked drops one entry to make room for a new one. It prefers the
+// oldest connector with no in-flight connect flow over strict insertion
+// order: a pure FIFO could evict a connector whose user is mid-flow (between
+// the /connect redirect and their /callback), turning a caller varying its
+// own Host header into a cross-user denial-of-service against a real,
+// in-progress login rather than just bounding memory (cross-review round 8,
+// chunk 3 P2). Caller holds p.mu. If every cached connector has a pending
+// flow (impossible in practice at connectorCacheCap, but never a reason to
+// grow unbounded), the oldest is evicted anyway — the cap is never violated.
+func (p *connectorProvider) evictOneLocked() {
+	victim := 0
+	for i, key := range p.order {
+		if !p.cache[key].HasPendingFlow() {
+			victim = i
+			break
+		}
+	}
+	key := p.order[victim]
+	p.order = append(p.order[:victim], p.order[victim+1:]...)
+	delete(p.cache, key)
 }
 
 // connectCallbackPath is the relative callback route for a server's connect flow.

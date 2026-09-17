@@ -453,7 +453,7 @@ ok "§4e /mcp refuses a session cookie and refuses no credential"
 # ---------------------------------------------------------------------------
 c "$BASE/api/v1/auth/provider" | jq -e '.display_name=="Example Corp" and (keys|length==1)' >/dev/null ||
 	die "5 /auth/provider must expose exactly display_name (FR-030)"
-c -b "$J" "$BASE/api/v1/servers" | jq -e '[.servers[].name]==["a"]' >/dev/null ||
+c -b "$J" "$BASE/api/v1/servers" | jq -e '[.data.servers[].name]==["a"]' >/dev/null ||
 	die "5 /servers as alice must list exactly [a] (entitlement-filtered)"
 c -b "$J" "$BASE/api/v1/user/servers" | jq -e '[.shared[].name]==["a"]' >/dev/null ||
 	die "5 /user/servers as alice must list shared=[a]"
@@ -485,8 +485,14 @@ SID="$(grep -i '^mcp-session-id' "$SCRATCH/init.h" | tr -d '\r' | cut -d' ' -f2)
 [[ -n "$SID" ]] || die "6 initialize returned no Mcp-Session-Id"
 allowed="$(mcp -H "Mcp-Session-Id: $SID" -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"call_tool_read","arguments":{"name":"a:echo","args":{"text":"hello","secret":"AKIAQUICKSTART7SENTINEL0"}}}}' | jq -c '.result.isError')"
 [[ "$allowed" == "false" ]] || die "6 a:echo through the token must succeed (isError=$allowed)"
-hidden="$(mcp -H "Mcp-Session-Id: $SID" -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"call_tool_read","arguments":{"name":"b:echo","args":{}}}}' | jq -r '.result.content[0].text // empty')"
+hiddenResp="$(mcp -H "Mcp-Session-Id: $SID" -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"call_tool_read","arguments":{"name":"b:echo","args":{}}}}')"
+hidden="$(echo "$hiddenResp" | jq -r '.result.content[0].text // empty')"
 log "6 b:echo refusal text: ${hidden:-<empty>}"
+# Server b is not in Alice's entitlement scope; the call must be refused, not
+# answered (an authorization regression here would otherwise pass the rig
+# silently — cross-review round 8, chunk 4 P2).
+echo "$hiddenResp" | jq -e '.result.isError==true' >/dev/null ||
+	die "6 b:echo must be refused (isError=true) for a token scoped to [a]"
 [[ -f "$AUDIT" ]] || die "6 audit log $AUDIT was not written"
 log "6 last audit lines:"
 tail -n 3 "$AUDIT" | jq -c '{event,decision,outcome,server,tool,reason,disclosed,caller:.caller.kind,email:.caller.user_email,rid:.request_id}' | sed 's/^/    /'

@@ -459,6 +459,12 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 			attempt.setUserID(h.lookupUserID(userInfo.Email))
 			attempt.refuse(w, LoginUserDisabled, "user record disabled")
 		default:
+			// The store WAS consulted here (the upsert itself failed), so
+			// FR-013's "store not yet consulted" condition for email_hash no
+			// longer holds and no user record was established either — the
+			// event must carry neither identity field (cross-review round 8,
+			// chunk 2 P2).
+			attempt.clearEmailHash()
 			attempt.unavailable(w, LoginInternalError, "user store", err)
 		}
 		return
@@ -647,6 +653,14 @@ func (a *loginAttempt) setUserID(id string) {
 		return
 	}
 	a.userID, a.emailHash = id, ""
+}
+
+// clearEmailHash drops a provisional email hash once the store has been
+// consulted and failed without establishing a record: FR-013 reserves
+// email_hash for reasons where the store was not yet consulted, and it must
+// never appear alongside a failed-but-attempted upsert either.
+func (a *loginAttempt) clearEmailHash() {
+	a.emailHash = ""
 }
 
 func (a *loginAttempt) result(reason LoginRefusal) LoginResult {

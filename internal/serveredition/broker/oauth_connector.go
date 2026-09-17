@@ -156,6 +156,20 @@ func (c *OAuthConnector) emitConnect(ctx context.Context, userID, reason string)
 // ServerKey returns the store key this connector persists credentials under.
 func (c *OAuthConnector) ServerKey() string { return c.serverKey }
 
+// HasPendingFlow reports whether this connector currently holds at least one
+// in-flight connect flow (a state issued by BuildAuthorizationURL and not yet
+// consumed by Complete/Deny or expired). A cache that evicts connectors by
+// age alone can drop one mid-flow out from under its user, turning their
+// upcoming callback into a spurious invalid-state failure; callers use this
+// to prefer evicting an idle connector instead (cross-review round 8, chunk 3
+// P2).
+func (c *OAuthConnector) HasPendingFlow() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.gcExpiredLocked()
+	return len(c.pending) > 0
+}
+
 // BuildAuthorizationURL starts a connect flow for userID. It generates a PKCE
 // verifier/challenge and an opaque state, records the pending flow, and returns
 // the upstream authorize URL (to which the gateway redirects the user) plus the

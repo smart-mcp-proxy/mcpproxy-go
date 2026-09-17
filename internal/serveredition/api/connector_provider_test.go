@@ -79,3 +79,52 @@ func TestConnectorProvider_CacheKeepsRecentEntries(t *testing.T) {
 	require.NoError(t, err)
 	assert.Same(t, conn1, conn2, "the just-used base's connector is still cached, not rebuilt")
 }
+
+// A connector holding an in-flight connect flow (BuildAuthorizationURL called,
+// callback not yet received) must survive eviction even when it is the
+// oldest entry: a caller varying its own Host header must not be able to
+// evict another user's pending login and turn their upcoming callback into a
+// spurious invalid-state failure (cross-review round 8, chunk 3 P2).
+func TestConnectorProvider_EvictionSparesPendingFlow(t *testing.T) {
+	store := credTestStore(t)
+	p := newConnectorProvider(store, nil, nil)
+	server := connectTestServer("s")
+
+	// First entry (oldest by insertion order) starts a pending flow.
+	r0 := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/s/connect", nil)
+	r0.Host = "host-0.example"
+	conn0, err := p.connector(r0, server)
+	require.NoError(t, err)
+	_, _, err = conn0.BuildAuthorizationURL("alice")
+	require.NoError(t, err)
+
+	// Fill the cache to its cap with distinct, flow-free hosts.
+	for i := 1; i < connectorCacheCap; i++ {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/s/connect", nil)
+		r.Host = fmt.Sprintf("host-%d.example", i)
+		_, err := p.connector(r, server)
+		require.NoError(t, err)
+	}
+
+	// One more distinct host forces an eviction: host-0 (pending) must be
+	// spared in favour of the oldest flow-free entry (host-1).
+	rNew := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/s/connect", nil)
+	rNew.Host = "host-new.example"
+	_, err = p.connector(rNew, server)
+	require.NoError(t, err)
+
+	p.mu.Lock()
+	_, host0Cached := p.cache[fmt.Sprintf("%s|http://host-0.example", conn0.ServerKey())]
+	_, host1Cached := p.cache[fmt.Sprintf("%s|http://host-1.example", conn0.ServerKey())]
+	size := len(p.cache)
+	p.mu.Unlock()
+
+	assert.True(t, host0Cached, "the connector with a pending flow must not be evicted")
+	assert.False(t, host1Cached, "an idle connector is evicted in its place")
+	assert.Equal(t, connectorCacheCap, size, "the cap is still enforced")
+
+	// The pending flow is still resolvable against the surviving connector.
+	conn0Again, err := p.connector(r0, server)
+	require.NoError(t, err)
+	assert.Same(t, conn0, conn0Again)
+}

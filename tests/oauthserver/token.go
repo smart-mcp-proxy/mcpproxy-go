@@ -231,6 +231,8 @@ func (s *OAuthTestServer) mintIDToken(authCode *AuthorizationCode, client *Clien
 	case mode.IDTokenMultiAudNoAzp:
 		claims["aud"] = []string{client.ClientID, "second-audience"}
 		delete(claims, "azp")
+	case mode.IDTokenAzpNonString:
+		claims["azp"] = 12345
 	}
 
 	claims["iat"] = now.Unix()

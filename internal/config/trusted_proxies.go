@@ -113,17 +113,26 @@ func ForwardedHeaders(r *http.Request, trusted []string) ForwardedInfo {
 	}
 	if xff := r.Header.Get("X-Forwarded-For"); strings.TrimSpace(xff) != "" {
 		hops := strings.Split(xff, ",")
-		// Walk right to left: the first hop that is not a trusted proxy is
-		// the client. When every hop is trusted the left-most one is the
-		// best available client address.
+		// Walk right to left: the first hop that parses as an IP and is not
+		// itself a trusted proxy is the client. A hop that does not parse as
+		// an IP literal (a hostname, "unknown", or an address still carrying
+		// its port) is skipped rather than accepted — it must never win the
+		// walk and land in session/audit ClientIP as a non-IP string
+		// (cross-review round 8, chunk 3 P2). When every parsable hop is
+		// trusted the left-most parsable one is the best available client
+		// address.
 		chosen := ""
 		for i := len(hops) - 1; i >= 0; i-- {
 			hop := strings.TrimSpace(hops[i])
 			if hop == "" {
 				continue
 			}
+			ip := net.ParseIP(hop)
+			if ip == nil {
+				continue
+			}
 			chosen = hop
-			if !ipInTrusted(net.ParseIP(hop), trusted) {
+			if !ipInTrusted(ip, trusted) {
 				break
 			}
 		}
@@ -132,7 +141,7 @@ func ForwardedHeaders(r *http.Request, trusted []string) ForwardedInfo {
 			return info
 		}
 	}
-	if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" {
+	if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" && net.ParseIP(xri) != nil {
 		info.ClientIP = xri
 	}
 	return info

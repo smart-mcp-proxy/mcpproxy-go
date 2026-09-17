@@ -470,6 +470,10 @@ func TestOIDCVerify_TamperMatrix(t *testing.T) {
 		{name: "wrong iss", mode: oauthserver.ErrorMode{IDTokenWrongIssuer: true}, reason: "issuer_mismatch", checkWords: []string{"iss"}},
 		{name: "wrong aud", mode: oauthserver.ErrorMode{IDTokenWrongAudience: true}, reason: "audience_mismatch", checkWords: []string{"aud"}},
 		{name: "multi-aud without matching azp", mode: oauthserver.ErrorMode{IDTokenMultiAudNoAzp: true}, reason: "audience_mismatch", checkWords: []string{"azp", "aud"}},
+		// A present-but-non-string azp must never be silently treated as
+		// absent: with a single-audience token that would let the equality
+		// check be skipped entirely (cross-review round 8, chunk 1 P2).
+		{name: "azp present but non-string", mode: oauthserver.ErrorMode{IDTokenAzpNonString: true}, reason: "audience_mismatch", checkWords: []string{"azp"}},
 		{name: "expired", mode: oauthserver.ErrorMode{IDTokenExpired: true}, reason: "token_expired", checkWords: []string{"exp"}},
 		{name: "nbf in the future", mode: oauthserver.ErrorMode{IDTokenNbfFuture: true}, reason: "id_token_invalid", checkWords: []string{"nbf", "not valid yet", "not before"}},
 		{name: "wrong nonce", wrongNonce: true, reason: "nonce_mismatch", checkWords: []string{"nonce"}},

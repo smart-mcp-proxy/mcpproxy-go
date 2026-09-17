@@ -929,6 +929,7 @@ func TestHandleCallback_Unavailable_InternalErrorRenders503(t *testing.T) {
 		w := rig.approveFlow(rid)
 		res := assertInternal(t, rig, rid, w)
 		assert.Empty(t, res.UserID, "no record exists when the upsert failed")
+		assert.Empty(t, res.EmailHash, "the store was already consulted (and failed); FR-013 reserves email_hash for reasons where the store was not yet consulted (cross-review round 8, chunk 2 P2)")
 
 		u, err := rig.store.GetUserByEmail(refusalUser)
 		require.NoError(t, err)

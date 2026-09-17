@@ -167,6 +167,39 @@ func TestForwardedHeadersTrustedPeer(t *testing.T) {
 		assert.Equal(t, "198.51.100.77", got.ClientIP)
 	})
 
+	// An unparsable right-most hop (a hostname, a garbage token, or an IP
+	// still carrying its port) must never win the walk: it is skipped like
+	// an untrusted-but-parsable hop would win over it, so the scan keeps
+	// looking left for a real IP instead of handing a non-IP string to the
+	// session/audit ClientIP (cross-review round 8, chunk 3 P2).
+	t.Run("unparsable right-most XFF hop is skipped, not accepted", func(t *testing.T) {
+		got := ForwardedHeaders(fwdRequest(t, "10.0.0.2:5555", map[string]string{
+			"X-Forwarded-For": "198.51.100.9, unknown",
+		}), trusted)
+		assert.Equal(t, "198.51.100.9", got.ClientIP, "the garbage hop is skipped; the next real IP to its left wins")
+	})
+
+	t.Run("XFF hop still carrying its port is skipped, not accepted", func(t *testing.T) {
+		got := ForwardedHeaders(fwdRequest(t, "10.0.0.2:5555", map[string]string{
+			"X-Forwarded-For": "198.51.100.9, 203.0.113.5:1234",
+		}), trusted)
+		assert.Equal(t, "198.51.100.9", got.ClientIP)
+	})
+
+	t.Run("XFF entirely unparsable falls back to the trusted peer", func(t *testing.T) {
+		got := ForwardedHeaders(fwdRequest(t, "10.0.0.2:5555", map[string]string{
+			"X-Forwarded-For": "unknown, garbage",
+		}), trusted)
+		assert.Equal(t, "10.0.0.2", got.ClientIP, "no XFF hop parses as an IP; fall back to the trusted peer, not a garbage string")
+	})
+
+	t.Run("unparsable X-Real-IP falls back to the trusted peer", func(t *testing.T) {
+		got := ForwardedHeaders(fwdRequest(t, "10.0.0.2:5555", map[string]string{
+			"X-Real-IP": "not-an-ip",
+		}), trusted)
+		assert.Equal(t, "10.0.0.2", got.ClientIP)
+	})
+
 	t.Run("XFF takes precedence over X-Real-IP", func(t *testing.T) {
 		got := ForwardedHeaders(fwdRequest(t, "10.0.0.2:5555", map[string]string{
 			"X-Forwarded-For": "198.51.100.1",

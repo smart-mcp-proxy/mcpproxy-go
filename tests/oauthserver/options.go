@@ -56,6 +56,7 @@ type ErrorMode struct {
 	IDTokenWrongIssuer    bool // id_token `iss` is another origin
 	IDTokenWrongAudience  bool // id_token `aud` is another client_id
 	IDTokenMultiAudNoAzp  bool // id_token `aud` has two members and no `azp`
+	IDTokenAzpNonString   bool // id_token `azp` is present but not a string (a number)
 	IDTokenExpired        bool // id_token `exp` one hour in the past
 	IDTokenNbfFuture      bool // id_token `nbf` one hour in the future
 	IDTokenNoNonce        bool // id_token omits `nonce`
