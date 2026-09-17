@@ -314,6 +314,15 @@ strings emitted at boot, by `PATCH /api/v1/config` and by `/config/apply`
 | `oauth.groups_claim` | string | `"groups"` | Restart | `oidc` only. Name of the ID-token (then userinfo) claim carrying group memberships. Accepted shapes: a flat JSON array of strings or a single string; anything else is treated as absent. Compared as exact strings by the group → server map |
 | `oauth.email_verified_policy` | `refuse_false` \| `require_true` \| `ignore` | `refuse_false` | Restart | `server_edition.oauth.email_verified_policy must be one of: refuse_false, require_true, ignore`. See the cost note below |
 | `oauth.display_name` | string | provider family name | Restart | Login-button label; at most 64 characters (`server_edition.oauth.display_name must be at most 64 characters`). It is the **only** field returned by the public `GET /api/v1/auth/provider` probe (never the issuer, client id, tenant, scopes or domains) |
+| `access` | object | absent (Shared-only semantics) | **Live** | Absent = today's behaviour, unchanged: every tenant sees every `shared` server. **Present = active**, with no silent allow-all: a tenant sees a shared server only through a group grant or `default_servers`; a user whose groups match no key and who has no default grant sees none. Read live through the config provider on every entitlement decision, so it hot-reloads (see [Group access map](/development/server-edition-multiuser-auth#group-access-map-server_editionaccess-and-entitlement-spec-107-pr-c)) |
+| `access.group_servers` | map[string]string[] | `{}` | Live | Group value (compared exactly, case-sensitive) → admin-config server names, or `"*"` for every shared server. Non-empty only with `oauth.provider: "oidc"` — `server_edition.access.group_servers requires oauth.provider "oidc" (legacy providers yield no groups)`. A group with no map entry contributes nothing (silent, not an error) |
+| `access.default_servers` | string[] | `[]` (no default grant) | Live | The grant for a user whose stored groups match no `group_servers` key. Absent, `null` and `[]` all mean "no default"; `"*"` is honoured here too |
+
+An access-map entry (in `group_servers` or `default_servers`) that names no
+configured server is accepted, not refused — it may be written ahead of the
+server it names — but `mcpproxy doctor` reports it: `server_edition.access
+names N server(s) that match no configured server (…): those entries grant
+nothing until a server with that exact name exists`.
 
 #### `email_verified_policy` — what each value costs
 
@@ -372,7 +381,7 @@ See [Upstream Servers](/configuration/upstream-servers) for detailed server conf
 
 MCPProxy watches the configuration file for changes and automatically reloads when modifications are detected. No restart is required for most configuration changes.
 
-Exceptions that require a restart include `listen`, `data_dir`, `api_key`, the TLS block, the three `http_*_timeout` options, and — in the Server edition — every `server_edition` key except `admin_emails` (see [Server Edition](#server-edition)). `trusted_proxies` is live.
+Exceptions that require a restart include `listen`, `data_dir`, `api_key`, the TLS block, the three `http_*_timeout` options, and — in the Server edition — every `server_edition` key except `admin_emails` and `access` (see [Server Edition](#server-edition)). `trusted_proxies` is live.
 
 ## Environment Variable Overrides
 

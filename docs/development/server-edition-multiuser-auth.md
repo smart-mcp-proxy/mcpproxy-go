@@ -179,22 +179,29 @@ ignored (one deprecation warning when `true`); see
 | `GET /api/v1/auth/login` | Public | Initiate OAuth login flow (PKCE S256, `state`, `nonce`; `?redirect_uri=` must be a same-origin path) |
 | `GET /api/v1/auth/callback` | Public | OAuth callback (verifies the ID token for `oidc`, creates session; one generic refusal page) |
 | `GET /api/v1/auth/me` | Session/JWT | Get current user profile |
-| `POST /api/v1/auth/token` | Session | Mint a user JWT for the REST API and CLI (`/api/v1/user/*`); a JWT is **never** an MCP credential — `/mcp` accepts only agent tokens, the API key and the socket |
+| `POST /api/v1/auth/token` | **Session only** | Mint a user JWT for the REST API and CLI (`/api/v1/user/*`); a JWT is **never** an MCP credential — `/mcp` accepts only agent tokens, the API key and the socket |
 | `POST /api/v1/auth/logout` | Session | Invalidate session |
-| `GET /api/v1/user/servers` | Session/JWT | List user's servers (personal + shared) |
+| `GET /api/v1/user/servers` | Session/JWT | List user's servers (personal + shared, filtered by the [group entitlement](#group-access-map-server_editionaccess-and-entitlement-spec-107-pr-c) when `access` is configured) |
 | `POST /api/v1/user/servers` | Session/JWT | Add personal upstream server |
 | `GET /api/v1/user/activity` | Session/JWT | User's activity log |
 | `GET /api/v1/user/diagnostics` | Session/JWT | Server health for user's servers |
-| `GET /api/v1/admin/users` | Admin | List all users |
-| `POST /api/v1/admin/users/{id}/disable` | Admin | Disable a user |
+| `GET /api/v1/user/tokens` | Session/JWT | List the caller's own agent tokens |
+| `POST /api/v1/user/tokens` | **Session only** | Mint an agent token owned by the caller; `allowed_servers` narrowed to the entitlement set, `expires_in` capped at 365 days |
+| `POST /api/v1/user/tokens/{name}/regenerate` | **Session only** | Rotate an owned token's secret, re-narrowing `allowed_servers` to the current entitlement |
+| `DELETE /api/v1/user/tokens/{name}` | Session/JWT | Revoke/delete an owned token; unlike mint and rotate, revoke keeps accepting a bearer JWT (it extends nothing) |
+| `GET /api/v1/admin/users` | Admin | List all users (now includes `groups`, `groups_updated_at`, `subject_rebind_armed_at`) |
+| `POST /api/v1/admin/users/{id}/disable` | Admin | Disable a user (revokes their sessions and owned tokens) |
+| `POST /api/v1/admin/users/{id}/enable` | Admin | Re-enable a disabled user; on a real `disabled: true → false` transition, arms a single-use subject rebind (`subject_rebind_armed_at`) consumed by the user's next successful login |
 | `GET /api/v1/admin/activity` | Admin | All users' activity logs |
 | `GET /api/v1/admin/sessions` | Admin | List active sessions |
+
+**"Session only"** means the session cookie exclusively: a bearer user JWT (or an agent token) presented to `POST /auth/token`, `POST /user/tokens` or `POST /user/tokens/{name}/regenerate` is refused with `401` — a derived credential never mints or renews another credential (FR-011). This closes what was previously an indefinite chain: a JWT could renew itself forever through `/auth/token`, and a JWT minted in a session's last second could still mint a 30-day agent token through `/user/tokens` in its own last second. See [Freshness bound](#freshness-bound-and-session-cookie-only-minting-doors-fr-011) below for the resulting staleness guarantee.
 
 ## Server Architecture
 
 - **Auth flow**: OAuth 2.0 + PKCE (+ nonce and a JWKS-verified ID token for `oidc`) → Session cookie (`HttpOnly; SameSite=Lax`; `Secure` per `session_cookie_secure`) for the Web UI + JWT bearer (REST API / CLI only). Neither is accepted on `/mcp`; a user reaches tools only through an agent token they own.
 - **Server types**: Shared (config file) + Personal (DB rows a user adds through `POST /api/v1/user/servers`). Every upstream connection is the process's single shared connection — there is no per-user connection, per-user workspace or per-user credential on the tool-call path.
-- **Isolation**: REST listing scope (users see only shared + own personal servers), agent-token `allowed_servers` scope narrowed on every authentication, and user-scoped activity logs.
+- **Isolation**: REST listing scope (users see only shared + own personal servers, further narrowed by the group entitlement below when `server_edition.access` is configured), agent-token `allowed_servers` scope narrowed on every authentication, a tenant session/JWT principal restricted to an explicit allowlist of core REST routes and filtered by the same entitlement (Spec 107 PR-C, [below](#tenant-session-principal-on-core-rest-spec-107-pr-c)), and user-scoped activity logs.
 - **Admin**: Identified by `admin_emails` config. Sees all activity, manages users.
 - **Build tag**: All server code behind `//go:build server`. Personal edition unaffected.
 
@@ -376,6 +383,111 @@ and the server edition has no cross-tenant token listing (that belongs in
 tidy audits them straight from storage — every record in the `agent_tokens`
 bucket whose `allowed_servers` contains `"*"` and whose `user_id` is non-empty
 — and asks the owner to rotate, or revokes them.
+
+### Freshness bound and session-cookie-only minting doors (FR-011)
+
+Groups (and admin-role membership) refresh only at login — there is no
+background IdP re-query. That makes staleness a real, documented bound rather
+than "however long the IdP takes to notice":
+
+```
+bound = session_ttl + max(bearer_token_ttl, longest owned agent-token expiry ≤ 365 days)
+```
+
+A live session or a bearer JWT is narrowed on its **next request**, and every
+owned agent token on its **next authentication** — both *before* the holder
+re-logs in, because the scope resolver reads the stored `User.Groups` /
+entitlement set fresh on every request rather than trusting anything cached in
+the JWT. `admin_emails` users are exempt from the group map, so this bound is
+about tenants; the administrator role itself already re-derives from
+`admin_emails` on every request ([Role freshness](#role-freshness-issue-1169)).
+
+The bound only holds because the three credential-minting doors —
+`POST /auth/token`, `POST /user/tokens`, `POST /user/tokens/{name}/regenerate`
+— accept a session cookie only (previous section): without that, a JWT or
+token minted in a session's last second could keep re-minting itself past the
+session's expiry, making the bound unbounded. `expires_in` on `/user/tokens` is
+capped at 365 days by the same `auth.ParseTokenExpiry` rule as core
+`/api/v1/tokens` (`9000h` → `400 expires_in must be at most 365 days`).
+
+An administrator `disable` is the immediate remedy — it is not subject to this
+bound because it revokes the user's sessions and owned tokens directly through
+the owner gate ([Agent tokens and tenant identity](#agent-tokens-and-tenant-identity-issue-1168)),
+rather than waiting for staleness to expire.
+
+### Group access map (`server_edition.access`) and entitlement (Spec 107 PR-C)
+
+`server_edition.access` (FR-006/FR-007/FR-009) turns "the IdP put someone in a
+group" into server entitlement. It is **absent by default** — today's
+Shared-only semantics, unchanged — and becomes **active** the moment the block
+is present, with no silent allow-all: `"*"` is the only way to grant every
+shared server, and a user whose stored groups match no key and who has no
+`default_servers` grant is entitled to **no shared server at all**
+(deny-all for non-administrators). See the [config reference](../configuration/config-file.md#server-edition)
+for the key table and the per-IdP groups-claim table.
+
+```
+grant(u)     = ⋃ access.group_servers[g] for g ∈ u.Groups  ∪  (access.default_servers if no g matches any key)
+               where "*" expands to every shared server
+entitled(u)  = personal(u) ∪ { s ∈ shared : access == nil ∨ s ∈ grant(u) }
+```
+
+`entitledServerNamesFor` (`internal/serveredition/api/user_handlers.go`) is the
+**one** function every tenant-facing door consults — REST listing/by-name
+doors, the owned-token narrowing on every authentication, and the tenant
+session principal below. Administrators keep today's whole-configuration view
+(SC-006 parity); the "*" literal survives only for them. A group-excluded
+server is indistinguishable from a nonexistent one on every surface (FR-010)
+except the still-open Spec 105 items named in [Agent Tokens](../features/agent-tokens.md#server-edition-incident-response).
+
+#### Upgrade-state table
+
+What happens to an existing deployment the moment an operator adds an `access`
+block to a config that previously had none:
+
+| State | Outcome |
+|-------|---------|
+| A pre-upgrade user record (no stored groups) | Decodes with `groups == nil`, which matches no `group_servers` key — the user falls straight to `default_servers` (or deny-all if that is empty too) |
+| A live session or bearer JWT the user is already holding | Narrowed to the new (default) grant on its **very next request** — no wait for expiry, no re-login required to lose access |
+| Every agent token that user owns | Narrowed to the new grant on its **next authentication** — same immediacy, independent of the request path above |
+| An `admin_emails` user | **Unaffected** — administrators are exempt from the group map by construction (FR-009) |
+| Groups themselves (as opposed to the grant computed from them) | Refresh only at the user's **next login** — enabling `access` narrows immediately using whatever groups are already stored; it does not requery the IdP |
+| Provider changed for the same email (e.g. migrating IdPs) | Automatic rebind on the first login with the new provider, flagged `provider_rebound` |
+| Same provider, but the IdP-side subject (`sub`) changed (e.g. account re-created) | Refused as `subject_mismatch` until an administrator runs `disable` (which revokes the user's sessions and tokens) → `enable` (which arms a single-use `subject_rebind_armed_at`) → the user's next successful login consumes it |
+
+### Tenant session principal on core REST (Spec 107 PR-C)
+
+Before this spec, a session cookie or user JWT was accepted only on
+`/api/v1/auth/*`, `/api/v1/user/*` and `/api/v1/admin/*`. PR-C additionally
+accepts a `user`-typed session/JWT principal on **core** `/api/v1` and `/events`
+(the routes the Web UI and CLI otherwise reach only with the admin API key),
+gated by a fixed allowlist and the entitlement above:
+
+| Method | Route | Filter |
+|---|---|---|
+| GET | `/api/v1/status` | `CanEnumerateServer` |
+| GET | `/api/v1/servers` | `visibleServers` |
+| GET | `/api/v1/servers/{id}/**` (except `/tool-calls` and the static `/servers/import/paths`) | `scopedServerSubtree` (404 parity with a nonexistent server) |
+| GET | `/api/v1/tools`, `/api/v1/index/search` | scoped (search is filtered *before* the ranked cut, so a hidden high-ranker can never displace an entitled hit) |
+| POST | `/api/v1/preflight` | `ResolveScope` with `Restricted=true` |
+| GET | `/api/v1/profiles`, `/api/v1/profiles/active` | tenant projection — profiles with an empty entitled intersection are omitted |
+| GET/HEAD | `/events` | `eventVisibleToCaller`; the principal is re-resolved before every frame |
+
+**Every other method+route** under `/api/v1` — `/tools/call`, `/code/exec`,
+`/config`, `/servers` add/remove/enable, `/quarantine/*`, `/tokens*`,
+`/secrets*`, `/sessions`, `/registries*`, `/telemetry/*`, `/activity*` and
+everything else, including routes added later — answers `403` before the
+handler runs (so before any body parse), with the same fixed body core REST
+already used for a scoped caller:
+`{"error":"forbidden","message":"this credential is not permitted to access this resource","request_id":"…"}`.
+
+An `admin_user` session or JWT is an administrator everywhere on core REST
+except `CanRevealSecrets`, which stays API-key/socket-only — `GET
+/config?reveal=…` and `/info`'s `web_ui_url` return masked values even for an
+administrator's session. This is the one place a session/JWT principal is
+deliberately weaker than the API key, and it is why the Web UI login alone is
+enough for a tenant to use the Configuration and Servers pages, but not enough
+to read a raw secret.
 
 ## Key Directories
 

@@ -487,6 +487,49 @@ mcpproxy serve --require-mcp-auth    # Enforce /mcp authentication
 | `--expires` | No | `30d` | Expiry duration (e.g., `7d`, `90d`, `365d`) |
 | `--profile-pin` | No | — | Pin the token to a single profile (see [Profile Pinning](#profile-pinning)) |
 
+### Documented invariant (Spec 107 FR-046)
+
+A person who signs in through the team's IdP — directly through their session
+on the REST API and Web UI, or through any agent token they mint — can see and
+use exactly the servers their group grants, and cannot learn about or act on
+any other server through proxy-produced data; every tool-call authorization
+decision about them is recorded on the audit line with the real server name,
+which is never echoed to them.
+
+- **Covered surfaces.** The server-edition REST routes (`/api/v1/auth/*`,
+  `/user/*`, `/admin/*`); the [core REST API](../development/server-edition-multiuser-auth.md#tenant-session-principal-on-core-rest-spec-107-pr-c)
+  and `/events` for the tenant session principal; the HTTP MCP surfaces
+  (`/mcp`) for agent tokens a tenant owns, scoped exactly as described
+  throughout this page; and the Web UI, which reaches nothing a tenant's own
+  session and owned tokens could not already reach. `/mcp` never accepts a
+  session cookie or user JWT — a tenant reaches tools only through an agent
+  token they own.
+- **Staleness bound (FR-011), including the closed JWT self-renewal.** Groups
+  refresh only at login: `session_ttl + max(bearer_token_ttl, longest owned
+  token expiry ≤ 365 days)`. This bound holds specifically because a bearer
+  JWT can no longer renew itself through `POST /auth/token`, nor mint or
+  rotate an agent token through `POST /user/tokens(/…/regenerate)` — those
+  three doors accept only a live session cookie (see
+  [Freshness bound](../development/server-edition-multiuser-auth.md#freshness-bound-and-session-cookie-only-minting-doors-fr-011)).
+  An administrator `disable` is immediate and is not subject to this bound.
+- **Retained Spec 105 effects.** Everything Spec 105 already scopes for an
+  agent token — [server scoping](#server-scoping), [administrative denial](#administrative-operations-are-admin-only),
+  and [`read_cache`](#server-scoping) authorization-stamped entries — applies
+  identically whether a server is excluded by group (this spec) or by token
+  scope (Spec 105); a group-excluded server is indistinguishable from a
+  nonexistent one on every one of those surfaces.
+- **Still-open Spec 105 items.** Three surfaces on `main` still leak the
+  *existence* (not the content) of an excluded server, whether excluded by
+  group or by token: `retrieve_tools`'s `usage_summary`/`session_risk`
+  statistics, the "Available servers" error text, and the scope-denial text.
+  This spec adds nothing new to that leak and closes it the moment the
+  corresponding Spec 105 item merges — it is not something a server-edition
+  deployment can configure around today.
+- **Single-replica assumption.** Pending OAuth login state, the SSE
+  per-frame principal re-resolution and the entitlement computation above all
+  run in-process with no shared cross-replica store; a second replica of the
+  server edition is unsupported.
+
 ### Server-edition incident response
 
 Administrators authenticated through a server-edition session or bearer JWT can list safe metadata for all owners with `GET /api/v1/admin/tokens`. Each entry includes `user_id`, `name`, scope, permissions, timestamps, prefix, profile pin, and revocation state. Raw credentials and token hashes are never listed.
