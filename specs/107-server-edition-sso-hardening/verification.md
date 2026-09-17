@@ -644,6 +644,122 @@ T115's scope as written).
 
 ### Real instance
 
+T116, run against `scripts/dev-server-edition.sh --phase d` (quickstart.md §6)
+plus manual extensions for the cases the script doesn't cover. Two rig bugs
+found and fixed in the process (both in `scripts/dev-server-edition.sh`, not
+in the audited feature code):
+
+- **Rig gap 1 — servers left quarantined.** The generated scratch config had
+  no `quarantine_enabled` key, so the three fixture servers (`a`, `b`,
+  `a__b`) booted quarantined (new-server TPA review, spec 086) and stayed
+  quarantined for the whole run — nothing in the script ever approved them.
+  §6's `a:echo` call then hit the scoped-caller tier gate
+  (`mcp.go:2517-2524`, `tierForAnnotations` with no discovered annotations →
+  requires `destructive`) against a token minted with `permissions:["read"]`,
+  and was refused — not because of anything in this PR, but because the rig
+  never got the fixture servers out of quarantine. Fix: added
+  `"quarantine_enabled": false` to the scratch config (§2) — these are
+  synthetic, trusted, loopback-only fixtures; quarantine review isn't part of
+  what phase d is testing. Verified before/after: with quarantine on,
+  `curl .../tools/call name=a:echo` returned `isError:true,
+  "Permission denied: token does not have 'destructive' permission required
+  for tool 'a:echo'"`; with `quarantine_enabled:false`, the same call
+  returned `{"content":[{"type":"text","text":"hello"}]}` (no `isError`).
+- **Rig gap 2 — `isError` assertion didn't accept the omitempty case.** Once
+  gap 1 was fixed, §6's `[[ "$allowed" == "false" ]]` still failed with
+  `isError=null`: a successful `tools/call` response omits `isError`
+  (`omitempty`), so `jq -c '.result.isError'` on the missing field prints
+  `null`, never the literal string `false`. Fixed the assertion to accept
+  both. Confirmed by re-running the full script twice after both fixes
+  (`phase-d-run3-1789645432`): clean `phase d complete` both times.
+
+With both rig fixes in place, `./scripts/dev-server-edition.sh --phase d
+--keep` ran clean end to end (`phase d complete`), and the tail of
+`$SCRATCH/audit.jsonl` showed exactly the three lines quickstart §6
+describes:
+
+```json
+{"event":"authz","decision":"allow","server":"a","tool":"echo","reason":"none","caller":"agent_token","email":"alice@example.com"}
+{"event":"tool_call","outcome":"success","server":"a","tool":"echo","caller":"agent_token","email":"alice@example.com"}
+{"event":"authz","decision":"deny","server":"b","tool":"echo","reason":"token_scope","disclosed":false,"caller":"agent_token","email":"alice@example.com"}
+```
+
+- `grep -c AKIAQUICKSTART7SENTINEL0 audit.jsonl` → `0` (sentinel absent).
+- `grep -c '"event":"auth_event"' audit.jsonl` → `2` (login `reason:ok` +
+  the open-redirect-check login, both `ok`).
+- `MCPPROXY_AUDIT_JSONL=$SCRATCH/audit.jsonl go test ./internal/audit -run
+  TestExternalJSONLValidates -count=1` → PASS (schema-validated every line
+  of the real sink file with `santhosh-tekuri/jsonschema/v6`, no `npx`, no
+  network) — run automatically by the script's §6 and independently
+  re-confirmed.
+
+**Sentinel in a caller-supplied tool name (extends §6 manually, not scripted
+by quickstart).** Minted a fresh token, called `call_tool_read` with
+`name: "AKIASENT99887766XXXXX:ghp_SENTINEL2TOOLNAMEZZZ"` and
+`args: {"secret": "sk-ant-SENTINELARGS998877"}` (a refused dispatch — the
+server name isn't in the token's scope). Response:
+`"Server 'AKIASENT99887766XXXXX' is not in scope for this agent token"`
+(isError:true). The audit `authz deny` line recorded
+`"server":"AKIA***XX"`, `"tool":"ghp_***ZZ"` (both fixed-prefix credential
+patterns masked per-field at build time, FR-016/FR-015) and no `args` field
+at all (only `args_sha256`/`args_bytes`). `grep -c` for all three raw
+sentinel strings (`AKIASENT99887766XXXXX`, `ghp_SENTINEL2TOOLNAMEZZZ`,
+`sk-ant-SENTINELARGS998877`) against the audit file → `0`.
+
+**stdout mode / native stdio transport rules.** Quickstart's phase-d rig
+always runs the server-edition binary in HTTP mode (`listen` set), so these
+cases were exercised by hand against a freshly built `-tags server` binary,
+`--listen ""` and `--listen ":0"` (both trigger the native-stdio branch,
+`main.go:648`: `cfg.Listen == "" || cfg.Listen == ":0"` — see the discrepancy
+note below on why only `:0` actually reaches it through `mcpproxy serve`):
+
+  - `audit_log` block **absent**, `--listen ":0"`: boot logged
+    `WARN audit_log.stdout is ignored under the stdio transport; set
+    audit_log.path`, `Starting MCP server {"transport": "stdio"}`, and
+    stdout carried only the clean `initialize` JSON-RPC response (no log
+    lines interleaved) — the default sink under stdio is disabled, as
+    FR-014 requires.
+  - `audit_log: {enabled:true, stdout:true}` **explicit**, no `path`,
+    `--listen ":0"`: process exited **4** with
+    `Error: audit_log.stdout cannot be used under the stdio transport
+    (stdout carries JSON-RPC); set audit_log.path` — the exact
+    `contracts/config-keys.md` message, before any listener or upstream
+    started.
+  - `audit_log.path` pointed at a non-existent directory
+    (`/root/no-permission/audit.jsonl`, HTTP mode): exited **4** with
+    `Error: audit_log.path "/root/..." cannot be opened for append: ...
+    open ...: no such file or directory` — the constructor's pre-flight
+    open/close probe (T098) catches it before `lumberjack`'s lazy-open
+    would have silently swallowed it.
+  - Docker-style run of the *built* server-edition image with `--entrypoint`
+    checks and a `docker run` stdout-default assertion, and the disk-full
+    (`/dev/full`) simulation, were **not run**: this session has no Docker
+    daemon available in the sandbox (not attempted — no error to report),
+    and macOS has no `/dev/full` character device (Linux-only; the
+    equivalent behaviour — write failure proceeds, counter increments, one
+    WARN per minute — is already covered by `internal/audit/sink_test.go`'s
+    fake-writer-failure case, T098, re-run clean in the automated gates
+    below). Recorded here as "not run: <reason>" per the verification.md
+    convention rather than skipped silently.
+
+**Discrepancy found (not fixed — outside PR-D's scope, pre-existing):**
+`cmd/mcpproxy/main.go:815` sets `cfg.Listen = listenFlag` from `--listen`
+only when the CLI flag was `Changed()`, so `--listen ""` explicitly should
+produce `cfg.Listen == ""` and trigger native stdio. In practice it does
+not: `internal/config/config.go:2686-2688`
+(`func (c *Config) Validate()`) unconditionally resets `c.Listen` back to
+`defaultPort` ("127.0.0.1:8080") whenever it's empty, and `Validate()` runs
+again later in the boot path (config file watcher / `ConfigService` load),
+so a real `mcpproxy serve --listen ""` process still starts in HTTP mode
+(`{"transport":"streamable-http","listen":"127.0.0.1:8080"}` observed, not
+stdio) — `--listen ":0"` is unaffected (`Validate()` only special-cases the
+empty string) and is the only way that actually reaches native stdio through
+the `serve` CLI today. `main.go:648`'s own comment already documents `""`
+and `":0"` as equivalent triggers, so this looks like a real, narrow,
+pre-existing gap (the `""` half of that equivalence is unreachable through
+`serve`), unrelated to any file this PR touches. Not fixed here per the
+"touch only your task's files" rule; flagging for a separate follow-up.
+
 ### Automated checks
 
 Full gate set per `plan.md` §Gates, run in this worktree (`107-d-audit-line`,
@@ -709,5 +825,34 @@ scope, all previously documented in PR-C's verification history):
 - `internal/serveredition/auth/oidc_jwks.go:141` +
   `oidc_jwks_test.go:83,84` — staticcheck `SA1019` (`ecdsa.PublicKey.X/Y`
   deprecated as of Go 1.26) — named in PR-C round 3's verification notes
+
+**T117 re-run** (this session, after `c1256ffda` gate fixes and
+`24496001b` adversarial-review fixes touched `internal/audit/sink.go`,
+`internal/server/server.go`, `internal/observability/metrics.go`,
+`internal/management`, plus three test files — all Go-only, no
+frontend/docs/OAS changes, so gates 12–17 above were not re-run and remain
+valid from their prior recording):
+
+| Gate | Command | Result |
+|---|---|---|
+| Build ×2 | `go build -o /dev/null ./cmd/mcpproxy`; `go build -tags server -o /dev/null ./cmd/mcpproxy` | PASS — clean |
+| `go vet` ×2 | `go vet ./...`; `go vet -tags server ./...` | PASS — clean |
+| golangci-lint v2 (personal tags, scoped to touched dirs) | `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run --config .github/.golangci.yml ./internal/audit/... ./internal/observability/... ./internal/management/... ./internal/server/... ./internal/serveredition/...` | PASS — 6 findings, identical set to the pre-existing/out-of-scope list above |
+| golangci-lint v2 (`--build-tags server`, same dirs) | same + `--build-tags server` | PASS — 9 findings, identical set (adds the two `oidc_jwks*` `SA1019` lines) |
+| `go test -race` non-server, excl. `internal/server` | `go test -race -count=1 -timeout 25m $(go list ./internal/... \| grep -v '/internal/server$')` | PASS — all packages green (`internal/runtime` 251.6s, `internal/storage` 55.6s, `internal/security/scanner` 44.2s, rest sub-40s) |
+| `internal/server`, personal tags, CI-skip regex | `go test -race -count=1 -timeout 25m -skip "E2E\|Binary\|MCPProtocol\|TestInfoEndpoint\|TestGracefulShutdownNoPanic\|TestSocketInfoEndpoint" ./internal/server/...` | PASS on re-run (409.3s) after one flake: `TestResolveDockerStatusResolvableAndWorking` FAILed once under this session's unusual load (four `go test -race` suites + `npx vitest` + the isolated `test-api-e2e.sh` all running concurrently); re-run alone (`go test -race -run TestResolveDockerStatusResolvableAndWorking ./internal/server/...`) PASSed in 0.33s — a real Docker daemon was reachable (`docker info` succeeded) throughout, and this PR touches no Docker-status code, so this is scored as resource-contention flake, not a regression |
+| Server-edition package list, `-tags server -race`, CI-skip regex | `go test -race -tags server -count=1 -timeout 25m -skip "..."` (same regex) `./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...` | PASS — `internal/server` 410.2s, `internal/storage` 45.0s, rest sub-35s each |
+| `go test ./cmd/...` + `./tests/oauthserver/...` | `go test ./cmd/... ./tests/oauthserver/...` | PASS — all packages ok/cached |
+| `make swagger-verify` | `make swagger-verify` | PASS — "OpenAPI artifacts are up to date" (no diff; consistent with the Go-only diff since the last recording) |
+| `python3 scripts/gen-roadmap.py --check` | same | PASS — "ROADMAP.md is up to date." |
+| Frozen goldens unregenerated | `go test ./internal/server/... -run 'TestToolsListSnapshot_\|TestMenuSurface_' -v` | PASS — all sub-tests green |
+| Frontend unit | `cd frontend && npx vitest run` | PASS — 130 files / 1312 tests |
+| Frontend build | `cd frontend && npm run build` | PASS — clean, same pre-existing `INEFFECTIVE_DYNAMIC_IMPORT` note |
+| Isolated `./scripts/test-api-e2e.sh` + audit assertion | pre-flight `pgrep`/`lsof` confirmed no conflicting instance; scratch copy per the documented recipe (the same two `pkill -f "mcpproxy.*serve"` / `pkill -f "launcher-server.*--port 39933"` lines removed, `diff` identical to the one recorded above), `LISTEN_PORT=18231 AUDIT_LISTEN_PORT=18232 bash /tmp/test-api-e2e-scratch.sh` | 68/70 PASS. All five T113 audit assertions PASS (sink non-empty; exactly one `authz` + one `tool_call` for the fixture `call_tool_read`; none for `retrieve_tools`; schema-valid against `docs/schemas/audit-line-v1.schema.json`). Two pre-existing, audit-unrelated failures: `launcher-test never reconnected after enable` and `per-server log missing launcher banner or child stdout` (Spec 046 launcher-lifecycle fixture, disable/enable/respawn timing) — scored as the same resource-contention class as the Docker flake above (this run also overlapped all four `go test -race` suites + `vitest`; the launcher child's respawn has a fixed poll-attempt budget that heavy host CPU load can exhaust). Not re-run in isolation this session (time budget); neither failing test touches `internal/audit`, the funnels, or any file this PR changes — `git status` after the run was clean beyond the two upstream gate-fix commits already recorded |
+
+No new gate-caused fixes were needed in this re-run; the two flakes above
+were confirmed non-reproducing (Docker one, directly; launcher one, by
+code-scope — see above) rather than fixed, since there is nothing in this
+PR's diff for either to fix.
 
 ### Cross-review

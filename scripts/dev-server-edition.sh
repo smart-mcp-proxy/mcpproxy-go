@@ -287,6 +287,7 @@ cat >"$CONFIG" <<EOF
   "listen": "127.0.0.1:$PORT",
   "require_mcp_auth": false,
   "trusted_proxies": ["127.0.0.1/32"],
+  "quarantine_enabled": false,
   "audit_log": {"enabled": true, "path": "$AUDIT", "stdout": false},
   "mcpServers": [
     {"name": "a",    "command": "node", "args": ["$FIXTURE/index.js"], "protocol": "stdio", "enabled": true, "shared": true},
@@ -484,7 +485,9 @@ mcp -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion
 SID="$(grep -i '^mcp-session-id' "$SCRATCH/init.h" | tr -d '\r' | cut -d' ' -f2)"
 [[ -n "$SID" ]] || die "6 initialize returned no Mcp-Session-Id"
 allowed="$(mcp -H "Mcp-Session-Id: $SID" -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"call_tool_read","arguments":{"name":"a:echo","args":{"text":"hello","secret":"AKIAQUICKSTART7SENTINEL0"}}}}' | jq -c '.result.isError')"
-[[ "$allowed" == "false" ]] || die "6 a:echo through the token must succeed (isError=$allowed)"
+# A successful call omits isError (omitempty), so jq renders the missing
+# field as `null`, not the literal `false` — both mean "not an error".
+[[ "$allowed" == "false" || "$allowed" == "null" ]] || die "6 a:echo through the token must succeed (isError=$allowed)"
 hiddenResp="$(mcp -H "Mcp-Session-Id: $SID" -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"call_tool_read","arguments":{"name":"b:echo","args":{}}}}')"
 hidden="$(echo "$hiddenResp" | jq -r '.result.content[0].text // empty')"
 log "6 b:echo refusal text: ${hidden:-<empty>}"
