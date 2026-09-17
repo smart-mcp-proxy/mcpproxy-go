@@ -1,4 +1,4 @@
-//go:build !darwin && !windows
+//go:build unix
 
 package codescripts
 
@@ -17,15 +17,30 @@ import (
 // Linux and the BSDs resolve names case-sensitively on their native
 // filesystems, but a case-folding mount (vfat, an ext4 casefold directory, a
 // bind mount from a case-insensitive host) finds `backdoor.JS` for
-// `backdoor.js` just as APFS and NTFS do — and unlike those it offers no
-// single-entry call that reports how an entry is spelled on disk: F_GETPATH
-// does not exist, and a readlink of /proc/self/fd/N echoes the spelling that
+// `backdoor.js` just as the default APFS volume does — and unlike APFS
+// (F_GETPATH) they offer no single-entry call that reports how an entry is
+// spelled on disk: a readlink of /proc/self/fd/N echoes the spelling that
 // was looked up, not the one stored. The only exact answer is the directory
 // listing, and a listing paid on a scoped caller's request is what Spec 105
 // FR-012 forbids: its cost grows with the directory, and paying it only when
 // a probe hits (codex r5 #1) made the presence of a differently cased entry
 // cost O(directory) while absence cost O(1) — a timing oracle on the stored
 // names.
+//
+// Round 13 (round-10 finding 1 and finding 3): darwin answers from this same
+// index rather than a per-request F_GETPATH probe. F_GETPATH is real and
+// exact, so darwin's OWN probe never had a case-folding blind spot — but it
+// answered a hit (Lstat succeeds, then entryName) and a miss (Lstat alone)
+// with a DIFFERENT number of platform calls, which is exactly the timing
+// oracle finding 3 named: a scoped caller could distinguish "no entry" from
+// "a case-variant exists" by latency alone, whatever a non-disclosing
+// refusal's contract (SC-005) requires. Answering darwin from the index too
+// makes an absent name and a present case-variant both plain index MISSES —
+// identical work, an O(1) map lookup, neither one reaching Fstatat — closing
+// the oracle the same way it is already closed for Linux/BSD. See
+// dirfd_other.go's own round-13 note for why no darwin-specific generation
+// reader was needed to do this, and entryname_darwin.go for the
+// belt-and-suspenders F_GETPATH proof darwin keeps on top of this index.
 //
 // So the scoped resolver answers from a stored-name INDEX instead: the exact
 // spellings a scripts directory holds, maintained OFF the request path. The
@@ -140,9 +155,6 @@ var (
 	storedIndexes    = map[string]*storedNames{}
 	storedIndexesLRU []string // least-recently-used first; a touched key moves to the end
 )
-
-// maxStoredNameIndexes bounds storedIndexes for bare (never-Warmed) use.
-const maxStoredNameIndexes = 4
 
 // storedNamesIndex returns the index of one cleaned scripts directory,
 // creating an empty (never built) one — with its own cancellation context —
@@ -278,58 +290,20 @@ func (g dirGeneration) latest() time.Time {
 	return g.modTime
 }
 
-// generationSettleTime is how far a directory's stamp must predate a listing
-// for the index to be trusted until the stamp moves. Timestamps can be coarse
-// (vfat: two seconds), so a write landing in the same tick as the recorded
-// stamp would leave it unchanged; until the stamp is older than the coarsest
-// tick, requests keep scheduling a refresh — at most one per window, and off
-// the request path. The bound depends on the clock alone, never on the
-// requested name.
-const generationSettleTime = 2 * time.Second
+// generationSettleTime, maxRebuildAttempts, rebuildBackoff, indexClock and
+// SetIndexClockForTest now live in indexclock.go (no build tag): round 13
+// gave Windows a real settle-window index too, sharing the identical clock
+// and constants rather than each platform keeping its own copy.
 
-// maxRebuildAttempts bounds how many times one rebuild re-lists when the
-// directory's generation keeps moving out from under it (round 8 SHOULD): a
-// directory that never stops changing must not keep this goroutine listing
-// forever, nor block Warm forever. After the bound, whatever the last
-// attempt installed stays as the index — the next request finds it stale
-// against the directory's CURRENT generation and refuses fail-closed (the
-// MUST-FIX rule above), rather than this loop trusting an unconfirmed
-// listing or spinning on one that can never confirm.
-const maxRebuildAttempts = 3
-
-// rebuildBackoff is the minimum gap between the end of one ASYNC rebuild
-// goroutine and the start of the next for the same directory (round 8
-// SHOULD). Without it, a directory changing on every request would let
-// scheduleRebuildLocked spawn a fresh rebuild the instant the bounded one
-// above gives up. During the backoff a request's own cost is unchanged: one
-// open and one fstat, answered fail-closed from whatever the index holds (or
-// does not).
-const rebuildBackoff = time.Second
-
-// indexClock is time.Now, a variable so the tests can settle an index
-// without waiting.
-var indexClock = time.Now
-
-// SetIndexClockForTest overrides the clock the settle check reads (round 9
-// MUST-FIX) and returns a func that restores it. A directory's ctime cannot
-// be forged from user space — it is exactly what makes the settle window a
-// real guarantee — so a caller outside this package that needs a freshly
-// written scripts directory treated as settled at once (an internal/server
-// fixture, say) has no way to fake it by backdating a file; it must move the
-// clock the settle check reads instead, as this package's own tests do
-// internally. Test-only: production code never calls this, and callers
-// outside this package must restore it (defer the returned func, or
-// t.Cleanup) before any other test observes the override.
-func SetIndexClockForTest(now func() time.Time) (restore func()) {
-	prev := indexClock
-	indexClock = now
-	return func() { indexClock = prev }
-}
-
-// spawnIndexRebuild runs one ASYNC index rebuild on its own goroutine. A
-// variable so the tests can hold a rebuild back and prove what a request
-// does on its own goroutine, then land it deliberately.
-var spawnIndexRebuild = func(rebuild func()) { go rebuild() }
+// extraVerifyOpened is an additional, platform-specific spelling proof run
+// on the opened descriptor after the shared generation recheck passes
+// (round 13). The default is a no-op: openat's identity binding
+// (dirfd_other.go) plus the generation recheck above is everything Linux
+// and the BSDs can prove, and nothing more is needed. darwin overrides this
+// (entryname_darwin.go's init) with an F_GETPATH check of the opened
+// descriptor's own basename — belt-and-suspenders on top of the same index,
+// not a substitute for it.
+var extraVerifyOpened = func(*os.File, string) error { return nil }
 
 // Warm builds the stored-name index of scriptsDir on the caller's goroutine,
 // so the first scoped request finds it ready. The server calls it when it
@@ -338,8 +312,10 @@ var spawnIndexRebuild = func(rebuild func()) { go rebuild() }
 // waited for, then Warm lists again), so the index reflects the directory as
 // it was at the call. A directory that cannot be opened or listed leaves a
 // failed index (scoped callers are refused as unreadable until the directory
-// changes) and the failure is returned for logging. On darwin and Windows
-// there is no index and Warm is a no-op.
+// changes) and the failure is returned for logging. On Windows there is no
+// index of this shape (storedspellings_probe_windows.go keeps its own,
+// round 13) and Warm is a no-op; darwin joined this index round 13, so Warm
+// behaves for it exactly as it does for Linux/BSD.
 //
 // Warm also keeps ONLY scriptsDir's index (round 9 SHOULD): the server calls
 // Warm whenever the active scripts directory changes, so this is the point
@@ -441,13 +417,17 @@ func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool
 	open = func(path string) (*os.File, error) {
 		return openatEntry(dirfd, filepath.Base(path))
 	}
-	// f and want are unused here: the SAME descriptor's own generation
-	// recheck (below) is what this platform can prove, and it needs
-	// neither the opened file nor the requested spelling — see the
-	// darwin/Windows counterpart in storedspellings_probe.go and
-	// storedspellings_probe_windows.go, which prove the spelling itself on
-	// f because they have no directory-generation index to recheck.
-	verifyUnchanged = func(_ *os.File, _ string) error {
+	// The SAME descriptor's own generation recheck (below) is what every
+	// unix platform proves; f and want are additionally threaded through
+	// to extraVerifyOpened, the round-13 hook darwin registers (via
+	// entryname_darwin.go's init) for its own belt-and-suspenders F_GETPATH
+	// proof on the opened descriptor — Linux/BSD leave the hook at its
+	// default no-op, since openat's identity binding plus the generation
+	// recheck is already everything they can prove. Windows has no
+	// directory-generation index to recheck at all — see the counterpart in
+	// storedspellings_probe_windows.go, which proves the spelling itself on
+	// f instead.
+	verifyUnchanged = func(f *os.File, want string) error {
 		cur, err := fstatDirGeneration(dirfd)
 		if err != nil {
 			return err
@@ -455,7 +435,7 @@ func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool
 		if !cur.equal(gen) {
 			return errIndexGenerationChanged
 		}
-		return nil
+		return extraVerifyOpened(f, want)
 	}
 	return storedExactly, open, verifyUnchanged, closeSession, nil
 }
@@ -521,12 +501,27 @@ func (idx *storedNames) scheduleRebuildLocked(key string, now time.Time) {
 	if !idx.nextAttempt.IsZero() && now.Before(idx.nextAttempt) {
 		return
 	}
+	// Round 13 SHOULD (finding 5): a non-blocking acquire — every slot busy
+	// means SKIP this rebuild outright rather than queue behind one, so a
+	// request-triggered rebuild never blocks the request that scheduled it
+	// (this call itself is always off the request path already) and never
+	// piles up waiting goroutines of its own. The index stays exactly as
+	// stale as it was; the next request against this directory calls
+	// scheduleRebuildLocked again.
+	select {
+	case rebuildSlots <- struct{}{}:
+	default:
+		return
+	}
 	idx.beginRebuildLocked()
 	// wg.Add happens before spawnIndexRebuild hands the closure off (which
 	// may run it synchronously, in a test that holds rebuilds back) so
 	// idx.wg.Wait() is never called before the matching Add is visible.
 	idx.wg.Add(1)
-	spawnIndexRebuild(func() { idx.rebuild(key, true, true) })
+	spawnIndexRebuild(func() {
+		defer func() { <-rebuildSlots }()
+		idx.rebuild(key, true, true)
+	})
 }
 
 // beginRebuildLocked claims the single-flight slot.

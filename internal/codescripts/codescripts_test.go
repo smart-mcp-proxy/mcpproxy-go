@@ -937,16 +937,16 @@ func TestResolveScoped_MissCostIsIndependentOfDirectorySize(t *testing.T) {
 	assert.Equal(t, 0, emptyReadDirs)
 	assert.Equal(t, 0, crowdedReadDirs, "ten thousand entries must not be enumerated on a scoped caller's behalf")
 	assert.Equal(t, emptyLstats, crowdedLstats, "the number of path probes is independent of the directory's contents")
-	// On darwin/Windows the candidate probe itself is a path-based Lstat, so
-	// it shows up here directly. On Linux/BSD (round 11 MUST-FIX) the probe
-	// runs through a retained directory descriptor instead (fstatatEntry,
-	// dirfd_other.go) and never touches this package's lstat var — a MISS
-	// like "gamma" here never even reaches that probe (its name is not a key
-	// of the index), so there is nothing to assert here beyond the
-	// equal-cost check above; storednames_other_test.go pins the Linux/BSD
-	// primitive counts, including the non-zero fstatat a HIT performs, on
-	// its own terms.
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-		assert.Greater(t, crowdedLstats, 0, "the candidate paths are probed directly")
-	}
+	// Round 13 (round-10 finding 3): every platform now answers a scoped
+	// candidate probe from a per-directory exact-spelling INDEX — Linux/BSD
+	// and darwin through a retained directory descriptor (fstatatEntry,
+	// dirfd_other.go), Windows through a retained directory handle
+	// (winProbeEntry, storednames_windows.go) — never through this
+	// package's shared lstat var, which the administrator's candidatesFor
+	// alone still uses. A MISS like "gamma" here never even reaches the
+	// per-platform probe (its name is not a key of the index), so both
+	// counts are 0 on every platform; storednames_other_test.go (unix) and
+	// storedspellings_probe_test.go (Windows) each pin their own non-zero
+	// HIT primitive counts on their own terms.
+	assert.Equal(t, 0, crowdedLstats, "the scoped candidate probe never touches the package's shared lstat var on any platform")
 }

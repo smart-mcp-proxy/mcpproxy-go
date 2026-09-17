@@ -76,13 +76,15 @@ const (
 var errNonRegular = errors.New("not a regular file")
 
 // scopedOpener opens the winning candidate for reading. nil means "use the
-// package's own openScriptFile", the administrator's path-based no-follow
-// open and darwin/Windows's default (round 11: their own fixes reach
-// authoritatively into the post-open recheck instead — see scopedVerifier).
-// Non-nil only on Linux/BSD (round 11 MUST-FIX), where it is bound to the
-// single retained directory descriptor the request's own candidates() call
-// opened, so the exact entry that was probed is the exact entry that gets
-// opened — never a fresh, independent resolution of the path.
+// package's own openScriptFile" — the administrator's path-based no-follow
+// open (round 13: also Windows's own storedspellings_probe_windows.go,
+// whose own reparse-hardened openScriptFile in open_windows.go is already
+// authoritative — see scopedVerifier). Non-nil on every unix platform
+// (round 11 MUST-FIX for Linux/BSD, round 13 for darwin joining the same
+// design), where it is bound to the single retained directory descriptor
+// the request's own candidates() call opened, so the exact entry that was
+// probed is the exact entry that gets opened — never a fresh, independent
+// resolution of the path.
 type scopedOpener func(path string) (*os.File, error)
 
 // scopedVerifier re-proves, on the descriptor openScriptFile or a
@@ -93,10 +95,11 @@ type scopedVerifier func(f *os.File, want string) error
 
 // scopedCloser releases whatever per-request resource a candidates()
 // implementation opened (round 11 MUST-FIX: the retained directory
-// descriptor on Linux/BSD; a directory handle on Windows) — nil when there
-// is nothing to release (the administrator; darwin). resolve defers it
-// immediately after calling candidates(), so it always runs exactly once,
-// whether or not a candidate was ultimately opened.
+// descriptor on every unix platform, round 13 darwin included; a directory
+// handle on Windows) — nil when there is nothing to release (the
+// administrator alone). resolve defers it immediately after calling
+// candidates(), so it always runs exactly once, whether or not a candidate
+// was ultimately opened.
 type scopedCloser func()
 
 // errIndexGenerationChanged is what a post-open verifyUnchanged closure
@@ -104,15 +107,21 @@ type scopedCloser func()
 // lookup that produced a hit and this open (round 8 MUST-FIX, the
 // lookup→open race): resolve treats it as an ordinary not-found, never as an
 // unreadable-directory error, so it discloses nothing beyond the caller's
-// own requested name.
+// own requested name. Every unix platform's index (Linux/BSD since round 8,
+// darwin since round 13) can return this; Windows has no directory
+// generation to recheck and never returns it.
 var errIndexGenerationChanged = errors.New("codescripts: scripts directory changed between the index lookup and the open")
 
-// errSpellingUnproven is what the darwin/Windows verifyUnchanged closure
-// returns when the OPENED descriptor's stored spelling (round 9 MUST-FIX)
-// could not be proven to match the requested name — a mismatch (a
+// errSpellingUnproven is what a spelling proof beyond the generation
+// recheck returns when the OPENED descriptor's stored spelling (round 9
+// MUST-FIX) could not be proven to match the requested name — a mismatch (a
 // case-rename or replacement landed between the pre-open probe and the
 // open) or a failure of the proof call itself; resolve treats either the
-// same as errIndexGenerationChanged, as an ordinary not-found.
+// same as errIndexGenerationChanged, as an ordinary not-found. Returned by
+// darwin's F_GETPATH belt-and-suspenders check (extraVerifyOpened,
+// entryname_darwin.go, round 13) on top of its own generation recheck, and
+// by Windows's full-path proof (storedspellings_probe_windows.go), which has
+// no generation to recheck at all.
 var errSpellingUnproven = errors.New("codescripts: the opened file's stored spelling could not be proven to match the requested name")
 
 // Entry is one listed script (FR-007). Paths holds the single source file, or
@@ -439,13 +448,15 @@ func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source [
 	// tell the difference, because it does not compare names, only symlink
 	// status. verifyUnchanged proves this AUTHORITATIVELY on f, the
 	// descriptor that will actually be read (round 9 MUST-FIX, the
-	// PROVEN-AT-OPEN rule): on Linux/BSD by re-reading the directory's
+	// PROVEN-AT-OPEN rule): on every unix platform (Linux/BSD since round 8,
+	// darwin since round 13) by re-reading the SAME retained descriptor's
 	// generation once more (gen-before == index.gen == gen-after proves the
-	// opened entry is the one the index vouched for); on darwin/Windows by
-	// reading the opened descriptor's own stored spelling (F_GETPATH /
-	// GetFinalPathNameByHandle) and comparing it byte-for-byte to the name
-	// that was requested. Either failure closes the descriptor (via the
-	// defer above) and refuses rather than trusting it. Nil for the
+	// opened entry is the one the index vouched for) plus, on darwin, an
+	// additional F_GETPATH basename check; on Windows by reading the opened
+	// descriptor's own stored spelling (GetFinalPathNameByHandle) and
+	// comparing it to the retained directory handle's own final path plus
+	// the name that was requested. Either failure closes the descriptor (via
+	// the defer above) and refuses rather than trusting it. Nil for the
 	// administrator, whose candidatesFor has nothing to recheck against.
 	if verifyUnchanged != nil {
 		if verifyErr := verifyUnchanged(f, filepath.Base(path)); verifyErr != nil {
@@ -540,36 +551,42 @@ func candidatesFor(scriptsDir, name string) ([]string, scopedOpener, scopedVerif
 // filesystem's own name→file decision is case-insensitive on the default
 // macOS and Windows volumes and on a Linux case-folding mount (see
 // candidatesFor): a `backdoor.JS` that a probe for `backdoor.js` would open
-// is not a stored script, exactly as List decides. On darwin and Windows a
-// single-entry platform call reports the stored spelling of a probed path; on
-// Linux and the BSDs, which have no such call, the answer comes from a
-// per-directory index of exact names that is listed once per directory
-// change, never per request (storednames_other.go, codex r5 #1). The
-// no-follow open remains the authoritative check.
+// is not a stored script, exactly as List decides. On every unix platform
+// (Linux, the BSDs, and — round 13, closing the round-10 finding-1/finding-3
+// pair — darwin too) the answer comes from a per-directory index of exact
+// names that is listed once per directory change, never per request
+// (storednames_other.go, codex r5 #1): an absent name and a differently
+// cased one are both plain index misses, identical cost. Windows alone still
+// answers from a single-entry platform call per probed path
+// (storedspellings_probe_windows.go). The no-follow open remains the
+// authoritative check.
 //
 // The verifier this returns is a post-open AUTHORITATIVE recheck (round 8 /
 // round 9 MUST-FIX, the lookup→open race): storedSpellingsOf's own verify
 // closure, run by resolve on the descriptor that was actually opened — on
-// Linux/BSD a directory-generation recheck on the SAME retained descriptor
-// the whole request used (storednames_other.go, round 11 MUST-FIX — see the
-// opener below), on darwin a proof of the opened descriptor's own stored
-// spelling (storedspellings_probe.go), on Windows the same proof plus a
-// full-path comparison against a directory handle opened once for the
-// request (storedspellings_probe_windows.go, round 11 MUST-FIX). Never nil
-// on any platform: this is what makes the pre-open probe above merely a
-// cheap gate rather than the authoritative decision.
+// every unix platform a directory-generation recheck on the SAME retained
+// descriptor the whole request used (storednames_other.go, round 11
+// MUST-FIX — see the opener below), with darwin adding its own F_GETPATH
+// proof of the opened descriptor's stored spelling on top
+// (entryname_darwin.go, round 13); on Windows a full-path comparison against
+// a directory handle opened once for the request
+// (storedspellings_probe_windows.go, round 11 MUST-FIX). Never nil on any
+// platform: this is what makes the pre-open probe above merely a cheap gate
+// rather than the authoritative decision.
 //
-// The opener this returns is non-nil ONLY on Linux/BSD (round 11 MUST-FIX):
-// it opens the winning candidate relative to the SAME retained directory
-// descriptor the generation check and the candidate probe both used,
-// instead of a fresh, independent resolution of the path — the fix for the
-// directory-path ABA hole (storednames_other.go's package doc comment has
-// the full account). darwin and Windows return nil here (their own fixes
-// reach authoritatively into the verifier instead), so resolve falls back
-// to the package's ordinary openScriptFile. The closer releases whatever
-// per-request resource the opener needs (the retained descriptor on
-// Linux/BSD, a directory handle on Windows) exactly once, whether or not a
-// candidate was ultimately opened.
+// The opener this returns is non-nil on every unix platform (round 11
+// MUST-FIX for Linux/BSD, round 13 for darwin): it opens the winning
+// candidate relative to the SAME retained directory descriptor the
+// generation check and the candidate probe both used, instead of a fresh,
+// independent resolution of the path — the fix for the directory-path ABA
+// hole (storednames_other.go's package doc comment has the full account).
+// Windows returns nil here (its own fix reaches authoritatively into the
+// verifier instead, and openScriptFile in open_windows.go is already the
+// reparse-hardened no-follow open), so resolve falls back to the package's
+// ordinary openScriptFile. The closer releases whatever per-request
+// resource the opener needs (the retained descriptor on unix, a directory
+// handle on Windows) exactly once, whether or not a candidate was
+// ultimately opened.
 func probeCandidates(scriptsDir, name string) ([]string, scopedOpener, scopedVerifier, scopedCloser, error) {
 	storedExactly, open, verifyUnchanged, closeSession, err := storedSpellingsOf(scriptsDir)
 	if err != nil {

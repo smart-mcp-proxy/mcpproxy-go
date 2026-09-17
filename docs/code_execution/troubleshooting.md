@@ -645,16 +645,17 @@ Linux a Docker Desktop bind mount from a macOS or Windows host, vfat, an ext4
 `FETCH-PR.JS` or `Fetch-pr.js` is not the script `fetch-pr` even where the
 filesystem would open it under that name — the daemon verifies the stored
 spelling before running anything, so the administrator's listing, the
-administrator's call and an agent-token call all agree. On Linux and the BSDs
-(which have no single-entry call that reports how a name is spelled on disk)
-an agent-token call is answered ONLY from an exact-name index of the
-directory that matches its CURRENT state — built at daemon start, validated
-by one stat of the directory per call, refreshed in the background when the
-directory changes — so no call lists the directory, whatever name is asked
-for, and the refusal body is unchanged. Every step of one call's own check —
-the stat, the candidate probe, the open and the re-check after it — is bound
-to a single directory descriptor retained for that call, never a fresh
-resolution of the path per step, so a symlink or bind mount retargeted
+administrator's call and an agent-token call all agree. Every platform —
+Linux, the BSDs, macOS/darwin and Windows — answers an agent-token call
+ONLY from an exact-name index of the directory that matches its CURRENT
+state — built at daemon start, validated once per call, refreshed in the
+background when the directory changes — so no call lists the directory,
+whatever name is asked for; a differently-cased name and one that is not
+stored at all cost exactly the same, and the refusal body is unchanged.
+Every step of one call's own check — the stat, the candidate probe, the
+open and the re-check after it — is bound to a single directory descriptor
+(or, on Windows, handle) retained for that call, never a fresh resolution
+of the path per step, so a symlink, bind mount or reparse point retargeted
 mid-call cannot make two of those steps disagree about which directory they
 are looking at. A call landing while that refresh is
 scheduled or in flight is refused exactly as one against a directory never
@@ -666,12 +667,14 @@ that a write could not still be landing on the same coarse tick): a script
 you have just added or renamed is callable by agent tokens only after the
 index has both refreshed AND settled — retry a call refused in that
 window, up to about two seconds — while administrators see the change at
-once; mcpproxy never creates the directory itself, `mkdir -p` it. On darwin
-and Windows the pre-open check is only a cheap gate — the authoritative
-check re-reads the stored spelling of the actually-opened file descriptor
-(`F_GETPATH` / `GetFinalPathNameByHandle`) and refuses on any mismatch, so a
-rename racing the open itself is caught there too, not just by the earlier
-probe.
+once; mcpproxy never creates the directory itself, `mkdir -p` it. macOS
+adds one extra, belt-and-suspenders check on top: after the open, it
+re-reads the opened descriptor's own stored spelling (`F_GETPATH`) and
+refuses on any mismatch. Windows performs the probe, the open and the
+background listing all relative to the SAME retained directory handle
+(`NtCreateFile`), so the post-open check only needs to confirm the opened
+handle's own name (`GetFinalPathNameByHandle`) rather than re-walking a
+path that a retargeted reparse point could have redirected.
 
 ---
 

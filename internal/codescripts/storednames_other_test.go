@@ -1,4 +1,4 @@
-//go:build !darwin && !windows
+//go:build unix
 
 package codescripts
 
@@ -764,6 +764,57 @@ func TestStoredNames_RebuildBackoffThrottlesReschedules(t *testing.T) {
 	_, _, err = ResolveScoped(dir, "gamma", "")
 	requireScopedNotFound(t, err)
 	assert.Equal(t, 1, held.land(), "past the backoff, the still-unresolved generation mismatch schedules again")
+}
+
+// TestStoredNames_RebuildSlotsBoundConcurrency (round 13 SHOULD, finding 5):
+// no more than maxConcurrentRebuilds ASYNC rebuild goroutines may run at
+// once, PROCESS-WIDE across every directory's index — a rebuild that cannot
+// acquire a slot is SKIPPED outright, not queued behind one, so it never
+// blocks the request that scheduled it and never itself piles up waiting.
+// holdIndexRebuilds captures each scheduled rebuild's closure instead of
+// running it, which — because scheduleRebuildLocked acquires its slot
+// SYNCHRONOUSLY before handing the closure to spawnIndexRebuild — holds that
+// slot consumed for exactly as long as the closure goes unlanded, without
+// needing a real goroutine parked mid-listing.
+func TestStoredNames_RebuildSlotsBoundConcurrency(t *testing.T) {
+	settleStoredNamesClock(t)
+	held := holdIndexRebuilds(t)
+
+	busy := make([]string, maxConcurrentRebuilds)
+	for i := range busy {
+		dir := t.TempDir()
+		writeScript(t, dir, "alpha.js", "1")
+		busy[i] = dir
+		_, _, err := ResolveScoped(dir, "alpha", "")
+		requireScopedNotFound(t, err)
+	}
+
+	third := t.TempDir()
+	writeScript(t, third, "alpha.js", "1")
+	_, _, err := ResolveScoped(third, "alpha", "")
+	requireScopedNotFound(t, err)
+
+	thirdIdx := storedNamesIndex(filepath.Clean(third))
+	thirdIdx.mu.Lock()
+	building := thirdIdx.building
+	thirdIdx.mu.Unlock()
+	assert.False(t, building, "every rebuild slot is already held by another directory: this rebuild must be skipped, not queued")
+
+	assert.Equal(t, maxConcurrentRebuilds, held.land(),
+		"exactly the directories that could acquire a slot were scheduled — the third was skipped, not merely deferred")
+	for _, dir := range busy {
+		waitForIndexRebuild(t, dir)
+	}
+
+	// A slot is free again: the third directory's own next request finally
+	// schedules its rebuild, and this time it can complete.
+	_, _, err = ResolveScoped(third, "alpha", "")
+	requireScopedNotFound(t, err) // the index has not landed yet, so this request still answers fail-closed
+	assert.Equal(t, 1, held.land(), "the previously-skipped rebuild is scheduled now that a slot is free")
+	waitForIndexRebuild(t, third)
+
+	names := lookupStoredNamesForTest(t, third)
+	assert.Contains(t, names, "alpha.js", "the rebuild that finally acquired a slot lands normally")
 }
 
 // TestStoredNames_WarmListsAfterAnInFlightRebuild: Warm is the server's

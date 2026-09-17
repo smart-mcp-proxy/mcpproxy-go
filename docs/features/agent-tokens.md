@@ -380,14 +380,15 @@ content are published to every caller by design and sit outside the invariant:
    directory becomes callable by agent tokens only after the index has both
    refreshed and settled — retry a call refused in that window, up to
    roughly two seconds — while administrators see the change immediately.
-   On darwin and Windows, where a single-entry platform call reports a
-   path's stored spelling directly, that pre-open probe is only a cheap
-   gate: the authoritative check re-reads the stored spelling of the file
-   descriptor MCPProxy actually opened and refuses on any mismatch, so a
-   rename racing the open itself is caught there too — on Windows that open
-   never follows a reparse point, and the check compares the descriptor's
-   full path, not just its base name, against a directory handle opened
-   once for that same call); an ambiguous or unusable script is
+   Linux, the BSDs, darwin and Windows all answer from this same index, so
+   a differently-cased name and one that is not stored at all cost the
+   same — both are plain misses. darwin re-checks the opened descriptor's
+   on-disk spelling as an extra, belt-and-suspenders proof; Windows performs
+   every step of a call — probing, opening, and the background listing that
+   refreshes the index — relative to ONE directory handle retained for the
+   whole call, so a rename or a reparse point cannot redirect where a
+   "relative" open lands, and the post-open check need only confirm the
+   opened descriptor's own name; an ambiguous or unusable script is
    reported by
    name and reason only, without its host path or a raw OS error;
    the REST listing `GET /api/v1/code/scripts` answers an agent token with

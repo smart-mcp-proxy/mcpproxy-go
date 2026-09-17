@@ -429,20 +429,23 @@ the same fail-closed way. A script added to, or renamed within, the
 directory becomes callable by agent tokens once the index has both
 refreshed AND settled — typically milliseconds for the refresh, up to about
 two seconds to settle; retry a call refused in that window — while
-administrators see the change immediately. On darwin and Windows, where a
-single-entry platform call reports a path's stored spelling directly, that
-pre-open probe is only the cheap gate: the authoritative check re-reads the
-stored spelling of the file descriptor MCPProxy actually opened
-(`F_GETPATH` on darwin, `GetFinalPathNameByHandle` on Windows) and compares
-it byte-for-byte to the requested name, so a case-rename racing the open
-itself is caught on the descriptor that would have been read, not just on
-an earlier probe of the same path. On Windows the open itself never follows
-a reparse point at the final path component either, and the post-open check
-compares the descriptor's FULL normalized path against the scripts
-directory's own — opened once per request — not just the file's base name,
-so a reparse point planted on the candidate or on an ancestor directory
-cannot substitute a file from elsewhere under the same name.) The refusal
-itself:
+administrators see the change immediately. Every platform — Linux, the
+BSDs, darwin and Windows alike — answers from this same index, so a name
+that is merely a case-variant of a stored one and a name that is not stored
+at all cost the same: both are plain index misses. macOS/darwin adds one
+extra, belt-and-suspenders check on top: after the winning candidate is
+opened, MCPProxy re-reads its on-disk spelling from the open descriptor
+itself (`F_GETPATH`) and compares it to what was requested, so a
+case-rename racing the open is caught on the descriptor that would actually
+have been read. On Windows every step — probing a candidate, opening it,
+listing the directory to refresh the index — is performed relative to ONE
+directory handle retained for the whole call (`NtCreateFile` with the
+handle as the open's root), so a rename or a reparse point planted on the
+directory itself or an ancestor cannot redirect where a "relative" open
+actually lands; the post-open check then only needs to confirm the opened
+descriptor's own base name (`GetFinalPathNameByHandle`), since the parent
+is already structurally guaranteed by the handle-relative open itself. The
+refusal itself:
 
 ```text
 Cannot execute stored script: stored script "fetch-pr" not found (the stored-script

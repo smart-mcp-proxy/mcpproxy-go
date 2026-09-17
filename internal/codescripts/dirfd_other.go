@@ -1,4 +1,4 @@
-//go:build !darwin && !windows
+//go:build unix
 
 package codescripts
 
@@ -47,6 +47,32 @@ import (
 // its own descriptor the same way and lists through it (listScopedDir), so
 // the listing and the generation the index records for it come from the
 // identical open — never a second resolution of the path either.
+//
+// Round 13 (unify darwin onto this design; round-10 finding 1, and finding 3
+// — the case-variant timing oracle — for free): darwin now builds this build
+// tag list too (`unix`, below) rather than opening a fresh path-based
+// probe per request the way storedspellings_probe.go used to. x/sys/unix's
+// Stat_t already spells the ctime field Mtim/Ctim uniformly across every
+// platform `unix` covers — including darwin, unlike the standard library's
+// syscall.Stat_t, which spells it Mtimespec/Ctimespec there — so
+// defaultFstatDirGeneration below needs no darwin-specific variant. Darwin's
+// own F_GETPATH stays in service as an ADDITIONAL, belt-and-suspenders proof
+// on the opened descriptor (entryname_darwin.go, wired onto
+// storednames_other.go's extraVerifyOpened hook) — openat's identity
+// binding already proves the parent, so only the basename is worth
+// re-checking.
+//
+// Round 13 SHOULD (finding 6 — plan9/js/wasip1 do not build): the `unix`
+// build constraint (recognized by cmd/go for every real Unix GOOS; see
+// https://pkg.go.dev/go/build#hdr-Build_Constraints) replaces the former
+// `!darwin && !windows`, which also matched plan9, js/wasip1 and any future
+// non-Unix GOOS — none of which have an x/sys/unix package to import. The
+// package still builds for those targets: fallback_other.go
+// (`!unix && !windows`) supplies a ResolveScoped that fails closed
+// (non-disclosing not-found, matching this file's own fail-closed answer to
+// an unreadable directory) and a no-op Warm, so a plan9 or js/wasm build of
+// the module compiles without ever being able to serve a scoped stored
+// script on those targets.
 //
 // Every primitive below is a variable so the package's tests can install a
 // real symlink retarget between two of a request's own calls (the actual

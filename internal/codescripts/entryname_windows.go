@@ -19,82 +19,29 @@ const (
 	winVolumeNameDOS      = 0x0
 )
 
-// entryName returns the name the filesystem actually stores for the directory
-// entry at path, without following a reparse point and without listing the
-// directory. NTFS is case-insensitive but case-PRESERVING: a probe for
-// `backdoor.js` finds `backdoor.JS`, and FindFirstFile on the exact path is
-// the single-entry lookup that reports the stored spelling (the same call the
-// standard library's filepath.EvalSymlinks uses to normalise case).
-func entryName(path string) (string, error) {
-	p, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return "", err
-	}
-	var data windows.Win32finddata
-	h, err := windows.FindFirstFile(p, &data)
-	if err != nil {
-		return "", err
-	}
-	_ = windows.FindClose(h)
-	return windows.UTF16ToString(data.FileName[:]), nil
-}
-
-// openedEntryName is entryName's post-open counterpart (round 9 MUST-FIX):
-// it proves the stored spelling of the descriptor that will actually be
-// EXECUTED, not of a separate pre-open probe of the same path. Superseded as
-// the AUTHORITATIVE proof by openedFinalPath (round 11 MUST-FIX: a basename
-// alone is satisfied by any identically named file reached through a
-// retargeted reparse point — see storedspellings_probe_windows.go), but kept
-// for entryNameFromFd's shared plumbing and any caller that only needs the
-// base name.
-func openedEntryName(f *os.File) (string, error) {
+// Round 13 MUST-FIX (round-10 findings 2 and 3 — unify Windows onto the
+// index + retained-directory-handle design storednames_windows.go now
+// builds): the path-based single-entry lookups this file used to hold
+// (entryName/FindFirstFile, dirFinalPath, openedFinalPath, a full-path
+// baseline comparison) are gone. storedExactly now answers from the same
+// per-directory exact-spelling INDEX every unix platform uses (an absent
+// name and a present case-variant are both plain index misses — closing
+// finding 3's timing oracle for Windows too), and both the candidate probe
+// and the actual open are performed RELATIVE TO ONE RETAINED DIRECTORY
+// HANDLE via NtCreateFile with RootDirectory set (storednames_windows.go) —
+// a rename of the directory, or a reparse point planted on an ancestor,
+// cannot redirect a relative open the way it could a fresh path lookup
+// (finding 2). Because the open is already structurally bound to the
+// retained handle, the post-open proof needs only the opened descriptor's
+// own BASENAME (winOpenedBaseName, storednames_windows.go) — the parent is
+// no longer in question — so this file keeps just finalPathOfHandle, the
+// shared GetFinalPathNameByHandle call that proof uses.
+func openedBaseName(f *os.File) (string, error) {
 	full, err := finalPathOfHandle(windows.Handle(f.Fd()))
 	if err != nil {
 		return "", err
 	}
 	return filepath.Base(full), nil
-}
-
-// openedFinalPath is openedEntryName's FULL-PATH counterpart (round 11
-// MUST-FIX, the reparse-point escape): the basename that openedEntryName
-// reports is satisfied by any identically named file reachable through a
-// reparse point planted between the pre-open probe and the open, so the
-// authoritative proof must compare the descriptor's complete normalized
-// path — parent directory included — against the scripts directory's own
-// final path (dirFinalPath) plus the exact basename, not the basename
-// alone.
-func openedFinalPath(f *os.File) (string, error) {
-	return finalPathOfHandle(windows.Handle(f.Fd()))
-}
-
-// dirFinalPath opens scriptsDir once — FILE_FLAG_BACKUP_SEMANTICS is
-// required to obtain a handle on a directory at all — and returns its own
-// normalized final path together with a func that releases the handle. This
-// is the baseline openedFinalPath is compared against (round 11 MUST-FIX):
-// confirming a candidate's PARENT is this exact directory, not merely that
-// its basename matches, is what a retargeted reparse point on an ancestor
-// cannot spoof.
-func dirFinalPath(scriptsDir string) (path string, closeHandle func(), err error) {
-	p, err := windows.UTF16PtrFromString(scriptsDir)
-	if err != nil {
-		return "", nil, err
-	}
-	h, err := windows.CreateFile(p,
-		windows.GENERIC_READ,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS,
-		0)
-	if err != nil {
-		return "", nil, err
-	}
-	fp, err := finalPathOfHandle(h)
-	if err != nil {
-		_ = windows.CloseHandle(h)
-		return "", nil, err
-	}
-	return fp, func() { _ = windows.CloseHandle(h) }, nil
 }
 
 // finalPathOfHandle is the shared GetFinalPathNameByHandle call: the

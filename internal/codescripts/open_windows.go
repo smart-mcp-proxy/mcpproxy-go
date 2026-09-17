@@ -24,6 +24,20 @@ import (
 // is, this is the handle it opens, atomically. GetFileInformationByHandle on
 // that handle then refuses a reparse point or a directory outright, exactly
 // as O_NOFOLLOW plus the regular-file Fstat check does on Unix.
+//
+// Round 13 MUST-FIX (round-10 finding 4): the share mode widened from
+// FILE_SHARE_READ alone to FILE_SHARE_READ|WRITE|DELETE — the same sharing
+// os.Open itself requests (syscall.Open on windows: FILE_SHARE_READ|
+// FILE_SHARE_WRITE) plus DELETE, so this read cannot itself block a
+// concurrent atomic replace (rename-over) of the very file it is reading.
+// Concrete failure this closes: an editor (or an atomic-write deploy of a
+// new script version) holds the file open with delete sharing enabled —
+// origin/main's os.Open could still read it; the round-11 CreateFile with
+// FILE_SHARE_READ alone returned a sharing violation instead, a behavior
+// change from the pre-Spec-105 administrator path that SC-005 does not
+// call for, and this open in turn withheld FILE_SHARE_DELETE from ITS OWN
+// handle, which would have blocked that same atomic replace for as long as
+// this read holds the file open.
 func openScriptFile(path string) (*os.File, error) {
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -31,7 +45,7 @@ func openScriptFile(path string) (*os.File, error) {
 	}
 	h, err := windows.CreateFile(p,
 		windows.GENERIC_READ,
-		windows.FILE_SHARE_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
 		windows.FILE_FLAG_OPEN_REPARSE_POINT,
