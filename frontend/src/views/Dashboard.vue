@@ -694,6 +694,13 @@ const loadClientStatuses = async () => {
 const activityCount = ref(0)
 
 const loadActivitySummary = async () => {
+  // Spec 107 FR-041 / T088: /activity* is an admin-only core door (fleet-
+  // wide history) named in contracts/rest-endpoints.md §8's must-refuse
+  // list — a tenant principal's dashboard has no activity-count chip to
+  // fill in, and this call would just draw the fixed 403 every 30s
+  // (cross-review round 1, P1: this was the one loader on this page missing
+  // the guard its four siblings already carry).
+  if (authStore.principalKind === 'tenant') return
   try {
     const response = await api.getActivitySummary('24h')
     if (response.success && response.data) {

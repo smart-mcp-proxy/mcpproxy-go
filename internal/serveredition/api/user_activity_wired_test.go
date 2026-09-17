@@ -161,7 +161,16 @@ func wiredActivityTestSetup(t *testing.T, records []*storage.ActivityRecord) (*U
 	activityFilter := multiuser.NewActivityFilter(provider)
 	logger := zap.NewNop().Sugar()
 
-	handlers := NewUserActivityHandlers(activityFilter, store, nil, logger)
+	// wiredSentinelRecord always uses ServerName "a", so the entitlement
+	// predicate (cross-review round 1 P1: getUserActivity must resolve
+	// AllowedServers live through it, never trust ac.AllowedServers — the
+	// production ServerEditionAuthMiddleware never populates that field)
+	// needs one shared server named "a" to grant every tenant the same
+	// access aliceContext/bobContext used to hand-set directly. No access
+	// block installed = today's Shared-only semantics, so this grants "a" to
+	// both Alice and Bob equally, matching this rig's original intent.
+	sharedServers := []*config.ServerConfig{{Name: "a", Shared: true, Enabled: true, Protocol: "http"}}
+	handlers := NewUserActivityHandlers(activityFilter, store, sharedServers, logger)
 
 	// The masking parity core GET /activity applies (T086): build an
 	// httpapi.Server purely to reuse its projector — no routes on it are
@@ -284,6 +293,97 @@ func TestUserActivityWired_AdminUnchangedMeansEmpty(t *testing.T) {
 
 	items, _ := resp.Items.([]interface{})
 	assert.Empty(t, items, `admin_user must still receive {"items":[],"total":0}`)
+}
+
+// TestUserActivityWired_IgnoresAuthContextAllowedServers pins cross-review
+// round 1's P1 finding: production mounts GET /user/activity behind
+// ServerEditionAuthMiddleware (setup.go), whose buildAuthContext returns a
+// plain auth.UserContext with AllowedServers left at its zero value (nil) —
+// only the SEPARATE SessionPrincipalResolver path (core /api/v1) ever
+// materialises that field. The handler used to read ac.AllowedServers
+// directly and hand it straight to storage.ActivityFilter, whose
+// serverAllowed treats nil as UNRESTRICTED — so every tenant, authenticated
+// through the door this handler is actually mounted behind, saw every
+// record for every server, not just their entitled ones.
+//
+// This test builds the AuthContext the way buildAuthContext really does
+// (auth.UserContext, AllowedServers untouched — nil) instead of the
+// hand-set ["a"] aliceContext()/bobContext() helpers above, and entitles
+// Alice to server "a" only through the live predicate (SetEntitlement) while
+// a record exists for a DIFFERENT server "b" she is not entitled to.
+//
+// BITES: reverting getUserActivity to `filter.AllowedServers = ac.AllowedServers`
+// makes this see both records (Total: 2) instead of just the entitled one.
+func TestUserActivityWired_IgnoresAuthContextAllowedServers(t *testing.T) {
+	records := []*storage.ActivityRecord{
+		wiredSentinelRecord("rec-alice-a", wiredAliceID, "alice@example.com"),
+		{
+			ID: "rec-alice-b", Type: storage.ActivityTypeToolCall, ServerName: "b",
+			ToolName: "call", Status: "success", Timestamp: time.Now().UTC(),
+			UserID: wiredAliceID, UserEmail: "alice@example.com",
+		},
+	}
+	handlers, _, store := wiredActivityTestSetup(t, records)
+
+	// The live predicate: Alice is entitled to "a" only (not "b"), through a
+	// real UserHandlers/access-block configuration — never through the
+	// AuthContext.
+	admin := []*config.ServerConfig{
+		{Name: "a", Shared: true, Enabled: true, Protocol: "http"},
+		{Name: "b", Shared: true, Enabled: true, Protocol: "http"},
+	}
+	predicate := NewUserHandlers(store, StaticAdminServers(admin), nil, nil, zap.NewNop().Sugar())
+	predicate.SetServerEditionConfigProvider(func() *config.ServerEditionConfig {
+		return &config.ServerEditionConfig{
+			Enabled: true,
+			Access: &config.ServerEditionAccessConfig{
+				GroupServers:   map[string][]string{"eng": {"a"}},
+				DefaultServers: []string{},
+			},
+		}
+	})
+	handlers.SetEntitlement(predicate)
+
+	// The AuthContext exactly as buildAuthContext constructs it: a plain
+	// user context whose AllowedServers is the zero value.
+	ac := auth.UserContext(wiredAliceID, "alice@example.com", "Alice", "google")
+	ac.CredentialKind = auth.CredentialKindCookie
+	require.Nil(t, ac.AllowedServers, "sanity: buildAuthContext never sets AllowedServers")
+	aliceUser := ensureFixtureUserWithGroups(t, store, wiredAliceID, "alice@example.com", []string{"eng"})
+	_ = aliceUser
+
+	router := wiredActivityRouter(handlers, ac)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/activity", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp ActivityListResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, 1, resp.Total,
+		"a tenant whose session context carries no AllowedServers must still be restricted "+
+			"to their LIVE entitlement set (\"a\"), never see an out-of-group server's (\"b\") records")
+}
+
+// ensureFixtureUserWithGroups persists a user record with the given Groups
+// claim, overwriting any record ensureUserRecord already created for the
+// same id (which stamps no Groups) — the live predicate reads Groups off the
+// stored record, never off the AuthContext.
+func ensureFixtureUserWithGroups(t *testing.T, store *users.UserStore, userID, email string, groups []string) *users.User {
+	t.Helper()
+	existing, err := store.GetUser(userID)
+	require.NoError(t, err)
+	if existing == nil {
+		existing = users.NewUser(email, "", "google", "sub-"+userID)
+		existing.ID = userID
+		existing.Groups = groups
+		require.NoError(t, store.CreateUser(existing))
+		return existing
+	}
+	existing.Groups = groups
+	require.NoError(t, store.UpdateUser(existing))
+	return existing
 }
 
 // TestCoreActivityDoorsRefuseTenant proves the FR-043(k) refusal list: a

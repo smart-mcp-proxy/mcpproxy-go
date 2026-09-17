@@ -48,9 +48,10 @@ import (
 // directly: the entitlement predicate (core + wrapper, see file comment) and
 // the administrator projection helper.
 var permittedSharedReaders = map[string]bool{
-	"entitledServerNamesFor": true,
-	"entitledServerNames":    true,
-	"adminSharedProjection":  true,
+	"entitledServerNamesFor":         true,
+	"entitledServerNamesForSnapshot": true,
+	"entitledServerNames":            true,
+	"adminSharedProjection":          true,
 }
 
 // sharedGuardExemptFiles are exempted by file name entirely.

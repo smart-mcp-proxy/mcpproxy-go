@@ -322,6 +322,33 @@ func TestTenantSessionScopedSubtreeParity(t *testing.T) {
 		"an unentitled server must read exactly as a nonexistent one (status parity)")
 }
 
+// TestTenantSessionNamedMustRefuseSurvivesEncodedServerName pins cross-review
+// round 1's P1 finding: nothing in config validation forbids a server name
+// containing a literal "/" (only ":" is refused,
+// internal/config/server_edition_config.go validateAccessServerName), and
+// such a name is addressed on the wire as a single percent-encoded path
+// segment. Chi routes on r.URL.RawPath when it is set (server.go:888), so
+// "/api/v1/servers/io.github.owner%2Frepo/tool-calls" still dispatches to
+// handleGetServerToolCalls with id="io.github.owner/repo" — the allowlist
+// gate ahead of it MUST see the same raw form, or it Cuts the DECODED path
+// on the literal "/" the escape produced, misreads the trailing segment as
+// "repo/tool-calls" instead of "tool-calls", and lets the named must-refuse
+// route through.
+//
+// BITES: reverting tenantSessionRoutePath to always return r.URL.Path (as
+// tryInstallSessionPrincipal did before this round) makes this fail with a
+// 200/404 from the real handler instead of the fixed 403.
+func TestTenantSessionNamedMustRefuseSurvivesEncodedServerName(t *testing.T) {
+	srv := newTenantWalkServer(t)
+
+	path := "/api/v1/servers/io.github.owner%2Frepo/tool-calls"
+	w := doTenantRequest(t, srv, http.MethodGet, path, false)
+	require.Equalf(t, http.StatusForbidden, w.Code,
+		"an encoded slash in the server name must not defeat the /servers/{id}/tool-calls must-refuse: got %d body=%s",
+		w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), tenantForbiddenErrorField)
+}
+
 // TestTenantSessionCanRevealSecretsFalse: session principals never satisfy
 // CanRevealSecrets (constraint 11) — pinned directly against the AuthContext
 // the resolver hands back, independent of any specific route's behaviour.

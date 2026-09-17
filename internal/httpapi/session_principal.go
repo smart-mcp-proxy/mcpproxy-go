@@ -62,14 +62,39 @@ func (s *Server) tryInstallSessionPrincipal(w http.ResponseWriter, r *http.Reque
 	// before any handler — and therefore before any body parse. Routes
 	// outside that surface (health checks, embedder-mounted routes) are not
 	// this gate's concern and are forwarded untouched.
-	if ac.Type == auth.AuthTypeUser && isTenantGatedPath(r.URL.Path) && !tenantSessionAllowlist(r.Method, r.URL.Path) {
-		s.writeTenantForbidden(w, r)
-		return true
+	if ac.Type == auth.AuthTypeUser {
+		routePath := tenantSessionRoutePath(r)
+		if isTenantGatedPath(routePath) && !tenantSessionAllowlist(r.Method, routePath) {
+			s.writeTenantForbidden(w, r)
+			return true
+		}
 	}
 
 	ctx := auth.WithAuthContext(r.Context(), ac)
 	next.ServeHTTP(w, r.WithContext(ctx))
 	return true
+}
+
+// tenantSessionRoutePath returns the path the allowlist must match on: chi
+// routes on r.URL.RawPath when it is set (server.go:888, "chi routes on
+// RawPath, so the {id} param arrives percent-encoded"), never on the decoded
+// r.URL.Path. A server name containing a literal "/" (nothing in config
+// validation forbids one — only ":" is refused) is addressed as a single
+// path segment via its percent-encoded form, e.g.
+// "/servers/io.github.owner%2Frepo/tool-calls"; matching that request against
+// the DECODED r.URL.Path ("/servers/io.github.owner/repo/tool-calls") makes
+// strings.Cut see two segments instead of one, so the id/sub split lands in
+// the wrong place and the named must-refuse for "/servers/{id}/tool-calls"
+// (FR-002/FR-043(k)) never fires — while chi, routing on RawPath, still
+// dispatches the request to the real handler. Matching on the same raw form
+// chi uses closes that gap; falling back to r.URL.Path when RawPath is empty
+// (the common case: no path segment needed non-default percent-encoding)
+// keeps every existing literal comparison working unchanged.
+func tenantSessionRoutePath(r *http.Request) string {
+	if r.URL.RawPath != "" {
+		return r.URL.RawPath
+	}
+	return r.URL.Path
 }
 
 // isTenantGatedPath reports whether path is on the surface the tenant-session

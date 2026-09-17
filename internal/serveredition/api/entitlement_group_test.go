@@ -707,3 +707,75 @@ func TestEntitlementGroup_RotateRenarrowsAfterGroupChange(t *testing.T) {
 			"entitledServerNames never reads Groups, so a standing grant to \"b\" survives "+
 			"a group downgrade until this door reads Groups")
 }
+
+// TestVisibleSharedServerDoor_ReadsAdminServersExactlyOnce pins cross-review
+// round 1's P1 finding: visibleSharedServers/visibleSharedServer used to call
+// h.adminConfigServers() TWICE per request — once inside
+// entitledServerNamesFor to compute the entitled name set, and again,
+// independently, to fetch the ServerConfig objects for disclosure. A
+// server-edition config hot-reload landing between those two live reads
+// (FR-039 part 3 makes server_edition.access, and any other config write,
+// apply without a restart) could authorize a name against one snapshot and
+// disclose a *different* server's data under that name from the next one —
+// e.g. a server that was Shared when the entitlement set was computed but
+// has since been unshared (or replaced) still gets returned, because the
+// by-name/by-set lookup never re-derives entitlement against the snapshot it
+// actually reads from.
+//
+// The fix (tenantEntitledSnapshot) fetches the admin-config servers ONCE per
+// request and threads that single snapshot through both the entitlement
+// computation and the disclosure lookup, mirroring the "ONE resolver call per
+// authentication" invariant this spec already holds for owner resolution.
+//
+// BITES: reverting visibleSharedServers/visibleSharedServer to call
+// h.tenantEntitled (which does not return a snapshot) and then
+// h.adminConfigServers() again makes the provider's call count 2 instead of
+// 1 for a single GET /api/v1/user/servers/{name} request.
+func TestVisibleSharedServerDoor_ReadsAdminServersExactlyOnce(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+
+	dbPath := t.TempDir()
+	db, err := bbolt.Open(filepath.Join(dbPath, "users.db"), 0600, &bbolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	userStore := users.NewUserStore(db)
+	require.NoError(t, userStore.EnsureBuckets())
+
+	alice := users.NewUser("alice@example.com", "Alice", "google", "sub-alice")
+	require.NoError(t, userStore.CreateUser(alice))
+
+	admin := groupFixtureServersB() // one shared server, "a"
+	var calls int32
+	countingProvider := AdminServersProvider(func() []*config.ServerConfig {
+		atomic.AddInt32(&calls, 1)
+		return admin
+	})
+
+	userHandlers := NewUserHandlers(userStore, countingProvider, nil, nil, logger)
+
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := auth.WithAuthContext(req.Context(), groupUserCtx(alice))
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
+	userHandlers.RegisterRoutesWithPrefix(r, "/api/v1")
+
+	atomic.StoreInt32(&calls, 0)
+	w := httptest.NewRequest(http.MethodGet, "/api/v1/user/servers/a", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, w)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls),
+		"GET /user/servers/{name} must read the live admin server snapshot exactly once, "+
+			"not once for entitlement and once for disclosure")
+
+	atomic.StoreInt32(&calls, 0)
+	wList := httptest.NewRequest(http.MethodGet, "/api/v1/user/servers", nil)
+	recList := httptest.NewRecorder()
+	r.ServeHTTP(recList, wList)
+	require.Equal(t, http.StatusOK, recList.Code)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls),
+		"GET /user/servers must read the live admin server snapshot exactly once")
+}

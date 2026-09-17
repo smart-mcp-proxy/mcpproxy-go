@@ -893,6 +893,22 @@ var errUserRecordMissing = errors.New("user record not found")
 // live rather than snapshotted at boot. Excluding it costs the tenant only a
 // token scope, never their server.
 func (h *UserHandlers) entitledServerNamesFor(user *users.User, isAdmin bool) ([]string, error) {
+	return h.entitledServerNamesForSnapshot(user, isAdmin, h.adminConfigServers())
+}
+
+// entitledServerNamesForSnapshot is entitledServerNamesFor's core, taking the
+// admin-config servers as a parameter instead of reading them live. It exists
+// so a caller that must also disclose full ServerConfig objects for the names
+// this predicate returns (visibleSharedServers, visibleSharedServer) can
+// fetch h.adminConfigServers() exactly ONCE and use that single snapshot for
+// both the entitlement decision and the disclosure: a second, independent
+// live read between the two would open a hot-reload race where a server is
+// entitled against an old snapshot (e.g. still Shared) and then disclosed
+// from a new one, defeating the "one predicate, one decision" contract
+// (FR-004) and contradicting FR-039's live-reload guarantee. Every other
+// caller (which only needs the name set) keeps calling entitledServerNamesFor
+// / entitledServerNames.
+func (h *UserHandlers) entitledServerNamesForSnapshot(user *users.User, isAdmin bool, adminServers []*config.ServerConfig) ([]string, error) {
 	if user == nil {
 		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, errUserRecordMissing)
 	}
@@ -906,8 +922,6 @@ func (h *UserHandlers) entitledServerNamesFor(user *users.User, isAdmin bool) ([
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, err)
 	}
-
-	adminServers := h.adminConfigServers()
 
 	names := make([]string, 0, len(personal)+len(adminServers))
 	seen := make(map[string]struct{}, len(personal)+len(adminServers))
@@ -1020,6 +1034,38 @@ func (h *UserHandlers) tenantEntitled(r *http.Request, userID string) (set map[s
 	return set, isAdmin, nil
 }
 
+// tenantEntitledSnapshot is tenantEntitled's sibling for callers that must
+// also disclose full ServerConfig objects for the entitled names: it fetches
+// h.adminConfigServers() exactly ONCE and threads that snapshot through
+// entitledServerNamesForSnapshot, so the set the caller checks membership
+// against and the server objects it then reads are guaranteed to come from
+// the same configuration version — closing the hot-reload race
+// tenantEntitled + a second h.adminConfigServers() call would otherwise open
+// (see entitledServerNamesForSnapshot's doc comment).
+func (h *UserHandlers) tenantEntitledSnapshot(r *http.Request, userID string) (set map[string]struct{}, isAdmin bool, adminServers []*config.ServerConfig, err error) {
+	ac := auth.AuthContextFromContext(r.Context())
+	isAdmin = ac != nil && ac.IsAdmin()
+	adminServers = h.adminConfigServers()
+
+	user, err := h.userStore.GetUser(userID)
+	if err != nil {
+		return nil, isAdmin, adminServers, fmt.Errorf("%w: %v", errServerScopeLookup, err)
+	}
+	if user == nil {
+		return nil, isAdmin, adminServers, fmt.Errorf("%w: %v", errServerScopeLookup, errUserRecordMissing)
+	}
+
+	names, err := h.entitledServerNamesForSnapshot(user, isAdmin, adminServers)
+	if err != nil {
+		return nil, isAdmin, adminServers, err
+	}
+	set = make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[n] = struct{}{}
+	}
+	return set, isAdmin, adminServers, nil
+}
+
 // adminSharedProjection is the administrator's view of the per-user doors
 // (/user/servers list/get/update/delete/enable, /user/credentials*,
 // /user/diagnostics): the admin-config servers flagged Shared, exactly as
@@ -1042,14 +1088,17 @@ func (h *UserHandlers) adminSharedProjection() []*config.ServerConfig {
 // renders for the caller: the administrator projection for an admin_user, the
 // entitlement set for a tenant (FR-004). Order follows the live configuration.
 func (h *UserHandlers) visibleSharedServers(r *http.Request, userID string) ([]*config.ServerConfig, error) {
-	set, isAdmin, err := h.tenantEntitled(r, userID)
+	set, isAdmin, servers, err := h.tenantEntitledSnapshot(r, userID)
 	if err != nil {
 		return nil, err
 	}
 	if isAdmin {
 		return h.adminSharedProjection(), nil
 	}
-	servers := h.adminConfigServers()
+	// `servers` and `set` come from the same tenantEntitledSnapshot call, so
+	// `set` already reflects exactly this snapshot's Shared flags (the
+	// predicate is the ONE reader of .Shared, contracts/entitlement-predicate
+	// .md §1) — no second Shared check is needed or permitted here.
 	out := make([]*config.ServerConfig, 0, len(servers))
 	for _, sc := range servers {
 		if sc == nil {
@@ -1071,7 +1120,7 @@ func (h *UserHandlers) visibleSharedServers(r *http.Request, userID string) ([]*
 // one, in status, body and timing class). Tenant names compare exactly; the
 // administrator projection keeps its historical case-insensitive match.
 func (h *UserHandlers) visibleSharedServer(r *http.Request, userID, name string) (*config.ServerConfig, error) {
-	set, isAdmin, err := h.tenantEntitled(r, userID)
+	set, isAdmin, servers, err := h.tenantEntitledSnapshot(r, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -1086,7 +1135,10 @@ func (h *UserHandlers) visibleSharedServer(r *http.Request, userID, name string)
 	if _, ok := set[name]; !ok {
 		return nil, nil
 	}
-	for _, sc := range h.adminConfigServers() {
+	// Same snapshot the entitlement was computed from (see
+	// visibleSharedServers): `set` membership already reflects this
+	// snapshot's Shared flags, so the lookup below only needs a name match.
+	for _, sc := range servers {
 		if sc != nil && sc.Name == name {
 			return sc, nil
 		}

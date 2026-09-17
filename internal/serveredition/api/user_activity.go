@@ -159,11 +159,30 @@ func (h *UserActivityHandlers) getUserActivity(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// The entitlement set is resolved live through the ONE predicate
+	// (Spec 107 FR-004), never trusted off ac.AllowedServers: this door is
+	// mounted behind ServerEditionAuthMiddleware (setup.go), which builds a
+	// plain UserContext and never populates AllowedServers — only the
+	// SessionPrincipalResolver path used by core /api/v1 materialises it.
+	// Reading ac.AllowedServers directly left storage.ActivityFilter.
+	// serverAllowed treating a nil slice as UNRESTRICTED (its documented
+	// "nil means unrestricted" contract), so every tenant on this door saw
+	// every user's activity for every server, entitled or not
+	// (cross-review round 1, P1). entitledServerNames always returns a
+	// non-nil slice (empty when nothing is entitled), which is exactly the
+	// deny-all shape serverAllowed requires.
+	entitled, err := h.entitlementPredicate().entitledServerNames(ac.UserID, false)
+	if err != nil {
+		h.logger.Errorw("failed to resolve server entitlement for activity", "user_id", ac.UserID, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "Server entitlement unavailable")
+		return
+	}
+
 	filter := storage.DefaultActivityFilter()
 	filter.Limit = limit
 	filter.Offset = offset
 	filter.UserID = ac.UserID
-	filter.AllowedServers = ac.AllowedServers
+	filter.AllowedServers = entitled
 
 	records, total, err := h.activityFilter.ListActivities(filter)
 	if err != nil {

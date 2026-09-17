@@ -29,7 +29,16 @@ const HIDDEN_SERVERS = ['b', 'a__b'];
 // every one of these, for a session-cookie tenant, must 403 with the fixed
 // scoped-caller body below — before any body parse (a malformed body must
 // not turn a 403 into a 400).
-const REFUSED_ROUTES: Array<{ method: 'GET' | 'POST'; path: string; body?: unknown }> = [
+// NOT the exhaustive production route table: internal/httpapi's Go suite
+// (TestTenantSessionAllowlistWalk, tenant_allowlist_walk_test.go) chi.Walks
+// every route this binary actually serves and is the binding, exhaustive
+// FR-045 gate; this list is a browser-level smoke check over a
+// representative subset (widened in cross-review round 1 to also cover the
+// named must-refuse examples spec.md's US4 Independent Test calls out —
+// /servers/{id}/tool-calls, the dispatch/mutation/telemetry/onboarding/
+// feedback/diagnostics/doctor/telemetry-payload/annotations/config-patch/
+// personal-tokens rows — that were previously exercised only in Go).
+const REFUSED_ROUTES: Array<{ method: 'GET' | 'POST' | 'PATCH'; path: string; body?: unknown }> = [
   { method: 'GET', path: '/api/v1/config' },
   { method: 'GET', path: '/api/v1/info' },
   { method: 'GET', path: '/api/v1/routing' },
@@ -38,16 +47,29 @@ const REFUSED_ROUTES: Array<{ method: 'GET' | 'POST'; path: string; body?: unkno
   { method: 'GET', path: '/api/v1/sessions' },
   { method: 'GET', path: '/api/v1/security/overview' },
   { method: 'GET', path: '/api/v1/activity' },
+  { method: 'GET', path: '/api/v1/activity/summary' },
   { method: 'GET', path: '/api/v1/tool-calls' },
+  { method: 'GET', path: `/api/v1/servers/${ENTITLED_SERVER}/tool-calls` },
   { method: 'GET', path: '/api/v1/connect' },
   { method: 'GET', path: '/api/v1/onboarding/state' },
   { method: 'GET', path: '/api/v1/doctor' },
+  { method: 'GET', path: '/api/v1/diagnostics' },
+  { method: 'GET', path: '/api/v1/code/scripts' },
+  { method: 'GET', path: '/api/v1/telemetry/payload' },
+  { method: 'GET', path: '/api/v1/annotations/coverage' },
   // Deliberately malformed body: still 403, never 400 (scoped-caller check
   // runs before the handler touches the body).
   { method: 'POST', path: '/api/v1/tools/call', body: '{not json' },
   { method: 'POST', path: '/api/v1/code/exec', body: {} },
   { method: 'POST', path: '/api/v1/servers', body: {} },
   { method: 'POST', path: '/api/v1/quarantine/approve', body: {} },
+  { method: 'POST', path: '/api/v1/tool-calls/some-id/replay', body: {} },
+  { method: 'POST', path: '/api/v1/registries/some-id/refresh', body: {} },
+  { method: 'POST', path: '/api/v1/telemetry/update-failure', body: {} },
+  { method: 'POST', path: '/api/v1/onboarding/mark', body: {} },
+  { method: 'POST', path: '/api/v1/feedback', body: {} },
+  { method: 'POST', path: '/api/v1/tokens', body: {} },
+  { method: 'PATCH', path: '/api/v1/config', body: {} },
 ];
 
 const FIXED_403_BODY = {
