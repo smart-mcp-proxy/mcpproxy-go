@@ -214,7 +214,13 @@ func (p *oidcProvider) fetchDiscovery(ctx context.Context) (*discoveryDoc, error
 		return nil, newOIDCError(LoginDiscoveryFailed, "discovery document is not JSON", err)
 	}
 	if doc.Issuer != p.cfg.IssuerURL {
-		return nil, newOIDCError(LoginDiscoveryFailed, "discovery issuer does not equal issuer_url", nil)
+		// Spec 107 (Edge Cases, "Issuer with a path or trailing slash"): the
+		// log line must name both values (they are not secrets) so the
+		// operator can see the mismatch, e.g. a trailing slash, without
+		// re-fetching the document themselves (cross-review round 7, chunk 3
+		// P3 — docs already promised this; the code did not deliver it).
+		return nil, newOIDCError(LoginDiscoveryFailed, fmt.Sprintf(
+			"discovery issuer %q does not equal issuer_url %q", doc.Issuer, p.cfg.IssuerURL), nil)
 	}
 	for name, ep := range map[string]string{
 		"authorization_endpoint": doc.AuthorizationEndpoint,
@@ -469,7 +475,17 @@ func (p *oidcProvider) verifyIDToken(ctx context.Context, raw, nonce string) (*i
 	out.Email, _ = claims["email"].(string)
 	out.Name, _ = claims["name"].(string)
 	out.Picture, _ = claims["picture"].(string)
-	if v, ok := claims["email_verified"].(bool); ok {
+	// A present-but-non-boolean email_verified (e.g. the string "false", or
+	// 0) must not be silently treated the same as an absent claim: refuse_false
+	// only refuses an explicit false, so nil (absent) would let a malformed
+	// value's login through even when the claim's clear intent is "not
+	// verified" (cross-review round 7, chunk 1 P2). Reject it as a malformed
+	// token instead of guessing its meaning.
+	if raw, present := claims["email_verified"]; present && raw != nil {
+		v, ok := raw.(bool)
+		if !ok {
+			return nil, newOIDCError(LoginIDTokenInvalid, "id_token email_verified is present but not a boolean", nil)
+		}
 		out.EmailVerified = &v
 	}
 	return out, nil

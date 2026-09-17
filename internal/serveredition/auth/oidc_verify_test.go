@@ -633,6 +633,26 @@ func TestOIDCVerify_EmailVerifiedPolicy(t *testing.T) {
 	}
 }
 
+// A present-but-non-boolean email_verified (e.g. a string) must never be
+// treated as absent: under the default refuse_false policy that would let a
+// malformed claim whose plain-text value is "false" log the user in anyway.
+// It is refused as id_token_invalid instead of being guessed (cross-review
+// round 7, chunk 1 P2).
+func TestOIDCVerify_EmailVerifiedMalformedType(t *testing.T) {
+	claims := oidcVerifyClaims()
+	claims["email_verified"] = "false" // string, not bool
+	idp := startOIDCVerifyIdP(t, claims)
+	rig := newOIDCVerifyRig(t, idp, oauthserver.ErrorMode{}, nil)
+
+	resp, res := rig.attempt()
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Equal(t, "id_token_invalid", string(res.Reason))
+	assert.Equal(t, 0, rig.userCount(), "user store untouched: no record created")
+	assert.Nil(t, rig.alice())
+	rig.assertLogNamesCheck("id_token_invalid", "email_verified")
+}
+
 // --- FR-008 / FR-022 / US2.3: groups ------------------------------------------
 
 func TestOIDCVerify_GroupsFromToken(t *testing.T) {

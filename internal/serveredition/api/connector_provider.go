@@ -16,6 +16,16 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/broker"
 )
 
+// connectorCacheCap bounds the number of distinct (server, base URL)
+// connectors held at once. With public_url unset, base comes from r.Host —
+// caller-controlled on every direct HTTP/1.1 request, trusted-proxy or not —
+// so without a cap a caller could mint one permanently-cached OAuthConnector
+// (plus its in-memory PKCE/state map) per distinct Host header value, an
+// unbounded memory-growth DoS (cross-review round 7, chunk 3 P2). A single
+// deployment normally resolves to one or a handful of origins, so this is
+// generous headroom, not a tight budget.
+const connectorCacheCap = 256
+
 // connectorProvider builds and caches one broker.OAuthConnector per
 // oauth_connect upstream (keyed by serverKey). The same connector instance must
 // serve both the connect redirect and the callback because the connector holds
@@ -35,6 +45,9 @@ type connectorProvider struct {
 
 	mu    sync.Mutex
 	cache map[string]*broker.OAuthConnector // keyed by serverKey + "|" + base URL
+	// order is cache's insertion order, oldest first; it bounds cache at
+	// connectorCacheCap entries by evicting the oldest on overflow.
+	order []string
 }
 
 // newConnectorProvider constructs an empty provider. A nil audit sink disables
@@ -116,7 +129,13 @@ func (p *connectorProvider) connector(r *http.Request, server *config.ServerConf
 	if err != nil {
 		return nil, err
 	}
+	if len(p.order) >= connectorCacheCap {
+		oldest := p.order[0]
+		p.order = p.order[1:]
+		delete(p.cache, oldest)
+	}
 	p.cache[key] = conn
+	p.order = append(p.order, key)
 	return conn, nil
 }
 

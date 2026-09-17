@@ -377,11 +377,11 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	attempt := h.newAttempt(r)
 
-	if h.providerErr != nil {
-		attempt.unavailable(w, LoginInternalError, "provider", h.providerErr)
-		return
-	}
-
+	// The pending state is consumed FIRST, exactly as the doc comment above
+	// promises: a broken provider config must not let an absent, unknown or
+	// expired state read as anything but state_invalid, and must not let an
+	// arbitrary caller distinguish "OAuth is misconfigured" from "OAuth is
+	// fine but your state is bad" (cross-review round 7, chunk 2 P3).
 	q := r.URL.Query()
 	pending, ok := h.consumePendingState(q.Get("state"))
 	if !ok {
@@ -390,6 +390,11 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if pending.RedirectRejected {
 		attempt.flag(FlagRedirectRejected)
+	}
+
+	if h.providerErr != nil {
+		attempt.unavailable(w, LoginInternalError, "provider", h.providerErr)
+		return
 	}
 
 	if idpErr := q.Get("error"); idpErr != "" {

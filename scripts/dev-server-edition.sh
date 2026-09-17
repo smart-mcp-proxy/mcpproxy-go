@@ -13,7 +13,8 @@
 #                                 [--keep] [--skip-build]
 #
 #   --phase b   quickstart §0–§4: build, fake IdP, config, boot, headless login,
-#               open-redirect check (default)
+#               open-redirect check, /mcp auth gate (session cookie and no
+#               credential both 401) (default)
 #   --phase c   + §5: tenant principal on core REST (PR-C)
 #   --phase d   + §6: mint an agent token as Alice, call /mcp, audit tail (PR-D)
 #   --scratch   root for the binary, config, data dir and logs
@@ -355,8 +356,20 @@ headless_login() {
 	local jar="$1" want="$2" auth cb
 	# 4a. /auth/login stores state+nonce server-side and 302s to the IdP.
 	auth="$(c -o /dev/null -w '%{http_code} %{redirect_url}' -c "$jar" "$BASE/api/v1/auth/login?redirect_uri=$want")"
-	[[ "${auth%% *}" == "302" || "${auth%% *}" == "303" || "${auth%% *}" == "307" ]] ||
+	if [[ "${auth%% *}" != "302" && "${auth%% *}" != "303" && "${auth%% *}" != "307" ]]; then
+		if [[ "$TAMPER" == "1" ]]; then
+			# Some tamper flags (e.g. -discovery-http-token-endpoint) fail
+			# synchronously at /auth/login itself — discovery runs before the
+			# redirect to the IdP is built — so there is no IdP form to
+			# submit and no callback to complete; the unavailable response IS
+			# the terminal outcome for this attempt. Previously this always
+			# died here, so that tamper case's expected-503 handling
+			# downstream was unreachable (cross-review round 7, chunk 4 P2).
+			echo "$auth"
+			return 0
+		fi
 		die "4a /auth/login answered HTTP ${auth%% *} instead of a redirect to the IdP (OIDC front door missing?)"
+	fi
 	auth="${auth#* }"
 	[[ "$auth" == "$IDP_URL"/* ]] || die "4a /auth/login redirected off the fake IdP: $auth"
 	echo "$auth" | grep -Eq 'code_challenge_method=S256' || die "4a authorize URL lacks code_challenge_method=S256 (FR-021)"
@@ -422,6 +435,17 @@ code="${res%% *}"; loc="${res#* }"
 [[ "$code" == "302" && "$loc" == "$BASE/ui/" ]] || die "4d open redirect: expected 302 -> $BASE/ui/, got HTTP $code -> '$loc'"
 ok "4d redirect_uri=https://evil.example/ landed on /ui/ (US2.7)"
 
+# §4e /mcp auth gate (T062, part of phase b itself — the session cookie and
+# JWT are never MCP credentials, and require_mcp_auth is forced true, so both
+# checks stand on PR-B alone and must run before the phase-b exit below
+# rather than only under --phase d, where they used to live unreachable
+# (cross-review round 7, chunk 4 P2).
+code="$(c -o /dev/null -w '%{http_code}' -b "$J" -X POST "$BASE/mcp" -d '{}')"
+[[ "$code" == "401" ]] || die "4e cookie on /mcp must be 401 (FR-003, got $code)"
+code="$(c -o /dev/null -w '%{http_code}' -X POST "$BASE/mcp" -d '{}')"
+[[ "$code" == "401" ]] || die "4e no credential on /mcp must be 401 despite require_mcp_auth:false (FR-029, got $code)"
+ok "§4e /mcp refuses a session cookie and refuses no credential"
+
 [[ "$PHASE" == "b" ]] && { log "phase b complete"; exit 0; }
 
 # ---------------------------------------------------------------------------
@@ -447,14 +471,10 @@ ok "§5 tenant principal on core REST"
 # §6 Mint an agent token as Alice, call /mcp, read the audit line (PR-D).
 # ---------------------------------------------------------------------------
 TOK="$(c -b "$J" -X POST "$BASE/api/v1/user/tokens" -H 'Content-Type: application/json' \
-	-d '{"name":"t1","allowed_servers":["*"],"permissions":["read"],"expires_in":"720h"}' | jq -r '.raw_token // empty')"
-[[ -n "$TOK" ]] || die "6 token mint as alice returned no raw_token"
+	-d '{"name":"t1","allowed_servers":["*"],"permissions":["read"],"expires_in":"720h"}' | jq -r '.token // empty')"
+[[ -n "$TOK" ]] || die "6 token mint as alice returned no token"
 c -b "$J" "$BASE/api/v1/user/tokens" | jq -e '.tokens[0].allowed_servers==["a"]' >/dev/null ||
 	die "6 minted token must have '*' materialised to [a] (US1.3)"
-code="$(c -o /dev/null -w '%{http_code}' -b "$J" -X POST "$BASE/mcp" -d '{}')"
-[[ "$code" == "401" ]] || die "6 cookie on /mcp must be 401 (FR-003, got $code)"
-code="$(c -o /dev/null -w '%{http_code}' -X POST "$BASE/mcp" -d '{}')"
-[[ "$code" == "401" ]] || die "6 no credential on /mcp must be 401 despite require_mcp_auth:false (FR-029, got $code)"
 mcp() {
 	c -X POST "$BASE/mcp" -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
 		-H 'Accept: application/json, text/event-stream' "$@"

@@ -356,6 +356,33 @@ func TestHandleCallback_MissingCode(t *testing.T) {
 	assert.Contains(t, string(body), "Sign-in was not permitted")
 }
 
+// A broken provider config (h.providerErr set at construction, restart-pinned
+// for the handler's lifetime) must not let the callback bypass the
+// state-first contract the HandleCallback doc comment promises: an unknown
+// state is state_invalid regardless of provider availability, not a 503 that
+// tells an unauthenticated caller OAuth is misconfigured before their state
+// is even looked at (cross-review round 7, chunk 2 P3).
+func TestHandleCallback_BrokenProviderStillStateFirst(t *testing.T) {
+	handler, _ := setupTestOAuthHandler(t, &config.ServerEditionOAuthConfig{
+		Provider: "not-a-real-provider",
+	})
+	require.Error(t, handler.providerErr, "the bad provider name must have failed construction")
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/auth/callback?code=whatever&state=unknown-state", nil)
+	w := httptest.NewRecorder()
+
+	handler.HandleCallback(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode, "state_invalid, not the 503 unavailable page")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Sign-in was not permitted")
+}
+
 func TestHandleCallback_DomainNotAllowed(t *testing.T) {
 	mockServer := mockOAuthProviderServer(t, "user@unauthorized.com", "Test User", "sub-123")
 	registerMockProvider(t, mockServer)
