@@ -1,0 +1,60 @@
+package audit
+
+// redact.go implements the fixed-prefix credential masking used both
+// per-field at build time (line.go) and as the defence-in-depth whole-line
+// pass (SanitizeLine) documented in contracts/audit-line-events.md
+// "Redaction (FR-015)". Deliberately excludes the generic high-entropy
+// rule: it would mask every args_sha256/email_hash and break the schema
+// after validation.
+
+import "regexp"
+
+// credentialPatterns are evaluated in order (most specific prefix first,
+// e.g. sk-ant- before sk-) so a longer, more specific match is consumed
+// before a shorter pattern could also match a prefix of it.
+var credentialPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`sk-ant-[A-Za-z0-9-]{10,}`),
+	regexp.MustCompile(`sk-[A-Za-z0-9]{16,}`),
+	regexp.MustCompile(`gh[poushr]_[A-Za-z0-9]{16,}`),
+	regexp.MustCompile(`AKIA[0-9A-Za-z]{8,}`),
+	regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`),
+	regexp.MustCompile(`Bearer\s+[A-Za-z0-9\-_.~+/]+=*`),
+}
+
+func maskMatch(s string) string {
+	if len(s) <= 8 {
+		return "***"
+	}
+	return s[:4] + "***" + s[len(s)-2:]
+}
+
+// applyMasking runs every fixed-prefix pattern over s in order and reports
+// whether any of them fired.
+func applyMasking(s string) (masked string, hit bool) {
+	for _, re := range credentialPatterns {
+		if re.MatchString(s) {
+			hit = true
+			s = re.ReplaceAllStringFunc(s, maskMatch)
+		}
+	}
+	return s, hit
+}
+
+// maskCredential applies the per-field pass to one caller/operator-controlled
+// string (client.name, caller.token_name, profile, and server/tool on a
+// refused dispatch). A value with no credential-shaped substring survives
+// verbatim.
+func maskCredential(s string) string {
+	masked, _ := applyMasking(s)
+	return masked
+}
+
+// SanitizeLine is the defence-in-depth whole-line pass applied before a
+// sink write: it must be the identity on well-formed builder output (every
+// caller/operator-controlled field was already masked per field) and only
+// fires on a builder bug. Returns the (possibly masked) line and whether
+// any pattern hit.
+func SanitizeLine(raw []byte) ([]byte, bool) {
+	masked, hit := applyMasking(string(raw))
+	return []byte(masked), hit
+}
