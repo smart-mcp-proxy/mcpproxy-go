@@ -333,6 +333,32 @@ func (mm *MetricsManager) RegisterAuditSink(sink auditFailureSource) {
 	))
 }
 
+// auditSanitizerSource is the minimal surface RegisterAuditSanitizer needs
+// from audit.Sink (declared locally, same reasoning as auditFailureSource).
+type auditSanitizerSource interface {
+	SanitizerHits() uint64
+}
+
+// RegisterAuditSanitizer wires the Spec 107 audit sink's always-on
+// defence-in-depth sanitizer-hit counter into Prometheus as
+// mcpproxy_audit_sanitizer_hits_total (contracts/audit-line-events.md
+// "Redaction (FR-015)"). A hit means the whole-line pass caught a
+// credential-shaped string that a builder bug let past per-field masking;
+// it should read zero for the life of a healthy process. Safe to call at
+// most once per sink; server.go only calls it when a sink exists.
+func (mm *MetricsManager) RegisterAuditSanitizer(sink auditSanitizerSource) {
+	if sink == nil {
+		return
+	}
+	mm.registry.MustRegister(prometheus.NewCounterFunc(
+		prometheus.CounterOpts{
+			Name: "mcpproxy_audit_sanitizer_hits_total",
+			Help: "Total number of audit-log lines where the defence-in-depth whole-line sanitizer masked a credential-shaped string that per-field masking missed",
+		},
+		func() float64 { return float64(sink.SanitizerHits()) },
+	))
+}
+
 // Handler returns an HTTP handler for the /metrics endpoint
 func (mm *MetricsManager) Handler() http.Handler {
 	return promhttp.HandlerFor(mm.registry, promhttp.HandlerOpts{

@@ -72,6 +72,7 @@ func (s *captureSink) Write(line []byte) error {
 }
 
 func (s *captureSink) WriteFailures() uint64 { return 0 }
+func (s *captureSink) SanitizerHits() uint64 { return 0 }
 func (s *captureSink) Close() error          { return nil }
 
 func (s *captureSink) all() [][]byte {

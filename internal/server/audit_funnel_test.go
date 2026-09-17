@@ -45,6 +45,7 @@ func (s *recordingAuditSink) Write(line []byte) error {
 }
 
 func (s *recordingAuditSink) WriteFailures() uint64 { return 0 }
+func (s *recordingAuditSink) SanitizerHits() uint64 { return 0 }
 func (s *recordingAuditSink) Close() error          { return nil }
 
 func (s *recordingAuditSink) snapshot() [][]byte {

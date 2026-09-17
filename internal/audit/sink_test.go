@@ -115,6 +115,54 @@ func TestSink_WriteFailuresCounterAlwaysOn(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// defence-in-depth whole-line sanitizer pass, wired into the production
+// write path (contracts/audit-line-events.md "Redaction (FR-015)")
+// ---------------------------------------------------------------------------
+
+// TestSink_WriteRunsLinesThroughSanitizerAndCountsHits proves the sink's
+// Write itself — not just the standalone SanitizeLine helper — applies the
+// defence-in-depth whole-line pass before a line reaches the underlying
+// writer, and that a hit is counted on Sink.SanitizerHits(). This is the
+// production wiring the contract requires as a safety net against a future
+// builder bug that lets a credential-shaped string past per-field masking;
+// without it, such a string would reach disk/stdout in clear.
+func TestSink_WriteRunsLinesThroughSanitizerAndCountsHits(t *testing.T) {
+	var buf bytes.Buffer
+	s := NewStdoutSink(&buf)
+	t.Cleanup(func() { _ = s.Close() })
+
+	if got := s.SanitizerHits(); got != 0 {
+		t.Fatalf("SanitizerHits() before any write = %d, want 0", got)
+	}
+
+	clean := []byte(`{"server":"jira"}`)
+	if err := s.Write(clean); err != nil {
+		t.Fatalf("Write(clean): %v", err)
+	}
+	if got := s.SanitizerHits(); got != 0 {
+		t.Fatalf("SanitizerHits() after a clean write = %d, want 0", got)
+	}
+	if !strings.Contains(buf.String(), `"server":"jira"`) {
+		t.Fatalf("clean line must be written verbatim, got: %s", buf.String())
+	}
+
+	// Simulated builder bug: a fixed-prefix credential reaches Write directly
+	// (standing in for a future field that skips per-field masking).
+	const sinkTestAkiaSentinel = "AKIASINKTEST7SENTINEL0"
+	buf.Reset()
+	leaked := []byte(`{"client":{"name":"` + sinkTestAkiaSentinel + `"}}`)
+	if err := s.Write(leaked); err != nil {
+		t.Fatalf("Write(leaked): %v", err)
+	}
+	if got := s.SanitizerHits(); got != 1 {
+		t.Fatalf("SanitizerHits() after a credential-shaped write = %d, want 1", got)
+	}
+	if strings.Contains(buf.String(), sinkTestAkiaSentinel) {
+		t.Fatalf("credential must be masked before it reaches the writer, got: %s", buf.String())
+	}
+}
+
 func TestSink_RuntimeWriteFailureIncrementsCounterAndCallProceeds(t *testing.T) {
 	fw := &failingWriter{failFrom: 2} // first write ok, every write after fails
 	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
@@ -523,6 +571,7 @@ type sinkStub struct{}
 
 func (sinkStub) Write(_ []byte) error  { return nil }
 func (sinkStub) WriteFailures() uint64 { return 0 }
+func (sinkStub) SanitizerHits() uint64 { return 0 }
 func (sinkStub) Close() error          { return nil }
 
 var _ io.Closer = sinkStub{}

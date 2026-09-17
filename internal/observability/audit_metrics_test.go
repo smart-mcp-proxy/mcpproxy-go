@@ -8,9 +8,10 @@ import (
 	"go.uber.org/zap"
 )
 
-type stubAuditSink struct{ n uint64 }
+type stubAuditSink struct{ n, sanitizerHits uint64 }
 
 func (s *stubAuditSink) WriteFailures() uint64 { return s.n }
+func (s *stubAuditSink) SanitizerHits() uint64 { return s.sanitizerHits }
 
 // TestRegisterAuditSink_MirrorsWriteFailures pins Spec 107 T109:
 // mcpproxy_audit_write_failures_total exists on /metrics and tracks the
@@ -30,6 +31,25 @@ func TestRegisterAuditSink_MirrorsWriteFailures(t *testing.T) {
 func TestRegisterAuditSink_NilSink_NoPanic(t *testing.T) {
 	mm := NewMetricsManager(zap.NewNop().Sugar())
 	mm.RegisterAuditSink(nil) // must be a no-op, never a nil-interface panic
+}
+
+// TestRegisterAuditSanitizer_MirrorsSanitizerHits proves
+// mcpproxy_audit_sanitizer_hits_total exists on /metrics and tracks the
+// sink's defence-in-depth whole-line sanitizer counter live (FR-015).
+func TestRegisterAuditSanitizer_MirrorsSanitizerHits(t *testing.T) {
+	mm := NewMetricsManager(zap.NewNop().Sugar())
+	sink := &stubAuditSink{}
+	mm.RegisterAuditSanitizer(sink)
+
+	assert.Equal(t, float64(0), gatherCounterValue(t, mm, "mcpproxy_audit_sanitizer_hits_total"))
+
+	sink.sanitizerHits = 2
+	assert.Equal(t, float64(2), gatherCounterValue(t, mm, "mcpproxy_audit_sanitizer_hits_total"))
+}
+
+func TestRegisterAuditSanitizer_NilSink_NoPanic(t *testing.T) {
+	mm := NewMetricsManager(zap.NewNop().Sugar())
+	mm.RegisterAuditSanitizer(nil) // must be a no-op, never a nil-interface panic
 }
 
 // gatherCounterValue scrapes the manager's registry and returns the single

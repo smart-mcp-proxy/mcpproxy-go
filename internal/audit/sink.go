@@ -26,10 +26,15 @@ const failureLogRateLimit = time.Minute
 // Sink is the audit line writer: mutex-guarded and synchronous (the caller
 // blocks until the line is on disk/stdout), with an always-on write-failure
 // counter (mirrored to metrics, surfaced by doctor — wiring is T109, not
-// this package).
+// this package) and an always-on defence-in-depth sanitizer-hit counter
+// (contracts/audit-line-events.md "Redaction (FR-015)": Write runs every
+// line through SanitizeLine before it reaches the underlying writer, and a
+// hit — which can only happen on a builder bug, since every well-formed
+// constructor output is untouched by the pass — is counted here).
 type Sink interface {
 	Write(line []byte) error
 	WriteFailures() uint64
+	SanitizerHits() uint64
 	Close() error
 }
 
@@ -55,10 +60,11 @@ func WithFailureLogger(fn func(err error)) Option {
 
 // writerSink is the shared Sink implementation behind both backends.
 type writerSink struct {
-	mu       sync.Mutex
-	w        io.Writer
-	closer   io.Closer
-	failures uint64 // atomic
+	mu            sync.Mutex
+	w             io.Writer
+	closer        io.Closer
+	failures      uint64 // atomic
+	sanitizerHits uint64 // atomic
 
 	clock         func() time.Time
 	failureLogger func(error)
@@ -82,18 +88,25 @@ func newWriterSink(w io.Writer, opts ...Option) *writerSink {
 
 // Write appends line (adding exactly one trailing newline if the caller did
 // not already include one) under the sink's mutex, so concurrent callers
-// never interleave partial lines. A write failure increments the always-on
+// never interleave partial lines. Before anything else, line passes through
+// the defence-in-depth whole-line sanitizer (SanitizeLine, FR-015): the
+// identity on every well-formed constructor output, but a safety net
+// against a future builder bug that lets a credential-shaped string past
+// the per-field masking. A hit increments the always-on SanitizerHits
+// counter and the (possibly masked) line is still written — the sink never
+// drops a line. A write failure increments the always-on write-failure
 // counter and, rate-limited, invokes the failure logger; it never panics
 // and control always returns to the caller.
 func (s *writerSink) Write(line []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	buf := line
+	buf, hit := SanitizeLine(line)
+	if hit {
+		atomic.AddUint64(&s.sanitizerHits, 1)
+	}
 	if len(buf) == 0 || buf[len(buf)-1] != '\n' {
-		buf = make([]byte, len(line)+1)
-		copy(buf, line)
-		buf[len(line)] = '\n'
+		buf = append(buf, '\n')
 	}
 
 	_, err := s.w.Write(buf)
@@ -124,6 +137,14 @@ func (s *writerSink) maybeLogFailure(err error) {
 // anywhere.
 func (s *writerSink) WriteFailures() uint64 {
 	return atomic.LoadUint64(&s.failures)
+}
+
+// SanitizerHits returns the always-on count of lines whose defence-in-depth
+// whole-line sanitizer pass fired. It reads zero from construction and
+// stays zero for the lifetime of the process unless a builder bug lets a
+// credential-shaped string past the per-field masking.
+func (s *writerSink) SanitizerHits() uint64 {
+	return atomic.LoadUint64(&s.sanitizerHits)
 }
 
 // Close releases the underlying writer's handle, if it has one (the stdout

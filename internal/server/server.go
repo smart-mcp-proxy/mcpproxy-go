@@ -320,8 +320,19 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 			}
 			return nil
 		})
+		// Spec 107 FR-015: the defence-in-depth whole-line sanitizer's hit
+		// counter, mirrored the same way as the write-failure counter above -
+		// a nonzero count means a builder bug let a credential-shaped string
+		// past per-field masking (the pass still masked and wrote the line).
+		mgmtService.AddRuntimeWarningSource(func() []string {
+			if n := server.auditSink.SanitizerHits(); n > 0 {
+				return []string{fmt.Sprintf("audit_log: %d defence-in-depth sanitizer hits since start (a builder bug may be leaking credential-shaped values into audit lines)", n)}
+			}
+			return nil
+		})
 		if obsManager != nil && obsManager.Metrics() != nil {
 			obsManager.Metrics().RegisterAuditSink(server.auditSink)
+			obsManager.Metrics().RegisterAuditSanitizer(server.auditSink)
 		}
 	}
 
