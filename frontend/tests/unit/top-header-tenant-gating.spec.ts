@@ -62,4 +62,37 @@ describe('TopHeader tenant gating (Spec 107 FR-041, cross-review round 2 P1)', (
     const wrapper = await mountTopHeaderAs('admin')
     expect(wrapper.findComponent({ name: 'ModeSwitcher' }).exists()).toBe(true)
   })
+
+  // Spec 107 PR-C cross-review round 3, chunk 4 (P2): the header's "Add
+  // Server" button always submitted through AddServerModal /
+  // serversStore.addServer(), which POSTs /api/v1/tools/call — a core
+  // dispatch door the tenant-session allowlist refuses with 403
+  // (rest-endpoints.md §8) — so a tenant's own labeled "Add Personal
+  // Server" button always failed. /my/servers is the working tenant flow
+  // (POST /api/v1/user/servers); the header button must be hidden for a
+  // tenant, not merely mislabeled.
+  it('hides the add-server button for a tenant principal', async () => {
+    const wrapper = await mountTopHeaderAs('user')
+    expect(wrapper.find('[data-test="header-add-server"]').exists()).toBe(false)
+  })
+
+  it('still renders the add-server button for an admin principal', async () => {
+    const wrapper = await mountTopHeaderAs('admin')
+    expect(wrapper.find('[data-test="header-add-server"]').exists()).toBe(true)
+  })
+
+  // Spec 107 PR-C cross-review round 3, chunk 4 (P2): selecting a profile in
+  // ProfileSwitcher calls PUT /api/v1/profiles/active, which the
+  // tenant-session allowlist also refuses with 403 (only GET /profiles* is
+  // tenant-reachable) — an enabled control that always fails to act.
+  it('hides the profile switcher for a tenant principal', async () => {
+    const wrapper = await mountTopHeaderAs('user')
+    expect(wrapper.find('[data-test="profile-switcher"]').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'ProfileSwitcher' }).exists()).toBe(false)
+  })
+
+  it('still renders the profile switcher for an admin principal', async () => {
+    const wrapper = await mountTopHeaderAs('admin')
+    expect(wrapper.findComponent({ name: 'ProfileSwitcher' }).exists()).toBe(true)
+  })
 })

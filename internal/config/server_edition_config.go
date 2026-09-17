@@ -154,13 +154,13 @@ func (a *ServerEditionAccessConfig) validate(provider string) error {
 		}
 		for _, name := range names {
 			if err := validateAccessServerName(name); err != nil {
-				return fmt.Errorf("server_edition.access.group_servers[%q]: %w", group, err)
+				return fmt.Errorf("server_edition.access.group_servers[%q] contains an invalid server name %q", group, name)
 			}
 		}
 	}
 	for _, name := range a.DefaultServers {
 		if err := validateAccessServerName(name); err != nil {
-			return fmt.Errorf("server_edition.access.default_servers: %w", err)
+			return fmt.Errorf("server_edition.access.default_servers contains an invalid server name %q", name)
 		}
 	}
 	return nil

@@ -135,4 +135,22 @@ describe('Dashboard tenant gating (Spec 107 FR-041, cross-review round 2 P1)', (
 
     expect(refreshSecuritySpy).not.toHaveBeenCalled()
   })
+
+  // Spec 107 PR-C cross-review round 3, chunk 4 (P2): the Overview panel's
+  // Connect Clients / Import from client configs / Recent Sessions actions
+  // and both "Add Server" buttons all reach core admin-only doors
+  // (/connect*, POST /api/v1/tools/call via AddServerModal, /sessions) that
+  // the tenant-session allowlist refuses with 403 — an enabled control that
+  // always fails to act, contradicting FR-041's "hidden, not
+  // issued-and-403'd". They must be absent from the DOM for a tenant
+  // principal, not merely non-functional.
+  it('hides the admin-only action buttons and links for a tenant principal', async () => {
+    const wrapper = await mountDashboardAsTenant()
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="dashboard-admin-left-actions"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="dashboard-recent-sessions-link"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="dashboard-right-add-server"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="dashboard-first-run-add-server"]').exists()).toBe(false)
+  })
 })

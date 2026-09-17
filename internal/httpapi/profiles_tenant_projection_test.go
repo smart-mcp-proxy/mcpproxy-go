@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -174,6 +175,51 @@ func TestTenantProfiles_CarolSeesEntitledActiveProfile(t *testing.T) {
 	data, _ := resp["data"].(map[string]interface{})
 	assert.Equal(t, "research", data["active_profile"],
 		"Carol is entitled to research-srv, so the research profile must remain visible")
+}
+
+// erroringConfigController wraps mockProfilesController but fails
+// GetConfig — the config-read-failure branch handleGetActiveProfile and
+// handleListProfiles must both fail CLOSED on.
+type erroringConfigController struct {
+	mockProfilesController
+}
+
+func (e *erroringConfigController) GetConfig() (*config.Config, error) {
+	return nil, fmt.Errorf("config store unavailable")
+}
+
+// TestTenantProfiles_ActiveProfileFailsClosedOnConfigError pins cross-review
+// round 3, chunk 3's finding: handleGetActiveProfile only cleared `active`
+// to "" when GetConfig succeeded and visibility resolved false — a GetConfig
+// ERROR fell through both checks and handed a tenant session principal the
+// real (potentially hidden) active-profile slug, an existence oracle that
+// handleListProfiles does not share (it refuses outright with 500 on the
+// same error). The door must fail closed, not open: an unresolvable
+// visibility check must read back as "", exactly like a resolved-hidden one.
+func TestTenantProfiles_ActiveProfileFailsClosedOnConfigError(t *testing.T) {
+	cfg := &config.Config{
+		APIKey: "test-key",
+		Servers: []*config.ServerConfig{
+			{Name: "research-srv"},
+			{Name: "deploy-srv"},
+		},
+		Profiles: []config.ProfileConfig{
+			{Name: "research", Servers: []string{"research-srv"}},
+			{Name: "deploy", Servers: []string{"deploy-srv"}},
+		},
+	}
+	ctrl := &erroringConfigController{mockProfilesController{apiKey: "test-key", cfg: cfg}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	srv.activeProfileMu.Lock()
+	srv.activeProfile = "deploy"
+	srv.activeProfileMu.Unlock()
+
+	w, resp := doProfilesJSONAs(t, srv, carolSessionContext(), http.MethodGet, "/api/v1/profiles/active")
+	require.Equal(t, http.StatusOK, w.Code)
+	data, _ := resp["data"].(map[string]interface{})
+	assert.Equal(t, "", data["active_profile"],
+		"a GetConfig error must fail closed (empty), never disclose the real active-profile slug")
 }
 
 func TestTenantProfiles_AdminSeesBothProfiles(t *testing.T) {

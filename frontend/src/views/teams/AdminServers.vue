@@ -187,8 +187,50 @@ const shareFilter = ref('')
 // truth for how these combine into a grant). `config.access` was never
 // wired into the frontend's `any`-typed GetConfigResponse.config before
 // this task; guarded throughout since the block is entirely optional.
-const groupServersByName = ref<Record<string, string[]>>({})
-const defaultServerNames = ref<Set<string>>(new Set())
+// Raw access config, as fetched — expansion against `servers` (Spec 107
+// cross-review round 3, chunk 4 P3, see below) happens in the `computed`s
+// below, reactively, rather than being baked in at fetch time: fetchServers()
+// and loadAccessGroups() are both fired from onMounted with no ordering
+// guarantee between them, so a one-shot expansion could run before
+// `servers.value` was ever populated and silently stay empty.
+const rawGroupServers = ref<Record<string, string[]>>({})
+const rawDefaultServers = ref<string[]>([])
+
+// Spec 107 cross-review round 3, chunk 4 (P3): entitlement-predicate.md §1
+// defines a group/default grant of "*" as every SHARED server, and
+// entitlement composition only ever admits a server that is Shared —
+// group_servers naming a private server grants nothing. This read-only
+// annotation must mirror that, or it misrepresents the live access
+// configuration: "*" showed no badge on any shared server (the literal
+// string was never expanded), and an explicit private-server entry showed
+// "Granted" despite composition excluding it.
+const sharedServerNames = computed(() => servers.value.filter(s => s.shared).map(s => s.name))
+
+function expandAccessNames(names: string[]): string[] {
+  const shared = sharedServerNames.value
+  const out = new Set<string>()
+  for (const name of names) {
+    if (name === '*') {
+      for (const s of shared) out.add(s)
+    } else if (shared.includes(name)) {
+      out.add(name)
+    }
+  }
+  return [...out]
+}
+
+const groupServersByName = computed<Record<string, string[]>>(() => {
+  const byName: Record<string, string[]> = {}
+  for (const [group, names] of Object.entries(rawGroupServers.value)) {
+    for (const name of expandAccessNames(names ?? [])) {
+      if (!byName[name]) byName[name] = []
+      byName[name].push(group)
+    }
+  }
+  return byName
+})
+
+const defaultServerNames = computed<Set<string>>(() => new Set(expandAccessNames(rawDefaultServers.value)))
 
 function groupsForServer(name: string): string[] {
   return groupServersByName.value[name] ?? []
@@ -204,19 +246,8 @@ async function loadAccessGroups() {
     if (!res.success || !res.data) return
     const access = res.data.config?.server_edition?.access
     if (!access) return
-
-    const byName: Record<string, string[]> = {}
-    const groupServers = access.group_servers as Record<string, string[]> | undefined
-    if (groupServers) {
-      for (const [group, names] of Object.entries(groupServers)) {
-        for (const name of names ?? []) {
-          if (!byName[name]) byName[name] = []
-          byName[name].push(group)
-        }
-      }
-    }
-    groupServersByName.value = byName
-    defaultServerNames.value = new Set(access.default_servers ?? [])
+    rawGroupServers.value = (access.group_servers as Record<string, string[]> | undefined) ?? {}
+    rawDefaultServers.value = access.default_servers ?? []
   } catch {
     // Best-effort, read-only annotation — leave the table usable without it.
   }

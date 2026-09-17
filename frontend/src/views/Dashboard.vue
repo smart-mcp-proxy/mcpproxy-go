@@ -162,7 +162,14 @@
             Add one and this page will show call volume, token sinks, error rates and a timeline.
           </p>
           <div class="flex flex-wrap gap-2 justify-center mt-2">
+            <!-- Spec 107 cross-review round 3, chunk 4 P2: this opens the
+                 generic AddServerModal, whose submit path is the core
+                 POST /api/v1/tools/call dispatch door — a mandatory
+                 tenant-session refusal. Hidden for a tenant, matching the
+                 TopHeader fix (FR-041: hidden, not issued-and-403'd); a
+                 tenant's working equivalent is /my/servers. -->
             <button
+              v-if="authStore.principalKind !== 'tenant'"
               class="btn btn-primary btn-sm"
               data-test="dashboard-first-run-add-server"
               @click="showAddServer = true"
@@ -242,8 +249,14 @@
           </div>
         </div>
 
-        <!-- Left Action Buttons -->
-        <div class="flex flex-col gap-2 w-full max-w-[260px] pt-3">
+        <!-- Left Action Buttons. Spec 107 cross-review round 3, chunk 4 P2:
+             Connect Clients (/connect* mutation), Import from client
+             configs (generic add-server path) and Recent Sessions
+             (/sessions, a caller-scoped admin surface, not on the
+             tenant-session read allowlist) are all core admin-only doors a
+             tenant session cannot act on or read; hidden rather than
+             issued-and-403'd (FR-041), matching the TopHeader fix above. -->
+        <div v-if="authStore.principalKind !== 'tenant'" class="flex flex-col gap-2 w-full max-w-[260px] pt-3" data-test="dashboard-admin-left-actions">
           <button @click="showConnectModal = true" class="btn btn-primary btn-sm w-full gap-1">
             Connect Clients
           </button>
@@ -253,7 +266,7 @@
             </svg>
             Import from client configs
           </button>
-          <router-link to="/sessions" class="btn btn-ghost btn-sm w-full gap-1">
+          <router-link to="/sessions" class="btn btn-ghost btn-sm w-full gap-1" data-test="dashboard-recent-sessions-link">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
@@ -433,9 +446,11 @@
           </div>
         </router-link>
 
-        <!-- Right Action Buttons -->
+        <!-- Right Action Buttons. Spec 107 cross-review round 3, chunk 4 P2:
+             same broken AddServerModal path as the other Add Server
+             buttons on this page. -->
         <div class="flex flex-col gap-2 w-full max-w-[240px] pt-3">
-          <button @click="showAddServer = true" class="btn btn-primary btn-sm w-full gap-1">
+          <button v-if="authStore.principalKind !== 'tenant'" @click="showAddServer = true" class="btn btn-primary btn-sm w-full gap-1" data-test="dashboard-right-add-server">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
             </svg>

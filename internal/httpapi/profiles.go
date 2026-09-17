@@ -137,10 +137,13 @@ func (s *Server) handleGetActiveProfile(w http.ResponseWriter, r *http.Request) 
 		ac := auth.AuthContextFromContext(r.Context())
 		if ac.IsSessionPrincipal() && !ac.IsAdmin() {
 			cfg, err := s.controller.GetConfig()
-			if err == nil && cfg != nil {
-				if !activeProfileVisible(r.Context(), cfg, active) {
-					active = ""
-				}
+			// Fail CLOSED, not open: a config-read failure must not answer
+			// with the real slug just because visibility could not be
+			// checked (cross-review round 3 — handleListProfiles already
+			// refuses outright on the same error; this door has no such
+			// escape hatch, so it clears the value instead).
+			if err != nil || cfg == nil || !activeProfileVisible(r.Context(), cfg, active) {
+				active = ""
 			}
 		}
 	}

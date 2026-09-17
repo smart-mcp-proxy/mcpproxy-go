@@ -4,6 +4,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -139,10 +140,23 @@ func TestServerEditionAccess_InvalidServerNamesRefused(t *testing.T) {
 			cfg.Access = &ServerEditionAccessConfig{GroupServers: map[string][]string{"eng": {tc.value}}}
 			err := cfg.Validate()
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "eng")
-			assert.Contains(t, err.Error(), "invalid server name")
+			// Exact contract string (contracts/config-keys.md:31, FR-039): the
+			// same message boot, PATCH /api/v1/config and /config/apply must
+			// all emit — not just "contains these substrings somewhere".
+			wantMsg := fmt.Sprintf("server_edition.access.group_servers[\"eng\"] contains an invalid server name %q", tc.value)
+			assert.Equal(t, wantMsg, err.Error())
 		})
 	}
+}
+
+func TestServerEditionAccess_InvalidDefaultServerNameMessage(t *testing.T) {
+	// Same name rule as group_servers, but the default_servers key path
+	// (contracts/config-keys.md:32: "same name rule").
+	cfg := accessBlock()
+	cfg.Access = &ServerEditionAccessConfig{DefaultServers: []string{"a:b"}}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Equal(t, `server_edition.access.default_servers contains an invalid server name "a:b"`, err.Error())
 }
 
 func TestServerEditionAccess_WildcardIsAValidServerName(t *testing.T) {
