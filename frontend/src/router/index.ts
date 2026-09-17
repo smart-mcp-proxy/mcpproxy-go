@@ -217,8 +217,11 @@ export const authGuard: NavigationGuard = async (to) => {
 
   // Initialize auth state on first navigation. checkAuth() shares one
   // in-flight probe, so if App.vue already started it this joins that run
-  // rather than issuing a second /status + /auth/me pair.
-  if (authStore.loading) {
+  // rather than issuing a second /status + /auth/me pair. Loop, not `if`: a
+  // `fresh` probe (reloadAfterAuth) queued behind the run we joined leaves
+  // `loading` true after our await, and the routing decision below must be
+  // made from the newest settled result, never the superseded one.
+  while (authStore.loading) {
     await authStore.checkAuth()
   }
 

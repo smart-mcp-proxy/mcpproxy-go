@@ -214,6 +214,39 @@ describe('router guard: hard-reload deep link under the server edition', () => {
     expect(router.currentRoute.value.name).toBe('login')
   })
 
+  it('guard drains a fresh probe queued behind the run it joined before deciding', async () => {
+    // Probe 1 (stale key) says signed out; reloadAfterAuth queues probe 2
+    // (repaired key) while the guard is still awaiting probe 1. The guard
+    // must route on probe 2, not bounce the deep link to /login.
+    const status = [deferred<{ data: { edition: string } }>(), deferred<{ data: { edition: string } }>()]
+    const me = [deferred<typeof tenant | null>(), deferred<typeof tenant | null>()]
+    statusSpy.mockImplementation(() => status[statusSpy.mock.calls.length - 1].promise)
+    meSpy.mockImplementation(() => me[meSpy.mock.calls.length - 1].promise)
+    const store = useAuthStore()
+    const router = makeRouter()
+
+    const mount = store.checkAuth()
+    const nav = router.push('/my/tokens')
+    // A macrotask, not a microtask: the guard's dynamic store import takes a
+    // few ticks, and it must have joined probe 1 BEFORE the fresh probe is
+    // queued for this to exercise the drain (otherwise it joins probe 2).
+    await new Promise((r) => setTimeout(r, 0))
+    expect(statusSpy).toHaveBeenCalledTimes(1)
+    const recovery = store.checkAuth({ fresh: true })
+
+    status[0].resolve({ data: { edition: 'server' } })
+    me[0].resolve(null)
+    await mount
+    expect(router.currentRoute.value.name).toBeUndefined() // still deciding
+
+    status[1].resolve({ data: { edition: 'server' } })
+    me[1].resolve(tenant)
+    await Promise.all([recovery, nav])
+
+    expect(router.currentRoute.value.name).toBe('user-tokens')
+    expect(statusSpy).toHaveBeenCalledTimes(2)
+  })
+
   it('guard alone (no mount call yet) still waits for the probe before deciding', async () => {
     const rig = serverEdition(tenant)
     const router = makeRouter()
