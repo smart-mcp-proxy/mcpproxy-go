@@ -820,8 +820,9 @@ epics:
         pr: "#1292"
       - id: sso-pr-c-group-allowlist
         title: PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4)
-        status: todo
+        status: in_progress
         depends_on: [sso-pr-b-oidc-front-door]
+        pr: "#1293"
       - id: sso-pr-d-audit-line
         title: PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3)
         status: todo
