@@ -4,6 +4,7 @@ package codescripts
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -111,8 +112,16 @@ func TestStoredSpellingsOf_PostOpenProofCatchesARaceOnTheOpenedDescriptor(t *tes
 	// The race: another entry is written into the SAME directory between the
 	// open and the recheck, moving the directory's own generation — exactly
 	// the round-8 lookup→open race the shared generation recheck exists to
-	// catch, here exercised through the Windows primitives.
+	// catch, here exercised through the Windows primitives. NTFS is not
+	// guaranteed to flush a directory's LastWriteTime to a value distinct
+	// from what a handle opened moments earlier already observed (CI
+	// runners have been seen to coalesce the two within the same 100ns
+	// FILETIME tick) — force it forward explicitly, the same mitigation
+	// the unix counterpart (TestResolveScoped_GenerationChangeBetweenLookupAndOpenRefuses)
+	// uses, so the assertion is about the recheck logic, not filesystem
+	// timestamp granularity.
 	writeScript(t, dir, "beta.js", "2")
+	require.NoError(t, os.Chtimes(dir, time.Now(), time.Now().Add(time.Second)))
 
 	verifyErr := verifyUnchanged(f, "alpha.js")
 	require.Error(t, verifyErr, "the directory's own generation moved between the open and the recheck")
