@@ -3835,11 +3835,43 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 		s.mcpProxy.auditToolCallShed(ctx, limitErr, durationMs)
 	case err != nil:
 		s.mcpProxy.auditToolCall(ctx, "error", "", audit.ErrorClassOf(err), durationMs, nil, nil)
+	case result != nil && result.Error != "":
+		// Round-4 cross-review finding, PR-D: runtime.ReplayToolCall folds an
+		// upstream tool failure into the record's own Error field and
+		// returns a NIL Go error (only a limiter shed returns non-nil) — so
+		// this branch, not `err != nil` above, is what a failed replay hits.
+		// Without it every failed replay fell into `default` and was
+		// audited as `outcome:"success"`.
+		s.mcpProxy.auditToolCall(ctx, "error", "", audit.ErrorClassOf(errors.New(result.Error)), durationMs, nil, nil)
+	case result != nil && isReplayResponseError(result.Response):
+		// Round-4 cross-review finding, PR-D companion case: an upstream
+		// tool-level failure (mcp.CallToolResult.IsError, e.g.
+		// mcp.NewToolResultError) is a successful RPC by MCP protocol
+		// convention — callErr is nil AND runtime.ReplayToolCall's own
+		// record.Error stays empty (it is only ever set from callErr) — so
+		// this is the one remaining path a failed replay could still be
+		// misaudited as `outcome:"success"` through. Mirrors the
+		// result.IsError check every other completion path in this package
+		// already makes (see emitActivityPolicyDecision's callers in mcp.go).
+		s.mcpProxy.auditToolCall(ctx, "error", "", audit.ErrorClassUpstreamError, durationMs, nil, nil)
 	default:
 		s.mcpProxy.auditToolCall(ctx, "success", "", "", durationMs, nil, nil)
 	}
 
 	return result, err
+}
+
+// isReplayResponseError reports whether a replayed record's Response is an
+// mcp.CallToolResult carrying IsError:true — an upstream tool-level failure,
+// which the MCP protocol returns as a normal (err==nil) RPC response, so
+// neither runtime.ReplayToolCall's callErr nor its record.Error field ever
+// see it (round-4 cross-review finding, PR-D). resp is untyped because
+// contracts.ToolCallRecord.Response is interface{}; anything else (a nil
+// Response, or a differently-shaped value from a code path that never
+// dispatched) is not an error by this check.
+func isReplayResponseError(resp interface{}) bool {
+	result, ok := resp.(*mcp.CallToolResult)
+	return ok && result != nil && result.IsError
 }
 
 // toConfigToolAnnotations adapts a persisted ToolCallRecord's annotations

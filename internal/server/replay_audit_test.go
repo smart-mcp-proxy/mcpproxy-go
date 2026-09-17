@@ -270,3 +270,94 @@ func TestReplayToolCall_AuthzWrittenBeforeUpstreamDispatch(t *testing.T) {
 	releaseOnce.Do(func() { close(release) })
 	<-done
 }
+
+// startRuntimeFailingUpstream is startRuntimeCountingUpstream's variant for a
+// tool that answers with an upstream-level failure. isRPCError selects which
+// of the two ways MCP has for a call to fail: true returns a Go error from
+// the handler (a JSON-RPC-level failure — the pre-existing `err != nil`
+// case), false returns mcp.NewToolResultError (a normal RPC response with
+// Result.IsError:true — the protocol's convention for a TOOL failure, which
+// callErr never sees).
+func startRuntimeFailingUpstream(t *testing.T, server, tool string, isRPCError bool) (url string) {
+	t.Helper()
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	mcpSrv := mcpserver.NewMCPServer(server, "1.0.0-test", mcpserver.WithToolCapabilities(true))
+	mcpSrv.AddTool(mcp.Tool{Name: tool, Description: "Replay target", InputSchema: mcp.ToolInputSchema{Type: "object"}},
+		func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			if isRPCError {
+				return nil, fmt.Errorf("boom")
+			}
+			return mcp.NewToolResultError("boom"), nil
+		})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	httpSrv := &http.Server{Handler: mcpserver.NewStreamableHTTPServer(mcpSrv), ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = httpSrv.Serve(ln) }()
+	t.Cleanup(func() { _ = httpSrv.Shutdown(context.Background()) })
+	return fmt.Sprintf("http://%s", ln.Addr().String())
+}
+
+// TestReplayToolCall_FailedUpstreamCallAuditsAsError is a round-4
+// cross-review regression (Spec 107 PR-D): runtime.ReplayToolCall folds a
+// non-shed upstream failure into the returned record's own Error field and
+// hands back a NIL Go error (only a limiter shed returns non-nil) — before
+// this fix Server.ReplayToolCall's outcome switch only branched on `err`, so
+// every failed replay of this shape fell into `default` and was audited as
+// `outcome:"success"`.
+func TestReplayToolCall_FailedUpstreamCallAuditsAsError(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, nil)
+	sink := &recordingAuditSink{}
+	proxy.auditSink = sink
+	mainSrv := &Server{runtime: rt, mcpProxy: proxy}
+
+	url := startRuntimeFailingUpstream(t, "a", "erase", true)
+	callID := seedReplayableCall(t, proxy, mainSrv, "a", "erase", url)
+
+	require.Eventually(t, func() bool {
+		client, ok := rt.UpstreamManager().GetClient("a")
+		return ok && client != nil && client.IsConnected()
+	}, 5*time.Second, 20*time.Millisecond)
+
+	result, err := mainSrv.ReplayToolCall(context.Background(), callID, nil)
+	require.NoError(t, err, "a non-shed upstream failure is still a completed replay, not a Server.ReplayToolCall error")
+	require.NotNil(t, result)
+	require.NotEmpty(t, result.Error)
+
+	lines := sink.decoded(t)
+	require.Len(t, lines, 2)
+	assert.Equal(t, "tool_call", lines[1]["event"])
+	assert.Equal(t, "error", lines[1]["outcome"], "a failed replay must never be audited as outcome:success")
+}
+
+// TestReplayToolCall_ToolLevelIsErrorResponseAuditsAsError is
+// TestReplayToolCall_FailedUpstreamCallAuditsAsError's companion for the
+// OTHER shape a tool failure takes on the wire: the MCP protocol answers a
+// tool-level failure as a normal (err==nil) RPC response with
+// Result.IsError:true — which neither callErr nor runtime.ReplayToolCall's
+// own record.Error field (only ever set from callErr) ever observes.
+func TestReplayToolCall_ToolLevelIsErrorResponseAuditsAsError(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, nil)
+	sink := &recordingAuditSink{}
+	proxy.auditSink = sink
+	mainSrv := &Server{runtime: rt, mcpProxy: proxy}
+
+	url := startRuntimeFailingUpstream(t, "a", "erase", false)
+	callID := seedReplayableCall(t, proxy, mainSrv, "a", "erase", url)
+
+	require.Eventually(t, func() bool {
+		client, ok := rt.UpstreamManager().GetClient("a")
+		return ok && client != nil && client.IsConnected()
+	}, 5*time.Second, 20*time.Millisecond)
+
+	result, err := mainSrv.ReplayToolCall(context.Background(), callID, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Empty(t, result.Error, "control: an IsError:true tool response does NOT populate record.Error")
+
+	lines := sink.decoded(t)
+	require.Len(t, lines, 2)
+	assert.Equal(t, "tool_call", lines[1]["event"])
+	assert.Equal(t, "error", lines[1]["outcome"], "an IsError:true tool response must never be audited as outcome:success")
+}

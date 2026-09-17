@@ -390,7 +390,7 @@ from the ingress-controller pod range.
 ```bash
 kubectl apply -f secret.yaml -f deployment.yaml -f service.yaml -f ingress.yaml
 kubectl rollout status deployment/mcpproxy
-kubectl logs -f deployment/mcpproxy | grep '"surface":"authz"'   # audit lines on stdout
+kubectl logs -f deployment/mcpproxy | grep '"event":"authz"'   # audit lines on stdout
 curl -s https://mcp.example.com/healthz
 curl -s https://mcp.example.com/api/v1/auth/provider              # {"display_name":"Example Keycloak"}
 ```
