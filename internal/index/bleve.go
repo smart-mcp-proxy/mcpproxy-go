@@ -366,7 +366,7 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 	if segmentQuery != nil {
 		hasExactToolName := false
 		for _, hit := range searchResult.Hits {
-			if toolName, ok := hit.Fields["tool_name"].(string); ok && toolName == queryStr {
+			if fieldsContainExactToolName(hit.Fields, queryStr) {
 				hasExactToolName = true
 				break
 			}
@@ -392,6 +392,15 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 
 	b.logger.Debug("Found tools matching query", zap.Int("count", len(results)), zap.String("query", queryStr))
 	return results, nil
+}
+
+func fieldsContainExactToolName(fields map[string]interface{}, queryStr string) bool {
+	for _, field := range []string{"tool_name", "full_tool_name"} {
+		if value, ok := fields[field].(string); ok && value == queryStr {
+			return true
+		}
+	}
+	return false
 }
 
 // underscoreSegmentQuery matches each underscore-delimited query segment at a
