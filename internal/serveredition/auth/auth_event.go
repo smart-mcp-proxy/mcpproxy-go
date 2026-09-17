@@ -59,13 +59,15 @@ func NewAuditEmitter(sink audit.Sink, logger *zap.SugaredLogger) func(LoginResul
 			}
 			return
 		}
-		if werr := sink.Write(b); werr != nil && logger != nil {
-			// The sink's own always-on WriteFailures() counter already
-			// recorded this; the rate-limited failure logger it was built
-			// with (T109) covers operator visibility. This warning is best
-			// effort, request-scoped context only.
-			logger.Warnw("audit: auth_event write failed", "error", werr, "request_id", res.RequestID)
-		}
+		// A write failure is intentionally NOT logged here (round-3
+		// cross-review finding, PR-D): FR-018 caps runtime sink-failure
+		// logging at once per minute, and that cap lives on the sink's own
+		// WithFailureLogger (T109) — a per-request Warnw here would log
+		// every failed login/logout while a persistent disk/stdout failure
+		// lasts, bypassing the sink's rate limit entirely. The sink's
+		// always-on WriteFailures() counter still records every failure for
+		// `mcpproxy doctor` regardless of whether this call was logged.
+		_ = sink.Write(b)
 	}
 }
 

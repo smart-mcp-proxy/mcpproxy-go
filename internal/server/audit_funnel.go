@@ -499,12 +499,18 @@ func (o *nestedAuthzObserver) ObserveAuthzGate(report jsruntime.AuthzGateReport)
 	reasonKey := telemetry.BlockReasonTokenScope
 	switch report.Code {
 	case jsruntime.ErrorCodeServerNotAllowed:
-		// The sandbox's allow-list is the intersection of the token's scope
-		// and the active profile (applyProfileScopeToExecution); a profile
-		// that narrowed it is the profile's refusal.
-		if o.profile != "" {
-			reasonKey = telemetry.BlockReasonProfileScope
-		}
+		// The sandbox's allow-list (ec.allowedServerMap) is the INTERSECTION
+		// of the script's own `options.allowed_servers` and the active
+		// profile (applyProfileScopeToExecution) — a single merged set the
+		// gate answers from, so a refusal here cannot tell which side of the
+		// intersection excluded the server (round-3 cross-review finding,
+		// PR-D: attributing every such refusal to `profile_scope` whenever
+		// any profile is active mislabels a script-authored exclusion the
+		// profile never narrowed). Per the published contract
+		// (audit-line-events.md: nested `checkDispatchGates` -> token_scope
+		// | token_permission), this gate always reports `token_scope` — it
+		// is the caller's/script's allow-list either way, never
+		// distinguished from the profile in the schema's nested mapping.
 	case jsruntime.ErrorCodeAccessDenied:
 		reasonKey = telemetry.BlockReasonTokenScope
 	case jsruntime.ErrorCodePermissionDenied:

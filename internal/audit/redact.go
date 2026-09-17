@@ -37,7 +37,11 @@ func truncateField(s string) string {
 // before a shorter pattern could also match a prefix of it.
 var credentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sk-ant-[A-Za-z0-9-]{10,}`),
-	regexp.MustCompile(`sk-[A-Za-z0-9]{16,}`),
+	// OpenAI keys: legacy sk-{48}, and current sk-proj-/sk-svcacct-/sk-admin-
+	// forms, which insert a hyphen-delimited segment before the random
+	// suffix (round-3 cross-review finding, PR-D — the prior pattern only
+	// matched the legacy form).
+	regexp.MustCompile(`sk-[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`gh[poushr]_[A-Za-z0-9]{16,}`),
 	regexp.MustCompile(`AKIA[0-9A-Za-z]{8,}`),
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`),

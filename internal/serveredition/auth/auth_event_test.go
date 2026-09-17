@@ -34,6 +34,7 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -45,6 +46,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -475,6 +477,39 @@ func TestAuthEvent_Logout_SurfaceLogoutReasonLogout(t *testing.T) {
 	assert.Equal(t, "session_user", c["kind"])
 	assert.Equal(t, loginUserID, c["user_id"])
 	assertValidatesAgainstSchema(t, line)
+}
+
+// failingAuditSink is an audit.Sink whose Write always fails, for proving
+// NewAuditEmitter's own logging behaviour on a persistent sink failure.
+type failingAuditSink struct{ writes int }
+
+func (s *failingAuditSink) Write(_ []byte) error  { s.writes++; return errTestSinkWrite }
+func (s *failingAuditSink) WriteFailures() uint64 { return uint64(s.writes) }
+func (s *failingAuditSink) SanitizerHits() uint64 { return 0 }
+func (s *failingAuditSink) Close() error          { return nil }
+
+var errTestSinkWrite = fmt.Errorf("test: sink write always fails")
+
+// TestAuthEvent_WriteFailureNotLoggedPerCall is a round-3 cross-review
+// regression (Spec 107 PR-D): FR-018 caps runtime audit-sink-failure
+// logging at once per minute. That cap lives on the sink's own
+// WithFailureLogger (internal/audit, T109); NewAuditEmitter must not ALSO
+// log a warning on every failed write, or a persistent disk/stdout failure
+// produces one unbounded warning per login/logout, bypassing the sink's
+// rate limit entirely. Before this fix, every failed sink.Write logged
+// unconditionally here.
+func TestAuthEvent_WriteFailureNotLoggedPerCall(t *testing.T) {
+	sink := &failingAuditSink{}
+	core, logs := observer.New(zap.DebugLevel)
+	logger := zap.New(core).Sugar()
+
+	emit := NewAuditEmitter(sink, logger)
+	for i := 0; i < 5; i++ {
+		emit(LoginResult{RequestID: fmt.Sprintf("req-fail-%d", i), Surface: "login", Reason: LoginRefusal("ok"), UserID: "u1", Role: "user", Provider: "oidc"})
+	}
+
+	assert.Equal(t, 5, sink.writes, "control: every call must have reached the sink")
+	assert.Empty(t, logs.All(), "a per-request write-failure warning bypasses the sink's own once-per-minute rate limit (FR-018)")
 }
 
 func TestAuthEvent_AbandonedRedirect_NoLine(t *testing.T) {

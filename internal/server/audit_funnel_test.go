@@ -21,6 +21,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -337,6 +338,52 @@ func TestAuditFunnel_NestedRefusalCarriesParentAndScriptCaller(t *testing.T) {
 	c := callerOf(t, authz)
 	assert.Equal(t, "agent_token", c["kind"], "nested children keep the script's caller")
 	assert.Equal(t, "mcp_agt_fix", c["token_prefix"])
+}
+
+// TestAuditFunnel_NestedScriptAllowlistExclusionIsTokenScopeNotProfileScope
+// is a round-3 cross-review regression (Spec 107 PR-D): the sandbox's
+// allow-list is the INTERSECTION of the script's own `options.allowed_servers`
+// and the active profile (applyProfileScopeToExecution) — a single merged
+// set the gate answers from. Before this fix, a SERVER_NOT_ALLOWED refusal
+// was classified `profile_scope` whenever ANY profile was active, even when
+// the profile itself permitted the target and only the script's own
+// allow-list excluded it. Per the published contract (audit-line-events.md),
+// nested `checkDispatchGates` always maps to `token_scope`.
+func TestAuditFunnel_NestedScriptAllowlistExclusionIsTokenScopeNotProfileScope(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}, {Name: "b", Enabled: true}})
+	sink := &recordingAuditSink{}
+	proxy.auditSink = sink
+	up := startCountingUpstream(t, proxy, rt, "b", readSpec("erase"))
+
+	// The active profile permits BOTH "a" and "b" — only the script's OWN
+	// options.allowed_servers (below) excludes "b".
+	scope := profile.NewProfileScope("both", []string{"a", "b"})
+	ctx := profile.WithProfileScope(adminCtx(), scope)
+
+	request := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name: "code_execution",
+		Arguments: map[string]interface{}{
+			"code":  `var r = call_tool("b", "erase", {}); ({ ok: r.ok, code: r.error ? r.error.code : null })`,
+			"input": map[string]interface{}{},
+			"options": map[string]interface{}{
+				"timeout_ms":      10000,
+				"max_tool_calls":  0,
+				"allowed_servers": []interface{}{"a"},
+			},
+		},
+	}}
+	result, err := proxy.handleCodeExecution(ctx, request)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.IsError)
+	assert.Equal(t, int64(0), up.count.Load(), "control: the script's own allow-list must have refused before any dispatch")
+
+	lines := sink.decoded(t)
+	require.Len(t, lines, 1)
+	assert.Equal(t, "authz", lines[0]["event"])
+	assert.Equal(t, "deny", lines[0]["decision"])
+	assert.Equal(t, "token_scope", lines[0]["reason"],
+		"the script's own allowed_servers excluded 'b'; the profile permitted it, so this must not read profile_scope")
 }
 
 func TestAuditFunnel_NestedAllowedDispatchPairsUnderParent(t *testing.T) {

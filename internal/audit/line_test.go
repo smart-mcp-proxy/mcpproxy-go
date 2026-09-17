@@ -469,6 +469,31 @@ func TestRedaction_TokenNameSentinelMasked(t *testing.T) {
 	validateAgainstPublishedSchema(t, line)
 }
 
+// TestRedaction_OpenAIProjectKeySentinelMasked is a round-3 cross-review
+// regression (PR-D): the generic `sk-` pattern required 16+ alphanumeric
+// characters immediately after the prefix, so a current-format OpenAI
+// project/service-account/admin key (`sk-proj-...`, `sk-svcacct-...`,
+// `sk-admin-...`), which inserts a hyphen-delimited segment before the
+// random suffix, fell through unmasked when placed in a
+// caller/operator-controlled field (client.name here).
+func TestRedaction_OpenAIProjectKeySentinelMasked(t *testing.T) {
+	const openAIProjSentinel = "sk-proj-QUICKSTART7SENTINEL0abcdefghijklmnopqrstuvwxyz"
+	sum, n := argsHash(`{}`)
+	att := baseAttempt()
+	att.ArgsSHA256, att.ArgsBytes = sum, n
+	att.ClientName = "evil-client " + openAIProjSentinel
+
+	line, err := audit.NewAuthz(audit.AuthzInput{
+		Ts: fixedTS, Attempt: att, Caller: agentCaller(),
+		Decision: "allow", Reason: "none",
+	})
+	if err != nil {
+		t.Fatalf("NewAuthz: %v", err)
+	}
+	assertSentinelAbsent(t, line, openAIProjSentinel)
+	validateAgainstPublishedSchema(t, line)
+}
+
 func TestRedaction_ProfileSentinelMasked(t *testing.T) {
 	sum, n := argsHash(`{}`)
 	att := baseAttempt()

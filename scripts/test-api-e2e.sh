@@ -1167,7 +1167,14 @@ AUDIT_MCP_URL="${AUDIT_BASE_URL}/mcp"
 AUDIT_DATA_DIR="./test-data-audit"
 AUDIT_CONFIG_FILE="${AUDIT_DATA_DIR}/e2e-audit-config.json"
 AUDIT_SERVER_LOG="/tmp/mcpproxy_e2e_audit.log"
-AUDIT_JSONL_DIR="$(mktemp -d -t mcpproxy_e2e_audit)"
+# Spec 107 (round-3 cross-review finding, PR-D): `mktemp -d -t PREFIX` is
+# BSD/macOS syntax (BSD mktemp appends the random suffix itself). GNU
+# mktemp — used by the mandatory Ubuntu CI job — treats -t's argument as a
+# template that must itself carry trailing X's, and errors ("too few X's in
+# template") without them; the script has no `set -e`, so AUDIT_JSONL_DIR
+# silently became empty and AUDIT_JSONL resolved to a root-level
+# "/audit.jsonl". The explicit XXXXXX template form is accepted by both.
+AUDIT_JSONL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mcpproxy_e2e_audit.XXXXXX")"
 AUDIT_JSONL="${AUDIT_JSONL_DIR}/audit.jsonl"
 AUDIT_API_KEY=""
 AUDIT_PID=""

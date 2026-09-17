@@ -3790,13 +3790,36 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 		callArgs = original.Arguments
 	}
 
+	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
+	// own annotations snapshot is the canonical target tier here — the same
+	// signal tierForAnnotations derives from a live gate's identity lookup
+	// elsewhere — so a replayed destructive/write call is not reported as
+	// `operation:"unknown"` when the snapshot is available. Left empty (and
+	// so defaulted to "unknown" by installAuditAttempt) when the record
+	// carries no annotations at all: mirrors mcp.go's own choice not to use
+	// tierForAnnotations' found=false "destructive" default for the AUDIT
+	// line — that default is an AUTHORIZATION fail-closed, and would
+	// misrepresent an unresolved tier as maximally risky rather than simply
+	// unknown to the proxy.
+	var operation string
+	if original.Annotations != nil {
+		operation = tierForAnnotations(toConfigToolAnnotations(original.Annotations), true)
+	}
 	ctx = s.mcpProxy.installAuditAttempt(ctx, auditAttemptSpec{
 		RequestID: mintCorrelationID(original.ServerName, original.ToolName),
 		Server:    original.ServerName,
 		Tool:      original.ToolName,
+		Operation: operation,
 		Surface:   auditSurfaceREST,
 		Args:      callArgs,
 	})
+	// Spec 107 FR-012: `decision: allow` MUST be written after the last gate
+	// and before the upstream call (round-3 cross-review finding, PR-D) —
+	// auditToolCall's own backfill only runs on completion, which would
+	// leave a replay that crashes mid-dispatch with no authorization record
+	// at all, unlike every other dispatch path (emitActivityToolCallStarted
+	// writes `allow` synchronously before its own upstream call).
+	s.mcpProxy.auditAuthz(ctx, "allow", "")
 
 	startTime := time.Now()
 	result, err := s.runtime.ReplayToolCall(ctx, id, arguments)
@@ -3817,6 +3840,23 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	}
 
 	return result, err
+}
+
+// toConfigToolAnnotations adapts a persisted ToolCallRecord's annotations
+// snapshot (contracts.ToolAnnotation) to the config.ToolAnnotations shape
+// tierForAnnotations consumes. Field sets are identical by construction; nil
+// in, nil out.
+func toConfigToolAnnotations(a *contracts.ToolAnnotation) *config.ToolAnnotations {
+	if a == nil {
+		return nil
+	}
+	return &config.ToolAnnotations{
+		Title:           a.Title,
+		ReadOnlyHint:    a.ReadOnlyHint,
+		DestructiveHint: a.DestructiveHint,
+		IdempotentHint:  a.IdempotentHint,
+		OpenWorldHint:   a.OpenWorldHint,
+	}
 }
 
 // GetToolCallsBySession retrieves tool calls filtered by session ID. scope
