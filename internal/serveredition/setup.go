@@ -4,6 +4,7 @@ package serveredition
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -11,9 +12,11 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	teamsapi "github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/api"
 	teamsauth "github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/broker"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/multiuser"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -233,6 +236,20 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// Create auth middleware
 	authMiddleware := teamsauth.NewServerEditionAuthMiddleware(sessionManager, userStore, serverEditionConfig, hmacKey, deps.Logger)
 
+	// Spec 107 T084: the session-principal hook consumed by
+	// internal/httpapi's apiKeyAuthMiddleware (contracts/entitlement-
+	// predicate.md §4). Built here, from the same session manager, user
+	// store, HMAC key and live admin-email check the middleware above uses,
+	// with the tenant's entitlement set materialised once per authentication
+	// through the SAME predicate (userHandlers.ResolveAgentTokenOwner —
+	// entitledServerNamesFor + narrowScopeToEntitled — Spec 107's ONE
+	// predicate); installed on the httpapi.Server via
+	// deps.InstallSessionPrincipalResolver, which serveredition_wire.go wires
+	// to httpAPIServer.SetSessionPrincipalResolver.
+	if deps.InstallSessionPrincipalResolver != nil {
+		deps.InstallSessionPrincipalResolver(buildSessionPrincipalResolver(sessionManager, userStore, hmacKey, serverEditionConfig, userHandlers))
+	}
+
 	// Register OAuth routes on the router.
 	// Login and callback are public (no auth required).
 	// These are mounted outside the API key auth group.
@@ -267,9 +284,25 @@ func setupMultiUserOAuth(deps Dependencies) error {
 		adminHandlers.SetAgentTokenStore(deps.StorageManager)
 	}
 	userHandlers.SetHMACKey(hmacKey)
-	userActivityHandlers := teamsapi.NewUserActivityHandlers(nil, userStore, sharedServers, deps.Logger)
+
+	// Spec 107 T086: GET /api/v1/user/activity wired through
+	// multiuser.ActivityFilter over the real storage manager (a nil
+	// activityFilter, as this door was wired with at HEAD, left it answering
+	// today's empty {items:[],total:0} unconditionally). ProjectActivity — the
+	// convert+mask composition core GET /activity applies — comes from
+	// serveredition_wire.go via httpAPIServer.ActivityProjector(); nil in
+	// embedders/tests that never set it, in which case the door falls back to
+	// its historical raw-record shape.
+	var activityFilter *multiuser.ActivityFilter
+	if deps.StorageManager != nil {
+		activityFilter = multiuser.NewActivityFilter(deps.StorageManager)
+	}
+	userActivityHandlers := teamsapi.NewUserActivityHandlers(activityFilter, userStore, sharedServers, deps.Logger)
 	userActivityHandlers.SetAdminServersProvider(adminServers)
 	userActivityHandlers.SetEntitlement(userHandlers)
+	if deps.ProjectActivity != nil {
+		userActivityHandlers.SetActivityProjector(deps.ProjectActivity)
+	}
 	// Per-user brokered-credential surfaces (spec 074 T8): list connection
 	// status, disconnect, and the Path B connect/callback flow. Reuses the same
 	// credential store wired into the OAuth login handler above. The audit sink
@@ -298,4 +331,84 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	)
 
 	return nil
+}
+
+// buildSessionPrincipalResolver builds the httpapi.SessionPrincipalResolver
+// hook (Spec 107 T084, contracts/entitlement-predicate.md §4). It resolves a
+// cookie by reading it straight off the request via sessionManager (the same
+// call authenticateFromSession makes), and a bearer JWT by validating value
+// directly (value is already the raw token the httpapi caller trimmed of its
+// "Bearer " prefix) — never both from the same call, mirroring
+// ServerEditionAuthMiddleware.Middleware's own separation.
+//
+// The returned AuthContext's AllowedServers is the tenant's entitlement set,
+// materialised through userHandlers.ResolveAgentTokenOwner — the SAME
+// predicate (entitledServerNamesFor + narrowScopeToEntitled) every other
+// entitlement decision in this package uses — passing granted=["*"] so a
+// session principal (which carries no token-scope grant of its own) receives
+// its full entitlement rather than any token-shaped narrowing.
+func buildSessionPrincipalResolver(
+	sessionManager *teamsauth.SessionManager,
+	userStore *users.UserStore,
+	hmacKey []byte,
+	serverEditionConfig teamsauth.ServerEditionConfigProvider,
+	userHandlers *teamsapi.UserHandlers,
+) httpapi.SessionPrincipalResolver {
+	return func(r *http.Request, kind auth.CredentialKind, value string) (*auth.AuthContext, error) {
+		var userID string
+		switch kind {
+		case auth.CredentialKindCookie:
+			session, err := sessionManager.GetSessionFromRequest(r)
+			if err != nil {
+				return nil, err
+			}
+			if session == nil {
+				return nil, nil
+			}
+			userID = session.UserID
+		case auth.CredentialKindBearerJWT:
+			if value == "" {
+				return nil, nil
+			}
+			claims, err := teamsauth.ValidateBearerToken(value, hmacKey)
+			if err != nil {
+				// An invalid/expired JWT is "not this principal", not a
+				// resolution failure — the caller answers its own 401.
+				return nil, nil
+			}
+			userID = claims.Subject
+		default:
+			return nil, nil
+		}
+
+		user, err := userStore.GetUser(userID)
+		if err != nil {
+			return nil, err
+		}
+		if user == nil || user.Disabled {
+			return nil, nil
+		}
+
+		var isAdminEmail func(string) bool
+		if se := serverEditionConfig(); se != nil {
+			isAdminEmail = se.IsAdminEmail
+		}
+		owner, err := userHandlers.ResolveAgentTokenOwner(user.ID, []string{"*"}, isAdminEmail)
+		if err != nil {
+			return nil, err
+		}
+		if !owner.Active {
+			return nil, nil
+		}
+
+		var ac *auth.AuthContext
+		if owner.Role == "admin" {
+			ac = auth.AdminUserContext(owner.UserID, owner.Email, user.DisplayName, owner.Provider)
+		} else {
+			ac = auth.UserContext(owner.UserID, owner.Email, user.DisplayName, owner.Provider)
+			ac.AllowedServers = owner.Entitled
+		}
+		ac.CredentialKind = kind
+		return ac, nil
+	}
 }

@@ -185,7 +185,7 @@ func AnonymousContext() *AuthContext {
 // Authenticated admins — the API key, a tray/socket connection, stdio, an
 // OAuth admin user in the server edition — are unaffected.
 func (ac *AuthContext) CanRevealSecrets() bool {
-	return ac != nil && ac.IsAdmin() && !ac.Anonymous
+	return ac != nil && ac.IsAdmin() && !ac.Anonymous && !ac.IsSessionPrincipal()
 }
 
 // UserContext returns an AuthContext for a regular OAuth-authenticated user.

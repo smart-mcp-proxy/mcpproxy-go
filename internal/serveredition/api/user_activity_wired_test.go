@@ -40,6 +40,12 @@ type stubServerController struct {
 
 func (c *stubServerController) GetCurrentConfig() interface{} { return c.cfg }
 
+// GetConfig backs internal/httpapi's trustedProxiesProvider (server.go:680),
+// which TagRequestMeta calls on EVERY /api/v1 request ahead of
+// apiKeyAuthMiddleware — so it must not fall through to the nil embedded
+// httpapi.ServerController, whatever the tenant allowlist gate below decides.
+func (c *stubServerController) GetConfig() (*config.Config, error) { return c.cfg, nil }
+
 // T082 (Spec 107 US4): GET /user/activity wired through
 // storage.ActivityFilter with BOTH the UserID and the AllowedServers terms
 // evaluated inside ActivityFilter.Matches — never a read-everything-then-

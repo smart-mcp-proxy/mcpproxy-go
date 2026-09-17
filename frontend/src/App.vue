@@ -42,7 +42,7 @@
 
     <!-- Authentication Error Modal -->
     <AuthErrorModal
-      :show="authModal.show"
+      :show="authModal.show || undefined"
       :can-close="authModal.canClose"
       :last-error="authModal.lastError"
       @close="handleAuthModalClose"
@@ -54,6 +54,7 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import SidebarNav from '@/components/SidebarNav.vue'
 import TopHeader from '@/components/TopHeader.vue'
 import AppFooter from '@/components/AppFooter.vue'
@@ -68,6 +69,7 @@ import api, { type APIAuthEvent } from '@/services/api'
 const systemStore = useSystemStore()
 const serversStore = useServersStore()
 const authStore = useAuthStore()
+const router = useRouter()
 
 // Authentication modal state
 const authModal = reactive({
@@ -129,6 +131,16 @@ function handleAuthModalRefresh(verified: boolean) {
 // Handle API authentication errors
 function handleAuthError(event: APIAuthEvent) {
   console.log('Global auth error received:', event)
+
+  // Spec 107 FR-041 / T088: a session principal (tenant or admin, no local
+  // API key) never holds an API key to type into the modal below — a 401
+  // there means the cookie/JWT went stale, and the fix is to sign in again
+  // via the IdP, not to prompt for a credential that does not exist.
+  if (authStore.isTeamsEdition && !api.hasAPIKey()) {
+    void router.push('/login')
+    return
+  }
+
   authModal.lastError = event.error
   authModal.show = true
   // Audit F28: one cause, one message. The modal now suppresses the reconnect
@@ -143,17 +155,25 @@ onMounted(async () => {
   // Set up API error listener
   removeAPIListener = api.addEventListener(handleAuthError)
 
-  // Connect to real-time updates
-  systemStore.connectEventSource()
+  // Spec 107 FR-041 / T088: these are all admin-only core doors (server
+  // status/version, routing mode, the full server list, the SSE event
+  // stream). A tenant principal is entitled to a narrow, per-user surface
+  // instead (their own servers/activity, fetched by the routed tenant
+  // views) — issuing these here would either 403 pointlessly or, worse,
+  // leak fleet-wide state into a tenant's browser.
+  if (authStore.principalKind !== 'tenant') {
+    // Connect to real-time updates
+    systemStore.connectEventSource()
 
-  // Initial data load
-  serversStore.fetchServers()
+    // Initial data load
+    serversStore.fetchServers()
 
-  // Fetch version info
-  systemStore.fetchInfo()
+    // Fetch version info
+    systemStore.fetchInfo()
 
-  // Fetch routing mode info
-  systemStore.fetchRouting()
+    // Fetch routing mode info
+    systemStore.fetchRouting()
+  }
 })
 
 onUnmounted(() => {

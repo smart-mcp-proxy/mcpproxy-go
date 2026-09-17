@@ -251,6 +251,7 @@
 import { ref, computed, onBeforeUnmount, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
+import { useAuthStore } from '@/stores/auth'
 import SerializationAxis from './SerializationAxis.vue'
 import type { RoutingModeMeta } from '@/utils/routingMode'
 import {
@@ -271,6 +272,7 @@ import {
 } from '@/utils/routingMode'
 
 const systemStore = useSystemStore()
+const authStore = useAuthStore()
 
 const open = ref(false)
 const busy = ref(false)
@@ -371,8 +373,11 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown))
 function toggle() {
   open.value = !open.value
   // Refresh on open: another surface (Settings, the tray, the config file) may
-  // have changed any of these three since the last fetch.
-  if (open.value) void systemStore.fetchRouting()
+  // have changed any of these three since the last fetch. Spec 107 FR-041:
+  // /routing is an admin-only core door; a tenant principal never has this
+  // panel available (see the App.vue mount gate), but guard the fetch too in
+  // case that ever changes.
+  if (open.value && authStore.principalKind !== 'tenant') void systemStore.fetchRouting()
 }
 
 async function applyField(field: string, value: string) {

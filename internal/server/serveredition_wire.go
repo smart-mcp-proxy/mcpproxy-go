@@ -40,6 +40,15 @@ func wireServerEditionOAuth(s *Server, httpAPIServer *httpapi.Server) {
 		SetServerShared:   s.runtime.SetServerShared,
 		ManagementService: s.runtime.GetManagementService(),
 		StorageManager:    sm,
+
+		// Spec 107 T084: setup.go builds the session-principal resolver and
+		// hands it back here so it can be installed on the same
+		// httpapi.Server that serves /api/v1.
+		InstallSessionPrincipalResolver: httpAPIServer.SetSessionPrincipalResolver,
+
+		// Spec 107 T086: the same convert+mask composition core GET /activity
+		// applies, for GET /api/v1/user/activity to reuse.
+		ProjectActivity: httpAPIServer.ActivityProjector(),
 	}
 
 	if err := serveredition.SetupAll(deps); err != nil {

@@ -9,9 +9,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/multiuser"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // UserActivityHandlers provides endpoints for user activity and diagnostics.
@@ -29,6 +32,13 @@ type UserActivityHandlers struct {
 	// user store and admin-servers provider (no access block: today's
 	// Shared-only semantics).
 	entitlement *UserHandlers
+
+	// activityProjector converts+masks a storage record exactly as core
+	// GET /activity does (Spec 107 T086: httpapi.(*Server).ActivityProjector,
+	// installed by setup.go via SetActivityProjector). nil only when
+	// activityFilter is also nil (setup.go wires both together); the door
+	// then answers today's empty shape.
+	activityProjector func(*storage.ActivityRecord) contracts.ActivityRecord
 }
 
 // NewUserActivityHandlers creates a new UserActivityHandlers instance.
@@ -62,6 +72,13 @@ func (h *UserActivityHandlers) SetAdminServersProvider(provider AdminServersProv
 // UserHandlers.
 func (h *UserActivityHandlers) SetEntitlement(e *UserHandlers) {
 	h.entitlement = e
+}
+
+// SetActivityProjector installs the convert+mask composition core
+// GET /activity applies (Spec 107 T086), so this door emits the same JSON
+// shape and the same masking for the same record.
+func (h *UserActivityHandlers) SetActivityProjector(p func(*storage.ActivityRecord) contracts.ActivityRecord) {
+	h.activityProjector = p
 }
 
 // entitlementPredicate returns the installed predicate, or one built over
@@ -111,11 +128,26 @@ type DiagnosticsResponse struct {
 
 // --- Handlers ---
 
-// getUserActivity returns the current user's activity log.
+// getUserActivity returns the current user's activity log (Spec 107 T086,
+// contracts/rest-endpoints.md §"user/activity"): records where
+// user_id == principal.user_id AND server_name is in the entitlement set,
+// both terms evaluated inside storage.ActivityFilter.Matches so `total`
+// counts only what the page may contain, then projected and masked through
+// the same composition core GET /activity applies.
+//
+// An admin_user session receives today's empty {items:[],total:0}
+// unconditionally (SC-006: this stays the merge-base carve-out — the filter's
+// admin branch is never reached from this door; administrators read history
+// on core /activity*, which refuses a tenant session non-disclosingly).
 func (h *UserActivityHandlers) getUserActivity(w http.ResponseWriter, r *http.Request) {
-	_, err := getUserID(r)
-	if err != nil {
+	ac := auth.AuthContextFromContext(r.Context())
+	if ac == nil || !ac.IsUser() {
 		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	if ac.IsAdmin() {
+		writeJSON(w, http.StatusOK, ActivityListResponse{Items: []struct{}{}, Total: 0})
 		return
 	}
 
@@ -123,32 +155,40 @@ func (h *UserActivityHandlers) getUserActivity(w http.ResponseWriter, r *http.Re
 	offset := parseIntParam(r, "offset", 0)
 
 	if h.activityFilter == nil {
-		writeJSON(w, http.StatusOK, ActivityListResponse{
-			Items: []struct{}{},
-			Total: 0,
-		})
+		writeJSON(w, http.StatusOK, ActivityListResponse{Items: []struct{}{}, Total: 0})
 		return
 	}
 
-	records, total, err := h.activityFilter.GetUserActivity(r.Context(), limit, offset)
+	filter := storage.DefaultActivityFilter()
+	filter.Limit = limit
+	filter.Offset = offset
+	filter.UserID = ac.UserID
+	filter.AllowedServers = ac.AllowedServers
+
+	records, total, err := h.activityFilter.ListActivities(filter)
 	if err != nil {
 		h.logger.Errorw("failed to get user activity", "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to get activity")
 		return
 	}
 
-	// NOTE: these are raw storage records, serialised as-is. That is safe only
-	// while activityFilter is nil (setup.go wires nil today, so this endpoint
-	// returns an empty list). Whoever wires it must route the records through
-	// the same masking the personal-edition activity API applies
-	// (httpapi.maskActivityPayloads → security.MaskArguments/MaskText +
-	// StripInternalArgs), or this endpoint will serve the credentials the
-	// detector flagged — the leak fixed for the activity drawer (audit F13).
-	//
-	// Ensure empty array in JSON (not null).
-	items := interface{}(records)
-	if records == nil {
+	// Route through the same convert+mask composition core GET /activity
+	// applies (Spec 107 T086) when a projector was installed. A nil
+	// projector (no setup.go wiring — e.g. an embedder or a test harness
+	// exercising activityFilter alone) falls back to the raw records, as
+	// this door always did.
+	var items interface{}
+	switch {
+	case h.activityProjector != nil:
+		projected := make([]contracts.ActivityRecord, 0, len(records))
+		for _, record := range records {
+			projected = append(projected, h.activityProjector(record))
+		}
+		items = projected
+	case records == nil:
 		items = []struct{}{}
+	default:
+		items = records
 	}
 
 	writeJSON(w, http.StatusOK, ActivityListResponse{

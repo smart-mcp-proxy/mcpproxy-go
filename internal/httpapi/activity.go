@@ -328,6 +328,22 @@ func (s *Server) maskActivityPayloads(record *contracts.ActivityRecord) {
 	record.Metadata = s.sensitiveMasker.MaskArguments(record.Metadata)
 }
 
+// ActivityProjector returns the exact convert+mask composition core
+// GET /activity applies to a storage record before it reaches a caller
+// (Spec 107 T086, contracts/rest-endpoints.md §"user/activity"): the
+// server-edition GET /api/v1/user/activity door holds *storage.ActivityRecord
+// values and has no access to this package's unexported
+// storageToContractActivity/maskActivityPayloads, so this is the one exported
+// seam that lets it emit the same JSON shape and the same masking as the core
+// door for the same record.
+func (s *Server) ActivityProjector() func(*storage.ActivityRecord) contracts.ActivityRecord {
+	return func(record *storage.ActivityRecord) contracts.ActivityRecord {
+		contract := storageToContractActivity(record)
+		s.maskActivityPayloads(&contract)
+		return contract
+	}
+}
+
 // contextualMetadataKeys are the top-level metadata keys that survive the
 // `exclude_payloads` projection (contracts/api-deltas.md §1). Everything here is
 // a short string the tray glance shows verbatim; anything unbounded (arguments,

@@ -543,6 +543,7 @@ import { computed, nextTick, ref, watch, onMounted, onUnmounted, defineAsyncComp
 import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import { useAuthStore } from '@/stores/auth'
 import { useSecurityScannerStatus, refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import api from '@/services/api'
 import logoSvg from '@/assets/logo.svg'
@@ -566,6 +567,7 @@ const UsageView = defineAsyncComponent(() => import('@/views/Usage.vue'))
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const onboardingStore = useOnboardingStore()
+const authStore = useAuthStore()
 
 // Usage ↔ Overview switcher state (Spec 069 T016). `usageEverActive` gates the
 // first mount; `activeView` then toggles via v-show so both panels keep state.
@@ -674,6 +676,10 @@ function clientIcon(client: ClientStatus): string {
 }
 
 const loadClientStatuses = async () => {
+  // Spec 107 FR-041 / T088: /connect is admin-only (client-config content
+  // read across the whole fleet host) — a tenant principal never has a
+  // client-connect surface to project this onto.
+  if (authStore.principalKind === 'tenant') return
   try {
     const response = await api.getConnectStatus()
     if (response.success && response.data) {
@@ -714,6 +720,10 @@ const {
 } = useSecurityScannerStatus()
 
 const loadSecurityStatus = async () => {
+  // Spec 107 FR-041 / T088: /docker/status and /config are admin-only core
+  // doors — a tenant principal's dashboard has no docker/quarantine chip to
+  // fill in.
+  if (authStore.principalKind === 'tenant') return
   try {
     // Docker status from dedicated endpoint. The badge reads "active" only when
     // Docker isolation is genuinely in effect: the user enabled it AND a real
@@ -787,6 +797,9 @@ function formatUptime(seconds: number): string {
 const recentSessions = ref<any[]>([])
 
 const loadSessions = async () => {
+  // Spec 107 FR-041 / T088: /sessions is an admin-only core door (fleet-wide
+  // MCP session list).
+  if (authStore.principalKind === 'tenant') return
   try {
     // status=active + a roomier limit (audit F10): an unfiltered top-5 can be
     // filled entirely by closed sessions and hide every live client.
@@ -803,6 +816,9 @@ const loadSessions = async () => {
 const tokenSavingsData = ref<any>(null)
 
 const loadTokenSavings = async () => {
+  // Spec 107 FR-041 / T088: /stats/tokens is an admin-only core door
+  // (fleet-wide token-savings aggregate).
+  if (authStore.principalKind === 'tenant') return
   try {
     const response = await api.getTokenStats()
     if (response.success && response.data) {

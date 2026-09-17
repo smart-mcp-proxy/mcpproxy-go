@@ -335,6 +335,11 @@ type Server struct {
 	// preflightPollOverride lowers the 250 ms poll floor. Tests set it; nothing
 	// in production does.
 	preflightPollOverride time.Duration
+
+	// sessionPrincipalResolver resolves a session cookie or bearer JWT to an
+	// AuthContext (Spec 107 US4). nil in the personal build; installed by the
+	// server edition via SetSessionPrincipalResolver. See session_principal.go.
+	sessionPrincipalResolver SessionPrincipalResolver
 }
 
 // usageCacheEntry is one cached usage response with the time it was stored.
@@ -497,39 +502,104 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// Extract token from request
-			token := ExtractToken(r)
-			if token == "" {
-				s.logger.Warnw("TCP connection with missing API key",
-					zap.String("path", r.URL.Path),
-					zap.String("remote_addr", r.RemoteAddr))
-				s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
-				return
-			}
-
-			// Check if this is an agent token (mcp_agt_ prefix)
-			if strings.HasPrefix(token, auth.TokenPrefixStr) {
-				s.handleAgentTokenAuth(w, r, next, token)
-				return
-			}
-
-			// Check if the token matches the global API key (admin)
-			if token == cfg.APIKey {
-				s.logger.Debugw("TCP connection with valid API key",
-					zap.String("path", r.URL.Path),
-					zap.String("remote_addr", r.RemoteAddr))
-				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
-			}
-
-			// Token doesn't match anything
-			s.logger.Warnw("TCP connection with invalid API key",
-				zap.String("path", r.URL.Path),
-				zap.String("remote_addr", r.RemoteAddr))
-			s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
+			s.authenticateWithPrecedence(w, r, next, cfg)
 		})
 	}
+}
+
+// authenticateWithPrecedence implements the FR-001 credential precedence
+// (Spec 107, contracts/rest-endpoints.md §8): exactly one credential source
+// is evaluated. Presence of a source is header/query MEMBERSHIP
+// (r.Header.Values, r.URL.Query().Has), not a non-empty value, so a present
+// but WRONG (or empty) X-API-Key, Authorization: Bearer or ?apikey= is a
+// terminal 401 and never falls through to a cookie sitting on the same
+// request. The mcpproxy_session cookie is consulted only when none of the
+// three is present at all.
+func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config) {
+	// 1. X-API-Key header (membership, not non-empty value).
+	if values := r.Header.Values("X-API-Key"); len(values) > 0 {
+		s.authenticateExplicitToken(w, r, next, cfg, values[0])
+		return
+	}
+
+	// 2. Authorization: Bearer header (membership).
+	if values := r.Header.Values("Authorization"); len(values) > 0 {
+		s.authenticateBearer(w, r, next, cfg, values[0])
+		return
+	}
+
+	// 3. ?apikey= query parameter (membership).
+	if r.URL.Query().Has("apikey") {
+		s.authenticateExplicitToken(w, r, next, cfg, r.URL.Query().Get("apikey"))
+		return
+	}
+
+	// 4. mcpproxy_session cookie — only reached when none of the above is present.
+	if cookie, err := r.Cookie(httpSessionCookieName); err == nil {
+		if s.tryInstallSessionPrincipal(w, r, next, auth.CredentialKindCookie, cookie.Value) {
+			return
+		}
+	}
+
+	s.logger.Warnw("TCP connection with missing API key",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
+}
+
+// authenticateExplicitToken handles a token presented via X-API-Key or
+// ?apikey=: an agent token, the global admin key, or nothing else — these two
+// sources never resolve a session principal (only Authorization: Bearer and
+// the cookie do).
+func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, token string) {
+	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
+		s.handleAgentTokenAuth(w, r, next, token)
+		return
+	}
+	if token != "" && token == cfg.APIKey {
+		s.logger.Debugw("TCP connection with valid API key",
+			zap.String("path", r.URL.Path),
+			zap.String("remote_addr", r.RemoteAddr))
+		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+		next.ServeHTTP(w, r.WithContext(ctx))
+		return
+	}
+	s.logger.Warnw("TCP connection with invalid API key",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
+}
+
+// authenticateBearer handles Authorization: Bearer — an agent token, the
+// global admin key, or a user JWT resolved as a session principal
+// (kind=bearer_jwt) through the edition hook.
+func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, authHeader string) {
+	var token string
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		token = strings.TrimPrefix(authHeader, "Bearer ")
+	}
+
+	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
+		s.handleAgentTokenAuth(w, r, next, token)
+		return
+	}
+	if token != "" && token == cfg.APIKey {
+		s.logger.Debugw("TCP connection with valid API key",
+			zap.String("path", r.URL.Path),
+			zap.String("remote_addr", r.RemoteAddr))
+		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+		next.ServeHTTP(w, r.WithContext(ctx))
+		return
+	}
+
+	if s.tryInstallSessionPrincipal(w, r, next, auth.CredentialKindBearerJWT, token) {
+		return
+	}
+
+	s.logger.Warnw("TCP connection with invalid API key",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
 
 // handleAgentTokenAuth validates an agent token and sets the appropriate AuthContext.
