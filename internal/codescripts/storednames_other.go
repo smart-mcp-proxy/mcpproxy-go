@@ -3,12 +3,15 @@
 package codescripts
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Linux and the BSDs resolve names case-sensitively on their native
@@ -28,54 +31,57 @@ import (
 // spellings a scripts directory holds, maintained OFF the request path. The
 // index is built when the server learns its scripts directory (Warm) and
 // rebuilt by a single-flight goroutine whenever a request finds it behind the
-// directory's GENERATION (one Lstat of the directory itself). No request ever
-// lists: it answers from the index that exists — an exact hit is re-probed by
-// the candidate's own Lstat and opened no-follow, so a removed or replaced
-// file fails closed; a script added since the listing is refused until the
-// rebuild lands, milliseconds later (the administrator's directory read sees
-// it at once). Every request — hit, miss or case-variant, cold or warm, in a
-// directory of ten thousand entries or none — costs a directory Lstat and an
-// O(1) set lookup (codex r6 #1). Listing cost follows the administrator's
-// writes, never the requested name, and never lands on a caller's goroutine.
+// directory's GENERATION. No request ever lists: it answers from the index
+// that exists — an exact hit is re-probed by the candidate's own no-follow
+// stat and opened no-follow, so a removed or replaced file fails closed; a
+// script added since the listing is refused until the rebuild lands,
+// milliseconds later (the administrator's directory read sees it at once).
+// Every request — hit, miss or case-variant, cold or warm, in a directory of
+// ten thousand entries or none — costs the same bounded number of directory
+// primitives and an O(1) set lookup. Listing cost follows the
+// administrator's writes, never the requested name, and never lands on a
+// caller's goroutine.
 //
-// The index answers ONLY for the generation it was built against (codex r7
-// #1 / round 8 MUST-FIX). Scheduling a rebuild is not the same as having one:
-// earlier rounds handed back whatever the index held while a mismatched
-// generation's rebuild was merely scheduled or in flight, and a stale index
-// can still vouch for an entry under a spelling the directory no longer has
-// it under — on a case-folding mount, a rename lets the stale hit's own
-// Lstat fold onto whatever now occupies that name. So a generation mismatch
-// refuses exactly as a never-built index refuses, fail closed, until its own
-// rebuild lands (a call landing within milliseconds of a directory change is
-// refused once — retry). The generation is checked once more after an
-// exact-set hit's no-follow open (round 8 MUST-FIX, the lookup→open race):
-// gen-before == index.gen == gen-after is what proves the file the open just
-// read is the one the index vouched for, not a replacement that landed in
-// the window between the probe and the open.
+// The index answers ONLY for the generation it was built against (round 8
+// MUST-FIX): a stale index is refused exactly as a never-built one is, fail
+// closed, until its own rebuild lands (a call landing within milliseconds of
+// a directory change is refused once — retry). The generation is checked
+// once more after an exact-set hit's no-follow open (round 8 MUST-FIX, the
+// lookup→open race): gen-before == index.gen == gen-after is what proves the
+// file the open just read is the one the index vouched for.
 //
 // A matching generation is not enough on its own (round 9 MUST-FIX): a
 // coarse filesystem timestamp (vfat: two seconds) can leave a directory's
 // stamp UNCHANGED across a rename that lands in the same tick as the stamp
-// the index was listed against — the index is then "current" by the
-// gen-equality test above while still blind to the rename, and the renamed
-// entry's own Lstat folds onto it on a case-folding mount exactly as a stale
-// index's does. An index may therefore AUTHORIZE a hit only once it is
-// SETTLED: its stamp predates the listing by at least generationSettleTime,
-// so no write still landing on that stamp could have escaped it. An
-// unsettled index — current or not — is refused with the same non-disclosing
-// not-found a never-built index gets; the documented consequence is that a
-// scoped call is refused for up to ~generationSettleTime after any change to
-// the scripts directory (retry). The rebuild-scheduling cadence below is
-// unaffected by this: it already runs at most once per settle window while
-// unsettled, whether or not this request's own hit is authorized.
+// the index was listed against. An index may therefore AUTHORIZE a hit only
+// once it is SETTLED: its stamp predates the listing by at least
+// generationSettleTime, so no write still landing on that stamp could have
+// escaped it.
 //
-// A directory that never stops changing cannot be allowed to keep a rebuild
-// goroutine re-listing forever, or Warm blocked forever, or a fresh rebuild
-// spawning the instant the last one gave up (round 8 SHOULD): one rebuild
-// re-lists at most maxRebuildAttempts times, and scheduleRebuildLocked
-// withholds a new rebuild goroutine for rebuildBackoff after the previous one
-// ends — a request's own cost is unaffected either way, since a stale or
-// absent index answers fail-closed at the same one-Lstat cost regardless.
+// Round 11 MUST-FIX (the directory-path ABA hole): every check above —
+// gen-before, the candidate probe, gen-after — and the eventual open used to
+// be FOUR INDEPENDENT resolutions of scriptsDir BY PATH. A replaceable
+// symlink, ancestor directory, or bind mount retargeted between two of those
+// steps and back before the next one let each step separately agree with a
+// DIFFERENT directory than the one the others saw — st_dev (round 9) rules
+// out a substitution visible during one snapshot, never an alternation
+// across several. The fix (dirfd_other.go) binds the entire request to ONE
+// retained directory descriptor: opened by path exactly once, then every
+// generation read, the candidate probe, and the open itself are all
+// performed RELATIVE TO THAT DESCRIPTOR (fstat / fstatat / openat) — no
+// second path resolution exists for anything to retarget. See
+// dirfd_other.go for the full account and storedSpellingsOf below for where
+// the descriptor is opened and released.
+//
+// Round 11 SHOULD (cancellable rebuilds): a directory that keeps changing
+// must not leave orphaned rebuild goroutines running forever after their
+// index has been evicted (LRU) or pruned (Warm keeping only the active
+// directory) — each index owns a context that eviction cancels, and its
+// rebuild goroutine (the ASYNC, request-scheduled kind only — Warm's own
+// synchronous rebuild is what the caller is waiting on and always runs to
+// completion) checks it between listing attempts and once more before
+// installing a result, so a cancelled rebuild stops promptly and writes
+// nothing nobody will read. See storedNames.rebuild below.
 
 // storedNames is the exact-spelling index of one scripts directory. names is
 // replaced, never mutated, so a set handed out under the lock stays valid
@@ -101,12 +107,27 @@ type storedNames struct {
 	// the previous one finished (round 8 SHOULD): a continuously changing
 	// directory would otherwise let scheduleRebuildLocked spawn another
 	// rebuild the instant the last one gives up, listing back to back
-	// forever. Set at the end of every rebuild, win or lose; zero means
-	// none has ever finished.
+	// forever. Set at the end of every ASYNC rebuild, win or lose; zero
+	// means none has ever finished.
 	nextAttempt time.Time
+
+	// ctx/cancel bind this index's ASYNC rebuild goroutines to the index's
+	// own lifetime (round 11 SHOULD): every place that discards this index
+	// — LRU eviction, Warm pruning every OTHER directory, forgetIndex —
+	// cancels ctx before the map forgets it, so a rebuild goroutine still
+	// mid-listing for a directory nobody will query through THIS index any
+	// longer stops re-listing and installs nothing rather than racing the
+	// eviction to finish a write no reader needed. wg is the seam a test (or
+	// a future caller) waits on to know the goroutine has actually
+	// returned, not merely that cancel was called; every rebuild call — the
+	// async ones AND Warm's own synchronous one — is wg.Add(1)'d before it
+	// starts, so wg.Wait() always reflects work truly in flight.
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
-// storedNameIndexes holds one *storedNames per cleaned scripts directory,
+// storedIndexes holds one *storedNames per cleaned scripts directory,
 // bounded so it tracks the directories actually in use rather than every
 // directory ever used (round 9 SHOULD): the server calls Warm whenever the
 // active scripts directory changes, and Warm keeps only the directory it was
@@ -124,14 +145,15 @@ var (
 const maxStoredNameIndexes = 4
 
 // storedNamesIndex returns the index of one cleaned scripts directory,
-// creating an empty (never built) one on first use, and records the access
-// for LRU eviction.
+// creating an empty (never built) one — with its own cancellation context —
+// on first use, and records the access for LRU eviction.
 func storedNamesIndex(key string) *storedNames {
 	storedIndexesMu.Lock()
 	defer storedIndexesMu.Unlock()
 	idx, ok := storedIndexes[key]
 	if !ok {
-		idx = &storedNames{}
+		ctx, cancel := context.WithCancel(context.Background())
+		idx = &storedNames{ctx: ctx, cancel: cancel}
 		storedIndexes[key] = idx
 	}
 	touchIndexLocked(key)
@@ -152,21 +174,28 @@ func touchIndexLocked(key string) {
 }
 
 // evictExcessLocked drops the least-recently-used indexes once the map holds
-// more than maxStoredNameIndexes. storedIndexesMu must be held.
+// more than maxStoredNameIndexes, cancelling each one's rebuild context
+// first (round 11 SHOULD) so an in-flight async rebuild for a directory this
+// map no longer tracks does not keep listing. storedIndexesMu must be held.
 func evictExcessLocked() {
 	for len(storedIndexesLRU) > maxStoredNameIndexes {
 		oldest := storedIndexesLRU[0]
 		storedIndexesLRU = storedIndexesLRU[1:]
+		if idx, ok := storedIndexes[oldest]; ok {
+			idx.cancel()
+		}
 		delete(storedIndexes, oldest)
 	}
 }
 
 // pruneOtherIndexesLocked drops every index but keep — Warm's own promise
-// that only the active scripts directory stays warm. storedIndexesMu must be
-// held.
+// that only the active scripts directory stays warm — cancelling each
+// dropped index's rebuild context first (round 11 SHOULD). storedIndexesMu
+// must be held.
 func pruneOtherIndexesLocked(keep string) {
-	for k := range storedIndexes {
+	for k, idx := range storedIndexes {
 		if k != keep {
+			idx.cancel()
 			delete(storedIndexes, k)
 		}
 	}
@@ -179,14 +208,18 @@ func pruneOtherIndexesLocked(keep string) {
 	storedIndexesLRU = kept
 }
 
-// forgetIndex removes one directory's index entirely, forcing the next
-// storedNamesIndex(key) to start from a never-built index. Production code
-// never calls this directly (pruneOtherIndexesLocked and evictExcessLocked
-// cover the two bounding cases); it exists so tests can force a cold index
-// without reaching into the map's internals.
+// forgetIndex removes one directory's index entirely, cancelling its
+// rebuild context first (round 11 SHOULD), forcing the next
+// storedNamesIndex(key) to start from a fresh, never-built index. Production
+// code never calls this directly (pruneOtherIndexesLocked and
+// evictExcessLocked cover the two bounding cases); it exists so tests can
+// force a cold index without reaching into the map's internals.
 func forgetIndex(key string) {
 	storedIndexesMu.Lock()
 	defer storedIndexesMu.Unlock()
+	if idx, ok := storedIndexes[key]; ok {
+		idx.cancel()
+	}
 	delete(storedIndexes, key)
 	for i, k := range storedIndexesLRU {
 		if k == key {
@@ -212,7 +245,7 @@ func forEachIndex(fn func(*storedNames)) {
 	}
 }
 
-// dirGeneration is the Lstat tuple that moves whenever a directory's entry
+// dirGeneration is the stat tuple that moves whenever a directory's entry
 // set can have changed: adding, removing or renaming an entry updates its
 // mtime and ctime (ctime cannot be set from user space, so a restored mtime —
 // tar, rsync -a — does not hide a change), a replaced directory has another
@@ -220,9 +253,11 @@ func forEachIndex(fn func(*storedNames)) {
 // (round 9 MUST-FIX): an inode number is unique only WITHIN a device, so
 // without it a bind-mount swap to another filesystem whose directory happens
 // to collide on inode, size, mtime and ctime would read as the SAME
-// generation — the stale index would then vouch for a spelling that was
-// never proven on the filesystem now actually mounted there.
-// dirGenerationOf reads the tuple per platform.
+// generation. dirGenerationOf reads the tuple from a path-based Lstat result
+// (used by the package's tests and by the pre-round-11 callers that still
+// have only a path, never a descriptor); dirFdGeneration in dirfd_other.go
+// reads the identical tuple from an already-open descriptor via fstat — the
+// form every request and rebuild actually uses (round 11 MUST-FIX).
 type dirGeneration struct {
 	modTime, changeTime time.Time
 	size                int64
@@ -262,13 +297,13 @@ const generationSettleTime = 2 * time.Second
 // listing or spinning on one that can never confirm.
 const maxRebuildAttempts = 3
 
-// rebuildBackoff is the minimum gap between the end of one rebuild goroutine
-// and the start of the next for the same directory (round 8 SHOULD). Without
-// it, a directory changing on every request would let scheduleRebuildLocked
-// spawn a fresh rebuild the instant the bounded one above gives up — the
-// same unbounded listing cost, just resumed one goroutine later. During the
-// backoff a request's own cost is unchanged: one Lstat, answered fail-closed
-// from whatever the index holds (or does not).
+// rebuildBackoff is the minimum gap between the end of one ASYNC rebuild
+// goroutine and the start of the next for the same directory (round 8
+// SHOULD). Without it, a directory changing on every request would let
+// scheduleRebuildLocked spawn a fresh rebuild the instant the bounded one
+// above gives up. During the backoff a request's own cost is unchanged: one
+// open and one fstat, answered fail-closed from whatever the index holds (or
+// does not).
 const rebuildBackoff = time.Second
 
 // indexClock is time.Now, a variable so the tests can settle an index
@@ -291,9 +326,9 @@ func SetIndexClockForTest(now func() time.Time) (restore func()) {
 	return func() { indexClock = prev }
 }
 
-// spawnIndexRebuild runs one index rebuild on its own goroutine. A variable
-// so the tests can hold a rebuild back and prove what a request does on its
-// own goroutine, then land it deliberately.
+// spawnIndexRebuild runs one ASYNC index rebuild on its own goroutine. A
+// variable so the tests can hold a rebuild back and prove what a request
+// does on its own goroutine, then land it deliberately.
 var spawnIndexRebuild = func(rebuild func()) { go rebuild() }
 
 // Warm builds the stored-name index of scriptsDir on the caller's goroutine,
@@ -301,7 +336,7 @@ var spawnIndexRebuild = func(rebuild func()) { go rebuild() }
 // learns its scripts directory; it is never called on a request's behalf.
 // The listing is taken after Warm was called (a rebuild already in flight is
 // waited for, then Warm lists again), so the index reflects the directory as
-// it was at the call. A directory that cannot be stat-ed or listed leaves a
+// it was at the call. A directory that cannot be opened or listed leaves a
 // failed index (scoped callers are refused as unreadable until the directory
 // changes) and the failure is returned for logging. On darwin and Windows
 // there is no index and Warm is a no-op.
@@ -309,7 +344,18 @@ var spawnIndexRebuild = func(rebuild func()) { go rebuild() }
 // Warm also keeps ONLY scriptsDir's index (round 9 SHOULD): the server calls
 // Warm whenever the active scripts directory changes, so this is the point
 // that knows which directory is current — every other directory's index is
-// dropped rather than left to accumulate for as long as the process runs.
+// dropped (its rebuild context cancelled, round 11 SHOULD) rather than left
+// to accumulate for as long as the process runs.
+//
+// Warm's own rebuild is never cancelled by that pruning (round 11 SHOULD):
+// cancellation exists to stop an ASYNC rebuild nobody is waiting for from
+// outliving the index that scheduled it, not to let a concurrent caller's
+// eviction of a DIFFERENT directory silently turn this synchronous call —
+// which the caller is blocked on and whose error it trusts — into a no-op.
+// scriptsDir's own index is never among the ones pruneOtherIndexesLocked
+// drops here, so this is only a concern for a hypothetical concurrent Warm
+// of a different directory; the rebuild call below simply does not consult
+// ctx, so it always runs to completion and its result is always installed.
 func Warm(scriptsDir string) error {
 	key := filepath.Clean(scriptsDir)
 	idx := storedNamesIndex(key)
@@ -332,37 +378,59 @@ func Warm(scriptsDir string) error {
 	// moves), not a request-triggered rebuild guarding against runaway
 	// churn — it must not spend part of the round 8 SHOULD backoff a moment
 	// after startup refuses the very first real change to the directory.
-	idx.rebuild(key, false)
+	// cancellable is false for the reason in the doc comment above.
+	idx.wg.Add(1)
+	idx.rebuild(key, false, false)
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	return idx.err
 }
 
 // storedSpellingsOf answers, for one scoped request, whether scriptsDir holds
-// an entry spelled exactly `want`: an index hit, confirmed by the candidate's
-// own Lstat (the entry may have gone since the listing; the no-follow open
-// remains the authoritative check). The index is validated once per request,
-// and only an index hit is probed, so an absent name and a differently cased
-// one cost the same. A directory that cannot be stat-ed or listed is an error
-// the scoped resolver reports as unreadable, as the administrator's directory
-// read always has (SC-005).
+// an entry spelled exactly `want`, and hands back how to open and re-verify
+// the winning candidate — all bound to the SINGLE directory descriptor this
+// call opens (round 11 MUST-FIX; see dirfd_other.go and the package doc
+// comment above). The index is validated once per request against that
+// descriptor's own generation, and only an index hit is probed, so an
+// absent name and a differently cased one cost the same. A directory that
+// cannot be opened or listed is an error the scoped resolver reports as
+// unreadable, as the administrator's directory read always has (SC-005).
 //
-// The second return is a post-open recheck (round 8 MUST-FIX, the
-// lookup→open race): the directory's generation as read for THIS lookup,
-// wrapped so the caller can re-read it once more after the open and refuse
-// if it moved — gen-before == index.gen == gen-after is what proves the file
-// the open just read is the one the index vouched for, not a replacement
-// that landed in the window between the probe and the open.
-func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool, error), verifyUnchanged func(f *os.File, want string) error, err error) {
-	names, gen, err := storedNamesFor(scriptsDir)
+// The returned open func opens the winning candidate relative to the same
+// descriptor (openatEntry) rather than a fresh resolution of the path — the
+// core of the round 11 MUST-FIX. verifyUnchanged is the post-open recheck
+// (round 8 MUST-FIX, the lookup→open race): the SAME descriptor's
+// generation, read once more after the open; gen-before == index.gen ==
+// gen-after is what proves the file the open just read is the one the index
+// vouched for. closeSession releases the descriptor once the caller is done
+// with it, whether or not a candidate was ever opened — callers must call it
+// exactly once (resolve, in codescripts.go, defers it immediately).
+func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool, error), open func(path string) (*os.File, error), verifyUnchanged func(f *os.File, want string) error, closeSession func(), err error) {
+	key := filepath.Clean(scriptsDir)
+
+	dirfd, err := openScopedDir(key)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
+	closeSession = func() { _ = unix.Close(dirfd) }
+
+	gen, err := fstatDirGeneration(dirfd)
+	if err != nil {
+		closeSession()
+		return nil, nil, nil, nil, err
+	}
+
+	names, lookupErr := storedNamesFor(key, dirfd, gen)
+	if lookupErr != nil {
+		closeSession()
+		return nil, nil, nil, nil, lookupErr
+	}
+
 	storedExactly = func(want string) (bool, error) {
 		if _, ok := names[want]; !ok {
 			return false, nil
 		}
-		if _, err := lstat(filepath.Join(scriptsDir, want)); err != nil {
+		if err := fstatatEntry(dirfd, want); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return false, nil
 			}
@@ -370,75 +438,56 @@ func storedSpellingsOf(scriptsDir string) (storedExactly func(want string) (bool
 		}
 		return true, nil
 	}
-	// f and want are unused here: the index's own generation recheck (below)
-	// is what this platform can prove, and it needs neither the opened
-	// descriptor nor the requested spelling — see the darwin/Windows
-	// counterpart in storedspellings_probe.go, which proves the spelling
-	// itself on f because it has no directory-generation index to recheck.
+	open = func(path string) (*os.File, error) {
+		return openatEntry(dirfd, filepath.Base(path))
+	}
+	// f and want are unused here: the SAME descriptor's own generation
+	// recheck (below) is what this platform can prove, and it needs
+	// neither the opened file nor the requested spelling — see the
+	// darwin/Windows counterpart in storedspellings_probe.go and
+	// storedspellings_probe_windows.go, which prove the spelling itself on
+	// f because they have no directory-generation index to recheck.
 	verifyUnchanged = func(_ *os.File, _ string) error {
-		info, err := lstat(scriptsDir)
+		cur, err := fstatDirGeneration(dirfd)
 		if err != nil {
 			return err
 		}
-		if !dirGenerationOf(info).equal(gen) {
+		if !cur.equal(gen) {
 			return errIndexGenerationChanged
 		}
 		return nil
 	}
-	return storedExactly, verifyUnchanged, nil
+	return storedExactly, open, verifyUnchanged, closeSession, nil
 }
 
 // storedNamesFor returns the exact-name set of scriptsDir as the index holds
-// it — never listing on the caller's behalf — together with the directory
-// generation this request read. One Lstat of the directory reads that
-// generation; when it does not equal the index's OWN generation (never
-// built, behind, or a rebuild merely scheduled or in flight for it), the
-// request is answered as fail-closed as a never-built index: nil names, no
-// error, nothing scheduled beyond the rebuild that (still) needs to run.
+// it for THIS request's already-open descriptor and its freshly read
+// generation (round 11 MUST-FIX: dirfd and gen both come from the SAME open,
+// never a path lookup of their own) — never listing on the caller's behalf.
+// When dirfd's generation does not equal the index's OWN generation (never
+// built, behind, or a rebuild merely scheduled or in flight for it) — or the
+// index is not yet SETTLED (round 9 MUST-FIX) — the request is answered as
+// fail-closed as a never-built index: nil names, no error, nothing scheduled
+// beyond the rebuild that (still) needs to run.
 //
-// Round 8 MUST-FIX: earlier rounds scheduled that rebuild but still handed
-// back whatever the index held before — a stale index that had listed an
-// entry under an EARLIER spelling stayed good enough to authorize it. On a
-// case-folding mount that is exploitable: warm the index with `report.js`,
-// rename it to `REPORT.JS` (which moves the directory's generation), and
-// the stale index's own Lstat of `report.js` still succeeds by folding onto
-// the renamed file — a stale index is not evidence about the directory's
-// CURRENT contents, whatever it used to be right about. The index now
-// answers ONLY for the generation it was built against; any other request
-// gets the same non-disclosing not-found a directory it has never seen
-// would get, until the rebuild it schedules lands. Documented consequence:
-// a scoped call landing within milliseconds of a change to the directory is
-// refused once — retry.
-func storedNamesFor(scriptsDir string) (names map[string]struct{}, gen dirGeneration, err error) {
-	key := filepath.Clean(scriptsDir)
+// Because dirfd's generation already carries the directory's device and
+// inode (dirGeneration, round 9 MUST-FIX), this is also what refuses a
+// request whose descriptor resolves to a DIFFERENT directory than the one
+// the index was built from, even should every other field of the stamp
+// happen to collide: idx.gen.equal(gen) requires the identical dev+ino, so
+// an index built from directory A never authorizes a request whose dirfd
+// opened directory B.
+func storedNamesFor(key string, dirfd int, gen dirGeneration) (names map[string]struct{}, err error) {
 	idx := storedNamesIndex(key)
-
-	info, err := lstat(key)
-	if err != nil {
-		return nil, dirGeneration{}, err
-	}
-	// A directory the process may not READ is answered with the unreadable
-	// form whatever the index holds — the same reason the administrator's
-	// listing gives (SC-005), and the same answer on every platform. Opening
-	// the directory (no readdir) is one constant-cost syscall; without it a
-	// scripts directory that lost its read bit after the index was built
-	// would be reported not-found until a rebuild recorded the error.
-	dirFile, err := os.Open(key)
-	if err != nil {
-		return nil, dirGeneration{}, err
-	}
-	_ = dirFile.Close()
-	gen = dirGenerationOf(info)
 	now := indexClock()
 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
 	// current is whether the index is BUILT and answers for exactly this
-	// generation — the necessary condition for scheduling logic below, which
-	// stays exactly as round 8 left it: an out-of-date generation always
-	// reschedules, an in-date-but-unsettled one reschedules at most once per
-	// window.
+	// generation — the necessary condition for scheduling logic below: an
+	// out-of-date generation always reschedules, an in-date-but-unsettled
+	// one reschedules at most once per window.
 	current := (idx.names != nil || idx.err != nil) && idx.gen.equal(gen)
 
 	switch {
@@ -449,21 +498,21 @@ func storedNamesFor(scriptsDir string) (names map[string]struct{}, gen dirGenera
 	}
 
 	// authorized additionally requires the index to be SETTLED (round 9
-	// MUST-FIX, doc comment above): a matching-but-unsettled generation is
-	// refused exactly as a mismatched one is, because a coarse timestamp
-	// cannot rule out a rename that landed on the very stamp being trusted.
+	// MUST-FIX): a matching-but-unsettled generation is refused exactly as
+	// a mismatched one is, because a coarse timestamp cannot rule out a
+	// rename that landed on the very stamp being trusted.
 	if !current || !idx.settled {
-		return nil, dirGeneration{}, nil
+		return nil, nil
 	}
-	return idx.names, gen, idx.err
+	return idx.names, idx.err
 }
 
-// scheduleRebuildLocked starts the directory's rebuild goroutine unless one
-// is already in flight or the backoff since the last one has not elapsed
-// (round 8 SHOULD), and opens the next refresh window either way. During the
-// backoff a request's own cost is unaffected — one Lstat, answered
-// fail-closed from whatever the index holds (or does not) — only a NEW
-// rebuild goroutine is withheld.
+// scheduleRebuildLocked starts the directory's ASYNC rebuild goroutine
+// unless one is already in flight or the backoff since the last one has not
+// elapsed (round 8 SHOULD), and opens the next refresh window either way.
+// During the backoff a request's own cost is unaffected — one open, one
+// fstat, answered fail-closed from whatever the index holds (or does not) —
+// only a NEW rebuild goroutine is withheld.
 func (idx *storedNames) scheduleRebuildLocked(key string, now time.Time) {
 	idx.refreshAfter = now.Add(generationSettleTime)
 	if idx.building {
@@ -473,7 +522,11 @@ func (idx *storedNames) scheduleRebuildLocked(key string, now time.Time) {
 		return
 	}
 	idx.beginRebuildLocked()
-	spawnIndexRebuild(func() { idx.rebuild(key, true) })
+	// wg.Add happens before spawnIndexRebuild hands the closure off (which
+	// may run it synchronously, in a test that holds rebuilds back) so
+	// idx.wg.Wait() is never called before the matching Add is visible.
+	idx.wg.Add(1)
+	spawnIndexRebuild(func() { idx.rebuild(key, true, true) })
 }
 
 // beginRebuildLocked claims the single-flight slot.
@@ -482,34 +535,55 @@ func (idx *storedNames) beginRebuildLocked() {
 	idx.landed = make(chan struct{})
 }
 
-// rebuild lists the directory and installs the result, holding no lock across
-// the listing. The stamp is read BEFORE the listing and re-read after it
-// under the lock: a write that lands during the listing moves the stamp, and
-// the listing is taken again rather than trusted (list-then-stamp race) — up
-// to maxRebuildAttempts (round 8 SHOULD): a directory that never stops
-// changing cannot keep this goroutine re-listing forever, nor keep Warm
-// blocked forever. Giving up leaves whatever the LAST attempt installed;
-// that attempt's own generation almost certainly no longer matches the
-// directory's current one (it kept moving), so storedNamesFor's own check
+// rebuild lists the directory (through dirfd_other.go's fd-bound primitives:
+// round 11 MUST-FIX) and installs the result, holding no lock across the
+// listing. cancellable selects whether this call honours idx.ctx (true for
+// every ASYNC, request-scheduled rebuild) or always runs to completion
+// (false, for Warm's own synchronous call — see Warm's doc comment for why).
+//
+// A change during the listing itself (list-then-stamp race) is caught by
+// listScopedDirOnce's own before/after generation read on the SAME
+// descriptor and retried — up to maxRebuildAttempts (round 8 SHOULD): a
+// directory that never stops changing cannot keep this goroutine re-listing
+// forever, nor keep Warm blocked forever. Giving up leaves whatever the LAST
+// attempt installed; that attempt's own generation almost certainly no
+// longer matches the directory's current one, so storedNamesFor's own check
 // finds the index stale and refuses fail-closed exactly as it would a
-// rebuild still in flight — this loop never leaves a lie standing, it
-// simply stops asserting anything. Requests that arrive while a rebuild is
-// in flight see building set and schedule nothing; their generation read
-// precedes this re-check, so the re-check covers whatever they saw. Ends by
-// releasing the slot and closing landed; when backoffAfter is set (every
-// spawnIndexRebuild-triggered call — Warm's own direct call passes false),
-// it also opens the backoff window before another rebuild of this directory
-// may start.
-func (idx *storedNames) rebuild(key string, backoffAfter bool) {
+// rebuild still in flight.
+//
+// When cancellable and idx.ctx is done — the index has been evicted or
+// pruned since this rebuild started (round 11 SHOULD) — the loop stops at
+// the next checkpoint (between attempts, and once more right before
+// installing) and installs NOTHING: there is no reader left this index
+// could still be wrong for, so there is no reason to pay for, or trust, a
+// listing nobody will read. Ends by releasing the single-flight slot and
+// closing landed either way, so a concurrent waiter (Warm, or another
+// request) is never left blocked; when backoffAfter is set (every
+// spawnIndexRebuild-triggered call), it also opens the backoff window
+// before another rebuild of this directory may start.
+func (idx *storedNames) rebuild(key string, backoffAfter, cancellable bool) {
+	defer idx.wg.Done()
 	for attempt := 1; ; attempt++ {
-		gen, err := idx.build(key)
-		idx.mu.Lock()
-		if err == nil && attempt < maxRebuildAttempts {
-			if info, statErr := lstat(key); statErr == nil && !dirGenerationOf(info).equal(gen) {
-				idx.mu.Unlock()
-				continue
-			}
+		if cancellable && idx.ctx.Err() != nil {
+			idx.finishRebuild(backoffAfter)
+			return
 		}
+		before, after, names, listErr := listScopedDirOnce(key)
+		now := indexClock()
+		if cancellable && idx.ctx.Err() != nil {
+			idx.finishRebuild(backoffAfter)
+			return
+		}
+		if listErr == nil && attempt < maxRebuildAttempts && !before.equal(after) {
+			continue
+		}
+		gen := after
+		if listErr != nil {
+			gen = before
+		}
+		idx.mu.Lock()
+		idx.names, idx.err, idx.gen = names, listErr, gen
+		idx.settled = listErr == nil && now.Sub(gen.latest()) >= generationSettleTime
 		idx.building = false
 		if backoffAfter {
 			idx.nextAttempt = indexClock().Add(rebuildBackoff)
@@ -520,31 +594,51 @@ func (idx *storedNames) rebuild(key string, backoffAfter bool) {
 	}
 }
 
-// build takes one listing of key and installs it — or the failure — as the
-// index, replacing names atomically under the lock.
-func (idx *storedNames) build(key string) (dirGeneration, error) {
-	var (
-		gen   dirGeneration
-		names map[string]struct{}
-	)
-	info, err := lstat(key)
-	now := indexClock()
-	if err == nil {
-		gen = dirGenerationOf(info)
-		var entries []fs.DirEntry
-		if entries, err = readDir(key); err == nil {
-			names = make(map[string]struct{}, len(entries))
-			for _, e := range entries {
-				names[e.Name()] = struct{}{}
-			}
-		}
-	}
-
+// finishRebuild releases the single-flight slot and closes landed without
+// installing anything — used only when a cancellable rebuild stops early
+// (round 11 SHOULD).
+func (idx *storedNames) finishRebuild(backoffAfter bool) {
 	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	idx.names, idx.err, idx.gen = names, err, gen
-	// Settled means no write can still land on this stamp: the tick was over
-	// before the listing began, so nothing the listing missed shares it.
-	idx.settled = err == nil && now.Sub(gen.latest()) >= generationSettleTime
-	return gen, err
+	idx.building = false
+	if backoffAfter {
+		idx.nextAttempt = indexClock().Add(rebuildBackoff)
+	}
+	close(idx.landed)
+	idx.mu.Unlock()
+}
+
+// listScopedDirOnce opens key once, reads its generation, lists its entries
+// through the SAME descriptor, and reads the generation once more — all
+// round 11 MUST-FIX: a single open serves the generation read AND the
+// listing, so a change during the listing (the list-then-stamp race) is
+// caught by the two reads disagreeing, without ever resolving the path a
+// second time. A variable so the tests can inject the directory-open seam's
+// behaviour directly; the primitives it calls (dirfd_other.go) are
+// themselves variables for finer-grained races.
+var listScopedDirOnce = defaultListScopedDirOnce
+
+func defaultListScopedDirOnce(key string) (before, after dirGeneration, names map[string]struct{}, err error) {
+	dirfd, err := openScopedDir(key)
+	if err != nil {
+		return dirGeneration{}, dirGeneration{}, nil, err
+	}
+	defer func() { _ = unix.Close(dirfd) }()
+
+	before, err = fstatDirGeneration(dirfd)
+	if err != nil {
+		return dirGeneration{}, dirGeneration{}, nil, err
+	}
+	entryNames, err := listScopedDir(dirfd, key)
+	if err != nil {
+		return before, dirGeneration{}, nil, err
+	}
+	after, err = fstatDirGeneration(dirfd)
+	if err != nil {
+		return before, dirGeneration{}, nil, err
+	}
+	names = make(map[string]struct{}, len(entryNames))
+	for _, n := range entryNames {
+		names[n] = struct{}{}
+	}
+	return before, after, names, nil
 }

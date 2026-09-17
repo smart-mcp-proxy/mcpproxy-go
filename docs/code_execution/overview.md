@@ -410,7 +410,12 @@ resolver answers ONLY from an exact-name index of the directory that matches
 its CURRENT state: built when the daemon starts, validated by one stat of
 the directory per request, and refreshed by a background rebuild when that
 stat finds the directory changed. No request lists the directory, cold or
-warm. A call landing while that rebuild is merely scheduled or in flight is
+warm. On Linux/BSD, every step of that per-request check — the stat, the
+candidate probe, the open, and the re-check after the open — is bound to
+the SAME retained directory descriptor rather than resolving the path
+again for each one, so a symlink or bind mount retargeted mid-request
+cannot make different steps see different directories. A call landing while
+that rebuild is merely scheduled or in flight is
 refused exactly like one against a directory the index has never seen —
 never answered from what the index held before the change — so a rename
 under a scoped caller's feet cannot have that caller's own probe fold onto
@@ -431,7 +436,13 @@ stored spelling of the file descriptor MCPProxy actually opened
 (`F_GETPATH` on darwin, `GetFinalPathNameByHandle` on Windows) and compares
 it byte-for-byte to the requested name, so a case-rename racing the open
 itself is caught on the descriptor that would have been read, not just on
-an earlier probe of the same path.) The refusal itself:
+an earlier probe of the same path. On Windows the open itself never follows
+a reparse point at the final path component either, and the post-open check
+compares the descriptor's FULL normalized path against the scripts
+directory's own — opened once per request — not just the file's base name,
+so a reparse point planted on the candidate or on an ancestor directory
+cannot substitute a file from elsewhere under the same name.) The refusal
+itself:
 
 ```text
 Cannot execute stored script: stored script "fetch-pr" not found (the stored-script

@@ -75,6 +75,30 @@ const (
 // (Unix maps the kernel's no-follow rejection onto it).
 var errNonRegular = errors.New("not a regular file")
 
+// scopedOpener opens the winning candidate for reading. nil means "use the
+// package's own openScriptFile", the administrator's path-based no-follow
+// open and darwin/Windows's default (round 11: their own fixes reach
+// authoritatively into the post-open recheck instead — see scopedVerifier).
+// Non-nil only on Linux/BSD (round 11 MUST-FIX), where it is bound to the
+// single retained directory descriptor the request's own candidates() call
+// opened, so the exact entry that was probed is the exact entry that gets
+// opened — never a fresh, independent resolution of the path.
+type scopedOpener func(path string) (*os.File, error)
+
+// scopedVerifier re-proves, on the descriptor openScriptFile or a
+// scopedOpener actually opened, that nothing was swapped between the probe
+// and the open. nil only for the administrator, whose directory-based
+// decision has nothing to recheck against.
+type scopedVerifier func(f *os.File, want string) error
+
+// scopedCloser releases whatever per-request resource a candidates()
+// implementation opened (round 11 MUST-FIX: the retained directory
+// descriptor on Linux/BSD; a directory handle on Windows) — nil when there
+// is nothing to release (the administrator; darwin). resolve defers it
+// immediately after calling candidates(), so it always runs exactly once,
+// whether or not a candidate was ultimately opened.
+type scopedCloser func()
+
 // errIndexGenerationChanged is what a post-open verifyUnchanged closure
 // returns when the scripts directory's generation moved between the index
 // lookup that produced a hit and this open (round 8 MUST-FIX, the
@@ -355,7 +379,15 @@ func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source [
 	if !disclose {
 		candidates = probeCandidates
 	}
-	found, verifyUnchanged, err := candidates(scriptsDir, name)
+	found, open, verifyUnchanged, closeSession, err := candidates(scriptsDir, name)
+	// Round 11 MUST-FIX: whatever per-request resource candidates() opened
+	// to decide found (a retained directory descriptor on Linux/BSD, a
+	// directory handle on Windows) is released exactly once here, however
+	// resolve returns below — a miss, an ambiguous name, a successful read,
+	// or any refusal in between.
+	if closeSession != nil {
+		defer closeSession()
+	}
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, "", notFound()
@@ -381,7 +413,10 @@ func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source [
 		return nil, "", err
 	}
 
-	f, err := openScriptFile(path)
+	if open == nil {
+		open = openScriptFile
+	}
+	f, err := open(path)
 	if err != nil {
 		switch {
 		case errors.Is(err, errNonRegular):
@@ -465,13 +500,15 @@ func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source [
 // the filesystem's matching from the loop entirely, so the two agree on every
 // platform. Resolve's no-follow open remains the authoritative check.
 //
-// The third return is the post-open authoritative recheck probeCandidates
-// supplies (round 8 / round 9 MUST-FIX); the administrator's directory-based
-// decision has nothing to recheck against, so it is always nil here.
-func candidatesFor(scriptsDir, name string) ([]string, func(f *os.File, want string) error, error) {
+// The remaining three returns — the scoped opener, the post-open recheck
+// (round 8 / round 9 MUST-FIX) and the per-request resource closer (round
+// 11 MUST-FIX) — belong to probeCandidates alone: the administrator's
+// directory-based decision has nothing to bind an open to or recheck
+// against, so all three are always nil here.
+func candidatesFor(scriptsDir, name string) ([]string, scopedOpener, scopedVerifier, scopedCloser, error) {
 	dirEntries, err := readDir(scriptsDir)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	present := make(map[string]bool, 2)
@@ -490,7 +527,7 @@ func candidatesFor(scriptsDir, name string) ([]string, func(f *os.File, want str
 			found = append(found, filepath.Join(scriptsDir, name+ext))
 		}
 	}
-	return found, nil, nil
+	return found, nil, nil, nil, nil
 }
 
 // probeCandidates is candidatesFor for the SCOPED resolver: the same two
@@ -510,31 +547,49 @@ func candidatesFor(scriptsDir, name string) ([]string, func(f *os.File, want str
 // change, never per request (storednames_other.go, codex r5 #1). The
 // no-follow open remains the authoritative check.
 //
-// The second return is a post-open AUTHORITATIVE recheck (round 8 / round 9
-// MUST-FIX, the lookup→open race): storedSpellingsOf's own verify closure,
-// run by resolve on the descriptor that was actually opened — on Linux/BSD a
-// directory-generation recheck (storednames_other.go), on darwin/Windows a
-// proof of the opened descriptor's own stored spelling
-// (storedspellings_probe.go). Never nil on either platform: this is what
-// makes the pre-open probe above merely a cheap gate rather than the
-// authoritative decision.
-func probeCandidates(scriptsDir, name string) ([]string, func(f *os.File, want string) error, error) {
-	storedExactly, verifyUnchanged, err := storedSpellingsOf(scriptsDir)
+// The verifier this returns is a post-open AUTHORITATIVE recheck (round 8 /
+// round 9 MUST-FIX, the lookup→open race): storedSpellingsOf's own verify
+// closure, run by resolve on the descriptor that was actually opened — on
+// Linux/BSD a directory-generation recheck on the SAME retained descriptor
+// the whole request used (storednames_other.go, round 11 MUST-FIX — see the
+// opener below), on darwin a proof of the opened descriptor's own stored
+// spelling (storedspellings_probe.go), on Windows the same proof plus a
+// full-path comparison against a directory handle opened once for the
+// request (storedspellings_probe_windows.go, round 11 MUST-FIX). Never nil
+// on any platform: this is what makes the pre-open probe above merely a
+// cheap gate rather than the authoritative decision.
+//
+// The opener this returns is non-nil ONLY on Linux/BSD (round 11 MUST-FIX):
+// it opens the winning candidate relative to the SAME retained directory
+// descriptor the generation check and the candidate probe both used,
+// instead of a fresh, independent resolution of the path — the fix for the
+// directory-path ABA hole (storednames_other.go's package doc comment has
+// the full account). darwin and Windows return nil here (their own fixes
+// reach authoritatively into the verifier instead), so resolve falls back
+// to the package's ordinary openScriptFile. The closer releases whatever
+// per-request resource the opener needs (the retained descriptor on
+// Linux/BSD, a directory handle on Windows) exactly once, whether or not a
+// candidate was ultimately opened.
+func probeCandidates(scriptsDir, name string) ([]string, scopedOpener, scopedVerifier, scopedCloser, error) {
+	storedExactly, open, verifyUnchanged, closeSession, err := storedSpellingsOf(scriptsDir)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	found := make([]string, 0, 2)
 	for _, ext := range []string{extJS, extTS} {
 		want := name + ext
 		stored, err := storedExactly(want)
 		if err != nil {
-			return nil, nil, err
+			if closeSession != nil {
+				closeSession()
+			}
+			return nil, nil, nil, nil, err
 		}
 		if stored {
 			found = append(found, filepath.Join(scriptsDir, want))
 		}
 	}
-	return found, verifyUnchanged, nil
+	return found, open, verifyUnchanged, closeSession, nil
 }
 
 // listForNotFound is the directory listing newNotFoundError attaches to the

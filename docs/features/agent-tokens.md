@@ -364,7 +364,11 @@ content are published to every caller by design and sit outside the invariant:
    matches its CURRENT state — built when the daemon starts and refreshed by
    a background rebuild whenever a call finds the directory changed — so no
    call ever lists it, whatever name is asked for and however many scripts
-   are stored; a call that lands while that rebuild is scheduled or in
+   are stored, and every step one call takes (the directory stat, the
+   candidate probe, the open, and the re-check after it) is bound to a
+   single directory descriptor retained for that call rather than a fresh
+   resolution of the path each time; a call that lands while that rebuild is
+   scheduled or in
    flight is refused once, exactly like a call against a directory it has
    never seen, rather than answered from what the index held a moment ago —
    an entry the index once listed under an earlier spelling must never still
@@ -380,7 +384,10 @@ content are published to every caller by design and sit outside the invariant:
    path's stored spelling directly, that pre-open probe is only a cheap
    gate: the authoritative check re-reads the stored spelling of the file
    descriptor MCPProxy actually opened and refuses on any mismatch, so a
-   rename racing the open itself is caught there too); an ambiguous or unusable script is
+   rename racing the open itself is caught there too — on Windows that open
+   never follows a reparse point, and the check compares the descriptor's
+   full path, not just its base name, against a directory handle opened
+   once for that same call); an ambiguous or unusable script is
    reported by
    name and reason only, without its host path or a raw OS error;
    the REST listing `GET /api/v1/code/scripts` answers an agent token with

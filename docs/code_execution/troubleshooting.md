@@ -651,7 +651,12 @@ an agent-token call is answered ONLY from an exact-name index of the
 directory that matches its CURRENT state — built at daemon start, validated
 by one stat of the directory per call, refreshed in the background when the
 directory changes — so no call lists the directory, whatever name is asked
-for, and the refusal body is unchanged. A call landing while that refresh is
+for, and the refusal body is unchanged. Every step of one call's own check —
+the stat, the candidate probe, the open and the re-check after it — is bound
+to a single directory descriptor retained for that call, never a fresh
+resolution of the path per step, so a symlink or bind mount retargeted
+mid-call cannot make two of those steps disagree about which directory they
+are looking at. A call landing while that refresh is
 scheduled or in flight is refused exactly as one against a directory never
 seen before, never served from what the index held a moment ago — a rename
 cannot have a scoped caller's own probe fold onto whatever now occupies the

@@ -31,9 +31,13 @@ func TestStoredSpellingsOf_PostOpenProofAcceptsAnUnchangedDescriptor(t *testing.
 	dir := t.TempDir()
 	path := writeScript(t, dir, "alpha.js", "1")
 
-	storedExactly, verifyUnchanged, err := storedSpellingsOf(dir)
+	storedExactly, open, verifyUnchanged, closeSession, err := storedSpellingsOf(dir)
 	require.NoError(t, err)
+	require.Nil(t, open, "darwin/Windows never bind the open to a per-request descriptor (round 11): openScriptFile's own no-follow open is already authoritative")
 	require.NotNil(t, verifyUnchanged, "darwin/Windows always supply the authoritative post-open check")
+	if closeSession != nil {
+		defer closeSession()
+	}
 	ok, err := storedExactly("alpha.js")
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -58,9 +62,12 @@ func TestStoredSpellingsOf_PostOpenProofCatchesARaceOnTheOpenedDescriptor(t *tes
 	dir := t.TempDir()
 	path := writeScript(t, dir, "alpha.js", "1")
 
-	_, verifyUnchanged, err := storedSpellingsOf(dir)
+	_, _, verifyUnchanged, closeSession, err := storedSpellingsOf(dir)
 	require.NoError(t, err)
 	require.NotNil(t, verifyUnchanged)
+	if closeSession != nil {
+		defer closeSession()
+	}
 
 	// The race: the file is case-renamed between the pre-open probe and the
 	// open. APFS and NTFS fold the requested spelling onto the renamed entry,
@@ -90,9 +97,12 @@ func TestStoredSpellingsOf_PostOpenProofCatchesARenameAfterOpen(t *testing.T) {
 	dir := t.TempDir()
 	path := writeScript(t, dir, "alpha.js", "1")
 
-	_, verifyUnchanged, err := storedSpellingsOf(dir)
+	_, _, verifyUnchanged, closeSession, err := storedSpellingsOf(dir)
 	require.NoError(t, err)
 	require.NotNil(t, verifyUnchanged)
+	if closeSession != nil {
+		defer closeSession()
+	}
 
 	f, err := openScriptFile(path)
 	require.NoError(t, err)

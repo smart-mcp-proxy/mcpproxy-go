@@ -41,15 +41,66 @@ func entryName(path string) (string, error) {
 
 // openedEntryName is entryName's post-open counterpart (round 9 MUST-FIX):
 // it proves the stored spelling of the descriptor that will actually be
-// EXECUTED, not of a separate pre-open probe of the same path — a
-// case-rename or replacement landing between the pre-open probe
-// (storedSpellingsOf) and openScriptFile's own open would otherwise let the
-// wrong spelling run, because NTFS folds the subsequent open onto whatever
-// now occupies the name. GetFinalPathNameByHandle on the EXECUTED file's own
-// handle is the call that reports the normalized path NTFS actually opened,
-// unlike the requested path, which merely echoes what was asked for.
+// EXECUTED, not of a separate pre-open probe of the same path. Superseded as
+// the AUTHORITATIVE proof by openedFinalPath (round 11 MUST-FIX: a basename
+// alone is satisfied by any identically named file reached through a
+// retargeted reparse point — see storedspellings_probe_windows.go), but kept
+// for entryNameFromFd's shared plumbing and any caller that only needs the
+// base name.
 func openedEntryName(f *os.File) (string, error) {
-	h := windows.Handle(f.Fd())
+	full, err := finalPathOfHandle(windows.Handle(f.Fd()))
+	if err != nil {
+		return "", err
+	}
+	return filepath.Base(full), nil
+}
+
+// openedFinalPath is openedEntryName's FULL-PATH counterpart (round 11
+// MUST-FIX, the reparse-point escape): the basename that openedEntryName
+// reports is satisfied by any identically named file reachable through a
+// reparse point planted between the pre-open probe and the open, so the
+// authoritative proof must compare the descriptor's complete normalized
+// path — parent directory included — against the scripts directory's own
+// final path (dirFinalPath) plus the exact basename, not the basename
+// alone.
+func openedFinalPath(f *os.File) (string, error) {
+	return finalPathOfHandle(windows.Handle(f.Fd()))
+}
+
+// dirFinalPath opens scriptsDir once — FILE_FLAG_BACKUP_SEMANTICS is
+// required to obtain a handle on a directory at all — and returns its own
+// normalized final path together with a func that releases the handle. This
+// is the baseline openedFinalPath is compared against (round 11 MUST-FIX):
+// confirming a candidate's PARENT is this exact directory, not merely that
+// its basename matches, is what a retargeted reparse point on an ancestor
+// cannot spoof.
+func dirFinalPath(scriptsDir string) (path string, closeHandle func(), err error) {
+	p, err := windows.UTF16PtrFromString(scriptsDir)
+	if err != nil {
+		return "", nil, err
+	}
+	h, err := windows.CreateFile(p,
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0)
+	if err != nil {
+		return "", nil, err
+	}
+	fp, err := finalPathOfHandle(h)
+	if err != nil {
+		_ = windows.CloseHandle(h)
+		return "", nil, err
+	}
+	return fp, func() { _ = windows.CloseHandle(h) }, nil
+}
+
+// finalPathOfHandle is the shared GetFinalPathNameByHandle call: the
+// normalized path NTFS actually resolved a handle to, unlike the path that
+// was requested, which merely echoes what was asked for.
+func finalPathOfHandle(h windows.Handle) (string, error) {
 	flags := uint32(winFileNameNormalized | winVolumeNameDOS)
 
 	buf := make([]uint16, 1024)
@@ -66,5 +117,5 @@ func openedEntryName(f *os.File) (string, error) {
 			return "", err
 		}
 	}
-	return filepath.Base(windows.UTF16ToString(buf[:n])), nil
+	return windows.UTF16ToString(buf[:n]), nil
 }

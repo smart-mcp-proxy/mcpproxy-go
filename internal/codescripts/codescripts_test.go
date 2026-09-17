@@ -937,5 +937,16 @@ func TestResolveScoped_MissCostIsIndependentOfDirectorySize(t *testing.T) {
 	assert.Equal(t, 0, emptyReadDirs)
 	assert.Equal(t, 0, crowdedReadDirs, "ten thousand entries must not be enumerated on a scoped caller's behalf")
 	assert.Equal(t, emptyLstats, crowdedLstats, "the number of path probes is independent of the directory's contents")
-	assert.Greater(t, crowdedLstats, 0, "the candidate paths are probed directly")
+	// On darwin/Windows the candidate probe itself is a path-based Lstat, so
+	// it shows up here directly. On Linux/BSD (round 11 MUST-FIX) the probe
+	// runs through a retained directory descriptor instead (fstatatEntry,
+	// dirfd_other.go) and never touches this package's lstat var — a MISS
+	// like "gamma" here never even reaches that probe (its name is not a key
+	// of the index), so there is nothing to assert here beyond the
+	// equal-cost check above; storednames_other_test.go pins the Linux/BSD
+	// primitive counts, including the non-zero fstatat a HIT performs, on
+	// its own terms.
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		assert.Greater(t, crowdedLstats, 0, "the candidate paths are probed directly")
+	}
 }
