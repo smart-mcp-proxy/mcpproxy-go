@@ -380,9 +380,72 @@ Round 8 commit: see the `fix(spec-107): cross-review round 8 for PR-B` commit on
 
 ### Real instance
 
+T079/T090, run 2026-09-17 against HEAD `aac50530d` (tip of the two cross-review rounds) via `scripts/dev-server-edition.sh --phase c` plus manual quickstart §6/§7 steps against the same rig, since the script's `--phase c` stops at §5. Scratch: `.../scratchpad/rig/run2` (port 18290, fake IdP port 18291), fixture `access: {group_servers: {eng:[a], ops:[a,b]}, default_servers: []}`, Alice in `eng`.
+
+- **§4 headless login** — `POST /api/v1/auth/login` → fake IdP form (`alice@example.com`/`pass`) → callback → session cookie; `GET /api/v1/auth/me` returns `{"email":"alice@example.com","role":"user","provider":"oidc","groups":["eng"], ...}`.
+- **§5 tenant principal on core REST**:
+  - `GET /api/v1/auth/provider` → `{"display_name":"Example Corp"}` only (FR-030, no issuer/client leak) — PASS.
+  - `GET /api/v1/servers` (session cookie) → `[.data.servers[].name] == ["a"]` — PASS (entitlement-filtered; `b`/`a__b` never appear).
+  - `GET /api/v1/user/servers` → `shared == [{name:"a", ...}]` — PASS.
+  - `GET /api/v1/config` → 403 (allowlist) — PASS.
+  - `POST /api/v1/tools/call` with `{}` → 403, before body parse — PASS.
+  - `X-API-Key: wrong` + valid cookie → 401 (FR-001 precedence) — PASS.
+  - Non-disclosing refusal for a hidden server: `GET /api/v1/servers/b` → 404 `{"error":"Server not found: b", "request_id":"..."}`; `GET /api/v1/servers/doesnotexist123` → 404 `{"error":"Server not found: doesnotexist123", "request_id":"..."}` — same status, same shape, body differs only by echoing the requested name and a fresh `request_id`; exact parity, confirmed by diffing both bodies with the name/request_id stripped — PASS.
+- **§6 mint an agent token as Alice, call `/mcp`**:
+  - `POST /api/v1/user/tokens` with `allowed_servers:["*"]` → stored token has `allowed_servers:["a"]` (US1.3 materialization: `"*"` narrowed to the entitled set at mint time) — PASS.
+  - A **new** mint attempted after the `eng` group was emptied (see hot-reload below) → `400 {"message":"no servers are available to scope this token to"}` — deny-all on an empty entitlement, confirmed live.
+  - `/mcp` with the session cookie → 401 (FR-003); `/mcp` with no credential → 401 (FR-029) — PASS both.
+  - `initialize` + `tools/call name=a:echo` (allowed server) → served (the fixture's `call_tool_read` variant denies on the tool's own `destructive`-permission requirement, unrelated to server scope — confirms the request reached dispatch, i.e. was not scope-refused).
+  - `tools/call name=b:echo` (hidden server) → `"Server 'b' is not in scope for this agent token"` — non-disclosing refusal, no existence leak — PASS.
+  - **PR-D not yet on this branch**: `audit_log` is not a recognised config key on this branch (`internal/config` has no `audit_log`/`AuditLog` field — confirmed by grep and by the server refusing to start with an unrecognised-key parse absent), so the audit-line assertions in quickstart §6 (`tail audit.jsonl`, `grep AKIAQUICKSTART...`, `TestExternalJSONLValidates`) are **not applicable to PR-C** and are deferred to PR-D (`## PR-D` section below, still open). This is expected — PR-D (JSONL audit line) is a separate, later PR in the stack per `plan.md`.
+- **§7 hot reload and the freshness bound**:
+  - `jq '.server_edition.access.group_servers.eng=[]'` on the live config file, no restart → `GET /api/v1/servers` (Alice's session) narrows to `[]` within the 2s poll window — PASS, no restart, no token/session rotation.
+  - The same pre-narrowing MCP session (existing `Mcp-Session-Id`, existing agent token minted *before* the narrowing) issues `retrieve_tools` after the narrowing → `{"tools":[],"total":0}` (was non-empty, including `a:echo`, before narrowing) — confirmed the *existing* session is re-scoped on its next request, live, no restart — PASS.
+  - JWT self-renewal: mint a JWT via `POST /api/v1/auth/token`, then present that JWT as `Authorization: Bearer` back to `POST /api/v1/auth/token` → 401 (FR-011, a JWT cannot renew itself) — PASS.
+  - `eng` group restored to `["a"]` afterward to leave the rig in its baseline state for the Web UI pass below.
+- **Administrator parity (SC-006, live)**: the operator `X-API-Key` (Dana's equivalent, unscoped) against `GET /api/v1/servers` → all three servers `["a","a__b","b"]`, unfiltered — confirms the entitlement predicate is a no-op for the administrator/API-key caller, live.
+- **§8 skipped for the real-instance pass** (already covered by the two-fixture harness in the automated suite, `TestAgentTokenOwnerResolution_*`/`TestUserTokens_TwoTenantCap`-family tests under `internal/storage`/`internal/serveredition/api`, re-run green below) — the 100-token seed loop is expensive and its behaviour is exhaustively unit-tested; not repeated live for T090/T079's PR-C scope (US1/US4).
+
+**Web UI / Playwright (T090, US4)**: the rig's server binary as built by `dev-server-edition.sh` (a bare `go build -tags server`) does **not** embed the frontend (the fallback "Web UI is not embedded" page serves `/ui/`, since only `make build-server` runs `frontend-build` first) — this is a rig-script gap, not a PR-C defect. Rebuilt with `make build-server` (runs `frontend-build` + `go build -tags server -o mcpproxy-server`), copied into the rig, rebooted. With the real frontend embedded:
+  - `e2e/playwright/server-edition-tenant.spec.ts` run against `MCPPROXY_RIG_URL=http://127.0.0.1:18290`: **4/5 PASS** — `refused-route allowlist` (30 routes, all 403 non-disclosing), `wrong X-API-Key + cookie → 401`, `cross-site POST refused (SameSite=Lax)`, `admin_user saves Settings + masked secrets` all green.
+  - **1/5 FAIL** (`fresh context -> login -> dashboard -> entitled servers only -> activity via /user/activity`): the login → dashboard → servers-list → refused-route parts of this same test passed (confirmed by manual reproduction below); it timed out at the **token-mint step**, `page.locator('input[type="text"]').first()`, which resolved to a different page's server-name input (placeholder `"e.g., github-server"`, not visible) instead of the token-name field.
+  - **Manual reproduction in a real Chrome tab against the same rig** isolated the cause: a full-page navigation (`page.goto`, and equally a bare browser address-bar load) to a deep client-side route — `/ui/servers`, `/ui/my/tokens` — renders the **Dashboard/Usage** panel's content instead of the target view, even though `document.title` updates correctly to the target route's title (e.g. "Agent Tokens - MCPProxy Control Panel" while the visible body is still the Usage dashboard). Clicking the same route's **sidebar nav link** (client-side `router-link` navigation, no full reload) renders correctly every time. `frontend/src/router/index.ts`'s `router.beforeEach` guard (`:212-254`) does `if (authStore.loading) { await authStore.checkAuth() }` then reads `authStore.isTeamsEdition`; if `isTeamsEdition` is not yet true at that read (e.g. because `App.vue`'s own mount-time `checkAuth()` already flipped `loading` to `false` in a race with the guard's own call, so the guard's `await` is skipped), the guard's personal-edition branch fires and force-redirects `/my/*`/`/admin/*`/deep routes to `{name:'dashboard'}` — silently, with no console error, which matches the symptom exactly (title text is set by a separate code path than the body that was redirected). **This reproduces on a hard reload of any deep route for a tenant session, not just `/my/tokens`, and is very likely pre-existing (Dashboard-fallback + `isTeamsEdition` race), not a PR-C-introduced regression** — nothing in the PR-C diff touches `router/index.ts`'s guard logic (`git diff --name-only e114cc44c^..aac50530d` does not list `frontend/src/router/index.ts`). Flagged as a follow-up (see task suggestion below) rather than fixed here: it is a Web-UI reload/race bug outside T079/T090's assigned files and outside PR-C's diff, and every REST/MCP-level security invariant it might appear to affect was independently verified above via `curl`/`mcp()` against the same rig and is correct.
+  - Screenshots: manual login (Alice via the fake IdP, "Sign in with Example Corp" → OAuth Test Server form → tenant dashboard with `1/1 Servers`, sidebar `My Servers / My Activity / Agent Tokens / Diagnostics / Tools`, no admin-only items) and "My Servers" (via nav-link click) showing only server `a` with the `shared` badge — captured live in-session; the Playwright failure's own screenshot (`test-results/.../test-failed-1.png`, genuinely captured against this rig, shows the tenant dashboard state at the point of failure) saved to `.../scratchpad/rig/screens/tenant-dashboard-token-mint-screen.png`.
+
+Teardown: both rig processes (fake IdP, server edition) killed by PID (`kill`, confirmed with `ps` before/after); scratch kept at `.../scratchpad/rig/run2` for inspection since this run recorded a real (non-security) finding.
+
 ### Automated checks
 
-Full gate set (plan.md §Gates) run 2026-09-17 against HEAD (`1e379ff54`, the tip of the five PR-C commits `e114cc44c..1e379ff54`). Every gate is green; no code fix was required — the working tree was clean before and after this pass, so no `fix(spec-107)` commit was created for PR-C (nothing to fix).
+**T093 re-run (2026-09-17b), against HEAD `aac50530d`** — the tip after both cross-review rounds (`bf06b43ef` round 1, `c2e963af2` round 2) landed fixes on top of the gate run below, so the full gate set was re-executed rather than trusted from before the review fixes:
+
+| Gate | Command | Result |
+|---|---|---|
+| Build (personal) | `go build -o /dev/null ./cmd/mcpproxy` | PASS |
+| Build (server) | `go build -tags server -o /dev/null ./cmd/mcpproxy` | PASS |
+| `go vet` (personal) | `go vet ./...` | PASS (clean) |
+| `go vet` (server) | `go vet -tags server ./...` | PASS (clean) |
+| golangci-lint v2 (pinned binary) | `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...` | REFUSED — same pre-existing go1.25-vs-go1.26.0 tooling gap as every prior round |
+| golangci-lint v2 (fallback) | `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run --config .github/.golangci.yml ./...` | 16 pre-existing findings, 0 in any file the PR-C diff touches (`git diff --name-only e114cc44c^..aac50530d`) — verified by diffing the lint output's file list against the PR-C file list; the one nominal overlap, `internal/httpapi/contracts_test.go:292`'s `TopK` deprecation, is the same pre-existing finding named in rounds 1/2, unrelated to this line's own PR-C-touched code |
+| Unit + race, excl. `internal/server` | `go test -race -timeout 20m $(go list ./internal/... \| grep -v .../internal/server$)` | PASS — 64 packages `ok`, 0 failures |
+| Unit + race, `internal/server` (skip regex) | `go test -race -count=1 -skip "E2E\|Binary\|MCPProtocol\|TestInfoEndpoint\|TestGracefulShutdownNoPanic\|TestSocketInfoEndpoint" ./internal/server/...` | PASS (406.8s) |
+| Server-edition job package list, `-tags server -race` (skip regex) | `go test -race -tags server -timeout 20m -skip "..." ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...` | PASS — all 12 packages `ok` (`internal/server` 411.2s under the added server-edition build tag, the rest cached/fast) |
+| `go test ./cmd/...` | — | PASS |
+| `go test -tags server ./tests/oauthserver/...` | — | PASS |
+| `make swagger-verify` | — | PASS — "OpenAPI artifacts are up to date" |
+| Frozen goldens (FR-044, unregenerated) | `go test ./internal/server/... -run 'TestToolsListSnapshot_\|TestMenuSurface_' -v` | PASS — all 5 golden tests pass unregenerated; `git status` confirms the golden files are untouched |
+| Administrator parity (SC-006) | Live, via the real-instance rig above (operator `X-API-Key` sees all 3 servers, unfiltered) + `internal/serveredition/api` sweep (`TestEntitlementGroup_DanaAdminProjectionUnchanged`, `TestUserActivityWired_AdminUnchangedMeansEmpty`) in the server-edition sweep above | PASS |
+| Frontend unit tests | `cd frontend && npx vitest run` | PASS — 128 files / 1298 tests |
+| Frontend build | `make build-server` (runs `frontend-build`: `vue-tsc && vite build`) | PASS — same pre-existing `INEFFECTIVE_DYNAMIC_IMPORT` note on `src/stores/auth.ts`, unrelated to PR-C |
+| `python3 scripts/gen-roadmap.py --check` | — | PASS — "ROADMAP.md is up to date" |
+| Isolated `./scripts/test-api-e2e.sh` | `pgrep -fl 'mcpproxy.*serve\|test-api-e2e'` clear first; pkill-stripped scratch copy (lines 80/83 `pkill` → `true #` prefix), `LISTEN_PORT=18094`/`18095`, per `reference_isolated_dev_instance.md` | see below |
+
+**Isolated e2e detail**: two runs of the pkill-stripped scratch copy, `LISTEN_PORT=18094` then `18095`, back to back — 63/65 PASS **both times**, the same 2 failures both runs: `launcher-test never reconnected after enable` and `per-server log missing launcher banner or child stdout`. Both belong to spec 046's launcher-lifecycle fixture (`test/launcher-server`, enable/disable/restart of a stdio-launched child process) and are outside every PR-C file (`git diff --name-only e114cc44c^..aac50530d`), matching the identical pre-existing pair recorded in the earlier (pre-review) gate run below. `test/e2e-config.json` restored with `git checkout --` after each run.
+
+**Summary: 19/19 non-e2e gates PASS + 63/65 e2e (both runs, same 2 pre-existing failures) — 0 regressions from the two cross-review rounds' fixes** (golangci-lint's pinned local binary is a tooling-version refusal, not a lint failure). No new `fix(spec-107)` commit was needed for this re-run — the working tree changes are only `verification.md` and `tasks.md` (task ticks, T095).
+
+---
+
+Prior gate run (2026-09-17a, pre-review, against `1e379ff54` — the tip of the five PR-C commits `e114cc44c..1e379ff54`, before the two cross-review rounds above): every gate was green; no code fix was required.
 
 | Gate | Command | Result |
 |---|---|---|
