@@ -48,6 +48,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -59,6 +60,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
 )
 
@@ -141,6 +143,22 @@ func newGroupScopeFixture(t *testing.T, serverNames []string) *groupScopeFixture
 	srv, err := NewServer(cfg, zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	// Background initialization (StartBackgroundInitialization, triggered by
+	// NewServer above) runs LoadConfiguredServers asynchronously: it re-saves
+	// every cfg.Servers entry to storage (config is the source of truth) —
+	// including the DISABLED shared-server placeholders registered above —
+	// and only flips the runtime to PhaseReady once that sync completes. The
+	// direct writes below (SaveUpstreamServer/AddServerConfig with
+	// Enabled:true) race that sync: if LoadConfiguredServers's save for a
+	// server lands AFTER this fixture's own save, it silently reverts the
+	// server back to Enabled:false in storage, which makes isExactToolCallable
+	// (mcp.go) drop its indexed tool from every later retrieve_tools call —
+	// exactly the flake this wait closes. Same pattern as
+	// newLogsTestServer (server_logs_missing_file_test.go).
+	require.Eventually(t, func() bool {
+		return srv.runtime.CurrentPhase() == runtime.PhaseReady
+	}, 10*time.Second, 10*time.Millisecond, "fixture: runtime never reached PhaseReady")
 
 	// Wire the REAL production multi-user OAuth setup (normally run inside
 	// startCustomHTTPServer, server.go:2911) against the same StorageManager
