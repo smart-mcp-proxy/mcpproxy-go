@@ -595,6 +595,12 @@ func ntCreateRelative(dirHandle windows.Handle, name string, access, options uin
 		0, 0)
 	if ntErr != nil {
 		if st, ok := ntErr.(windows.NTStatus); ok {
+			// FILE_NON_DIRECTORY_FILE refuses a directory at the kernel:
+			// that is the non-regular answer the Unix Fstat check gives,
+			// not an unreadable entry.
+			if st == windows.STATUS_FILE_IS_A_DIRECTORY {
+				return 0, errNonRegular
+			}
 			return 0, st.Errno()
 		}
 		return 0, ntErr

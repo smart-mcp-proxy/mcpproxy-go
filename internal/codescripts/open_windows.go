@@ -3,6 +3,7 @@
 package codescripts
 
 import (
+	"errors"
 	"os"
 
 	"golang.org/x/sys/windows"
@@ -51,6 +52,18 @@ func openScriptFile(path string) (*os.File, error) {
 		windows.FILE_FLAG_OPEN_REPARSE_POINT,
 		0)
 	if err != nil {
+		// Without FILE_FLAG_BACKUP_SEMANTICS (deliberately not requested: it
+		// would let a process holding SeBackupPrivilege read past ACLs, which
+		// os.Open never did) CreateFile refuses a DIRECTORY with
+		// ERROR_ACCESS_DENIED before any attribute is visible. The
+		// administrator's pre-105 answer for a directory candidate is
+		// non-regular, not unreadable (SC-005), so classify that one case
+		// from the attributes.
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			if attrs, aerr := windows.GetFileAttributes(p); aerr == nil && attrs&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+				return nil, errNonRegular
+			}
+		}
 		return nil, err
 	}
 	var fi windows.ByHandleFileInformation
