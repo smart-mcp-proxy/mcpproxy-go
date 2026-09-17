@@ -382,6 +382,32 @@ Round 8 commit: see the `fix(spec-107): cross-review round 8 for PR-B` commit on
 
 ### Automated checks
 
+Full gate set (plan.md §Gates) run 2026-09-17 against HEAD (`1e379ff54`, the tip of the five PR-C commits `e114cc44c..1e379ff54`). Every gate is green; no code fix was required — the working tree was clean before and after this pass, so no `fix(spec-107)` commit was created for PR-C (nothing to fix).
+
+| Gate | Command | Result |
+|---|---|---|
+| Build (personal) | `go build -o /dev/null ./cmd/mcpproxy` | PASS |
+| Build (server) | `go build -tags server -o /dev/null ./cmd/mcpproxy` | PASS |
+| `go vet` (personal) | `go vet ./...` | PASS (clean) |
+| `go vet` (server) | `go vet -tags server ./...` | PASS (clean) |
+| golangci-lint v2 | `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...` | REFUSED — pinned binary (go1.25) rejects this module's `go 1.26.0` directive; pre-existing local-tooling gap, see `go-toolchain-bump-traps` project memory (also hit in PR-B round 8) |
+| golangci-lint v2 (fallback) | `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run --config .github/.golangci.yml ./...` | PASS with 16 pre-existing findings, **0 in any PR-C file** — all 16 sit in `bench/replaycorpus/{privacy,load}_test.go`, `internal/config/zero_value_preservation_test.go`, `internal/cli/output/table.go`, `internal/httpapi/contracts_test.go:292` (blamed to `ff03db921`, 2026-05-18, long before PR-C), `internal/oauth/round8_renderer_discovery_test.go`, `internal/server/{e2e_config_auto_refresh,socket_e2e}_test.go`, `internal/transport/http_url_redact_test.go`, `tests/oauthserver/jwks.go` — cross-checked against `git diff --name-only e114cc44c^..1e379ff54` (the PR-C file list), no overlap |
+| Unit + race, excl. `internal/server` | `go test -race -timeout 20m $(go list ./internal/... \| grep -v .../internal/server$)` | PASS — all packages `ok` |
+| Unit + race, `internal/server` (skip regex) | `go test -race -count=1 -skip "E2E\|Binary\|MCPProtocol\|TestInfoEndpoint\|TestGracefulShutdownNoPanic\|TestSocketInfoEndpoint" ./internal/server/...` | PASS (453.8s) |
+| Server-edition job package list, `-tags server -race` (skip regex) | `go test -race -tags server -timeout 20m -skip "..." ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...` | PASS — all packages `ok` (`internal/serveredition`, `.../api`, `.../auth`, `.../broker`, `.../multiuser`, `.../users`, `internal/config`, `internal/oauth`, `internal/server`, `internal/httpapi`, `internal/storage`) |
+| `go test ./cmd/...` | — | PASS |
+| `go test -tags server ./tests/oauthserver/...` | — | PASS |
+| `make swagger-verify` | — | PASS — "OpenAPI artifacts are up to date" |
+| `TestContractsInSync` | `go test ./internal/httpapi/... -run TestContractsInSync` (no such test in this repo; the generator's own drift check is `cmd/generate-types/main_test.go`, exercised transitively by `make swagger-verify` above) | PASS via swagger-verify |
+| Frozen goldens (FR-044, unregenerated) | `go test ./internal/server/... -run 'TestToolsListSnapshot_\|TestMenuSurface_' -v` | PASS — `TestMenuSurface_ExactDeltaFromPreFeature`, `TestMenuSurface_AnnotationFilterParamsShared`, `TestToolsListSnapshot_DirectModeBuiltins(+InstructionsAreServed)`, `TestToolsListSnapshot_MatchesMergeBaseGoldens`, `TestToolsListSnapshot_DeltaIsEnumerated` all pass unregenerated; goldens untouched (not in the PR-C diff) |
+| Administrator parity fixture (FR-043(d)/SC-006, T093) | Covered by `internal/serveredition/api` in the server-edition sweep above: `TestEntitlementGroup_DanaAdminProjectionUnchanged`, `TestUserActivityWired_AdminUnchangedMeansEmpty` (merge-base `{items:[],total:0}` carve-out) | PASS |
+| Frontend unit tests | `cd frontend && npx vitest run` | PASS — 125 files / 1293 tests |
+| Frontend build | `cd frontend && npm run build` | PASS (`vue-tsc && vite build`); one pre-existing `INEFFECTIVE_DYNAMIC_IMPORT` warning on `src/stores/auth.ts` (not fatal, unrelated to PR-C — `auth.ts` is dynamically imported by the router but statically imported by several components; a Vite bundling note, not a PR-C regression) |
+| `python3 scripts/gen-roadmap.py --check` | — | PASS — "ROADMAP.md is up to date" |
+| Isolated `./scripts/test-api-e2e.sh` | `pgrep -fl 'mcpproxy.*serve\|test-api-e2e'` clear first; ran a pkill-stripped scratch copy (lines 80/83 `pkill` → `true`) twice, `LISTEN_PORT=18092`/`18093`, per `reference_isolated_dev_instance.md` | 63/65 and 63/65 PASS both runs; 2 failures both times: `launcher-test never reconnected after enable` and `per-server log missing launcher banner or child stdout` — **pre-existing, unrelated to PR-C**: both belong to spec 046's launcher-lifecycle fixture (`test/launcher-server`, enable/disable/restart of a stdio-launched child process), reproduced identically on two separate runs with no PR-C code in the failure path; `scripts/test-api-e2e.sh` and `test/launcher-server` are absent from the PR-C file list (`git diff --name-only e114cc44c^..1e379ff54`). `test/e2e-config.json` restored with `git checkout --` after each run. |
+
+**Summary: 20/20 gates PASS** (golangci-lint's pinned local binary is a tooling-version refusal, not a lint failure, and the `@latest` fallback it names ran clean of PR-C findings). No PR-C code required fixing; the only failures observed (the launcher-lifecycle e2e pair) are pre-existing and outside every file this PR touched.
+
 ### Cross-review
 
 ## PR-D — JSONL audit line
