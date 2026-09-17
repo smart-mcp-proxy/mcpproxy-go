@@ -110,10 +110,17 @@ func NewStartupError(exitCode int, message string) *StartupError {
 //     honoured on this transport; err is always a *StartupError. The caller
 //     must not construct a sink.
 //
-// The personal edition always resolves to {Enabled:false}: audit_log is a
-// server-edition-build feature, keyed on the build tag (isServerEditionBuild),
-// not on the server_edition.enabled feature flag - the audit funnels compile
-// into every server-edition binary regardless of whether SSO is turned on.
+// Only the per-edition DEFAULT differs (FR-014: "Defaults differ by
+// edition, the code does not"): with no `audit_log` block, the personal
+// edition resolves to {Enabled:false} (isServerEditionBuild, keyed on the
+// build tag, not on the server_edition.enabled feature flag — the audit
+// funnels compile into every server-edition binary regardless of whether
+// SSO is turned on) and the server edition to its own stdout/stdio default
+// below. An EXPLICIT block is resolved identically on both editions from
+// this point on — "an explicit value always wins" is not a server-edition-
+// only promise (round-2 cross-review finding, PR-D: this used to return
+// {Enabled:false} unconditionally for every personal build, silently
+// dropping an explicit `audit_log: {enabled: true, ...}`).
 func EffectiveAuditLog(cfg *Config, transport string) (resolved ResolvedAuditLog, warning string, err error) {
 	resolved = ResolvedAuditLog{
 		MaxSizeMB:  DefaultAuditLogMaxSizeMB,
@@ -122,16 +129,18 @@ func EffectiveAuditLog(cfg *Config, transport string) (resolved ResolvedAuditLog
 		Compress:   true,
 	}
 
-	if !isServerEditionBuild {
-		return resolved, "", nil
-	}
-
 	var block *AuditLogConfig
 	if cfg != nil {
 		block = cfg.AuditLog
 	}
 
 	if block == nil {
+		if !isServerEditionBuild {
+			// Personal-edition default: audit_log off, no sink, no startup
+			// line. An explicit block is handled below, identically on both
+			// editions — only this absent-block default is edition-keyed.
+			return resolved, "", nil
+		}
 		// Per-edition default for an absent block: stdout:true on HTTP.
 		if transport == TransportStdio {
 			// Only the default is suppressed (FR-014); an explicit value

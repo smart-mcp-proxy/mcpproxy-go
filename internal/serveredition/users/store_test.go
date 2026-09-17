@@ -284,6 +284,44 @@ func TestSetUserDisabled_DoesNotLoseConcurrentLoginWrite(t *testing.T) {
 	}
 }
 
+// TestUpdateUserLogin_RefusalOutcomeCarriesTheRecord is a round-2
+// cross-review regression (PR-D): ErrUserDisabled/ErrSubjectMismatch used to
+// discard the LoginOutcome entirely (`return LoginOutcome{}, err`), forcing
+// the caller (oauth_handler.go) to re-look the user up by email in a SEPARATE
+// read after this transaction returned — a window a concurrent DeleteUser
+// could race, silently losing the auth_event line's required `user_id`. The
+// outcome must now carry the exact record the refusal was decided from, from
+// the same transaction, so no second read — and no race — is needed.
+func TestUpdateUserLogin_RefusalOutcomeCarriesTheRecord(t *testing.T) {
+	t.Run("ErrUserDisabled", func(t *testing.T) {
+		store := setupTestStore(t)
+		user := NewUser("disabled@example.com", "Disabled", "google", "sub-disabled")
+		require.NoError(t, store.CreateUser(user))
+		_, _, err := store.SetUserDisabled(user.ID, true)
+		require.NoError(t, err)
+
+		outcome, err := store.UpdateUserLogin(context.Background(), LoginClaims{
+			Email: "disabled@example.com", Provider: "google", Subject: "sub-disabled",
+		})
+		require.ErrorIs(t, err, ErrUserDisabled)
+		require.NotNil(t, outcome.User, "the refused-against record must be returned alongside the error")
+		assert.Equal(t, user.ID, outcome.User.ID)
+	})
+
+	t.Run("ErrSubjectMismatch", func(t *testing.T) {
+		store := setupTestStore(t)
+		user := NewUser("mismatch@example.com", "Mismatch", "google", "sub-original")
+		require.NoError(t, store.CreateUser(user))
+
+		outcome, err := store.UpdateUserLogin(context.Background(), LoginClaims{
+			Email: "mismatch@example.com", Provider: "google", Subject: "sub-DIFFERENT",
+		})
+		require.ErrorIs(t, err, ErrSubjectMismatch)
+		require.NotNil(t, outcome.User, "the refused-against record must be returned alongside the error")
+		assert.Equal(t, user.ID, outcome.User.ID)
+	})
+}
+
 func TestUserStore_DeleteUser_RemovesEmailIndex(t *testing.T) {
 	store := setupTestStore(t)
 

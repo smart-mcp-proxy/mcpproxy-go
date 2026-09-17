@@ -43,6 +43,20 @@ func newBatchStub() *batchStub {
 func (s *batchStub) CallTool(ctx context.Context, serverName, toolName string, args map[string]interface{}) (interface{}, error) {
 	key := serverName + ":" + toolName
 
+	// A well-behaved ToolCaller — the real upstreamToolCaller bridge, or a
+	// managed client's transport — checks an already-done context and
+	// returns promptly without doing real upstream work, exactly what a
+	// realistic stub must simulate here: round-2 cross-review, PR-D
+	// (dispatchBatchElement no longer short-circuits on ctx.Err() itself,
+	// so this stub is the one place that now has to).
+	if err := ctx.Err(); err != nil {
+		s.mu.Lock()
+		s.dispatched++
+		s.cancelled++
+		s.mu.Unlock()
+		return nil, err
+	}
+
 	s.mu.Lock()
 	s.dispatched++
 	s.inFlight++
@@ -853,6 +867,14 @@ func TestBatchCancellationStillRecordsEveryElement(t *testing.T) {
 		}
 	})
 
+	// "cancelled before dispatch" is a round-2 cross-review regression (PR-D):
+	// dispatchBatchElement used to short-circuit on ctx.Err() BEFORE calling
+	// the ToolCaller at all, skipping the real bridge that installs the
+	// audit.Attempt and writes the paired `authz allow` + `tool_call` lines
+	// for every accepted (pre-dispatch-allowed) element. It must now always
+	// reach the ToolCaller — exactly like the lone call_tool() path already
+	// does — and rely on the caller itself to bail promptly on a cancelled
+	// context (batchStub.CallTool does, simulating the real bridge).
 	t.Run("cancelled before dispatch", func(t *testing.T) {
 		stub := newBatchStub()
 
@@ -876,8 +898,10 @@ func TestBatchCancellationStillRecordsEveryElement(t *testing.T) {
 				t.Errorf("slot %d code = %q, want %q", i, gotCode, string(ErrorCodeUpstreamError))
 			}
 		}
-		if dispatched, _, _ := stub.stats(); dispatched != 0 {
-			t.Errorf("dispatched %d calls under a cancelled context", dispatched)
+		if dispatched, _, cancelled := stub.stats(); dispatched != 2 || cancelled != 2 {
+			t.Errorf("dispatched=%d cancelled=%d, want 2 and 2 — every accepted element must still reach the ToolCaller "+
+				"(the real bridge that writes its audit lines), even though the context is already done",
+				dispatched, cancelled)
 		}
 		if len(ec.ToolCalls) != 2 {
 			t.Errorf("recorded %d tool calls, want 2", len(ec.ToolCalls))

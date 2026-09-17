@@ -1146,14 +1146,15 @@ fi
 # ===========================================
 # Audit Log Tests (Spec 107 PR-D, T113)
 # ===========================================
-# NOTE ON "personal instance" (discrepancy vs. tasks.md T113 / task brief):
-# internal/config/audit_log.go:96-118 (EffectiveAuditLog) hard-gates
-# audit_log behind the isServerEditionBuild build tag — a personal-edition
-# binary always resolves audit_log to {Enabled:false} regardless of config
-# (internal/config/audit_log_config_personal_test.go pins this). So this
-# sub-test runs its OWN server-edition instance (./mcpproxy-server) rather
-# than reusing the personal $MCPPROXY_BINARY instance started above; the
-# personal-instance run above is otherwise unchanged.
+# NOTE ON "personal instance": EffectiveAuditLog's absent-block DEFAULT is
+# edition-keyed (personal: disabled; server: stdout on HTTP) per FR-014, but
+# an explicit audit_log block is honoured identically on both editions
+# (internal/config/audit_log_config_personal_test.go pins both halves). This
+# sub-test still runs its OWN server-edition instance (./mcpproxy-server)
+# rather than reusing the personal $MCPPROXY_BINARY instance started above,
+# simply because the server binary is already built for the OAuth/SSO
+# suites above and this sub-test needs no personal-edition-specific
+# coverage of its own; the personal-instance run above is unchanged.
 echo ""
 echo -e "${YELLOW}Testing audit_log sink (Spec 107 PR-D)...${NC}"
 echo ""

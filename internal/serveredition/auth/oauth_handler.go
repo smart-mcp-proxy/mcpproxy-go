@@ -338,6 +338,17 @@ func (h *OAuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	codeChallenge := base64.RawURLEncoding.EncodeToString(challengeHash[:])
 
 	redirectURI, rejected := sanitizeLoginRedirect(r.URL.Query().Get("redirect_uri"))
+	if rejected {
+		// Round-2 cross-review finding, PR-D: this is a non-terminal fact of
+		// THIS attempt (the caller's redirect_uri was replaced), established
+		// before the pending state — and any later failure — exists. A
+		// discovery/provider failure below (attempt.fail) used to report the
+		// terminal result with no flags at all, because the callback's own
+		// `attempt.flag(FlagRedirectRejected)` (from pending.RedirectRejected)
+		// never runs on this pre-redirect failure path — the pending state
+		// this attempt never reached storing.
+		attempt.flag(FlagRedirectRejected)
+	}
 	callbackURL := h.CallbackURL(r)
 
 	// Build the authorization URL before allocating the pending state, so a
@@ -465,12 +476,25 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, users.ErrSubjectMismatch):
-			if u := h.lookupUser(userInfo.Email); u != nil {
+			// outcome.User is the record UpdateUserLogin refused against, from
+			// the SAME transaction the decision was made in — round-2
+			// cross-review finding, PR-D: a separate re-lookup by email AFTER
+			// the transaction returned could race a concurrent DeleteUser (or
+			// a transient read failure), losing the schema-required `user_id`
+			// on this auth_event line and silently downgrading it to
+			// anonymous. Fall back to the racy re-lookup only if the store
+			// implementation did not populate it (belt and suspenders; the
+			// in-process UserStore always does).
+			if u := outcome.User; u != nil {
+				attempt.setUserID(u.ID, h.roleFor(u.Email), u.Provider)
+			} else if u := h.lookupUser(userInfo.Email); u != nil {
 				attempt.setUserID(u.ID, h.roleFor(u.Email), u.Provider)
 			}
 			attempt.refuse(w, LoginSubjectMismatch, "provider subject differs from the stored binding")
 		case errors.Is(err, users.ErrUserDisabled):
-			if u := h.lookupUser(userInfo.Email); u != nil {
+			if u := outcome.User; u != nil {
+				attempt.setUserID(u.ID, h.roleFor(u.Email), u.Provider)
+			} else if u := h.lookupUser(userInfo.Email); u != nil {
 				attempt.setUserID(u.ID, h.roleFor(u.Email), u.Provider)
 			}
 			attempt.refuse(w, LoginUserDisabled, "user record disabled")

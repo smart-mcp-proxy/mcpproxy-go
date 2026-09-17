@@ -168,6 +168,32 @@ func TestAuditFunnel_AllowedDispatchWritesAuthzAllowThenToolCall(t *testing.T) {
 	}
 }
 
+// TestAuditFunnel_OperationReflectsTargetTierNotCallerVariant is a round-2
+// cross-review regression (PR-D): the attempt is stamped with the caller's
+// chosen door (call_tool_read) before the target tool's actual
+// annotation-derived tier (write) is known. Both the authz and tool_call
+// lines must record the tool's real tier, not the variant the caller
+// happened to dial — an admin can call any variant against any tool, so
+// `call_tool_read` against a write-tiered tool must not misrepresent the
+// dispatch as read.
+func TestAuditFunnel_OperationReflectsTargetTierNotCallerVariant(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+	sink := &recordingAuditSink{}
+	proxy.auditSink = sink
+	up := startCountingUpstream(t, proxy, rt, "a", writeSpec("erase"))
+
+	result, err := proxy.handleCallToolVariant(adminCtx(), auditCallToolRequest("a:erase", nil), contracts.ToolVariantRead)
+	require.NoError(t, err)
+	require.False(t, result.IsError, "control: an admin may dispatch any variant against any tool")
+	require.Equal(t, int64(1), up.count.Load())
+
+	lines := sink.decoded(t)
+	require.Len(t, lines, 2)
+	assert.Equal(t, "call_tool_read", lines[0]["surface"], "surface still records the caller's chosen door")
+	assert.Equal(t, "write", lines[0]["operation"], "operation records the TARGET tool's real tier")
+	assert.Equal(t, "write", lines[1]["operation"])
+}
+
 func TestAuditFunnel_ScopeRefusalRecordsHiddenServerUndisclosed(t *testing.T) {
 	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}, {Name: "b", Enabled: true}})
 	sink := &recordingAuditSink{}
@@ -250,6 +276,39 @@ func TestAuditFunnel_IntentInvalidIsAuthzDenyWithUnknownPair(t *testing.T) {
 	require.Len(t, lines, 1)
 	assert.Equal(t, "deny", lines[0]["decision"])
 	assert.Equal(t, "intent_rejected", lines[0]["reason"])
+	assert.Equal(t, true, lines[0]["disclosed"])
+}
+
+// TestAuditFunnel_MalformedArgsJSONIsAuthzDenyNotAllow is a round-2
+// cross-review regression (PR-D): malformed args_json has always
+// short-circuited before the profile/token-scope/target-tier/quarantine/
+// callability gates (pre-Spec-107 behaviour, unchanged here), so recording
+// it as `authz allow` + `tool_call error` — round-1's fix — would let an
+// out-of-scope or quarantined target submitted with malformed args_json be
+// recorded as authorized even though authorization never ran. It must be
+// exactly one `authz deny` line and no `tool_call` line, even for a target
+// scoped out of the caller's token (proving the deny is not a disguised
+// allow that merely happens to match this particular target's scope).
+func TestAuditFunnel_MalformedArgsJSONIsAuthzDenyNotAllow(t *testing.T) {
+	proxy, _ := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}, {Name: "b", Enabled: true}})
+	sink := &recordingAuditSink{}
+	proxy.auditSink = sink
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]interface{}{
+		"name":      "b:erase", // out of fullTierAgentOn("a")'s scope
+		"args_json": "{not valid json",
+	}
+	result, err := proxy.handleCallToolVariant(fullTierAgentOn("a"), req, contracts.ToolVariantRead)
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "Invalid args_json format")
+
+	lines := sink.decoded(t)
+	require.Len(t, lines, 1, "malformed args_json before any gate is exactly one authz line and no tool_call")
+	assert.Equal(t, "authz", lines[0]["event"])
+	assert.Equal(t, "deny", lines[0]["decision"])
+	assert.Equal(t, "other", lines[0]["reason"])
 	assert.Equal(t, true, lines[0]["disclosed"])
 }
 

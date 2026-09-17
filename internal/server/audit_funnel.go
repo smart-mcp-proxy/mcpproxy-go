@@ -421,6 +421,28 @@ func auditNoteErrorClass(ctx context.Context, class audit.ErrorClass) {
 	d.mu.Unlock()
 }
 
+// auditSetOperation corrects the attempt's `operation` once the target
+// tool's actual annotation-derived tier is known (round-2 cross-review
+// finding, PR-D): installAuditAttempt runs before the identity gate that
+// resolves the tool's annotations, so it can only stamp the CALLER-chosen
+// door (contracts.ToolVariantToOperationType[toolVariant]) — for a scoped
+// caller that is explicitly NOT what gets authorized (mcp.go:
+// "the variant is the CALLER's choice ... Authorize against the TARGET
+// tool's annotation-derived tier"), so a call_tool_read against a write
+// tool would otherwise record operation:"read" on both the authz and
+// tool_call lines despite being authorized, and refused, against write. A
+// no-op without an attempt (nil sink / already-dispatched line: this is
+// always called before the first line of an attempt is written).
+func auditSetOperation(ctx context.Context, op string) {
+	d := auditDispatchFromContext(ctx)
+	if d == nil || op == "" {
+		return
+	}
+	d.mu.Lock()
+	d.attempt.Operation = op
+	d.mu.Unlock()
+}
+
 // auditToolCallShed writes the tool_call line for a concurrency-limiter shed
 // (`outcome:rejected`, reason limiter_queue_full|limiter_queue_timeout). The
 // shed happens inside the managed client after every gate (research.md D6),

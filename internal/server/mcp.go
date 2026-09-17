@@ -2385,13 +2385,20 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	}
 
 	// Arguments were parsed above the first gate (audit attempt); a parse
-	// failure is answered here, where it always was. The attempt already
-	// exists on ctx, so this still owes the count invariant its pair: an
-	// `authz allow` (every gate above it passed) plus the `tool_call error`
-	// that reports the refusal (round-1 cross-review finding, PR-D) — never
-	// a silent return that leaves the dispatch unaudited.
+	// failure is answered here, where it always was (pre-Spec-107 behaviour:
+	// this has always short-circuited before the profile/token-scope/
+	// target-tier/quarantine/callability gates below, and that response
+	// order is unchanged here). The attempt already exists on ctx, so this
+	// still owes the count invariant its line — but as an `authz deny`, not
+	// an `authz allow` + `tool_call error`: those gates never ran, so FR-012
+	// ("allow after last gate") forbids recording this dispatch as
+	// authorized (round-2 cross-review finding, PR-D — round-1's fix wrote
+	// `allow` here, which would let an out-of-scope or quarantined target
+	// submitted with malformed args_json be recorded as authorized even
+	// though authorization was never completed). "other" is the correct
+	// reason: malformed args_json is not one of FR-012's named gates.
 	if argsErrMsg != "" {
-		p.auditToolCall(ctx, "error", "", audit.ErrorClassValidation, 0, nil, nil)
+		p.auditAuthz(ctx, "deny", telemetry.BlockReasonOther)
 		return mcp.NewToolResultError(argsErrMsg), nil
 	}
 
@@ -2445,6 +2452,19 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	gate := p.evaluateExactToolGate(serverName, actualToolName)
 	identity := gate.identity
 	annotations, annotationsFound := identity.Annotations, identity.Found
+	// Spec 107 (round-2 cross-review finding, PR-D): the attempt was stamped
+	// with the caller-chosen variant's operation before this point, the
+	// earliest the target's real tier is known; correct it now so every
+	// line from here on (including a deny below) reports the tool's actual
+	// tier rather than the door the caller happened to use. Only when the
+	// tool's annotations were actually found: tierForAnnotations' !found
+	// fallback is "destructive" for AUTHORIZATION purposes (deny by
+	// default), which would misrepresent an unresolved/nonexistent target
+	// as maximally risky on the audit line rather than simply "unknown to
+	// the proxy" — the variant remains the best available signal there.
+	if annotationsFound {
+		auditSetOperation(ctx, tierForAnnotations(annotations, annotationsFound))
+	}
 	if p.dispatchGatePause != nil {
 		p.dispatchGatePause(serverName, actualToolName)
 	}

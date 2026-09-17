@@ -150,10 +150,18 @@ func encodeCanonicalString(buf *bytes.Buffer, s string) {
 	buf.WriteByte('"')
 }
 
-// formatNumberJCS is ES6 Number::toString per RFC 8785: shortest
-// round-tripping digits, "0" for +/-0, exponent without zero-padding
-// (strconv emits "1e+05"; JCS wants "1e+5"). NaN/Inf cannot occur from a
-// decoded args map.
+// formatNumberJCS is ES6 Number::toString per RFC 8785 (ECMA-262
+// Number::toString, "Number Prototype Object" toString algorithm):
+// shortest round-tripping decimal digits, "0" for +/-0, fixed-point
+// notation while the decimal-point position n satisfies -6 < n <= 21, and
+// exponential notation (mantissa "e" sign exponent, unpadded — JCS wants
+// "1e+5", not Go's "1e+05") outside that range. Go's `%g` verb switches to
+// exponential far earlier than ES6 (e.g. 0.000001 -> "1e-06" instead of
+// "0.000001", and 1e20 -> "1e+20" instead of the 21-digit fixed form), so
+// this cannot be strconv.FormatFloat(f, 'g', ...) reformatted — it derives
+// the shortest round-tripping digit string via the 'e' verb and then
+// applies the ECMA-262 placement rule directly. NaN/Inf cannot occur from
+// a decoded args map (canonicalizeArgs refuses them before this is called).
 func formatNumberJCS(f float64) string {
 	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return "null"
@@ -162,17 +170,51 @@ func formatNumberJCS(f float64) string {
 		return "0"
 	}
 
-	mantissa, exp, hasExp := strings.Cut(strconv.FormatFloat(f, 'g', -1, 64), "e")
-	if !hasExp {
-		return mantissa
+	neg := f < 0
+	if neg {
+		f = -f
 	}
 
-	sign, digits := "+", exp
-	if digits[0] == '+' || digits[0] == '-' {
-		sign, digits = string(digits[0]), digits[1:]
+	// strconv's 'e' verb with precision -1 gives the shortest decimal that
+	// round-trips to f, as "d.ddd...e±XX" (or "de±XX" for a single digit).
+	mantissa, expPart, _ := strings.Cut(strconv.FormatFloat(f, 'e', -1, 64), "e")
+	digits := strings.Replace(mantissa, ".", "", 1)
+	exp, err := strconv.Atoi(expPart)
+	if err != nil {
+		// Unreachable: strconv always emits a well-formed exponent for a
+		// finite, non-zero float in 'e' format.
+		panic(fmt.Sprintf("audit: malformed exponent from strconv: %q", expPart))
 	}
-	if digits = strings.TrimLeft(digits, "0"); digits == "" {
-		digits = "0"
+	k := len(digits)
+	n := exp + 1 // ECMA-262: digits * 10^(n-k) == f, k <= n derived from exp.
+
+	var out string
+	switch {
+	case k <= n && n <= 21:
+		// Integer-valued magnitude: digits followed by (n-k) trailing zeros.
+		out = digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		// Decimal point falls within the digit string.
+		out = digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		// Leading "0." plus -n zeros before the digits.
+		out = "0." + strings.Repeat("0", -n) + digits
+	default:
+		// Exponential notation, unpadded exponent (JCS: "1e+5" not "1e+05").
+		m := digits
+		if k > 1 {
+			m = digits[:1] + "." + digits[1:]
+		}
+		e := n - 1
+		sign := "+"
+		if e < 0 {
+			sign = "-"
+			e = -e
+		}
+		out = m + "e" + sign + strconv.Itoa(e)
 	}
-	return mantissa + "e" + sign + digits
+	if neg {
+		out = "-" + out
+	}
+	return out
 }

@@ -1,0 +1,12 @@
+{
+  "description": "ECMA-262 Number::toString fixed/exponential boundary (round-2 cross-review, PR-D): Go's `%g` formatter switches to exponential far earlier than ES6 does, so values just inside and outside the -6 < n <= 21 fixed-notation window must be exercised directly against the RFC 8785 rule, not against Go's own %g threshold.",
+  "variants": [
+    {
+      "just_above_zero": 0.000001,
+      "negative_just_above_zero": -0.000001,
+      "just_below_exponential": 1e-7,
+      "large_fixed": 1e20,
+      "just_above_large_fixed": 1e21
+    }
+  ]
+}

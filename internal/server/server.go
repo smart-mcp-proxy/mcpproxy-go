@@ -45,6 +45,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 	"github.com/smart-mcp-proxy/mcpproxy-go/web"
 )
@@ -3767,8 +3768,55 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 // ReplayToolCall replays a tool call with modified arguments. ctx is the
 // caller's request context: it governs the concurrency-limiter queue wait as
 // well as the upstream call (spec 093 FR-005).
+//
+// Spec 107 FR-012 (round-2 cross-review finding, PR-D): replay reaches a
+// (server, tool) pair like every other upstream dispatch path, so it MUST
+// produce exactly one `authz` line and, unless shed by the limiter, one
+// `tool_call` line — this endpoint previously wrote neither, because
+// runtime.ReplayToolCall calls the managed client directly and has no
+// access to the server's audit sink. The lookup here is best-effort and
+// duplicates runtime.ReplayToolCall's own (a second, cheap read of the same
+// stored record): if it fails, the call is delegated unaudited exactly as
+// before — runtime.ReplayToolCall's own not-found error is authoritative,
+// and no `(server, tool)` pair was ever resolved to audit.
 func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
-	return s.runtime.ReplayToolCall(ctx, id, arguments)
+	original, lookupErr := s.runtime.GetToolCallByID(id)
+	if lookupErr != nil || original == nil || s.mcpProxy == nil {
+		return s.runtime.ReplayToolCall(ctx, id, arguments)
+	}
+
+	callArgs := arguments
+	if callArgs == nil {
+		callArgs = original.Arguments
+	}
+
+	ctx = s.mcpProxy.installAuditAttempt(ctx, auditAttemptSpec{
+		RequestID: mintCorrelationID(original.ServerName, original.ToolName),
+		Server:    original.ServerName,
+		Tool:      original.ToolName,
+		Surface:   auditSurfaceREST,
+		Args:      callArgs,
+	})
+
+	startTime := time.Now()
+	result, err := s.runtime.ReplayToolCall(ctx, id, arguments)
+	durationMs := time.Since(startTime).Milliseconds()
+
+	var limitErr *limiter.LimitError
+	switch {
+	case errors.As(err, &limitErr) &&
+		(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout):
+		// Spec 093 FR-011: a shed never reached the upstream, so it is the
+		// tool_call half of the authz-allow pair, never a second authz —
+		// mirrors auditToolCallShed's use at every other dispatch site.
+		s.mcpProxy.auditToolCallShed(ctx, limitErr, durationMs)
+	case err != nil:
+		s.mcpProxy.auditToolCall(ctx, "error", "", audit.ErrorClassOf(err), durationMs, nil, nil)
+	default:
+		s.mcpProxy.auditToolCall(ctx, "success", "", "", durationMs, nil, nil)
+	}
+
+	return result, err
 }
 
 // GetToolCallsBySession retrieves tool calls filtered by session ID. scope

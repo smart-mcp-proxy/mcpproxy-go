@@ -348,8 +348,14 @@ func referenceEncodeString(buf *bytes.Buffer, s string) {
 
 // referenceFormatNumber implements ES6 Number::toString for a float64 as
 // RFC 8785 requires: shortest round-tripping decimal digits, "0" for
-// +/-0, and an exponent written without the zero-padding Go's strconv
-// applies (Go: "1e+05"; ES6/JCS: "1e+5").
+// +/-0, fixed-point notation while the decimal-point position n satisfies
+// -6 < n <= 21 (ECMA-262 Number::toString), and exponential notation with
+// an unpadded exponent (Go: "1e+05"; ES6/JCS: "1e+5") outside that range.
+// This intentionally derives the ECMA-262 placement rule directly from the
+// shortest round-tripping digit string (via strconv's 'e' verb) rather
+// than reformatting Go's `%g` output, which switches to exponential far
+// earlier than ES6 does (round-2 cross-review finding, PR-D: `%g` gave
+// "1e-06" for 0.000001 and "1e+20" for 1e20, both wrong per ES6).
 func referenceFormatNumber(f float64) string {
 	if math.IsNaN(f) || math.IsInf(f, 0) {
 		panic(fmt.Sprintf("referenceFormatNumber: non-finite value %v (cannot occur from encoding/json input)", f))
@@ -358,24 +364,45 @@ func referenceFormatNumber(f float64) string {
 		return "0"
 	}
 
-	s := strconv.FormatFloat(f, 'g', -1, 64)
-	mantissa, exp, hasExp := strings.Cut(s, "e")
-	if !hasExp {
-		return mantissa
+	neg := f < 0
+	if neg {
+		f = -f
 	}
 
-	sign := "+"
-	digits := exp
-	switch digits[0] {
-	case '+', '-':
-		sign = string(digits[0])
-		digits = digits[1:]
+	mantissa, expPart, _ := strings.Cut(strconv.FormatFloat(f, 'e', -1, 64), "e")
+	digits := strings.Replace(mantissa, ".", "", 1)
+	exp, err := strconv.Atoi(expPart)
+	if err != nil {
+		panic(fmt.Sprintf("referenceFormatNumber: malformed exponent %q", expPart))
 	}
-	digits = strings.TrimLeft(digits, "0")
-	if digits == "" {
-		digits = "0"
+	k := len(digits)
+	n := exp + 1
+
+	var out string
+	switch {
+	case k <= n && n <= 21:
+		out = digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		out = digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		out = "0." + strings.Repeat("0", -n) + digits
+	default:
+		m := digits
+		if k > 1 {
+			m = digits[:1] + "." + digits[1:]
+		}
+		e := n - 1
+		sign := "+"
+		if e < 0 {
+			sign = "-"
+			e = -e
+		}
+		out = m + "e" + sign + strconv.Itoa(e)
 	}
-	return mantissa + "e" + sign + digits
+	if neg {
+		out = "-" + out
+	}
+	return out
 }
 
 // TestReferenceFormatNumber_KnownValues pins the reference helper itself
@@ -392,6 +419,13 @@ func TestReferenceFormatNumber_KnownValues(t *testing.T) {
 		{4.5, "4.5"},
 		{0.002, "0.002"},
 		{100, "100"},
+		// ECMA-262 fixed/exponential boundary cases (round-2 cross-review,
+		// PR-D): Go's `%g` gives "1e-06"/"1e+20" for these, ES6 does not.
+		{0.000001, "0.000001"},
+		{-0.000001, "-0.000001"},
+		{1e20, "100000000000000000000"},
+		{1e21, "1e+21"},
+		{1e-7, "1e-7"},
 	}
 	for _, tc := range cases {
 		if got := referenceFormatNumber(tc.in); got != tc.want {

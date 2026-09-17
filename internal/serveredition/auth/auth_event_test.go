@@ -312,6 +312,31 @@ func TestAuthEvent_StageDependentIdentityAcrossEveryReason(t *testing.T) {
 		assertValidatesAgainstSchema(t, line)
 	})
 
+	// "discovery_failed carries redirect_rejected" is a round-2 cross-review
+	// regression (PR-D): the redirect_uri is sanitised in HandleLogin BEFORE
+	// the pending state is stored, so a failure before that point (discovery,
+	// provider errors) used to report its terminal result with NO flags at
+	// all — the callback's own `attempt.flag(FlagRedirectRejected)` (read
+	// from the stored pending state) never runs on this pre-redirect
+	// failure path, because no pending state was ever stored for it.
+	t.Run("discovery_failed carries redirect_rejected when the caller's redirect_uri was rejected", func(t *testing.T) {
+		rig := newOIDCRefusalRig(t, oauthserver.ErrorMode{DiscoveryHTTPTokenEndpoint: true}, nil)
+		sink := attachAuditCapture(rig)
+		const rid = "req-ae-discovery-failed-redirect-rejected"
+
+		req := withRequestID(httptest.NewRequest(http.MethodGet,
+			"http://"+refusalHost+"/api/v1/auth/login?redirect_uri=https://evil.example.com/", nil), rid)
+		w := httptest.NewRecorder()
+		rig.handler.HandleLogin(w, req)
+		require.NotEqual(t, http.StatusFound, w.Code, "control: this redirect_uri must not itself cause a redirect")
+
+		line := sink.exactlyOne(t)
+		assertCommonAuthEventFields(t, line, rid, "login", "discovery_failed")
+		flags, _ := line["flags"].([]interface{})
+		assert.Contains(t, flags, "redirect_rejected", "flags = %v", line["flags"])
+		assertValidatesAgainstSchema(t, line)
+	})
+
 	t.Run("subject_mismatch: session caller + user_id, never email_hash", func(t *testing.T) {
 		rig := newOIDCRefusalRig(t, oauthserver.ErrorMode{}, nil)
 		u := users.NewUser(refusalUser, "Alice Example", "oidc", "someone-else-sub")

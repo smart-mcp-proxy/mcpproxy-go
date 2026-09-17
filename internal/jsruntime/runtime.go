@@ -951,15 +951,23 @@ func dispatchBatchElement(ctx context.Context, caller ToolCaller, req batchReque
 	}
 
 	// A cancelled execution still owes every accepted element a slot and a
-	// record, so the remaining queue is drained into cancellation errors
-	// instead of being dispatched.
-	if err := ctx.Err(); err != nil {
-		record.DurationMs = time.Since(record.StartTime).Milliseconds()
-		record.ErrorDetail = err.Error()
-		return errorEnvelope(ErrorCodeUpstreamError,
-			fmt.Sprintf("execution ended before the call was dispatched: %v", err)), record
-	}
-
+	// record — and, for a real ToolCaller, exactly the paired `authz allow`
+	// + `tool_call` audit lines every other allowed dispatch gets (round-2
+	// cross-review finding, PR-D): this pre-dispatch pass already made the
+	// allow decision (runBatch's gate loop, above), and the ONLY place that
+	// decision is written to the audit sink is inside the real ToolCaller's
+	// dispatch bridge (upstreamToolCaller.callTool installs the
+	// audit.Attempt and writes `authz allow` before ever touching the
+	// network). Short-circuiting here on ctx.Err() — as this used to, to
+	// avoid a doomed dispatch — skipped that bridge entirely, so an element
+	// whose worker reached the queue after the execution context expired
+	// produced ZERO audit lines, violating `#authz == #pre-dispatch
+	// decisions` under load. This always calls dispatchTool, exactly like
+	// the lone call_tool() path (makeCallToolFunction) already does with no
+	// such short-circuit: a well-behaved ToolCaller (the real
+	// upstreamToolCaller, or a managed client's transport) itself checks
+	// ctx and returns promptly without doing real upstream work — the
+	// audit-attempt bridge simply has to run first.
 	result, err := dispatchTool(ctx, caller, req.server, req.tool, req.args, req.gate)
 	record.DurationMs = time.Since(record.StartTime).Milliseconds()
 

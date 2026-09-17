@@ -423,6 +423,34 @@ func TestRedaction_ClientNameSentinelMasked(t *testing.T) {
 	validateAgainstPublishedSchema(t, line)
 }
 
+// TestRedaction_ClientNameLengthCapped is a round-2 cross-review regression
+// (PR-D): an unbounded, entirely caller-asserted MCP `initialize` clientInfo
+// value must not reach the sink unbounded — it can otherwise exceed the
+// rotating-file writer's per-record limit and cause the required authz line
+// to be silently dropped, or force unbounded audit-log disk growth.
+func TestRedaction_ClientNameLengthCapped(t *testing.T) {
+	sum, n := argsHash(`{}`)
+	att := baseAttempt()
+	att.ArgsSHA256, att.ArgsBytes = sum, n
+	att.ClientName = strings.Repeat("x", 10000)
+
+	line, err := audit.NewAuthz(audit.AuthzInput{
+		Ts: fixedTS, Attempt: att, Caller: agentCaller(),
+		Decision: "allow", Reason: "none",
+	})
+	if err != nil {
+		t.Fatalf("NewAuthz: %v", err)
+	}
+	raw, err := line.JSON()
+	if err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	if len(raw) > 2000 {
+		t.Fatalf("line with a 10000-rune client.name serialised to %d bytes — length cap not applied", len(raw))
+	}
+	validateAgainstPublishedSchema(t, line)
+}
+
 func TestRedaction_TokenNameSentinelMasked(t *testing.T) {
 	sum, n := argsHash(`{}`)
 	att := baseAttempt()
