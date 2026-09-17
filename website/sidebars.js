@@ -150,6 +150,7 @@ const sidebars = {
       link: { type: 'generated-index', slug: '/operations' },
       items: [
         'operations/reverse-proxy',
+        'operations/deploying-for-a-team',
         'operations/shutdown-behavior',
         'features/observability',
         'logging',

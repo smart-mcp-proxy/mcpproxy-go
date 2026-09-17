@@ -534,6 +534,114 @@ Round 3 commit: `4cdc7661d` (`fix(spec-107): cross-review round 3 for PR-C`). Ro
 
 ## PR-D — JSONL audit line
 
+### Docs-site follow-up (T111)
+
+`docs/features/audit-log.md` (schema tables, vocabularies, versioning rule,
+crash window, Docker/stdout and stdio recipes, vendor-neutral log-shipper
+example, back-link from `docs/features/sensitive-data-detection.md`'s SIEM
+section) and `docs/configuration/config-file.md`'s `audit_log` keys are both
+written and published in this repo's `docs/` tree (the source of truth per
+`project_docs_site_pipeline` memory — `website/docs` is a generated mirror,
+never edited directly). **Not done in this task, left as a follow-up**: this
+repo's own `website/sidebars.js` needs a `features/audit-log` entry (alongside
+its existing `features/activity-log` and `features/sensitive-data-detection`
+rows) for the new page to appear in the docs-site navigation, and the docs
+publish pipeline's include-allowlist (`website/prepare-docs.sh` /
+`docs-site-pipeline` memory) needs the page added so the mirror step picks it
+up — otherwise the file exists in `docs/` and renders via the repo's own
+Docusaurus site path, but is orphaned from the published nav and may be
+overwritten as "not on the allowlist" by the next mirror run. Do this as a
+follow-up edit to `website/sidebars.js` and the allowlist, not as part of
+T111's content work. `docs/features/audit-log.md` currently links to the
+checked-in schema (`docs/schemas/audit-line-v1.schema.json`) via its GitHub
+blob URL rather than a `docs.mcpproxy.app` static path, since there is no
+existing `website/` wiring that copies `docs/schemas/**` into `static/`; the
+same follow-up should add that copy step and switch the link to the published
+URL once it exists.
+
+### T115 — SC-009 benchmark
+
+**Discrepancy from the task text** (rule 9): T115 cites "`bench/` (existing
+harness)" and "Spec 105 FR-011 method... merge-base vs branch" as if a runnable
+harness already existed. It does not. Spec 105's `scope_latency_test.go` /
+`mintAgentToken` / `scope_http_matrix_test.go` harness described in
+`specs/105-agent-scope-hardening/research.md` D10 and `tasks.md` T078/H1 was
+never implemented anywhere in this branch's history — no such files exist, and
+`bench/` (checked: every `*.go` under `bench/`) has no test that drives
+`retrieve_tools`/`call_tool_read`/`tools/list` through the MCP surface at all;
+it benchmarks token/payload shapes (`armrun.go`, `respcost.go`, `reportv2.go`),
+not wall-clock latency. The only reusable piece is the 527-tool LiveMCPBench
+fixture itself and its loader, `loadDeferredLargeCorpus` in
+`internal/server/mcp_routing_deferred_tokens_test.go:139-176`, reading
+`specs/083-discovery-profiler/datasets/livemcptool_snapshot/tools.json`
+(527 tools, verified via `require.Len(t, corpus.Tools, 527, ...)`).
+
+**Second discrepancy**: a literal merge-base-checkout comparison (research
+D10's actual CI design: run the same test file at merge-base `107-c-group-
+allowlist` and at HEAD) is not meaningful for this PR — `audit_log` and
+`proxy.auditSink` do not exist at all at merge-base (PR-D adds the whole
+package), so a test that sets `proxy.auditSink` cannot even compile there.
+What SC-009 actually needs measured — "with `audit_log` enabled... regresses
+by no more than 10% or 5 ms [vs without it]" — is the audit feature's OWN
+marginal cost, which a same-tree A/B (audit_log off vs on, identical binary,
+identical corpus, identical process) isolates directly and more precisely
+than a cross-commit diff would (no compiler/toolchain/host drift between the
+two arms). Assumption made per the Must-Do zero-interruption rule; documented
+here rather than asked about.
+
+**Harness built** (test-only, not committed — see below):
+`internal/server/sc009_bench_test.go`, `TestSC009_AuditLogLatencyRegression`.
+Seeds the full 527-tool snapshot across its 70 real upstream servers into a
+`createTestProxyWithRuntime` proxy via the existing `seedTargetTierServer`
+StateView/approval-record pattern, plus `proxy.index.IndexTool` per tool so
+`retrieve_tools` BM25 search is real. Builds two such proxies — one with
+`proxy.auditSink` left nil (audit off) and one with a real
+`audit.NewFileSink` writing to a tmp file (audit on) — then for each, 20
+warm-ups + 200 timed calls (per Spec 105 FR-011's method) of:
+- `call_tool_read` (`proxy.handleCallToolVariant`, administrator context via
+  `auth.AdminContext()`) against a real seeded tool — dispatch fails fast
+  ("no client") since no real upstream process is connected, which is fine:
+  this isolates the pre-dispatch authz+tool_call audit-funnel overhead T115
+  is actually about, not upstream I/O.
+- `retrieve_tools` (`proxy.handleRetrieveTools`), administrator context and a
+  scoped-tenant context (`AllowedServers` = 1 of the 70 servers,
+  `PermRead` only).
+- `tools/list` (`proxy.server.HandleMessage`, real JSON-RPC, administrator
+  context) — in retrieve-tools routing mode (this branch's default) this
+  method returns the built-in tool set (`retrieve_tools`, `call_tool_*`,
+  etc.), not a 527-tool listing; the direct-mode surface (which would list
+  all 527) is a materially different code path from the one call_tool_read /
+  retrieve_tools exercise and was out of scope to stand up a second time
+  here. Noted, not silently substituted.
+
+**Results** (macOS dev host, `go test ./internal/server/ -run
+TestSC009_AuditLogLatencyRegression -count=1`, two independent runs, ~41s
+each):
+
+| operation | audit OFF p95 | audit ON p95 | delta | SC-009 bound | verdict |
+|---|---|---|---|---|---|
+| call_tool_read (admin) | run1 205µs / run2 251µs | run1 344µs / run2 389µs | +0.14ms both runs | max(10%, 5ms) = 5ms | **PASS** (well within 5ms; the reported +55-67% is entirely inside sub-millisecond noise) |
+| retrieve_tools (admin) | run1 2.071ms / run2 2.099ms | run1 1.974ms / run2 2.050ms | -0.10ms / -0.05ms (audit ON measured faster) | 5ms | **PASS** |
+| tools/list (admin) | run1 4.6µs / run2 4.8µs | run1 11.7µs / run2 4.7µs | +0.01ms / ~0ms | 5ms | **PASS** (audit fires no line on tools/list at all — expected near-zero delta; run1's 152% swing is µs-scale scheduler noise) |
+| retrieve_tools scoped vs admin | off: -1.34ms / -1.42ms; on: -1.25ms / -1.33ms | scoped is FASTER than admin in every arm | bound 20ms | **PASS** |
+
+**SC-009 overall: PASS** for all three named operations and the scoped-vs-
+admin `retrieve_tools` bound, on the same-tree audit-on/audit-off measurement
+substituted for the (infeasible, pre-existing-code-required) merge-base
+comparison. p50s were computed but not tabulated (all sub-millisecond,
+p95-dominated by the same noise floor as above; `t.Logf` output in the raw
+run captured both). No token/USD figures were reported by this benchmark
+(`feedback_quote_usd_with_tokens` — n/a, latency-only).
+
+**Bench file disposition**: `internal/server/sc009_bench_test.go` was written
+to run this measurement, verified to compile and pass twice, and then
+**deleted** before finishing — HARD RULE 4 says do not commit unless the task
+says so, and T115's deliverable is the recorded numbers in this file, not a
+permanent new bench file; `git status` is clean of it. Re-derivable from this
+section's description if a permanent CI-gated version is wanted later (would
+belong with a real `.github/workflows/*-latency.yml` job, which is out of
+T115's scope as written).
+
 ### Real instance
 
 ### Automated checks

@@ -91,6 +91,12 @@ cleanup() {
     # Clean up test results
     rm -f "$TEST_RESULTS_FILE"
 
+    # T113: the script overwrites the tracked test/e2e-config.json as scratch
+    # (fresh copy from the template + port substitution, and the audit_log
+    # sub-test below adds its own scratch config next to it) — restore the
+    # tracked file so the repo is left clean after every run, pass or fail.
+    git checkout -- "$CONFIG_FILE" 2>/dev/null || true
+
     echo "Cleanup complete"
 }
 
@@ -1134,6 +1140,239 @@ if echo "$RESPONSE" | grep -q "list\|watch\|show\|summary\|export"; then
 else
     log_fail "CLI: activity --help"
     echo "Response: $RESPONSE"
+fi
+
+
+# ===========================================
+# Audit Log Tests (Spec 107 PR-D, T113)
+# ===========================================
+# NOTE ON "personal instance" (discrepancy vs. tasks.md T113 / task brief):
+# internal/config/audit_log.go:96-118 (EffectiveAuditLog) hard-gates
+# audit_log behind the isServerEditionBuild build tag — a personal-edition
+# binary always resolves audit_log to {Enabled:false} regardless of config
+# (internal/config/audit_log_config_personal_test.go pins this). So this
+# sub-test runs its OWN server-edition instance (./mcpproxy-server) rather
+# than reusing the personal $MCPPROXY_BINARY instance started above; the
+# personal-instance run above is otherwise unchanged.
+echo ""
+echo -e "${YELLOW}Testing audit_log sink (Spec 107 PR-D)...${NC}"
+echo ""
+
+AUDIT_BINARY="./mcpproxy-server"
+AUDIT_SCHEMA="./docs/schemas/audit-line-v1.schema.json"
+AUDIT_PORT="${AUDIT_LISTEN_PORT:-18181}"
+AUDIT_BASE_URL="http://localhost:${AUDIT_PORT}"
+AUDIT_MCP_URL="${AUDIT_BASE_URL}/mcp"
+AUDIT_DATA_DIR="./test-data-audit"
+AUDIT_CONFIG_FILE="${AUDIT_DATA_DIR}/e2e-audit-config.json"
+AUDIT_SERVER_LOG="/tmp/mcpproxy_e2e_audit.log"
+AUDIT_JSONL_DIR="$(mktemp -d -t mcpproxy_e2e_audit)"
+AUDIT_JSONL="${AUDIT_JSONL_DIR}/audit.jsonl"
+AUDIT_API_KEY=""
+AUDIT_PID=""
+AUDIT_MCP_SESSION_ID=""
+
+extract_audit_api_key() {
+    if [ -f "$AUDIT_SERVER_LOG" ]; then
+        AUDIT_API_KEY=$(grep -ao '"api_key": "[^"]*"' "$AUDIT_SERVER_LOG" | sed 's/.*"api_key": "\([^"]*\)".*/\1/' | head -1)
+    fi
+}
+
+wait_for_audit_server() {
+    local attempt=1
+    while [ "$attempt" -le 30 ]; do
+        extract_audit_api_key
+        if [ -n "$AUDIT_API_KEY" ] && curl -s -f --max-time 5 -H "X-API-Key: $AUDIT_API_KEY" "${AUDIT_BASE_URL}/api/v1/servers" > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+wait_for_audit_everything() {
+    local attempt=1
+    local connected
+    while [ "$attempt" -le 30 ]; do
+        connected=$(curl -s --max-time 5 -H "X-API-Key: $AUDIT_API_KEY" "${AUDIT_BASE_URL}/api/v1/servers" 2>/dev/null | jq -r '.data.servers[] | select(.name=="everything") | .connected // false' 2>/dev/null)
+        if [ "$connected" = "true" ]; then
+            sleep 3
+            return 0
+        fi
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+# Initialize an MCP Streamable-HTTP session against the audit instance
+# (pattern from tests/test-quarantine.sh init_mcp_session/mcp_call_file).
+init_audit_mcp_session() {
+    local header_file payload_file
+    header_file=$(mktemp)
+    payload_file=$(mktemp)
+    cat > "$payload_file" <<'JSON'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"audit-e2e-test","version":"1.0.0"},"capabilities":{}}}
+JSON
+    curl -s -X POST "$AUDIT_MCP_URL" -H "Content-Type: application/json" -D "$header_file" -d @"$payload_file" > /dev/null 2>&1
+    AUDIT_MCP_SESSION_ID=$(grep -i "Mcp-Session-Id" "$header_file" | tr -d '\r\n' | sed 's/[^:]*: *//')
+    rm -f "$header_file" "$payload_file"
+}
+
+audit_mcp_call() {
+    local payload_file="$1"
+    curl -s -X POST "$AUDIT_MCP_URL" -H "Content-Type: application/json" -H "Mcp-Session-Id: $AUDIT_MCP_SESSION_ID" -d @"$payload_file" > /dev/null 2>&1
+}
+
+if [ ! -x "$AUDIT_BINARY" ]; then
+    log_test "Audit log: server-edition binary present"
+    log_fail "Audit log: server-edition binary present"
+    echo "Build it first: go build -tags server -o $AUDIT_BINARY ./cmd/mcpproxy"
+else
+    rm -rf "$AUDIT_DATA_DIR"
+    mkdir -p "$AUDIT_DATA_DIR"
+
+    # Scratch config: template's listen/data_dir/audit_log overridden, and
+    # the fixed-port launcher-test fixture dropped (it is owned by the
+    # personal-instance run above and would collide on :39933).
+    jq --arg port ":${AUDIT_PORT}" --arg dir "$AUDIT_DATA_DIR" --arg path "$AUDIT_JSONL" \
+        '.listen = $port | .data_dir = $dir | .mcpServers = [.mcpServers[] | select(.name=="everything")] | .audit_log = {enabled: true, path: $path}' \
+        "$CONFIG_TEMPLATE" > "$AUDIT_CONFIG_FILE"
+
+    "$AUDIT_BINARY" serve --config="$AUDIT_CONFIG_FILE" --log-level=info > "$AUDIT_SERVER_LOG" 2>&1 &
+    AUDIT_PID=$!
+    echo "Started audit-log instance with PID: $AUDIT_PID (port $AUDIT_PORT)"
+
+    if ! wait_for_audit_server; then
+        log_test "Audit log: server-edition instance became ready"
+        log_fail "Audit log: server-edition instance became ready"
+        echo "Server logs:"
+        tail -50 "$AUDIT_SERVER_LOG"
+    elif ! wait_for_audit_everything; then
+        log_test "Audit log: everything server connected on audit instance"
+        log_fail "Audit log: everything server connected on audit instance"
+        tail -50 "$AUDIT_SERVER_LOG"
+    else
+        init_audit_mcp_session
+
+        # One dispatched tool call: one authz allow + one tool_call line.
+        AUDIT_PAYLOAD_CALL=$(mktemp)
+        cat > "$AUDIT_PAYLOAD_CALL" <<'JSON'
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"call_tool_read","arguments":{"name":"everything:echo","args":{"message":"audit e2e"}}}}
+JSON
+        audit_mcp_call "$AUDIT_PAYLOAD_CALL"
+        rm -f "$AUDIT_PAYLOAD_CALL"
+
+        # retrieve_tools: the built-in search tool never gates through
+        # handleCallToolVariant, so it must emit no authz/tool_call line
+        # (contracts/audit-line-events.md "authz — one per pre-dispatch decision").
+        AUDIT_PAYLOAD_SEARCH=$(mktemp)
+        cat > "$AUDIT_PAYLOAD_SEARCH" <<'JSON'
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"retrieve_tools","arguments":{"query":"echo"}}}
+JSON
+        audit_mcp_call "$AUDIT_PAYLOAD_SEARCH"
+        rm -f "$AUDIT_PAYLOAD_SEARCH"
+
+        sleep 1
+
+        log_test "Audit log: sink file exists and is non-empty"
+        if [ -s "$AUDIT_JSONL" ]; then
+            log_pass "Audit log: sink file exists and is non-empty"
+        else
+            log_fail "Audit log: sink file exists and is non-empty"
+        fi
+
+        AUDIT_AUTHZ_COUNT=$(jq -c 'select(.event=="authz" and .server=="everything" and .tool=="echo")' "$AUDIT_JSONL" 2>/dev/null | wc -l | tr -d ' ')
+        AUDIT_TOOLCALL_COUNT=$(jq -c 'select(.event=="tool_call" and .server=="everything" and .tool=="echo")' "$AUDIT_JSONL" 2>/dev/null | wc -l | tr -d ' ')
+        AUDIT_RETRIEVE_COUNT=$(jq -c 'select((.event=="authz" or .event=="tool_call") and .tool=="retrieve_tools")' "$AUDIT_JSONL" 2>/dev/null | wc -l | tr -d ' ')
+
+        log_test "Audit log: exactly one authz line for the fixture tool call"
+        if [ "$AUDIT_AUTHZ_COUNT" = "1" ]; then
+            log_pass "Audit log: exactly one authz line for the fixture tool call"
+        else
+            log_fail "Audit log: exactly one authz line for the fixture tool call"
+            echo "Got: $AUDIT_AUTHZ_COUNT"
+        fi
+
+        log_test "Audit log: exactly one tool_call line for the fixture tool call"
+        if [ "$AUDIT_TOOLCALL_COUNT" = "1" ]; then
+            log_pass "Audit log: exactly one tool_call line for the fixture tool call"
+        else
+            log_fail "Audit log: exactly one tool_call line for the fixture tool call"
+            echo "Got: $AUDIT_TOOLCALL_COUNT"
+        fi
+
+        log_test "Audit log: no authz/tool_call line for retrieve_tools"
+        if [ "$AUDIT_RETRIEVE_COUNT" = "0" ]; then
+            log_pass "Audit log: no authz/tool_call line for retrieve_tools"
+        else
+            log_fail "Audit log: no authz/tool_call line for retrieve_tools"
+            echo "Got: $AUDIT_RETRIEVE_COUNT"
+        fi
+
+        # Schema validation: jq structural checks (required keys/enums) against
+        # docs/schemas/audit-line-v1.schema.json (contracts/audit-line.schema.json
+        # is the binding wire schema; internal/audit/schema_test.go is the
+        # byte-exact producer-strict validator). ajv only if already on PATH.
+        log_test "Audit log: lines validate structurally against docs/schemas/audit-line-v1.schema.json"
+        AUDIT_SCHEMA_OK=true
+        if [ ! -f "$AUDIT_SCHEMA" ]; then
+            AUDIT_SCHEMA_OK=false
+        fi
+        while IFS= read -r audit_line; do
+            [ -z "$audit_line" ] && continue
+            echo "$audit_line" | jq -e '
+                .schema_version == 1
+                and (.event | IN("authz","tool_call","auth_event"))
+                and (.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{9}Z$"))
+                and (.origin | IN("local","socket","remote"))
+                and (.source | IN("mcp","api","internal"))
+                and (.request_id | length > 0)
+                and (.caller.kind | IN("api_key","socket","stdio","anonymous","agent_token","session_user","session_admin","internal"))
+                and (if .event == "authz" then
+                        (.surface | IN("call_tool_read","call_tool_write","call_tool_destructive","direct","code_execution","rest"))
+                        and (.decision | IN("allow","deny"))
+                        and (.args_sha256 | test("^[0-9a-f]{64}$"))
+                        and (.args_bytes | type == "number")
+                     elif .event == "tool_call" then
+                        (.outcome | IN("success","error","blocked","rejected"))
+                        and (.duration_ms | type == "number")
+                     else true end)
+            ' > /dev/null 2>&1 || AUDIT_SCHEMA_OK=false
+        done < "$AUDIT_JSONL"
+        if command -v ajv > /dev/null 2>&1 && [ -f "$AUDIT_SCHEMA" ]; then
+            if ! ajv validate -s "$AUDIT_SCHEMA" -d "$AUDIT_JSONL" --all-errors > /tmp/mcpproxy_e2e_audit_ajv.log 2>&1; then
+                AUDIT_SCHEMA_OK=false
+                echo "ajv output:"
+                cat /tmp/mcpproxy_e2e_audit_ajv.log
+            fi
+        fi
+        if [ "$AUDIT_SCHEMA_OK" = "true" ]; then
+            log_pass "Audit log: lines validate structurally against docs/schemas/audit-line-v1.schema.json"
+        else
+            log_fail "Audit log: lines validate structurally against docs/schemas/audit-line-v1.schema.json"
+            echo "Sink file: $AUDIT_JSONL"
+        fi
+    fi
+
+    # Stop only the audit instance by PID — never a blanket pkill here
+    # (that is cleanup()'s job on script exit, and it would also hit
+    # concurrent sessions' cores; see memory reference_isolated_dev_instance).
+    if [ -n "$AUDIT_PID" ]; then
+        kill "$AUDIT_PID" 2>/dev/null || true
+        AUDIT_WAIT_COUNT=0
+        while [ "$AUDIT_WAIT_COUNT" -lt 10 ]; do
+            kill -0 "$AUDIT_PID" 2>/dev/null || break
+            sleep 1
+            AUDIT_WAIT_COUNT=$((AUDIT_WAIT_COUNT + 1))
+        done
+        if kill -0 "$AUDIT_PID" 2>/dev/null; then
+            kill -9 "$AUDIT_PID" 2>/dev/null || true
+        fi
+    fi
+    rm -rf "$AUDIT_DATA_DIR" "$AUDIT_JSONL_DIR"
+    rm -f "$AUDIT_SERVER_LOG"
 fi
 
 # Cleanup CLI test servers
