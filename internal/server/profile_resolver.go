@@ -171,7 +171,44 @@ func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *pro
 // config here would let a hot reload between the two hand back a payload whose
 // `active_profile` and `servers` disagree (or drop the just-stored selection
 // as stale) — Spec 105 PR D critique round 1.
+//
+// Every tier below that resolves a profile by name (pin, session selection)
+// does it through profileIndexFor(cfg)'s precomputed serverPos/members data
+// (EffectiveServersFor) instead of profileScopeForSlugIn, which rebuilds a
+// fleet-sized "known servers" set on every single call. resolveActiveProfile
+// runs on every admitted scoped READ (retrieve_tools, describe_tool,
+// call_tool_*, code_execution — every consumer of resolveActiveProfile in
+// mcp.go), so that rebuild previously happened once per pinned or
+// session-profiled call, at the fleet's cost, not the pin/session profile's
+// own: identical output, no timing promise broken, at O(profile size)
+// instead (Spec 105 PR D review round 14 MUST-FIX; the wildcard grant here
+// is deliberate — this tier renders the profile's OWN full membership, never
+// intersected with the caller's AllowedServers, exactly as
+// profileScopeForSlugIn always did; a caller-specific view is applied
+// separately downstream, e.g. handleSetProfile's own EffectiveServersFor
+// call and callerVisibleServers' pre-105 equivalent).
 func (p *MCPProxyServer) resolveActiveProfileIn(ctx context.Context, cfg *config.Config) (string, *profile.ProfileScope) {
+	return p.resolveActiveProfileFromIndex(ctx, p.profileIndexFor(cfg))
+}
+
+// resolveActiveProfileFromIndex is resolveActiveProfileIn over an ALREADY
+// resolved (index, snapshot) pair — the seam handleSetProfile uses to
+// finish its own admission and payload rendering on the EXACT SAME pair
+// profileIndexCurrent gave it, rather than resolving cfg's index a second,
+// independent time. Two different lookups of "the index for this cfg" can
+// legitimately disagree: profileIndexCurrent's bare-proxy fallback caches by
+// cfg's pointer identity (TestHandleSetProfile_ScopedRefusalTouchesOnlySlug-
+// AndPin relies on exactly that to reuse a manually warmed index), while a
+// test config a caller mutates IN PLACE between calls (cfg.Profiles = nil to
+// simulate a deleted profile, never replacing the *config.Config pointer —
+// TestSetProfileClearReportsPinnedScope,
+// TestReadCache_DeletedPinnedProfileRevokesCachedAccess) makes that cached
+// index's positions describe a Profiles slice the pointer no longer holds.
+// Resolving the name and rendering its servers from two independently
+// (re-)resolved indices could therefore pair a stale position with the
+// current (shorter) Profiles slice and index out of range; resolving both
+// from the ONE pair the caller already has cannot.
+func (p *MCPProxyServer) resolveActiveProfileFromIndex(ctx context.Context, idx *profileIndex) (string, *profile.ProfileScope) {
 	// 1. Agent-token pin (T3). When present it is authoritative and bounds
 	//    everything below — including the case where the pinned profile has been
 	//    removed from config since the token was minted.
@@ -186,7 +223,7 @@ func (p *MCPProxyServer) resolveActiveProfileIn(ctx context.Context, cfg *config
 	//    pin against an empty server set for the same reason, so the session and
 	//    preflight paths cannot disagree about what a pinned token may see.
 	if pin := profilePinFromContext(ctx); pin != "" {
-		if scope := profileScopeForSlugIn(cfg, pin); scope != nil {
+		if scope := profileScopeFromIndex(idx, pin); scope != nil {
 			return pin, scope
 		}
 		if p.logger != nil {
@@ -206,7 +243,7 @@ func (p *MCPProxyServer) resolveActiveProfileIn(ctx context.Context, cfg *config
 	if p.sessionStore != nil {
 		if sid := sessionIDFromContext(ctx); sid != "" {
 			if name := p.sessionStore.GetActiveProfile(sid); name != "" {
-				if scope := profileScopeForSlugIn(cfg, name); scope != nil {
+				if scope := profileScopeFromIndex(idx, name); scope != nil {
 					return name, scope
 				}
 				// Stored profile vanished from config — drop the stale selection.
@@ -217,4 +254,21 @@ func (p *MCPProxyServer) resolveActiveProfileIn(ctx context.Context, cfg *config
 
 	// 4. No profile in effect.
 	return "", nil
+}
+
+// profileScopeFromIndex builds the ProfileScope for slug's FULL membership
+// (declared servers ∩ configured servers, unintersected with any caller
+// credential — see resolveActiveProfileIn's doc comment) from idx, or nil
+// when idx's snapshot has no such profile. It is profileScopeForSlugIn's
+// O(profile size) counterpart, resolving through the index's precomputed
+// data instead of rebuilding a fleet-sized set on every call.
+func profileScopeFromIndex(idx *profileIndex, slug string) *profile.ProfileScope {
+	if idx == nil || idx.cfg == nil {
+		return nil
+	}
+	candidate := idx.position(slug)
+	if candidate < 0 {
+		return nil
+	}
+	return profile.NewProfileScope(slug, idx.effectiveServersForCandidate(candidate, []string{"*"}))
 }

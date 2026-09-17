@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,7 +15,6 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // buildSetProfileTool constructs the set_profile MCP tool definition (Profiles
@@ -144,8 +143,27 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	// outranks the stored selection; a deleted pin is deny-all) bounded by the
 	// credential — never the stored selection's own servers when something
 	// else governs. Same snapshot as the admission check above.
-	_, effective := p.resolveActiveProfileIn(ctx, cfg)
-	return setProfileResult(slug, callerVisibleServers(ctx, scopeServersIn(cfg, effective)))
+	//
+	// Rendered directly through the index's EffectiveServersFor, never
+	// scopeServersIn/callerVisibleServers (removed): that pair rebuilt a
+	// fleet-sized "known servers" set (profileServersIn → EffectiveServers)
+	// for the effective profile AND, on a cleared/no-profile session, walked
+	// every configured server a second time to apply the credential
+	// (allServerNames + a CanEnumerateServer test per server) — fleet-sized
+	// work on a request already admitted for exactly this caller (Spec 105
+	// PR D review round 14 MUST-FIX). effectiveProfileName == "" renders the
+	// no-profile/cleared-session set; a name no longer present in cfg (a
+	// stale pin) renders empty, matching the deny-all scope it resolved to
+	// — EffectiveServersFor needs only the resolved NAME, never the scope's
+	// own (possibly already caller-filtered, e.g. via a /mcp/p/<slug> URL)
+	// server set, so intersecting it again here with the caller's real
+	// grant is idempotent, not a second, different filter.
+	effectiveProfileName, _ := p.resolveActiveProfileFromIndex(ctx, profiles)
+	var allowed []string
+	if ac := auth.AuthContextFromContext(ctx); ac != nil {
+		allowed = ac.AllowedServers
+	}
+	return setProfileResult(slug, profiles.EffectiveServersFor(effectiveProfileName, allowed))
 }
 
 // profileServersIn renders the pre-105 set_profile server list for a stored
@@ -166,32 +184,6 @@ func profileServersIn(cfg *config.Config, slug string) []string {
 		}
 	}
 	return nil
-}
-
-// scopeServersIn renders a resolved ProfileScope as a deterministic server
-// list: nil scope ⇒ every configured server (config order); otherwise the
-// scope's profile in its declared order filtered by the scope, so the payload
-// carries the order every other EffectiveServers consumer uses rather than
-// map-iteration order. A scope whose profile cfg no longer names (a deleted
-// pin — deny-all — or a URL scope built from an older snapshot) falls back to
-// the scope's own set, sorted.
-func scopeServersIn(cfg *config.Config, scope *profile.ProfileScope) []string {
-	if scope == nil {
-		return allServerNames(cfg)
-	}
-	declared := profileServersIn(cfg, scope.Name)
-	if declared == nil {
-		names := scope.AllowedServerNames()
-		slices.Sort(names)
-		return names
-	}
-	out := make([]string, 0, len(declared))
-	for _, name := range declared {
-		if scope.Allows(name) {
-			out = append(out, name)
-		}
-	}
-	return out
 }
 
 // setProfileResult renders the standard set_profile success payload.
@@ -223,31 +215,6 @@ func allServerNames(cfg *config.Config) []string {
 		}
 	}
 	return names
-}
-
-// callerVisibleServers filters a server list through the caller's credential.
-// set_profile's payload advertises what the session can reach, so a token
-// restricted to server A must never be told about server B — whether the list
-// is "all servers" (cleared selection), a profile's full set, or a pinned
-// profile's scope (Spec 104 FR-016b).
-//
-// The predicate is auth.CanEnumerateServer — the same CanAccessServer rule
-// serverInScope applies to retrieve_tools / describe_tool — so this surface
-// cannot disagree with visibility: admin (API-key / socket / anonymous
-// back-compat) and absent contexts pass everything through untouched; any
-// non-admin context (agent token, server-edition user) keeps only the servers
-// its AllowedServers names, "*" allows all, and an EMPTY list grants nothing.
-func callerVisibleServers(ctx context.Context, servers []string) []string {
-	if !auth.IsScopedCaller(ctx) {
-		return servers
-	}
-	out := make([]string, 0, len(servers))
-	for _, s := range servers {
-		if auth.CanEnumerateServer(ctx, s) {
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 // selectableProfileNames returns the profile slugs the caller may select. An
@@ -399,12 +366,24 @@ func (idx *profileIndex) membersOf(p int) []uint64 {
 }
 
 // position resolves one slug to its position in cfg.Profiles in O(1), or -1
-// when the snapshot has no such profile.
+// when the snapshot has no such profile. The position is also bounds-checked
+// against idx.cfg.Profiles' CURRENT length, not merely built at "ok": every
+// other profileIndex field (members, nonEmpty, serverPos) was snapshotted at
+// construction from an assumed-immutable *config.Config and is safe to
+// index by a byName position regardless, but idx.cfg itself is a pointer a
+// raw test fixture may mutate IN PLACE after building this index (cfg.
+// Profiles = nil to simulate a deleted profile, never replacing the
+// pointer — TestSetProfileClearReportsPinnedScope,
+// TestReadCache_DeletedPinnedProfileRevokesCachedAccess), which would
+// otherwise let a stale byName entry index a Profiles slice that has since
+// shrunk out from under it. For a real (never-mutated) snapshot this check
+// is always true — the position and idx.cfg.Profiles' length were built
+// together — so it costs nothing on the path that matters.
 func (idx *profileIndex) position(slug string) int {
 	if idx.lookupHook != nil {
 		idx.lookupHook(slug)
 	}
-	if i, ok := idx.byName[slug]; ok {
+	if i, ok := idx.byName[slug]; ok && idx.cfg != nil && i < len(idx.cfg.Profiles) {
 		return i
 	}
 	return -1
@@ -417,6 +396,134 @@ func (idx *profileIndex) lookup(slug string) *config.ProfileConfig {
 		return &idx.cfg.Profiles[i]
 	}
 	return nil
+}
+
+// profileAt returns the profile at an ALREADY resolved position (candidate <
+// 0: no such profile), the int-keyed counterpart to lookup — the seam a
+// caller that already paid for position(slug) elsewhere in the same request
+// (serveProfileURL's admission gate) uses to fetch the *ProfileConfig
+// without resolving the slug a second time through the lookup-hook seam.
+func (idx *profileIndex) profileAt(candidate int) *config.ProfileConfig {
+	if candidate < 0 || idx.cfg == nil || candidate >= len(idx.cfg.Profiles) {
+		return nil
+	}
+	return &idx.cfg.Profiles[candidate]
+}
+
+// EffectiveServersFor is the caller-facing counterpart to
+// config.ProfileConfig.EffectiveServers: the servers within profileName's
+// declared set — or, for profileName == "", every configured server — that
+// allowed also grants (the same "*" / exact-name rule as
+// AuthContext.CanAccessServer). It is what every admitted scoped READ
+// (set_profile, /mcp/p/<slug>, and the pin/session tiers resolveActiveProfile
+// consults on every call) renders its payload/scope from instead of
+// re-deriving a fleet-sized "known servers" set on every call the way
+// EffectiveServers does.
+//
+// Its cost is O(len(allowed)) (plus, only for a wildcard grant, one walk of
+// the TARGET population — the profile's own declared servers, or every
+// configured server for profileName == "", never a SECOND, nested walk per
+// grant entry) — never O(len(cfg.Servers)): each granted name is tested
+// against the index's precomputed serverPos/members data, built once per
+// snapshot, rather than rebuilding a fleet-sized set on every call (Spec 105
+// PR D review round 14 MUST-FIX). allowed == nil or empty is deny-all (an
+// agent token's empty AllowedServers grants nothing — CanAccessServer's own
+// rule) and returns nil without touching the index at all.
+//
+// The order matches every other EffectiveServers consumer: profile-declared
+// order (duplicates kept) for a named profile, config order for profileName
+// == "" — reproduced from the reader's own grant via serverPos, so it never
+// needs cfg.Servers itself to get there.
+func (idx *profileIndex) EffectiveServersFor(profileName string, allowed []string) []string {
+	if profileName == "" {
+		return idx.effectiveServersForAllowed(allowed)
+	}
+	return idx.effectiveServersForCandidate(idx.position(profileName), allowed)
+}
+
+// effectiveServersForCandidate is EffectiveServersFor for an ALREADY resolved
+// profile position — see profileAt.
+func (idx *profileIndex) effectiveServersForCandidate(candidate int, allowed []string) []string {
+	if idx.cfg == nil || candidate < 0 || candidate >= len(idx.cfg.Profiles) || len(allowed) == 0 {
+		return nil
+	}
+	declared := idx.cfg.Profiles[candidate].Servers
+	if hasWildcardGrant(allowed) {
+		out := make([]string, 0, len(declared))
+		for _, name := range declared {
+			if _, ok := idx.serverPos[name]; ok {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+	grant := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		grant[name] = struct{}{}
+	}
+	out := make([]string, 0, len(declared))
+	for _, name := range declared {
+		if _, ok := idx.serverPos[name]; !ok {
+			continue
+		}
+		if _, ok := grant[name]; ok {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// effectiveServersForAllowed is EffectiveServersFor("", allowed): every
+// configured server allowed grants, in config order — the "no profile in
+// effect" / cleared-selection rendering. A wildcard grant is unrestricted by
+// definition (SC-005 administrator parity: the same full list, at the same
+// cost administrators already pay for it), so it returns allServerNames
+// directly rather than resolving each configured server through allowed. A
+// restricted grant resolves each of the reader's OWN entries to its config
+// position via serverPos — O(1) each — and sorts the (small) result by that
+// position, so it reproduces config order without ever walking cfg.Servers:
+// its cost is O(len(allowed) log len(allowed)), never the fleet's.
+func (idx *profileIndex) effectiveServersForAllowed(allowed []string) []string {
+	if idx.cfg == nil || len(allowed) == 0 {
+		return nil
+	}
+	if hasWildcardGrant(allowed) {
+		return allServerNames(idx.cfg)
+	}
+	type grantHit struct {
+		pos  int
+		name string
+	}
+	hits := make([]grantHit, 0, len(allowed))
+	seen := make(map[int]struct{}, len(allowed))
+	for _, name := range allowed {
+		pos, ok := idx.serverPos[name]
+		if !ok {
+			continue
+		}
+		if _, dup := seen[pos]; dup {
+			continue
+		}
+		seen[pos] = struct{}{}
+		hits = append(hits, grantHit{pos: pos, name: name})
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].pos < hits[j].pos })
+	out := make([]string, len(hits))
+	for i, h := range hits {
+		out[i] = h.name
+	}
+	return out
+}
+
+// hasWildcardGrant reports whether allowed carries the "*" entry
+// AuthContext.CanAccessServer treats as unrestricted.
+func hasWildcardGrant(allowed []string) bool {
+	for _, name := range allowed {
+		if name == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 // hasMember reports whether profile candidate's reach set is non-empty —
@@ -783,4 +890,38 @@ func (p *MCPProxyServer) profileIndexCurrent(ctx context.Context) *profileIndex 
 		return p.mainServer.profileIndexes.For(p.currentConfig())
 	}
 	return p.profileIndexes.For(p.currentConfig())
+}
+
+// profileIndexFor returns the profile index for an EXPLICIT snapshot cfg —
+// the one resolveActiveProfileIn and its callers already hold, never a fresh
+// runtime.Config() read (cfg may be older than the live config, e.g. the
+// snapshot handleSetProfile admitted a selection against). Over a wired
+// runtime it prefers the cache's Published pair — an O(1) pointer-identity
+// match against a snapshot the warm path already indexed, never a build —
+// and falls back to For only when cfg is not one of the two most recently
+// prepared pairs (a snapshot captured further back than the cache retains):
+// TestProfileRequests_NeverBuildTheIndexOverARuntime pins that a live
+// runtime's own snapshot always hits Published, so this fallback never
+// fires there. Unlike profileIndexCurrent it never reads currentConfig()
+// itself and never returns nil — cfg is already fixed, so there is nothing
+// to (re-)match atomically the way Acquire does.
+//
+// Without a runtime behind it (bare test construction: p.mainServer == nil)
+// it builds fresh on every call rather than consulting p.profileIndexes'
+// pointer-identity cache: a bare proxy's cfg is a raw fixture a test may
+// mutate IN PLACE between calls (e.g.
+// TestReadCache_DeletedPinnedProfileRevokesCachedAccess sets
+// proxy.config.Profiles = nil to simulate a deleted pin, never replacing the
+// *config.Config pointer) — caching by that same pointer's identity would
+// silently keep serving the profile positions of whatever Profiles slice was
+// in place the first time this cfg was seen. There is no hot-path cost to
+// protect without a runtime behind it.
+func (p *MCPProxyServer) profileIndexFor(cfg *config.Config) *profileIndex {
+	if p.mainServer != nil {
+		if idx := p.mainServer.profileIndexes.Published(cfg); idx != nil {
+			return idx
+		}
+		return p.mainServer.profileIndexes.For(cfg)
+	}
+	return newProfileIndex(cfg)
 }

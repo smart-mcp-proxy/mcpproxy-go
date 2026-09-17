@@ -2491,8 +2491,13 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 
 	// Look up profile by slug (lock-free snapshot). A scoped caller that
 	// passed the gate always resolves here — the predicate only admits
-	// configured profiles.
-	found := profiles.lookup(slug)
+	// configured profiles. The position is kept, not just the *ProfileConfig,
+	// so the effective-server computation below can reuse this exact
+	// resolution instead of resolving the slug a third time through the
+	// lookup-hook seam (round 14 MUST-FIX; TestProfileMiddleware_Gate-
+	// TouchesOnlyRequestedSlugAndPin bounds admission to slug-twice-plus-pin).
+	candidate := profiles.position(slug)
+	found := profiles.profileAt(candidate)
 
 	// FR-009: slug not found — administrator callers only, with the
 	// discovery affordance.
@@ -2510,8 +2515,27 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 		return
 	}
 
-	// Build scope from the effective server set (unknown-server warn-skip applied).
-	effectiveServers := found.EffectiveServers(cfg)
+	// Build scope from the effective server set (unknown-server warn-skip
+	// applied). A scoped caller already passed the reach gate above for
+	// exactly this profile: render ITS view through the index's
+	// O(len(allowed))-cost EffectiveServersFor rather than
+	// config.EffectiveServers, which rebuilds a fleet-sized set on every
+	// call — an admitted READ must never cost the hidden server population
+	// any more than the refusal above does (Spec 105 PR D review round 14
+	// MUST-FIX). Administrators (and absent contexts) keep the unchanged,
+	// fleet-proportional EffectiveServers path: SC-005 makes no timing
+	// promise for them, and they already pay this cost on every other
+	// admin-shaped read.
+	var effectiveServers []string
+	if auth.IsScopedCaller(r.Context()) {
+		var allowed []string
+		if ac := auth.AuthContextFromContext(r.Context()); ac != nil {
+			allowed = ac.AllowedServers
+		}
+		effectiveServers = profiles.effectiveServersForCandidate(candidate, allowed)
+	} else {
+		effectiveServers = found.EffectiveServers(cfg)
+	}
 	scope := profile.NewProfileScope(found.Name, effectiveServers)
 	ctx := profile.WithProfileScope(r.Context(), scope)
 	// Pin the request to the exact (index, snapshot) PAIR admission decided
