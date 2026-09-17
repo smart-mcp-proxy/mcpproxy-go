@@ -112,8 +112,12 @@ func TestCreateUserToken_SessionCookieOnly(t *testing.T) {
 			rig := newTokenTestRig(t)
 			rig.actAs(withCredentialKind(userACtx(), tc.kind))
 
+			want := tc.wantMintStatus
+			if want == http.StatusOK {
+				want = http.StatusCreated // the create door's success status
+			}
 			w := rig.createToken(t, "tok-"+tc.name, nil)
-			assert.Equal(t, tc.wantMintStatus, w.Code, "POST /user/tokens with credential kind %q", tc.kind)
+			assert.Equal(t, want, w.Code, "POST /user/tokens with credential kind %q", tc.kind)
 		})
 	}
 

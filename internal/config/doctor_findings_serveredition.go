@@ -5,12 +5,16 @@ package config
 import (
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 )
 
 // serverEditionDoctorFindings are the server-only doctor findings of Spec 107:
 // an overridden require_mcp_auth (FR-029), an unset public_url on a
 // non-loopback listener (FR-025) and an explicit session_cookie_secure: false
-// (FR-026). T074 adds the unknown access-map names.
+// (FR-026), and every `access` entry that names no configured server (FR-007
+// "warn, never fail" — read off the LIVE config, so a hot-reloaded map is
+// re-checked on the next `doctor` run).
 func serverEditionDoctorFindings(cfg *Config) []string {
 	if !ServerEditionEnabled(cfg) {
 		return nil
@@ -25,7 +29,22 @@ func serverEditionDoctorFindings(cfg *Config) []string {
 	if cfg.ServerEdition.SessionCookieSecure == SessionCookieSecureFalse {
 		out = append(out, "server_edition.session_cookie_secure is explicitly false: the session cookie is sent over plain http; only a loopback or test deployment should run this way")
 	}
+	if unknown := cfg.ServerEdition.Access.UnknownAccessServerNames(cfg.Servers); len(unknown) > 0 {
+		out = append(out, AccessUnknownServerNamesFinding(unknown))
+	}
 	return out
+}
+
+// AccessUnknownServerNamesFinding renders the boot warning / doctor finding
+// for access-map entries that match no configured server. One line, every
+// name quoted, so the operator can find the typo; a name is never an error
+// (the server may be added later).
+func AccessUnknownServerNamesFinding(unknown []string) string {
+	quoted := make([]string, 0, len(unknown))
+	for _, n := range unknown {
+		quoted = append(quoted, strconv.Quote(n))
+	}
+	return fmt.Sprintf("server_edition.access names %d server(s) that match no configured server (%s): those entries grant nothing until a server with that exact name exists", len(unknown), strings.Join(quoted, ", "))
 }
 
 // ListenIsLoopback reports whether a listen address binds a loopback

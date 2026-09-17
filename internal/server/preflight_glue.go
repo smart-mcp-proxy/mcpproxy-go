@@ -145,7 +145,7 @@ func (p *MCPProxyServer) evaluatePreflight(
 // sees every id as not_found (tier scope-silence) — a loud, correct answer that
 // names the removed profile in the logs, rather than a silent widening.
 func (p *MCPProxyServer) resolvePreflightScope(params preflight.Params) (*preflight.Scope, error) {
-	inputs := preflight.ScopeInputs{TokenServers: params.TokenServers}
+	inputs := preflight.ScopeInputs{Restricted: params.Restricted, TokenServers: params.TokenServers}
 
 	if pin := params.TokenProfilePin; pin != "" {
 		inputs.TokenPinName = pin

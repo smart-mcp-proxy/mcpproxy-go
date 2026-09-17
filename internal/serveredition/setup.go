@@ -15,6 +15,7 @@ import (
 	teamsauth "github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/broker"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 func init() {
@@ -76,59 +77,79 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// any fallible step runs.
 	userStore := users.NewUserStore(deps.DB)
 
-	// Agent tokens outlive the sessions of the user who minted them, and nothing
-	// re-checked that user afterwards: a disabled account's tokens kept
-	// authenticating, carrying its UserID into every downstream authorisation.
-	// Gate them on the owner's current state. The gate is on the authentication
-	// hot path, so it is a single keyed store read and no more; it fails closed.
+	// The LIVE view of the whole configuration and of the server-edition
+	// block. Both are read through deps.ConfigProvider on every decision —
+	// the configuration is hot-reloadable, so anything captured here is only
+	// true of the process's first moment: a server the admin adds afterwards,
+	// an admin_emails demotion (#1169) or an `access` group-map edit (Spec 107
+	// FR-039 part 3) must all take effect on the NEXT request. Falls back to
+	// the boot pointers when no provider was supplied (tests, embedders with
+	// no config service) or when a reload dropped the block, which is the
+	// previous behaviour and never widens anything.
+	liveConfig := func() *config.Config {
+		if deps.ConfigProvider != nil {
+			if live := deps.ConfigProvider(); live != nil {
+				return live
+			}
+		}
+		return deps.Config
+	}
+	serverEditionConfig := teamsauth.ServerEditionConfigProvider(func() *config.ServerEditionConfig {
+		if live := liveConfig(); live != nil && live.ServerEdition != nil {
+			return live.ServerEdition
+		}
+		return cfg
+	})
+	adminServers := teamsapi.AdminServersProvider(func() []*config.ServerConfig {
+		if live := liveConfig(); live != nil {
+			return live.Servers
+		}
+		return nil
+	})
+
+	// The per-user door handlers, and with them THE entitlement predicate
+	// (Spec 107 FR-004): entitledServerNamesFor inside teamsapi.UserHandlers
+	// is the only place that decides which servers a tenant may see, use,
+	// mint against, connect to or diagnose. It is constructed here, before
+	// any fallible step, because the agent-token owner resolution below
+	// needs it. deps.StorageManager may be nil in tests; the handlers
+	// tolerate that (token doors answer "not available").
+	userHandlers := teamsapi.NewUserHandlers(userStore, adminServers, deps.StorageManager, nil, deps.Logger)
+	userHandlers.SetServerEditionConfigProvider(serverEditionConfig)
+
+	// Agent tokens outlive the sessions of the user who minted them, and
+	// nothing re-checked that user afterwards: a disabled account's tokens
+	// kept authenticating, carrying its UserID into every downstream
+	// authorisation. The single owner resolution (Spec 107 FR-004, replacing
+	// the owner gate + scope resolver pair) answers, from ONE user-store read
+	// per authentication: is the owner still active, who are they (email,
+	// provider, live role from admin_emails), and what is their entitlement
+	// NOW — so every HTTP or MCP authentication receives a fresh, narrow-only
+	// intersection (Spec 106 FR-004), including old wildcard credentials and
+	// requests on an existing MCP session, and the group term (FR-009) is
+	// applied without a second predicate. It is on the authentication hot
+	// path, so it is one keyed store read plus the predicate; it fails closed.
 	//
-	// This is deliberately the FIRST thing this function does. SetupAll's error
-	// is only logged by wireServerEditionOAuth — the process comes up either
-	// way — so anything installed after a fallible step is absent from a server
-	// that is nonetheless serving traffic. Installed last, a failure in config
-	// validation, bucket creation, HMAC-key derivation or credential-store
-	// construction left agent tokens UNGATED: the control that stops a disabled
-	// user's tokens authenticating would have been the one thing the failure
-	// removed, which is fail-open on precisely the wrong axis.
+	// This is deliberately the FIRST fallible-adjacent thing this function
+	// does. SetupAll's error is only logged by wireServerEditionOAuth — the
+	// process comes up either way — so anything installed after a fallible
+	// step is absent from a server that is nonetheless serving traffic.
+	// Installed last, a failure in config validation, bucket creation,
+	// HMAC-key derivation or credential-store construction left agent tokens
+	// UNGATED: the control that stops a disabled user's tokens authenticating
+	// would have been the one thing the failure removed, which is fail-open
+	// on precisely the wrong axis.
 	//
 	// Installed here it fails CLOSED instead: if EnsureBuckets never ran, the
-	// gate's GetUser errors or answers "no such user", and the owned tokens are
-	// refused rather than waved through.
+	// resolver's GetUser errors or answers "no such user", and the owned
+	// tokens are refused rather than waved through.
 	if deps.StorageManager != nil {
-		deps.StorageManager.SetAgentTokenOwnerGate(func(userID string) (bool, error) {
-			user, err := userStore.GetUser(userID)
-			if err != nil {
-				return false, err
+		deps.StorageManager.SetAgentTokenOwnerResolver(func(userID string, granted []string) (storage.OwnerResolution, error) {
+			se := serverEditionConfig()
+			if se == nil {
+				return storage.OwnerResolution{}, fmt.Errorf("server entitlement configuration unavailable")
 			}
-			if user == nil {
-				// The owner is gone from the store entirely. A token for an
-				// identity that no longer exists must not authenticate.
-				return false, nil
-			}
-			return !user.Disabled, nil
-		})
-		// Like the owner gate, install before any fallible setup step. Every
-		// HTTP authentication receives a fresh intersection, including old
-		// wildcard credentials and requests on an existing MCP session.
-		deps.StorageManager.SetAgentTokenScopeResolver(func(userID string, granted []string) ([]string, error) {
-			live := deps.Config
-			if deps.ConfigProvider != nil {
-				live = deps.ConfigProvider()
-			}
-			if live == nil || live.ServerEdition == nil {
-				return nil, fmt.Errorf("server entitlement configuration unavailable")
-			}
-			user, err := userStore.GetUser(userID)
-			if err != nil {
-				return nil, err
-			}
-			if user == nil || user.Disabled {
-				return nil, fmt.Errorf("token owner unavailable")
-			}
-			scope := teamsapi.NewUserHandlers(userStore, func() []*config.ServerConfig {
-				return live.Servers
-			}, nil, nil, deps.Logger)
-			return scope.NarrowTokenServerScope(userID, granted, live.ServerEdition.IsAdminEmail(user.Email))
+			return userHandlers.ResolveAgentTokenOwner(userID, granted, se.IsAdminEmail)
 		})
 	}
 
@@ -193,30 +214,6 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	}
 	sessionManager := teamsauth.NewSessionManagerWithPolicy(userStore, sessionTTL, securePolicy)
 
-	// The LIVE view of the server-edition block, read through the same provider
-	// the admin-servers check uses rather than a second mechanism.
-	//
-	// `admin_emails` is the sole source of truth for the admin role, and it IS
-	// hot-reloadable: the file watcher reloads the whole file (config.LoadFromFile
-	// unmarshals `server_edition` in full), `server_edition` is not one of the
-	// restart-pinned fields, and the result is republished as the snapshot
-	// ConfigProvider reads. Deriving the role from `cfg` — the boot-time pointer
-	// — therefore meant a demotion took effect only on the next process restart,
-	// which is issue #1169 with a different horizon rather than issue #1169
-	// closed.
-	//
-	// Falls back to the boot block when there is no provider (tests, embedders
-	// with no config service) or when a reload dropped the block entirely, which
-	// is the previous behaviour and never widens the admin list.
-	serverEditionConfig := teamsauth.ServerEditionConfigProvider(func() *config.ServerEditionConfig {
-		if deps.ConfigProvider != nil {
-			if live := deps.ConfigProvider(); live != nil && live.ServerEdition != nil {
-				return live.ServerEdition
-			}
-		}
-		return cfg
-	})
-
 	// Create OAuth handler. It resolves the identity provider once from the
 	// boot block (discovery stays lazy) and derives each login's role from the
 	// LIVE admin_emails through the same provider (Spec 107 T044).
@@ -246,27 +243,18 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	authEndpoints := teamsapi.NewAuthEndpoints(userStore, sessionManager, cfg, hmacKey, deps.Logger)
 	authEndpoints.RegisterPublicRoutesWithPrefix(deps.Router, "/api/v1")
 
-	// Shared servers are the main config servers (admin-configured).
+	// Shared servers are the main config servers (admin-configured). The boot
+	// slice is handed to the handlers that still take one; every entitlement
+	// decision reads the LIVE list through adminServers above.
 	sharedServers := deps.Config.Servers
 
-	// The LIVE view of the same thing. The configuration is hot-reloadable, so
-	// the slice above is only true of the process's first moment: a server the
-	// admin adds afterwards is absent from it forever. Every check that decides
-	// what a tenant may name or reach — the personal-server name collision and
-	// the token-scope entitlement set in api.UserHandlers — must read through
-	// this instead, or a tenant can pre-empt a name the admin has not created
-	// yet and walk through the entitlement control on a stale snapshot.
-	//
-	// Falls back to the boot slice when no provider was supplied (tests, and
-	// any embedder that has no config service), which is the previous behaviour.
-	adminServers := teamsapi.AdminServersProvider(func() []*config.ServerConfig {
-		if deps.ConfigProvider != nil {
-			if live := deps.ConfigProvider(); live != nil {
-				return live.Servers
-			}
-		}
-		return sharedServers
-	})
+	// Spec 107 FR-007: an access-map entry that names no configured server is
+	// a boot warning and a `doctor` finding (config.DoctorFindings), never a
+	// refusal — the server may be added later, and until then the entry
+	// grants nothing.
+	if unknown := cfg.Access.UnknownAccessServerNames(sharedServers); len(unknown) > 0 {
+		deps.Logger.Warnw(config.AccessUnknownServerNamesFinding(unknown), "unknown_servers", unknown)
+	}
 
 	// All server edition endpoints that require session cookie or JWT authentication.
 	// Mounted outside the API key group so session cookies work.
@@ -278,9 +266,10 @@ func setupMultiUserOAuth(deps Dependencies) error {
 		adminHandlers.SetTokenRevoker(deps.StorageManager)
 		adminHandlers.SetAgentTokenStore(deps.StorageManager)
 	}
-	userHandlers := teamsapi.NewUserHandlers(userStore, adminServers, deps.StorageManager, hmacKey, deps.Logger)
+	userHandlers.SetHMACKey(hmacKey)
 	userActivityHandlers := teamsapi.NewUserActivityHandlers(nil, userStore, sharedServers, deps.Logger)
 	userActivityHandlers.SetAdminServersProvider(adminServers)
+	userActivityHandlers.SetEntitlement(userHandlers)
 	// Per-user brokered-credential surfaces (spec 074 T8): list connection
 	// status, disconnect, and the Path B connect/callback flow. Reuses the same
 	// credential store wired into the OAuth login handler above. The audit sink
@@ -290,6 +279,7 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	brokerAudit := teamsapi.NewActivityAuditSink(deps.StorageManager, deps.Logger)
 	credentialHandlers := teamsapi.NewCredentialHandlers(credStore, sharedServers, brokerAudit, deps.Logger)
 	credentialHandlers.SetAdminServersProvider(adminServers)
+	credentialHandlers.SetEntitlement(userHandlers)
 	credentialHandlers.SetFrontDoor(publicURL, trustedProxies)
 
 	deps.Router.Group(func(r chi.Router) {

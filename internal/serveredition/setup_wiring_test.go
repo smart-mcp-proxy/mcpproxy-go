@@ -79,6 +79,19 @@ func (h *wiringHarness) setAdminEmails(emails []string) {
 	h.config = &next
 }
 
+// setAccess replaces the live ServerEdition.Access block, copy-on-write like
+// setAdminEmails, so a fixture can install (or hot-reload) the group map the
+// entitlement predicate reads through ServerEditionConfigProvider (T074/T075).
+func (h *wiringHarness) setAccess(access *config.ServerEditionAccessConfig) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
+	next := *h.config
+	nextSE := *next.ServerEdition
+	nextSE.Access = access
+	next.ServerEdition = &nextSE
+	h.config = &next
+}
+
 // generateBearerToken mints a session-cookie-equivalent bearer JWT for u,
 // with the given role ("user" or "admin"), using this harness's HMAC key —
 // the credential every /user/* and /admin/* door accepts via
@@ -350,4 +363,101 @@ func TestSetupAdminTokenRevocationUsesProductionAuth(t *testing.T) {
 	}
 	_, err = h.tokens.ValidateAgentToken(raw, h.hmacKey)
 	require.Error(t, err)
+}
+
+// TestSetupMultiUserOAuth_GroupGrantWiredThroughProductionSetup drives the
+// two-fixture oracle (fixture_oracle_test.go) through the PRODUCTION wiring
+// (setupMultiUserOAuth): the access block, the group term of the entitlement
+// predicate and the single owner resolution are installed by setup.go, not by
+// a hand-built rig (Spec 107 T074/T075/T076 — US1.1, US1.3, US1.6, US1.8).
+func TestSetupMultiUserOAuth_GroupGrantWiredThroughProductionSetup(t *testing.T) {
+	tf := newTwoFixture(t)
+
+	listAs := func(u func(fx *fixtureHarness) *users.User) twoFixtureOp {
+		return func(fx *fixtureHarness) (int, []byte) {
+			return fx.doBearer(http.MethodGet, "/api/v1/user/servers", fx.bearerFor(t, u(fx)))
+		}
+	}
+	sharedNamesOf := func(body []byte) []string {
+		var resp struct {
+			Shared []struct {
+				Name string `json:"name"`
+			} `json:"shared"`
+		}
+		require.NoError(t, json.Unmarshal(body, &resp))
+		out := make([]string, 0, len(resp.Shared))
+		for _, s := range resp.Shared {
+			out = append(out, s.Name)
+		}
+		return out
+	}
+
+	// US1.1: Alice (eng -> [a]) sees the same list on both fixtures, and no
+	// sentinel of b / a__b.
+	assertTwoFixture(t, tf, listAs(func(fx *fixtureHarness) *users.User { return fx.alice }), sentinelServerB, sentinelServerAB)
+	status, body := listAs(func(fx *fixtureHarness) *users.User { return fx.alice })(tf.A)
+	require.Equal(t, http.StatusOK, status, string(body))
+	assert.Equal(t, []string{"a"}, sharedNamesOf(body))
+
+	// Bob (no group, no default grant) is an unentitled tenant on both.
+	assertTwoFixture(t, tf, listAs(func(fx *fixtureHarness) *users.User { return fx.bob }), sentinelServerA, sentinelServerB, sentinelServerAB)
+
+	// Carol (ops -> [a, b]) sees b where it exists.
+	_, carolA := listAs(func(fx *fixtureHarness) *users.User { return fx.carol })(tf.A)
+	assert.ElementsMatch(t, []string{"a", "b"}, sharedNamesOf(carolA))
+
+	// US1.8: Dana (admin_emails) keeps the whole shared projection.
+	_, danaA := listAs(func(fx *fixtureHarness) *users.User { return fx.dana })(tf.A)
+	assert.ElementsMatch(t, []string{"a", "b", "a__b"}, sharedNamesOf(danaA))
+
+	// By-name door: hidden b == absent name (status parity, own name echoed).
+	assertStatusParity(t,
+		func() (int, []byte) {
+			return tf.A.doBearer(http.MethodGet, "/api/v1/user/servers/b", tf.A.bearerFor(t, tf.A.alice))
+		},
+		func() (int, []byte) {
+			return tf.B.doBearer(http.MethodGet, "/api/v1/user/servers/b", tf.B.bearerFor(t, tf.B.alice))
+		},
+	)
+
+	// The agent-token path (US1.3 / US1.5): Alice's "*" token narrows to [a]
+	// on both fixtures through the single owner resolution; Bob's to nothing.
+	for _, fx := range []*fixtureHarness{tf.A, tf.B} {
+		tok, err := fx.h.tokens.ValidateAgentToken(fx.aliceTokenStar, fx.h.hmacKey)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a"}, tok.AllowedServers)
+		assert.Equal(t, fx.alice.Email, tok.OwnerEmail, "the owner resolution stamps the live identity")
+		assert.Equal(t, "user", tok.OwnerRole)
+		bobStar := mintFixtureToken(t, fx.h, fx.bob, "bob-star", []string{"*"})
+		bob, err := fx.h.tokens.ValidateAgentToken(bobStar, fx.h.hmacKey)
+		require.NoError(t, err)
+		require.NotNil(t, bob.AllowedServers, "an unentitled token carries a NON-NIL empty grant (FR-006)")
+		assert.Empty(t, bob.AllowedServers)
+	}
+
+	// FR-009: Dana's literal "*" survives the owner resolution (never frozen
+	// into a snapshot of the configuration), and her live role is stamped.
+	danaStar := mintFixtureToken(t, tf.A.h, tf.A.dana, "dana-star", []string{"*"})
+	danaTok, err := tf.A.h.tokens.ValidateAgentToken(danaStar, tf.A.h.hmacKey)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"*"}, danaTok.AllowedServers, "an administrator's literal star must survive validation")
+	assert.Equal(t, "admin", danaTok.OwnerRole)
+
+	// US1.6: hot reload — removing the eng mapping narrows Alice's NEXT
+	// request and her existing token's next authentication; re-adding widens.
+	tf.A.h.setAccess(&config.ServerEditionAccessConfig{GroupServers: map[string][]string{"ops": {"a", "b"}}, DefaultServers: []string{}})
+	_, narrowed := listAs(func(fx *fixtureHarness) *users.User { return fx.alice })(tf.A)
+	assert.Empty(t, sharedNamesOf(narrowed), "un-mapping eng must narrow the next REST request without a restart")
+	tok, err := tf.A.h.tokens.ValidateAgentToken(tf.A.aliceTokenStar, tf.A.h.hmacKey)
+	require.NoError(t, err)
+	assert.Empty(t, tok.AllowedServers, "the next token authentication must see the narrowed map")
+
+	tf.A.h.setAccess(&config.ServerEditionAccessConfig{GroupServers: map[string][]string{"eng": {"a"}, "ops": {"a", "b"}}, DefaultServers: []string{}})
+	_, widened := listAs(func(fx *fixtureHarness) *users.User { return fx.alice })(tf.A)
+	assert.Equal(t, []string{"a"}, sharedNamesOf(widened), "re-adding the mapping widens the next request")
+
+	// Un-sharing a narrows too, whatever the map says.
+	tf.A.h.setLiveServers([]*config.ServerConfig{{Name: "a", Protocol: "http", Shared: false, Enabled: true}})
+	_, unshared := listAs(func(fx *fixtureHarness) *users.User { return fx.alice })(tf.A)
+	assert.Empty(t, sharedNamesOf(unshared))
 }

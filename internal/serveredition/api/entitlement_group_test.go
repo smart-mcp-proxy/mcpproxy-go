@@ -21,6 +21,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	teamsauth "github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/broker"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -159,13 +160,29 @@ func (rig *groupFixtureRig) setUserGroups(t *testing.T, u *users.User, groups []
 
 // groupUserCtx/groupAdminCtx build the AuthContext the per-user door reads
 // getUserID from; these carry no Groups (Groups lives on the stored
-// users.User record, read by entitledServerNamesFor once T075 lands).
+// users.User record, read by entitledServerNamesFor). They are session-cookie
+// principals, the only kind the minting doors admit (T078).
 func groupUserCtx(u *users.User) *auth.AuthContext {
-	return auth.UserContext(u.ID, u.Email, u.DisplayName, u.Provider)
+	return withCookieKind(auth.UserContext(u.ID, u.Email, u.DisplayName, u.Provider))
 }
 
 func groupAdminCtx(u *users.User) *auth.AuthContext {
-	return auth.AdminUserContext(u.ID, u.Email, u.DisplayName, u.Provider)
+	return withCookieKind(auth.AdminUserContext(u.ID, u.Email, u.DisplayName, u.Provider))
+}
+
+// groupFixtureAccess is the live `server_edition.access` block of the
+// blueprint (eng -> [a], ops -> [a, b], empty default_servers), installed on
+// the predicate exactly as setup.go installs the live block through
+// ServerEditionConfigProvider.
+func groupFixtureAccess() *config.ServerEditionConfig {
+	return &config.ServerEditionConfig{
+		Enabled:     true,
+		AdminEmails: []string{"dana@example.com"},
+		Access: &config.ServerEditionAccessConfig{
+			GroupServers:   map[string][]string{"eng": {"a"}, "ops": {"a", "b"}},
+			DefaultServers: []string{},
+		},
+	}
 }
 
 func newGroupFixtureRig(t *testing.T, admin []*config.ServerConfig) *groupFixtureRig {
@@ -202,8 +219,11 @@ func newGroupFixtureRig(t *testing.T, admin []*config.ServerConfig) *groupFixtur
 	require.NoError(t, userStore.CreateUser(rig.dana))
 
 	userHandlers := NewUserHandlers(userStore, StaticAdminServers(admin), mgr, tokenTestHMACKey, logger)
+	userHandlers.SetServerEditionConfigProvider(teamsauth.StaticServerEditionConfig(groupFixtureAccess()))
 	activityHandlers := NewUserActivityHandlers(nil, userStore, admin, logger)
+	activityHandlers.SetEntitlement(userHandlers)
 	credHandlers := NewCredentialHandlers(credTestStore(t), admin, nil, logger)
+	credHandlers.SetEntitlement(userHandlers)
 
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
@@ -301,16 +321,20 @@ func assertGroupTwoFixture(t *testing.T, tf *groupTwoFixture, op groupTwoFixture
 // normalised) to its refusal for a name that never existed anywhere — the
 // non-disclosing-refusal oracle (memory/project_entitlement_test_oracle.md):
 // never "body must not contain the name" (a 404 legitimately echoes the
-// caller's own path param), always parity between the two refusals.
-func assertGroupStatusParity(t *testing.T, hidden, absent *httptest.ResponseRecorder) {
+// caller's own path param), always parity between the two refusals. The
+// echoed request names (hiddenName, absentName — the caller's OWN input) are
+// the one legitimate difference between the two bodies, so they are
+// normalised to a placeholder before the comparison; everything else must be
+// byte-identical.
+func assertGroupStatusParity(t *testing.T, hidden, absent *httptest.ResponseRecorder, hiddenName, absentName string) {
 	t.Helper()
 
 	require.Equalf(t, absent.Code, hidden.Code,
 		"an out-of-scope EXISTING name and a nonexistent name must refuse with the same status\nhidden (%d): %s\nabsent (%d): %s",
 		hidden.Code, hidden.Body.String(), absent.Code, absent.Body.String())
 
-	normHidden := groupNormalize(t, hidden.Body.Bytes())
-	normAbsent := groupNormalize(t, absent.Body.Bytes())
+	normHidden := groupNormalize(t, groupNormalizeEchoedName(hidden.Body.Bytes(), hiddenName))
+	normAbsent := groupNormalize(t, groupNormalizeEchoedName(absent.Body.Bytes(), absentName))
 	if json.Valid(normHidden) && json.Valid(normAbsent) {
 		require.JSONEqf(t, string(normAbsent), string(normHidden),
 			"an out-of-scope existing name and a nonexistent name must refuse with the same body (non-disclosing refusal)\nhidden: %s\nabsent: %s",
@@ -320,6 +344,16 @@ func assertGroupStatusParity(t *testing.T, hidden, absent *httptest.ResponseReco
 			"an out-of-scope existing name and a nonexistent name must refuse with the same body (non-disclosing refusal)\nhidden: %s\nabsent: %s",
 			hidden.Body.String(), absent.Body.String())
 	}
+}
+
+// groupNormalizeEchoedName replaces the quoted request name a refusal echoes
+// (`Server "b" not found`, JSON-escaped as \"b\") with a fixed placeholder.
+func groupNormalizeEchoedName(body []byte, name string) []byte {
+	if name == "" {
+		return body
+	}
+	out := strings.ReplaceAll(string(body), `\"`+name+`\"`, `\"<name>\"`)
+	return []byte(out)
 }
 
 func sharedNames(list []*ServerResponse) []string {
@@ -393,7 +427,7 @@ func TestEntitlementGroup_AliceByNameServerParityWithAbsent(t *testing.T) {
 		t.Run(hidden, func(t *testing.T) {
 			wHidden := rig.get("/api/v1/user/servers/" + hidden)
 			wAbsent := rig.get("/api/v1/user/servers/" + groupAbsentServerName)
-			assertGroupStatusParity(t, wHidden, wAbsent)
+			assertGroupStatusParity(t, wHidden, wAbsent, hidden, groupAbsentServerName)
 		})
 	}
 }
@@ -462,12 +496,12 @@ func TestEntitlementGroup_AliceCredentialByNameDoorsParityWithAbsent(t *testing.
 		t.Run(hidden+"/connect", func(t *testing.T) {
 			wHidden := rig.get("/api/v1/user/credentials/" + hidden + "/connect")
 			wAbsent := rig.get("/api/v1/user/credentials/" + groupAbsentServerName + "/connect")
-			assertGroupStatusParity(t, wHidden, wAbsent)
+			assertGroupStatusParity(t, wHidden, wAbsent, hidden, groupAbsentServerName)
 		})
 		t.Run(hidden+"/delete", func(t *testing.T) {
 			wHidden := rig.delete("/api/v1/user/credentials/" + hidden)
 			wAbsent := rig.delete("/api/v1/user/credentials/" + groupAbsentServerName)
-			assertGroupStatusParity(t, wHidden, wAbsent)
+			assertGroupStatusParity(t, wHidden, wAbsent, hidden, groupAbsentServerName)
 		})
 	}
 }
@@ -500,11 +534,18 @@ func TestEntitlementGroup_CredentialsListReadsStoreOnlyForEntitledServer(t *test
 	admin := groupFixtureServersA()
 	counting := &countingCredentialStore{CredentialStore: credTestStore(t)}
 
+	// Alice's record (with her groups) must be in the store the predicate
+	// reads, and the predicate must see the blueprint's access block.
+	userStore := newFixtureUserStore(t)
 	alice := users.NewUser("alice@example.com", "Alice", "google", "sub-alice")
 	alice.Groups = []string{"eng"}
+	require.NoError(t, userStore.CreateUser(alice))
 
 	handlers := NewCredentialHandlers(counting, admin, nil, zap.NewNop().Sugar())
-	router := credRouter(handlers, groupUserCtx(alice))
+	predicate := NewUserHandlers(userStore, StaticAdminServers(admin), nil, nil, zap.NewNop().Sugar())
+	predicate.SetServerEditionConfigProvider(teamsauth.StaticServerEditionConfig(groupFixtureAccess()))
+	handlers.SetEntitlement(predicate)
+	router := credRouter(t, handlers, groupUserCtx(alice))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials", nil)
 	w := httptest.NewRecorder()
@@ -635,7 +676,7 @@ func TestEntitlementGroup_MintRejectionParityHiddenVsAbsentServer(t *testing.T) 
 
 	wHidden := rig.post("/api/v1/user/tokens", `{"name":"alice-hidden","permissions":["read"],"allowed_servers":["a__b"]}`)
 	wAbsent := rig.post("/api/v1/user/tokens", `{"name":"alice-absent","permissions":["read"],"allowed_servers":["`+groupAbsentServerName+`"]}`)
-	assertGroupStatusParity(t, wHidden, wAbsent)
+	assertGroupStatusParity(t, wHidden, wAbsent, "a__b", groupAbsentServerName)
 }
 
 // TestEntitlementGroup_RotateRenarrowsAfterGroupChange: rotation re-checks

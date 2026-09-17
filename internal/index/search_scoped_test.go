@@ -34,10 +34,13 @@ import (
 // unlimited scan. T075a closes this by filtering before the ranked cut
 // (scoped, paginated search) rather than after it.
 //
-// Every assertion below is against the CURRENT, unscoped SearchTools API: a
-// future scoped implementation changes call shape, not this function's
-// existing contract, so these are legitimate target assertions on today's
-// symbol, not requests for a symbol that does not exist yet.
+// The scoped assertions below drive SearchToolsScoped (T075a) — the
+// filter-before-the-cut door — while the unscoped SearchTools(query, limit)
+// calls stay as the CONTROL that shows the hidden server really does outrank
+// the entitled one (so a green scoped result is not a fixture accident). An
+// unscoped call has no entitlement input and can never be asked to surface
+// the entitled hit; asserting that on SearchTools would demand a change to
+// the unscoped contract SC-006 keeps byte-identical.
 
 const scopedSeamQuery = "gizmo"
 
@@ -94,17 +97,38 @@ func buildScopedSeamCorpus(t *testing.T, hiddenCount int) *BleveIndex {
 func TestBleveIndex_SearchTools_HiddenHighRankerDisplacesEntitledHit(t *testing.T) {
 	idx := buildScopedSeamCorpus(t, 1)
 
-	results, err := idx.SearchTools(scopedSeamQuery, 1)
+	// Control: the unscoped global top-1 cut IS the hidden server's tool —
+	// the displacement shape is real.
+	control, err := idx.SearchTools(scopedSeamQuery, 1)
 	require.NoError(t, err)
-	require.Len(t, results, 1, "the global top-1 cut must return exactly one hit")
+	require.Len(t, control, 1, "the global top-1 cut must return exactly one hit")
+	require.Equal(t, "b", control[0].Tool.ServerName, "fixture: the hidden server must outrank the entitled one")
 
-	// Desired end state (T075a): the caller entitled only to server "a" must
-	// see their own tool at the top of a size-1 window, never the hidden
-	// server's. This fails today: SearchTools has no entitlement input, so
-	// the hidden "b" tool (prefix-boosted to outrank "a") wins the cut.
+	// Scoped (T075a): the caller entitled only to server "a" must see their
+	// own tool at the top of a size-1 window, never the hidden server's.
+	onlyA := func(server string) bool { return server == "a" }
+	results, err := idx.SearchToolsScoped(scopedSeamQuery, 1, onlyA)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
 	assert.Equal(t, "a", results[0].Tool.ServerName,
-		"SearchTools(query, 1) must surface the entitled server's hit, not a hidden higher-ranked one — "+
-			"today it cannot, because the global top-K cut runs before any caller-scope filter exists")
+		"SearchToolsScoped(query, 1, onlyA) must surface the entitled server's hit, not a hidden higher-ranked one")
+
+	// The kept hit carries the UNFILTERED search's score: the scoped path
+	// never adds a scoring clause.
+	all, err := idx.SearchTools(scopedSeamQuery, 10)
+	require.NoError(t, err)
+	for _, r := range all {
+		if r.Tool.ServerName == "a" {
+			assert.Equal(t, r.Score, results[0].Score, "scoped score must equal the unscoped search's score for the same hit")
+		}
+	}
+
+	// A predicate that admits nothing short-circuits to an empty, non-nil
+	// result (fail closed, Spec 106 FR-004).
+	none, err := idx.SearchToolsScoped(scopedSeamQuery, 1, func(string) bool { return false })
+	require.NoError(t, err)
+	require.NotNil(t, none)
+	assert.Empty(t, none)
 }
 
 // TestBleveIndex_SearchTools_HiddenPrefixLongerThanOnePage is the same
@@ -139,15 +163,20 @@ func TestBleveIndex_SearchTools_HiddenPrefixLongerThanOnePage(t *testing.T) {
 	}
 	require.True(t, foundEntitledSomewhere, "the entitled tool must exist in the corpus for this test to mean anything")
 
-	results, err := idx.SearchTools(scopedSeamQuery, 1)
+	// Control: the unscoped size-1 window is entirely a hidden hit.
+	control, err := idx.SearchTools(scopedSeamQuery, 1)
+	require.NoError(t, err)
+	require.Len(t, control, 1)
+	require.Equal(t, "b", control[0].Tool.ServerName, "fixture: 300 hidden tools must outrank the entitled one")
+
+	// T075a, tasks.md T070a "hidden prefix longer than one page": filtering
+	// to the entitled set before the ranked cut always finds "a"'s tool here,
+	// however many hidden documents outrank it — the 300 hidden tools exceed
+	// the 256-hit page, so this proves paging is exhaustive with no cap.
+	onlyA := func(server string) bool { return server == "a" }
+	results, err := idx.SearchToolsScoped(scopedSeamQuery, 1, onlyA)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
-
-	// Desired end state (T075a, tasks.md T070a "hidden prefix longer than one
-	// page"): filtering to the entitled set before the ranked cut always
-	// finds "a"'s tool here, however many hidden documents outrank it. Today
-	// it does not — the 300 hidden tools alone fill the size-1 window.
 	assert.Equal(t, "a", results[0].Tool.ServerName,
-		"a caller entitled only to server \"a\" must get \"a\"'s tool even when 300 hidden-server tools outrank it — "+
-			"a single-page SearchTools(query, limit) call cannot guarantee this without filtering first")
+		"a caller entitled only to server \"a\" must get \"a\"'s tool even when 300 hidden-server tools outrank it")
 }

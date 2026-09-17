@@ -21,6 +21,14 @@ type UserActivityHandlers struct {
 	sharedServers  []*config.ServerConfig
 	adminServers   AdminServersProvider
 	logger         *zap.SugaredLogger
+
+	// entitlement is the ONE tenant predicate (Spec 107 FR-004) the
+	// diagnostics door selects its shared servers through. Installed by
+	// setup.go (SetEntitlement) with the same UserHandlers the /user/servers
+	// doors use; when absent, a predicate is built over this handler's own
+	// user store and admin-servers provider (no access block: today's
+	// Shared-only semantics).
+	entitlement *UserHandlers
 }
 
 // NewUserActivityHandlers creates a new UserActivityHandlers instance.
@@ -46,6 +54,23 @@ func (h *UserActivityHandlers) RegisterRoutes(r chi.Router) {
 
 func (h *UserActivityHandlers) SetAdminServersProvider(provider AdminServersProvider) {
 	h.adminServers = provider
+}
+
+// SetEntitlement installs the shared entitlement predicate (Spec 107 FR-004):
+// the diagnostics door and the /user/servers doors must answer "may this
+// user see server N" from one place, so setup.go hands both the same
+// UserHandlers.
+func (h *UserActivityHandlers) SetEntitlement(e *UserHandlers) {
+	h.entitlement = e
+}
+
+// entitlementPredicate returns the installed predicate, or one built over
+// this handler's own sources (no access block) when none was installed.
+func (h *UserActivityHandlers) entitlementPredicate() *UserHandlers {
+	if h.entitlement != nil {
+		return h.entitlement
+	}
+	return NewUserHandlers(h.userStore, h.currentAdminServers, nil, nil, h.logger)
 }
 
 func (h *UserActivityHandlers) currentAdminServers() []*config.ServerConfig {
@@ -142,17 +167,19 @@ func (h *UserActivityHandlers) getDiagnostics(w http.ResponseWriter, r *http.Req
 
 	var diagnostics []*ServerDiagnostic
 
-	// Add shared servers.
-	//
-	// The `Shared` gate is the ENTITLEMENT check, not a formality (issue #1161
-	// follow-up): setup.go hands every handler `deps.Config.Servers` — the
-	// admin's whole server list — under the name `sharedServers`, so a loop
-	// without this guard reports admin upstreams the admin deliberately did not
-	// share, labelled `ownership:"shared"`, to every authenticated user.
-	for _, sc := range h.currentAdminServers() {
-		if sc == nil || !sc.Shared {
-			continue
-		}
+	// Add shared servers — the caller's ENTITLED ones, through the one
+	// predicate (Spec 107 FR-004; issue #1161 follow-up): setup.go hands
+	// every handler `deps.Config.Servers` — the admin's whole server list —
+	// so a loop without the predicate reports admin upstreams the admin
+	// deliberately did not share, or did not grant to this caller's group,
+	// labelled `ownership:"shared"`, to every authenticated user.
+	visible, err := h.entitlementPredicate().visibleSharedServers(r, userID)
+	if err != nil {
+		h.logger.Errorw("failed to resolve server entitlement for diagnostics", "user_id", userID, "error", err)
+		writeError(w, http.StatusServiceUnavailable, "Server entitlement unavailable")
+		return
+	}
+	for _, sc := range visible {
 		diagnostics = append(diagnostics, &ServerDiagnostic{
 			Name:      sc.Name,
 			Ownership: "shared",

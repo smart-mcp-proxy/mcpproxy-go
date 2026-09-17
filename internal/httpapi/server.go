@@ -142,6 +142,10 @@ type ServerController interface {
 	// Tools and search
 	GetServerTools(serverName string) ([]map[string]interface{}, error)
 	SearchTools(query string, limit int) ([]map[string]interface{}, error)
+	// SearchToolsScoped is SearchTools filtered to servers inScope admits
+	// BEFORE the ranked cut (Spec 107 T075a): the top-`limit` of an exhaustive
+	// search filtered to the caller's entitlement, with unfiltered scores.
+	SearchToolsScoped(query string, limit int, inScope func(serverName string) bool) ([]map[string]interface{}, error)
 
 	// Logs
 	GetServerLogs(serverName string, tail int) ([]contracts.LogEntry, error)
@@ -3805,7 +3809,28 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	results, err := s.controller.SearchTools(query, limit)
+	var results []map[string]interface{}
+	var err error
+	if auth.IsScopedCaller(r.Context()) {
+		// #1166 / Spec 107 T075a: the MCP twin of this discovery surface
+		// filters through serverInScope (internal/server/mcp_visibility.go);
+		// this one used to post-filter a GLOBAL top-K, so a hidden server
+		// that outranked an entitled one displaced it — and the caller's
+		// response differed with whether the hidden server existed at all.
+		// The scoped search filters BEFORE the ranked cut, exhaustively, so
+		// the window is the top-`limit` of what the caller may see. An
+		// entitlement that admits nothing fails closed without a search.
+		ctx := r.Context()
+		if ac := auth.AuthContextFromContext(ctx); ac != nil && len(ac.AllowedServers) == 0 {
+			results = []map[string]interface{}{}
+		} else {
+			results, err = s.controller.SearchToolsScoped(query, limit, func(serverName string) bool {
+				return canSeeServer(ctx, serverName)
+			})
+		}
+	} else {
+		results, err = s.controller.SearchTools(query, limit)
+	}
 	if err != nil {
 		s.logger.Errorw("Failed to search tools", "query", query, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Search failed: %v", err))
@@ -3814,19 +3839,6 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 
 	// Convert to typed search results
 	typedResults := contracts.ConvertGenericSearchResultsToTyped(results)
-
-	// #1166: the MCP twin of this discovery surface filters through
-	// serverInScope (internal/server/mcp_visibility.go); this one returned
-	// tool_name + server_name pairs for the whole index to any scoped token.
-	if auth.IsScopedCaller(r.Context()) {
-		scoped := make([]contracts.SearchResult, 0, len(typedResults))
-		for i := range typedResults {
-			if canSeeServer(r.Context(), typedResults[i].Tool.ServerName) {
-				scoped = append(scoped, typedResults[i])
-			}
-		}
-		typedResults = scoped
-	}
 
 	// Restore the bare-tool-name contract on this REST surface (#871). The index
 	// read seams canonicalize the name to "server:tool" for the MCP discovery

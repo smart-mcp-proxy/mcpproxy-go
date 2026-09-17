@@ -111,10 +111,20 @@ func newGroupScopeFixture(t *testing.T, serverNames []string) *groupScopeFixture
 	cfg.ServerEdition = &config.ServerEditionConfig{
 		Enabled:     true,
 		AdminEmails: []string{"dana@example.com"},
+		// `oidc` is the one provider that yields groups; a non-empty
+		// access.group_servers is refused for a legacy provider (FR-007).
 		OAuth: &config.ServerEditionOAuthConfig{
-			Provider:     "google",
+			Provider:     "oidc",
 			ClientID:     "test-client-id",
 			ClientSecret: "test-client-secret",
+			IssuerURL:    "https://idp.example.com",
+		},
+		// The two-fixture blueprint's group map (fixture_oracle_test.go):
+		// eng -> [a], ops -> [a, b], no default grant — read live by the
+		// entitlement predicate (T074/T075).
+		Access: &config.ServerEditionAccessConfig{
+			GroupServers:   map[string][]string{"eng": {"a"}, "ops": {"a", "b"}},
+			DefaultServers: []string{},
 		},
 	}
 	// Live config carries the shared servers DISABLED: an enabled entry makes

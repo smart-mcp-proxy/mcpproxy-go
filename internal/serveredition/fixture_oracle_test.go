@@ -36,15 +36,13 @@ import (
 // memory/project_entitlement_test_oracle.md — body-must-not-contain-the-name
 // is the WRONG oracle, status+body PARITY with an absent resource is right).
 //
-// The `access` grant below (fixtureAccessBlueprint) is the shape T074 will
-// add to ServerEditionConfig (contracts/entitlement-predicate.md §1,
-// data-model.md §8); until T074 lands, nothing in this package reads it off
-// the live config — tests before T074 (T069) assert the config shape
-// directly, and tests from T070 onward will wire it into the fixture
-// builder's live config once entitledServerNamesFor exists. Keeping the
-// blueprint here (rather than duplicating it per test file) is what makes
-// "fixture A and fixture B share the same access map" a structural
-// guarantee instead of something every new test has to remember to copy.
+// The `access` grant below (fixtureAccessBlueprint) is installed on both
+// fixtures' LIVE config (wiringHarness.setAccess), which the entitlement
+// predicate reads through ServerEditionConfigProvider (T074/T075,
+// contracts/entitlement-predicate.md §1). Keeping the blueprint here (rather
+// than duplicating it per test file) is what makes "fixture A and fixture B
+// share the same access map" a structural guarantee instead of something
+// every new test has to remember to copy.
 
 // Per-server high-entropy sentinels. Each is unique enough that its
 // accidental presence in a response body can only mean the corresponding
@@ -173,10 +171,13 @@ func filterFixtureServers(all []fixtureServerSpec, keep ...string) []fixtureServ
 func buildFixtureHarness(t *testing.T, servers []fixtureServerSpec) *fixtureHarness {
 	t.Helper()
 
+	// `oidc`: the one provider that yields groups, and the only one under
+	// which a non-empty access.group_servers validates (FR-007).
 	h := newWiringHarnessWith(t, &config.ServerEditionOAuthConfig{
-		Provider:     "google",
+		Provider:     "oidc",
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
+		IssuerURL:    "https://idp.example.com",
 	})
 
 	// Dana is the fixture's administrator; her email must be live in
@@ -195,6 +196,10 @@ func buildFixtureHarness(t *testing.T, servers []fixtureServerSpec) *fixtureHarn
 	}
 	h.setLiveServers(live)
 	h.setLiveProfiles([]config.ProfileConfig{{Name: "ops-only", Servers: []string{"b"}}})
+	h.setAccess(&config.ServerEditionAccessConfig{
+		GroupServers:   fixtureAccessBlueprint.GroupServers,
+		DefaultServers: fixtureAccessBlueprint.DefaultServers,
+	})
 
 	fx := &fixtureHarness{h: h}
 

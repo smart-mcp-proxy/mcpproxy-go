@@ -9,6 +9,7 @@ import (
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/keyword"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/standard"
+	bquery "github.com/blevesearch/bleve/v2/search/query"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -282,12 +283,12 @@ func (b *BleveIndex) DeleteServerTools(serverName string) error {
 	return nil
 }
 
-// SearchTools searches for tools using multiple query strategies for better results
-func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchResult, error) {
-	if queryStr == "" {
-		return nil, fmt.Errorf("search query cannot be empty")
-	}
-
+// buildToolSearchQuery is the ONE boolean query both SearchTools and
+// SearchToolsScoped run (Spec 107 T075a): every clause is a Should, so
+// matching is boolean and corpus-independent, and no scoped variant may add
+// a Must term on server_name — that would change BM25 scores, and the scoped
+// path must return the unfiltered search's scores for the hits it keeps.
+func buildToolSearchQuery(queryStr string) *bquery.BooleanQuery {
 	// Create a boolean query to combine multiple search strategies
 	boolQuery := bleve.NewBooleanQuery()
 
@@ -328,9 +329,16 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 	searchableTextQuery.SetBoost(1.5)
 	boolQuery.AddShould(searchableTextQuery)
 
-	// Create search request
-	searchReq := bleve.NewSearchRequest(boolQuery)
-	searchReq.Size = limit
+	return boolQuery
+}
+
+// newToolSearchRequest builds the ranked-window request SearchTools and
+// SearchToolsScoped share: the same fields, highlight and the deterministic
+// score-then-id sort, over the window [from, from+size).
+func newToolSearchRequest(q bquery.Query, from, size int) *bleve.SearchRequest {
+	searchReq := bleve.NewSearchRequest(q)
+	searchReq.From = from
+	searchReq.Size = size
 	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
 	searchReq.Highlight = bleve.NewHighlight()
 
@@ -342,6 +350,16 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 	// SortBy is applied before truncating to Size, so it also stabilizes which
 	// tied hits survive the limit boundary.
 	searchReq.SortBy([]string{"-_score", "_id"})
+	return searchReq
+}
+
+// SearchTools searches for tools using multiple query strategies for better results
+func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchResult, error) {
+	if queryStr == "" {
+		return nil, fmt.Errorf("search query cannot be empty")
+	}
+
+	searchReq := newToolSearchRequest(buildToolSearchQuery(queryStr), 0, limit)
 
 	b.logger.Debug("Searching tools with enhanced query", zap.String("query", queryStr), zap.Int("limit", limit))
 
@@ -360,6 +378,65 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 	}
 
 	b.logger.Debug("Found tools matching query", zap.Int("count", len(results)), zap.String("query", queryStr))
+	return results, nil
+}
+
+// scopedSearchMinPage is the smallest page SearchToolsScoped walks the ranked
+// result with; the page is max(limit, scopedSearchMinPage).
+const scopedSearchMinPage = 256
+
+// SearchToolsScoped is SearchTools for a caller who may see only some servers
+// (Spec 107 T075a; Spec 105 "Ranking under scope"): the result is the top-
+// `limit` of the SAME ranked search, filtered to servers `inScope` admits
+// BEFORE the cut, with the unfiltered scores. It runs the identical boolean
+// query (no extra clause — a Must term on server_name would change scores)
+// and the identical score-then-id sort, and pages through the ranked result
+// EXHAUSTIVELY with From/Size: each page is filtered through inScope, and
+// paging stops only when `limit` in-scope hits have been collected or the
+// window has passed searchResult.Total. There is deliberately NO result cap:
+// any cap would let a hidden population larger than the cap displace an
+// entitled hit, and make membership and `total` differ between a corpus that
+// contains the hidden servers and one that does not — the existence oracle
+// FR-010 forbids. A caller whose predicate is nil sees nothing (fail closed)
+// without a search.
+func (b *BleveIndex) SearchToolsScoped(queryStr string, limit int, inScope func(serverName string) bool) ([]*config.SearchResult, error) {
+	if queryStr == "" {
+		return nil, fmt.Errorf("search query cannot be empty")
+	}
+	if inScope == nil || limit <= 0 {
+		return []*config.SearchResult{}, nil
+	}
+
+	q := buildToolSearchQuery(queryStr)
+	pageSize := limit
+	if pageSize < scopedSearchMinPage {
+		pageSize = scopedSearchMinPage
+	}
+
+	b.logger.Debug("Searching tools with scoped query", zap.String("query", queryStr), zap.Int("limit", limit))
+
+	results := make([]*config.SearchResult, 0, limit)
+	for from := 0; ; from += pageSize {
+		searchResult, err := b.index.Search(newToolSearchRequest(q, from, pageSize))
+		if err != nil {
+			return nil, fmt.Errorf("search failed: %w", err)
+		}
+		for _, hit := range searchResult.Hits {
+			tool := readToolMetadata(hit.ID, hit.Fields)
+			if !inScope(tool.ServerName) {
+				continue
+			}
+			results = append(results, &config.SearchResult{Tool: tool, Score: hit.Score})
+			if len(results) >= limit {
+				return results, nil
+			}
+		}
+		if len(searchResult.Hits) == 0 || uint64(from+pageSize) >= searchResult.Total {
+			break
+		}
+	}
+
+	b.logger.Debug("Found scoped tools matching query", zap.Int("count", len(results)), zap.String("query", queryStr))
 	return results, nil
 }
 

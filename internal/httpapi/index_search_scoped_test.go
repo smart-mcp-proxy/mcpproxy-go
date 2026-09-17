@@ -91,6 +91,34 @@ func (c *fixtureSearchController) SearchTools(_ string, limit int) ([]map[string
 	return out, nil
 }
 
+// SearchToolsScoped is the T075a seam on this double: the SAME pre-ranked
+// corpus walked exhaustively, filtered through inScope, then cut to limit —
+// which is exactly what the production BleveIndex.SearchToolsScoped does with
+// From/Size paging (internal/index/search_scoped_test.go covers the real
+// engine). Counted like SearchTools so the fail-closed case can assert the
+// index was never consulted.
+func (c *fixtureSearchController) SearchToolsScoped(_ string, limit int, inScope func(string) bool) ([]map[string]interface{}, error) {
+	c.calls++
+	out := make([]map[string]interface{}, 0, limit)
+	for _, h := range c.corpus {
+		if !inScope(h.serverName) {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"tool": map[string]interface{}{
+				"name":        h.name,
+				"server_name": h.serverName,
+				"description": "fixture tool",
+			},
+			"score": h.score,
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 // entitledOracle is the per-fixture derivation tasks.md T070a specifies:
 // filter the (already score-sorted) corpus down to servers `allowed` admits,
 // then cut to `limit`. This is test-only logic — the target contract for a

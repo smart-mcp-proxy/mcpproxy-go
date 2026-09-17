@@ -92,6 +92,10 @@ func (m *ServerEditionAuthMiddleware) Middleware() func(http.Handler) http.Handl
 				m.logger.Warnw("session authentication error", "error", err)
 			}
 			if authCtx != nil {
+				// Spec 107 FR-011/T078: record WHICH credential authenticated
+				// the request. The minting doors (POST /auth/token, /user/tokens,
+				// /user/tokens/{name}/regenerate) admit only the cookie kind.
+				authCtx.CredentialKind = coreauth.CredentialKindCookie
 				r = r.WithContext(coreauth.WithAuthContext(r.Context(), authCtx))
 				next.ServeHTTP(w, r)
 				return
@@ -103,6 +107,7 @@ func (m *ServerEditionAuthMiddleware) Middleware() func(http.Handler) http.Handl
 				m.logger.Debugw("bearer token authentication failed", "error", err)
 			}
 			if authCtx != nil {
+				authCtx.CredentialKind = coreauth.CredentialKindBearerJWT
 				r = r.WithContext(coreauth.WithAuthContext(r.Context(), authCtx))
 				next.ServeHTTP(w, r)
 				return
