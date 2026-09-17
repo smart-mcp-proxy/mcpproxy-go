@@ -170,10 +170,27 @@ func profileScopeForSlugIn(cfg *config.Config, slug string) *profile.ProfileScop
 // use resolveActiveProfileIn, which still resolves the index via
 // profileIndexFor(cfg).
 func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *profile.ProfileScope) {
-	if injected, ok := profileRequestIndexFromContext(ctx); ok {
-		return p.resolveActiveProfileFromIndex(ctx, injected)
+	name, scope, _ := p.resolveActiveProfileWithIndex(ctx)
+	return name, scope
+}
+
+// resolveActiveProfileWithIndex is resolveActiveProfile, but also returns the
+// (index, snapshot) the (name, scope) pair was resolved against — the SAME
+// pair, never a second, independent lookup. A caller that must derive
+// something else from that identical pair — cacheAuthorizationWith's
+// caller-intersected ProfileServers stamp (Spec 105 PR D review round 17
+// MUST-FIX) — uses this seam instead of re-resolving the index on its own,
+// which could pair a decision made against one published snapshot with an
+// index built from a later one on a request that pauses in between, exactly
+// the class of bug rounds 9/11/14/15 closed on the admission and resolution
+// paths.
+func (p *MCPProxyServer) resolveActiveProfileWithIndex(ctx context.Context) (string, *profile.ProfileScope, *profileIndex) {
+	idx, ok := profileRequestIndexFromContext(ctx)
+	if !ok {
+		idx = p.profileIndexFor(p.currentConfig())
 	}
-	return p.resolveActiveProfileIn(ctx, p.currentConfig())
+	name, scope := p.resolveActiveProfileFromIndex(ctx, idx)
+	return name, scope, idx
 }
 
 // resolveActiveProfileIn is resolveActiveProfile against an explicit config

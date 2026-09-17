@@ -200,3 +200,126 @@ func TestReadCache_BroaderReaderMayReadNarrowerEntry(t *testing.T) {
 	result := readCacheAs(t, proxy, admin, match[1], 0)
 	assert.False(t, result.IsError, "an unrestricted admin could have produced the entry, so it may read it")
 }
+
+// Spec 105 PR D review round 17 MUST-FIX: cacheAuthorizationWith must stamp
+// ProfileServers with the CALLER-INTERSECTED profile membership
+// (profiles.EffectiveServersFor(profileName, ac.AllowedServers)), not the
+// resolver's wildcard-derived ProfileScope.AllowedServerNames() — a server
+// entirely outside the token's own grant must not affect this token's own
+// cache behavior for a server it IS, and remains, authorized to reach.
+//
+// Scenario (traced by the round-16 reviewer): token AllowedServers={github}
+// pinned to profile research={github, weather} — weather sits outside this
+// token's own grant, and the token never had, and never will have, access to
+// it. An operator later removes weather from the profile (an event this
+// token has no authorization to observe or care about). The SAME token's
+// cache read for its own authorized server (github) must not be revoked by
+// that unrelated removal: before the fix, the cache stamp carried the
+// resolver's wildcard-derived full profile membership {github, weather}, so
+// the reader's now-narrower resolved set {github} failed the redemption
+// set-covering comparison — an unrelated, never-authorized server's presence
+// became an observable side-channel through the cache layer (SC-005-class).
+func TestReadCache_CacheAuthzIntersectsCallerGrant_HiddenProfileMemberRemovalDoesNotRevoke(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+	proxy.config.Servers = []*config.ServerConfig{{Name: "github", Enabled: true}, {Name: "weather", Enabled: true}}
+	proxy.config.Profiles = []config.ProfileConfig{{Name: "research", Servers: []string{"github", "weather"}}}
+	pIdx, err := proxy.index.ForProfile("research")
+	require.NoError(t, err)
+	for _, name := range []string{"github:create_issue", "github:list_issues", "github:get_repo", "weather:get_forecast", "weather:search_city"} {
+		require.NoError(t, pIdx.IndexTool(&config.ToolMetadata{
+			Name: name, ServerName: name[:strings.Index(name, ":")],
+			Description: "manage things with " + name, ParamsJSON: `{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"}}}`,
+			Hash: "hash-" + name,
+		}))
+	}
+
+	// Token is granted github ONLY — weather sits in the profile, but the
+	// token never had, and never will have, access to it.
+	pinned := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "pinned", TokenPrefix: "mcp_agt_pinne",
+		AllowedServers: []string{"github"}, Permissions: []string{auth.PermRead},
+		ProfilePin: "research",
+	})
+
+	args := map[string]interface{}{"query": "manage", "limit": float64(10)}
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = args
+	full, err := proxy.handleRetrieveTools(pinned, req)
+	require.NoError(t, err)
+	require.Contains(t, resultText(t, full), "github:", "premise: the token's own grant surfaces github")
+	require.NotContains(t, resultText(t, full), "weather:", "premise: weather sits outside the token's own grant and must not be discoverable at all")
+	setTruncateLimit(proxy, len(resultText(t, full))/2)
+	truncated, err := proxy.handleRetrieveTools(pinned, req)
+	require.NoError(t, err)
+	match := cacheKeyRE.FindStringSubmatch(resultText(t, truncated))
+	require.Len(t, match, 2, "premise: the github-only response must still be large enough to truncate into a keyed page")
+	setTruncateLimit(proxy, 1_000_000)
+
+	before := readCacheAs(t, proxy, pinned, match[1], 0)
+	require.False(t, before.IsError, "premise: the producing token reads its own entry")
+
+	// Operator removes weather from the profile — a server this token never
+	// had, and never will have, access to. This token's OWN cache behavior
+	// for its own authorized server (github) must not change.
+	proxy.config.Profiles = []config.ProfileConfig{{Name: "research", Servers: []string{"github"}}}
+
+	after := readCacheAs(t, proxy, pinned, match[1], 0)
+	assert.False(t, after.IsError, "removing an out-of-grant profile member must not revoke this token's own cached access to its own authorized server")
+	assert.Contains(t, resultText(t, after), `"records"`)
+}
+
+// Companion to the fix above: narrowing a profile to drop a server the token
+// WAS itself authorized for (through the profile) must still revoke access to
+// entries produced under the wider scope — the caller-intersection fix must
+// not weaken this pre-existing guarantee (mirrors
+// TestReadCache_DeletedPinnedProfileRevokesCachedAccess at a finer grain: a
+// partial narrowing of the token's own reach, not a full profile deletion).
+func TestReadCache_CacheAuthzIntersectsCallerGrant_OwnGrantMemberRemovalStillRevokes(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy)
+	proxy.config.Servers = []*config.ServerConfig{{Name: "github", Enabled: true}, {Name: "weather", Enabled: true}}
+	proxy.config.Profiles = []config.ProfileConfig{{Name: "research", Servers: []string{"github", "weather"}}}
+	pIdx, err := proxy.index.ForProfile("research")
+	require.NoError(t, err)
+	for _, name := range []string{"github:create_issue", "github:list_issues", "github:get_repo", "weather:get_forecast", "weather:search_city"} {
+		require.NoError(t, pIdx.IndexTool(&config.ToolMetadata{
+			Name: name, ServerName: name[:strings.Index(name, ":")],
+			Description: "manage things with " + name, ParamsJSON: `{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"}}}`,
+			Hash: "hash-" + name,
+		}))
+	}
+
+	// Token is granted BOTH servers the profile declares.
+	pinned := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "pinned", TokenPrefix: "mcp_agt_pinne",
+		AllowedServers: []string{"github", "weather"}, Permissions: []string{auth.PermRead},
+		ProfilePin: "research",
+	})
+
+	args := map[string]interface{}{"query": "manage", "limit": float64(10)}
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = args
+	full, err := proxy.handleRetrieveTools(pinned, req)
+	require.NoError(t, err)
+	require.Contains(t, resultText(t, full), "github:")
+	setTruncateLimit(proxy, len(resultText(t, full))/2)
+	truncated, err := proxy.handleRetrieveTools(pinned, req)
+	require.NoError(t, err)
+	match := cacheKeyRE.FindStringSubmatch(resultText(t, truncated))
+	require.Len(t, match, 2)
+	setTruncateLimit(proxy, 1_000_000)
+
+	before := readCacheAs(t, proxy, pinned, match[1], 0)
+	require.False(t, before.IsError, "premise: the producing token reads its own entry")
+
+	// Operator narrows the profile to drop weather — a server the token WAS,
+	// itself, authorized to reach through this profile. That must still
+	// revoke this entry, even though the entry's own content came from
+	// github (Spec 104 FR-016a compares server SETS, not entry content).
+	proxy.config.Profiles = []config.ProfileConfig{{Name: "research", Servers: []string{"github"}}}
+
+	after := readCacheAs(t, proxy, pinned, match[1], 0)
+	assert.True(t, after.IsError, "narrowing a server the token itself was authorized for must still revoke cached access")
+	assert.Contains(t, resultText(t, after), "not readable with this credential")
+}

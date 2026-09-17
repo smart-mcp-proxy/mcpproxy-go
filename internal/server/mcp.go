@@ -1738,10 +1738,14 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// that is allowed to see nothing leave a new index directory behind — for a
 	// profile that may no longer exist. The post-filter below returns the same
 	// empty result set from the shared index.
-	profileName, profileScope := p.resolveActiveProfile(ctx)
+	profileName, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
 	// Spec 104 FR-016a: the cache stamp is the authorization THIS search runs
 	// under, captured now rather than re-resolved when the response is cut.
-	producer := p.cacheAuthorizationWith(ctx, profileName, profileScope)
+	// The index/snapshot pair is threaded through too (Spec 105 PR D review
+	// round 17 MUST-FIX): cacheAuthorizationWith derives the stamped
+	// ProfileServers from this exact pair, never a second, independently
+	// resolved one.
+	producer := p.cacheAuthorizationWith(ctx, profileName, profileScope, profileIdx)
 	searchIndex := p.index
 	if profileName != "" && !profileScope.DeniesAll() {
 		if pIdx, perr := p.index.ForProfile(profileName); perr == nil && pIdx != nil {
@@ -2304,8 +2308,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// FR-016a), captured here — at authorization time, before the upstream
 	// call — so a profile deleted or narrowed while the call is in flight
 	// cannot re-stamp a response that was authorized under the wider scope.
-	profileSlug, profileScope := p.resolveActiveProfile(ctx)
-	producer := p.cacheAuthorizationWith(ctx, profileSlug, profileScope)
+	profileSlug, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
+	producer := p.cacheAuthorizationWith(ctx, profileSlug, profileScope, profileIdx)
 	if profileScope != nil && !profileScope.Allows(serverName) {
 		errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
 		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
