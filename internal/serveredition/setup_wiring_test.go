@@ -54,6 +54,42 @@ func (h *wiringHarness) currentConfig() *config.Config {
 	return h.config
 }
 
+// setLiveProfiles replaces the current configuration's Profiles, copy-on-write
+// like setLiveServers, so a fixture can pin a profile (e.g. "ops-only") without
+// racing a concurrent reader of the live config.
+func (h *wiringHarness) setLiveProfiles(profiles []config.ProfileConfig) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
+	next := *h.config
+	next.Profiles = profiles
+	h.config = &next
+}
+
+// setAdminEmails replaces the live ServerEdition.AdminEmails, copy-on-write
+// like setLiveServers, so a fixture that needs a named administrator (the
+// two-fixture oracle's Dana, fixture_oracle_test.go) does not have to
+// rebuild the whole harness with a bespoke OAuth block.
+func (h *wiringHarness) setAdminEmails(emails []string) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
+	next := *h.config
+	nextSE := *next.ServerEdition
+	nextSE.AdminEmails = emails
+	next.ServerEdition = &nextSE
+	h.config = &next
+}
+
+// generateBearerToken mints a session-cookie-equivalent bearer JWT for u,
+// with the given role ("user" or "admin"), using this harness's HMAC key —
+// the credential every /user/* and /admin/* door accepts via
+// apiKeyAuthMiddleware. Factored out of the per-test call() closures
+// (TestSetupAdminTokenRevocationUsesProductionAuth et al.) so the two-fixture
+// oracle (fixture_oracle_test.go) can mint one without duplicating the
+// teamsauth import under a second alias.
+func (h *wiringHarness) generateBearerToken(u *users.User, role string) (string, error) {
+	return teamsauth.GenerateBearerToken(h.hmacKey, u.ID, u.Email, u.DisplayName, role, u.Provider, time.Hour)
+}
+
 func newWiringHarness(t *testing.T) *wiringHarness {
 	t.Helper()
 	return newWiringHarnessWith(t, &config.ServerEditionOAuthConfig{

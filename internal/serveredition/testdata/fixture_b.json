@@ -1,0 +1,37 @@
+{
+  "_comment": "Two-fixture oracle, fixture B (spec 107 T067). Identical to fixture_a.json except mcpServers drops `b` and `a__b`, and access.group_servers.ops drops the now-nonexistent `b`. Every other byte — users, groups, access.group_servers.eng, default_servers, the ops-only profile, admin_emails — is unchanged, so any behavioural difference an entitled caller (e.g. Alice, group eng, entitled only to `a` in both fixtures) sees between A and B can only come from server EXISTENCE, never from a different grant. See fixture_oracle_test.go's assertTwoFixture for how this parity is enforced in Go.",
+  "listen": "127.0.0.1:8080",
+  "mcpServers": [
+    {
+      "name": "a",
+      "url": "http://127.0.0.1:9/a-sentinel-a-7f3c9e1b2d4a6f80c1",
+      "protocol": "http",
+      "shared": true,
+      "enabled": true
+    }
+  ],
+  "profiles": [
+    {
+      "name": "ops-only",
+      "servers": ["b"],
+      "_note": "b does not exist in this fixture; config.ValidateProfiles warn-skips the reference (EffectiveServers returns []), it does not fail to load."
+    }
+  ],
+  "server_edition": {
+    "enabled": true,
+    "admin_emails": ["admin@example.com", "dana@example.com"],
+    "access": {
+      "group_servers": {
+        "eng": ["a"],
+        "ops": ["a"]
+      },
+      "default_servers": []
+    }
+  },
+  "_users": [
+    {"email": "alice@example.com", "groups": ["eng"]},
+    {"email": "bob@example.com", "groups": []},
+    {"email": "carol@example.com", "groups": ["ops"]},
+    {"email": "dana@example.com", "groups": [], "_note": "administrator via admin_emails, not the group grant"}
+  ]
+}
