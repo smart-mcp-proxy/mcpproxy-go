@@ -646,4 +646,68 @@ T115's scope as written).
 
 ### Automated checks
 
+Full gate set per `plan.md` §Gates, run in this worktree (`107-d-audit-line`,
+merge-base baseline: PR-C's `gh pr checks 1293`). Two gate-caused findings,
+both fixed; every other finding on the touched-file scope is clean or
+pre-existing (named below with evidence).
+
+| # | Gate | Command | Result |
+|---|------|---------|--------|
+| 1 | Build (personal) | `go build -o /dev/null ./cmd/mcpproxy` | PASS — clean |
+| 2 | Build (server) | `go build -tags server -o /dev/null ./cmd/mcpproxy` | PASS — clean |
+| 3 | `go vet` (personal) | `go vet ./...` | PASS — clean |
+| 4 | `go vet` (server) | `go vet -tags server ./...` | PASS — clean |
+| 5 | golangci-lint v2 (personal tags) | `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run --config .github/.golangci.yml ./internal/audit/... ./internal/server/... ./internal/config/... ./internal/serveredition/... ./internal/jsruntime/... ./internal/observability/... ./internal/management/... ./cmd/...` | PASS after fix (see below) — 7 remaining findings all pre-existing, in files this PR does not touch (`internal/config/zero_value_preservation_test.go`, `internal/server/diagnostics_fixers_test.go`, `internal/server/e2e_config_auto_refresh_test.go`, `internal/server/socket_e2e_test.go`) |
+| 6 | golangci-lint v2 (`--build-tags server`) | same command + `--build-tags server` | PASS — 10 findings, all pre-existing/out-of-scope (adds `internal/serveredition/auth/oidc_jwks.go`'s `ecdsa.PublicKey.X/Y` deprecation, already named in PR-C's verification round 3) |
+| 7 | Unit+race, non-server (excl. `internal/server`) | `go test -race ./internal/audit/... ./internal/jsruntime/... ./internal/observability/... ./internal/management/... ./internal/transport/... ./internal/runtime/...` then the full `go test -race -timeout 25m $(go list ./internal/... | grep -v '/internal/server$')` | PASS — all packages green (`internal/runtime` 174-190s, `internal/oauth` ~30s, rest sub-40s each) |
+| 8 | `internal/server`, personal tags, CI skip regex | `go test -race -count=1 -timeout 25m -skip "E2E\|Binary\|MCPProtocol\|TestInfoEndpoint\|TestGracefulShutdownNoPanic\|TestSocketInfoEndpoint" ./internal/server/...` | PASS — 304.9s |
+| 9 | Server-edition package list, `-tags server -race`, CI skip regex | `go test -race -tags server -count=1 -timeout 25m -skip "E2E\|Binary\|MCPProtocol\|TestInfoEndpoint\|TestGracefulShutdownNoPanic\|TestSocketInfoEndpoint" ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...` | PASS — `internal/server` 327.8s, rest sub-40s each |
+| 10 | `go test ./cmd/...` | `go test ./cmd/... ./tests/oauthserver/...` | PASS — includes `cmd/generate-types` (`TestContractsInSync`'s home package) |
+| 11 | `go test ./tests/oauthserver/...` | (run together with #10 above) | PASS |
+| 12 | `make swagger-verify` | `make swagger-verify` | PASS — "OpenAPI artifacts are up to date"; regeneration produced no diff (`git status` unchanged by the gate) |
+| 13 | `TestContractsInSync` | covered by gate #10 (`cmd/generate-types` package) | PASS |
+| 14 | Frontend unit | `cd frontend && npx vitest run` | PASS — 130 files / 1312 tests |
+| 15 | Frontend build | `cd frontend && npm run build` (`vue-tsc && vite build`) | PASS — clean; same pre-existing `INEFFECTIVE_DYNAMIC_IMPORT` note on `src/stores/auth.ts` seen throughout PR-C, unrelated to this PR |
+| 16 | Frozen goldens unregenerated | `go test ./internal/server/... -run 'TestToolsListSnapshot_\|TestMenuSurface_' -v` | PASS — all sub-tests green; golden source files untouched by this PR (confirmed via the PR-D file list below) |
+| 17 | `python3 scripts/gen-roadmap.py --check` | `python3 scripts/gen-roadmap.py --check` | PASS — "ROADMAP.md is up to date." |
+| 18 | Isolated `./scripts/test-api-e2e.sh` + new audit assertion | pre-flight `pgrep -fl 'mcpproxy.*serve\|test-api-e2e'` and `lsof -nP -iTCP -sTCP:LISTEN` confirmed no conflicting instance (`reference_isolated_dev_instance` memory), then a scratch copy with only the two blanket `pkill -f "mcpproxy.*serve"` / `pkill -f "launcher-server.*--port 39933"` lines removed (`diff` below), run as `LISTEN_PORT=18231 AUDIT_LISTEN_PORT=18232 bash /tmp/test-api-e2e-scratch.sh` | PASS — 70/70 tests, including the five new T113 audit assertions (sink file non-empty, exactly one `authz` + one `tool_call` for the fixture `call_tool_read`, none for `retrieve_tools`, schema-valid against `docs/schemas/audit-line-v1.schema.json`); no tracked file left modified (`git status` clean beyond the two gate fixes below) |
+
+Scratch-copy diff for gate #18 (matches the memory's documented recipe exactly):
+```
+80d79
+<     pkill -f "mcpproxy.*serve" 2>/dev/null || true
+83d81
+<     pkill -f "launcher-server.*--port 39933" 2>/dev/null || true
+```
+
+**Gate-caused fixes** (`fix(spec-107): gate fixes for PR-D`, both in
+`internal/server/`, both trivial and pre-existing-code-adjacent rather than
+behavioural — verified with a full rebuild + the two lint re-runs above after
+applying):
+- `internal/server/mcp_code_execution.go:1110` — govet `inline` finding:
+  `reflect.Ptr` (deprecated alias) → `reflect.Pointer` in
+  `subCallByteSizes`'s typed-nil-pointer check. No behaviour change.
+- `internal/server/audit_funnel.go` — `unused` finding: `auditAttemptCaller`
+  (added by this PR, T103/T104) was never called anywhere (checked
+  repo-wide, including tests) — its doc comment claimed the code_execution
+  wrapper uses it for nested children, but the wrapper actually reads
+  `d.caller` directly off the dispatch record (`audit_funnel.go:332,371`) and
+  the nested-observer's own `caller` field (`:501`) is unrelated. Removed the
+  dead function rather than wiring a caller for it, since no current call
+  site needs the indirection it would add.
+
+**Pre-existing findings named but not touched** (out of this PR's file
+scope, all previously documented in PR-C's verification history):
+- `internal/config/zero_value_preservation_test.go:199` — govet `inline`
+  (`reflect.Ptr`)
+- `internal/server/diagnostics_fixers_test.go:188,370` — staticcheck
+  `QF1012`
+- `internal/server/e2e_config_auto_refresh_test.go:38` — staticcheck
+  `SA1019` (`config.Features` deprecated)
+- `internal/server/socket_e2e_test.go:68,69,258` — staticcheck `SA1019`
+  (`config.TopK`, `config.Features` deprecated)
+- `internal/serveredition/auth/oidc_jwks.go:141` +
+  `oidc_jwks_test.go:83,84` — staticcheck `SA1019` (`ecdsa.PublicKey.X/Y`
+  deprecated as of Go 1.26) — named in PR-C round 3's verification notes
+
 ### Cross-review

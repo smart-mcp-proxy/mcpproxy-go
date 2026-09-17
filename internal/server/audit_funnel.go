@@ -439,16 +439,6 @@ func auditDurationMs(ctx context.Context) int64 {
 	return time.Since(d.attempt.StartedAt).Milliseconds()
 }
 
-// auditAttemptCaller returns the caller recorded on the attempt (the
-// code_execution wrapper captures it for its nested children).
-func auditAttemptCaller(ctx context.Context) (audit.Caller, bool) {
-	d := auditDispatchFromContext(ctx)
-	if d == nil {
-		return audit.Caller{}, false
-	}
-	return d.caller, true
-}
-
 // ---------------------------------------------------------------------------
 // Nested (code_execution) refusals — T104
 // ---------------------------------------------------------------------------

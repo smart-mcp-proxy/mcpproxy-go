@@ -1107,7 +1107,7 @@ func subCallDetectionText(result interface{}, callErr error) string {
 // reflect is what tells the two apart.
 func subCallByteSizes(args map[string]interface{}, result interface{}) (requestBytes, responseBytes int) {
 	if result != nil {
-		if rv := reflect.ValueOf(result); rv.Kind() == reflect.Ptr && rv.IsNil() {
+		if rv := reflect.ValueOf(result); rv.Kind() == reflect.Pointer && rv.IsNil() {
 			result = nil
 		}
 	}
