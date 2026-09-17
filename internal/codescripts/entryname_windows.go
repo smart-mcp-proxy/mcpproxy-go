@@ -44,6 +44,13 @@ func openedBaseName(f *os.File) (string, error) {
 	return filepath.Base(full), nil
 }
 
+// getFinalPathNameByHandle is windows.GetFinalPathNameByHandle as a seam:
+// entryname_windows_test.go replaces it to drive the retry logic in
+// finalPathOfHandle at exact buffer-size boundaries, which no real handle
+// can be made to hit deterministically (it would need a path whose
+// normalized UTF-16 length is exactly 1024 units).
+var getFinalPathNameByHandle = windows.GetFinalPathNameByHandle
+
 // finalPathOfHandle is the shared GetFinalPathNameByHandle call: the
 // normalized path NTFS actually resolved a handle to, unlike the path that
 // was requested, which merely echoes what was asked for.
@@ -51,15 +58,18 @@ func finalPathOfHandle(h windows.Handle) (string, error) {
 	flags := uint32(winFileNameNormalized | winVolumeNameDOS)
 
 	buf := make([]uint16, 1024)
-	n, err := windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), flags)
+	n, err := getFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), flags)
 	if err != nil {
 		return "", err
 	}
-	if int(n) > len(buf) {
-		// The path did not fit; n is the required length (including the
-		// terminator) and the call did not error, so retry once at that size.
+	if int(n) >= len(buf) {
+		// The path did not fit; when the buffer was too small, n is the
+		// required length INCLUDING the terminator and the call does not
+		// error, so n == len(buf) also means truncation (an exact-length
+		// path leaves no room for the terminator), not only n > len(buf).
+		// Retry once at that size.
 		buf = make([]uint16, n)
-		n, err = windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), flags)
+		n, err = getFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), flags)
 		if err != nil {
 			return "", err
 		}
