@@ -24,6 +24,111 @@ func writeUTF16Content(filePath *uint16, filePathSize, n uint32) {
 	}
 }
 
+// TestFinalPathOfHandle_GrowingPathDoesNotPanic pins the round-15 MUST-FIX:
+// a single resize-and-retry is not enough when the path GetFinalPathNameByHandle
+// resolves keeps growing between calls (e.g. another process extends the
+// path of a file while this delete-shareable handle stays open). Before the
+// fix, a second oversized report after the one retry fell straight into
+// `buf[:n]` with a buffer still sized to the FIRST report, which panics with
+// a slice-bounds-out-of-range whenever the second n exceeds that stale
+// length. The fix loops the resize, bounded by finalPathNameMaxAttempts, and
+// only slices once a call's n actually fits the buffer it was given.
+func TestFinalPathOfHandle_GrowingPathDoesNotPanic(t *testing.T) {
+	const initialBufLen = 1024
+
+	t.Run("exact-fit — first call already fits, no retry", func(t *testing.T) {
+		calls := 0
+		orig := getFinalPathNameByHandle
+		getFinalPathNameByHandle = func(_ windows.Handle, filePath *uint16, filePathSize uint32, _ uint32) (uint32, error) {
+			calls++
+			const n = initialBufLen - 1
+			writeUTF16Content(filePath, filePathSize, n)
+			return n, nil
+		}
+		t.Cleanup(func() { getFinalPathNameByHandle = orig })
+
+		got, err := finalPathOfHandle(windows.Handle(0))
+		require.NoError(t, err)
+		assert.Equal(t, 1, calls)
+		assert.NotEmpty(t, got)
+	})
+
+	t.Run("one retry — second call's report fits the resized buffer", func(t *testing.T) {
+		calls := 0
+		orig := getFinalPathNameByHandle
+		getFinalPathNameByHandle = func(_ windows.Handle, filePath *uint16, filePathSize uint32, _ uint32) (uint32, error) {
+			calls++
+			switch calls {
+			case 1:
+				// Too small: reports the required size (including the
+				// terminator), writes nothing usable.
+				return initialBufLen + 500, nil
+			case 2:
+				require.Equal(t, uint32(initialBufLen+500), filePathSize,
+					"retry must size the buffer to the first report")
+				n := filePathSize - 1
+				writeUTF16Content(filePath, filePathSize, n)
+				return n, nil
+			default:
+				t.Fatalf("unexpected call %d", calls)
+				return 0, nil
+			}
+		}
+		t.Cleanup(func() { getFinalPathNameByHandle = orig })
+
+		got, err := finalPathOfHandle(windows.Handle(0))
+		require.NoError(t, err)
+		assert.Equal(t, 2, calls)
+		assert.NotEmpty(t, got)
+	})
+
+	t.Run("forced second growth — path keeps growing past the first retry, no panic, clean error", func(t *testing.T) {
+		calls := 0
+		orig := getFinalPathNameByHandle
+		getFinalPathNameByHandle = func(_ windows.Handle, filePath *uint16, filePathSize uint32, _ uint32) (uint32, error) {
+			calls++
+			// Every call reports a size larger than the buffer it was just
+			// given — the pathological "path keeps growing forever" case.
+			// Before the fix this second growth (on what used to be the
+			// unconditional final slice) panicked; now it must instead loop
+			// up to the bound and then return an error.
+			return filePathSize + 100, nil
+		}
+		t.Cleanup(func() { getFinalPathNameByHandle = orig })
+
+		require.NotPanics(t, func() {
+			got, err := finalPathOfHandle(windows.Handle(0))
+			assert.Error(t, err, "must fail closed, not return an unproven/truncated path")
+			assert.Empty(t, got)
+		})
+		assert.Equal(t, finalPathNameMaxAttempts, calls, "must stop retrying at the bound, not loop forever")
+	})
+
+	t.Run("growth settles within the bound — succeeds on a later attempt", func(t *testing.T) {
+		calls := 0
+		orig := getFinalPathNameByHandle
+		getFinalPathNameByHandle = func(_ windows.Handle, filePath *uint16, filePathSize uint32, _ uint32) (uint32, error) {
+			calls++
+			if calls < finalPathNameMaxAttempts {
+				// Keeps growing by more than the last resize, forcing
+				// another loop iteration, right up to (but not exceeding)
+				// the bound.
+				return filePathSize + 10, nil
+			}
+			// Settles on the last permitted attempt.
+			n := filePathSize - 1
+			writeUTF16Content(filePath, filePathSize, n)
+			return n, nil
+		}
+		t.Cleanup(func() { getFinalPathNameByHandle = orig })
+
+		got, err := finalPathOfHandle(windows.Handle(0))
+		require.NoError(t, err)
+		assert.Equal(t, finalPathNameMaxAttempts, calls)
+		assert.NotEmpty(t, got)
+	})
+}
+
 // TestFinalPathOfHandle_RetriesAtBufferSizeBoundary pins the round-14 fix:
 // GetFinalPathNameByHandle's returned size (n) INCLUDES the null terminator
 // when the initial 1024-unit buffer was too small, so a path whose resolved

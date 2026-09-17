@@ -3,6 +3,7 @@
 package codescripts
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -51,6 +52,16 @@ func openedBaseName(f *os.File) (string, error) {
 // normalized UTF-16 length is exactly 1024 units).
 var getFinalPathNameByHandle = windows.GetFinalPathNameByHandle
 
+// finalPathNameMaxAttempts bounds finalPathOfHandle's resize-and-retry loop
+// (round 15 MUST-FIX): the path GetFinalPathNameByHandle resolves a handle
+// to can keep growing between calls — e.g. another process renames the
+// file to a longer path while this delete-shareable handle stays open — so
+// a single retry sized to one stale report can still be too small. Bounded
+// rather than unbounded so a pathologically fast renamer cannot spin this
+// forever; four attempts is generous headroom over the one legitimate
+// undersized-then-exact-fit retry this ever needs in practice.
+const finalPathNameMaxAttempts = 4
+
 // finalPathOfHandle is the shared GetFinalPathNameByHandle call: the
 // normalized path NTFS actually resolved a handle to, unlike the path that
 // was requested, which merely echoes what was asked for.
@@ -58,21 +69,33 @@ func finalPathOfHandle(h windows.Handle) (string, error) {
 	flags := uint32(winFileNameNormalized | winVolumeNameDOS)
 
 	buf := make([]uint16, 1024)
-	n, err := getFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), flags)
-	if err != nil {
-		return "", err
-	}
-	if int(n) >= len(buf) {
-		// The path did not fit; when the buffer was too small, n is the
-		// required length INCLUDING the terminator and the call does not
-		// error, so n == len(buf) also means truncation (an exact-length
-		// path leaves no room for the terminator), not only n > len(buf).
-		// Retry once at that size.
-		buf = make([]uint16, n)
-		n, err = getFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), flags)
+	for attempt := 0; attempt < finalPathNameMaxAttempts; attempt++ {
+		n, err := getFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), flags)
 		if err != nil {
 			return "", err
 		}
+		if int(n) < len(buf) {
+			// The call succeeded within this buffer — n is the resolved
+			// length EXCLUDING the terminator here, unlike the
+			// undersized-buffer case below. Only now is buf[:n] safe to
+			// slice.
+			return windows.UTF16ToString(buf[:n]), nil
+		}
+		// The path did not fit; when the buffer was too small, n is the
+		// required length INCLUDING the terminator, and the call does not
+		// error, so n == len(buf) also means truncation (an exact-length
+		// path leaves no room for the terminator), not only n > len(buf).
+		// Resize to exactly that reported size and retry — the resize
+		// itself is not the last word, because the path can have grown
+		// again by the time the retry lands (see finalPathNameMaxAttempts).
+		buf = make([]uint16, n)
 	}
-	return windows.UTF16ToString(buf[:n]), nil
+	// Exhausted the bound without a call ever reporting a length that fit
+	// the buffer it was given: the path is growing faster than we can size
+	// for it (or something is persistently wrong). Return a plain error
+	// rather than slicing a stale/undersized buffer — the caller
+	// (winOpenedBaseName's verifyUnchanged) already treats any non-nil
+	// error here the same as a spelling mismatch, folding it into
+	// errSpellingUnproven, a non-disclosing refusal (SC-005).
+	return "", fmt.Errorf("codescripts: GetFinalPathNameByHandle did not settle within %d attempts", finalPathNameMaxAttempts)
 }

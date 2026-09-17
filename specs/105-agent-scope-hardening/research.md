@@ -88,3 +88,7 @@ Per [prior-diff-assessment.md](prior-diff-assessment.md): port hunks 1–6 and 1
 ## D14 — Test harness sequencing (astra r1 finding 14)
 
 **Decision**: PRs A–G ship **standalone** tests (the per-gap tests in tasks.md) using the shared fixtures from Phase 1 (`scope_fixture_test.go`); H1 introduces `runScopeScenario` and re-registers those scenarios by US id. No PR depends on H1. Parallel PRs B/D/E/H0 share **no function**; B and E both edit `mcp.go` in disjoint regions (5613-5690 vs 5787-5803). Same-function hotspots that force serial order: A/G in `handleCallToolVariant`, C/G in `toolVisibleToSession`, F/G in `directEntryInScope`, direct catalog construction and direct describe resolution.
+
+## H0 — accepted residual: unbounded per-rebuild index memory (codex r12 SHOULD, finding 2)
+
+**Decision**: not fixed. `internal/codescripts`'s directory-index rebuild (`dirfd_other.go`, `storednames_other.go`, `storednames_windows.go`) reads a full entry listing into a slice/map per rebuild with no per-directory size or byte cap; a scripts directory with an extreme entry count could make `Warm` or an async rebuild allocate proportionally. Left unbounded because rebuild concurrency is already capped process-wide at 2 (`maxConcurrentRebuilds`, `rebuildsemaphore.go`), the scripts directory is operator-controlled (not agent-writable), and bounding it is real scope beyond H0's SC-005 disclosure fixes. Revisit only if a real deployment reports memory pressure from this path.
