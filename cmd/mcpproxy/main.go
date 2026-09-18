@@ -785,7 +785,7 @@ func (s *serveConfigSaver) save(cfg *config.Config, path string) error {
 // copies MCPPROXY_API_KEY into api_key via Validate, creates data_dir and
 // replaces the process-global registry list — none of which a save may do.
 func readConfigFile(path string) (*config.Config, error) {
-	return config.ReadFile(path)
+	return config.DecodeConfigFile(path)
 }
 
 func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
