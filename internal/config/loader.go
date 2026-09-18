@@ -24,6 +24,19 @@ const (
 	falseValue     = "false"
 )
 
+// ReadFile decodes the config file over the defaults and applies only the
+// read-time normalizations (legacy key migration, created stamps). Unlike
+// LoadFromFile it applies no env overrides, runs no validation, creates no
+// directories and touches no process-global state, so it is safe as the base
+// of a read-modify-write save while the server is running.
+func ReadFile(configPath string) (*Config, error) {
+	cfg := DefaultConfig()
+	if err := loadConfigFile(configPath, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // LoadFromFile loads configuration from a specific file
 func LoadFromFile(configPath string) (*Config, error) {
 	cfg := DefaultConfig()

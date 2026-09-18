@@ -25,7 +25,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -778,26 +777,12 @@ func (s *serveConfigSaver) save(cfg *config.Config, path string) error {
 	return config.SaveConfig(&persisted, path)
 }
 
-// readConfigFile decodes the config file over the defaults and nothing more.
+// readConfigFile is the side-effect-free read the saver merges into.
 // config.LoadFromFile is NOT a read: it applies MCPPROXY_* env overrides,
 // copies MCPPROXY_API_KEY into api_key via Validate, creates data_dir and
 // replaces the process-global registry list — none of which a save may do.
 func readConfigFile(path string) (*config.Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	cfg := config.DefaultConfig()
-	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, err
-	}
-	// Same stamp the loader applies, so a save never writes a zero time.
-	for _, server := range cfg.Servers {
-		if server.Created.IsZero() {
-			server.Created = time.Now()
-		}
-	}
-	return cfg, nil
+	return config.ReadFile(path)
 }
 
 // serveConfigPath is the file runServer saves to: --config when given, else

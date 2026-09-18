@@ -306,3 +306,23 @@ func TestServeSaverBaseIgnoresEnvOverrides(t *testing.T) {
 	recordStartupOutcome(cfg, path, "success", saver.save)
 	assert.Equal(t, "127.0.0.1:8080", readConfigFileJSON(t, path)["listen"], "env override leaked into the file")
 }
+
+// The merge base must apply the loader's read-time normalizations (legacy
+// "teams" → "server_edition", MCP-1086) or a serve-time save erases them.
+func TestServeSaverKeepsLegacyTeamsBlock(t *testing.T) {
+	saveServeGlobals(t)
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "mcp_config.json")
+	raw := `{"listen":"127.0.0.1:8080","data_dir":` + jsonString(tmp) + `,"teams":{},"mcpServers":[]}`
+	require.NoError(t, os.WriteFile(path, []byte(raw), 0o600))
+	configFile, dataDir = path, tmp
+
+	cfg, saver, err := loadConfig(newServeFlagTestCmd())
+	require.NoError(t, err)
+	require.NotNil(t, cfg.ServerEdition, "loader normalizes teams → server_edition")
+
+	recordStartupOutcome(cfg, path, "success", saver.save)
+
+	file := readConfigFileJSON(t, path)
+	assert.NotNil(t, file["server_edition"], "legacy teams block was erased by the save")
+}
