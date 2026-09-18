@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 )
@@ -18,6 +19,14 @@ var (
 
 	dataDirMu sync.Mutex
 	dataDir   string
+
+	// claimSeq disambiguates legacy-id claim paths beyond os.Getpid(), which
+	// is constant for the process's whole lifetime. Real racers are always
+	// separate processes (distinct PIDs), so this never matters in
+	// production, but it keeps the claim path collision-free for any
+	// same-process caller too (e.g. concurrent test goroutines) instead of
+	// relying on PID uniqueness alone.
+	claimSeq atomic.Uint64
 
 	// legacyInstanceIDPath is a var (not a const) so tests can point it at a
 	// scratch path instead of the real host-wide file.
@@ -98,7 +107,7 @@ func resolveInstanceID(dir string) string {
 // both processes read the same id before either removed the file,
 // recreating the original host-wide-shared-id bug for that pair.
 func adoptLegacyInstanceID(dataDir string) string {
-	claimPath := fmt.Sprintf("%s.claimed-%d", legacyInstanceIDPath(), os.Getpid())
+	claimPath := fmt.Sprintf("%s.claimed-%d-%d", legacyInstanceIDPath(), os.Getpid(), claimSeq.Add(1))
 	if err := os.Rename(legacyInstanceIDPath(), claimPath); err != nil {
 		// No legacy file, or another process already claimed it.
 		return ""
