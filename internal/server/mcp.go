@@ -299,6 +299,10 @@ type MCPProxyServer struct {
 	// Empty in constructions that did not declare one; see
 	// activeConfigFilePath() for the fallback order.
 	configFilePath string
+
+	// warmedScriptsDir is the scripts directory whose stored-name index was
+	// last warmed (Spec 105 FR-012); scriptsDir re-warms when it moves.
+	warmedScriptsDir atomic.Pointer[string]
 }
 
 // MCPProxyOption customizes an MCPProxyServer at construction time.
@@ -634,6 +638,12 @@ func NewMCPProxyServer(
 
 	// Let the hooks (registered before the proxy existed) reach it.
 	proxyRef.Store(proxy)
+
+	// Build the stored-script index now that the scripts directory is known,
+	// so no scoped request ever lists it (Spec 105 FR-012).
+	scriptsDir := proxy.scriptsDir()
+	proxy.warmedScriptsDir.Store(&scriptsDir)
+	proxy.warmStoredScripts(scriptsDir)
 
 	// Register proxy tools for the default (retrieve_tools) server
 	proxy.registerTools(debugSearch)

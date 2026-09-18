@@ -138,10 +138,16 @@ Things to know when converting a recipe:
 - **Edit by atomic replace** (write a temp file, `mv` it over) and the next
   invocation runs the new content — no daemon restart, so the authoring loop is
   still "edit, rerun".
-- **Discovery** is the not‑found error: naming a script that does not exist
-  returns the available names (first 20 alphabetically, plus the total), so an
-  agent never needs the list out of band. `mcpproxy code scripts list` shows the
-  full set, including `ambiguous` and `invalid` entries.
+- **Discovery is administrator‑only**: for an administrator (admin API key,
+  tray, in‑process caller) naming a script that does not exist returns the
+  available names (first 20 alphabetically, plus the total). An
+  [agent token](https://docs.mcpproxy.app/features/agent-tokens/) must already
+  know the name — its not‑found error lists nothing, so hand the agent the
+  script names out of band (or in its custom instructions). `mcpproxy code
+  scripts list` shows the full set, including `ambiguous` and `invalid` entries.
+- **Scripts are published content**: whoever can run one sees whatever it
+  returns without an upstream call; only its `call_tool()` calls are
+  scope‑checked. Keep server names and secrets out of script source.
 - **Read‑only surface**: nothing writes scripts for you — no tool, no endpoint,
   no CLI verb. Authoring is the filesystem, deliberately.
 

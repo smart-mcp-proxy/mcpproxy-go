@@ -24,6 +24,9 @@ internal/server/testdata/**/*.golden.json text eol=lf
 # Without this Windows checks out CRLF and all three
 # TestToolsListSnapshot_MatchesMergeBaseGoldens surfaces fail on \r alone.
 internal/server/testdata/toolslist_goldens/*.json text eol=lf
+# The frozen baselines (pre099/, pre105/) live one level down, where a single
+# `*` does not reach.
+internal/server/testdata/toolslist_goldens/**/*.json text eol=lf
 
 # Self-contained verification/QA reports embed base64 PNG screenshots, so a
 # single file is multiple MB of "HTML". They are point-in-time artifacts, not

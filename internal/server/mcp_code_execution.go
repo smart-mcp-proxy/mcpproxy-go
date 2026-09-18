@@ -52,8 +52,9 @@ const (
 		"**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. " +
 		"Types are automatically stripped before execution.\n\n" +
 		"**Stored scripts**: Instead of `code`, pass `script: \"<name>\"` to run a script stored server-side in the `scripts/` directory next to mcpproxy's config file — " +
-		"a long workflow then costs a name per run instead of its full source. Provide exactly one of `code` or `script`. Naming a script that does not exist returns the " +
-		"available names, which is how you discover what is stored.\n\n" +
+		"a long workflow then costs a name per run instead of its full source. Provide exactly one of `code` or `script`. The stored-script listing is administrator-only " +
+		"(`mcpproxy code scripts list`, or the not-found error under the admin API key); an agent-token caller must already know the script name — " +
+		"a name that does not exist is refused without naming what is stored.\n\n" +
 		"**Important runtime rules**:\n" +
 		"- `call_tool` and `call_tools` are strictly SYNCHRONOUS. Do not use `await`.\n" +
 		"- Upstream tools usually return an MCP content array. To parse JSON results: `const data = JSON.parse(res.result.content[0].text);`\n" +
@@ -73,8 +74,9 @@ const (
 		"directory next to mcpproxy's active config file and are read fresh on every invocation, so an edited script takes effect immediately. " +
 		"Provide EXACTLY ONE of `code` or `script`. The name is a bare identifier (letters, digits, '-' and '_'; 1-64 chars) — never a path. " +
 		"The language comes from the file extension (.js → javascript, .ts → typescript); an explicit `language` that contradicts it is an error. " +
-		"DISCOVERY: calling with a name that does not exist returns an error listing the available script names (first 20 alphabetically, plus the total), " +
-		"so the current set can always be recovered from a single failed call. Everything else — `input`, options, sandbox limits, results — behaves exactly as for inline code."
+		"ENUMERATION IS ADMINISTRATOR-ONLY: for an administrator (the admin API key, the tray, an in-process caller) a name that does not exist returns an error listing " +
+		"the available script names (first 20 alphabetically, plus the total); an agent-token caller must already know the script name — its not-found error " +
+		"names neither the stored scripts nor how many there are. Everything else — `input`, options, sandbox limits, results — behaves exactly as for inline code."
 
 	codeExecutionInputDescription = "Input data accessible as global `input` variable in code (default: {})"
 
@@ -518,7 +520,7 @@ func (p *MCPProxyServer) resolveCodeExecutionSource(ctx context.Context, args ma
 		return code, "", ""
 	}
 
-	source, language, err := codescripts.Resolve(p.scriptsDir(), scriptName, options.Language)
+	source, language, err := p.resolveStoredScript(ctx, scriptName, options.Language)
 	if err != nil {
 		// Keep the typed identity reachable for the REST surface (404 for a
 		// name that is not there, 400 for one that cannot run) — the text alone
@@ -528,6 +530,34 @@ func (p *MCPProxyServer) resolveCodeExecutionSource(ctx context.Context, args ma
 	}
 	options.Language = language
 	return string(source), scriptName, ""
+}
+
+// resolveStoredScript applies the Spec 105 FR-012 caller-kind rule to
+// stored-script resolution. The Spec 097 FR-004 not-found error enumerates
+// the stored names and their count so an administrator recovers the set from
+// one failed call, and its sibling refusals (ambiguous, unusable, unreadable)
+// name the host path they are about; for a scoped caller (an agent token,
+// whatever its server scope — the caller KIND decides, never AllowedServers)
+// the listing is never even computed and every refusal is the non-disclosing
+// form (codescripts.ResolveScoped): the caller's own name and the reason,
+// independent of the directory's contents and location, so a failed call is
+// not an oracle for what is stored or where. An absent auth context
+// (in-process caller) or an administrator — including the anonymous,
+// admin-shaped /mcp caller under require_mcp_auth=false — keeps the
+// enumeration (SC-005: the named FR-012 admin exception).
+func (p *MCPProxyServer) resolveStoredScript(ctx context.Context, scriptName, explicitLanguage string) ([]byte, string, error) {
+	if !auth.IsScopedCaller(ctx) {
+		return codescripts.Resolve(p.scriptsDir(), scriptName, explicitLanguage)
+	}
+	source, language, err := codescripts.ResolveScoped(p.scriptsDir(), scriptName, explicitLanguage)
+	if err != nil {
+		// The refusal deliberately carries no count or path; the log line
+		// records only that a scoped probe was refused, for the same reason.
+		p.logger.Debug("Stored-script refusal delivered in non-disclosing form to scoped caller (Spec 105 FR-012)",
+			zap.String("script", scriptName),
+			zap.String("refusal", fmt.Sprintf("%T", err)))
+	}
+	return source, language, err
 }
 
 // activeConfigFilePath returns the configuration FILE this server belongs to:
@@ -552,7 +582,26 @@ func (p *MCPProxyServer) scriptsDir() string {
 	if configFilePath == "" && p.config != nil {
 		configFilePath = config.GetConfigPath(p.config.DataDir)
 	}
-	return codescripts.DirFor(configFilePath)
+	dir := codescripts.DirFor(configFilePath)
+	if warmed := p.warmedScriptsDir.Load(); warmed != nil && *warmed != dir && p.warmedScriptsDir.CompareAndSwap(warmed, &dir) {
+		// The active config file moved: warm the new directory's index off
+		// this (possibly scoped) request's goroutine, once.
+		go p.warmStoredScripts(dir)
+	}
+	return dir
+}
+
+// warmStoredScripts builds the stored-name index of dir the scoped resolver
+// answers from (Spec 105 FR-012) — synchronously on the caller's goroutine,
+// which is never a request's: construction, or a goroutine of its own when
+// the directory moves. A directory that cannot be indexed (usually: not
+// created yet) refuses scoped callers until it changes; the administrator's
+// resolution does not depend on the index at all.
+func (p *MCPProxyServer) warmStoredScripts(dir string) {
+	if err := codescripts.Warm(dir); err != nil {
+		p.logger.Debug("Stored-script index not built; scoped callers are refused until the directory changes (Spec 105 FR-012)",
+			zap.String("dir", dir), zap.Error(err))
+	}
 }
 
 // codeExecRecordArguments builds the argument payload recorded for a

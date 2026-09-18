@@ -588,11 +588,14 @@ executed source under `code` and additionally carry `script: "<name>"`.
 | Situation | Message (abbreviated) |
 |-----------|-----------------------|
 | Both or neither of `code` / `script` | `Provide exactly one of 'code' (inline source) or 'script' (the name of a script stored in the 'scripts' directory next to mcpproxy's config file) — not both, not neither.` |
-| Unknown name | `stored script "X" not found in <dir>. Available scripts (N): a, b, c …` |
-| No scripts at all | `stored script "X" not found: no stored scripts in <dir> (create X.js or X.ts there)` |
+| Unknown name (administrator) | `stored script "X" not found in <dir>. Available scripts (N): a, b, c …` |
+| No scripts at all (administrator) | `stored script "X" not found: no stored scripts in <dir> (create X.js or X.ts there)` |
+| Unknown name ([agent token](https://docs.mcpproxy.app/features/agent-tokens/), any scope) | `stored script "X" not found (the stored-script listing is available to administrators only; an agent-token caller must already know the script name)` — identical for an empty and a populated directory; the listing is administrator-only |
 | Invalid name | `invalid script name "…": character "/" is not allowed …` |
-| Both extensions present | `stored script "X" is ambiguous: <dir>/X.js and <dir>/X.ts both exist — remove one` |
-| Empty / oversized / unreadable / non-regular | `stored script "X" (<path>) is oversized: scripts are limited to 262144 bytes` |
+| Both extensions present (administrator) | `stored script "X" is ambiguous: <dir>/X.js and <dir>/X.ts both exist — remove one` |
+| Both extensions present (agent token) | `stored script "X" is ambiguous: both a .js and a .ts file exist — ask an administrator to remove one` — no host path |
+| Empty / oversized / unreadable / non-regular (administrator) | `stored script "X" (<path>) is oversized: scripts are limited to 262144 bytes` |
+| Empty / oversized / unreadable / non-regular (agent token) | `stored script "X" is oversized: scripts are limited to 262144 bytes` — the reason stays, the host path and any raw OS error are withheld |
 | `language` contradicts the extension | `stored script "X" is a .ts file (typescript) but language "javascript" was requested …` |
 
 The not-found error **is** the MCP discovery mechanism (FR-004): it lists the
@@ -633,9 +636,9 @@ never re-sends a request that cannot succeed:
 | Situation | Status | `error.code` |
 |-----------|--------|--------------|
 | `enable_code_execution` is `false` | 403 | `FEATURE_DISABLED` |
-| Unknown script name (carries the available names) | 404 | `SCRIPT_NOT_FOUND` |
+| Unknown script name (carries the available names for an administrator; an agent token gets the non-disclosing message) | 404 | `SCRIPT_NOT_FOUND` |
 | Invalid script name | 400 | `INVALID_SCRIPT_NAME` |
-| Ambiguous, empty, oversized, unreadable or non-regular | 400 | `SCRIPT_UNUSABLE` |
+| Ambiguous, empty, oversized, unreadable or non-regular (an agent token gets the path-free message) | 400 | `SCRIPT_UNUSABLE` |
 | `language` contradicts the extension | 400 | `INVALID_LANGUAGE` |
 | Execution fault (pool, storage, internal) | 500 | `EXECUTION_FAILED` |
 
@@ -649,7 +652,12 @@ switching the feature off also stops stored scripts from being read from disk.
 ### REST: `GET /api/v1/code/scripts`
 
 Read-only listing of the stored scripts, using the same API-key auth as the rest
-of `/api/v1` (`X-API-Key` header or `?apikey=`):
+of `/api/v1` (`X-API-Key` header or `?apikey=`). **Administrator-only**: the
+admin API key (and the tray over the local socket) get the listing; an
+[agent token](https://docs.mcpproxy.app/features/agent-tokens/#what-a-scoped-token-cannot-learn)
+— whatever its server scope — is refused with `403` and a body that names
+nothing about the directory, because this listing is exactly the enumeration
+the missing-script error withholds from a scoped caller:
 
 ```bash
 curl -H "X-API-Key: $MCPPROXY_API_KEY" http://127.0.0.1:8080/api/v1/code/scripts
@@ -681,6 +689,10 @@ curl -H "X-API-Key: $MCPPROXY_API_KEY" http://127.0.0.1:8080/api/v1/code/scripts
 
 An absent or empty directory returns an empty `scripts` list, not an error.
 Statuses are advisory — the tool re-checks at invocation time.
+
+```json
+{"success": false, "error": "Agent tokens cannot list stored scripts (the stored-script listing is available to administrators only)"}
+```
 
 **There is no write surface.** No endpoint, tool, or CLI verb creates, updates,
 or deletes a script; the filesystem is the sole authoring interface.

@@ -361,7 +361,9 @@ JS
 mv "$tmp" ~/.mcpproxy/scripts/fetch-prs.js   # atomic within the same filesystem
 ```
 
-Adding or deleting a file is reflected on the next invocation or listing.
+Adding or deleting a file is reflected on the next invocation or listing
+(for an agent token on Linux, after the next index refresh — see
+[Discovering script names](#discovering-script-names)).
 Editing a script **in place** while it is being invoked is the one unsupported
 case: the run gets whatever the read returned (validated, but unspecified).
 
@@ -376,16 +378,92 @@ mcpproxy code scripts list -o json  # {"dir": "...", "scripts": [{"name","paths"
 curl -H "X-API-Key: $KEY" http://127.0.0.1:8080/api/v1/code/scripts
 ```
 
+Both are administrator views: the REST listing answers only the admin API key
+(or the tray over the local socket) and refuses an agent token with `403`.
+
 MCP clients do not get a listing tool — registrations are static, so an embedded
-list would go stale. Discovery is **error-driven** instead: invoking a name that
-does not exist returns an error listing the first 20 available names
-alphabetically plus the total, so an agent recovers the current name set from a
-single failed call.
+list would go stale. For **administrators** (the admin API key, the tray over the
+local socket, an in-process caller — and, under the default
+`require_mcp_auth: false`, an unauthenticated `/mcp` client, which the proxy
+treats as an administrator for backward compatibility) discovery is
+**error-driven** instead:
+invoking a name that does not exist returns an error listing the first 20
+available names alphabetically plus the total, so the current name set is
+recovered from a single failed call.
 
 ```text
 Cannot execute stored script: stored script "fetch-pr" not found in
 /Users/me/.mcpproxy/scripts. Available scripts (3): daily-report, fetch-prs, triage
 ```
+
+**Enumeration is administrator-only.** An
+[agent token](https://docs.mcpproxy.app/features/agent-tokens/) — whatever its
+server scope, even `--servers "*"` — must already know the script name. Its
+not-found error names neither the other stored scripts, nor how many there are,
+nor the directory, and it is byte-for-byte the same whether the directory is
+empty or full, so a failed call cannot be used to probe what is stored — and
+the proxy does not read the directory on its behalf at all — it probes the
+requested name's two candidate files and nothing else — so the refusal's cost
+does not grow with the number of stored scripts. (On Linux and the BSDs, which
+have no single-entry call reporting how a name is spelled on disk, the scoped
+resolver answers ONLY from an exact-name index of the directory that matches
+its CURRENT state: built when the daemon starts, validated by one stat of
+the directory per request, and refreshed by a background rebuild when that
+stat finds the directory changed. No request lists the directory, cold or
+warm. On Linux/BSD, every step of that per-request check — the stat, the
+candidate probe, the open, and the re-check after the open — is bound to
+the SAME retained directory descriptor rather than resolving the path
+again for each one, so a symlink or bind mount retargeted mid-request
+cannot make different steps see different directories. A call landing while
+that rebuild is merely scheduled or in flight is
+refused exactly like one against a directory the index has never seen —
+never answered from what the index held before the change — so a rename
+under a scoped caller's feet cannot have that caller's own probe fold onto
+whatever now occupies the old name. Beyond that, the index only ever
+*authorizes* from a stamp that is provably SETTLED — old enough (about two
+seconds, the coarsest directory-timestamp granularity MCPProxy has to assume)
+that no filesystem write could still land on it unseen — so a matching
+generation is not, by itself, enough to trust a hit; a directory whose
+timestamp is younger than that refuses every scoped call, hit or miss alike,
+the same fail-closed way. A script added to, or renamed within, the
+directory becomes callable by agent tokens once the index has both
+refreshed AND settled — typically milliseconds for the refresh, up to about
+two seconds to settle; retry a call refused in that window — while
+administrators see the change immediately. Every platform — Linux, the
+BSDs, darwin and Windows alike — answers from this same index, so a name
+that is merely a case-variant of a stored one and a name that is not stored
+at all cost the same: both are plain index misses. macOS/darwin adds one
+extra, belt-and-suspenders check on top: after the winning candidate is
+opened, MCPProxy re-reads its on-disk spelling from the open descriptor
+itself (`F_GETPATH`) and compares it to what was requested, so a
+case-rename racing the open is caught on the descriptor that would actually
+have been read. On Windows every step — probing a candidate, opening it,
+listing the directory to refresh the index — is performed relative to ONE
+directory handle retained for the whole call (`NtCreateFile` with the
+handle as the open's root), so a rename or a reparse point planted on the
+directory itself or an ancestor cannot redirect where a "relative" open
+actually lands; the post-open check then only needs to confirm the opened
+descriptor's own base name (`GetFinalPathNameByHandle`), since the parent
+is already structurally guaranteed by the handle-relative open itself. The
+refusal itself:
+
+```text
+Cannot execute stored script: stored script "fetch-pr" not found (the stored-script
+listing is available to administrators only; an agent-token caller must already
+know the script name)
+```
+
+The same rule covers the other refusals: an ambiguous, empty, oversized or
+unreadable script is reported to an agent token by name and reason only — no
+host path, no raw OS error — while an administrator sees the full path.
+
+Stored scripts are operator-published content: any caller allowed to run
+`code_execution` can run a script it knows the name of and receive whatever the
+script returns without an upstream call, while every `call_tool()` the script
+makes is still checked against the caller's server scope and permission tier.
+Do not put server names, credentials or other secrets in a script's source or
+its constant return values — see the
+[agent-token invariant](https://docs.mcpproxy.app/features/agent-tokens/#what-a-scoped-token-cannot-learn).
 
 ### No write path
 

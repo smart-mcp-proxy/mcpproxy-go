@@ -75,6 +75,55 @@ const (
 // (Unix maps the kernel's no-follow rejection onto it).
 var errNonRegular = errors.New("not a regular file")
 
+// scopedOpener opens the winning candidate for reading. nil means "use the
+// package's own openScriptFile" — the administrator's path-based no-follow
+// open (round 13: also Windows's own storedspellings_probe_windows.go,
+// whose own reparse-hardened openScriptFile in open_windows.go is already
+// authoritative — see scopedVerifier). Non-nil on every unix platform
+// (round 11 MUST-FIX for Linux/BSD, round 13 for darwin joining the same
+// design), where it is bound to the single retained directory descriptor
+// the request's own candidates() call opened, so the exact entry that was
+// probed is the exact entry that gets opened — never a fresh, independent
+// resolution of the path.
+type scopedOpener func(path string) (*os.File, error)
+
+// scopedVerifier re-proves, on the descriptor openScriptFile or a
+// scopedOpener actually opened, that nothing was swapped between the probe
+// and the open. nil only for the administrator, whose directory-based
+// decision has nothing to recheck against.
+type scopedVerifier func(f *os.File, want string) error
+
+// scopedCloser releases whatever per-request resource a candidates()
+// implementation opened (round 11 MUST-FIX: the retained directory
+// descriptor on every unix platform, round 13 darwin included; a directory
+// handle on Windows) — nil when there is nothing to release (the
+// administrator alone). resolve defers it immediately after calling
+// candidates(), so it always runs exactly once, whether or not a candidate
+// was ultimately opened.
+type scopedCloser func()
+
+// errIndexGenerationChanged is what a post-open verifyUnchanged closure
+// returns when the scripts directory's generation moved between the index
+// lookup that produced a hit and this open (round 8 MUST-FIX, the
+// lookup→open race): resolve treats it as an ordinary not-found, never as an
+// unreadable-directory error, so it discloses nothing beyond the caller's
+// own requested name. Every unix platform's index (Linux/BSD since round 8,
+// darwin since round 13) can return this; Windows has no directory
+// generation to recheck and never returns it.
+var errIndexGenerationChanged = errors.New("codescripts: scripts directory changed between the index lookup and the open")
+
+// errSpellingUnproven is what a spelling proof beyond the generation
+// recheck returns when the OPENED descriptor's stored spelling (round 9
+// MUST-FIX) could not be proven to match the requested name — a mismatch (a
+// case-rename or replacement landed between the pre-open probe and the
+// open) or a failure of the proof call itself; resolve treats either the
+// same as errIndexGenerationChanged, as an ordinary not-found. Returned by
+// darwin's F_GETPATH belt-and-suspenders check (extraVerifyOpened,
+// entryname_darwin.go, round 13) on top of its own generation recheck, and
+// by Windows's full-path proof (storedspellings_probe_windows.go), which has
+// no generation to recheck at all.
+var errSpellingUnproven = errors.New("codescripts: the opened file's stored spelling could not be proven to match the requested name")
+
 // Entry is one listed script (FR-007). Paths holds the single source file, or
 // both candidates when the name is ambiguous.
 type Entry struct {
@@ -97,14 +146,40 @@ func (e *InvalidNameError) Error() string {
 
 // NotFoundError reports a name with no script file behind it, carrying the
 // available names so the caller can recover in one round trip (FR-004).
+//
+// The enumeration is administrator-only (Spec 105 FR-012): a scoped caller
+// receives the same error with Undisclosed set, whose text names neither
+// the other scripts, their count nor the directory — see NonDisclosing().
 type NotFoundError struct {
 	Name      string
 	Dir       string
 	Available []string // first MaxErrorNames ok names, alphabetical
 	Total     int      // total ok scripts in the directory
+
+	// Undisclosed marks the agent-token form of the error: the listing is
+	// withheld and the message is independent of the directory's contents,
+	// so a failed call cannot serve as an oracle for what is stored.
+	Undisclosed bool
+}
+
+// nonDisclosingNotFoundFormat is the agent-token refusal text. It carries only
+// the caller's own requested name and must never depend on the directory's
+// contents (Spec 105 FR-012: byte-equal for an empty and a populated
+// directory).
+const nonDisclosingNotFoundFormat = "stored script %q not found (the stored-script listing is available to administrators only; an agent-token caller must already know the script name)"
+
+// NonDisclosing returns a copy of the error stripped of everything that
+// discloses the directory's contents — names, count and path — for delivery
+// to a scoped (agent-token) caller. The typed identity is preserved, so the
+// REST surface still classifies it as SCRIPT_NOT_FOUND.
+func (e *NotFoundError) NonDisclosing() *NotFoundError {
+	return &NotFoundError{Name: e.Name, Undisclosed: true}
 }
 
 func (e *NotFoundError) Error() string {
+	if e.Undisclosed {
+		return fmt.Sprintf(nonDisclosingNotFoundFormat, e.Name)
+	}
 	if e.Total == 0 {
 		return fmt.Sprintf("stored script %q not found: no stored scripts in %s (create %s%s or %s%s there)",
 			e.Name, e.Dir, e.Name, extJS, e.Name, extTS)
@@ -118,26 +193,66 @@ func (e *NotFoundError) Error() string {
 }
 
 // AmbiguousError reports a name backed by both a .js and a .ts file.
+//
+// The paths are host filesystem locations (they reveal the config directory),
+// so the scoped form withholds them — see NonDisclosing().
 type AmbiguousError struct {
 	Name  string
 	Paths []string
+
+	// Undisclosed marks the agent-token form: the message names the caller's
+	// own script and the reason only, never a host path (Spec 105 FR-012).
+	Undisclosed bool
+}
+
+// NonDisclosing returns a copy stripped of the host paths, for delivery to a
+// scoped (agent-token) caller. The typed identity is preserved, so the REST
+// surface still classifies it as SCRIPT_UNUSABLE.
+func (e *AmbiguousError) NonDisclosing() *AmbiguousError {
+	return &AmbiguousError{Name: e.Name, Undisclosed: true}
 }
 
 func (e *AmbiguousError) Error() string {
+	if e.Undisclosed {
+		return fmt.Sprintf("stored script %q is ambiguous: both a %s and a %s file exist — ask an administrator to remove one",
+			e.Name, extJS, extTS)
+	}
 	return fmt.Sprintf("stored script %q is ambiguous: %s both exist — remove one",
 		e.Name, strings.Join(e.Paths, " and "))
 }
 
 // InvalidError reports a script file that exists but cannot be executed.
+//
+// Path is a host filesystem location and Detail is frequently a raw OS error
+// carrying another one, so the scoped form withholds both — see
+// NonDisclosing().
 type InvalidError struct {
 	Name   string
 	Path   string
 	Reason string
 	Detail string
+
+	// Undisclosed marks the agent-token form: the message names the caller's
+	// own script and the reason only — no path, no OS error (Spec 105 FR-012).
+	Undisclosed bool
+}
+
+// NonDisclosing returns a copy stripped of the host path and the raw detail,
+// for delivery to a scoped (agent-token) caller. The typed identity and the
+// reason are preserved, so the REST surface still classifies it as
+// SCRIPT_UNUSABLE and the caller still learns what is wrong with its own
+// script.
+func (e *InvalidError) NonDisclosing() *InvalidError {
+	return &InvalidError{Name: e.Name, Reason: e.Reason, Undisclosed: true}
 }
 
 func (e *InvalidError) Error() string {
-	msg := fmt.Sprintf("stored script %q (%s) is %s", e.Name, e.Path, e.Reason)
+	var msg string
+	if e.Undisclosed {
+		msg = fmt.Sprintf("stored script %q is %s", e.Name, e.Reason)
+	} else {
+		msg = fmt.Sprintf("stored script %q (%s) is %s", e.Name, e.Path, e.Reason)
+	}
 	switch e.Reason {
 	case ReasonOversized:
 		msg += fmt.Sprintf(": scripts are limited to %d bytes", MaxSizeBytes)
@@ -152,14 +267,41 @@ func (e *InvalidError) Error() string {
 
 // LanguageMismatchError reports an explicit `language` that contradicts the
 // script's extension (the extension is authoritative).
+//
+// Extension and Derived are host filesystem facts about the script (its real
+// extension is what a directory listing would show), so — like AmbiguousError
+// and InvalidError — the scoped form withholds them: see NonDisclosing(). Every
+// other refusal `resolve` can return (NotFoundError, AmbiguousError,
+// InvalidError) already threads the `disclose` flag through to its own
+// NonDisclosing() form; this type was the one omission, always returning the
+// full administrator detail regardless of caller kind.
 type LanguageMismatchError struct {
 	Name      string
 	Extension string
 	Requested string
 	Derived   string
+
+	// Undisclosed marks the agent-token form: the message names the caller's
+	// own requested language (its own input, not host information) but
+	// withholds the script's actual extension and derived language — host
+	// filesystem facts a directory listing would show (Spec 105 FR-012).
+	Undisclosed bool
+}
+
+// NonDisclosing returns a copy stripped of the extension/derived language
+// details, for delivery to a scoped (agent-token) caller. The typed identity
+// is preserved, so the REST surface still classifies it as INVALID_LANGUAGE —
+// same as AmbiguousError/InvalidError keeping their own distinct classification
+// as SCRIPT_UNUSABLE rather than being folded into SCRIPT_NOT_FOUND.
+func (e *LanguageMismatchError) NonDisclosing() *LanguageMismatchError {
+	return &LanguageMismatchError{Name: e.Name, Requested: e.Requested, Undisclosed: true}
 }
 
 func (e *LanguageMismatchError) Error() string {
+	if e.Undisclosed {
+		return fmt.Sprintf("stored script %q does not accept requested language %q — omit 'language' and let it be derived automatically",
+			e.Name, e.Requested)
+	}
 	return fmt.Sprintf("stored script %q is a %s file (%s) but language %q was requested — omit 'language' or set it to %q",
 		e.Name, e.Extension, e.Derived, e.Requested, e.Derived)
 }
@@ -214,68 +356,158 @@ func DeriveLanguage(name, ext, explicitLanguage string) (string, error) {
 }
 
 // Resolve reads the stored script `name` from scriptsDir and returns its
-// source together with the language derived from its extension.
+// source together with the language derived from its extension. This is the
+// ADMINISTRATOR form: a not-found error carries the directory's listing
+// (FR-004) and every other refusal names the host path it is about.
 //
 // Order matters: the name is validated BEFORE any filesystem call (SC-003),
-// then the directory decides which candidates exist, then the surviving
-// candidate is opened with the platform's no-follow idiom and read through a
-// bounded reader. Exactly one open and one read per call — no cache, no re-read.
+// then the directory decides which candidates exist (pre-105 behaviour, kept
+// verbatim: a directory the administrator cannot list is a refusal, SC-005),
+// then the surviving candidate is opened with the platform's no-follow idiom
+// and read through a bounded reader. Exactly one open and one read per call —
+// no cache, no re-read.
 func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language string, err error) {
+	return resolve(scriptsDir, name, explicitLanguage, true)
+}
+
+// ResolveScoped is Resolve for a scoped (agent-token) caller — Spec 105
+// FR-012. It opens and reads the script exactly as Resolve does, but decides
+// its candidates by a constant-cost path probe instead of the directory
+// listing, and every refusal it returns is already the non-disclosing form: a
+// not-found error is built WITHOUT listing the directory — neither the
+// discovery listing nor a directory read on the way to the miss; the two
+// candidate names are probed and nothing else, so the refusal's cost does not
+// grow with what is stored and does not depend on the name asked for
+// (probeCandidates) — and the ambiguous / invalid forms carry the caller's
+// own name and the reason but no host path and no raw OS error. Typed
+// identities are the same, so the REST classifier does not tell the two
+// callers apart. The probe is the scoped resolver's alone: the administrator
+// path keeps its directory-based decision (SC-005), so a directory that is
+// searchable but not listable still refuses administrators as it always did.
+func ResolveScoped(scriptsDir, name, explicitLanguage string) (source []byte, language string, err error) {
+	return resolve(scriptsDir, name, explicitLanguage, false)
+}
+
+// resolve is the shared body of Resolve and ResolveScoped; disclose selects
+// the administrator (true) or the scoped (false) refusal forms.
+func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source []byte, language string, err error) {
 	if err := ValidateName(name); err != nil {
 		return nil, "", err
+	}
+
+	notFound := func() error { return notFoundErrorFor(scriptsDir, name, disclose) }
+	invalid := func(path, reason, detail string) error {
+		e := &InvalidError{Name: name, Path: path, Reason: reason, Detail: detail}
+		if !disclose {
+			return e.NonDisclosing()
+		}
+		return e
 	}
 
 	// An empty scripts dir would make filepath.Join produce a bare relative
 	// path resolved against the process CWD — never that. No authority means
 	// no scripts.
 	if scriptsDir == "" {
-		return nil, "", newNotFoundError(scriptsDir, name)
+		return nil, "", notFound()
 	}
 
-	found, err := candidatesFor(scriptsDir, name)
+	candidates := candidatesFor
+	if !disclose {
+		candidates = probeCandidates
+	}
+	found, open, verifyUnchanged, closeSession, err := candidates(scriptsDir, name)
+	// Round 11 MUST-FIX: whatever per-request resource candidates() opened
+	// to decide found (a retained directory descriptor on Linux/BSD, a
+	// directory handle on Windows) is released exactly once here, however
+	// resolve returns below — a miss, an ambiguous name, a successful read,
+	// or any refusal in between.
+	if closeSession != nil {
+		defer closeSession()
+	}
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, "", newNotFoundError(scriptsDir, name)
+			return nil, "", notFound()
 		}
-		return nil, "", &InvalidError{Name: name, Path: scriptsDir, Reason: ReasonUnreadable, Detail: err.Error()}
+		return nil, "", invalid(scriptsDir, ReasonUnreadable, err.Error())
 	}
 
 	switch len(found) {
 	case 0:
-		return nil, "", newNotFoundError(scriptsDir, name)
+		return nil, "", notFound()
 	case 1:
 	default:
-		return nil, "", &AmbiguousError{Name: name, Paths: found}
+		ambiguous := &AmbiguousError{Name: name, Paths: found}
+		if !disclose {
+			return nil, "", ambiguous.NonDisclosing()
+		}
+		return nil, "", ambiguous
 	}
 
 	path := found[0]
 	lang, err := DeriveLanguage(name, filepath.Ext(path), explicitLanguage)
 	if err != nil {
+		if !disclose {
+			var mismatch *LanguageMismatchError
+			if errors.As(err, &mismatch) {
+				return nil, "", mismatch.NonDisclosing()
+			}
+		}
 		return nil, "", err
 	}
 
-	f, err := openScriptFile(path)
+	if open == nil {
+		open = openScriptFile
+	}
+	f, err := open(path)
 	if err != nil {
 		switch {
 		case errors.Is(err, errNonRegular):
-			return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonNonRegular}
+			return nil, "", invalid(path, ReasonNonRegular, "")
 		case errors.Is(err, fs.ErrNotExist):
 			// Removed between the probe and the open.
-			return nil, "", newNotFoundError(scriptsDir, name)
+			return nil, "", notFound()
 		default:
-			return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonUnreadable, Detail: err.Error()}
+			return nil, "", invalid(path, ReasonUnreadable, err.Error())
 		}
 	}
 	defer f.Close()
+
+	// Round 8 MUST-FIX (the lookup→open race): an index hit is re-probed by
+	// the candidate's own Lstat, but neither that nor the open itself proves
+	// the file just opened is the one the index vouched for — a rename
+	// landing between the probe and this open can leave a DIFFERENT file
+	// occupying the exact name (a folded spelling of it, on a case-folding
+	// mount) for the descriptor's entire lifetime; a no-follow open cannot
+	// tell the difference, because it does not compare names, only symlink
+	// status. verifyUnchanged proves this AUTHORITATIVELY on f, the
+	// descriptor that will actually be read (round 9 MUST-FIX, the
+	// PROVEN-AT-OPEN rule): on every unix platform (Linux/BSD since round 8,
+	// darwin since round 13) by re-reading the SAME retained descriptor's
+	// generation once more (gen-before == index.gen == gen-after proves the
+	// opened entry is the one the index vouched for) plus, on darwin, an
+	// additional F_GETPATH basename check; on Windows by reading the opened
+	// descriptor's own stored spelling (GetFinalPathNameByHandle) and
+	// comparing it to the retained directory handle's own final path plus
+	// the name that was requested. Either failure closes the descriptor (via
+	// the defer above) and refuses rather than trusting it. Nil for the
+	// administrator, whose candidatesFor has nothing to recheck against.
+	if verifyUnchanged != nil {
+		if verifyErr := verifyUnchanged(f, filepath.Base(path)); verifyErr != nil {
+			if errors.Is(verifyErr, errIndexGenerationChanged) || errors.Is(verifyErr, errSpellingUnproven) {
+				return nil, "", notFound()
+			}
+			return nil, "", invalid(path, ReasonUnreadable, verifyErr.Error())
+		}
+	}
 
 	// Re-verify on the open descriptor: this is the file that will actually be
 	// read, whatever the path pointed at a moment ago.
 	info, err := f.Stat()
 	if err != nil {
-		return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonUnreadable, Detail: err.Error()}
+		return nil, "", invalid(path, ReasonUnreadable, err.Error())
 	}
 	if !info.Mode().IsRegular() {
-		return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonNonRegular}
+		return nil, "", invalid(path, ReasonNonRegular, "")
 	}
 
 	// Bound the read itself rather than trusting the stat size: a file that
@@ -283,13 +515,13 @@ func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language
 	// One extra byte is requested purely to detect the overflow.
 	data, err := io.ReadAll(io.LimitReader(f, MaxSizeBytes+1))
 	if err != nil {
-		return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonUnreadable, Detail: err.Error()}
+		return nil, "", invalid(path, ReasonUnreadable, err.Error())
 	}
 	if len(data) > MaxSizeBytes {
-		return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonOversized}
+		return nil, "", invalid(path, ReasonOversized, "")
 	}
 	if len(data) == 0 {
-		return nil, "", &InvalidError{Name: name, Path: path, Reason: ReasonEmpty}
+		return nil, "", invalid(path, ReasonEmpty, "")
 	}
 
 	return data, lang, nil
@@ -297,7 +529,10 @@ func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language
 
 // candidatesFor returns the paths of the script files backing `name`, in
 // extension order (.js then .ts), by reading the directory and comparing entry
-// names BYTE FOR BYTE — the same rule List applies.
+// names BYTE FOR BYTE — the same rule List applies. This is the ADMINISTRATOR
+// resolver's decision, unchanged from before Spec 105 (SC-005): a directory
+// the process cannot list is a refusal, whatever the constructed paths would
+// have answered.
 //
 // The obvious implementation, stat-ing the two constructed paths, delegates the
 // name→file decision to the filesystem, and on the default macOS and Windows
@@ -308,10 +543,16 @@ func Resolve(scriptsDir, name, explicitLanguage string) (source []byte, language
 // entries that both refused to run as ambiguous. Reading the directory removes
 // the filesystem's matching from the loop entirely, so the two agree on every
 // platform. Resolve's no-follow open remains the authoritative check.
-func candidatesFor(scriptsDir, name string) ([]string, error) {
-	dirEntries, err := os.ReadDir(scriptsDir)
+//
+// The remaining three returns — the scoped opener, the post-open recheck
+// (round 8 / round 9 MUST-FIX) and the per-request resource closer (round
+// 11 MUST-FIX) — belong to probeCandidates alone: the administrator's
+// directory-based decision has nothing to bind an open to or recheck
+// against, so all three are always nil here.
+func candidatesFor(scriptsDir, name string) ([]string, scopedOpener, scopedVerifier, scopedCloser, error) {
+	dirEntries, err := readDir(scriptsDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	present := make(map[string]bool, 2)
@@ -330,7 +571,102 @@ func candidatesFor(scriptsDir, name string) ([]string, error) {
 			found = append(found, filepath.Join(scriptsDir, name+ext))
 		}
 	}
-	return found, nil
+	return found, nil, nil, nil, nil
+}
+
+// probeCandidates is candidatesFor for the SCOPED resolver: the same two
+// candidate names, each decided by the platform's constant-cost answer to
+// "does the directory hold an entry spelled exactly so" (storedSpellingsOf)
+// instead of by a listing. A scoped caller's refusal must cost the same
+// whatever the directory holds and whatever it asks for (Spec 105 FR-012 —
+// timing class is part of a non-disclosing refusal), so nothing here lists
+// the directory on a request's behalf. Exactness matters because the
+// filesystem's own name→file decision is case-insensitive on the default
+// macOS and Windows volumes and on a Linux case-folding mount (see
+// candidatesFor): a `backdoor.JS` that a probe for `backdoor.js` would open
+// is not a stored script, exactly as List decides. On every unix platform
+// (Linux, the BSDs, and — round 13, closing the round-10 finding-1/finding-3
+// pair — darwin too) the answer comes from a per-directory index of exact
+// names that is listed once per directory change, never per request
+// (storednames_other.go, codex r5 #1): an absent name and a differently
+// cased one are both plain index misses, identical cost. Windows alone still
+// answers from a single-entry platform call per probed path
+// (storedspellings_probe_windows.go). The no-follow open remains the
+// authoritative check.
+//
+// The verifier this returns is a post-open AUTHORITATIVE recheck (round 8 /
+// round 9 MUST-FIX, the lookup→open race): storedSpellingsOf's own verify
+// closure, run by resolve on the descriptor that was actually opened — on
+// every unix platform a directory-generation recheck on the SAME retained
+// descriptor the whole request used (storednames_other.go, round 11
+// MUST-FIX — see the opener below), with darwin adding its own F_GETPATH
+// proof of the opened descriptor's stored spelling on top
+// (entryname_darwin.go, round 13); on Windows a full-path comparison against
+// a directory handle opened once for the request
+// (storedspellings_probe_windows.go, round 11 MUST-FIX). Never nil on any
+// platform: this is what makes the pre-open probe above merely a cheap gate
+// rather than the authoritative decision.
+//
+// The opener this returns is non-nil on every unix platform (round 11
+// MUST-FIX for Linux/BSD, round 13 for darwin): it opens the winning
+// candidate relative to the SAME retained directory descriptor the
+// generation check and the candidate probe both used, instead of a fresh,
+// independent resolution of the path — the fix for the directory-path ABA
+// hole (storednames_other.go's package doc comment has the full account).
+// Windows returns nil here (its own fix reaches authoritatively into the
+// verifier instead, and openScriptFile in open_windows.go is already the
+// reparse-hardened no-follow open), so resolve falls back to the package's
+// ordinary openScriptFile. The closer releases whatever per-request
+// resource the opener needs (the retained descriptor on unix, a directory
+// handle on Windows) exactly once, whether or not a candidate was
+// ultimately opened.
+func probeCandidates(scriptsDir, name string) ([]string, scopedOpener, scopedVerifier, scopedCloser, error) {
+	storedExactly, open, verifyUnchanged, closeSession, err := storedSpellingsOf(scriptsDir)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	found := make([]string, 0, 2)
+	for _, ext := range []string{extJS, extTS} {
+		want := name + ext
+		stored, err := storedExactly(want)
+		if err != nil {
+			if closeSession != nil {
+				closeSession()
+			}
+			return nil, nil, nil, nil, err
+		}
+		if stored {
+			found = append(found, filepath.Join(scriptsDir, want))
+		}
+	}
+	return found, open, verifyUnchanged, closeSession, nil
+}
+
+// listForNotFound is the directory listing newNotFoundError attaches to the
+// administrator's error. A variable so the package's tests can witness that
+// the scoped form never invokes it.
+var listForNotFound = List
+
+// readDir and lstat are the package's two directory-touching primitives,
+// variables so the tests can count them: a scoped resolution must never
+// enumerate the directory on a request's behalf (readDir) and must probe a
+// fixed number of paths (lstat) whatever the directory holds and whatever it
+// asks for (Spec 105 FR-012 timing class).
+var (
+	readDir = os.ReadDir
+	lstat   = os.Lstat
+)
+
+// notFoundErrorFor builds the not-found error for one caller kind: the
+// discovery-carrying administrator form (FR-004), or the scoped form that is
+// constructed without touching the directory at all (Spec 105 FR-012 — the
+// listing would only be thrown away, and its per-entry stat would make the
+// refusal's latency grow with the number of stored scripts).
+func notFoundErrorFor(scriptsDir, name string, disclose bool) *NotFoundError {
+	if !disclose {
+		return &NotFoundError{Name: name, Undisclosed: true}
+	}
+	return newNotFoundError(scriptsDir, name)
 }
 
 // newNotFoundError builds the discovery-carrying not-found error (FR-004).
@@ -340,7 +676,7 @@ func newNotFoundError(scriptsDir, name string) *NotFoundError {
 	if scriptsDir == "" {
 		return err
 	}
-	entries, listErr := List(scriptsDir)
+	entries, listErr := listForNotFound(scriptsDir)
 	if listErr != nil {
 		return err
 	}
@@ -363,7 +699,7 @@ func List(scriptsDir string) ([]Entry, error) {
 	if scriptsDir == "" {
 		return []Entry{}, nil
 	}
-	dirEntries, err := os.ReadDir(scriptsDir)
+	dirEntries, err := readDir(scriptsDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return []Entry{}, nil
