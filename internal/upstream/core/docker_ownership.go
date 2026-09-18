@@ -75,9 +75,25 @@ const containerOwnerLabel = "com.mcpproxy.server"
 // server name appearing in both — and before this label was checked here,
 // ownsContainer admitted either instance's container for that name (codex
 // round: FR-007 canonical ownership was server-name-scoped but not
-// instance-scoped, so it was neither canonical nor unspoofable across
-// instances; a Docker-capable actor could also just create a container
-// carrying a live instance's id and a configured server's name and label).
+// instance-scoped, so it was neither canonical across instances nor immune
+// to two COOPERATING mcpproxy processes colliding on a name). That is the
+// gap this label closes.
+//
+// It does NOT, and cannot, make ownership cryptographically unforgeable
+// against a fully Docker-capable adversary (codex round 2): Docker labels
+// are plain, uninterpreted, unauthenticated string metadata — anyone who
+// can run `docker run --label` can copy this instance's real id verbatim
+// (readable off any of its own containers with a plain `docker inspect`,
+// no guessing required) onto a container of their own. That actor already
+// holds the Docker socket, i.e. is already equivalent to root on this
+// host's containers; no label scheme defeats them, and the pre-existing
+// com.mcpproxy.server check never claimed to either (ContainerOwnedByAny's
+// own doc: "which any foreign container can copy"). FR-007's canonical
+// ownership is scoped to distinguishing mcpproxy's OWN legitimate
+// containers — between configured servers, and now between live mcpproxy
+// instances — not to authenticating labels against a host-level attacker;
+// that would need a different mechanism entirely (signed labels, or state
+// kept outside Docker's label store) and is out of this fix's scope.
 const containerInstanceLabel = "com.mcpproxy.instance"
 
 // ownedContainerSuffixPattern is the random suffix generateRandomSuffix
@@ -198,8 +214,20 @@ func (c *Client) listOwnedContainersFiltered(ctx context.Context, includeStopped
 		if line == "" {
 			continue
 		}
+		// EXACTLY 6, never "at least": Docker label VALUES are arbitrary
+		// bytes with no tab-escaping, so a label an attacker controls
+		// (Owner or Instance, on a container they created themselves) could
+		// otherwise smuggle "<real-value>\t<garbage>" past an exact-match
+		// comparison — the embedded tab reads as one more field boundary,
+		// shifting everything after it, so a `< 6` (at-least) check would
+		// still accept parts[4]/parts[5] as exactly the real value with the
+		// forged suffix silently absorbed into the row that follows. A
+		// genuine row from ownedContainerFormat's 5 literal tabs always
+		// splits to exactly 6 fields; any other count is unparseable or
+		// tampered and the row is dropped rather than guessed at (codex
+		// round, HIGH: FR-007 instance-scoping fix).
 		parts := strings.Split(line, "\t")
-		if len(parts) < 6 {
+		if len(parts) != 6 {
 			continue
 		}
 		row := ownedContainer{ID: parts[0], Name: parts[1], Status: parts[2], Image: parts[3], Owner: parts[4], Instance: parts[5]}
@@ -373,12 +401,19 @@ func (cm ContainerMutator) read(ctx context.Context, id string) (ContainerRow, b
 		return ContainerRow{}, false, err
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		// SplitN(5): Status (the last field) is `docker ps`'s own human text
-		// and may itself be empty (a pre-label container docker never
-		// started, though that never reaches here) — keep it as whatever
-		// remains rather than dropping the row for a short split.
-		parts := strings.SplitN(line, "\t", 5)
-		if len(parts) < 5 || parts[0] != id {
+		// EXACTLY 5, never "at least" (codex round, HIGH: FR-007
+		// instance-scoping fix): containerRowFormat's 4 literal tabs always
+		// split a genuine row to exactly 5 fields, Status possibly empty
+		// (a pre-label container docker never started, though that never
+		// reaches here) but still present as its own field. Label VALUES
+		// have no tab-escaping, so a label an attacker controls (Owner or
+		// Instance, on a container they created themselves) could otherwise
+		// smuggle "<real-value>\t<garbage>" past an exact-match comparison
+		// with the embedded tab read as one more field boundary — an
+		// unbounded split rejects that row outright (extra fields, wrong
+		// count) instead of accepting a plausible-looking prefix.
+		parts := strings.Split(line, "\t")
+		if len(parts) != 5 || parts[0] != id {
 			continue
 		}
 		return ContainerRow{ID: parts[0], Name: parts[1], Owner: parts[2], Instance: parts[3], Status: parts[4]}, true, nil

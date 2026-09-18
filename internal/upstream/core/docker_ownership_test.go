@@ -824,3 +824,40 @@ func TestContainerOwnedByAny_Predicate(t *testing.T) {
 	}
 	assert.False(t, ContainerOwnedByAny(nil, "mcpproxy-a-wxyz", "a", own), "no configured servers, nothing is owned")
 }
+
+// TestContainerMutatorRead_RejectsEmbeddedTabInLabel is codex round 2 (PR E),
+// the HIGH finding on the instance-scoping fix: containerRowFormat's
+// tab-separated `docker ps` row has no escaping for a label's own value, so
+// a container an attacker creates themselves can give its Instance (or
+// Owner) label a value containing a literal tab: "<this instance's real
+// id>\t<garbage>". A bounded split (the original SplitN(5)) would absorb
+// everything after the 4th tab into Status, leaving the Instance field
+// read back as EXACTLY the real instance id — smuggling an exact match past
+// ownsContainer even though the field, as Docker actually reported it, was
+// never that clean value. read() now requires the row split to exactly the
+// expected field count; a row with an extra, attacker-controlled tab is
+// rejected outright rather than leniently parsed.
+func TestContainerMutatorRead_RejectsEmbeddedTabInLabel(t *testing.T) {
+	if runtime.GOOS == osWindows {
+		t.Skip("unix shell shim")
+	}
+	own := getInstanceID()
+	const id = "cafe00000001"
+	// containerRowFormat is ID \t Names \t Owner \t Instance \t Status (4
+	// literal tabs, 5 fields). This raw row instead carries an extra tab —
+	// as if the Instance label's own value were "<own>\tX" — so it splits
+	// to 6 fields, not 5.
+	raw := id + "\tmcpproxy-a-wxyz\ta\t" + own + "\tX\tUp 1 second\n"
+	mut := ContainerMutator{
+		Docker: func(ctx context.Context, _ ...string) *exec.Cmd {
+			return exec.CommandContext(ctx, "printf", "%s", raw)
+		},
+		Owns: func(containerName, ownerLabel, instanceLabel string) bool {
+			return ownsContainer("a", containerName, ownerLabel, instanceLabel)
+		},
+	}
+	row, ok, err := mut.Verify(context.Background(), id)
+	require.NoError(t, err)
+	assert.False(t, ok, "a row with an extra (attacker-controlled) tab must be rejected, not leniently parsed")
+	assert.Empty(t, row.Instance, "no partial row is handed back for a rejected read")
+}

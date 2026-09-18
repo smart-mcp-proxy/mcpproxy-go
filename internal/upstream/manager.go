@@ -819,8 +819,16 @@ func (m *Manager) readManagedContainers(ctx context.Context, includeStopped bool
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 4)
-		if len(parts) < 4 {
+		// EXACTLY 4, never "at least" (codex round, HIGH finding on the
+		// core.Client equivalent of this parse: FR-007 instance-scoping
+		// fix). Label VALUES have no tab-escaping, so a label an attacker
+		// controls (Owner or Instance, on a container they created
+		// themselves) could otherwise smuggle "<real-value>\t<garbage>"
+		// past the exact-match comparisons in core.ContainerOwnedByAny — an
+		// unbounded split rejects that row outright (extra fields) instead
+		// of guessing which prefix was the real one.
+		parts := strings.Split(line, "\t")
+		if len(parts) != 4 {
 			rows = append(rows, managedContainer{ID: parts[0]})
 			continue
 		}
