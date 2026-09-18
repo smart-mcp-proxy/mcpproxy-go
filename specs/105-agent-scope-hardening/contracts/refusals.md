@@ -14,6 +14,7 @@ Caller in every row: agent token `allowed={a}`, `perms={read}`, no pin, unless s
 | `call_tool_write a:write_tool` (authorized, over-tier) | `Permission denied … 'write'`, zero upstream | n/a | tier refusal is **not** non-disclosing by design |
 | `call_tool_read a:ghost` (unresolved identity on a known server) | insufficient-permission, zero upstream | same | every caller incl. admin (D4, SC-005 named exception); unknown-server branch unchanged |
 | `read_cache K` (K produced under broader scope) | `cache key not found` | `cache key not found` | ≡ on MCP and REST `/api/v1/tools/call`; internal/legacy keys same body |
+| `read_cache K` (K admitted on the header, body undecodable/disagreeing) | `Cache entry is unreadable … invalidated` | `cache key not found` | **not** ≡ by design: the refusal shape is decided on the fixed record header only; a reader the header admits gets an admitted-class outcome (`ErrEntryUnreadable`, entry invalidated), the same body for every caller kind, so nothing sharing the not-found shape was decided on the body |
 | `code_execution script=missing` | error without `Available scripts` | same | ≡; admin enumerates |
 | `upstream_servers tail_log b` | `tailLogNotFound` (exists) | same | ≡ (regression) |
 | `set_profile <not selectable>` | one format string (exists) | same | ≡ (regression) |
