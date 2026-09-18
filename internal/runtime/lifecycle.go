@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -1476,9 +1478,9 @@ func (r *Runtime) SaveConfiguration() error {
 			// the configSvc snapshot (the running config). Marked as our own
 			// write first, or the watcher reads the pending value back as an
 			// external edit and hot-applies what we deliberately deferred.
-			r.noteConfigSelfWrite(diskCopy)
+			r.noteConfigSelfWrite(diskCopy, snapshot.Path)
 			if err := config.SaveConfig(diskCopy, snapshot.Path); err != nil {
-				r.forgetConfigSelfWrite(diskCopy)
+				r.forgetConfigSelfWrite(diskCopy, snapshot.Path)
 				r.logger.Error("Failed to save config to file (pending-aware path)", zap.Error(err))
 				return err
 			}
@@ -1492,7 +1494,7 @@ func (r *Runtime) SaveConfiguration() error {
 		// Fallback to legacy save (no configSvc store to keep in sync)
 		if diskCopy != nil {
 			configCopy = diskCopy
-			r.noteConfigSelfWrite(diskCopy)
+			r.noteConfigSelfWrite(diskCopy, snapshot.Path)
 		}
 		if err := config.SaveConfig(configCopy, snapshot.Path); err != nil {
 			r.logger.Error("Failed to save config to file (legacy path)", zap.Error(err))
@@ -1583,6 +1585,10 @@ func (r *Runtime) ReloadConfiguration() error {
 		if loadErr != nil {
 			return fmt.Errorf("failed to reload config: %w", loadErr)
 		}
+		r.mu.RLock()
+		live := r.cfg
+		r.mu.RUnlock()
+		config.ReapplyFlagOverrides(newConfig, live)
 		// Already holding configCommitMu; use the locked helper so we don't
 		// re-acquire the non-reentrant mutex (would deadlock).
 		r.updateConfigLocked(newConfig, cfgPath)
@@ -1600,6 +1606,15 @@ func (r *Runtime) ReloadConfiguration() error {
 		config.LogLoadDiagnostics(newSnapshot.Config, r.logger)
 	}
 
+	// fileCfg is the file as reloaded — the DESIRED config. running is what
+	// this process adopts from it: restart-gated fields pinned to the live
+	// values and the serve flags re-applied. They coincide unless something is
+	// pending or a flag is in force; every per-component side effect below
+	// follows running (parity with ApplyConfig, which applies hotCfg), while
+	// the restart-required warning diffs the file.
+	fileCfg := newSnapshot.Config
+	running := newSnapshot.Config
+
 	// Sync the legacy r.cfg/r.cfgPath fields too: Runtime.GetConfig() still
 	// backs GET/PATCH /api/v1/config and other httpapi handlers. Without this,
 	// a disk reload only lands in the configsvc snapshot — the API keeps
@@ -1616,27 +1631,44 @@ func (r *Runtime) ReloadConfiguration() error {
 		// a surface nobody was being served, and pinRestartGated on the apply
 		// path would pin to a value that was never live.
 		r.mu.RLock()
-		pinned := pinRestartGated(r.cfg, newSnapshot.Config)
+		live := r.cfg
+		pinned := pinRestartGated(live, newSnapshot.Config)
 		r.mu.RUnlock()
+
+		// The loader re-applied the MCPPROXY_* env overrides but knows nothing
+		// about the serve flags; the RUNNING config is the file plus both, so
+		// a hand edit of an unrelated key must not switch `--read-only` off.
+		// Applied to the pinned copy only (nested blocks copy-on-write): the
+		// desired config below stays the file, so a pending file edit of a
+		// restart-gated flag field (listen) is still reported as pending.
+		config.ReapplyFlagOverrides(pinned, live)
 
 		// Republish so the configsvc snapshot and r.cfg cannot disagree:
 		// ReloadFromFile has already published the RAW file, which live
 		// subscribers would read as the running configuration. Skipped when
-		// nothing is pending — the common case, where pinned is equivalent to
-		// what ReloadFromFile just published.
-		if DetectConfigChanges(newSnapshot.Config, pinned).RequiresRestart {
+		// nothing is pending and no flag differs — the common case, where
+		// pinned is equivalent to what ReloadFromFile just published.
+		if DetectConfigChanges(fileCfg, pinned).RequiresRestart || !configsEquivalent(fileCfg, pinned) {
 			if uerr := r.configSvc.Update(pinned, configsvc.UpdateTypeModify, "reload_pin_restart_gated"); uerr != nil {
 				r.logger.Error("Failed to republish the pinned configuration after reload", zap.Error(uerr))
+			} else {
+				newSnapshot = r.configSvc.Current()
 			}
 		}
+		running = pinned
 
 		r.mu.Lock()
 		r.cfg = pinned
 		// The file IS the desired configuration, so a disk reload resets it —
 		// including over an API change that was still waiting for a restart:
 		// whoever edited the file wins, and nothing may keep merging onto a
-		// base the file no longer agrees with.
-		r.desiredCfg = newSnapshot.Config
+		// base the file no longer agrees with. The hot serve flags ride along
+		// exactly as they do in the startup desired config (the effective
+		// one): every PUT/PATCH round-trips this document, and a base that
+		// had lost --read-only would hand the file's value back as an "edit".
+		// Restart-gated fields stay the file's, so a pending edit of listen
+		// is still reported as pending.
+		r.desiredCfg = pinRestartGated(fileCfg, pinned)
 		if newSnapshot.Path != "" {
 			r.cfgPath = newSnapshot.Path
 		}
@@ -1650,8 +1682,8 @@ func (r *Runtime) ReloadConfiguration() error {
 	// ConfigApplyResult; the disk path had no channel at all, so at least make
 	// it loud in the log. Log-only on purpose: auto-restarting on a file save
 	// would be far more surprising than a stale deadline.
-	if oldSnapshot != nil && oldSnapshot.Config != nil && newSnapshot != nil && newSnapshot.Config != nil {
-		if result := DetectConfigChanges(oldSnapshot.Config, newSnapshot.Config); result.RequiresRestart {
+	if oldSnapshot != nil && oldSnapshot.Config != nil && fileCfg != nil {
+		if result := DetectConfigChanges(oldSnapshot.Config, fileCfg); result.RequiresRestart {
 			r.logger.Warn("Config file change includes restart-required fields; the running server keeps the old values until restart",
 				zap.Strings("changed_fields", result.ChangedFields),
 				zap.String("reason", result.RestartReason))
@@ -1664,7 +1696,7 @@ func (r *Runtime) ReloadConfiguration() error {
 	// health_check_interval from this, so external edits must reach it too —
 	// not only API applies.
 	if r.upstreamManager != nil {
-		r.upstreamManager.SetGlobalConfig(newSnapshot.Config)
+		r.upstreamManager.SetGlobalConfig(running)
 	}
 
 	// Parity with ApplyConfig's live per-component side effects (PR #857
@@ -1673,7 +1705,7 @@ func (r *Runtime) ReloadConfiguration() error {
 	// external edit lands in the snapshot/API while the running components
 	// keep their stale values.
 	r.mu.Lock()
-	r.applyComponentConfigLocked(oldSnapshot.Config, newSnapshot.Config)
+	r.applyComponentConfigLocked(oldSnapshot.Config, running)
 	r.mu.Unlock()
 
 	if err := r.LoadConfiguredServers(nil); err != nil {
@@ -1687,12 +1719,12 @@ func (r *Runtime) ReloadConfiguration() error {
 	// fsnotify config file watcher (config_watcher.go), which funnels external
 	// file edits into this method. nil-safe + fire-and-forget.
 	if r.telemetryService != nil {
-		r.telemetryService.NotifyConfigChanged(newSnapshot.Config)
+		r.telemetryService.NotifyConfigChanged(running)
 	}
 
 	// Spec 079 FR-012: re-gate the update checker on the disk-reload path too
 	// (ApplyConfig covers the API path). SetConfig no-ops when unchanged.
-	r.applyUpdateCheckConfig(newSnapshot.Config)
+	r.applyUpdateCheckConfig(running)
 
 	go r.postConfigReload()
 
@@ -2257,4 +2289,12 @@ func (r *Runtime) supervisorEventForwarder() {
 			return
 		}
 	}
+}
+
+// configsEquivalent reports whether two configs marshal to the same JSON —
+// the same comparison the config watcher uses to recognise its own saves.
+func configsEquivalent(a, b *config.Config) bool {
+	ja, errA := json.Marshal(a)
+	jb, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(ja, jb)
 }

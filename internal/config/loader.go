@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -454,6 +455,46 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 
 // SaveConfig saves configuration to file
 func SaveConfig(cfg *Config, path string) error {
+	return SaveConfigWithEdits(cfg, nil, path)
+}
+
+// SaveConfigWithEdits is SaveConfig for the save that persists an API edit:
+// the overridden fields that moved between mergeBase (the config the edit was
+// merged onto) and cfg are the caller's edits and are written as they are;
+// every other overridden field is written back from the file as in
+// SaveConfig. See PersistableConfigWithEdits.
+//
+// Never persists a process-only override (serve flag, MCPPROXY_* env, env
+// API key): the file's value is written back for every field still carrying
+// one (see process_overrides.go). That makes every save a read-modify-write
+// of the file, so in-process savers — the runtime, telemetry, serve's own
+// saves — are serialised: a save always reads the file the previous save
+// wrote, and an API edit can never be reverted by a concurrent save that had
+// read the file before it landed. (A stale config saved whole still
+// overwrites unrelated fields with what it holds — the residual window
+// telemetry.persistConfig documents — but a field it merely carries from an
+// override is restored from the file, never from that stale copy.)
+func SaveConfigWithEdits(cfg, mergeBase *Config, path string) error {
+	saveConfigMu.Lock()
+	defer saveConfigMu.Unlock()
+	persisted := PersistableConfigWithEdits(cfg, mergeBase, path)
+	if saveConfigTestHook != nil {
+		saveConfigTestHook()
+	}
+	return writeConfigFile(persisted, path)
+}
+
+// saveConfigMu serialises the read-base-then-write of every in-process save.
+// Leaf-level: nothing under it takes another lock except the override
+// registry's RWMutex (a leaf itself).
+var saveConfigMu sync.Mutex
+
+// saveConfigTestHook, when set, runs between a save's base read and its write
+// (under saveConfigMu). Tests only.
+var saveConfigTestHook func()
+
+// writeConfigFile marshals cfg exactly as given and writes it atomically.
+func writeConfigFile(cfg *Config, path string) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
@@ -689,8 +730,14 @@ func expandDataDir(cfg *Config) {
 	cfg.DataDir = resolved
 }
 
-// applyTLSEnvOverrides applies environment variable overrides for TLS configuration
+// applyTLSEnvOverrides applies the MCPPROXY_* environment overrides. Each one
+// goes through OverrideForProcess so no save path persists it (see
+// process_overrides.go); the env-sourced set is rebuilt from scratch on every
+// load so a reload reflects the variables set now.
 func applyTLSEnvOverrides(cfg *Config) {
+	b := &envOverrideBatch{}
+	defer b.commit()
+
 	// Ensure TLS config is initialized
 	if cfg.TLS == nil {
 		cfg.TLS = &TLSConfig{
@@ -702,41 +749,35 @@ func applyTLSEnvOverrides(cfg *Config) {
 	}
 
 	// Override listen address from environment
-	if value := os.Getenv("MCPPROXY_LISTEN"); value != "" {
-		cfg.Listen = value
-	}
+	value := os.Getenv("MCPPROXY_LISTEN")
+	envOverride(b, cfg, FieldListen, value != "", value)
 
 	// Override TLS enabled from environment
-	if value := os.Getenv("MCPPROXY_TLS_ENABLED"); value != "" {
-		cfg.TLS.Enabled = (value == trueValue || value == "1")
-	}
+	value = os.Getenv("MCPPROXY_TLS_ENABLED")
+	envOverride(b, cfg, FieldTLSEnabled, value != "", value == trueValue || value == "1")
 
 	// Override TLS client cert requirement from environment
-	if value := os.Getenv("MCPPROXY_TLS_REQUIRE_CLIENT_CERT"); value != "" {
-		cfg.TLS.RequireClientCert = (value == trueValue || value == "1")
-	}
+	value = os.Getenv("MCPPROXY_TLS_REQUIRE_CLIENT_CERT")
+	envOverride(b, cfg, FieldTLSRequireClientCert, value != "", value == trueValue || value == "1")
 
 	// Override TLS certificates directory from environment
-	if value := os.Getenv("MCPPROXY_CERTS_DIR"); value != "" {
-		cfg.TLS.CertsDir = value
-	}
+	value = os.Getenv("MCPPROXY_CERTS_DIR")
+	envOverride(b, cfg, FieldTLSCertsDir, value != "", value)
 
 	// Override data directory from environment (for backward compatibility)
-	if value := os.Getenv("MCPPROXY_DATA"); value != "" {
-		cfg.DataDir = value
-	}
+	value = os.Getenv("MCPPROXY_DATA")
+	envOverride(b, cfg, FieldDataDir, value != "", value)
 
 	// Override trusted hosts for reverse-proxy deployments (GH #898).
 	// Comma-separated list of Host header values accepted on loopback listeners.
-	if value := os.Getenv("MCPPROXY_TRUSTED_HOSTS"); value != "" {
-		var hosts []string
-		for _, h := range strings.Split(value, ",") {
-			if h = strings.TrimSpace(h); h != "" {
-				hosts = append(hosts, h)
-			}
+	var hosts []string
+	value = os.Getenv("MCPPROXY_TRUSTED_HOSTS")
+	for _, h := range strings.Split(value, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			hosts = append(hosts, h)
 		}
-		cfg.TrustedHosts = hosts
 	}
+	envOverride(b, cfg, FieldTrustedHosts, value != "", hosts)
 
 	// Override trusted proxies (Spec 107 FR-027). Comma-separated CIDRs or
 	// IPs; an empty variable leaves the file value. Entries are validated by
@@ -754,12 +795,8 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// (spec 086 FR-019). Explicit MCPPROXY_* alias per the loader convention;
 	// the env value wins over the file value, and materializes the security
 	// block so a config with no `security` key can still point at a corpus.
-	if value := os.Getenv(EnvTPABundlePath); value != "" {
-		if cfg.Security == nil {
-			cfg.Security = &SecurityConfig{}
-		}
-		cfg.Security.TPABundlePath = value
-	}
+	value = os.Getenv(EnvTPABundlePath)
+	envOverride(b, cfg, FieldTPABundlePath, value != "", value)
 
 	// Override the automatic informational baseline-scan kill switch from
 	// environment. Materializes the security block so an install with no
@@ -771,35 +808,29 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// bare `value != ""` check would have materialized `false` here and silently
 	// turned automatic scanning off for a config that had explicitly enabled it,
 	// because the accessor then reads the overwritten field rather than the env.
+	var autoScan *bool
 	switch os.Getenv(EnvAutoBaselineScan) {
 	case trueValue, "1":
 		enabled := true
-		if cfg.Security == nil {
-			cfg.Security = &SecurityConfig{}
-		}
-		cfg.Security.AutoBaselineScan = &enabled
+		autoScan = &enabled
 	case falseValue, "0":
 		enabled := false
-		if cfg.Security == nil {
-			cfg.Security = &SecurityConfig{}
-		}
-		cfg.Security.AutoBaselineScan = &enabled
+		autoScan = &enabled
 	}
+	envOverride(b, cfg, FieldAutoBaselineScan, autoScan != nil, autoScan)
 
 	// Override retrieve_tools serialization mode from environment (Spec 085).
 	// Explicit MCPPROXY_* alias per the established loader convention; the
 	// value is validated by cfg.Validate() right after these overrides apply.
-	if value := os.Getenv("MCPPROXY_TOOL_RESPONSE_MODE"); value != "" {
-		cfg.ToolResponseMode = value
-	}
+	value = os.Getenv("MCPPROXY_TOOL_RESPONSE_MODE")
+	envOverride(b, cfg, FieldToolResponseMode, value != "", value)
 
 	// Override DIRECT-surface serialization mode from environment (Spec 102).
 	// A separate variable from MCPPROXY_TOOL_RESPONSE_MODE above, matching the
 	// separate config axis: that one governs retrieve_tools, this one governs
 	// the direct enumeration surface. Setting one must never move the other.
-	if value := os.Getenv("MCPPROXY_DIRECT_TOOL_RESPONSE_MODE"); value != "" {
-		cfg.DirectToolResponseMode = value
-	}
+	value = os.Getenv("MCPPROXY_DIRECT_TOOL_RESPONSE_MODE")
+	envOverride(b, cfg, FieldDirectToolResponseMode, value != "", value)
 
 	// Override the GLOBAL aggregate concurrency limiter from environment
 	// (spec 093 FR-022, GH #955). Only this scope has an env scheme: the
@@ -807,28 +838,12 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// An explicit 0 is meaningful (it disables the limiter), so the value is
 	// materialized as a pointer; malformed values are warned about and ignored
 	// so a typo cannot silently reshape the proxy's admission behavior.
-	if value := os.Getenv("MCPPROXY_MAX_CONCURRENT_REQUESTS"); value != "" {
-		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
-			cfg.MaxConcurrentRequests = &n
-		} else {
-			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_MAX_CONCURRENT_REQUESTS=%q (want a non-negative integer)\n", value)
-		}
-	}
-	if value := os.Getenv("MCPPROXY_QUEUE_SIZE"); value != "" {
-		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
-			cfg.QueueSize = &n
-		} else {
-			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_QUEUE_SIZE=%q (want a non-negative integer)\n", value)
-		}
-	}
-	if value := os.Getenv("MCPPROXY_QUEUE_TIMEOUT"); value != "" {
-		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
-			qt := Duration(d)
-			cfg.QueueTimeout = &qt
-		} else {
-			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_QUEUE_TIMEOUT=%q (want a duration such as \"30s\")\n", value)
-		}
-	}
+	maxReqSet, maxReq := envNonNegativeInt("MCPPROXY_MAX_CONCURRENT_REQUESTS", "want a non-negative integer")
+	envOverride(b, cfg, FieldMaxConcurrentRequests, maxReqSet, maxReq)
+	queueSizeSet, queueSize := envNonNegativeInt("MCPPROXY_QUEUE_SIZE", "want a non-negative integer")
+	envOverride(b, cfg, FieldQueueSize, queueSizeSet, queueSize)
+	queueTimeoutSet, queueTimeout := envNonNegativeDuration("MCPPROXY_QUEUE_TIMEOUT", "want a duration such as \"30s\"")
+	envOverride(b, cfg, FieldQueueTimeout, queueTimeoutSet, queueTimeout)
 
 	// Override the HTTP server's request deadlines from environment (GH #965)
 	// — the escape hatch for operators who cannot edit the config file. An
@@ -837,28 +852,42 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// ResolveHTTPIdleTimeout), so the value is materialized as a pointer;
 	// malformed values are warned about and ignored so a typo cannot silently
 	// reintroduce a response-truncating deadline.
-	if value := os.Getenv("MCPPROXY_HTTP_READ_TIMEOUT"); value != "" {
-		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
-			rt := Duration(d)
-			cfg.HTTPReadTimeout = &rt
-		} else {
-			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_HTTP_READ_TIMEOUT=%q (want a duration such as \"120s\", or \"0s\" to disable)\n", value)
-		}
+	readTimeoutSet, readTimeout := envNonNegativeDuration("MCPPROXY_HTTP_READ_TIMEOUT", "want a duration such as \"120s\", or \"0s\" to disable")
+	envOverride(b, cfg, FieldHTTPReadTimeout, readTimeoutSet, readTimeout)
+	writeTimeoutSet, writeTimeout := envNonNegativeDuration("MCPPROXY_HTTP_WRITE_TIMEOUT", "want a duration such as \"300s\", or \"0s\" to disable")
+	envOverride(b, cfg, FieldHTTPWriteTimeout, writeTimeoutSet, writeTimeout)
+	idleTimeoutSet, idleTimeout := envNonNegativeDuration("MCPPROXY_HTTP_IDLE_TIMEOUT", "want a duration such as \"180s\"; \"0s\" falls back to the read timeout")
+	envOverride(b, cfg, FieldHTTPIdleTimeout, idleTimeoutSet, idleTimeout)
+}
+
+// envNonNegativeInt reads a non-negative integer env override; malformed
+// values are warned about and ignored so a typo cannot silently reshape the
+// proxy's behavior.
+func envNonNegativeInt(name, want string) (bool, *int) {
+	value := os.Getenv(name)
+	if value == "" {
+		return false, nil
 	}
-	if value := os.Getenv("MCPPROXY_HTTP_WRITE_TIMEOUT"); value != "" {
-		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
-			wt := Duration(d)
-			cfg.HTTPWriteTimeout = &wt
-		} else {
-			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_HTTP_WRITE_TIMEOUT=%q (want a duration such as \"300s\", or \"0s\" to disable)\n", value)
-		}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid %s=%q (%s)\n", name, value, want)
+		return false, nil
 	}
-	if value := os.Getenv("MCPPROXY_HTTP_IDLE_TIMEOUT"); value != "" {
-		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
-			it := Duration(d)
-			cfg.HTTPIdleTimeout = &it
-		} else {
-			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_HTTP_IDLE_TIMEOUT=%q (want a duration such as \"180s\"; \"0s\" falls back to the read timeout)\n", value)
-		}
+	return true, &n
+}
+
+// envNonNegativeDuration reads a non-negative duration env override; malformed
+// values are warned about and ignored.
+func envNonNegativeDuration(name, want string) (bool, *Duration) {
+	value := os.Getenv(name)
+	if value == "" {
+		return false, nil
 	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d < 0 {
+		fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid %s=%q (%s)\n", name, value, want)
+		return false, nil
+	}
+	dur := Duration(d)
+	return true, &dur
 }

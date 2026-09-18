@@ -356,3 +356,139 @@ func TestServeSaverUsesTheDiscoveredConfigPath(t *testing.T) {
 	untouched := readConfigFileJSON(t, unrelated)
 	assert.Nil(t, untouched["telemetry"], "save landed in the unrelated <data_dir> config")
 }
+
+// newServeRuntimeFlagTestCmd adds the flags runServer (not loadConfig) applies
+// onto the loaded config.
+func newServeRuntimeFlagTestCmd() *cobra.Command {
+	cmd := newServeFlagTestCmd()
+	cmd.Flags().String("log-level", "", "")
+	cmd.Flags().Bool("log-to-file", true, "")
+	cmd.Flags().String("log-dir", "", "")
+	cmd.Flags().Bool("debug-search", false, "")
+	cmd.Flags().Bool("require-mcp-auth", false, "")
+	cmd.Flags().Bool("read-only", false, "")
+	cmd.Flags().Bool("disable-management", false, "")
+	cmd.Flags().Bool("allow-server-add", true, "")
+	cmd.Flags().Bool("allow-server-remove", true, "")
+	cmd.Flags().Bool("enable-prompts", true, "")
+	cmd.Flags().Bool("aggregate-upstream-prompts", false, "")
+	return cmd
+}
+
+// The serve saver covers serve's OWN three saves. Every other persist path —
+// the runtime's SaveConfiguration on a server enable, telemetry's first-run
+// anonymous_id write — goes through config.SaveConfig with the live config.
+// Those must not persist the flag overrides either, which is what registering
+// every flag as a process-only override (config.OverrideForProcess) buys: the
+// central save seam writes the file's value back.
+func TestServeFlagsAreRegisteredAsProcessOverrides(t *testing.T) {
+	saveServeGlobals(t)
+	t.Cleanup(config.ResetProcessOverrides)
+	config.ResetProcessOverrides()
+	path := writeServeFlagTestConfig(t)
+	configFile, dataDir = path, filepath.Dir(path)
+
+	cmd := newServeRuntimeFlagTestCmd()
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--listen", ":0",
+		"--tray-endpoint", "unix:///tmp/x.sock",
+		"--enable-socket=false",
+		"--tool-response-limit", "500",
+		"--tool-response-mode", "compact",
+		"--direct-tool-response-mode", "deferred",
+		"--log-level", "debug",
+		"--log-to-file=false",
+		"--log-dir", t.TempDir(),
+		"--debug-search",
+		"--require-mcp-auth",
+		"--read-only",
+		"--disable-management",
+		"--allow-server-add=false",
+		"--allow-server-remove=false",
+		"--enable-prompts=false",
+		"--aggregate-upstream-prompts",
+	}))
+
+	cfg, _, err := loadConfig(cmd)
+	require.NoError(t, err)
+	applyServeLoggingFlags(cmd, cfg)
+	applyServeRuntimeFlags(cmd, cfg)
+
+	// The effective config carries every flag…
+	assert.Equal(t, ":0", cfg.Listen)
+	assert.Equal(t, "debug", cfg.Logging.Level)
+	assert.False(t, cfg.Logging.EnableFile)
+	assert.True(t, cfg.ReadOnlyMode)
+	assert.True(t, cfg.DebugSearch)
+	assert.False(t, cfg.AllowServerAdd)
+
+	// …and a plain runtime-style save writes none of them.
+	cfg.ToolsLimit = 42 // a genuine in-memory change that must persist
+	require.NoError(t, config.SaveConfig(cfg, path))
+
+	file := readConfigFileJSON(t, path)
+	assert.Equal(t, "127.0.0.1:8080", file["listen"])
+	assert.Nil(t, file["tray_endpoint"])
+	assert.Equal(t, true, file["enable_socket"])
+	assert.Equal(t, float64(20000), file["tool_response_limit"])
+	assert.Equal(t, "full", file["tool_response_mode"])
+	assert.Equal(t, "full", file["direct_tool_response_mode"])
+	logging, _ := file["logging"].(map[string]any)
+	assert.Equal(t, "info", logging["level"])
+	assert.Equal(t, true, logging["enable_file"])
+	assert.NotEqual(t, cfg.Logging.LogDir, logging["log_dir"], "--log-dir leaked")
+	assert.NotEqual(t, true, file["debug_search"])
+	assert.NotEqual(t, true, file["require_mcp_auth"])
+	assert.NotEqual(t, true, file["read_only_mode"])
+	assert.NotEqual(t, true, file["disable_management"])
+	assert.NotEqual(t, false, file["allow_server_add"])
+	assert.NotEqual(t, false, file["allow_server_remove"])
+	assert.NotEqual(t, false, file["enable_prompts"])
+	assert.NotEqual(t, true, file["aggregate_upstream_prompts"])
+	assert.Equal(t, float64(42), file["tools_limit"])
+}
+
+// A field the API edits after the flag was applied is a real change and is
+// persisted, flag or no flag.
+func TestServeFlagOverrideEditedViaAPIIsPersisted(t *testing.T) {
+	saveServeGlobals(t)
+	t.Cleanup(config.ResetProcessOverrides)
+	config.ResetProcessOverrides()
+	path := writeServeFlagTestConfig(t)
+	configFile, dataDir = path, filepath.Dir(path)
+
+	cmd := newServeRuntimeFlagTestCmd()
+	require.NoError(t, cmd.ParseFlags([]string{"--listen", ":0", "--read-only"}))
+	cfg, _, err := loadConfig(cmd)
+	require.NoError(t, err)
+	applyServeRuntimeFlags(cmd, cfg)
+
+	cfg.Listen = "127.0.0.1:9090" // the Settings page
+	cfg.ReadOnlyMode = false      // toggled back off
+	require.NoError(t, config.SaveConfig(cfg, path))
+
+	file := readConfigFileJSON(t, path)
+	assert.Equal(t, "127.0.0.1:9090", file["listen"])
+	assert.Equal(t, false, file["read_only_mode"])
+}
+
+// Both loadConfig and runServer apply --tool-response-limit; the second
+// registration must not replace the recorded file value (the fallback when
+// the file cannot be read at save time) with the flag's own value.
+func TestServeFlagsRegisteredTwiceKeepTheFileFallback(t *testing.T) {
+	saveServeGlobals(t)
+	t.Cleanup(config.ResetProcessOverrides)
+	config.ResetProcessOverrides()
+	path := writeServeFlagTestConfig(t)
+	configFile, dataDir = path, filepath.Dir(path)
+
+	cmd := newServeRuntimeFlagTestCmd()
+	require.NoError(t, cmd.ParseFlags([]string{"--tool-response-limit", "500"}))
+	cfg, _, err := loadConfig(cmd)
+	require.NoError(t, err)
+	applyServeRuntimeFlags(cmd, cfg)
+	require.Equal(t, 500, cfg.ToolResponseLimit)
+
+	persisted := config.PersistableConfig(cfg, filepath.Join(t.TempDir(), "missing.json"))
+	assert.Equal(t, 20000, persisted.ToolResponseLimit)
+}
