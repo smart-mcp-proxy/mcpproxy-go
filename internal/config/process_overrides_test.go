@@ -360,34 +360,8 @@ func TestReapplyFlagOverrides_SkipsAFlagTheLiveConfigSuperseded(t *testing.T) {
 	ReapplyFlagOverrides(reloaded, live)
 	assert.True(t, reloaded.ReadOnlyMode, "the superseded flag must not be resurrected")
 	assert.Equal(t, "compact", reloaded.ToolResponseMode, "the untouched flag is re-applied")
-	assert.Equal(t, []string{"tool_response_mode"}, ProcessOverrideFields(), "the superseded flag is retired")
-}
-
-// Once the running config carries a different value than the override, the
-// override is retired: a later edit back to the override's value is then an
-// ordinary edit and persists (it used to restore the file value instead).
-func TestRetireSupersededOverrides(t *testing.T) {
-	t.Cleanup(ResetProcessOverrides)
-	ResetProcessOverrides()
-	path := writeOverrideTestFile(t, `{"tool_response_mode": "full", "listen": "127.0.0.1:8080", "mcpServers": []}`)
-
-	cfg, err := ReadFile(path)
-	require.NoError(t, err)
-	OverrideForProcess(cfg, FieldToolResponseMode, OverrideSourceFlag, "compact")
-	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, ":0")
-
-	// The API sets the hot field to something else; listen stays pinned.
-	cfg.ToolResponseMode = "full"
-	require.NoError(t, SaveConfig(cfg, path))
-	RetireSupersededOverrides(cfg)
-	assert.Equal(t, []string{"listen"}, ProcessOverrideFields())
-
-	// …and back to the flag's value: a real edit now.
-	cfg.ToolResponseMode = "compact"
-	require.NoError(t, SaveConfig(cfg, path))
-	m := readJSON(t, path)
-	assert.Equal(t, "compact", m["tool_response_mode"])
-	assert.Equal(t, "127.0.0.1:8080", m["listen"], "the pinned flag is still not persisted")
+	assert.ElementsMatch(t, []string{"read_only_mode", "tool_response_mode"}, ProcessOverrideFields(),
+		"the record stays: a stale config still carrying the flag value must keep restoring the file")
 }
 
 // Registering the same override twice (loadConfig and runServer both apply
@@ -425,8 +399,79 @@ func TestPersistableConfig_StackedEnvAndFlag_EditToTheEnvValuePersists(t *testin
 	assert.Equal(t, "deferred", readJSON(t, path)["direct_tool_response_mode"])
 }
 
-// Retiring a superseded field forgets the whole stack, not only the winner.
-func TestRetireSupersededOverrides_RetiresTheWholeStack(t *testing.T) {
+// Round-5 review finding.
+
+// Edit-aware saves (review rounds 2-8). An override is never "retired": the
+// save that persists an API edit ignores the overrides of the fields the
+// caller MOVED relative to its merge base, and every other save keeps
+// restoring the file value. No mutable state means no window in which a
+// concurrent save of the still-live config is unprotected.
+
+func TestSaveConfigWithEdits_PersistsAnEditBackToTheOverrideValue(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"tool_response_mode": "full", "listen": "127.0.0.1:8080", "mcpServers": []}`)
+
+	cfg, err := ReadFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(cfg, FieldToolResponseMode, OverrideSourceFlag, "compact")
+	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, ":0")
+
+	base := *cfg
+	next := base
+	next.ToolResponseMode = "full" // away from the flag
+	require.NoError(t, SaveConfigWithEdits(&next, &base, path))
+	assert.Equal(t, "full", readJSON(t, path)["tool_response_mode"])
+
+	base = next
+	next.ToolResponseMode = "compact" // and back to it: still an edit
+	require.NoError(t, SaveConfigWithEdits(&next, &base, path))
+	m := readJSON(t, path)
+	assert.Equal(t, "compact", m["tool_response_mode"])
+	assert.Equal(t, "127.0.0.1:8080", m["listen"], "the untouched override is still not persisted")
+}
+
+func TestSaveConfigWithEdits_RoundTripIsNotAnEdit(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"read_only_mode": false, "mcpServers": []}`)
+
+	cfg, err := ReadFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(cfg, FieldReadOnlyMode, OverrideSourceFlag, true)
+
+	base := *cfg
+	next := base
+	next.ToolsLimit = 42 // the only thing the caller changed
+	require.NoError(t, SaveConfigWithEdits(&next, &base, path))
+	m := readJSON(t, path)
+	assert.NotEqual(t, true, m["read_only_mode"])
+	assert.Equal(t, float64(42), m["tools_limit"])
+}
+
+// Moving a field from a base value to the override's own value is an edit
+// (base != next == override is distinguishable, unlike a round trip).
+func TestSaveConfigWithEdits_MovingToTheOverrideValueIsAnEdit(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
+
+	cfg, err := ReadFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, "127.0.0.1:9000")
+
+	base := *cfg
+	base.Listen = "127.0.0.1:8080" // the desired config after a disk reload
+	next := base
+	next.Listen = "127.0.0.1:9000" // the operator makes the flag's address permanent
+	require.NoError(t, SaveConfigWithEdits(&next, &base, path))
+	assert.Equal(t, "127.0.0.1:9000", readJSON(t, path)["listen"])
+}
+
+// With env AND a flag on the same field only the flag is effective; the env
+// record must not intercept a plain save of an edit that equals the env value
+// once that edit is on disk.
+func TestPersistableConfig_StackedEnvAndFlag_RestoresFromTheFile(t *testing.T) {
 	t.Cleanup(ResetProcessOverrides)
 	ResetProcessOverrides()
 	path := writeOverrideTestFile(t, `{"direct_tool_response_mode": "full", "mcpServers": []}`)
@@ -436,77 +481,55 @@ func TestRetireSupersededOverrides_RetiresTheWholeStack(t *testing.T) {
 	require.NoError(t, err)
 	OverrideForProcess(cfg, FieldDirectToolResponseMode, OverrideSourceFlag, "compact")
 
-	cfg.DirectToolResponseMode = "deferred"
-	RetireSupersededOverrides(cfg)
-	assert.NotContains(t, ProcessOverrideFields(), "direct_tool_response_mode")
-
-	cfg.DirectToolResponseMode = "compact" // back to the (retired) flag value: an ordinary edit
-	require.NoError(t, SaveConfig(cfg, path))
-	assert.Equal(t, "compact", readJSON(t, path)["direct_tool_response_mode"])
-}
-
-// Round-5 review finding.
-
-// An apply retires only the overrides its caller actually edited: a field that
-// merely round-tripped a value the merge base already held is not an edit.
-func TestRetireEditedOverrides_IgnoresRoundTrips(t *testing.T) {
-	t.Cleanup(ResetProcessOverrides)
-	ResetProcessOverrides()
-
-	cfg := DefaultConfig()
-	OverrideForProcess(cfg, FieldReadOnlyMode, OverrideSourceFlag, true)
-	OverrideForProcess(cfg, FieldDirectToolResponseMode, OverrideSourceFlag, "compact")
-
-	base := *cfg
-	base.ReadOnlyMode = false // a merge base that lost the flag (a disk reload)
-	next := base
-	next.ToolsLimit = 42 // the only thing the caller changed
-	RetireEditedOverrides(&base, &next)
-	assert.ElementsMatch(t, []string{"direct_tool_response_mode", "read_only_mode"}, ProcessOverrideFields(),
-		"a round-tripped value is not an edit")
-
-	next.DirectToolResponseMode = "full" // a real edit off the flag
-	RetireEditedOverrides(&base, &next)
-	assert.Equal(t, []string{"read_only_mode"}, ProcessOverrideFields())
-}
-
-// Round-6 review finding: moving a field from a base value to the override's
-// own value is an edit too (base != next == override) and retires it.
-func TestRetireEditedOverrides_MovingToTheOverrideValueIsAnEdit(t *testing.T) {
-	t.Cleanup(ResetProcessOverrides)
-	ResetProcessOverrides()
-
-	cfg := DefaultConfig()
-	cfg.Listen = "127.0.0.1:8080"
-	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, "127.0.0.1:9000")
-
-	base := *cfg
-	base.Listen = "127.0.0.1:8080" // the desired config after a disk reload
-	next := base
-	next.Listen = "127.0.0.1:9000" // the operator makes the flag's address permanent
-	RetireEditedOverrides(&base, &next)
-	assert.NotContains(t, ProcessOverrideFields(), "listen")
-}
-
-// Round-7 review finding: retirement precedes the save, so a failed save must
-// be able to put the overrides back — or a later unrelated save leaks them.
-func TestRetireEditedOverrides_RestoreAfterFailedSave(t *testing.T) {
-	t.Cleanup(ResetProcessOverrides)
-	ResetProcessOverrides()
-
-	cfg := DefaultConfig()
-	OverrideForProcess(cfg, FieldAPIKey, OverrideSourceEnv, "env-secret")
-	OverrideForProcess(cfg, FieldReadOnlyMode, OverrideSourceFlag, true)
-
 	base := *cfg
 	next := base
-	next.APIKey = "rotated"
-	retired := RetireEditedOverrides(&base, &next)
-	assert.Equal(t, []string{"read_only_mode"}, ProcessOverrideFields())
+	next.DirectToolResponseMode = "deferred" // visibly different from "compact"
+	require.NoError(t, SaveConfigWithEdits(&next, &base, path))
+	assert.Equal(t, "deferred", readJSON(t, path)["direct_tool_response_mode"])
 
-	retired.Restore() // the save failed
-	assert.ElementsMatch(t, []string{"api_key", "read_only_mode"}, ProcessOverrideFields())
+	// A later plain save of the same effective config keeps what is on disk.
+	require.NoError(t, SaveConfig(&next, path))
+	assert.Equal(t, "deferred", readJSON(t, path)["direct_tool_response_mode"])
+}
 
-	persisted := PersistableConfig(cfg, filepath.Join(t.TempDir(), "missing.json"))
-	assert.NotEqual(t, "env-secret", persisted.APIKey)
+// While an API save persists a rotated api_key, a concurrent plain save of
+// the still-live config (telemetry, another runtime path) must never write
+// the env secret: the override record is never removed, only ignored by the
+// one save that edits the field.
+func TestSaveConfigWithEdits_ConcurrentStaleSaveNeverLeaksTheEnvKey(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
+
+	live, err := ReadFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(live, FieldAPIKey, OverrideSourceEnv, "env-secret")
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = SaveConfig(live, path) // the stale live config, env-secret and all
+		}
+	}()
+	for i := 0; i < 100; i++ {
+		base := *live
+		next := base
+		next.APIKey = "rotated-key"
+		require.NoError(t, SaveConfigWithEdits(&next, &base, path))
+		if got := readJSON(t, path)["api_key"]; got == "env-secret" {
+			close(stop)
+			<-done
+			t.Fatalf("iteration %d: env API key leaked into the file", i)
+		}
+	}
+	close(stop)
+	<-done
+	assert.NotEqual(t, "env-secret", readJSON(t, path)["api_key"])
 }

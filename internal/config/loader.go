@@ -424,7 +424,20 @@ func SaveConfig(cfg *Config, path string) error {
 	// Never persist a process-only override (serve flag, MCPPROXY_* env, env
 	// API key): write the file's value back for every field still carrying
 	// one. See process_overrides.go.
-	cfg = PersistableConfig(cfg, path)
+	return writeConfigFile(PersistableConfig(cfg, path), path)
+}
+
+// SaveConfigWithEdits is SaveConfig for the save that persists an API edit:
+// the overridden fields that moved between mergeBase (the config the edit was
+// merged onto) and cfg are the caller's edits and are written as they are;
+// every other overridden field is written back from the file as in
+// SaveConfig. See PersistableConfigWithEdits.
+func SaveConfigWithEdits(cfg, mergeBase *Config, path string) error {
+	return writeConfigFile(PersistableConfigWithEdits(cfg, mergeBase, path), path)
+}
+
+// writeConfigFile marshals cfg exactly as given and writes it atomically.
+func writeConfigFile(cfg *Config, path string) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)

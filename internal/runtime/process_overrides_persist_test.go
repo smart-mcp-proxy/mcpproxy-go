@@ -301,8 +301,8 @@ func TestApplyConfig_EditingListenUnderAFlagEndsTheOverride(t *testing.T) {
 	desired, err = rt.GetDesiredConfig()
 	require.NoError(t, err)
 	assert.Equal(t, ":0", desired.Listen)
-	assert.NotContains(t, config.ProcessOverrideFields(), "listen")
-	assert.Contains(t, config.ProcessOverrideFields(), "read_only_mode", "untouched overrides stay")
+	require.NoError(t, rt.SaveConfiguration())
+	assert.Equal(t, ":0", readConfigJSON(t, cfgPath)["listen"], "a later unrelated save keeps it")
 }
 
 // After a disk reload the desired config must still carry the hot flags, as
@@ -330,7 +330,6 @@ func TestApplyConfig_UnrelatedEditAfterReloadKeepsHotFlags(t *testing.T) {
 	assert.True(t, live.ReadOnlyMode, "--read-only must survive an unrelated API edit")
 	assert.Equal(t, "compact", live.ToolResponseMode)
 	assert.Equal(t, 99, live.ToolsLimit)
-	assert.Contains(t, config.ProcessOverrideFields(), "read_only_mode")
 
 	m := readConfigJSON(t, cfgPath)
 	assertNoOverridesOnDisk(t, m)
@@ -355,7 +354,6 @@ func TestApplyConfig_RoundTripAfterReloadKeepsTheListenOverride(t *testing.T) {
 	_, err = rt.ApplyConfig(desired, cfgPath)
 	require.NoError(t, err)
 
-	assert.Contains(t, config.ProcessOverrideFields(), "listen")
 	require.NoError(t, rt.SaveConfiguration())
 	assert.Equal(t, "127.0.0.1:8080", readConfigJSON(t, cfgPath)["listen"])
 }
@@ -383,12 +381,11 @@ func TestApplyConfig_EditingListenToTheFlagValueAfterReloadPersists(t *testing.T
 	desired, err = rt.GetDesiredConfig()
 	require.NoError(t, err)
 	assert.Equal(t, ":0", desired.Listen)
-	assert.NotContains(t, config.ProcessOverrideFields(), "listen")
 }
 
 // A failed save must not leave an override retired: the env API key would
 // otherwise leak into the file on the next unrelated save once disk recovers.
-func TestApplyConfig_FailedSaveRestoresTheRetiredOverride(t *testing.T) {
+func TestApplyConfig_FailedSaveKeepsTheOverrideProtected(t *testing.T) {
 	rt, cfgPath := newOverriddenRuntime(t)
 	dir := filepath.Dir(cfgPath)
 
@@ -401,8 +398,6 @@ func TestApplyConfig_FailedSaveRestoresTheRetiredOverride(t *testing.T) {
 	_, err = rt.ApplyConfig(desired, cfgPath)
 	require.Error(t, err, "the save must fail")
 	require.NoError(t, os.Chmod(dir, 0o700))
-
-	assert.Contains(t, config.ProcessOverrideFields(), "api_key", "the override is back after the failed save")
 
 	require.NoError(t, rt.SaveConfiguration()) // disk recovered; an unrelated save
 	m := readConfigJSON(t, cfgPath)

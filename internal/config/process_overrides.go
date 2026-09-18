@@ -348,7 +348,7 @@ func (b *envOverrideBatch) commit() {
 //
 // live is the config this process was running before the reload. A flag the
 // live config no longer carries was superseded by an API edit (which is on
-// disk by now); it is retired rather than resurrected over that edit.
+// disk by now) and is not resurrected over that edit.
 func ReapplyFlagOverrides(cfg, live *Config) {
 	if cfg == nil {
 		return
@@ -360,11 +360,10 @@ func ReapplyFlagOverrides(cfg, live *Config) {
 			continue
 		}
 		if live != nil && o.supersededBy(live) {
-			// Superseded by an API edit: the field is API-managed now, so
-			// the env record beneath the flag goes too (the loader has
-			// just re-recorded it; see RetireSupersededOverrides).
-			delete(processOverrides, key)
-			delete(processOverrides, overrideKey{key.field, OverrideSourceEnv})
+			// Superseded by an API edit that is on disk by now: the file
+			// value stands. The record is KEPT — a stale config still
+			// carrying the flag value (telemetry's, an in-flight save's)
+			// must go on restoring the file value rather than persist it.
 			continue
 		}
 		// Over an env override of the same field the config already carries
@@ -397,105 +396,6 @@ func effectiveOverridesLocked() []processOverride {
 		out = append(out, o)
 	}
 	return out
-}
-
-// RetireSupersededOverrides forgets every override the running config no
-// longer carries. An API edit that moved an overridden field to another
-// value has superseded the override for this process: from then on the field
-// is ordinary, so an edit BACK to the override's value persists as the edit
-// it is instead of being swapped for the file value. Call it with the config
-// this process actually runs (never with a file-derived one, whose values
-// differ from every override by construction).
-//
-// live is the config the process adopted, or — for a restart-gated field the
-// API edited but the process cannot adopt — the config the API saved: an
-// operator editing listen under --listen has ended that override for this
-// process even though the listener stays bound, and a later edit back to the
-// flag's value must persist as asked.
-//
-// A superseded field forgets its whole stack (flag and env): the field is
-// API-managed from now on.
-func RetireSupersededOverrides(live *Config) {
-	if live == nil {
-		return
-	}
-	processOverridesMu.Lock()
-	defer processOverridesMu.Unlock()
-	for _, o := range effectiveOverridesLocked() {
-		if !o.supersededBy(live) {
-			continue
-		}
-		for _, source := range []OverrideSource{OverrideSourceFlag, OverrideSourceEnv} {
-			delete(processOverrides, overrideKey{o.name(), source})
-		}
-	}
-}
-
-// RetireEditedOverrides forgets every override whose field the caller
-// actually edited: next differs from base, the config the edit was merged
-// onto (the desired config for PUT/PATCH /api/v1/config). What it was moved
-// TO does not matter — moving listen from the file's address to the flag's
-// own address is the operator making that address permanent, and is an edit
-// (base != next == override is distinguishable, unlike a plain round trip).
-// A field that merely round-tripped a value base already held — the file's
-// listen after a disk reload, say — is not an edit, whatever it equals; a
-// blanket "differs from the override" test would retire the override on the
-// first unrelated save after a reload.
-//
-// Call it BEFORE the save that persists next: once the field is API-managed
-// the save writes the edit; called after, PersistableConfig would already
-// have swapped an edit equal to the override for the file value. If that
-// save then FAILS, call Restore on the result: nothing reached disk, the
-// live and desired configs still carry the override, and leaving it retired
-// would let the next unrelated save write it — for MCPPROXY_API_KEY, leak the
-// secret — into the file.
-func RetireEditedOverrides(base, next *Config) RetiredOverrides {
-	var retired RetiredOverrides
-	if base == nil || next == nil {
-		return retired
-	}
-	processOverridesMu.Lock()
-	defer processOverridesMu.Unlock()
-	for _, o := range effectiveOverridesLocked() {
-		if !o.movedBetween(base, next) {
-			continue
-		}
-		for _, source := range []OverrideSource{OverrideSourceFlag, OverrideSourceEnv} {
-			key := overrideKey{o.name(), source}
-			if entry, ok := processOverrides[key]; ok {
-				retired.entries = append(retired.entries, retiredEntry{key, entry})
-				delete(processOverrides, key)
-			}
-		}
-	}
-	return retired
-}
-
-// RetiredOverrides is what RetireEditedOverrides removed, so a failed save
-// can put it back.
-type RetiredOverrides struct {
-	entries []retiredEntry
-}
-
-type retiredEntry struct {
-	key   overrideKey
-	entry processOverride
-}
-
-// Restore re-registers the retired overrides. An entry re-recorded for the
-// same field and source in the meantime (a reload rebuilding the env set)
-// is newer and is kept.
-func (r RetiredOverrides) Restore() {
-	if len(r.entries) == 0 {
-		return
-	}
-	processOverridesMu.Lock()
-	defer processOverridesMu.Unlock()
-	for _, e := range r.entries {
-		if _, exists := processOverrides[e.key]; !exists {
-			processOverrides[e.key] = e.entry
-		}
-	}
 }
 
 // ResetProcessOverrides forgets every recorded override. For tests.
@@ -534,11 +434,36 @@ func ProcessOverrideFields() []string {
 // with effective; the ones it restores are copied first. Callers must not
 // mutate the shared structures.
 //
-// Known limitation: "edited" is inferred from the value. An explicit API edit
-// that sets an overridden field to exactly the override's value is
-// indistinguishable from a round trip and is not persisted — unreachable from
-// the Web UI, which already shows the override as the current value.
+// A save that carries an API edit uses PersistableConfigWithEdits instead, so
+// the edited fields are persisted whatever they equal.
 func PersistableConfig(effective *Config, path string) *Config {
+	return PersistableConfigWithEdits(effective, nil, path)
+}
+
+// PersistableConfigWithEdits is PersistableConfig for the save that persists
+// an API edit: mergeBase is the config the edit was merged onto (the desired
+// config for PUT/PATCH /api/v1/config), and every overridden field that
+// MOVED between mergeBase and effective is the caller's edit — persisted as
+// is, whatever it moved to. Moving listen from the file's address to the
+// flag's own address is the operator making that address permanent
+// (base != next == override is distinguishable, unlike a plain round trip);
+// moving it back to the file's value is an edit too. A field that merely
+// round-tripped a value mergeBase already held — the file's listen after a
+// disk reload, say — keeps restoring the file value, whatever it equals.
+//
+// The override records are never removed by an edit. The one save that
+// carries the edit ignores them; every other save — a concurrent telemetry
+// write of the still-live config, the next server enable — keeps restoring
+// the CURRENT file value, which after the edit's save is the edit itself.
+// That is what makes an edit of api_key under MCPPROXY_API_KEY safe: there
+// is no window in which a stale config carrying the env secret is
+// unprotected.
+//
+// Known limitation: an edit that sets an overridden field to exactly the
+// override's value while mergeBase already holds that value is
+// indistinguishable from a round trip and is not persisted — unreachable
+// from the Web UI, which already shows the override as the current value.
+func PersistableConfigWithEdits(effective, mergeBase *Config, path string) *Config {
 	if effective == nil {
 		return nil
 	}
@@ -558,6 +483,9 @@ func PersistableConfig(effective *Config, path string) *Config {
 
 	out := *effective
 	for _, o := range overrides {
+		if mergeBase != nil && o.movedBetween(mergeBase, effective) {
+			continue // the caller's edit
+		}
 		o.restore(&out, base)
 	}
 	return &out

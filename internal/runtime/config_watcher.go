@@ -136,7 +136,14 @@ type selfWriteEntry struct {
 // cfg (config.PersistableConfig), which is what SaveConfig actually writes when
 // a serve flag or MCPPROXY_* env override is in force.
 func (r *Runtime) noteConfigSelfWrite(cfg *config.Config, path string) {
-	data, err := json.MarshalIndent(config.PersistableConfig(cfg, path), "", "  ")
+	r.noteConfigSelfWriteWithEdits(cfg, nil, path)
+}
+
+// noteConfigSelfWriteWithEdits is noteConfigSelfWrite for a save that carries
+// an API edit (config.SaveConfigWithEdits): mergeBase is the config the edit
+// was merged onto, so the marker matches the bytes that save writes.
+func (r *Runtime) noteConfigSelfWriteWithEdits(cfg, mergeBase *config.Config, path string) {
+	data, err := json.MarshalIndent(config.PersistableConfigWithEdits(cfg, mergeBase, path), "", "  ")
 	if err != nil {
 		return
 	}
@@ -163,7 +170,13 @@ func (r *Runtime) noteConfigSelfWrite(cfg *config.Config, path string) {
 // a genuine external edit the watcher must reload. Only the failed payload is
 // removed — markers pre-armed by other (successful) saves stay live.
 func (r *Runtime) forgetConfigSelfWrite(cfg *config.Config, path string) {
-	data, err := json.MarshalIndent(config.PersistableConfig(cfg, path), "", "  ")
+	r.forgetConfigSelfWriteWithEdits(cfg, nil, path)
+}
+
+// forgetConfigSelfWriteWithEdits is forgetConfigSelfWrite's counterpart to
+// noteConfigSelfWriteWithEdits.
+func (r *Runtime) forgetConfigSelfWriteWithEdits(cfg, mergeBase *config.Config, path string) {
+	data, err := json.MarshalIndent(config.PersistableConfigWithEdits(cfg, mergeBase, path), "", "  ")
 	if err != nil {
 		return
 	}

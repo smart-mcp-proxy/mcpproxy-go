@@ -1414,11 +1414,6 @@ func (r *Runtime) SaveConfiguration() error {
 		return fmt.Errorf("failed to clone configuration")
 	}
 
-	// A serve flag / env override the running config no longer carries was
-	// superseded (UpdateListenAddress, an earlier hot apply); retire it so
-	// the field is persisted like any other from now on.
-	config.RetireSupersededOverrides(configCopy)
-
 	// Update servers with latest from storage
 	configCopy.Servers = latestServers
 
