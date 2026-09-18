@@ -495,13 +495,26 @@ func (idx *profileIndex) effectiveServersForCandidate(candidate int, allowed []s
 	// one append per occurrence, for the rare authored duplicate — bounded
 	// by the admin-authored declared list, never by anything the caller
 	// controls) instead of a walk of the profile's own declared list.
+	//
+	// allowed itself may repeat a name (an unvalidated AllowedServers list);
+	// dedupeSeen guards against that so a repeated grant entry doesn't
+	// re-expand the same occurrences again — the old grant-map-based walk
+	// deduped allowed implicitly (map keys), so declared's own duplicates
+	// alone drove the output count, and this must reproduce that exactly
+	// (cross-model review round 2: a naive per-`allowed`-entry expansion
+	// multiplied by BOTH allowed's and declared's duplicate counts).
 	occ := idx.declaredOccurrences[candidate]
 	type hit struct {
 		pos  int
 		name string
 	}
 	hits := make([]hit, 0, len(allowed))
+	dedupeSeen := make(map[string]struct{}, len(allowed))
 	for _, name := range allowed {
+		if _, dup := dedupeSeen[name]; dup {
+			continue
+		}
+		dedupeSeen[name] = struct{}{}
 		for _, pos := range occ[name] {
 			hits = append(hits, hit{pos: pos, name: name})
 		}

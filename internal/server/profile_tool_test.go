@@ -1195,3 +1195,32 @@ func TestHandleSetProfile_ScopedRefusalReachCostsTheGrantNotTheFleet(t *testing.
 		require.Equal(t, steps["2 servers"], steps["4096 hidden servers"], "%s: %v", name, steps)
 	}
 }
+
+// TestProfileIndex_EffectiveServersForRestrictedGrant_DuplicatesFollowDeclaredOnly
+// (cross-model review round 2, PR D): declaredOccurrences lets a restricted
+// grant reproduce "profile-declared order, duplicates kept" in O(len(allowed))
+// instead of walking the profile's full declared list — but round 2 caught
+// that the first version of this multiplied a NAME's occurrences by both the
+// number of times IT appears in the profile's declared list AND the number
+// of times it appears in the caller's own (unvalidated, possibly repeating)
+// AllowedServers. The pre-fix grant-map-based walk implicitly deduped
+// `allowed` (a Go map's keys), so declared's own duplicate count alone drove
+// the output; this pins that exact contract: a repeated grant entry must not
+// re-expand the same occurrences again.
+func TestProfileIndex_EffectiveServersForRestrictedGrant_DuplicatesFollowDeclaredOnly(t *testing.T) {
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{{Name: "a-srv"}, {Name: "b-srv"}},
+		Profiles: []config.ProfileConfig{
+			{Name: "dup", Servers: []string{"a-srv", "b-srv", "a-srv"}},
+		},
+	}
+	idx := newProfileIndex(cfg)
+
+	// declared has "a-srv" twice; a NON-repeating grant must still report it
+	// twice (duplicates kept, per the documented contract).
+	require.Equal(t, []string{"a-srv", "a-srv"}, idx.EffectiveServersFor("dup", []string{"a-srv"}))
+
+	// A REPEATING grant for the same name must not multiply the output any
+	// further: still exactly declared's own two occurrences, not four.
+	require.Equal(t, []string{"a-srv", "a-srv"}, idx.EffectiveServersFor("dup", []string{"a-srv", "a-srv", "a-srv"}))
+}
