@@ -1604,6 +1604,15 @@ func (r *Runtime) ReloadConfiguration() error {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
 
+	// fileCfg is the file as reloaded — the DESIRED config. running is what
+	// this process adopts from it: restart-gated fields pinned to the live
+	// values and the serve flags re-applied. They coincide unless something is
+	// pending or a flag is in force; every per-component side effect below
+	// follows running (parity with ApplyConfig, which applies hotCfg), while
+	// the restart-required warning diffs the file.
+	fileCfg := newSnapshot.Config
+	running := newSnapshot.Config
+
 	// Sync the legacy r.cfg/r.cfgPath fields too: Runtime.GetConfig() still
 	// backs GET/PATCH /api/v1/config and other httpapi handlers. Without this,
 	// a disk reload only lands in the configsvc snapshot — the API keeps
@@ -1637,11 +1646,14 @@ func (r *Runtime) ReloadConfiguration() error {
 		// subscribers would read as the running configuration. Skipped when
 		// nothing is pending and no flag differs — the common case, where
 		// pinned is equivalent to what ReloadFromFile just published.
-		if DetectConfigChanges(newSnapshot.Config, pinned).RequiresRestart || !configsEquivalent(newSnapshot.Config, pinned) {
+		if DetectConfigChanges(fileCfg, pinned).RequiresRestart || !configsEquivalent(fileCfg, pinned) {
 			if uerr := r.configSvc.Update(pinned, configsvc.UpdateTypeModify, "reload_pin_restart_gated"); uerr != nil {
 				r.logger.Error("Failed to republish the pinned configuration after reload", zap.Error(uerr))
+			} else {
+				newSnapshot = r.configSvc.Current()
 			}
 		}
+		running = pinned
 
 		r.mu.Lock()
 		r.cfg = pinned
@@ -1649,7 +1661,7 @@ func (r *Runtime) ReloadConfiguration() error {
 		// including over an API change that was still waiting for a restart:
 		// whoever edited the file wins, and nothing may keep merging onto a
 		// base the file no longer agrees with.
-		r.desiredCfg = newSnapshot.Config
+		r.desiredCfg = fileCfg
 		if newSnapshot.Path != "" {
 			r.cfgPath = newSnapshot.Path
 		}
@@ -1663,8 +1675,8 @@ func (r *Runtime) ReloadConfiguration() error {
 	// ConfigApplyResult; the disk path had no channel at all, so at least make
 	// it loud in the log. Log-only on purpose: auto-restarting on a file save
 	// would be far more surprising than a stale deadline.
-	if oldSnapshot != nil && oldSnapshot.Config != nil && newSnapshot != nil && newSnapshot.Config != nil {
-		if result := DetectConfigChanges(oldSnapshot.Config, newSnapshot.Config); result.RequiresRestart {
+	if oldSnapshot != nil && oldSnapshot.Config != nil && fileCfg != nil {
+		if result := DetectConfigChanges(oldSnapshot.Config, fileCfg); result.RequiresRestart {
 			r.logger.Warn("Config file change includes restart-required fields; the running server keeps the old values until restart",
 				zap.Strings("changed_fields", result.ChangedFields),
 				zap.String("reason", result.RestartReason))
@@ -1677,7 +1689,7 @@ func (r *Runtime) ReloadConfiguration() error {
 	// health_check_interval from this, so external edits must reach it too —
 	// not only API applies.
 	if r.upstreamManager != nil {
-		r.upstreamManager.SetGlobalConfig(newSnapshot.Config)
+		r.upstreamManager.SetGlobalConfig(running)
 	}
 
 	// Parity with ApplyConfig's live per-component side effects (PR #857
@@ -1686,7 +1698,7 @@ func (r *Runtime) ReloadConfiguration() error {
 	// external edit lands in the snapshot/API while the running components
 	// keep their stale values.
 	r.mu.Lock()
-	r.applyComponentConfigLocked(oldSnapshot.Config, newSnapshot.Config)
+	r.applyComponentConfigLocked(oldSnapshot.Config, running)
 	r.mu.Unlock()
 
 	if err := r.LoadConfiguredServers(nil); err != nil {
@@ -1700,12 +1712,12 @@ func (r *Runtime) ReloadConfiguration() error {
 	// fsnotify config file watcher (config_watcher.go), which funnels external
 	// file edits into this method. nil-safe + fire-and-forget.
 	if r.telemetryService != nil {
-		r.telemetryService.NotifyConfigChanged(newSnapshot.Config)
+		r.telemetryService.NotifyConfigChanged(running)
 	}
 
 	// Spec 079 FR-012: re-gate the update checker on the disk-reload path too
 	// (ApplyConfig covers the API path). SetConfig no-ops when unchanged.
-	r.applyUpdateCheckConfig(newSnapshot.Config)
+	r.applyUpdateCheckConfig(running)
 
 	go r.postConfigReload()
 

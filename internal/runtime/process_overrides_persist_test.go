@@ -236,3 +236,42 @@ func TestReloadConfiguration_RestartGatedFlagDoesNotHideAPendingFileEdit(t *test
 	require.NoError(t, rt.SaveConfiguration())
 	assert.Equal(t, "127.0.0.1:9090", readConfigJSON(t, cfgPath)["listen"], "a later save keeps the pending edit")
 }
+
+// The reload's per-component side effects (upstream manager global config,
+// truncator, logging, telemetry) must follow the RUNNING config — the file
+// plus the flags — exactly as ApplyConfig applies hotCfg, not the raw file.
+func TestReloadConfiguration_ComponentsFollowTheRunningConfig(t *testing.T) {
+	t.Cleanup(config.ResetProcessOverrides)
+	config.ResetProcessOverrides()
+
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "mcp_config.json")
+	initial := config.DefaultConfig()
+	initial.DataDir = tmp
+	initial.ToolResponseLimit = 20000
+	initial.ToolResponseMode = "full"
+	require.NoError(t, config.SaveConfig(initial, cfgPath))
+
+	cfg, err := config.ReadFile(cfgPath)
+	require.NoError(t, err)
+	config.OverrideForProcess(cfg, config.FieldToolResponseLimit, config.OverrideSourceFlag, 500)
+	config.OverrideForProcess(cfg, config.FieldToolResponseMode, config.OverrideSourceFlag, "compact")
+
+	rt, err := New(cfg, cfgPath, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+	require.Equal(t, 500, rt.Truncator().Limit())
+
+	edited, err := config.ReadFile(cfgPath)
+	require.NoError(t, err)
+	edited.ToolsLimit = 77
+	require.NoError(t, config.SaveConfig(edited, cfgPath))
+	require.NoError(t, rt.ReloadConfiguration())
+
+	assert.Equal(t, 500, rt.Truncator().Limit(), "the truncator must not be rebuilt from the file's limit")
+	if um := rt.upstreamManager; um != nil {
+		assert.Equal(t, "compact", um.GlobalConfig().ToolResponseMode, "the upstream manager must see the running config")
+	}
+	snap := rt.ConfigSnapshot()
+	assert.Equal(t, "compact", snap.Config.ToolResponseMode, "the published snapshot is the running config")
+}
