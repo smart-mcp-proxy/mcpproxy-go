@@ -293,11 +293,13 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		// CRITICAL FIX: Cleanup Docker containers when initialization fails
 		// This prevents container accumulation when servers timeout during startup
 		if c.isDockerCommand {
-			c.logger.Warn("Initialization failed for Docker command - cleaning up container",
-				zap.String("server", c.config.Name),
-				zap.String("container_name", c.containerName),
-				zap.String("container_id", c.containerID),
-				zap.Error(err))
+			// Spec 105 D8: name a container here only with evidence — see
+			// dockerContainerLogFields. c.containerName alone can be a
+			// generated name never observed from Docker.
+			fields := []zap.Field{zap.String("server", c.config.Name)}
+			fields = append(fields, dockerContainerLogFields(c.containerID, c.containerName, c.containerOwner)...)
+			fields = append(fields, zap.Error(err))
+			c.logger.Warn("Initialization failed for Docker command - cleaning up container", fields...)
 
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 			defer cleanupCancel()

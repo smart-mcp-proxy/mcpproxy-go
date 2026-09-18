@@ -71,7 +71,12 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 		zap.Strings("container_args", logSafeArgs(containerArgs)),
 		zap.Strings("docker_run_args", logSafeArgs(dockerRunArgs)))
 
-	// Log to server-specific log as well
+	// Log to server-specific log as well. The name is GENERATED here, before
+	// Docker has created or inspected anything, so the record carries no
+	// container_owner (Spec 105 D9: the owner field is only ever the label
+	// read back from Docker); the attributed reader withholds the record
+	// from scoped callers as an ownerless container subject, administrators
+	// see it unchanged.
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Docker isolation configured",
 			zap.String("runtime_type", runtimeType),

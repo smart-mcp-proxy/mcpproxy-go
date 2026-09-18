@@ -53,11 +53,13 @@ func (c *Client) initialize(ctx context.Context) error {
 		// CRITICAL FIX: Additional cleanup for direct initialize() calls
 		// This handles cases where initialize() is called independently
 		if c.isDockerCommand {
-			c.logger.Debug("Direct initialization failed for Docker command - cleanup may be handled by caller",
-				zap.String("server", c.config.Name),
-				zap.String("container_name", c.containerName),
-				zap.String("container_id", c.containerID),
-				logSafeErrorField(err))
+			// Spec 105 D8: name a container here only with evidence — see
+			// dockerContainerLogFields. c.containerName alone can be a
+			// generated name never observed from Docker.
+			fields := []zap.Field{zap.String("server", c.config.Name)}
+			fields = append(fields, dockerContainerLogFields(c.containerID, c.containerName, c.containerOwner)...)
+			fields = append(fields, logSafeErrorField(err))
+			c.logger.Debug("Direct initialization failed for Docker command - cleanup may be handled by caller", fields...)
 		}
 
 		// Surface the useful context that the raw "context deadline exceeded"
@@ -67,7 +69,7 @@ func (c *Client) initialize(ctx context.Context) error {
 			waited := time.Since(initStart).Round(100 * time.Millisecond)
 			stderrBlock := c.formatRecentStderr()
 			if stderrBlock != "" {
-				return fmt.Errorf("server did not respond to MCP initialize within %s (subprocess may have crashed or printed to stderr instead of stdout); recent stderr:\n%s", waited, stderrBlock)
+				return &childOutputError{msg: fmt.Sprintf("server did not respond to MCP initialize within %s (subprocess may have crashed or printed to stderr instead of stdout); recent stderr:\n%s", waited, stderrBlock)}
 			}
 			return fmt.Errorf("server did not respond to MCP initialize within %s and produced no stderr output (check that the command starts an MCP server and not a help banner)", waited)
 		}
@@ -151,9 +153,36 @@ func shouldEnrichStdioPrematureExit(transportType string, err error) bool {
 
 func enrichTransportClosedError(stderrBlock string, cause error) error {
 	if stderrBlock != "" {
-		return fmt.Errorf("server process exited before completing the MCP initialize handshake; recent stderr:\n%s: %w", stderrBlock, cause)
+		return &childOutputError{
+			msg:   fmt.Sprintf("server process exited before completing the MCP initialize handshake; recent stderr:\n%s: %v", stderrBlock, cause),
+			cause: cause,
+		}
 	}
 	return fmt.Errorf("server process exited before completing the MCP initialize handshake and produced no stderr output (transport closed before the handshake): %w", cause)
+}
+
+// childOutputError is a connect error whose text re-emits the child
+// process's own stderr (the recent-stderr buffer). It is the provenance the
+// per-server log needs: a record that renders such an error carries child
+// text and is stamped child_output=true (recordConnectionFailure), so the
+// attributed reader (internal/logs, D8 rules 1 and 3) treats it exactly like
+// the direct stderr record — on a `docker run` name collision that text
+// names another server's container. It unwraps to its cause so errors.Is /
+// errors.As keep working through the wrappers connectStdio and Connect add
+// (Spec 105 FR-007, codex round 3).
+type childOutputError struct {
+	msg   string
+	cause error
+}
+
+func (e *childOutputError) Error() string { return e.msg }
+func (e *childOutputError) Unwrap() error { return e.cause }
+
+// embedsChildOutput reports whether err, anywhere in its chain, re-emits the
+// child's stderr.
+func embedsChildOutput(err error) bool {
+	var target *childOutputError
+	return errors.As(err, &target)
 }
 
 // isTransportClosedErr reports whether an initialize() failure indicates the
@@ -273,6 +302,7 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	isDocker := c.isDockerCommand
 	containerID := c.containerID
 	containerName := c.containerName
+	containerOwner := c.containerOwner
 	pgid := c.processGroupID
 	processCmd := c.processCmd
 	serverName := c.config.Name
@@ -300,14 +330,23 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 		defer cleanupCancel()
 
 		if containerID != "" {
+			// containerID is only ever set alongside containerOwner, once
+			// trackCidfileContainer or the name-recovery fallback verified
+			// ownership (Spec 105 D8) — safe to name here.
 			c.logger.Debug("Cleaning up Docker container by ID",
 				zap.String("server", serverName),
-				zap.String("container_id", containerID))
+				zap.String("container_id", containerID),
+				containerOwnerField(containerOwner))
 			c.killDockerContainerWithContext(cleanupCtx)
 		} else if containerName != "" {
+			// containerName alone (containerID empty here) is the GENERATED
+			// canonical name, never read back from Docker — not evidence a
+			// container by that name is ours (Spec 105 D8), so the record
+			// names the server only. killDockerContainerByNameWithContext
+			// still re-verifies ownership via ContainerMutator before it
+			// ever stops anything.
 			c.logger.Debug("Cleaning up Docker container by name",
-				zap.String("server", serverName),
-				zap.String("container_name", containerName))
+				zap.String("server", serverName))
 			c.killDockerContainerByNameWithContext(cleanupCtx, containerName)
 		} else {
 			c.logger.Debug("No container ID or name, using pattern-based cleanup",

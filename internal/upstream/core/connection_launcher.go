@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/launcher"
 )
@@ -341,9 +342,26 @@ func newLoggerWriter(primary, fallback *zap.Logger) io.Writer {
 }
 
 func (w *loggerWriter) Write(p []byte) (int, error) {
-	line := strings.TrimRight(string(p), "\n")
+	// One record per line: pumpLines already writes one line per call, and
+	// the split keeps that shape for any other producer (one record per
+	// child line is what `mcpproxy upstream logs` shows).
+	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+		w.writeLine(strings.TrimRight(line, "\r"))
+	}
+	return len(p), nil
+}
+
+// writeLine records one child output line through the per-server logger.
+// The child's text is the `message` FIELD of a constant-message record
+// stamped child_output=true, never the record message (Spec 105 FR-007,
+// internal/logs research D8 rule 1): the console encoder writes a message
+// unescaped, so child text there could carry a record header or boundary,
+// and a docker CLI failure names another server's container — the
+// attributed reader withholds child-output records that mention a container
+// (codex round 2).
+func (w *loggerWriter) writeLine(line string) {
 	if line == "" {
-		return len(p), nil
+		return
 	}
 	// Issue #1158 (review round 2, investigation 3). This is the child
 	// process's own stdout/stderr, written verbatim into
@@ -362,9 +380,8 @@ func (w *loggerWriter) Write(p []byte) (int, error) {
 	line = oauth.ScrubUpstreamText(line)
 	switch {
 	case w.primary != nil:
-		w.primary.Info(line)
+		w.primary.Info("launcher", zap.String("message", line), logs.ChildOutputField())
 	case w.fallback != nil:
-		w.fallback.Info(line)
+		w.fallback.Info("launcher", zap.String("message", line), logs.ChildOutputField())
 	}
-	return len(p), nil
 }

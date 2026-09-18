@@ -476,6 +476,49 @@ Denied to agent tokens on both surfaces:
 
 On the MCP surface (`upstream_servers`, `quarantine_security`) these return a tool error; on the REST surface (mutating `/api/v1/servers/...`, `/api/v1/config/...`, and `/api/v1/registries/...` routes) they return **`403 Forbidden`** (`operation requires admin access`). Read-only operations stay available to scoped tokens: `upstream_servers` `list`/`tail_log`, `GET /api/v1/servers`, per-server diagnostics, registry reads, and `GET /api/v1/index/search` (which honors quarantine — a quarantined server's tools are withheld from search on every surface). Those reads are **scope-filtered** as described above. `GET /api/v1/config` is the exception: it is an admin document (it carries the global `api_key`, every server's credentials, and a second enumeration of server names under `profiles[].servers`), so it returns `403` for an agent token rather than a filtered view.
 
+**Log attribution on `tail_log`.** Per-server log files are named from a
+*sanitised* server name, so two configured servers can share one file —
+`a/b` and `a_b` both write `server-a_b.log`, and on a case-insensitive
+filesystem so do `A` and `a`. `upstream_servers` `tail_log` therefore
+returns a scoped token only the records **attributable to the server it
+named**: every record mcpproxy writes carries its writer's server identity,
+and the reader filters on it *before* applying the line limit, so
+`lines_returned` counts the authorized tail and a co-owner's interleaved
+record never displaces an authorized one. The rule is the same whether or
+not a co-owner exists — a scoped caller never gets a whole-file refusal that
+depends on another server sharing the file, and a single over-long line in
+the shared file (longer than 1 MiB) is skipped rather than failing the read.
+Withheld from scoped callers:
+records with no writer identity (lines written before this rule existed,
+hand-appended lines, torn fragments), records about a container — by id,
+name or count — that do not prove the container's owner (`container_owner`,
+written by container housekeeping since this rule — earlier housekeeping
+records are treated as non-attributable), and records whose subject is
+another server (an OAuth callback tear-down that an earlier version routed
+through the wrong server's logger), and a child process's own output line
+that names a container — Docker's `docker run` name-conflict error, for
+instance, quotes the *other* container's name and id when two servers'
+generated container names collide (`a/b` and `a-b` both produce
+`mcpproxy-a-b-…`) — the same rule covers the "Connection failed" record
+whose error re-emits that stderr. For the same reason a scoped token's
+`connection_status.last_error` (on `tail_log` and `list`, and the health
+detail derived from it) has container ids, canonical container names and
+Docker's name-conflict phrase replaced by `[container]`; a server that is
+itself *named* like a container (`mcpproxy-tenant-abcd`) is not a container
+mention, so its ordinary child output stays attributable. Retained effects: rotation and retention
+of a shared file stay shared, so a co-owner's output can rotate an authorized
+record out of the readable history; and child process output is attributed
+to the server whose process wrote it — a child cannot forge another server's
+identity. The administrator readers — `tail_log` with the API key or over the
+local socket, and `mcpproxy upstream logs` — keep the whole file exactly as
+before; a profile on the URL (`/mcp/p/<slug>`) bounds *which* server an
+administrator may name, not which records of it they see. The REST endpoint
+`GET /api/v1/servers/{id}/logs` is **not** attributed: it serves the whole
+shared file to any caller entitled to the server name, agent tokens
+included. Until it is aligned with `tail_log`, do not rely on it to keep a
+co-owner's records from a scoped token — the REST management API's scope
+policy is a separate piece of work.
+
 ## Profile Pinning
 
 A [profile](./profiles.md) scopes tool discovery and calls to a named subset of upstream servers. With `--profile-pin`, you can **bind a token to a single profile** so it can never operate outside it — regardless of the URL it connects to or any `set_profile` call it makes.
