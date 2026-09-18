@@ -1737,16 +1737,23 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// (config_watcher.go). If the save fails, its entry is removed again on
 	// the error path below — nothing reached disk, so a later byte-identical
 	// EXTERNAL write of this config is a genuine edit the watcher must reload.
-	r.noteConfigSelfWrite(newCfg)
+	//
+	// The overridden fields this apply MOVED relative to its merge base are
+	// the caller's edits and are persisted as they are — whatever they moved
+	// to, including a serve flag's own value; a round trip of a value the
+	// base already held keeps restoring the file value. The override records
+	// stay: a concurrent save of the still-live config must keep restoring
+	// the file value (config.PersistableConfigWithEdits).
+	r.noteConfigSelfWriteWithEdits(newCfg, baseCfg, savePath)
 
-	saveErr := config.SaveConfig(newCfg, savePath)
+	saveErr := config.SaveConfigWithEdits(newCfg, baseCfg, savePath)
 	if saveErr != nil {
 		// Drop the pre-armed self-write entry: the save never landed, so no
 		// future fs event for these bytes can be our own echo. Keeping it
 		// would suppress a genuine external write of byte-identical JSON.
 		// Only this payload is forgotten — markers from other still-pending
 		// successful saves stay live.
-		r.forgetConfigSelfWrite(newCfg)
+		r.forgetConfigSelfWriteWithEdits(newCfg, baseCfg, savePath)
 		r.logger.Error("Failed to save configuration to disk",
 			zap.String("path", savePath),
 			zap.Error(saveErr))
@@ -2233,10 +2240,15 @@ func (r *Runtime) SearchRegistryServers(registryID, tag, query string, limit int
 	}
 
 	// Cache the freshly fetched list so subsequent searches surface its age.
+	// The entry is stamped internal (Spec 105 FR-002): read_cache refuses it
+	// for every caller without evicting it, and the Peek above keeps serving
+	// it. An unstamped entry would be legacy provenance — invalidated by the
+	// first read_cache probe of this guessable key.
 	var cacheInfo *contracts.RegistryCacheInfo
 	if r.cacheManager != nil {
 		if data, mErr := json.Marshal(result); mErr == nil {
-			if sErr := r.cacheManager.Store(cacheKey, "registry-servers", nil, string(data), "", len(result)); sErr != nil {
+			if sErr := r.cacheManager.StoreAs(cacheKey, "registry-servers", nil, string(data), "", len(result),
+				cache.Authorization{CallerKind: cache.CallerKindInternal}); sErr != nil {
 				r.logger.Warn("Failed to cache registry search", zap.Error(sErr))
 			}
 		}

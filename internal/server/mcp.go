@@ -5952,11 +5952,9 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	reader := p.cacheAuthorization(ctx)
 	response, err := p.cacheManager.GetRecordsAs(key, offset, limit, reader)
 	if err != nil {
+		// The activity record keeps the real reason; the body below may not.
 		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
-		if errors.Is(err, cache.ErrUnauthorizedRead) {
-			return mcp.NewToolResultError("Cache entry is not readable with this credential: it was produced under a broader authorization (server scope, permission tier or profile) than this request holds. Re-run the original tool call with this credential to obtain your own cache key."), nil
-		}
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to retrieve cached data: %v", err)), nil
+		return readCacheRefusal(err, reader), nil
 	}
 
 	// Serialize response
@@ -5973,13 +5971,23 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	// in that case there's nothing this layer can subdivide, so the oversize
 	// text flows through unchanged. p.logger receives a zap.Warn if the cache
 	// write fails so the resulting "cache key not found" is diagnosable.
+	//
+	// A re-cached page is stamped with the PARENT entry's snapshot, not the
+	// redeemer's (Spec 105 FR-001, monotone recursive provenance). Because
+	// the child's snapshot equals the parent's, the child's readers are
+	// exactly the parent's readers: a child never becomes redeemable by a
+	// caller the parent refused, nor unreadable to the producer whose payload
+	// it continues. (Under caller-kind-first ordering the redeemer is not
+	// necessarily broader in reach — a session-profiled administrator passes
+	// the gate — which is why the parent's snapshot, not "the narrower of the
+	// two", is the rule.)
 	text, reTruncated := maybeTruncateAndCacheText(
 		string(jsonResult),
 		"read_cache",
 		args,
 		len(response.Records),
 		p.currentTruncator(),
-		p.cacheStoreAs(reader),
+		p.cacheStoreAs(childPageProducer(response, reader)),
 		p.logger,
 	)
 

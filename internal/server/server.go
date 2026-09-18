@@ -2946,6 +2946,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			im := core.NewIsolationManager(liveCfg.DockerIsolation)
 			return string(im.ResolveMode(sc))
 		})
+		secService.SetInstanceID(core.GetInstanceID())
 		secService.SetEmitter(s.runtime)
 		secService.SetServerInfoProvider(&configServerInfoProvider{
 			cfg:        cfg,

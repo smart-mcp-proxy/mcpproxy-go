@@ -2229,7 +2229,13 @@ func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKey
 	// Check environment variable for API key first - this overrides config file
 	// Use LookupEnv to distinguish between "not set" and "set to empty string"
 	if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists && envAPIKey != "" {
-		c.APIKey = envAPIKey
+		// A process-only override of whatever the file holds: no save path
+		// may replace the file's key with it (see process_overrides.go).
+		// Already equal means Validate recorded it (or the file literally
+		// holds the env key); re-recording would lose the file value.
+		if c.APIKey != envAPIKey {
+			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envAPIKey)
+		}
 		return c.APIKey, false, APIKeySourceEnvironment
 	}
 
@@ -2743,7 +2749,10 @@ func (c *Config) Validate() error {
 		// Check environment variable for API key
 		// Use LookupEnv to distinguish between "not set" and "set to empty string"
 		if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists {
-			c.APIKey = envAPIKey // Allow empty string to explicitly disable authentication
+			// Allow empty string to explicitly disable authentication. A
+			// process-only override: no save path may write it into api_key
+			// (see process_overrides.go).
+			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envAPIKey)
 		}
 	}
 

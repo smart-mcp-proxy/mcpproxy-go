@@ -21,6 +21,13 @@ import (
 // needed, so total coverage is never bounded by this value (MCP-3319).
 const defaultSearchPageSize = 10000
 
+const (
+	// maxUnderscoreSearchSegments bounds the extra wildcard clauses generated for
+	// identifier-style queries. Typical MCP tool names stay well below this cap.
+	maxUnderscoreSearchSegments = 16
+	underscoreSegmentBoost      = 5.0
+)
+
 // BleveIndex wraps Bleve index operations
 type BleveIndex struct {
 	index  bleve.Index
@@ -359,13 +366,37 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 		return nil, fmt.Errorf("search query cannot be empty")
 	}
 
-	searchReq := newToolSearchRequest(buildToolSearchQuery(queryStr), 0, limit)
+	boolQuery := buildToolSearchQuery(queryStr)
+	searchReq := newToolSearchRequest(boolQuery, 0, limit)
 
 	b.logger.Debug("Searching tools with enhanced query", zap.String("query", queryStr), zap.Int("limit", limit))
 
 	searchResult, err := b.index.Search(searchReq)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
+	}
+
+	// Identifier queries often include only the meaningful segments of a
+	// longer tool name. If the legacy query did not find a canonical exact
+	// match, repeat it with an additional segment-aware signal. This preserves
+	// exact-name scores while letting boundary matches outrank substring hits.
+	segmentQuery := underscoreSegmentQuery(queryStr)
+	if segmentQuery != nil {
+		hasExactToolName := false
+		for _, hit := range searchResult.Hits {
+			if fieldsContainExactToolName(hit.Fields, queryStr) {
+				hasExactToolName = true
+				break
+			}
+		}
+
+		if !hasExactToolName {
+			boolQuery.AddShould(segmentQuery)
+			searchResult, err = b.index.Search(searchReq)
+			if err != nil {
+				return nil, fmt.Errorf("underscore segment search failed: %w", err)
+			}
+		}
 	}
 
 	// Convert results
@@ -438,6 +469,64 @@ func (b *BleveIndex) SearchToolsScoped(queryStr string, limit int, inScope func(
 
 	b.logger.Debug("Found scoped tools matching query", zap.Int("count", len(results)), zap.String("query", queryStr))
 	return results, nil
+}
+
+func fieldsContainExactToolName(fields map[string]interface{}, queryStr string) bool {
+	for _, field := range []string{"tool_name", "full_tool_name"} {
+		if value, ok := fields[field].(string); ok && value == queryStr {
+			return true
+		}
+	}
+	return false
+}
+
+// underscoreSegmentQuery matches each underscore-delimited query segment at a
+// complete segment boundary in the keyword-indexed tool_name field. Segment
+// order is intentionally irrelevant, but every segment is required.
+func underscoreSegmentQuery(queryStr string) bquery.Query {
+	segments := strings.Split(queryStr, "_")
+	if len(segments) < 2 || len(segments) > maxUnderscoreSearchSegments {
+		return nil
+	}
+
+	segmentQueries := make([]bquery.Query, 0, len(segments))
+	for _, segment := range segments {
+		if !isASCIIAlphanumeric(segment) {
+			return nil
+		}
+
+		exact := bleve.NewTermQuery(segment)
+		exact.SetField("tool_name")
+		exact.SetBoost(underscoreSegmentBoost)
+
+		prefix := bleve.NewPrefixQuery(segment + "_")
+		prefix.SetField("tool_name")
+		prefix.SetBoost(underscoreSegmentBoost)
+
+		middle := bleve.NewWildcardQuery("*_" + segment + "_*")
+		middle.SetField("tool_name")
+		middle.SetBoost(underscoreSegmentBoost)
+
+		suffix := bleve.NewWildcardQuery("*_" + segment)
+		suffix.SetField("tool_name")
+		suffix.SetBoost(underscoreSegmentBoost)
+
+		segmentQueries = append(segmentQueries, bleve.NewDisjunctionQuery(exact, prefix, middle, suffix))
+	}
+
+	return bleve.NewConjunctionQuery(segmentQueries...)
+}
+
+func isASCIIAlphanumeric(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // GetDocumentCount returns the number of documents in the index

@@ -268,17 +268,77 @@ Server scoping is enforced at three levels:
    receive every event unchanged; the stream is rendered per connection.
 4. **Cached responses** (`read_cache`) — a truncated response is parked behind
    a cache key, and the key is a hash, not a credential. Every entry is stamped
-   with the authorization that produced it (server scope, permission tier,
-   profile pin, effective profile, caller kind). `read_cache` refuses, on every
-   page, any request whose own authorization could not have produced the entry,
-   so a narrower token sharing the same MCP session cannot page a broader
-   token's response. An unrestricted admin may read any entry; a token may read
-   its own entries and those of tokens at least as narrow as itself. Profile
-   scope is compared as a server set, so deleting or narrowing a profile after
-   the entry was produced revokes cached access as well (a stale pin resolves to
-   a deny-all scope and reads nothing). An unauthenticated `/mcp` caller ranks
-   below an authenticated admin: it cannot page an entry an API-key admin
-   produced.
+   with the authorization snapshot that authorized producing it (server scope,
+   permission tier, profile pin, effective profile, caller kind), captured when
+   the call was authorized — a profile narrowed while the call was in flight
+   does not re-stamp the response. `read_cache` — on every MCP surface and on
+   the REST direct call path (`POST /api/v1/tools/call`) — admits, on every
+   page, exactly three kinds of request and refuses every other, so a
+   narrower token sharing the same MCP session cannot page a broader token's
+   response. Ordered by **caller kind first**: an administrator may read any
+   entry regardless of its own profile binding (an unauthenticated `/mcp`
+   caller ranks below an authenticated admin and cannot page an entry an
+   API-key admin produced); an agent token never reads an administrator's
+   entry. Between agent entries a reader is admitted when it presents the
+   **same effective authorization** the entry was produced under — the same
+   token, server grant, permission tiers, pin and effective profile server
+   set (compared as sets, so list order and the profile's name do not
+   matter) — or when it is **unrestricted**: a `*` server grant, no pin, no
+   effective profile, and every permission tier the entry's producer held. A
+   token that is wider than the producer but still bounded (an `{a,b}` grant
+   over an `{a}` entry, a session that left the profile it produced under)
+   is refused: it re-runs the call under its own credential instead. Profile
+   scope is compared as a server set, so deleting or narrowing a profile
+   after the entry was produced revokes cached access as well (a stale pin
+   resolves to a deny-all scope and reads nothing).
+
+   A page that `read_cache` itself has to truncate again is stamped with its
+   *parent's* snapshot, never the redeemer's, so provenance is monotone down
+   the chain. For a scoped caller every refusal — an entry it may not read, an
+   expired entry, an internal entry, a key that never existed — answers with
+   the same `cache key not found` body, status and timing (a refusal commits
+   the same stats write a miss does), so a key cannot be probed for
+   existence. A refusal also never decodes the entry's payload: the gate
+   reads a small header stored in front of each record, so a multi-megabyte
+   entry is refused as quickly as a one-line one. An expired entry is refused
+   like a miss and left for the periodic cleanup sweep to evict, so the
+   refusing read writes exactly what a miss writes. The header and the record
+   behind it are two encodings of the same stamp; an entry on which they
+   disagree (a corrupt or hand-edited database) is treated as unreadable —
+   refused for every caller, invalidated, never served. The header is
+   fixed-size and decides the whole verdict by itself: it carries the caller
+   kind, the permission tiers and a digest of the producer's effective
+   authorization, and the reader's own digest is compared against it — so a
+   refusal never loads the producer's snapshot, a pre-upgrade entry is
+   invalidated without being decoded, and a probe costs what a miss costs on
+   the first request after a restart as much as on the thousandth, however
+   many servers the producer's authorization names. Each distinct snapshot
+   is still stored once, under that digest, for administrator diagnostics;
+   nothing reads it to decide. The size statistics are reconciled from the
+   store by the periodic cleanup sweep, which is why an invalidated
+   pre-upgrade entry can leave `total_size_bytes` over-counting for at most
+   one sweep interval.
+
+   Server-edition OAuth **users** are bounded by the same dispatch gates as
+   agent tokens (server allowlist, permission tier, effective profile), so a
+   user's cached entry is stamped with those dimensions as well as the user
+   id, and redemption requires the same user *with the same* authorization:
+   a grant changed or a profile changed since the entry was produced revokes
+   cached access exactly as it does for an agent token.
+
+   **Upgrading.** Entries written by any release before this one — including
+   the immediately preceding one, which stamped a producer but no schema
+   version — are refused for **every** caller, administrators included, and
+   are invalidated on the first attempt to read them (a one-time
+   `cache key not found` on keys minted before the upgrade; re-run the
+   original tool call). The registry and repository-metadata caches mcpproxy
+   keeps for itself are stamped internal from this release on: never readable
+   through `read_cache`, and kept rather than evicted when refused. Registry
+   and repository-metadata entries persisted *before* the upgrade carry no
+   stamp, so the first `read_cache` probe of such a key after upgrading
+   invalidates it once — the next registry search or repository lookup
+   re-fetches and re-stamps it. The no-eviction guarantee applies to entries
+   written after the upgrade.
 
 ## Administrative Operations Are Admin-Only
 

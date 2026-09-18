@@ -464,7 +464,7 @@ func TestConfigWatcher_BackToBackSelfWritesBothSuppressed(t *testing.T) {
 	// this window). With a single slot this evicts A's record.
 	cfgB := editedConfig(initialCfg, 72222)
 	cfgB.Listen = "127.0.0.1:2"
-	rt.noteConfigSelfWrite(cfgB)
+	rt.noteConfigSelfWrite(cfgB, cfgPath)
 
 	// A's debounce fires while disk still holds A. It must stay suppressed.
 	time.Sleep(1200 * time.Millisecond)
