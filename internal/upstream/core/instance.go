@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/google/uuid"
 )
@@ -19,14 +18,6 @@ var (
 
 	dataDirMu sync.Mutex
 	dataDir   string
-
-	// claimSeq disambiguates legacy-id claim paths beyond os.Getpid(), which
-	// is constant for the process's whole lifetime. Real racers are always
-	// separate processes (distinct PIDs), so this never matters in
-	// production, but it keeps the claim path collision-free for any
-	// same-process caller too (e.g. concurrent test goroutines) instead of
-	// relying on PID uniqueness alone.
-	claimSeq atomic.Uint64
 
 	// legacyInstanceIDPath is a var (not a const) so tests can point it at a
 	// scratch path instead of the real host-wide file.
@@ -99,20 +90,23 @@ func resolveInstanceID(dir string) string {
 // adoptLegacyInstanceID migrates the pre-fix, host-wide shared instance id
 // (if present) into dataDir. Returns "" if there is no legacy file to adopt.
 //
-// Claiming the legacy file happens via os.Rename to a process-unique path
-// rather than a plain read-then-remove: rename atomically fails if the
-// source is already gone, so when two processes race to adopt the same
-// legacy file at upgrade time, exactly one wins and the other correctly
-// falls through to generating its own fresh id. A read-then-remove would let
-// both processes read the same id before either removed the file,
-// recreating the original host-wide-shared-id bug for that pair.
+// Claiming the legacy file happens via os.Rename to a globally-unique path
+// (a fresh UUID, not e.g. os.Getpid()) rather than a plain read-then-remove:
+// rename atomically fails if the source is already gone, so when two
+// processes race to adopt the same legacy file at upgrade time, exactly one
+// wins and the other correctly falls through to generating its own fresh id.
+// A read-then-remove would let both processes read the same id before
+// either removed the file, recreating the original host-wide-shared-id bug
+// for that pair. The claim destination must itself never collide between
+// racers -- a PID-based suffix alone doesn't guarantee that (PIDs repeat
+// across a crashed-and-restarted process, and are identical across
+// goroutines within one process), so a random UUID is used instead.
 func adoptLegacyInstanceID(dataDir string) string {
-	claimPath := fmt.Sprintf("%s.claimed-%d-%d", legacyInstanceIDPath(), os.Getpid(), claimSeq.Add(1))
+	claimPath := fmt.Sprintf("%s.claimed-%s", legacyInstanceIDPath(), uuid.New().String())
 	if err := os.Rename(legacyInstanceIDPath(), claimPath); err != nil {
 		// No legacy file, or another process already claimed it.
 		return ""
 	}
-	defer os.Remove(claimPath)
 
 	data, err := os.ReadFile(claimPath)
 	if err != nil {
@@ -120,9 +114,19 @@ func adoptLegacyInstanceID(dataDir string) string {
 	}
 	id := strings.TrimSpace(string(data))
 	if id == "" {
+		_ = os.Remove(claimPath)
 		return ""
 	}
-	_ = saveInstanceID(dataDir, id) // Best effort save, same as the fresh-id path below
+
+	if err := saveInstanceID(dataDir, id); err != nil {
+		// Persistence under the new per-data-dir location failed: leave the
+		// claimed content at claimPath instead of deleting it, so it isn't
+		// silently lost and can still be recovered manually. This process
+		// still uses id for its own lifetime -- the same best-effort
+		// tolerance the fresh-uuid path below already has for a failed save.
+		return id
+	}
+	_ = os.Remove(claimPath)
 	return id
 }
 

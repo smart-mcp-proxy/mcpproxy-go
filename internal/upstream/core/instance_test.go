@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -140,6 +141,45 @@ func TestAdoptLegacyInstanceIDConcurrentClaimIsExclusive(t *testing.T) {
 	}
 }
 
+func TestAdoptLegacyInstanceIDPreservesClaimWhenSaveFails(t *testing.T) {
+	legacyPath := filepath.Join(t.TempDir(), "mcpproxy-instance-id")
+	withLegacyInstanceIDPath(t, legacyPath)
+
+	legacyID := uuid.New().String()
+	if err := os.WriteFile(legacyPath, []byte(legacyID), 0o600); err != nil {
+		t.Fatalf("failed to seed legacy instance id file: %v", err)
+	}
+
+	// A plain file (not a directory) as the "data dir" makes saveInstanceID's
+	// os.WriteFile(filepath.Join(dataDir, instanceIDFileName), ...) fail on
+	// every OS, without relying on permission bits that behave differently
+	// on Windows.
+	unwritableDataDir := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(unwritableDataDir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("failed to seed the not-a-directory stand-in: %v", err)
+	}
+
+	id := adoptLegacyInstanceID(unwritableDataDir)
+	if id != legacyID {
+		t.Fatalf("expected adoptLegacyInstanceID to still return the legacy id %q despite the failed save, got %q", legacyID, id)
+	}
+
+	matches, err := filepath.Glob(legacyPath + ".claimed-*")
+	if err != nil {
+		t.Fatalf("glob failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("expected the claimed legacy content to survive a failed save (found %d claim files, want 1): %v", len(matches), matches)
+	}
+	claimed, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("failed to read the surviving claim file: %v", err)
+	}
+	if strings.TrimSpace(string(claimed)) != legacyID {
+		t.Fatalf("surviving claim file content = %q, want %q", claimed, legacyID)
+	}
+}
+
 // helperProcessEnvVar and friends drive a re-exec of this test binary as a
 // standalone helper process, so GetInstanceID's process-wide sync.Once is
 // exercised fresh -- other tests in this package (e.g. isolation_*_test.go,
@@ -180,17 +220,31 @@ func TestHelperProcess(t *testing.T) {
 // real machine's host-wide legacy file. Returns what it printed.
 func runInstanceIDHelperProcess(t *testing.T, dataDir string) string {
 	t.Helper()
+	out, err := runInstanceIDHelperProcessWithLegacyPath(dataDir, filepath.Join(dataDir, "no-legacy-file"))
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return out
+}
+
+// runInstanceIDHelperProcessWithLegacyPath is like runInstanceIDHelperProcess
+// but lets the caller point multiple helper processes at the SAME legacy
+// path, to exercise the real cross-process legacy-claim race. It returns an
+// error instead of calling t.Fatalf directly so it's safe to invoke from a
+// spawned goroutine (testing.T.Fatal/FailNow must only be called from the
+// test's own goroutine).
+func runInstanceIDHelperProcessWithLegacyPath(dataDir, legacyPath string) (string, error) {
 	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcess")
 	cmd.Env = append(os.Environ(),
 		helperProcessEnvVar+"=1",
 		helperProcessDataDirEnvVar+"="+dataDir,
-		helperProcessLegacyPathEnvVar+"="+filepath.Join(dataDir, "no-legacy-file"),
+		helperProcessLegacyPathEnvVar+"="+legacyPath,
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("helper process failed: %v\noutput: %s", err, out)
+		return "", fmt.Errorf("helper process failed: %w\noutput: %s", err, out)
 	}
-	return string(out)
+	return string(out), nil
 }
 
 func TestGetInstanceIDReturnsValidUUIDPersistedUnderDataDir(t *testing.T) {
@@ -214,10 +268,72 @@ func TestGetInstanceIDDistinctAcrossConcurrentProcesses(t *testing.T) {
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
 
-	id1 := runInstanceIDHelperProcess(t, dir1)
-	id2 := runInstanceIDHelperProcess(t, dir2)
+	var id1, id2 string
+	var err1, err2 error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		id1, err1 = runInstanceIDHelperProcessWithLegacyPath(dir1, filepath.Join(dir1, "no-legacy-file"))
+	}()
+	go func() {
+		defer wg.Done()
+		id2, err2 = runInstanceIDHelperProcessWithLegacyPath(dir2, filepath.Join(dir2, "no-legacy-file"))
+	}()
+	wg.Wait()
 
+	if err1 != nil {
+		t.Fatalf("%v", err1)
+	}
+	if err2 != nil {
+		t.Fatalf("%v", err2)
+	}
 	if id1 == id2 {
 		t.Fatalf("expected two mcpproxy processes with distinct data dirs to get distinct instance ids, got %q for both", id1)
+	}
+}
+
+// TestGetInstanceIDCrossProcessLegacyClaimIsExclusive is the real-world
+// counterpart to TestAdoptLegacyInstanceIDConcurrentClaimIsExclusive: that
+// test proves the claim is exclusive between goroutines in one process
+// (which, unrealistically, all share one PID); this one starts two genuinely
+// separate OS processes racing over the SAME seeded legacy file and checks
+// exactly one of them adopts it.
+func TestGetInstanceIDCrossProcessLegacyClaimIsExclusive(t *testing.T) {
+	legacyPath := filepath.Join(t.TempDir(), "mcpproxy-instance-id")
+	legacyID := uuid.New().String()
+	if err := os.WriteFile(legacyPath, []byte(legacyID), 0o600); err != nil {
+		t.Fatalf("failed to seed legacy instance id file: %v", err)
+	}
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	var id1, id2 string
+	var err1, err2 error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); id1, err1 = runInstanceIDHelperProcessWithLegacyPath(dir1, legacyPath) }()
+	go func() { defer wg.Done(); id2, err2 = runInstanceIDHelperProcessWithLegacyPath(dir2, legacyPath) }()
+	wg.Wait()
+
+	if err1 != nil {
+		t.Fatalf("%v", err1)
+	}
+	if err2 != nil {
+		t.Fatalf("%v", err2)
+	}
+
+	adopters := 0
+	for _, id := range []string{id1, id2} {
+		if id == legacyID {
+			adopters++
+		}
+	}
+	if adopters != 1 {
+		t.Fatalf("expected exactly one of 2 concurrent mcpproxy processes to adopt the legacy id %q, got %d (id1=%q id2=%q)", legacyID, adopters, id1, id2)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("expected the legacy shared file to be gone after the race, stat err = %v", err)
 	}
 }
