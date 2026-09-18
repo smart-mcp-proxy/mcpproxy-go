@@ -444,10 +444,15 @@ func RetireSupersededOverrides(live *Config) {
 //
 // Call it BEFORE the save that persists next: once the field is API-managed
 // the save writes the edit; called after, PersistableConfig would already
-// have swapped an edit equal to the override for the file value.
-func RetireEditedOverrides(base, next *Config) {
+// have swapped an edit equal to the override for the file value. If that
+// save then FAILS, call Restore on the result: nothing reached disk, the
+// live and desired configs still carry the override, and leaving it retired
+// would let the next unrelated save write it — for MCPPROXY_API_KEY, leak the
+// secret — into the file.
+func RetireEditedOverrides(base, next *Config) RetiredOverrides {
+	var retired RetiredOverrides
 	if base == nil || next == nil {
-		return
+		return retired
 	}
 	processOverridesMu.Lock()
 	defer processOverridesMu.Unlock()
@@ -456,7 +461,39 @@ func RetireEditedOverrides(base, next *Config) {
 			continue
 		}
 		for _, source := range []OverrideSource{OverrideSourceFlag, OverrideSourceEnv} {
-			delete(processOverrides, overrideKey{o.name(), source})
+			key := overrideKey{o.name(), source}
+			if entry, ok := processOverrides[key]; ok {
+				retired.entries = append(retired.entries, retiredEntry{key, entry})
+				delete(processOverrides, key)
+			}
+		}
+	}
+	return retired
+}
+
+// RetiredOverrides is what RetireEditedOverrides removed, so a failed save
+// can put it back.
+type RetiredOverrides struct {
+	entries []retiredEntry
+}
+
+type retiredEntry struct {
+	key   overrideKey
+	entry processOverride
+}
+
+// Restore re-registers the retired overrides. An entry re-recorded for the
+// same field and source in the meantime (a reload rebuilding the env set)
+// is newer and is kept.
+func (r RetiredOverrides) Restore() {
+	if len(r.entries) == 0 {
+		return
+	}
+	processOverridesMu.Lock()
+	defer processOverridesMu.Unlock()
+	for _, e := range r.entries {
+		if _, exists := processOverrides[e.key]; !exists {
+			processOverrides[e.key] = e.entry
 		}
 	}
 }

@@ -385,3 +385,27 @@ func TestApplyConfig_EditingListenToTheFlagValueAfterReloadPersists(t *testing.T
 	assert.Equal(t, ":0", desired.Listen)
 	assert.NotContains(t, config.ProcessOverrideFields(), "listen")
 }
+
+// A failed save must not leave an override retired: the env API key would
+// otherwise leak into the file on the next unrelated save once disk recovers.
+func TestApplyConfig_FailedSaveRestoresTheRetiredOverride(t *testing.T) {
+	rt, cfgPath := newOverriddenRuntime(t)
+	dir := filepath.Dir(cfgPath)
+
+	desired, err := rt.GetDesiredConfig()
+	require.NoError(t, err)
+	desired.APIKey = "rotated-key"
+
+	require.NoError(t, os.Chmod(dir, 0o500)) // the atomic write cannot create its temp file
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	_, err = rt.ApplyConfig(desired, cfgPath)
+	require.Error(t, err, "the save must fail")
+	require.NoError(t, os.Chmod(dir, 0o700))
+
+	assert.Contains(t, config.ProcessOverrideFields(), "api_key", "the override is back after the failed save")
+
+	require.NoError(t, rt.SaveConfiguration()) // disk recovered; an unrelated save
+	m := readConfigJSON(t, cfgPath)
+	assert.NotEqual(t, "env-secret", m["api_key"], "MCPPROXY_API_KEY must not leak")
+	assert.NotEqual(t, "rotated-key", m["api_key"], "the failed edit must not appear either")
+}

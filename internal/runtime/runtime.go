@@ -1737,6 +1737,7 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// (config_watcher.go). If the save fails, its entry is removed again on
 	// the error path below — nothing reached disk, so a later byte-identical
 	// EXTERNAL write of this config is a genuine edit the watcher must reload.
+	//
 	// An overridden field this apply MOVED (relative to the merge base, so a
 	// round trip of a value the base already held is not an edit) is
 	// API-managed for this process from here on: retire the serve flag / env
@@ -1744,10 +1745,11 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// including the override's own — is what reaches disk, and an edit back
 	// later persists as the edit it is. Judged on what is SAVED, not on the
 	// pinned hot config: an edit of listen under --listen ends that override
-	// even though the listener stays bound to the flag's value. A failed save
-	// below leaves the field retired; the apply reports the failure and the
-	// desired config is unchanged, so nothing has been persisted wrongly.
-	config.RetireEditedOverrides(baseCfg, newCfg)
+	// even though the listener stays bound to the flag's value. Restored if
+	// the save below fails: nothing reached disk and the live config still
+	// carries the override, which the next unrelated save would otherwise
+	// persist.
+	retired := config.RetireEditedOverrides(baseCfg, newCfg)
 
 	r.noteConfigSelfWrite(newCfg, savePath)
 
@@ -1759,6 +1761,7 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 		// Only this payload is forgotten — markers from other still-pending
 		// successful saves stay live.
 		r.forgetConfigSelfWrite(newCfg, savePath)
+		retired.Restore()
 		r.logger.Error("Failed to save configuration to disk",
 			zap.String("path", savePath),
 			zap.Error(saveErr))

@@ -487,3 +487,26 @@ func TestRetireEditedOverrides_MovingToTheOverrideValueIsAnEdit(t *testing.T) {
 	RetireEditedOverrides(&base, &next)
 	assert.NotContains(t, ProcessOverrideFields(), "listen")
 }
+
+// Round-7 review finding: retirement precedes the save, so a failed save must
+// be able to put the overrides back — or a later unrelated save leaks them.
+func TestRetireEditedOverrides_RestoreAfterFailedSave(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+
+	cfg := DefaultConfig()
+	OverrideForProcess(cfg, FieldAPIKey, OverrideSourceEnv, "env-secret")
+	OverrideForProcess(cfg, FieldReadOnlyMode, OverrideSourceFlag, true)
+
+	base := *cfg
+	next := base
+	next.APIKey = "rotated"
+	retired := RetireEditedOverrides(&base, &next)
+	assert.Equal(t, []string{"read_only_mode"}, ProcessOverrideFields())
+
+	retired.Restore() // the save failed
+	assert.ElementsMatch(t, []string{"api_key", "read_only_mode"}, ProcessOverrideFields())
+
+	persisted := PersistableConfig(cfg, filepath.Join(t.TempDir(), "missing.json"))
+	assert.NotEqual(t, "env-secret", persisted.APIKey)
+}
