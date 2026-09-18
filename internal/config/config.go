@@ -383,11 +383,16 @@ type Config struct {
 	// (Spec 107 FR-027). Empty (default) trusts nobody. Edition-neutral, live
 	// (hot-reloadable). Env override: MCPPROXY_TRUSTED_PROXIES (comma-separated).
 	// The one reader is ForwardedHeaders; validation is validateTrustedProxies.
-	TrustedProxies    []string `json:"trusted_proxies,omitempty" mapstructure:"trusted-proxies"`
-	ReadOnlyMode      bool     `json:"read_only_mode" mapstructure:"read-only-mode"`
-	DisableManagement bool     `json:"disable_management" mapstructure:"disable-management"`
-	AllowServerAdd    bool     `json:"allow_server_add" mapstructure:"allow-server-add"`
-	AllowServerRemove bool     `json:"allow_server_remove" mapstructure:"allow-server-remove"`
+	TrustedProxies []string `json:"trusted_proxies,omitempty" mapstructure:"trusted-proxies"`
+	// AuditLog configures the Spec 107 edition-neutral audit sink
+	// (internal/audit). nil means "use the per-edition/per-transport
+	// default" (EffectiveAuditLog); restart-pinned (bound at sink
+	// construction). See audit_log.go.
+	AuditLog          *AuditLogConfig `json:"audit_log,omitempty" mapstructure:"audit-log"`
+	ReadOnlyMode      bool            `json:"read_only_mode" mapstructure:"read-only-mode"`
+	DisableManagement bool            `json:"disable_management" mapstructure:"disable-management"`
+	AllowServerAdd    bool            `json:"allow_server_add" mapstructure:"allow-server-add"`
+	AllowServerRemove bool            `json:"allow_server_remove" mapstructure:"allow-server-remove"`
 
 	// Internal field to track if API key was explicitly set in config
 	apiKeyExplicitlySet bool `json:"-"`
@@ -2643,6 +2648,10 @@ func (c *Config) validateDetailedCore() []ValidationError {
 	// on every door — boot, PATCH and /config/apply. No-op in the personal
 	// edition (stub); enforced in the server edition.
 	errors = append(errors, validateServerEditionConfig(c)...)
+
+	// Spec 107 FR-014/FR-019: audit_log validated (never mutated) on every
+	// door - boot, PATCH and /config/apply.
+	errors = append(errors, validateAuditLog(c)...)
 
 	return errors
 }

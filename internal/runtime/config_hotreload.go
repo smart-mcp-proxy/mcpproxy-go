@@ -467,6 +467,22 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "server_edition.access")
 	}
 
+	// audit_log (Spec 107 FR-019/T109). Restart-pinned: the sink is
+	// constructed once at cmd/mcpproxy serve startup and handed to the
+	// server via server.WithAuditSink, so an edit here cannot take effect
+	// without rebuilding the sink. jsonEqual, not DeepEqual, for the same
+	// PATCH round-trip reason as trusted_proxies/server_edition: pointer
+	// fields and omitempty make byte-identical documents compare unequal
+	// under reflect.DeepEqual after a JSON round trip.
+	if !jsonEqual(oldCfg.AuditLog, newCfg.AuditLog) {
+		result.ChangedFields = append(result.ChangedFields, "audit_log")
+		result.RequiresRestart = true
+		result.AppliedImmediately = false
+		if result.RestartReason == "" {
+			result.RestartReason = "audit_log is bound at sink construction"
+		}
+	}
+
 	// If no changes detected
 	if len(result.ChangedFields) == 0 {
 		result.AppliedImmediately = false

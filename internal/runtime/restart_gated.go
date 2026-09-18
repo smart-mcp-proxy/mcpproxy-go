@@ -45,6 +45,15 @@ func pinRestartGated(live, desired *config.Config) *config.Config {
 	// the detector, which is exactly why it is easy to miss here — and missing
 	// it would let the API report a pool size that is not in effect.
 	pinned.CodeExecutionPoolSize = live.CodeExecutionPoolSize
+	// audit_log's sink is bound once at construction (config_hotreload.go's
+	// detector clause, :470-482) and never rebuilt in-process — restart-
+	// pinned exactly like the HTTP/listener fields above (round-3
+	// cross-review finding, PR-D: this clause was missing entirely, so a
+	// mixed apply that also touched a hot field adopted the new audit_log
+	// into the live config while the API still reported the apply as
+	// pending a restart, leaving Runtime.Config() readers disagreeing with
+	// the sink actually still writing).
+	pinned.AuditLog = live.AuditLog
 	// server_edition's restart-pinned subset (enabled, oauth.*, public_url,
 	// session_cookie_secure, session_ttl, bearer_token_ttl,
 	// credential_encryption_key — Spec 107 FR-039 part 2) is bound at login

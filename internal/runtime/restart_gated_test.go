@@ -40,6 +40,14 @@ func TestPinRestartGatedCoversEveryRestartGatedField(t *testing.T) {
 		// The one restart-gated clause that does not early-return in the
 		// detector, and so the one most easily missed by the pinner.
 		"code_execution_pool_size": func(c *config.Config) { c.CodeExecutionPoolSize = 99 },
+		// Spec 107 (round-3 cross-review finding, PR-D): audit_log is
+		// restart-pinned (the sink is bound at construction,
+		// config_hotreload.go:470-482) but pinRestartGated never reverted
+		// it — a mixed apply that also touched a hot field would adopt the
+		// new audit_log into the live config while the API still reported
+		// the apply as pending a restart, leaving Runtime.Config() readers
+		// disagreeing with the sink actually in effect.
+		"audit_log": func(c *config.Config) { c.AuditLog = &config.AuditLogConfig{Path: "/tmp/two.jsonl"} },
 	}
 
 	for name, mutate := range mutations {

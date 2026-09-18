@@ -1127,3 +1127,34 @@ func TestDetectConfigChanges_TrustedProxies(t *testing.T) {
 		assert.NotContains(t, DetectConfigChanges(mk([]string{"::1"}), mk([]string{"::1"})).ChangedFields, "trusted_proxies")
 	})
 }
+
+// Spec 107 T108/T109: audit_log is bound at sink construction, so an edit is
+// reported restart-pinned, never applied immediately.
+func TestDetectConfigChanges_AuditLog_RestartPinned(t *testing.T) {
+	mk := func(a *config.AuditLogConfig) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			AuditLog: a,
+		}
+	}
+	trueVal := true
+
+	t.Run("nil to explicit block requires restart", func(t *testing.T) {
+		result := DetectConfigChanges(mk(nil), mk(&config.AuditLogConfig{Enabled: &trueVal, Stdout: &trueVal}))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "audit_log")
+		assert.True(t, result.RequiresRestart)
+		assert.False(t, result.AppliedImmediately)
+		assert.Equal(t, "audit_log is bound at sink construction", result.RestartReason)
+	})
+
+	t.Run("unchanged block not reported", func(t *testing.T) {
+		a := &config.AuditLogConfig{Enabled: &trueVal, Stdout: &trueVal}
+		b := &config.AuditLogConfig{Enabled: &trueVal, Stdout: &trueVal}
+		assert.NotContains(t, DetectConfigChanges(mk(a), mk(b)).ChangedFields, "audit_log")
+	})
+
+	t.Run("nil to nil not reported", func(t *testing.T) {
+		assert.NotContains(t, DetectConfigChanges(mk(nil), mk(nil)).ChangedFields, "audit_log")
+	})
+}

@@ -110,7 +110,7 @@ func (p *MCPProxyServer) applyOutputSanitisation(ctx context.Context, serverName
 	}
 
 	if d.block {
-		p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, "blocked", d.reason, telemetry.BlockReasonOutputSanitisation)
+		p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", d.reason, telemetry.BlockReasonOutputSanitisation)
 		return mcp.NewToolResultError("tool output blocked by sanitisation policy: " + d.reason)
 	}
 
@@ -135,7 +135,7 @@ func (p *MCPProxyServer) applyOutputSanitisation(ctx context.Context, serverName
 		action, reason := summariseSanitisation(redactedCount, redactedCats, strippedClasses)
 		// Redact/strip are not blocks — the availability counter ignores them —
 		// but the key is still declared so the funnel has no unclassified sites.
-		p.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, action, reason, telemetry.BlockReasonOutputSanitisation)
+		p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, action, reason, telemetry.BlockReasonOutputSanitisation)
 	}
 
 	return nil
@@ -284,7 +284,7 @@ func (p *MCPProxyServer) applyPromptResultSanitisation(
 	}
 
 	if d.block {
-		p.emitActivityPolicyDecision(serverName, promptName, sessionID, requestID,
+		p.emitActivityPolicyDecision(ctx, serverName, promptName, sessionID, requestID,
 			"blocked", d.reason, telemetry.BlockReasonOutputSanitisation)
 		return nil, true
 	}
@@ -325,7 +325,7 @@ func (p *MCPProxyServer) applyPromptResultSanitisation(
 
 	if redactedCount > 0 || len(strippedClasses) > 0 {
 		action, reason := summariseSanitisation(redactedCount, redactedCats, strippedClasses)
-		p.emitActivityPolicyDecision(serverName, promptName, sessionID, requestID,
+		p.emitActivityPolicyDecision(ctx, serverName, promptName, sessionID, requestID,
 			action, reason, telemetry.BlockReasonOutputSanitisation)
 	}
 	return result, false

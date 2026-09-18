@@ -678,6 +678,36 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 - **Auto-Generation**: If no API key is provided, one is generated and logged for easy access
 - **Tray Integration**: Tray app automatically manages API keys for core communication
 
+## Audit Log
+
+One JSONL line per authorization decision and tool call, edition-neutral. Personal
+edition defaults to off; the server edition defaults to on (stdout, unless the native
+stdio transport is in use — see below). See [Audit Log](features/audit-log.md).
+
+```json
+{
+  "audit_log": {
+    "enabled": true,
+    "stdout": false,
+    "path": "/var/log/mcpproxy/audit.jsonl",
+    "max_size_mb": 50,
+    "max_backups": 10,
+    "max_age_days": 90,
+    "compress": true
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `audit_log.enabled` | boolean | personal: `false`; server: `true` | Turn audit logging on. Restart-pinned — the sink is bound at construction |
+| `audit_log.stdout` | boolean | server: `true` when the block is absent | Write lines to stdout. Env `MCPPROXY_AUDIT_LOG_STDOUT`. Not used under the native stdio transport (stdout carries JSON-RPC); an explicit `stdout: true` with no `path` there fails boot with exit code 4 |
+| `audit_log.path` | string | `""` | File to append lines to (rotated). Env `MCPPROXY_AUDIT_LOG_PATH`. An unwritable path fails boot with exit code 4 |
+| `audit_log.max_size_mb` | int | `50` | Rotate after this size. Must be positive when a path is set |
+| `audit_log.max_backups` | int | `10` | Rotated files to keep. Must be positive when a path is set |
+| `audit_log.max_age_days` | int | `90` | Delete rotated files after this many days. Must be positive when a path is set |
+| `audit_log.compress` | boolean | `true` | gzip rotated files |
+
 ### Reverse Proxy Deployments (`trusted_hosts`)
 
 When mcpproxy listens on a loopback address (the default `127.0.0.1:8080`), DNS-rebinding
@@ -1631,6 +1661,9 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_API_KEY` | `api_key` | API key for authentication (empty values trigger auto-generation; auth remains enabled) |
 | `MCPPROXY_TRUSTED_HOSTS` | `trusted_hosts` | Comma-separated `Host` allowlist for loopback listeners behind a reverse proxy |
 | `MCPPROXY_TRUSTED_PROXIES` | `trusted_proxies` | Comma-separated CIDRs/IPs whose `X-Forwarded-*` headers are honoured |
+| `MCPPROXY_AUDIT_LOG_ENABLED` | `audit_log.enabled` | Turn audit logging on/off |
+| `MCPPROXY_AUDIT_LOG_PATH` | `audit_log.path` | Audit log file path |
+| `MCPPROXY_AUDIT_LOG_STDOUT` | `audit_log.stdout` | Write audit lines to stdout |
 | `MCPPROXY_TLS_ENABLED` | `tls.enabled` | Enable HTTPS/TLS |
 | `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | `tls.require_client_cert` | Enable mTLS |
 | `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |

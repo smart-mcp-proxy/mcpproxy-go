@@ -109,6 +109,13 @@ jobs:
           mkdir -p dist-bin
           # Candidate headless core (nogui matches the E2E build; no tray deps).
           go build -tags nogui -ldflags "${LDFLAGS}" -o dist-bin/mcpproxy       ./cmd/mcpproxy
+          # Server edition (Spec 107 round-3 cross-review finding, PR-D):
+          # test-api-e2e.sh's audit_log sub-test requires ./mcpproxy-server
+          # and hard-FAILS ("Audit log: server-edition binary present") when
+          # it is missing/non-executable rather than skipping — this job
+          # never built it, so every run of suite/api-e2e deterministically
+          # failed that test.
+          go build -tags server,nogui -ldflags "${LDFLAGS}" -o dist-bin/mcpproxy-server ./cmd/mcpproxy
           go build                                    -o dist-bin/mcpfixture    ./cmd/mcpfixture
           go build                                    -o dist-bin/oauthserver   ./tests/oauthserver/cmd/server
           go build                                    -o dist-bin/release-gate  ./cmd/release-gate
@@ -161,6 +168,9 @@ jobs:
           chmod +x dist-bin/*
           # test-api-e2e.sh expects the built core at ./mcpproxy (unmodified).
           cp dist-bin/mcpproxy ./mcpproxy
+          # ...and its audit_log sub-test (Spec 107 PR-D) expects the
+          # server-edition binary at ./mcpproxy-server.
+          cp dist-bin/mcpproxy-server ./mcpproxy-server
 
       - name: Run API E2E suite
         run: |

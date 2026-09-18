@@ -1,0 +1,40 @@
+{
+  "listen": "0.0.0.0:8080",
+  "trusted_proxies": ["10.42.0.0/16"],
+  "trusted_hosts": ["mcp.example.com"],
+  "require_mcp_auth": true,
+  "audit_log": {
+    "enabled": true,
+    "stdout": true
+  },
+  "server_edition": {
+    "enabled": true,
+    "admin_emails": ["platform-team@example.com"],
+    "public_url": "https://mcp.example.com",
+    "session_cookie_secure": "auto",
+    "session_ttl": "24h",
+    "bearer_token_ttl": "24h",
+    "credential_encryption_key": "${env:MCPPROXY_CRED_KEY}",
+    "oauth": {
+      "provider": "oidc",
+      "issuer_url": "https://keycloak.example.com/realms/team",
+      "client_id": "mcpproxy",
+      "client_secret": "${env:OIDC_CLIENT_SECRET}",
+      "scopes": ["openid", "profile", "email", "groups"],
+      "groups_claim": "groups",
+      "email_verified_policy": "refuse_false",
+      "display_name": "Example Keycloak"
+    },
+    "access": {
+      "group_servers": {
+        "mcpproxy-engineering": ["github", "ast-grep"],
+        "mcpproxy-admins": ["*"]
+      },
+      "default_servers": []
+    }
+  },
+  "mcpServers": [
+    { "name": "github", "url": "https://api.github.com/mcp", "protocol": "http", "enabled": true },
+    { "name": "ast-grep", "command": "npx", "args": ["ast-grep-mcp"], "protocol": "stdio", "enabled": true }
+  ]
+}

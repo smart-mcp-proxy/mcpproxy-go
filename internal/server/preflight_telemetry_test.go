@@ -522,13 +522,13 @@ func TestPreflightCounters_NoDiscoveryOmissionWhenNothingWithheld(t *testing.T) 
 func TestPreflightCounters_AvailabilityBlockByReason(t *testing.T) {
 	proxy, rt := newPreflightCountedProxy(t)
 
-	proxy.emitActivityPolicyDecision("srv", "tool", "sess-1", "req-1",
+	proxy.emitActivityPolicyDecision(context.Background(), "srv", "tool", "sess-1", "req-1",
 		"blocked", "Server is quarantined for security review",
 		telemetry.BlockReasonServerQuarantined)
-	proxy.emitActivityPolicyDecision("srv", "tool", "sess-1", "req-2",
+	proxy.emitActivityPolicyDecision(context.Background(), "srv", "tool", "sess-1", "req-2",
 		"blocked", "Server 'srv' is not in scope for this agent token",
 		telemetry.BlockReasonTokenScope)
-	proxy.emitActivityPolicyDecision("srv", "tool", "sess-1", "req-3",
+	proxy.emitActivityPolicyDecision(context.Background(), "srv", "tool", "sess-1", "req-3",
 		"redacted", "1 secret redacted", telemetry.BlockReasonOutputSanitisation)
 
 	snap := preflightSnapshot(t, rt)
@@ -543,7 +543,7 @@ func TestPreflightCounters_AvailabilityBlockByReason(t *testing.T) {
 func TestPreflightCounters_UnclassifiedBlockFoldsIntoOther(t *testing.T) {
 	proxy, rt := newPreflightCountedProxy(t)
 
-	proxy.emitActivityPolicyDecision("acme-internal", "purge_all", "sess-1", "req-1",
+	proxy.emitActivityPolicyDecision(context.Background(), "acme-internal", "purge_all", "sess-1", "req-1",
 		"blocked", "Server 'acme-internal' is not in scope for this agent token",
 		"some-future-unregistered-key")
 
@@ -565,7 +565,7 @@ func TestPreflightCounters_OptOutRecordsNothing(t *testing.T) {
 		"query":          diagQueryAll,
 		"read_only_only": true,
 	})
-	proxy.emitActivityPolicyDecision("srv", "tool", "sess-1", "req-1",
+	proxy.emitActivityPolicyDecision(context.Background(), "srv", "tool", "sess-1", "req-1",
 		"blocked", "quarantined", telemetry.BlockReasonServerQuarantined)
 
 	snap := preflightSnapshot(t, rt)

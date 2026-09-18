@@ -1,0 +1,14 @@
+{
+  "description": "RFC 8785 §3.2.2.2 minimal string escaping: only U+0022, U+005C and control chars U+0000-U+001F are escaped (short forms where defined, else lowercase \\u00XX); solidus is NOT escaped; non-ASCII chars are raw UTF-8, not \\u escapes.",
+  "variants": [
+    {
+      "quote": "she said \"hi\"",
+      "backslash": "a\\b",
+      "solidus": "a/b/c",
+      "controls": "\u0000\u0001\b\f\n\r\t\u001f",
+      "euro": "€100",
+      "accented": "Dumbris — Žemaičių Kalvarija",
+      "cjk": "日本語"
+    }
+  ]
+}

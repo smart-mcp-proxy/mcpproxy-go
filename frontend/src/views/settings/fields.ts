@@ -445,6 +445,21 @@ export function isBlankInstructions(v: string | null | undefined): boolean {
   return !v || v.trim() === ''
 }
 
+// Spec 107 PR-D (T110): `audit_log.*` rows from `contracts/config-keys.md`.
+// `audit_log` is `RequiresRestart=true` ("audit_log is bound at sink
+// construction" — DetectConfigChanges), so every row carries the restart
+// badge. There is no secret key under `audit_log`, so no row uses the
+// `secret` control.
+export const AUDIT_LOG_FIELDS: SettingField[] = [
+  { key: 'audit_log.enabled', label: 'Enable audit logging', help: 'Writes one JSONL line per authorization decision and tool call. On by default under the server edition; the personal edition defaults to off.', control: 'toggle', restart: true },
+  { key: 'audit_log.stdout', label: 'Write to stdout', help: 'Server edition default when no path is set — not used under the native stdio transport (stdout carries JSON-RPC there); set a path instead.', control: 'toggle', restart: true },
+  { key: 'audit_log.path', label: 'File path', help: 'Where to write the rotating audit log file. Leave blank to use stdout instead.', control: 'text', optional: true, placeholder: '/var/log/mcpproxy/audit.jsonl', restart: true },
+  { key: 'audit_log.max_size_mb', label: 'Rotate after (MB)', control: 'number', min: 1, restart: true },
+  { key: 'audit_log.max_backups', label: 'Rotated files to keep', control: 'number', min: 1, restart: true },
+  { key: 'audit_log.max_age_days', label: 'Delete rotated logs after (days)', control: 'number', min: 1, restart: true },
+  { key: 'audit_log.compress', label: 'Compress rotated files', control: 'toggle', restart: true },
+]
+
 // ---- Section 3: Advanced (subsystem accordions) ----
 export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
   {
@@ -540,6 +555,13 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
       { key: 'activity_max_records', label: 'Maximum records kept', control: 'number', min: 0 },
       { key: 'activity_cleanup_interval_min', label: 'Cleanup runs every (minutes)', control: 'number', min: 1 },
     ],
+  },
+  {
+    id: 'audit-log',
+    docs: '/features/audit-log',
+    title: 'Audit log',
+    description: 'Edition-neutral JSONL record of authorization decisions and tool calls. Changes take effect after a restart (the sink is bound at startup).',
+    fields: AUDIT_LOG_FIELDS,
   },
   {
     id: 'discovery',
