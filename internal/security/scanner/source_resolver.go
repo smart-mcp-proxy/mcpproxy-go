@@ -44,14 +44,29 @@ type SourceResolver struct {
 
 	// instanceID, when set, scopes findServerContainer's ownership check to
 	// containers labeled com.mcpproxy.instance=<instanceID> (the value
-	// internal/upstream/core.GetInstanceID() assigns at container creation),
-	// so two mcpproxy processes sharing one Docker daemon and a same-named
-	// server cannot select each other's container. It is injected via
-	// SetInstanceID by the wiring layer (internal/server) rather than imported
-	// directly — internal/upstream/core sits downstream of this package in the
-	// import graph (core -> storage/oauth -> ... -> security/scanner), so a
-	// direct import would cycle. Left empty in tests that construct a
-	// SourceResolver directly, in which case the instance filter is omitted.
+	// internal/upstream/core.GetInstanceID() assigns at container creation).
+	// It is injected via SetInstanceID by the wiring layer (internal/server)
+	// rather than imported directly — internal/upstream/core sits downstream
+	// of this package in the import graph (core -> storage/oauth -> ... ->
+	// security/scanner), so a direct import would cycle. Left empty in tests
+	// that construct a SourceResolver directly, in which case the instance
+	// filter is omitted.
+	//
+	// KNOWN LIMITATION: this closes cross-instance ownership hijack only
+	// between mcpproxy processes that actually receive distinct instance IDs
+	// — e.g. separate hosts pointed at one shared/remote Docker daemon.
+	// core.GetInstanceID() persists its ID to a single file under
+	// os.TempDir(), which is shared by every process on the SAME host/user,
+	// so two mcpproxy processes running side by side on one machine (e.g. a
+	// scratch dev instance next to the main app — a workflow this repo's own
+	// tooling supports) currently receive the SAME instance ID and are not
+	// distinguished by this filter. That is a pre-existing property of
+	// GetInstanceID() (already relied on, with the same gap, by
+	// internal/upstream/manager.go's container cleanup) — fixing it means
+	// changing what gets written onto the label at container creation and
+	// every reader of that label, which is out of scope for this
+	// scanner-focused fix. This filter still fully closes the label/name
+	// injection this package's ownership check was vulnerable to.
 	instanceID string
 }
 
@@ -537,7 +552,8 @@ func (r *SourceResolver) findServerContainer(ctx context.Context, serverName str
 }
 
 // containerIDPattern matches a Docker container ID as printed by `docker ps
-// --no-trunc --format {{.ID}}`: lowercase hex, short (12) or full (64) form.
+// --format {{.ID}}`: lowercase hex, anywhere from a short prefix (12) up to
+// the full (64-char) form `--no-trunc` normally emits.
 var containerIDPattern = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
 
 // firstContainerID returns the first line of `docker ps --format {{.ID}}`
