@@ -217,6 +217,111 @@ func TestBleveIndex_SearchTokenization(t *testing.T) {
 	}
 }
 
+func TestBleveIndex_SearchUnderscoreSegments(t *testing.T) {
+	idx, err := NewBleveIndex(t.TempDir(), zap.NewNop())
+	require.NoError(t, err)
+	defer idx.Close()
+
+	require.NoError(t, idx.BatchIndex([]*config.ToolMetadata{
+		{
+			Name:        "work_start_task_attachment_upload",
+			ServerName:  "fixture",
+			Description: "Create a signed request for a local file.",
+			ParamsJSON:  `{"type":"object","properties":{}}`,
+			Hash:        "target",
+		},
+		{
+			Name:        "network_upload_attachment",
+			ServerName:  "fixture",
+			Description: "Create a signed request for a remote file.",
+			ParamsJSON:  `{"type":"object","properties":{}}`,
+			Hash:        "substring-decoy",
+		},
+	}))
+
+	t.Run("matches non-contiguous segments in any order", func(t *testing.T) {
+		for _, query := range []string{
+			"work_upload_attachment",
+			"attachment_work_upload",
+			"work_start_task_attachment_upload",
+		} {
+			results, err := idx.SearchTools(query, 10)
+			require.NoError(t, err)
+			require.NotEmpty(t, results, query)
+			assert.Equal(t, "fixture:work_start_task_attachment_upload", results[0].Tool.Name, query)
+		}
+	})
+
+	t.Run("requires segment boundaries and every query segment", func(t *testing.T) {
+		for _, query := range []string{"network_work_upload_attachment", "work_missing_attachment"} {
+			results, err := idx.SearchTools(query, 10)
+			require.NoError(t, err)
+			assert.Empty(t, results, query)
+		}
+	})
+
+	t.Run("preserves a legacy prefix match ahead of an added segment match", func(t *testing.T) {
+		prefixIdx, err := NewBleveIndex(t.TempDir(), zap.NewNop())
+		require.NoError(t, err)
+		defer prefixIdx.Close()
+
+		require.NoError(t, prefixIdx.BatchIndex([]*config.ToolMetadata{
+			{
+				Name:        "work_upload_attachment_preview",
+				ServerName:  "fixture",
+				Description: "Preview an attachment upload for a Work task.",
+				Hash:        "legacy-prefix",
+			},
+			{
+				Name:        "work_start_task_attachment_upload",
+				ServerName:  "fixture",
+				Description: "Create a signed request for a local file.",
+				Hash:        "segment-match",
+			},
+		}))
+
+		results, err := prefixIdx.SearchTools("work_upload_attachment", 10)
+		require.NoError(t, err)
+		require.Len(t, results, 2)
+		assert.Equal(t, "fixture:work_upload_attachment_preview", results[0].Tool.Name)
+		assert.Equal(t, "fixture:work_start_task_attachment_upload", results[1].Tool.Name)
+	})
+}
+
+func TestFieldsContainExactToolName(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields map[string]interface{}
+		query  string
+		want   bool
+	}{
+		{
+			name:   "tool name",
+			fields: map[string]interface{}{"tool_name": "work_upload_attachment", "full_tool_name": "fixture:work_upload_attachment"},
+			query:  "work_upload_attachment",
+			want:   true,
+		},
+		{
+			name:   "full tool name",
+			fields: map[string]interface{}{"tool_name": "work_upload_attachment", "full_tool_name": "fixture:work_upload_attachment"},
+			query:  "fixture:work_upload_attachment",
+			want:   true,
+		},
+		{
+			name:   "no exact name",
+			fields: map[string]interface{}{"tool_name": "work_start_task_attachment_upload", "full_tool_name": "fixture:work_start_task_attachment_upload"},
+			query:  "work_upload_attachment",
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, fieldsContainExactToolName(tt.fields, tt.query))
+		})
+	}
+}
+
 func TestBleveIndex_FieldMapping(t *testing.T) {
 	// Test that all fields are properly indexed and searchable
 	tool := &config.ToolMetadata{
