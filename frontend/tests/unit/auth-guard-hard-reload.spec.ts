@@ -6,7 +6,12 @@ import { createRouter, createMemoryHistory, type Router } from 'vue-router'
 // callers race for the auth probe: App.vue's onMounted checkAuth() and the
 // router guard's own checkAuth() for the initial navigation. The guard must
 // decide `isTeamsEdition` / `isAuthenticated` from ONE settled probe (never a
-// half-run one) and the pair must not double-issue /status + /auth/me.
+// half-run one) and the pair must not double-issue /auth/provider + /auth/me.
+//
+// Spec 107 FR-030/FR-041 moved edition detection off the keyed GET
+// /api/v1/status (a tenant holds no API key) onto the public GET
+// /api/v1/auth/provider probe, so `providerSpy` stands in for that call here
+// — same race, same single-in-flight-probe guarantee, different endpoint.
 
 const deferred = <T,>() => {
   let resolve!: (v: T) => void
@@ -14,18 +19,12 @@ const deferred = <T,>() => {
   return { promise, resolve }
 }
 
-const statusSpy = vi.hoisted(() => vi.fn())
+const providerSpy = vi.hoisted(() => vi.fn())
 const meSpy = vi.hoisted(() => vi.fn())
-
-vi.mock('@/services/api', () => ({
-  default: {
-    getStatus: statusSpy,
-    hasAPIKey: vi.fn(() => false),
-  },
-}))
 
 vi.mock('@/services/auth-api', () => ({
   authApi: {
+    getProvider: providerSpy,
     getMe: meSpy,
     getLoginUrl: vi.fn(() => '/api/v1/auth/login'),
     logout: vi.fn(),
@@ -57,13 +56,13 @@ function makeRouter(): Router {
 }
 
 function serverEdition(user: typeof tenant | null) {
-  const status = deferred<{ data: { edition: string } }>()
+  const provider = deferred<{ display_name: string }>()
   const me = deferred<typeof tenant | null>()
-  statusSpy.mockReturnValue(status.promise)
+  providerSpy.mockReturnValue(provider.promise)
   meSpy.mockReturnValue(me.promise)
   return {
     settle: () => {
-      status.resolve({ data: { edition: 'server' } })
+      provider.resolve({ display_name: 'Server SSO' })
       me.resolve(user)
     },
   }
@@ -72,11 +71,11 @@ function serverEdition(user: typeof tenant | null) {
 describe('auth store: concurrent checkAuth shares one in-flight probe', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    statusSpy.mockReset()
+    providerSpy.mockReset()
     meSpy.mockReset()
   })
 
-  it('issues /status and /auth/me once for two concurrent callers, both see the settled edition', async () => {
+  it('issues /auth/provider and /auth/me once for two concurrent callers, both see the settled edition', async () => {
     const rig = serverEdition(tenant)
     const store = useAuthStore()
 
@@ -85,7 +84,7 @@ describe('auth store: concurrent checkAuth shares one in-flight probe', () => {
     rig.settle()
     await Promise.all([mount, guard])
 
-    expect(statusSpy).toHaveBeenCalledTimes(1)
+    expect(providerSpy).toHaveBeenCalledTimes(1)
     expect(meSpy).toHaveBeenCalledTimes(1)
     expect(store.isTeamsEdition).toBe(true)
     expect(store.isAuthenticated).toBe(true)
@@ -95,28 +94,28 @@ describe('auth store: concurrent checkAuth shares one in-flight probe', () => {
   it('fresh: true queues a new probe behind the in-flight one instead of joining it', async () => {
     // Probe 1 was issued before the key was repaired (/auth/me says signed
     // out); probe 2 is the recovery read and must see the tenant.
-    const status = [deferred<{ data: { edition: string } }>(), deferred<{ data: { edition: string } }>()]
+    const provider = [deferred<{ display_name: string }>(), deferred<{ display_name: string }>()]
     const me = [deferred<typeof tenant | null>(), deferred<typeof tenant | null>()]
-    statusSpy.mockImplementation(() => status[statusSpy.mock.calls.length - 1].promise)
+    providerSpy.mockImplementation(() => provider[providerSpy.mock.calls.length - 1].promise)
     meSpy.mockImplementation(() => me[meSpy.mock.calls.length - 1].promise)
     const store = useAuthStore()
 
     const first = store.checkAuth()
-    await Promise.resolve() // let probe 1 issue its /status call
-    expect(statusSpy).toHaveBeenCalledTimes(1)
+    await Promise.resolve() // let probe 1 issue its /auth/provider call
+    expect(providerSpy).toHaveBeenCalledTimes(1)
 
     const recovery = store.checkAuth({ fresh: true }) // reloadAfterAuth
-    expect(statusSpy).toHaveBeenCalledTimes(1) // queued, not joined and not issued yet
+    expect(providerSpy).toHaveBeenCalledTimes(1) // queued, not joined and not issued yet
 
-    status[0].resolve({ data: { edition: 'server' } })
+    provider[0].resolve({ display_name: 'Server SSO' })
     me[0].resolve(null)
     await first
     // The stale run settled, but the store is not "settled" until the fresh
     // probe behind it has too.
     expect(store.loading).toBe(true)
-    expect(statusSpy).toHaveBeenCalledTimes(2)
+    expect(providerSpy).toHaveBeenCalledTimes(2)
 
-    status[1].resolve({ data: { edition: 'server' } })
+    provider[1].resolve({ display_name: 'Server SSO' })
     me[1].resolve(tenant)
     await recovery
 
@@ -137,7 +136,7 @@ describe('auth store: concurrent checkAuth shares one in-flight probe', () => {
     second.settle()
     await q
 
-    expect(statusSpy).toHaveBeenCalledTimes(2)
+    expect(providerSpy).toHaveBeenCalledTimes(2)
     expect(store.isAdmin).toBe(true)
   })
 })
@@ -145,7 +144,7 @@ describe('auth store: concurrent checkAuth shares one in-flight probe', () => {
 describe('router guard: hard-reload deep link under the server edition', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    statusSpy.mockReset()
+    providerSpy.mockReset()
     meSpy.mockReset()
   })
 
@@ -170,7 +169,7 @@ describe('router guard: hard-reload deep link under the server edition', () => {
 
       expect(router.currentRoute.value.name).toBe(name)
       expect(document.title).toBe(`${router.currentRoute.value.meta.title} - MCPProxy Control Panel`)
-      expect(statusSpy).toHaveBeenCalledTimes(1)
+      expect(providerSpy).toHaveBeenCalledTimes(1)
     })
 
     it(`admin: mount-time checkAuth racing the initial navigation to ${path} lands on ${name}`, async () => {
@@ -184,7 +183,7 @@ describe('router guard: hard-reload deep link under the server edition', () => {
       await Promise.all([mount, nav])
 
       expect(router.currentRoute.value.name).toBe(name)
-      expect(statusSpy).toHaveBeenCalledTimes(1)
+      expect(providerSpy).toHaveBeenCalledTimes(1)
     })
   }
 
@@ -218,9 +217,9 @@ describe('router guard: hard-reload deep link under the server edition', () => {
     // Probe 1 (stale key) says signed out; reloadAfterAuth queues probe 2
     // (repaired key) while the guard is still awaiting probe 1. The guard
     // must route on probe 2, not bounce the deep link to /login.
-    const status = [deferred<{ data: { edition: string } }>(), deferred<{ data: { edition: string } }>()]
+    const provider = [deferred<{ display_name: string }>(), deferred<{ display_name: string }>()]
     const me = [deferred<typeof tenant | null>(), deferred<typeof tenant | null>()]
-    statusSpy.mockImplementation(() => status[statusSpy.mock.calls.length - 1].promise)
+    providerSpy.mockImplementation(() => provider[providerSpy.mock.calls.length - 1].promise)
     meSpy.mockImplementation(() => me[meSpy.mock.calls.length - 1].promise)
     const store = useAuthStore()
     const router = makeRouter()
@@ -231,20 +230,20 @@ describe('router guard: hard-reload deep link under the server edition', () => {
     // few ticks, and it must have joined probe 1 BEFORE the fresh probe is
     // queued for this to exercise the drain (otherwise it joins probe 2).
     await new Promise((r) => setTimeout(r, 0))
-    expect(statusSpy).toHaveBeenCalledTimes(1)
+    expect(providerSpy).toHaveBeenCalledTimes(1)
     const recovery = store.checkAuth({ fresh: true })
 
-    status[0].resolve({ data: { edition: 'server' } })
+    provider[0].resolve({ display_name: 'Server SSO' })
     me[0].resolve(null)
     await mount
     expect(router.currentRoute.value.name).toBeUndefined() // still deciding
 
-    status[1].resolve({ data: { edition: 'server' } })
+    provider[1].resolve({ display_name: 'Server SSO' })
     me[1].resolve(tenant)
     await Promise.all([recovery, nav])
 
     expect(router.currentRoute.value.name).toBe('user-tokens')
-    expect(statusSpy).toHaveBeenCalledTimes(2)
+    expect(providerSpy).toHaveBeenCalledTimes(2)
   })
 
   it('guard alone (no mount call yet) still waits for the probe before deciding', async () => {
@@ -257,6 +256,6 @@ describe('router guard: hard-reload deep link under the server edition', () => {
     await nav
 
     expect(router.currentRoute.value.name).toBe('user-tokens')
-    expect(statusSpy).toHaveBeenCalledTimes(1)
+    expect(providerSpy).toHaveBeenCalledTimes(1)
   })
 })
