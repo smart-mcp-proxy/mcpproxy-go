@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -532,4 +533,44 @@ func TestSaveConfigWithEdits_ConcurrentStaleSaveNeverLeaksTheEnvKey(t *testing.T
 	close(stop)
 	<-done
 	assert.NotEqual(t, "env-secret", readJSON(t, path)["api_key"])
+}
+
+// Round-9 review finding: a plain save reads the file as its base and writes
+// a whole replacement. Without serialisation an API edit that lands between
+// that read and that write is reverted. In-process writers (the runtime,
+// telemetry, serve's own saves) are serialised through one mutex, so the
+// later save always reads the earlier save's file.
+func TestSaveConfig_ReadBaseAndWriteAreSerialisedAgainstOtherSaves(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	t.Cleanup(func() { saveConfigTestHook = nil })
+	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
+
+	live, err := ReadFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(live, FieldAPIKey, OverrideSourceEnv, "env-secret")
+
+	var once bool
+	editDone := make(chan error, 1)
+	saveConfigTestHook = func() {
+		if once {
+			return
+		}
+		once = true
+		// The stale save has read its base ("" for api_key). Now an API edit
+		// rotates the key concurrently; it must not be able to land between
+		// this read and the stale save's write.
+		go func() {
+			base := *live
+			next := base
+			next.APIKey = "rotated-key"
+			editDone <- SaveConfigWithEdits(&next, &base, path)
+		}()
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	require.NoError(t, SaveConfig(live, path)) // the stale, telemetry-style save
+	require.NoError(t, <-editDone)
+
+	assert.Equal(t, "rotated-key", readJSON(t, path)["api_key"], "the API edit must not be reverted by the stale save")
 }

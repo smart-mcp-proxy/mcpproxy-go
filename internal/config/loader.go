@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -421,10 +422,7 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 
 // SaveConfig saves configuration to file
 func SaveConfig(cfg *Config, path string) error {
-	// Never persist a process-only override (serve flag, MCPPROXY_* env, env
-	// API key): write the file's value back for every field still carrying
-	// one. See process_overrides.go.
-	return writeConfigFile(PersistableConfig(cfg, path), path)
+	return SaveConfigWithEdits(cfg, nil, path)
 }
 
 // SaveConfigWithEdits is SaveConfig for the save that persists an API edit:
@@ -432,9 +430,35 @@ func SaveConfig(cfg *Config, path string) error {
 // merged onto) and cfg are the caller's edits and are written as they are;
 // every other overridden field is written back from the file as in
 // SaveConfig. See PersistableConfigWithEdits.
+//
+// Never persists a process-only override (serve flag, MCPPROXY_* env, env
+// API key): the file's value is written back for every field still carrying
+// one (see process_overrides.go). That makes every save a read-modify-write
+// of the file, so in-process savers — the runtime, telemetry, serve's own
+// saves — are serialised: a save always reads the file the previous save
+// wrote, and an API edit can never be reverted by a concurrent save that had
+// read the file before it landed. (A stale config saved whole still
+// overwrites unrelated fields with what it holds — the residual window
+// telemetry.persistConfig documents — but a field it merely carries from an
+// override is restored from the file, never from that stale copy.)
 func SaveConfigWithEdits(cfg, mergeBase *Config, path string) error {
-	return writeConfigFile(PersistableConfigWithEdits(cfg, mergeBase, path), path)
+	saveConfigMu.Lock()
+	defer saveConfigMu.Unlock()
+	persisted := PersistableConfigWithEdits(cfg, mergeBase, path)
+	if saveConfigTestHook != nil {
+		saveConfigTestHook()
+	}
+	return writeConfigFile(persisted, path)
 }
+
+// saveConfigMu serialises the read-base-then-write of every in-process save.
+// Leaf-level: nothing under it takes another lock except the override
+// registry's RWMutex (a leaf itself).
+var saveConfigMu sync.Mutex
+
+// saveConfigTestHook, when set, runs between a save's base read and its write
+// (under saveConfigMu). Tests only.
+var saveConfigTestHook func()
 
 // writeConfigFile marshals cfg exactly as given and writes it atomically.
 func writeConfigFile(cfg *Config, path string) error {
