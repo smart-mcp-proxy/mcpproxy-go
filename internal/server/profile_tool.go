@@ -158,7 +158,14 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	// own (possibly already caller-filtered, e.g. via a /mcp/p/<slug> URL)
 	// server set, so intersecting it again here with the caller's real
 	// grant is idempotent, not a second, different filter.
-	effectiveProfileName, _ := p.resolveActiveProfileFromIndex(ctx, profiles)
+	//
+	// resolveEffectiveProfileForJustSetSlug, NOT resolveActiveProfileFromIndex:
+	// the latter's tier 3 re-reads SessionStore.GetActiveProfile, which a
+	// concurrent set_profile on the SAME session could have already
+	// overwritten between this call's own SetActiveProfile write above and
+	// this render — reporting THIS call's slug in active_profile with a
+	// DIFFERENT call's servers (cross-model review, PR D).
+	effectiveProfileName, _ := p.resolveEffectiveProfileForJustSetSlug(ctx, profiles, slug)
 	var allowed []string
 	if ac := auth.AuthContextFromContext(ctx); ac != nil {
 		allowed = ac.AllowedServers
@@ -303,6 +310,19 @@ type profileIndex struct {
 	nonEmpty []bool
 	none     []uint64
 
+	// declaredOccurrences[p] maps a server name to the ordered list of
+	// indices at which it appears in cfg.Profiles[p].Servers — that
+	// profile's OWN declared order, duplicates tracked individually.
+	// Precomputed once per snapshot (same amortization as members/
+	// serverPos) so effectiveServersForCandidate's restricted-grant branch
+	// can render "profile-declared order, duplicates kept" by touching only
+	// the caller's own grant, never a walk of the profile's full declared
+	// list per request (cross-model review, PR D: the prior restricted-grant
+	// branch walked `declared` directly — O(profile size) — reopening the
+	// exact SC-005 timing-disclosure class rounds 14-17 closed for every
+	// other admitted-read path, at this one call site).
+	declaredOccurrences []map[string][]int
+
 	// lookupHook, when set, observes every slug the index resolves. It is the
 	// seam the traversal-counter tests use to prove the gate and set_profile
 	// touch at most the requested slug and the pin; nil in production.
@@ -344,14 +364,18 @@ func newProfileIndex(cfg *config.Config) *profileIndex {
 	idx.none = make([]uint64, idx.words)
 	idx.members = make([]uint64, len(cfg.Profiles)*idx.words)
 	idx.nonEmpty = make([]bool, len(cfg.Profiles))
+	idx.declaredOccurrences = make([]map[string][]int, len(cfg.Profiles))
 	for p := range cfg.Profiles {
 		set := idx.membersOf(p)
-		for _, name := range cfg.Profiles[p].Servers {
+		occ := make(map[string][]int, len(cfg.Profiles[p].Servers))
+		for declaredPos, name := range cfg.Profiles[p].Servers {
 			if i, ok := idx.serverPos[name]; ok {
 				set[i/64] |= 1 << (uint(i) % 64)
 				idx.nonEmpty[p] = true
+				occ[name] = append(occ[name], declaredPos)
 			}
 		}
+		idx.declaredOccurrences[p] = occ
 	}
 	return idx
 }
@@ -434,6 +458,13 @@ func (idx *profileIndex) profileAt(candidate int) *config.ProfileConfig {
 // order (duplicates kept) for a named profile, config order for profileName
 // == "" — reproduced from the reader's own grant via serverPos, so it never
 // needs cfg.Servers itself to get there.
+//
+// (cross-model review, PR D: the named-profile restricted-grant branch had
+// walked the profile's own declared list to get that order — O(profile
+// size), not O(len(allowed)) as documented above, reopening the SC-005
+// timing class rounds 14-17 closed elsewhere. Fixed via
+// declaredOccurrences, precomputed once per snapshot alongside members/
+// serverPos, so the order is reproduced from the CALLER's own grant.)
 func (idx *profileIndex) EffectiveServersFor(profileName string, allowed []string) []string {
 	if profileName == "" {
 		return idx.effectiveServersForAllowed(allowed)
@@ -447,8 +478,8 @@ func (idx *profileIndex) effectiveServersForCandidate(candidate int, allowed []s
 	if idx.cfg == nil || candidate < 0 || candidate >= len(idx.cfg.Profiles) || len(allowed) == 0 {
 		return nil
 	}
-	declared := idx.cfg.Profiles[candidate].Servers
 	if hasWildcardGrant(allowed) {
+		declared := idx.cfg.Profiles[candidate].Servers
 		out := make([]string, 0, len(declared))
 		for _, name := range declared {
 			if _, ok := idx.serverPos[name]; ok {
@@ -457,18 +488,28 @@ func (idx *profileIndex) effectiveServersForCandidate(candidate int, allowed []s
 		}
 		return out
 	}
-	grant := make(map[string]struct{}, len(allowed))
-	for _, name := range allowed {
-		grant[name] = struct{}{}
+	// Restricted grant: touch only the caller's own allowed entries — never
+	// declared (the profile's full, possibly hidden-from-this-caller, size).
+	// declaredOccurrences[candidate] was precomputed once per snapshot
+	// (newProfileIndex), so a hit costs one map lookup per grant entry (plus
+	// one append per occurrence, for the rare authored duplicate — bounded
+	// by the admin-authored declared list, never by anything the caller
+	// controls) instead of a walk of the profile's own declared list.
+	occ := idx.declaredOccurrences[candidate]
+	type hit struct {
+		pos  int
+		name string
 	}
-	out := make([]string, 0, len(declared))
-	for _, name := range declared {
-		if _, ok := idx.serverPos[name]; !ok {
-			continue
+	hits := make([]hit, 0, len(allowed))
+	for _, name := range allowed {
+		for _, pos := range occ[name] {
+			hits = append(hits, hit{pos: pos, name: name})
 		}
-		if _, ok := grant[name]; ok {
-			out = append(out, name)
-		}
+	}
+	sort.Slice(hits, func(i, j int) bool { return hits[i].pos < hits[j].pos })
+	out := make([]string, len(hits))
+	for i, h := range hits {
+		out[i] = h.name
 	}
 	return out
 }

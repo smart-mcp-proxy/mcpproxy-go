@@ -622,17 +622,20 @@ func TestProfile_SetProfileUnknown(t *testing.T) {
 // Profiles v2 (T3): per-agent-token profile_pin — server-side URL enforcement
 // ---------------------------------------------------------------------------
 
-// mintAgentToken creates a stored agent token with the given allowed-server
-// list, permission set and profile pin, and returns its raw secret. It uses the
-// same HMAC key path the auth middleware reads, so the minted token validates
-// end-to-end (Spec 105 T035 — generalised from the pin-only minter so the
-// FR-004 fixtures can mint a RESTRICTED unpinned token; PR H1 reuses it).
+// mintProfileAgentToken creates a stored agent token with the given
+// allowed-server list, permission set and profile pin, and returns its raw
+// secret. It uses the same HMAC key path the auth middleware reads, so the
+// minted token validates end-to-end (Spec 105 T035 — generalised from the
+// pin-only minter so the FR-004 fixtures can mint a RESTRICTED unpinned
+// token; PR H1 reuses it). Named distinctly from mcp_auth_forced_test.go's
+// server-tagged mintAgentToken(t, *Server, name) helper (Spec 107 PR-C,
+// merged in #1293) to avoid a same-package redeclaration under -tags server.
 //
 // Fixture semantics mirror internal/server/scope_fixture_test.go: an EMPTY
 // allowed list is deny-all under CanAccessServer, so an unrestricted token must
 // pass []string{"*"}; HasPermission is exact membership, so pass every tier
 // the token holds; an empty pin means unpinned.
-func mintAgentToken(t *testing.T, env *profileTestEnv, name string, allowed, perms []string, pin string) string {
+func mintProfileAgentToken(t *testing.T, env *profileTestEnv, name string, allowed, perms []string, pin string) string {
 	t.Helper()
 	cfg := env.proxyServer.runtime.Config()
 	hmacKey, err := auth.GetOrCreateHMACKey(cfg.DataDir)
@@ -653,7 +656,7 @@ func mintAgentToken(t *testing.T, env *profileTestEnv, name string, allowed, per
 // the given profile — the shape the pre-105 pin tests were written against.
 func (e *profileTestEnv) mintPinnedToken(name, pin string) string {
 	e.t.Helper()
-	return mintAgentToken(e.t, e, name, []string{"*"}, []string{auth.PermRead}, pin)
+	return mintProfileAgentToken(e.t, e, name, []string{"*"}, []string{auth.PermRead}, pin)
 }
 
 // TestProfile_PinnedTokenURLEnforcement verifies the T3 server-side guard: an
@@ -912,7 +915,7 @@ func assertUniformProfileRefusal(t *testing.T, refusals []profileRefusal) {
 // after the deploy profile has been deleted.
 func TestProfile_ScopedUnpinnedRefusalUniform(t *testing.T) {
 	env := newProfileTestEnv(t)
-	rawToken := mintAgentToken(t, env, "a-only", []string{"research-srv"}, []string{auth.PermRead}, "")
+	rawToken := mintProfileAgentToken(t, env, "a-only", []string{"research-srv"}, []string{auth.PermRead}, "")
 
 	// Positive control: the selectable profile initializes.
 	status, body := profileInitRequest(t, env.baseURL, "/mcp/p/research", rawToken)
@@ -1026,7 +1029,7 @@ func TestProfile_PinnedZeroReachURLRefusedUniformly(t *testing.T) {
 	env.proxyServer.runtime.UpdateConfig(cfg, "")
 
 	// Unrestricted grant: only the profile's emptiness removes its reach.
-	rawToken := mintAgentToken(t, env, "pinned-empty", []string{"*"}, []string{auth.PermRead}, "empty")
+	rawToken := mintProfileAgentToken(t, env, "pinned-empty", []string{"*"}, []string{auth.PermRead}, "empty")
 
 	refusals := []profileRefusal{
 		captureProfileRefusal(t, env.baseURL, "/mcp/p/empty", "empty", rawToken),
@@ -1036,7 +1039,7 @@ func TestProfile_PinnedZeroReachURLRefusedUniformly(t *testing.T) {
 	assertUniformProfileRefusal(t, refusals)
 
 	// A disjoint grant is zero reach too: pinned to deploy, allowed research-srv only.
-	disjoint := mintAgentToken(t, env, "pinned-disjoint", []string{"research-srv"}, []string{auth.PermRead}, "deploy")
+	disjoint := mintProfileAgentToken(t, env, "pinned-disjoint", []string{"research-srv"}, []string{auth.PermRead}, "deploy")
 	assertUniformProfileRefusal(t, []profileRefusal{
 		captureProfileRefusal(t, env.baseURL, "/mcp/p/deploy", "deploy", disjoint),
 		captureProfileRefusal(t, env.baseURL, "/mcp/p/nope", "nope", disjoint),

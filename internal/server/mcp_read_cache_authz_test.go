@@ -338,5 +338,12 @@ func TestReadCache_CacheAuthzIntersectsCallerGrant_OwnGrantMemberRemovalStillRev
 
 	after := readCacheAs(t, proxy, pinned, match[1], 0)
 	assert.True(t, after.IsError, "narrowing a server the token itself was authorized for must still revoke cached access")
-	assert.Contains(t, resultText(t, after), "not readable with this credential")
+	// The reader is a scoped agent, not an administrator: readCacheRefusal
+	// remaps ErrUnauthorizedRead to the uniform ErrKeyNotFound body for any
+	// non-administrator caller kind (FR-001 "refusal is non-disclosing") —
+	// "not readable with this credential" is the administrator-only wording
+	// (cache_authz.go readCacheRefusal, reached only when
+	// reader.IsAdministrator()); this pinned agent must see the SAME body a
+	// missing key produces, not the reason.
+	assert.Contains(t, resultText(t, after), "cache key not found")
 }

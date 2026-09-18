@@ -284,6 +284,43 @@ func (p *MCPProxyServer) resolveActiveProfileFromIndex(ctx context.Context, idx 
 	return "", nil
 }
 
+// resolveEffectiveProfileForJustSetSlug is resolveActiveProfileFromIndex's
+// precedence (pin > URL > session selection) for the ONE caller that must
+// never re-read the session store's mutable selection to answer it:
+// handleSetProfile, immediately after it has itself just written slug via
+// SetActiveProfile. Tiers 1 (pin) and 2 (URL) are per-request context values
+// and safe to re-resolve as-is; tier 3 uses slug DIRECTLY instead of calling
+// SessionStore.GetActiveProfile — closing a race a concurrent set_profile
+// call on the SAME session could otherwise open between this call's own
+// write and its own response render: call A sets "research", call B
+// (interleaved) sets "deploy", and A's subsequent GetActiveProfile would see
+// B's "deploy" — so A's response would report active_profile: "research"
+// (A's own requested slug) with "deploy"'s servers, an FR-003 stored-
+// selection/effective-scope consistency violation (cross-model review, PR
+// D). slug is already validated selectable against idx immediately before
+// the write (handleSetProfile's own profiles.selectable(ctx, slug) check),
+// so profileScopeFromIndex(idx, slug) cannot miss here the way tier 3's
+// general "stored profile vanished from config" fallback anticipates for a
+// session's OLD selection read on some later, unrelated call.
+func (p *MCPProxyServer) resolveEffectiveProfileForJustSetSlug(ctx context.Context, idx *profileIndex, slug string) (string, *profile.ProfileScope) {
+	if pin := profilePinFromContext(ctx); pin != "" {
+		if scope := profileScopeFromIndex(idx, pin); scope != nil {
+			return pin, scope
+		}
+		return pin, profile.NewProfileScope(pin, nil)
+	}
+	if urlScope := profile.ProfileScopeFromContext(ctx); urlScope != nil {
+		return urlScope.Name, urlScope
+	}
+	if slug == "" {
+		return "", nil
+	}
+	if scope := profileScopeFromIndex(idx, slug); scope != nil {
+		return slug, scope
+	}
+	return "", nil
+}
+
 // profileScopeFromIndex builds the ProfileScope for slug's FULL membership
 // (declared servers ∩ configured servers, unintersected with any caller
 // credential — see resolveActiveProfileIn's doc comment) from idx, or nil

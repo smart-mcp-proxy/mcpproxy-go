@@ -131,7 +131,7 @@ func TestCacheAuthorizationCallerKindUser_NeverProducedOnMCPPath(t *testing.T) {
 		if ac != nil {
 			ctx = auth.WithAuthContext(ctx, ac)
 		}
-		got := p.cacheAuthorizationWith(ctx, "", nil)
+		got := p.cacheAuthorizationWith(ctx, "", nil, nil)
 		if got.CallerKind == cache.CallerKindUser {
 			callerKindUserCount++
 		}
@@ -145,7 +145,7 @@ func TestCacheAuthorizationCallerKindUser_NeverProducedOnMCPPath(t *testing.T) {
 	// map to CallerKindUser. If this assertion ever failed, the zero count
 	// above would be meaningless (the switch itself broken, not merely unfed).
 	sessionCtx := auth.WithAuthContext(context.Background(), auth.UserContext("u-t068", "alice@example.com", "Alice", "google"))
-	got := p.cacheAuthorizationWith(sessionCtx, "", nil)
+	got := p.cacheAuthorizationWith(sessionCtx, "", nil, nil)
 	require.Equal(t, cache.CallerKindUser, got.CallerKind,
 		"fixture: auth.UserContext must map to CallerKindUser, or the negative assertions above are vacuous")
 }

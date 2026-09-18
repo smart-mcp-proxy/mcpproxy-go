@@ -36,8 +36,8 @@ func (p *MCPProxyServer) cacheAuthorization(ctx context.Context) cache.Authoriza
 // response that was authorized under the wider scope.
 func (p *MCPProxyServer) cacheAuthorizationWith(ctx context.Context, profileName string, scope *profile.ProfileScope, idx *profileIndex) cache.Authorization {
 	a := cache.Authorization{CallerKind: cache.CallerKindAnonymous}
-	var agentAllowed []string
-	isAgent := false
+	var callerAllowed []string
+	callerBounded := false
 	if ac := auth.AuthContextFromContext(ctx); ac != nil {
 		switch {
 		case ac.Anonymous:
@@ -48,8 +48,8 @@ func (p *MCPProxyServer) cacheAuthorizationWith(ctx context.Context, profileName
 			a.AllowedServers = append([]string(nil), ac.AllowedServers...)
 			a.Permissions = append([]string(nil), ac.Permissions...)
 			a.ProfilePin = ac.ProfilePin
-			agentAllowed = ac.AllowedServers
-			isAgent = true
+			callerAllowed = ac.AllowedServers
+			callerBounded = true
 		case ac.Type == auth.AuthTypeUser:
 			// A server-edition user is bounded by the SAME dispatch gates
 			// as an agent token — CanAccessServer, HasPermission and the
@@ -59,12 +59,22 @@ func (p *MCPProxyServer) cacheAuthorizationWith(ctx context.Context, profileName
 			// digest (codex round 4: a snapshot of the user id alone let a
 			// user narrowed to {b} redeem the {a} entry it produced
 			// earlier; research D16: digest equality is the only user
-			// admission).
+			// admission). Spec 107 PR-C (IdP-group server grants, #1293,
+			// already merged) gives a plain OAuth user its own restricted
+			// AllowedServers via CanAccessServer's exact rule (nil/empty is
+			// deny-all, same as an agent token) — so a User is caller-
+			// bounded exactly like an Agent, not "no AllowedServers of its
+			// own" as the ProfileServers comment below used to assume
+			// (cross-model review, PR D: that assumption was already false
+			// for this type, reopening round 17's cache side-channel for a
+			// restricted OAuth user).
 			a.CallerKind = cache.CallerKindUser
 			a.Principal = ac.UserID
 			a.AllowedServers = append([]string(nil), ac.AllowedServers...)
 			a.Permissions = append([]string(nil), ac.Permissions...)
 			a.ProfilePin = ac.ProfilePin
+			callerAllowed = ac.AllowedServers
+			callerBounded = true
 		case ac.Type == auth.AuthTypeAdminUser:
 			a.CallerKind = cache.CallerKindAdminUser
 			a.Principal = ac.UserID
@@ -75,10 +85,12 @@ func (p *MCPProxyServer) cacheAuthorizationWith(ctx context.Context, profileName
 	a.Profile = profileName
 	if scope != nil {
 		a.ProfileScoped = true
-		// Spec 105 PR D review round 17 MUST-FIX: an agent token's stamp is
-		// the CALLER-INTERSECTED profile membership — the same
+		// Spec 105 PR D review round 17 MUST-FIX (widened by cross-model
+		// review to cover AuthTypeUser, not only AuthTypeAgent — see the
+		// AuthTypeUser case above): a caller-bounded token's stamp is the
+		// CALLER-INTERSECTED profile membership — the same
 		// EffectiveServersFor helper handleSetProfile's own scoped-visible
-		// path already renders through (profile_tool.go), O(len(agentAllowed))
+		// path already renders through (profile_tool.go), O(len(callerAllowed))
 		// via idx's precomputed serverPos/members data, never a fleet- or
 		// profile-declared-size walk. A profile member entirely outside the
 		// token's own grant (the token never had, and never will have,
@@ -89,13 +101,14 @@ func (p *MCPProxyServer) cacheAuthorizationWith(ctx context.Context, profileName
 		// an entry produced from a server the token remains fully authorized
 		// for — an unrelated, never-authorized server's continued existence
 		// becoming an observable side-channel through the cache layer
-		// (SC-005-class disclosure). Non-agent scoped callers (admin/user
-		// reading through a profile URL) carry no AllowedServers of their own
-		// to intersect against, so they keep the resolver's full profile
-		// membership — exactly resolveActiveProfileIn's documented
-		// wildcard/profile's-own-membership semantic, untouched here.
-		if isAgent && idx != nil {
-			a.ProfileServers = idx.EffectiveServersFor(profileName, agentAllowed)
+		// (SC-005-class disclosure). Only truly unbounded scoped callers
+		// (admin/anonymous reading through a profile URL, which carry no
+		// AllowedServers of their own to intersect against) keep the
+		// resolver's full profile membership — exactly resolveActiveProfileIn's
+		// documented wildcard/profile's-own-membership semantic, untouched
+		// here.
+		if callerBounded && idx != nil {
+			a.ProfileServers = idx.EffectiveServersFor(profileName, callerAllowed)
 		} else {
 			a.ProfileServers = scope.AllowedServerNames()
 		}
