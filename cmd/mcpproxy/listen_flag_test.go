@@ -55,7 +55,7 @@ func TestLoadConfig_ListenFlag(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			cfg, err := loadConfig(cmd)
+			cfg, _, err := loadConfig(cmd)
 			if err != nil {
 				t.Fatalf("loadConfig: %v", err)
 			}
