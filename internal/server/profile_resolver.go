@@ -299,26 +299,41 @@ func (p *MCPProxyServer) resolveActiveProfileFromIndex(ctx context.Context, idx 
 // selection/effective-scope consistency violation (cross-model review, PR
 // D). slug is already validated selectable against idx immediately before
 // the write (handleSetProfile's own profiles.selectable(ctx, slug) check),
-// so profileScopeFromIndex(idx, slug) cannot miss here the way tier 3's
-// general "stored profile vanished from config" fallback anticipates for a
-// session's OLD selection read on some later, unrelated call.
-func (p *MCPProxyServer) resolveEffectiveProfileForJustSetSlug(ctx context.Context, idx *profileIndex, slug string) (string, *profile.ProfileScope) {
+// so idx.position(slug) cannot miss here the way tier 3's general "stored
+// profile vanished from config" fallback anticipates for a session's OLD
+// selection read on some later, unrelated call.
+//
+// Returns only the profile NAME, never a *ProfileScope: its one caller
+// renders through EffectiveServersFor(name, callerAllowed), which never
+// touches this scope. The first version of this function called
+// profileScopeFromIndex and discarded the *ProfileScope it built — but that
+// always resolves the WILDCARD-derived (`[]string{"*"}`) full membership,
+// an O(profile size) allocation paid for a value nothing used (cross-model
+// review round 2). idx.position is the O(1) existence check the pin/slug
+// tiers actually need.
+func (p *MCPProxyServer) resolveEffectiveProfileForJustSetSlug(ctx context.Context, idx *profileIndex, slug string) string {
 	if pin := profilePinFromContext(ctx); pin != "" {
-		if scope := profileScopeFromIndex(idx, pin); scope != nil {
-			return pin, scope
+		if idx != nil && idx.position(pin) >= 0 {
+			return pin
 		}
-		return pin, profile.NewProfileScope(pin, nil)
+		// Stale pin (profile deleted since the token was minted): still
+		// authoritative — the caller stays deny-all under its own pin,
+		// never falls through to slug — and still worth an operator's
+		// attention, exactly as resolveActiveProfileFromIndex's own stale-
+		// pin branch logs it.
+		if p.logger != nil {
+			p.logger.Warn("agent-token profile_pin no longer matches any configured profile; resolving to a deny-all scope",
+				zap.String("profile_pin", pin))
+		}
+		return pin
 	}
 	if urlScope := profile.ProfileScopeFromContext(ctx); urlScope != nil {
-		return urlScope.Name, urlScope
+		return urlScope.Name
 	}
-	if slug == "" {
-		return "", nil
+	if slug != "" && idx != nil && idx.position(slug) >= 0 {
+		return slug
 	}
-	if scope := profileScopeFromIndex(idx, slug); scope != nil {
-		return slug, scope
-	}
-	return "", nil
+	return ""
 }
 
 // profileScopeFromIndex builds the ProfileScope for slug's FULL membership

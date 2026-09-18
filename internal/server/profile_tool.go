@@ -165,7 +165,7 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	// overwritten between this call's own SetActiveProfile write above and
 	// this render — reporting THIS call's slug in active_profile with a
 	// DIFFERENT call's servers (cross-model review, PR D).
-	effectiveProfileName, _ := p.resolveEffectiveProfileForJustSetSlug(ctx, profiles, slug)
+	effectiveProfileName := p.resolveEffectiveProfileForJustSetSlug(ctx, profiles, slug)
 	var allowed []string
 	if ac := auth.AuthContextFromContext(ctx); ac != nil {
 		allowed = ac.AllowedServers
