@@ -49,7 +49,7 @@ func TestPersistableConfig_RestoresFileValueWhileOverrideStillApplies(t *testing
 	ResetProcessOverrides()
 	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
 
-	cfg, err := ReadFile(path)
+	cfg, err := DecodeConfigFile(path)
 	require.NoError(t, err)
 	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, ":0")
 
@@ -63,7 +63,7 @@ func TestPersistableConfig_KeepsAnEditOfTheOverriddenField(t *testing.T) {
 	ResetProcessOverrides()
 	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
 
-	cfg, err := ReadFile(path)
+	cfg, err := DecodeConfigFile(path)
 	require.NoError(t, err)
 	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, ":0")
 
@@ -79,7 +79,7 @@ func TestPersistableConfig_PrefersTheCurrentFileOverTheLoadTimeValue(t *testing.
 	ResetProcessOverrides()
 	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
 
-	cfg, err := ReadFile(path)
+	cfg, err := DecodeConfigFile(path)
 	require.NoError(t, err)
 	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, ":0")
 
@@ -135,7 +135,7 @@ func TestSaveConfig_DoesNotPersistProcessOverrides(t *testing.T) {
 	ResetProcessOverrides()
 	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "read_only_mode": false, "mcpServers": []}`)
 
-	cfg, err := ReadFile(path)
+	cfg, err := DecodeConfigFile(path)
 	require.NoError(t, err)
 	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, ":0")
 	OverrideForProcess(cfg, FieldReadOnlyMode, OverrideSourceFlag, true)
@@ -413,7 +413,7 @@ func TestSaveConfigWithEdits_PersistsAnEditBackToTheOverrideValue(t *testing.T) 
 	ResetProcessOverrides()
 	path := writeOverrideTestFile(t, `{"tool_response_mode": "full", "listen": "127.0.0.1:8080", "mcpServers": []}`)
 
-	cfg, err := ReadFile(path)
+	cfg, err := DecodeConfigFile(path)
 	require.NoError(t, err)
 	OverrideForProcess(cfg, FieldToolResponseMode, OverrideSourceFlag, "compact")
 	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, ":0")
@@ -437,7 +437,7 @@ func TestSaveConfigWithEdits_RoundTripIsNotAnEdit(t *testing.T) {
 	ResetProcessOverrides()
 	path := writeOverrideTestFile(t, `{"read_only_mode": false, "mcpServers": []}`)
 
-	cfg, err := ReadFile(path)
+	cfg, err := DecodeConfigFile(path)
 	require.NoError(t, err)
 	OverrideForProcess(cfg, FieldReadOnlyMode, OverrideSourceFlag, true)
 
@@ -457,7 +457,7 @@ func TestSaveConfigWithEdits_MovingToTheOverrideValueIsAnEdit(t *testing.T) {
 	ResetProcessOverrides()
 	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
 
-	cfg, err := ReadFile(path)
+	cfg, err := DecodeConfigFile(path)
 	require.NoError(t, err)
 	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, "127.0.0.1:9000")
 
@@ -502,7 +502,7 @@ func TestSaveConfigWithEdits_ConcurrentStaleSaveNeverLeaksTheEnvKey(t *testing.T
 	ResetProcessOverrides()
 	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
 
-	live, err := ReadFile(path)
+	live, err := DecodeConfigFile(path)
 	require.NoError(t, err)
 	OverrideForProcess(live, FieldAPIKey, OverrideSourceEnv, "env-secret")
 
@@ -546,7 +546,7 @@ func TestSaveConfig_ReadBaseAndWriteAreSerialisedAgainstOtherSaves(t *testing.T)
 	t.Cleanup(func() { saveConfigTestHook = nil })
 	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
 
-	live, err := ReadFile(path)
+	live, err := DecodeConfigFile(path)
 	require.NoError(t, err)
 	OverrideForProcess(live, FieldAPIKey, OverrideSourceEnv, "env-secret")
 

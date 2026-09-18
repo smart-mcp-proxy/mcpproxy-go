@@ -26,7 +26,7 @@ func TestEnsureAnonymousID_DoesNotPersistProcessOverrides(t *testing.T) {
 	raw := `{"listen": "127.0.0.1:8080", "data_dir": ` + jsonQuote(tmp) + `, "read_only_mode": false, "mcpServers": []}`
 	require.NoError(t, os.WriteFile(cfgPath, []byte(raw), 0o600))
 
-	cfg, err := config.ReadFile(cfgPath)
+	cfg, err := config.DecodeConfigFile(cfgPath)
 	require.NoError(t, err)
 	config.OverrideForProcess(cfg, config.FieldListen, config.OverrideSourceFlag, ":0")
 	config.OverrideForProcess(cfg, config.FieldReadOnlyMode, config.OverrideSourceFlag, true)

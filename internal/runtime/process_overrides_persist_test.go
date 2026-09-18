@@ -31,7 +31,7 @@ func newOverriddenRuntime(t *testing.T) (*Runtime, string) {
 	initial.ToolResponseMode = "full"
 	require.NoError(t, config.SaveConfig(initial, cfgPath))
 
-	cfg, err := config.ReadFile(cfgPath)
+	cfg, err := config.DecodeConfigFile(cfgPath)
 	require.NoError(t, err)
 	config.OverrideForProcess(cfg, config.FieldListen, config.OverrideSourceFlag, ":0")
 	config.OverrideForProcess(cfg, config.FieldToolResponseMode, config.OverrideSourceFlag, "compact")
@@ -148,7 +148,7 @@ func TestConfigWatcher_OwnSaveWithOverridesIsNotAnExternalEdit(t *testing.T) {
 func TestReloadConfiguration_KeepsFlagOverridesEffective(t *testing.T) {
 	rt, cfgPath := newOverriddenRuntime(t)
 
-	edited, err := config.ReadFile(cfgPath)
+	edited, err := config.DecodeConfigFile(cfgPath)
 	require.NoError(t, err)
 	edited.ToolsLimit = 77 // the external edit
 	require.NoError(t, config.SaveConfig(edited, cfgPath))
@@ -180,7 +180,7 @@ func TestReloadConfiguration_DoesNotResurrectAFlagTheAPISuperseded(t *testing.T)
 	_, err = rt.ApplyConfig(desired, cfgPath)
 	require.NoError(t, err)
 
-	edited, err := config.ReadFile(cfgPath)
+	edited, err := config.DecodeConfigFile(cfgPath)
 	require.NoError(t, err)
 	require.Equal(t, "full", edited.ToolResponseMode)
 	edited.ToolsLimit = 77
@@ -220,7 +220,7 @@ func TestApplyConfig_TogglingAnOverriddenFieldBackPersists(t *testing.T) {
 func TestReloadConfiguration_RestartGatedFlagDoesNotHideAPendingFileEdit(t *testing.T) {
 	rt, cfgPath := newOverriddenRuntime(t)
 
-	edited, err := config.ReadFile(cfgPath)
+	edited, err := config.DecodeConfigFile(cfgPath)
 	require.NoError(t, err)
 	edited.Listen = "127.0.0.1:9090"
 	require.NoError(t, config.SaveConfig(edited, cfgPath))
@@ -252,7 +252,7 @@ func TestReloadConfiguration_ComponentsFollowTheRunningConfig(t *testing.T) {
 	initial.ToolResponseMode = "full"
 	require.NoError(t, config.SaveConfig(initial, cfgPath))
 
-	cfg, err := config.ReadFile(cfgPath)
+	cfg, err := config.DecodeConfigFile(cfgPath)
 	require.NoError(t, err)
 	config.OverrideForProcess(cfg, config.FieldToolResponseLimit, config.OverrideSourceFlag, 500)
 	config.OverrideForProcess(cfg, config.FieldToolResponseMode, config.OverrideSourceFlag, "compact")
@@ -262,7 +262,7 @@ func TestReloadConfiguration_ComponentsFollowTheRunningConfig(t *testing.T) {
 	t.Cleanup(func() { _ = rt.Close() })
 	require.Equal(t, 500, rt.Truncator().Limit())
 
-	edited, err := config.ReadFile(cfgPath)
+	edited, err := config.DecodeConfigFile(cfgPath)
 	require.NoError(t, err)
 	edited.ToolsLimit = 77
 	require.NoError(t, config.SaveConfig(edited, cfgPath))
@@ -311,7 +311,7 @@ func TestApplyConfig_EditingListenUnderAFlagEndsTheOverride(t *testing.T) {
 func TestApplyConfig_UnrelatedEditAfterReloadKeepsHotFlags(t *testing.T) {
 	rt, cfgPath := newOverriddenRuntime(t)
 
-	edited, err := config.ReadFile(cfgPath)
+	edited, err := config.DecodeConfigFile(cfgPath)
 	require.NoError(t, err)
 	edited.ToolsLimit = 77
 	require.NoError(t, config.SaveConfig(edited, cfgPath))
@@ -341,7 +341,7 @@ func TestApplyConfig_UnrelatedEditAfterReloadKeepsHotFlags(t *testing.T) {
 func TestApplyConfig_RoundTripAfterReloadKeepsTheListenOverride(t *testing.T) {
 	rt, cfgPath := newOverriddenRuntime(t)
 
-	edited, err := config.ReadFile(cfgPath)
+	edited, err := config.DecodeConfigFile(cfgPath)
 	require.NoError(t, err)
 	edited.ToolsLimit = 77
 	require.NoError(t, config.SaveConfig(edited, cfgPath))
@@ -364,7 +364,7 @@ func TestApplyConfig_RoundTripAfterReloadKeepsTheListenOverride(t *testing.T) {
 func TestApplyConfig_EditingListenToTheFlagValueAfterReloadPersists(t *testing.T) {
 	rt, cfgPath := newOverriddenRuntime(t)
 
-	edited, err := config.ReadFile(cfgPath)
+	edited, err := config.DecodeConfigFile(cfgPath)
 	require.NoError(t, err)
 	edited.ToolsLimit = 77
 	require.NoError(t, config.SaveConfig(edited, cfgPath))

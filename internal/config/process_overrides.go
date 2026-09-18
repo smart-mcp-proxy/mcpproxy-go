@@ -476,7 +476,7 @@ func PersistableConfigWithEdits(effective, mergeBase *Config, path string) *Conf
 
 	var base *Config
 	if path != "" {
-		if onDisk, err := ReadFile(path); err == nil {
+		if onDisk, err := DecodeConfigFile(path); err == nil {
 			base = onDisk
 		}
 	}
