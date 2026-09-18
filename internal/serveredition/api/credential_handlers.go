@@ -42,6 +42,14 @@ type CredentialHandlers struct {
 	adminServers  AdminServersProvider
 	connectors    *connectorProvider
 	logger        *zap.SugaredLogger
+
+	// entitlement is the ONE tenant predicate (Spec 107 FR-004) every
+	// credential surface selects its upstreams through. Installed by setup.go
+	// (SetEntitlement) with the same UserHandlers the /user/servers doors
+	// use. These handlers hold no user store of their own, so with no
+	// predicate installed every door fails closed (503): a credential surface
+	// that cannot decide entitlement must not connect anything.
+	entitlement *UserHandlers
 }
 
 // NewCredentialHandlers builds the handlers over a credential store and the set
@@ -62,6 +70,11 @@ func NewCredentialHandlers(store broker.CredentialStore, sharedServers []*config
 
 func (h *CredentialHandlers) SetAdminServersProvider(provider AdminServersProvider) {
 	h.adminServers = provider
+}
+
+// SetEntitlement installs the shared entitlement predicate (Spec 107 FR-004).
+func (h *CredentialHandlers) SetEntitlement(e *UserHandlers) {
+	h.entitlement = e
 }
 
 // SetFrontDoor installs server_edition.public_url and the live trusted-proxy
@@ -130,10 +143,16 @@ func (h *CredentialHandlers) listCredentials(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	servers, err := h.brokerServerList(r, userID)
+	if err != nil {
+		h.writeEntitlementError(w, userID, err)
+		return
+	}
+
 	storeEnabled := h.store != nil && h.store.Enabled()
 
 	out := make([]CredentialStatus, 0)
-	for _, srv := range h.brokerServerList() {
+	for _, srv := range servers {
 		status := CredentialStatus{
 			Server: srv.Name,
 			Mode:   srv.AuthBroker.Mode,
@@ -200,7 +219,7 @@ func (h *CredentialHandlers) deleteCredential(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	srv, ok := h.lookupServer(w, r)
+	srv, ok := h.lookupServer(w, r, userID)
 	if !ok {
 		return
 	}
@@ -231,7 +250,7 @@ func (h *CredentialHandlers) connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	srv, ok := h.lookupServer(w, r)
+	srv, ok := h.lookupServer(w, r, userID)
 	if !ok {
 		return
 	}
@@ -263,12 +282,13 @@ func (h *CredentialHandlers) connect(w http.ResponseWriter, r *http.Request) {
 // user), and redirects back to the Web UI. A denied/failed authorization clears
 // the pending flow and stores nothing.
 func (h *CredentialHandlers) callback(w http.ResponseWriter, r *http.Request) {
-	if _, err := getUserID(r); err != nil {
+	userID, err := getUserID(r)
+	if err != nil {
 		writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
 	}
 
-	srv, ok := h.lookupServer(w, r)
+	srv, ok := h.lookupServer(w, r, userID)
 	if !ok {
 		return
 	}
@@ -313,9 +333,12 @@ func (h *CredentialHandlers) callback(w http.ResponseWriter, r *http.Request) {
 
 // --- Helpers ---
 
-// lookupServer resolves the {server} path param to a brokered upstream, writing
-// a 4xx and returning ok=false when missing/unknown.
-func (h *CredentialHandlers) lookupServer(w http.ResponseWriter, r *http.Request) (*config.ServerConfig, bool) {
+// lookupServer resolves the {server} path param to a brokered upstream the
+// caller is entitled to, writing a 4xx/5xx and returning ok=false otherwise.
+// The entitlement is resolved BEFORE the name is looked up, so a brokered
+// server outside the caller's grant answers exactly like one that never
+// existed (FR-010 status parity) and performs no credential-store read.
+func (h *CredentialHandlers) lookupServer(w http.ResponseWriter, r *http.Request, userID string) (*config.ServerConfig, bool) {
 	name := chi.URLParam(r, "server")
 	if decoded, err := url.PathUnescape(name); err == nil {
 		name = decoded
@@ -325,7 +348,11 @@ func (h *CredentialHandlers) lookupServer(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "Server name is required")
 		return nil, false
 	}
-	srv := h.brokerServerByName(name)
+	srv, err := h.brokerServerByName(r, userID, name)
+	if err != nil {
+		h.writeEntitlementError(w, userID, err)
+		return nil, false
+	}
 	if srv == nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("Brokered server %q not found", name))
 		return nil, false
@@ -333,43 +360,70 @@ func (h *CredentialHandlers) lookupServer(w http.ResponseWriter, r *http.Request
 	return srv, true
 }
 
-// brokerEntitled reports whether a per-user credential surface may act on this
-// upstream at all.
+// brokerEntitled reports whether a per-user credential surface may act on an
+// upstream the caller is ENTITLED to (the entitlement itself is decided
+// upstream of this, by the one predicate — see brokerServerList): only a
+// brokered upstream has a credential to connect.
 //
-// `Shared` is the ENTITLEMENT check (issue #1161 follow-up), not a formality:
-// setup.go hands these handlers `deps.Config.Servers` — the admin's WHOLE
-// server list — under the name `sharedServers`. Selecting on `AuthBroker != nil`
-// alone therefore reached admin upstreams the admin deliberately did not share,
-// disclosing their existence and broker mode through the list, and letting any
-// authenticated user drive the connect flow against the admin's registered
-// OAuth client for a server they were never granted.
-//
-// Every credential surface selects through this one predicate so a new one
-// cannot reintroduce the gap by copying the old two-thirds of the condition.
+// Issue #1161 follow-up: setup.go hands these handlers `deps.Config.Servers`
+// — the admin's WHOLE server list. Selecting on `AuthBroker != nil` over that
+// list reached admin upstreams the admin deliberately did not share,
+// disclosing their existence and broker mode through the list, and letting
+// any authenticated user drive the connect flow against the admin's
+// registered OAuth client for a server they were never granted. Spec 107
+// FR-004 moves the sharing/group term into entitledServerNamesFor, so every
+// credential surface now selects through that predicate and then this one;
+// a new surface cannot reintroduce the gap by copying two-thirds of the
+// condition.
 func brokerEntitled(s *config.ServerConfig) bool {
-	return s != nil && s.Shared && s.AuthBroker != nil
+	return s != nil && s.AuthBroker != nil
 }
 
-// brokerServerList returns the shared servers that carry an auth_broker block.
-func (h *CredentialHandlers) brokerServerList() []*config.ServerConfig {
-	servers := h.currentAdminServers()
-	out := make([]*config.ServerConfig, 0, len(servers))
-	for _, s := range servers {
+// errNoEntitlement marks a credential door reached with no predicate
+// installed: these handlers cannot decide entitlement on their own.
+var errNoEntitlement = errors.New("credential handlers have no entitlement predicate installed")
+
+// brokerServerList returns the caller's ENTITLED shared servers that carry an
+// auth_broker block (the administrator projection for an admin_user).
+func (h *CredentialHandlers) brokerServerList(r *http.Request, userID string) ([]*config.ServerConfig, error) {
+	if h.entitlement == nil {
+		return nil, errNoEntitlement
+	}
+	visible, err := h.entitlement.visibleSharedServers(r, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*config.ServerConfig, 0, len(visible))
+	for _, s := range visible {
 		if brokerEntitled(s) {
 			out = append(out, s)
 		}
 	}
-	return out
+	return out, nil
 }
 
-// brokerServerByName finds a brokered upstream by case-insensitive name.
-func (h *CredentialHandlers) brokerServerByName(name string) *config.ServerConfig {
-	for _, s := range h.currentAdminServers() {
-		if brokerEntitled(s) && strings.EqualFold(s.Name, name) {
-			return s
-		}
+// brokerServerByName finds a brokered upstream the caller is entitled to,
+// by name (exact for a tenant; the administrator projection keeps its
+// historical case-insensitive match). nil = hidden or absent, indistinguishably.
+func (h *CredentialHandlers) brokerServerByName(r *http.Request, userID, name string) (*config.ServerConfig, error) {
+	if h.entitlement == nil {
+		return nil, errNoEntitlement
 	}
-	return nil
+	srv, err := h.entitlement.visibleSharedServer(r, userID, name)
+	if err != nil {
+		return nil, err
+	}
+	if !brokerEntitled(srv) {
+		return nil, nil
+	}
+	return srv, nil
+}
+
+// writeEntitlementError answers a credential door whose entitlement could
+// not be decided: fail closed, and say nothing about any server.
+func (h *CredentialHandlers) writeEntitlementError(w http.ResponseWriter, userID string, err error) {
+	h.logger.Errorw("failed to resolve server entitlement for credentials", "user_id", userID, "error", err)
+	writeError(w, http.StatusServiceUnavailable, "Server entitlement unavailable")
 }
 
 // sanitizeCallbackError coerces a raw OAuth authorization-server error code into

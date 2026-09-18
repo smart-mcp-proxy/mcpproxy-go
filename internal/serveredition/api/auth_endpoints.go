@@ -145,13 +145,20 @@ func (h *AuthEndpoints) getMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// generateToken creates a new JWT bearer token for MCP access.
+// generateToken creates a new JWT bearer token for the REST/Web UI surfaces.
+//
+// Session-cookie-only (Spec 107 FR-011): a bearer JWT presented here used to
+// mint a fresh full-TTL JWT, so a JWT could renew itself forever and keep
+// minting agent tokens without the user ever re-authenticating — an unbounded
+// freshness window for stored groups and the live role. A derived credential
+// never mints another credential: the Web UI calls this door with the cookie,
+// and a JWT or agent token receives 401.
 func (h *AuthEndpoints) generateToken(w http.ResponseWriter, r *http.Request) {
 	ac := auth.AuthContextFromContext(r.Context())
 	// Require the user TIER. This is the sharp one: without it, a scoped
 	// read-only agent token carrying its owner's UserID could mint a full user
 	// session JWT for that owner — a privilege upgrade, not a lateral move.
-	if ac == nil || !ac.IsUser() || ac.GetUserID() == "" {
+	if ac == nil || !ac.IsUser() || ac.GetUserID() == "" || ac.CredentialKind != auth.CredentialKindCookie {
 		writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
 	}

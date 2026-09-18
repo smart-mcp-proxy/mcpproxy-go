@@ -460,6 +460,12 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	if !slices.Equal(config.ServerEditionAdminEmails(oldCfg), config.ServerEditionAdminEmails(newCfg)) {
 		result.ChangedFields = append(result.ChangedFields, "server_edition.admin_emails")
 	}
+	// server_edition.access (Spec 107 FR-039 part 3) is read live by the
+	// entitlement predicate through ServerEditionConfigProvider, so like
+	// admin_emails it applies hot. jsonEqual: omitempty collapses nil-vs-{}.
+	if !jsonEqual(config.ServerEditionAccessProjection(oldCfg), config.ServerEditionAccessProjection(newCfg)) {
+		result.ChangedFields = append(result.ChangedFields, "server_edition.access")
+	}
 
 	// If no changes detected
 	if len(result.ChangedFields) == 0 {

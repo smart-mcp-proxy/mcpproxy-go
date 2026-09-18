@@ -97,6 +97,18 @@ func ServerEditionAdminEmails(cfg *Config) []string {
 	return cfg.ServerEdition.AdminEmails
 }
 
+// ServerEditionAccessProjection returns the live `server_edition.access`
+// block for DetectConfigChanges (Spec 107 FR-039 part 3): read live through
+// ServerEditionConfigProvider by the entitlement predicate, so an edit is
+// reported as `server_edition.access` and applies hot. Meant for jsonEqual: a
+// nil block projects to the zero value, so absent and `{}` compare equal.
+func ServerEditionAccessProjection(cfg *Config) any {
+	if cfg == nil || cfg.ServerEdition == nil || cfg.ServerEdition.Access == nil {
+		return ServerEditionAccessConfig{}
+	}
+	return *cfg.ServerEdition.Access
+}
+
 // ServerEditionRestartReason names the first restart-pinned key group that
 // differs between the two blocks, in the words of contracts/config-keys.md.
 // It carries key names only — never a value, so no secret can reach a log

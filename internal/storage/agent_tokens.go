@@ -758,9 +758,13 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 //
 // Order and duplicates follow proposed, so the hook still decides the shape of
 // the list it is allowed to produce.
+//
+// The result is NEVER nil (Spec 107 FR-006): an empty intersection and an
+// empty `proposed` both return []string{}, so no consumer can read "nothing
+// survived" as "no restriction" (the preflight two-semantics trap).
 func intersectAllowedServers(current, proposed []string) []string {
 	if len(proposed) == 0 {
-		return nil
+		return []string{}
 	}
 
 	granted := make(map[string]struct{}, len(current))
@@ -787,9 +791,6 @@ func intersectAllowedServers(current, proposed []string) []string {
 		out = append(out, name)
 	}
 
-	if len(out) == 0 {
-		return nil
-	}
 	return out
 }
 
@@ -885,57 +886,71 @@ func (m *Manager) GetAgentTokenCount() (int, error) {
 	return count, err
 }
 
-// agentTokenOwnerGate reports whether the user a token belongs to may still
-// authenticate. It is consulted on the authentication hot path, so it must be
-// cheap and must not block; a store lookup keyed by user id is what the server
-// edition installs.
-//
-// It is called ONLY for owned tokens (UserID != ""), never for the personal
-// edition's ownerless ones.
-type agentTokenOwnerGate func(userID string) (active bool, err error)
-
-type agentTokenScopeResolver func(userID string, granted []string) ([]string, error)
-
-// SetAgentTokenScopeResolver installs the live entitlement check used on each
-// owned-token authentication. Its result can only narrow the persisted grant.
-func (m *Manager) SetAgentTokenScopeResolver(resolve agentTokenScopeResolver) {
-	m.scopeResolver.Store(resolve)
+// OwnerResolution is the single answer the server edition gives about an
+// owned token's owner on every authentication (Spec 107 FR-004,
+// contracts/entitlement-predicate.md §2, data-model.md §6). It replaces the
+// two callbacks that used to run in sequence (an owner gate returning only
+// `active`, then a scope resolver that loaded the same user record again):
+// one store read now yields the owner's liveness, identity, live role and
+// the NARROWED grant together.
+type OwnerResolution struct {
+	// Active is false when the owner record is missing or disabled — the
+	// token is refused with ErrAgentTokenOwnerInactive.
+	Active bool
+	// UserID, Email, Provider and Role describe the owner as of now; Role is
+	// derived live from admin_emails. They are stamped on the returned
+	// token's non-persisted Owner* fields, never written to the store.
+	UserID, Email  string
+	Provider, Role string
+	// Entitled is the ALREADY NARROWED grant: narrowScopeToEntitled(granted,
+	// entitledServerNamesFor(user, isAdmin), isAdmin). Non-nil. ["*"] stays
+	// literal for an administrator, is materialised into the entitlement set
+	// for a tenant, and is [] when nothing survives. It MUST NOT be the raw
+	// whole-configuration list: intersectAllowedServers treats a stored "*"
+	// as "take every entry of proposed", so an administrator's literal star
+	// would be frozen into a snapshot of the current configuration (FR-009).
+	Entitled []string
 }
 
-// SetAgentTokenOwnerGate installs the predicate ValidateAgentToken consults for
-// every OWNED agent token. Passing nil removes it. Safe to call at any time.
+// AgentTokenOwnerResolver answers OwnerResolution for the owner of a token
+// whose stored grant is `granted`. It is consulted on the authentication hot
+// path — exactly ONCE per ValidateAgentToken — so it must be one keyed store
+// read and the entitlement computation, no more. It is called ONLY for owned
+// tokens (UserID != ""), never for the personal edition's ownerless ones.
 //
-// It exists because a token's authorisation is decided once, when the token is
-// minted, and nothing re-checks the identity behind it afterwards. Disabling a
-// user is the documented remediation for a compromised account — it revokes
-// their sessions and stops their JWTs — but the agent tokens they minted are
-// separate records that kept authenticating, still carrying that user's UserID
-// into every downstream authorisation and activity decision. The gate closes
-// that: the token is only as live as its owner.
+// Errors fail CLOSED: a resolver that cannot answer denies the token
+// (ErrAgentTokenScopeUnavailable), or ErrAgentTokenOwnerInactive when the
+// error wraps that sentinel (the resolver's own owner-store read failed —
+// "cannot read the owner" and "owner is gone" refuse the same way).
+type AgentTokenOwnerResolver func(userID string, granted []string) (OwnerResolution, error)
+
+// SetAgentTokenOwnerResolver installs the single owner resolution
+// ValidateAgentToken consults for every OWNED agent token. Passing nil
+// removes it. Safe to call at any time.
 //
-// It FAILS CLOSED. A gate that errors denies the token rather than falling back
-// to "valid", because the failure mode of the alternative is precisely the hole
-// this closes. The personal edition installs no gate and is unaffected — its
-// tokens are all ownerless.
-func (m *Manager) SetAgentTokenOwnerGate(gate agentTokenOwnerGate) {
-	m.ownerGate.Store(gate)
+// It exists because a token's authorisation is decided once, when the token
+// is minted, and nothing re-checked the identity behind it afterwards.
+// Disabling a user is the documented remediation for a compromised account
+// — it revokes their sessions and stops their JWTs — but the agent tokens
+// they minted are separate records that kept authenticating. The resolver
+// closes that (the token is only as live as its owner) and, in the same
+// read, re-derives the owner's current entitlement so every authentication
+// receives a fresh, narrow-only intersection (Spec 106 FR-004).
+//
+// It FAILS CLOSED. The personal edition installs no resolver and is
+// unaffected — its tokens are all ownerless.
+func (m *Manager) SetAgentTokenOwnerResolver(resolve AgentTokenOwnerResolver) {
+	m.ownerResolver.Store(resolve)
 }
 
-// agentTokenOwnerActive applies the installed gate, if any. Reports true when
-// no gate is installed or the token is ownerless.
-func (m *Manager) agentTokenOwnerActive(userID string) (bool, error) {
-	if userID == "" {
-		return true, nil
-	}
-	v := m.ownerGate.Load()
+// agentTokenOwnerResolver returns the installed resolver, or nil.
+func (m *Manager) agentTokenOwnerResolver() AgentTokenOwnerResolver {
+	v := m.ownerResolver.Load()
 	if v == nil {
-		return true, nil
+		return nil
 	}
-	gate, _ := v.(agentTokenOwnerGate)
-	if gate == nil {
-		return true, nil
-	}
-	return gate(userID)
+	resolve, _ := v.(AgentTokenOwnerResolver)
+	return resolve
 }
 
 // ValidateAgentToken hashes the raw token and looks it up in storage.
@@ -965,33 +980,40 @@ func (m *Manager) ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.Age
 		return nil, fmt.Errorf("token has expired")
 	}
 
-	// The identity behind the token must still be live. Checked LAST so a
-	// revoked or expired token keeps its own, more specific answer, and so the
-	// gate is not consulted for credentials that were going to be refused
-	// anyway.
-	active, err := m.agentTokenOwnerActive(token.UserID)
-	if err != nil {
-		// Fail closed: a user store that cannot answer must not mean "yes".
-		if m.logger != nil {
-			m.logger.Warnw("denying agent token: owner status could not be determined",
-				"user_id", token.UserID, "token_prefix", token.TokenPrefix, "error", err)
-		}
-		return nil, ErrAgentTokenOwnerInactive
-	}
-	if !active {
-		return nil, ErrAgentTokenOwnerInactive
-	}
+	// The identity behind the token must still be live, and its grant must
+	// be re-narrowed to the owner's CURRENT entitlement. Checked LAST so a
+	// revoked or expired token keeps its own, more specific answer, and so
+	// the resolver is not consulted for credentials that were going to be
+	// refused anyway. One resolver call per authentication (Spec 107
+	// FR-004): liveness, identity, live role and the narrowed grant come
+	// from the same store read.
 	if token.UserID != "" {
-		if resolve, _ := m.scopeResolver.Load().(agentTokenScopeResolver); resolve != nil {
+		if resolve := m.agentTokenOwnerResolver(); resolve != nil {
 			granted := append([]string(nil), token.AllowedServers...)
-			allowed, err := resolve(token.UserID, append([]string(nil), granted...))
+			res, err := resolve(token.UserID, append([]string(nil), granted...))
 			if err != nil {
+				// Fail closed: a user store that cannot answer must not mean
+				// "yes". The owner-store failure keeps the owner-inactive
+				// sentinel; anything else is the entitlement being unavailable.
 				if m.logger != nil {
-					m.logger.Warnw("denying agent token: entitlement lookup failed", "user_id", token.UserID, "error", err)
+					m.logger.Warnw("denying agent token: owner resolution failed",
+						"user_id", token.UserID, "token_prefix", token.TokenPrefix, "error", err)
+				}
+				if errors.Is(err, ErrAgentTokenOwnerInactive) {
+					return nil, ErrAgentTokenOwnerInactive
 				}
 				return nil, ErrAgentTokenScopeUnavailable
 			}
-			token.AllowedServers = intersectAllowedServers(granted, allowed)
+			if !res.Active {
+				return nil, ErrAgentTokenOwnerInactive
+			}
+			// res.Entitled is already the narrowed grant; the intersection is
+			// the storage-side narrow-only fence (intersect(["*"], ["*"]) =
+			// ["*"], so an administrator's literal star survives).
+			token.AllowedServers = intersectAllowedServers(granted, res.Entitled)
+			token.OwnerEmail = res.Email
+			token.OwnerProvider = res.Provider
+			token.OwnerRole = res.Role
 		}
 	}
 

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -54,6 +56,68 @@ type AgentToken struct {
 	Revoked        bool       `json:"revoked"`
 	UserID         string     `json:"user_id,omitempty"`     // Owner user ID (server edition)
 	ProfilePin     string     `json:"profile_pin,omitempty"` // Profile this token is pinned to (Profiles v2 T3)
+
+	// OwnerEmail, OwnerProvider and OwnerRole are the owner's identity as of
+	// THIS authentication (Spec 107 FR-004/FR-013, data-model.md §3). They are
+	// NEVER persisted (`json:"-"` keeps them out of the BBolt record, which is
+	// json.Marshal'ed): storage.ValidateAgentToken stamps them on the token
+	// value it returns from the single owner resolution, and AuthContext()
+	// copies them into the request context. A token read back from the store
+	// by any other path carries them empty. Role is derived live from
+	// admin_emails, so it can change between two authentications of the same
+	// token — which is exactly why it must not be stored.
+	OwnerEmail    string `json:"-"`
+	OwnerProvider string `json:"-"`
+	OwnerRole     string `json:"-"`
+}
+
+// Token expiry rule shared by core POST /api/v1/tokens and the server
+// edition's POST /api/v1/user/tokens (Spec 107 FR-011).
+const (
+	// DefaultTokenExpiry is the expiry applied when expires_in is omitted.
+	DefaultTokenExpiry = 30 * 24 * time.Hour
+	// MaxTokenExpiry caps every owned or operator token at 365 days.
+	MaxTokenExpiry = 365 * 24 * time.Hour
+)
+
+// ParseTokenExpiry is THE expiry rule for an agent token (Spec 107 FR-011,
+// contracts/entitlement-predicate.md §5): positive, at most 365 days, fixed
+// error text. Accepted formats: "30d" (days), "720h" (hours), or any Go
+// duration string; "" means the 30-day default. Both minting doors call it,
+// so neither can drift to an unbounded lifetime again (the server-edition
+// door used to parse with a bare time.ParseDuration and no cap).
+func ParseTokenExpiry(expiresIn string, now time.Time) (time.Time, error) {
+	if expiresIn == "" {
+		return now.Add(DefaultTokenExpiry), nil
+	}
+
+	var d time.Duration
+
+	// Handle "Nd" format (days)
+	if strings.HasSuffix(expiresIn, "d") {
+		daysStr := strings.TrimSuffix(expiresIn, "d")
+		days, err := strconv.Atoi(daysStr)
+		if err != nil || days <= 0 {
+			return time.Time{}, fmt.Errorf("invalid expiry duration: %q", expiresIn)
+		}
+		d = time.Duration(days) * 24 * time.Hour
+	} else {
+		// Try standard Go duration
+		var err error
+		d, err = time.ParseDuration(expiresIn)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("invalid expiry duration: %q", expiresIn)
+		}
+		if d <= 0 {
+			return time.Time{}, fmt.Errorf("expiry duration must be positive")
+		}
+	}
+
+	if d > MaxTokenExpiry {
+		return time.Time{}, fmt.Errorf("expiry duration cannot exceed 365 days")
+	}
+
+	return now.Add(d), nil
 }
 
 // AuthContext builds the request AuthContext for a validated agent token. It
@@ -61,6 +125,11 @@ type AgentToken struct {
 // drop a field: the REST path used to omit ProfilePin, which meant a
 // profile-pinned token evaluated (and, with Spec 098, preflighted) against the
 // unpinned server set. Returns nil for a nil token.
+//
+// Spec 107 (T076): it also copies the non-persisted OwnerEmail/OwnerProvider/
+// OwnerRole that storage stamped on the validated token value into
+// Email/Provider/Role, so an owned token's request carries its owner's live
+// identity without a second store read. CredentialKind is always agent_token.
 func (t *AgentToken) AuthContext() *AuthContext {
 	if t == nil {
 		return nil
@@ -72,6 +141,10 @@ func (t *AgentToken) AuthContext() *AuthContext {
 		AllowedServers: t.AllowedServers,
 		Permissions:    t.Permissions,
 		ProfilePin:     t.ProfilePin,
+		Email:          t.OwnerEmail,
+		Provider:       t.OwnerProvider,
+		Role:           t.OwnerRole,
+		CredentialKind: CredentialKindAgentToken,
 		// UserID carries the owning tenant (server edition). Without it an
 		// agent-token request had no tenant identity at all, so its activity
 		// could not be attributed or scoped. It does NOT confer the user tier:

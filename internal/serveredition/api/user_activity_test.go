@@ -77,6 +77,9 @@ func activityTestSetup(t *testing.T, records []*storage.ActivityRecord, sharedSe
 
 // activityTestRouter creates a chi router with user activity handlers and auth context.
 func activityTestRouter(handlers *UserActivityHandlers, authCtx *auth.AuthContext) *chi.Mux {
+	// Spec 107 T075: the diagnostics door goes through the entitlement
+	// predicate, which loads the caller's record; persist it.
+	ensureUserRecord(handlers.userStore, authCtx)
 	r := chi.NewRouter()
 	if authCtx != nil {
 		r.Use(func(next http.Handler) http.Handler {

@@ -379,7 +379,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 				// Tray connections are always trusted, even with require_mcp_auth
 				source := transport.GetConnectionSource(r.Context())
 				if source == transport.ConnectionSourceTray {
-					ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+					ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AdminContext(), auth.CredentialKindSocket))
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -391,7 +391,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			// without a token. Checked BEFORE the anonymous fallback so a
 			// socket caller is not downgraded (issue #1148).
 			if transport.GetConnectionSource(r.Context()) == transport.ConnectionSourceTray {
-				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+				ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AdminContext(), auth.CredentialKindSocket))
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -404,7 +404,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			// operation that worked before still works; only the
 			// secret-REVEALING check (AuthContext.CanRevealSecrets) tells the
 			// two apart.
-			ctx := auth.WithAuthContext(r.Context(), auth.AnonymousContext())
+			ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AnonymousContext(), auth.CredentialKindAnonymous))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -458,7 +458,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 		// Check if it matches the global API key — treat as admin
 		cfg := s.runtime.Config()
 		if cfg != nil && cfg.APIKey != "" && token == cfg.APIKey {
-			ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+			ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AdminContext(), auth.CredentialKindAPIKey))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -466,7 +466,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 		// Tray connections are trusted
 		source := transport.GetConnectionSource(r.Context())
 		if source == transport.ConnectionSourceTray {
-			ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+			ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AdminContext(), auth.CredentialKindSocket))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -480,9 +480,18 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 		// Backward compatibility: allow through with an ANONYMOUS admin
 		// context. The token proved nothing, so it is no more of an identity
 		// than no token at all (issue #1148).
-		ctx := auth.WithAuthContext(r.Context(), auth.AnonymousContext())
+		ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AnonymousContext(), auth.CredentialKindAnonymous))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// credentialKindContext records which FR-001 credential source authenticated
+// an /mcp request (Spec 107, auth.CredentialKind). An agent token's context
+// carries agent_token from auth.AgentToken.AuthContext itself; the admin and
+// anonymous constructors are stamped here.
+func credentialKindContext(ac *auth.AuthContext, kind auth.CredentialKind) *auth.AuthContext {
+	ac.CredentialKind = kind
+	return ac
 }
 
 // createSelectiveWebUIProtectedHandler serves the Web UI without authentication.
@@ -3402,6 +3411,48 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 		return nil, err
 	}
 
+	resultMaps := s.searchResultsToMaps(results)
+	s.logger.Debug("Search completed", zap.String("query", query), zap.Int("results", len(resultMaps)))
+	return resultMaps, nil
+}
+
+// SearchToolsScoped is SearchTools for a scoped caller (Spec 107 T075a): the
+// same ranked search, filtered to servers inScope admits BEFORE the top-K
+// cut, so a hidden higher-ranking server cannot displace an entitled hit and
+// the caller's window is the top-`limit` of what they may see. Quarantine
+// withholding is applied inside the predicate too, so a quarantined server's
+// hits never occupy a slot either. Unscoped callers keep SearchTools untouched.
+func (s *Server) SearchToolsScoped(query string, limit int, inScope func(serverName string) bool) ([]map[string]interface{}, error) {
+	s.logger.Debug("SearchToolsScoped called", zap.String("query", query), zap.Int("limit", limit))
+
+	if s.runtime.IndexManager() == nil {
+		return nil, fmt.Errorf("index manager not initialized")
+	}
+	if inScope == nil {
+		return []map[string]interface{}{}, nil
+	}
+
+	withheld := s.quarantinedServerFilter()
+	visible := func(serverName string) bool {
+		return !withheld(serverName) && inScope(serverName)
+	}
+	results, err := s.runtime.IndexManager().SearchToolsScoped(query, limit, visible)
+	if err != nil {
+		s.logger.Error("Failed to search tools (scoped)", zap.String("query", query), zap.Error(err))
+		return nil, err
+	}
+
+	resultMaps := s.searchResultsToMaps(results)
+	if resultMaps == nil {
+		resultMaps = []map[string]interface{}{}
+	}
+	s.logger.Debug("Scoped search completed", zap.String("query", query), zap.Int("results", len(resultMaps)))
+	return resultMaps, nil
+}
+
+// searchResultsToMaps converts index hits to the /api/v1/index/search map
+// shape, applying the server-level quarantine gate (issue #877).
+func (s *Server) searchResultsToMaps(results []*config.SearchResult) []map[string]interface{} {
 	// SECURITY (issue #877): the MCP retrieve_tools path never surfaces a
 	// quarantined server's tools — their descriptions/schemas are withheld
 	// because they are the Tool Poisoning Attack vector quarantine exists to
@@ -3448,9 +3499,7 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 			resultMaps = append(resultMaps, resultMap)
 		}
 	}
-
-	s.logger.Debug("Search completed", zap.String("query", query), zap.Int("results", len(resultMaps)))
-	return resultMaps, nil
+	return resultMaps
 }
 
 // quarantinedServerFilter returns a predicate reporting whether a search hit

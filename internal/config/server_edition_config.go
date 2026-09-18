@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -45,6 +46,184 @@ type ServerEditionConfig struct {
 	// (Spec 107 FR-026): "auto" (default — https public_url, in-process TLS or
 	// a trusted X-Forwarded-Proto: https), "true" or "false".
 	SessionCookieSecure string `json:"session_cookie_secure,omitempty" mapstructure:"session-cookie-secure"`
+
+	// Access is the IdP-group → server grant map (Spec 107 FR-007, US1). Absent
+	// = today's Shared-only semantics; present = the map is ACTIVE and a tenant
+	// sees a shared server only through a group grant (or default_servers).
+	// Read live through ServerEditionConfigProvider on every entitlement
+	// decision, so it is hot-reloadable (FR-039 part 3) and never restart-pinned.
+	Access *ServerEditionAccessConfig `json:"access,omitempty" mapstructure:"access"`
+}
+
+// ServerEditionAccessConfig is `server_edition.access` (Spec 107 FR-007,
+// contracts/config-keys.md): the group map that turns "onboarding is adding
+// someone to a group" into server entitlement.
+//
+//	group_servers   group value (compared exactly, case-sensitive) → admin-config
+//	                server names, or "*" = every shared server. Non-empty only
+//	                with oauth.provider "oidc", the one provider that yields groups.
+//	default_servers the grant for a user whose stored groups match no key;
+//	                absent, null and [] all mean "no default grant".
+//
+// With the block present there is no silent allow-all: "*" is the only way to
+// grant everything, and a user in no mapped group with no default grant is
+// entitled to no shared server at all (deny-all, FR-006).
+type ServerEditionAccessConfig struct {
+	GroupServers   map[string][]string `json:"group_servers,omitempty" mapstructure:"group-servers"`
+	DefaultServers []string            `json:"default_servers,omitempty" mapstructure:"default-servers"`
+}
+
+// Validation message fixed by contracts/config-keys.md for the oidc-only rule.
+const msgAccessGroupServersOIDCOnly = `server_edition.access.group_servers requires oauth.provider "oidc" (legacy providers yield no groups)`
+
+// AccessWildcard is the group-map entry that expands to every shared server.
+const AccessWildcard = "*"
+
+// Clone returns a deep copy of the access block (nil-safe).
+func (a *ServerEditionAccessConfig) Clone() *ServerEditionAccessConfig {
+	if a == nil {
+		return nil
+	}
+	out := &ServerEditionAccessConfig{}
+	if a.GroupServers != nil {
+		out.GroupServers = make(map[string][]string, len(a.GroupServers))
+		for g, names := range a.GroupServers {
+			out.GroupServers[g] = append([]string(nil), names...)
+		}
+	}
+	if a.DefaultServers != nil {
+		out.DefaultServers = append([]string(nil), a.DefaultServers...)
+	}
+	return out
+}
+
+// GrantFor returns the group grant of a user with the given stored groups
+// (spec Definitions "Group grant"): the union of group_servers[g] for every g
+// in groups, plus default_servers when NO stored group matches any key. A
+// group value with no map entry contributes nothing; nil groups (a pre-upgrade
+// record) match no key. Values are compared exactly, case-sensitive. The
+// result may contain "*" (AccessWildcard), which the caller expands to the
+// shared set. It never allocates a grant for a nil receiver — the block being
+// absent is the caller's decision (today's Shared-only semantics), not an
+// empty grant.
+func (a *ServerEditionAccessConfig) GrantFor(groups []string) []string {
+	if a == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	add := func(names []string) {
+		for _, n := range names {
+			if _, dup := seen[n]; dup || n == "" {
+				continue
+			}
+			seen[n] = struct{}{}
+			out = append(out, n)
+		}
+	}
+	matched := false
+	for _, g := range groups {
+		names, ok := a.GroupServers[g]
+		if !ok {
+			continue
+		}
+		matched = true
+		add(names)
+	}
+	if !matched {
+		add(a.DefaultServers)
+	}
+	return out
+}
+
+// validate holds the shape rules of the access block (FR-007): a non-empty
+// group_servers needs the oidc provider, and every entry must be a valid
+// server name or "*". Unknown-but-valid names are NOT refused here — they are
+// the doctor finding of serverEditionDoctorFindings (warn, never fail), so an
+// operator can write the map before the server it names exists.
+func (a *ServerEditionAccessConfig) validate(provider string) error {
+	if a == nil {
+		return nil
+	}
+	if len(a.GroupServers) > 0 && provider != "oidc" {
+		return fmt.Errorf("%s", msgAccessGroupServersOIDCOnly)
+	}
+	for group, names := range a.GroupServers {
+		if group == "" {
+			return fmt.Errorf("server_edition.access.group_servers has an empty group key")
+		}
+		for _, name := range names {
+			if err := validateAccessServerName(name); err != nil {
+				return fmt.Errorf("server_edition.access.group_servers[%q] contains an invalid server name %q", group, name)
+			}
+		}
+	}
+	for _, name := range a.DefaultServers {
+		if err := validateAccessServerName(name); err != nil {
+			return fmt.Errorf("server_edition.access.default_servers contains an invalid server name %q", name)
+		}
+	}
+	return nil
+}
+
+// validateAccessServerName admits "*" and any name Config.ValidateDetailed
+// would admit for a server (non-empty, no ':' routing separator).
+func validateAccessServerName(name string) error {
+	if name == AccessWildcard {
+		return nil
+	}
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("invalid server name %q (must not be empty)", name)
+	}
+	if strings.Contains(name, ":") {
+		return fmt.Errorf("invalid server name %q (must not contain ':', the server:tool routing separator)", name)
+	}
+	return nil
+}
+
+// UnknownAccessServerNames returns every access-map entry (group_servers and
+// default_servers, "*" excluded) that names no server in servers — the input
+// of the doctor finding. Deterministic order: group keys sorted, then
+// default_servers, duplicates dropped.
+func (a *ServerEditionAccessConfig) UnknownAccessServerNames(servers []*ServerConfig) []string {
+	if a == nil {
+		return nil
+	}
+	known := make(map[string]struct{}, len(servers))
+	for _, sc := range servers {
+		if sc != nil {
+			known[sc.Name] = struct{}{}
+		}
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	consider := func(name string) {
+		if name == AccessWildcard {
+			return
+		}
+		if _, ok := known[name]; ok {
+			return
+		}
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	groups := make([]string, 0, len(a.GroupServers))
+	for g := range a.GroupServers {
+		groups = append(groups, g)
+	}
+	sort.Strings(groups)
+	for _, g := range groups {
+		for _, name := range a.GroupServers[g] {
+			consider(name)
+		}
+	}
+	for _, name := range a.DefaultServers {
+		consider(name)
+	}
+	return out
 }
 
 // Session cookie Secure policies (Spec 107 FR-026).
@@ -275,6 +454,9 @@ func (c *ServerEditionConfig) Validate() error {
 	if err := c.OAuth.validateOIDC(); err != nil {
 		return err
 	}
+	if err := c.Access.validate(c.OAuth.Provider); err != nil {
+		return err
+	}
 	if err := ValidatePublicURL(c.PublicURL); err != nil {
 		return err
 	}
@@ -314,6 +496,7 @@ func (c *ServerEditionConfig) Clone() *ServerEditionConfig {
 		}
 		out.OAuth = &oauth
 	}
+	out.Access = c.Access.Clone()
 	return &out
 }
 

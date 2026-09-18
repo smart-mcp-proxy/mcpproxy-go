@@ -38,6 +38,11 @@ func ServerEditionRestartProjection(cfg *Config) any {
 // is not interpreted, so there is no live key to compare.
 func ServerEditionAdminEmails(_ *Config) []string { return nil }
 
+// ServerEditionAccessProjection is always nil on the personal build: the
+// carrier is not interpreted, so there is no live access block to compare
+// (any change inside the carrier is `server_edition`, restart-pinned).
+func ServerEditionAccessProjection(_ *Config) any { return nil }
+
 // ServerEditionRestartReason is the single reason the personal build can
 // give — it cannot tell which key inside the opaque block moved.
 func ServerEditionRestartReason(_, _ *Config) string {

@@ -138,8 +138,10 @@
             </svg>
           </button>
 
-          <!-- Export is not a filter — it belongs on the strip, not inside the grid. -->
-          <div class="dropdown dropdown-end">
+          <!-- Export is not a filter — it belongs on the strip, not inside the grid.
+               Spec 107 FR-041/T088: /activity/export is the core (admin-only)
+               door; a tenant principal has no export target yet. -->
+          <div v-if="authStore.principalKind !== 'tenant'" class="dropdown dropdown-end">
             <div tabindex="0" role="button" class="btn btn-sm btn-outline">
               <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -1294,6 +1296,7 @@ import { serverDetailPath } from '@/utils/serverRoute'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
+import { useAuthStore } from '@/stores/auth'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse, MCPSession } from '@/types/api'
 import { buildSessionLabels } from '@/utils/sessionLabel'
@@ -1346,6 +1349,7 @@ import JsonViewer from '@/components/JsonViewer.vue'
 
 const route = useRoute()
 const systemStore = useSystemStore()
+const authStore = useAuthStore()
 
 // State
 const activities = ref<ActivityRecord[]>([])
@@ -1437,6 +1441,10 @@ const unresolvableSessions = ref(new Set<string>())
 let sessionsInFlight: Promise<void> | null = null
 
 const loadSessions = async () => {
+  // Spec 107 FR-041 / T088: /sessions is an admin-only core door — a tenant
+  // principal has no session-name resolution available, so the group keys
+  // fall back to raw session ids (still correct, just unlabelled).
+  if (authStore.principalKind === 'tenant') return
   // Coalesce: a burst of SSE events must not fan out into N parallel fetches.
   if (sessionsInFlight) return sessionsInFlight
 
@@ -1915,6 +1923,29 @@ const loadActivities = async () => {
   loading.value = true
   error.value = null
 
+  // Spec 107 FR-041/FR-043(k), T086/T088: the core `/activity` and
+  // `/activity/summary` doors are admin-only and 403 a session principal
+  // (contracts/rest-endpoints.md). A tenant principal reads their own,
+  // entitled-server-filtered records from GET /user/activity instead — that
+  // door has no parent_id/summary support (T086: `{items,total}`,
+  // `limit`/`offset` only), so the parent/child drill-down and the 24h
+  // summary tiles stay empty for a tenant rather than erroring.
+  if (authStore.principalKind === 'tenant') {
+    try {
+      const response = await api.getUserActivity({ limit: 200 })
+      if (response.success && response.data) {
+        activities.value = response.data.items || []
+      } else {
+        error.value = response.error || 'Failed to load activity'
+      }
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : 'Unknown error'
+    } finally {
+      loading.value = false
+    }
+    return
+  }
+
   try {
     const [activitiesResponse, summaryResponse] = await Promise.all([
       api.getActivities({ limit: 200, parent_id: filterParentId.value || undefined }),
@@ -2004,7 +2035,14 @@ const viewParentCall = async (child: ActivityRecord) => {
     parent = activities.value.find(a => a.request_id === parentId)
   }
 
-  if (!parent) {
+  // Spec 107 FR-041 / cross-review round 2, chunk 4 P2: GET /api/v1/activity
+  // is the core, admin-only door (named must-refuse) — even after
+  // loadActivities() above has already used the tenant-scoped
+  // GET /user/activity, this fallback unconditionally called the forbidden
+  // one when the parent was not among the loaded rows. GET /user/activity
+  // has no request_id filter (T086), so there is nothing scoped to fall
+  // back to for a tenant: skip straight to the "not found" toast below.
+  if (!parent && authStore.principalKind !== 'tenant') {
     const response = await api.getActivities({ request_id: parentId, limit: 1 })
     const fetched = response.success ? response.data?.activities?.[0] : undefined
     if (fetched) {

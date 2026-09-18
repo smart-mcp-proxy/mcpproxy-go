@@ -9,6 +9,7 @@
 
 import { ref } from 'vue'
 import api from '@/services/api'
+import { useAuthStore } from '@/stores/auth'
 
 const enabledCount = ref<number | null>(null)
 const dockerAvailable = ref<boolean>(true)
@@ -61,7 +62,15 @@ export async function refreshSecurityScannerStatus(): Promise<void> {
 }
 
 export function useSecurityScannerStatus() {
-  if (!loaded.value && !inflight) {
+  // Spec 107 FR-041 / T088: /security/overview is an admin-only core door
+  // (fleet-wide scanner/finding totals). Servers.vue and ServerCard.vue call
+  // this composable to decide whether to show scan-trigger buttons; a tenant
+  // principal has no entitlement to that door, so skip the auto-fetch for
+  // them rather than eat a 403 on every servers-page mount. `useAuthStore()`
+  // is safe here — every caller of this composable runs inside a component
+  // `setup()` with an active Pinia instance.
+  const authStore = useAuthStore()
+  if (!loaded.value && !inflight && authStore.principalKind !== 'tenant') {
     void refreshSecurityScannerStatus()
   }
   return {

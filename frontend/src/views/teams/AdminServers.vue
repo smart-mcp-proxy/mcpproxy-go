@@ -63,6 +63,7 @@
               <th>Endpoint</th>
               <th>Status</th>
               <th>Sharing</th>
+              <th>Groups</th>
               <th class="text-right">Actions</th>
             </tr>
           </thead>
@@ -87,6 +88,26 @@
               <td>
                 <span v-if="server.shared" class="badge badge-info badge-xs">shared</span>
                 <span v-else class="badge badge-ghost badge-xs">private</span>
+              </td>
+              <td @click.stop>
+                <!-- Spec 107 FR-007/FR-041: read-only view of
+                     server_edition.access.group_servers, derived from the
+                     already-fetched config — edit it in Settings /
+                     the config file, not here. -->
+                <div v-if="groupsForServer(server.name).length" class="flex flex-wrap gap-1">
+                  <span
+                    v-for="group in groupsForServer(server.name)"
+                    :key="group"
+                    class="badge badge-sm badge-ghost"
+                    :title="`Granted via access.group_servers.${group}`"
+                  >{{ group }}</span>
+                </div>
+                <span
+                  v-else-if="isDefaultGrantServer(server.name)"
+                  class="badge badge-sm badge-ghost"
+                  title="Granted via access.default_servers (the grant for any user whose stored groups match no key)"
+                >default</span>
+                <span v-else class="text-xs text-base-content/40">&mdash;</span>
               </td>
               <td class="text-right" @click.stop>
                 <div class="dropdown dropdown-end">
@@ -132,6 +153,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import api from '@/services/api'
 
 interface AdminServer {
   name: string
@@ -157,6 +179,79 @@ const servers = ref<AdminServer[]>([])
 const searchQuery = ref('')
 const statusFilter = ref('')
 const shareFilter = ref('')
+
+// Spec 107 FR-007/FR-041/T088: server -> [groups] reverse-derived from
+// server_edition.access.group_servers, plus which server names fall back to
+// access.default_servers. Read-only display only — editing lives in Settings
+// / the config file (contracts/entitlement-predicate.md is the source of
+// truth for how these combine into a grant). `config.access` was never
+// wired into the frontend's `any`-typed GetConfigResponse.config before
+// this task; guarded throughout since the block is entirely optional.
+// Raw access config, as fetched — expansion against `servers` (Spec 107
+// cross-review round 3, chunk 4 P3, see below) happens in the `computed`s
+// below, reactively, rather than being baked in at fetch time: fetchServers()
+// and loadAccessGroups() are both fired from onMounted with no ordering
+// guarantee between them, so a one-shot expansion could run before
+// `servers.value` was ever populated and silently stay empty.
+const rawGroupServers = ref<Record<string, string[]>>({})
+const rawDefaultServers = ref<string[]>([])
+
+// Spec 107 cross-review round 3, chunk 4 (P3): entitlement-predicate.md §1
+// defines a group/default grant of "*" as every SHARED server, and
+// entitlement composition only ever admits a server that is Shared —
+// group_servers naming a private server grants nothing. This read-only
+// annotation must mirror that, or it misrepresents the live access
+// configuration: "*" showed no badge on any shared server (the literal
+// string was never expanded), and an explicit private-server entry showed
+// "Granted" despite composition excluding it.
+const sharedServerNames = computed(() => servers.value.filter(s => s.shared).map(s => s.name))
+
+function expandAccessNames(names: string[]): string[] {
+  const shared = sharedServerNames.value
+  const out = new Set<string>()
+  for (const name of names) {
+    if (name === '*') {
+      for (const s of shared) out.add(s)
+    } else if (shared.includes(name)) {
+      out.add(name)
+    }
+  }
+  return [...out]
+}
+
+const groupServersByName = computed<Record<string, string[]>>(() => {
+  const byName: Record<string, string[]> = {}
+  for (const [group, names] of Object.entries(rawGroupServers.value)) {
+    for (const name of expandAccessNames(names ?? [])) {
+      if (!byName[name]) byName[name] = []
+      byName[name].push(group)
+    }
+  }
+  return byName
+})
+
+const defaultServerNames = computed<Set<string>>(() => new Set(expandAccessNames(rawDefaultServers.value)))
+
+function groupsForServer(name: string): string[] {
+  return groupServersByName.value[name] ?? []
+}
+
+function isDefaultGrantServer(name: string): boolean {
+  return defaultServerNames.value.has(name)
+}
+
+async function loadAccessGroups() {
+  try {
+    const res = await api.getConfig()
+    if (!res.success || !res.data) return
+    const access = res.data.config?.server_edition?.access
+    if (!access) return
+    rawGroupServers.value = (access.group_servers as Record<string, string[]> | undefined) ?? {}
+    rawDefaultServers.value = access.default_servers ?? []
+  } catch {
+    // Best-effort, read-only annotation — leave the table usable without it.
+  }
+}
 
 const connectedCount = computed(() => servers.value.filter(s => s.enabled && s.connected).length)
 const sharedCount = computed(() => servers.value.filter(s => s.shared).length)
@@ -309,5 +404,6 @@ function clearSuccessAfterDelay() {
 
 onMounted(() => {
   fetchServers()
+  void loadAccessGroups()
 })
 </script>

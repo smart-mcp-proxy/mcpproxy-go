@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type { OnboardingStateResponse, OnboardingMarkRequest } from '@/types'
 import api from '@/services/api'
+import { useAuthStore } from '@/stores/auth'
 
 /**
  * Adaptive onboarding wizard store (Spec 046).
@@ -72,6 +73,11 @@ export const useOnboardingStore = defineStore('onboarding', () => {
    * reuses the existing API key handling and credentials.
    */
   async function fetchState(): Promise<OnboardingStateResponse | null> {
+    // Spec 107 FR-041 / T088: /onboarding/state describes the operator's
+    // fleet-wide setup wizard (connected clients, configured servers across
+    // the whole instance) — a tenant principal has no wizard to drive.
+    if (useAuthStore().principalKind === 'tenant') return null
+
     loading.value = true
     error.value = null
     try {

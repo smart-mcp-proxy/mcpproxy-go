@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,6 +53,55 @@ func (h *wiringHarness) currentConfig() *config.Config {
 	h.configMu.RLock()
 	defer h.configMu.RUnlock()
 	return h.config
+}
+
+// setLiveProfiles replaces the current configuration's Profiles, copy-on-write
+// like setLiveServers, so a fixture can pin a profile (e.g. "ops-only") without
+// racing a concurrent reader of the live config.
+func (h *wiringHarness) setLiveProfiles(profiles []config.ProfileConfig) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
+	next := *h.config
+	next.Profiles = profiles
+	h.config = &next
+}
+
+// setAdminEmails replaces the live ServerEdition.AdminEmails, copy-on-write
+// like setLiveServers, so a fixture that needs a named administrator (the
+// two-fixture oracle's Dana, fixture_oracle_test.go) does not have to
+// rebuild the whole harness with a bespoke OAuth block.
+func (h *wiringHarness) setAdminEmails(emails []string) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
+	next := *h.config
+	nextSE := *next.ServerEdition
+	nextSE.AdminEmails = emails
+	next.ServerEdition = &nextSE
+	h.config = &next
+}
+
+// setAccess replaces the live ServerEdition.Access block, copy-on-write like
+// setAdminEmails, so a fixture can install (or hot-reload) the group map the
+// entitlement predicate reads through ServerEditionConfigProvider (T074/T075).
+func (h *wiringHarness) setAccess(access *config.ServerEditionAccessConfig) {
+	h.configMu.Lock()
+	defer h.configMu.Unlock()
+	next := *h.config
+	nextSE := *next.ServerEdition
+	nextSE.Access = access
+	next.ServerEdition = &nextSE
+	h.config = &next
+}
+
+// generateBearerToken mints a session-cookie-equivalent bearer JWT for u,
+// with the given role ("user" or "admin"), using this harness's HMAC key —
+// the credential every /user/* and /admin/* door accepts via
+// apiKeyAuthMiddleware. Factored out of the per-test call() closures
+// (TestSetupAdminTokenRevocationUsesProductionAuth et al.) so the two-fixture
+// oracle (fixture_oracle_test.go) can mint one without duplicating the
+// teamsauth import under a second alias.
+func (h *wiringHarness) generateBearerToken(u *users.User, role string) (string, error) {
+	return teamsauth.GenerateBearerToken(h.hmacKey, u.ID, u.Email, u.DisplayName, role, u.Provider, time.Hour)
 }
 
 func newWiringHarness(t *testing.T) *wiringHarness {
@@ -314,4 +364,182 @@ func TestSetupAdminTokenRevocationUsesProductionAuth(t *testing.T) {
 	}
 	_, err = h.tokens.ValidateAgentToken(raw, h.hmacKey)
 	require.Error(t, err)
+}
+
+// TestSetupMultiUserOAuth_GroupGrantWiredThroughProductionSetup drives the
+// two-fixture oracle (fixture_oracle_test.go) through the PRODUCTION wiring
+// (setupMultiUserOAuth): the access block, the group term of the entitlement
+// predicate and the single owner resolution are installed by setup.go, not by
+// a hand-built rig (Spec 107 T074/T075/T076 — US1.1, US1.3, US1.6, US1.8).
+func TestSetupMultiUserOAuth_GroupGrantWiredThroughProductionSetup(t *testing.T) {
+	tf := newTwoFixture(t)
+
+	listAs := func(u func(fx *fixtureHarness) *users.User) twoFixtureOp {
+		return func(fx *fixtureHarness) (int, []byte) {
+			return fx.doBearer(http.MethodGet, "/api/v1/user/servers", fx.bearerFor(t, u(fx)))
+		}
+	}
+	sharedNamesOf := func(body []byte) []string {
+		var resp struct {
+			Shared []struct {
+				Name string `json:"name"`
+			} `json:"shared"`
+		}
+		require.NoError(t, json.Unmarshal(body, &resp))
+		out := make([]string, 0, len(resp.Shared))
+		for _, s := range resp.Shared {
+			out = append(out, s.Name)
+		}
+		return out
+	}
+
+	// US1.1: Alice (eng -> [a]) sees the same list on both fixtures, and no
+	// sentinel of b / a__b.
+	assertTwoFixture(t, tf, listAs(func(fx *fixtureHarness) *users.User { return fx.alice }), sentinelServerB, sentinelServerAB)
+	status, body := listAs(func(fx *fixtureHarness) *users.User { return fx.alice })(tf.A)
+	require.Equal(t, http.StatusOK, status, string(body))
+	assert.Equal(t, []string{"a"}, sharedNamesOf(body))
+
+	// Bob (no group, no default grant) is an unentitled tenant on both.
+	assertTwoFixture(t, tf, listAs(func(fx *fixtureHarness) *users.User { return fx.bob }), sentinelServerA, sentinelServerB, sentinelServerAB)
+
+	// Carol (ops -> [a, b]) sees b where it exists.
+	_, carolA := listAs(func(fx *fixtureHarness) *users.User { return fx.carol })(tf.A)
+	assert.ElementsMatch(t, []string{"a", "b"}, sharedNamesOf(carolA))
+
+	// US1.8: Dana (admin_emails) keeps the whole shared projection.
+	_, danaA := listAs(func(fx *fixtureHarness) *users.User { return fx.dana })(tf.A)
+	assert.ElementsMatch(t, []string{"a", "b", "a__b"}, sharedNamesOf(danaA))
+
+	// By-name door: hidden b == absent name (status parity, own name echoed).
+	assertStatusParity(t,
+		func() (int, []byte) {
+			return tf.A.doBearer(http.MethodGet, "/api/v1/user/servers/b", tf.A.bearerFor(t, tf.A.alice))
+		},
+		func() (int, []byte) {
+			return tf.B.doBearer(http.MethodGet, "/api/v1/user/servers/b", tf.B.bearerFor(t, tf.B.alice))
+		},
+	)
+
+	// The agent-token path (US1.3 / US1.5): Alice's "*" token narrows to [a]
+	// on both fixtures through the single owner resolution; Bob's to nothing.
+	for _, fx := range []*fixtureHarness{tf.A, tf.B} {
+		tok, err := fx.h.tokens.ValidateAgentToken(fx.aliceTokenStar, fx.h.hmacKey)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a"}, tok.AllowedServers)
+		assert.Equal(t, fx.alice.Email, tok.OwnerEmail, "the owner resolution stamps the live identity")
+		assert.Equal(t, "user", tok.OwnerRole)
+		bobStar := mintFixtureToken(t, fx.h, fx.bob, "bob-star", []string{"*"})
+		bob, err := fx.h.tokens.ValidateAgentToken(bobStar, fx.h.hmacKey)
+		require.NoError(t, err)
+		require.NotNil(t, bob.AllowedServers, "an unentitled token carries a NON-NIL empty grant (FR-006)")
+		assert.Empty(t, bob.AllowedServers)
+	}
+
+	// FR-009: Dana's literal "*" survives the owner resolution (never frozen
+	// into a snapshot of the configuration), and her live role is stamped.
+	danaStar := mintFixtureToken(t, tf.A.h, tf.A.dana, "dana-star", []string{"*"})
+	danaTok, err := tf.A.h.tokens.ValidateAgentToken(danaStar, tf.A.h.hmacKey)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"*"}, danaTok.AllowedServers, "an administrator's literal star must survive validation")
+	assert.Equal(t, "admin", danaTok.OwnerRole)
+
+	// US1.6: hot reload — removing the eng mapping narrows Alice's NEXT
+	// request and her existing token's next authentication; re-adding widens.
+	tf.A.h.setAccess(&config.ServerEditionAccessConfig{GroupServers: map[string][]string{"ops": {"a", "b"}}, DefaultServers: []string{}})
+	_, narrowed := listAs(func(fx *fixtureHarness) *users.User { return fx.alice })(tf.A)
+	assert.Empty(t, sharedNamesOf(narrowed), "un-mapping eng must narrow the next REST request without a restart")
+	tok, err := tf.A.h.tokens.ValidateAgentToken(tf.A.aliceTokenStar, tf.A.h.hmacKey)
+	require.NoError(t, err)
+	assert.Empty(t, tok.AllowedServers, "the next token authentication must see the narrowed map")
+
+	tf.A.h.setAccess(&config.ServerEditionAccessConfig{GroupServers: map[string][]string{"eng": {"a"}, "ops": {"a", "b"}}, DefaultServers: []string{}})
+	_, widened := listAs(func(fx *fixtureHarness) *users.User { return fx.alice })(tf.A)
+	assert.Equal(t, []string{"a"}, sharedNamesOf(widened), "re-adding the mapping widens the next request")
+
+	// Un-sharing a narrows too, whatever the map says.
+	tf.A.h.setLiveServers([]*config.ServerConfig{{Name: "a", Protocol: "http", Shared: false, Enabled: true}})
+	_, unshared := listAs(func(fx *fixtureHarness) *users.User { return fx.alice })(tf.A)
+	assert.Empty(t, sharedNamesOf(unshared))
+}
+
+// TestSetupMultiUserOAuth_WiresEntitlementSnapshotProvider proves production
+// setup installs teamsapi.UserHandlers' combined EntitlementSnapshotProvider
+// (see TestEntitledServerNamesFor_ServersAndAccessFromOneSnapshot in
+// internal/serveredition/api/entitlement_group_test.go for the split-read
+// race it closes) rather than leaving the entitlement predicate on the two
+// independent providers, which read the live configuration separately.
+//
+// Oracle: wrap Dependencies.ConfigProvider in a counter and drive one
+// GET /api/v1/user/servers request through it. Two components read the live
+// configuration on this request: the auth middleware (role derivation via
+// its own ServerEditionConfigProvider call) and the entitlement predicate.
+// With the combined provider, the predicate makes exactly ONE call for
+// both its servers and access values, for a total of 2; without it (the two
+// separate providers, each read independently), the predicate makes 2 calls
+// on its own, for a total of 3.
+//
+// BITES: removing the SetEntitlementSnapshotProvider call from
+// setupMultiUserOAuth makes this test observe 3 calls instead of 2.
+func TestSetupMultiUserOAuth_WiresEntitlementSnapshotProvider(t *testing.T) {
+	tmpDir := t.TempDir()
+	db, err := bbolt.Open(tmpDir+"/test.db", 0600, &bbolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	logger := zap.NewNop().Sugar()
+	tokens, err := storage.NewManager(t.TempDir(), logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { tokens.Close() })
+
+	baseConfig := &config.Config{
+		ServerEdition: &config.ServerEditionConfig{
+			Enabled:     true,
+			AdminEmails: []string{"admin@example.com"},
+			OAuth: &config.ServerEditionOAuthConfig{
+				Provider:     "google",
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+	}
+
+	var calls int32
+	countingConfigProvider := func() *config.Config {
+		atomic.AddInt32(&calls, 1)
+		return baseConfig
+	}
+
+	router := chi.NewRouter()
+	require.NoError(t, setupMultiUserOAuth(Dependencies{
+		Router:         router,
+		DB:             db,
+		Logger:         logger,
+		DataDir:        tmpDir,
+		Config:         baseConfig,
+		ConfigProvider: countingConfigProvider,
+		StorageManager: tokens,
+	}))
+
+	userStore := users.NewUserStore(db)
+	hmacKey, err := auth.GetOrCreateHMACKey(tmpDir)
+	require.NoError(t, err)
+
+	alice := users.NewUser("alice@example.com", "Alice", "google", "sub-alice")
+	require.NoError(t, userStore.CreateUser(alice))
+
+	bearer, err := teamsauth.GenerateBearerToken(hmacKey, alice.ID, alice.Email, alice.DisplayName, "user", alice.Provider, time.Hour)
+	require.NoError(t, err)
+
+	atomic.StoreInt32(&calls, 0)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/servers", nil)
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(&calls),
+		"GET /user/servers must read the live configuration once for auth-middleware role "+
+			"derivation and exactly once (not twice) for its entitlement decision through the "+
+			"combined EntitlementSnapshotProvider")
 }

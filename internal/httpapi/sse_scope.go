@@ -17,6 +17,9 @@ import (
 func (s *Server) newSSECallerContextRefresher(r *http.Request) func() (context.Context, error) {
 	base := r.Context()
 	ac := auth.AuthContextFromContext(base)
+	if ac != nil && ac.IsSessionPrincipal() && s.sessionPrincipalResolver != nil {
+		return s.newSSESessionPrincipalRefresher(r, base, ac.CredentialKind)
+	}
 	if ac == nil || ac.Type != auth.AuthTypeAgent {
 		return func() (context.Context, error) { return base, nil }
 	}
@@ -41,6 +44,51 @@ func (s *Server) newSSECallerContextRefresher(r *http.Request) func() (context.C
 			return nil, validateErr
 		}
 		return auth.WithAuthContext(base, token.AuthContext()), nil
+	}
+}
+
+// newSSESessionPrincipalRefresher re-resolves a SESSION principal (cookie or
+// bearer JWT, never an agent token) before every identity-bearing frame on a
+// long-lived /events connection (Spec 107 US4,
+// contracts/entitlement-predicate.md §4: "The SSE refresher ... calls the
+// same resolver with the original (kind, value) before each frame"). The
+// credential value is captured once, from the connecting request, and
+// replayed on every call — an admin un-sharing a server or disabling the
+// account narrows or ends the stream on the very next frame, the same live
+// guarantee #1166 gives an agent token. (nil, nil) or an error from the
+// resolver ends the stream.
+func (s *Server) newSSESessionPrincipalRefresher(r *http.Request, base context.Context, kind auth.CredentialKind) func() (context.Context, error) {
+	value := sessionCredentialValue(r, kind)
+	return func() (context.Context, error) {
+		ac, err := s.sessionPrincipalResolver(r, kind, value)
+		if err != nil {
+			return nil, err
+		}
+		if ac == nil {
+			return nil, fmt.Errorf("session principal no longer valid")
+		}
+		ac.CredentialKind = kind
+		return auth.WithAuthContext(base, ac), nil
+	}
+}
+
+// sessionCredentialValue extracts the raw cookie or bearer-token value the
+// given kind was originally authenticated with, from the connecting request.
+func sessionCredentialValue(r *http.Request, kind auth.CredentialKind) string {
+	switch kind {
+	case auth.CredentialKindCookie:
+		if cookie, err := r.Cookie(httpSessionCookieName); err == nil {
+			return cookie.Value
+		}
+		return ""
+	case auth.CredentialKindBearerJWT:
+		authHeader := r.Header.Get("Authorization")
+		if len(authHeader) > len("Bearer ") && authHeader[:7] == "Bearer " {
+			return authHeader[7:]
+		}
+		return ""
+	default:
+		return ""
 	}
 }
 

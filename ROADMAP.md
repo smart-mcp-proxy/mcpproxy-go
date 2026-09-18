@@ -426,16 +426,16 @@ graph LR
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class sso_pr_a_freeze_cut done;
-  class sso_pr_b_oidc_front_door in_progress;
-  class sso_pr_c_group_allowlist,sso_pr_d_audit_line todo;
+  class sso_pr_a_freeze_cut,sso_pr_b_oidc_front_door done;
+  class sso_pr_c_group_allowlist in_progress;
+  class sso_pr_d_audit_line todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6) | 🟢 Done | #1287 |
-| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | 🔵 In progress | #1292 |
-| PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4) | ⚪ Todo | — |
+| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | 🟢 Done | #1292 |
+| PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4) | 🔵 In progress | #1293 |
 | PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3) | ⚪ Todo | — |
 
 </details>
@@ -896,7 +896,7 @@ graph LR
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 19/81 (23%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
-| Spec 107 server edition SSO front door hardened for real IdPs | In progress | P2 | 69/126 (55%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
+| Spec 107 server edition SSO front door hardened for real IdPs | In progress | P2 | 100/126 (79%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Auto routing mode: budget-fitted tool surface per session (spec 104) | Todo | P1 | — | [104-auto-routing-mode](./specs/104-auto-routing-mode/) |  |
@@ -1038,4 +1038,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
 | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `in-flight` | 12/109 (11%) |
 | [106-security-residual-fixes](./specs/106-security-residual-fixes/) | `shipped` | 18/19 (95%) |
-| [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `in-flight` | 69/126 (55%) |
+| [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `in-flight` | 100/126 (79%) |

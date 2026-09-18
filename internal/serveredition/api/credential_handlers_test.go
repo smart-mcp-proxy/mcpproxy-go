@@ -67,7 +67,17 @@ func credTestStore(t *testing.T) broker.CredentialStore {
 }
 
 // credRouter wires the credential handlers behind an auth context injector.
-func credRouter(h *CredentialHandlers, authCtx *auth.AuthContext) *chi.Mux {
+// Spec 107 T075: the credential doors select through the one entitlement
+// predicate, so a standalone handler set gets a fixture predicate and the
+// acting user's record (see entitlement_fixture_test.go).
+func credRouter(t *testing.T, h *CredentialHandlers, authCtx *auth.AuthContext) *chi.Mux {
+	t.Helper()
+	if h.entitlement == nil {
+		store := installFixtureEntitlement(t, h)
+		ensureUserRecord(store, authCtx)
+	} else {
+		ensureUserRecord(h.entitlement.userStore, authCtx)
+	}
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -117,7 +127,7 @@ func TestCredentialsList_RedactsSecrets(t *testing.T) {
 	}))
 
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
-	r := credRouter(h, defaultAuthContext())
+	r := credRouter(t, h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials", http.NoBody)
 	w := httptest.NewRecorder()
@@ -154,7 +164,7 @@ func TestCredentialsList_Statuses(t *testing.T) {
 	}))
 
 	h := NewCredentialHandlers(store, []*config.ServerConfig{connected, expired, fresh}, nil, zap.NewNop().Sugar())
-	r := credRouter(h, defaultAuthContext())
+	r := credRouter(t, h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials", http.NoBody)
 	w := httptest.NewRecorder()
@@ -188,7 +198,7 @@ func TestCredentialsList_StoreDisabled(t *testing.T) {
 
 	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeOAuthConnect)
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
-	r := credRouter(h, defaultAuthContext())
+	r := credRouter(t, h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials", http.NoBody)
 	w := httptest.NewRecorder()
@@ -210,7 +220,7 @@ func TestCredentialsDelete_Removes(t *testing.T) {
 	}))
 
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
-	r := credRouter(h, defaultAuthContext())
+	r := credRouter(t, h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/user/credentials/shared-gh", http.NoBody)
 	w := httptest.NewRecorder()
@@ -225,7 +235,7 @@ func TestCredentialsDelete_UnknownServer404(t *testing.T) {
 	store := credTestStore(t)
 	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeOAuthConnect)
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
-	r := credRouter(h, defaultAuthContext())
+	r := credRouter(t, h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/user/credentials/does-not-exist", http.NoBody)
 	w := httptest.NewRecorder()
@@ -244,7 +254,7 @@ func TestCredentials_CrossUserIsolation(t *testing.T) {
 
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	// Act as user A.
-	r := credRouter(h, auth.UserContext(testUserID, "a@example.com", "A", "google"))
+	r := credRouter(t, h, auth.UserContext(testUserID, "a@example.com", "A", "google"))
 
 	// FR-027: A must not see B's credential — A sees not_connected.
 	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials", http.NoBody)
@@ -272,7 +282,7 @@ func TestCredentialsConnect_Redirects(t *testing.T) {
 	store := credTestStore(t)
 	srv := brokerHTTPServer("connect-srv", config.AuthBrokerModeOAuthConnect)
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
-	r := credRouter(h, defaultAuthContext())
+	r := credRouter(t, h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/connect", http.NoBody)
 	req.Host = "gw.example.com"
@@ -297,7 +307,7 @@ func TestCredentialsConnect_NonConnectMode400(t *testing.T) {
 	// mode); the handler still refuses one defensively.
 	srv := brokerHTTPServer("xchg-srv", "not-a-connect-mode")
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
-	r := credRouter(h, defaultAuthContext())
+	r := credRouter(t, h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/xchg-srv/connect", http.NoBody)
 	w := httptest.NewRecorder()
@@ -319,7 +329,7 @@ func TestCredentialsConnectCallback_StoresCredential(t *testing.T) {
 	sk := serverKeyFor(srv)
 
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
-	r := credRouter(h, defaultAuthContext())
+	r := credRouter(t, h, defaultAuthContext())
 
 	// Step 1: connect → capture state from the redirect.
 	connReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/connect", http.NoBody)
@@ -353,7 +363,7 @@ func TestCredentialsCallback_DeniedByUpstream(t *testing.T) {
 	sk := serverKeyFor(srv)
 	sink := &testRecordingSink{}
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, sink, zap.NewNop().Sugar())
-	r := credRouter(h, defaultAuthContext())
+	r := credRouter(t, h, defaultAuthContext())
 
 	// Begin a flow to register a state.
 	connReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/connect", http.NoBody)
@@ -386,7 +396,7 @@ func TestCredentialsCallback_Denied_UnknownErrorCoerced(t *testing.T) {
 	srv := brokerHTTPServer("connect-srv", config.AuthBrokerModeOAuthConnect)
 	sink := &testRecordingSink{}
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, sink, zap.NewNop().Sugar())
-	r := credRouter(h, defaultAuthContext())
+	r := credRouter(t, h, defaultAuthContext())
 
 	// Begin a flow to register a state.
 	connReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/connect", http.NoBody)
@@ -421,7 +431,7 @@ func TestCredentialsCallback_Denied_RedirectSanitized(t *testing.T) {
 	srv := brokerHTTPServer("connect-srv", config.AuthBrokerModeOAuthConnect)
 	sink := &testRecordingSink{}
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, sink, zap.NewNop().Sugar())
-	r := credRouter(h, defaultAuthContext())
+	r := credRouter(t, h, defaultAuthContext())
 
 	// Begin a flow to register a state.
 	connReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/connect", http.NoBody)
@@ -453,7 +463,7 @@ func TestCredentials_Unauthenticated(t *testing.T) {
 	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeOAuthConnect)
 	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	// Empty auth context → unauthenticated.
-	r := credRouter(h, &auth.AuthContext{})
+	r := credRouter(t, h, &auth.AuthContext{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials", http.NoBody)
 	w := httptest.NewRecorder()

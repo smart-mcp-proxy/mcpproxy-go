@@ -30,7 +30,7 @@ const (
 const tokenAdminUser = "01HTEST00000000000ADMINUSR"
 
 func adminUserCtx() *auth.AuthContext {
-	return auth.AdminUserContext(tokenAdminUser, "root@example.com", "Root", "google")
+	return withCookieKind(auth.AdminUserContext(tokenAdminUser, "root@example.com", "Root", "google"))
 }
 
 // scopeFixtureServers mirrors what setup.go hands NewUserHandlers: the WHOLE

@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
 
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
 
@@ -966,6 +966,23 @@ class APIService {
     }
     const url = `/api/v1/activity${searchParams.toString() ? '?' + searchParams.toString() : ''}`
     return this.request<ActivityListResponse>(url)
+  }
+
+  // Spec 107 FR-041/FR-043(k), T086/T088: the tenant-scoped twin of
+  // getActivities() above — the core `/activity*` doors 403 a session
+  // principal (contracts/rest-endpoints.md); a tenant reads their own
+  // records, entitled-server-filtered, from this door instead. Response
+  // shape is `{items,total}` with only `limit`/`offset` (no type/server/etc.
+  // query params — those apply client-side in Activity.vue, same as today).
+  async getUserActivity(params?: { limit?: number; offset?: number }): Promise<APIResponse<{ items: ActivityRecord[]; total: number }>> {
+    const searchParams = new URLSearchParams()
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined) searchParams.append(key, String(value))
+      })
+    }
+    const url = `/api/v1/user/activity${searchParams.toString() ? '?' + searchParams.toString() : ''}`
+    return this.request<{ items: ActivityRecord[]; total: number }>(url)
   }
 
   async getActivityDetail(id: string): Promise<APIResponse<ActivityDetailResponse>> {

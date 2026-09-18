@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -80,11 +79,8 @@ type regenerateTokenResponse struct {
 // tokenNameRegex validates token name format: starts with alphanumeric, followed by alphanumeric, underscores, or hyphens.
 var tokenNameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 
-// maxExpiryDuration is the maximum allowed token expiry (365 days).
-const maxExpiryDuration = 365 * 24 * time.Hour
-
-// defaultExpiryDuration is the default token expiry (30 days).
-const defaultExpiryDuration = 30 * 24 * time.Hour
+// The expiry rule (30-day default, 365-day cap) lives in auth.ParseTokenExpiry
+// (Spec 107 FR-011), shared with the server edition's POST /user/tokens.
 
 // requireAdminAuth checks that the request is authenticated as admin (not an agent token).
 // Returns true if the request should proceed, false if a 403 was written.
@@ -461,41 +457,13 @@ func (s *Server) validateProfilePin(slug string) error {
 	return fmt.Errorf("unknown profile_pin %q (available: %s)", slug, strings.Join(available, ", "))
 }
 
-// parseExpiry parses an expiry duration string and returns the absolute expiry time.
-// Accepted formats: "30d" (days), "720h" (hours), or any Go duration string.
-// Maximum allowed duration is 365 days. Empty string defaults to 30 days.
+// parseExpiry parses an expiry duration string and returns the absolute expiry
+// time. It is a one-line wrapper over auth.ParseTokenExpiry (Spec 107 FR-011):
+// "30d", "720h" or any Go duration, positive, at most 365 days, 30 days when
+// empty — the SAME rule the server edition's POST /user/tokens applies, so the
+// two minting doors cannot drift.
 func parseExpiry(expiresIn string) (time.Time, error) {
-	if expiresIn == "" {
-		return time.Now().UTC().Add(defaultExpiryDuration), nil
-	}
-
-	var d time.Duration
-
-	// Handle "Nd" format (days)
-	if strings.HasSuffix(expiresIn, "d") {
-		daysStr := strings.TrimSuffix(expiresIn, "d")
-		days, err := strconv.Atoi(daysStr)
-		if err != nil || days <= 0 {
-			return time.Time{}, fmt.Errorf("invalid expiry duration: %q", expiresIn)
-		}
-		d = time.Duration(days) * 24 * time.Hour
-	} else {
-		// Try standard Go duration
-		var err error
-		d, err = time.ParseDuration(expiresIn)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("invalid expiry duration: %q", expiresIn)
-		}
-		if d <= 0 {
-			return time.Time{}, fmt.Errorf("expiry duration must be positive")
-		}
-	}
-
-	if d > maxExpiryDuration {
-		return time.Time{}, fmt.Errorf("expiry duration cannot exceed 365 days")
-	}
-
-	return time.Now().UTC().Add(d), nil
+	return auth.ParseTokenExpiry(expiresIn, time.Now().UTC())
 }
 
 // validateAllowedServers checks that each server name in the list either is "*"

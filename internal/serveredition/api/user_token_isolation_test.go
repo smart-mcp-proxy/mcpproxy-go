@@ -98,6 +98,9 @@ func newTokenTestRigWithServers(t *testing.T, sharedServers []*config.ServerConf
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			// Spec 107 T075: the entitlement predicate loads the caller's
+			// record, as the middleware guarantees in production.
+			ensureUserRecord(userStore, rig.as)
 			ctx := auth.WithAuthContext(req.Context(), rig.as)
 			next.ServeHTTP(w, req.WithContext(ctx))
 		})
@@ -135,12 +138,14 @@ func (rig *tokenTestRig) seedToken(t *testing.T, owner, name string) {
 	}, raw, tokenTestHMACKey))
 }
 
+// userACtx/userBCtx are session-cookie principals (Spec 107 T078: the
+// minting doors admit only the cookie kind).
 func userACtx() *auth.AuthContext {
-	return auth.UserContext(tokenUserA, "a@example.com", "User A", "google")
+	return withCookieKind(auth.UserContext(tokenUserA, "a@example.com", "User A", "google"))
 }
 
 func userBCtx() *auth.AuthContext {
-	return auth.UserContext(tokenUserB, "b@example.com", "User B", "google")
+	return withCookieKind(auth.UserContext(tokenUserB, "b@example.com", "User B", "google"))
 }
 
 // assertHandlerNotFound checks that the response is the HANDLER's 404 envelope
