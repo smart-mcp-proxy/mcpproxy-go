@@ -603,12 +603,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 		// Save the auto-generated key to config file for persistence
 		saver.setGeneratedAPIKey(apiKey)
-		var configPathToSave string
-		if configFile != "" {
-			configPathToSave = configFile
-		} else {
-			configPathToSave = config.GetConfigPath(cfg.DataDir)
-		}
+		configPathToSave := serveConfigPath(cfg)
 
 		if err := saver.save(cfg, configPathToSave); err != nil {
 			logger.Warn("Failed to save auto-generated API key to config file",
@@ -629,13 +624,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Create server with the actual config path used
-	var actualConfigPath string
-	if configFile != "" {
-		actualConfigPath = configFile
-	} else {
-		// When using default config, still track the actual path used
-		actualConfigPath = config.GetConfigPath(cfg.DataDir)
-	}
+	actualConfigPath := serveConfigPath(cfg)
 	srv, err := server.NewServerWithConfigPath(cfg, actualConfigPath, logger)
 	if err != nil {
 		// Spec 042: classify the failure into a startup outcome enum.
@@ -728,33 +717,40 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 }
 
-// serveConfigSaver persists the config during `serve` without leaking the CLI
-// flag overrides that loadConfig and runServer layer onto the in-memory config
-// (--listen, --tray-endpoint, --enable-socket, --tool-response-*, --log-level,
-// --read-only, ...). A flag applies to that one process only; persisting it
-// would make the next unflagged start — or the tray-launched core — inherit a
-// one-off choice (`--listen :0` used to write `"listen": ":0"` into the file,
-// after which the core silently booted in stdio mode).
+// serveConfigSaver persists the config during `serve` without leaking the
+// process-only overrides that loadConfig and runServer layer onto the in-memory
+// config: CLI flags (--listen, --tray-endpoint, --enable-socket,
+// --tool-response-*, --log-level, --read-only, ...) and MCPPROXY_* env values.
+// An override applies to that one process only; persisting it would make the
+// next unflagged start — or the tray-launched core — inherit a one-off choice
+// (`--listen :0` used to write `"listen": ":0"` into the file, after which the
+// core silently booted in stdio mode).
 //
 // The three `serve` saves (auto-generated API key, first-run telemetry notice,
 // startup outcome) own exactly two things: the generated key and the telemetry
-// state. Everything else is written back from the current config FILE, so a
-// save that fires late (the fatal-serve-error path can run hours after
-// startup) never resurrects a startup-era server list over changes the runtime
-// persisted in the meantime.
+// state. Everything else is written back from the config FILE as it is at save
+// time, so a save that fires late (the fatal-serve-error path can run hours
+// after startup) never resurrects a startup-era server list over changes the
+// runtime persisted in the meantime.
 type serveConfigSaver struct {
-	// fileCfg is the config as loaded at startup, before any flag override.
-	// It is the base only when the file can no longer be read; Logging is
-	// copied because runServer mutates it in place.
+	// fileCfg is the file as read at startup (see readConfigFile), the base
+	// only when the file can no longer be read at save time.
 	fileCfg config.Config
-	// generatedAPIKey is set only when serve generated the key itself. A key
-	// from MCPPROXY_API_KEY is an override like any flag and must not be
-	// copied into the file.
+	// generatedAPIKey is set only when serve generated the key itself. It
+	// fills an empty api_key; a key rotated through the API since is kept.
 	generatedAPIKey string
 }
 
-func newServeConfigSaver(cfg *config.Config) *serveConfigSaver {
-	s := &serveConfigSaver{fileCfg: *cfg}
+// newServeConfigSaver snapshots the file at path; when it cannot be read
+// (e.g. --config=/dev/null) the loaded cfg — taken before any flag override,
+// Logging copied because runServer mutates it in place — stands in.
+func newServeConfigSaver(cfg *config.Config, path string) *serveConfigSaver {
+	s := &serveConfigSaver{}
+	if fileCfg, err := readConfigFile(path); err == nil {
+		s.fileCfg = *fileCfg
+		return s
+	}
+	s.fileCfg = *cfg
 	if cfg.Logging != nil {
 		logging := *cfg.Logging
 		s.fileCfg.Logging = &logging
@@ -768,37 +764,49 @@ func (s *serveConfigSaver) setGeneratedAPIKey(key string) {
 }
 
 // save writes the current file contents plus the fields `serve` owns: the
-// API key it generated (if any) and cfg.Telemetry (last_startup_outcome,
-// first-run notice flag).
+// API key it generated (only into an empty api_key) and cfg.Telemetry
+// (last_startup_outcome, first-run notice flag).
 func (s *serveConfigSaver) save(cfg *config.Config, path string) error {
-	var persisted config.Config
-	if onDisk, err := config.LoadFromFile(path); err == nil {
+	persisted := s.fileCfg
+	if onDisk, err := readConfigFile(path); err == nil {
 		persisted = *onDisk
-	} else {
-		persisted = s.fileCfg
 	}
-	// Loading runs Validate, which copies MCPPROXY_API_KEY into APIKey; take
-	// the key from the raw file so an env secret is never written to disk.
-	persisted.APIKey = rawFileAPIKey(path)
-	if s.generatedAPIKey != "" {
+	if persisted.APIKey == "" {
 		persisted.APIKey = s.generatedAPIKey
 	}
 	persisted.Telemetry = cfg.Telemetry
 	return config.SaveConfig(&persisted, path)
 }
 
-// rawFileAPIKey returns the api_key literally present in the config file
-// ("" when absent or unreadable), bypassing the env override Validate applies.
-func rawFileAPIKey(path string) string {
+// readConfigFile decodes the config file over the defaults and nothing more.
+// config.LoadFromFile is NOT a read: it applies MCPPROXY_* env overrides,
+// copies MCPPROXY_API_KEY into api_key via Validate, creates data_dir and
+// replaces the process-global registry list — none of which a save may do.
+func readConfigFile(path string) (*config.Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return nil, err
 	}
-	var raw struct {
-		APIKey string `json:"api_key"`
+	cfg := config.DefaultConfig()
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, err
 	}
-	_ = json.Unmarshal(data, &raw)
-	return raw.APIKey
+	// Same stamp the loader applies, so a save never writes a zero time.
+	for _, server := range cfg.Servers {
+		if server.Created.IsZero() {
+			server.Created = time.Now()
+		}
+	}
+	return cfg, nil
+}
+
+// serveConfigPath is the file runServer saves to: --config when given, else
+// the default path under the data dir.
+func serveConfigPath(cfg *config.Config) string {
+	if configFile != "" {
+		return configFile
+	}
+	return config.GetConfigPath(cfg.DataDir)
 }
 
 func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
@@ -825,9 +833,9 @@ func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 		return nil, nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Snapshot the file-loaded values before any flag override so the saves
-	// in runServer never persist a one-off CLI choice.
-	saver := newServeConfigSaver(cfg)
+	// Snapshot the file before any flag override so the saves in runServer
+	// never persist a one-off CLI choice.
+	saver := newServeConfigSaver(cfg, serveConfigPath(cfg))
 
 	// Override with command line flags ONLY if they were explicitly set
 	if dataDir != "" {

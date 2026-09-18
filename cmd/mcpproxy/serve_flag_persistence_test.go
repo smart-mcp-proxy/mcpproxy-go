@@ -244,3 +244,65 @@ func TestServeSaverKeepsChangesTheRuntimePersistedLater(t *testing.T) {
 	telemetry, _ := file["telemetry"].(map[string]any)
 	assert.Equal(t, "other_error", telemetry["last_startup_outcome"])
 }
+
+// If the file vanished after startup, the fallback must recreate it with the
+// key the file had — not drop it, and not substitute an env key.
+func TestServeSaverFallbackKeepsFileAPIKey(t *testing.T) {
+	saveServeGlobals(t)
+	path := writeServeFlagTestConfig(t)
+	configFile, dataDir = path, filepath.Dir(path)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, []byte(`{"api_key":"mcp_file_key",`+string(raw[1:])), 0o600))
+	t.Setenv("MCPPROXY_API_KEY", "mcp_env_secret")
+
+	cfg, saver, err := loadConfig(newServeFlagTestCmd())
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(path))
+
+	recordStartupOutcome(cfg, path, "success", saver.save)
+
+	file := readConfigFileJSON(t, path)
+	assert.Equal(t, "mcp_file_key", file["api_key"])
+	assert.Equal(t, "127.0.0.1:8080", file["listen"])
+}
+
+// A key serve generated at startup fills an EMPTY api_key only. If the key was
+// rotated through the API and persisted later, a late save keeps the new one.
+func TestServeSaverGeneratedKeyDoesNotOverrideRotatedKey(t *testing.T) {
+	saveServeGlobals(t)
+	path := writeServeFlagTestConfig(t)
+	configFile, dataDir = path, filepath.Dir(path)
+
+	cfg, saver, err := loadConfig(newServeFlagTestCmd())
+	require.NoError(t, err)
+	saver.setGeneratedAPIKey("mcp_generated_at_startup")
+	require.NoError(t, saver.save(cfg, path))
+	require.Equal(t, "mcp_generated_at_startup", readConfigFileJSON(t, path)["api_key"])
+
+	// Simulate a runtime-persisted key rotation.
+	onDisk := readConfigFileJSON(t, path)
+	onDisk["api_key"] = "mcp_rotated"
+	rotated, err := json.Marshal(onDisk)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, rotated, 0o600))
+
+	recordStartupOutcome(cfg, path, "other_error", saver.save)
+	assert.Equal(t, "mcp_rotated", readConfigFileJSON(t, path)["api_key"])
+}
+
+// The merge base is the file as written, not a full load: MCPPROXY_* env
+// overrides (applied by config.LoadFromFile) must not be written back either.
+func TestServeSaverBaseIgnoresEnvOverrides(t *testing.T) {
+	saveServeGlobals(t)
+	path := writeServeFlagTestConfig(t)
+	configFile, dataDir = path, filepath.Dir(path)
+	t.Setenv("MCPPROXY_LISTEN", "127.0.0.1:1")
+
+	cfg, saver, err := loadConfig(newServeFlagTestCmd())
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1:1", cfg.Listen, "env override applies to the process")
+
+	recordStartupOutcome(cfg, path, "success", saver.save)
+	assert.Equal(t, "127.0.0.1:8080", readConfigFileJSON(t, path)["listen"], "env override leaked into the file")
+}
