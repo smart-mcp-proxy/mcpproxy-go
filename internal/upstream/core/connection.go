@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 
@@ -182,6 +183,30 @@ func logSafeErrorField(err error) zap.Field {
 	return zap.String("error", oauth.ScrubUpstreamText(err.Error()))
 }
 
+// recordConnectionFailure writes the "Connection failed" record to the
+// per-server log. A connect error that re-emits the child's stderr
+// (childOutputError: the initialize-timeout and premature-exit enrichments
+// splice the recent-stderr buffer into their text) makes this record a
+// child-output record, and it is stamped as one (logs.ChildOutputField) so
+// the attributed reader applies the same container-subject rule it applies
+// to the direct stderr record: on a `docker run` name collision the buffer
+// names another server's container, and this record repeated it without the
+// provenance (Spec 105 FR-007, codex round 3). Ordinary connect errors are
+// recorded exactly as before.
+func (c *Client) recordConnectionFailure(err error) {
+	if c.upstreamLogger == nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.String("transport", c.transportType),
+		zap.Error(err),
+	}
+	if embedsChildOutput(err) {
+		fields = append(fields, logs.ChildOutputField())
+	}
+	c.upstreamLogger.Error("Connection failed", fields...)
+}
+
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -296,21 +321,21 @@ func (c *Client) Connect(ctx context.Context) error {
 		err = redactURLCredentialsInError(err)
 
 		// Log connection failure to server-specific log
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("Connection failed",
-				zap.String("transport", c.transportType),
-				zap.Error(err))
-		}
+		c.recordConnectionFailure(err)
 
 		// CRITICAL FIX: Cleanup Docker containers when any connection type fails
 		// This prevents container accumulation when connections fail after Docker setup
 		if c.isDockerCommand {
-			c.logger.Warn("Connection failed for Docker command - cleaning up container",
+			// Spec 105 D8: name a container here only with evidence — see
+			// dockerContainerLogFields. c.containerName alone can be a
+			// generated name never observed from Docker.
+			fields := []zap.Field{
 				zap.String("server", c.config.Name),
 				zap.String("transport", c.transportType),
-				zap.String("container_name", c.containerName),
-				zap.String("container_id", c.containerID),
-				zap.Error(err))
+			}
+			fields = append(fields, dockerContainerLogFields(c.containerID, c.containerName, c.containerOwner)...)
+			fields = append(fields, zap.Error(err))
+			c.logger.Warn("Connection failed for Docker command - cleaning up container", fields...)
 
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 			defer cleanupCancel()

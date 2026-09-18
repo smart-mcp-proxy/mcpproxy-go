@@ -118,6 +118,22 @@ func (m *CallbackServerManager) adoptLoggerLocked(logger *zap.Logger) *zap.Logge
 	return m.logger
 }
 
+// subjectLoggerLocked returns the logger one server's callback records are
+// written through (Spec 105 FR-007, subject-bound routing): the caller's own
+// logger — the tee into that server's per-server log — or, for a caller that
+// supplies none (the deprecated StartCallbackServer), the zap global. It is
+// never the manager logger: that is whichever server's logger was installed
+// last, so resolving a nil logger through it recorded loggerB.With(server=a)
+// for a server started without a logger and wrote a's start and stop records
+// into b's log (codex round 2). A caller's logger is still adopted as the
+// manager logger for the manager's own records. m.mu must be held.
+func (m *CallbackServerManager) subjectLoggerLocked(logger *zap.Logger) *zap.Logger {
+	if logger == nil {
+		return zap.L().Named(oauthCallbackLoggerName)
+	}
+	return m.adoptLoggerLocked(logger)
+}
+
 // CallbackServer represents an active OAuth callback server.
 //
 // Callback parameters are dispatched by the `state` parameter (issue #975):
@@ -1273,7 +1289,10 @@ func (b CallbackBinding) host() string {
 // Falls back to dynamic allocation if the preferred port is unavailable.
 //
 // Deprecated in favour of StartCallbackServerOnHost, which can bind IPv6
-// loopback and carries the caller's logger. Kept for callers that have neither.
+// loopback and carries the caller's logger. Kept for callers that have
+// neither; a server started here records the zap global as its logger (its
+// records are not routed into any per-server log — never into another
+// server's, Spec 105 FR-007).
 func (m *CallbackServerManager) StartCallbackServer(serverName string, preferredPort int) (*CallbackServer, error) {
 	return m.StartCallbackServerOnHost(serverName, CallbackBinding{Port: preferredPort})
 }
@@ -1300,7 +1319,7 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	logger := m.adoptLoggerLocked(binding.Logger)
+	logger := m.subjectLoggerLocked(binding.Logger)
 	bindHost := binding.host()
 	preferredPort := binding.Port
 
@@ -1687,21 +1706,50 @@ func (m *CallbackServerManager) StopCallbackServer(serverName string) error {
 	return m.StopCallbackServerWithLogger(serverName, nil)
 }
 
-// StopCallbackServerWithLogger is StopCallbackServer with the caller's logger,
-// so the tear-down (and any waiter it drops) is actually recorded.
+// StopCallbackServerWithLogger is StopCallbackServer with the caller's logger.
+// The signature is kept for its callers; the tear-down records are written
+// through the stopped server's OWN recorded logger (Spec 105 FR-007,
+// subject-bound routing), and the caller's logger is only the fallback for a
+// server that recorded none. Stopping never adopts a logger as the manager
+// logger: the manager serves every server, and the last-installed logger is a
+// tee into whichever server's log file ran a flow last — pre-105 that is where
+// another server's name, bind host, port and dropped-waiter count landed.
 func (m *CallbackServerManager) StopCallbackServerWithLogger(serverName string, logger *zap.Logger) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return m.stopCallbackServerLocked(serverName, m.adoptLoggerLocked(logger))
+	return m.stopCallbackServerLocked(serverName, logger)
 }
 
 // stopCallbackServerLocked shuts the server down and removes it from the map.
-// m.mu must be held.
-func (m *CallbackServerManager) stopCallbackServerLocked(serverName string, logger *zap.Logger) error {
+// m.mu must be held. fallback is consulted only when the server recorded no
+// logger of its own (every server started through StartCallbackServerOnHost
+// records one); a nil fallback resolves to the manager logger.
+func (m *CallbackServerManager) stopCallbackServerLocked(serverName string, fallback *zap.Logger) error {
 	server, exists := m.servers[serverName]
 	if !exists {
 		return nil // Already stopped or never started
+	}
+
+	// Subject-bound (FR-007): the record concerns `server`, so it is written
+	// through the logger recorded for that server at start — the tee into
+	// ITS per-server log — never through whichever logger was installed last.
+	// The recorded logger already carries server, bind_host and port as
+	// context fields (StartCallbackServerOnHost), so the records below add
+	// none of them; a fallback logger gets the same three fields once.
+	logger := server.logger
+	if logger == nil {
+		logger = fallback
+		if logger == nil {
+			logger = m.logger
+		}
+		if logger == nil {
+			logger = zap.L().Named(oauthCallbackLoggerName)
+		}
+		logger = logger.With(
+			zap.String("server", serverName),
+			zap.String("bind_host", server.BindHost),
+			zap.Int("port", server.Port))
 	}
 
 	// Shutdown the server
@@ -1709,9 +1757,7 @@ func (m *CallbackServerManager) stopCallbackServerLocked(serverName string, logg
 	defer cancel()
 
 	if err := server.Server.Shutdown(ctx); err != nil {
-		logger.Error("Error shutting down OAuth callback server",
-			zap.String("server", serverName),
-			zap.Error(err))
+		logger.Error("Error shutting down OAuth callback server", zap.Error(err))
 	}
 
 	// Drop any registered waiters. They unblock on their own context deadline;
@@ -1719,17 +1765,13 @@ func (m *CallbackServerManager) stopCallbackServerLocked(serverName string, logg
 	// zero-value receive for a real callback.
 	if dropped := server.dropAllWaiters(); dropped > 0 {
 		logger.Warn("Stopped OAuth callback server while flows were still waiting",
-			zap.String("server", serverName),
 			zap.Int("waiters", dropped))
 	}
 
 	// Remove from map
 	delete(m.servers, serverName)
 
-	logger.Info("OAuth callback server stopped",
-		zap.String("server", serverName),
-		zap.String("bind_host", server.BindHost),
-		zap.Int("port", server.Port))
+	logger.Info("OAuth callback server stopped")
 
 	return nil
 }

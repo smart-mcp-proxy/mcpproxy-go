@@ -5,13 +5,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"regexp"
 	"strings"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
@@ -209,9 +209,13 @@ func (c *Client) monitorStderr(ctx context.Context, stderr io.Reader) {
 				zap.String("server", c.config.Name),
 				zap.String("message", line))
 
-			// Log to server-specific logger if available
+			// Log to server-specific logger if available. The child's text is
+			// a field value stamped child_output=true (Spec 105 FR-007, D8
+			// rules 1 and 3): a docker CLI failure on the isolation path names
+			// a colliding container — another server's — and the attributed
+			// reader withholds child-output records that mention a container.
 			if c.upstreamLogger != nil {
-				c.upstreamLogger.Info("stderr", zap.String("message", line))
+				c.upstreamLogger.Info("stderr", zap.String("message", line), logs.ChildOutputField())
 			}
 
 			c.recordRecentStderr(line)
@@ -245,15 +249,23 @@ func (c *Client) monitorStderr(ctx context.Context, stderr io.Reader) {
 	}
 }
 
-// monitorDockerLogsWithContext monitors Docker container logs using `docker logs` with context cancellation
+// dockerLogsWaitTimeout bounds how long monitorDockerLogsWithContext waits
+// for the container id to be tracked. A variable so tests can shorten it.
+var dockerLogsWaitTimeout = 10 * time.Second
+
+// monitorDockerLogsWithContext monitors Docker container logs using `docker
+// logs` with context cancellation. The container it names is only ever the
+// one trackCidfileContainer verified (id and owner read back from Docker):
+// it never reads the cidfile itself, since a cidfile can name a container
+// that is not this server's (Spec 105 D9, codex round 6).
 func (c *Client) monitorDockerLogsWithContext(ctx context.Context, cidFile string) {
 	waitTicker := time.NewTicker(100 * time.Millisecond)
 	defer waitTicker.Stop()
 
-	waitTimeout := time.NewTimer(10 * time.Second)
+	waitTimeout := time.NewTimer(dockerLogsWaitTimeout)
 	defer waitTimeout.Stop()
 
-	var containerID string
+	var containerID, containerOwner string
 
 waitLoop:
 	for {
@@ -264,20 +276,13 @@ waitLoop:
 				zap.String("cid_file", cidFile))
 			return
 		case <-waitTimeout.C:
-			// Fall back to reading the cid file one time in case tracking goroutine failed
-			if data, err := os.ReadFile(cidFile); err == nil {
-				containerID = strings.TrimSpace(string(data))
-				if containerID != "" {
-					break waitLoop
-				}
-			}
-			c.logger.Debug("Docker logs monitoring timed out waiting for container ID",
+			c.logger.Debug("Docker logs monitoring timed out before a verified container ID was tracked",
 				zap.String("server", c.config.Name),
 				zap.String("cid_file", cidFile))
 			return
 		case <-waitTicker.C:
 			c.mu.RLock()
-			containerID = c.containerID
+			containerID, containerOwner = c.containerID, c.containerOwner
 			c.mu.RUnlock()
 			if containerID != "" {
 				break waitLoop
@@ -291,7 +296,8 @@ waitLoop:
 	c.logger.Debug("Docker container started - logs available via 'docker logs' command",
 		zap.String("server", c.config.Name),
 		zap.String("container_id", shortContainerID(containerID)),
-		zap.String("command", fmt.Sprintf("docker logs -f %s", containerID[:12])))
+		containerOwnerField(containerOwner),
+		zap.String("command", fmt.Sprintf("docker logs -f %s", shortContainerID(containerID))))
 
 	// Note: We intentionally do NOT stream container logs to mcpproxy logs because:
 	// 1. It causes massive log file bloat (multiple GB per day with active containers)
@@ -305,7 +311,8 @@ waitLoop:
 	<-ctx.Done()
 	c.logger.Debug("Docker logs monitoring ended",
 		zap.String("server", c.config.Name),
-		zap.String("container_id", shortContainerID(containerID)))
+		zap.String("container_id", shortContainerID(containerID)),
+		containerOwnerField(containerOwner))
 }
 
 // recordRecentStderr appends a stderr line to the bounded ring buffer.
@@ -488,7 +495,6 @@ func (c *Client) GetConnectionDiagnostics() map[string]interface{} {
 	if c.isDockerCommand {
 		diagnostics["is_docker"] = true
 		diagnostics["docker_args"] = oauth.LiveRedaction.Argv(c.config.Args)
-		diagnostics["container_id"] = c.containerID
 
 		// Check Docker daemon connectivity
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -502,11 +508,33 @@ func (c *Client) GetConnectionDiagnostics() map[string]interface{} {
 			diagnostics["docker_daemon_reachable"] = true
 		}
 
-		// Check if container is still running
+		// Spec 105 D8/D9: `docker inspect <id>` resolves purely by id, so
+		// publishing and inspecting the tracked id directly let a container
+		// another Docker client relabelled or renamed after tracking still
+		// report as this server's and running — the same stale-ownership
+		// failure verifyDockerContainerHealthy fixed for the manager's
+		// health path (codex round 8). Re-verify through the same
+		// ContainerMutator.Verify read+predicate before publishing anything:
+		// once the predicate no longer holds (or the re-read itself fails),
+		// the diagnostics name no container id and report it not running;
+		// only a container ownership confirms right now is published, with
+		// the container_owner read back at that same moment.
+		//
+		// Running state comes from that SAME read, never a follow-up
+		// `docker inspect` (codex round 16 finding 1): a second, separately
+		// timed command by id alone would report whatever container holds
+		// that id AT THAT LATER MOMENT — which ownership may no longer
+		// belong to — while the diagnostics kept attributing it to this
+		// server. ContainerRow.Running derives it from the ps row Verify
+		// already read.
 		if c.containerID != "" {
-			inspectCmd := c.newDockerCmd(ctx, "inspect", "--format", "{{.State.Running}}", c.containerID)
-			if output, err := inspectCmd.Output(); err == nil {
-				diagnostics["container_running"] = strings.TrimSpace(string(output)) == "true"
+			row, ok, err := c.containerMutator().Verify(ctx, c.containerID)
+			if err != nil || !ok {
+				diagnostics["container_running"] = false
+			} else {
+				diagnostics["container_id"] = row.ID
+				diagnostics["container_owner"] = row.Owner
+				diagnostics["container_running"] = row.Running()
 			}
 		}
 	}

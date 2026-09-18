@@ -348,7 +348,60 @@ When MCPProxy stops, containers are cleaned up with a 30-second timeout:
 1. **Graceful Stop**: `docker stop` (sends SIGTERM to container)
 2. **Force Kill**: `docker kill` if container doesn't stop gracefully
 
-Containers are labeled with `mcpproxy.managed=true` for identification.
+Containers are labeled with `com.mcpproxy.managed=true` for identification
+and `com.mcpproxy.server=<server name>` (the raw, unsanitised name) for
+ownership.
+
+### Container ownership
+
+Every container mcpproxy creates is named
+`mcpproxy-<sanitised server name>-<4 random chars>`. The name alone does not
+identify the server — `a/b` and `a-b` both sanitise to `a-b` — so every
+cleanup path (the pre-start sweep for stale containers, the container
+captured from `--cidfile`, the disconnect fallbacks by exact name, by name
+pattern and by image name) inspects the container and stops or removes it
+only when its `com.mcpproxy.server` label **and** canonical name both match
+the server being cleaned up — and it re-inspects the container immediately
+before every `docker stop`, `kill` or `rm -f` (the kill after a failed stop
+included), never acting on an earlier listing, so a container renamed,
+relabelled or replaced in between is left alone. Containers you started yourself with
+`docker run --name …`, or that pre-date the label, are never touched by any
+of these paths, and a container that merely shares an image with a server's
+is never stopped on that server's behalf. Housekeeping records in the
+per-server log carry `container_owner` (the label value read back from
+Docker) so [`tail_log`](/features/agent-tokens) can attribute them to the
+right server; the pre-start "Docker isolation configured" record names the
+generated container name before Docker has created anything and carries no
+owner. The child process's own output lines (the docker CLI's stderr
+included) are written to the per-server log as the `message` field of a
+`stderr` or `launcher` record marked `child_output`, never as the record
+text.
+
+Two consequences of the ownership rule are worth knowing:
+
+- **Servers you configure as `docker run …` yourself** (no isolation) get no
+  `com.mcpproxy.server` label — MCPProxy only labels the containers it
+  builds for isolation — so MCPProxy never stops or removes their
+  container, not even through the `--cidfile` it injects into your command.
+  Use `--rm` (and let the container exit when its stdin closes) or stop it
+  by hand; earlier versions would stop it via the cidfile and, if that
+  capture failed, every container on the same image, yours or not.
+- **Renaming a server** changes the label value a container must carry. A
+  container created under the old name is no longer owned by the new one,
+  so it is left alone by the pre-start sweep and must be removed manually
+  (`docker rm -f`).
+- **The shutdown and emergency sweeps** (every `com.mcpproxy.managed`
+  container on shutdown; every one carrying this instance's id when
+  shutdown fails) apply the same rule: only containers canonically owned by
+  a server in the current configuration are stopped or removed — each one
+  re-inspected immediately before its stop, kill or removal through the
+  same check every per-server cleanup uses, so a container renamed or
+  relabelled after the sweep listed it is left alone — and the
+  disconnect-timeout path re-checks the ownership of the id it tracked
+  before `docker rm -f`. A container that merely carries the mcpproxy
+  labels — one you labelled yourself, or an orphan of a server that is no
+  longer configured — is left alone and only counted in a warning, never
+  named. Remove such orphans by hand (see below).
 
 ### Manual Cleanup
 
@@ -356,10 +409,10 @@ If containers remain after MCPProxy stops:
 
 ```bash
 # List MCPProxy-managed containers
-docker ps --filter "label=mcpproxy.managed=true"
+docker ps --filter "label=com.mcpproxy.managed=true"
 
 # Remove all MCPProxy containers
-docker rm -f $(docker ps -q --filter "label=mcpproxy.managed=true")
+docker rm -f $(docker ps -q --filter "label=com.mcpproxy.managed=true")
 ```
 
 See [Shutdown Behavior](/operations/shutdown-behavior) for detailed subprocess lifecycle documentation.
