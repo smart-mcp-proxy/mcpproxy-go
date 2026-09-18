@@ -387,17 +387,31 @@ func TestApplyConfig_EditingListenToTheFlagValueAfterReloadPersists(t *testing.T
 // otherwise leak into the file on the next unrelated save once disk recovers.
 func TestApplyConfig_FailedSaveKeepsTheOverrideProtected(t *testing.T) {
 	rt, cfgPath := newOverriddenRuntime(t)
-	dir := filepath.Dir(cfgPath)
+	tmp := filepath.Dir(cfgPath)
 
 	desired, err := rt.GetDesiredConfig()
 	require.NoError(t, err)
 	desired.APIKey = "rotated-key"
 
-	require.NoError(t, os.Chmod(dir, 0o500)) // the atomic write cannot create its temp file
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	_, err = rt.ApplyConfig(desired, cfgPath)
+	// Induce a real, cross-platform write failure by pointing this ONE save
+	// at a path whose parent is a plain file instead of a directory, rather
+	// than chmod'ing an existing directory read-only: Windows does not enforce
+	// Unix-style directory permission bits via os.Chmod the way POSIX does, so
+	// the GitHub Actions windows-latest runner can still write into a
+	// "read-only" directory and the save silently succeeds. writeConfigFile's
+	// os.MkdirAll(dir, 0700) pre-flight does `Stat(dir); if err == nil &&
+	// !IsDir() { return ENOTDIR }` — pure Go logic that runs identically on
+	// every OS, so a file sitting where the save's directory should be fails
+	// the same way on Linux, macOS and Windows. This targets only this one
+	// ApplyConfig call: cfgPath (the runtime's own saved-to path, still a real
+	// writable directory) is untouched, so the later SaveConfiguration below
+	// exercises "disk recovered" for real.
+	blockedDir := filepath.Join(tmp, "blocked-save-dir")
+	require.NoError(t, os.WriteFile(blockedDir, []byte("not a directory"), 0o644))
+	brokenPath := filepath.Join(blockedDir, "mcp_config.json")
+
+	_, err = rt.ApplyConfig(desired, brokenPath)
 	require.Error(t, err, "the save must fail")
-	require.NoError(t, os.Chmod(dir, 0o700))
 
 	require.NoError(t, rt.SaveConfiguration()) // disk recovered; an unrelated save
 	m := readConfigJSON(t, cfgPath)
