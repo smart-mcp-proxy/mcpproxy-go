@@ -21,7 +21,9 @@ import (
 //
 // Key scheme:
 //   - upstream credential:   "<userID>:<serverKey>"
-//   - idp subject token:     "<userID>"            (no colon)
+//   - idp subject token:     "<userID>"            (no colon) — RETIRED. The
+//     writer was removed by Spec 107 FR-033; rows an earlier release left
+//     behind are deleted at boot by PurgeLegacyIDPSubjectTokens.
 //
 // serverKey follows the existing SHA256(name+url) scheme from
 // internal/oauth.GenerateServerKey.
@@ -98,7 +100,8 @@ func NewBBoltAESStore(db *bbolt.DB, base64Key string, logger *zap.Logger) (*BBol
 func (s *BBoltAESStore) Enabled() bool { return s.enabled }
 
 // recordKey builds the BBolt key for a (userID, serverKey) pair. An empty
-// serverKey yields the bare userID, used for the idp subject token.
+// serverKey yields the bare userID — the shape the retired idp subject-token
+// writer used; no production caller passes an empty serverKey any more.
 func recordKey(userID, serverKey string) string {
 	if serverKey == "" {
 		return userID
@@ -218,6 +221,69 @@ func (s *BBoltAESStore) List(userID string) ([]CredentialEntry, error) {
 		return nil, fmt.Errorf("list credentials: %w", err)
 	}
 	return entries, nil
+}
+
+// PurgeLegacyIDPSubjectTokens deletes every record the retired IdP
+// subject-token writer (Spec 107 FR-033) left in the credential bucket: the
+// rows keyed by a BARE userID, with no ":<serverKey>" suffix. Those rows held
+// a user's IdP access token and offline refresh token, encrypted, and this
+// release has no reader, no listing and no per-row delete door for them —
+// List seeks "<userID>:" and the credential routes address a resolved server —
+// so without this sweep an upgraded deployment that ran with
+// `store_idp_tokens: true` would keep them at rest indefinitely.
+//
+// Rows are matched and deleted by KEY, never decrypted, so the sweep runs
+// whether or not an encryption key is configured (a deployment that dropped
+// its MCPPROXY_CRED_KEY is cleaned too). Upstream credentials always carry a
+// colon (user IDs are ULIDs; the server key is appended with ":") and are
+// never touched. Returns the number of rows removed; idempotent.
+func (s *BBoltAESStore) PurgeLegacyIDPSubjectTokens() (int, error) {
+	return PurgeLegacyIDPSubjectTokens(s.db)
+}
+
+// PurgeLegacyIDPSubjectTokens is the store-less form of the sweep above. It
+// takes the raw database so setup can run it BEFORE NewBBoltAESStore validates
+// the encryption key: a key that is set but malformed fails store construction
+// and with it the whole server-feature setup, which is logged and survived —
+// the sweep must not be lost behind that failure (codex round 2 on PR-A). A
+// nil db is a no-op.
+func PurgeLegacyIDPSubjectTokens(db *bbolt.DB) (int, error) {
+	if db == nil {
+		return 0, nil
+	}
+	var legacy [][]byte
+	if err := db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(credentialBucket))
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, _ []byte) error {
+			if !strings.Contains(string(k), ":") {
+				legacy = append(legacy, append([]byte(nil), k...))
+			}
+			return nil
+		})
+	}); err != nil {
+		return 0, fmt.Errorf("scan credential bucket for legacy idp subject tokens: %w", err)
+	}
+	if len(legacy) == 0 {
+		return 0, nil
+	}
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(credentialBucket))
+		if b == nil {
+			return nil
+		}
+		for _, k := range legacy {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return 0, fmt.Errorf("delete legacy idp subject tokens: %w", err)
+	}
+	return len(legacy), nil
 }
 
 // hasPrefix reports whether b begins with prefix.

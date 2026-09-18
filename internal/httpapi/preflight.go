@@ -141,6 +141,12 @@ func preflightParams(r *http.Request, req *contracts.PreflightRequest, tools []p
 		// disclosure and visibility are separate decisions, and inventing a
 		// scope here would turn a missing credential into a deny-all evaluation.
 		if authCtx != nil {
+			// Spec 107 FR-006: every NON-ADMINISTRATOR context is restricted,
+			// so an empty AllowedServers (an unentitled token, or a tenant
+			// principal entitled to nothing) is deny-all here exactly as it is
+			// on /mcp — never "unrestricted". disclosureTier returns a non-nil
+			// context only for non-admin types, so this is that predicate.
+			params.Restricted = true
 			params.TokenServers = authCtx.AllowedServers
 			params.TokenProfilePin = authCtx.ProfilePin
 		}

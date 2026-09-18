@@ -135,7 +135,21 @@ import (
 // events idempotently even when a response is lost after the endpoint has
 // committed the heartbeat. The id is random, contains no machine data, and is
 // scoped to one reporting window.
-const SchemaVersion = 12
+//
+// v13 (Spec 107): feature_flags.server_edition_enabled (bool), feature_flags.idp_provider
+// (closed enum google|github|microsoft|oidc|none — never an issuer), member_count_bucket
+// (closed enum 0|1-10|11-100|101-1000|1000+; "0" when no user counter is installed — the personal
+// edition — and omitted only when the installed counter errors).
+// env_markers.is_container unchanged. No worker migration: fields ride in payload_json.
+//
+// The wire key is member_count_bucket, not the user_count_bucket the Spec 107
+// contract first named: ScanForPII rule 2 substring-matches the home-dir
+// basename against the WHOLE wire form, keys included, and "user" is the
+// username of every `USER user` container image (the server edition's own
+// topology). A key containing "user" would have had every heartbeat from such
+// an install refused before it left the machine. See
+// TestPayloadV13_PassesScanWithCommonUsernameBlocked.
+const SchemaVersion = 13
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -360,6 +374,15 @@ type HeartbeatPayload struct {
 	// "scan" mode can produce a tool-change gate scan at all. No PII: counts
 	// only, no server names, no raw config strings.
 	TrustModeDistribution map[string]int `json:"trust_mode_distribution,omitempty"`
+
+	// Schema v13 (Spec 107 US7): UserCountBucket is the number of server-
+	// edition user records (team members), bucketed into the bucketUpstream
+	// vocabulary (0|1-10|11-100|101-1000|1000+). "0" when no user counter is
+	// installed (the personal edition, short-lived CLI commands); omitted ONLY
+	// when the installed counter errors. A count only — never a user id,
+	// email, group or IdP subject. The wire key deliberately avoids the
+	// substring "user" (see the SchemaVersion comment).
+	UserCountBucket string `json:"member_count_bucket,omitempty"`
 }
 
 // OnboardingSnapshot is the data the telemetry service needs to populate
@@ -480,6 +503,14 @@ type Service struct {
 	// stateview. nil-safe: when unset, diagnostics.current_error_codes is
 	// simply omitted (short-lived CLI commands have no supervisor).
 	currentErrorCodesProvider func() map[string]int
+
+	// Spec 107 (US7, schema v13): optional counter of server-edition user
+	// records, installed by the server-edition wiring
+	// (internal/server/serveredition_wire.go) with a closure over the user
+	// store. nil-safe: when unset — the personal edition, short-lived CLI
+	// commands — member_count_bucket reports "0"; when the installed counter
+	// errors, the field is omitted for that heartbeat.
+	userCounter func() (int, error)
 
 	// For testing: override initial delay and heartbeat interval
 	initialDelay      time.Duration
@@ -822,6 +853,35 @@ func (s *Service) SetOnboardingProvider(fn func() *OnboardingSnapshot) {
 // decaying window. Returning nil omits diagnostics.current_error_codes.
 func (s *Service) SetCurrentErrorCodesProvider(fn func() map[string]int) {
 	s.currentErrorCodesProvider = fn
+}
+
+// SetUserCounter installs the server-edition user counter behind
+// member_count_bucket (schema v13, Spec 107 US7). Only the count crosses this
+// seam; the closure must never expose user records. nil-safe: passing nil (or
+// never calling this) reports "0", the personal-edition value.
+//
+// Guarded by s.mu (cross-review round 4, chunk 4 P2): Start() launches the
+// heartbeat loop on its own goroutine (runtime/lifecycle.go
+// "go r.telemetryService.Start(...)") from StartBackgroundInitialization,
+// while SetUserCounter is called later, from a different call chain
+// (server.startCustomHTTPServer -> serveredition_wire.go), with no ordering
+// guarantee between the two relative to each other. An unsynchronized write
+// here racing the unsynchronized read in BuildPayload is a real data race
+// under the Go memory model, not merely a theoretical one — the same class
+// the file's own s.mu already protects for resolvedEnabled/config/endpoint
+// and the anonymous-id/funnel fields.
+func (s *Service) SetUserCounter(fn func() (int, error)) {
+	s.mu.Lock()
+	s.userCounter = fn
+	s.mu.Unlock()
+}
+
+// userCounterFunc returns the currently installed user counter (or nil)
+// under s.mu, so BuildPayload never reads s.userCounter directly.
+func (s *Service) userCounterFunc() func() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.userCounter
 }
 
 // resolveLaunchSource returns the LaunchSource to emit in the current
@@ -1392,6 +1452,23 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 		// fleet signal). Resolution is a runtime concern, so it is spliced in
 		// here rather than in the side-effect-free BuildFeatureFlagSnapshot.
 		payload.FeatureFlags.DockerCLISource = s.stats.GetDockerCLISource()
+	}
+
+	// Schema v13 (Spec 107 US7): bucketed server-edition user count. The
+	// counter is a runtime concern (a BBolt read through the user store), so
+	// it is spliced in here rather than in the side-effect-free snapshot
+	// helper. No counter installed → "0"; counter error → field omitted for
+	// this heartbeat (the error text never reaches the payload).
+	payload.UserCountBucket = bucketUpstream(0)
+	if counter := s.userCounterFunc(); counter != nil {
+		if n, err := counter(); err != nil {
+			if s.logger != nil {
+				s.logger.Debug("telemetry: user counter failed; omitting member_count_bucket", zap.Error(err))
+			}
+			payload.UserCountBucket = ""
+		} else {
+			payload.UserCountBucket = bucketUpstream(int64(n))
+		}
 	}
 
 	// Schema v3: fixed-key per-protocol counter over cfg.Servers. Logs

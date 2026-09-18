@@ -46,8 +46,19 @@
           </button>
         </div>
 
-        <!-- Add Server Button -->
+        <!-- Add Server Button. Spec 107 cross-review round 3, chunk 4 P2:
+             this always submitted through the generic AddServerModal, whose
+             serversStore.addServer() calls the core POST /api/v1/tools/call
+             dispatch door — a mandatory tenant-session refusal
+             (rest-endpoints.md §8) — so a tenant clicking their own labeled
+             "Add Personal Server" button always drew a 403 the API client
+             mistakes for an auth failure. /my/servers (UserServers.vue) is
+             the working tenant flow, wired to POST /api/v1/user/servers;
+             hidden here rather than rewired, matching the ModeSwitcher
+             precedent below (FR-041: tenant-inapplicable controls are
+             hidden, never issued-and-403'd). -->
         <button
+          v-if="authStore.principalKind !== 'tenant'"
           @click="showAddServerModal = true"
           class="btn btn-primary"
           :aria-label="addServerLabel"
@@ -62,8 +73,15 @@
 
       <!-- Right: Stats + Proxy Info -->
       <div class="hidden md:flex items-center space-x-3 shrink-0">
-        <!-- Profile switcher (Profiles v2 / MCP-3243) -->
-        <ProfileSwitcher />
+        <!-- Profile switcher (Profiles v2 / MCP-3243). Spec 107 cross-review
+             round 3, chunk 4 P2: selecting a profile calls
+             PUT /api/v1/profiles/active, which the tenant-session allowlist
+             rejects with 403 before the handler runs (rest-endpoints.md §8
+             lists only GET /profiles* as a tenant-reachable read) — so an
+             enabled control a tenant could open always failed to act. Hidden
+             for the same FR-041 reason as the button above; GET /profiles
+             stays reachable elsewhere (it is not this component's read). -->
+        <ProfileSwitcher v-if="authStore.principalKind !== 'tenant'" />
 
         <!-- Servers -->
         <div class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm">
@@ -88,8 +106,19 @@
         <!-- Routing + serialization mode switcher. Was a read-only badge whose
              `cursor-help` promised an explanation the browser only produced
              after a long hover (audit F31 follow-up); now it explains and
-             switches, like the profile switcher beside it. -->
-        <ModeSwitcher />
+             switches, like the profile switcher beside it.
+
+             Spec 107 FR-041 / cross-review round 2, chunk 4 P1: routing_mode
+             lives under PATCH /config, an admin-only core door (named
+             must-refuse, rest-endpoints.md §8), and routing_mode itself is
+             read from GET /routing (also must-refuse). A tenant session has
+             nothing to switch — the panel would open on a permanently
+             unresolved state and every selection would draw a fixed 403.
+             Hidden entirely, matching the FR-041 promise for tenant-
+             inapplicable chips (round 1 already suppressed the fetch this
+             component would otherwise issue on mount; this hides the
+             control itself, including its mutation path). -->
+        <ModeSwitcher v-if="authStore.principalKind !== 'tenant'" />
 
         <!-- MCP Endpoints Dropdown -->
         <div v-if="systemStore.listenAddr" class="relative">

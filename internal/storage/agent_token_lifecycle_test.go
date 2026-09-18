@@ -2,6 +2,7 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -204,9 +205,10 @@ func TestRegenerateAgentTokenForOwner_NarrowScopeHookCannotWiden(t *testing.T) {
 // throughout as the personal-edition control; and the refusal is pinned to the
 // typed sentinel rather than to any message.
 //
-// BITES: delete the agentTokenOwnerActive call from ValidateAgentToken (leave
-// the gate and the setter in place, so the package still builds) and the
-// "disabled" assertions fail.
+// BITES: drop the `!res.Active` branch from ValidateAgentToken (leave the
+// resolver and the setter in place, so the package still builds) and the
+// "disabled" assertions fail. (Spec 107 T076 migrated this from the old
+// owner gate to the single owner resolver; the property is unchanged.)
 func TestValidateAgentToken_OwnerGateStopsADisabledOwner(t *testing.T) {
 	manager, cleanup := setupTestStorageForAgentTokens(t)
 	defer cleanup()
@@ -217,8 +219,8 @@ func TestValidateAgentToken_OwnerGateStopsADisabledOwner(t *testing.T) {
 	require.NoError(t, manager.CreateAgentToken(ownerless, rawOwnerless, testHMACKey))
 
 	disabled := map[string]bool{}
-	manager.SetAgentTokenOwnerGate(func(userID string) (bool, error) {
-		return !disabled[userID], nil
+	manager.SetAgentTokenOwnerResolver(func(userID string, granted []string) (OwnerResolution, error) {
+		return OwnerResolution{Active: !disabled[userID], UserID: userID, Entitled: granted}, nil
 	})
 
 	// Positive control: with the gate installed and the owner active, the token
@@ -259,10 +261,13 @@ func TestValidateAgentToken_OwnerGateStopsADisabledOwner(t *testing.T) {
 
 // TestValidateAgentToken_OwnerGateFailsClosed pins the direction of the failure.
 //
-// A gate that cannot answer — user store unavailable, database error — must
-// deny. The alternative, treating an unanswerable question as "valid", is
-// exactly the hole the gate exists to close, reachable by making the store
-// error.
+// A resolver whose OWNER-STORE read cannot answer — user store unavailable,
+// database error — must deny. The alternative, treating an unanswerable
+// question as "valid", is exactly the hole the resolver exists to close,
+// reachable by making the store error. The resolver reports a store failure
+// by wrapping ErrAgentTokenOwnerInactive (Spec 107 FR-004: "store error or
+// missing owner → ErrAgentTokenOwnerInactive"); a bare error is the
+// entitlement being unavailable (agent_tokens_owner_resolution_test.go).
 //
 // BITES: change the error branch in ValidateAgentToken to fall through to
 // `return token, nil` and this fails.
@@ -273,14 +278,18 @@ func TestValidateAgentToken_OwnerGateFailsClosed(t *testing.T) {
 	owned, rawOwned := makeOwnedTestToken(t, "ci", "userA")
 	require.NoError(t, manager.CreateAgentToken(owned, rawOwned, testHMACKey))
 
-	// Positive control with a healthy gate.
-	manager.SetAgentTokenOwnerGate(func(string) (bool, error) { return true, nil })
+	// Positive control with a healthy resolver.
+	manager.SetAgentTokenOwnerResolver(func(userID string, granted []string) (OwnerResolution, error) {
+		return OwnerResolution{Active: true, UserID: userID, Entitled: granted}, nil
+	})
 	got, err := manager.ValidateAgentToken(rawOwned, testHMACKey)
-	require.NoError(t, err, "positive control: a healthy gate must let the token through")
+	require.NoError(t, err, "positive control: a healthy resolver must let the token through")
 	require.NotNil(t, got)
 
 	boom := errors.New("user store unavailable")
-	manager.SetAgentTokenOwnerGate(func(string) (bool, error) { return false, boom })
+	manager.SetAgentTokenOwnerResolver(func(string, []string) (OwnerResolution, error) {
+		return OwnerResolution{}, fmt.Errorf("%w: %v", ErrAgentTokenOwnerInactive, boom)
+	})
 
 	got, err = manager.ValidateAgentToken(rawOwned, testHMACKey)
 	assert.Nil(t, got, "an unanswerable owner check must deny the token")

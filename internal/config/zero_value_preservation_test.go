@@ -173,13 +173,13 @@ var numericOmitemptyAllowlist = map[string]string{
 
 	// Server edition (//go:build server). These are invisible to an untagged
 	// run of this test, which is why it must also be run as
-	// `go test -tags server ./internal/config`. All four are normalised by
-	// ServerEditionConfig.Validate, which treats <= 0 as "use the default"
-	// (internal/config/server_edition_config.go:90-101).
-	"Config.ServerEdition.SessionTTL":           "Validate: <= 0 becomes the 24h default",
-	"Config.ServerEdition.BearerTokenTTL":       "Validate: <= 0 becomes the 24h default",
-	"Config.ServerEdition.WorkspaceIdleTimeout": "Validate: <= 0 becomes the 30m default",
-	"Config.ServerEdition.MaxUserServers":       "Validate: <= 0 becomes the 20 default",
+	// `go test -tags server ./internal/config`. Both are normalised by
+	// ServerEditionConfig.ApplyDefaults at boot, which treats <= 0 as "use the
+	// default" (Spec 107 FR-039 moved that out of the non-mutating Validate);
+	// the removed max_user_servers / workspace_idle_timeout knobs (FR-032) no
+	// longer exist on the struct.
+	"Config.ServerEdition.SessionTTL":     "ApplyDefaults: <= 0 becomes the 24h default",
+	"Config.ServerEdition.BearerTokenTTL": "ApplyDefaults: <= 0 becomes the 24h default",
 
 	// 0 and absent both fall back to the DefaultConfig value; there is no
 	// documented meaning for an explicit 0.

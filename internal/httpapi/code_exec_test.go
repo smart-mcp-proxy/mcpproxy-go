@@ -56,6 +56,9 @@ func (m *mockController) UnquarantineServer(serverName string) error { return ni
 func (m *mockController) GetServerTools(serverName string) ([]map[string]interface{}, error) {
 	return nil, nil
 }
+func (m *mockController) SearchToolsScoped(_ string, _ int, _ func(string) bool) ([]map[string]interface{}, error) {
+	return nil, nil
+}
 func (m *mockController) SearchTools(query string, limit int) ([]map[string]interface{}, error) {
 	return nil, nil
 }

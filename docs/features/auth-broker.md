@@ -3,27 +3,27 @@ id: auth-broker
 title: Per-User Auth Broker
 sidebar_label: Auth Broker
 sidebar_position: 11
-description: Server-edition per-upstream token brokering — token exchange, Entra OBO, and per-user OAuth connect flow
-keywords: [auth broker, token exchange, entra obo, oauth connect, per-user, server edition, spec 074]
+description: Server-edition per-user OAuth connect flow — credentials are stored encrypted per user for a future broker and are not injected into upstream calls
+keywords: [auth broker, oauth connect, per-user, credential store, server edition, spec 074, spec 107]
 ---
 
 # Per-User Auth Broker
 
-:::info Server edition only
-The auth broker is part of the **server edition** (`//go:build server`). It is opt-in **per upstream** — servers without an `auth_broker` block behave exactly as before. Brokering applies only to HTTP-family upstreams (`http`, `sse`, `streamable-http`); configuring it on a `stdio` upstream is rejected at config validation in this phase.
-:::
+**A stored credential is kept for a future broker and is NOT injected into upstream calls in this release.** The `auth_broker` block lets a user of the server edition connect their *own* OAuth credential for a shared upstream through a per-user consent flow; the proxy persists that credential encrypted, per user, and shows its status through the REST API, the CLI and the Web UI. Nothing on the tool-call path reads it: a proxied request to that upstream still carries whatever the upstream's own `headers` / `oauth` configuration says, exactly as it would without the block.
 
-The auth broker lets the gateway acquire an **upstream credential on behalf of the calling user** instead of sharing a single static token. Each upstream server can declare how its credential is obtained via an `auth_broker` block on its server config (spec 074).
+:::info Server edition only
+The auth broker is part of the **server edition** (`//go:build server`). It is opt-in **per upstream** — servers without an `auth_broker` block behave exactly as before. The connect flow applies only to HTTP-family upstreams (`http`, `sse`, `streamable-http`); configuring it on a `stdio` upstream is rejected at config validation. The personal edition keeps the block in the config file as opaque JSON so a file shared between editions round-trips unchanged; it never validates or acts on it.
+:::
 
 ## Modes
 
-The `auth_broker.mode` field selects the credential-acquisition strategy:
+`auth_broker.mode` accepts one value:
 
 | Mode | Description |
 |------|-------------|
-| `token_exchange` | RFC 8693 OAuth 2.0 Token Exchange — swaps the caller's IdP token for an upstream-scoped token at the IdP token endpoint. |
-| `entra_obo` | Microsoft Entra **On-Behalf-Of** flow. |
-| `oauth_connect` | **Path B** — a per-user authorization-code + PKCE *connect* flow against an upstream authorization server that does not support token exchange. The user is redirected to the upstream's consent screen once; the resulting per-user credential is persisted encrypted and refreshed transparently. |
+| `oauth_connect` | **Path B** — a per-user authorization-code + PKCE *connect* flow against the upstream's authorization server. The user is redirected to the upstream's consent screen once; the resulting per-user credential is persisted encrypted. |
+
+Earlier releases also validated the modes `token_exchange` (RFC 8693) and `entra_obo` (Microsoft On-Behalf-Of). Neither was ever performed by any code path, and they are no longer accepted: a config file that still names one loads with **that server's whole `auth_broker` block ignored** and one warning (`auth_broker.mode "token_exchange" was never implemented; the auth_broker block for server "<name>" was ignored`), and `PATCH /api/v1/config` / `/config/apply` refuse it with the same text. The same applies to the removed `header` and `header_format` keys (`auth_broker.header is no longer supported and was ignored`).
 
 ## Configuration
 
@@ -54,58 +54,54 @@ The block lives under a server entry in the config file:
 
 | Key | Required | Description |
 |-----|----------|-------------|
-| `mode` | yes | One of `token_exchange`, `entra_obo`, `oauth_connect`. |
-| `token_endpoint` | yes | IdP/upstream token endpoint used to mint (and refresh) the upstream credential. |
-| `authorization_endpoint` | **only for `oauth_connect`** | Upstream authorization-server *authorize* URL the user is redirected to for consent. Required when `mode` is `oauth_connect`; ignored by `token_exchange` and `entra_obo`. |
+| `mode` | yes | Must be `oauth_connect`. |
+| `token_endpoint` | yes | Upstream authorization-server token endpoint where the authorization code is exchanged. |
+| `authorization_endpoint` | yes | Upstream authorization-server *authorize* URL the user is redirected to for consent. |
 | `resource` | no | RFC 8707 audience the resulting token is scoped to. |
 | `scopes` | no | Scopes requested for the upstream credential. |
 | `client_id` | no¹ | Identifies the gateway to the token/authorization endpoint. |
-| `client_secret` | no | Authenticates a confidential client. A public client may omit it — PKCE still protects the `oauth_connect` code exchange. |
-| `header` | no | Outbound header the resolved credential is injected into (default `Authorization`). |
-| `header_format` | no | Value template; `{token}` is replaced with the resolved credential (default `Bearer {token}`). |
+| `client_secret` | no | Authenticates a confidential client. A public client may omit it — PKCE still protects the code exchange. The value is sent to the token endpoint exactly as written: `${env:VAR}` / `${keyring:NAME}` references are **not** expanded for the connect flow (only the upstream MCP client's own copy of a server config is expanded), so put the literal secret here or use a public client. |
 
-¹ `client_id` is required at runtime for the `oauth_connect` flow (the connector rejects an empty client ID); it is validated when the connect flow is assembled.
+¹ `client_id` is required at runtime for the connect flow (the connector rejects an empty client ID); it is validated when the connect flow is assembled.
 
-:::warning `authorization_endpoint` is mandatory for `oauth_connect`
-Config validation fails with `auth_broker.authorization_endpoint is required for mode "oauth_connect"` if the key is missing while `mode` is `oauth_connect`. The other two modes never read it.
+:::warning `authorization_endpoint` is mandatory
+Config validation fails with `auth_broker.authorization_endpoint is required for mode "oauth_connect"` if the key is missing.
 :::
+
+## Credential storage and the encryption key
+
+Per-user credentials are encrypted with **AES-256-GCM** before they are written to BBolt (`config.db`), keyed by `server_edition.credential_encryption_key` — a base64-encoded 32-byte key. The environment variable **`MCPPROXY_CRED_KEY`** is the recommended way to provide it in container or systemd deployments, and **it takes precedence**: when both are set the variable is used and the config value is ignored (`broker.ResolveMasterKey`), so a credential encrypted under one key is unreadable if the other is later put in front of it. Set exactly one.
+
+```bash
+# Generate a fresh 32-byte key and base64-encode it
+export MCPPROXY_CRED_KEY="$(openssl rand -base64 32)"
+```
+
+Store the value in a secret manager (Vault, AWS Secrets Manager, a Kubernetes Secret, …) and inject it at runtime. The key is never written to disk by MCPProxy itself. When no key is configured the credential store is **disabled**: every credential reports `unavailable` and nothing is persisted. Key rotation is not supported; rotating the key means clearing the `user_upstream_credentials` bucket and asking users to connect again.
+
+Stored credentials are scoped per user — one user's credential is never visible to another — and secret values (access/refresh tokens) are never serialised by any REST, CLI or UI surface.
 
 ## The `oauth_connect` flow (Path B)
 
 1. The gateway builds an authorize URL from `authorization_endpoint` with a per-user opaque `state` and a PKCE `S256` challenge, and redirects the user there.
 2. On the upstream's callback, `state` is validated as a **known, unexpired, single-use** pending flow (10-minute TTL) bound to the initiating user — confused-deputy / replay hardening.
 3. The authorization code is exchanged at `token_endpoint` using the bound PKCE verifier; the resulting credential is stored **encrypted, per user**, tagged `ObtainedVia=connect_flow`.
-4. Tokens are refreshed transparently from the stored refresh token; a non-rotating authorization server keeps its prior refresh token.
+4. That is where the flow ends. The credential is **not** refreshed and **not** injected into any request. Once its access token expires the status becomes `expired`; the user runs the connect flow again to store a fresh one.
 
 A denied consent (`error=access_denied`) clears the pending flow and stores nothing.
 
-## Credential resolution
+## Status surfaces
 
-On each proxied request the broker resolves the per-user credential to inject, in a strict **per-user-only** order. There is **no shared or static fallback** — a request that cannot produce a per-user credential fails rather than borrowing another identity:
+| Surface | Reference |
+|---------|-----------|
+| REST | `GET /api/v1/user/credentials`, `DELETE /api/v1/user/credentials/{server}`, `GET /api/v1/user/credentials/{server}/connect`, `GET /api/v1/user/credentials/{server}/callback` |
+| CLI | [`mcpproxy credential list\|status\|connect\|rm`](../cli/credential-commands.md) |
 
-1. A valid cached per-user credential is injected directly; if it is within the near-expiry window it is refreshed first (re-minted for `token_exchange`/`entra_obo`, or renewed from the stored refresh token for `oauth_connect`).
-2. Otherwise, for `token_exchange`/`entra_obo`, a credential is minted from the user's stored IdP subject token.
-3. Otherwise, for `oauth_connect` upstreams the user has not connected — or whose stored credential expired and could not be refreshed — the request fails with an **actionable error carrying the connect URL**, so the user is told to (re)connect rather than being silently denied.
-4. Otherwise the request fails with "no per-user credential available".
+Status values are `connected` (a valid, non-expired credential is stored), `expired`, `not_connected` and `unavailable` (no encryption key, store disabled). `connected` describes the *stored* credential only; it does not mean any upstream call carries it.
 
-Concurrent requests for the same `(user, upstream)` are coalesced (single-flight) so a burst does not trigger duplicate upstream token flows. A policy-decision hook is evaluated per call immediately before the credential is returned; no policy engine ships yet, so it permits every injection by default.
-
-## Header injection
-
-The resolved per-user credential is injected into the configured outbound header (`header`, default `Authorization`) using the value template (`header_format`, default `Bearer {token}`), then the request is forwarded to the upstream.
-
-Injection is a **replacement**, not a merge:
-
-- Any header on the upstream config whose name matches `header` (case-insensitively) is **removed** before the resolved credential is set, so a brokered upstream presents exactly one value for that header.
-- The inbound gateway/IdP token is **never forwarded** to the upstream. Brokering exists precisely so the upstream sees a credential minted *for it*, scoped to the calling user — not the token the user presented to the gateway.
-
-Injection applies only to **HTTP-family** upstreams (`http`, `sse`, `streamable-http`). Brokering on a `stdio` upstream is rejected — at config validation, and again as a runtime guard at the injection boundary — with a clear "unsupported in this phase" message.
-
-## Per-(user, server) connection keying
-
-A **shared** upstream that is brokered per-user must carry **each user's own** credential. Brokered upstream connections are therefore keyed by `(user, server)`, never by server alone: one user's connection (and the credential injected on it) is never reused for another user. The server-component of the key reuses the same `name + URL` scheme as the credential store, so a connection and its cached credential stay in lockstep.
+Connect-flow consent and callback outcomes are recorded as `credential_broker` activity records (see [Activity Log](./activity-log.md)).
 
 ## See also
 
 - [OAuth Authentication](./oauth-authentication.md) — upstream OAuth for the personal edition.
-- Server multi-user authentication is covered in the project `CLAUDE.md` (Spec 024).
+- [Server Multi-User Authentication](../development/server-edition-multiuser-auth.md) — the server-edition login front door.

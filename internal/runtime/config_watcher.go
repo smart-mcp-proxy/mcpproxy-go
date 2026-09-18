@@ -131,8 +131,19 @@ type selfWriteEntry struct {
 // does; a marshal failure just skips recording (the write itself would have
 // failed the same way). Recording an already-present payload refreshes its
 // timestamp; when full, the oldest entry is evicted.
-func (r *Runtime) noteConfigSelfWrite(cfg *config.Config) {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+//
+// path is the file the save targets: the payload is the PERSISTABLE form of
+// cfg (config.PersistableConfig), which is what SaveConfig actually writes when
+// a serve flag or MCPPROXY_* env override is in force.
+func (r *Runtime) noteConfigSelfWrite(cfg *config.Config, path string) {
+	r.noteConfigSelfWriteWithEdits(cfg, nil, path)
+}
+
+// noteConfigSelfWriteWithEdits is noteConfigSelfWrite for a save that carries
+// an API edit (config.SaveConfigWithEdits): mergeBase is the config the edit
+// was merged onto, so the marker matches the bytes that save writes.
+func (r *Runtime) noteConfigSelfWriteWithEdits(cfg, mergeBase *config.Config, path string) {
+	data, err := json.MarshalIndent(config.PersistableConfigWithEdits(cfg, mergeBase, path), "", "  ")
 	if err != nil {
 		return
 	}
@@ -158,8 +169,14 @@ func (r *Runtime) noteConfigSelfWrite(cfg *config.Config) {
 // those bytes never reached disk, so a later byte-identical write of them is
 // a genuine external edit the watcher must reload. Only the failed payload is
 // removed — markers pre-armed by other (successful) saves stay live.
-func (r *Runtime) forgetConfigSelfWrite(cfg *config.Config) {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+func (r *Runtime) forgetConfigSelfWrite(cfg *config.Config, path string) {
+	r.forgetConfigSelfWriteWithEdits(cfg, nil, path)
+}
+
+// forgetConfigSelfWriteWithEdits is forgetConfigSelfWrite's counterpart to
+// noteConfigSelfWriteWithEdits.
+func (r *Runtime) forgetConfigSelfWriteWithEdits(cfg, mergeBase *config.Config, path string) {
+	data, err := json.MarshalIndent(config.PersistableConfigWithEdits(cfg, mergeBase, path), "", "  ")
 	if err != nil {
 		return
 	}
@@ -235,8 +252,12 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 	// event came from our own save. If a future save path diverges, this
 	// degrades to one redundant (idempotent) reload — never a loop, since
 	// ReloadConfiguration never writes the file.
+	// Compared in its PERSISTABLE form: with a serve flag or MCPPROXY_* env
+	// override in force the file legitimately differs from memory in exactly
+	// those fields (config.PersistableConfig), and reading that difference as
+	// an external edit would reload the file over the override on every save.
 	trimmedDisk := bytes.TrimSpace(diskBytes)
-	if current, merr := json.MarshalIndent(r.ConfigSnapshot().Config, "", "  "); merr == nil {
+	if current, merr := json.MarshalIndent(config.PersistableConfig(r.ConfigSnapshot().Config, absPath), "", "  "); merr == nil {
 		if bytes.Equal(bytes.TrimSpace(current), trimmedDisk) {
 			// The file now matches memory. If that content matches none of
 			// the recorded self-writes, the file has moved past our saves

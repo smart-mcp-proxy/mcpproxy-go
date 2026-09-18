@@ -266,6 +266,7 @@ type ScanContext struct {
 	SourcePath      string   `json:"source_path"`               // Actual path/URL that was scanned
 	DockerIsolation bool     `json:"docker_isolation"`          // Whether server runs in Docker
 	ContainerID     string   `json:"container_id,omitempty"`    // Docker container ID (if applicable)
+	ContainerOwner  string   `json:"container_owner,omitempty"` // Server name that owns ContainerID (verified via com.mcpproxy.server label)
 	ContainerImage  string   `json:"container_image,omitempty"` // Docker image used
 	ServerProtocol  string   `json:"server_protocol"`           // stdio, http, sse
 	ServerCommand   string   `json:"server_command,omitempty"`  // Command used to start server

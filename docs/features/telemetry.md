@@ -10,7 +10,7 @@ MCPProxy collects anonymous usage statistics to help improve the product. This p
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 12** (`schema_version: 12` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 13** (`schema_version: 13` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
 
 | Field | Example | Purpose |
 |-------|---------|---------|
@@ -43,6 +43,10 @@ MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying 
 | `tpa_scanner` | `{"scans_completed":4,"scans_failed":0,"scans_with_findings":1,"findings":{"high":2},"tool_change_gate_scans":6,"prompt_scans":11}` | Security/TPA scanner activity (schema v8, extended in v9) — counts only, keyed by the fixed severity enum. Omitted entirely when no scan of any kind ran |
 | `trust_mode_distribution` | `{"auto":1,"scan":3,"manual":8}` | Configured servers per effective trust tier (schema v9) — fixed enum keys `auto`/`scan`/`manual`, counts only. Never server names |
 | `feature_flags.deep_scan_enabled` | `false` | Whether the opt-in deep-scan layer is turned on (schema v8) |
+| `feature_flags.server_edition_enabled` | `false` | Whether the `server_edition` block is present and enabled (schema v13, Spec 107). Always `false` on the personal edition, where the block is never interpreted |
+| `feature_flags.idp_provider` | `none` | The configured identity-provider **family** for server-edition SSO (schema v13) — fixed enum `google` / `github` / `microsoft` / `oidc` / `none`. The kind only: never the issuer URL, tenant, client id or display name. `none` when the block is disabled or unset |
+| `member_count_bucket` | `1-10` | Number of server-edition user accounts, bucketed (schema v13) — fixed enum `0` / `1-10` / `11-100` / `101-1000` / `1000+`. `0` on the personal edition (no counter is installed); omitted only when the counter fails. A count only, never an identity. (Named `member_…`, not `user_…`: the anonymity scanner blocks the home-dir basename as a substring of the whole payload, and `user` is the username of every `USER user` container image) |
+| `env_markers.is_container` | `true` | Unchanged in v13; read together with the fields above to see how server-edition installs are deployed |
 | `preflight` | `{"filter_diag_emitted_24h":3,"availability_block_24h":2,"availability_block_reasons_24h":{"server_quarantined":2},"discovery_omission_24h":5}` | Preflight baseline counters (issue #969) — counts only, reason map keyed by a fixed enum. Omitted entirely when nothing was counted. See below |
 
 The `server_protocol_counts` map uses a **fixed enum of keys** (`stdio`, `http`, `sse`, `streamable_http`, `auto`) — server names and URLs are never included. Unknown or misconfigured protocol values are bucketed into `auto`.
@@ -86,6 +90,7 @@ The following is **never** collected:
 - File paths or environment variables
 - IP addresses (stripped by our server before storage)
 - User identity, email, or account information
+- Server-edition IdP issuer URLs, tenant ids, client ids, or group names (only the provider family and a bucketed member count are sent — schema v13)
 - Tool call content, arguments, or responses
 - Any user-generated content
 - The **raw** OS machine id or any reversible hardware identifier (only the salted, non-reversible `machine_id` hash is sent — see below)

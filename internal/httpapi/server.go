@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -62,6 +63,13 @@ const (
 	// caller asked for.
 	codeExecRequestTimeout = 630 * time.Second
 )
+
+// sseHeartbeatInterval is how often /events sends a keep-alive "ping" frame.
+// A var, not a const, so tests can shrink it and observe a session-principal
+// refresh landing on a heartbeat tick specifically (Spec 107 FR-005 — the
+// refresher runs "before each frame", heartbeats included) without waiting
+// out the real interval.
+var sseHeartbeatInterval = 30 * time.Second
 
 // longRunningAPIBudgets lists the /api/v1 paths that need more than
 // defaultAPIRequestTimeout, keyed by request path.
@@ -141,6 +149,10 @@ type ServerController interface {
 	// Tools and search
 	GetServerTools(serverName string) ([]map[string]interface{}, error)
 	SearchTools(query string, limit int) ([]map[string]interface{}, error)
+	// SearchToolsScoped is SearchTools filtered to servers inScope admits
+	// BEFORE the ranked cut (Spec 107 T075a): the top-`limit` of an exhaustive
+	// search filtered to the caller's entitlement, with unfiltered scores.
+	SearchToolsScoped(query string, limit int, inScope func(serverName string) bool) ([]map[string]interface{}, error)
 
 	// Logs
 	GetServerLogs(serverName string, tail int) ([]contracts.LogEntry, error)
@@ -330,6 +342,11 @@ type Server struct {
 	// preflightPollOverride lowers the 250 ms poll floor. Tests set it; nothing
 	// in production does.
 	preflightPollOverride time.Duration
+
+	// sessionPrincipalResolver resolves a session cookie or bearer JWT to an
+	// AuthContext (Spec 107 US4). nil in the personal build; installed by the
+	// server edition via SetSessionPrincipalResolver. See session_principal.go.
+	sessionPrincipalResolver SessionPrincipalResolver
 }
 
 // usageCacheEntry is one cached usage response with the time it was stored.
@@ -492,39 +509,104 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// Extract token from request
-			token := ExtractToken(r)
-			if token == "" {
-				s.logger.Warnw("TCP connection with missing API key",
-					zap.String("path", r.URL.Path),
-					zap.String("remote_addr", r.RemoteAddr))
-				s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
-				return
-			}
-
-			// Check if this is an agent token (mcp_agt_ prefix)
-			if strings.HasPrefix(token, auth.TokenPrefixStr) {
-				s.handleAgentTokenAuth(w, r, next, token)
-				return
-			}
-
-			// Check if the token matches the global API key (admin)
-			if token == cfg.APIKey {
-				s.logger.Debugw("TCP connection with valid API key",
-					zap.String("path", r.URL.Path),
-					zap.String("remote_addr", r.RemoteAddr))
-				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
-				next.ServeHTTP(w, r.WithContext(ctx))
-				return
-			}
-
-			// Token doesn't match anything
-			s.logger.Warnw("TCP connection with invalid API key",
-				zap.String("path", r.URL.Path),
-				zap.String("remote_addr", r.RemoteAddr))
-			s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
+			s.authenticateWithPrecedence(w, r, next, cfg)
 		})
 	}
+}
+
+// authenticateWithPrecedence implements the FR-001 credential precedence
+// (Spec 107, contracts/rest-endpoints.md §8): exactly one credential source
+// is evaluated. Presence of a source is header/query MEMBERSHIP
+// (r.Header.Values, r.URL.Query().Has), not a non-empty value, so a present
+// but WRONG (or empty) X-API-Key, Authorization: Bearer or ?apikey= is a
+// terminal 401 and never falls through to a cookie sitting on the same
+// request. The mcpproxy_session cookie is consulted only when none of the
+// three is present at all.
+func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config) {
+	// 1. X-API-Key header (membership, not non-empty value).
+	if values := r.Header.Values("X-API-Key"); len(values) > 0 {
+		s.authenticateExplicitToken(w, r, next, cfg, values[0])
+		return
+	}
+
+	// 2. Authorization: Bearer header (membership).
+	if values := r.Header.Values("Authorization"); len(values) > 0 {
+		s.authenticateBearer(w, r, next, cfg, values[0])
+		return
+	}
+
+	// 3. ?apikey= query parameter (membership).
+	if r.URL.Query().Has("apikey") {
+		s.authenticateExplicitToken(w, r, next, cfg, r.URL.Query().Get("apikey"))
+		return
+	}
+
+	// 4. mcpproxy_session cookie — only reached when none of the above is present.
+	if cookie, err := r.Cookie(httpSessionCookieName); err == nil {
+		if s.tryInstallSessionPrincipal(w, r, next, auth.CredentialKindCookie, cookie.Value) {
+			return
+		}
+	}
+
+	s.logger.Warnw("TCP connection with missing API key",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
+}
+
+// authenticateExplicitToken handles a token presented via X-API-Key or
+// ?apikey=: an agent token, the global admin key, or nothing else — these two
+// sources never resolve a session principal (only Authorization: Bearer and
+// the cookie do).
+func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, token string) {
+	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
+		s.handleAgentTokenAuth(w, r, next, token)
+		return
+	}
+	if token != "" && token == cfg.APIKey {
+		s.logger.Debugw("TCP connection with valid API key",
+			zap.String("path", r.URL.Path),
+			zap.String("remote_addr", r.RemoteAddr))
+		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+		next.ServeHTTP(w, r.WithContext(ctx))
+		return
+	}
+	s.logger.Warnw("TCP connection with invalid API key",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
+}
+
+// authenticateBearer handles Authorization: Bearer — an agent token, the
+// global admin key, or a user JWT resolved as a session principal
+// (kind=bearer_jwt) through the edition hook.
+func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, authHeader string) {
+	var token string
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		token = strings.TrimPrefix(authHeader, "Bearer ")
+	}
+
+	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
+		s.handleAgentTokenAuth(w, r, next, token)
+		return
+	}
+	if token != "" && token == cfg.APIKey {
+		s.logger.Debugw("TCP connection with valid API key",
+			zap.String("path", r.URL.Path),
+			zap.String("remote_addr", r.RemoteAddr))
+		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+		next.ServeHTTP(w, r.WithContext(ctx))
+		return
+	}
+
+	if s.tryInstallSessionPrincipal(w, r, next, auth.CredentialKindBearerJWT, token) {
+		return
+	}
+
+	s.logger.Warnw("TCP connection with invalid API key",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
 
 // handleAgentTokenAuth validates an agent token and sets the appropriate AuthContext.
@@ -665,6 +747,20 @@ func (s *Server) requireServerOp(op string, next http.HandlerFunc) http.HandlerF
 	}
 }
 
+// trustedProxiesProvider yields the LIVE trusted_proxies list through the
+// controller's config (Spec 107 FR-027), evaluated per request.
+func (s *Server) trustedProxiesProvider() config.TrustedProxiesProvider {
+	return func() []string {
+		if s.controller == nil {
+			return nil
+		}
+		if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+			return cfg.TrustedProxies
+		}
+		return nil
+	}
+}
+
 // setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
 	s.logger.Debug("Setting up HTTP API routes")
@@ -752,6 +848,9 @@ func (s *Server) setupRoutes() {
 		// The deadline is per-route: the long-running routes carry their own
 		// budget, everything else gets defaultAPIRequestTimeout.
 		r.Use(apiRequestTimeout(defaultAPIRequestTimeout, longRunningAPIBudgets()))
+		// Spec 107 T050: {ClientIP, Mount: api} for the audit line, with the
+		// forwarded IP believed only from a trusted proxy (live list).
+		r.Use(TagRequestMeta(reqcontext.MountAPI, s.trustedProxiesProvider()))
 		r.Use(s.apiKeyAuthMiddleware())
 		// Spec 042: Tier 2 telemetry middlewares. Both fetch the registry via
 		// a closure so the registry can be installed after route setup.
@@ -1013,8 +1112,9 @@ func (s *Server) setupRoutes() {
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD
-	s.router.With(s.apiKeyAuthMiddleware()).Method("GET", "/events", http.HandlerFunc(s.handleSSEEvents))
-	s.router.With(s.apiKeyAuthMiddleware()).Method("HEAD", "/events", http.HandlerFunc(s.handleSSEEvents))
+	tagEvents := TagRequestMeta(reqcontext.MountAPI, s.trustedProxiesProvider())
+	s.router.With(tagEvents, s.apiKeyAuthMiddleware()).Method("GET", "/events", http.HandlerFunc(s.handleSSEEvents))
+	s.router.With(tagEvents, s.apiKeyAuthMiddleware()).Method("HEAD", "/events", http.HandlerFunc(s.handleSSEEvents))
 
 	// Note: Swagger UI is mounted directly on the main mux (not via HTTP API server)
 	// See internal/server/server.go for swagger handler registration
@@ -3786,7 +3886,28 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	results, err := s.controller.SearchTools(query, limit)
+	var results []map[string]interface{}
+	var err error
+	if auth.IsScopedCaller(r.Context()) {
+		// #1166 / Spec 107 T075a: the MCP twin of this discovery surface
+		// filters through serverInScope (internal/server/mcp_visibility.go);
+		// this one used to post-filter a GLOBAL top-K, so a hidden server
+		// that outranked an entitled one displaced it — and the caller's
+		// response differed with whether the hidden server existed at all.
+		// The scoped search filters BEFORE the ranked cut, exhaustively, so
+		// the window is the top-`limit` of what the caller may see. An
+		// entitlement that admits nothing fails closed without a search.
+		ctx := r.Context()
+		if ac := auth.AuthContextFromContext(ctx); ac != nil && len(ac.AllowedServers) == 0 {
+			results = []map[string]interface{}{}
+		} else {
+			results, err = s.controller.SearchToolsScoped(query, limit, func(serverName string) bool {
+				return canSeeServer(ctx, serverName)
+			})
+		}
+	} else {
+		results, err = s.controller.SearchTools(query, limit)
+	}
 	if err != nil {
 		s.logger.Errorw("Failed to search tools", "query", query, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Search failed: %v", err))
@@ -3795,19 +3916,6 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 
 	// Convert to typed search results
 	typedResults := contracts.ConvertGenericSearchResultsToTyped(results)
-
-	// #1166: the MCP twin of this discovery surface filters through
-	// serverInScope (internal/server/mcp_visibility.go); this one returned
-	// tool_name + server_name pairs for the whole index to any scoped token.
-	if auth.IsScopedCaller(r.Context()) {
-		scoped := make([]contracts.SearchResult, 0, len(typedResults))
-		for i := range typedResults {
-			if canSeeServer(r.Context(), typedResults[i].Tool.ServerName) {
-				scoped = append(scoped, typedResults[i])
-			}
-		}
-		typedResults = scoped
-	}
 
 	// Restore the bare-tool-name contract on this REST surface (#871). The index
 	// read seams canonicalize the name to "server:tool" for the MCP discovery
@@ -3890,7 +3998,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		"events_channel_nil", eventsCh == nil)
 
 	// Create heartbeat ticker to keep connection alive
-	heartbeat := time.NewTicker(30 * time.Second)
+	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
 
 	// Send initial status
@@ -3925,6 +4033,18 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-heartbeat.C:
+			// FR-005: the heartbeat is a frame like any other. On an
+			// otherwise-idle connection (no status update, no runtime event)
+			// it is the ONLY frame the server sends, so it must re-resolve
+			// the caller context too — otherwise a disabled tenant's stream
+			// never closes as long as nothing else happens to trigger a
+			// refresh (cross-review round 2, chunk 3 P2). The ping payload
+			// itself carries no identity data, so nothing here needs the
+			// resolved context beyond the failure check.
+			if _, err := refreshCallerContext(); err != nil {
+				s.logger.Warnw("Closing SSE stream after caller revalidation failed", "error", err)
+				return
+			}
 			// Send heartbeat ping to keep connection alive
 			pingData := map[string]interface{}{
 				"timestamp": time.Now().Unix(),
@@ -5203,6 +5323,13 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Spec 107 FR-039: the removed server-edition keys / auth_broker modes
+	// are refused on the raw document, before it is typed (see
+	// handlePatchConfig). No-op in the personal build.
+	if s.refuseRemovedConfigKeys(w, r, document, "Invalid configuration") {
+		return
+	}
+
 	stored, err := s.desiredConfigForPatch()
 	if err != nil {
 		s.logger.Errorw("Failed to read configuration for apply", "error", err)
@@ -5328,8 +5455,13 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
 // @Router       /api/v1/config [patch]
 func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
+	// UseNumber: every number rides through the merge as its decimal text, so
+	// the personal build's opaque server_edition / auth_broker carriers (Spec
+	// 107 FR-040) and any large integer survive the round trip exactly.
+	patchDecoder := json.NewDecoder(r.Body)
+	patchDecoder.UseNumber()
 	var patchMap map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&patchMap); err != nil {
+	if err := patchDecoder.Decode(&patchMap); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
@@ -5372,8 +5504,10 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
 		return
 	}
+	baseDecoder := json.NewDecoder(bytes.NewReader(baseBytes))
+	baseDecoder.UseNumber()
 	var baseMap map[string]interface{}
-	if err := json.Unmarshal(baseBytes, &baseMap); err != nil {
+	if err := baseDecoder.Decode(&baseMap); err != nil {
 		s.logger.Errorw("Failed to unmarshal live configuration", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
 		return
@@ -5396,6 +5530,15 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deepMergeJSON(baseMap, patchMap)
+
+	// Spec 107 FR-039: refuse the removed server-edition keys / auth_broker
+	// modes on the MERGED generic map, before the typed decode drops them
+	// without a trace (json.Unmarshal into config.Config ignores unknown
+	// keys, so Config.Validate can never see them). No-op in the personal
+	// build.
+	if s.refuseRemovedConfigKeys(w, r, baseMap, "Invalid configuration patch") {
+		return
+	}
 
 	mergedBytes, err := json.Marshal(baseMap)
 	if err != nil {
@@ -5503,6 +5646,36 @@ func withLiveUpstreamStats(ctx context.Context, status interface{}, live map[str
 		refreshed["message"] = ""
 	}
 	return refreshed
+}
+
+// refuseRemovedConfigKeys runs config.ValidateRemovedKeys on a generic
+// configuration document and, when it reports anything, answers 400 with the
+// structured validation_errors payload (the #1084 shape) and returns true.
+// It is the Spec 107 FR-039 write-time gate for keys the typed decode would
+// otherwise drop silently; the boot path normalises + records instead.
+func (s *Server) refuseRemovedConfigKeys(w http.ResponseWriter, r *http.Request, document map[string]interface{}, msg string) bool {
+	errs := config.ValidateRemovedKeys(document)
+	if len(errs) == 0 {
+		return false
+	}
+	s.writeApplyConfigError(w, r, msg, &internalRuntime.ConfigApplyResult{
+		Success:          false,
+		ValidationErrors: errs,
+	}, fmt.Errorf("%s", errs[0].Error()))
+	return true
+}
+
+// MergeConfigPatch deep-merges patch into a copy of base and returns the
+// merged document — the exact merge handlePatchConfig performs. Exported so
+// the personal-build round-trip test (Spec 107 FR-040, T010) can drive the
+// PATCH path without an HTTP server.
+func MergeConfigPatch(base, patch map[string]interface{}) map[string]interface{} {
+	merged := make(map[string]interface{}, len(base))
+	for k, v := range base {
+		merged[k] = v
+	}
+	deepMergeJSON(merged, patch)
+	return merged
 }
 
 // deepMergeJSON recursively merges patch into base. When both base[k] and

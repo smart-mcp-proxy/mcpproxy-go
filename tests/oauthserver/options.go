@@ -47,6 +47,47 @@ type ErrorMode struct {
 	MCPRateLimitCount      int  // Return 429 this many times before real response
 	MCPRateLimitRetryAfter int  // Retry-After header value (seconds, 0 = omit header)
 	MCPRateLimitUseResetAt bool // Use JSON body with reset_at instead of Retry-After header
+
+	// OIDC tamper knobs (Spec 107 research D2, one per T037 network/integration
+	// case). Each takes effect only when Options.OIDC is on and produces exactly
+	// the defect its name states; everything else about the flow stays valid so
+	// a verifier's refusal is attributable to that one check.
+	IDTokenBadSignature   bool // id_token signed by a key that is NOT in the JWKS (kid still names a published key)
+	IDTokenWrongIssuer    bool // id_token `iss` is another origin
+	IDTokenWrongAudience  bool // id_token `aud` is another client_id
+	IDTokenMultiAudNoAzp  bool // id_token `aud` has two members and no `azp`
+	IDTokenAzpNonString   bool // id_token `azp` is present but not a string (a number)
+	IDTokenExpired        bool // id_token `exp` one hour in the past
+	IDTokenNbfFuture      bool // id_token `nbf` one hour in the future
+	IDTokenNoNonce        bool // id_token omits `nonce`
+	IDTokenAlgNone        bool // id_token is an unsigned `alg: none` JWT
+	IDTokenHS256          bool // id_token is HMAC-signed (HS256) with the client secret
+	IDTokenUnknownKid     bool // id_token header `kid` names a key that is not in the JWKS
+	IDTokenKeyAlgMismatch bool // id_token header says ES256 (signed by the EC key) but `kid` names the RSA key
+	EmailVerifiedFalse    bool // `email_verified: false` in the id_token and userinfo
+
+	// Groups-claim knobs (apply to the id_token and to /userinfo alike).
+	GroupsNonArray         bool // groups claim is a string, not an array
+	GroupsOverageMarker    bool // groups claim absent; Entra `_claim_names`/`_claim_sources` overage marker present
+	GroupsAbsentEverywhere bool // groups claim absent from the id_token and from /userinfo
+
+	// Userinfo knobs. Each also strips the groups claim from the id_token so a
+	// verifier that only consults /userinfo when the token lacks groups is
+	// forced onto the endpoint.
+	UserinfoSubMismatch bool // /userinfo answers with a different `sub`
+	UserinfoRedirect    bool // /userinfo answers 302 to another origin
+	UserinfoNonJSON     bool // /userinfo answers 200 with a non-JSON body
+	UserinfoUnavailable bool // /userinfo answers 503
+
+	// Provider-metadata / token-endpoint knobs (FR-020 hostile discovery).
+	DiscoveryHTTPTokenEndpoint bool // discovery advertises a plain-http, non-loopback token_endpoint
+	TokenEndpointRedirect      bool // /token answers 302 to another origin instead of a token response
+}
+
+// userinfoConsulted reports whether a knob needs the id_token to lack the
+// groups claim so that the verifier is driven onto /userinfo.
+func (e ErrorMode) userinfoConsulted() bool {
+	return e.UserinfoSubMismatch || e.UserinfoRedirect || e.UserinfoNonJSON || e.UserinfoUnavailable
 }
 
 // Options configures the OAuth test server behavior.
@@ -91,6 +132,30 @@ type Options struct {
 
 	// Test credentials
 	ValidUsers map[string]string // Default: {"testuser": "testpass"}
+
+	// OIDC turns the fake into an OpenID Provider (Spec 107, research D2):
+	// discovery advertises userinfo_endpoint and
+	// id_token_signing_alg_values_supported, the auth-code token response
+	// carries an RS256 id_token signed by the KeyRing, /userinfo answers for a
+	// valid access token, the JWKS also publishes an EC (P-256) key, and the
+	// authorize request's nonce is echoed in the id_token. Default: off, in
+	// which case none of this exists and the server behaves as before.
+	OIDC bool
+
+	// UserClaims holds the identity claims per ValidUsers entry (keyed by
+	// username): sub, email, email_verified, name and the groups claim (under
+	// GroupsClaim, or "groups"). Missing entries and missing keys are derived:
+	// sub from the username, email = username (or username@example.com),
+	// email_verified = true, name = the local part, groups = [].
+	UserClaims map[string]map[string]any
+
+	// ClientRedirectURIs are appended to the redirect URIs of both
+	// pre-registered test clients (e.g. mcpproxy's /api/v1/auth/callback).
+	ClientRedirectURIs []string
+
+	// GroupsClaim is the name of the groups claim in the id_token and
+	// /userinfo. Default: "groups".
+	GroupsClaim string
 
 	// Pre-registered clients (in addition to auto-generated test client)
 	Clients []ClientConfig
@@ -156,6 +221,16 @@ func (o *Options) applyDefaults() {
 	if len(o.ValidUsers) == 0 {
 		o.ValidUsers = defaults.ValidUsers
 	}
+	if o.OIDC {
+		if o.GroupsClaim == "" {
+			o.GroupsClaim = "groups"
+		}
+		for _, sc := range []string{"openid", "profile", "email", "groups"} {
+			if !containsString(o.SupportedScopes, sc) {
+				o.SupportedScopes = append(o.SupportedScopes, sc)
+			}
+		}
+	}
 
 	// Enable all flows by default if none explicitly set
 	// (This is a heuristic: if all are false, enable defaults)
@@ -168,4 +243,13 @@ func (o *Options) applyDefaults() {
 		o.EnableRefreshToken = defaults.EnableRefreshToken
 		o.RequirePKCE = defaults.RequirePKCE
 	}
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }

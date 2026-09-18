@@ -132,6 +132,12 @@ func TestSetupMultiUserOAuth_DemotedAdminJWTIsIndistinguishableFromPlainUser(t *
 // unfixed code a demoted admin renews admin indefinitely and the bug never
 // self-heals at token expiry.
 //
+// Spec 107 FR-011 (T078) then closed the door itself to a bearer JWT: only a
+// session-cookie principal may mint through POST /auth/token, so the renewal
+// here is driven by the demoted admin's SESSION (a stale admin JWT gets 401,
+// asserted first). The role property is unchanged: the reissued token must
+// carry role="user".
+//
 // BITES: unfixed, the reissued token carries role="admin".
 func TestSetupMultiUserOAuth_DemotedAdminCannotMintFreshAdminToken(t *testing.T) {
 	router, userStore, hmacKey := serverEditionTestDeps(t)
@@ -146,9 +152,24 @@ func TestSetupMultiUserOAuth_DemotedAdminCannotMintFreshAdminToken(t *testing.T)
 		t.Fatalf("failed to mint the stale token: %v", err)
 	}
 
+	// FR-011: a JWT can no longer renew itself, whatever role it claims.
+	jwtReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/token", nil)
+	jwtReq.Host = "localhost:8080"
+	jwtReq.Header.Set("Authorization", "Bearer "+stale)
+	jwtRec := httptest.NewRecorder()
+	router.ServeHTTP(jwtRec, jwtReq)
+	if jwtRec.Code != http.StatusUnauthorized {
+		t.Fatalf("a bearer JWT must not renew itself through /auth/token (FR-011): got %d (body: %s)", jwtRec.Code, jwtRec.Body.String())
+	}
+
+	// The session cookie is the one credential the door admits.
+	session := users.NewSession(demoted.ID, time.Hour)
+	if err := userStore.CreateSession(session); err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/token", nil)
 	req.Host = "localhost:8080"
-	req.Header.Set("Authorization", "Bearer "+stale)
+	req.AddCookie(&http.Cookie{Name: teamsauth.SessionCookieName, Value: session.ID})
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 

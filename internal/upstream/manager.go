@@ -193,6 +193,15 @@ func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
 
 // NewManager creates a new upstream manager
 func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *storage.BoltDB, secretResolver *secret.Resolver, storageMgr *storage.Manager) *Manager {
+	// Scope this process's Docker container-ownership instance ID to its data
+	// dir instead of a host-wide shared file, so concurrent mcpproxy
+	// processes on one host (which already require distinct data dirs, since
+	// BBolt locks config.db) get distinct IDs. Must happen before any code
+	// path calls core.GetInstanceID(), so it's done here, at the earliest
+	// point every entry point (serve, tray, CLI subcommands) has the loaded
+	// config available.
+	core.SetInstanceDataDir(globalConfig.DataDir)
+
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	manager := &Manager{
 		clients:           make(map[string]*managed.Client),

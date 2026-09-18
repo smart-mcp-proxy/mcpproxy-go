@@ -46,6 +46,9 @@ type Params struct {
 	// Profile is the profile named in the request body ("" = unscoped operator
 	// view).
 	Profile string
+	// Restricted marks a non-administrator caller (Spec 107 FR-006): an empty
+	// TokenServers is then deny-all, not "no restriction". See ScopeInputs.
+	Restricted bool
 	// TokenServers is the agent token's allowed_servers list (nil for operator
 	// callers).
 	TokenServers []string

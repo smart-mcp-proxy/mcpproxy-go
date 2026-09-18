@@ -112,7 +112,10 @@ import { ref, computed, onMounted } from 'vue'
 import api from '@/services/api'
 
 interface Props {
-  show: boolean
+  // Spec 107 T088 (App.vue): bound as `authModal.show || undefined` so the
+  // stubbed component in tests never renders a literal `show="false"`
+  // attribute — accept the omitted case here too.
+  show?: boolean
   canClose?: boolean
   lastError?: string
 }

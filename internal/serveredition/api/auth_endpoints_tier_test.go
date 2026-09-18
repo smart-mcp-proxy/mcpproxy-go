@@ -64,7 +64,7 @@ func TestAuthEndpoints_RejectAgentTierContext(t *testing.T) {
 	// Positive control: as the USER, both routes work. This proves the routes
 	// are registered at these paths and the fixture user exists, so the 401s
 	// below are the guard and not a routing mistake.
-	userRouter := newRouter(auth.UserContext(user.ID, user.Email, user.DisplayName, user.Provider))
+	userRouter := newRouter(withCookieKind(auth.UserContext(user.ID, user.Email, user.DisplayName, user.Provider)))
 	require.Equal(t, http.StatusOK, call(userRouter, http.MethodGet, "/api/v1/auth/me").Code)
 	ctlToken := call(userRouter, http.MethodPost, "/api/v1/auth/token")
 	require.Equal(t, http.StatusOK, ctlToken.Code)

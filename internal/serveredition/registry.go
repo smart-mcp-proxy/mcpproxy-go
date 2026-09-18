@@ -10,6 +10,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -35,6 +37,21 @@ type Dependencies struct {
 	SetServerShared   func(string, bool) (*config.ServerConfig, error)
 	ManagementService interface{}      // management.Service - kept as interface{} to avoid circular imports
 	StorageManager    *storage.Manager // Shared storage manager for token operations
+
+	// InstallSessionPrincipalResolver, when non-nil, receives the
+	// session-principal resolver a feature builds (Spec 107 T084), so
+	// internal/server/serveredition_wire.go can install it on the
+	// httpapi.Server (httpAPIServer.SetSessionPrincipalResolver) without this
+	// package importing that Server type directly at the wiring call site.
+	// Only the multiuser-oauth feature sets it.
+	InstallSessionPrincipalResolver func(httpapi.SessionPrincipalResolver)
+
+	// ProjectActivity converts+masks a storage.ActivityRecord exactly as core
+	// GET /activity does (Spec 107 T086: httpapi.(*Server).ActivityProjector,
+	// supplied by serveredition_wire.go). GET /api/v1/user/activity injects
+	// it into UserActivityHandlers so that door emits the same JSON shape
+	// and the same masking as the core surface for the same record.
+	ProjectActivity func(*storage.ActivityRecord) contracts.ActivityRecord
 }
 
 // Feature represents a server edition feature module that self-registers.

@@ -3,6 +3,7 @@ package oauthserver
 import (
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -33,6 +34,9 @@ type OAuthTestServer struct {
 	// Rate limit tracking
 	mcpRateLimitHits int
 
+	// bogusKey signs id_tokens under IDTokenBadSignature; never published.
+	bogusKey *rsa.PrivateKey
+
 	mu sync.RWMutex
 
 	// Test reference
@@ -52,6 +56,7 @@ type ServerResult struct {
 	MCPURL                       string // MCP endpoint URL (for resource auto-detection testing)
 	SSEURL                       string // Legacy SSE MCP endpoint (same tools, same auth middleware)
 	ProtectedResourceMetadataURL string // RFC 9728 metadata URL
+	UserinfoEndpoint             string // OIDC userinfo (empty unless Options.OIDC)
 
 	// Pre-registered test client (confidential)
 	ClientID     string
@@ -81,6 +86,13 @@ func StartOnPort(t *testing.T, port int, opts Options) *ServerResult {
 			t.Fatalf("Failed to create key ring: %v", err)
 		}
 		panic(fmt.Sprintf("Failed to create key ring: %v", err))
+	}
+
+	if err := addOIDCKeys(keyRing, opts); err != nil {
+		if t != nil {
+			t.Fatalf("Failed to create EC key: %v", err)
+		}
+		panic(fmt.Sprintf("Failed to create EC key: %v", err))
 	}
 
 	// Create listener on specific port
@@ -162,6 +174,9 @@ func StartOnPort(t *testing.T, port int, opts Options) *ServerResult {
 	if opts.EnableDeviceCode {
 		result.DeviceAuthorizationEndpoint = issuerURL + "/device_authorization"
 	}
+	if opts.OIDC {
+		result.UserinfoEndpoint = issuerURL + "/userinfo"
+	}
 
 	return result
 }
@@ -180,6 +195,10 @@ func Start(t *testing.T, opts Options) *ServerResult {
 	keyRing, err := NewKeyRing()
 	if err != nil {
 		t.Fatalf("Failed to create key ring: %v", err)
+	}
+
+	if err := addOIDCKeys(keyRing, opts); err != nil {
+		t.Fatalf("Failed to create EC key: %v", err)
 	}
 
 	// Create listener on ephemeral port
@@ -256,6 +275,9 @@ func Start(t *testing.T, opts Options) *ServerResult {
 	if opts.EnableDeviceCode {
 		result.DeviceAuthorizationEndpoint = issuerURL + "/device_authorization"
 	}
+	if opts.OIDC {
+		result.UserinfoEndpoint = issuerURL + "/userinfo"
+	}
 
 	return result
 }
@@ -294,6 +316,11 @@ func (s *OAuthTestServer) setupRoutes(mux *http.ServeMux) {
 	// Protected resource (for WWW-Authenticate detection)
 	if s.options.DetectionMode == WWWAuthenticate || s.options.DetectionMode == Both {
 		mux.HandleFunc("/protected", s.handleProtected)
+	}
+
+	// OIDC userinfo (Options.OIDC only)
+	if s.options.OIDC {
+		mux.HandleFunc("/userinfo", s.handleUserinfo)
 	}
 
 	// Callback endpoint for testing - displays received OAuth parameters
@@ -389,7 +416,7 @@ func (s *OAuthTestServer) registerTestClient(isPublic bool) *Client {
 	client := &Client{
 		ClientID:      clientID,
 		ClientSecret:  clientSecret,
-		RedirectURIs:  []string{"http://127.0.0.1/callback", "http://localhost/callback"},
+		RedirectURIs:  append([]string{"http://127.0.0.1/callback", "http://localhost/callback"}, s.options.ClientRedirectURIs...),
 		GrantTypes:    []string{"authorization_code", "refresh_token"},
 		ResponseTypes: []string{"code"},
 		Scopes:        s.options.SupportedScopes,
@@ -464,6 +491,19 @@ func (s *OAuthTestServer) GetClient(clientID string) (*Client, bool) {
 	return client, exists
 }
 
+// KeyRing exposes the signing keys so tests can rotate keys or mint their own
+// tokens (Spec 107 T037 crafts alg:none/HS256 tokens against the real JWKS).
+func (s *OAuthTestServer) KeyRing() *KeyRing {
+	return s.keyRing
+}
+
+// errorMode returns a snapshot of the current error injection settings.
+func (s *OAuthTestServer) errorMode() ErrorMode {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.options.ErrorMode
+}
+
 // SetErrorMode updates error injection at runtime.
 func (s *OAuthTestServer) SetErrorMode(mode ErrorMode) {
 	s.mu.Lock()
@@ -504,6 +544,15 @@ type AuthCodeInfo struct {
 	Scopes    []string
 	ExpiresAt time.Time
 	Used      bool
+}
+
+// addOIDCKeys publishes the EC key the OIDC mode needs (JWKS with RSA and EC).
+func addOIDCKeys(keyRing *KeyRing, opts Options) error {
+	if !opts.OIDC {
+		return nil
+	}
+	_, err := keyRing.AddECKey()
+	return err
 }
 
 // generateRandomString creates a random hex string of specified length.

@@ -187,6 +187,13 @@ func (s *Service) SetEmitter(emitter EventEmitter) {
 	s.emitter.Store(&emitter)
 }
 
+// SetInstanceID scopes this service's Docker container-ownership lookups to
+// the given mcpproxy instance ID (internal/upstream/core.GetInstanceID()).
+// See SourceResolver.instanceID for why this is injected rather than imported.
+func (s *Service) SetInstanceID(instanceID string) {
+	s.sourceResolver.SetInstanceID(instanceID)
+}
+
 // SetScannerDisableNoNewPrivileges controls whether scanner containers are
 // launched without `--security-opt no-new-privileges`. This is the runtime
 // knob for SecurityConfig.ScannerDisableNoNewPrivileges. See the config
@@ -1013,6 +1020,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 				scanCtx.SourcePath = resolved.ServerURL
 			}
 			scanCtx.ContainerID = resolved.ContainerID
+			scanCtx.ContainerOwner = resolved.ContainerOwner
 			// Docker-image servers (`docker run mcp/fetch`): the scan target is the
 			// image itself, not a source dir. Carry the reference so image-capable
 			// scanners (Trivy) run in image mode, and surface it in the context.
@@ -1221,6 +1229,7 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 			scanCtx.SourcePath = resolved.ServerURL
 		}
 		scanCtx.ContainerID = resolved.ContainerID
+		scanCtx.ContainerOwner = resolved.ContainerOwner
 		// Docker-image servers: scan the image (Trivy image mode reports OS-package
 		// and bundled-dependency CVEs). No source dir to enrich or export tools into.
 		if resolved.ContainerImage != "" {

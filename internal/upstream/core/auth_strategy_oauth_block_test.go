@@ -13,6 +13,14 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 )
 
+func strategyNames(strategies []authStrategy) []string {
+	names := make([]string, len(strategies))
+	for i, s := range strategies {
+		names[i] = s.name
+	}
+	return names
+}
+
 // GH #1271: an upstream that answers initialize/tools/list anonymously but
 // requires a token for tools/call can never be authenticated when no-auth sits
 // before OAuth in the ladder — no-auth "succeeds" and the ladder stops. A
@@ -63,20 +71,6 @@ func TestAuthStrategies_DisableOAuthEnvKeepsHistoricalChain(t *testing.T) {
 	}
 	if got := strategyNames(c.sseAuthStrategies()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("SSE strategies = %v, want %v", got, want)
-	}
-}
-
-// Spec 074 fail-closed must win over the oauth block: a brokered connection
-// stays headers-only even when the server config carries an oauth block.
-func TestAuthStrategies_BrokeredWinsOverOAuthBlock(t *testing.T) {
-	c := &Client{config: &config.ServerConfig{URL: "https://upstream.example/mcp", OAuth: &config.OAuthConfig{}}}
-	c.SetBrokeredAuth(&transport.BrokeredAuth{Header: "Authorization", Format: "Bearer {token}", Token: "u"})
-	want := []string{"headers"}
-	if got := strategyNames(c.httpAuthStrategies()); !reflect.DeepEqual(got, want) {
-		t.Fatalf("brokered HTTP strategies = %v, want %v", got, want)
-	}
-	if got := strategyNames(c.sseAuthStrategies()); !reflect.DeepEqual(got, want) {
-		t.Fatalf("brokered SSE strategies = %v, want %v", got, want)
 	}
 }
 

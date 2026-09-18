@@ -27,12 +27,11 @@ type Manager struct {
 	logger   *zap.SugaredLogger
 	asyncMgr *AsyncManager
 
-	// ownerGate is consulted by ValidateAgentToken for every OWNED token.
-	// Installed by the server edition; nil (and therefore inert) in the
-	// personal edition, where every token is ownerless. See
-	// SetAgentTokenOwnerGate.
-	ownerGate     atomic.Value // agentTokenOwnerGate
-	scopeResolver atomic.Value // agentTokenScopeResolver
+	// ownerResolver is consulted by ValidateAgentToken for every OWNED token
+	// — exactly once per authentication (Spec 107 FR-004). Installed by the
+	// server edition; nil (and therefore inert) in the personal edition,
+	// where every token is ownerless. See SetAgentTokenOwnerResolver.
+	ownerResolver atomic.Value // AgentTokenOwnerResolver
 
 	// toolCallMaxResponseBytes and toolCallMaxRecords bound the per-server
 	// tool-call history (#1176). Both are guarded by mu, set once from config

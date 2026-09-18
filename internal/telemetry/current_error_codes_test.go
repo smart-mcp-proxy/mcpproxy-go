@@ -265,7 +265,7 @@ func TestPayloadV11_CurrentErrorCodesReachTheWire(t *testing.T) {
 	js := string(data)
 
 	for _, want := range []string{
-		`"schema_version":12`,
+		`"schema_version":13`,
 		`"MCPX_OAUTH_LOGIN_REQUIRED":2`,
 		`"MCPX_HTTP_DNS_FAILED":1`,
 		`"current_error_codes"`,

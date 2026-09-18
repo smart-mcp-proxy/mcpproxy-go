@@ -13,9 +13,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // OAuthProvider defines the OAuth endpoints and behavior for an identity provider.
+//
+// The three legacy providers (google, github, microsoft) are static endpoint
+// sets. The generic `oidc` provider (Spec 107 FR-020) carries its state in
+// the unexported oidc field: endpoints come from lazy discovery and the ID
+// token is verified against the issuer's JWKS, so AuthURL/TokenURL/
+// UserInfoURL stay empty for it.
 type OAuthProvider struct {
 	Name         string
 	AuthURL      string
@@ -26,17 +34,12 @@ type OAuthProvider struct {
 	SupportsOIDC bool // If true, ID token contains user info
 	SupportsPKCE bool
 
-	// OfflineAccessScopes are extra scopes appended to the authorization request
-	// when offline access (a durable refresh token) is required — e.g.
-	// Microsoft's "offline_access". Empty when the provider asks for offline
-	// access via query parameters instead (see OfflineAuthParams).
-	OfflineAccessScopes []string
-
-	// OfflineAuthParams are extra authorization-URL query parameters that ask the
-	// provider to issue a refresh token — e.g. Google's access_type=offline and
-	// prompt=consent. Google returns a refresh token only when these are present.
-	OfflineAuthParams map[string]string
+	oidc *oidcProvider // non-nil for the generic `oidc` provider only
 }
+
+// IsGenericOIDC reports whether the provider is the discovery-based `oidc`
+// provider with a verified ID token (as opposed to a legacy provider).
+func (p *OAuthProvider) IsGenericOIDC() bool { return p != nil && p.oidc != nil }
 
 // TokenResponse represents the OAuth token exchange response.
 type TokenResponse struct {
@@ -54,13 +57,56 @@ type OAuthUserInfo struct {
 	DisplayName string
 	SubjectID   string // Provider-unique user identifier
 	AvatarURL   string
+
+	// Groups is the verified groups claim of an `oidc` login (Spec 107
+	// FR-008); nil for the legacy providers, which store [].
+	Groups []string
+	// EmailVerified is the `email_verified` claim; nil when absent.
+	EmailVerified *bool
 }
 
-// providerRegistry holds the built-in provider configurations.
-var providerRegistry = map[string]func(tenantID string) *OAuthProvider{
-	"google":    newGoogleProvider,
-	"github":    newGitHubProvider,
-	"microsoft": newMicrosoftProvider,
+// providerRegistry holds the built-in provider factories, keyed by the
+// `server_edition.oauth.provider` value. A factory takes the whole OAuth
+// block (Spec 107 FR-020); the legacy factories read nothing but TenantID.
+// Tests swap an entry to point a provider at a mock; the handler resolves the
+// provider ONCE at construction, so a swap must precede NewOAuthHandler.
+var providerRegistry = map[string]func(*config.ServerEditionOAuthConfig) *OAuthProvider{
+	"google":    func(*config.ServerEditionOAuthConfig) *OAuthProvider { return newGoogleProvider("") },
+	"github":    func(*config.ServerEditionOAuthConfig) *OAuthProvider { return newGitHubProvider("") },
+	"microsoft": func(c *config.ServerEditionOAuthConfig) *OAuthProvider { return newMicrosoftProvider(c.TenantID) },
+	"oidc":      newGenericOIDCProvider,
+}
+
+// newGenericOIDCProvider builds the discovery-based provider. No network I/O
+// happens here: discovery is lazy on the first login.
+func newGenericOIDCProvider(c *config.ServerEditionOAuthConfig) *OAuthProvider {
+	cfg := *c
+	cfg.Scopes = append([]string(nil), c.Scopes...)
+	cfg.AllowedDomains = append([]string(nil), c.AllowedDomains...)
+	if len(cfg.Scopes) == 0 {
+		cfg.Scopes = []string{"openid", "profile", "email"}
+	} else if !containsExactOIDC(cfg.Scopes, "openid") {
+		// FR-020 requires "openid" on every oidc authorization request. This
+		// factory must not assume its input already passed through
+		// config.ServerEditionConfig.ApplyDefaults() — the OAuthHandler is
+		// constructed from the LIVE, non-defaulted block whenever a
+		// ConfigProvider is wired (internal/serveredition/setup.go's
+		// serverEditionConfig provider prefers live.ServerEdition over the
+		// defaulted clone), so an explicit `scopes` list missing "openid"
+		// would otherwise reach the authorization request unchanged and a
+		// compliant IdP would return no ID token.
+		cfg.Scopes = append(append([]string(nil), cfg.Scopes...), "openid")
+	}
+	if cfg.GroupsClaim == "" {
+		cfg.GroupsClaim = "groups"
+	}
+	return &OAuthProvider{
+		Name:         "oidc",
+		Scopes:       cfg.Scopes,
+		SupportsOIDC: true,
+		SupportsPKCE: true,
+		oidc:         newOIDCProvider(&cfg),
+	}
 }
 
 func newGoogleProvider(_ string) *OAuthProvider {
@@ -72,10 +118,6 @@ func newGoogleProvider(_ string) *OAuthProvider {
 		Scopes:       []string{"openid", "email", "profile"},
 		SupportsOIDC: true,
 		SupportsPKCE: true,
-		// Google issues a refresh token only when the authorization request sets
-		// access_type=offline; prompt=consent forces re-issuance on repeat logins.
-		// https://developers.google.com/identity/protocols/oauth2/web-server
-		OfflineAuthParams: map[string]string{"access_type": "offline", "prompt": "consent"},
 	}
 }
 
@@ -104,47 +146,40 @@ func newMicrosoftProvider(tenantID string) *OAuthProvider {
 		Scopes:       []string{"openid", "email", "profile", "User.Read"},
 		SupportsOIDC: true,
 		SupportsPKCE: true,
-		// Microsoft's v2.0 endpoint returns a refresh token only when the request
-		// explicitly includes the offline_access scope.
-		// https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc
-		OfflineAccessScopes: []string{"offline_access"},
 	}
 }
 
 // GetProvider returns a provider configuration by name.
 // For Microsoft, tenantID specifies the Azure AD tenant; empty defaults to "common".
+// The generic `oidc` provider needs the whole OAuth block: use
+// GetProviderFromConfig.
 func GetProvider(name string, tenantID string) (*OAuthProvider, error) {
-	factory, ok := providerRegistry[strings.ToLower(name)]
-	if !ok {
-		return nil, fmt.Errorf("unknown OAuth provider: %q (supported: google, github, microsoft)", name)
-	}
-	return factory(tenantID), nil
+	return GetProviderFromConfig(&config.ServerEditionOAuthConfig{Provider: name, TenantID: tenantID})
 }
 
-// BuildAuthURL constructs the authorization URL with the required query parameters.
-// When offlineAccess is true, the request also asks the provider to issue a
-// durable refresh token (extra scopes and/or query parameters per provider), so
-// that the persisted IdP subject token can later be refreshed instead of forcing
-// re-authentication. offlineAccess is driven by teams.store_idp_tokens; when the
-// feature is off, the URL is identical to before (FR-006).
-func (p *OAuthProvider) BuildAuthURL(clientID, redirectURI, state, codeChallenge string, offlineAccess bool) string {
-	scopes := p.Scopes
-	if offlineAccess && len(p.OfflineAccessScopes) > 0 {
-		scopes = append(append([]string{}, p.Scopes...), p.OfflineAccessScopes...)
+// GetProviderFromConfig resolves the provider named by cfg.Provider through
+// the registry. Construction never touches the network.
+func GetProviderFromConfig(cfg *config.ServerEditionOAuthConfig) (*OAuthProvider, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("OAuth not configured")
 	}
+	factory, ok := providerRegistry[strings.ToLower(cfg.Provider)]
+	if !ok {
+		return nil, fmt.Errorf("unknown OAuth provider: %q (supported: google, github, microsoft, oidc)", cfg.Provider)
+	}
+	return factory(cfg), nil
+}
 
+// BuildAuthURL constructs the authorization URL with the required query
+// parameters. Offline access (a durable refresh token) is never requested: the
+// login flow has no reader for an IdP refresh token (Spec 107 FR-033).
+func (p *OAuthProvider) BuildAuthURL(clientID, redirectURI, state, codeChallenge string) string {
 	params := url.Values{
 		"client_id":     {clientID},
 		"redirect_uri":  {redirectURI},
 		"response_type": {"code"},
-		"scope":         {strings.Join(scopes, " ")},
+		"scope":         {strings.Join(p.Scopes, " ")},
 		"state":         {state},
-	}
-
-	if offlineAccess {
-		for k, v := range p.OfflineAuthParams {
-			params.Set(k, v)
-		}
 	}
 
 	if p.SupportsPKCE && codeChallenge != "" {
@@ -206,53 +241,6 @@ func (p *OAuthProvider) ExchangeCode(ctx context.Context, code, redirectURI, cli
 		return nil, fmt.Errorf("parsing token response: %w", err)
 	}
 
-	return &tokenResp, nil
-}
-
-// RefreshAccessToken exchanges a refresh token for a fresh access token via the
-// refresh_token grant (RFC 6749 §6). Providers may or may not rotate the refresh
-// token; callers should preserve the previous refresh token when the response
-// omits one.
-func (p *OAuthProvider) RefreshAccessToken(ctx context.Context, refreshToken, clientID, clientSecret string) (*TokenResponse, error) {
-	if refreshToken == "" {
-		return nil, fmt.Errorf("refresh token is empty")
-	}
-
-	data := url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {refreshToken},
-		"client_id":     {clientID},
-	}
-	if clientSecret != "" {
-		data.Set("client_secret", clientSecret)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.TokenURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("creating refresh request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("refresh token request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading refresh response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("refresh token failed (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	var tokenResp TokenResponse
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("parsing refresh response: %w", err)
-	}
 	return &tokenResp, nil
 }
 
@@ -492,6 +480,21 @@ func parseIDToken(idToken string) (*OAuthUserInfo, error) {
 		DisplayName: claims.Name,
 		AvatarURL:   claims.Picture,
 	}, nil
+}
+
+// containsExactOIDC reports whether list contains want by exact string
+// match. OAuth/OIDC scope values are case-sensitive (RFC 6749 §3.3), so an
+// operator-configured lookalike of a different case must not be treated as
+// satisfying the FR-020 requirement that "openid" be present on every oidc
+// authorization request (cross-review round 6, chunk 1 P2). Mirrors
+// config.containsExact (unexported in another package).
+func containsExactOIDC(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // base64URLDecode decodes a base64url-encoded string with optional padding.
