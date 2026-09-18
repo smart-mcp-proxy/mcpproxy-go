@@ -444,3 +444,28 @@ func TestRetireSupersededOverrides_RetiresTheWholeStack(t *testing.T) {
 	require.NoError(t, SaveConfig(cfg, path))
 	assert.Equal(t, "compact", readJSON(t, path)["direct_tool_response_mode"])
 }
+
+// Round-5 review finding.
+
+// An apply retires only the overrides its caller actually edited: a field that
+// merely round-tripped a value the merge base already held is not an edit.
+func TestRetireEditedOverrides_IgnoresRoundTrips(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+
+	cfg := DefaultConfig()
+	OverrideForProcess(cfg, FieldReadOnlyMode, OverrideSourceFlag, true)
+	OverrideForProcess(cfg, FieldDirectToolResponseMode, OverrideSourceFlag, "compact")
+
+	base := *cfg
+	base.ReadOnlyMode = false // a merge base that lost the flag (a disk reload)
+	next := base
+	next.ToolsLimit = 42 // the only thing the caller changed
+	RetireEditedOverrides(&base, &next)
+	assert.ElementsMatch(t, []string{"direct_tool_response_mode", "read_only_mode"}, ProcessOverrideFields(),
+		"a round-tripped value is not an edit")
+
+	next.DirectToolResponseMode = "full" // a real edit off the flag
+	RetireEditedOverrides(&base, &next)
+	assert.Equal(t, []string{"read_only_mode"}, ProcessOverrideFields())
+}

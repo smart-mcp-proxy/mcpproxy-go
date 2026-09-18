@@ -1660,8 +1660,13 @@ func (r *Runtime) ReloadConfiguration() error {
 		// The file IS the desired configuration, so a disk reload resets it —
 		// including over an API change that was still waiting for a restart:
 		// whoever edited the file wins, and nothing may keep merging onto a
-		// base the file no longer agrees with.
-		r.desiredCfg = fileCfg
+		// base the file no longer agrees with. The hot serve flags ride along
+		// exactly as they do in the startup desired config (the effective
+		// one): every PUT/PATCH round-trips this document, and a base that
+		// had lost --read-only would hand the file's value back as an "edit".
+		// Restart-gated fields stay the file's, so a pending edit of listen
+		// is still reported as pending.
+		r.desiredCfg = pinRestartGated(fileCfg, pinned)
 		if newSnapshot.Path != "" {
 			r.cfgPath = newSnapshot.Path
 		}

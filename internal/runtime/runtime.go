@@ -1793,9 +1793,11 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// An overridden field this apply moved away from its serve flag / env
 	// value is superseded for this process: retire the override so an edit
 	// BACK to that value later persists as the edit it is. Judged on what was
-	// SAVED (newCfg), not on hotCfg: an edit of listen under --listen ends
-	// that override even though the listener stays bound to the flag's value.
-	config.RetireSupersededOverrides(newCfg)
+	// SAVED (newCfg) against the merge base, not on hotCfg: an edit of listen
+	// under --listen ends that override even though the listener stays bound
+	// to the flag's value, while a round trip of a value the base already
+	// held (the file's listen after a disk reload) is not an edit at all.
+	config.RetireEditedOverrides(baseCfg, newCfg)
 
 	// What this process can actually adopt, always computed against the running
 	// config — never against the desired one `result` was diffed from, which can

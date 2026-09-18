@@ -304,3 +304,58 @@ func TestApplyConfig_EditingListenUnderAFlagEndsTheOverride(t *testing.T) {
 	assert.NotContains(t, config.ProcessOverrideFields(), "listen")
 	assert.Contains(t, config.ProcessOverrideFields(), "read_only_mode", "untouched overrides stay")
 }
+
+// After a disk reload the desired config must still carry the hot flags, as
+// it does at startup, so a GET→PUT round trip of an unrelated edit neither
+// retires --read-only nor hot-applies the file's value over it.
+func TestApplyConfig_UnrelatedEditAfterReloadKeepsHotFlags(t *testing.T) {
+	rt, cfgPath := newOverriddenRuntime(t)
+
+	edited, err := config.ReadFile(cfgPath)
+	require.NoError(t, err)
+	edited.ToolsLimit = 77
+	require.NoError(t, config.SaveConfig(edited, cfgPath))
+	require.NoError(t, rt.ReloadConfiguration())
+
+	desired, err := rt.GetDesiredConfig()
+	require.NoError(t, err)
+	assert.True(t, desired.ReadOnlyMode, "GET /config shows the effective hot flag after a reload")
+	assert.Equal(t, "compact", desired.ToolResponseMode)
+	desired.ToolsLimit = 99 // the unrelated edit
+	_, err = rt.ApplyConfig(desired, cfgPath)
+	require.NoError(t, err)
+
+	live, err := rt.GetConfig()
+	require.NoError(t, err)
+	assert.True(t, live.ReadOnlyMode, "--read-only must survive an unrelated API edit")
+	assert.Equal(t, "compact", live.ToolResponseMode)
+	assert.Equal(t, 99, live.ToolsLimit)
+	assert.Contains(t, config.ProcessOverrideFields(), "read_only_mode")
+
+	m := readConfigJSON(t, cfgPath)
+	assertNoOverridesOnDisk(t, m)
+	assert.Equal(t, float64(99), m["tools_limit"])
+}
+
+// A round trip of the file's listen value after a reload is not an edit of
+// listen: the --listen override survives and is still not persisted.
+func TestApplyConfig_RoundTripAfterReloadKeepsTheListenOverride(t *testing.T) {
+	rt, cfgPath := newOverriddenRuntime(t)
+
+	edited, err := config.ReadFile(cfgPath)
+	require.NoError(t, err)
+	edited.ToolsLimit = 77
+	require.NoError(t, config.SaveConfig(edited, cfgPath))
+	require.NoError(t, rt.ReloadConfiguration())
+
+	desired, err := rt.GetDesiredConfig()
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1:8080", desired.Listen, "restart-gated: the desired config is the file")
+	desired.ToolsLimit = 99
+	_, err = rt.ApplyConfig(desired, cfgPath)
+	require.NoError(t, err)
+
+	assert.Contains(t, config.ProcessOverrideFields(), "listen")
+	require.NoError(t, rt.SaveConfiguration())
+	assert.Equal(t, "127.0.0.1:8080", readConfigJSON(t, cfgPath)["listen"])
+}

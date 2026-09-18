@@ -198,6 +198,8 @@ type processOverride interface {
 	loadedValue() any
 	// supersededBy reports whether live no longer carries the process value.
 	supersededBy(live *Config) bool
+	// movedBetween reports whether the field differs between base and next.
+	movedBetween(base, next *Config) bool
 	// reapply layers the process value back onto a freshly loaded cfg and
 	// returns the entry with its recorded file value refreshed (loaded is
 	// what cfg held before, or fileValue when the caller knows better).
@@ -229,6 +231,11 @@ func (o typedOverride[T]) restore(out, base *Config) {
 // supersededBy reports whether live no longer carries the process value.
 func (o typedOverride[T]) supersededBy(live *Config) bool {
 	return !reflect.DeepEqual(o.field.Get(live), o.process)
+}
+
+// movedBetween reports whether the field differs between base and next.
+func (o typedOverride[T]) movedBetween(base, next *Config) bool {
+	return !reflect.DeepEqual(o.field.Get(base), o.field.Get(next))
 }
 
 func (o typedOverride[T]) reapply(cfg *Config, fileValue any, useFileValue bool) processOverride {
@@ -416,6 +423,29 @@ func RetireSupersededOverrides(live *Config) {
 	defer processOverridesMu.Unlock()
 	for _, o := range effectiveOverridesLocked() {
 		if !o.supersededBy(live) {
+			continue
+		}
+		for _, source := range []OverrideSource{OverrideSourceFlag, OverrideSourceEnv} {
+			delete(processOverrides, overrideKey{o.name(), source})
+		}
+	}
+}
+
+// RetireEditedOverrides forgets every override whose field the caller
+// actually edited: next differs from the override AND from base, the config
+// the edit was merged onto (the desired config for PUT/PATCH /api/v1/config).
+// A field that merely round-tripped a value base already held — the file's
+// listen after a disk reload, say — is not an edit, whatever it equals; a
+// blanket "differs from the override" test would retire the override on the
+// first unrelated save after a reload.
+func RetireEditedOverrides(base, next *Config) {
+	if base == nil || next == nil {
+		return
+	}
+	processOverridesMu.Lock()
+	defer processOverridesMu.Unlock()
+	for _, o := range effectiveOverridesLocked() {
+		if !o.supersededBy(next) || !o.movedBetween(base, next) {
 			continue
 		}
 		for _, source := range []OverrideSource{OverrideSourceFlag, OverrideSourceEnv} {
