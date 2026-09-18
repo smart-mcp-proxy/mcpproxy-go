@@ -8,12 +8,12 @@ import (
 // buildDiscoveryMetadata constructs the OAuth 2.0 Authorization Server Metadata.
 func (s *OAuthTestServer) buildDiscoveryMetadata() *DiscoveryMetadata {
 	metadata := &DiscoveryMetadata{
-		Issuer:                s.issuerURL,
-		AuthorizationEndpoint: s.issuerURL + "/authorize",
-		TokenEndpoint:         s.issuerURL + "/token",
-		JWKSURI:               s.issuerURL + "/jwks.json",
-		ScopesSupported:       s.options.SupportedScopes,
-		ResponseTypesSupported: []string{"code"},
+		Issuer:                        s.issuerURL,
+		AuthorizationEndpoint:         s.issuerURL + "/authorize",
+		TokenEndpoint:                 s.issuerURL + "/token",
+		JWKSURI:                       s.issuerURL + "/jwks.json",
+		ScopesSupported:               s.options.SupportedScopes,
+		ResponseTypesSupported:        []string{"code"},
 		CodeChallengeMethodsSupported: []string{"S256"},
 		TokenEndpointAuthMethodsSupported: []string{
 			"client_secret_basic",
@@ -46,6 +46,22 @@ func (s *OAuthTestServer) buildDiscoveryMetadata() *DiscoveryMetadata {
 		metadata.DeviceAuthorizationEndpoint = s.issuerURL + "/device_authorization"
 	}
 
+	// OpenID Provider Metadata (Options.OIDC): the same document is served on
+	// /.well-known/openid-configuration.
+	if s.options.OIDC {
+		metadata.UserinfoEndpoint = s.issuerURL + "/userinfo"
+		metadata.IDTokenSigningAlgValuesSupported = []string{"RS256"}
+		metadata.SubjectTypesSupported = []string{"public"}
+		metadata.ClaimsSupported = []string{"sub", "iss", "aud", "exp", "iat", "nonce", "email", "email_verified", "name", s.options.GroupsClaim}
+
+		// FR-020 hostile-metadata knob: a plain-http token endpoint on a
+		// non-loopback host (loopback http is legitimately allowed under
+		// allow_insecure_issuer, so the fake's own origin would not do).
+		if s.errorMode().DiscoveryHTTPTokenEndpoint {
+			metadata.TokenEndpoint = "http://idp.invalid/token"
+		}
+	}
+
 	return metadata
 }
 
@@ -70,9 +86,9 @@ func (s *OAuthTestServer) handleDiscovery(w http.ResponseWriter, r *http.Request
 // buildProtectedResourceMetadata constructs RFC 9728 Protected Resource Metadata.
 func (s *OAuthTestServer) buildProtectedResourceMetadata() *ProtectedResourceMetadata {
 	return &ProtectedResourceMetadata{
-		Resource:              s.issuerURL + "/mcp",
-		AuthorizationServers:  []string{s.issuerURL},
-		ScopesSupported:       s.options.SupportedScopes,
+		Resource:               s.issuerURL + "/mcp",
+		AuthorizationServers:   []string{s.issuerURL},
+		ScopesSupported:        s.options.SupportedScopes,
 		BearerMethodsSupported: []string{"header"},
 	}
 }

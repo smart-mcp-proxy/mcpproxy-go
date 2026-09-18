@@ -13,9 +13,17 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // OAuthProvider defines the OAuth endpoints and behavior for an identity provider.
+//
+// The three legacy providers (google, github, microsoft) are static endpoint
+// sets. The generic `oidc` provider (Spec 107 FR-020) carries its state in
+// the unexported oidc field: endpoints come from lazy discovery and the ID
+// token is verified against the issuer's JWKS, so AuthURL/TokenURL/
+// UserInfoURL stay empty for it.
 type OAuthProvider struct {
 	Name         string
 	AuthURL      string
@@ -25,7 +33,13 @@ type OAuthProvider struct {
 	Scopes       []string
 	SupportsOIDC bool // If true, ID token contains user info
 	SupportsPKCE bool
+
+	oidc *oidcProvider // non-nil for the generic `oidc` provider only
 }
+
+// IsGenericOIDC reports whether the provider is the discovery-based `oidc`
+// provider with a verified ID token (as opposed to a legacy provider).
+func (p *OAuthProvider) IsGenericOIDC() bool { return p != nil && p.oidc != nil }
 
 // TokenResponse represents the OAuth token exchange response.
 type TokenResponse struct {
@@ -43,13 +57,56 @@ type OAuthUserInfo struct {
 	DisplayName string
 	SubjectID   string // Provider-unique user identifier
 	AvatarURL   string
+
+	// Groups is the verified groups claim of an `oidc` login (Spec 107
+	// FR-008); nil for the legacy providers, which store [].
+	Groups []string
+	// EmailVerified is the `email_verified` claim; nil when absent.
+	EmailVerified *bool
 }
 
-// providerRegistry holds the built-in provider configurations.
-var providerRegistry = map[string]func(tenantID string) *OAuthProvider{
-	"google":    newGoogleProvider,
-	"github":    newGitHubProvider,
-	"microsoft": newMicrosoftProvider,
+// providerRegistry holds the built-in provider factories, keyed by the
+// `server_edition.oauth.provider` value. A factory takes the whole OAuth
+// block (Spec 107 FR-020); the legacy factories read nothing but TenantID.
+// Tests swap an entry to point a provider at a mock; the handler resolves the
+// provider ONCE at construction, so a swap must precede NewOAuthHandler.
+var providerRegistry = map[string]func(*config.ServerEditionOAuthConfig) *OAuthProvider{
+	"google":    func(*config.ServerEditionOAuthConfig) *OAuthProvider { return newGoogleProvider("") },
+	"github":    func(*config.ServerEditionOAuthConfig) *OAuthProvider { return newGitHubProvider("") },
+	"microsoft": func(c *config.ServerEditionOAuthConfig) *OAuthProvider { return newMicrosoftProvider(c.TenantID) },
+	"oidc":      newGenericOIDCProvider,
+}
+
+// newGenericOIDCProvider builds the discovery-based provider. No network I/O
+// happens here: discovery is lazy on the first login.
+func newGenericOIDCProvider(c *config.ServerEditionOAuthConfig) *OAuthProvider {
+	cfg := *c
+	cfg.Scopes = append([]string(nil), c.Scopes...)
+	cfg.AllowedDomains = append([]string(nil), c.AllowedDomains...)
+	if len(cfg.Scopes) == 0 {
+		cfg.Scopes = []string{"openid", "profile", "email"}
+	} else if !containsExactOIDC(cfg.Scopes, "openid") {
+		// FR-020 requires "openid" on every oidc authorization request. This
+		// factory must not assume its input already passed through
+		// config.ServerEditionConfig.ApplyDefaults() — the OAuthHandler is
+		// constructed from the LIVE, non-defaulted block whenever a
+		// ConfigProvider is wired (internal/serveredition/setup.go's
+		// serverEditionConfig provider prefers live.ServerEdition over the
+		// defaulted clone), so an explicit `scopes` list missing "openid"
+		// would otherwise reach the authorization request unchanged and a
+		// compliant IdP would return no ID token.
+		cfg.Scopes = append(append([]string(nil), cfg.Scopes...), "openid")
+	}
+	if cfg.GroupsClaim == "" {
+		cfg.GroupsClaim = "groups"
+	}
+	return &OAuthProvider{
+		Name:         "oidc",
+		Scopes:       cfg.Scopes,
+		SupportsOIDC: true,
+		SupportsPKCE: true,
+		oidc:         newOIDCProvider(&cfg),
+	}
 }
 
 func newGoogleProvider(_ string) *OAuthProvider {
@@ -94,12 +151,23 @@ func newMicrosoftProvider(tenantID string) *OAuthProvider {
 
 // GetProvider returns a provider configuration by name.
 // For Microsoft, tenantID specifies the Azure AD tenant; empty defaults to "common".
+// The generic `oidc` provider needs the whole OAuth block: use
+// GetProviderFromConfig.
 func GetProvider(name string, tenantID string) (*OAuthProvider, error) {
-	factory, ok := providerRegistry[strings.ToLower(name)]
-	if !ok {
-		return nil, fmt.Errorf("unknown OAuth provider: %q (supported: google, github, microsoft)", name)
+	return GetProviderFromConfig(&config.ServerEditionOAuthConfig{Provider: name, TenantID: tenantID})
+}
+
+// GetProviderFromConfig resolves the provider named by cfg.Provider through
+// the registry. Construction never touches the network.
+func GetProviderFromConfig(cfg *config.ServerEditionOAuthConfig) (*OAuthProvider, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("OAuth not configured")
 	}
-	return factory(tenantID), nil
+	factory, ok := providerRegistry[strings.ToLower(cfg.Provider)]
+	if !ok {
+		return nil, fmt.Errorf("unknown OAuth provider: %q (supported: google, github, microsoft, oidc)", cfg.Provider)
+	}
+	return factory(cfg), nil
 }
 
 // BuildAuthURL constructs the authorization URL with the required query
@@ -412,6 +480,21 @@ func parseIDToken(idToken string) (*OAuthUserInfo, error) {
 		DisplayName: claims.Name,
 		AvatarURL:   claims.Picture,
 	}, nil
+}
+
+// containsExactOIDC reports whether list contains want by exact string
+// match. OAuth/OIDC scope values are case-sensitive (RFC 6749 §3.3), so an
+// operator-configured lookalike of a different case must not be treated as
+// satisfying the FR-020 requirement that "openid" be present on every oidc
+// authorization request (cross-review round 6, chunk 1 P2). Mirrors
+// config.containsExact (unexported in another package).
+func containsExactOIDC(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // base64URLDecode decodes a base64url-encoded string with optional padding.

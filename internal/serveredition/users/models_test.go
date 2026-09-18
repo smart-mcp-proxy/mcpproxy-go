@@ -179,3 +179,19 @@ func TestSession_JSON_RoundTrip(t *testing.T) {
 	assert.Equal(t, original.UserAgent, restored.UserAgent)
 	assert.Equal(t, original.IPAddress, restored.IPAddress)
 }
+
+// Spec 107 FR-020/FR-022 (T040, behaviour-red until T041): the generic `oidc`
+// provider is a valid User.Provider, and `sub` stays mandatory for it — it is
+// the ProviderSubjectID that FR-023 binds the record to.
+func TestUser_Validate_OIDCProviderAdmitted(t *testing.T) {
+	u := NewUser("test@example.com", "Test User", "oidc", "sub-oidc-1")
+	assert.NoError(t, u.Validate(), "provider oidc must be admitted")
+}
+
+func TestUser_Validate_OIDCRequiresSubject(t *testing.T) {
+	u := NewUser("test@example.com", "Test User", "oidc", "")
+	err := u.Validate()
+	require.Error(t, err, "oidc without a subject must be refused")
+	assert.Contains(t, err.Error(), "provider subject ID",
+		"the refusal must be the subject rule, not the provider enum")
+}

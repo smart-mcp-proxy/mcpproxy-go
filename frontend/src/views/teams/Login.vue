@@ -20,12 +20,16 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 
 const authStore = useAuthStore()
 
-// Provider name will come from status API in future; for now show generic
-const providerName = 'your organization'
+// Spec 107 FR-030: the label comes from the public probe
+// (GET /api/v1/auth/provider → {display_name}: oauth.display_name, falling
+// back to the provider family name on the server). The generic fallback only
+// shows while the probe is still in flight.
+const providerName = computed(() => authStore.provider?.display_name || 'your organization')
 
 function handleLogin() {
   authStore.login()

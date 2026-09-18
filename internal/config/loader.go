@@ -61,6 +61,17 @@ func LoadFromFile(configPath string) (*Config, error) {
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
+	// server_edition.oauth.client_id/client_secret are deliberately NOT
+	// expanded here (cross-review round 6, chunk 3 P2, superseding round 1's
+	// in-place expansion): this cfg is what becomes r.cfg/r.desiredCfg and is
+	// round-tripped back to disk by SaveConfig on every later PATCH
+	// /api/v1/config or /config/apply, so resolving the secret into it here
+	// would persist the plaintext value instead of the operator's
+	// `${env:...}` reference. ServerEditionConfig.Validate() (reached just
+	// below) resolves it itself, read-only, to enforce the "required" check
+	// against the actual value; auth.NewOAuthHandler resolves it again on its
+	// own private, never-persisted config clone to get the live secret for
+	// the token endpoint.
 
 	// Create data directory if it doesn't exist.
 	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —
@@ -186,6 +197,9 @@ func LoadWithPath() (*Config, string, error) {
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
+	// server_edition.oauth.client_id/client_secret are deliberately NOT
+	// expanded here — see the matching comment in LoadFromFile (cross-review
+	// round 6, chunk 3 P2).
 
 	// Create data directory if it doesn't exist.
 	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —
@@ -723,6 +737,18 @@ func applyTLSEnvOverrides(cfg *Config) {
 		}
 		cfg.TrustedHosts = hosts
 	}
+
+	// Override trusted proxies (Spec 107 FR-027). Comma-separated CIDRs or
+	// IPs; an empty variable leaves the file value. Entries are validated by
+	// validateTrustedProxies exactly like file values (LoadFromFile validates
+	// after the overrides run).
+	if value := os.Getenv("MCPPROXY_TRUSTED_PROXIES"); strings.TrimSpace(value) != "" {
+		cfg.TrustedProxies = parseTrustedProxiesEnv(value)
+	}
+
+	// Spec 107 FR-025: MCPPROXY_PUBLIC_URL, the one nested server_edition.*
+	// key with an env alias. Build-tagged: a no-op on the personal build.
+	applyServerEditionEnvOverrides(cfg)
 
 	// Override the offline TPA signature-bundle path from environment
 	// (spec 086 FR-019). Explicit MCPPROXY_* alias per the loader convention;

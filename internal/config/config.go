@@ -377,7 +377,13 @@ type Config struct {
 	// Origin header when present (MCP spec DNS-rebinding defense). Empty
 	// (default) keeps full protection. Env override: MCPPROXY_TRUSTED_HOSTS
 	// (comma-separated).
-	TrustedHosts      []string `json:"trusted_hosts,omitempty" mapstructure:"trusted-hosts"`
+	TrustedHosts []string `json:"trusted_hosts,omitempty" mapstructure:"trusted-hosts"`
+	// TrustedProxies lists the CIDRs or IP addresses whose X-Forwarded-For /
+	// X-Real-IP / X-Forwarded-Proto / X-Forwarded-Host headers are believed
+	// (Spec 107 FR-027). Empty (default) trusts nobody. Edition-neutral, live
+	// (hot-reloadable). Env override: MCPPROXY_TRUSTED_PROXIES (comma-separated).
+	// The one reader is ForwardedHeaders; validation is validateTrustedProxies.
+	TrustedProxies    []string `json:"trusted_proxies,omitempty" mapstructure:"trusted-proxies"`
 	ReadOnlyMode      bool     `json:"read_only_mode" mapstructure:"read-only-mode"`
 	DisableManagement bool     `json:"disable_management" mapstructure:"disable-management"`
 	AllowServerAdd    bool     `json:"allow_server_add" mapstructure:"allow-server-add"`
@@ -2622,6 +2628,10 @@ func (c *Config) validateDetailedCore() []ValidationError {
 			})
 		}
 	}
+
+	// Spec 107 FR-027/FR-039: every trusted_proxies entry must parse as a
+	// CIDR or IP on every door (boot, PATCH, /config/apply).
+	errors = append(errors, validateTrustedProxies(c)...)
 
 	// Spec 107 FR-039: the server_edition block is validated (never mutated)
 	// on every door — boot, PATCH and /config/apply. No-op in the personal

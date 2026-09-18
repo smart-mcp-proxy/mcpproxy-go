@@ -1,12 +1,14 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { authApi, type UserProfile } from '@/services/auth-api'
-import api from '@/services/api'
+import { authApi, type ProviderInfo, type UserProfile } from '@/services/auth-api'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<UserProfile | null>(null)
   const loading = ref(true)
   const isTeamsEdition = ref(false)
+  // Spec 107 FR-030: the operator-chosen login label from the public probe;
+  // null on the personal edition. Login.vue renders it.
+  const provider = ref<ProviderInfo | null>(null)
 
   const isAuthenticated = computed(() => !!user.value)
   const isAdmin = computed(() => user.value?.role === 'admin')
@@ -25,13 +27,15 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function probe() {
     try {
-      // Check if this is server edition using the API service (includes API key)
-      const statusRes = await api.getStatus()
-      isTeamsEdition.value = statusRes.data?.edition === 'server'
+      // Spec 107 FR-030 / FR-041: learn the edition from the PUBLIC probe
+      // before any authenticated call. The previous detection went through
+      // GET /api/v1/status with the API key, which a tenant never holds — so
+      // every tenant read as "personal edition" and was bounced off /login.
+      const probe = await authApi.getProvider()
+      provider.value = probe
+      isTeamsEdition.value = probe != null
 
-      if (isTeamsEdition.value) {
-        user.value = await authApi.getMe()
-      }
+      user.value = isTeamsEdition.value ? await authApi.getMe() : null
     } catch {
       // Not authenticated or not server edition
       user.value = null
@@ -68,6 +72,7 @@ export const useAuthStore = defineStore('auth', () => {
     user,
     loading,
     isTeamsEdition,
+    provider,
     isAuthenticated,
     isAdmin,
     displayName,

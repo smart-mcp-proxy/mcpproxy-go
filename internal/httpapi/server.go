@@ -666,6 +666,20 @@ func (s *Server) requireServerOp(op string, next http.HandlerFunc) http.HandlerF
 	}
 }
 
+// trustedProxiesProvider yields the LIVE trusted_proxies list through the
+// controller's config (Spec 107 FR-027), evaluated per request.
+func (s *Server) trustedProxiesProvider() config.TrustedProxiesProvider {
+	return func() []string {
+		if s.controller == nil {
+			return nil
+		}
+		if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+			return cfg.TrustedProxies
+		}
+		return nil
+	}
+}
+
 // setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
 	s.logger.Debug("Setting up HTTP API routes")
@@ -753,6 +767,9 @@ func (s *Server) setupRoutes() {
 		// The deadline is per-route: the long-running routes carry their own
 		// budget, everything else gets defaultAPIRequestTimeout.
 		r.Use(apiRequestTimeout(defaultAPIRequestTimeout, longRunningAPIBudgets()))
+		// Spec 107 T050: {ClientIP, Mount: api} for the audit line, with the
+		// forwarded IP believed only from a trusted proxy (live list).
+		r.Use(TagRequestMeta(reqcontext.MountAPI, s.trustedProxiesProvider()))
 		r.Use(s.apiKeyAuthMiddleware())
 		// Spec 042: Tier 2 telemetry middlewares. Both fetch the registry via
 		// a closure so the registry can be installed after route setup.
@@ -1014,8 +1031,9 @@ func (s *Server) setupRoutes() {
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD
-	s.router.With(s.apiKeyAuthMiddleware()).Method("GET", "/events", http.HandlerFunc(s.handleSSEEvents))
-	s.router.With(s.apiKeyAuthMiddleware()).Method("HEAD", "/events", http.HandlerFunc(s.handleSSEEvents))
+	tagEvents := TagRequestMeta(reqcontext.MountAPI, s.trustedProxiesProvider())
+	s.router.With(tagEvents, s.apiKeyAuthMiddleware()).Method("GET", "/events", http.HandlerFunc(s.handleSSEEvents))
+	s.router.With(tagEvents, s.apiKeyAuthMiddleware()).Method("HEAD", "/events", http.HandlerFunc(s.handleSSEEvents))
 
 	// Note: Swagger UI is mounted directly on the main mux (not via HTTP API server)
 	// See internal/server/server.go for swagger handler registration

@@ -116,7 +116,7 @@ func setupIntegration(t *testing.T, email, name, userSub string, oauthCfg *confi
 	// Register the mock provider in the package-level registry so that
 	// GetProvider("google", ...) returns endpoints pointing at the mock.
 	origFactory := providerRegistry["google"]
-	providerRegistry["google"] = func(_ string) *OAuthProvider {
+	providerRegistry["google"] = func(_ *config.ServerEditionOAuthConfig) *OAuthProvider {
 		return &OAuthProvider{
 			Name:         "google",
 			AuthURL:      mockProvider.server.URL + "/authorize",
@@ -148,7 +148,7 @@ func setupIntegration(t *testing.T, email, name, userSub string, oauthCfg *confi
 
 	// -- Components --
 	sessionMgr := NewSessionManager(store, sessionTTL, false)
-	oauthH := NewOAuthHandler(store, sessionMgr, teamsCfg, hmacKey, logger)
+	oauthH := NewOAuthHandler(store, sessionMgr, StaticServerEditionConfig(teamsCfg), hmacKey, logger)
 	authMW := NewServerEditionAuthMiddleware(sessionMgr, store, StaticServerEditionConfig(teamsCfg), hmacKey, logger)
 
 	// -- Router --
@@ -476,8 +476,10 @@ func TestIntegration_DomainRestriction(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, cbResp.StatusCode,
 		"login from disallowed domain should be rejected with 403")
 
+	// Spec 107 FR-024: the generic page, never the reason.
 	body, _ := io.ReadAll(cbResp.Body)
-	assert.Contains(t, string(body), "domain not allowed")
+	assert.Contains(t, string(body), "Sign-in was not permitted")
+	assert.NotContains(t, string(body), "domain not allowed")
 }
 
 // ---------- Expired session ----------

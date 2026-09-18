@@ -127,6 +127,14 @@ type Service interface {
 	// setter rather than a constructor parameter. Optional — callers without
 	// a scanner can skip the call and ListServers will return SecurityScan=nil.
 	SetScanSummaryEnricher(e SecurityScanEnricher)
+
+	// AddRuntimeWarningSource registers a producer of free-text findings that
+	// Doctor appends to Diagnostics.RuntimeWarnings (and counts in
+	// TotalIssues) on every call — the `mcpproxy doctor` seam for
+	// configuration findings that are not errors (Spec 107 T052:
+	// config.DoctorFindings over the live config; PR-D adds the audit sink's
+	// failure counter). Sources are consulted in registration order.
+	AddRuntimeWarningSource(source func() []string)
 }
 
 // EventEmitter defines the interface for emitting runtime events.
@@ -182,6 +190,33 @@ type service struct {
 	// guarded by scanEnricherMu so wiring is concurrency-safe.
 	scanEnricher   SecurityScanEnricher
 	scanEnricherMu sync.RWMutex
+
+	// warningSources feed Doctor's RuntimeWarnings; guarded like scanEnricher.
+	warningSources   []func() []string
+	warningSourcesMu sync.RWMutex
+}
+
+// AddRuntimeWarningSource registers one Doctor runtime-warning producer. A nil
+// source is ignored.
+func (s *service) AddRuntimeWarningSource(source func() []string) {
+	if source == nil {
+		return
+	}
+	s.warningSourcesMu.Lock()
+	s.warningSources = append(s.warningSources, source)
+	s.warningSourcesMu.Unlock()
+}
+
+// runtimeWarningsFromSources evaluates every registered source.
+func (s *service) runtimeWarningsFromSources() []string {
+	s.warningSourcesMu.RLock()
+	sources := append([]func() []string(nil), s.warningSources...)
+	s.warningSourcesMu.RUnlock()
+	var out []string
+	for _, src := range sources {
+		out = append(out, src()...)
+	}
+	return out
 }
 
 // SetScanSummaryEnricher installs the SecurityScanEnricher used by

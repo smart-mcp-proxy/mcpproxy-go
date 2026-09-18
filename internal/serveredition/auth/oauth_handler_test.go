@@ -3,8 +3,10 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -46,7 +48,7 @@ func setupTestOAuthHandler(t *testing.T, oauthCfg *config.ServerEditionOAuthConf
 	logger := zap.NewNop().Sugar()
 	hmacKey := []byte("test-hmac-key-for-jwt-signing-32b")
 
-	handler := NewOAuthHandler(store, sessionMgr, teamsCfg, hmacKey, logger)
+	handler := NewOAuthHandler(store, sessionMgr, StaticServerEditionConfig(teamsCfg), hmacKey, logger)
 	return handler, store
 }
 
@@ -99,7 +101,7 @@ func registerMockProvider(t *testing.T, mockServer *httptest.Server) {
 
 	originalFactory := providerRegistry["google"]
 
-	providerRegistry["google"] = func(_ string) *OAuthProvider {
+	providerRegistry["google"] = func(_ *config.ServerEditionOAuthConfig) *OAuthProvider {
 		return &OAuthProvider{
 			Name:         "google",
 			AuthURL:      mockServer.URL + "/authorize",
@@ -175,7 +177,7 @@ func TestHandleLogin_StoreIDPTokensTrueStillNeverRequestsOfflineAccess(t *testin
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
 	})
-	handler.config.StoreIDPTokens = true
+	handler.config().StoreIDPTokens = true
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil)
 	w := httptest.NewRecorder()
@@ -318,12 +320,13 @@ func TestHandleCallback_InvalidState(t *testing.T) {
 	resp := w.Result()
 	defer resp.Body.Close()
 
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-
-	var errResp map[string]interface{}
-	err := json.NewDecoder(resp.Body).Decode(&errResp)
+	// Spec 107 FR-024: every refusal (here state_invalid) renders the one
+	// generic 403 page; the reason reaches the log only.
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, errResp["message"], "invalid or expired state")
+	assert.Contains(t, string(body), "Sign-in was not permitted")
+	assert.NotContains(t, string(body), "state_invalid")
 }
 
 func TestHandleCallback_MissingCode(t *testing.T) {
@@ -345,12 +348,39 @@ func TestHandleCallback_MissingCode(t *testing.T) {
 	resp := w.Result()
 	defer resp.Body.Close()
 
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-
-	var errResp map[string]interface{}
-	err := json.NewDecoder(resp.Body).Decode(&errResp)
+	// Spec 107 FR-024: an unknown state is state_invalid on the generic 403
+	// page, never a distinct 400 that discloses which parameter was missing.
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, errResp["message"], "missing code")
+	assert.Contains(t, string(body), "Sign-in was not permitted")
+}
+
+// A broken provider config (h.providerErr set at construction, restart-pinned
+// for the handler's lifetime) must not let the callback bypass the
+// state-first contract the HandleCallback doc comment promises: an unknown
+// state is state_invalid regardless of provider availability, not a 503 that
+// tells an unauthenticated caller OAuth is misconfigured before their state
+// is even looked at (cross-review round 7, chunk 2 P3).
+func TestHandleCallback_BrokenProviderStillStateFirst(t *testing.T) {
+	handler, _ := setupTestOAuthHandler(t, &config.ServerEditionOAuthConfig{
+		Provider: "not-a-real-provider",
+	})
+	require.Error(t, handler.providerErr, "the bad provider name must have failed construction")
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/auth/callback?code=whatever&state=unknown-state", nil)
+	w := httptest.NewRecorder()
+
+	handler.HandleCallback(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode, "state_invalid, not the 503 unavailable page")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Sign-in was not permitted")
 }
 
 func TestHandleCallback_DomainNotAllowed(t *testing.T) {
@@ -384,12 +414,13 @@ func TestHandleCallback_DomainNotAllowed(t *testing.T) {
 	resp := w.Result()
 	defer resp.Body.Close()
 
+	// Spec 107 FR-024: domain_not_allowed renders the generic 403 page; the
+	// reason is never disclosed to the caller.
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
-
-	var errResp map[string]interface{}
-	err := json.NewDecoder(resp.Body).Decode(&errResp)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, errResp["message"], "domain not allowed")
+	assert.Contains(t, string(body), "Sign-in was not permitted")
+	assert.NotContains(t, string(body), "domain")
 }
 
 func TestHandleCallback_ExistingUser(t *testing.T) {
@@ -633,37 +664,76 @@ func TestIsDomainAllowed(t *testing.T) {
 	}
 }
 
-func TestBuildCallbackURL(t *testing.T) {
+// TestCallbackURL pins the Spec 107 FR-025/FR-027 callback resolution: Host
+// and the listener scheme by default; X-Forwarded-Proto/-Host only from a
+// trusted proxy; public_url wins over everything.
+func TestCallbackURL(t *testing.T) {
+	oauthCfg := &config.ServerEditionOAuthConfig{Provider: "google", ClientID: "test-client-id", ClientSecret: "test-client-secret"}
 	tests := []struct {
-		name     string
-		host     string
-		tls      bool
-		xProto   string
-		expected string
+		name      string
+		host      string
+		xProto    string
+		trusted   []string
+		publicURL string
+		expected  string
 	}{
-		{
-			name:     "http localhost",
-			host:     "localhost:8080",
-			expected: "http://localhost:8080/api/v1/auth/callback",
-		},
-		{
-			name:     "with X-Forwarded-Proto",
-			host:     "app.example.com",
-			xProto:   "https",
-			expected: "https://app.example.com/api/v1/auth/callback",
-		},
+		{name: "http localhost", host: "localhost:8080", expected: "http://localhost:8080/api/v1/auth/callback"},
+		{name: "untrusted X-Forwarded-Proto is ignored", host: "app.example.com", xProto: "https", expected: "http://app.example.com/api/v1/auth/callback"},
+		{name: "trusted X-Forwarded-Proto is honoured", host: "app.example.com", xProto: "https", trusted: []string{"192.0.2.1"}, expected: "https://app.example.com/api/v1/auth/callback"},
+		{name: "public_url wins", host: "evil.example", xProto: "http", trusted: []string{"192.0.2.1"}, publicURL: "https://sso.example.com", expected: "https://sso.example.com/api/v1/auth/callback"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			handler, _ := setupTestOAuthHandler(t, oauthCfg)
+			handler.publicURL = tt.publicURL
+			handler.SetTrustedProxiesProvider(func() []string { return tt.trusted })
+
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/callback", nil)
 			req.Host = tt.host
+			req.RemoteAddr = "192.0.2.1:4444"
 			if tt.xProto != "" {
 				req.Header.Set("X-Forwarded-Proto", tt.xProto)
 			}
 
-			result := buildCallbackURL(req)
-			assert.Equal(t, tt.expected, result)
+			assert.Equal(t, tt.expected, handler.CallbackURL(req))
 		})
 	}
+}
+
+// Spec 107 cross-review round 6, chunk 3 P2: NewOAuthHandler must resolve a
+// `${env:...}` server_edition.oauth.client_secret/client_id reference into
+// its own private, never-persisted h.oauthCfg clone — config.LoadFromFile
+// deliberately stops short of resolving it into the Config object that is
+// round-tripped back to disk by SaveConfig on every later PATCH/apply, so
+// this handler-construction step is the only place the actual secret is
+// produced for the token endpoint. Proved by driving a real authorization
+// code exchange through mockOAuthProviderServer's /token endpoint, which
+// only succeeds if the handler sent the resolved value, not the literal
+// "${env:...}" text.
+func TestNewOAuthHandler_ResolvesEnvSecretRefForTokenExchange(t *testing.T) {
+	t.Setenv("MCPPROXY_TEST_HANDLER_OIDC_SECRET", "resolved-secret-value")
+
+	provider := mockOAuthProviderServer(t, "alice@example.com", "Alice", "alice-sub")
+	defer provider.Close()
+
+	oauthCfg := &config.ServerEditionOAuthConfig{
+		Provider:     "google",
+		ClientID:     "${env:MCPPROXY_TEST_HANDLER_OIDC_SECRET}", // exercise both fields
+		ClientSecret: "${env:MCPPROXY_TEST_HANDLER_OIDC_SECRET}",
+	}
+	handler, _ := setupTestOAuthHandler(t, oauthCfg)
+	require.NoError(t, handler.providerErr, "the handler must resolve the reference, not fail construction")
+	require.NotNil(t, handler.oauthCfg)
+	assert.Equal(t, "resolved-secret-value", handler.oauthCfg.ClientSecret,
+		"the handler's own clone must carry the resolved value")
+	assert.Equal(t, "resolved-secret-value", handler.oauthCfg.ClientID)
+
+	handler.provider.TokenURL = provider.URL + "/token"
+	handler.provider.UserInfoURL = provider.URL + "/userinfo"
+
+	tokenResp, err := handler.provider.ExchangeCode(context.Background(), "test-code", "http://localhost/callback",
+		handler.oauthCfg.ClientID, handler.oauthCfg.ClientSecret, "")
+	require.NoError(t, err, "the token exchange must succeed with the resolved secret")
+	assert.Equal(t, "mock-access-token", tokenResp.AccessToken)
 }

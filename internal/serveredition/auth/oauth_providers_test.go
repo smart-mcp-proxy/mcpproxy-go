@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -67,6 +68,33 @@ func TestGetProvider_Microsoft(t *testing.T) {
 		assert.Contains(t, p.AuthURL, "/common/")
 		assert.Contains(t, p.TokenURL, "/common/")
 	})
+}
+
+func TestNewGenericOIDCProvider_ForcesOpenIDScope(t *testing.T) {
+	// FR-020 requires "openid" on every oidc authorization request. An
+	// operator who sets `scopes: ["profile", "email"]` explicitly (no
+	// "openid") must still get it added — the OAuthHandler resolves the
+	// provider from the live, non-defaulted config.ServerEditionConfig
+	// (internal/serveredition/setup.go's serverEditionConfig provider
+	// prefers ConfigProvider()'s live block over the ApplyDefaults'd
+	// clone), so newGenericOIDCProvider itself must not assume its input
+	// has already been through ApplyDefaults.
+	cfg := &config.ServerEditionOAuthConfig{
+		Provider:  "oidc",
+		IssuerURL: "https://idp.example.com",
+		Scopes:    []string{"profile", "email"},
+	}
+	p := newGenericOIDCProvider(cfg)
+	assert.Contains(t, p.Scopes, "openid", "explicit scopes without openid must still get it injected")
+}
+
+func TestNewGenericOIDCProvider_EmptyScopesDefaultsIncludeOpenID(t *testing.T) {
+	cfg := &config.ServerEditionOAuthConfig{
+		Provider:  "oidc",
+		IssuerURL: "https://idp.example.com",
+	}
+	p := newGenericOIDCProvider(cfg)
+	assert.Contains(t, p.Scopes, "openid")
 }
 
 func TestGetProvider_Invalid(t *testing.T) {
