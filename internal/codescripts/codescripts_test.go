@@ -526,6 +526,36 @@ func TestResolveScoped_RefusalsCarryNoHostPath(t *testing.T) {
 		assert.Contains(t, adminErr.Error(), dir)
 		assert.Contains(t, adminErr.Error(), "permission denied", "the administrator keeps the OS error")
 	})
+
+	// This is the one refusal `resolve` returns without ever consulting
+	// `disclose` before the fix: DeriveLanguage's *LanguageMismatchError went
+	// straight out unconditionally, so a scoped caller received the same
+	// Extension/Derived detail an administrator does — and, because the
+	// error's TYPE differs from the non-disclosing NotFoundError's, a caller
+	// who always sends an explicit language no real script could have could
+	// use the type split alone as a found/not-found oracle per guessed name
+	// (a codex round-1 review finding on PR H0's merge with main).
+	t.Run("language mismatch", func(t *testing.T) {
+		dir := t.TempDir()
+		writeScript(t, dir, "typed.ts", "1")
+		warmStoredNames(t, dir)
+
+		_, _, err := ResolveScoped(dir, "typed", LanguageJavaScript)
+		var mismatch *LanguageMismatchError
+		require.True(t, errors.As(fmt.Errorf("wrap: %w", err), &mismatch), "want *LanguageMismatchError, got %T: %v", err, err)
+		assert.True(t, mismatch.Undisclosed)
+		assert.Empty(t, mismatch.Extension, "the scoped form withholds the real extension")
+		assert.Empty(t, mismatch.Derived, "the scoped form withholds the derived language")
+		assert.Equal(t, LanguageJavaScript, mismatch.Requested, "the caller's own input is not host information")
+		assert.NotContains(t, err.Error(), extTS)
+		assert.NotContains(t, err.Error(), LanguageTypeScript)
+
+		_, _, adminErr := Resolve(dir, "typed", LanguageJavaScript)
+		var adminMismatch *LanguageMismatchError
+		require.True(t, errors.As(adminErr, &adminMismatch))
+		assert.Equal(t, extTS, adminMismatch.Extension, "the administrator keeps the extension")
+		assert.Equal(t, LanguageTypeScript, adminMismatch.Derived, "the administrator keeps the derived language")
+	})
 }
 
 func TestResolve_Ambiguous(t *testing.T) {

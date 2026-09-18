@@ -267,14 +267,41 @@ func (e *InvalidError) Error() string {
 
 // LanguageMismatchError reports an explicit `language` that contradicts the
 // script's extension (the extension is authoritative).
+//
+// Extension and Derived are host filesystem facts about the script (its real
+// extension is what a directory listing would show), so — like AmbiguousError
+// and InvalidError — the scoped form withholds them: see NonDisclosing(). Every
+// other refusal `resolve` can return (NotFoundError, AmbiguousError,
+// InvalidError) already threads the `disclose` flag through to its own
+// NonDisclosing() form; this type was the one omission, always returning the
+// full administrator detail regardless of caller kind.
 type LanguageMismatchError struct {
 	Name      string
 	Extension string
 	Requested string
 	Derived   string
+
+	// Undisclosed marks the agent-token form: the message names the caller's
+	// own requested language (its own input, not host information) but
+	// withholds the script's actual extension and derived language — host
+	// filesystem facts a directory listing would show (Spec 105 FR-012).
+	Undisclosed bool
+}
+
+// NonDisclosing returns a copy stripped of the extension/derived language
+// details, for delivery to a scoped (agent-token) caller. The typed identity
+// is preserved, so the REST surface still classifies it as INVALID_LANGUAGE —
+// same as AmbiguousError/InvalidError keeping their own distinct classification
+// as SCRIPT_UNUSABLE rather than being folded into SCRIPT_NOT_FOUND.
+func (e *LanguageMismatchError) NonDisclosing() *LanguageMismatchError {
+	return &LanguageMismatchError{Name: e.Name, Requested: e.Requested, Undisclosed: true}
 }
 
 func (e *LanguageMismatchError) Error() string {
+	if e.Undisclosed {
+		return fmt.Sprintf("stored script %q does not accept requested language %q — omit 'language' and let it be derived automatically",
+			e.Name, e.Requested)
+	}
 	return fmt.Sprintf("stored script %q is a %s file (%s) but language %q was requested — omit 'language' or set it to %q",
 		e.Name, e.Extension, e.Derived, e.Requested, e.Derived)
 }
@@ -419,6 +446,12 @@ func resolve(scriptsDir, name, explicitLanguage string, disclose bool) (source [
 	path := found[0]
 	lang, err := DeriveLanguage(name, filepath.Ext(path), explicitLanguage)
 	if err != nil {
+		if !disclose {
+			var mismatch *LanguageMismatchError
+			if errors.As(err, &mismatch) {
+				return nil, "", mismatch.NonDisclosing()
+			}
+		}
 		return nil, "", err
 	}
 
