@@ -88,10 +88,24 @@ func resolveInstanceID(dir string) string {
 }
 
 // adoptLegacyInstanceID migrates the pre-fix, host-wide shared instance id
-// (if present) into dataDir and removes the legacy file so it can only be
-// adopted once. Returns "" if there is no legacy file to adopt.
+// (if present) into dataDir. Returns "" if there is no legacy file to adopt.
+//
+// Claiming the legacy file happens via os.Rename to a process-unique path
+// rather than a plain read-then-remove: rename atomically fails if the
+// source is already gone, so when two processes race to adopt the same
+// legacy file at upgrade time, exactly one wins and the other correctly
+// falls through to generating its own fresh id. A read-then-remove would let
+// both processes read the same id before either removed the file,
+// recreating the original host-wide-shared-id bug for that pair.
 func adoptLegacyInstanceID(dataDir string) string {
-	data, err := os.ReadFile(legacyInstanceIDPath())
+	claimPath := fmt.Sprintf("%s.claimed-%d", legacyInstanceIDPath(), os.Getpid())
+	if err := os.Rename(legacyInstanceIDPath(), claimPath); err != nil {
+		// No legacy file, or another process already claimed it.
+		return ""
+	}
+	defer os.Remove(claimPath)
+
+	data, err := os.ReadFile(claimPath)
 	if err != nil {
 		return ""
 	}
@@ -99,8 +113,7 @@ func adoptLegacyInstanceID(dataDir string) string {
 	if id == "" {
 		return ""
 	}
-	_ = saveInstanceID(dataDir, id)
-	_ = os.Remove(legacyInstanceIDPath())
+	_ = saveInstanceID(dataDir, id) // Best effort save, same as the fresh-id path below
 	return id
 }
 
