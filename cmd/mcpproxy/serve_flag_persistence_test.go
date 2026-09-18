@@ -148,6 +148,7 @@ func TestServeFlagOverridesAreNotPersisted(t *testing.T) {
 			// The API-key save site: the generated key must land in the file
 			// while the flag override must not.
 			cfg.APIKey = "mcp_test_generated_key"
+			saver.setGeneratedAPIKey(cfg.APIKey)
 			require.NoError(t, saver.save(cfg, path))
 
 			file := readConfigFileJSON(t, path)
@@ -186,4 +187,60 @@ func TestServeSaverPersistsTelemetryWithoutFlagOverrides(t *testing.T) {
 	telemetry, _ := file["telemetry"].(map[string]any)
 	assert.Equal(t, "success", telemetry["last_startup_outcome"])
 	assert.Equal(t, true, telemetry["notice_shown"])
+}
+
+// An API key that came from MCPPROXY_API_KEY is an override like any flag: the
+// saves must not copy that secret into the file. Only a key `serve` generated
+// itself is persisted.
+func TestServeSaverDoesNotPersistEnvAPIKey(t *testing.T) {
+	saveServeGlobals(t)
+	path := writeServeFlagTestConfig(t)
+	configFile, dataDir = path, filepath.Dir(path)
+	t.Setenv("MCPPROXY_API_KEY", "mcp_env_secret")
+
+	cfg, saver, err := loadConfig(newServeFlagTestCmd())
+	require.NoError(t, err)
+	apiKey, wasGenerated, _ := cfg.EnsureAPIKey()
+	require.Equal(t, "mcp_env_secret", apiKey)
+	require.False(t, wasGenerated)
+
+	recordStartupOutcome(cfg, path, "success", saver.save)
+
+	file := readConfigFileJSON(t, path)
+	assert.Nil(t, file["api_key"], "env API key leaked into the config file")
+	telemetry, _ := file["telemetry"].(map[string]any)
+	assert.Equal(t, "success", telemetry["last_startup_outcome"])
+}
+
+// The fatal-serve-error save can fire hours after startup, by which time the
+// runtime has persisted its own changes (servers added via the API, quarantine
+// decisions). That save must layer the telemetry fields onto the CURRENT file,
+// not resurrect the startup-time snapshot.
+func TestServeSaverKeepsChangesTheRuntimePersistedLater(t *testing.T) {
+	saveServeGlobals(t)
+	path := writeServeFlagTestConfig(t)
+	configFile, dataDir = path, filepath.Dir(path)
+
+	cmd := newServeFlagTestCmd()
+	require.NoError(t, cmd.ParseFlags([]string{"--listen", ":0"}))
+	cfg, saver, err := loadConfig(cmd)
+	require.NoError(t, err)
+
+	// Simulate a runtime save that landed after startup: a server was added
+	// and a top-level setting changed.
+	onDisk, err := config.LoadFromFile(path)
+	require.NoError(t, err)
+	onDisk.Servers = append(onDisk.Servers, &config.ServerConfig{Name: "added-later", URL: "http://127.0.0.1:1/mcp", Protocol: "http", Enabled: true})
+	onDisk.ToolsLimit = 7
+	require.NoError(t, config.SaveConfig(onDisk, path))
+
+	recordStartupOutcome(cfg, path, "other_error", saver.save)
+
+	file := readConfigFileJSON(t, path)
+	servers, _ := file["mcpServers"].([]any)
+	require.Len(t, servers, 1, "server added after startup was clobbered")
+	assert.Equal(t, float64(7), file["tools_limit"], "setting changed after startup was clobbered")
+	assert.Equal(t, "127.0.0.1:8080", file["listen"])
+	telemetry, _ := file["telemetry"].(map[string]any)
+	assert.Equal(t, "other_error", telemetry["last_startup_outcome"])
 }
