@@ -444,7 +444,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	cmdAggregateUpstreamPrompts, _ := cmd.Flags().GetBool("aggregate-upstream-prompts")
 
 	// Load configuration first to get logging settings
-	cfg, err := loadConfig(cmd)
+	cfg, saver, err := loadConfig(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
@@ -608,7 +608,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			configPathToSave = config.GetConfigPath(cfg.DataDir)
 		}
 
-		if err := config.SaveConfig(cfg, configPathToSave); err != nil {
+		if err := saver.save(cfg, configPathToSave); err != nil {
 			logger.Warn("Failed to save auto-generated API key to config file",
 				zap.Error(err),
 				zap.String("config_path", configPathToSave))
@@ -637,7 +637,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	srv, err := server.NewServerWithConfigPath(cfg, actualConfigPath, logger)
 	if err != nil {
 		// Spec 042: classify the failure into a startup outcome enum.
-		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err))
+		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err), saver.save)
 		return fmt.Errorf("failed to create server: %w", err)
 	}
 
@@ -645,7 +645,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	// the user has not already seen it). Persist the flag so we never nag
 	// twice.
 	if telemetry.MaybePrintFirstRunNotice(cfg, os.Stderr) {
-		_ = config.SaveConfig(cfg, actualConfigPath)
+		_ = saver.save(cfg, actualConfigPath)
 	}
 
 	// Setup signal handling for graceful shutdown
@@ -692,11 +692,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	logger.Info("Starting mcpproxy server")
 	if err := srv.StartServer(ctx); err != nil {
 		// Spec 042: classify the failure into a startup outcome enum.
-		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err))
+		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err), saver.save)
 		return fmt.Errorf("failed to start server: %w", err)
 	}
 	// Spec 042: clean start.
-	recordStartupOutcome(cfg, actualConfigPath, "success")
+	recordStartupOutcome(cfg, actualConfigPath, "success", saver.save)
 
 	// Wait for context cancellation (signal) or a fatal serve failure
 	select {
@@ -717,7 +717,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// conflicts) and can react via its state machine.
 		logger.Error("Server failed, shutting down", zap.Error(err))
 		// Spec 042: overwrite the optimistic "success" outcome recorded above.
-		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err))
+		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err), saver.save)
 		srv.SetShutdownInfo("error", "")
 		if shutdownErr := srv.Shutdown(); shutdownErr != nil {
 			logger.Error("Error shutting down server", zap.Error(shutdownErr))
@@ -726,7 +726,40 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 }
 
-func loadConfig(cmd *cobra.Command) (*config.Config, error) {
+// serveConfigSaver persists the config during `serve` without leaking the CLI
+// flag overrides that loadConfig and runServer layer onto the in-memory config
+// (--listen, --tray-endpoint, --enable-socket, --tool-response-*, --log-level,
+// --read-only, ...). A flag applies to that one process only; persisting it
+// would make the next unflagged start — or the tray-launched core — inherit a
+// one-off choice (`--listen :0` used to write `"listen": ":0"` into the file,
+// after which the core silently booted in stdio mode).
+type serveConfigSaver struct {
+	// fileCfg is the config exactly as loaded from the file, before any flag
+	// override. Logging is the only pointer runServer mutates in place, so it
+	// is copied; the other pointer fields are shared and never overridden.
+	fileCfg config.Config
+}
+
+func newServeConfigSaver(cfg *config.Config) *serveConfigSaver {
+	s := &serveConfigSaver{fileCfg: *cfg}
+	if cfg.Logging != nil {
+		logging := *cfg.Logging
+		s.fileCfg.Logging = &logging
+	}
+	return s
+}
+
+// save writes the file-loaded values plus the only fields `serve` legitimately
+// generates at runtime: the auto-generated API key and the telemetry state
+// (last_startup_outcome, first-run notice flag).
+func (s *serveConfigSaver) save(cfg *config.Config, path string) error {
+	persisted := s.fileCfg
+	persisted.APIKey = cfg.APIKey
+	persisted.Telemetry = cfg.Telemetry
+	return config.SaveConfig(&persisted, path)
+}
+
+func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 	var cfg *config.Config
 	var err error
 
@@ -739,7 +772,7 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 		// default here; the explicit one used to exit with "no such file or
 		// directory" instead, which made that whole flow unusable.
 		if _, ensureErr := config.EnsureConfigFile(configFile, dataDir); ensureErr != nil {
-			return nil, ensureErr
+			return nil, nil, ensureErr
 		}
 		cfg, err = config.LoadFromFile(configFile)
 	} else {
@@ -747,8 +780,12 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to load configuration: %w", err)
+		return nil, nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
+
+	// Snapshot the file-loaded values before any flag override so the saves
+	// in runServer never persist a one-off CLI choice.
+	saver := newServeConfigSaver(cfg)
 
 	// Override with command line flags ONLY if they were explicitly set
 	if dataDir != "" {
@@ -774,10 +811,10 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 
 	// Validate the configuration
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
+		return nil, nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	return cfg, nil
+	return cfg, saver, nil
 }
 
 // applyToolResponseModeFlag applies the --tool-response-mode serve flag onto

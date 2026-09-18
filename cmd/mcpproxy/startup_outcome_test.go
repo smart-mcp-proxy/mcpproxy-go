@@ -31,7 +31,7 @@ func TestRecordStartupOutcomeMapping(t *testing.T) {
 
 func TestRecordStartupOutcomePersists(t *testing.T) {
 	cfg := &config.Config{}
-	recordStartupOutcome(cfg, "", "success")
+	recordStartupOutcome(cfg, "", "success", config.SaveConfig)
 
 	if cfg.Telemetry == nil {
 		t.Fatal("Telemetry should be initialized")
@@ -41,7 +41,7 @@ func TestRecordStartupOutcomePersists(t *testing.T) {
 	}
 
 	// Idempotent: second call with same outcome leaves the field unchanged.
-	recordStartupOutcome(cfg, "", "success")
+	recordStartupOutcome(cfg, "", "success", config.SaveConfig)
 	if cfg.Telemetry.LastStartupOutcome != "success" {
 		t.Errorf("LastStartupOutcome changed: %q", cfg.Telemetry.LastStartupOutcome)
 	}
