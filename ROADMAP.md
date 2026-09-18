@@ -423,16 +423,18 @@ graph LR
   sso_pr_b_oidc_front_door --> sso_pr_c_group_allowlist
   sso_pr_c_group_allowlist --> sso_pr_d_audit_line
 
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class sso_pr_a_freeze_cut,sso_pr_b_oidc_front_door,sso_pr_c_group_allowlist in_progress;
+  class sso_pr_a_freeze_cut,sso_pr_b_oidc_front_door done;
+  class sso_pr_c_group_allowlist in_progress;
   class sso_pr_d_audit_line todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
-| PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6) | 🔵 In progress | #1287 |
-| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | 🔵 In progress | #1292 |
+| PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6) | 🟢 Done | #1287 |
+| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | 🟢 Done | #1292 |
 | PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4) | 🔵 In progress | #1293 |
 | PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3) | ⚪ Todo | — |
 
@@ -888,7 +890,7 @@ graph LR
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
-| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | In progress | P1 | 0/109 (0%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
+| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | In progress | P1 | 12/109 (11%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
@@ -1034,6 +1036,6 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
-| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `drafted` | 0/109 (0%) |
+| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `in-flight` | 12/109 (11%) |
 | [106-security-residual-fixes](./specs/106-security-residual-fixes/) | `shipped` | 18/19 (95%) |
 | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `in-flight` | 100/126 (79%) |

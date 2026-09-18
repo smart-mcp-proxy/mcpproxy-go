@@ -810,12 +810,12 @@ epics:
     tasks:
       - id: sso-pr-a-freeze-cut
         title: PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6)
-        status: in_progress
+        status: done
         depends_on: []
         pr: "#1287"
       - id: sso-pr-b-oidc-front-door
         title: PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7)
-        status: in_progress
+        status: done
         depends_on: [sso-pr-a-freeze-cut]
         pr: "#1292"
       - id: sso-pr-c-group-allowlist
