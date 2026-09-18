@@ -210,7 +210,17 @@ func (c *Client) listOwnedContainersFiltered(ctx context.Context, includeStopped
 	}
 
 	var owned []ownedContainer
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	// NOT strings.TrimSpace(output) before splitting (codex round 3): Instance
+	// is the LAST templated field, so an attacker-controlled label value
+	// ending in its own literal tab renders as a trailing tab on the last
+	// line of output — indistinguishable from ordinary trailing whitespace,
+	// which TrimSpace (it treats \t as whitespace) would silently strip,
+	// collapsing the row back to the expected field count and admitting the
+	// forged suffix as if it were never there. Splitting on the raw output
+	// and dropping only genuinely empty lines (docker's own trailing
+	// newline) leaves that trailing tab exactly where the attacker put it,
+	// so the exact-count check below still rejects the row.
+	for _, line := range strings.Split(string(output), "\n") {
 		if line == "" {
 			continue
 		}

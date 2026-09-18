@@ -815,7 +815,16 @@ func (m *Manager) readManagedContainers(ctx context.Context, includeStopped bool
 	}
 
 	var rows []managedContainer
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+	// NOT strings.TrimSpace(output) before splitting (codex round 3): Instance
+	// is the LAST templated field, so an attacker-controlled label value
+	// ending in its own literal tab renders as a trailing tab on the last
+	// line of output — TrimSpace (it treats \t as whitespace) would
+	// silently strip it, collapsing the row back to the expected field
+	// count and admitting the forged suffix as if it were never there.
+	// Splitting on the raw output and dropping only genuinely empty lines
+	// (docker's own trailing newline) leaves that tab exactly where the
+	// attacker put it, so the exact-count check below still rejects it.
+	for _, line := range strings.Split(string(output), "\n") {
 		if line == "" {
 			continue
 		}
