@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docs.mcpproxy.app/schemas/audit-line/v1.json",
+  "title": "MCPProxy audit line (schema_version 1)",
+  "description": "One JSON object per line written by the audit sink (Spec 107 FR-013). Three event kinds share one closed key set; per-event required/forbidden keys and the caller identity rules are enforced by the allOf/if/then blocks. Absent optional keys are omitted, never null. Adding a key is a minor change; removing or renaming a key or narrowing a vocabulary bumps schema_version. This published document is CONSUMER-TOLERANT (additionalProperties: true at every object level) so a strict consumer keeps validating across a minor additive change under the same $id; the exact key set is a producer property proven by internal/audit/schema_test.go, which flips additionalProperties to false in memory.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "ts", "event", "origin", "source", "caller"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "ts": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{9}Z$", "description": "RFC 3339, fixed nine fractional digits, UTC (Z) — Go layout 2006-01-02T15:04:05.000000000Z (not RFC3339Nano, which trims trailing zeros); format alone would admit offsets and other precisions" },
+    "event": { "enum": ["authz", "tool_call", "auth_event"] },
+    "request_id": { "type": "string", "minLength": 1, "description": "Activity request id (locally minted on /mcp, mcp.go:837; transport id on REST-originated direct dispatch). Join key to the activity record." },
+    "transport_request_id": { "type": "string", "minLength": 1, "description": "REST only: X-Request-Id. Equals request_id on REST-originated direct dispatch." },
+    "parent_id": { "type": "string", "minLength": 1, "description": "code_execution children: the wrapper's activity request id (a correlation key into the activity log — the wrapper writes no line)." },
+    "session_id": { "type": "string" },
+    "work_session_id": { "type": "string" },
+    "origin": { "enum": ["local", "socket", "remote"], "description": "Listener-derived (transport.ConnectionSource). remote is reserved for Spec 089 FR-010 and never emitted by Spec 107." },
+    "source": { "enum": ["mcp", "api", "internal"], "description": "Mount point, never the X-MCPProxy-Client header. api for every REST-originated line." },
+    "surface": { "enum": ["call_tool_read", "call_tool_write", "call_tool_destructive", "direct", "code_execution", "rest", "login", "logout"] },
+    "caller": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["api_key", "socket", "stdio", "anonymous", "agent_token", "session_user", "session_admin", "internal"], "description": "stdio = the native stdio transport (administrator context, no listener; tagged as its own connection source)." },
+        "user_id": { "type": "string", "minLength": 1 },
+        "user_email": { "type": "string", "format": "email" },
+        "email_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of the normalised (lower-cased, trimmed) email. auth_event only, only when a verified email is known and no user record exists." },
+        "role": { "enum": ["admin", "user"] },
+        "provider": { "enum": ["google", "github", "microsoft", "oidc"] },
+        "token_name": { "type": "string", "minLength": 1 },
+        "token_prefix": { "type": "string", "minLength": 8, "maxLength": 16 },
+        "profile_pin": { "type": "string" }
+      }
+    },
+    "client": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string", "description": "Caller-asserted (MCP clientInfo or X-MCPProxy-Client). Untrusted." },
+        "version": { "type": "string", "description": "Caller-asserted. Untrusted." },
+        "ip": { "type": "string", "description": "RemoteAddr, or the right-most untrusted X-Forwarded-For hop when the peer is in trusted_proxies (FR-027)." }
+      }
+    },
+    "profile": { "type": "string" },
+    "server": { "type": "string", "minLength": 1, "description": "Canonical server name. Recorded even on a non-disclosing refusal (FR-016)." },
+    "tool": { "type": "string", "minLength": 1, "description": "Raw upstream tool name (Spec 105 FR-009 registration identity)." },
+    "operation": { "enum": ["read", "write", "destructive", "unknown"] },
+    "decision": { "enum": ["allow", "deny"] },
+    "reason": {
+      "type": "string",
+      "description": "Event-specific closed vocabulary; see the per-event blocks below. Never prose."
+    },
+    "disclosed": { "type": "boolean", "description": "false when the refusal was non-disclosing to the caller." },
+    "flags": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["provider_rebound", "redirect_rejected", "groups_claim_missing"] },
+      "description": "auth_event only. Non-terminal facts of one attempt; omitted when empty."
+    },
+    "outcome": { "enum": ["success", "error", "blocked", "rejected"] },
+    "error_class": { "enum": ["upstream_error", "upstream_timeout", "upstream_unavailable", "validation", "sanitisation", "internal", "cancelled"] },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "request_bytes": { "type": "integer", "minimum": 0 },
+    "response_bytes": { "type": "integer", "minimum": 0 },
+    "args_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 over the RFC 8785 serialisation of security.StripInternalArgs(args), computed before masking/truncation (FR-015)." },
+    "args_bytes": { "type": "integer", "minimum": 0, "description": "Length of the canonical serialisation the hash was computed over." }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "event": { "const": "authz" } } },
+      "then": {
+        "required": ["request_id", "surface", "server", "tool", "operation", "decision", "reason", "args_sha256", "args_bytes"],
+        "properties": {
+          "surface": { "enum": ["call_tool_read", "call_tool_write", "call_tool_destructive", "direct", "code_execution", "rest"] },
+          "reason": { "enum": ["none", "intent_invalid", "intent_rejected", "profile_scope", "token_scope", "token_permission", "server_quarantined", "tool_pending_approval", "tool_changed_approval", "tool_not_callable", "other"] },
+          "caller": { "properties": { "kind": { "enum": ["api_key", "socket", "stdio", "anonymous", "agent_token", "session_admin", "internal"] } }, "not": { "required": ["email_hash"] } }
+        },
+        "not": { "anyOf": [
+          { "required": ["outcome"] }, { "required": ["error_class"] }, { "required": ["duration_ms"] },
+          { "required": ["request_bytes"] }, { "required": ["response_bytes"] }, { "required": ["flags"] }
+        ] },
+        "allOf": [
+          { "if": { "properties": { "decision": { "const": "allow" } } }, "then": { "properties": { "reason": { "const": "none" } } } },
+          { "if": { "properties": { "decision": { "const": "deny" } } }, "then": { "properties": { "reason": { "not": { "const": "none" } } }, "required": ["disclosed"] } }
+        ]
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "tool_call" } } },
+      "then": {
+        "required": ["request_id", "surface", "server", "tool", "operation", "outcome", "duration_ms", "args_sha256", "args_bytes"],
+        "properties": {
+          "surface": { "enum": ["call_tool_read", "call_tool_write", "call_tool_destructive", "direct", "code_execution", "rest"] },
+          "reason": { "enum": ["output_sanitisation", "output_schema", "limiter_queue_full", "limiter_queue_timeout"] },
+          "caller": { "properties": { "kind": { "enum": ["api_key", "socket", "stdio", "anonymous", "agent_token", "session_admin", "internal"] } }, "not": { "required": ["email_hash"] } }
+        },
+        "not": { "anyOf": [ { "required": ["decision"] }, { "required": ["disclosed"] }, { "required": ["flags"] } ] },
+        "allOf": [
+          { "if": { "properties": { "outcome": { "const": "blocked" } } }, "then": { "required": ["reason"], "properties": { "reason": { "enum": ["output_sanitisation", "output_schema"] } } } },
+          { "if": { "properties": { "outcome": { "const": "rejected" } } }, "then": { "required": ["reason"], "properties": { "reason": { "enum": ["limiter_queue_full", "limiter_queue_timeout"] } } } },
+          { "if": { "properties": { "outcome": { "enum": ["success", "error"] } } }, "then": { "not": { "required": ["reason"] } } },
+          { "if": { "properties": { "outcome": { "const": "error" } } }, "then": { "required": ["error_class"] } },
+          { "if": { "properties": { "outcome": { "not": { "const": "error" } } } }, "then": { "not": { "required": ["error_class"] } } }
+        ]
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "auth_event" } } },
+      "then": {
+        "required": ["request_id", "surface", "reason"],
+        "properties": {
+          "surface": { "enum": ["login", "logout"] },
+          "reason": { "enum": ["ok", "logout", "authorization_denied", "id_token_invalid", "nonce_mismatch", "audience_mismatch", "issuer_mismatch", "token_expired", "email_missing", "email_unverified", "domain_not_allowed", "subject_mismatch", "userinfo_subject_mismatch", "user_disabled", "state_invalid", "provider_error", "discovery_failed", "internal_error"] },
+          "caller": { "properties": { "kind": { "enum": ["session_user", "session_admin", "anonymous"] } }, "not": { "required": ["user_email"] }, "description": "Identity rule (FR-013/FR-017): user_id, else email_hash only for a verified email, else neither — never the raw email." }
+        },
+        "not": { "anyOf": [
+          { "required": ["server"] }, { "required": ["tool"] }, { "required": ["operation"] }, { "required": ["decision"] },
+          { "required": ["disclosed"] }, { "required": ["outcome"] }, { "required": ["error_class"] }, { "required": ["duration_ms"] },
+          { "required": ["request_bytes"] }, { "required": ["response_bytes"] }, { "required": ["args_sha256"] }, { "required": ["args_bytes"] },
+          { "required": ["parent_id"] }, { "required": ["profile"] }
+        ] },
+        "allOf": [
+          { "description": "Pre-identity refusals carry neither user_id nor email_hash (FR-013). provider_error is stage-dependent and handled by the next two rules.",
+            "if": { "properties": { "reason": { "enum": ["state_invalid", "authorization_denied", "discovery_failed", "id_token_invalid", "nonce_mismatch", "audience_mismatch", "issuer_mismatch", "token_expired", "email_missing", "email_unverified"] } } },
+            "then": { "properties": { "caller": { "not": { "anyOf": [ { "required": ["user_id"] }, { "required": ["email_hash"] }, { "required": ["user_email"] } ] } } } } },
+          { "description": "provider_error never reaches the user store: no user_id at either stage; email_hash only when it was raised by the userinfo fetch after a verified ID token (US2.3).",
+            "if": { "properties": { "reason": { "const": "provider_error" } } },
+            "then": { "properties": { "caller": { "not": { "anyOf": [ { "required": ["user_id"] }, { "required": ["user_email"] } ] } } } } },
+          { "description": "Post-identity results (the store was reached and a record exists): a session caller kind carrying user_id (FR-013/FR-017; audit-line-events.md auth_event table). internal_error is stage-dependent and stays unconstrained beyond the per-kind rules.",
+            "if": { "properties": { "reason": { "enum": ["ok", "logout", "subject_mismatch", "user_disabled"] } } },
+            "then": { "properties": { "caller": { "required": ["user_id"], "properties": { "kind": { "enum": ["session_user", "session_admin"] } } } } } },
+          { "description": "Verified email known, store not yet consulted: an anonymous caller carrying email_hash (never user_id).",
+            "if": { "properties": { "reason": { "enum": ["domain_not_allowed", "userinfo_subject_mismatch"] } } },
+            "then": { "properties": { "caller": { "required": ["email_hash"], "properties": { "kind": { "const": "anonymous" } } } } } },
+          { "if": { "properties": { "surface": { "const": "logout" } } }, "then": { "properties": { "reason": { "const": "logout" } } } },
+          { "if": { "properties": { "reason": { "const": "logout" } } }, "then": { "properties": { "surface": { "const": "logout" } } } }
+        ]
+      }
+    },
+    {
+      "description": "caller.user_email and caller.email_hash are mutually exclusive; email_hash never appears beside a user_id.",
+      "properties": { "caller": { "not": { "anyOf": [ { "required": ["user_email", "email_hash"] }, { "required": ["user_id", "email_hash"] } ] } } }
+    },
+    {
+      "description": "Caller identity rules per kind (contracts/audit-line-events.md 'Caller identity rules'): impersonal kinds carry no identity; agent tokens carry token_name/token_prefix; session kinds carry user_id and their matching role and never token fields.",
+      "properties": { "caller": { "allOf": [
+        { "if": { "properties": { "kind": { "enum": ["api_key", "socket", "stdio", "internal"] } } },
+          "then": { "not": { "anyOf": [ { "required": ["user_id"] }, { "required": ["user_email"] }, { "required": ["email_hash"] }, { "required": ["role"] }, { "required": ["provider"] }, { "required": ["token_name"] }, { "required": ["token_prefix"] } ] } } },
+        { "if": { "properties": { "kind": { "const": "anonymous" } } },
+          "then": { "not": { "anyOf": [ { "required": ["user_id"] }, { "required": ["user_email"] }, { "required": ["role"] }, { "required": ["provider"] }, { "required": ["token_name"] }, { "required": ["token_prefix"] } ] } } },
+        { "if": { "properties": { "kind": { "const": "agent_token" } } },
+          "then": { "required": ["token_name", "token_prefix"], "not": { "required": ["email_hash"] } } },
+        { "description": "Owned agent token: user_id implies user_email, role and provider (all-or-none).",
+          "if": { "properties": { "kind": { "const": "agent_token" } }, "required": ["user_id"] },
+          "then": { "required": ["user_email", "role", "provider"] } },
+        { "description": "Ownerless agent token: no user identity at all.",
+          "if": { "properties": { "kind": { "const": "agent_token" } }, "not": { "required": ["user_id"] } },
+          "then": { "not": { "anyOf": [ { "required": ["user_email"] }, { "required": ["role"] }, { "required": ["provider"] } ] } } },
+        { "if": { "properties": { "kind": { "const": "session_user" } } },
+          "then": { "required": ["user_id", "role"], "properties": { "role": { "const": "user" } }, "not": { "anyOf": [ { "required": ["email_hash"] }, { "required": ["token_name"] }, { "required": ["token_prefix"] } ] } } },
+        { "if": { "properties": { "kind": { "const": "session_admin" } } },
+          "then": { "required": ["user_id", "role"], "properties": { "role": { "const": "admin" } }, "not": { "anyOf": [ { "required": ["email_hash"] }, { "required": ["token_name"] }, { "required": ["token_prefix"] } ] } } }
+      ] } }
+    },
+    {
+      "description": "An anonymous caller may carry email_hash only on an auth_event refused after a verified email is known and before the user store was consulted (domain_not_allowed, userinfo_subject_mismatch, or provider_error raised by the userinfo fetch).",
+      "if": { "properties": { "caller": { "properties": { "kind": { "const": "anonymous" } }, "required": ["email_hash"] } } },
+      "then": { "properties": { "event": { "const": "auth_event" }, "reason": { "enum": ["domain_not_allowed", "userinfo_subject_mismatch", "provider_error"] } } }
+    }
+  ],
+  "examples": [
+    { "schema_version": 1, "ts": "2026-09-15T10:00:00.000000001Z", "event": "authz", "request_id": "1757930400000000001-jira-create_issue-7", "session_id": "s-1", "origin": "local", "source": "mcp", "surface": "call_tool_write", "caller": { "kind": "agent_token", "user_id": "01J...", "user_email": "alice@example.com", "role": "user", "provider": "oidc", "token_name": "t1", "token_prefix": "mcp_agt_ab12" }, "client": { "name": "claude-code", "version": "2.1", "ip": "10.0.0.7" }, "server": "jira", "tool": "create_issue", "operation": "write", "decision": "allow", "reason": "none", "args_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "args_bytes": 2 },
+    { "schema_version": 1, "ts": "2026-09-15T10:00:00.250000000Z", "event": "tool_call", "request_id": "1757930400000000001-jira-create_issue-7", "session_id": "s-1", "origin": "local", "source": "mcp", "surface": "call_tool_write", "caller": { "kind": "agent_token", "user_id": "01J...", "user_email": "alice@example.com", "role": "user", "provider": "oidc", "token_name": "t1", "token_prefix": "mcp_agt_ab12" }, "server": "jira", "tool": "create_issue", "operation": "write", "outcome": "success", "duration_ms": 248, "request_bytes": 2, "response_bytes": 512, "args_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "args_bytes": 2 },
+    { "schema_version": 1, "ts": "2026-09-15T10:00:01.000000000Z", "event": "authz", "request_id": "1757930401000000000-prod-db-query-8", "session_id": "s-1", "origin": "local", "source": "mcp", "surface": "call_tool_read", "caller": { "kind": "agent_token", "user_id": "01J...", "user_email": "alice@example.com", "role": "user", "provider": "oidc", "token_name": "t1", "token_prefix": "mcp_agt_ab12" }, "server": "prod-db", "tool": "query", "operation": "read", "decision": "deny", "reason": "token_scope", "disclosed": false, "args_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "args_bytes": 2 },
+    { "schema_version": 1, "ts": "2026-09-15T09:59:00.000000000Z", "event": "auth_event", "request_id": "req-4f2a", "origin": "local", "source": "api", "surface": "login", "caller": { "kind": "session_user", "user_id": "01J...", "role": "user", "provider": "oidc" }, "client": { "ip": "10.0.0.7" }, "reason": "ok", "flags": ["groups_claim_missing"] },
+    { "schema_version": 1, "ts": "2026-09-15T09:59:30.000000000Z", "event": "auth_event", "request_id": "req-9c01", "origin": "local", "source": "api", "surface": "login", "caller": { "kind": "anonymous" }, "client": { "ip": "203.0.113.9" }, "reason": "nonce_mismatch" },
+    { "schema_version": 1, "ts": "2026-09-15T09:59:45.000000000Z", "event": "auth_event", "request_id": "req-b7d2", "origin": "local", "source": "api", "surface": "login", "caller": { "kind": "anonymous", "email_hash": "b36a83701f1c3191e19722d6f90274bc1b5501fe69ebf33313e440fe4b0fe210" }, "client": { "ip": "10.0.0.7" }, "reason": "provider_error" }
+  ]
+}

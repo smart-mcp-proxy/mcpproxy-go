@@ -327,6 +327,26 @@ The pin is shown by `token list` (PROFILE PIN column) and `token show` (Profile 
 
 ## Managing Tokens
 
+### Token Limit
+
+A deployment stores at most **100 agent tokens**, and in the server edition
+each signed-in user may hold at most **25** of them. Revoked tokens still
+occupy a slot until they are permanently deleted, so once a limit is reached,
+creating another token answers `409 Conflict`:
+
+- **Your own quota (server edition, 25 per user).** The message tells you it is
+  your limit; permanently delete one of your unused tokens to free a slot. The
+  quota keeps one user from taking the whole pool, but every stored token still
+  counts toward the deployment limit below, so a deployment whose records add
+  up to 100 refuses the next token for everyone. The quota is checked first: a
+  user already at 25 always sees this message, whatever the deployment total.
+- **The deployment limit (100 stored records).** In the personal edition every
+  token belongs to the one operator, so this is the only limit and deleting one
+  of your tokens frees a slot. In the server edition a caller who is still under
+  their own quota gets this message; it says the limit is shared and points at
+  an administrator, because deleting your own tokens may not free a slot that
+  other users' records are filling.
+
 ### List All Tokens
 
 ```bash

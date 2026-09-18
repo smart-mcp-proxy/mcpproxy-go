@@ -75,10 +75,11 @@ func secretBearingSharedServer() *config.ServerConfig {
 			ClientSecret: sharedOAuthSecret,
 		},
 		AuthBroker: &config.AuthBrokerConfig{
-			Mode:          config.AuthBrokerModeTokenExchange,
-			TokenEndpoint: "https://idp.example.com/token",
-			ClientID:      "broker-client-id",
-			ClientSecret:  sharedBrokerSecret,
+			Mode:                  config.AuthBrokerModeOAuthConnect,
+			AuthorizationEndpoint: "https://idp.example.com/authorize",
+			TokenEndpoint:         "https://idp.example.com/token",
+			ClientID:              "broker-client-id",
+			ClientSecret:          sharedBrokerSecret,
 		},
 		Isolation: &config.IsolationConfig{
 			ExtraArgs: []string{"-e", "API_KEY=" + sharedIsolationArg},

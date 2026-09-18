@@ -254,7 +254,7 @@ func TestSetupAuxiliarySurfacesFollowLiveSharing(t *testing.T) {
 	token, err := teamsauth.GenerateBearerToken(h.hmacKey, user.ID, user.Email, user.DisplayName, "user", user.Provider, time.Hour)
 	require.NoError(t, err)
 	for _, shared := range []bool{true, false, true} {
-		h.setLiveServers([]*config.ServerConfig{{Name: "sharing-sentinel", Shared: shared, AuthBroker: &config.AuthBrokerConfig{Mode: "token_exchange"}}})
+		h.setLiveServers([]*config.ServerConfig{{Name: "sharing-sentinel", Shared: shared, AuthBroker: &config.AuthBrokerConfig{Mode: config.AuthBrokerModeOAuthConnect}}})
 		for _, path := range []string{"/api/v1/user/credentials", "/api/v1/user/diagnostics"} {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			req.Host = "localhost:8080"

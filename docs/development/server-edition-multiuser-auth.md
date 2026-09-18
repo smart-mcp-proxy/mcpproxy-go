@@ -23,12 +23,21 @@ Server edition supports OAuth-based multi-user authentication with Google, GitHu
       "allowed_domains": ["company.com"]
     },
     "session_ttl": "24h",
-    "bearer_token_ttl": "24h",
-    "workspace_idle_timeout": "30m",
-    "max_user_servers": 20
+    "bearer_token_ttl": "24h"
   }
 }
 ```
+
+The former knobs `workspace_idle_timeout` and `max_user_servers` never
+controlled anything and were removed (Spec 107). A config file that still
+carries them loads: the server edition drops each with one startup warning
+(`server_edition.max_user_servers is no longer supported and was ignored`,
+likewise for `workspace_idle_timeout`) and the next write-back omits them;
+`PATCH /api/v1/config` and `/config/apply` refuse them with the same text. The
+personal edition carries the whole `server_edition` block as opaque JSON and
+neither warns nor validates it. `store_idp_tokens` is likewise accepted and
+ignored (one deprecation warning when `true`); see
+[IdP Token Storage](../features/idp-token-storage.md).
 
 ## Server API Endpoints
 
@@ -37,7 +46,7 @@ Server edition supports OAuth-based multi-user authentication with Google, GitHu
 | `GET /api/v1/auth/login` | Public | Initiate OAuth login flow |
 | `GET /api/v1/auth/callback` | Public | OAuth callback (creates session) |
 | `GET /api/v1/auth/me` | Session/JWT | Get current user profile |
-| `POST /api/v1/auth/token` | Session | Generate JWT bearer token for MCP |
+| `POST /api/v1/auth/token` | Session | Mint a user JWT for the REST API and CLI (`/api/v1/user/*`); a JWT is **never** an MCP credential — `/mcp` accepts only agent tokens, the API key and the socket |
 | `POST /api/v1/auth/logout` | Session | Invalidate session |
 | `GET /api/v1/user/servers` | Session/JWT | List user's servers (personal + shared) |
 | `POST /api/v1/user/servers` | Session/JWT | Add personal upstream server |
@@ -50,9 +59,9 @@ Server edition supports OAuth-based multi-user authentication with Google, GitHu
 
 ## Server Architecture
 
-- **Auth flow**: OAuth 2.0 + PKCE → Session cookie (Web UI) + JWT bearer (MCP/API)
-- **Server types**: Shared (config file, single connection) + Personal (DB, per-user connections)
-- **Isolation**: Users see only shared + own personal servers. Activity logs user-scoped.
+- **Auth flow**: OAuth 2.0 + PKCE → Session cookie (Web UI) + JWT bearer (REST API / CLI only). Neither is accepted on `/mcp`; a user reaches tools only through an agent token they own.
+- **Server types**: Shared (config file) + Personal (DB rows a user adds through `POST /api/v1/user/servers`). Every upstream connection is the process's single shared connection — there is no per-user connection, per-user workspace or per-user credential on the tool-call path.
+- **Isolation**: REST listing scope (users see only shared + own personal servers), agent-token `allowed_servers` scope narrowed on every authentication, and user-scoped activity logs.
 - **Admin**: Identified by `admin_emails` config. Sees all activity, manages users.
 - **Build tag**: All server code behind `//go:build server`. Personal edition unaffected.
 
@@ -204,32 +213,36 @@ themselves a token over the admin's whole inventory.
   inventory) closes only when enforcement resolves a server name against an
   owner rather than as a bare string.
 
-#### Scope is a snapshot, not a live check
+#### Scope is stored at mint time and narrowed on every use
 
-`resolveTokenServerScope` runs at mint time and **nothing re-validates at use
-time**. Un-sharing a server, or removing a personal one, does **not** revoke the
-grants already written into live tokens — to actually withdraw access, revoke or
-delete the tokens.
+`resolveTokenServerScope` runs at mint time and writes the entitled list into
+the token record. Since #1272 that stored list is **not the last word**: every
+authentication of an *owned* token intersects the stored `allowed_servers` with
+the owner's current entitlement (narrow-only, fail-closed), so un-sharing a
+server or removing a personal one takes effect on the token's next request
+without a revoke. The stored list is still worth keeping tight — it is the upper
+bound the per-request narrowing starts from — and revoking or deleting the token
+remains the way to withdraw *all* access at once.
 
-Rotation is the one re-check: `POST /api/v1/user/tokens/{name}/regenerate`
-re-runs the entitlement predicate and persists the **narrowed** list
+Rotation persists the re-check: `POST /api/v1/user/tokens/{name}/regenerate`
+re-runs the entitlement predicate and stores the **narrowed** list
 (`narrowScopeToEntitled`), echoing it back in the response. It only ever narrows,
-and it never rejects — refusing to rotate would leave the over-broad grant in
-place and working. A token that is never rotated is never re-checked.
+and it never rejects — refusing to rotate would leave the wider stored list in
+place (harmless at use time, since narrowing happens per request, but
+misleading when read back).
 
 **Tokens minted with a literal `"*"` before this constraint existed.** The
-enforcement layer honours `"*"` unconditionally, so any such token is a standing
-grant over the whole deployment. There is no migration and no admin-facing
-report: `GET /api/v1/user/tokens` is per-caller, and the server edition has no
-cross-tenant token listing (that belongs in `admin_handlers`, as its own
-feature). Until one exists, an operator audits them straight from storage —
-every record in the `agent_tokens` bucket whose `allowed_servers` contains `"*"`
-and whose `user_id` is non-empty — and revokes them; a tenant's own rotation
-also materialises the star into their entitled set. **This does not block the
-release**: the escalation route is closed for every token minted from here on,
-and a pre-existing `"*"` token could only have been minted by a tenant who was
-already able to mint one, i.e. it is not a new exposure. It is a cleanup item to
-carry into the cross-tenant token administration feature.
+enforcement layer honours `"*"` unconditionally, but a tenant-owned token no
+longer reaches it with a star: the per-authentication narrowing above
+materialises a tenant's `"*"` into their current entitled set on every request
+(an administrator's star stays literal), and rotation persists that bounded
+list. Such records still read as `"*"` in storage until rotated. There is no
+migration and no admin-facing report: `GET /api/v1/user/tokens` is per-caller,
+and the server edition has no cross-tenant token listing (that belongs in
+`admin_handlers`, as its own feature). An operator who wants the stored lists
+tidy audits them straight from storage — every record in the `agent_tokens`
+bucket whose `allowed_servers` contains `"*"` and whose `user_id` is non-empty
+— and asks the owner to rotate, or revokes them.
 
 ## Key Directories
 
@@ -240,8 +253,8 @@ carry into the cross-tenant token administration feature.
 | `cmd/mcpproxy/serveredition_register.go` | Server feature registration entry point |
 | `internal/serveredition/auth/` | OAuth, sessions, JWT tokens, middleware |
 | `internal/serveredition/users/` | User/session models, BBolt store |
-| `internal/serveredition/workspace/` | Per-user workspace for personal upstreams |
-| `internal/serveredition/multiuser/` | Multi-user router (**not yet wired** — `NewRouter` has no production caller), tool filtering, activity isolation |
+| `internal/serveredition/multiuser/` | Activity isolation (user-scoped activity queries). The per-user router, tool filter and workspace packages that once lived here had no production caller and were deleted in Spec 107. |
+| `internal/serveredition/broker/` | Per-user `oauth_connect` credential store (stored, not injected — see [Auth Broker](../features/auth-broker.md)) |
 | `internal/serveredition/api/` | Server REST API endpoints (user, admin, auth) |
 
 ## Server Testing
@@ -252,4 +265,4 @@ go build -tags server ./cmd/mcpproxy                        # Build server editi
 go build ./cmd/mcpproxy                                     # Verify personal edition unaffected
 ```
 
-> Note: server-edition `//go:build server` routes are invisible to `swag` / `verify-oas-coverage.sh` / CI lint (which don't pass `--build-tags server`). Lint locally with the tag and document endpoints here.
+> Note: server-edition `//go:build server` routes are invisible to `swag` / `verify-oas-coverage.sh` (which don't pass `--build-tags server`), so document endpoints here. CI lints twice — bare and with `--build-tags server` — and race-tests `internal/server`, `internal/httpapi` and `internal/storage` under the tag (Spec 107 FR-047); run both lint passes locally before pushing (see the Lint block in `CLAUDE.md`).

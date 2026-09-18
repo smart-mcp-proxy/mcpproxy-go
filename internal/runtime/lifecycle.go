@@ -1593,6 +1593,13 @@ func (r *Runtime) ReloadConfiguration() error {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
 
+	// Spec 107 FR-035: a hot reload re-runs the loader, which records (but
+	// cannot log) the removed-key / deprecated-key findings; emit them here,
+	// once per successful reload, with the logger the reload path has.
+	if newSnapshot != nil {
+		config.LogLoadDiagnostics(newSnapshot.Config, r.logger)
+	}
+
 	// Sync the legacy r.cfg/r.cfgPath fields too: Runtime.GetConfig() still
 	// backs GET/PATCH /api/v1/config and other httpapi handlers. Without this,
 	// a disk reload only lands in the configsvc snapshot — the API keeps

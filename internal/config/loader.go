@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -283,10 +284,28 @@ func loadConfigFile(path string, cfg *Config) error {
 		return nil
 	}
 
+	// Spec 107 FR-032/FR-035: the server build drops the removed
+	// server-edition keys / auth_broker modes from the RAW document before the
+	// typed decode and records one LoadDiagnostic each (the loader has no
+	// logger; LogLoadDiagnostics emits them once one exists). The personal
+	// build returns the bytes untouched and records nothing (opaque carriers).
+	data, diagnostics, err := normalizeLoadedDocument(data)
+	if err != nil {
+		return err
+	}
+	cfg.loadDiagnostics = diagnostics
+
 	// First check if api_key is present in the JSON to distinguish between
-	// "not set" vs "explicitly set to empty"
+	// "not set" vs "explicitly set to empty". Decoded with UseNumber: the
+	// legacy "teams" alias below is re-marshaled FROM this map into the
+	// server-edition block, and in the personal build that block is an opaque
+	// carrier whose numbers must keep their decimal text (Spec 107 FR-040) —
+	// a float64 detour would round 2^53+1 or a long decimal before the
+	// carrier ever saw it. Only key presence is read from the map otherwise.
 	var rawConfig map[string]interface{}
-	if err := json.Unmarshal(data, &rawConfig); err != nil {
+	rawDec := json.NewDecoder(bytes.NewReader(data))
+	rawDec.UseNumber()
+	if err := rawDec.Decode(&rawConfig); err != nil {
 		return fmt.Errorf("failed to parse config file for api_key detection: %w", err)
 	}
 
@@ -303,8 +322,8 @@ func loadConfigFile(path string, cfg *Config) error {
 	// legacy "teams" key to "server_edition". An existing config that still uses
 	// "teams" is normalized onto ServerEdition on read. The new key always wins;
 	// only fall back to the legacy key when "server_edition" is absent. This
-	// compiles in both editions because ServerEditionConfig is a struct{} stub
-	// in the personal build (it simply unmarshals to an empty value there).
+	// compiles in both editions because ServerEditionConfig is a raw-JSON
+	// carrier in the personal build (it stores the block verbatim there).
 	if _, hasNew := rawConfig["server_edition"]; !hasNew {
 		if legacy, hasLegacy := rawConfig["teams"]; hasLegacy {
 			if raw, err := json.Marshal(legacy); err == nil {
