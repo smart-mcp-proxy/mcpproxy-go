@@ -861,3 +861,42 @@ func TestContainerMutatorRead_RejectsEmbeddedTabInLabel(t *testing.T) {
 	assert.False(t, ok, "a row with an extra (attacker-controlled) tab must be rejected, not leniently parsed")
 	assert.Empty(t, row.Instance, "no partial row is handed back for a rejected read")
 }
+
+// TestContainerMutatorRead_RejectsNewlineSplicedRow is codex round 4 (PR E):
+// a label VALUE can contain a literal NEWLINE, not just a tab. Since every
+// container's `docker ps --format` output is meant to render as exactly one
+// line, an attacker's own container whose Owner label is
+// "junk\n<forged-id>\tmcpproxy-a-wxyz\ta\t<real-instance>" splits Docker's
+// single rendered row into two: a short, malformed first fragment (missing
+// fields — the attacker's own real id/name/truncated-owner) and a second
+// fragment that, on its own, looks like a complete, independently
+// well-formed row for a container id, name, owner and instance entirely of
+// the attacker's choosing. A parser that skips only the malformed fragment
+// and keeps scanning would accept the forged second line. Every malformed
+// line now poisons the WHOLE read: this proves the read fails closed (not
+// found) rather than falling through to the forged fragment.
+func TestContainerMutatorRead_RejectsNewlineSplicedRow(t *testing.T) {
+	if runtime.GOOS == osWindows {
+		t.Skip("unix shell shim")
+	}
+	own := getInstanceID()
+	const attackerID = "beef00000002"
+	const forgedID = "cafe00000001" // the id this read() call actually asks about
+	// Fragment 1 (attackerID's own truncated row, 3 fields — missing
+	// Instance and Status): "beef00000002\tcustom\tjunk"
+	// Fragment 2 (fully forged, 5 fields, looks legitimate on its own):
+	// "cafe00000001\tmcpproxy-a-wxyz\ta\t<own>\tUp 1 second"
+	raw := attackerID + "\tcustom\tjunk\n" + forgedID + "\tmcpproxy-a-wxyz\ta\t" + own + "\tUp 1 second\n"
+	mut := ContainerMutator{
+		Docker: func(ctx context.Context, _ ...string) *exec.Cmd {
+			return exec.CommandContext(ctx, "printf", "%s", raw)
+		},
+		Owns: func(containerName, ownerLabel, instanceLabel string) bool {
+			return ownsContainer("a", containerName, ownerLabel, instanceLabel)
+		},
+	}
+	row, ok, err := mut.Verify(context.Background(), forgedID)
+	require.NoError(t, err)
+	assert.False(t, ok, "a newline-spliced forged row must be rejected, even though it looks well-formed on its own")
+	assert.Empty(t, row.ID, "no partial row is handed back for a rejected read")
+}

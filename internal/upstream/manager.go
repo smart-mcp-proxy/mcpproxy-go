@@ -814,32 +814,31 @@ func (m *Manager) readManagedContainers(ctx context.Context, includeStopped bool
 		return nil, err
 	}
 
+	// NOT strings.TrimSpace(output) before splitting, and no per-line
+	// "keep the rest" on a bad count (codex rounds 3 and 4: FR-007
+	// instance-scoping fix). Label VALUES have no tab- or
+	// newline-escaping, and this listing's own docker-side filter
+	// deliberately does NOT constrain com.mcpproxy.server (it must match
+	// ANY configured server, checked in Go by core.ContainerOwnedByAny) —
+	// so a container an attacker creates themselves, carrying
+	// com.mcpproxy.managed=true, can give that Owner label a value
+	// engineered to smuggle "<real-value>\t<junk>" past an exact-match
+	// comparison, or worse, containing a literal newline that splits what
+	// Docker rendered as ONE row into what looks like a second,
+	// independently well-formed line naming a DIFFERENT id, name, owner
+	// and instance of the attacker's choosing. A single malformed line
+	// proves this listing's line boundaries are untrustworthy, so ANY bad
+	// count discards the WHOLE listing (report nothing found) rather than
+	// keeping whichever rows still look well-formed.
 	var rows []managedContainer
-	// NOT strings.TrimSpace(output) before splitting (codex round 3): Instance
-	// is the LAST templated field, so an attacker-controlled label value
-	// ending in its own literal tab renders as a trailing tab on the last
-	// line of output — TrimSpace (it treats \t as whitespace) would
-	// silently strip it, collapsing the row back to the expected field
-	// count and admitting the forged suffix as if it were never there.
-	// Splitting on the raw output and dropping only genuinely empty lines
-	// (docker's own trailing newline) leaves that tab exactly where the
-	// attacker put it, so the exact-count check below still rejects it.
 	for _, line := range strings.Split(string(output), "\n") {
 		if line == "" {
 			continue
 		}
-		// EXACTLY 4, never "at least" (codex round, HIGH finding on the
-		// core.Client equivalent of this parse: FR-007 instance-scoping
-		// fix). Label VALUES have no tab-escaping, so a label an attacker
-		// controls (Owner or Instance, on a container they created
-		// themselves) could otherwise smuggle "<real-value>\t<garbage>"
-		// past the exact-match comparisons in core.ContainerOwnedByAny — an
-		// unbounded split rejects that row outright (extra fields) instead
-		// of guessing which prefix was the real one.
 		parts := strings.Split(line, "\t")
 		if len(parts) != 4 {
-			rows = append(rows, managedContainer{ID: parts[0]})
-			continue
+			m.logger.Warn("Discarding managed-container listing: a docker ps row did not parse to the expected field count")
+			return nil, nil
 		}
 		rows = append(rows, managedContainer{ID: parts[0], Name: parts[1], Owner: parts[2], Instance: parts[3]})
 	}

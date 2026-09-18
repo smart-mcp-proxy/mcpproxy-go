@@ -209,7 +209,6 @@ func (c *Client) listOwnedContainersFiltered(ctx context.Context, includeStopped
 		return nil, err
 	}
 
-	var owned []ownedContainer
 	// NOT strings.TrimSpace(output) before splitting (codex round 3): Instance
 	// is the LAST templated field, so an attacker-controlled label value
 	// ending in its own literal tab renders as a trailing tab on the last
@@ -220,25 +219,37 @@ func (c *Client) listOwnedContainersFiltered(ctx context.Context, includeStopped
 	// and dropping only genuinely empty lines (docker's own trailing
 	// newline) leaves that trailing tab exactly where the attacker put it,
 	// so the exact-count check below still rejects the row.
-	for _, line := range strings.Split(string(output), "\n") {
+	lines := strings.Split(string(output), "\n")
+
+	var owned []ownedContainer
+	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		// EXACTLY 6, never "at least": Docker label VALUES are arbitrary
-		// bytes with no tab-escaping, so a label an attacker controls
-		// (Owner or Instance, on a container they created themselves) could
+		// EXACTLY 6, never "at least" (codex round, HIGH: FR-007
+		// instance-scoping fix): Docker label VALUES are arbitrary bytes
+		// with no tab-escaping, so a label an attacker controls (Owner or
+		// Instance, on a container they created themselves) could
 		// otherwise smuggle "<real-value>\t<garbage>" past an exact-match
-		// comparison — the embedded tab reads as one more field boundary,
-		// shifting everything after it, so a `< 6` (at-least) check would
-		// still accept parts[4]/parts[5] as exactly the real value with the
-		// forged suffix silently absorbed into the row that follows. A
-		// genuine row from ownedContainerFormat's 5 literal tabs always
-		// splits to exactly 6 fields; any other count is unparseable or
-		// tampered and the row is dropped rather than guessed at (codex
-		// round, HIGH: FR-007 instance-scoping fix).
+		// comparison. A genuine row from ownedContainerFormat's 5 literal
+		// tabs always splits to exactly 6 fields.
+		//
+		// A wrong count here is not just THIS row's problem (codex round
+		// 4): a label value can also contain a literal NEWLINE, splitting
+		// what Docker rendered as ONE container's row into what LOOKS like
+		// two lines — one usually short (missing fields, caught here) and
+		// one that can be padded with the label's own extra tabs to land
+		// on exactly 6 fields, forging an entire fabricated row for an id,
+		// name, owner and instance of the attacker's choosing. Once any
+		// line's boundaries are known to be untrustworthy, no other line's
+		// field count can be trusted either — the WHOLE listing is
+		// discarded (fail closed: report nothing found) rather than
+		// quietly keeping the rows that still look well-formed.
 		parts := strings.Split(line, "\t")
 		if len(parts) != 6 {
-			continue
+			c.logger.Warn("Discarding container listing: a docker ps row did not parse to the expected field count",
+				zap.String("server", c.config.Name))
+			return nil, nil
 		}
 		row := ownedContainer{ID: parts[0], Name: parts[1], Status: parts[2], Image: parts[3], Owner: parts[4], Instance: parts[5]}
 		if !ownsContainer(c.config.Name, row.Name, row.Owner, row.Instance) {
@@ -410,20 +421,32 @@ func (cm ContainerMutator) read(ctx context.Context, id string) (ContainerRow, b
 	if err != nil {
 		return ContainerRow{}, false, err
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		// EXACTLY 5, never "at least" (codex round, HIGH: FR-007
-		// instance-scoping fix): containerRowFormat's 4 literal tabs always
-		// split a genuine row to exactly 5 fields, Status possibly empty
-		// (a pre-label container docker never started, though that never
-		// reaches here) but still present as its own field. Label VALUES
-		// have no tab-escaping, so a label an attacker controls (Owner or
-		// Instance, on a container they created themselves) could otherwise
-		// smuggle "<real-value>\t<garbage>" past an exact-match comparison
-		// with the embedded tab read as one more field boundary — an
-		// unbounded split rejects that row outright (extra fields, wrong
-		// count) instead of accepting a plausible-looking prefix.
+	// NOT strings.TrimSpace(output) before splitting, and no per-line
+	// "keep scanning" on a bad count (codex rounds 3 and 4: FR-007
+	// instance-scoping fix). containerRowFormat's 4 literal tabs always
+	// split a genuine row to exactly 5 fields, Status possibly empty (a
+	// pre-label container docker never started, though that never reaches
+	// here) but still present as its own field. Docker label VALUES have
+	// no tab- or newline-escaping: --filter id= only constrains this to
+	// the container Docker itself knows as id, but that container can be
+	// one the caller (a Docker-capable actor) created themselves, with an
+	// Owner or Instance label engineered to smuggle "<real-value>\t<junk>"
+	// past an exact-match comparison, or — worse — containing a literal
+	// newline that splits what Docker rendered as ONE row into what looks
+	// like a second, independently well-formed line for a DIFFERENT id of
+	// the attacker's choosing. A single malformed line proves this read's
+	// line boundaries are untrustworthy, so ANY bad count fails the WHOLE
+	// read closed (not found) rather than continuing to look for a
+	// plausible match elsewhere in the output.
+	for _, line := range strings.Split(string(output), "\n") {
+		if line == "" {
+			continue
+		}
 		parts := strings.Split(line, "\t")
-		if len(parts) != 5 || parts[0] != id {
+		if len(parts) != 5 {
+			return ContainerRow{}, false, nil
+		}
+		if parts[0] != id {
 			continue
 		}
 		return ContainerRow{ID: parts[0], Name: parts[1], Owner: parts[2], Instance: parts[3], Status: parts[4]}, true, nil
