@@ -28,6 +28,11 @@ func NewTruncator(limit int) *Truncator {
 	return &Truncator{limit: limit}
 }
 
+// Limit returns the character limit this truncator applies.
+func (t *Truncator) Limit() int {
+	return t.limit
+}
+
 // Truncate analyzes and truncates a tool response if it exceeds the limit.
 // The record array the resulting cache handle pages is inferred from the
 // payload; callers that already know which array their truncation banner

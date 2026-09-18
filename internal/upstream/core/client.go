@@ -90,14 +90,6 @@ type Client struct {
 	// when multiple requests are in-flight simultaneously
 	sseRequestMu sync.Mutex
 
-	// brokeredAuth, when set, is the per-user upstream credential the gateway
-	// resolved for this (user, server) connection. The headers-auth strategy
-	// injects it into the configured outbound header, replacing any inbound or
-	// statically-configured auth — the gateway/IdP token is never forwarded
-	// (spec 074 FR-016/FR-017). nil for non-brokered upstreams (unchanged
-	// behaviour).
-	brokeredAuth *proxytransport.BrokeredAuth
-
 	// retryAfter collects the `Retry-After` hints this upstream's HTTP/SSE
 	// responses carry. mcp-go flattens a 429 into an error string long before
 	// the connection state machine sees it, so the hint is captured by a

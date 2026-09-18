@@ -32,6 +32,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -263,6 +264,17 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	)
 	rt.SetManagementService(mgmtService)
 
+	// Spec 107 T052: configuration findings for `mcpproxy doctor`, read from
+	// the LIVE config on every Doctor call (never the boot pointer).
+	mgmtService.AddRuntimeWarningSource(func() []string {
+		return config.DoctorFindings(rt.Config())
+	})
+	// Spec 107 FR-029: an explicit require_mcp_auth: false under an enabled
+	// server-edition block is overridden, never refused — one boot notice.
+	if config.RequireMCPAuthOverridden(cfg) {
+		logger.Warn(config.MsgRequireMCPAuthOverridden)
+	}
+
 	server := &Server{
 		logger:              logger,
 		runtime:             rt,
@@ -345,6 +357,17 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	return server, nil
 }
 
+// trustedProxiesProvider yields the LIVE trusted_proxies list (Spec 107
+// FR-027) through the runtime's config snapshot, evaluated per request.
+func (s *Server) trustedProxiesProvider() config.TrustedProxiesProvider {
+	return func() []string {
+		if cfg := s.runtime.Config(); cfg != nil {
+			return cfg.TrustedProxies
+		}
+		return nil
+	}
+}
+
 // mcpAuthMiddleware wraps the MCP endpoint handler to inject AuthContext into the
 // request context. The MCP endpoint is not behind the REST API key middleware, so
 // this middleware extracts tokens from the request and creates the appropriate
@@ -354,19 +377,21 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 // AuthContext with server/permission scopes. For the global API key, it sets an
 // admin AuthContext.
 //
-// When config.RequireMCPAuth is true, unauthenticated requests are rejected with
-// 401 Unauthorized. When false (default), unauthenticated requests get admin
-// context for backward compatibility. Tray connections always bypass auth.
+// When config.EffectiveRequireMCPAuth is true (require_mcp_auth, or an enabled
+// server-edition block — Spec 107 FR-029), unauthenticated requests are
+// rejected with 401 Unauthorized. When false (default), unauthenticated
+// requests get admin context for backward compatibility. Tray connections
+// always bypass auth.
 func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := httpapi.ExtractToken(r)
 		if token == "" {
 			// Check if MCP auth is required
-			if cfg := s.runtime.Config(); cfg != nil && cfg.RequireMCPAuth {
+			if cfg := s.runtime.Config(); config.EffectiveRequireMCPAuth(cfg) {
 				// Tray connections are always trusted, even with require_mcp_auth
 				source := transport.GetConnectionSource(r.Context())
 				if source == transport.ConnectionSourceTray {
-					ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+					ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AdminContext(), auth.CredentialKindSocket))
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -378,7 +403,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			// without a token. Checked BEFORE the anonymous fallback so a
 			// socket caller is not downgraded (issue #1148).
 			if transport.GetConnectionSource(r.Context()) == transport.ConnectionSourceTray {
-				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+				ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AdminContext(), auth.CredentialKindSocket))
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -391,7 +416,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			// operation that worked before still works; only the
 			// secret-REVEALING check (AuthContext.CanRevealSecrets) tells the
 			// two apart.
-			ctx := auth.WithAuthContext(r.Context(), auth.AnonymousContext())
+			ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AnonymousContext(), auth.CredentialKindAnonymous))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -452,7 +477,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 		// Check if it matches the global API key — treat as admin
 		cfg := s.runtime.Config()
 		if cfg != nil && cfg.APIKey != "" && token == cfg.APIKey {
-			ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+			ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AdminContext(), auth.CredentialKindAPIKey))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -460,13 +485,13 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 		// Tray connections are trusted
 		source := transport.GetConnectionSource(r.Context())
 		if source == transport.ConnectionSourceTray {
-			ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
+			ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AdminContext(), auth.CredentialKindSocket))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
 		// Token provided but doesn't match anything
-		if cfg := s.runtime.Config(); cfg != nil && cfg.RequireMCPAuth {
+		if cfg := s.runtime.Config(); config.EffectiveRequireMCPAuth(cfg) {
 			// When auth is required, reject unrecognized tokens
 			http.Error(w, `{"error":"Invalid authentication token"}`, http.StatusUnauthorized)
 			return
@@ -474,9 +499,18 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 		// Backward compatibility: allow through with an ANONYMOUS admin
 		// context. The token proved nothing, so it is no more of an identity
 		// than no token at all (issue #1148).
-		ctx := auth.WithAuthContext(r.Context(), auth.AnonymousContext())
+		ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AnonymousContext(), auth.CredentialKindAnonymous))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// credentialKindContext records which FR-001 credential source authenticated
+// an /mcp request (Spec 107, auth.CredentialKind). An agent token's context
+// carries agent_token from auth.AgentToken.AuthContext itself; the admin and
+// anonymous constructors are stamped here.
+func credentialKindContext(ac *auth.AuthContext, kind auth.CredentialKind) *auth.AuthContext {
+	ac.CredentialKind = kind
+	return ac
 }
 
 // createSelectiveWebUIProtectedHandler serves the Web UI without authentication.
@@ -2848,7 +2882,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	//
 	// streamingNoDeadline is the OUTERMOST wrapper on every MCP route so a tool
 	// call slower than http.Server.WriteTimeout is not truncated (GH #965).
-	mcpHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(streamableServer))))
+	// Spec 107 T050: tag every MCP-mount request with {ClientIP, Mount: mcp}
+	// for the audit line (the mount is fixed here, never by a header).
+	tagMCP := httpapi.TagRequestMeta(reqcontext.MountMCP, s.trustedProxiesProvider())
+	mcpHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(streamableServer)))))
 	mux.Handle("/mcp", mcpHandler)
 	mux.Handle("/mcp/", mcpHandler) // Handle trailing slash
 
@@ -2857,21 +2894,21 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// /mcp/all → direct mode (all tools with serverName__toolName naming)
 	directStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeDirect),
 		clientFacingStreamableOptions()...)
-	directHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(directStreamable))))
+	directHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(directStreamable)))))
 	mux.Handle("/mcp/all", directHandler)
 	mux.Handle("/mcp/all/", directHandler)
 
 	// /mcp/code → code_execution mode (JS orchestration)
 	codeExecStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeCodeExecution),
 		clientFacingStreamableOptions()...)
-	codeExecHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(codeExecStreamable))))
+	codeExecHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(codeExecStreamable)))))
 	mux.Handle("/mcp/code", codeExecHandler)
 	mux.Handle("/mcp/code/", codeExecHandler)
 
 	// /mcp/call → retrieve_tools mode (focused: retrieve_tools + call_tool_read/write/destructive)
 	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
 		clientFacingStreamableOptions()...)
-	callToolHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(callToolStreamable))))
+	callToolHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(callToolStreamable)))))
 	mux.Handle("/mcp/call", callToolHandler)
 	mux.Handle("/mcp/call/", callToolHandler)
 
@@ -2880,7 +2917,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// so that agent-token scope can compose downstream with the profile scope.
 	profileStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
 		clientFacingStreamableOptions()...)
-	profileHandler := s.streamingNoDeadline(s.hostValidationMiddleware(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable)))))
+	profileHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable))))))
 	mux.Handle("/mcp/p/", profileHandler)
 	mux.Handle("/mcp/p", profileHandler)
 
@@ -2932,7 +2969,13 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Wire client connect service
 	if cfg := s.runtime.Config(); cfg != nil {
 		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey).
-			WithRequireMCPAuth(cfg.RequireMCPAuth).
+			// The effective value (Spec 107 FR-029: forced true under an
+			// enabled server_edition regardless of the raw config), never the
+			// raw field — otherwise a server-edition deployment with
+			// require_mcp_auth: false writes credential-less client configs
+			// while /mcp itself still demands one, so every generated client
+			// gets a 401 on its first real call (cross-review round 3).
+			WithRequireMCPAuth(config.EffectiveRequireMCPAuth(cfg)).
 			// Read listen/api_key/require_mcp_auth LIVE so a runtime toggle (the
 			// /mcp middleware already honors require_mcp_auth per-request) is
 			// reflected in what connect writes, instead of the startup snapshot
@@ -2942,7 +2985,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				if c == nil {
 					return "", "", false
 				}
-				return c.Listen, c.APIKey, c.RequireMCPAuth
+				return c.Listen, c.APIKey, config.EffectiveRequireMCPAuth(c)
 			})
 		httpAPIServer.SetConnectService(connectSvc)
 
@@ -3025,6 +3068,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			im := core.NewIsolationManager(liveCfg.DockerIsolation)
 			return string(im.ResolveMode(sc))
 		})
+		secService.SetInstanceID(core.GetInstanceID())
 		secService.SetEmitter(s.runtime)
 		secService.SetServerInfoProvider(&configServerInfoProvider{
 			cfg:        cfg,
@@ -3096,7 +3140,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	s.logger.Info("Registered pprof endpoints", zap.String("path", "/debug/pprof/"))
 
 	// Swagger UI (OpenAPI documentation) - mounted directly on main mux for /swagger/* access
-	swaggerHandler := httpapi.SetupSwaggerHandler(s.logger.Sugar())
+	swaggerHandler := httpapi.SetupSwaggerHandler(s.logger.Sugar(), s.trustedProxiesProvider())
 	mux.Handle("/swagger/", swaggerHandler)
 	s.logger.Info("Registered Swagger UI endpoint", zap.String("swagger_endpoint", "/swagger/*"))
 
@@ -3547,6 +3591,48 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 		return nil, err
 	}
 
+	resultMaps := s.searchResultsToMaps(results)
+	s.logger.Debug("Search completed", zap.String("query", query), zap.Int("results", len(resultMaps)))
+	return resultMaps, nil
+}
+
+// SearchToolsScoped is SearchTools for a scoped caller (Spec 107 T075a): the
+// same ranked search, filtered to servers inScope admits BEFORE the top-K
+// cut, so a hidden higher-ranking server cannot displace an entitled hit and
+// the caller's window is the top-`limit` of what they may see. Quarantine
+// withholding is applied inside the predicate too, so a quarantined server's
+// hits never occupy a slot either. Unscoped callers keep SearchTools untouched.
+func (s *Server) SearchToolsScoped(query string, limit int, inScope func(serverName string) bool) ([]map[string]interface{}, error) {
+	s.logger.Debug("SearchToolsScoped called", zap.String("query", query), zap.Int("limit", limit))
+
+	if s.runtime.IndexManager() == nil {
+		return nil, fmt.Errorf("index manager not initialized")
+	}
+	if inScope == nil {
+		return []map[string]interface{}{}, nil
+	}
+
+	withheld := s.quarantinedServerFilter()
+	visible := func(serverName string) bool {
+		return !withheld(serverName) && inScope(serverName)
+	}
+	results, err := s.runtime.IndexManager().SearchToolsScoped(query, limit, visible)
+	if err != nil {
+		s.logger.Error("Failed to search tools (scoped)", zap.String("query", query), zap.Error(err))
+		return nil, err
+	}
+
+	resultMaps := s.searchResultsToMaps(results)
+	if resultMaps == nil {
+		resultMaps = []map[string]interface{}{}
+	}
+	s.logger.Debug("Scoped search completed", zap.String("query", query), zap.Int("results", len(resultMaps)))
+	return resultMaps, nil
+}
+
+// searchResultsToMaps converts index hits to the /api/v1/index/search map
+// shape, applying the server-level quarantine gate (issue #877).
+func (s *Server) searchResultsToMaps(results []*config.SearchResult) []map[string]interface{} {
 	// SECURITY (issue #877): the MCP retrieve_tools path never surfaces a
 	// quarantined server's tools — their descriptions/schemas are withheld
 	// because they are the Tool Poisoning Attack vector quarantine exists to
@@ -3593,9 +3679,7 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 			resultMaps = append(resultMaps, resultMap)
 		}
 	}
-
-	s.logger.Debug("Search completed", zap.String("query", query), zap.Int("results", len(resultMaps)))
-	return resultMaps, nil
+	return resultMaps
 }
 
 // quarantinedServerFilter returns a predicate reporting whether a search hit

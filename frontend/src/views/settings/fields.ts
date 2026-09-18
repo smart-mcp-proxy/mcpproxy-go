@@ -34,6 +34,12 @@ export interface DangerSpec {
 // which are validated from the control type). Centralised in validateField.
 export type ValueKind = 'hostport' | 'bytesize' | 'cpu' | 'hostname' | 'url' | 'secretkey'
 
+// A `[]string` config key edited through a textarea. The form shows a joined
+// string ('comma' = "a, b", 'lines' = one entry per line) and the PATCH
+// partial carries the split, trimmed array — see listToText / textToList.
+// Without this the textarea would PATCH a plain string into a []string key.
+export type ListKind = 'comma' | 'lines'
+
 export interface SettingField {
   key: string // dot-path, e.g. "docker_isolation.enabled"
   label: string
@@ -54,6 +60,8 @@ export interface SettingField {
   // for `omitempty` fields whose zero value is meaningful (the serialization
   // modes: "" means "full"). See normalizeFieldDefaults below for why.
   defaultValue?: string
+  // Set for a textarea that edits a []string key (see ListKind).
+  listKind?: ListKind
 }
 
 export interface SettingsAccordion {
@@ -235,6 +243,18 @@ export const SECURITY_FIELDS: SettingField[] = [
         'Binding to a non-loopback address (e.g. 0.0.0.0) exposes mcpproxy to your network. Make sure “Require API key for MCP clients” is enabled. Continue?',
     },
   },
+  {
+    // Spec 107 FR-027 (edition-neutral, hot-reloaded): X-Forwarded-For /
+    // X-Forwarded-Proto / X-Forwarded-Host / X-Real-IP are honoured only when
+    // the direct peer is in this list. Empty = trust nobody.
+    key: 'trusted_proxies',
+    label: 'Trusted reverse proxies',
+    help: 'One CIDR or IP address per line (e.g. 10.0.0.0/8). Forwarded headers (X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host, X-Real-IP) are honoured only from these peers; leave empty when mcpproxy is not behind a proxy. Applies without a restart.',
+    control: 'textarea',
+    listKind: 'lines',
+    optional: true,
+    placeholder: '10.0.0.0/8',
+  },
 ]
 
 // ---- Section 2: General ----
@@ -321,10 +341,102 @@ export const GENERAL_FIELDS: SettingField[] = [
 // so old configs hydrate the form while edits always save under `server_edition`.
 export const SERVER_EDITION_TAB_LABEL = 'Server Edition'
 export const SERVER_EDITION_SECTION_TITLE = '👥 Server Edition'
+//
+// Spec 107 PR-B (T054): this row set is asserted EXACTLY by
+// `tests/unit/settings-server-edition-wording.spec.ts`. The `Settings`
+// disposition paragraph of `specs/107-server-edition-sso-hardening/contracts/
+// config-keys.md` is the authority. Every row is restart-pinned (bound at
+// login-handler construction). Deliberately absent, Raw-JSON-only:
+// `access.*` (no map control), `oauth.allow_insecure_issuer` (a loopback-only
+// development toggle that must not look like a normal setting), and the
+// retained keys with no row today (`admin_emails`, `session_ttl`,
+// `bearer_token_ttl`, `oauth.client_id`, `oauth.tenant_id`,
+// `oauth.allowed_domains` — SC-007, no UI widening). NEVER a row:
+// `oauth.client_secret` and `credential_encryption_key` (secrets; `${env:}` /
+// `MCPPROXY_CRED_KEY`) and `store_idp_tokens` (deprecated no-op).
 export const SERVER_EDITION_FIELDS: SettingField[] = [
   { key: 'server_edition.enabled', label: 'Enable multi-user mode', control: 'toggle', restart: true },
-  { key: 'server_edition.oauth.provider', label: 'OAuth provider', control: 'select', options: ['', 'google', 'github', 'microsoft'].map((v) => ({ value: v, label: v || '(none)' })) },
-  { key: 'server_edition.max_user_servers', label: 'Max servers per user', control: 'number', min: 0 },
+  {
+    key: 'server_edition.oauth.provider',
+    label: 'OAuth provider',
+    help: 'Identity provider family. Choose "oidc" for any OpenID Connect provider (Keycloak, Okta, Entra, Authentik, …) and set the issuer URL below. Client id and secret are set in the config file (use ${env:…} for the secret).',
+    control: 'select',
+    options: ['', 'google', 'github', 'microsoft', 'oidc'].map((v) => ({ value: v, label: v || '(none)' })),
+    restart: true,
+  },
+  {
+    key: 'server_edition.oauth.display_name',
+    label: 'Login button label',
+    help: 'Shown on the sign-in page as "Sign in with …". Defaults to the provider family name. Up to 64 characters.',
+    control: 'text',
+    optional: true,
+    placeholder: 'Acme SSO',
+    restart: true,
+  },
+  {
+    key: 'server_edition.oauth.issuer_url',
+    label: 'OIDC issuer URL',
+    help: 'Required when the provider is "oidc". Must be https (plain http is accepted only for a loopback host with allow_insecure_issuer set in the config file). Discovery runs at <issuer>/.well-known/openid-configuration and the discovered issuer must match byte-for-byte.',
+    control: 'text',
+    valueKind: 'url',
+    optional: true,
+    placeholder: 'https://login.example.com/realms/acme',
+    restart: true,
+  },
+  {
+    key: 'server_edition.oauth.scopes',
+    label: 'OIDC scopes',
+    help: 'Comma-separated scopes requested at login. "openid" is always added. Default: openid, profile, email.',
+    control: 'textarea',
+    listKind: 'comma',
+    optional: true,
+    placeholder: 'openid, profile, email',
+    restart: true,
+  },
+  {
+    key: 'server_edition.oauth.groups_claim',
+    label: 'Groups claim',
+    help: 'Name of the ID-token / userinfo claim that carries the user’s groups (used by the access map). Default: groups.',
+    control: 'text',
+    optional: true,
+    placeholder: 'groups',
+    restart: true,
+  },
+  {
+    key: 'server_edition.oauth.email_verified_policy',
+    label: 'Email verification policy',
+    help: 'refuse_false = reject a login whose ID token says email_verified: false (default); require_true = also reject when the claim is missing; ignore = never check.',
+    control: 'select',
+    options: [
+      { value: 'refuse_false', label: 'refuse_false — reject unverified (default)' },
+      { value: 'require_true', label: 'require_true — require the claim to be true' },
+      { value: 'ignore', label: 'ignore — never check' },
+    ],
+    restart: true,
+  },
+  {
+    key: 'server_edition.public_url',
+    label: 'Public URL',
+    help: 'The absolute origin users reach mcpproxy at behind a reverse proxy (scheme://host[:port], no path). Used to build the OAuth callback and to decide whether the session cookie is Secure. MCPPROXY_PUBLIC_URL overrides it.',
+    control: 'text',
+    valueKind: 'url',
+    optional: true,
+    placeholder: 'https://mcp.example.com',
+    restart: true,
+  },
+  {
+    key: 'server_edition.session_cookie_secure',
+    label: 'Session cookie Secure attribute',
+    help: 'auto = Secure when the public URL is https or TLS is on (default). "false" cannot be combined with an https public URL or TLS.',
+    control: 'select',
+    defaultValue: 'auto',
+    options: [
+      { value: 'auto', label: 'auto — follow the public URL / TLS (default)' },
+      { value: 'true', label: 'true — always Secure' },
+      { value: 'false', label: 'false — never Secure (plain-http development only)' },
+    ],
+    restart: true,
+  },
 ]
 
 // isBlankInstructions returns true when a saved instructions value is empty /
@@ -545,8 +657,8 @@ export function aliasServerEdition(cfg: any): any {
 export function hydrateConfigState(cfg: any): { working: any; original: any; raw: any } {
   const clone = (v: any) => (v == null ? v : JSON.parse(JSON.stringify(v)))
   return {
-    working: normalizeFieldDefaults(aliasServerEdition(clone(cfg))),
-    original: normalizeFieldDefaults(aliasServerEdition(clone(cfg))),
+    working: normalizeListFields(normalizeFieldDefaults(aliasServerEdition(clone(cfg)))),
+    original: normalizeListFields(normalizeFieldDefaults(aliasServerEdition(clone(cfg)))),
     raw: clone(cfg),
   }
 }
@@ -557,6 +669,47 @@ export function normalizeFieldDefaults(cfg: any): any {
     if (f.defaultValue == null) continue
     const cur = getPath(cfg, f.key)
     if (cur == null || cur === '') setPath(cfg, f.key, f.defaultValue)
+  }
+  return cfg
+}
+
+/**
+ * Render a []string value as the textarea text of a list-kind field. Anything
+ * that is not an array (already text, null) is returned unchanged.
+ */
+export function listToText(kind: ListKind, value: unknown): unknown {
+  if (!Array.isArray(value)) return value
+  const items = value.map((v) => String(v))
+  return kind === 'lines' ? items.join('\n') : items.join(', ')
+}
+
+/**
+ * Parse the textarea text of a list-kind field back into a trimmed []string.
+ * Commas and newlines both separate entries for either kind (an operator who
+ * pastes "a,b" into a one-per-line box still gets two entries); blank entries
+ * are dropped, so a cleared textarea is an empty list, never a string. An
+ * array is returned as-is.
+ */
+export function textToList(_kind: ListKind, value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((v) => String(v))
+  if (value == null) return []
+  return String(value)
+    .split(/[\n,]/)
+    .map((v) => v.trim())
+    .filter((v) => v !== '')
+}
+
+/**
+ * Turn every list-kind field's array into its textarea text. Applied to BOTH
+ * the working copy and the last-saved snapshot (see hydrateConfigState) so the
+ * dirty comparison stays string-vs-string. Mutates and returns cfg.
+ */
+export function normalizeListFields(cfg: any): any {
+  if (cfg == null || typeof cfg !== 'object') return cfg
+  for (const f of allCatalogFields()) {
+    if (!f.listKind) continue
+    const cur = getPath(cfg, f.key)
+    if (Array.isArray(cur)) setPath(cfg, f.key, listToText(f.listKind, cur))
   }
   return cfg
 }
@@ -584,10 +737,15 @@ export function setPath(obj: any, path: string, value: any): void {
 
 // buildPartial assembles a nested object containing ONLY the given dot-path
 // keys, read from `source`. This is the partial payload sent to PATCH /config.
+// A list-kind field (see ListKind) is converted from its textarea text back
+// into the []string the Go side expects.
 export function buildPartial(source: any, dirtyKeys: string[]): Record<string, any> {
   const out: Record<string, any> = {}
+  const fields = allCatalogFields()
   for (const key of dirtyKeys) {
-    setPath(out, key, getPath(source, key))
+    const f = fields.find((x) => x.key === key)
+    const val = getPath(source, key)
+    setPath(out, key, f?.listKind ? textToList(f.listKind, val) : val)
   }
   return out
 }

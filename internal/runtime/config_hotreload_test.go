@@ -1100,3 +1100,30 @@ func TestDetectConfigChanges_RoutingModeNormalization(t *testing.T) {
 		assert.Contains(t, result.ChangedFields, "routing_mode")
 	})
 }
+
+// Spec 107 FR-027 (T047): trusted_proxies is live — reported as a changed
+// field, never restart-pinned; nil vs empty is not a change (omitempty).
+func TestDetectConfigChanges_TrustedProxies(t *testing.T) {
+	mk := func(list []string) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			TrustedProxies: list,
+		}
+	}
+
+	t.Run("trusted_proxies change detected live", func(t *testing.T) {
+		result := DetectConfigChanges(mk(nil), mk([]string{"10.0.0.0/8"}))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "trusted_proxies")
+		assert.False(t, result.RequiresRestart, "trusted_proxies is hot-reloadable")
+		assert.True(t, result.AppliedImmediately)
+	})
+
+	t.Run("nil vs empty slice not reported", func(t *testing.T) {
+		assert.NotContains(t, DetectConfigChanges(mk(nil), mk([]string{})).ChangedFields, "trusted_proxies")
+	})
+
+	t.Run("unchanged list not reported", func(t *testing.T) {
+		assert.NotContains(t, DetectConfigChanges(mk([]string{"::1"}), mk([]string{"::1"})).ChangedFields, "trusted_proxies")
+	})
+}

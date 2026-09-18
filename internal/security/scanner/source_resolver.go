@@ -8,10 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/dockernaming"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
@@ -41,6 +41,33 @@ type SourceResolver struct {
 	// Pass-2 goroutine's ResolveFullSource increment is race-free.
 	resolveCalls           atomic.Int64
 	resolveFullSourceCalls atomic.Int64
+
+	// instanceID, when set, scopes findServerContainer's ownership check to
+	// containers labeled com.mcpproxy.instance=<instanceID> (the value
+	// internal/upstream/core.GetInstanceID() assigns at container creation).
+	// It is injected via SetInstanceID by the wiring layer (internal/server)
+	// rather than imported directly — internal/upstream/core sits downstream
+	// of this package in the import graph (core -> storage/oauth -> ... ->
+	// security/scanner), so a direct import would cycle. Left empty in tests
+	// that construct a SourceResolver directly, in which case the instance
+	// filter is omitted.
+	//
+	// KNOWN LIMITATION: this closes cross-instance ownership hijack only
+	// between mcpproxy processes that actually receive distinct instance IDs
+	// — e.g. separate hosts pointed at one shared/remote Docker daemon.
+	// core.GetInstanceID() persists its ID to a single file under
+	// os.TempDir(), which is shared by every process on the SAME host/user,
+	// so two mcpproxy processes running side by side on one machine (e.g. a
+	// scratch dev instance next to the main app — a workflow this repo's own
+	// tooling supports) currently receive the SAME instance ID and are not
+	// distinguished by this filter. That is a pre-existing property of
+	// GetInstanceID() (already relied on, with the same gap, by
+	// internal/upstream/manager.go's container cleanup) — fixing it means
+	// changing what gets written onto the label at container creation and
+	// every reader of that label, which is out of scope for this
+	// scanner-focused fix. This filter still fully closes the label/name
+	// injection this package's ownership check was vulnerable to.
+	instanceID string
 }
 
 // NewSourceResolver creates a new SourceResolver
@@ -51,6 +78,12 @@ func NewSourceResolver(logger *zap.Logger) *SourceResolver {
 // SetFetchPackageSource toggles the published-package-source fetch fallback.
 func (r *SourceResolver) SetFetchPackageSource(enabled bool) {
 	r.fetchPackageSource = enabled
+}
+
+// SetInstanceID scopes container-ownership lookups to this mcpproxy instance.
+// See the instanceID field doc for why this is injected rather than imported.
+func (r *SourceResolver) SetInstanceID(instanceID string) {
+	r.instanceID = instanceID
 }
 
 // dockerCmd builds an exec.Cmd that invokes the resolved `docker` binary.
@@ -98,6 +131,7 @@ type ServerInfo struct {
 type ResolvedSource struct {
 	SourceDir      string   // Host directory containing source files
 	ContainerID    string   // Docker container ID (if applicable)
+	ContainerOwner string   // Server name that owns ContainerID, per the com.mcpproxy.server label (verified, not just name-matched)
 	ContainerImage string   // Docker image reference (for "container_image" input)
 	ServerURL      string   // URL for mcp_connection input (HTTP/SSE servers)
 	Method         string   // How source was resolved: "docker_extract", "container_image", "working_dir", "local_path", "url", "manual"
@@ -158,10 +192,11 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 				zap.String("source_dir", sourceDir),
 			)
 			return &ResolvedSource{
-				SourceDir:   sourceDir,
-				ContainerID: containerID,
-				Method:      "docker_extract",
-				Cleanup:     cleanup,
+				SourceDir:      sourceDir,
+				ContainerID:    containerID,
+				ContainerOwner: info.Name,
+				Method:         "docker_extract",
+				Cleanup:        cleanup,
 			}, nil
 		}
 		r.logger.Warn("Failed to extract from container, trying fallback",
@@ -458,32 +493,82 @@ func dirLooksLikeSource(dir string) bool {
 	return found
 }
 
-// findServerContainer finds the running Docker container for a server.
-// MCPProxy names containers as: mcpproxy-<sanitized-server-name>-<suffix>.
-// The sanitization MUST match the one used to name the container at launch
-// (internal/upstream/core), hence the shared dockernaming package — official
-// registry names like "com.pulsemcp/google-flights" keep their dots and would
-// otherwise never match (MCP-2123).
+// findServerContainer finds the running Docker container owned by a server.
+// Every container mcpproxy creates is labeled at launch (internal/upstream/core/instance.go)
+// with com.mcpproxy.managed=true, com.mcpproxy.instance=<this process's
+// persisted instance id>, and com.mcpproxy.server=<the exact, unsanitized
+// server name>. Ownership here is established ENTIRELY through Docker's own
+// `--filter label=key=value`, which the daemon matches against the raw label
+// value server-side — never by matching container names or by rendering a
+// label into --format text for us to re-parse.
+//
+// Two earlier approaches were tried and rejected here:
+//
+//  1. `docker ps --filter name=mcpproxy-<sanitized>-` is a SUBSTRING match,
+//     not an anchored one: servers whose sanitized names collide as a prefix
+//     (server "a" vs "a-b"/"a_b"/"a/b", which all sanitize toward a token "a"
+//     is a prefix of) could resolve to a different server's container, whose
+//     filesystem would then be exec'd/copied/diffed and reported under the
+//     wrong server.
+//
+//  2. Re-verifying name-filtered candidates by requesting
+//     `{{.Label "com.mcpproxy.server"}}` in --format text and parsing
+//     tab/newline-delimited "records" is ITSELF exploitable: mcpproxy server
+//     names are validated only for non-empty and no ':' (internal/config/config.go),
+//     so a name containing an embedded newline+tab forges an extra line that a
+//     naive parser attributes to whatever "owner" follows the tab — redirecting
+//     extraction to an attacker-chosen container ID. Verified against a real
+//     Docker daemon: a server named "a-b\n<attacker-id>\ta" makes
+//     `docker ps --filter name=mcpproxy-a- --format '{{.ID}}\t{{.Label ...}}'`
+//     print a second, fabricated line reading "<attacker-id>\ta", which an
+//     exact-string-equality check on the parsed owner accepts for server "a".
+//
+// `--filter label=` has neither problem: it compares the argv value against
+// the raw label bytes directly with no intermediate text format for a crafted
+// label to escape (verified: filtering by the exact embedded-newline value
+// matches only the genuine container; filtering by any truncated prefix of it
+// matches nothing).
 func (r *SourceResolver) findServerContainer(ctx context.Context, serverName string) (string, error) {
-	// Use docker ps with filter to find matching containers
-	cmd := r.dockerCmd(ctx, "ps",
-		"--filter", fmt.Sprintf("name=mcpproxy-%s-", dockernaming.SanitizeServerName(serverName)),
-		"--format", "{{.ID}}",
-		"--no-trunc",
-	)
+	args := []string{"ps",
+		"--filter", "label=com.mcpproxy.managed=true",
+		"--filter", fmt.Sprintf("label=com.mcpproxy.server=%s", serverName),
+	}
+	if r.instanceID != "" {
+		args = append(args, "--filter", fmt.Sprintf("label=com.mcpproxy.instance=%s", r.instanceID))
+	}
+	args = append(args, "--format", "{{.ID}}", "--no-trunc")
+	cmd := r.dockerCmd(ctx, args...)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("docker ps failed: %w", err)
 	}
 
-	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-	if len(lines) == 0 || lines[0] == "" {
+	containerID := firstContainerID(stdout.String())
+	if containerID == "" {
 		return "", fmt.Errorf("no running container found for server %s", serverName)
 	}
+	return containerID, nil
+}
 
-	// Return first match
-	return lines[0], nil
+// containerIDPattern matches a Docker container ID as printed by `docker ps
+// --format {{.ID}}`: lowercase hex, anywhere from a short prefix (12) up to
+// the full (64-char) form `--no-trunc` normally emits.
+var containerIDPattern = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
+
+// firstContainerID returns the first line of `docker ps --format {{.ID}}`
+// output that has the shape of a real container ID. The ID is the one field
+// in this pipeline Docker guarantees is a safe opaque hex token, but it still
+// arrives as free-form command output, so a line that does not match the
+// expected shape is discarded rather than trusted blindly.
+func firstContainerID(psOutput string) string {
+	for _, line := range strings.Split(strings.TrimSpace(psOutput), "\n") {
+		line = strings.TrimSpace(line)
+		if containerIDPattern.MatchString(line) {
+			return line
+		}
+	}
+	return ""
 }
 
 // extractFromContainer extracts changed files from a running container.
@@ -953,10 +1038,11 @@ func (r *SourceResolver) ResolveFullSource(ctx context.Context, info ServerInfo)
 				zap.String("source_dir", sourceDir),
 			)
 			return &ResolvedSource{
-				SourceDir:   sourceDir,
-				ContainerID: containerID,
-				Method:      "docker_extract",
-				Cleanup:     cleanup,
+				SourceDir:      sourceDir,
+				ContainerID:    containerID,
+				ContainerOwner: info.Name,
+				Method:         "docker_extract",
+				Cleanup:        cleanup,
 			}, nil
 		}
 		r.logger.Warn("Failed to extract full source from container, trying fallback",

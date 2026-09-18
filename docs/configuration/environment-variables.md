@@ -38,6 +38,7 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCPPROXY_TRUSTED_HOSTS` | Comma-separated `Host` header allowlist for loopback listeners behind a reverse proxy (see [Reverse Proxy Deployment](/operations/reverse-proxy)) | - |
+| `MCPPROXY_TRUSTED_PROXIES` | Comma-separated CIDRs or IP addresses whose `X-Forwarded-For` / `X-Real-IP` / `X-Forwarded-Proto` / `X-Forwarded-Host` headers are honoured (overrides `trusted_proxies`). Any other peer's forwarded headers are ignored. An entry that is neither a CIDR nor an IP is refused at boot with `trusted_proxies[N] "value" is not a valid CIDR or IP address`, exactly like a file value. See [trusted_proxies](/operations/reverse-proxy#trusted_proxies-forwarded-headers) | - (trust nobody) |
 | `MCPPROXY_TLS_ENABLED` | Enable TLS/HTTPS | `false` |
 | `MCPPROXY_TLS_CERT` | Path to TLS certificate | - |
 | `MCPPROXY_TLS_KEY` | Path to TLS private key | - |
@@ -51,6 +52,18 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCPPROXY_DISABLE_OAUTH` | Disable OAuth for testing | `false` |
+
+### Server Edition (SSO)
+
+These are read only by the Server edition binary (`mcpproxy-server`, the Docker
+image); the Personal edition ignores them. Every other `server_edition.*` key is
+file-only — reference secrets with `${env:NAME}` inside the config file instead
+(see [Server Edition](./config-file.md#server-edition)).
+
+| Variable | Config key | Description | Default |
+|----------|------------|-------------|---------|
+| `MCPPROXY_PUBLIC_URL` | `server_edition.public_url` | Absolute origin users reach the deployment at (`https://mcp.example.com`, no path). Sole source of the IdP `redirect_uri`, the connect-flow base URL and the `Secure` cookie decision when set. Overrides the file value; validated with the same message (`server_edition.public_url must be an absolute origin (scheme://host[:port]) with no path`) | - |
+| `MCPPROXY_CRED_KEY` | `server_edition.credential_encryption_key` | Key for encrypting per-user upstream credentials at rest (the `oauth_connect` broker — see [Auth Broker](/features/auth-broker)). Used only when the config key is empty; an explicit config value wins | - |
 
 ### Browser Detection
 

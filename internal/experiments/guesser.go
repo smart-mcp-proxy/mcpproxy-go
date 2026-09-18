@@ -345,11 +345,14 @@ func (g *Guesser) cacheInfo(cacheKey string, info *RepositoryInfo) {
 		return
 	}
 
-	// Cache for 6 hours
-	if err := g.cacheManager.Store(cacheKey, "repo_guess", map[string]interface{}{
+	// Stamped internal (Spec 105 FR-002): read_cache refuses the entry for
+	// every caller without evicting it, and the ungated Get above keeps
+	// serving it. An unstamped entry would be legacy provenance — invalidated
+	// by the first read_cache probe of this guessable key.
+	if err := g.cacheManager.StoreAs(cacheKey, "repo_guess", map[string]interface{}{
 		"package_name": info.PackageName,
 		"type":         string(info.Type),
-	}, string(data), "", 1); err != nil {
+	}, string(data), "", 1, cache.Authorization{CallerKind: cache.CallerKindInternal}); err != nil {
 		g.logger.Warn("Failed to cache repo info", zap.Error(err))
 	}
 }

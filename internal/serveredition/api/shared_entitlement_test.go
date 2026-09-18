@@ -90,7 +90,7 @@ func TestCredentialsList_OmitsUnsharedAdminServers(t *testing.T) {
 		[]*config.ServerConfig{shared, unsharedBrokeredAdminServer()},
 		nil, nil,
 	)
-	router := credRouter(handlers, defaultAuthContext())
+	router := credRouter(t, handlers, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials", nil)
 	w := httptest.NewRecorder()
@@ -116,7 +116,7 @@ func TestCredentialRoutes_RejectUnsharedAdminServer(t *testing.T) {
 		[]*config.ServerConfig{unsharedBrokeredAdminServer()},
 		nil, nil,
 	)
-	router := credRouter(handlers, defaultAuthContext())
+	router := credRouter(t, handlers, defaultAuthContext())
 
 	for _, tc := range []struct {
 		method string
@@ -169,9 +169,14 @@ const unsharedBrokerSecret = "unsharedsecret_MDk4NzY1NDMyMWFi"
 func perUserDoorRouter(t *testing.T, admin []*config.ServerConfig) *chi.Mux {
 	t.Helper()
 
-	userHandlers, _ := testSetup(t, admin)
+	userHandlers, userStore := testSetup(t, admin)
 	activityHandlers, _ := activityTestSetup(t, nil, admin)
 	credHandlers := NewCredentialHandlers(credTestStore(t), admin, nil, nil)
+	// As setup.go wires it: every per-user door shares ONE entitlement
+	// predicate (Spec 107 FR-004), and the caller's record exists.
+	activityHandlers.SetEntitlement(userHandlers)
+	credHandlers.SetEntitlement(userHandlers)
+	ensureUserRecord(userStore, defaultAuthContext())
 
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {

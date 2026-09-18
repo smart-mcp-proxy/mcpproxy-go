@@ -163,6 +163,27 @@ final class ConfigStore: ObservableObject {
         )
     }
 
+    /// Binding for a `listLines` textarea (fields.ts `listKind: 'lines'`): the
+    /// JSON value is a []string shown one entry per line. Writing splits on
+    /// newlines AND commas (a pasted "a,b" still yields two entries), trims,
+    /// and drops blank entries, so a cleared box is an empty list — never a
+    /// string the Go side cannot decode into []string. Clearing a key the core
+    /// never sent stores "unset" rather than [], so the row does not read as
+    /// dirty against an absent key (same tri-state as optionalStringBinding).
+    func linesBinding(_ key: String) -> Binding<String> {
+        Binding(
+            get: { linesText(self.value(key)) },
+            set: {
+                let list = parseLines($0)
+                if list.isEmpty, isBlankValue(configGet(self.original, key)) {
+                    self.setValue(key, nil)
+                } else {
+                    self.setValue(key, list)
+                }
+            }
+        )
+    }
+
     func doubleBinding(_ key: String) -> Binding<Double> {
         Binding(
             get: { coerceDouble(self.value(key)) ?? 0 },
@@ -190,6 +211,21 @@ func coerceString(_ v: Any?) -> String {
     default: return ""
     }
 }
+/// Render a []string as one entry per line; a scalar falls back to its string
+/// form so a hand-edited file never shows as blank.
+func linesText(_ v: Any?) -> String {
+    if let arr = v as? [Any] { return arr.map { coerceString($0) }.joined(separator: "\n") }
+    return coerceString(v)
+}
+
+/// Parse textarea text into a trimmed []string (mirrors textToList in
+/// fields.ts): newlines and commas both separate entries; blanks are dropped.
+func parseLines(_ text: String) -> [String] {
+    text.components(separatedBy: CharacterSet(charactersIn: "\n,"))
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+}
+
 func coerceDouble(_ v: Any?) -> Double? {
     switch v {
     case let n as NSNumber: return n.doubleValue
@@ -404,14 +440,17 @@ struct ConfigFieldRow: View {
             }
         case .textarea:
             // The instructions field: multi-line, and its placeholder is the
-            // live built-in default rather than an example.
+            // live built-in default rather than an example. A `listLines`
+            // field (trusted_proxies) binds a []string one entry per line and
+            // keeps its own example placeholder.
+            let text = field.listLines ? store.linesBinding(field.key) : store.optionalStringBinding(field.key)
             ZStack(alignment: .topLeading) {
-                TextEditor(text: store.optionalStringBinding(field.key))
+                TextEditor(text: text)
                     .font(.system(.callout, design: .monospaced))
                     .frame(minHeight: 120)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
-                if coerceString(store.value(field.key)).isEmpty {
-                    Text(store.defaultInstructions ?? field.placeholder ?? "")
+                if text.wrappedValue.isEmpty {
+                    Text(field.listLines ? (field.placeholder ?? "") : (store.defaultInstructions ?? field.placeholder ?? ""))
                         .font(.system(.caption, design: .monospaced))
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 6).padding(.vertical, 10)

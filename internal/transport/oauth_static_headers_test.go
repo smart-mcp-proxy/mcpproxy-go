@@ -71,21 +71,3 @@ func TestOAuthClients_CarryStaticHeaders(t *testing.T) {
 		})
 	}
 }
-
-// Spec 074 fail-closed at the transport: a brokered per-user credential must
-// never meet an OAuth transport, where the shared token would overwrite or
-// ride beside it.
-func TestOAuthClients_RefuseBrokeredAuth(t *testing.T) {
-	cfg := &HTTPTransportConfig{
-		URL:          "http://127.0.0.1:1/mcp",
-		OAuthConfig:  oauthTestConfig(),
-		UseOAuth:     true,
-		BrokeredAuth: &BrokeredAuth{Header: "Authorization", Format: "Bearer {token}", Token: "alice"},
-	}
-	if _, err := CreateHTTPClient(cfg); err == nil {
-		t.Fatal("CreateHTTPClient must refuse brokered auth on an OAuth transport")
-	}
-	if _, err := CreateSSEClient(cfg); err == nil {
-		t.Fatal("CreateSSEClient must refuse brokered auth on an OAuth transport")
-	}
-}

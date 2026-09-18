@@ -191,6 +191,10 @@ func (m *MockServerController) GetServerTools(serverName string) ([]map[string]i
 	}, nil
 }
 
+func (m *MockServerController) SearchToolsScoped(_ string, _ int, _ func(string) bool) ([]map[string]interface{}, error) {
+	return []map[string]interface{}{}, nil
+}
+
 func (m *MockServerController) SearchTools(_ string, _ int) ([]map[string]interface{}, error) {
 	return []map[string]interface{}{
 		{

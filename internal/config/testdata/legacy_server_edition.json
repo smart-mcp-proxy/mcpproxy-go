@@ -1,0 +1,45 @@
+{
+  "listen": "127.0.0.1:18107",
+  "api_key": "legacy-fixture-key",
+  "server_edition": {
+    "enabled": true,
+    "admin_emails": ["admin@example.com"],
+    "oauth": {
+      "provider": "google",
+      "client_id": "legacy-client-id",
+      "client_secret": "legacy-client-secret"
+    },
+    "session_ttl": "24h",
+    "bearer_token_ttl": "24h",
+    "max_user_servers": 7,
+    "workspace_idle_timeout": "45m",
+    "store_idp_tokens": true
+  },
+  "mcpServers": [
+    {
+      "name": "legacy-exchange",
+      "url": "https://exchange.example.com/mcp",
+      "protocol": "http",
+      "enabled": true,
+      "created": "2026-01-01T00:00:00Z",
+      "auth_broker": {
+        "mode": "token_exchange",
+        "token_endpoint": "https://idp.example.com/token",
+        "resource": "https://exchange.example.com"
+      }
+    },
+    {
+      "name": "legacy-header",
+      "url": "https://header.example.com/mcp",
+      "protocol": "http",
+      "enabled": true,
+      "created": "2026-01-01T00:00:00Z",
+      "auth_broker": {
+        "mode": "oauth_connect",
+        "token_endpoint": "https://idp.example.com/token",
+        "authorization_endpoint": "https://idp.example.com/authorize",
+        "header": "X-Auth"
+      }
+    }
+  ]
+}

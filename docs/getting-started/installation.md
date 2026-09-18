@@ -399,6 +399,65 @@ docker run -d --name mcpproxy \
   container is awkward.
 - **Web UI**: `http://localhost:8080/ui/`.
 
+### Behind an ingress with SSO
+
+To put the container behind a TLS-terminating ingress and sign users in through your
+IdP, add the `server_edition` block to the config on the volume and pass the secrets as
+environment variables that the file references with `${env:...}` — nothing secret is
+written into `mcp_config.json`:
+
+```bash
+docker run -d --name mcpproxy \
+  -p 8080:8080 \
+  -e MCPPROXY_API_KEY \
+  -e OIDC_CLIENT_SECRET \
+  -e MCPPROXY_CRED_KEY \
+  -e MCPPROXY_PUBLIC_URL="https://mcp.example.com" \
+  -e MCPPROXY_TRUSTED_PROXIES="10.42.0.0/16" \
+  -v mcpproxy-data:/root/.mcpproxy \
+  ghcr.io/smart-mcp-proxy/mcpproxy-server:latest
+```
+
+```json
+{
+  "listen": "0.0.0.0:8080",
+  "trusted_proxies": ["10.42.0.0/16"],
+  "server_edition": {
+    "enabled": true,
+    "admin_emails": ["admin@example.com"],
+    "public_url": "https://mcp.example.com",
+    "credential_encryption_key": "${env:MCPPROXY_CRED_KEY}",
+    "oauth": {
+      "provider": "oidc",
+      "issuer_url": "https://login.example.com/realms/team",
+      "client_id": "mcpproxy",
+      "client_secret": "${env:OIDC_CLIENT_SECRET}"
+    }
+  }
+}
+```
+
+- **`public_url`** is the origin users reach — the IdP `redirect_uri` becomes
+  `https://mcp.example.com/api/v1/auth/callback` and the session cookie is `Secure`,
+  independent of what the ingress puts in `Host` or `X-Forwarded-*`. The image listens on
+  `0.0.0.0:8080`, so leaving it unset is a boot warning and a `mcpproxy doctor` finding.
+  `MCPPROXY_PUBLIC_URL` overrides the file value; it is the only nested `server_edition`
+  key with an environment alias.
+- **`trusted_proxies`** is the ingress's source range as the container sees it. Forwarded
+  headers from anywhere else are ignored, so a direct client cannot spoof its address or
+  scheme. `MCPPROXY_TRUSTED_PROXIES` (comma list) overrides the file value. `trusted_hosts`
+  is unrelated here — it never runs on a non-loopback listener.
+- **Secrets** stay in the environment: `client_secret`, `credential_encryption_key` (or
+  just `MCPPROXY_CRED_KEY`, its fallback) and the API key. `${env:NAME}` is expanded when
+  the file is loaded and the secret is masked in every API response.
+- **`/mcp` requires a credential** as soon as `server_edition.enabled` is `true`, whatever
+  `require_mcp_auth` says — agent tokens, the API key or the socket; a browser session is
+  never an MCP credential.
+
+The full key table — `session_cookie_secure`, `scopes`, `groups_claim`,
+`email_verified_policy`, `display_name`, the per-IdP groups-claim notes — is in
+[Server Edition](/configuration/config-file#server-edition).
+
 Note that this image ships the Server edition binary (`mcpproxy version` reports `(server)`); it is
 the headless core only, with no system tray.
 

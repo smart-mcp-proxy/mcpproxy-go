@@ -109,7 +109,7 @@ than stopping the daemon from booting.
 | `working_dir` | string | No | Working directory for stdio servers |
 | `env` | object | No | Environment variables to pass |
 | `oauth` | object | No | OAuth configuration |
-| `auth_broker` | object | No | Server-edition per-user token brokering. See [Auth Broker](../features/auth-broker.md). The `authorization_endpoint` key is required when `auth_broker.mode` is `oauth_connect`. |
+| `auth_broker` | object | No | Server-edition per-user `oauth_connect` credential store — the stored credential is **not** injected into upstream calls. See [Auth Broker](../features/auth-broker.md). `mode` must be `oauth_connect`; `authorization_endpoint` and `token_endpoint` are required. |
 | `health_check_interval` | duration | No | Per-server override for the liveness `ping` cadence (`0s` disables; falls back to the global value, then the `30s` default). No-op for Docker-isolated servers. |
 | `tool_discovery_interval` | duration | No | Per-server override for the `tools/list` re-index sweep (`0s` disables; falls back to the global value, then the `5m` default). |
 

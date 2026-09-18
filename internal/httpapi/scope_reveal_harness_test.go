@@ -193,6 +193,27 @@ func (c *scopeController) GetServerTools(name string) ([]map[string]interface{},
 	}, nil
 }
 
+// SearchToolsScoped mirrors production (Spec 107 T075a): the same corpus,
+// filtered through inScope before the cut.
+func (c *scopeController) SearchToolsScoped(q string, limit int, inScope func(string) bool) ([]map[string]interface{}, error) {
+	all, err := c.SearchTools(q, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]interface{}, 0, len(all))
+	for _, hit := range all {
+		tool, _ := hit["tool"].(map[string]interface{})
+		name, _ := tool["server_name"].(string)
+		if inScope(name) {
+			out = append(out, hit)
+		}
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (c *scopeController) SearchTools(_ string, _ int) ([]map[string]interface{}, error) {
 	out := make([]map[string]interface{}, 0, len(c.servers))
 	for i := range c.servers {

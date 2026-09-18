@@ -162,7 +162,14 @@
             Add one and this page will show call volume, token sinks, error rates and a timeline.
           </p>
           <div class="flex flex-wrap gap-2 justify-center mt-2">
+            <!-- Spec 107 cross-review round 3, chunk 4 P2: this opens the
+                 generic AddServerModal, whose submit path is the core
+                 POST /api/v1/tools/call dispatch door — a mandatory
+                 tenant-session refusal. Hidden for a tenant, matching the
+                 TopHeader fix (FR-041: hidden, not issued-and-403'd); a
+                 tenant's working equivalent is /my/servers. -->
             <button
+              v-if="authStore.principalKind !== 'tenant'"
               class="btn btn-primary btn-sm"
               data-test="dashboard-first-run-add-server"
               @click="showAddServer = true"
@@ -242,8 +249,14 @@
           </div>
         </div>
 
-        <!-- Left Action Buttons -->
-        <div class="flex flex-col gap-2 w-full max-w-[260px] pt-3">
+        <!-- Left Action Buttons. Spec 107 cross-review round 3, chunk 4 P2:
+             Connect Clients (/connect* mutation), Import from client
+             configs (generic add-server path) and Recent Sessions
+             (/sessions, a caller-scoped admin surface, not on the
+             tenant-session read allowlist) are all core admin-only doors a
+             tenant session cannot act on or read; hidden rather than
+             issued-and-403'd (FR-041), matching the TopHeader fix above. -->
+        <div v-if="authStore.principalKind !== 'tenant'" class="flex flex-col gap-2 w-full max-w-[260px] pt-3" data-test="dashboard-admin-left-actions">
           <button @click="showConnectModal = true" class="btn btn-primary btn-sm w-full gap-1">
             Connect Clients
           </button>
@@ -253,7 +266,7 @@
             </svg>
             Import from client configs
           </button>
-          <router-link to="/sessions" class="btn btn-ghost btn-sm w-full gap-1">
+          <router-link to="/sessions" class="btn btn-ghost btn-sm w-full gap-1" data-test="dashboard-recent-sessions-link">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
@@ -433,9 +446,11 @@
           </div>
         </router-link>
 
-        <!-- Right Action Buttons -->
+        <!-- Right Action Buttons. Spec 107 cross-review round 3, chunk 4 P2:
+             same broken AddServerModal path as the other Add Server
+             buttons on this page. -->
         <div class="flex flex-col gap-2 w-full max-w-[240px] pt-3">
-          <button @click="showAddServer = true" class="btn btn-primary btn-sm w-full gap-1">
+          <button v-if="authStore.principalKind !== 'tenant'" @click="showAddServer = true" class="btn btn-primary btn-sm w-full gap-1" data-test="dashboard-right-add-server">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
             </svg>
@@ -543,6 +558,7 @@ import { computed, nextTick, ref, watch, onMounted, onUnmounted, defineAsyncComp
 import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import { useAuthStore } from '@/stores/auth'
 import { useSecurityScannerStatus, refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import api from '@/services/api'
 import logoSvg from '@/assets/logo.svg'
@@ -566,6 +582,7 @@ const UsageView = defineAsyncComponent(() => import('@/views/Usage.vue'))
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const onboardingStore = useOnboardingStore()
+const authStore = useAuthStore()
 
 // Usage ↔ Overview switcher state (Spec 069 T016). `usageEverActive` gates the
 // first mount; `activeView` then toggles via v-show so both panels keep state.
@@ -674,6 +691,10 @@ function clientIcon(client: ClientStatus): string {
 }
 
 const loadClientStatuses = async () => {
+  // Spec 107 FR-041 / T088: /connect is admin-only (client-config content
+  // read across the whole fleet host) — a tenant principal never has a
+  // client-connect surface to project this onto.
+  if (authStore.principalKind === 'tenant') return
   try {
     const response = await api.getConnectStatus()
     if (response.success && response.data) {
@@ -688,6 +709,13 @@ const loadClientStatuses = async () => {
 const activityCount = ref(0)
 
 const loadActivitySummary = async () => {
+  // Spec 107 FR-041 / T088: /activity* is an admin-only core door (fleet-
+  // wide history) named in contracts/rest-endpoints.md §8's must-refuse
+  // list — a tenant principal's dashboard has no activity-count chip to
+  // fill in, and this call would just draw the fixed 403 every 30s
+  // (cross-review round 1, P1: this was the one loader on this page missing
+  // the guard its four siblings already carry).
+  if (authStore.principalKind === 'tenant') return
   try {
     const response = await api.getActivitySummary('24h')
     if (response.success && response.data) {
@@ -714,6 +742,10 @@ const {
 } = useSecurityScannerStatus()
 
 const loadSecurityStatus = async () => {
+  // Spec 107 FR-041 / T088: /docker/status and /config are admin-only core
+  // doors — a tenant principal's dashboard has no docker/quarantine chip to
+  // fill in.
+  if (authStore.principalKind === 'tenant') return
   try {
     // Docker status from dedicated endpoint. The badge reads "active" only when
     // Docker isolation is genuinely in effect: the user enabled it AND a real
@@ -787,6 +819,9 @@ function formatUptime(seconds: number): string {
 const recentSessions = ref<any[]>([])
 
 const loadSessions = async () => {
+  // Spec 107 FR-041 / T088: /sessions is an admin-only core door (fleet-wide
+  // MCP session list).
+  if (authStore.principalKind === 'tenant') return
   try {
     // status=active + a roomier limit (audit F10): an unfiltered top-5 can be
     // filled entirely by closed sessions and hide every live client.
@@ -803,6 +838,9 @@ const loadSessions = async () => {
 const tokenSavingsData = ref<any>(null)
 
 const loadTokenSavings = async () => {
+  // Spec 107 FR-041 / T088: /stats/tokens is an admin-only core door
+  // (fleet-wide token-savings aggregate).
+  if (authStore.principalKind === 'tenant') return
   try {
     const response = await api.getTokenStats()
     if (response.success && response.data) {
@@ -1084,7 +1122,14 @@ onMounted(() => {
   loadSessions()
   loadSecurityStatus()
   // Populate security scanner totals for the Security Scan chip (F-12).
-  void refreshSecurityScannerStatus()
+  // Spec 107 FR-041 / cross-review round 2, chunk 4 P1: /security/overview
+  // is an admin-only core door (named must-refuse, rest-endpoints.md §8) —
+  // unlike its five sibling loaders above, this call had no
+  // `principalKind === 'tenant'` guard, so a tenant drew a 403 here on every
+  // mount and every 30s refresh.
+  if (authStore.principalKind !== 'tenant') {
+    void refreshSecurityScannerStatus()
+  }
   serversStore.fetchServers().then(() => {
     serversFetchSettled.value = true
     loadPendingTools()
@@ -1097,7 +1142,9 @@ onMounted(() => {
     loadActivitySummary()
     loadSessions()
     loadSecurityStatus()
-    void refreshSecurityScannerStatus()
+    if (authStore.principalKind !== 'tenant') {
+      void refreshSecurityScannerStatus()
+    }
     loadPendingTools()
   }, 30000)
 

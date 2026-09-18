@@ -320,6 +320,40 @@ func TestExpiredRecords(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for expired record")
 	}
+
+	// Spec 105 FR-002 durable invalidation (gap FR001-G3): the expiry branch
+	// deletes the record inside the read transaction and then returns a
+	// non-nil error from the same Update closure, which makes bbolt ROLL BACK
+	// the delete — the entry stays on disk while the in-memory stats already
+	// count it as evicted. An expired entry must be absent after the miss and
+	// the stats must agree with the bucket.
+	if rec, ok := manager.Peek(key); ok {
+		t.Fatalf("expired record still on disk after the expiring Get (delete rolled back): %+v", rec)
+	}
+	onDisk := 0
+	if err := db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(CacheBucket)).ForEach(func(_, _ []byte) error {
+			onDisk++
+			return nil
+		})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stats := manager.GetStats()
+	if stats.TotalEntries != onDisk {
+		t.Fatalf("stats.TotalEntries=%d but the bucket holds %d entries: stats drifted from the committed state", stats.TotalEntries, onDisk)
+	}
+	if stats.EvictedCount != 1 {
+		t.Fatalf("stats.EvictedCount=%d, want 1 (the committed eviction)", stats.EvictedCount)
+	}
+	// The stored stats must reflect the same commit: reload them from disk.
+	reloaded := &Manager{db: db, logger: logger, stats: &Stats{}}
+	if err := reloaded.loadStats(); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.stats.TotalEntries != onDisk || reloaded.stats.EvictedCount != 1 {
+		t.Fatalf("persisted stats %+v disagree with the bucket (%d entries): the eviction was not committed", *reloaded.stats, onDisk)
+	}
 }
 
 func TestCleanup(t *testing.T) {

@@ -268,17 +268,77 @@ Server scoping is enforced at three levels:
    receive every event unchanged; the stream is rendered per connection.
 4. **Cached responses** (`read_cache`) — a truncated response is parked behind
    a cache key, and the key is a hash, not a credential. Every entry is stamped
-   with the authorization that produced it (server scope, permission tier,
-   profile pin, effective profile, caller kind). `read_cache` refuses, on every
-   page, any request whose own authorization could not have produced the entry,
-   so a narrower token sharing the same MCP session cannot page a broader
-   token's response. An unrestricted admin may read any entry; a token may read
-   its own entries and those of tokens at least as narrow as itself. Profile
-   scope is compared as a server set, so deleting or narrowing a profile after
-   the entry was produced revokes cached access as well (a stale pin resolves to
-   a deny-all scope and reads nothing). An unauthenticated `/mcp` caller ranks
-   below an authenticated admin: it cannot page an entry an API-key admin
-   produced.
+   with the authorization snapshot that authorized producing it (server scope,
+   permission tier, profile pin, effective profile, caller kind), captured when
+   the call was authorized — a profile narrowed while the call was in flight
+   does not re-stamp the response. `read_cache` — on every MCP surface and on
+   the REST direct call path (`POST /api/v1/tools/call`) — admits, on every
+   page, exactly three kinds of request and refuses every other, so a
+   narrower token sharing the same MCP session cannot page a broader token's
+   response. Ordered by **caller kind first**: an administrator may read any
+   entry regardless of its own profile binding (an unauthenticated `/mcp`
+   caller ranks below an authenticated admin and cannot page an entry an
+   API-key admin produced); an agent token never reads an administrator's
+   entry. Between agent entries a reader is admitted when it presents the
+   **same effective authorization** the entry was produced under — the same
+   token, server grant, permission tiers, pin and effective profile server
+   set (compared as sets, so list order and the profile's name do not
+   matter) — or when it is **unrestricted**: a `*` server grant, no pin, no
+   effective profile, and every permission tier the entry's producer held. A
+   token that is wider than the producer but still bounded (an `{a,b}` grant
+   over an `{a}` entry, a session that left the profile it produced under)
+   is refused: it re-runs the call under its own credential instead. Profile
+   scope is compared as a server set, so deleting or narrowing a profile
+   after the entry was produced revokes cached access as well (a stale pin
+   resolves to a deny-all scope and reads nothing).
+
+   A page that `read_cache` itself has to truncate again is stamped with its
+   *parent's* snapshot, never the redeemer's, so provenance is monotone down
+   the chain. For a scoped caller every refusal — an entry it may not read, an
+   expired entry, an internal entry, a key that never existed — answers with
+   the same `cache key not found` body, status and timing (a refusal commits
+   the same stats write a miss does), so a key cannot be probed for
+   existence. A refusal also never decodes the entry's payload: the gate
+   reads a small header stored in front of each record, so a multi-megabyte
+   entry is refused as quickly as a one-line one. An expired entry is refused
+   like a miss and left for the periodic cleanup sweep to evict, so the
+   refusing read writes exactly what a miss writes. The header and the record
+   behind it are two encodings of the same stamp; an entry on which they
+   disagree (a corrupt or hand-edited database) is treated as unreadable —
+   refused for every caller, invalidated, never served. The header is
+   fixed-size and decides the whole verdict by itself: it carries the caller
+   kind, the permission tiers and a digest of the producer's effective
+   authorization, and the reader's own digest is compared against it — so a
+   refusal never loads the producer's snapshot, a pre-upgrade entry is
+   invalidated without being decoded, and a probe costs what a miss costs on
+   the first request after a restart as much as on the thousandth, however
+   many servers the producer's authorization names. Each distinct snapshot
+   is still stored once, under that digest, for administrator diagnostics;
+   nothing reads it to decide. The size statistics are reconciled from the
+   store by the periodic cleanup sweep, which is why an invalidated
+   pre-upgrade entry can leave `total_size_bytes` over-counting for at most
+   one sweep interval.
+
+   Server-edition OAuth **users** are bounded by the same dispatch gates as
+   agent tokens (server allowlist, permission tier, effective profile), so a
+   user's cached entry is stamped with those dimensions as well as the user
+   id, and redemption requires the same user *with the same* authorization:
+   a grant changed or a profile changed since the entry was produced revokes
+   cached access exactly as it does for an agent token.
+
+   **Upgrading.** Entries written by any release before this one — including
+   the immediately preceding one, which stamped a producer but no schema
+   version — are refused for **every** caller, administrators included, and
+   are invalidated on the first attempt to read them (a one-time
+   `cache key not found` on keys minted before the upgrade; re-run the
+   original tool call). The registry and repository-metadata caches mcpproxy
+   keeps for itself are stamped internal from this release on: never readable
+   through `read_cache`, and kept rather than evicted when refused. Registry
+   and repository-metadata entries persisted *before* the upgrade carry no
+   stamp, so the first `read_cache` probe of such a key after upgrading
+   invalidates it once — the next registry search or repository lookup
+   re-fetches and re-stamps it. The no-eviction guarantee applies to entries
+   written after the upgrade.
 
 ## Administrative Operations Are Admin-Only
 
@@ -326,6 +386,26 @@ Resolution precedence (highest wins):
 The pin is shown by `token list` (PROFILE PIN column) and `token show` (Profile Pin field), and is preserved across `token regenerate`.
 
 ## Managing Tokens
+
+### Token Limit
+
+A deployment stores at most **100 agent tokens**, and in the server edition
+each signed-in user may hold at most **25** of them. Revoked tokens still
+occupy a slot until they are permanently deleted, so once a limit is reached,
+creating another token answers `409 Conflict`:
+
+- **Your own quota (server edition, 25 per user).** The message tells you it is
+  your limit; permanently delete one of your unused tokens to free a slot. The
+  quota keeps one user from taking the whole pool, but every stored token still
+  counts toward the deployment limit below, so a deployment whose records add
+  up to 100 refuses the next token for everyone. The quota is checked first: a
+  user already at 25 always sees this message, whatever the deployment total.
+- **The deployment limit (100 stored records).** In the personal edition every
+  token belongs to the one operator, so this is the only limit and deleting one
+  of your tokens frees a slot. In the server edition a caller who is still under
+  their own quota gets this message; it says the limit is shared and points at
+  an administrator, because deleting your own tokens may not free a slot that
+  other users' records are filling.
 
 ### List All Tokens
 
@@ -466,6 +546,49 @@ mcpproxy serve --require-mcp-auth    # Enforce /mcp authentication
 | `--permissions` | Yes | — | Comma-separated: `read`, `write`, `destructive` |
 | `--expires` | No | `30d` | Expiry duration (e.g., `7d`, `90d`, `365d`) |
 | `--profile-pin` | No | — | Pin the token to a single profile (see [Profile Pinning](#profile-pinning)) |
+
+### Documented invariant (Spec 107 FR-046)
+
+A person who signs in through the team's IdP — directly through their session
+on the REST API and Web UI, or through any agent token they mint — can see and
+use exactly the servers their group grants, and cannot learn about or act on
+any other server through proxy-produced data; every tool-call authorization
+decision about them is recorded on the audit line with the real server name,
+which is never echoed to them.
+
+- **Covered surfaces.** The server-edition REST routes (`/api/v1/auth/*`,
+  `/user/*`, `/admin/*`); the [core REST API](../development/server-edition-multiuser-auth.md#tenant-session-principal-on-core-rest-spec-107-pr-c)
+  and `/events` for the tenant session principal; the HTTP MCP surfaces
+  (`/mcp`) for agent tokens a tenant owns, scoped exactly as described
+  throughout this page; and the Web UI, which reaches nothing a tenant's own
+  session and owned tokens could not already reach. `/mcp` never accepts a
+  session cookie or user JWT — a tenant reaches tools only through an agent
+  token they own.
+- **Staleness bound (FR-011), including the closed JWT self-renewal.** Groups
+  refresh only at login: `session_ttl + max(bearer_token_ttl, longest owned
+  token expiry ≤ 365 days)`. This bound holds specifically because a bearer
+  JWT can no longer renew itself through `POST /auth/token`, nor mint or
+  rotate an agent token through `POST /user/tokens(/…/regenerate)` — those
+  three doors accept only a live session cookie (see
+  [Freshness bound](../development/server-edition-multiuser-auth.md#freshness-bound-and-session-cookie-only-minting-doors-fr-011)).
+  An administrator `disable` is immediate and is not subject to this bound.
+- **Retained Spec 105 effects.** Everything Spec 105 already scopes for an
+  agent token — [server scoping](#server-scoping), [administrative denial](#administrative-operations-are-admin-only),
+  and [`read_cache`](#server-scoping) authorization-stamped entries — applies
+  identically whether a server is excluded by group (this spec) or by token
+  scope (Spec 105); a group-excluded server is indistinguishable from a
+  nonexistent one on every one of those surfaces.
+- **Still-open Spec 105 items.** Three surfaces on `main` still leak the
+  *existence* (not the content) of an excluded server, whether excluded by
+  group or by token: `retrieve_tools`'s `usage_summary`/`session_risk`
+  statistics, the "Available servers" error text, and the scope-denial text.
+  This spec adds nothing new to that leak and closes it the moment the
+  corresponding Spec 105 item merges — it is not something a server-edition
+  deployment can configure around today.
+- **Single-replica assumption.** Pending OAuth login state, the SSE
+  per-frame principal re-resolution and the entitlement computation above all
+  run in-process with no shared cross-replica store; a second replica of the
+  server edition is unsupported.
 
 ### Server-edition incident response
 
