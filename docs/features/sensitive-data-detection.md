@@ -367,6 +367,11 @@ mcpproxy activity export --format json --output - | \
   your-siem-forwarder --input -
 ```
 
+For a schema-pinned, redacted, attribution-focused stream instead — one line per
+authorization decision, tool call and login attempt, with no proxy-side read
+surface — see the [Audit Log](audit-log.md), which most SIEM pipelines should
+tail directly rather than polling `activity export`.
+
 ### Incident Response
 
 When a critical detection is identified:

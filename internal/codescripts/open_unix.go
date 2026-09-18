@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build unix
 
 package codescripts
 
@@ -8,6 +8,12 @@ import (
 	"syscall"
 )
 
+// Round 13 SHOULD (finding 6): this file's build tag narrowed from
+// `!windows` to `unix` — the constants it needs (syscall.O_NOFOLLOW,
+// ELOOP, EMLINK) do not exist on plan9 or js/wasm, so `!windows` alone
+// still failed to build there; fallback_other.go supplies a stub for
+// every non-unix, non-Windows target instead.
+//
 // openScriptFile opens a stored script for reading, rejecting a symlink at the
 // final path component ATOMICALLY: O_NOFOLLOW makes the kernel refuse the open
 // (ELOOP) instead of resolving the link, so there is no check-then-open window

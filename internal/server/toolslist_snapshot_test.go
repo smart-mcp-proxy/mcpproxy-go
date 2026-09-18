@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -320,4 +321,136 @@ func reportToolsListDiff(t *testing.T, surface string, want, got []byte) {
 		assert.JSONEq(t, string(wantTools[name]), string(gotTool),
 			"surface %s: tool %q schema changed (FR-015)", surface, name)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Spec 105 FR-012 (PR H0, FR01x-G2): the ONE narrow golden exception.
+//
+// The code_execution definition told every caller to discover stored scripts
+// by requesting a name that does not exist. Under FR-012 that enumeration is
+// administrator-only (an agent-token caller gets a non-disclosing refusal,
+// see mcp_code_scripts_test.go), so the published text has to say so — and
+// the goldens that pin the text move by exactly those two strings and
+// nothing else. testdata/toolslist_goldens/pre105/ is the FROZEN copy of the
+// three goldens as they stood before this spec (never regenerated); the live
+// goldens are compared against it entry by entry and field by field.
+// ---------------------------------------------------------------------------
+
+const (
+	// toolsListPre105Dir holds the frozen pre-Spec-105 capture of the three
+	// surfaces, the baseline the FR-012 narrow-diff assertion measures against.
+	toolsListPre105Dir = "pre105"
+
+	// spec105CodeExecutionTool is the only entry allowed to differ from the
+	// pre-105 baseline, and only in the two description strings below.
+	spec105CodeExecutionTool = "code_execution"
+)
+
+// spec105EnumerationPhrases are the pre-105 fragments that advertised
+// discovery-by-failed-call. Neither may survive in the live strings.
+var spec105EnumerationPhrases = []string{
+	"returns the available names, which is how you discover what is stored",
+	"DISCOVERY: calling with a name that does not exist returns an error listing the available script names",
+	"so the current set can always be recovered from a single failed call",
+}
+
+// TestCodeExecutionDescriptions_EnumerationIsAdminOnly (T063) pins the
+// reworded definition text and the narrow golden delta together: the live
+// strings no longer teach enumeration by failed call and name the
+// administrator-only rule, and the regenerated goldens differ from the frozen
+// pre-105 capture in code_execution.description and
+// code_execution.inputSchema.properties.script.description ONLY.
+func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
+	t.Run("live strings", func(t *testing.T) {
+		for _, phrase := range spec105EnumerationPhrases {
+			assert.NotContains(t, codeExecutionToolDescription, phrase,
+				"code_execution.description must not advertise discovery by failed call (FR-012)")
+			assert.NotContains(t, codeExecutionScriptDescription, phrase,
+				"script.description must not advertise discovery by failed call (FR-012)")
+		}
+		for _, text := range []string{codeExecutionToolDescription, codeExecutionScriptDescription} {
+			lower := strings.ToLower(text)
+			assert.Contains(t, lower, "administrator",
+				"the definition must say enumeration is administrator-only (FR-012)")
+			assert.Contains(t, lower, "agent",
+				"the definition must tell agent-token callers they need to already know the name (FR-012)")
+		}
+	})
+
+	for _, surface := range toolsListGoldenSurfaces {
+		surface := surface
+		t.Run(surface, func(t *testing.T) {
+			before := decodeToolsListGolden(t, filepath.Join("testdata", toolsListGoldenDir, toolsListPre105Dir, surface+".json"))
+			after := decodeToolsListGolden(t, toolsListGoldenPath(surface))
+
+			// The tool SET is untouched: nothing added, nothing removed.
+			assert.Equal(t, sortedToolNames(before), sortedToolNames(after),
+				"surface %s: the FR-012 exception changes two strings, never the tool set", surface)
+
+			// Every other entry is byte-equal to the frozen capture.
+			for name, pre := range before {
+				if name == spec105CodeExecutionTool {
+					continue
+				}
+				assert.True(t, bytes.Equal(pre, after[name]),
+					"surface %s: tool %q must be byte-identical to the pre-105 golden (FR-012: only code_execution may move)", surface, name)
+			}
+
+			preTool, ok := before[spec105CodeExecutionTool]
+			require.True(t, ok, "surface %s: frozen baseline carries code_execution", surface)
+			postTool, ok := after[spec105CodeExecutionTool]
+			require.True(t, ok, "surface %s: live golden carries code_execution", surface)
+
+			var preM, postM map[string]interface{}
+			require.NoError(t, json.Unmarshal(preTool, &preM))
+			require.NoError(t, json.Unmarshal(postTool, &postM))
+
+			preDesc, _ := preM["description"].(string)
+			postDesc, _ := postM["description"].(string)
+			preScript := codeExecScriptDescriptionOf(t, preM)
+			postScript := codeExecScriptDescriptionOf(t, postM)
+
+			// Both strings MOVED (a regenerated golden that still carries the
+			// pre-105 wording is the description lying about the runtime), and
+			// the live golden carries exactly the live constants.
+			assert.NotEqual(t, preDesc, postDesc,
+				"surface %s: code_execution.description must be regenerated with the FR-012 wording", surface)
+			assert.NotEqual(t, preScript, postScript,
+				"surface %s: script.description must be regenerated with the FR-012 wording", surface)
+			assert.Equal(t, codeExecutionToolDescription, postDesc, "surface %s: golden description == live constant", surface)
+			assert.Equal(t, codeExecutionScriptDescription, postScript, "surface %s: golden script.description == live constant", surface)
+			for _, phrase := range spec105EnumerationPhrases {
+				assert.NotContains(t, postDesc, phrase, "surface %s: regenerated golden still advertises enumeration", surface)
+				assert.NotContains(t, postScript, phrase, "surface %s: regenerated golden still advertises enumeration", surface)
+			}
+
+			// And NOTHING else moved: put the two pre-105 strings back into the
+			// live entry and it must deep-equal the frozen one.
+			postM["description"] = preDesc
+			setCodeExecScriptDescription(t, postM, preScript)
+			assert.Equal(t, preM, postM,
+				"surface %s: code_execution may differ from the pre-105 golden in description and script.description only (FR-012)", surface)
+		})
+	}
+}
+
+// codeExecScriptDescriptionOf reads inputSchema.properties.script.description
+// from a decoded tool entry.
+func codeExecScriptDescriptionOf(t *testing.T, tool map[string]interface{}) string {
+	t.Helper()
+	schema, _ := tool["inputSchema"].(map[string]interface{})
+	props, _ := schema["properties"].(map[string]interface{})
+	script, _ := props["script"].(map[string]interface{})
+	require.NotNil(t, script, "code_execution must expose the `script` parameter")
+	desc, _ := script["description"].(string)
+	return desc
+}
+
+func setCodeExecScriptDescription(t *testing.T, tool map[string]interface{}, desc string) {
+	t.Helper()
+	schema, _ := tool["inputSchema"].(map[string]interface{})
+	props, _ := schema["properties"].(map[string]interface{})
+	script, _ := props["script"].(map[string]interface{})
+	require.NotNil(t, script)
+	script["description"] = desc
 }

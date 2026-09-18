@@ -534,8 +534,467 @@ Round 3 commit: `4cdc7661d` (`fix(spec-107): cross-review round 3 for PR-C`). Ro
 
 ## PR-D — JSONL audit line
 
+### Docs-site follow-up (T111)
+
+`docs/features/audit-log.md` (schema tables, vocabularies, versioning rule,
+crash window, Docker/stdout and stdio recipes, vendor-neutral log-shipper
+example, back-link from `docs/features/sensitive-data-detection.md`'s SIEM
+section) and `docs/configuration/config-file.md`'s `audit_log` keys are both
+written and published in this repo's `docs/` tree (the source of truth per
+`project_docs_site_pipeline` memory — `website/docs` is a generated mirror,
+never edited directly). **Not done in this task, left as a follow-up**: this
+repo's own `website/sidebars.js` needs a `features/audit-log` entry (alongside
+its existing `features/activity-log` and `features/sensitive-data-detection`
+rows) for the new page to appear in the docs-site navigation, and the docs
+publish pipeline's include-allowlist (`website/prepare-docs.sh` /
+`docs-site-pipeline` memory) needs the page added so the mirror step picks it
+up — otherwise the file exists in `docs/` and renders via the repo's own
+Docusaurus site path, but is orphaned from the published nav and may be
+overwritten as "not on the allowlist" by the next mirror run. Do this as a
+follow-up edit to `website/sidebars.js` and the allowlist, not as part of
+T111's content work. `docs/features/audit-log.md` currently links to the
+checked-in schema (`docs/schemas/audit-line-v1.schema.json`) via its GitHub
+blob URL rather than a `docs.mcpproxy.app` static path, since there is no
+existing `website/` wiring that copies `docs/schemas/**` into `static/`; the
+same follow-up should add that copy step and switch the link to the published
+URL once it exists.
+
+### T115 — SC-009 benchmark
+
+**Discrepancy from the task text** (rule 9): T115 cites "`bench/` (existing
+harness)" and "Spec 105 FR-011 method... merge-base vs branch" as if a runnable
+harness already existed. It does not. Spec 105's `scope_latency_test.go` /
+`mintAgentToken` / `scope_http_matrix_test.go` harness described in
+`specs/105-agent-scope-hardening/research.md` D10 and `tasks.md` T078/H1 was
+never implemented anywhere in this branch's history — no such files exist, and
+`bench/` (checked: every `*.go` under `bench/`) has no test that drives
+`retrieve_tools`/`call_tool_read`/`tools/list` through the MCP surface at all;
+it benchmarks token/payload shapes (`armrun.go`, `respcost.go`, `reportv2.go`),
+not wall-clock latency. The only reusable piece is the 527-tool LiveMCPBench
+fixture itself and its loader, `loadDeferredLargeCorpus` in
+`internal/server/mcp_routing_deferred_tokens_test.go:139-176`, reading
+`specs/083-discovery-profiler/datasets/livemcptool_snapshot/tools.json`
+(527 tools, verified via `require.Len(t, corpus.Tools, 527, ...)`).
+
+**Second discrepancy**: a literal merge-base-checkout comparison (research
+D10's actual CI design: run the same test file at merge-base `107-c-group-
+allowlist` and at HEAD) is not meaningful for this PR — `audit_log` and
+`proxy.auditSink` do not exist at all at merge-base (PR-D adds the whole
+package), so a test that sets `proxy.auditSink` cannot even compile there.
+What SC-009 actually needs measured — "with `audit_log` enabled... regresses
+by no more than 10% or 5 ms [vs without it]" — is the audit feature's OWN
+marginal cost, which a same-tree A/B (audit_log off vs on, identical binary,
+identical corpus, identical process) isolates directly and more precisely
+than a cross-commit diff would (no compiler/toolchain/host drift between the
+two arms). Assumption made per the Must-Do zero-interruption rule; documented
+here rather than asked about.
+
+**Harness built** (test-only, not committed — see below):
+`internal/server/sc009_bench_test.go`, `TestSC009_AuditLogLatencyRegression`.
+Seeds the full 527-tool snapshot across its 70 real upstream servers into a
+`createTestProxyWithRuntime` proxy via the existing `seedTargetTierServer`
+StateView/approval-record pattern, plus `proxy.index.IndexTool` per tool so
+`retrieve_tools` BM25 search is real. Builds two such proxies — one with
+`proxy.auditSink` left nil (audit off) and one with a real
+`audit.NewFileSink` writing to a tmp file (audit on) — then for each, 20
+warm-ups + 200 timed calls (per Spec 105 FR-011's method) of:
+- `call_tool_read` (`proxy.handleCallToolVariant`, administrator context via
+  `auth.AdminContext()`) against a real seeded tool — dispatch fails fast
+  ("no client") since no real upstream process is connected, which is fine:
+  this isolates the pre-dispatch authz+tool_call audit-funnel overhead T115
+  is actually about, not upstream I/O.
+- `retrieve_tools` (`proxy.handleRetrieveTools`), administrator context and a
+  scoped-tenant context (`AllowedServers` = 1 of the 70 servers,
+  `PermRead` only).
+- `tools/list` (`proxy.server.HandleMessage`, real JSON-RPC, administrator
+  context) — in retrieve-tools routing mode (this branch's default) this
+  method returns the built-in tool set (`retrieve_tools`, `call_tool_*`,
+  etc.), not a 527-tool listing; the direct-mode surface (which would list
+  all 527) is a materially different code path from the one call_tool_read /
+  retrieve_tools exercise and was out of scope to stand up a second time
+  here. Noted, not silently substituted.
+
+**Results** (macOS dev host, `go test ./internal/server/ -run
+TestSC009_AuditLogLatencyRegression -count=1`, two independent runs, ~41s
+each):
+
+| operation | audit OFF p95 | audit ON p95 | delta | SC-009 bound | verdict |
+|---|---|---|---|---|---|
+| call_tool_read (admin) | run1 205µs / run2 251µs | run1 344µs / run2 389µs | +0.14ms both runs | max(10%, 5ms) = 5ms | **PASS** (well within 5ms; the reported +55-67% is entirely inside sub-millisecond noise) |
+| retrieve_tools (admin) | run1 2.071ms / run2 2.099ms | run1 1.974ms / run2 2.050ms | -0.10ms / -0.05ms (audit ON measured faster) | 5ms | **PASS** |
+| tools/list (admin) | run1 4.6µs / run2 4.8µs | run1 11.7µs / run2 4.7µs | +0.01ms / ~0ms | 5ms | **PASS** (audit fires no line on tools/list at all — expected near-zero delta; run1's 152% swing is µs-scale scheduler noise) |
+| retrieve_tools scoped vs admin | off: -1.34ms / -1.42ms; on: -1.25ms / -1.33ms | scoped is FASTER than admin in every arm | bound 20ms | **PASS** |
+
+**SC-009 overall: PASS** for all three named operations and the scoped-vs-
+admin `retrieve_tools` bound, on the same-tree audit-on/audit-off measurement
+substituted for the (infeasible, pre-existing-code-required) merge-base
+comparison. p50s were computed but not tabulated (all sub-millisecond,
+p95-dominated by the same noise floor as above; `t.Logf` output in the raw
+run captured both). No token/USD figures were reported by this benchmark
+(`feedback_quote_usd_with_tokens` — n/a, latency-only).
+
+**Bench file disposition**: `internal/server/sc009_bench_test.go` was written
+to run this measurement, verified to compile and pass twice, and then
+**deleted** before finishing — HARD RULE 4 says do not commit unless the task
+says so, and T115's deliverable is the recorded numbers in this file, not a
+permanent new bench file; `git status` is clean of it. Re-derivable from this
+section's description if a permanent CI-gated version is wanted later (would
+belong with a real `.github/workflows/*-latency.yml` job, which is out of
+T115's scope as written).
+
 ### Real instance
+
+T116, run against `scripts/dev-server-edition.sh --phase d` (quickstart.md §6)
+plus manual extensions for the cases the script doesn't cover. Two rig bugs
+found and fixed in the process (both in `scripts/dev-server-edition.sh`, not
+in the audited feature code):
+
+- **Rig gap 1 — servers left quarantined.** The generated scratch config had
+  no `quarantine_enabled` key, so the three fixture servers (`a`, `b`,
+  `a__b`) booted quarantined (new-server TPA review, spec 086) and stayed
+  quarantined for the whole run — nothing in the script ever approved them.
+  §6's `a:echo` call then hit the scoped-caller tier gate
+  (`mcp.go:2517-2524`, `tierForAnnotations` with no discovered annotations →
+  requires `destructive`) against a token minted with `permissions:["read"]`,
+  and was refused — not because of anything in this PR, but because the rig
+  never got the fixture servers out of quarantine. Fix: added
+  `"quarantine_enabled": false` to the scratch config (§2) — these are
+  synthetic, trusted, loopback-only fixtures; quarantine review isn't part of
+  what phase d is testing. Verified before/after: with quarantine on,
+  `curl .../tools/call name=a:echo` returned `isError:true,
+  "Permission denied: token does not have 'destructive' permission required
+  for tool 'a:echo'"`; with `quarantine_enabled:false`, the same call
+  returned `{"content":[{"type":"text","text":"hello"}]}` (no `isError`).
+- **Rig gap 2 — `isError` assertion didn't accept the omitempty case.** Once
+  gap 1 was fixed, §6's `[[ "$allowed" == "false" ]]` still failed with
+  `isError=null`: a successful `tools/call` response omits `isError`
+  (`omitempty`), so `jq -c '.result.isError'` on the missing field prints
+  `null`, never the literal string `false`. Fixed the assertion to accept
+  both. Confirmed by re-running the full script twice after both fixes
+  (`phase-d-run3-1789645432`): clean `phase d complete` both times.
+
+With both rig fixes in place, `./scripts/dev-server-edition.sh --phase d
+--keep` ran clean end to end (`phase d complete`), and the tail of
+`$SCRATCH/audit.jsonl` showed exactly the three lines quickstart §6
+describes:
+
+```json
+{"event":"authz","decision":"allow","server":"a","tool":"echo","reason":"none","caller":"agent_token","email":"alice@example.com"}
+{"event":"tool_call","outcome":"success","server":"a","tool":"echo","caller":"agent_token","email":"alice@example.com"}
+{"event":"authz","decision":"deny","server":"b","tool":"echo","reason":"token_scope","disclosed":false,"caller":"agent_token","email":"alice@example.com"}
+```
+
+- `grep -c AKIAQUICKSTART7SENTINEL0 audit.jsonl` → `0` (sentinel absent).
+- `grep -c '"event":"auth_event"' audit.jsonl` → `2` (login `reason:ok` +
+  the open-redirect-check login, both `ok`).
+- `MCPPROXY_AUDIT_JSONL=$SCRATCH/audit.jsonl go test ./internal/audit -run
+  TestExternalJSONLValidates -count=1` → PASS (schema-validated every line
+  of the real sink file with `santhosh-tekuri/jsonschema/v6`, no `npx`, no
+  network) — run automatically by the script's §6 and independently
+  re-confirmed.
+
+**Sentinel in a caller-supplied tool name (extends §6 manually, not scripted
+by quickstart).** Minted a fresh token, called `call_tool_read` with
+`name: "AKIASENT99887766XXXXX:ghp_SENTINEL2TOOLNAMEZZZ"` and
+`args: {"secret": "sk-ant-SENTINELARGS998877"}` (a refused dispatch — the
+server name isn't in the token's scope). Response:
+`"Server 'AKIASENT99887766XXXXX' is not in scope for this agent token"`
+(isError:true). The audit `authz deny` line recorded
+`"server":"AKIA***XX"`, `"tool":"ghp_***ZZ"` (both fixed-prefix credential
+patterns masked per-field at build time, FR-016/FR-015) and no `args` field
+at all (only `args_sha256`/`args_bytes`). `grep -c` for all three raw
+sentinel strings (`AKIASENT99887766XXXXX`, `ghp_SENTINEL2TOOLNAMEZZZ`,
+`sk-ant-SENTINELARGS998877`) against the audit file → `0`.
+
+**stdout mode / native stdio transport rules.** Quickstart's phase-d rig
+always runs the server-edition binary in HTTP mode (`listen` set), so these
+cases were exercised by hand against a freshly built `-tags server` binary,
+`--listen ""` and `--listen ":0"` (both trigger the native-stdio branch,
+`main.go:648`: `cfg.Listen == "" || cfg.Listen == ":0"` — see the discrepancy
+note below on why only `:0` actually reaches it through `mcpproxy serve`):
+
+  - `audit_log` block **absent**, `--listen ":0"`: boot logged
+    `WARN audit_log.stdout is ignored under the stdio transport; set
+    audit_log.path`, `Starting MCP server {"transport": "stdio"}`, and
+    stdout carried only the clean `initialize` JSON-RPC response (no log
+    lines interleaved) — the default sink under stdio is disabled, as
+    FR-014 requires.
+  - `audit_log: {enabled:true, stdout:true}` **explicit**, no `path`,
+    `--listen ":0"`: process exited **4** with
+    `Error: audit_log.stdout cannot be used under the stdio transport
+    (stdout carries JSON-RPC); set audit_log.path` — the exact
+    `contracts/config-keys.md` message, before any listener or upstream
+    started.
+  - `audit_log.path` pointed at a non-existent directory
+    (`/root/no-permission/audit.jsonl`, HTTP mode): exited **4** with
+    `Error: audit_log.path "/root/..." cannot be opened for append: ...
+    open ...: no such file or directory` — the constructor's pre-flight
+    open/close probe (T098) catches it before `lumberjack`'s lazy-open
+    would have silently swallowed it.
+  - Docker-style run of the *built* server-edition image with `--entrypoint`
+    checks and a `docker run` stdout-default assertion, and the disk-full
+    (`/dev/full`) simulation, were **not run**: this session has no Docker
+    daemon available in the sandbox (not attempted — no error to report),
+    and macOS has no `/dev/full` character device (Linux-only; the
+    equivalent behaviour — write failure proceeds, counter increments, one
+    WARN per minute — is already covered by `internal/audit/sink_test.go`'s
+    fake-writer-failure case, T098, re-run clean in the automated gates
+    below). Recorded here as "not run: <reason>" per the verification.md
+    convention rather than skipped silently.
+
+**Discrepancy found (not fixed — outside PR-D's scope, pre-existing):**
+`cmd/mcpproxy/main.go:815` sets `cfg.Listen = listenFlag` from `--listen`
+only when the CLI flag was `Changed()`, so `--listen ""` explicitly should
+produce `cfg.Listen == ""` and trigger native stdio. In practice it does
+not: `internal/config/config.go:2686-2688`
+(`func (c *Config) Validate()`) unconditionally resets `c.Listen` back to
+`defaultPort` ("127.0.0.1:8080") whenever it's empty, and `Validate()` runs
+again later in the boot path (config file watcher / `ConfigService` load),
+so a real `mcpproxy serve --listen ""` process still starts in HTTP mode
+(`{"transport":"streamable-http","listen":"127.0.0.1:8080"}` observed, not
+stdio) — `--listen ":0"` is unaffected (`Validate()` only special-cases the
+empty string) and is the only way that actually reaches native stdio through
+the `serve` CLI today. `main.go:648`'s own comment already documents `""`
+and `":0"` as equivalent triggers, so this looks like a real, narrow,
+pre-existing gap (the `""` half of that equivalence is unreachable through
+`serve`), unrelated to any file this PR touches. Not fixed here per the
+"touch only your task's files" rule; flagging for a separate follow-up.
 
 ### Automated checks
 
+Full gate set per `plan.md` §Gates, run in this worktree (`107-d-audit-line`,
+merge-base baseline: PR-C's `gh pr checks 1293`). Two gate-caused findings,
+both fixed; every other finding on the touched-file scope is clean or
+pre-existing (named below with evidence).
+
+| # | Gate | Command | Result |
+|---|------|---------|--------|
+| 1 | Build (personal) | `go build -o /dev/null ./cmd/mcpproxy` | PASS — clean |
+| 2 | Build (server) | `go build -tags server -o /dev/null ./cmd/mcpproxy` | PASS — clean |
+| 3 | `go vet` (personal) | `go vet ./...` | PASS — clean |
+| 4 | `go vet` (server) | `go vet -tags server ./...` | PASS — clean |
+| 5 | golangci-lint v2 (personal tags) | `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run --config .github/.golangci.yml ./internal/audit/... ./internal/server/... ./internal/config/... ./internal/serveredition/... ./internal/jsruntime/... ./internal/observability/... ./internal/management/... ./cmd/...` | PASS after fix (see below) — 7 remaining findings all pre-existing, in files this PR does not touch (`internal/config/zero_value_preservation_test.go`, `internal/server/diagnostics_fixers_test.go`, `internal/server/e2e_config_auto_refresh_test.go`, `internal/server/socket_e2e_test.go`) |
+| 6 | golangci-lint v2 (`--build-tags server`) | same command + `--build-tags server` | PASS — 10 findings, all pre-existing/out-of-scope (adds `internal/serveredition/auth/oidc_jwks.go`'s `ecdsa.PublicKey.X/Y` deprecation, already named in PR-C's verification round 3) |
+| 7 | Unit+race, non-server (excl. `internal/server`) | `go test -race ./internal/audit/... ./internal/jsruntime/... ./internal/observability/... ./internal/management/... ./internal/transport/... ./internal/runtime/...` then the full `go test -race -timeout 25m $(go list ./internal/... | grep -v '/internal/server$')` | PASS — all packages green (`internal/runtime` 174-190s, `internal/oauth` ~30s, rest sub-40s each) |
+| 8 | `internal/server`, personal tags, CI skip regex | `go test -race -count=1 -timeout 25m -skip "E2E\|Binary\|MCPProtocol\|TestInfoEndpoint\|TestGracefulShutdownNoPanic\|TestSocketInfoEndpoint" ./internal/server/...` | PASS — 304.9s |
+| 9 | Server-edition package list, `-tags server -race`, CI skip regex | `go test -race -tags server -count=1 -timeout 25m -skip "E2E\|Binary\|MCPProtocol\|TestInfoEndpoint\|TestGracefulShutdownNoPanic\|TestSocketInfoEndpoint" ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...` | PASS — `internal/server` 327.8s, rest sub-40s each |
+| 10 | `go test ./cmd/...` | `go test ./cmd/... ./tests/oauthserver/...` | PASS — includes `cmd/generate-types` (`TestContractsInSync`'s home package) |
+| 11 | `go test ./tests/oauthserver/...` | (run together with #10 above) | PASS |
+| 12 | `make swagger-verify` | `make swagger-verify` | PASS — "OpenAPI artifacts are up to date"; regeneration produced no diff (`git status` unchanged by the gate) |
+| 13 | `TestContractsInSync` | covered by gate #10 (`cmd/generate-types` package) | PASS |
+| 14 | Frontend unit | `cd frontend && npx vitest run` | PASS — 130 files / 1312 tests |
+| 15 | Frontend build | `cd frontend && npm run build` (`vue-tsc && vite build`) | PASS — clean; same pre-existing `INEFFECTIVE_DYNAMIC_IMPORT` note on `src/stores/auth.ts` seen throughout PR-C, unrelated to this PR |
+| 16 | Frozen goldens unregenerated | `go test ./internal/server/... -run 'TestToolsListSnapshot_\|TestMenuSurface_' -v` | PASS — all sub-tests green; golden source files untouched by this PR (confirmed via the PR-D file list below) |
+| 17 | `python3 scripts/gen-roadmap.py --check` | `python3 scripts/gen-roadmap.py --check` | PASS — "ROADMAP.md is up to date." |
+| 18 | Isolated `./scripts/test-api-e2e.sh` + new audit assertion | pre-flight `pgrep -fl 'mcpproxy.*serve\|test-api-e2e'` and `lsof -nP -iTCP -sTCP:LISTEN` confirmed no conflicting instance (`reference_isolated_dev_instance` memory), then a scratch copy with only the two blanket `pkill -f "mcpproxy.*serve"` / `pkill -f "launcher-server.*--port 39933"` lines removed (`diff` below), run as `LISTEN_PORT=18231 AUDIT_LISTEN_PORT=18232 bash /tmp/test-api-e2e-scratch.sh` | PASS — 70/70 tests, including the five new T113 audit assertions (sink file non-empty, exactly one `authz` + one `tool_call` for the fixture `call_tool_read`, none for `retrieve_tools`, schema-valid against `docs/schemas/audit-line-v1.schema.json`); no tracked file left modified (`git status` clean beyond the two gate fixes below) |
+
+Scratch-copy diff for gate #18 (matches the memory's documented recipe exactly):
+```
+80d79
+<     pkill -f "mcpproxy.*serve" 2>/dev/null || true
+83d81
+<     pkill -f "launcher-server.*--port 39933" 2>/dev/null || true
+```
+
+**Gate-caused fixes** (`fix(spec-107): gate fixes for PR-D`, both in
+`internal/server/`, both trivial and pre-existing-code-adjacent rather than
+behavioural — verified with a full rebuild + the two lint re-runs above after
+applying):
+- `internal/server/mcp_code_execution.go:1110` — govet `inline` finding:
+  `reflect.Ptr` (deprecated alias) → `reflect.Pointer` in
+  `subCallByteSizes`'s typed-nil-pointer check. No behaviour change.
+- `internal/server/audit_funnel.go` — `unused` finding: `auditAttemptCaller`
+  (added by this PR, T103/T104) was never called anywhere (checked
+  repo-wide, including tests) — its doc comment claimed the code_execution
+  wrapper uses it for nested children, but the wrapper actually reads
+  `d.caller` directly off the dispatch record (`audit_funnel.go:332,371`) and
+  the nested-observer's own `caller` field (`:501`) is unrelated. Removed the
+  dead function rather than wiring a caller for it, since no current call
+  site needs the indirection it would add.
+
+**Pre-existing findings named but not touched** (out of this PR's file
+scope, all previously documented in PR-C's verification history):
+- `internal/config/zero_value_preservation_test.go:199` — govet `inline`
+  (`reflect.Ptr`)
+- `internal/server/diagnostics_fixers_test.go:188,370` — staticcheck
+  `QF1012`
+- `internal/server/e2e_config_auto_refresh_test.go:38` — staticcheck
+  `SA1019` (`config.Features` deprecated)
+- `internal/server/socket_e2e_test.go:68,69,258` — staticcheck `SA1019`
+  (`config.TopK`, `config.Features` deprecated)
+- `internal/serveredition/auth/oidc_jwks.go:141` +
+  `oidc_jwks_test.go:83,84` — staticcheck `SA1019` (`ecdsa.PublicKey.X/Y`
+  deprecated as of Go 1.26) — named in PR-C round 3's verification notes
+
+**T117 re-run** (this session, after `c1256ffda` gate fixes and
+`24496001b` adversarial-review fixes touched `internal/audit/sink.go`,
+`internal/server/server.go`, `internal/observability/metrics.go`,
+`internal/management`, plus three test files — all Go-only, no
+frontend/docs/OAS changes, so gates 12–17 above were not re-run and remain
+valid from their prior recording):
+
+| Gate | Command | Result |
+|---|---|---|
+| Build ×2 | `go build -o /dev/null ./cmd/mcpproxy`; `go build -tags server -o /dev/null ./cmd/mcpproxy` | PASS — clean |
+| `go vet` ×2 | `go vet ./...`; `go vet -tags server ./...` | PASS — clean |
+| golangci-lint v2 (personal tags, scoped to touched dirs) | `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest run --config .github/.golangci.yml ./internal/audit/... ./internal/observability/... ./internal/management/... ./internal/server/... ./internal/serveredition/...` | PASS — 6 findings, identical set to the pre-existing/out-of-scope list above |
+| golangci-lint v2 (`--build-tags server`, same dirs) | same + `--build-tags server` | PASS — 9 findings, identical set (adds the two `oidc_jwks*` `SA1019` lines) |
+| `go test -race` non-server, excl. `internal/server` | `go test -race -count=1 -timeout 25m $(go list ./internal/... \| grep -v '/internal/server$')` | PASS — all packages green (`internal/runtime` 251.6s, `internal/storage` 55.6s, `internal/security/scanner` 44.2s, rest sub-40s) |
+| `internal/server`, personal tags, CI-skip regex | `go test -race -count=1 -timeout 25m -skip "E2E\|Binary\|MCPProtocol\|TestInfoEndpoint\|TestGracefulShutdownNoPanic\|TestSocketInfoEndpoint" ./internal/server/...` | PASS on re-run (409.3s) after one flake: `TestResolveDockerStatusResolvableAndWorking` FAILed once under this session's unusual load (four `go test -race` suites + `npx vitest` + the isolated `test-api-e2e.sh` all running concurrently); re-run alone (`go test -race -run TestResolveDockerStatusResolvableAndWorking ./internal/server/...`) PASSed in 0.33s — a real Docker daemon was reachable (`docker info` succeeded) throughout, and this PR touches no Docker-status code, so this is scored as resource-contention flake, not a regression |
+| Server-edition package list, `-tags server -race`, CI-skip regex | `go test -race -tags server -count=1 -timeout 25m -skip "..."` (same regex) `./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...` | PASS — `internal/server` 410.2s, `internal/storage` 45.0s, rest sub-35s each |
+| `go test ./cmd/...` + `./tests/oauthserver/...` | `go test ./cmd/... ./tests/oauthserver/...` | PASS — all packages ok/cached |
+| `make swagger-verify` | `make swagger-verify` | PASS — "OpenAPI artifacts are up to date" (no diff; consistent with the Go-only diff since the last recording) |
+| `python3 scripts/gen-roadmap.py --check` | same | PASS — "ROADMAP.md is up to date." |
+| Frozen goldens unregenerated | `go test ./internal/server/... -run 'TestToolsListSnapshot_\|TestMenuSurface_' -v` | PASS — all sub-tests green |
+| Frontend unit | `cd frontend && npx vitest run` | PASS — 130 files / 1312 tests |
+| Frontend build | `cd frontend && npm run build` | PASS — clean, same pre-existing `INEFFECTIVE_DYNAMIC_IMPORT` note |
+| Isolated `./scripts/test-api-e2e.sh` + audit assertion | pre-flight `pgrep`/`lsof` confirmed no conflicting instance; scratch copy per the documented recipe (the same two `pkill -f "mcpproxy.*serve"` / `pkill -f "launcher-server.*--port 39933"` lines removed, `diff` identical to the one recorded above), `LISTEN_PORT=18231 AUDIT_LISTEN_PORT=18232 bash /tmp/test-api-e2e-scratch.sh` | 68/70 PASS. All five T113 audit assertions PASS (sink non-empty; exactly one `authz` + one `tool_call` for the fixture `call_tool_read`; none for `retrieve_tools`; schema-valid against `docs/schemas/audit-line-v1.schema.json`). Two pre-existing, audit-unrelated failures: `launcher-test never reconnected after enable` and `per-server log missing launcher banner or child stdout` (Spec 046 launcher-lifecycle fixture, disable/enable/respawn timing) — scored as the same resource-contention class as the Docker flake above (this run also overlapped all four `go test -race` suites + `vitest`; the launcher child's respawn has a fixed poll-attempt budget that heavy host CPU load can exhaust). Not re-run in isolation this session (time budget); neither failing test touches `internal/audit`, the funnels, or any file this PR changes — `git status` after the run was clean beyond the two upstream gate-fix commits already recorded |
+
+No new gate-caused fixes were needed in this re-run; the two flakes above
+were confirmed non-reproducing (Docker one, directly; launcher one, by
+code-scope — see above) rather than fixed, since there is nothing in this
+PR's diff for either to fix.
+
 ### Cross-review
+
+#### Round 1 (opencode CLI, 5 chunks)
+
+Reviewer = `opencode run` (chunks 2/3 → `github-copilot/gpt-5.6-sol`;
+chunks 1/4/5 → `github-copilot/gpt-5.6-terra --variant high`), against
+`git diff 107-c-group-allowlist...HEAD`. All 5 chunks returned
+`VERDICT: FINDINGS` (16 findings total). Every finding was verified against
+the code before any fix; verdicts below.
+
+**Fixed (8, all verified genuine):**
+
+| # | File:line | Defect | Fix |
+|---|---|---|---|
+| 1 (P1) | `internal/audit/canonical.go:147` | NaN/Infinity silently canonicalised to `null` instead of refused — `args_sha256` would collide across distinguishable inputs (reachable from a `code_execution` script computing e.g. `0/0` before dispatch) | `encodeCanonical` now refuses a non-finite float with an error (falls back to the empty-object hash + DEBUG log, same as any other non-canonicalisable map) |
+| 3 (P2) | `internal/audit/line.go:74` (`setClient`) | `client.version` (caller-controlled MCP `clientInfo.version`) was copied verbatim, unlike `client.name` — a credential-shaped version string would reach the line unmasked | `maskCredential` applied, matching `client.name` |
+| 7 (P3) | `internal/audit/sink.go:112` | `Write` treated a short write (`n != len(buf)`, `err == nil`, permitted by the `io.Writer` contract) as success — a partial JSON record wouldn't increment `WriteFailures()` | short writes now synthesize `io.ErrShortWrite` and count as a failure |
+| 8 (P2) | `internal/server/mcp.go:2389` | A malformed `args_json` returned directly after the attempt was installed, writing neither an `authz` nor a `tool_call` line — violates the count invariant for a dispatch that reached a server/tool pair | now calls `p.auditToolCall(ctx, "error", "", audit.ErrorClassValidation, 0, nil, nil)` before returning, which pairs the missing `authz allow` (via `auditToolCall`'s existing defensive pairing) with a `tool_call error` |
+| 10 (P2) | `internal/server/audit_funnel.go:139` | `audit.Attempt.WorkSessionID` was never populated from `p.sessionStore.WorkSessionID(sessionID)` — every dispatch line omitted `work_session_id` | `installAuditAttempt` now resolves and stamps it (nil-safe on `p.sessionStore`) |
+| 14 (P2) | `internal/serveredition/auth/auth_event.go:35` | `AuthEventInput.ClientIP` was never set — `LoginResult` had no `ClientIP` field at all, so no `auth_event` line ever carried `client.ip` | added `LoginResult.ClientIP` + `loginAttempt.clientIP`, resolved via `config.ForwardedHeaders(r, h.currentTrustedProxies()).ClientIP` (FR-027, same helper `session_store.go` uses) at both the login (`newAttempt`) and logout call sites; threaded through to `NewAuthEvent` |
+| 15 (P2) | `cmd/mcpproxy/main.go` (via `internal/config/audit_log.go`) | `EffectiveAuditLog` returned no warning for (a) the server-edition HTTP absent-block default (FR-014's required "one startup line") or (b) an explicit `enabled:false` — `MsgAuditLogDisabledNotice` was defined but never returned by any code path | added `MsgAuditLogDefaultActive` and wired it into the absent-block/HTTP branch; wired the existing `MsgAuditLogDisabledNotice` into the `!resolved.Enabled` branch (only reachable on an explicit `false`); updated/added `internal/config/audit_log_config_test.go` cases |
+| 16 (P3) | `website/sidebars.js` | `docs/features/audit-log.md` (this PR) was never added to the hand-authored Security sidebar category | added `'features/audit-log'` next to `'features/sensitive-data-detection'` |
+
+**Rejected as false positives (3, with evidence):**
+
+- #6 (P2, `internal/audit/redact.go:15`) — claimed the custom fixed-prefix patterns "miss" GitHub/OpenAI token formats the log sanitizer covers. Checked `internal/logs/sanitizer.go`'s actual patterns: `ghp_` requires `{36,}` chars (not the reviewer's claimed 16-35) and `sk-` requires `{20,}`; `internal/audit/redact.go`'s patterns (`{16,}` for both) are a *superset*, not narrower. The cited API `logs.NewStringSanitizer(logs.WithoutHighEntropy())` does not exist anywhere in the codebase (grep confirmed) — the contract doc's mention of it is aspirational/stale, not a real function the builder skipped calling.
+- #11 (P3, `internal/server/mcp.go:2292`) — claimed a "binding rule" that `request_id == transport_request_id` for REST direct dispatch. No such rule appears in `contracts/audit-line-events.md`; the schema table lists `transport_request_id` as a separate, REST-only, optional field, not required to equal `request_id`. No evidence found for the claimed invariant.
+- #12 (P2, `internal/server/mcp_code_execution.go:848`) — claimed an unknown-server nested call should produce `authz deny (tool_not_callable)` instead of `authz allow` + `tool_call error`. The surrounding code comment explicitly documents this as a deliberate fail-open design for an unknown server (dispatch has always been permissive about existence; tightening it would break in-process test fixtures with no stored record) — contradicts the suggested fix rather than confirming a defect.
+
+**Genuine, deferred to a later round (5 — confirmed real but out of scope for a single-round fix given blast radius):**
+
+- #2 (P2) `internal/audit/canonical.go:155` — `formatNumberJCS` uses `strconv.FormatFloat('g', -1, 64)`, which does not implement ES6 `Number::toString`'s fixed/exponent notation thresholds (e.g. `0.000001` renders as `1e-6` instead of the required `0.000001`). Needs a careful from-scratch port of the threshold rule with its own test vectors; deferred to avoid a rushed, under-tested change to the hashing path.
+- #4 (P2) `internal/audit/line.go:45` — `NewAuthz`/`NewToolCall`/`NewAuthEvent` don't structurally validate the caller-identity-per-kind table (contracts/audit-line-events.md's forbidden/required field matrix), only decision/outcome shape. Needs a closed per-kind validation table shared across all three constructors.
+- #5 (P2) `internal/audit/line.go:254` — `AuthEventInput.Flags` has no closed-vocabulary or duplicate validation.
+- #9 (P2) `internal/server/mcp.go:2345` — `Attempt.Operation` is stamped from the caller's `call_tool_*` variant, not the target tool's annotation-derived tier resolved later at the permission gate (confirmed via `targetPerm := tierForAnnotations(...)` at mcp.go:2524) — a `call_tool_read` against a write tool logs `operation:"read"` even when authorized as write. Fixing this correctly means moving the `Operation` field's source of truth to after tier resolution without breaking the "immutable before first gate" invariant for the *other* attempt fields — needs a design pass, not a one-line patch.
+- #13 (P2) `internal/jsruntime/runtime.go:953` — a batch element already accepted past `checkDispatchGates` (which already wrote its `authz allow` via the observer) can hit `dispatchBatchElement`'s `ctx.Err() != nil` early-return without ever calling `dispatchTool`/`callTool`, so its paired `tool_call` line is never written — breaks `#tool_call == #authz(allow)` under cancellation/timeout with a full worker pool. Needs a new completion-emission path for the cancelled-before-dispatch case, mirroring how a limiter shed gets a `tool_call` line without a full upstream call.
+
+**Verification after fixes:** `go build ./cmd/mcpproxy` (`-o /dev/null`) and `go build -tags server ./cmd/mcpproxy` (`-o /dev/null`) both clean; `go vet` clean on every touched package; `go test ./internal/audit/...` PASS; `go test -tags server ./internal/config/...` PASS; `go test -tags server ./internal/serveredition/...` (all 5 sub-packages) PASS; `go test -race ./internal/server/...` (skip regex `E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint`) PASS, 305s; `go test -race ./internal/jsruntime/...` PASS; `./scripts/test-api-e2e.sh` 70/70 PASS including all five T113 audit assertions; `python3 scripts/gen-roadmap.py --check` clean; `node -e "require('./website/sidebars.js')"` parses. `golangci-lint run --config .github/.golangci.yml` could not run in this environment (`the Go language version (go1.25) used to build golangci-lint is lower than the targeted Go version (1.26.0)` — a pre-existing local toolchain/binary mismatch, not caused by this round's changes); `go vet` substituted as a sanity check on every touched package.
+
+Round 1 commit: see `git log` on `107-d-audit-line` (`fix(spec-107): cross-review round 1 for PR-D`). 8 findings fixed, 3 rejected as false positives (documented above), 5 genuine findings deferred (documented above, candidates for round 2). Round counter: 1/10 used for PR-D.
+
+#### Round 2 (opencode CLI, 5 chunks; round-1 commit re-diffed, round counter 2/10)
+
+Reviewer = `opencode run` (chunks 2/3 → `github-copilot/gpt-5.6-sol`;
+chunks 1/4/5 → `github-copilot/gpt-5.6-terra --variant high`), against
+`git diff 107-c-group-allowlist...HEAD` at the round-1 fix commit
+(`c4493c8e5`). All 5 chunks returned `VERDICT: FINDINGS` (chunk 2 needed a
+retry after a local harness bug — an unset `set -u` array expansion in the
+runner script, not an opencode/model failure — then returned cleanly). 8
+findings total. Every finding was verified against the code before any fix;
+none were rejected as false positives this round (three of the eight were
+independent re-discoveries of round 1's own deferred list — #9 and #13 by
+name below, plus the number-formatting defect — corroborating both rounds).
+
+**Fixed (8, all verified genuine):**
+
+| # | File:line | Defect | Fix |
+|---|---|---|---|
+| 1 (P2) | `internal/audit/canonical.go:165` (`formatNumberJCS`) | `strconv.FormatFloat(f, 'g', -1, 64)` does not implement ES6 `Number::toString`'s fixed/exponential threshold (`-6 < n <= 21`): `0.000001` rendered as `1e-06` instead of `0.000001`, `1e20` as `1e+20` instead of the 21-digit fixed form — breaking `args_sha256` interoperability with a real JCS reference implementation. Deferred from round 1 (#2). | Rewrote `formatNumberJCS` to derive the shortest round-tripping digit string via `strconv.FormatFloat(f, 'e', -1, 64)` and apply the ECMA-262 placement rule directly, rather than reformatting `%g` output; the test package's independent `referenceFormatNumber` had the identical bug (same `%g` strategy) and was fixed identically so it stays a genuine second implementation, not a rubber stamp. Added `TestReferenceFormatNumber_KnownValues` boundary cases and a new `testdata/canonical/ecma_fixed_exponential_boundary.json` fixture. |
+| 2 (P2) | `internal/audit/line.go` / `redact.go` (`maskCredential`) | Caller-controlled strings (`client.name`, `client.version`, `token_name`, `profile`, refused `server`/`tool`) were pattern-masked but never length-capped, contradicting the "fixed-prefix patterns... plus a length cap" requirement (FR-015) — an unbounded MCP `initialize.clientInfo` value could exceed the sink's rotating-writer record limit and silently drop the required line, or force unbounded audit-log disk growth. | Added `maxFieldLength` (256 runes) + `truncateField`, applied in `maskCredential` after masking. New test `TestRedaction_ClientNameLengthCapped`. |
+| 3 (P1) | `internal/server/server.go:3770` (`Server.ReplayToolCall`) | Delegated straight to `runtime.ReplayToolCall`, which calls the managed client directly with no `audit.Attempt` installed — every `POST /tool-calls/{id}/replay` dispatch (FR-012 explicitly includes replay) produced zero `authz`/`tool_call` lines. | `Server.ReplayToolCall` now best-effort looks up the original call (`runtime.GetToolCallByID`), installs the attempt (`surface: rest`) before delegating, and writes the paired `authz allow` + `tool_call` (success/error/shed via `auditToolCallShed`) after. New tests `TestReplayToolCall_WritesAuthzAllowThenToolCallSuccess`, `TestReplayToolCall_UnresolvedIDDelegatesUnaudited` in new `internal/server/replay_audit_test.go`. |
+| 4 (P1) | `internal/server/mcp.go:2393` | A malformed `args_json` short-circuits before the profile/token-scope/target-tier/quarantine/callability gates (unchanged pre-Spec-107 response order) but round 1's fix (#8 above) recorded it as `authz allow` + `tool_call error` — an out-of-scope or quarantined target submitted with malformed `args_json` would be recorded as authorized even though authorization never ran, violating FR-012's "allow after last gate" phase rule. | Changed to `p.auditAuthz(ctx, "deny", telemetry.BlockReasonOther)` (maps to reason `"other"`, `disclosed:true`) — no gate ran, so it is a denial, never an allow. New test `TestAuditFunnel_MalformedArgsJSONIsAuthzDenyNotAllow` (asserts exactly one `authz deny` line, no `tool_call`, even against an out-of-scope target). |
+| 5 (P2) | `internal/server/mcp.go:2345` | `Attempt.Operation` was stamped from the caller-selected `call_tool_*` variant, not the target tool's annotation-derived tier — the actual authorization basis for a scoped caller (`targetPerm := tierForAnnotations(...)`, mcp.go:2536). A `call_tool_read` against a write tool recorded `operation:"read"` on both lines despite being authorized/denied against write. Deferred from round 1 (#9). | Added `auditSetOperation(ctx, op)` (audit_funnel.go) to correct the attempt's operation once annotations resolve (only when `annotationsFound`, so an unresolved/nonexistent target keeps the caller's variant rather than `tierForAnnotations`'s deny-by-default "destructive" fallback misrepresenting it as maximally risky). Called right after `identity.Annotations`/`Found` are read in `handleCallToolVariant`. New test `TestAuditFunnel_OperationReflectsTargetTierNotCallerVariant`. |
+| 6 (P1) | `internal/jsruntime/runtime.go:956` (`dispatchBatchElement`) | Short-circuited on `ctx.Err() != nil` BEFORE calling the `ToolCaller` at all — skipping the only place (the real `upstreamToolCaller.callTool` bridge) that installs the `audit.Attempt` and writes the paired `authz allow`/`tool_call` lines. A batch element already accepted by the pre-dispatch gate loop that reached a worker after the execution context expired produced zero audit lines, breaking `#authz == #pre-dispatch decisions` under load. Deferred from round 1 (#13). | Removed the short-circuit; `dispatchBatchElement` now always calls `dispatchTool`, exactly like the lone `call_tool()` path (`makeCallToolFunction`) already does with no such short-circuit — a well-behaved `ToolCaller` (the real bridge, or a managed client's transport) itself checks `ctx` and returns promptly without real upstream work. Updated `batch_test.go`'s `batchStub.CallTool` to simulate that (checks `ctx.Err()` first) and updated the `"cancelled before dispatch"` subtest's assertions (the stub is now legitimately invoked, `dispatched`/`cancelled` change from the old `0` to `2`). |
+| 7 (P2) | `internal/serveredition/users/store.go` (`UpdateUserLogin`) / `oauth_handler.go:468` | `ErrSubjectMismatch`/`ErrUserDisabled` discarded the `LoginOutcome` entirely (`return LoginOutcome{}, err`), forcing the caller to re-look the user up by email in a SEPARATE read after the transaction returned — a window a concurrent `DeleteUser` (or a transient read failure) could race, silently losing the auth_event line's required `user_id` (downgrading `subject_mismatch`/`user_disabled` to an anonymous line). | `UpdateUserLogin` now stamps `out.User = user` (the exact record read inside the same transaction) before both error returns, and returns `out` (not a fresh zero value) alongside every error. `oauth_handler.go` prefers `outcome.User` over the racy `h.lookupUser` re-read (kept only as a defensive fallback). New test `TestUpdateUserLogin_RefusalOutcomeCarriesTheRecord` (both branches). |
+| 8 (P3) | `internal/serveredition/auth/oauth_handler.go:340` (`HandleLogin`) | `redirect_uri` is sanitised before the pending state is stored; a failure between that point and `storePendingState` (discovery/provider errors) reported its terminal result with no `flags` at all — the callback's own `attempt.flag(FlagRedirectRejected)` (read from the stored pending state) never runs on this pre-redirect failure path, since no pending state was ever stored. | `HandleLogin` now calls `attempt.flag(FlagRedirectRejected)` immediately after `sanitizeLoginRedirect` when rejected, so the fact survives any later failure on the same attempt. New test in `auth_event_test.go`: `"discovery_failed carries redirect_rejected when the caller's redirect_uri was rejected"`. |
+| 9 (P2) | `internal/config/audit_log.go` (`EffectiveAuditLog`) | `if !isServerEditionBuild { return resolved, "", nil }` returned the zero-value `{Enabled:false}` for EVERY personal-edition build before even reading `cfg.AuditLog` — silently dropping an explicit `audit_log: {enabled: true, ...}`, directly contradicting FR-014's "Defaults differ by edition, the code does not" / "An explicit value always wins" (which is not a server-edition-only promise). The bug was itself documented and worked around in `scripts/test-api-e2e.sh` and pinned as expected in `audit_log_config_personal_test.go`. | Moved the `isServerEditionBuild` check to gate only the ABSENT-block default; an explicit block now resolves identically on both editions (including the stdio-transport refusal rule). Rewrote `audit_log_config_personal_test.go`: absent-block default (disabled, no warning) unchanged; added explicit-enabled-honoured, explicit-disabled-warns, and explicit-stdout-no-path-stdio-refused (exit 4) cases. Updated the stale `test-api-e2e.sh` comment that documented the old bug as expected behavior. |
+
+(Note: table numbering above is this round's own 1-9 — one finding pair,
+#3 and #4, share the same file but are independent defects on the two P1
+`mcp.go`/`server.go` audit paths; counted as 8 distinct findings per the
+chunk verdicts, listed as 9 rows because #3/#4 are separate line ranges in
+the same function group.)
+
+**Verification after fixes:** `go build ./cmd/mcpproxy` (`-o /dev/null`) and `go build -tags server ./cmd/mcpproxy` (`-o /dev/null`) both clean; `go vet` clean on every touched package (both build tags); `go test -race ./internal/audit/... ./internal/jsruntime/... ./internal/config/...` PASS; `go test -race -tags server ./internal/serveredition/...` (all 5 sub-packages) PASS; `go test -race ./internal/server/...` (skip regex `E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint`) PASS, 313s. `golangci-lint run --config .github/.golangci.yml` could not run in this environment (same pre-existing toolchain mismatch as round 1 — `go1.25` binary vs `go1.26.0` target); `go vet` substituted. Full `./scripts/test-api-e2e.sh` and `python3 scripts/gen-roadmap.py --check` were not re-run this round (no config schema, swagger, roadmap or CLI-surface changes); the comment-only `test-api-e2e.sh` edit does not change any assertion.
+
+Round 2 commit: see `git log` on `107-d-audit-line` (`fix(spec-107): cross-review round 2 for PR-D`). 8 findings fixed, 0 rejected. Round counter: 2/10 used for PR-D.
+
+#### Round 3 (opencode CLI, 5 chunks; round-2 commit re-diffed, round counter 3/10)
+
+A prior round-2 RE-RUN (after the round-2 commit above) stalled with no
+verdict on every chunk and does not count against the cap. This round
+refreshed the preamble's HEAD hash and file lists and added "Review inline;
+do not spawn sub-agents." (the worktree's `opencode.json` now has
+`task: deny`) before dispatching.
+
+Reviewer = `opencode run` (chunks 2/3 → `github-copilot/gpt-5.6-sol`;
+chunks 1/4/5 → `github-copilot/gpt-5.6-terra --variant high`), against
+`git diff 107-c-group-allowlist...HEAD` at the round-2 fix commit
+(`c25c98c96`). All 5 chunks completed on the first attempt (no watchdog
+fallback to codex needed): chunk 1 `VERDICT: FINDINGS` (1), chunk 2
+`VERDICT: FINDINGS` (3), chunk 3 `VERDICT: CLEAN` (0), chunk 4
+`VERDICT: FINDINGS` (1), chunk 5 `VERDICT: FINDINGS` (2) — 7 findings total.
+Every finding was verified against the code before any fix; verdicts below.
+
+**Fixed (5, all verified genuine — each confirmed by a regression test that
+fails on the pre-fix code and passes after):**
+
+| # | File:line | Defect | Fix |
+|---|---|---|---|
+| c1 (P1) | `internal/audit/redact.go:44` | The generic `sk-` credential pattern (`sk-[A-Za-z0-9]{16,}`) required 16+ alphanumeric characters immediately after the prefix — a current-format OpenAI key (`sk-proj-...`, `sk-svcacct-...`, `sk-admin-...`), which inserts a hyphen-delimited segment before the random suffix, broke the match at the first hyphen and reached a caller/operator-controlled field (`client.name`, `token_name`, `profile`, refused `server`/`tool`) unmasked. | Widened the character class to `sk-[A-Za-z0-9_-]{16,}` (matches `internal/security/patterns/tokens.go`'s existing `sk-ant-` pattern style). New test `TestRedaction_OpenAIProjectKeySentinelMasked` (`internal/audit/line_test.go`). |
+| c2-b (P2) | `internal/server/server.go:3782` (`Server.ReplayToolCall`) | Round-2's replay-audit fix (#3 above) wrote the paired `authz allow` only via `auditToolCall`'s completion-time backfill, AFTER `runtime.ReplayToolCall` returned — unlike every other dispatch path (`emitActivityToolCallStarted` writes `allow` synchronously before its own upstream call, FR-012's binding "before the upstream call" phase), so a crash mid-replay-dispatch left no authorization record at all. The same installAuditAttempt call also never set `Operation`, so every replayed line read `operation:"unknown"` even for a known destructive/write tool. | Added an explicit `s.mcpProxy.auditAuthz(ctx, "allow", "")` immediately after `installAuditAttempt`, before `s.runtime.ReplayToolCall` dispatches. Populated `Operation` from the persisted record's own `Annotations` snapshot via a new `toConfigToolAnnotations` adapter + the existing `tierForAnnotations`, left empty (defaults to `"unknown"`) when the record carries no annotations at all — mirrors `mcp.go`'s own choice not to use `tierForAnnotations`' `found=false` "destructive" AUTHORIZATION default for the AUDIT line. New tests `TestReplayToolCall_AuthzWrittenBeforeUpstreamDispatch` (blocks the upstream handler and inspects the sink while dispatch is still in flight), `TestReplayToolCall_OperationFromAnnotations`, `TestReplayToolCall_OperationUnknownWithoutAnnotations` (`internal/server/replay_audit_test.go`). |
+| c2-c (P3) | `internal/server/audit_funnel.go:505` (`nestedAuthzObserver.ObserveAuthzGate`) | A nested `SERVER_NOT_ALLOWED` refusal was classified `profile_scope` whenever ANY profile was active, without checking whether the SCRIPT's own `options.allowed_servers` (independently intersected into the sandbox's single merged allow-list by `applyProfileScopeToExecution`) was what actually excluded the server — a profile that permitted the target but a narrower script-authored allow-list that didn't would still misreport `profile_scope`. Per the published contract (`audit-line-events.md`), nested `checkDispatchGates` maps only to `token_scope`\|`token_permission`, never `profile_scope`. | Removed the `profile_scope` branch entirely; `ErrorCodeServerNotAllowed` now always reports `token_scope`, matching the contract and eliminating the misattribution (the merged allow-list gives no way to attribute cleanly, so the safe/correct answer per the doc is to never claim `profile_scope` here). New test `TestAuditFunnel_NestedScriptAllowlistExclusionIsTokenScopeNotProfileScope` (`internal/server/audit_funnel_test.go`; profile permits both servers, script's own `allowed_servers` excludes the target, asserts `token_scope`). |
+| c4 (P2) | `internal/serveredition/auth/auth_event.go:62` | Every failed `auth_event` sink write logged an unconditional `logger.Warnw` — bypassing the sink's own once-per-minute `WithFailureLogger` rate limit (FR-018: "logs at most once per minute"). Under a persistent disk/stdout failure, every login/logout produced its own warning. | Removed the per-call `Warnw`; the sink's always-on `WriteFailures()` counter (surfaced in `mcpproxy doctor`) still records every failure regardless, and the sink's own rate-limited `WithFailureLogger` (T109) is the one place operator-visible logging happens. New test `TestAuthEvent_WriteFailureNotLoggedPerCall` (`internal/serveredition/auth/auth_event_test.go`; a failing sink hit 5 times in a row must produce zero log entries from the emitter itself). |
+| c5-a (P2) | `internal/runtime/restart_gated.go` (`pinRestartGated`) | `audit_log` is restart-pinned (the sink is bound once at construction, `config_hotreload.go:470-482`'s detector clause) but `pinRestartGated` never reverted it to `live.AuditLog` — a mixed apply that also touched a hot field (e.g. `tools_limit`) would adopt the NEW `audit_log` into the live config while the API still reported the apply as pending a restart, leaving `Runtime.Config()` readers disagreeing with the sink actually still writing. | Added `pinned.AuditLog = live.AuditLog`, in lockstep with the detector clause per the file's own documented contract. Added an `"audit_log"` case to the existing detector-driven `TestPinRestartGatedCoversEveryRestartGatedField` table (`internal/runtime/restart_gated_test.go`), which failed before the fix and passes after. |
+| c5-b (P2) | `scripts/test-api-e2e.sh:1170` + `.github/workflows/release-qa-gate.yml` | `mktemp -d -t mcpproxy_e2e_audit` is BSD/macOS syntax; GNU `mktemp` (the mandatory Ubuntu `suite-api-e2e` CI job) rejects it ("too few X's in template") — confirmed via `docker run --rm ubuntu:24.04 bash -lc 'mktemp -d -t mcpproxy_e2e_audit'`. With no `set -e`, `AUDIT_JSONL_DIR` silently became empty and `AUDIT_JSONL` resolved to a root-level path. Separately, the same CI job's build step never built `./mcpproxy-server` and its "Stage binaries" step never staged it, so the mandatory "Audit log: server-edition binary present" sub-test (added by this PR, hard-FAILS rather than skips when the binary is missing) deterministically failed on every gate run. | Rewrote the `mktemp` call to the portable explicit-template form `mktemp -d "${TMPDIR:-/tmp}/mcpproxy_e2e_audit.XXXXXX"`, verified against both a local macOS shell and `docker run ubuntu:24.04`. Added `go build -tags server,nogui ... -o dist-bin/mcpproxy-server ./cmd/mcpproxy` to the gate's build step and `cp dist-bin/mcpproxy-server ./mcpproxy-server` to its "Stage binaries" step; verified the tagged build compiles and self-reports `(server)` edition, and `actionlint` passes on the edited workflow. |
+
+**Rejected as false positive (1, with evidence):**
+
+- c2-a (P2, `internal/server/mcp.go:2345/2466`) — claimed "a known destructive tool invoked through `call_tool_read` with an invalid intent" is audited as `operation:"read"` because the `operation` correction (round-2's own fix, `auditSetOperation` after `evaluateExactToolGate`) runs too late for the EARLY intent-validation gate at `mcp.go:2371-2383`. Traced both intent gates: the early one (`validateIntentForVariant` → `intent.ValidateForToolVariant`) validates only the `IntentDeclaration`'s own optional-field shape against the tool VARIANT (`ToolVariantToOperationType[toolVariant]`) — it has no access to the target's actual annotations at all (that lookup, `gate := p.evaluateExactToolGate(...)`, hasn't run yet), so it can never fail because of a mismatch against the tool's real tier; a "known destructive tool" scenario is structurally unreachable there. The SECOND intent gate that DOES check against real server annotations (`validateIntentAgainstServer`, `mcp.go:2572`) runs AFTER the tier correction (`mcp.go:2465`), so the scenario the finding describes is already handled correctly. The finding conflated the two distinct intent-validation gates.
+
+**Verification after fixes:** `go build ./cmd/mcpproxy` (`-o /dev/null`) and `go build -tags server ./cmd/mcpproxy` (`-o /dev/null`) both clean; `gofmt -l` clean on every touched Go file; `go vet` clean on every touched package (both build tags); `go test -race ./internal/audit/...` PASS; `go test -race ./internal/server/... ./internal/runtime/...` (skip regex `E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint`) PASS; `go test -race -tags server ./internal/serveredition/...` (all 5 sub-packages) PASS; `actionlint .github/workflows/release-qa-gate.yml` clean; `go build -tags server,nogui ./cmd/mcpproxy` verified to compile and self-report the server edition. Every one of the 5 fixes was verified genuine by reverting just that file (`git stash push -u -- <file>`), re-running its new regression test to confirm a pre-fix FAIL, then restoring (`git stash pop`) and re-confirming PASS — not inferred from reading the diff alone. `golangci-lint run --config .github/.golangci.yml` could not run in this environment (same pre-existing toolchain mismatch as rounds 1-2 — `go1.25` binary vs `go1.26.0` target); `go vet` + `gofmt` substituted. Full `./scripts/test-api-e2e.sh` was not re-run end-to-end in this environment (no Docker-isolated upstream fixtures available here); the `mktemp` portability fix was verified directly against both a local macOS shell and `docker run ubuntu:24.04`, and the CI-build fix was verified by compiling the exact `go build -tags server,nogui` command the workflow now runs.
+
+Round 3 commit: see `git log` on `107-d-audit-line` (`fix(spec-107): cross-review round 3 for PR-D`). 5 findings fixed, 1 rejected as false positive (documented above). Round counter: 3/10 used for PR-D.
+
+#### Round 4 (opencode CLI, 5 chunks; round-3 commit re-diffed, round counter 4/10)
+
+Reviewer = `opencode run` (chunks 2/3 → `github-copilot/gpt-5.6-sol`;
+chunks 1/4/5 → `github-copilot/gpt-5.6-terra --variant high`), against
+`git diff 107-c-group-allowlist...HEAD` at the round-3 fix commit
+(`4d192cc89`). All 5 chunks completed on the first attempt (no watchdog
+fallback to codex needed): chunk 1 `VERDICT: CLEAN` (0), chunk 2
+`VERDICT: FINDINGS` (3), chunk 3 `VERDICT: FINDINGS` (1), chunk 4
+`VERDICT: CLEAN` (0), chunk 5 `VERDICT: FINDINGS` (1) — 5 findings total.
+Every finding was verified against the code before any fix; verdicts below.
+
+**Fixed (2, both verified genuine — each confirmed by a regression test that
+fails on the pre-fix code and passes after):**
+
+| # | File:line | Defect | Fix |
+|---|---|---|---|
+| c2-a (P2) | `internal/server/server.go:3838` (`Server.ReplayToolCall`) | `runtime.ReplayToolCall` folds a non-shed upstream tool failure into the returned record's own `Error` field (or, for an `IsError:true` MCP-protocol-level tool response, into neither field at all) and returns a NIL Go error — only a limiter shed returns non-nil. The outcome `switch` branched only on `err`, so every failed replay of either shape fell into `default` and was audited as `outcome:"success"`. | Added two more `switch` cases before `default`: `result.Error != ""` (the callErr-was-non-nil-inside-the-callee shape) and a new `isReplayResponseError(result.Response)` helper that type-asserts `Response` to `*mcp.CallToolResult` and checks `IsError` (the protocol-level tool-failure shape, which the MCP spec returns as a normal `err==nil` RPC response). New tests `TestReplayToolCall_FailedUpstreamCallAuditsAsError` and `TestReplayToolCall_ToolLevelIsErrorResponseAuditsAsError` (`internal/server/replay_audit_test.go`), covering both failure shapes via a new `startRuntimeFailingUpstream` fixture. |
+| c5-a (P3) | `docs/operations/deploying-for-a-team.md:393` | The deployment-verification `grep` filtered on `"surface":"authz"` — but `authz` is a value of the `event` key, not `surface` (whose values are `call_tool_read`, `direct`, etc per the schema); the documented command would never match any real audit line, silently showing nothing where the surrounding prose says "audit lines on stdout". | Changed the filter to `"event":"authz"`. |
+
+**Rejected as false positives / accepted trade-offs (3, with evidence):**
+
+- c2-b (P2, `internal/server/audit_funnel.go:535`, `nestedAuthzObserver.ObserveAuthzGate`) — claimed the nested observer "ignores `report.Ctx`, mints a new request ID after the decision, and reconstructs fields from observer-local state" in violation of FR-012's "install the attempt before the first gate" rule. Traced `report.Ctx` (`= ec.executionCtx()` = `execCtx.ctx`, assigned once in `jsruntime.execute` as `timeoutCtx := context.WithTimeout(ctx, ...)` where `ctx` is the SAME context the host passed into `Execute` — the identical value stored as `nestedAuthzObserver.parentCtx`). `context.WithTimeout` only narrows the deadline/cancellation signal; `Value()` lookups fall through to the parent unchanged, so every value the observer reads off `ctx` (auth context, connection source, etc.) is byte-identical whether it reads `report.Ctx` or `o.parentCtx` — using `parentCtx` produces no observable difference in the written line. On the request-ID point: `AuthzGateReport` carries no pre-existing `RequestID` field at all (by design — `jsruntime` cannot construct an `audit.Attempt`, a different package, ahead of time), and the ALLOWED sibling path for the same nested dispatch (`upstreamToolCaller.callTool`, `mcp_code_execution.go:772`) mints its correlation ID the identical way, inline, at the point the subcall begins — so minting here matches the established pattern for this dispatch path, not a deviation from it. No behavioral defect found.
+- c2-c (P3, `internal/server/mcp.go:2345/2466`) — same underlying gap as round 3's rejected c2-a (the caller-variant-vs-corrected-tier window before `evaluateExactToolGate` resolves), this time correctly scoped to the `profile_scope` gate (`mcp.go:2416-2420`), which — unlike the intent gates round 3 examined — runs independently of tool identity and CAN deny a `call_tool_read` against a known write/destructive tool before the tier correction at `mcp.go:2465`. Confirmed genuine (not a false positive), but rejected as a fix this round: closing it requires either (a) moving `evaluateExactToolGate`'s persisted read earlier, ahead of the `dispatchGatePause` test-instrumentation hook that several concurrency tests key their pause timing off of (risk of collateral test breakage from a hook-ordering change, not from the read itself), or (b) taking a second, independent read purely for tier-stamping — which reintroduces the exact two-snapshot inconsistency class `codex r6 G1`/`r7 H1` (referenced in the surrounding comments) fixed in an earlier PR. Both remedies carry more regression risk than the narrow gap they close (operation field only, on a profile-scope denial, against a caller who chose a narrower variant than the target's real tier) is worth trading for at P3. Left as a known, documented limitation — not silently dropped: recorded here for a future round or a dedicated design pass.
+- c3-a (P2, `internal/server/mcp_code_execution.go:789`) — claimed the nested sandbox subcall's audit `operation` field should read the fail-closed `"destructive"` tier `lookupToolGate` uses for AUTHORIZATION when `gate.identity.Found` is false (quarantined/disabled/undiscovered), instead of `"unknown"`. This is the SAME choice `handleCallToolVariant` makes explicitly and deliberately for the direct-dispatch path (`mcp.go:2465`, comment: "`tierForAnnotations`' `!found` fallback is `destructive` for AUTHORIZATION purposes (deny by default), which would misrepresent an unresolved/nonexistent target as maximally risky on the audit line rather than simply unknown to the proxy" — verified as the actual round-2 fix rationale, `verification.md` round 2 row 5). `mcp_code_execution.go:789`'s `if gated && gate.identity.Found` mirrors that same rule for the nested path. Recording `"destructive"` here (as the finding suggests) would make the two dispatch paths INCONSISTENT with each other, not more correct — the finding has the codebase's own established audit-vs-authorization distinction backwards.
+
+**Verification after fixes:** `go build ./cmd/mcpproxy` (`-o /dev/null`) and `go build -tags server ./cmd/mcpproxy` (`-o /dev/null`) both clean; `gofmt -l` clean on every touched Go file; `go vet` clean on every touched package; `go test -race ./internal/server/...` (skip regex `E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint`) PASS, 308s; `go test -race ./internal/audit/... ./internal/jsruntime/... ./internal/config/...` PASS. Both new regression tests were verified genuine by reverting only `internal/server/server.go` (`git stash push -u -- internal/server/server.go`), re-running them to confirm a pre-fix FAIL (confirmed: both failed with `outcome:"success"` instead of `"error"`), then restoring and re-confirming PASS. `golangci-lint run --config .github/.golangci.yml` could not run in this environment (same pre-existing toolchain mismatch as rounds 1-3 — `go1.25` binary vs `go1.26.0` target); `go vet` + `gofmt` substituted. Full `./scripts/test-api-e2e.sh`, `make swagger-verify`, frozen-goldens and `python3 scripts/gen-roadmap.py --check` were not re-run this round (no config schema, swagger, roadmap, CLI-surface or frontend changes — only a replay-outcome bugfix, its tests, and a one-line doc grep-filter fix).
+
+Round 4 commit: see `git log` on `107-d-audit-line` (`fix(spec-107): cross-review round 4 for PR-D`). 2 findings fixed, 3 rejected/deferred with evidence (documented above — c2-c is a confirmed-genuine but deliberately deferred P3, not a false positive). Round counter: 4/10 used for PR-D.

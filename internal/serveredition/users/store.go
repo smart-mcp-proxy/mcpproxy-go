@@ -549,6 +549,16 @@ func (s *UserStore) UpdateUserLogin(ctx context.Context, claims LoginClaims) (Lo
 			out.Created = true
 		} else {
 			if user.Disabled {
+				// The record this login refused against, from the SAME read
+				// this transaction made — round-2 cross-review finding,
+				// PR-D: the caller used to re-look the user up by email
+				// AFTER this transaction committed/rolled back, which a
+				// concurrent DeleteUser (or a transient read failure) could
+				// race, turning a schema-required `user_id` on the
+				// auth_event line into a silently anonymous one. Capturing
+				// it here is race-free by construction: it is the exact
+				// record the refusal decision was made from.
+				out.User = user
 				return ErrUserDisabled
 			}
 			armed := user.SubjectRebindArmedAt != nil
@@ -563,6 +573,7 @@ func (s *UserStore) UpdateUserLogin(ctx context.Context, claims LoginClaims) (Lo
 			case armed:
 				out.Rebound = true
 			default:
+				out.User = user // see the ErrUserDisabled comment above.
 				return ErrSubjectMismatch
 			}
 			if armed {
@@ -611,7 +622,13 @@ func (s *UserStore) UpdateUserLogin(ctx context.Context, claims LoginClaims) (Lo
 		return nil
 	})
 	if err != nil {
-		return LoginOutcome{}, err
+		// out.User is set only on the two branches that captured it
+		// (ErrUserDisabled, ErrSubjectMismatch) above; every other error
+		// path leaves out at its zero value, so returning out here instead
+		// of LoginOutcome{} changes nothing for those callers and gives the
+		// two refusal callers race-free access to the record the decision
+		// was made from (round-2 cross-review finding, PR-D).
+		return out, err
 	}
 	return out, nil
 }

@@ -46,11 +46,12 @@ func TestCodeExec_ScriptResolutionFailuresAreClientErrors(t *testing.T) {
 	wrap := func(err error) error { return fmt.Errorf("tool call failed: %w", err) }
 
 	tests := []struct {
-		name       string
-		err        error
-		wantStatus int
-		wantCode   string
-		wantInMsg  string
+		name         string
+		err          error
+		wantStatus   int
+		wantCode     string
+		wantInMsg    string
+		wantNotInMsg []string
 	}{
 		{
 			name: "not found carries the discovery listing",
@@ -63,6 +64,39 @@ func TestCodeExec_ScriptResolutionFailuresAreClientErrors(t *testing.T) {
 			wantStatus: http.StatusNotFound,
 			wantCode:   "SCRIPT_NOT_FOUND",
 			wantInMsg:  "daily-report",
+		},
+		{
+			// Spec 105 FR-012: the scoped form keeps the typed identity — the
+			// same 404 / SCRIPT_NOT_FOUND — with its own non-disclosing text.
+			// The classifier must keep using .Error() rather than rebuilding
+			// the message from the (now empty) fields.
+			name: "not found, agent-token form, discloses nothing",
+			err: wrap((&codescripts.NotFoundError{
+				Name:      "nope",
+				Dir:       "/cfg/scripts",
+				Available: []string{"daily-report"},
+				Total:     1,
+			}).NonDisclosing()),
+			wantStatus:   http.StatusNotFound,
+			wantCode:     "SCRIPT_NOT_FOUND",
+			wantInMsg:    "administrators only",
+			wantNotInMsg: []string{"daily-report", "/cfg/scripts", "(1)"},
+		},
+		{
+			name:         "ambiguous, agent-token form, discloses no path",
+			err:          wrap((&codescripts.AmbiguousError{Name: "dup", Paths: []string{"/cfg/scripts/dup.js", "/cfg/scripts/dup.ts"}}).NonDisclosing()),
+			wantStatus:   http.StatusBadRequest,
+			wantCode:     "SCRIPT_UNUSABLE",
+			wantInMsg:    "ambiguous",
+			wantNotInMsg: []string{"/cfg/scripts"},
+		},
+		{
+			name:         "unreadable, agent-token form, discloses no path or OS error",
+			err:          wrap((&codescripts.InvalidError{Name: "x", Path: "/cfg/scripts", Reason: codescripts.ReasonUnreadable, Detail: "open /cfg/scripts: permission denied"}).NonDisclosing()),
+			wantStatus:   http.StatusBadRequest,
+			wantCode:     "SCRIPT_UNUSABLE",
+			wantInMsg:    codescripts.ReasonUnreadable,
+			wantNotInMsg: []string{"/cfg/scripts", "permission denied"},
 		},
 		{
 			name:       "invalid name",
@@ -105,6 +139,10 @@ func TestCodeExec_ScriptResolutionFailuresAreClientErrors(t *testing.T) {
 			assert.Equal(t, tc.wantCode, decoded.Error.Code)
 			assert.Contains(t, decoded.Error.Message, tc.wantInMsg,
 				"the tool's own explanation must survive the status mapping — it is how a caller recovers")
+			for _, absent := range tc.wantNotInMsg {
+				assert.NotContains(t, decoded.Error.Message, absent,
+					"the REST surface must not re-disclose what the scoped form withheld (FR-012)")
+			}
 		})
 	}
 

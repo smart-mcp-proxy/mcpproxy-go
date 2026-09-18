@@ -1,0 +1,7 @@
+{
+  "description": "9007199254740993 (2^53 + 1) is not exactly representable as float64; RFC 8785 numbers are IEEE-754 double values (via ES6 Number semantics), so this MUST round to 9007199254740992 (2^53) once decoded to float64 -- matching what a JS JSON.parse + JCS reference implementation would also produce. Both variants below (the literal and its rounded neighbour) must canonicalize identically.",
+  "variants": [
+    { "a": 9007199254740993 },
+    { "a": 9007199254740992 }
+  ]
+}

@@ -131,8 +131,10 @@ func TestActivityStatusForResult_TruncatesLongErrors(t *testing.T) {
 // mirrors an upstream dispatch (call_tool_*) is covered by the end-to-end test
 // TestE2E_UpstreamIsErrorRecordedAsActivityError instead.
 var statusArgIndex = map[string]int{
-	// (serverName, toolName, sessionID, requestID, source, status, ...)
-	"emitActivityToolCallCompleted": 5,
+	// (ctx, serverName, toolName, sessionID, requestID, source, status, ...)
+	// — ctx became the first parameter in Spec 107 PR-D (FR-012), moving
+	// status from index 5 to 6.
+	"emitActivityToolCallCompleted": 6,
 }
 
 func TestActivityCompletionNeverHardcodesSuccess(t *testing.T) {

@@ -80,8 +80,8 @@ graph LR
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
 - 🔵 **MCP protocol upgrade to 2026-07-28 revision** — In progress · P1
 - 🔵 **Planning/docs truth automation** — In progress · P2
-- 🔵 **Spec 107 server edition SSO front door hardened for real IdPs** — In progress · P2
 - 🔵 **Discovery-quality eval harness (Spec 065 second half)** — In progress · P3
+- 🟡 **Spec 107 server edition SSO front door hardened for real IdPs** — In review · P2
 - ⚪ **Windows native tray app** — Todo · P2
 - ⚫ **Server marketplace** — Todo · P3 · parked
 - ⚫ **Audit SIEM integration** — Todo · P3 · parked
@@ -406,41 +406,6 @@ graph LR
 </details>
 
 <details>
-<summary>🔵 Spec 107 server edition SSO front door hardened for real IdPs — In progress · P2</summary>
-
-> Generic OIDC, IdP-group -> server allowlist, attributable JSONL audit line; freeze the latent multiuser/credential-injection code. Research: docs/research/server-edition-2026-09-14 (#1281).
-
-Spec: [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/)
-
-```mermaid
-graph LR
-  sso_pr_a_freeze_cut["PR-A freeze/cut latent code + config normalis…"]
-  sso_pr_b_oidc_front_door["PR-B generic OIDC provider + front door behin…"]
-  sso_pr_c_group_allowlist["PR-C one entitlement predicate, group grants,…"]
-  sso_pr_d_audit_line["PR-D attributable JSONL audit line + auth_eve…"]
-
-  sso_pr_a_freeze_cut --> sso_pr_b_oidc_front_door
-  sso_pr_b_oidc_front_door --> sso_pr_c_group_allowlist
-  sso_pr_c_group_allowlist --> sso_pr_d_audit_line
-
-  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class sso_pr_a_freeze_cut,sso_pr_b_oidc_front_door done;
-  class sso_pr_c_group_allowlist in_progress;
-  class sso_pr_d_audit_line todo;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6) | 🟢 Done | #1287 |
-| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | 🟢 Done | #1292 |
-| PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4) | 🔵 In progress | #1293 |
-| PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3) | ⚪ Todo | — |
-
-</details>
-
-<details>
 <summary>🔵 Discovery-quality eval harness (Spec 065 second half) — In progress · P3</summary>
 
 > IN PROGRESS — 2026-08-31 audit, corrected on cross-model review: both halves of the HARNESS shipped INDEPENDENTLY (not via token-bench-harness), but spec 065 is NOT fully met, so this is not done. FR-009 and SC-005 require CI to FAIL on a discovery regression beyond tolerance; the retrieval-D1 job is continue-on-error on pull requests, so on the PR path it does not fail — eval.yml itself records the promotion to PR-blocking as still open (MCP-742). A second, weaker tension to adjudicate rather than assume: CN-002 asks that scoring never run against a live drifting corpus, and D1 does boot a live mcpproxy serving 7 reference servers — but #931 pinned all seven upstreams to freeze-era versions and the job gates on the exact corpus ID set, so the corpus is reproducible in practice. Decide whether that satisfies CN-002 or whether a committed snapshot is required. Remaining work is therefore the gating promotion, not the harness. The earlier 'superseded / folded into token-bench-harness' framing was wrong on its own terms: token-bench-harness is still unbuilt, so nothing could have been folded into it. Security recall/FP half: cmd/scan-eval, backing the Spec 076/077 gate in eval.yml. Discovery-quality half: the eval.yml retrieval-d1 job boots mcpproxy and scores retrieval_golden_v1.json against a committed baseline at --tolerance 0.05 via the pinned external mcp-eval repo — note continue-on-error is scoped to github.event_name == 'pull_request', so the job is REPORT-ONLY on PRs (npx/uvx fetch flake) and BLOCKING on both the nightly schedule and manual workflow_dispatch runs. Promoting it to PR-blocking after a green soak is still open (MCP-742). NB the workflow's own inline comment says 'blocking on the nightly schedule' and omits workflow_dispatch. A second in-repo implementation lives in bench/: metrics.go defines RecallAtK/NDCGAtK, and the SC-003 recall@5 = 0.68 +/- 0.05 parity gate through the production Bleve index is asserted in bench/armindex_test.go (armindex.go supplies the production index wiring, not the assertion). Kept as a stable depends_on target; do not build a standalone harness.
@@ -459,6 +424,39 @@ graph LR
 | Task | Status | Refs |
 | --- | --- | --- |
 | Promote retrieval-D1 from report-only to PR-blocking (spec 065 FR-009/SC-005), and adjudicate the CN-002 frozen-corpus question | ⚪ Todo | `MCP-742` |
+
+</details>
+
+<details>
+<summary>🟡 Spec 107 server edition SSO front door hardened for real IdPs — In review · P2</summary>
+
+> Generic OIDC, IdP-group -> server allowlist, attributable JSONL audit line; freeze the latent multiuser/credential-injection code. Research: docs/research/server-edition-2026-09-14 (#1281).
+
+Spec: [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/)
+
+```mermaid
+graph LR
+  sso_pr_a_freeze_cut["PR-A freeze/cut latent code + config normalis…"]
+  sso_pr_b_oidc_front_door["PR-B generic OIDC provider + front door behin…"]
+  sso_pr_c_group_allowlist["PR-C one entitlement predicate, group grants,…"]
+  sso_pr_d_audit_line["PR-D attributable JSONL audit line + auth_eve…"]
+
+  sso_pr_a_freeze_cut --> sso_pr_b_oidc_front_door
+  sso_pr_b_oidc_front_door --> sso_pr_c_group_allowlist
+  sso_pr_c_group_allowlist --> sso_pr_d_audit_line
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
+  class sso_pr_a_freeze_cut,sso_pr_b_oidc_front_door,sso_pr_c_group_allowlist done;
+  class sso_pr_d_audit_line in_review;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6) | 🟢 Done | #1287 |
+| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | 🟢 Done | #1292 |
+| PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4) | 🟢 Done | #1293 |
+| PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3) | 🟡 In review | #1296 |
 
 </details>
 
@@ -890,14 +888,14 @@ graph LR
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
-| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | In progress | P1 | 23/109 (21%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
+| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | In progress | P1 | 29/109 (27%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 19/81 (23%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
-| Spec 107 server edition SSO front door hardened for real IdPs | In progress | P2 | 100/126 (79%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
+| Spec 107 server edition SSO front door hardened for real IdPs | In review | P2 | 102/126 (81%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Auto routing mode: budget-fitted tool surface per session (spec 104) | Todo | P1 | — | [104-auto-routing-mode](./specs/104-auto-routing-mode/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
@@ -1036,6 +1034,6 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
-| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `in-flight` | 23/109 (21%) |
+| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `in-flight` | 29/109 (27%) |
 | [106-security-residual-fixes](./specs/106-security-residual-fixes/) | `shipped` | 18/19 (95%) |
-| [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `in-flight` | 100/126 (79%) |
+| [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `in-flight` | 102/126 (81%) |

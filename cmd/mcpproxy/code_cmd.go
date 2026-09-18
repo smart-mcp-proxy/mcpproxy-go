@@ -607,8 +607,10 @@ func outputResult(result *cliclient.CodeExecResult) error {
 func outputResultFromMCP(result *mcp.CallToolResult) error {
 	// A tool ERROR is plain text, not the execution envelope — and for a stored
 	// script that text is the recovery path: naming one that does not exist
-	// answers with the available names (FR-004). Parsing it as JSON and giving
-	// up ("unexpected result format") threw that away.
+	// answers with the available names (FR-004) because the CLI authenticates
+	// with the admin API key (an agent token would get the non-disclosing
+	// form, Spec 105 FR-012). Parsing it as JSON and giving up ("unexpected
+	// result format") threw that away.
 	if result.IsError {
 		for _, content := range result.Content {
 			if textContent, ok := mcp.AsTextContent(content); ok {

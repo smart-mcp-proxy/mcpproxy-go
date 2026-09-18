@@ -9,6 +9,7 @@ import (
 	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
@@ -52,6 +53,12 @@ type Dependencies struct {
 	// it into UserActivityHandlers so that door emits the same JSON shape
 	// and the same masking as the core surface for the same record.
 	ProjectActivity func(*storage.ActivityRecord) contracts.ActivityRecord
+
+	// AuditSink is the Spec 107 audit line writer the server was built with
+	// (server.WithAuditSink), handed to the OAuth handler so PR-D's
+	// auth_event emitter (T107) shares the ONE sink the dispatch funnels
+	// write through. nil = no-op (audit_log off).
+	AuditSink audit.Sink
 }
 
 // Feature represents a server edition feature module that self-registers.

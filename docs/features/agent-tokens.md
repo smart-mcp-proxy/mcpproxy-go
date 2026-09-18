@@ -234,6 +234,11 @@ Server scoping is enforced at three levels:
      masked, so this is a credential *inventory* rather than a disclosure, but
      it names the secrets of servers the caller may not enumerate. A strictly
      narrower view of the document `GET /api/v1/config` already denies.
+   - `GET /api/v1/code/scripts` — the stored-script listing (every name, its
+     host path and the scripts directory) is exactly the enumeration the
+     missing-script error withholds from a scoped caller, so the door is
+     closed on the REST surface too (see
+     [What a scoped token cannot learn](#what-a-scoped-token-cannot-learn)).
 
    **Withheld rather than denied.** `GET /api/v1/status` stays open — agents
    legitimately poll it for liveness — but its `activation` block is omitted for
@@ -339,6 +344,125 @@ Server scoping is enforced at three levels:
    invalidates it once — the next registry search or repository lookup
    re-fetches and re-stamps it. The no-eviction guarantee applies to entries
    written after the upgrade.
+
+### What a scoped token cannot learn
+
+**Invariant.** No proxy-produced response to an agent-token caller — a tool
+result, a refusal, a listing, a count, a suggestion, a notification, a cached
+page or a log line — names, counts or otherwise discloses a server, tool,
+prompt, profile or stored resource outside the caller's effective scope, and an
+out-of-scope resource is refused exactly as a nonexistent one would be.
+Administrators (the admin API key, the tray over the local socket, and native
+stdio) keep every capability they have today; the exceptions where an
+administrator's answer deliberately differs from a token's are named and tested
+one by one.
+
+> **Rollout status.** This invariant is being landed surface by surface as the
+> agent-scope hardening series (Spec 105) merges; each release's notes list the
+> surfaces it closes. The rules on this page that are stated as present-tense
+> guarantees — the stored-script rules below, the REST doors listed above and
+> the `read_cache` rule — are enforced by the version that documents them. Until
+> the series is complete, a listing or suggestion on a surface not yet covered
+> can still name an out-of-scope resource; treat that as a known gap, not a
+> configuration mistake.
+
+> **Who counts as an administrator.** The admin API key, the tray over the
+> local socket, native stdio, an in-process caller — and, under the default
+> `require_mcp_auth: false`, an **unauthenticated** `/mcp` client, which the
+> proxy has always treated as an administrator for backward compatibility. Only
+> an agent token is a scoped caller; if unauthenticated clients must not see
+> administrator answers, set
+> [`require_mcp_auth: true`](https://docs.mcpproxy.app/configuration/) so every
+> `/mcp` request carries a key or a token.
+
+**Covered surfaces.** The invariant holds for agent-token requests on every
+HTTP MCP surface — `/mcp`, `/mcp/all`, `/mcp/call`, `/mcp/code`,
+`/mcp/p/<slug>` and the trailing-slash alias of each (see
+[Routing Modes](https://docs.mcpproxy.app/features/routing-modes/)) — and on
+the REST doors listed above. Native stdio is local-administrator-only and is
+not a token surface.
+
+**Retained, documented effects.** Some shared resources are fleet-wide by
+construction and this invariant does not change them; a hidden server can still
+*affect* what an authorized caller experiences, without being *named*:
+
+- **Display-name collision admission on `/mcp/all`** — two servers exposing the
+  same display name collide fleet-wide, so a hidden server can withhold an
+  authorized entry from the direct listing.
+- **Prompt collision rule and the global prompt cap** — evaluated over the whole
+  fleet.
+- **Fleet-wide `list_changed` notifications** on the fixed surfaces — a hidden
+  server's change still emits the (content-free) notification.
+- **Shared call limiter** — the proxy-wide concurrency limit is global, so calls
+  held on a hidden server can make a call to an authorized server fail with the
+  existing "proxy-wide limit saturated" response.
+- **Cross-server security-scan admission** — under `trust_mode: scan`, a
+  same-name near-identical tool on a hidden server can hold an authorized
+  server's newly added tool pending as a shadowing finding, changing that
+  tool's discovery and dispatch outcome (see
+  [Security Quarantine](https://docs.mcpproxy.app/features/security-quarantine/)).
+- **Shared prompt-refresh deadline** — prompts are collected under one
+  fleet-wide deadline, so a slow hidden server can exhaust it before an
+  authorized server's prompts are collected.
+- **Shared log rotation and retention** — attribution filters what a token can
+  read back, not what history survives rotation.
+
+**Operator-published content — keep secrets out.** Two kinds of operator-authored
+content are published to every caller by design and sit outside the invariant:
+
+1. **Custom initialization `instructions`** (the `instructions` key in the
+   [config file](https://docs.mcpproxy.app/configuration/)) are returned
+   verbatim to every client that initializes, scoped or not.
+2. **Stored code-execution scripts** — any caller allowed to run
+   `code_execution` can run a script it knows the name of and receive whatever
+   the script returns without an upstream call. What the invariant *does*
+   cover: a missing-script error never enumerates the other script names, the
+   script count or the scripts directory to an agent-token caller (the refusal
+   is identical for an empty and a populated directory, and the directory is
+   never read on the caller's behalf: on Linux and the BSDs the scoped
+   resolver answers ONLY from an exact-name index of the directory that
+   matches its CURRENT state — built when the daemon starts and refreshed by
+   a background rebuild whenever a call finds the directory changed — so no
+   call ever lists it, whatever name is asked for and however many scripts
+   are stored, and every step one call takes (the directory stat, the
+   candidate probe, the open, and the re-check after it) is bound to a
+   single directory descriptor retained for that call rather than a fresh
+   resolution of the path each time; a call that lands while that rebuild is
+   scheduled or in
+   flight is refused once, exactly like a call against a directory it has
+   never seen, rather than answered from what the index held a moment ago —
+   an entry the index once listed under an earlier spelling must never still
+   authorize it after a rename. The index authorizes a hit only once its
+   directory timestamp is provably settled — old enough (roughly two
+   seconds, the coarsest directory-timestamp granularity assumed) that no
+   write could still be landing on the same tick unseen — so a matching
+   generation alone is not enough; a script added to (or renamed within) the
+   directory becomes callable by agent tokens only after the index has both
+   refreshed and settled — retry a call refused in that window, up to
+   roughly two seconds — while administrators see the change immediately.
+   Linux, the BSDs, darwin and Windows all answer from this same index, so
+   a differently-cased name and one that is not stored at all cost the
+   same — both are plain misses. darwin re-checks the opened descriptor's
+   on-disk spelling as an extra, belt-and-suspenders proof; Windows performs
+   every step of a call — probing, opening, and the background listing that
+   refreshes the index — relative to ONE directory handle retained for the
+   whole call, so a rename or a reparse point cannot redirect where a
+   "relative" open lands, and the post-open check need only confirm the
+   opened descriptor's own name; an ambiguous or unusable script is
+   reported by
+   name and reason only, without its host path or a raw OS error;
+   the REST listing `GET /api/v1/code/scripts` answers an agent token with
+   `403`; administrators keep today's listing and paths; and every
+   `call_tool()` a script makes is checked against the caller's server scope
+   and permission tier — a hidden server is refused exactly as a nonexistent
+   one. The published `code_execution` definition says so — enumeration is
+   administrator-only and an agent-token caller must already know the script
+   name. See
+   [Stored scripts](https://docs.mcpproxy.app/code_execution/overview/#stored-scripts).
+
+Do **not** place server names, hostnames, credentials, tokens or any other
+secret in either — a scoped agent can read them, and a script's constant return
+value is as public as its name.
 
 ## Administrative Operations Are Admin-Only
 

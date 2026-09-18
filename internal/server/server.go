@@ -20,6 +20,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
@@ -44,6 +45,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 	"github.com/smart-mcp-proxy/mcpproxy-go/web"
 )
@@ -171,11 +173,26 @@ type Server struct {
 	// MCP-32: observability manager (Prometheus /metrics + OTLP tracing).
 	// Nil when disabled; config-gated and off by default.
 	observability *observability.Manager
+
+	// auditSink is the Spec 107 audit line writer (WithAuditSink); nil in the
+	// personal-edition default and whenever audit_log is off.
+	auditSink audit.Sink
+}
+
+// ServerOption customises a Server at construction time (Spec 107 T103).
+// Distinct from MCPProxyOption (mcp.go), which customises the MCP proxy the
+// Server owns. Every existing caller passes none.
+type ServerOption func(*Server)
+
+// WithAuditSink installs the Spec 107 audit sink. nil (the personal-edition
+// default when audit_log is off) keeps every audit funnel a no-op.
+func WithAuditSink(sink audit.Sink) ServerOption {
+	return func(s *Server) { s.auditSink = sink }
 }
 
 // NewServer creates a new server instance
-func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
-	return NewServerWithConfigPath(cfg, "", logger)
+func NewServer(cfg *config.Config, logger *zap.Logger, opts ...ServerOption) (*Server, error) {
+	return NewServerWithConfigPath(cfg, "", logger, opts...)
 }
 
 // buildObservabilityConfig maps the file-level observability config (MCP-32)
@@ -212,7 +229,7 @@ func buildObservabilityConfig(cfg *config.Config) observability.Config {
 }
 
 // NewServerWithConfigPath creates a new server instance with explicit config path tracking
-func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.Logger) (*Server, error) {
+func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.Logger, opts ...ServerOption) (*Server, error) {
 	rt, err := runtime.New(cfg, configPath, logger)
 	if err != nil {
 		return nil, err
@@ -290,6 +307,39 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		infoScanSettleTimeout: informationalScanSettleTimeout,
 		infoScanSweepDelay:    baselineSweepStartDelay,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(server)
+		}
+	}
+
+	// Spec 107 T109: the audit sink's always-on write-failure counter, mirrored
+	// to both `mcpproxy doctor` (works with metrics disabled) and Prometheus
+	// (metrics enabled only). Registered only when a sink exists - nil means
+	// audit_log is off, so there is nothing to report.
+	if server.auditSink != nil {
+		mgmtService.AddRuntimeWarningSource(func() []string {
+			if n := server.auditSink.WriteFailures(); n > 0 {
+				return []string{fmt.Sprintf("audit_log: %d write failures since start", n)}
+			}
+			return nil
+		})
+		// Spec 107 FR-015: the defence-in-depth whole-line sanitizer's hit
+		// counter, mirrored the same way as the write-failure counter above -
+		// a nonzero count means a builder bug let a credential-shaped string
+		// past per-field masking (the pass still masked and wrote the line).
+		mgmtService.AddRuntimeWarningSource(func() []string {
+			if n := server.auditSink.SanitizerHits(); n > 0 {
+				return []string{fmt.Sprintf("audit_log: %d defence-in-depth sanitizer hits since start (a builder bug may be leaking credential-shaped values into audit lines)", n)}
+			}
+			return nil
+		})
+		if obsManager != nil && obsManager.Metrics() != nil {
+			obsManager.Metrics().RegisterAuditSink(server.auditSink)
+			obsManager.Metrics().RegisterAuditSanitizer(server.auditSink)
+		}
+	}
+
 	// Record the servers this process started with: they are the baseline
 	// sweep's job, and anything that shows up later is a NEW admission that gets
 	// its own informational scan. Seeded from the startup config (available
@@ -322,6 +372,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// MCP-32: give the MCP proxy access to observability for tool-call metrics
 	// and OTLP spans.
 	mcpProxy.SetObservability(obsManager)
+	// Spec 107 T103: the audit sink reaches the dispatch funnels through the
+	// proxy; nil keeps them no-ops.
+	mcpProxy.auditSink = server.auditSink
 
 	server.mcpProxy = mcpProxy
 
@@ -1097,7 +1150,12 @@ func (s *Server) Start(ctx context.Context) error {
 //	  mcp_describe_direct.go, mcp_visibility.go,
 //	  observability_edition_server.go, auth.AuthorizeServerOp and the
 //	  `authCtx != nil && !authCtx.IsAdmin()` gates in mcp.go.
+//
+// Spec 107 T103: the context is also tagged transport.ConnectionSourceStdio.
+// Without the tag GetConnectionSource defaults to TCP and the audit line
+// would report the stdio operator as caller.kind: api_key.
 func stdioAuthContext(ctx context.Context) context.Context {
+	ctx = transport.TagConnectionContext(ctx, transport.ConnectionSourceStdio)
 	return auth.WithAuthContext(ctx, auth.AdminContext())
 }
 
@@ -3891,8 +3949,127 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 // ReplayToolCall replays a tool call with modified arguments. ctx is the
 // caller's request context: it governs the concurrency-limiter queue wait as
 // well as the upstream call (spec 093 FR-005).
+//
+// Spec 107 FR-012 (round-2 cross-review finding, PR-D): replay reaches a
+// (server, tool) pair like every other upstream dispatch path, so it MUST
+// produce exactly one `authz` line and, unless shed by the limiter, one
+// `tool_call` line — this endpoint previously wrote neither, because
+// runtime.ReplayToolCall calls the managed client directly and has no
+// access to the server's audit sink. The lookup here is best-effort and
+// duplicates runtime.ReplayToolCall's own (a second, cheap read of the same
+// stored record): if it fails, the call is delegated unaudited exactly as
+// before — runtime.ReplayToolCall's own not-found error is authoritative,
+// and no `(server, tool)` pair was ever resolved to audit.
 func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
-	return s.runtime.ReplayToolCall(ctx, id, arguments)
+	original, lookupErr := s.runtime.GetToolCallByID(id)
+	if lookupErr != nil || original == nil || s.mcpProxy == nil {
+		return s.runtime.ReplayToolCall(ctx, id, arguments)
+	}
+
+	callArgs := arguments
+	if callArgs == nil {
+		callArgs = original.Arguments
+	}
+
+	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
+	// own annotations snapshot is the canonical target tier here — the same
+	// signal tierForAnnotations derives from a live gate's identity lookup
+	// elsewhere — so a replayed destructive/write call is not reported as
+	// `operation:"unknown"` when the snapshot is available. Left empty (and
+	// so defaulted to "unknown" by installAuditAttempt) when the record
+	// carries no annotations at all: mirrors mcp.go's own choice not to use
+	// tierForAnnotations' found=false "destructive" default for the AUDIT
+	// line — that default is an AUTHORIZATION fail-closed, and would
+	// misrepresent an unresolved tier as maximally risky rather than simply
+	// unknown to the proxy.
+	var operation string
+	if original.Annotations != nil {
+		operation = tierForAnnotations(toConfigToolAnnotations(original.Annotations), true)
+	}
+	ctx = s.mcpProxy.installAuditAttempt(ctx, auditAttemptSpec{
+		RequestID: mintCorrelationID(original.ServerName, original.ToolName),
+		Server:    original.ServerName,
+		Tool:      original.ToolName,
+		Operation: operation,
+		Surface:   auditSurfaceREST,
+		Args:      callArgs,
+	})
+	// Spec 107 FR-012: `decision: allow` MUST be written after the last gate
+	// and before the upstream call (round-3 cross-review finding, PR-D) —
+	// auditToolCall's own backfill only runs on completion, which would
+	// leave a replay that crashes mid-dispatch with no authorization record
+	// at all, unlike every other dispatch path (emitActivityToolCallStarted
+	// writes `allow` synchronously before its own upstream call).
+	s.mcpProxy.auditAuthz(ctx, "allow", "")
+
+	startTime := time.Now()
+	result, err := s.runtime.ReplayToolCall(ctx, id, arguments)
+	durationMs := time.Since(startTime).Milliseconds()
+
+	var limitErr *limiter.LimitError
+	switch {
+	case errors.As(err, &limitErr) &&
+		(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout):
+		// Spec 093 FR-011: a shed never reached the upstream, so it is the
+		// tool_call half of the authz-allow pair, never a second authz —
+		// mirrors auditToolCallShed's use at every other dispatch site.
+		s.mcpProxy.auditToolCallShed(ctx, limitErr, durationMs)
+	case err != nil:
+		s.mcpProxy.auditToolCall(ctx, "error", "", audit.ErrorClassOf(err), durationMs, nil, nil)
+	case result != nil && result.Error != "":
+		// Round-4 cross-review finding, PR-D: runtime.ReplayToolCall folds an
+		// upstream tool failure into the record's own Error field and
+		// returns a NIL Go error (only a limiter shed returns non-nil) — so
+		// this branch, not `err != nil` above, is what a failed replay hits.
+		// Without it every failed replay fell into `default` and was
+		// audited as `outcome:"success"`.
+		s.mcpProxy.auditToolCall(ctx, "error", "", audit.ErrorClassOf(errors.New(result.Error)), durationMs, nil, nil)
+	case result != nil && isReplayResponseError(result.Response):
+		// Round-4 cross-review finding, PR-D companion case: an upstream
+		// tool-level failure (mcp.CallToolResult.IsError, e.g.
+		// mcp.NewToolResultError) is a successful RPC by MCP protocol
+		// convention — callErr is nil AND runtime.ReplayToolCall's own
+		// record.Error stays empty (it is only ever set from callErr) — so
+		// this is the one remaining path a failed replay could still be
+		// misaudited as `outcome:"success"` through. Mirrors the
+		// result.IsError check every other completion path in this package
+		// already makes (see emitActivityPolicyDecision's callers in mcp.go).
+		s.mcpProxy.auditToolCall(ctx, "error", "", audit.ErrorClassUpstreamError, durationMs, nil, nil)
+	default:
+		s.mcpProxy.auditToolCall(ctx, "success", "", "", durationMs, nil, nil)
+	}
+
+	return result, err
+}
+
+// isReplayResponseError reports whether a replayed record's Response is an
+// mcp.CallToolResult carrying IsError:true — an upstream tool-level failure,
+// which the MCP protocol returns as a normal (err==nil) RPC response, so
+// neither runtime.ReplayToolCall's callErr nor its record.Error field ever
+// see it (round-4 cross-review finding, PR-D). resp is untyped because
+// contracts.ToolCallRecord.Response is interface{}; anything else (a nil
+// Response, or a differently-shaped value from a code path that never
+// dispatched) is not an error by this check.
+func isReplayResponseError(resp interface{}) bool {
+	result, ok := resp.(*mcp.CallToolResult)
+	return ok && result != nil && result.IsError
+}
+
+// toConfigToolAnnotations adapts a persisted ToolCallRecord's annotations
+// snapshot (contracts.ToolAnnotation) to the config.ToolAnnotations shape
+// tierForAnnotations consumes. Field sets are identical by construction; nil
+// in, nil out.
+func toConfigToolAnnotations(a *contracts.ToolAnnotation) *config.ToolAnnotations {
+	if a == nil {
+		return nil
+	}
+	return &config.ToolAnnotations{
+		Title:           a.Title,
+		ReadOnlyHint:    a.ReadOnlyHint,
+		DestructiveHint: a.DestructiveHint,
+		IdempotentHint:  a.IdempotentHint,
+		OpenWorldHint:   a.OpenWorldHint,
+	}
 }
 
 // GetToolCallsBySession retrieves tool calls filtered by session ID. scope

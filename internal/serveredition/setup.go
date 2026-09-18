@@ -240,6 +240,10 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// LIVE admin_emails through the same provider (Spec 107 T044).
 	oauthHandler := teamsauth.NewOAuthHandler(userStore, sessionManager, serverEditionConfig, hmacKey, deps.Logger)
 	oauthHandler.SetTrustedProxiesProvider(trustedProxies)
+	// Spec 107 T107: one `auth_event` line per terminal login attempt and
+	// per logout, through the ONE audit.Sink the dispatch funnels write
+	// through (nil deps.AuditSink = audit_log off = no-op).
+	oauthHandler.LoginResultObserver = teamsauth.NewAuditEmitter(deps.AuditSink, deps.Logger)
 
 	// The per-user credential store backs the oauth_connect flow (spec 074
 	// Path B): credentials a user connects are stored here, encrypted under

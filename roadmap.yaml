@@ -802,7 +802,7 @@ epics:
 
   - id: sso
     title: Spec 107 server edition SSO front door hardened for real IdPs
-    status: in_progress
+    status: in_review
     priority: P2
     spec: specs/107-server-edition-sso-hardening
     depends_on: []
@@ -820,13 +820,14 @@ epics:
         pr: "#1292"
       - id: sso-pr-c-group-allowlist
         title: PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4)
-        status: in_progress
+        status: done
         depends_on: [sso-pr-b-oidc-front-door]
         pr: "#1293"
       - id: sso-pr-d-audit-line
         title: PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3)
-        status: todo
+        status: in_review
         depends_on: [sso-pr-c-group-allowlist]
+        pr: "#1296"
 
   # ── MERGED-BUT-UNIMPLEMENTED specs (cross-spec audit 2026-07-01) ───────────
   # These specs are checked into specs/ but materially absent from code. Most
