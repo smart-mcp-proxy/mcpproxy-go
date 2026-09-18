@@ -24,6 +24,21 @@ const (
 	falseValue     = "false"
 )
 
+// DecodeConfigFile decodes the config file over the defaults and applies only
+// the read-time normalizations (legacy key migration, created stamps). Unlike
+// LoadFromFile it applies no env overrides, runs no validation, creates no
+// directories and touches no process-global state, so it is safe as the base
+// of a read-modify-write save while the server is running. (Not "ReadFile":
+// the oauth door scan keys config-returning functions by bare name and would
+// taint every os.ReadFile call in the tree.)
+func DecodeConfigFile(configPath string) (*Config, error) {
+	cfg := DefaultConfig()
+	if err := loadConfigFile(configPath, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // LoadFromFile loads configuration from a specific file
 func LoadFromFile(configPath string) (*Config, error) {
 	cfg := DefaultConfig()
@@ -88,6 +103,14 @@ func warnNormalizedTrustModes(cfg *Config) {
 
 // Load loads configuration from file, environment, and defaults
 func Load() (*Config, error) {
+	cfg, _, err := LoadWithPath()
+	return cfg, err
+}
+
+// LoadWithPath is Load that also reports which config file it read (or
+// created), so callers that persist later write to the file they loaded
+// rather than to a path re-derived from data_dir.
+func LoadWithPath() (*Config, string, error) {
 	cfg := DefaultConfig()
 
 	// Set up viper
@@ -98,15 +121,22 @@ func Load() (*Config, error) {
 	configFileAutoLoaded := false
 	if configPath != "" {
 		if err := loadConfigFile(configPath, cfg); err != nil {
-			return nil, fmt.Errorf("failed to load config file %s: %w", configPath, err)
+			return nil, "", fmt.Errorf("failed to load config file %s: %w", configPath, err)
 		}
 	} else {
 		// Try to find config file in common locations
-		configFound, _, err := findAndLoadConfigFile(cfg)
+		configFound, foundPath, err := findAndLoadConfigFile(cfg)
 		if err != nil && configFound {
-			return nil, err // Only return error if config was found but couldn't be loaded
+			return nil, "", err // Only return error if config was found but couldn't be loaded
 		}
 		configFileAutoLoaded = configFound
+		// Discovery returns "mcp_config.json" for the cwd hit; report it
+		// absolute so later saves do not depend on the working directory.
+		if abs, absErr := filepath.Abs(foundPath); configFound && absErr == nil {
+			configPath = abs
+		} else {
+			configPath = foundPath
+		}
 
 		// If no config file was found, create a default one
 		if !configFound {
@@ -114,21 +144,22 @@ func Load() (*Config, error) {
 			if cfg.DataDir == "" {
 				homeDir, err := os.UserHomeDir()
 				if err != nil {
-					return nil, fmt.Errorf("failed to get user home directory: %w", err)
+					return nil, "", fmt.Errorf("failed to get user home directory: %w", err)
 				}
 				cfg.DataDir = filepath.Join(homeDir, DefaultDataDir)
 			}
 
 			// Create data directory if it doesn't exist
 			if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
-				return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
+				return nil, "", fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 			}
 
 			// Create default config file
 			defaultConfigPath := filepath.Join(cfg.DataDir, ConfigFileName)
 			if err := createDefaultConfigFile(defaultConfigPath, cfg); err != nil {
-				return nil, fmt.Errorf("failed to create default config file: %w", err)
+				return nil, "", fmt.Errorf("failed to create default config file: %w", err)
 			}
+			configPath = defaultConfigPath
 
 			fmt.Fprintf(os.Stderr, "INFO: Created default configuration file at %s\n", defaultConfigPath)
 		}
@@ -139,7 +170,7 @@ func Load() (*Config, error) {
 	if !configFileAutoLoaded {
 		// Override with viper (CLI flags and env vars)
 		if err := viper.Unmarshal(cfg); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+			return nil, "", fmt.Errorf("failed to unmarshal config: %w", err)
 		}
 	}
 
@@ -147,7 +178,7 @@ func Load() (*Config, error) {
 	if cfg.DataDir == "" {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get user home directory: %w", err)
+			return nil, "", fmt.Errorf("failed to get user home directory: %w", err)
 		}
 		cfg.DataDir = filepath.Join(homeDir, DefaultDataDir)
 	}
@@ -160,7 +191,7 @@ func Load() (*Config, error) {
 	// these are invalid path characters on Windows and the directory can't be created anyway.
 	if !strings.Contains(cfg.DataDir, "${") {
 		if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
-			return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
+			return nil, "", fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 		}
 	}
 
@@ -168,7 +199,7 @@ func Load() (*Config, error) {
 	upstreamList := viper.GetStringSlice("upstream")
 	for _, upstream := range upstreamList {
 		if err := parseUpstreamServer(upstream, cfg); err != nil {
-			return nil, fmt.Errorf("failed to parse upstream server %s: %w", upstream, err)
+			return nil, "", fmt.Errorf("failed to parse upstream server %s: %w", upstream, err)
 		}
 	}
 
@@ -180,13 +211,13 @@ func Load() (*Config, error) {
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
+		return nil, "", fmt.Errorf("invalid configuration: %w", err)
 	}
 
 	// Initialize registries from config
 	initializeRegistries(cfg)
 
-	return cfg, nil
+	return cfg, configPath, nil
 }
 
 // setupViper configures viper with environment variable handling
