@@ -21,13 +21,16 @@ import (
 func TestLoadConfig_ListenFlag(t *testing.T) {
 	cases := []struct {
 		name string
+		env  string // MCPPROXY_LISTEN; applied by config.Load before the flag
 		args []string
 		want string
 	}{
-		{"unset flag keeps config default", nil, "127.0.0.1:8080"},
-		{"explicit address wins", []string{"--listen", "127.0.0.1:9999"}, "127.0.0.1:9999"},
-		{"explicit :0 is the stdio sentinel", []string{"--listen", ":0"}, ":0"},
-		{"explicit empty string means stdio too", []string{"--listen", ""}, ":0"},
+		{"unset flag keeps config default", "", nil, "127.0.0.1:8080"},
+		{"unset flag keeps env override", "127.0.0.1:7777", nil, "127.0.0.1:7777"},
+		{"explicit address wins", "", []string{"--listen", "127.0.0.1:9999"}, "127.0.0.1:9999"},
+		{"explicit :0 is the stdio sentinel", "", []string{"--listen", ":0"}, ":0"},
+		{"explicit empty string means stdio too", "", []string{"--listen", ""}, ":0"},
+		{"explicit empty string beats env override", "127.0.0.1:7777", []string{"--listen", ""}, ":0"},
 	}
 
 	for _, tc := range cases {
@@ -37,6 +40,10 @@ func TestLoadConfig_ListenFlag(t *testing.T) {
 			if err := os.WriteFile(cfgPath, []byte(`{"mcpServers":[]}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
+
+			// Isolate from the developer's shell: loader.go applies
+			// MCPPROXY_LISTEN even when an explicit config file is given.
+			t.Setenv("MCPPROXY_LISTEN", tc.env)
 
 			oldConfigFile, oldDataDir := configFile, dataDir
 			defer func() { configFile, dataDir = oldConfigFile, oldDataDir }()
