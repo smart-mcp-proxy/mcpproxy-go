@@ -1476,9 +1476,9 @@ func (r *Runtime) SaveConfiguration() error {
 			// the configSvc snapshot (the running config). Marked as our own
 			// write first, or the watcher reads the pending value back as an
 			// external edit and hot-applies what we deliberately deferred.
-			r.noteConfigSelfWrite(diskCopy)
+			r.noteConfigSelfWrite(diskCopy, snapshot.Path)
 			if err := config.SaveConfig(diskCopy, snapshot.Path); err != nil {
-				r.forgetConfigSelfWrite(diskCopy)
+				r.forgetConfigSelfWrite(diskCopy, snapshot.Path)
 				r.logger.Error("Failed to save config to file (pending-aware path)", zap.Error(err))
 				return err
 			}
@@ -1492,7 +1492,7 @@ func (r *Runtime) SaveConfiguration() error {
 		// Fallback to legacy save (no configSvc store to keep in sync)
 		if diskCopy != nil {
 			configCopy = diskCopy
-			r.noteConfigSelfWrite(diskCopy)
+			r.noteConfigSelfWrite(diskCopy, snapshot.Path)
 		}
 		if err := config.SaveConfig(configCopy, snapshot.Path); err != nil {
 			r.logger.Error("Failed to save config to file (legacy path)", zap.Error(err))

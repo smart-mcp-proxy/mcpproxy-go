@@ -421,6 +421,10 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 
 // SaveConfig saves configuration to file
 func SaveConfig(cfg *Config, path string) error {
+	// Never persist a process-only override (serve flag, MCPPROXY_* env, env
+	// API key): write the file's value back for every field still carrying
+	// one. See process_overrides.go.
+	cfg = PersistableConfig(cfg, path)
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
@@ -656,8 +660,13 @@ func expandDataDir(cfg *Config) {
 	cfg.DataDir = resolved
 }
 
-// applyTLSEnvOverrides applies environment variable overrides for TLS configuration
+// applyTLSEnvOverrides applies the MCPPROXY_* environment overrides. Each one
+// goes through OverrideForProcess so no save path persists it (see
+// process_overrides.go); the env-sourced set is rebuilt from scratch on every
+// load so a reload reflects the variables set now.
 func applyTLSEnvOverrides(cfg *Config) {
+	clearProcessOverrides(OverrideSourceEnv)
+
 	// Ensure TLS config is initialized
 	if cfg.TLS == nil {
 		cfg.TLS = &TLSConfig{
@@ -670,27 +679,27 @@ func applyTLSEnvOverrides(cfg *Config) {
 
 	// Override listen address from environment
 	if value := os.Getenv("MCPPROXY_LISTEN"); value != "" {
-		cfg.Listen = value
+		OverrideForProcess(cfg, FieldListen, OverrideSourceEnv, value)
 	}
 
 	// Override TLS enabled from environment
 	if value := os.Getenv("MCPPROXY_TLS_ENABLED"); value != "" {
-		cfg.TLS.Enabled = (value == trueValue || value == "1")
+		OverrideForProcess(cfg, FieldTLSEnabled, OverrideSourceEnv, value == trueValue || value == "1")
 	}
 
 	// Override TLS client cert requirement from environment
 	if value := os.Getenv("MCPPROXY_TLS_REQUIRE_CLIENT_CERT"); value != "" {
-		cfg.TLS.RequireClientCert = (value == trueValue || value == "1")
+		OverrideForProcess(cfg, FieldTLSRequireClientCert, OverrideSourceEnv, value == trueValue || value == "1")
 	}
 
 	// Override TLS certificates directory from environment
 	if value := os.Getenv("MCPPROXY_CERTS_DIR"); value != "" {
-		cfg.TLS.CertsDir = value
+		OverrideForProcess(cfg, FieldTLSCertsDir, OverrideSourceEnv, value)
 	}
 
 	// Override data directory from environment (for backward compatibility)
 	if value := os.Getenv("MCPPROXY_DATA"); value != "" {
-		cfg.DataDir = value
+		OverrideForProcess(cfg, FieldDataDir, OverrideSourceEnv, value)
 	}
 
 	// Override trusted hosts for reverse-proxy deployments (GH #898).
@@ -702,7 +711,7 @@ func applyTLSEnvOverrides(cfg *Config) {
 				hosts = append(hosts, h)
 			}
 		}
-		cfg.TrustedHosts = hosts
+		OverrideForProcess(cfg, FieldTrustedHosts, OverrideSourceEnv, hosts)
 	}
 
 	// Override the offline TPA signature-bundle path from environment
@@ -710,10 +719,7 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// the env value wins over the file value, and materializes the security
 	// block so a config with no `security` key can still point at a corpus.
 	if value := os.Getenv(EnvTPABundlePath); value != "" {
-		if cfg.Security == nil {
-			cfg.Security = &SecurityConfig{}
-		}
-		cfg.Security.TPABundlePath = value
+		OverrideForProcess(cfg, FieldTPABundlePath, OverrideSourceEnv, value)
 	}
 
 	// Override the automatic informational baseline-scan kill switch from
@@ -729,23 +735,17 @@ func applyTLSEnvOverrides(cfg *Config) {
 	switch os.Getenv(EnvAutoBaselineScan) {
 	case trueValue, "1":
 		enabled := true
-		if cfg.Security == nil {
-			cfg.Security = &SecurityConfig{}
-		}
-		cfg.Security.AutoBaselineScan = &enabled
+		OverrideForProcess(cfg, FieldAutoBaselineScan, OverrideSourceEnv, &enabled)
 	case falseValue, "0":
 		enabled := false
-		if cfg.Security == nil {
-			cfg.Security = &SecurityConfig{}
-		}
-		cfg.Security.AutoBaselineScan = &enabled
+		OverrideForProcess(cfg, FieldAutoBaselineScan, OverrideSourceEnv, &enabled)
 	}
 
 	// Override retrieve_tools serialization mode from environment (Spec 085).
 	// Explicit MCPPROXY_* alias per the established loader convention; the
 	// value is validated by cfg.Validate() right after these overrides apply.
 	if value := os.Getenv("MCPPROXY_TOOL_RESPONSE_MODE"); value != "" {
-		cfg.ToolResponseMode = value
+		OverrideForProcess(cfg, FieldToolResponseMode, OverrideSourceEnv, value)
 	}
 
 	// Override DIRECT-surface serialization mode from environment (Spec 102).
@@ -753,7 +753,7 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// separate config axis: that one governs retrieve_tools, this one governs
 	// the direct enumeration surface. Setting one must never move the other.
 	if value := os.Getenv("MCPPROXY_DIRECT_TOOL_RESPONSE_MODE"); value != "" {
-		cfg.DirectToolResponseMode = value
+		OverrideForProcess(cfg, FieldDirectToolResponseMode, OverrideSourceEnv, value)
 	}
 
 	// Override the GLOBAL aggregate concurrency limiter from environment
@@ -764,14 +764,14 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// so a typo cannot silently reshape the proxy's admission behavior.
 	if value := os.Getenv("MCPPROXY_MAX_CONCURRENT_REQUESTS"); value != "" {
 		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
-			cfg.MaxConcurrentRequests = &n
+			OverrideForProcess(cfg, FieldMaxConcurrentRequests, OverrideSourceEnv, &n)
 		} else {
 			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_MAX_CONCURRENT_REQUESTS=%q (want a non-negative integer)\n", value)
 		}
 	}
 	if value := os.Getenv("MCPPROXY_QUEUE_SIZE"); value != "" {
 		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
-			cfg.QueueSize = &n
+			OverrideForProcess(cfg, FieldQueueSize, OverrideSourceEnv, &n)
 		} else {
 			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_QUEUE_SIZE=%q (want a non-negative integer)\n", value)
 		}
@@ -779,7 +779,7 @@ func applyTLSEnvOverrides(cfg *Config) {
 	if value := os.Getenv("MCPPROXY_QUEUE_TIMEOUT"); value != "" {
 		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
 			qt := Duration(d)
-			cfg.QueueTimeout = &qt
+			OverrideForProcess(cfg, FieldQueueTimeout, OverrideSourceEnv, &qt)
 		} else {
 			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_QUEUE_TIMEOUT=%q (want a duration such as \"30s\")\n", value)
 		}
@@ -795,7 +795,7 @@ func applyTLSEnvOverrides(cfg *Config) {
 	if value := os.Getenv("MCPPROXY_HTTP_READ_TIMEOUT"); value != "" {
 		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
 			rt := Duration(d)
-			cfg.HTTPReadTimeout = &rt
+			OverrideForProcess(cfg, FieldHTTPReadTimeout, OverrideSourceEnv, &rt)
 		} else {
 			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_HTTP_READ_TIMEOUT=%q (want a duration such as \"120s\", or \"0s\" to disable)\n", value)
 		}
@@ -803,7 +803,7 @@ func applyTLSEnvOverrides(cfg *Config) {
 	if value := os.Getenv("MCPPROXY_HTTP_WRITE_TIMEOUT"); value != "" {
 		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
 			wt := Duration(d)
-			cfg.HTTPWriteTimeout = &wt
+			OverrideForProcess(cfg, FieldHTTPWriteTimeout, OverrideSourceEnv, &wt)
 		} else {
 			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_HTTP_WRITE_TIMEOUT=%q (want a duration such as \"300s\", or \"0s\" to disable)\n", value)
 		}
@@ -811,7 +811,7 @@ func applyTLSEnvOverrides(cfg *Config) {
 	if value := os.Getenv("MCPPROXY_HTTP_IDLE_TIMEOUT"); value != "" {
 		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
 			it := Duration(d)
-			cfg.HTTPIdleTimeout = &it
+			OverrideForProcess(cfg, FieldHTTPIdleTimeout, OverrideSourceEnv, &it)
 		} else {
 			fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid MCPPROXY_HTTP_IDLE_TIMEOUT=%q (want a duration such as \"180s\"; \"0s\" falls back to the read timeout)\n", value)
 		}

@@ -2710,7 +2710,10 @@ func (c *Config) Validate() error {
 		// Check environment variable for API key
 		// Use LookupEnv to distinguish between "not set" and "set to empty string"
 		if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists {
-			c.APIKey = envAPIKey // Allow empty string to explicitly disable authentication
+			// Allow empty string to explicitly disable authentication. A
+			// process-only override: no save path may write it into api_key
+			// (see process_overrides.go).
+			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envAPIKey)
 		}
 	}
 

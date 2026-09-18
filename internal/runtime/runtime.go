@@ -1737,7 +1737,7 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// (config_watcher.go). If the save fails, its entry is removed again on
 	// the error path below — nothing reached disk, so a later byte-identical
 	// EXTERNAL write of this config is a genuine edit the watcher must reload.
-	r.noteConfigSelfWrite(newCfg)
+	r.noteConfigSelfWrite(newCfg, savePath)
 
 	saveErr := config.SaveConfig(newCfg, savePath)
 	if saveErr != nil {
@@ -1746,7 +1746,7 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 		// would suppress a genuine external write of byte-identical JSON.
 		// Only this payload is forgotten — markers from other still-pending
 		// successful saves stay live.
-		r.forgetConfigSelfWrite(newCfg)
+		r.forgetConfigSelfWrite(newCfg, savePath)
 		r.logger.Error("Failed to save configuration to disk",
 			zap.String("path", savePath),
 			zap.Error(saveErr))

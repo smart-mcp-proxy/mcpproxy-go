@@ -432,16 +432,6 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	// Get flag values from command (handles both global and local flags)
 	cmdLogLevel, _ := cmd.Flags().GetString("log-level")
 	cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
-	cmdLogDir, _ := cmd.Flags().GetString("log-dir")
-	cmdDebugSearch, _ := cmd.Flags().GetBool("debug-search")
-	cmdToolResponseLimit, _ := cmd.Flags().GetInt("tool-response-limit")
-	cmdRequireMCPAuth, _ := cmd.Flags().GetBool("require-mcp-auth")
-	cmdReadOnlyMode, _ := cmd.Flags().GetBool("read-only")
-	cmdDisableManagement, _ := cmd.Flags().GetBool("disable-management")
-	cmdAllowServerAdd, _ := cmd.Flags().GetBool("allow-server-add")
-	cmdAllowServerRemove, _ := cmd.Flags().GetBool("allow-server-remove")
-	cmdEnablePrompts, _ := cmd.Flags().GetBool("enable-prompts")
-	cmdAggregateUpstreamPrompts, _ := cmd.Flags().GetBool("aggregate-upstream-prompts")
 
 	// Load configuration first to get logging settings
 	cfg, saver, err := loadConfig(cmd)
@@ -449,51 +439,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Override logging settings from command line
-	if cfg.Logging == nil {
-		// Use command-specific default level (INFO for server command)
-		defaultLevel := cmdLogLevel
-		if defaultLevel == "" {
-			defaultLevel = defaultLogLevel // Server command defaults to INFO
-		}
-
-		cfg.Logging = &config.LogConfig{
-			Level:         defaultLevel,
-			EnableFile:    !cmd.Flags().Changed("log-to-file") || cmdLogToFile, // Default true for serve, unless explicitly disabled
-			EnableConsole: true,
-			Filename:      "main.log",
-			MaxSize:       10,
-			MaxBackups:    5,
-			MaxAge:        30,
-			Compress:      true,
-			JSONFormat:    false,
-		}
-	} else {
-		// Override specific fields from command line
-		if cmdLogLevel != "" {
-			cfg.Logging.Level = cmdLogLevel
-		} else if cfg.Logging.Level == "" {
-			cfg.Logging.Level = defaultLogLevel // Server command defaults to INFO
-		}
-
-		// For serve mode: Enable file logging by default, only disable if explicitly set to false
-		if cmd.Flags().Changed("log-to-file") {
-			cfg.Logging.EnableFile = cmdLogToFile
-		} else {
-			cfg.Logging.EnableFile = true // Default to true for serve mode
-		}
-
-		if cfg.Logging.Filename == "" || cfg.Logging.Filename == "mcpproxy.log" {
-			cfg.Logging.Filename = "main.log"
-		}
-	}
-
-	// Resolve the log directory. An explicit --log-dir wins; otherwise a
-	// non-default data dir co-locates logs under <data-dir>/logs so that
-	// tests/e2e/harness `serve` runs do not pollute the shared OS-standard
-	// prod log (root cause of the phantom "core restarts every 10s" in
-	// MCP-2250). The default data dir keeps the OS-standard location.
-	cfg.Logging.LogDir = resolveServeLogDir(cmdLogDir, cfg.Logging.LogDir, cfg.DataDir, defaultDataDirPath())
+	applyServeLoggingFlags(cmd, cfg)
 
 	// Setup logger with new logging system
 	logger, err := logs.SetupLogger(cfg.Logging)
@@ -540,38 +486,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	// Issue #566: registries (e.g. Pulse) require a versioned User-Agent.
 	registries.SetVersion(version)
 
-	// Override other settings from command line
-	cfg.DebugSearch = cmdDebugSearch
-
-	if cmdToolResponseLimit != 0 {
-		cfg.ToolResponseLimit = cmdToolResponseLimit
-	}
-
-	// Apply security settings from command line ONLY if explicitly set
-	if cmd.Flags().Changed("require-mcp-auth") {
-		cfg.RequireMCPAuth = cmdRequireMCPAuth
-	}
-	if cmd.Flags().Changed("read-only") {
-		cfg.ReadOnlyMode = cmdReadOnlyMode
-	}
-	if cmd.Flags().Changed("disable-management") {
-		cfg.DisableManagement = cmdDisableManagement
-	}
-	if cmd.Flags().Changed("allow-server-add") {
-		cfg.AllowServerAdd = cmdAllowServerAdd
-	}
-	if cmd.Flags().Changed("allow-server-remove") {
-		cfg.AllowServerRemove = cmdAllowServerRemove
-	}
-	if cmd.Flags().Changed("enable-prompts") {
-		cfg.EnablePrompts = cmdEnablePrompts
-	}
-	if cmd.Flags().Changed("aggregate-upstream-prompts") {
-		cfg.AggregateUpstreamPrompts = cmdAggregateUpstreamPrompts
-	}
+	applyServeRuntimeFlags(cmd, cfg)
 
 	logger.Info("Configuration loaded",
 		zap.String("data_dir", cfg.DataDir),
+		zap.Strings("process_overrides", config.ProcessOverrideFields()),
 		zap.Int("servers_count", len(cfg.Servers)),
 		zap.Bool("require_mcp_auth", cfg.RequireMCPAuth),
 		zap.Bool("read_only_mode", cfg.ReadOnlyMode),
@@ -817,24 +736,26 @@ func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 	// never persist a one-off CLI choice.
 	saver := newServeConfigSaver(cfg, loadedPath)
 
-	// Override with command line flags ONLY if they were explicitly set
+	// Override with command line flags ONLY if they were explicitly set. Each
+	// one is a process-only override (config.OverrideForProcess): the effective
+	// config carries it, no save path persists it — see process_overrides.go.
 	if dataDir != "" {
-		cfg.DataDir = dataDir
+		config.OverrideForProcess(cfg, config.FieldDataDir, config.OverrideSourceFlag, dataDir)
 	}
 	if cmd.Flags().Changed("listen") {
 		listenFlag, _ := cmd.Flags().GetString("listen")
-		cfg.Listen = listenFlag
+		config.OverrideForProcess(cfg, config.FieldListen, config.OverrideSourceFlag, listenFlag)
 	}
 	if cmd.Flags().Changed("tray-endpoint") {
 		trayEndpointFlag, _ := cmd.Flags().GetString("tray-endpoint")
-		cfg.TrayEndpoint = trayEndpointFlag
+		config.OverrideForProcess(cfg, config.FieldTrayEndpoint, config.OverrideSourceFlag, trayEndpointFlag)
 	}
 	if cmd.Flags().Changed("enable-socket") {
 		enableSocketFlag, _ := cmd.Flags().GetBool("enable-socket")
-		cfg.EnableSocket = enableSocketFlag
+		config.OverrideForProcess(cfg, config.FieldEnableSocket, config.OverrideSourceFlag, enableSocketFlag)
 	}
 	if toolResponseLimit != 0 {
-		cfg.ToolResponseLimit = toolResponseLimit
+		config.OverrideForProcess(cfg, config.FieldToolResponseLimit, config.OverrideSourceFlag, toolResponseLimit)
 	}
 	applyToolResponseModeFlag(cfg, cmd.Flags().Changed("tool-response-mode"), toolResponseMode)
 	applyDirectToolResponseModeFlag(cfg, cmd.Flags().Changed("direct-tool-response-mode"), directToolResponseMode)
@@ -854,7 +775,7 @@ func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 // invalid values with a tool_response_mode error.
 func applyToolResponseModeFlag(cfg *config.Config, changed bool, mode string) {
 	if changed {
-		cfg.ToolResponseMode = mode
+		config.OverrideForProcess(cfg, config.FieldToolResponseMode, config.OverrideSourceFlag, mode)
 	}
 }
 
@@ -866,7 +787,93 @@ func applyToolResponseModeFlag(cfg *config.Config, changed bool, mode string) {
 // rejects invalid values with a direct_tool_response_mode error.
 func applyDirectToolResponseModeFlag(cfg *config.Config, changed bool, mode string) {
 	if changed {
-		cfg.DirectToolResponseMode = mode
+		config.OverrideForProcess(cfg, config.FieldDirectToolResponseMode, config.OverrideSourceFlag, mode)
+	}
+}
+
+// applyServeLoggingFlags fills serve's logging defaults and layers the
+// --log-level / --log-to-file / --log-dir flags on top. The flags are
+// process-only overrides (config.OverrideForProcess) so no save path writes
+// them into the file; the serve defaults (INFO, file logging on, main.log)
+// are plain in-memory fills, as they always were.
+func applyServeLoggingFlags(cmd *cobra.Command, cfg *config.Config) {
+	cmdLogLevel, _ := cmd.Flags().GetString("log-level")
+	cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
+	cmdLogDir, _ := cmd.Flags().GetString("log-dir")
+
+	if cfg.Logging == nil {
+		cfg.Logging = &config.LogConfig{
+			EnableConsole: true,
+			Filename:      "main.log",
+			MaxSize:       10,
+			MaxBackups:    5,
+			MaxAge:        30,
+			Compress:      true,
+			JSONFormat:    false,
+		}
+	}
+
+	if cmdLogLevel != "" {
+		config.OverrideForProcess(cfg, config.FieldLogLevel, config.OverrideSourceFlag, cmdLogLevel)
+	} else if cfg.Logging.Level == "" {
+		cfg.Logging.Level = defaultLogLevel // Server command defaults to INFO
+	}
+
+	// For serve mode: Enable file logging by default, only disable if explicitly set to false
+	if cmd.Flags().Changed("log-to-file") {
+		config.OverrideForProcess(cfg, config.FieldLogEnableFile, config.OverrideSourceFlag, cmdLogToFile)
+	} else {
+		cfg.Logging.EnableFile = true // Default to true for serve mode
+	}
+
+	if cfg.Logging.Filename == "" || cfg.Logging.Filename == "mcpproxy.log" {
+		cfg.Logging.Filename = "main.log"
+	}
+
+	// Resolve the log directory. An explicit --log-dir wins; otherwise a
+	// non-default data dir co-locates logs under <data-dir>/logs so that
+	// tests/e2e/harness `serve` runs do not pollute the shared OS-standard
+	// prod log (root cause of the phantom "core restarts every 10s" in
+	// MCP-2250). The default data dir keeps the OS-standard location.
+	logDir := resolveServeLogDir(cmdLogDir, cfg.Logging.LogDir, cfg.DataDir, defaultDataDirPath())
+	if cmdLogDir != "" {
+		config.OverrideForProcess(cfg, config.FieldLogDir, config.OverrideSourceFlag, logDir)
+	} else {
+		cfg.Logging.LogDir = logDir
+	}
+}
+
+// applyServeRuntimeFlags layers the remaining serve flags onto the loaded
+// config, each as a process-only override (config.OverrideForProcess).
+func applyServeRuntimeFlags(cmd *cobra.Command, cfg *config.Config) {
+	flags := cmd.Flags()
+
+	// --debug-search has always applied unconditionally (its default is
+	// false), so it is recorded unconditionally too.
+	cmdDebugSearch, _ := flags.GetBool("debug-search")
+	config.OverrideForProcess(cfg, config.FieldDebugSearch, config.OverrideSourceFlag, cmdDebugSearch)
+
+	if cmdToolResponseLimit, _ := flags.GetInt("tool-response-limit"); cmdToolResponseLimit != 0 {
+		config.OverrideForProcess(cfg, config.FieldToolResponseLimit, config.OverrideSourceFlag, cmdToolResponseLimit)
+	}
+
+	// Apply security settings from command line ONLY if explicitly set
+	for _, f := range []struct {
+		flag  string
+		field config.Field[bool]
+	}{
+		{"require-mcp-auth", config.FieldRequireMCPAuth},
+		{"read-only", config.FieldReadOnlyMode},
+		{"disable-management", config.FieldDisableManagement},
+		{"allow-server-add", config.FieldAllowServerAdd},
+		{"allow-server-remove", config.FieldAllowServerRemove},
+		{"enable-prompts", config.FieldEnablePrompts},
+		{"aggregate-upstream-prompts", config.FieldAggregateUpstreamPrompts},
+	} {
+		if flags.Changed(f.flag) {
+			v, _ := flags.GetBool(f.flag)
+			config.OverrideForProcess(cfg, f.field, config.OverrideSourceFlag, v)
+		}
 	}
 }
 
