@@ -849,6 +849,74 @@ func TestStoredNames_WarmListsAfterAnInFlightRebuild(t *testing.T) {
 	assert.Equal(t, 0, held.land())
 }
 
+// TestStoredNames_WarmBlocksOnRebuildSlots (round 17 SHOULD, finding 1):
+// Warm's own synchronous, population-sized listing must count against the
+// SAME process-wide rebuildSlots bound the async path enforces
+// (rebuildsemaphore.go) — otherwise two concurrent Warm calls for different
+// directories (e.g. two active-config-path moves, each spawning its own
+// async warmStoredScripts goroutine per mcp_code_execution.go) could run an
+// unbounded number of listings alongside the async rebuilds the semaphore is
+// meant to cap. The semaphore's capacity is temporarily reduced to 1 (a
+// seam: rebuildSlots is swapped for the test and restored on cleanup) so a
+// single held listing is enough to prove the second Warm call BLOCKS on the
+// slot rather than racing ahead unbounded, and unblocks once the first
+// Warm's slot is released — never deadlocking, since Warm never holds
+// idx.mu while blocked acquiring the slot (see Warm's own comment).
+func TestStoredNames_WarmBlocksOnRebuildSlots(t *testing.T) {
+	quiesceIndexRebuilds()
+	settleStoredNamesClock(t)
+	origSlots := rebuildSlots
+	rebuildSlots = make(chan struct{}, 1)
+	t.Cleanup(func() { rebuildSlots = origSlots })
+
+	dirA := t.TempDir()
+	writeScript(t, dirA, "alpha.js", "1")
+	dirB := t.TempDir()
+	writeScript(t, dirB, "beta.js", "1")
+
+	// Gate dirA's listing so the test controls exactly when its rebuild —
+	// and with it, the sole rebuildSlots slot — completes.
+	gate := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	origList := listScopedDirOnce
+	t.Cleanup(func() { listScopedDirOnce = origList })
+	listScopedDirOnce = func(key string) (dirGeneration, dirGeneration, map[string]struct{}, error) {
+		if key == filepath.Clean(dirA) {
+			entered <- struct{}{}
+			<-gate
+		}
+		return origList(key)
+	}
+
+	doneA := make(chan error, 1)
+	go func() { doneA <- Warm(dirA) }()
+	<-entered // dirA now holds the sole rebuildSlots slot, blocked mid-listing
+
+	doneB := make(chan error, 1)
+	go func() { doneB <- Warm(dirB) }()
+
+	// dirB's Warm claims its OWN index's building flag immediately (it does
+	// not contend with dirA on idx.mu — different indexes) but must block
+	// acquiring the shared slot, so it must not return yet.
+	select {
+	case err := <-doneB:
+		t.Fatalf("Warm(dirB) returned (err=%v) while the sole rebuildSlots slot was held by dirA's in-flight rebuild — the semaphore did not bound it", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	idxB := storedNamesIndex(filepath.Clean(dirB))
+	idxB.mu.Lock()
+	buildingB := idxB.building
+	idxB.mu.Unlock()
+	assert.True(t, buildingB, "dirB's Warm has claimed its own index's building flag while waiting on the slot")
+
+	close(gate) // release dirA's listing; its slot frees once its Warm returns
+	require.NoError(t, <-doneA)
+	require.NoError(t, <-doneB, "dirB's Warm proceeds once dirA's slot is released")
+
+	namesB := lookupStoredNamesForTest(t, dirB)
+	assert.Contains(t, namesB, "beta.js", "dirB's rebuild ran and landed once it finally acquired the slot")
+}
+
 // TestStoredNames_UnlistableDirectoryRefusesScopedCallers: a scripts
 // directory the process cannot read is refused with the non-disclosing
 // unreadable form — no path, no OS error — on the very first request, cold

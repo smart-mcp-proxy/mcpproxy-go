@@ -349,6 +349,24 @@ func Warm(scriptsDir string) error {
 		idx.mu.Unlock()
 		<-landed
 	}
+	// Round 17 SHOULD: Warm's own population-sized listing must count
+	// against the SAME process-wide rebuildSlots bound the async path
+	// enforces (rebuildsemaphore.go) — otherwise the documented "at most
+	// maxConcurrentRebuilds concurrent listings, process-wide" claim
+	// (research.md) does not hold once more than one Warm call is in
+	// flight for different directories, e.g. two active-config-path moves
+	// each spawning their own async `go warmStoredScripts` call
+	// (mcp_code_execution.go). Unlike scheduleRebuildLocked's non-blocking,
+	// skip-if-busy acquire, Warm BLOCKS for a slot: it cannot skip the
+	// work the way an async, nobody's-waiting rebuild can — the caller is
+	// blocked on Warm and trusts the error it returns. Acquired here,
+	// OUTSIDE idx.mu (already released by the loop above), so a blocked
+	// acquire can never hold up another goroutine that needs idx.mu to
+	// make progress; what frees this acquire is some OTHER rebuild in the
+	// process finishing and releasing its slot, which never depends on
+	// idx.mu or on this goroutine.
+	rebuildSlots <- struct{}{}
+	defer func() { <-rebuildSlots }()
 	// backoffAfter is false: Warm is the server's own explicit request for a
 	// current index (at startup, or when the active scripts directory
 	// moves), not a request-triggered rebuild guarding against runaway

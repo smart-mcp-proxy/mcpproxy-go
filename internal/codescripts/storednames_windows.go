@@ -218,6 +218,11 @@ func Warm(scriptsDir string) error {
 		idx.mu.Unlock()
 		<-landed
 	}
+	// Round 17 SHOULD: same process-wide rebuildSlots bound as the unix
+	// Warm (storednames_other.go) — see there for the full rationale.
+	// Acquired here, OUTSIDE idx.mu, already released by the loop above.
+	rebuildSlots <- struct{}{}
+	defer func() { <-rebuildSlots }()
 	idx.wg.Add(1)
 	idx.rebuild(key, false, false)
 	idx.mu.Lock()
