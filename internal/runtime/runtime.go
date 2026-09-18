@@ -1790,10 +1790,12 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// smuggling the still-pending value into memory.
 	hotCfg := pinRestartGated(r.cfg, newCfg)
 
-	// An overridden hot field this apply moved away from its serve flag / env
+	// An overridden field this apply moved away from its serve flag / env
 	// value is superseded for this process: retire the override so an edit
-	// BACK to that value later persists as the edit it is.
-	config.RetireSupersededOverrides(hotCfg)
+	// BACK to that value later persists as the edit it is. Judged on what was
+	// SAVED (newCfg), not on hotCfg: an edit of listen under --listen ends
+	// that override even though the listener stays bound to the flag's value.
+	config.RetireSupersededOverrides(newCfg)
 
 	// What this process can actually adopt, always computed against the running
 	// config — never against the desired one `result` was diffed from, which can

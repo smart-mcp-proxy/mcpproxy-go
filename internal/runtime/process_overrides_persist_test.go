@@ -275,3 +275,32 @@ func TestReloadConfiguration_ComponentsFollowTheRunningConfig(t *testing.T) {
 	snap := rt.ConfigSnapshot()
 	assert.Equal(t, "compact", snap.Config.ToolResponseMode, "the published snapshot is the running config")
 }
+
+// An API edit of a restart-gated overridden field (listen under --listen)
+// ends the override for this process even though the listener stays bound:
+// a second edit back to the flag's value is then persisted as asked, so disk,
+// the desired config and the API result agree.
+func TestApplyConfig_EditingListenUnderAFlagEndsTheOverride(t *testing.T) {
+	rt, cfgPath := newOverriddenRuntime(t)
+
+	desired, err := rt.GetDesiredConfig()
+	require.NoError(t, err)
+	desired.Listen = "127.0.0.1:9090"
+	_, err = rt.ApplyConfig(desired, cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1:9090", readConfigJSON(t, cfgPath)["listen"])
+
+	desired, err = rt.GetDesiredConfig()
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1:9090", desired.Listen)
+	desired.Listen = ":0" // cancel: back to what this process is bound to
+	_, err = rt.ApplyConfig(desired, cfgPath)
+	require.NoError(t, err)
+
+	assert.Equal(t, ":0", readConfigJSON(t, cfgPath)["listen"], "the explicit edit is persisted as asked")
+	desired, err = rt.GetDesiredConfig()
+	require.NoError(t, err)
+	assert.Equal(t, ":0", desired.Listen)
+	assert.NotContains(t, config.ProcessOverrideFields(), "listen")
+	assert.Contains(t, config.ProcessOverrideFields(), "read_only_mode", "untouched overrides stay")
+}

@@ -353,7 +353,11 @@ func ReapplyFlagOverrides(cfg, live *Config) {
 			continue
 		}
 		if live != nil && o.supersededBy(live) {
+			// Superseded by an API edit: the field is API-managed now, so
+			// the env record beneath the flag goes too (the loader has
+			// just re-recorded it; see RetireSupersededOverrides).
 			delete(processOverrides, key)
+			delete(processOverrides, overrideKey{key.field, OverrideSourceEnv})
 			continue
 		}
 		// Over an env override of the same field the config already carries
@@ -367,6 +371,27 @@ func ReapplyFlagOverrides(cfg, live *Config) {
 	}
 }
 
+// effectiveOverridesLocked returns the one override that is in force per
+// field: a flag shadows an env override of the same field (the flag is
+// applied after the env value, so it is what the process actually runs with).
+// Only the winner may decide whether the field was edited — the shadowed env
+// record would otherwise intercept an API edit that happens to equal the env
+// value. Caller must hold processOverridesMu (read or write).
+func effectiveOverridesLocked() []processOverride {
+	winners := make(map[string]processOverride, len(processOverrides))
+	for key, o := range processOverrides {
+		if prev, ok := winners[key.field]; ok && prev.source() == OverrideSourceFlag {
+			continue
+		}
+		winners[key.field] = o
+	}
+	out := make([]processOverride, 0, len(winners))
+	for _, o := range winners {
+		out = append(out, o)
+	}
+	return out
+}
+
 // RetireSupersededOverrides forgets every override the running config no
 // longer carries. An API edit that moved an overridden field to another
 // value has superseded the override for this process: from then on the field
@@ -374,15 +399,27 @@ func ReapplyFlagOverrides(cfg, live *Config) {
 // it is instead of being swapped for the file value. Call it with the config
 // this process actually runs (never with a file-derived one, whose values
 // differ from every override by construction).
+//
+// live is the config the process adopted, or — for a restart-gated field the
+// API edited but the process cannot adopt — the config the API saved: an
+// operator editing listen under --listen has ended that override for this
+// process even though the listener stays bound, and a later edit back to the
+// flag's value must persist as asked.
+//
+// A superseded field forgets its whole stack (flag and env): the field is
+// API-managed from now on.
 func RetireSupersededOverrides(live *Config) {
 	if live == nil {
 		return
 	}
 	processOverridesMu.Lock()
 	defer processOverridesMu.Unlock()
-	for key, o := range processOverrides {
-		if o.supersededBy(live) {
-			delete(processOverrides, key)
+	for _, o := range effectiveOverridesLocked() {
+		if !o.supersededBy(live) {
+			continue
+		}
+		for _, source := range []OverrideSource{OverrideSourceFlag, OverrideSourceEnv} {
+			delete(processOverrides, overrideKey{o.name(), source})
 		}
 	}
 }
@@ -432,10 +469,7 @@ func PersistableConfig(effective *Config, path string) *Config {
 		return nil
 	}
 	processOverridesMu.RLock()
-	overrides := make([]processOverride, 0, len(processOverrides))
-	for _, o := range processOverrides {
-		overrides = append(overrides, o)
-	}
+	overrides := effectiveOverridesLocked()
 	processOverridesMu.RUnlock()
 	if len(overrides) == 0 {
 		return effective

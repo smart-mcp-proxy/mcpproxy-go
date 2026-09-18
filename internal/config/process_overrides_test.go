@@ -405,3 +405,42 @@ func TestOverrideForProcess_RepeatedRegistrationKeepsTheFileFallback(t *testing.
 	persisted := PersistableConfig(cfg, filepath.Join(t.TempDir(), "missing.json"))
 	assert.Equal(t, 20000, persisted.ToolResponseLimit)
 }
+
+// Round-4 review findings.
+
+// With env AND a flag on the same field only the flag is effective; the env
+// record must not intercept an API edit that happens to equal the env value.
+func TestPersistableConfig_StackedEnvAndFlag_EditToTheEnvValuePersists(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"direct_tool_response_mode": "full", "mcpServers": []}`)
+	t.Setenv("MCPPROXY_DIRECT_TOOL_RESPONSE_MODE", "deferred")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(cfg, FieldDirectToolResponseMode, OverrideSourceFlag, "compact")
+
+	cfg.DirectToolResponseMode = "deferred" // the API edit: visibly different from "compact"
+	require.NoError(t, SaveConfig(cfg, path))
+	assert.Equal(t, "deferred", readJSON(t, path)["direct_tool_response_mode"])
+}
+
+// Retiring a superseded field forgets the whole stack, not only the winner.
+func TestRetireSupersededOverrides_RetiresTheWholeStack(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"direct_tool_response_mode": "full", "mcpServers": []}`)
+	t.Setenv("MCPPROXY_DIRECT_TOOL_RESPONSE_MODE", "deferred")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(cfg, FieldDirectToolResponseMode, OverrideSourceFlag, "compact")
+
+	cfg.DirectToolResponseMode = "deferred"
+	RetireSupersededOverrides(cfg)
+	assert.NotContains(t, ProcessOverrideFields(), "direct_tool_response_mode")
+
+	cfg.DirectToolResponseMode = "compact" // back to the (retired) flag value: an ordinary edit
+	require.NoError(t, SaveConfig(cfg, path))
+	assert.Equal(t, "compact", readJSON(t, path)["direct_tool_response_mode"])
+}
