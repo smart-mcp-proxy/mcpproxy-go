@@ -359,3 +359,29 @@ func TestApplyConfig_RoundTripAfterReloadKeepsTheListenOverride(t *testing.T) {
 	require.NoError(t, rt.SaveConfiguration())
 	assert.Equal(t, "127.0.0.1:8080", readConfigJSON(t, cfgPath)["listen"])
 }
+
+// After a reload the desired listen is the file's; an API edit that sets it
+// to the flag's own address is a distinguishable, legitimate edit and must
+// reach the file.
+func TestApplyConfig_EditingListenToTheFlagValueAfterReloadPersists(t *testing.T) {
+	rt, cfgPath := newOverriddenRuntime(t)
+
+	edited, err := config.ReadFile(cfgPath)
+	require.NoError(t, err)
+	edited.ToolsLimit = 77
+	require.NoError(t, config.SaveConfig(edited, cfgPath))
+	require.NoError(t, rt.ReloadConfiguration())
+
+	desired, err := rt.GetDesiredConfig()
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1:8080", desired.Listen)
+	desired.Listen = ":0" // make the flag's address permanent
+	_, err = rt.ApplyConfig(desired, cfgPath)
+	require.NoError(t, err)
+
+	assert.Equal(t, ":0", readConfigJSON(t, cfgPath)["listen"], "the edit must reach the file")
+	desired, err = rt.GetDesiredConfig()
+	require.NoError(t, err)
+	assert.Equal(t, ":0", desired.Listen)
+	assert.NotContains(t, config.ProcessOverrideFields(), "listen")
+}

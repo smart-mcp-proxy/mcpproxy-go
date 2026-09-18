@@ -469,3 +469,21 @@ func TestRetireEditedOverrides_IgnoresRoundTrips(t *testing.T) {
 	RetireEditedOverrides(&base, &next)
 	assert.Equal(t, []string{"read_only_mode"}, ProcessOverrideFields())
 }
+
+// Round-6 review finding: moving a field from a base value to the override's
+// own value is an edit too (base != next == override) and retires it.
+func TestRetireEditedOverrides_MovingToTheOverrideValueIsAnEdit(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+
+	cfg := DefaultConfig()
+	cfg.Listen = "127.0.0.1:8080"
+	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, "127.0.0.1:9000")
+
+	base := *cfg
+	base.Listen = "127.0.0.1:8080" // the desired config after a disk reload
+	next := base
+	next.Listen = "127.0.0.1:9000" // the operator makes the flag's address permanent
+	RetireEditedOverrides(&base, &next)
+	assert.NotContains(t, ProcessOverrideFields(), "listen")
+}

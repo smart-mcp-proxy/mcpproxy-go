@@ -1737,6 +1737,18 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// (config_watcher.go). If the save fails, its entry is removed again on
 	// the error path below — nothing reached disk, so a later byte-identical
 	// EXTERNAL write of this config is a genuine edit the watcher must reload.
+	// An overridden field this apply MOVED (relative to the merge base, so a
+	// round trip of a value the base already held is not an edit) is
+	// API-managed for this process from here on: retire the serve flag / env
+	// override BEFORE the save so the edit — whatever value it moved to,
+	// including the override's own — is what reaches disk, and an edit back
+	// later persists as the edit it is. Judged on what is SAVED, not on the
+	// pinned hot config: an edit of listen under --listen ends that override
+	// even though the listener stays bound to the flag's value. A failed save
+	// below leaves the field retired; the apply reports the failure and the
+	// desired config is unchanged, so nothing has been persisted wrongly.
+	config.RetireEditedOverrides(baseCfg, newCfg)
+
 	r.noteConfigSelfWrite(newCfg, savePath)
 
 	saveErr := config.SaveConfig(newCfg, savePath)
@@ -1789,15 +1801,6 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// caller that (correctly) merged its change onto the DESIRED config from
 	// smuggling the still-pending value into memory.
 	hotCfg := pinRestartGated(r.cfg, newCfg)
-
-	// An overridden field this apply moved away from its serve flag / env
-	// value is superseded for this process: retire the override so an edit
-	// BACK to that value later persists as the edit it is. Judged on what was
-	// SAVED (newCfg) against the merge base, not on hotCfg: an edit of listen
-	// under --listen ends that override even though the listener stays bound
-	// to the flag's value, while a round trip of a value the base already
-	// held (the file's listen after a disk reload) is not an edit at all.
-	config.RetireEditedOverrides(baseCfg, newCfg)
 
 	// What this process can actually adopt, always computed against the running
 	// config — never against the desired one `result` was diffed from, which can

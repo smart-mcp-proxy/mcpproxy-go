@@ -432,12 +432,19 @@ func RetireSupersededOverrides(live *Config) {
 }
 
 // RetireEditedOverrides forgets every override whose field the caller
-// actually edited: next differs from the override AND from base, the config
-// the edit was merged onto (the desired config for PUT/PATCH /api/v1/config).
+// actually edited: next differs from base, the config the edit was merged
+// onto (the desired config for PUT/PATCH /api/v1/config). What it was moved
+// TO does not matter — moving listen from the file's address to the flag's
+// own address is the operator making that address permanent, and is an edit
+// (base != next == override is distinguishable, unlike a plain round trip).
 // A field that merely round-tripped a value base already held — the file's
 // listen after a disk reload, say — is not an edit, whatever it equals; a
 // blanket "differs from the override" test would retire the override on the
 // first unrelated save after a reload.
+//
+// Call it BEFORE the save that persists next: once the field is API-managed
+// the save writes the edit; called after, PersistableConfig would already
+// have swapped an edit equal to the override for the file value.
 func RetireEditedOverrides(base, next *Config) {
 	if base == nil || next == nil {
 		return
@@ -445,7 +452,7 @@ func RetireEditedOverrides(base, next *Config) {
 	processOverridesMu.Lock()
 	defer processOverridesMu.Unlock()
 	for _, o := range effectiveOverridesLocked() {
-		if !o.supersededBy(next) || !o.movedBetween(base, next) {
+		if !o.movedBetween(base, next) {
 			continue
 		}
 		for _, source := range []OverrideSource{OverrideSourceFlag, OverrideSourceEnv} {
