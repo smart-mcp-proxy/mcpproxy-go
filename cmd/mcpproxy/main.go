@@ -602,7 +602,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 		// Save the auto-generated key to config file for persistence
 		saver.setGeneratedAPIKey(apiKey)
-		configPathToSave := serveConfigPath(cfg)
+		configPathToSave := saver.path
 
 		if err := saver.save(cfg, configPathToSave); err != nil {
 			logger.Warn("Failed to save auto-generated API key to config file",
@@ -622,8 +622,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 			zap.String("api_key_prefix", maskedKey))
 	}
 
-	// Create server with the actual config path used
-	actualConfigPath := serveConfigPath(cfg)
+	// Create server with the config path that was actually loaded
+	actualConfigPath := saver.path
 	srv, err := server.NewServerWithConfigPath(cfg, actualConfigPath, logger)
 	if err != nil {
 		// Spec 042: classify the failure into a startup outcome enum.
@@ -732,6 +732,9 @@ func runServer(cmd *cobra.Command, _ []string) error {
 // after startup) never resurrects a startup-era server list over changes the
 // runtime persisted in the meantime.
 type serveConfigSaver struct {
+	// path is the config file loadConfig actually read (or created): the
+	// destination of every serve save and the runtime's config path.
+	path string
 	// fileCfg is the file as read at startup (see readConfigFile), the base
 	// only when the file can no longer be read at save time.
 	fileCfg config.Config
@@ -744,7 +747,7 @@ type serveConfigSaver struct {
 // (e.g. --config=/dev/null) the loaded cfg — taken before any flag override,
 // Logging copied because runServer mutates it in place — stands in.
 func newServeConfigSaver(cfg *config.Config, path string) *serveConfigSaver {
-	s := &serveConfigSaver{}
+	s := &serveConfigSaver{path: path}
 	if fileCfg, err := readConfigFile(path); err == nil {
 		s.fileCfg = *fileCfg
 		return s
@@ -785,18 +788,10 @@ func readConfigFile(path string) (*config.Config, error) {
 	return config.ReadFile(path)
 }
 
-// serveConfigPath is the file runServer saves to: --config when given, else
-// the default path under the data dir.
-func serveConfigPath(cfg *config.Config) string {
-	if configFile != "" {
-		return configFile
-	}
-	return config.GetConfigPath(cfg.DataDir)
-}
-
 func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 	var cfg *config.Config
 	var err error
+	loadedPath := configFile
 
 	// Load configuration - use LoadFromFile if config file specified, otherwise use Load
 	if configFile != "" {
@@ -811,7 +806,7 @@ func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 		}
 		cfg, err = config.LoadFromFile(configFile)
 	} else {
-		cfg, err = config.Load()
+		cfg, loadedPath, err = config.LoadWithPath()
 	}
 
 	if err != nil {
@@ -820,7 +815,7 @@ func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 
 	// Snapshot the file before any flag override so the saves in runServer
 	// never persist a one-off CLI choice.
-	saver := newServeConfigSaver(cfg, serveConfigPath(cfg))
+	saver := newServeConfigSaver(cfg, loadedPath)
 
 	// Override with command line flags ONLY if they were explicitly set
 	if dataDir != "" {

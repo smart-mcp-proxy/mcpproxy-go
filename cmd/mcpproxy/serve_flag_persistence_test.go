@@ -326,3 +326,33 @@ func TestServeSaverKeepsLegacyTeamsBlock(t *testing.T) {
 	file := readConfigFileJSON(t, path)
 	assert.NotNil(t, file["server_edition"], "legacy teams block was erased by the save")
 }
+
+// Without --config, config.Load() discovers ./mcp_config.json (or the home
+// file). The saves must go to THAT file, not to <data_dir>/mcp_config.json,
+// which may be an unrelated config the merge would otherwise read as its base.
+func TestServeSaverUsesTheDiscoveredConfigPath(t *testing.T) {
+	saveServeGlobals(t)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	other := filepath.Join(t.TempDir(), "data")
+	require.NoError(t, os.MkdirAll(other, 0o700))
+	loaded := filepath.Join(cwd, "mcp_config.json")
+	unrelated := filepath.Join(other, "mcp_config.json")
+	require.NoError(t, os.WriteFile(loaded, []byte(`{"listen":"127.0.0.1:8080","data_dir":`+jsonString(other)+`,"tools_limit":11,"mcpServers":[]}`), 0o600))
+	require.NoError(t, os.WriteFile(unrelated, []byte(`{"listen":"127.0.0.1:7","tools_limit":99,"mcpServers":[]}`), 0o600))
+	configFile, dataDir = "", ""
+
+	cfg, saver, err := loadConfig(newServeFlagTestCmd())
+	require.NoError(t, err)
+	require.Equal(t, 11, cfg.ToolsLimit, "config.Load() picked ./mcp_config.json")
+	assert.Equal(t, loaded, saver.path)
+
+	recordStartupOutcome(cfg, saver.path, "success", saver.save)
+
+	got := readConfigFileJSON(t, loaded)
+	assert.Equal(t, float64(11), got["tools_limit"])
+	telemetry, _ := got["telemetry"].(map[string]any)
+	assert.Equal(t, "success", telemetry["last_startup_outcome"])
+	untouched := readConfigFileJSON(t, unrelated)
+	assert.Nil(t, untouched["telemetry"], "save landed in the unrelated <data_dir> config")
+}
