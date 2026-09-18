@@ -47,6 +47,16 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 
 **Note:** TLS certificates are managed in `~/.mcpproxy/certs/` or via the `tls.certs_dir` config option. Use `mcpproxy trust-cert` to set up certificates.
 
+### Audit Log
+
+See [Audit Log](/features/audit-log) and [`audit_log`](./config-file.md#audit_log-edition-neutral-jsonl-audit-record) for the full key set — only `enabled`, `path` and `stdout` have an env override; the rotation/`compress` keys are file-only.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_AUDIT_LOG_ENABLED` | Override `audit_log.enabled` | see `audit_log` default |
+| `MCPPROXY_AUDIT_LOG_PATH` | Override `audit_log.path` | `""` |
+| `MCPPROXY_AUDIT_LOG_STDOUT` | Override `audit_log.stdout` | server: `true` when the block is absent |
+
 ### OAuth Settings
 
 | Variable | Description | Default |

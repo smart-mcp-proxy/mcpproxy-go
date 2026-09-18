@@ -107,6 +107,7 @@ const sidebars = {
             'features/tool-scanner',
             'features/security-scanner-plugins',
             'features/sensitive-data-detection',
+            'features/audit-log',
             'features/output-sanitisation',
             'features/output-schema-validation',
             'features/agent-tokens',
@@ -150,6 +151,7 @@ const sidebars = {
       link: { type: 'generated-index', slug: '/operations' },
       items: [
         'operations/reverse-proxy',
+        'operations/deploying-for-a-team',
         'operations/shutdown-behavior',
         'features/observability',
         'logging',

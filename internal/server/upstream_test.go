@@ -196,10 +196,24 @@ func TestUpstreamServersListOperation(t *testing.T) {
 		t.Fatal("handleUpstreamServers returned nil result")
 	}
 
-	// Should be very fast for list operation
-	if duration > 100*time.Millisecond {
-		t.Fatalf("handleUpstreamServers list took too long: %v (should be < 100ms)", duration)
+	// Should be fast for a list operation — see upstreamServersListCeiling's
+	// doc comment for why this is a generous ceiling rather than a tight
+	// latency assertion.
+	if duration > upstreamServersListCeiling {
+		t.Fatalf("handleUpstreamServers list took too long: %v (should be < %v)", duration, upstreamServersListCeiling)
 	}
 
 	t.Logf("handleUpstreamServers list completed in %v", duration)
 }
+
+// upstreamServersListCeiling is a ceiling with real headroom, not the
+// observed budget for the `list` operation itself. It exists to catch an
+// architectural regression (e.g. `list` starting to make an upstream call or
+// a full index scan) rather than to pin the handler to a specific latency —
+// the previous 100ms bound had no slack on shared/loaded CI runners and was
+// observed failing at 157ms on macOS/windows-latest while ubuntu-latest
+// passed on the identical commit (PR #1296), matching this repo's documented
+// history of timing-sensitive unit tests flaking on noisier macOS/Windows
+// GitHub Actions runners (see the ceiling comment on preflightBenchPerOpCeiling
+// in internal/httpapi/preflight_bench_test.go for the same pattern).
+const upstreamServersListCeiling = 500 * time.Millisecond

@@ -613,15 +613,24 @@ Or, with an empty/absent directory:
 Cannot execute stored script: stored script "fetch-pr" not found: no stored scripts in /Users/me/.mcpproxy/scripts (create fetch-pr.js or fetch-pr.ts there)
 ```
 
+Or, when the caller is an [agent token](https://docs.mcpproxy.app/features/agent-tokens/)
+rather than an administrator — the listing, the count and the directory are
+withheld, and the message is the same whether the directory is empty or full:
+```
+Cannot execute stored script: stored script "fetch-pr" not found (the stored-script listing is available to administrators only; an agent-token caller must already know the script name)
+```
+
 **Cause**: No `<name>.js` / `<name>.ts` in the scripts directory. Usually a typo
 (names are **case-sensitive**), a file that is not a script (uppercase or other
 extension: `.JS`, `.mjs`, `.jsx` are ignored), or the wrong directory — the
 scripts directory follows the **active config file**, not `--data-dir`.
 
-**Solution**: This error *is* the discovery mechanism — it lists the first 20
-available names alphabetically plus the total, so an MCP client can recover the
-name set from the failed call. For the full picture, including where the daemon
-looked:
+**Solution**: For an administrator this error *is* the discovery mechanism — it
+lists the first 20 available names alphabetically plus the total, so the name
+set is recovered from the failed call. An agent token gets no listing: give the
+agent the script names out of band (or in its custom instructions) and check
+them against the administrator's view. For the full picture, including where
+the daemon looked:
 ```bash
 mcpproxy code scripts list
 mcpproxy code scripts list --config /etc/mcpproxy/mcp_config.json   # a non-default config
@@ -629,7 +638,43 @@ mcpproxy code scripts list --config /etc/mcpproxy/mcp_config.json   # a non-defa
 If the directory in the message is not the one you authored in, start the daemon
 with the config file you meant (`mcpproxy serve --config …`) — with
 `~/.mcpproxy/mcp_config.json` the scripts live in `~/.mcpproxy/scripts/`.
-mcpproxy never creates the directory itself; `mkdir -p` it.
+
+**Case-insensitive filesystems** (the default macOS and Windows volumes; on
+Linux a Docker Desktop bind mount from a macOS or Windows host, vfat, an ext4
+`casefold` directory): the on-disk spelling still decides, for every caller.
+`FETCH-PR.JS` or `Fetch-pr.js` is not the script `fetch-pr` even where the
+filesystem would open it under that name — the daemon verifies the stored
+spelling before running anything, so the administrator's listing, the
+administrator's call and an agent-token call all agree. Every platform —
+Linux, the BSDs, macOS/darwin and Windows — answers an agent-token call
+ONLY from an exact-name index of the directory that matches its CURRENT
+state — built at daemon start, validated once per call, refreshed in the
+background when the directory changes — so no call lists the directory,
+whatever name is asked for; a differently-cased name and one that is not
+stored at all cost exactly the same, and the refusal body is unchanged.
+Every step of one call's own check — the stat, the candidate probe, the
+open and the re-check after it — is bound to a single directory descriptor
+(or, on Windows, handle) retained for that call, never a fresh resolution
+of the path per step, so a symlink, bind mount or reparse point retargeted
+mid-call cannot make two of those steps disagree about which directory they
+are looking at. A call landing while that refresh is
+scheduled or in flight is refused exactly as one against a directory never
+seen before, never served from what the index held a moment ago — a rename
+cannot have a scoped caller's own probe fold onto whatever now occupies the
+old name. Even once refreshed, the index only authorizes a hit once its
+directory timestamp is provably SETTLED (old enough — about two seconds —
+that a write could not still be landing on the same coarse tick): a script
+you have just added or renamed is callable by agent tokens only after the
+index has both refreshed AND settled — retry a call refused in that
+window, up to about two seconds — while administrators see the change at
+once; mcpproxy never creates the directory itself, `mkdir -p` it. macOS
+adds one extra, belt-and-suspenders check on top: after the open, it
+re-reads the opened descriptor's own stored spelling (`F_GETPATH`) and
+refuses on any mismatch. Windows performs the probe, the open and the
+background listing all relative to the SAME retained directory handle
+(`NtCreateFile`), so the post-open check only needs to confirm the opened
+handle's own name (`GetFinalPathNameByHandle`) rather than re-walking a
+path that a retargeted reparse point could have redirected.
 
 ---
 
@@ -735,7 +780,9 @@ running in the sandbox has no filesystem access either.
 
 **Solution**: Author scripts with your normal filesystem tooling (editor, `scp`,
 configuration management). `GET /api/v1/code/scripts` and `mcpproxy code scripts
-list` are read-only views of the result.
+list` are read-only, administrator-only views of the result (an
+[agent token](https://docs.mcpproxy.app/features/agent-tokens/) is refused with
+`403`).
 
 ---
 

@@ -64,6 +64,25 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 | `require_mcp_auth` | boolean | `false` | Require an API key on the `/mcp` endpoint (off by default for client compatibility). Enable when exposing MCPProxy beyond localhost. **Server edition:** forced to `true` whenever `server_edition.enabled` is `true` — an explicit `false` is not an error, but boot logs `require_mcp_auth: false is overridden to true because server_edition.enabled is true` and `mcpproxy doctor` reports the same finding |
 | `enable_socket` | boolean | `true` | Enable Unix socket/named pipe for local communication |
 
+### `audit_log` (edition-neutral JSONL audit record)
+
+One JSONL line per authorization decision and tool call. Personal edition defaults to
+`{enabled:false}`; the server edition defaults to `{enabled:true, stdout:true}` when the
+block is absent — except under the native stdio transport, where stdout carries the
+MCP JSON-RPC channel and the default resolves to `{enabled:false}` with a startup WARN
+naming `audit_log.path` as the stdio-compatible sink (an *explicit* value always wins).
+See [Audit Log](/features/audit-log) for the line schema and event vocabulary.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `audit_log.enabled` | boolean | see above | Turn audit logging on. Restart-pinned — the sink is bound at construction |
+| `audit_log.stdout` | boolean | server: `true` when the block is absent | Write lines to stdout. Refused under the stdio transport when explicit and no `path` is set: `audit_log.stdout cannot be used under the stdio transport (stdout carries JSON-RPC); set audit_log.path` (exit code 4) |
+| `audit_log.path` | string | `""` | File to append lines to (rotated). An unwritable path fails boot with exit code 4: `audit_log.path %q cannot be opened for append: %v` |
+| `audit_log.max_size_mb` | int | `50` | Rotate after this size. Must be positive when a path is set |
+| `audit_log.max_backups` | int | `10` | Rotated files to keep. Must be positive when a path is set |
+| `audit_log.max_age_days` | int | `90` | Delete rotated files after this many days. Must be positive when a path is set |
+| `audit_log.compress` | boolean | `true` | gzip rotated files |
+
 ### HTTP Server Timeouts
 
 Deadlines applied to MCPProxy's own HTTP listener (REST API, `/mcp`, `/events`).

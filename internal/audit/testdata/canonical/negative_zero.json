@@ -1,0 +1,9 @@
+{
+  "description": "Negative zero canonicalizes to \"0\", identically to positive zero (RFC 8785 §3.2.2.3 / ES6 Number::toString(-0) === \"0\").",
+  "variants": [
+    { "a": -0 },
+    { "a": -0.0 },
+    { "a": 0 },
+    { "a": 0.0 }
+  ]
+}

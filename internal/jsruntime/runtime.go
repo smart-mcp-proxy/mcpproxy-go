@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,41 @@ type ExecutionOptions struct {
 	// second, independent read. When set it takes precedence over
 	// ToolAnnotationFunc; leave nil to keep the tier-only contract.
 	ToolGateFunc ToolGateLookup
+
+	// AuthzObserver, when set, receives one AuthzGateReport per scope or
+	// permission REFUSAL resolveDispatchGates decides — the lone call_tool()
+	// and every call_tools() batch element alike — so the host can write the
+	// Spec 107 `authz deny` audit line for a nested call that never reaches
+	// the ToolCaller (the completion emitters never see it). A refused call
+	// is reported exactly once; an allowed call is not reported here at all
+	// (its `authz allow` is the host's, written at dispatch). nil = no-op.
+	AuthzObserver AuthzObserver
+	// ParentID is the wrapper's correlation id, echoed on every report so the
+	// nested line carries parent_id (contracts/audit-line-events.md).
+	ParentID string
+}
+
+// AuthzGateReport is one pre-dispatch refusal decided inside the sandbox
+// (Spec 107 T102/T104). Arguments is the caller's args map with every
+// `_auth_`-prefixed key removed (FR-015) — the observer hashes it, never
+// records it.
+type AuthzGateReport struct {
+	Ctx             context.Context
+	ParentID        string
+	ServerName      string
+	ToolName        string
+	CanonicalTarget string // "server:tool"
+	Denied          bool
+	Code            ErrorCode // the envelope code of the refusal (SERVER_NOT_ALLOWED, ACCESS_DENIED, PERMISSION_DENIED)
+	RequiredPerm    string    // the tier the lookup resolved, when one was resolved
+	Arguments       map[string]interface{}
+}
+
+// AuthzObserver receives AuthzGateReports. Implementations must be safe for
+// concurrent use: call_tools() batch elements are gated on the script
+// goroutine, but the observer contract does not promise that forever.
+type AuthzObserver interface {
+	ObserveAuthzGate(report AuthzGateReport)
 }
 
 // AuthInfo carries authentication context for permission enforcement in JS execution.
@@ -169,6 +205,11 @@ type ExecutionContext struct {
 	toolAnnotationFunc ToolAnnotationLookup
 	toolGateFunc       ToolGateLookup // gate-capturing lookup; takes precedence over toolAnnotationFunc
 	maxPermissionLevel string         // Tracks highest permission used: read < write < destructive
+
+	// Spec 107 T104: the host's authorization-decision observer and the
+	// parent_id it installed (see ExecutionOptions.AuthzObserver).
+	authzObserver AuthzObserver
+	parentID      string
 }
 
 // ToolCallRecord represents a single call_tool() invocation
@@ -200,6 +241,8 @@ func newExecutionContext(caller ToolCaller, opts ExecutionOptions) *ExecutionCon
 		toolAnnotationFunc: opts.ToolAnnotationFunc,
 		toolGateFunc:       opts.ToolGateFunc,
 		maxPermissionLevel: "",
+		authzObserver:      opts.AuthzObserver,
+		parentID:           opts.ParentID,
 	}
 
 	// Build allowed server map for fast lookup
@@ -440,8 +483,51 @@ func successEnvelope(result interface{}) map[string]interface{} {
 // effect stay with the callers, because the batch path accounts for both
 // across a whole batch before dispatching any of it.
 func (ec *ExecutionContext) checkDispatchGates(serverName, toolName string) (gateErr map[string]interface{}, requiredPerm string) {
-	gateErr, requiredPerm, _ = ec.resolveDispatchGates(serverName, toolName)
+	gateErr, requiredPerm, _ = ec.resolveDispatchGates(serverName, toolName, nil)
 	return gateErr, requiredPerm
+}
+
+// reportAuthzRefusal hands one refusal to the host's observer (Spec 107
+// T104). It is the ONLY reporting seam: resolveDispatchGates calls it on
+// every refusing return, once, so a refusal is never re-reported by the
+// completion path (which a refused call never reaches). nil observer = no-op.
+func (ec *ExecutionContext) reportAuthzRefusal(serverName, toolName string, code ErrorCode, requiredPerm string, args map[string]interface{}) {
+	if ec.authzObserver == nil {
+		return
+	}
+	ec.authzObserver.ObserveAuthzGate(AuthzGateReport{
+		Ctx:             ec.executionCtx(),
+		ParentID:        ec.parentID,
+		ServerName:      serverName,
+		ToolName:        toolName,
+		CanonicalTarget: serverName + ":" + toolName,
+		Denied:          true,
+		Code:            code,
+		RequiredPerm:    requiredPerm,
+		Arguments:       stripAuthInjectedArgs(args),
+	})
+}
+
+// authInjectedArgPrefix mirrors security.StripInternalArgs' prefix (the
+// `_auth_*` activity-metadata keys, Spec 028) without importing
+// internal/security into the sandbox package.
+const authInjectedArgPrefix = "_auth_"
+
+// stripAuthInjectedArgs returns args without any `_auth_`-prefixed key. It
+// never mutates the input; when nothing is stripped it returns a shallow
+// copy so the report cannot alias the script's live map either.
+func stripAuthInjectedArgs(args map[string]interface{}) map[string]interface{} {
+	if args == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(args))
+	for k, v := range args {
+		if strings.HasPrefix(k, authInjectedArgPrefix) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // resolveDispatchGates is checkDispatchGates plus the ToolGate the tier
@@ -449,11 +535,15 @@ func (ec *ExecutionContext) checkDispatchGates(serverName, toolName string) (gat
 // gate is returned only for a call that passed every check: the dispatch
 // that follows consumes it so the call runs on the read that authorized it
 // (Spec 105 FR-009; codex r9 I1).
-func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string) (gateErr map[string]interface{}, requiredPerm string, gate ToolGate) {
+//
+// args is the call's argument map, reported (stripped of `_auth_*` keys) to
+// the AuthzObserver on a refusal; nil is accepted.
+func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string, args map[string]interface{}) (gateErr map[string]interface{}, requiredPerm string, gate ToolGate) {
 	// Check allowed servers. When restrictToAllowed is set (active Spec 057
 	// profile), the map is enforced even when empty — an empty effective set
 	// means "deny everything". Otherwise an empty map means "no restriction".
 	if (ec.restrictToAllowed || len(ec.allowedServerMap) > 0) && !ec.allowedServerMap[serverName] {
+		ec.reportAuthzRefusal(serverName, toolName, ErrorCodeServerNotAllowed, "", args)
 		return errorEnvelope(ErrorCodeServerNotAllowed, fmt.Sprintf("server not allowed: %s", serverName)), "", nil
 	}
 
@@ -461,6 +551,7 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string) (g
 	// before anything about the tool is looked up, so an out-of-scope server
 	// is refused without disclosing whether the name resolves on it.
 	if ec.authInfo != nil && !ec.authInfo.CanAccessServer(serverName) {
+		ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, "", args)
 		return errorEnvelope(ErrorCodeAccessDenied, fmt.Sprintf("token does not have access to server '%s'", serverName)), "", nil
 	}
 
@@ -486,6 +577,7 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string) (g
 		// to the same identity rule as every HTTP caller. It answers with the
 		// permission envelope, never with an upstream's own "tool not found".
 		if requiredPerm == PermissionTierUnresolved {
+			ec.reportAuthzRefusal(serverName, toolName, ErrorCodePermissionDenied, requiredPerm, args)
 			return errorEnvelope(ErrorCodePermissionDenied,
 				fmt.Sprintf("permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it",
 					serverName, toolName, serverName)), "", nil
@@ -500,6 +592,7 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string) (g
 	}
 
 	if !ec.authInfo.HasPermission(requiredPerm) {
+		ec.reportAuthzRefusal(serverName, toolName, ErrorCodePermissionDenied, requiredPerm, args)
 		return errorEnvelope(ErrorCodePermissionDenied,
 			fmt.Sprintf("token does not have '%s' permission for tool '%s:%s'", requiredPerm, serverName, toolName)), "", nil
 	}
@@ -531,7 +624,7 @@ func (ec *ExecutionContext) makeCallToolFunction(vm *goja.Runtime) func(goja.Fun
 				fmt.Sprintf("exceeded max tool calls limit: %d", ec.maxToolCalls)))
 		}
 
-		gateErr, requiredPerm, gate := ec.resolveDispatchGates(serverName, toolName)
+		gateErr, requiredPerm, gate := ec.resolveDispatchGates(serverName, toolName, args)
 		if gateErr != nil {
 			return vm.ToValue(gateErr)
 		}
@@ -781,7 +874,7 @@ func (ec *ExecutionContext) runBatch(requests []batchRequest, maxParallelOverrid
 			continue
 		}
 
-		gateErr, requiredPerm, gate := ec.resolveDispatchGates(req.server, req.tool)
+		gateErr, requiredPerm, gate := ec.resolveDispatchGates(req.server, req.tool, req.args)
 		if gateErr != nil {
 			slots[i] = gateErr
 			continue
@@ -858,15 +951,23 @@ func dispatchBatchElement(ctx context.Context, caller ToolCaller, req batchReque
 	}
 
 	// A cancelled execution still owes every accepted element a slot and a
-	// record, so the remaining queue is drained into cancellation errors
-	// instead of being dispatched.
-	if err := ctx.Err(); err != nil {
-		record.DurationMs = time.Since(record.StartTime).Milliseconds()
-		record.ErrorDetail = err.Error()
-		return errorEnvelope(ErrorCodeUpstreamError,
-			fmt.Sprintf("execution ended before the call was dispatched: %v", err)), record
-	}
-
+	// record — and, for a real ToolCaller, exactly the paired `authz allow`
+	// + `tool_call` audit lines every other allowed dispatch gets (round-2
+	// cross-review finding, PR-D): this pre-dispatch pass already made the
+	// allow decision (runBatch's gate loop, above), and the ONLY place that
+	// decision is written to the audit sink is inside the real ToolCaller's
+	// dispatch bridge (upstreamToolCaller.callTool installs the
+	// audit.Attempt and writes `authz allow` before ever touching the
+	// network). Short-circuiting here on ctx.Err() — as this used to, to
+	// avoid a doomed dispatch — skipped that bridge entirely, so an element
+	// whose worker reached the queue after the execution context expired
+	// produced ZERO audit lines, violating `#authz == #pre-dispatch
+	// decisions` under load. This always calls dispatchTool, exactly like
+	// the lone call_tool() path (makeCallToolFunction) already does with no
+	// such short-circuit: a well-behaved ToolCaller (the real
+	// upstreamToolCaller, or a managed client's transport) itself checks
+	// ctx and returns promptly without doing real upstream work — the
+	// audit-attempt bridge simply has to run first.
 	result, err := dispatchTool(ctx, caller, req.server, req.tool, req.args, req.gate)
 	record.DurationMs = time.Since(record.StartTime).Milliseconds()
 

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -18,6 +19,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
@@ -50,8 +52,9 @@ const (
 		"**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. " +
 		"Types are automatically stripped before execution.\n\n" +
 		"**Stored scripts**: Instead of `code`, pass `script: \"<name>\"` to run a script stored server-side in the `scripts/` directory next to mcpproxy's config file — " +
-		"a long workflow then costs a name per run instead of its full source. Provide exactly one of `code` or `script`. Naming a script that does not exist returns the " +
-		"available names, which is how you discover what is stored.\n\n" +
+		"a long workflow then costs a name per run instead of its full source. Provide exactly one of `code` or `script`. The stored-script listing is administrator-only " +
+		"(`mcpproxy code scripts list`, or the not-found error under the admin API key); an agent-token caller must already know the script name — " +
+		"a name that does not exist is refused without naming what is stored.\n\n" +
 		"**Important runtime rules**:\n" +
 		"- `call_tool` and `call_tools` are strictly SYNCHRONOUS. Do not use `await`.\n" +
 		"- Upstream tools usually return an MCP content array. To parse JSON results: `const data = JSON.parse(res.result.content[0].text);`\n" +
@@ -71,8 +74,9 @@ const (
 		"directory next to mcpproxy's active config file and are read fresh on every invocation, so an edited script takes effect immediately. " +
 		"Provide EXACTLY ONE of `code` or `script`. The name is a bare identifier (letters, digits, '-' and '_'; 1-64 chars) — never a path. " +
 		"The language comes from the file extension (.js → javascript, .ts → typescript); an explicit `language` that contradicts it is an error. " +
-		"DISCOVERY: calling with a name that does not exist returns an error listing the available script names (first 20 alphabetically, plus the total), " +
-		"so the current set can always be recovered from a single failed call. Everything else — `input`, options, sandbox limits, results — behaves exactly as for inline code."
+		"ENUMERATION IS ADMINISTRATOR-ONLY: for an administrator (the admin API key, the tray, an in-process caller) a name that does not exist returns an error listing " +
+		"the available script names (first 20 alphabetically, plus the total); an agent-token caller must already know the script name — its not-found error " +
+		"names neither the stored scripts nor how many there are. Everything else — `input`, options, sandbox limits, results — behaves exactly as for inline code."
 
 	codeExecutionInputDescription = "Input data accessible as global `input` variable in code (default: {})"
 
@@ -267,6 +271,27 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 
 	// Spec 057 (Codex #621 finding 2): Intersect profile scope into code_execution.
 	p.applyProfileScopeToExecution(ctx, &options)
+
+	// Spec 107 T103/T104: the wrapper itself writes no audit line (it is a
+	// built-in), but it captures the SCRIPT's caller for every nested line
+	// and installs the sandbox's authorization-decision observer so a
+	// scope/permission refusal decided inside jsruntime — which never
+	// reaches the bridge — still gets its `authz deny`, with parent_id.
+	if p.auditSink != nil {
+		scriptCaller := auditCallerFromContext(ctx)
+		toolCaller.auditCaller = &scriptCaller
+		toolCaller.auditProfile, _ = p.resolveActiveProfile(ctx)
+		options.ParentID = parentCallID
+		options.AuthzObserver = &nestedAuthzObserver{
+			proxy:         p,
+			parentCtx:     ctx,
+			caller:        scriptCaller,
+			sessionID:     sessionID,
+			clientName:    clientName,
+			clientVersion: clientVersion,
+			profile:       toolCaller.auditProfile,
+		}
+	}
 
 	// Execute code
 	p.logger.Info("executing code",
@@ -495,7 +520,7 @@ func (p *MCPProxyServer) resolveCodeExecutionSource(ctx context.Context, args ma
 		return code, "", ""
 	}
 
-	source, language, err := codescripts.Resolve(p.scriptsDir(), scriptName, options.Language)
+	source, language, err := p.resolveStoredScript(ctx, scriptName, options.Language)
 	if err != nil {
 		// Keep the typed identity reachable for the REST surface (404 for a
 		// name that is not there, 400 for one that cannot run) — the text alone
@@ -505,6 +530,34 @@ func (p *MCPProxyServer) resolveCodeExecutionSource(ctx context.Context, args ma
 	}
 	options.Language = language
 	return string(source), scriptName, ""
+}
+
+// resolveStoredScript applies the Spec 105 FR-012 caller-kind rule to
+// stored-script resolution. The Spec 097 FR-004 not-found error enumerates
+// the stored names and their count so an administrator recovers the set from
+// one failed call, and its sibling refusals (ambiguous, unusable, unreadable)
+// name the host path they are about; for a scoped caller (an agent token,
+// whatever its server scope — the caller KIND decides, never AllowedServers)
+// the listing is never even computed and every refusal is the non-disclosing
+// form (codescripts.ResolveScoped): the caller's own name and the reason,
+// independent of the directory's contents and location, so a failed call is
+// not an oracle for what is stored or where. An absent auth context
+// (in-process caller) or an administrator — including the anonymous,
+// admin-shaped /mcp caller under require_mcp_auth=false — keeps the
+// enumeration (SC-005: the named FR-012 admin exception).
+func (p *MCPProxyServer) resolveStoredScript(ctx context.Context, scriptName, explicitLanguage string) ([]byte, string, error) {
+	if !auth.IsScopedCaller(ctx) {
+		return codescripts.Resolve(p.scriptsDir(), scriptName, explicitLanguage)
+	}
+	source, language, err := codescripts.ResolveScoped(p.scriptsDir(), scriptName, explicitLanguage)
+	if err != nil {
+		// The refusal deliberately carries no count or path; the log line
+		// records only that a scoped probe was refused, for the same reason.
+		p.logger.Debug("Stored-script refusal delivered in non-disclosing form to scoped caller (Spec 105 FR-012)",
+			zap.String("script", scriptName),
+			zap.String("refusal", fmt.Sprintf("%T", err)))
+	}
+	return source, language, err
 }
 
 // activeConfigFilePath returns the configuration FILE this server belongs to:
@@ -529,7 +582,26 @@ func (p *MCPProxyServer) scriptsDir() string {
 	if configFilePath == "" && p.config != nil {
 		configFilePath = config.GetConfigPath(p.config.DataDir)
 	}
-	return codescripts.DirFor(configFilePath)
+	dir := codescripts.DirFor(configFilePath)
+	if warmed := p.warmedScriptsDir.Load(); warmed != nil && *warmed != dir && p.warmedScriptsDir.CompareAndSwap(warmed, &dir) {
+		// The active config file moved: warm the new directory's index off
+		// this (possibly scoped) request's goroutine, once.
+		go p.warmStoredScripts(dir)
+	}
+	return dir
+}
+
+// warmStoredScripts builds the stored-name index of dir the scoped resolver
+// answers from (Spec 105 FR-012) — synchronously on the caller's goroutine,
+// which is never a request's: construction, or a goroutine of its own when
+// the directory moves. A directory that cannot be indexed (usually: not
+// created yet) refuses scoped callers until it changes; the administrator's
+// resolution does not depend on the index at all.
+func (p *MCPProxyServer) warmStoredScripts(dir string) {
+	if err := codescripts.Warm(dir); err != nil {
+		p.logger.Debug("Stored-script index not built; scoped callers are refused until the directory changes (Spec 105 FR-012)",
+			zap.String("dir", dir), zap.Error(err))
+	}
 }
 
 // codeExecRecordArguments builds the argument payload recorded for a
@@ -694,6 +766,15 @@ type upstreamToolCaller struct {
 	// FR-002). nil in unit tests that drive the caller directly, in which case
 	// the gate is skipped exactly as it was before the consolidation.
 	proxy *MCPProxyServer
+
+	// auditCaller is the SCRIPT's caller, captured by the wrapper before the
+	// sub-call context is tagged SourceInternal (Spec 107 T103/T104): every
+	// nested audit line keeps it, with surface code_execution and parent_id.
+	// nil when no sink is configured or the bridge is driven directly.
+	auditCaller *audit.Caller
+	// auditProfile is the active profile slug the wrapper resolved, stamped
+	// on the nested lines' `profile`.
+	auditProfile string
 }
 
 // sandboxGate is the jsruntime.ToolGate the bridge hands from the sandbox's
@@ -750,6 +831,30 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// the script itself.
 	ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceInternal)
 
+	// Spec 107 T103: the nested call's audit attempt, installed before its
+	// first gate (the policy refusal below). Operation is the tier of the
+	// gate's identity — the same read the sandbox authorized against.
+	if u.proxy != nil {
+		operation := ""
+		if gated && gate.identity.Found {
+			operation = tierForAnnotations(gate.identity.Annotations, true)
+		}
+		ctx = u.proxy.installAuditAttempt(ctx, auditAttemptSpec{
+			RequestID:     requestID,
+			ParentID:      u.parentCallID,
+			SessionID:     u.sessionID,
+			Server:        serverName,
+			Tool:          toolName,
+			Operation:     operation,
+			Surface:       auditSurfaceCodeExecution,
+			ClientName:    u.clientName,
+			ClientVersion: u.clientVersion,
+			Profile:       u.auditProfile,
+			Args:          args,
+			Caller:        u.auditCaller,
+		})
+	}
+
 	u.logger.Debug("calling upstream tool from JavaScript",
 		zap.String("execution_id", u.executionID),
 		zap.String("server", serverName),
@@ -779,7 +884,10 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
-		u.emitSubCallRefused(serverName, toolName, requestID, args, refusal, startTime, duration)
+		if u.proxy != nil {
+			u.proxy.auditAuthz(ctx, "deny", policyRefusalReasonKey(gate))
+		}
+		u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration)
 		return nil, refusal
 	}
 	if u.proxy != nil && u.proxy.dispatchGatePause != nil {
@@ -793,7 +901,8 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, err.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, err, startTime, duration)
-		u.emitSubCallActivity(serverName, toolName, requestID, args, nil, err, startTime, duration)
+		auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
+		u.emitSubCallActivity(ctx, serverName, toolName, requestID, args, nil, err, startTime, duration)
 		return nil, err
 	}
 
@@ -823,7 +932,8 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 			duration := time.Since(startTime)
 			u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
 			u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
-			u.emitSubCallRefused(serverName, toolName, requestID, args, refusal, startTime, duration)
+			u.proxy.auditAuthz(ctx, "deny", telemetry.BlockReasonToolNotCallable)
+			u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration)
 			return nil, refusal
 		}
 		certified = live
@@ -837,6 +947,13 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// refusal is answered exactly as the pre-dispatch check answers a name
 	// whose generation is not certified: the discovery-window body, recorded
 	// as a refusal, zero upstream calls.
+	// Spec 107: every pre-dispatch gate has passed — the nested `authz allow`
+	// line is written HERE, ahead of the upstream call (no Started event is
+	// emitted for a nested call, so the funnel that writes it for the other
+	// paths never runs on this one).
+	if u.proxy != nil {
+		u.proxy.auditAuthz(ctx, "allow", "")
+	}
 	var (
 		result *mcp.CallToolResult
 		err    error
@@ -851,7 +968,14 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
-		u.emitSubCallRefused(serverName, toolName, requestID, args, refusal, startTime, duration)
+		// Post-allow refusal (the managed client refused to send): the
+		// attempt's authz line is already written, so this is its tool_call
+		// — an error nothing reached the upstream for.
+		auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
+		if u.proxy != nil {
+			u.proxy.auditToolCall(ctx, "error", "", "", duration.Milliseconds(), nil, nil)
+		}
+		u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration)
 		return nil, refusal
 	}
 	if err == nil {
@@ -872,7 +996,10 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// upstream rejection is a clean success here and an error there.
 	u.recordUpstreamCall(serverName, toolName, startTime, duration, result, err)
 	u.storeToolCallInHistory(serverName, toolName, args, result, err, startTime, duration)
-	u.emitSubCallActivity(serverName, toolName, requestID, args, result, err, startTime, duration)
+	if err != nil {
+		auditNoteError(ctx, err)
+	}
+	u.emitSubCallActivity(ctx, serverName, toolName, requestID, args, result, err, startTime, duration)
 
 	u.logger.Debug("upstream tool call completed",
 		zap.String("execution_id", u.executionID),
@@ -953,7 +1080,9 @@ const subCallActivityResponseLimit = 8 * 1024
 // `started` event is emitted: for a nested call it would arrive after the work
 // already finished, and it would double the SSE traffic of a busy script for
 // nothing — started events are never persisted anyway.
-func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName, requestID string, args map[string]interface{}, result interface{}, callErr error, startTime time.Time, duration time.Duration) {
+//
+// ctx is the sub-call's context carrying its audit.Attempt (Spec 107).
+func (u *upstreamToolCaller) emitSubCallActivity(ctx context.Context, serverName, toolName, requestID string, args map[string]interface{}, result interface{}, callErr error, startTime time.Time, duration time.Duration) {
 	// nil in the unit tests that drive the caller directly (see the field
 	// comment on upstreamToolCaller.proxy) — there is no runtime to emit into.
 	if u.proxy == nil {
@@ -969,6 +1098,12 @@ func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName, requestID
 	// server_unavailable is an ordinary error with no canonical record, so it
 	// must fall through and be recorded here like any other failure.
 	if shedHasCanonicalRecord(callErr) {
+		// The audit line is not the activity row: the shed is this attempt's
+		// `tool_call outcome:rejected` (research.md D6).
+		var limitErr *limiter.LimitError
+		if errors.As(callErr, &limitErr) {
+			u.proxy.auditToolCallShed(ctx, limitErr, duration.Milliseconds())
+		}
 		return
 	}
 
@@ -980,7 +1115,7 @@ func (u *upstreamToolCaller) emitSubCallActivity(serverName, toolName, requestID
 	detectionText := subCallDetectionText(result, callErr)
 
 	requestBytes, responseBytes := subCallByteSizes(args, result)
-	u.proxy.emitActivityToolCallCompleted(
+	u.proxy.emitActivityToolCallCompleted(ctx,
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
 		status, errMsg, duration.Milliseconds(), args, responseText, truncated,
 		"", nil, "", "", requestBytes, responseBytes, detectionText, nil, u.parentCallID)
@@ -1021,7 +1156,7 @@ func subCallDetectionText(result interface{}, callErr error) string {
 // reflect is what tells the two apart.
 func subCallByteSizes(args map[string]interface{}, result interface{}) (requestBytes, responseBytes int) {
 	if result != nil {
-		if rv := reflect.ValueOf(result); rv.Kind() == reflect.Ptr && rv.IsNil() {
+		if rv := reflect.ValueOf(result); rv.Kind() == reflect.Pointer && rv.IsNil() {
 			result = nil
 		}
 	}
@@ -1034,11 +1169,15 @@ func subCallByteSizes(args map[string]interface{}, result interface{}) (requestB
 // aggregate routes blocked tool_calls off the executed-call statistics
 // (Calls/latency) while still giving the attempt a failed bar in the timeline,
 // the same treatment a direct-path policy_decision gets.
-func (u *upstreamToolCaller) emitSubCallRefused(serverName, toolName, requestID string, args map[string]interface{}, refusal error, startTime time.Time, duration time.Duration) {
+//
+// ctx is the sub-call's context carrying its audit.Attempt (Spec 107): the
+// `authz deny` was written by the caller at the refusing gate, so the funnel
+// this goes through writes no further audit line for a blocked status.
+func (u *upstreamToolCaller) emitSubCallRefused(ctx context.Context, serverName, toolName, requestID string, args map[string]interface{}, refusal error, startTime time.Time, duration time.Duration) {
 	if u.proxy == nil {
 		return
 	}
-	u.proxy.emitActivityToolCallCompleted(
+	u.proxy.emitActivityToolCallCompleted(ctx,
 		serverName, toolName, u.sessionID, requestID, string(storage.ActivitySourceInternal),
 		storage.ActivityStatusBlocked, refusal.Error(), duration.Milliseconds(), args, "", false,
 		// The policy gate refused this before dispatch, so there IS no response
@@ -1117,6 +1256,26 @@ func (u *upstreamToolCaller) policyRefusal(serverName, toolName string) error {
 // policyRefusalFor is policyRefusal over an already-evaluated gate. gated is
 // dispatchGate's second result: false means no gate was evaluated (no
 // storage) and nothing is refused.
+// policyRefusalReasonKey classifies the refusal policyRefusalFor returns
+// onto the closed telemetry.BlockReason* enum, mirroring its branch order so
+// the audit `authz deny` reason always matches the refusal the script saw.
+func policyRefusalReasonKey(gate toolGate) string {
+	switch {
+	case gate.serverConfig == nil:
+		// Only the storage-error branch refuses here (an unknown server
+		// falls through to "server not found").
+		return telemetry.BlockReasonToolNotCallable
+	case gate.serverQuarantined():
+		return telemetry.BlockReasonServerQuarantined
+	case gate.lockStatus == storage.ToolApprovalStatusPending:
+		return telemetry.BlockReasonToolPendingApproval
+	case gate.lockStatus == storage.ToolApprovalStatusChanged:
+		return telemetry.BlockReasonToolChanged
+	default:
+		return telemetry.BlockReasonToolNotCallable
+	}
+}
+
 func policyRefusalFor(gate toolGate, gated bool) error {
 	if !gated {
 		return nil
