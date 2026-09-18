@@ -675,13 +675,11 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 		dst.QueueTimeout = &v
 	}
 
-	// Copy the per-upstream auth-broker block by value (spec 074, server edition).
-	// In the personal edition AuthBrokerConfig is an empty stub struct, so this is
-	// a no-op there; copying by value keeps the pointer from being shared.
-	if src.AuthBroker != nil {
-		broker := *src.AuthBroker
-		dst.AuthBroker = &broker
-	}
+	// Deep-copy the per-upstream auth-broker block (spec 074, server edition).
+	// In the personal edition AuthBrokerConfig is a raw-JSON carrier (Spec 107
+	// FR-040); a value copy would alias its backing array, so both editions
+	// clone through the build-tagged Clone().
+	dst.AuthBroker = src.AuthBroker.Clone()
 
 	// Copy *bool by value (not pointer) to avoid shared state
 	if src.ExposePrompts != nil {

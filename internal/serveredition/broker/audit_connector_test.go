@@ -6,12 +6,44 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 )
+
+// recordingSink captures audit events for assertions. It is concurrency-safe.
+// (Formerly a helper of audit_resolver_test.go, which Spec 107 FR-031 deleted
+// with the never-wired credential resolver.)
+type recordingSink struct {
+	mu     sync.Mutex
+	events []AuditEvent
+}
+
+func (s *recordingSink) RecordBrokerEvent(_ context.Context, ev AuditEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, ev)
+}
+
+func (s *recordingSink) all() []AuditEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]AuditEvent, len(s.events))
+	copy(out, s.events)
+	return out
+}
+
+func (s *recordingSink) last(t *testing.T) AuditEvent {
+	t.Helper()
+	evs := s.all()
+	if len(evs) == 0 {
+		t.Fatalf("expected at least one audit event, got none")
+	}
+	return evs[len(evs)-1]
+}
 
 // connectorWithSink builds a connector wired to a recording audit sink, pointed
 // at the given mock token server.

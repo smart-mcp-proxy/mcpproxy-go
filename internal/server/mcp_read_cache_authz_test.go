@@ -78,13 +78,22 @@ func TestReadCache_NarrowerTokenOnSameSessionCannotReadBroaderEntry(t *testing.T
 	setTruncateLimit(proxy, 1_000_000)
 
 	// Every page, not only the first: an attacker who is refused page 0 just
-	// asks for page 1. The refusal must be THE authorization refusal — a
-	// key-not-found or any other error would pass a vacuous "IsError" check.
+	// asks for page 1. Spec 105 FR-001 (task T031 inversion): for a scoped
+	// caller the refusal is NON-DISCLOSING — byte-identical to the body a key
+	// that never existed produces — so it cannot be asserted by its wording.
+	// It is kept non-vacuous two ways: the administrator control below proves
+	// the key is live (the refusal is the gate, not a miss), and the body is
+	// compared against the nonexistent-key body rather than merely IsError.
+	adminControl := readCacheAs(t, proxy, auth.WithAuthContext(session, auth.AdminContext()), key, 0)
+	require.False(t, adminControl.IsError, "control: the key is live — an administrator pages it")
+	absent := readCacheAs(t, proxy, narrow, "0000000000000000000000000000000000000000000000000000000000000000", 0)
+	require.True(t, absent.IsError)
+	require.Contains(t, resultText(t, absent), "cache key not found")
 	for offset := range fullResp.Tools {
 		result := readCacheAs(t, proxy, narrow, key, offset)
 		assert.True(t, result.IsError, "offset %d: a narrower token must not read a broader token's cache entry", offset)
-		assert.Contains(t, resultText(t, result), "not readable with this credential",
-			"offset %d: refusal must be the authorization gate, not an unrelated failure", offset)
+		assert.Equal(t, resultText(t, absent), resultText(t, result),
+			"offset %d: the refusal must be the nonexistent-key body (non-disclosing)", offset)
 		assert.NotContains(t, resultText(t, result), "github:",
 			"offset %d: refused read must not leak the out-of-scope payload", offset)
 		assert.NotContains(t, resultText(t, result), `"records"`,
@@ -168,8 +177,16 @@ func TestReadCache_DeletedPinnedProfileRevokesCachedAccess(t *testing.T) {
 
 	after := readCacheAs(t, proxy, pinned, match[1], 0)
 	assert.True(t, after.IsError, "a deleted pinned profile must revoke cached access")
-	assert.Contains(t, resultText(t, after), "not readable with this credential")
+	// Spec 105 FR-001 (task T031 inversion): the revocation is non-disclosing
+	// — the stale pin sees the nonexistent-key body, not a wording that
+	// confirms the entry exists. The administrator control proves it does.
+	absent := readCacheAs(t, proxy, pinned, "0000000000000000000000000000000000000000000000000000000000000000", 0)
+	require.True(t, absent.IsError)
+	assert.Equal(t, resultText(t, absent), resultText(t, after), "a revoked read must be indistinguishable from a miss")
+	assert.Contains(t, resultText(t, after), "cache key not found")
 	assert.NotContains(t, resultText(t, after), "github:")
+	control := readCacheAs(t, proxy, auth.WithAuthContext(context.Background(), auth.AdminContext()), match[1], 0)
+	require.False(t, control.IsError, "control: the entry is still live for an administrator")
 }
 
 // The reverse direction stays open: an admin (unrestricted) reader could have

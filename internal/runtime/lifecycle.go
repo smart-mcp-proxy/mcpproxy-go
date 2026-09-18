@@ -1599,6 +1599,13 @@ func (r *Runtime) ReloadConfiguration() error {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
 
+	// Spec 107 FR-035: a hot reload re-runs the loader, which records (but
+	// cannot log) the removed-key / deprecated-key findings; emit them here,
+	// once per successful reload, with the logger the reload path has.
+	if newSnapshot != nil {
+		config.LogLoadDiagnostics(newSnapshot.Config, r.logger)
+	}
+
 	// fileCfg is the file as reloaded — the DESIRED config. running is what
 	// this process adopts from it: restart-gated fields pinned to the live
 	// values and the serve flags re-applied. They coincide unless something is

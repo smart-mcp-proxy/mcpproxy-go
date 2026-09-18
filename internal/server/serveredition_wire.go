@@ -8,6 +8,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
 )
 
 // wireServerEditionOAuth sets up server edition multi-user OAuth routes on the HTTP API server.
@@ -43,5 +44,24 @@ func wireServerEditionOAuth(s *Server, httpAPIServer *httpapi.Server) {
 
 	if err := serveredition.SetupAll(deps); err != nil {
 		s.logger.Error("Failed to initialize server features", zap.Error(err))
+	}
+
+	// Spec 107 (US7, telemetry v13): install the user counter behind
+	// member_count_bucket. Only a count crosses this seam — the closure reads
+	// the user store and returns len(); no user record, email, group or IdP
+	// subject is ever handed to telemetry. Installed regardless of SetupAll's
+	// outcome and of whether the block is enabled: a server-edition binary
+	// with the block off reports "0" from an empty bucket, which is the same
+	// value the personal edition reports with no counter at all. nil-safe on
+	// the telemetry side (short-lived CLI commands have no service).
+	if ts := s.runtime.TelemetryService(); ts != nil {
+		userStore := users.NewUserStore(sm.GetDB())
+		ts.SetUserCounter(func() (int, error) {
+			list, err := userStore.ListUsers()
+			if err != nil {
+				return 0, err
+			}
+			return len(list), nil
+		})
 	}
 }

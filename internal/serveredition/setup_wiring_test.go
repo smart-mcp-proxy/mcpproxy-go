@@ -56,6 +56,18 @@ func (h *wiringHarness) currentConfig() *config.Config {
 
 func newWiringHarness(t *testing.T) *wiringHarness {
 	t.Helper()
+	return newWiringHarnessWith(t, &config.ServerEditionOAuthConfig{
+		Provider:     "google",
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+	})
+}
+
+// newWiringHarnessWith drives the production setup with the given OAuth
+// block. newOIDCWiringHarness (harness_oidc_test.go) points it at an
+// in-process tests/oauthserver OpenID Provider so a test can log in for real.
+func newWiringHarnessWith(t *testing.T, oauthCfg *config.ServerEditionOAuthConfig) *wiringHarness {
+	t.Helper()
 
 	tmpDir := t.TempDir()
 	db, err := bbolt.Open(tmpDir+"/test.db", 0600, &bbolt.Options{Timeout: time.Second})
@@ -76,11 +88,7 @@ func newWiringHarness(t *testing.T) *wiringHarness {
 				AdminEmails:    []string{"admin@example.com"},
 				SessionTTL:     config.Duration(24 * time.Hour),
 				BearerTokenTTL: config.Duration(24 * time.Hour),
-				OAuth: &config.ServerEditionOAuthConfig{
-					Provider:     "google",
-					ClientID:     "test-client-id",
-					ClientSecret: "test-client-secret",
-				},
+				OAuth:          oauthCfg,
 			},
 		},
 	}
@@ -254,7 +262,7 @@ func TestSetupAuxiliarySurfacesFollowLiveSharing(t *testing.T) {
 	token, err := teamsauth.GenerateBearerToken(h.hmacKey, user.ID, user.Email, user.DisplayName, "user", user.Provider, time.Hour)
 	require.NoError(t, err)
 	for _, shared := range []bool{true, false, true} {
-		h.setLiveServers([]*config.ServerConfig{{Name: "sharing-sentinel", Shared: shared, AuthBroker: &config.AuthBrokerConfig{Mode: "token_exchange"}}})
+		h.setLiveServers([]*config.ServerConfig{{Name: "sharing-sentinel", Shared: shared, AuthBroker: &config.AuthBrokerConfig{Mode: config.AuthBrokerModeOAuthConnect}}})
 		for _, path := range []string{"/api/v1/user/credentials", "/api/v1/user/diagnostics"} {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			req.Host = "localhost:8080"

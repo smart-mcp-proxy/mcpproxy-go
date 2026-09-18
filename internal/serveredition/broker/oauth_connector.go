@@ -156,6 +156,20 @@ func (c *OAuthConnector) emitConnect(ctx context.Context, userID, reason string)
 // ServerKey returns the store key this connector persists credentials under.
 func (c *OAuthConnector) ServerKey() string { return c.serverKey }
 
+// HasPendingFlow reports whether this connector currently holds at least one
+// in-flight connect flow (a state issued by BuildAuthorizationURL and not yet
+// consumed by Complete/Deny or expired). A cache that evicts connectors by
+// age alone can drop one mid-flow out from under its user, turning their
+// upcoming callback into a spurious invalid-state failure; callers use this
+// to prefer evicting an idle connector instead (cross-review round 8, chunk 3
+// P2).
+func (c *OAuthConnector) HasPendingFlow() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.gcExpiredLocked()
+	return len(c.pending) > 0
+}
+
 // BuildAuthorizationURL starts a connect flow for userID. It generates a PKCE
 // verifier/challenge and an opaque state, records the pending flow, and returns
 // the upstream authorize URL (to which the gateway redirects the user) plus the
@@ -259,46 +273,8 @@ func (c *OAuthConnector) Deny(state, reason string) error {
 	return nil
 }
 
-// Refresh mints a fresh access token for userID from the stored refresh token
-// and re-persists the credential. It is the transparent auto-refresh path
-// (FR-012). An absent or empty refresh token is an error.
-func (c *OAuthConnector) Refresh(ctx context.Context, userID string) (*UpstreamCredential, error) {
-	existing, err := c.store.Get(userID, c.serverKey)
-	if err != nil {
-		return nil, fmt.Errorf("oauth connector: load credential: %w", err)
-	}
-	if existing.RefreshToken == "" {
-		return nil, fmt.Errorf("oauth connector: no refresh token for user %q", userID)
-	}
-
-	form := url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {existing.RefreshToken},
-		"client_id":     {c.cfg.ClientID},
-	}
-	if len(c.cfg.Scopes) > 0 {
-		form.Set("scope", strings.Join(c.cfg.Scopes, " "))
-	}
-	if c.cfg.Resource != "" {
-		form.Set("resource", c.cfg.Resource)
-	}
-	tok, err := c.postToken(ctx, form)
-	if err != nil {
-		return nil, err
-	}
-
-	// Preserve the prior refresh token when the AS does not rotate it.
-	cred := c.credentialFromToken(tok, existing.RefreshToken)
-	if err := c.store.Put(userID, c.serverKey, cred); err != nil {
-		return nil, fmt.Errorf("oauth connector: persist refreshed credential: %w", err)
-	}
-	c.logger.Debug("refreshed per-user upstream credential", zap.String("user_id", userID))
-	return cred, nil
-}
-
 // oauthTokenResponse is the subset of the OAuth token endpoint response we
-// consume. Named distinctly from token_exchanger.go's tokenResponse (RFC 8693)
-// to avoid a same-package redeclaration in the broker package.
+// consume.
 type oauthTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
@@ -344,6 +320,14 @@ func (c *OAuthConnector) postToken(ctx context.Context, form url.Values) (*oauth
 	return &tok, nil
 }
 
+// tokenErrorResponse is the OAuth 2.0 error body (RFC 6749 §5.2). Only the
+// machine-readable error code is ever surfaced; error_description may reflect
+// caller-supplied input and is treated as untrusted (never returned to callers).
+type tokenErrorResponse struct {
+	ErrorCode        string `json:"error"`
+	ErrorDescription string `json:"error_description"`
+}
+
 // rfc6749TokenErrorCodes is the closed set of error codes a token endpoint may
 // legitimately return per RFC 6749 §5.2. Any value outside this set is treated
 // as untrusted AS-controlled free text (which could echo secrets or caller
@@ -362,8 +346,7 @@ var rfc6749TokenErrorCodes = map[string]struct{}{
 // error code. The raw response body and error_description are deliberately
 // dropped: a malicious or misconfigured authorization server can embed access
 // tokens, refresh tokens, client details, or echoed request data there, and
-// that error string is logged on the connect and refresh paths (FR-029 /
-// SC-005). This mirrors the RFC 8693 exchanger's sanitizedError.
+// that error string is logged on the connect path (FR-029 / SC-005).
 func sanitizedTokenEndpointError(status int, body []byte) error {
 	var te tokenErrorResponse
 	_ = json.Unmarshal(body, &te)

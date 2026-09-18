@@ -13,6 +13,14 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
+// userCtx builds the request context a signed-in user session produces.
+// (Formerly a helper of router_test.go, which Spec 107 FR-031 deleted with the
+// never-wired multi-user router.)
+func userCtx(userID string) context.Context {
+	ac := auth.UserContext(userID, userID+"@example.com", "Regular User", "google")
+	return auth.WithAuthContext(context.Background(), ac)
+}
+
 // stubActivityProvider is the smallest storage provider GetUserActivity needs.
 // It records whether it was consulted at all, which is what distinguishes
 // "refused before reading" from "read and then filtered to nothing".

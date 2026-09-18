@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -61,6 +62,17 @@ func LoadFromFile(configPath string) (*Config, error) {
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
+	// server_edition.oauth.client_id/client_secret are deliberately NOT
+	// expanded here (cross-review round 6, chunk 3 P2, superseding round 1's
+	// in-place expansion): this cfg is what becomes r.cfg/r.desiredCfg and is
+	// round-tripped back to disk by SaveConfig on every later PATCH
+	// /api/v1/config or /config/apply, so resolving the secret into it here
+	// would persist the plaintext value instead of the operator's
+	// `${env:...}` reference. ServerEditionConfig.Validate() (reached just
+	// below) resolves it itself, read-only, to enforce the "required" check
+	// against the actual value; auth.NewOAuthHandler resolves it again on its
+	// own private, never-persisted config clone to get the live secret for
+	// the token endpoint.
 
 	// Create data directory if it doesn't exist.
 	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —
@@ -186,6 +198,9 @@ func LoadWithPath() (*Config, string, error) {
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
+	// server_edition.oauth.client_id/client_secret are deliberately NOT
+	// expanded here — see the matching comment in LoadFromFile (cross-review
+	// round 6, chunk 3 P2).
 
 	// Create data directory if it doesn't exist.
 	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —
@@ -284,10 +299,28 @@ func loadConfigFile(path string, cfg *Config) error {
 		return nil
 	}
 
+	// Spec 107 FR-032/FR-035: the server build drops the removed
+	// server-edition keys / auth_broker modes from the RAW document before the
+	// typed decode and records one LoadDiagnostic each (the loader has no
+	// logger; LogLoadDiagnostics emits them once one exists). The personal
+	// build returns the bytes untouched and records nothing (opaque carriers).
+	data, diagnostics, err := normalizeLoadedDocument(data)
+	if err != nil {
+		return err
+	}
+	cfg.loadDiagnostics = diagnostics
+
 	// First check if api_key is present in the JSON to distinguish between
-	// "not set" vs "explicitly set to empty"
+	// "not set" vs "explicitly set to empty". Decoded with UseNumber: the
+	// legacy "teams" alias below is re-marshaled FROM this map into the
+	// server-edition block, and in the personal build that block is an opaque
+	// carrier whose numbers must keep their decimal text (Spec 107 FR-040) —
+	// a float64 detour would round 2^53+1 or a long decimal before the
+	// carrier ever saw it. Only key presence is read from the map otherwise.
 	var rawConfig map[string]interface{}
-	if err := json.Unmarshal(data, &rawConfig); err != nil {
+	rawDec := json.NewDecoder(bytes.NewReader(data))
+	rawDec.UseNumber()
+	if err := rawDec.Decode(&rawConfig); err != nil {
 		return fmt.Errorf("failed to parse config file for api_key detection: %w", err)
 	}
 
@@ -304,8 +337,8 @@ func loadConfigFile(path string, cfg *Config) error {
 	// legacy "teams" key to "server_edition". An existing config that still uses
 	// "teams" is normalized onto ServerEdition on read. The new key always wins;
 	// only fall back to the legacy key when "server_edition" is absent. This
-	// compiles in both editions because ServerEditionConfig is a struct{} stub
-	// in the personal build (it simply unmarshals to an empty value there).
+	// compiles in both editions because ServerEditionConfig is a raw-JSON
+	// carrier in the personal build (it stores the block verbatim there).
 	if _, hasNew := rawConfig["server_edition"]; !hasNew {
 		if legacy, hasLegacy := rawConfig["teams"]; hasLegacy {
 			if raw, err := json.Marshal(legacy); err == nil {
@@ -745,6 +778,18 @@ func applyTLSEnvOverrides(cfg *Config) {
 		}
 	}
 	envOverride(b, cfg, FieldTrustedHosts, value != "", hosts)
+
+	// Override trusted proxies (Spec 107 FR-027). Comma-separated CIDRs or
+	// IPs; an empty variable leaves the file value. Entries are validated by
+	// validateTrustedProxies exactly like file values (LoadFromFile validates
+	// after the overrides run).
+	if value := os.Getenv("MCPPROXY_TRUSTED_PROXIES"); strings.TrimSpace(value) != "" {
+		cfg.TrustedProxies = parseTrustedProxiesEnv(value)
+	}
+
+	// Spec 107 FR-025: MCPPROXY_PUBLIC_URL, the one nested server_edition.*
+	// key with an env alias. Build-tagged: a no-op on the personal build.
+	applyServerEditionEnvOverrides(cfg)
 
 	// Override the offline TPA signature-bundle path from environment
 	// (spec 086 FR-019). Explicit MCPPROXY_* alias per the loader convention;

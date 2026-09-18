@@ -21,8 +21,6 @@ func TestTeamsDefaultServerEditionConfig(t *testing.T) {
 	assert.Nil(t, cfg.OAuth, "OAuth config should be nil by default")
 	assert.Equal(t, Duration(24*time.Hour), cfg.SessionTTL, "session TTL should default to 24h")
 	assert.Equal(t, Duration(24*time.Hour), cfg.BearerTokenTTL, "bearer token TTL should default to 24h")
-	assert.Equal(t, Duration(30*time.Minute), cfg.WorkspaceIdleTimeout, "workspace idle timeout should default to 30m")
-	assert.Equal(t, 20, cfg.MaxUserServers, "max user servers should default to 20")
 }
 
 func TestTeamsIsAdminEmail(t *testing.T) {
@@ -143,10 +141,8 @@ func TestTeamsValidate_ValidGoogleConfig(t *testing.T) {
 			ClientID:     "my-client-id.apps.googleusercontent.com",
 			ClientSecret: "GOCSPX-secret",
 		},
-		SessionTTL:           Duration(8 * time.Hour),
-		BearerTokenTTL:       Duration(1 * time.Hour),
-		WorkspaceIdleTimeout: Duration(15 * time.Minute),
-		MaxUserServers:       10,
+		SessionTTL:     Duration(8 * time.Hour),
+		BearerTokenTTL: Duration(1 * time.Hour),
 	}
 	err := cfg.Validate()
 	assert.NoError(t, err)
@@ -166,7 +162,7 @@ func TestTeamsValidate_ValidGitHubConfig(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestTeamsValidate_MicrosoftDefaultsTenantID(t *testing.T) {
+func TestTeamsApplyDefaults_MicrosoftDefaultsTenantID(t *testing.T) {
 	cfg := &ServerEditionConfig{
 		Enabled:     true,
 		AdminEmails: []string{"admin@example.com"},
@@ -177,8 +173,10 @@ func TestTeamsValidate_MicrosoftDefaultsTenantID(t *testing.T) {
 			TenantID:     "", // empty should default to "common"
 		},
 	}
-	err := cfg.Validate()
-	assert.NoError(t, err)
+	// Spec 107 FR-039: Validate is non-mutating; ApplyDefaults fills the tenant.
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, "", cfg.OAuth.TenantID, "Validate must not fill the tenant")
+	cfg.ApplyDefaults()
 	assert.Equal(t, "common", cfg.OAuth.TenantID, "Microsoft tenant ID should default to 'common'")
 }
 
@@ -193,12 +191,12 @@ func TestTeamsValidate_MicrosoftExplicitTenantID(t *testing.T) {
 			TenantID:     "my-tenant-id",
 		},
 	}
-	err := cfg.Validate()
-	assert.NoError(t, err)
+	require.NoError(t, cfg.Validate())
+	cfg.ApplyDefaults()
 	assert.Equal(t, "my-tenant-id", cfg.OAuth.TenantID, "explicit tenant ID should be preserved")
 }
 
-func TestTeamsValidate_DefaultsAppliedForZeroValues(t *testing.T) {
+func TestTeamsApplyDefaults_DefaultsAppliedForZeroValues(t *testing.T) {
 	cfg := &ServerEditionConfig{
 		Enabled:     true,
 		AdminEmails: []string{"admin@example.com"},
@@ -207,14 +205,30 @@ func TestTeamsValidate_DefaultsAppliedForZeroValues(t *testing.T) {
 			ClientID:     "id",
 			ClientSecret: "secret",
 		},
-		// All duration/limit fields left at zero
+		// All duration fields left at zero
 	}
-	err := cfg.Validate()
-	assert.NoError(t, err)
+	// Spec 107 FR-039: zero TTLs are valid (unset) and Validate leaves them.
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, Duration(0), cfg.SessionTTL, "Validate must not fill SessionTTL")
+	cfg.ApplyDefaults()
 	assert.Equal(t, Duration(24*time.Hour), cfg.SessionTTL, "zero SessionTTL should default to 24h")
 	assert.Equal(t, Duration(24*time.Hour), cfg.BearerTokenTTL, "zero BearerTokenTTL should default to 24h")
-	assert.Equal(t, Duration(30*time.Minute), cfg.WorkspaceIdleTimeout, "zero WorkspaceIdleTimeout should default to 30m")
-	assert.Equal(t, 20, cfg.MaxUserServers, "zero MaxUserServers should default to 20")
+}
+
+func TestTeamsValidate_NegativeTTLRefused(t *testing.T) {
+	cfg := &ServerEditionConfig{
+		Enabled:     true,
+		AdminEmails: []string{"admin@example.com"},
+		OAuth: &ServerEditionOAuthConfig{
+			Provider:     "google",
+			ClientID:     "id",
+			ClientSecret: "secret",
+		},
+		SessionTTL: Duration(-1),
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server_edition.session_ttl must be positive")
 }
 
 func TestTeamsValidate_AllProviders(t *testing.T) {
@@ -246,10 +260,8 @@ func TestServerEditionConfig_JSONRoundTrip(t *testing.T) {
 			ClientSecret:   "GOCSPX-secret",
 			AllowedDomains: []string{"example.com", "corp.io"},
 		},
-		SessionTTL:           Duration(8 * time.Hour),
-		BearerTokenTTL:       Duration(1 * time.Hour),
-		WorkspaceIdleTimeout: Duration(15 * time.Minute),
-		MaxUserServers:       50,
+		SessionTTL:     Duration(8 * time.Hour),
+		BearerTokenTTL: Duration(1 * time.Hour),
 	}
 
 	data, err := json.Marshal(original)
@@ -268,8 +280,6 @@ func TestServerEditionConfig_JSONRoundTrip(t *testing.T) {
 	assert.Equal(t, original.OAuth.AllowedDomains, restored.OAuth.AllowedDomains)
 	assert.Equal(t, original.SessionTTL, restored.SessionTTL)
 	assert.Equal(t, original.BearerTokenTTL, restored.BearerTokenTTL)
-	assert.Equal(t, original.WorkspaceIdleTimeout, restored.WorkspaceIdleTimeout)
-	assert.Equal(t, original.MaxUserServers, restored.MaxUserServers)
 }
 
 func TestServerEditionConfig_JSONRoundTrip_MicrosoftWithTenant(t *testing.T) {
@@ -322,8 +332,7 @@ func TestServerEditionConfig_EmbeddedInConfig(t *testing.T) {
 				ClientID:     "id",
 				ClientSecret: "secret",
 			},
-			SessionTTL:     Duration(12 * time.Hour),
-			MaxUserServers: 30,
+			SessionTTL: Duration(12 * time.Hour),
 		},
 	}
 
@@ -339,7 +348,6 @@ func TestServerEditionConfig_EmbeddedInConfig(t *testing.T) {
 	assert.Equal(t, []string{"admin@example.com"}, restored.ServerEdition.AdminEmails)
 	assert.Equal(t, "google", restored.ServerEdition.OAuth.Provider)
 	assert.Equal(t, Duration(12*time.Hour), restored.ServerEdition.SessionTTL)
-	assert.Equal(t, 30, restored.ServerEdition.MaxUserServers)
 }
 
 func TestServerEditionConfig_OmittedFromConfig(t *testing.T) {
@@ -371,9 +379,7 @@ func TestServerEditionConfig_UnmarshalFromJSON(t *testing.T) {
 				"client_secret": "ghp_secret"
 			},
 			"session_ttl": "4h",
-			"bearer_token_ttl": "30m",
-			"workspace_idle_timeout": "10m",
-			"max_user_servers": 5
+			"bearer_token_ttl": "30m"
 		}
 	}`
 
@@ -387,8 +393,6 @@ func TestServerEditionConfig_UnmarshalFromJSON(t *testing.T) {
 	assert.Equal(t, "Iv1.abc", cfg.ServerEdition.OAuth.ClientID)
 	assert.Equal(t, Duration(4*time.Hour), cfg.ServerEdition.SessionTTL)
 	assert.Equal(t, Duration(30*time.Minute), cfg.ServerEdition.BearerTokenTTL)
-	assert.Equal(t, Duration(10*time.Minute), cfg.ServerEdition.WorkspaceIdleTimeout)
-	assert.Equal(t, 5, cfg.ServerEdition.MaxUserServers)
 }
 
 // writeServerEditionConfigFile writes a config JSON to a temp file and returns
@@ -462,4 +466,32 @@ func TestLoadFromFile_BothKeysNewWins(t *testing.T) {
 	assert.Equal(t, []string{"new@example.com"}, cfg.ServerEdition.AdminEmails,
 		"new server_edition key must win over legacy teams key")
 	assert.Equal(t, "google", cfg.ServerEdition.OAuth.Provider)
+}
+
+// Clone must deep-copy the slices (AdminEmails, OAuth.AllowedDomains) and the
+// nested OAuth block so a copy never shares a backing array with its source.
+func TestServerEditionConfig_CloneDoesNotAlias(t *testing.T) {
+	src := &ServerEditionConfig{
+		Enabled:     true,
+		AdminEmails: []string{"a@example.com"},
+		OAuth: &ServerEditionOAuthConfig{
+			Provider:       "google",
+			ClientID:       "id",
+			ClientSecret:   "secret",
+			AllowedDomains: []string{"example.com"},
+		},
+	}
+	dst := src.Clone()
+	require.NotNil(t, dst)
+	require.NotSame(t, src, dst)
+	require.NotSame(t, src.OAuth, dst.OAuth)
+
+	dst.AdminEmails[0] = "changed"
+	dst.OAuth.AllowedDomains[0] = "changed"
+	dst.OAuth.ClientID = "changed"
+	assert.Equal(t, "a@example.com", src.AdminEmails[0])
+	assert.Equal(t, "example.com", src.OAuth.AllowedDomains[0])
+	assert.Equal(t, "id", src.OAuth.ClientID)
+
+	assert.Nil(t, (*ServerEditionConfig)(nil).Clone())
 }

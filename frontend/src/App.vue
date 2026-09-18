@@ -95,8 +95,9 @@ async function reloadAfterAuth() {
   systemStore.fetchInfo() // TopHeader version / update state
   systemStore.fetchRouting() // TopHeader routing chip
   // Server-edition role-based nav. The router guard does not run for a
-  // key-driven remount, so re-check here.
-  await authStore.checkAuth()
+  // key-driven remount, so re-check here — and read with the repaired key,
+  // never by joining a probe that was issued before the key was replaced.
+  await authStore.checkAuth({ fresh: true })
 }
 
 function handleAuthModalAuthenticated() {

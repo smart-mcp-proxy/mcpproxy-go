@@ -47,28 +47,61 @@ func TestSessionManager_CreateSession(t *testing.T) {
 	assert.WithinDuration(t, time.Now().Add(time.Hour), session.ExpiresAt, 5*time.Second)
 }
 
+// Spec 107 FR-027: forwarded headers are believed only from a trusted proxy
+// (the legacy bool constructor trusts nobody); the client IP is the
+// right-most X-Forwarded-For hop that is not itself a trusted proxy.
 func TestSessionManager_CreateSession_XForwardedFor(t *testing.T) {
-	mgr := setupTestSessionManager(t, time.Hour, false)
+	t.Run("untrusted peer is ignored", func(t *testing.T) {
+		mgr := setupTestSessionManager(t, time.Hour, false)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("X-Forwarded-For", "10.0.0.1, 10.0.0.2")
-	req.RemoteAddr = "127.0.0.1:8080"
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("X-Forwarded-For", "10.0.0.1, 10.0.0.2")
+		req.RemoteAddr = "127.0.0.1:8080"
 
-	session, err := mgr.CreateSession("user-xff", req)
-	require.NoError(t, err)
-	assert.Equal(t, "10.0.0.1", session.IPAddress)
+		session, err := mgr.CreateSession("user-xff", req)
+		require.NoError(t, err)
+		assert.Equal(t, "127.0.0.1", session.IPAddress)
+	})
+
+	t.Run("trusted peer: right-most untrusted hop", func(t *testing.T) {
+		mgr := setupTestSessionManager(t, time.Hour, false)
+		mgr.policy.TrustedProxies = func() []string { return []string{"127.0.0.1/32", "10.0.0.2/32"} }
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("X-Forwarded-For", "10.0.0.1, 10.0.0.2")
+		req.RemoteAddr = "127.0.0.1:8080"
+
+		session, err := mgr.CreateSession("user-xff", req)
+		require.NoError(t, err)
+		assert.Equal(t, "10.0.0.1", session.IPAddress)
+	})
 }
 
 func TestSessionManager_CreateSession_XRealIP(t *testing.T) {
-	mgr := setupTestSessionManager(t, time.Hour, false)
+	t.Run("untrusted peer is ignored", func(t *testing.T) {
+		mgr := setupTestSessionManager(t, time.Hour, false)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("X-Real-IP", "172.16.0.5")
-	req.RemoteAddr = "127.0.0.1:8080"
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("X-Real-IP", "172.16.0.5")
+		req.RemoteAddr = "127.0.0.1:8080"
 
-	session, err := mgr.CreateSession("user-xri", req)
-	require.NoError(t, err)
-	assert.Equal(t, "172.16.0.5", session.IPAddress)
+		session, err := mgr.CreateSession("user-xri", req)
+		require.NoError(t, err)
+		assert.Equal(t, "127.0.0.1", session.IPAddress)
+	})
+
+	t.Run("trusted peer is honoured", func(t *testing.T) {
+		mgr := setupTestSessionManager(t, time.Hour, false)
+		mgr.policy.TrustedProxies = func() []string { return []string{"127.0.0.1/32"} }
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("X-Real-IP", "172.16.0.5")
+		req.RemoteAddr = "127.0.0.1:8080"
+
+		session, err := mgr.CreateSession("user-xri", req)
+		require.NoError(t, err)
+		assert.Equal(t, "172.16.0.5", session.IPAddress)
+	})
 }
 
 func TestSessionManager_SetAndGetSessionCookie(t *testing.T) {

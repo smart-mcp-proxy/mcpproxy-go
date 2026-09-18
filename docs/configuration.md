@@ -654,6 +654,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 {
   "api_key": "your-secret-api-key",
   "trusted_hosts": ["mcp.example.com"],
+  "trusted_proxies": ["127.0.0.1"],
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,
@@ -665,6 +666,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 |-------|------|---------|-------------|
 | `api_key` | string | Auto-generated | API key for REST API authentication. Required; if empty, one is auto-generated and enforced (logged on startup) |
 | `trusted_hosts` | string[] | `[]` | Non-loopback `Host` header values accepted on loopback listeners (reverse-proxy deployments). See below |
+| `trusted_proxies` | string[] | `[]` (trust nobody) | CIDRs or IP addresses whose `X-Forwarded-For` / `X-Real-IP` / `X-Forwarded-Proto` / `X-Forwarded-Host` headers are honoured; any other peer's forwarded headers are ignored and `RemoteAddr` is used. Env `MCPPROXY_TRUSTED_PROXIES`. Hot-reloadable. Invalid entry: `trusted_proxies[N] "value" is not a valid CIDR or IP address` (boot, PATCH and apply). See [Reverse Proxy Deployment](operations/reverse-proxy.md#trusted_proxies-forwarded-headers) |
 | `read_only_mode` | boolean | `false` | Prevent all configuration modifications |
 | `disable_management` | boolean | `false` | Disable server management operations (restart, enable, disable) |
 | `allow_server_add` | boolean | `true` | Allow adding new servers via API/tools |
@@ -1627,6 +1629,8 @@ Many configuration options can be overridden via environment variables:
 |----------------------|--------------|-------------|
 | `MCPPROXY_LISTEN` / `MCPP_LISTEN` | `listen` | Network binding address |
 | `MCPPROXY_API_KEY` | `api_key` | API key for authentication (empty values trigger auto-generation; auth remains enabled) |
+| `MCPPROXY_TRUSTED_HOSTS` | `trusted_hosts` | Comma-separated `Host` allowlist for loopback listeners behind a reverse proxy |
+| `MCPPROXY_TRUSTED_PROXIES` | `trusted_proxies` | Comma-separated CIDRs/IPs whose `X-Forwarded-*` headers are honoured |
 | `MCPPROXY_TLS_ENABLED` | `tls.enabled` | Enable HTTPS/TLS |
 | `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | `tls.require_client_cert` | Enable mTLS |
 | `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |

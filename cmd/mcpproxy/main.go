@@ -134,7 +134,7 @@ func main() {
 	}
 
 	// Add server-specific flags
-	serverCmd.Flags().StringVarP(&listen, "listen", "l", "", "Listen address (for HTTP mode, not used in stdio mode)")
+	serverCmd.Flags().StringVarP(&listen, "listen", "l", "", "Listen address for HTTP mode (host:port). Pass \"\" or \":0\" for native stdio transport")
 	serverCmd.Flags().StringVar(&trayEndpoint, "tray-endpoint", "", "Tray endpoint override (unix:///path/socket.sock or npipe:////./pipe/name). Default: auto-detect from data-dir")
 	serverCmd.Flags().BoolVar(&enableSocket, "enable-socket", true, "Enable Unix socket/named pipe for local IPC (default: true)")
 	serverCmd.Flags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
@@ -450,6 +450,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		_ = logger.Sync()
 	}()
 
+	// Spec 107 FR-035: the loader has no logger, so the removed-key /
+	// deprecated-key findings it recorded are emitted here, once, now that
+	// one exists (server build only; the personal build records none).
+	config.LogLoadDiagnostics(cfg, logger)
+
 	// Log startup information including log directory info
 	logDirInfo, err := logs.GetLogDirInfo()
 	if err != nil {
@@ -744,6 +749,14 @@ func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 	}
 	if cmd.Flags().Changed("listen") {
 		listenFlag, _ := cmd.Flags().GetString("listen")
+		// An explicit empty --listen asks for native stdio transport, but
+		// cfg.Validate() below resets an empty Listen to the HTTP default (it
+		// cannot tell "no listen key in the file" from "cleared on purpose").
+		// ":0" is the sentinel the server recognises after validation, so map
+		// the empty flag onto it here — the only place the intent is knowable.
+		if listenFlag == "" {
+			listenFlag = ":0"
+		}
 		config.OverrideForProcess(cfg, config.FieldListen, config.OverrideSourceFlag, listenFlag)
 	}
 	if cmd.Flags().Changed("tray-endpoint") {
