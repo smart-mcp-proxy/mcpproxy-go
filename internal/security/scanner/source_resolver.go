@@ -98,6 +98,7 @@ type ServerInfo struct {
 type ResolvedSource struct {
 	SourceDir      string   // Host directory containing source files
 	ContainerID    string   // Docker container ID (if applicable)
+	ContainerOwner string   // Server name that owns ContainerID, per the com.mcpproxy.server label (verified, not just name-matched)
 	ContainerImage string   // Docker image reference (for "container_image" input)
 	ServerURL      string   // URL for mcp_connection input (HTTP/SSE servers)
 	Method         string   // How source was resolved: "docker_extract", "container_image", "working_dir", "local_path", "url", "manual"
@@ -158,10 +159,11 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 				zap.String("source_dir", sourceDir),
 			)
 			return &ResolvedSource{
-				SourceDir:   sourceDir,
-				ContainerID: containerID,
-				Method:      "docker_extract",
-				Cleanup:     cleanup,
+				SourceDir:      sourceDir,
+				ContainerID:    containerID,
+				ContainerOwner: info.Name,
+				Method:         "docker_extract",
+				Cleanup:        cleanup,
 			}, nil
 		}
 		r.logger.Warn("Failed to extract from container, trying fallback",
@@ -464,11 +466,22 @@ func dirLooksLikeSource(dir string) bool {
 // (internal/upstream/core), hence the shared dockernaming package — official
 // registry names like "com.pulsemcp/google-flights" keep their dots and would
 // otherwise never match (MCP-2123).
+//
+// The `docker ps --filter name=` clause above is a SUBSTRING match, not an
+// anchored one: servers whose sanitized names collide as a prefix (server "a"
+// vs "a-b"/"a_b"/"a/b", which all sanitize toward a token "a-b" is a prefix
+// of) can make this filter return a container belonging to a different
+// server. That container would then be exec'd/copied/diffed and its findings
+// reported under the wrong server. To close that gap, every candidate is
+// re-verified against the com.mcpproxy.server label — set to the exact,
+// unsanitized server name at container creation (internal/upstream/core) —
+// via selectOwnedContainer, which rejects any candidate whose label does not
+// match serverName exactly.
 func (r *SourceResolver) findServerContainer(ctx context.Context, serverName string) (string, error) {
 	// Use docker ps with filter to find matching containers
 	cmd := r.dockerCmd(ctx, "ps",
 		"--filter", fmt.Sprintf("name=mcpproxy-%s-", dockernaming.SanitizeServerName(serverName)),
-		"--format", "{{.ID}}",
+		"--format", "{{.ID}}\t{{.Label \"com.mcpproxy.server\"}}",
 		"--no-trunc",
 	)
 	var stdout bytes.Buffer
@@ -477,13 +490,33 @@ func (r *SourceResolver) findServerContainer(ctx context.Context, serverName str
 		return "", fmt.Errorf("docker ps failed: %w", err)
 	}
 
-	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
-	if len(lines) == 0 || lines[0] == "" {
+	containerID := selectOwnedContainer(stdout.String(), serverName)
+	if containerID == "" {
 		return "", fmt.Errorf("no running container found for server %s", serverName)
 	}
+	return containerID, nil
+}
 
-	// Return first match
-	return lines[0], nil
+// selectOwnedContainer parses `docker ps --format {{.ID}}\t{{.Label "com.mcpproxy.server"}}`
+// output and returns the ID of the first container whose ownership label
+// equals serverName exactly. Candidates arrive from a name-prefix substring
+// match (see findServerContainer), so this exact-equality check is what
+// actually enforces ownership and rejects a same-prefix collision.
+func selectOwnedContainer(psOutput, serverName string) string {
+	for _, line := range strings.Split(strings.TrimSpace(psOutput), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		id, owner := parts[0], parts[1]
+		if owner == serverName {
+			return id
+		}
+	}
+	return ""
 }
 
 // extractFromContainer extracts changed files from a running container.
@@ -953,10 +986,11 @@ func (r *SourceResolver) ResolveFullSource(ctx context.Context, info ServerInfo)
 				zap.String("source_dir", sourceDir),
 			)
 			return &ResolvedSource{
-				SourceDir:   sourceDir,
-				ContainerID: containerID,
-				Method:      "docker_extract",
-				Cleanup:     cleanup,
+				SourceDir:      sourceDir,
+				ContainerID:    containerID,
+				ContainerOwner: info.Name,
+				Method:         "docker_extract",
+				Cleanup:        cleanup,
 			}, nil
 		}
 		r.logger.Warn("Failed to extract full source from container, trying fallback",

@@ -1013,6 +1013,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 				scanCtx.SourcePath = resolved.ServerURL
 			}
 			scanCtx.ContainerID = resolved.ContainerID
+			scanCtx.ContainerOwner = resolved.ContainerOwner
 			// Docker-image servers (`docker run mcp/fetch`): the scan target is the
 			// image itself, not a source dir. Carry the reference so image-capable
 			// scanners (Trivy) run in image mode, and surface it in the context.
@@ -1221,6 +1222,7 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 			scanCtx.SourcePath = resolved.ServerURL
 		}
 		scanCtx.ContainerID = resolved.ContainerID
+		scanCtx.ContainerOwner = resolved.ContainerOwner
 		// Docker-image servers: scan the image (Trivy image mode reports OS-package
 		// and bundled-dependency CVEs). No source dir to enrich or export tools into.
 		if resolved.ContainerImage != "" {
