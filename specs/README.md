@@ -82,6 +82,7 @@ Brainstormed design docs that feed future specs live under [`docs/superpowers/sp
 | [043-linux-package-repos](./043-linux-package-repos/) | Linux Package Repositories (apt/yum) | `shipped` | 39/41 (95%) |
 | [104-auto-routing-mode](./104-auto-routing-mode/) | Auto Routing Mode — Budget-Fitted Tool Surface Per Session | `drafted` | — |
 | [105-agent-scope-hardening](./105-agent-scope-hardening/) | Agent-Token Scope Hardening — Every MCP Request Authorized by Its Own Scope | `drafted` | — |
+| [107-server-edition-sso-hardening](./107-server-edition-sso-hardening/) | Server Edition SSO Front Door Hardened for Real IdPs — Generic OIDC, Group Allowlist, JSONL Audit, Freeze | `drafted` | 4/126 (3%) |
 
 ## Updating this index
 

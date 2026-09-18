@@ -76,6 +76,15 @@ func (s *Scope) ServerNames() []string {
 // AllowedServers containing "*" is likewise unrestricted (matching
 // auth.AuthContext.CanAccessServer).
 type ScopeInputs struct {
+	// Restricted marks a NON-ADMINISTRATOR caller (Spec 107 FR-006): for such
+	// a caller an empty TokenServers is deny-all — the owner's entitlement no
+	// longer covers any granted server (storage.intersectAllowedServers hands
+	// back a non-nil empty list), or a tenant principal is entitled to nothing.
+	// Without the marker "empty" reads as "no restriction", which is right only
+	// for operator callers; the REST preflight door used to evaluate a fully
+	// unentitled token as token-unrestricted (the empty-list two-semantics trap).
+	// A literal "*" stays unrestricted whatever the marker says.
+	Restricted bool
 	// TokenServers is the agent token's allowed_servers list. nil for operator
 	// callers (API key / socket / named pipe).
 	TokenServers []string
@@ -101,7 +110,7 @@ type ScopeInputs struct {
 // The pin can therefore never be widened by naming another profile.
 func ResolveScope(in ScopeInputs) *Scope {
 	restrictions := make([][]string, 0, 3)
-	if servers, restricted := normalizeTokenServers(in.TokenServers); restricted {
+	if servers, restricted := normalizeTokenServers(in.TokenServers, in.Restricted); restricted {
 		restrictions = append(restrictions, servers)
 	}
 	if in.TokenPinName != "" {
@@ -147,10 +156,16 @@ func ResolveScope(in ScopeInputs) *Scope {
 	return NewScope(name, names)
 }
 
-// normalizeTokenServers reports the token's server restriction. A nil/empty
-// list or a "*" wildcard entry means the token does not restrict servers.
-func normalizeTokenServers(list []string) (servers []string, restricted bool) {
+// normalizeTokenServers reports the token's server restriction. A "*"
+// wildcard entry means the token does not restrict servers. A nil/empty list
+// means the same ONLY for an unrestricted (operator) caller; for a caller
+// carrying the restricted marker it is deny-all (Spec 107 FR-006) — an empty
+// server list that intersects everything away.
+func normalizeTokenServers(list []string, restrictedCaller bool) (servers []string, restricted bool) {
 	if len(list) == 0 {
+		if restrictedCaller {
+			return []string{}, true
+		}
 		return nil, false
 	}
 	for _, s := range list {

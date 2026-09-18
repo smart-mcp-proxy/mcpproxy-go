@@ -383,6 +383,17 @@ components:
             type: string
           type: array
           uniqueItems: false
+        trusted_proxies:
+          description: |-
+            TrustedProxies lists the CIDRs or IP addresses whose X-Forwarded-For /
+            X-Real-IP / X-Forwarded-Proto / X-Forwarded-Host headers are believed
+            (Spec 107 FR-027). Empty (default) trusts nobody. Edition-neutral, live
+            (hot-reloadable). Env override: MCPPROXY_TRUSTED_PROXIES (comma-separated).
+            The one reader is ForwardedHeaders; validation is validateTrustedProxies.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         update_check:
           $ref: '#/components/schemas/config.UpdateCheckConfig'
       type: object

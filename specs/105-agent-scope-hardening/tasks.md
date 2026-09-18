@@ -60,27 +60,27 @@
 
 ### Failing tests
 
-- [ ] T021 [US1] FR001-G1: store legacy (nil producer) record → every reader kind incl. admin/anonymous gets `ErrUnauthorizedRead`; `Peek` false; close+reopen bbolt → absent; server-level admin `handleReadCache` → IsError without `records` — `internal/cache/manager_legacy_test.go` (new) + `internal/server/mcp_read_cache_authz_test.go`
-- [ ] T022 [P] [US1] FR001-G2: store `registry-servers:…` and `npm:…` keys via the runtime/guesser writers → admin `readCacheAs` IsError, no payload; agent live-vs-absent key identical text; entry still `Peek`-able (no eviction) — `internal/server/mcp_read_cache_authz_test.go`
-- [ ] T023 [P] [US1] FR001-G3: store, rewrite `ExpiresAt` past, `Get` errs, `Peek` false, on-disk count == in-memory count — `internal/cache/manager_test.go` (`TestExpiredRecords` extended to assert absence)
-- [ ] T024 [P] [US1] FR001-G4: agent W `["*"]` produces K1; admin pages K1 → K2; W reads K2 → success — `internal/server/mcp_read_cache_authz_test.go`
-- [ ] T025 [P] [US1] FR001-G5: narrow ctx `[weather]`; live broad key vs nonexistent → identical text on `handleReadCache` and `CallToolDirect`; `cache key not found` substring kept — `internal/server/mcp_read_cache_authz_test.go` + `internal/server/mcp_call_tool_direct_test.go`
-- [ ] T026 [P] [US1] FR001-G6: table — admin reader qualifies for ANY snapshot regardless of its profile (unscoped, narrower, wider, empty, deleted profile → true); agent reader vs admin-produced snapshot → false; pinned wildcard agent vs unpinned agent entry → false; empty-profile agent reader → false (deny-all guard for agents only) — `internal/cache/authorization_test.go` (D5 / FR-001 `spec.md:124`)
-- [ ] T027 [P] [US1] FR001-G7: upgrade fixture (raw JSON record without `producer` and with `version:0`), fresh-internal-entry, recursive-child on MCP + REST, pinned-token REST (direct dispatch refused AND `read_cache` refused with nonexistent-key body), held-call narrowing (passes; regression) — `internal/server/scope_cache_fixtures_test.go` (new)
+- [x] T021 [US1] FR001-G1: store legacy (nil producer) record → every reader kind incl. admin/anonymous gets `ErrUnauthorizedRead`; `Peek` false; close+reopen bbolt → absent; server-level admin `handleReadCache` → IsError without `records` — `internal/cache/manager_legacy_test.go` (new) + `internal/server/mcp_read_cache_authz_test.go`
+- [x] T022 [P] [US1] FR001-G2: store `registry-servers:…` and `npm:…` keys via the runtime/guesser writers → admin `readCacheAs` IsError, no payload; agent live-vs-absent key identical text; entry still `Peek`-able (no eviction) — `internal/server/mcp_read_cache_authz_test.go`
+- [x] T023 [P] [US1] FR001-G3: store, rewrite `ExpiresAt` past, `Get` errs, `Peek` false, on-disk count == in-memory count — `internal/cache/manager_test.go` (`TestExpiredRecords` extended to assert absence)
+- [x] T024 [P] [US1] FR001-G4: agent W `["*"]` produces K1; admin pages K1 → K2; W reads K2 → success — `internal/server/mcp_read_cache_authz_test.go`
+- [x] T025 [P] [US1] FR001-G5: narrow ctx `[weather]`; live broad key vs nonexistent → identical text on `handleReadCache` and `CallToolDirect`; `cache key not found` substring kept — `internal/server/mcp_read_cache_authz_test.go` + `internal/server/mcp_call_tool_direct_test.go`
+- [x] T026 [P] [US1] FR001-G6: table — admin reader qualifies for ANY snapshot regardless of its profile (unscoped, narrower, wider, empty, deleted profile → true); agent reader vs admin-produced snapshot → false; pinned wildcard agent vs unpinned agent entry → false; empty-profile agent reader → false (deny-all guard for agents only) — `internal/cache/authorization_test.go` (D5 / FR-001 `spec.md:124`)
+- [x] T027 [P] [US1] FR001-G7: upgrade fixture (raw JSON record without `producer` and with `version:0`), fresh-internal-entry, recursive-child on MCP + REST, pinned-token REST (direct dispatch refused AND `read_cache` refused with nonexistent-key body), held-call narrowing (passes; regression) — `internal/server/scope_cache_fixtures_test.go` (new)
 
 ### Implementation
 
-- [ ] T028 [US1] `Record.Version` + `Authorization.Kind = internal`; `GetRecordsAs`: nil/unknown version → refuse + delete inside the committed `Update` (tx fn returns nil; refusal surfaced outside), stats mutate on commit only; internal → refuse without eviction; **caller kind first** — admin reader qualifies for any snapshot, agent never for an admin snapshot, deny-all guard applies to agent readers only; rename `Unrestricted()` → `IsAdministrator()` (D2, D5) — `internal/cache/models.go:26-43`, `internal/cache/manager.go:108-245`, `internal/cache/authorization.go:52-95`
-- [ ] T029 [P] [US1] Stamp internal writers `CallerKindInternal` in `internal/runtime/runtime.go:2226` and `internal/experiments/guesser.go:349`
-- [ ] T030 [US1] `ReadCacheResponse.Producer` (`json:"-"`) carries the parent's authorization to child page stores; `handleReadCache` collapses unauthorized/not-found/expired into the `cache key not found` body for agent callers (real BBolt errors distinct; activity log keeps the real reason) — `internal/server/mcp.go:5613-5690`, `internal/server/cache_authz.go:54-86`, `internal/server/content_forward.go:256`
+- [x] T028 [US1] `Record.Version` + `Authorization.Kind = internal`; `GetRecordsAs`: nil/unknown version → refuse + delete inside the committed `Update` (tx fn returns nil; refusal surfaced outside), stats mutate on commit only; internal → refuse without eviction; **caller kind first** — admin reader qualifies for any snapshot, agent never for an admin snapshot, deny-all guard applies to agent readers only; rename `Unrestricted()` → `IsAdministrator()` (D2, D5) — `internal/cache/models.go:26-43`, `internal/cache/manager.go:108-245`, `internal/cache/authorization.go:52-95`
+- [x] T029 [P] [US1] Stamp internal writers `CallerKindInternal` in `internal/runtime/runtime.go:2226` and `internal/experiments/guesser.go:349`
+- [x] T030 [US1] `ReadCacheResponse.Producer` (`json:"-"`) carries the parent's authorization to child page stores; `handleReadCache` collapses unauthorized/not-found/expired into the `cache key not found` body for agent callers (real BBolt errors distinct; activity log keeps the real reason) — `internal/server/mcp.go:5613-5690`, `internal/server/cache_authz.go:54-86`, `internal/server/content_forward.go:256`
 
 ### Inverted pinned tests
 
-- [ ] T031 [US1] Invert `internal/cache/authorization_test.go:65-72,93-121,123-154`, `internal/server/mcp_read_cache_authz_test.go:86,171`, `internal/server/mcp_call_tool_direct_test.go:35-48` (seed stamped records instead of unstamped)
+- [x] T031 [US1] Invert `internal/cache/authorization_test.go:65-72,93-121,123-154`, `internal/server/mcp_read_cache_authz_test.go:86,171`, `internal/server/mcp_call_tool_direct_test.go:35-48` (seed stamped records instead of unstamped)
 
 ### Verification
 
-- [ ] T032 [US1] Common verification + `go test -race ./internal/cache/... ./internal/runtime/... ./internal/experiments/...`; `-tags server` build to `/dev/null`
+- [x] T032 [US1] Common verification + `go test -race ./internal/cache/... ./internal/runtime/... ./internal/experiments/...`; `-tags server` build to `/dev/null`
 - [~] T033 [US1] Live check: daemon with a pre-feature `config.db` copy; `read_cache` on an old key refused, key gone after restart
 - [~] T034 [US1] Astra rounds on FR-001/002 + FR001-G1…G7; quote final `VERDICT:`
 

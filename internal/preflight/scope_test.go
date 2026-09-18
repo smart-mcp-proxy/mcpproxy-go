@@ -153,16 +153,26 @@ func TestResolveScope_PinCannotBeWidened(t *testing.T) {
 }
 
 func TestNormalizeTokenServers(t *testing.T) {
-	_, restricted := normalizeTokenServers(nil)
+	// Unrestricted (operator) caller: empty means no restriction.
+	_, restricted := normalizeTokenServers(nil, false)
 	assert.False(t, restricted)
 
-	_, restricted = normalizeTokenServers([]string{})
+	_, restricted = normalizeTokenServers([]string{}, false)
 	assert.False(t, restricted)
 
-	_, restricted = normalizeTokenServers([]string{"gh", "*"})
+	_, restricted = normalizeTokenServers([]string{"gh", "*"}, false)
 	assert.False(t, restricted, "a wildcard entry means the token does not restrict servers")
 
-	servers, restricted := normalizeTokenServers([]string{"gh"})
+	servers, restricted := normalizeTokenServers([]string{"gh"}, false)
 	assert.True(t, restricted)
 	assert.Equal(t, []string{"gh"}, servers)
+
+	// Restricted (non-administrator) caller, Spec 107 FR-006: empty is
+	// deny-all; a wildcard is still unrestricted.
+	servers, restricted = normalizeTokenServers(nil, true)
+	assert.True(t, restricted)
+	assert.Empty(t, servers)
+
+	_, restricted = normalizeTokenServers([]string{"*"}, true)
+	assert.False(t, restricted)
 }

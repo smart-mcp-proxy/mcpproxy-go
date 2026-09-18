@@ -46,6 +46,8 @@ func testSetup(t *testing.T, sharedServers []*config.ServerConfig) (*UserHandler
 // testRouter creates a chi router with the user handlers registered and
 // wraps all requests with the given auth context.
 func testRouter(handlers *UserHandlers, authCtx *auth.AuthContext) *chi.Mux {
+	// Spec 107 T075: the predicate loads the caller's record; persist it.
+	ensureUserRecord(handlers.userStore, authCtx)
 	r := chi.NewRouter()
 	// Inject auth context into every request for testing.
 	r.Use(func(next http.Handler) http.Handler {

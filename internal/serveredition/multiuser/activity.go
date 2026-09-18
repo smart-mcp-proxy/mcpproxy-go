@@ -66,6 +66,17 @@ func (f *ActivityFilter) GetUserActivity(ctx context.Context, limit, offset int)
 	return f.listByUserID(ac.UserID, filter)
 }
 
+// ListActivities is a direct passthrough to the storage provider (Spec 107
+// T086): the caller (GET /api/v1/user/activity) builds a
+// storage.ActivityFilter with BOTH the UserID and AllowedServers
+// authorization terms set and lets storage.ActivityFilter.Matches evaluate
+// them inside the one query, replacing the read-everything-then-post-filter
+// shape of listByUserID below (which predates the UserID filter field and is
+// kept only for GetFilteredActivity's admin door).
+func (f *ActivityFilter) ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error) {
+	return f.storageProvider.ListActivities(filter)
+}
+
 // GetFilteredActivity returns activity for a specific user. Only admins can call this.
 // Non-admin callers receive an authorization error.
 // Returns the filtered records, total matching count, and any error.

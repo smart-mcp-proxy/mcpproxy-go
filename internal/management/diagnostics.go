@@ -213,6 +213,11 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		diag.RuntimeWarnings = append(diag.RuntimeWarnings, warning)
 	}
 
+	// Registered runtime-warning sources (Spec 107 T052): configuration
+	// findings such as an overridden require_mcp_auth or an unset public_url
+	// on a non-loopback listener, read from the live config at call time.
+	diag.RuntimeWarnings = append(diag.RuntimeWarnings, s.runtimeWarningsFromSources()...)
+
 	// Calculate total issues
 	diag.TotalIssues = len(diag.UpstreamErrors) + len(diag.OAuthRequired) +
 		len(diag.OAuthIssues) + len(diag.MissingSecrets) + len(diag.RuntimeWarnings)

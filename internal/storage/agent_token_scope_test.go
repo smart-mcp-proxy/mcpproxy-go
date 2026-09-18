@@ -13,9 +13,11 @@ func TestAgentTokenScopeRevalidatedAndNarrowOnly(t *testing.T) {
 	token.UserID = "owner"
 	require.NoError(t, mgr.CreateAgentToken(token, raw, testHMACKey))
 	current := []string{"github"}
-	mgr.SetAgentTokenScopeResolver(func(owner string, grant []string) ([]string, error) {
+	// Spec 107 T076: the single owner resolver replaces the scope resolver;
+	// Entitled is the already-narrowed grant (here: whatever `current` says).
+	mgr.SetAgentTokenOwnerResolver(func(owner string, grant []string) (OwnerResolution, error) {
 		require.Equal(t, "owner", owner)
-		return current, nil
+		return OwnerResolution{Active: true, UserID: owner, Entitled: current}, nil
 	})
 	got, err := mgr.ValidateAgentToken(raw, testHMACKey)
 	require.NoError(t, err)
@@ -27,7 +29,9 @@ func TestAgentTokenScopeRevalidatedAndNarrowOnly(t *testing.T) {
 	stored, err := mgr.GetAgentTokenByOwnerAndName("owner", "owned")
 	require.NoError(t, err)
 	require.Equal(t, token.AllowedServers, stored.AllowedServers)
-	mgr.SetAgentTokenScopeResolver(func(string, []string) ([]string, error) { return nil, errors.New("unavailable") })
+	mgr.SetAgentTokenOwnerResolver(func(string, []string) (OwnerResolution, error) {
+		return OwnerResolution{}, errors.New("unavailable")
+	})
 	_, err = mgr.ValidateAgentToken(raw, testHMACKey)
 	require.Error(t, err)
 	operator, operatorRaw := makeTestToken("operator")

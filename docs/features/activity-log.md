@@ -25,7 +25,7 @@ The activity log captures:
 | `policy_decision` | Tool calls blocked by policy rules |
 | `quarantine_change` | Server quarantine/unquarantine events |
 | `server_change` | Server enable/disable/restart events |
-| `credential_broker` | Per-user credential brokering events (acquire/refresh/inject/connect) — server edition only |
+| `credential_broker` | Per-user `oauth_connect` consent/callback outcomes (`connect` is the only action ever recorded; the credential is stored, never injected) — server edition only |
 
 ### System Lifecycle Events
 
@@ -297,7 +297,7 @@ GET /api/v1/activity
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `type` | string | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` |
+| `type` | string | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` (server edition; connect-flow outcomes only) |
 | `server` | string | Filter by server name |
 | `tool` | string | Filter by tool name |
 | `session_id` | string | Filter by MCP session ID |

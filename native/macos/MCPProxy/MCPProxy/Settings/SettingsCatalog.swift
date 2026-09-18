@@ -38,6 +38,11 @@ struct ConfigField: Identifiable {
     // this is the real default (e.g. "30s"), so a blank field reads as
     // "inherit the default" rather than a generic example.
     var placeholder: String? = nil
+    // Mirrors `listKind: 'lines'` in fields.ts: the JSON value is a []string
+    // that the textarea shows one entry per line (Spec 107 `trusted_proxies`).
+    // The store's linesBinding does the join/split; a plain textarea stays a
+    // string field.
+    var listLines: Bool = false
     // Danger confirm: present a confirm dialog before saving. For toggles,
     // only when the new value == dangerConfirmValue (nil = always confirm).
     var dangerMessage: String? = nil
@@ -146,6 +151,18 @@ enum SettingsCatalog {
             valueKind: .hostport,
             placeholder: "127.0.0.1:8080",
             dangerMessage: "Binding to a non-loopback address (e.g. 0.0.0.0) exposes mcpproxy to your network. Make sure \u{201C}Require API key for MCP clients\u{201D} is enabled. Continue?"
+        ),
+        // Spec 107 FR-027 (edition-neutral, hot-reloaded): forwarded headers
+        // are honoured only when the direct peer is in this list. Mirrors the
+        // fields.ts row so scripts/check-settings-parity.py stays green.
+        ConfigField(
+            key: "trusted_proxies",
+            label: "Trusted reverse proxies",
+            help: "One CIDR or IP address per line (e.g. 10.0.0.0/8). Forwarded headers (X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host, X-Real-IP) are honoured only from these peers; leave empty when mcpproxy is not behind a proxy. Applies without a restart.",
+            control: .textarea,
+            optional: true,
+            placeholder: "10.0.0.0/8",
+            listLines: true
         ),
     ]
 

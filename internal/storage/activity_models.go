@@ -298,6 +298,16 @@ type ActivityFilter struct {
 	// operator-plane events with no server to be entitled to.
 	AllowedServers []string
 
+	// UserID is an AUTHORIZATION filter (Spec 107 FR-002, T086), evaluated
+	// beside AllowedServers: empty means unrestricted (every existing caller
+	// of ListActivities/StreamActivities), a non-empty value restricts
+	// matches to records whose UserID equals this exactly. It exists so
+	// GET /api/v1/user/activity can select "my own records on servers I am
+	// entitled to" inside ONE storage query, rather than fetching a page and
+	// post-filtering it — which shrinks the returned page while `total` keeps
+	// counting the records that were dropped.
+	UserID string
+
 	// ExcludeCallToolSuccess filters out call_tool_* internal tool calls, which
 	// are always paired with a canonical record carrying the same request_id:
 	// successful and failed ones with the upstream tool_call record
@@ -383,6 +393,9 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 	// Authorization filter first: a caller must never be able to widen its own
 	// visibility with any of the query-string filters below it.
 	if !f.serverAllowed(record.ServerName) {
+		return false
+	}
+	if f.UserID != "" && record.UserID != f.UserID {
 		return false
 	}
 

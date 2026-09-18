@@ -113,6 +113,19 @@ func (m *Manager) SearchTools(query string, limit int) ([]*config.SearchResult, 
 	return m.bleveIndex.SearchTools(query, limit)
 }
 
+// SearchToolsScoped is SearchTools filtered to the servers inScope admits
+// BEFORE the ranked cut (Spec 107 T075a). See BleveIndex.SearchToolsScoped.
+func (m *Manager) SearchToolsScoped(query string, limit int, inScope func(serverName string) bool) ([]*config.SearchResult, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20 // default limit, as SearchTools
+	}
+
+	return m.bleveIndex.SearchToolsScoped(query, limit, inScope)
+}
+
 // Search searches for tools matching the query (alias for SearchTools)
 func (m *Manager) Search(query string, limit int) ([]*config.SearchResult, error) {
 	return m.SearchTools(query, limit)

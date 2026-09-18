@@ -1,11 +1,14 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"net/http"
 	"strings"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // ProfileSummary is one entry of the GET /api/v1/profiles listing (Profiles v2 T2).
@@ -58,6 +61,16 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Spec 107 T085: a tenant SESSION principal (cookie/bearer-JWT, never an
+	// agent token) omits a profile ENTIRELY when its effective server set has
+	// empty intersection with her entitlement, rather than merely narrowing
+	// `servers` to []. Narrowing alone still names the profile and hands back
+	// a tool_count of 0 for servers she may not otherwise enumerate — a count
+	// oracle. Agent-token behaviour (#1166 per-server narrowing) is
+	// unchanged: this omission is session-principal-only.
+	ac := auth.AuthContextFromContext(r.Context())
+	omitHiddenProfiles := ac.IsSessionPrincipal() && !ac.IsAdmin()
+
 	toolCounts := s.serverToolCounts()
 	out := make([]ProfileSummary, 0, len(cfg.Profiles))
 	for i := range cfg.Profiles {
@@ -75,6 +88,16 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 				if canSeeServer(r.Context(), name) {
 					scoped = append(scoped, name)
 				}
+			}
+			// FR-002: omit whenever the intersection is empty — including
+			// when the profile's effective server set was ALREADY empty
+			// before scoping (a profile naming only a server absent from the
+			// admin configuration, or configured with no servers at all).
+			// There is no carve-out for that case: an empty intersection is
+			// an empty intersection regardless of which side was empty
+			// (cross-review round 2, chunk 3 P3).
+			if omitHiddenProfiles && len(scoped) == 0 {
+				continue
 			}
 			eff = scoped
 		}
@@ -101,11 +124,49 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.SuccessResponse "Active profile"
 // @Router /api/v1/profiles/active [get]
-func (s *Server) handleGetActiveProfile(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleGetActiveProfile(w http.ResponseWriter, r *http.Request) {
 	s.activeProfileMu.RLock()
 	active := s.activeProfile
 	s.activeProfileMu.RUnlock()
+
+	// Spec 107 T085: a tenant session principal reads the hidden active
+	// profile back as "" (same omission handleListProfiles applies), never
+	// the real slug — the slug's existence is not itself something she may
+	// see when every server it resolves to is outside her entitlement.
+	if active != "" {
+		ac := auth.AuthContextFromContext(r.Context())
+		if ac.IsSessionPrincipal() && !ac.IsAdmin() {
+			cfg, err := s.controller.GetConfig()
+			// Fail CLOSED, not open: a config-read failure must not answer
+			// with the real slug just because visibility could not be
+			// checked (cross-review round 3 — handleListProfiles already
+			// refuses outright on the same error; this door has no such
+			// escape hatch, so it clears the value instead).
+			if err != nil || cfg == nil || !activeProfileVisible(r.Context(), cfg, active) {
+				active = ""
+			}
+		}
+	}
+
 	s.writeSuccess(w, map[string]interface{}{"active_profile": active})
+}
+
+// activeProfileVisible reports whether the named profile's effective server
+// set has non-empty intersection with the caller's entitlement (Spec 107
+// T085) — the same rule handleListProfiles applies per row.
+func activeProfileVisible(ctx context.Context, cfg *config.Config, name string) bool {
+	for i := range cfg.Profiles {
+		if cfg.Profiles[i].Name != name {
+			continue
+		}
+		for _, srv := range cfg.Profiles[i].EffectiveServers(cfg) {
+			if canSeeServer(ctx, srv) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // SetActiveProfileRequest is the body of PUT /api/v1/profiles/active. Either

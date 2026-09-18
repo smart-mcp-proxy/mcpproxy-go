@@ -10,6 +10,26 @@ const (
 	AuthTypeAdminUser = "admin_user" // OAuth-authenticated admin (server edition)
 )
 
+// CredentialKind records WHICH credential source authenticated a request
+// (Spec 107 FR-001 precedence, data-model.md §4). It lives in this package —
+// not httpapi — because httpapi imports auth, so an AuthContext field of an
+// httpapi type would be an import cycle. It drives the session-cookie-only
+// minting doors (FR-011), `caller.kind` on the audit line (FR-013) and
+// CanRevealSecrets (FR-002). Empty means "not recorded" (a context built by
+// an in-process caller or a test), which every consumer treats as the least
+// privileged reading for its own decision.
+type CredentialKind string
+
+// The credential kinds an AuthContext can carry.
+const (
+	CredentialKindSocket     CredentialKind = "socket"      // tray Unix socket / Windows named pipe
+	CredentialKindAPIKey     CredentialKind = "api_key"     // the global API key (header, bearer or ?apikey=)
+	CredentialKindBearerJWT  CredentialKind = "bearer_jwt"  // a user JWT minted by POST /auth/token
+	CredentialKindAgentToken CredentialKind = "agent_token" // an mcp_agt_ agent token
+	CredentialKindCookie     CredentialKind = "cookie"      // the mcpproxy_session cookie
+	CredentialKindAnonymous  CredentialKind = "anonymous"   // no credential (require_mcp_auth: false back-compat)
+)
+
 // AuthContext carries authentication identity through request context.
 type AuthContext struct {
 	Type           string   // "admin", "agent", "user", or "admin_user"
@@ -36,6 +56,23 @@ type AuthContext struct {
 	// so it must not satisfy a check that hands back raw credentials. See
 	// CanRevealSecrets.
 	Anonymous bool
+
+	// CredentialKind is the FR-001 source that authenticated this request
+	// (Spec 107). Stamped by apiKeyAuthMiddleware, mcpAuthMiddleware and the
+	// server-edition middleware; empty for contexts built in-process.
+	CredentialKind CredentialKind
+}
+
+// IsSessionPrincipal reports whether this context was installed by a session
+// credential — the mcpproxy_session cookie or a user JWT (Spec 107 FR-002
+// "session principal"). Nil-safe. Session principals never satisfy
+// CanRevealSecrets, and only the cookie kind may reach a minting door
+// (FR-011: a derived credential never mints another credential).
+func (ac *AuthContext) IsSessionPrincipal() bool {
+	if ac == nil {
+		return false
+	}
+	return ac.CredentialKind == CredentialKindCookie || ac.CredentialKind == CredentialKindBearerJWT
 }
 
 // contextKey is an unexported type used as context key to avoid collisions.
@@ -148,7 +185,7 @@ func AnonymousContext() *AuthContext {
 // Authenticated admins — the API key, a tray/socket connection, stdio, an
 // OAuth admin user in the server edition — are unaffected.
 func (ac *AuthContext) CanRevealSecrets() bool {
-	return ac != nil && ac.IsAdmin() && !ac.Anonymous
+	return ac != nil && ac.IsAdmin() && !ac.Anonymous && !ac.IsSessionPrincipal()
 }
 
 // UserContext returns an AuthContext for a regular OAuth-authenticated user.
