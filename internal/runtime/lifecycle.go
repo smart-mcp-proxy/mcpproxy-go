@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -1412,6 +1414,11 @@ func (r *Runtime) SaveConfiguration() error {
 		return fmt.Errorf("failed to clone configuration")
 	}
 
+	// A serve flag / env override the running config no longer carries was
+	// superseded (UpdateListenAddress, an earlier hot apply); retire it so
+	// the field is persisted like any other from now on.
+	config.RetireSupersededOverrides(configCopy)
+
 	// Update servers with latest from storage
 	configCopy.Servers = latestServers
 
@@ -1583,7 +1590,10 @@ func (r *Runtime) ReloadConfiguration() error {
 		if loadErr != nil {
 			return fmt.Errorf("failed to reload config: %w", loadErr)
 		}
-		config.ReapplyFlagOverrides(newConfig)
+		r.mu.RLock()
+		live := r.cfg
+		r.mu.RUnlock()
+		config.ReapplyFlagOverrides(newConfig, live)
 		// Already holding configCommitMu; use the locked helper so we don't
 		// re-acquire the non-reentrant mutex (would deadlock).
 		r.updateConfigLocked(newConfig, cfgPath)
@@ -1610,15 +1620,24 @@ func (r *Runtime) ReloadConfiguration() error {
 		// a surface nobody was being served, and pinRestartGated on the apply
 		// path would pin to a value that was never live.
 		r.mu.RLock()
-		pinned := pinRestartGated(r.cfg, newSnapshot.Config)
+		live := r.cfg
+		pinned := pinRestartGated(live, newSnapshot.Config)
 		r.mu.RUnlock()
+
+		// The loader re-applied the MCPPROXY_* env overrides but knows nothing
+		// about the serve flags; the RUNNING config is the file plus both, so
+		// a hand edit of an unrelated key must not switch `--read-only` off.
+		// Applied to the pinned copy only (nested blocks copy-on-write): the
+		// desired config below stays the file, so a pending file edit of a
+		// restart-gated flag field (listen) is still reported as pending.
+		config.ReapplyFlagOverrides(pinned, live)
 
 		// Republish so the configsvc snapshot and r.cfg cannot disagree:
 		// ReloadFromFile has already published the RAW file, which live
 		// subscribers would read as the running configuration. Skipped when
-		// nothing is pending — the common case, where pinned is equivalent to
-		// what ReloadFromFile just published.
-		if DetectConfigChanges(newSnapshot.Config, pinned).RequiresRestart {
+		// nothing is pending and no flag differs — the common case, where
+		// pinned is equivalent to what ReloadFromFile just published.
+		if DetectConfigChanges(newSnapshot.Config, pinned).RequiresRestart || !configsEquivalent(newSnapshot.Config, pinned) {
 			if uerr := r.configSvc.Update(pinned, configsvc.UpdateTypeModify, "reload_pin_restart_gated"); uerr != nil {
 				r.logger.Error("Failed to republish the pinned configuration after reload", zap.Error(uerr))
 			}
@@ -2251,4 +2270,12 @@ func (r *Runtime) supervisorEventForwarder() {
 			return
 		}
 	}
+}
+
+// configsEquivalent reports whether two configs marshal to the same JSON —
+// the same comparison the config watcher uses to recognise its own saves.
+func configsEquivalent(a, b *config.Config) bool {
+	ja, errA := json.Marshal(a)
+	jb, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(ja, jb)
 }

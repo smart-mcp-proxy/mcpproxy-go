@@ -168,3 +168,71 @@ func TestReloadConfiguration_KeepsFlagOverridesEffective(t *testing.T) {
 	assertNoOverridesOnDisk(t, m)
 	assert.Equal(t, float64(77), m["tools_limit"])
 }
+
+// A hot API edit of an overridden field supersedes the flag for this process:
+// a later external edit of an unrelated key must not resurrect it on reload.
+func TestReloadConfiguration_DoesNotResurrectAFlagTheAPISuperseded(t *testing.T) {
+	rt, cfgPath := newOverriddenRuntime(t)
+
+	desired, err := rt.GetDesiredConfig()
+	require.NoError(t, err)
+	desired.ToolResponseMode = "full" // the API turns the flag's choice off
+	_, err = rt.ApplyConfig(desired, cfgPath)
+	require.NoError(t, err)
+
+	edited, err := config.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, "full", edited.ToolResponseMode)
+	edited.ToolsLimit = 77
+	require.NoError(t, config.SaveConfig(edited, cfgPath))
+	require.NoError(t, rt.ReloadConfiguration())
+
+	live, err := rt.GetConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "full", live.ToolResponseMode, "the API edit survives the reload")
+	assert.True(t, live.ReadOnlyMode, "the untouched flag survives the reload")
+}
+
+// Toggling an overridden hot field away from the flag and back again via the
+// API: the second edit is a real edit and must persist, not be swapped for
+// the file's value.
+func TestApplyConfig_TogglingAnOverriddenFieldBackPersists(t *testing.T) {
+	rt, cfgPath := newOverriddenRuntime(t)
+
+	desired, err := rt.GetDesiredConfig()
+	require.NoError(t, err)
+	desired.ToolResponseMode = "full"
+	_, err = rt.ApplyConfig(desired, cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, "full", readConfigJSON(t, cfgPath)["tool_response_mode"])
+
+	desired, err = rt.GetDesiredConfig()
+	require.NoError(t, err)
+	desired.ToolResponseMode = "compact"
+	_, err = rt.ApplyConfig(desired, cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, "compact", readConfigJSON(t, cfgPath)["tool_response_mode"])
+}
+
+// A reload must keep the DESIRED config equal to the file: a restart-gated
+// flag (listen) is re-applied to the running config only, so a pending file
+// edit of that field is still reported as pending and not clobbered.
+func TestReloadConfiguration_RestartGatedFlagDoesNotHideAPendingFileEdit(t *testing.T) {
+	rt, cfgPath := newOverriddenRuntime(t)
+
+	edited, err := config.ReadFile(cfgPath)
+	require.NoError(t, err)
+	edited.Listen = "127.0.0.1:9090"
+	require.NoError(t, config.SaveConfig(edited, cfgPath))
+	require.NoError(t, rt.ReloadConfiguration())
+
+	live, err := rt.GetConfig()
+	require.NoError(t, err)
+	assert.Equal(t, ":0", live.Listen, "the bound listener keeps the flag value")
+	desired, err := rt.GetDesiredConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:9090", desired.Listen, "the desired config is the file")
+
+	require.NoError(t, rt.SaveConfiguration())
+	assert.Equal(t, "127.0.0.1:9090", readConfigJSON(t, cfgPath)["listen"], "a later save keeps the pending edit")
+}

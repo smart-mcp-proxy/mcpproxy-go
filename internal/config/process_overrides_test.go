@@ -246,7 +246,7 @@ func TestOverrides_EnvAndFlagOnTheSameFieldBothSurviveReload(t *testing.T) {
 	reloaded, err := LoadFromFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "127.0.0.1:9000", reloaded.Listen, "the loader applies env")
-	ReapplyFlagOverrides(reloaded)
+	ReapplyFlagOverrides(reloaded, nil)
 	assert.Equal(t, "127.0.0.1:9999", reloaded.Listen, "flag overrides are re-applied on reload")
 
 	require.NoError(t, SaveConfig(reloaded, path))
@@ -290,7 +290,7 @@ func TestReapplyFlagOverrides(t *testing.T) {
 	reloaded, err := LoadFromFile(path)
 	require.NoError(t, err)
 	require.Equal(t, "warn", reloaded.Logging.Level)
-	ReapplyFlagOverrides(reloaded)
+	ReapplyFlagOverrides(reloaded, nil)
 	assert.True(t, reloaded.ReadOnlyMode)
 	assert.Equal(t, "debug", reloaded.Logging.Level)
 
@@ -335,4 +335,73 @@ func TestOverrides_EnvRebuildIsAtomicWithSaves(t *testing.T) {
 	}
 	close(stop)
 	<-done
+}
+
+// Round-2 review findings.
+
+// A flag the API superseded in this process (a hot edit to a different
+// value) must not come back on a reload: the edit is on disk, the flag is
+// retired.
+func TestReapplyFlagOverrides_SkipsAFlagTheLiveConfigSuperseded(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"read_only_mode": false, "tool_response_mode": "full", "mcpServers": []}`)
+
+	live, err := LoadFromFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(live, FieldReadOnlyMode, OverrideSourceFlag, false) // explicit --read-only=false
+	OverrideForProcess(live, FieldToolResponseMode, OverrideSourceFlag, "compact")
+
+	live.ReadOnlyMode = true // the API edit, applied hot and persisted
+	require.NoError(t, os.WriteFile(path, []byte(`{"read_only_mode": true, "tool_response_mode": "full", "tools_limit": 5, "mcpServers": []}`), 0o600))
+
+	reloaded, err := LoadFromFile(path)
+	require.NoError(t, err)
+	ReapplyFlagOverrides(reloaded, live)
+	assert.True(t, reloaded.ReadOnlyMode, "the superseded flag must not be resurrected")
+	assert.Equal(t, "compact", reloaded.ToolResponseMode, "the untouched flag is re-applied")
+	assert.Equal(t, []string{"tool_response_mode"}, ProcessOverrideFields(), "the superseded flag is retired")
+}
+
+// Once the running config carries a different value than the override, the
+// override is retired: a later edit back to the override's value is then an
+// ordinary edit and persists (it used to restore the file value instead).
+func TestRetireSupersededOverrides(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"tool_response_mode": "full", "listen": "127.0.0.1:8080", "mcpServers": []}`)
+
+	cfg, err := ReadFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(cfg, FieldToolResponseMode, OverrideSourceFlag, "compact")
+	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, ":0")
+
+	// The API sets the hot field to something else; listen stays pinned.
+	cfg.ToolResponseMode = "full"
+	require.NoError(t, SaveConfig(cfg, path))
+	RetireSupersededOverrides(cfg)
+	assert.Equal(t, []string{"listen"}, ProcessOverrideFields())
+
+	// …and back to the flag's value: a real edit now.
+	cfg.ToolResponseMode = "compact"
+	require.NoError(t, SaveConfig(cfg, path))
+	m := readJSON(t, path)
+	assert.Equal(t, "compact", m["tool_response_mode"])
+	assert.Equal(t, "127.0.0.1:8080", m["listen"], "the pinned flag is still not persisted")
+}
+
+// Registering the same override twice (loadConfig and runServer both apply
+// --tool-response-limit; Validate runs twice) must keep the FILE value as the
+// fallback, not the flag value the second registration finds in place.
+func TestOverrideForProcess_RepeatedRegistrationKeepsTheFileFallback(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+
+	cfg := DefaultConfig()
+	cfg.ToolResponseLimit = 20000
+	OverrideForProcess(cfg, FieldToolResponseLimit, OverrideSourceFlag, 500)
+	OverrideForProcess(cfg, FieldToolResponseLimit, OverrideSourceFlag, 500)
+
+	persisted := PersistableConfig(cfg, filepath.Join(t.TempDir(), "missing.json"))
+	assert.Equal(t, 20000, persisted.ToolResponseLimit)
 }

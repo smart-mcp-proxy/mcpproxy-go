@@ -196,6 +196,8 @@ type processOverride interface {
 	restore(out, base *Config)
 	// loadedValue is the file value recorded when the override was applied.
 	loadedValue() any
+	// supersededBy reports whether live no longer carries the process value.
+	supersededBy(live *Config) bool
 	// reapply layers the process value back onto a freshly loaded cfg and
 	// returns the entry with its recorded file value refreshed (loaded is
 	// what cfg held before, or fileValue when the caller knows better).
@@ -222,6 +224,11 @@ func (o typedOverride[T]) restore(out, base *Config) {
 		fileValue = o.field.Get(base)
 	}
 	o.field.Set(out, fileValue)
+}
+
+// supersededBy reports whether live no longer carries the process value.
+func (o typedOverride[T]) supersededBy(live *Config) bool {
+	return !reflect.DeepEqual(o.field.Get(live), o.process)
 }
 
 func (o typedOverride[T]) reapply(cfg *Config, fileValue any, useFileValue bool) processOverride {
@@ -267,16 +274,25 @@ func OverrideForProcess[T any](cfg *Config, f Field[T], source OverrideSource, v
 // The recorded file value is what cfg holds now — unless this is a flag
 // layered over an env override of the same field, whose record already
 // knows the real file value.
+//
+// A repeated registration of the same override (loadConfig and runServer both
+// apply --tool-response-limit; Validate runs twice) finds the previous
+// override already in place, so the file value is inherited from the
+// existing record rather than read off cfg.
 func newOverride[T any](cfg *Config, f Field[T], source OverrideSource, value T) typedOverride[T] {
 	loaded := f.Get(cfg)
-	if source == OverrideSourceFlag {
-		processOverridesMu.RLock()
-		env, ok := processOverrides[overrideKey{f.Name, OverrideSourceEnv}]
-		processOverridesMu.RUnlock()
-		if ok {
-			if v, isT := env.loadedValue().(T); isT {
-				loaded = v
-			}
+	processOverridesMu.RLock()
+	prev, hasPrev := processOverrides[overrideKey{f.Name, source}]
+	env, hasEnv := processOverrides[overrideKey{f.Name, OverrideSourceEnv}]
+	processOverridesMu.RUnlock()
+	if hasPrev {
+		if p, ok := prev.(typedOverride[T]); ok && reflect.DeepEqual(loaded, p.process) {
+			loaded = p.loaded
+		}
+	}
+	if source == OverrideSourceFlag && hasEnv {
+		if v, ok := env.loadedValue().(T); ok {
+			loaded = v
 		}
 	}
 	return typedOverride[T]{field: f, src: source, process: value, loaded: loaded}
@@ -322,7 +338,11 @@ func (b *envOverrideBatch) commit() {
 // re-applied the env overrides but knows nothing about the serve flags — and
 // refreshes each record's file value. Without it a hot reload after an
 // external edit silently switched `--read-only` (or any other flag) off.
-func ReapplyFlagOverrides(cfg *Config) {
+//
+// live is the config this process was running before the reload. A flag the
+// live config no longer carries was superseded by an API edit (which is on
+// disk by now); it is retired rather than resurrected over that edit.
+func ReapplyFlagOverrides(cfg, live *Config) {
 	if cfg == nil {
 		return
 	}
@@ -330,6 +350,10 @@ func ReapplyFlagOverrides(cfg *Config) {
 	defer processOverridesMu.Unlock()
 	for key, o := range processOverrides {
 		if key.source != OverrideSourceFlag {
+			continue
+		}
+		if live != nil && o.supersededBy(live) {
+			delete(processOverrides, key)
 			continue
 		}
 		// Over an env override of the same field the config already carries
@@ -340,6 +364,26 @@ func ReapplyFlagOverrides(cfg *Config) {
 			fileValue = env.loadedValue()
 		}
 		processOverrides[key] = o.reapply(cfg, fileValue, hasEnv)
+	}
+}
+
+// RetireSupersededOverrides forgets every override the running config no
+// longer carries. An API edit that moved an overridden field to another
+// value has superseded the override for this process: from then on the field
+// is ordinary, so an edit BACK to the override's value persists as the edit
+// it is instead of being swapped for the file value. Call it with the config
+// this process actually runs (never with a file-derived one, whose values
+// differ from every override by construction).
+func RetireSupersededOverrides(live *Config) {
+	if live == nil {
+		return
+	}
+	processOverridesMu.Lock()
+	defer processOverridesMu.Unlock()
+	for key, o := range processOverrides {
+		if o.supersededBy(live) {
+			delete(processOverrides, key)
+		}
 	}
 }
 

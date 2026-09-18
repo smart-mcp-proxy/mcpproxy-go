@@ -471,3 +471,24 @@ func TestServeFlagOverrideEditedViaAPIIsPersisted(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:9090", file["listen"])
 	assert.Equal(t, false, file["read_only_mode"])
 }
+
+// Both loadConfig and runServer apply --tool-response-limit; the second
+// registration must not replace the recorded file value (the fallback when
+// the file cannot be read at save time) with the flag's own value.
+func TestServeFlagsRegisteredTwiceKeepTheFileFallback(t *testing.T) {
+	saveServeGlobals(t)
+	t.Cleanup(config.ResetProcessOverrides)
+	config.ResetProcessOverrides()
+	path := writeServeFlagTestConfig(t)
+	configFile, dataDir = path, filepath.Dir(path)
+
+	cmd := newServeRuntimeFlagTestCmd()
+	require.NoError(t, cmd.ParseFlags([]string{"--tool-response-limit", "500"}))
+	cfg, _, err := loadConfig(cmd)
+	require.NoError(t, err)
+	applyServeRuntimeFlags(cmd, cfg)
+	require.Equal(t, 500, cfg.ToolResponseLimit)
+
+	persisted := config.PersistableConfig(cfg, filepath.Join(t.TempDir(), "missing.json"))
+	assert.Equal(t, 20000, persisted.ToolResponseLimit)
+}

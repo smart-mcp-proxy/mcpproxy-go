@@ -853,10 +853,6 @@ func applyServeRuntimeFlags(cmd *cobra.Command, cfg *config.Config) {
 	cmdDebugSearch, _ := flags.GetBool("debug-search")
 	config.OverrideForProcess(cfg, config.FieldDebugSearch, config.OverrideSourceFlag, cmdDebugSearch)
 
-	if cmdToolResponseLimit, _ := flags.GetInt("tool-response-limit"); cmdToolResponseLimit != 0 {
-		config.OverrideForProcess(cfg, config.FieldToolResponseLimit, config.OverrideSourceFlag, cmdToolResponseLimit)
-	}
-
 	// Apply security settings from command line ONLY if explicitly set
 	for _, f := range []struct {
 		flag  string
