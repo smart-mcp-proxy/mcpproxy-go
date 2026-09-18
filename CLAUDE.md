@@ -54,7 +54,7 @@ Built in two editions from one codebase via Go build tags:
 | Edition | Build | Binary | Distribution |
 |---------|-------|--------|--------------|
 | **Personal** (default) | `go build ./cmd/mcpproxy` | `mcpproxy` | macOS DMG, Windows installer, Linux tar.gz |
-| **Server** | `go build -tags server ./cmd/mcpproxy` | `mcpproxy-server` | Docker image, .deb, Linux tar.gz |
+| **Server** | `go build -tags server -o mcpproxy-server ./cmd/mcpproxy` | `mcpproxy-server` | Docker image (`ghcr.io`) only — no .deb / tar.gz |
 
 All server code is behind `//go:build server` in `internal/serveredition/`; the personal edition is unaffected. The binary self-identifies (`mcpproxy version`, `/api/v1/status` → `"edition"`). Server multi-user OAuth (Spec 024): see [docs/development/server-edition-multiuser-auth.md](docs/development/server-edition-multiuser-auth.md).
 
@@ -99,8 +99,14 @@ go test -tags server ./internal/serveredition/... -race   # server edition
 
 # Lint — CI uses golangci-lint v2 with .github/.golangci.yml, which is STRICTER
 # than the local scripts/run-linter.sh (v1.x) and catches things it misses.
-# Run the v2 binary before pushing:
+# CI runs it TWICE: bare, and with --build-tags server (server-edition code is
+# invisible to the bare run). Run both before pushing:
 /opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...
+/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml --build-tags server ./...
+# CI also race-tests internal/server, httpapi and storage under -tags server
+# with the unit-tests.yml -skip regex (bare `go test ./internal/server/...`
+# hangs to the timeout on the binary-spawning tests):
+go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...
 
 # Run
 ./mcpproxy serve [--listen :8080] [--log-level=debug]     # core (localhost:8080)

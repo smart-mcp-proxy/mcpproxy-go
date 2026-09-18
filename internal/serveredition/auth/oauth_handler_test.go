@@ -101,14 +101,13 @@ func registerMockProvider(t *testing.T, mockServer *httptest.Server) {
 
 	providerRegistry["google"] = func(_ string) *OAuthProvider {
 		return &OAuthProvider{
-			Name:              "google",
-			AuthURL:           mockServer.URL + "/authorize",
-			TokenURL:          mockServer.URL + "/token",
-			UserInfoURL:       mockServer.URL + "/userinfo",
-			Scopes:            []string{"openid", "email", "profile"},
-			OfflineAuthParams: map[string]string{"access_type": "offline", "prompt": "consent"},
-			SupportsOIDC:      true,
-			SupportsPKCE:      true,
+			Name:         "google",
+			AuthURL:      mockServer.URL + "/authorize",
+			TokenURL:     mockServer.URL + "/token",
+			UserInfoURL:  mockServer.URL + "/userinfo",
+			Scopes:       []string{"openid", "email", "profile"},
+			SupportsOIDC: true,
+			SupportsPKCE: true,
 		}
 	}
 
@@ -151,18 +150,23 @@ func TestHandleLogin_Redirects(t *testing.T) {
 	assert.Equal(t, "code", params.Get("response_type"))
 	assert.Contains(t, params.Get("scope"), "openid")
 
-	// Default-off (FR-006): store_idp_tokens unset → no offline-access request,
-	// so login behaves exactly as before.
-	assert.Empty(t, params.Get("access_type"), "offline access must not be requested by default")
+	// Login never requests offline access: the IdP refresh token has no reader
+	// (Spec 107 FR-033), so the deprecated store_idp_tokens cannot change the URL.
+	assert.Empty(t, params.Get("access_type"), "offline access must never be requested")
 	assert.Empty(t, params.Get("prompt"))
 }
 
-// TestHandleLogin_RequestsOfflineAccess verifies that when teams.store_idp_tokens
-// is enabled, the login redirect asks the provider for offline access so the
-// persisted IdP subject token actually carries a refresh token (Codex review on
-// PR #601 / MCP-1036). Without this, the refresh path in GetValidIDPSubjectToken
-// would have no refresh token and always return ErrReauthRequired after expiry.
-func TestHandleLogin_RequestsOfflineAccess(t *testing.T) {
+// TestHandleLogin_StoreIDPTokensTrueStillNeverRequestsOfflineAccess pins the
+// Spec 107 FR-033 no-op where it matters: with the deprecated flag ON, the
+// authorization URL is byte-for-byte free of every offline-access marker the
+// retired capture path used to add (`access_type=offline`, `prompt=consent`,
+// the `offline_access` scope). TestHandleLogin_Redirects runs with the flag
+// off, so on its own it could not catch the capture path coming back behind
+// the flag.
+//
+// BITES: re-add OfflineAuthParams / OfflineAccessScopes gated on
+// h.config.StoreIDPTokens in HandleLogin.
+func TestHandleLogin_StoreIDPTokensTrueStillNeverRequestsOfflineAccess(t *testing.T) {
 	mockServer := mockOAuthProviderServer(t, "user@example.com", "Test User", "sub-123")
 	registerMockProvider(t, mockServer)
 
@@ -171,7 +175,6 @@ func TestHandleLogin_RequestsOfflineAccess(t *testing.T) {
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
 	})
-	// Operator opted into persisting IdP subject tokens.
 	handler.config.StoreIDPTokens = true
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil)
@@ -185,10 +188,13 @@ func TestHandleLogin_RequestsOfflineAccess(t *testing.T) {
 	redirectURL, err := url.Parse(resp.Header.Get("Location"))
 	require.NoError(t, err)
 	params := redirectURL.Query()
+	// Positive control: this is the real authorization request.
+	assert.Equal(t, "test-client-id", params.Get("client_id"))
+	assert.Equal(t, "code", params.Get("response_type"))
 
-	assert.Equal(t, "offline", params.Get("access_type"),
-		"login must request offline access when store_idp_tokens is enabled")
-	assert.Equal(t, "consent", params.Get("prompt"))
+	assert.Empty(t, params.Get("access_type"), "store_idp_tokens must not request offline access")
+	assert.Empty(t, params.Get("prompt"), "store_idp_tokens must not force a consent prompt")
+	assert.NotContains(t, params.Get("scope"), "offline_access", "store_idp_tokens must not add the offline_access scope")
 }
 
 func TestHandleLogin_StateInURL(t *testing.T) {

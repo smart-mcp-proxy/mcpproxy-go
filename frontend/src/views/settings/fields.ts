@@ -324,7 +324,6 @@ export const SERVER_EDITION_SECTION_TITLE = '👥 Server Edition'
 export const SERVER_EDITION_FIELDS: SettingField[] = [
   { key: 'server_edition.enabled', label: 'Enable multi-user mode', control: 'toggle', restart: true },
   { key: 'server_edition.oauth.provider', label: 'OAuth provider', control: 'select', options: ['', 'google', 'github', 'microsoft'].map((v) => ({ value: v, label: v || '(none)' })) },
-  { key: 'server_edition.max_user_servers', label: 'Max servers per user', control: 'number', min: 0 },
 ]
 
 // isBlankInstructions returns true when a saved instructions value is empty /

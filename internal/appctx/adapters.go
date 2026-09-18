@@ -279,11 +279,16 @@ func (c *CacheManagerAdapter) Get(key string) (interface{}, bool) {
 	return record.FullContent, true
 }
 
-// Set adapts the cache manager to implement our interface
+// Set adapts the cache manager to implement our interface. The entry is
+// stamped internal (Spec 105 FR-002): it is written on the proxy's own behalf
+// and read back through the ungated Get above, so read_cache refuses it for
+// every caller without evicting it. An unstamped Store would be legacy
+// provenance, invalidated by the first read_cache probe of the key.
 func (c *CacheManagerAdapter) Set(key string, value interface{}, _ time.Duration) error {
 	// The cache manager has a different Store signature, so we adapt it
 	valueStr := fmt.Sprintf("%v", value)
-	return c.Store(key, "generic_tool", map[string]interface{}{}, valueStr, "", 0)
+	return c.StoreAs(key, "generic_tool", map[string]interface{}{}, valueStr, "", 0,
+		cache.Authorization{CallerKind: cache.CallerKindInternal})
 }
 
 // Delete removes a cache entry

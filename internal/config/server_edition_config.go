@@ -10,20 +10,25 @@ import (
 )
 
 // ServerEditionConfig holds configuration for the server edition multi-user features.
+//
+// Spec 107 FR-032 removed the never-enforced `max_user_servers` and
+// `workspace_idle_timeout` knobs. A config file that still carries them loads
+// (the server-build normaliser drops them from the raw document and records a
+// LoadDiagnostic per key); the write doors refuse them (ValidateRemovedKeys).
 type ServerEditionConfig struct {
-	Enabled              bool                      `json:"enabled" mapstructure:"enabled"`
-	AdminEmails          []string                  `json:"admin_emails" mapstructure:"admin-emails"`
-	OAuth                *ServerEditionOAuthConfig `json:"oauth,omitempty" mapstructure:"oauth"`
-	SessionTTL           Duration                  `json:"session_ttl,omitempty" mapstructure:"session-ttl"`
-	BearerTokenTTL       Duration                  `json:"bearer_token_ttl,omitempty" mapstructure:"bearer-token-ttl"`
-	WorkspaceIdleTimeout Duration                  `json:"workspace_idle_timeout,omitempty" mapstructure:"workspace-idle-timeout"`
-	MaxUserServers       int                       `json:"max_user_servers,omitempty" mapstructure:"max-user-servers"`
+	Enabled        bool                      `json:"enabled" mapstructure:"enabled"`
+	AdminEmails    []string                  `json:"admin_emails" mapstructure:"admin-emails"`
+	OAuth          *ServerEditionOAuthConfig `json:"oauth,omitempty" mapstructure:"oauth"`
+	SessionTTL     Duration                  `json:"session_ttl,omitempty" mapstructure:"session-ttl"`
+	BearerTokenTTL Duration                  `json:"bearer_token_ttl,omitempty" mapstructure:"bearer-token-ttl"`
 
 	// CredentialEncryptionKey encrypts per-user upstream credentials at rest
-	// (spec 074). When empty, it falls back to the MCPPROXY_CRED_KEY env var.
+	// (spec 074). When empty, ApplyDefaults falls back to the MCPPROXY_CRED_KEY
+	// env var.
 	CredentialEncryptionKey string `json:"credential_encryption_key,omitempty" mapstructure:"credential-encryption-key"`
-	// StoreIDPTokens controls whether caller IdP subject tokens are persisted.
-	// Privacy-preserving default: false (FR-006).
+	// StoreIDPTokens is a deprecated no-op retained so pre-107 configs keep
+	// loading (Spec 107 FR-033). IdP tokens are no longer persisted at login;
+	// `true` records one deprecation LoadDiagnostic at load time.
 	StoreIDPTokens bool `json:"store_idp_tokens" mapstructure:"store-idp-tokens"`
 }
 
@@ -36,14 +41,15 @@ type ServerEditionOAuthConfig struct {
 	AllowedDomains []string `json:"allowed_domains,omitempty" mapstructure:"allowed-domains"`
 }
 
+// defaultServerEditionTTL is the default for session_ttl and bearer_token_ttl.
+const defaultServerEditionTTL = Duration(24 * time.Hour)
+
 // DefaultServerEditionConfig returns a ServerEditionConfig with sensible defaults.
 func DefaultServerEditionConfig() *ServerEditionConfig {
 	return &ServerEditionConfig{
-		Enabled:              false,
-		SessionTTL:           Duration(24 * time.Hour),
-		BearerTokenTTL:       Duration(24 * time.Hour),
-		WorkspaceIdleTimeout: Duration(30 * time.Minute),
-		MaxUserServers:       20,
+		Enabled:        false,
+		SessionTTL:     defaultServerEditionTTL,
+		BearerTokenTTL: defaultServerEditionTTL,
 	}
 }
 
@@ -57,15 +63,39 @@ func (c *ServerEditionConfig) IsAdminEmail(email string) bool {
 	return false
 }
 
-// Validate checks that the ServerEditionConfig is valid for operation.
-func (c *ServerEditionConfig) Validate() error {
-	if !c.Enabled {
-		return nil // disabled, no validation needed
+// ApplyDefaults fills the derived values a running server edition needs: the
+// TTLs, the Microsoft multi-tenant "common" tenant, and the MCPPROXY_CRED_KEY
+// fallback for credential_encryption_key (an explicit config value always wins
+// over the environment). It is the boot-time companion of Validate (Spec 107
+// FR-039): setup calls ApplyDefaults then Validate on a Clone of the live
+// block — never on the runtime's own pointer, which is the PATCH merge base
+// and the next write-back — while the write doors call only Validate, so
+// nothing derived is ever persisted into the config file.
+func (c *ServerEditionConfig) ApplyDefaults() {
+	if c == nil {
+		return
 	}
-	// Spec 074: fall back to MCPPROXY_CRED_KEY when no explicit key is set.
-	// An explicit config value always wins over the environment.
 	if c.CredentialEncryptionKey == "" {
 		c.CredentialEncryptionKey = os.Getenv("MCPPROXY_CRED_KEY")
+	}
+	if c.OAuth != nil && c.OAuth.Provider == "microsoft" && c.OAuth.TenantID == "" {
+		c.OAuth.TenantID = "common"
+	}
+	if c.SessionTTL.Duration() <= 0 {
+		c.SessionTTL = defaultServerEditionTTL
+	}
+	if c.BearerTokenTTL.Duration() <= 0 {
+		c.BearerTokenTTL = defaultServerEditionTTL
+	}
+}
+
+// Validate checks that the ServerEditionConfig is valid for operation. It is
+// non-mutating: unset TTLs, an unset Microsoft tenant and an unset encryption
+// key are defaulted by ApplyDefaults, never refused here, so the same rules
+// apply at boot, on PATCH /api/v1/config and on /config/apply (FR-039).
+func (c *ServerEditionConfig) Validate() error {
+	if c == nil || !c.Enabled {
+		return nil // disabled, no validation needed
 	}
 	if len(c.AdminEmails) == 0 {
 		return fmt.Errorf("server_edition.admin_emails must contain at least one admin email")
@@ -83,21 +113,30 @@ func (c *ServerEditionConfig) Validate() error {
 	if c.OAuth.ClientSecret == "" {
 		return fmt.Errorf("server_edition.oauth.client_secret is required")
 	}
-	if c.OAuth.Provider == "microsoft" && c.OAuth.TenantID == "" {
-		// Default to "common" for multi-tenant
-		c.OAuth.TenantID = "common"
+	if c.SessionTTL.Duration() < 0 {
+		return fmt.Errorf("server_edition.session_ttl must be positive")
 	}
-	if c.SessionTTL.Duration() <= 0 {
-		c.SessionTTL = Duration(24 * time.Hour)
-	}
-	if c.BearerTokenTTL.Duration() <= 0 {
-		c.BearerTokenTTL = Duration(24 * time.Hour)
-	}
-	if c.WorkspaceIdleTimeout.Duration() <= 0 {
-		c.WorkspaceIdleTimeout = Duration(30 * time.Minute)
-	}
-	if c.MaxUserServers <= 0 {
-		c.MaxUserServers = 20
+	if c.BearerTokenTTL.Duration() < 0 {
+		return fmt.Errorf("server_edition.bearer_token_ttl must be positive")
 	}
 	return nil
+}
+
+// Clone returns a deep copy of the block (nil-safe).
+func (c *ServerEditionConfig) Clone() *ServerEditionConfig {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	if c.AdminEmails != nil {
+		out.AdminEmails = append([]string(nil), c.AdminEmails...)
+	}
+	if c.OAuth != nil {
+		oauth := *c.OAuth
+		if c.OAuth.AllowedDomains != nil {
+			oauth.AllowedDomains = append([]string(nil), c.OAuth.AllowedDomains...)
+		}
+		out.OAuth = &oauth
+	}
+	return &out
 }

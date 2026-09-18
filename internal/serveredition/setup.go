@@ -29,7 +29,29 @@ func setupMultiUserOAuth(deps Dependencies) error {
 		return nil
 	}
 
-	cfg := deps.Config.ServerEdition
+	// Spec 107 FR-033 residual: an earlier release with `store_idp_tokens: true`
+	// persisted each user's IdP access + offline refresh token in the
+	// credential bucket under the bare userID. The writer is gone and nothing
+	// reads, lists or deletes those rows through any door, so sweep them here
+	// — by key, no decryption, so it needs no encryption key — and BEFORE any
+	// fallible step: config validation, bucket creation, the HMAC key and
+	// credential-store construction (a key that is set but malformed) can all
+	// fail this setup, which the caller only logs, and the sweep must not be
+	// lost behind such a failure. Hygiene only: a failed sweep is logged and
+	// never keeps the server from coming up.
+	if purged, perr := broker.PurgeLegacyIDPSubjectTokens(deps.DB); perr != nil {
+		deps.Logger.Warnw("failed to purge legacy IdP subject-token rows from the credential store", "error", perr)
+	} else if purged > 0 {
+		deps.Logger.Infow("purged legacy IdP subject-token rows left by store_idp_tokens (removed in Spec 107)", "rows", purged)
+	}
+
+	// deps.Config is the runtime's live/desired *config.Config — the pointer
+	// PATCH /api/v1/config marshals as its merge base and the next write-back
+	// persists. The derived values ApplyDefaults fills below (the MCPPROXY_CRED_KEY
+	// fallback, the Microsoft "common" tenant, the TTLs) must never land in
+	// that document, so they are applied to a clone and the clone is what every
+	// handler constructed here receives (Spec 107 FR-039).
+	cfg := deps.Config.ServerEdition.Clone()
 
 	// Create user store. Constructing it is infallible; EnsureBuckets below is
 	// not, which is why the owner gate is installed against the store BEFORE
@@ -92,7 +114,11 @@ func setupMultiUserOAuth(deps Dependencies) error {
 		})
 	}
 
-	// Validate server config
+	// Spec 107 FR-039: defaults (TTLs, Microsoft tenant, MCPPROXY_CRED_KEY
+	// fallback) are applied at boot only, to the clone above; Validate itself
+	// never mutates, so the write doors run the same rules without persisting
+	// derived values.
+	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("server config validation: %w", err)
 	}
@@ -117,15 +143,15 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// Create OAuth handler
 	oauthHandler := teamsauth.NewOAuthHandler(userStore, sessionManager, cfg, hmacKey, deps.Logger)
 
-	// Wire the per-user credential store so IdP subject tokens can be captured at
-	// login when teams.store_idp_tokens is enabled (spec 074). The store derives
-	// its key from MCPPROXY_CRED_KEY or teams.credential_encryption_key; with no
-	// key it is constructed disabled and token capture is silently skipped.
+	// The per-user credential store backs the oauth_connect flow (spec 074
+	// Path B): credentials a user connects are stored here, encrypted under
+	// MCPPROXY_CRED_KEY or server_edition.credential_encryption_key. With no key
+	// it is constructed disabled and the connect surface reports so. Nothing
+	// injects a stored credential into a proxied request (Spec 107 FR-034).
 	credStore, err := broker.NewBBoltAESStore(deps.DB, broker.ResolveMasterKey(cfg.CredentialEncryptionKey), deps.Logger.Desugar())
 	if err != nil {
 		return fmt.Errorf("creating credential store: %w", err)
 	}
-	oauthHandler.SetCredentialStore(credStore)
 
 	// The LIVE view of the server-edition block, read through the same provider
 	// the admin-servers check uses rather than a second mechanism.

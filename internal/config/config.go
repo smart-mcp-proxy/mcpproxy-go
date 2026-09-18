@@ -390,6 +390,12 @@ type Config struct {
 	// empty servers) captured during Validate(), for the boot path to log.
 	profileWarnings []string `json:"-"`
 
+	// loadDiagnostics holds the non-fatal Spec 107 findings the server-build
+	// loader recorded while normalising the raw document (removed keys /
+	// modes dropped, deprecated keys retained), for LogLoadDiagnostics to
+	// emit once a logger exists. See load_diagnostics.go.
+	loadDiagnostics []LoadDiagnostic `json:"-"`
+
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
 
@@ -743,12 +749,15 @@ type ServerConfig struct {
 	// — and no longer gates quarantine or skip_quarantine.
 	SourceRegistryProvenance string `json:"source_registry_provenance,omitempty" mapstructure:"source_registry_provenance"`
 
-	// AuthBroker holds per-upstream token-brokering configuration (spec 074,
-	// server edition only). When set, the gateway exchanges the caller's IdP
-	// subject token for an upstream-scoped credential and injects it into the
-	// outbound request. The concrete type is build-tagged: a full struct in the
-	// server edition, an empty stub in the personal edition (which ignores it),
-	// so personal-edition behavior is unaffected. swaggerignore mirrors ServerEdition.
+	// AuthBroker holds the per-upstream `oauth_connect` credential-connect
+	// block (spec 074, server edition only). When set, a user can complete a
+	// per-user consent flow and have their credential STORED encrypted for this
+	// upstream — nothing injects it into the outbound request (Spec 107
+	// FR-034); the call path keeps using the server's own headers/oauth
+	// settings. The concrete type is build-tagged: a validated struct in the
+	// server edition, an opaque json.RawMessage carrier in the personal
+	// edition (preserved verbatim through load → save → PATCH, FR-040), so
+	// personal-edition behavior is unaffected. swaggerignore mirrors ServerEdition.
 	AuthBroker *AuthBrokerConfig `json:"auth_broker,omitempty" mapstructure:"auth_broker" swaggerignore:"true"`
 }
 
@@ -2613,6 +2622,11 @@ func (c *Config) validateDetailedCore() []ValidationError {
 			})
 		}
 	}
+
+	// Spec 107 FR-039: the server_edition block is validated (never mutated)
+	// on every door — boot, PATCH and /config/apply. No-op in the personal
+	// edition (stub); enforced in the server edition.
+	errors = append(errors, validateServerEditionConfig(c)...)
 
 	return errors
 }

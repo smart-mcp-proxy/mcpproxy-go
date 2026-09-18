@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -5203,6 +5204,13 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Spec 107 FR-039: the removed server-edition keys / auth_broker modes
+	// are refused on the raw document, before it is typed (see
+	// handlePatchConfig). No-op in the personal build.
+	if s.refuseRemovedConfigKeys(w, r, document, "Invalid configuration") {
+		return
+	}
+
 	stored, err := s.desiredConfigForPatch()
 	if err != nil {
 		s.logger.Errorw("Failed to read configuration for apply", "error", err)
@@ -5328,8 +5336,13 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
 // @Router       /api/v1/config [patch]
 func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
+	// UseNumber: every number rides through the merge as its decimal text, so
+	// the personal build's opaque server_edition / auth_broker carriers (Spec
+	// 107 FR-040) and any large integer survive the round trip exactly.
+	patchDecoder := json.NewDecoder(r.Body)
+	patchDecoder.UseNumber()
 	var patchMap map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&patchMap); err != nil {
+	if err := patchDecoder.Decode(&patchMap); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
 		return
 	}
@@ -5372,8 +5385,10 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
 		return
 	}
+	baseDecoder := json.NewDecoder(bytes.NewReader(baseBytes))
+	baseDecoder.UseNumber()
 	var baseMap map[string]interface{}
-	if err := json.Unmarshal(baseBytes, &baseMap); err != nil {
+	if err := baseDecoder.Decode(&baseMap); err != nil {
 		s.logger.Errorw("Failed to unmarshal live configuration", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
 		return
@@ -5396,6 +5411,15 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deepMergeJSON(baseMap, patchMap)
+
+	// Spec 107 FR-039: refuse the removed server-edition keys / auth_broker
+	// modes on the MERGED generic map, before the typed decode drops them
+	// without a trace (json.Unmarshal into config.Config ignores unknown
+	// keys, so Config.Validate can never see them). No-op in the personal
+	// build.
+	if s.refuseRemovedConfigKeys(w, r, baseMap, "Invalid configuration patch") {
+		return
+	}
 
 	mergedBytes, err := json.Marshal(baseMap)
 	if err != nil {
@@ -5503,6 +5527,36 @@ func withLiveUpstreamStats(ctx context.Context, status interface{}, live map[str
 		refreshed["message"] = ""
 	}
 	return refreshed
+}
+
+// refuseRemovedConfigKeys runs config.ValidateRemovedKeys on a generic
+// configuration document and, when it reports anything, answers 400 with the
+// structured validation_errors payload (the #1084 shape) and returns true.
+// It is the Spec 107 FR-039 write-time gate for keys the typed decode would
+// otherwise drop silently; the boot path normalises + records instead.
+func (s *Server) refuseRemovedConfigKeys(w http.ResponseWriter, r *http.Request, document map[string]interface{}, msg string) bool {
+	errs := config.ValidateRemovedKeys(document)
+	if len(errs) == 0 {
+		return false
+	}
+	s.writeApplyConfigError(w, r, msg, &internalRuntime.ConfigApplyResult{
+		Success:          false,
+		ValidationErrors: errs,
+	}, fmt.Errorf("%s", errs[0].Error()))
+	return true
+}
+
+// MergeConfigPatch deep-merges patch into a copy of base and returns the
+// merged document — the exact merge handlePatchConfig performs. Exported so
+// the personal-build round-trip test (Spec 107 FR-040, T010) can drive the
+// PATCH path without an HTTP server.
+func MergeConfigPatch(base, patch map[string]interface{}) map[string]interface{} {
+	merged := make(map[string]interface{}, len(base))
+	for k, v := range base {
+		merged[k] = v
+	}
+	deepMergeJSON(merged, patch)
+	return merged
 }
 
 // deepMergeJSON recursively merges patch into base. When both base[k] and
