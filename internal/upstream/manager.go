@@ -755,15 +755,16 @@ func (m *Manager) ShutdownAll(ctx context.Context) error {
 }
 
 // managedContainerFormat is the `docker ps --format` both sweeps read: id,
-// name and the owner label, tab-separated, label last so an empty label
-// leaves the column empty.
-const managedContainerFormat = "{{.ID}}\t{{.Names}}\t{{.Label \"com.mcpproxy.server\"}}"
+// name and the owner + instance labels, tab-separated, labels last so an
+// empty label leaves its column empty rather than shifting the others.
+const managedContainerFormat = "{{.ID}}\t{{.Names}}\t{{.Label \"com.mcpproxy.server\"}}\t{{.Label \"com.mcpproxy.instance\"}}"
 
 // managedContainer is one `docker ps` row of a sweep.
 type managedContainer struct {
-	ID    string
-	Name  string
-	Owner string // the com.mcpproxy.server label value as Docker reported it
+	ID       string
+	Name     string
+	Owner    string // the com.mcpproxy.server label value as Docker reported it
+	Instance string // the com.mcpproxy.instance label value as Docker reported it
 }
 
 // configuredServerNames returns the raw name of every configured server
@@ -818,12 +819,12 @@ func (m *Manager) readManagedContainers(ctx context.Context, includeStopped bool
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
-		if len(parts) < 3 {
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) < 4 {
 			rows = append(rows, managedContainer{ID: parts[0]})
 			continue
 		}
-		rows = append(rows, managedContainer{ID: parts[0], Name: parts[1], Owner: parts[2]})
+		rows = append(rows, managedContainer{ID: parts[0], Name: parts[1], Owner: parts[2], Instance: parts[3]})
 	}
 	return rows, nil
 }
@@ -852,7 +853,7 @@ func (m *Manager) listOwnedManagedContainers(ctx context.Context, includeStopped
 	configured := m.configuredServerNames()
 	var owned []managedContainer
 	for _, row := range rows {
-		if !core.ContainerOwnedByAny(configured, row.Name, row.Owner) {
+		if !core.ContainerOwnedByAny(configured, row.Name, row.Owner, row.Instance) {
 			continue
 		}
 		owned = append(owned, row)
@@ -892,8 +893,8 @@ func (m *Manager) logOwnerGroupedCounts(msg string, level func(msg string, field
 func (m *Manager) mutateOwnedManagedContainer(ctx context.Context, selected managedContainer, op core.ContainerMutation, intent func(core.ContainerRow)) core.MutationResult {
 	mutator := core.ContainerMutator{
 		Docker: sweepDocker,
-		Owns: func(containerName, ownerLabel string) bool {
-			return core.ContainerOwnedByAny(m.configuredServerNames(), containerName, ownerLabel)
+		Owns: func(containerName, ownerLabel, instanceLabel string) bool {
+			return core.ContainerOwnedByAny(m.configuredServerNames(), containerName, ownerLabel, instanceLabel)
 		},
 	}
 	res := mutator.Mutate(ctx, selected.ID, op, intent)
@@ -912,9 +913,15 @@ func (m *Manager) mutateOwnedManagedContainer(ctx context.Context, selected mana
 	return res
 }
 
-// cleanupAllManagedContainers finds and stops all Docker containers managed by mcpproxy
-// Uses labels to identify containers across all instances, then keeps only
-// the ones a configured server canonically owns (listOwnedManagedContainers).
+// cleanupAllManagedContainers finds and stops this instance's Docker
+// containers managed by mcpproxy. The initial `docker ps` filter is the
+// shared, copyable com.mcpproxy.managed label only — deliberately broad —
+// but listOwnedManagedContainers' canonical-ownership check
+// (core.ContainerOwnedByAny) then keeps only the rows that ALSO carry this
+// process's own com.mcpproxy.instance label: a row from another live
+// mcpproxy instance (same host, a configured server with the same name) is
+// exactly as foreign as one with no label at all, and this shutdown path
+// must never stop or remove a container it does not own.
 func (m *Manager) cleanupAllManagedContainers(ctx context.Context) {
 	m.logger.Info("Cleaning up all mcpproxy-managed Docker containers")
 
@@ -2286,8 +2293,8 @@ func (m *Manager) verifyContainerHealthy(client *managed.Client) (bool, error) {
 func (m *Manager) verifyDockerContainerHealthy(ctx context.Context, docker core.DockerCommand, serverName, containerID string) (bool, error) {
 	mutator := core.ContainerMutator{
 		Docker: docker,
-		Owns: func(containerName, ownerLabel string) bool {
-			return core.ContainerOwnedByAny([]string{serverName}, containerName, ownerLabel)
+		Owns: func(containerName, ownerLabel, instanceLabel string) bool {
+			return core.ContainerOwnedByAny([]string{serverName}, containerName, ownerLabel, instanceLabel)
 		},
 	}
 	row, ok, err := mutator.Verify(ctx, containerID)

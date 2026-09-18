@@ -301,12 +301,26 @@ const (
 	ownerLabel           = "com.mcpproxy.server"
 )
 
+// withOwnInstance returns a copy of labels with this test process's own
+// com.mcpproxy.instance value merged in. Every fixture representing a
+// container this server should canonically own must carry it now that
+// ownsContainer requires an instance match too (FR-007 instance-scoping
+// fix, codex finding): a fixture that omits it looks like a container from
+// no instance at all, which is exactly as foreign as a pre-label container.
+func withOwnInstance(labels map[string]string) map[string]string {
+	out := map[string]string{containerInstanceLabel: getInstanceID()}
+	for k, v := range labels {
+		out[k] = v
+	}
+	return out
+}
+
 func ownAndForeignFixture() []fakeContainer {
 	return []fakeContainer{
 		{ID: foreignContainerID, Name: foreignContainerName, Image: "mcp/example", Status: "Up 2 minutes",
 			Labels: map[string]string{"com.mcpproxy.managed": "true", ownerLabel: "a-b"}},
 		{ID: ownContainerID, Name: ownContainerName, Image: "mcp/example", Status: "Exited (0) 1 minute ago",
-			Labels: map[string]string{"com.mcpproxy.managed": "true", ownerLabel: "a"}},
+			Labels: withOwnInstance(map[string]string{"com.mcpproxy.managed": "true", ownerLabel: "a"})},
 	}
 }
 
@@ -396,7 +410,7 @@ func TestDockerCleanup_OwnershipMatcherTable(t *testing.T) {
 		labels map[string]string
 		owned  bool
 	}{
-		{"own label and canonical name", "a", "mcpproxy-a-wxyz", map[string]string{ownerLabel: "a"}, true},
+		{"own label and canonical name", "a", "mcpproxy-a-wxyz", withOwnInstance(map[string]string{ownerLabel: "a"}), true},
 		{"a-b container, server a", "a", "mcpproxy-a-b-wxyz", map[string]string{ownerLabel: "a-b"}, false},
 		{"a/b container, server a", "a", "mcpproxy-a-b-wxyz", map[string]string{ownerLabel: "a/b"}, false},
 		{"case-different label", "a", "mcpproxy-a-wxyz", map[string]string{ownerLabel: "A"}, false},
@@ -406,9 +420,9 @@ func TestDockerCleanup_OwnershipMatcherTable(t *testing.T) {
 		{"own label, name with extra segment", "a", "mcpproxy-a-wxyz-extra", map[string]string{ownerLabel: "a"}, false},
 		{"own label, uppercase suffix", "a", "mcpproxy-a-WXYZ", map[string]string{ownerLabel: "a"}, false},
 		{"own label, short suffix", "a", "mcpproxy-a-wxy", map[string]string{ownerLabel: "a"}, false},
-		{"server a/b owns its container", "a/b", "mcpproxy-a-b-wxyz", map[string]string{ownerLabel: "a/b"}, true},
+		{"server a/b owns its container", "a/b", "mcpproxy-a-b-wxyz", withOwnInstance(map[string]string{ownerLabel: "a/b"}), true},
 		{"server a/b vs a-b's container", "a/b", "mcpproxy-a-b-wxyz", map[string]string{ownerLabel: "a-b"}, false},
-		{"server a-b owns its container", "a-b", "mcpproxy-a-b-wxyz", map[string]string{ownerLabel: "a-b"}, true},
+		{"server a-b owns its container", "a-b", "mcpproxy-a-b-wxyz", withOwnInstance(map[string]string{ownerLabel: "a-b"}), true},
 		{"server a-b vs a/b's container", "a-b", "mcpproxy-a-b-wxyz", map[string]string{ownerLabel: "a/b"}, false},
 		{"server A vs a's container", "A", "mcpproxy-a-wxyz", map[string]string{ownerLabel: "a"}, false},
 	}
@@ -467,38 +481,46 @@ func TestDockerCleanup_CountRecordCarriesContainerOwner(t *testing.T) {
 // predicate that returned true for everything still passed. This is the
 // direct table, plus a filter-blind shim mode below.
 func TestOwnsContainer_Predicate(t *testing.T) {
+	own := getInstanceID()
 	cases := []struct {
-		name   string
-		server string
-		cname  string
-		label  string
-		owned  bool
+		name     string
+		server   string
+		cname    string
+		label    string
+		instance string
+		owned    bool
 	}{
-		{"own label and canonical name", "a", "mcpproxy-a-wxyz", "a", true},
-		{"docker-style leading slash is not canonical", "a", "/mcpproxy-a-wxyz", "a", false},
-		{"a-b container, server a", "a", "mcpproxy-a-b-wxyz", "a-b", false},
-		{"a/b container, server a", "a", "mcpproxy-a-b-wxyz", "a/b", false},
-		{"case-different label", "a", "mcpproxy-a-wxyz", "A", false},
-		{"pre-label container", "a", "mcpproxy-a-wxyz", "", false},
-		{"label mismatch, canonical name", "a", "mcpproxy-a-wxyz", "a-b", false},
-		{"own label, name with extra segment", "a", "mcpproxy-a-wxyz-extra", "a", false},
-		{"own label, uppercase suffix", "a", "mcpproxy-a-WXYZ", "a", false},
-		{"own label, short suffix", "a", "mcpproxy-a-wxy", "a", false},
-		{"own label, long suffix", "a", "mcpproxy-a-wxyz1", "a", false},
-		{"own label, wrong prefix", "a", "other-a-wxyz", "a", false},
-		{"server a/b owns its container", "a/b", "mcpproxy-a-b-wxyz", "a/b", true},
-		{"server a/b vs a-b's container", "a/b", "mcpproxy-a-b-wxyz", "a-b", false},
-		{"server a-b owns its container", "a-b", "mcpproxy-a-b-wxyz", "a-b", true},
-		{"server a-b vs a/b's container", "a-b", "mcpproxy-a-b-wxyz", "a/b", false},
-		{"server A vs a's container", "A", "mcpproxy-a-wxyz", "a", false},
+		{"own label and canonical name", "a", "mcpproxy-a-wxyz", "a", own, true},
+		{"docker-style leading slash is not canonical", "a", "/mcpproxy-a-wxyz", "a", own, false},
+		{"a-b container, server a", "a", "mcpproxy-a-b-wxyz", "a-b", own, false},
+		{"a/b container, server a", "a", "mcpproxy-a-b-wxyz", "a/b", own, false},
+		{"case-different label", "a", "mcpproxy-a-wxyz", "A", own, false},
+		{"pre-label container", "a", "mcpproxy-a-wxyz", "", own, false},
+		{"label mismatch, canonical name", "a", "mcpproxy-a-wxyz", "a-b", own, false},
+		{"own label, name with extra segment", "a", "mcpproxy-a-wxyz-extra", "a", own, false},
+		{"own label, uppercase suffix", "a", "mcpproxy-a-WXYZ", "a", own, false},
+		{"own label, short suffix", "a", "mcpproxy-a-wxy", "a", own, false},
+		{"own label, long suffix", "a", "mcpproxy-a-wxyz1", "a", own, false},
+		{"own label, wrong prefix", "a", "other-a-wxyz", "a", own, false},
+		{"server a/b owns its container", "a/b", "mcpproxy-a-b-wxyz", "a/b", own, true},
+		{"server a/b vs a-b's container", "a/b", "mcpproxy-a-b-wxyz", "a-b", own, false},
+		{"server a-b owns its container", "a-b", "mcpproxy-a-b-wxyz", "a-b", own, true},
+		{"server a-b vs a/b's container", "a-b", "mcpproxy-a-b-wxyz", "a/b", own, false},
+		{"server A vs a's container", "A", "mcpproxy-a-wxyz", "a", own, false},
 		// The sanitiser keeps '.', so a.b names mcpproxy-a.b-*; QuoteMeta keeps
 		// the dot literal in the pattern rather than a wildcard.
-		{"regex metacharacters in the name are literal", "a.b", "mcpproxy-a.b-wxyz", "a.b", true},
-		{"regex metacharacters do not widen the match", "a.b", "mcpproxy-aXb-wxyz", "a.b", false},
+		{"regex metacharacters in the name are literal", "a.b", "mcpproxy-a.b-wxyz", "a.b", own, true},
+		{"regex metacharacters do not widen the match", "a.b", "mcpproxy-aXb-wxyz", "a.b", own, false},
+		// FR-007 instance-scoping (codex finding, PR E): the label AND name
+		// can both match exactly and it must still be rejected when the
+		// container belongs to a DIFFERENT (or no) mcpproxy instance — two
+		// separate processes can configure a server with the same raw name.
+		{"own label and canonical name, no instance label (pre-#1300 or foreign)", "a", "mcpproxy-a-wxyz", "a", "", false},
+		{"own label and canonical name, different instance", "a", "mcpproxy-a-wxyz", "a", "some-other-instance-id", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.owned, ownsContainer(tc.server, tc.cname, tc.label))
+			assert.Equal(t, tc.owned, ownsContainer(tc.server, tc.cname, tc.label, tc.instance))
 		})
 	}
 }
@@ -554,7 +576,7 @@ func TestDockerCleanup_CidfileContainerMustPassOwnership(t *testing.T) {
 		{"user --name custom, no label", fakeContainer{ID: customFullID, Name: "custom", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{}}, false},
 		{"own label, user --name custom via extra_args", fakeContainer{ID: customFullID, Name: "custom", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}}, false},
 		{"foreign label, canonical-looking name", fakeContainer{ID: customFullID, Name: "mcpproxy-a-wxyz", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a-b"}}, false},
-		{"own label and canonical name", fakeContainer{ID: customFullID, Name: "mcpproxy-a-wxyz", Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}}, true},
+		{"own label and canonical name", fakeContainer{ID: customFullID, Name: "mcpproxy-a-wxyz", Image: "mcp/example", Status: "Up 1 second", Labels: withOwnInstance(map[string]string{ownerLabel: "a"})}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -663,7 +685,7 @@ func TestDockerCleanup_ExactNamePathsApplyOwnership(t *testing.T) {
 		{"foreign label=a-b canonical-looking name", ownContainerName,
 			fakeContainer{ID: foreignID, Name: ownContainerName, Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a-b"}}, false},
 		{"own label and canonical name", ownContainerName,
-			fakeContainer{ID: ownContainerID, Name: ownContainerName, Image: "mcp/example", Status: "Up 1 second", Labels: map[string]string{ownerLabel: "a"}}, true},
+			fakeContainer{ID: ownContainerID, Name: ownContainerName, Image: "mcp/example", Status: "Up 1 second", Labels: withOwnInstance(map[string]string{ownerLabel: "a"})}, true},
 	}
 	for _, tc := range cases {
 		t.Run("recovery/"+tc.name, func(t *testing.T) {
@@ -774,25 +796,31 @@ func TestForceRemoveTrackedContainerIfOwned_AppliesOwnership(t *testing.T) {
 // ContainerOwnedByAny is the whole-manager sweep predicate (codex round 3,
 // docker finding 2): label AND canonical name for the SAME configured server.
 func TestContainerOwnedByAny_Predicate(t *testing.T) {
+	own := getInstanceID()
 	configured := []string{"a", "a/b"}
 	cases := []struct {
-		name  string
-		cname string
-		label string
-		owned bool
+		name     string
+		cname    string
+		label    string
+		instance string
+		owned    bool
 	}{
-		{"a's canonical container", "mcpproxy-a-wxyz", "a", true},
-		{"a/b's canonical container", "mcpproxy-a-b-wxyz", "a/b", true},
-		{"a-b's container: a-b not configured", "mcpproxy-a-b-wxyz", "a-b", false},
-		{"copied managed label, no server label", "postgres", "", false},
-		{"configured label, non-canonical name", "custom", "a", false},
-		{"canonical name for a, label of a/b", "mcpproxy-a-wxyz", "a/b", false},
-		{"canonical name for a, no label", "mcpproxy-a-wxyz", "", false},
+		{"a's canonical container", "mcpproxy-a-wxyz", "a", own, true},
+		{"a/b's canonical container", "mcpproxy-a-b-wxyz", "a/b", own, true},
+		{"a-b's container: a-b not configured", "mcpproxy-a-b-wxyz", "a-b", own, false},
+		{"copied managed label, no server label", "postgres", "", own, false},
+		{"configured label, non-canonical name", "custom", "a", own, false},
+		{"canonical name for a, label of a/b", "mcpproxy-a-wxyz", "a/b", own, false},
+		{"canonical name for a, no label", "mcpproxy-a-wxyz", "", own, false},
+		// FR-007 instance-scoping: a's canonical container, but from another
+		// (or no) mcpproxy instance, is foreign even though a is configured.
+		{"a's canonical container, different instance", "mcpproxy-a-wxyz", "a", "some-other-instance-id", false},
+		{"a's canonical container, no instance label", "mcpproxy-a-wxyz", "a", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.owned, ContainerOwnedByAny(configured, tc.cname, tc.label))
+			assert.Equal(t, tc.owned, ContainerOwnedByAny(configured, tc.cname, tc.label, tc.instance))
 		})
 	}
-	assert.False(t, ContainerOwnedByAny(nil, "mcpproxy-a-wxyz", "a"), "no configured servers, nothing is owned")
+	assert.False(t, ContainerOwnedByAny(nil, "mcpproxy-a-wxyz", "a", own), "no configured servers, nothing is owned")
 }

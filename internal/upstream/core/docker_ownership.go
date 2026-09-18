@@ -20,16 +20,28 @@ import (
 // and wrote their ids and names into `a`'s per-server log, which
 // `upstream_servers tail_log` serves to an `a`-scoped agent.
 //
-// A container is owned by server S iff BOTH hold:
-//   - its com.mcpproxy.server label equals S's raw name exactly, and
+// A container is owned by server S, on THIS mcpproxy instance, iff ALL hold:
+//   - its com.mcpproxy.server label equals S's raw name exactly,
+//   - its com.mcpproxy.instance label equals this process's own instance id
+//     (core.GetInstanceID(), instance.go) exactly, and
 //   - its name matches ^mcpproxy-<sanitised(S)>-[a-z0-9]{4}$ (the regex guards
 //     against a foreign process re-using the label).
 //
-// Docker applies both filters server-side (`--filter label=` is an exact
-// match, `--filter name=` a regexp match) and ownsContainer re-checks them in
-// Go, so no container that fails either is ever mutated or logged. Pre-label
-// containers and user-`--name` containers are left alone: they never were ours
-// by this rule. That holds on EVERY stop/kill/rm path, including the two that
+// The instance check matters even though every reader here is scoped to one
+// server name: two separate mcpproxy processes (distinct data dirs) can both
+// configure a server literally named `a`, and without it either instance's
+// cleanup would stop, kill or rm the OTHER instance's live container for
+// that name — a container neither created nor is otherwise entitled to touch
+// (the vulnerability class this file exists to close, now recurring one
+// level up: server-name-scoped but not instance-scoped is exactly as
+// canonical as name-scoped but not label-scoped was pre-105).
+//
+// Docker applies all three filters server-side (`--filter label=` is an
+// exact match, `--filter name=` a regexp match) and ownsContainer re-checks
+// them in Go, so no container that fails any of them is ever mutated or
+// logged. Pre-label containers, containers from another instance, and
+// user-`--name` containers are all left alone: they never were ours by this
+// rule. That holds on EVERY stop/kill/rm path, including the two that
 // start from a single known container rather than a listing (codex round 1):
 // the id read from the cidfile of this server's own `docker run` — a
 // user-configured direct `docker run --name custom` gets a cidfile but no
@@ -56,6 +68,18 @@ import (
 // mcpproxy server a container was created for (formatContainerLabels).
 const containerOwnerLabel = "com.mcpproxy.server"
 
+// containerInstanceLabel is the Docker label carrying this mcpproxy
+// PROCESS's instance id (formatContainerLabels, instance.go). Two mcpproxy
+// instances on one Docker host can each configure a server with the same
+// name — distinct data dirs, distinct config.db, but nothing stops the same
+// server name appearing in both — and before this label was checked here,
+// ownsContainer admitted either instance's container for that name (codex
+// round: FR-007 canonical ownership was server-name-scoped but not
+// instance-scoped, so it was neither canonical nor unspoofable across
+// instances; a Docker-capable actor could also just create a container
+// carrying a live instance's id and a configured server's name and label).
+const containerInstanceLabel = "com.mcpproxy.instance"
+
 // ownedContainerSuffixPattern is the random suffix generateRandomSuffix
 // produces: four lowercase alphanumerics.
 const ownedContainerSuffixPattern = "[a-z0-9]{4}"
@@ -66,9 +90,17 @@ func ownedContainerNamePattern(serverName string) string {
 	return "^mcpproxy-" + regexp.QuoteMeta(sanitizeServerNameForContainer(serverName)) + "-" + ownedContainerSuffixPattern + "$"
 }
 
-// ownsContainer is the Go-side ownership predicate: label AND canonical name.
-func ownsContainer(serverName, containerName, ownerLabel string) bool {
+// ownsContainer is the Go-side ownership predicate: label AND canonical name
+// AND this process's own instance id. instanceLabel is the
+// com.mcpproxy.instance value Docker reported for the row; a container
+// created by a different mcpproxy instance (or one with no instance label at
+// all — pre-#1300, or forged) fails this exactly like a pre-label container
+// fails the server-name half: it is a foreign container, never touched.
+func ownsContainer(serverName, containerName, ownerLabel, instanceLabel string) bool {
 	if ownerLabel != serverName {
+		return false
+	}
+	if instanceLabel == "" || instanceLabel != getInstanceID() {
 		return false
 	}
 	matched, err := regexp.MatchString(ownedContainerNamePattern(serverName), containerName)
@@ -77,17 +109,18 @@ func ownsContainer(serverName, containerName, ownerLabel string) bool {
 
 // ownedContainer is one `docker ps` row that passed the ownership predicate.
 type ownedContainer struct {
-	ID     string
-	Name   string
-	Status string
-	Image  string
-	Owner  string // the com.mcpproxy.server label value (== the server's raw name)
+	ID       string
+	Name     string
+	Status   string
+	Image    string
+	Owner    string // the com.mcpproxy.server label value (== the server's raw name)
+	Instance string // the com.mcpproxy.instance label value
 }
 
 // ownedContainerFormat is the `docker ps --format` template the ownership
-// listing reads: one tab-separated row per container, label value last so an
-// empty label leaves the column empty rather than shifting the others.
-const ownedContainerFormat = "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Label \"" + containerOwnerLabel + "\"}}"
+// listing reads: one tab-separated row per container, label values last so
+// an empty label leaves its column empty rather than shifting the others.
+const ownedContainerFormat = "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Label \"" + containerOwnerLabel + "\"}}\t{{.Label \"" + containerInstanceLabel + "\"}}"
 
 // listOwnedContainers lists the containers canonically owned by this server.
 // includeStopped adds `-a` (stopped containers too). Rows that fail the
@@ -95,6 +128,7 @@ const ownedContainerFormat = "{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.L
 func (c *Client) listOwnedContainers(ctx context.Context, includeStopped bool) ([]ownedContainer, error) {
 	return c.listOwnedContainersFiltered(ctx, includeStopped,
 		"label="+containerOwnerLabel+"="+c.config.Name,
+		"label="+containerInstanceLabel+"="+getInstanceID(),
 		"name="+ownedContainerNamePattern(c.config.Name))
 }
 
@@ -124,6 +158,7 @@ func (c *Client) lookupOwnedContainerByID(ctx context.Context, id string) (owned
 func (c *Client) lookupOwnedContainerByName(ctx context.Context, name string) (ownedContainer, bool, error) {
 	rows, err := c.listOwnedContainersFiltered(ctx, true,
 		"label="+containerOwnerLabel+"="+c.config.Name,
+		"label="+containerInstanceLabel+"="+getInstanceID(),
 		"name=^"+regexp.QuoteMeta(name)+"$")
 	if err != nil {
 		return ownedContainer{}, false, err
@@ -164,11 +199,11 @@ func (c *Client) listOwnedContainersFiltered(ctx context.Context, includeStopped
 			continue
 		}
 		parts := strings.Split(line, "\t")
-		if len(parts) < 5 {
+		if len(parts) < 6 {
 			continue
 		}
-		row := ownedContainer{ID: parts[0], Name: parts[1], Status: parts[2], Image: parts[3], Owner: parts[4]}
-		if !ownsContainer(c.config.Name, row.Name, row.Owner) {
+		row := ownedContainer{ID: parts[0], Name: parts[1], Status: parts[2], Image: parts[3], Owner: parts[4], Instance: parts[5]}
+		if !ownsContainer(c.config.Name, row.Name, row.Owner, row.Instance) {
 			continue
 		}
 		owned = append(owned, row)
@@ -237,10 +272,11 @@ type DockerCommand func(ctx context.Context, args ...string) *exec.Cmd
 // trusted whatever container held that id at the LATER moment, which another
 // Docker client can have relabelled or renamed in between.
 type ContainerRow struct {
-	ID     string
-	Name   string
-	Owner  string
-	Status string
+	ID       string
+	Name     string
+	Owner    string
+	Instance string
+	Status   string
 }
 
 // Running reports whether the container was up — running or paused, exactly
@@ -262,7 +298,7 @@ func (r ContainerRow) Running() bool {
 // {{.Status}} rides along with identity so a caller deciding running/healthy
 // state never needs a second, separately-timed `docker inspect` (codex round
 // 16 finding 1): ownership and state come from the identical read.
-const containerRowFormat = "{{.ID}}\t{{.Names}}\t{{.Label \"" + containerOwnerLabel + "\"}}\t{{.Status}}"
+const containerRowFormat = "{{.ID}}\t{{.Names}}\t{{.Label \"" + containerOwnerLabel + "\"}}\t{{.Label \"" + containerInstanceLabel + "\"}}\t{{.Status}}"
 
 // MutationResult is what ContainerMutator.Mutate reports. Verified is true
 // when ownership held at the re-read and the command ran, in which case
@@ -283,7 +319,7 @@ type MutationResult struct {
 // (ownsContainer for one server, ContainerOwnedByAny for the manager).
 type ContainerMutator struct {
 	Docker DockerCommand
-	Owns   func(containerName, ownerLabel string) bool
+	Owns   func(containerName, ownerLabel, instanceLabel string) bool
 }
 
 // Mutate re-reads container id immediately before running op on it and runs
@@ -322,7 +358,7 @@ func (cm ContainerMutator) Verify(ctx context.Context, id string) (ContainerRow,
 	if err != nil {
 		return ContainerRow{}, false, err
 	}
-	if !ok || !cm.Owns(row.Name, row.Owner) {
+	if !ok || !cm.Owns(row.Name, row.Owner, row.Instance) {
 		return ContainerRow{}, false, nil
 	}
 	return row, true, nil
@@ -337,15 +373,15 @@ func (cm ContainerMutator) read(ctx context.Context, id string) (ContainerRow, b
 		return ContainerRow{}, false, err
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		// SplitN(4): Status (the last field) is `docker ps`'s own human text
+		// SplitN(5): Status (the last field) is `docker ps`'s own human text
 		// and may itself be empty (a pre-label container docker never
 		// started, though that never reaches here) — keep it as whatever
 		// remains rather than dropping the row for a short split.
-		parts := strings.SplitN(line, "\t", 4)
-		if len(parts) < 4 || parts[0] != id {
+		parts := strings.SplitN(line, "\t", 5)
+		if len(parts) < 5 || parts[0] != id {
 			continue
 		}
-		return ContainerRow{ID: parts[0], Name: parts[1], Owner: parts[2], Status: parts[3]}, true, nil
+		return ContainerRow{ID: parts[0], Name: parts[1], Owner: parts[2], Instance: parts[3], Status: parts[4]}, true, nil
 	}
 	return ContainerRow{}, false, nil
 }
@@ -355,8 +391,8 @@ func (cm ContainerMutator) read(ctx context.Context, id string) (ContainerRow, b
 func (c *Client) containerMutator() ContainerMutator {
 	return ContainerMutator{
 		Docker: c.newDockerCmd,
-		Owns: func(containerName, ownerLabel string) bool {
-			return ownsContainer(c.config.Name, containerName, ownerLabel)
+		Owns: func(containerName, ownerLabel, instanceLabel string) bool {
+			return ownsContainer(c.config.Name, containerName, ownerLabel, instanceLabel)
 		},
 	}
 }
@@ -472,17 +508,22 @@ func (c *Client) stopOwnedContainer(ctx context.Context, id, cleanupPath string)
 	return true
 }
 
-// ContainerOwnedByAny is the whole-manager predicate: a container (its name
-// and its com.mcpproxy.server label as Docker reported them) is canonically
-// owned by one of serverNames — the configured servers — under the same
-// label-AND-name rule ownsContainer applies per server. The manager's
-// shutdown and emergency sweeps select containers by the shared
+// ContainerOwnedByAny is the whole-manager predicate: a container (its name,
+// its com.mcpproxy.server label and its com.mcpproxy.instance label as
+// Docker reported them) is canonically owned by one of serverNames — the
+// configured servers, on THIS mcpproxy instance — under the same
+// label-AND-name-AND-instance rule ownsContainer applies per server. The
+// manager's shutdown and emergency sweeps select containers by the shared
 // com.mcpproxy.managed / com.mcpproxy.instance labels, which any foreign
 // container can copy; only the rows this admits may be stopped, removed or
-// named (codex round 3).
-func ContainerOwnedByAny(serverNames []string, containerName, ownerLabel string) bool {
+// named (codex round 3). Requiring the instance label here too (not just in
+// the sweep's own Docker filter) closes the gap where a sweep that filtered
+// broadly, or a caller re-verifying a single tracked id with no filter at
+// all, would otherwise admit another live mcpproxy instance's container for
+// a same-named server.
+func ContainerOwnedByAny(serverNames []string, containerName, ownerLabel, instanceLabel string) bool {
 	for _, serverName := range serverNames {
-		if ownsContainer(serverName, containerName, ownerLabel) {
+		if ownsContainer(serverName, containerName, ownerLabel, instanceLabel) {
 			return true
 		}
 	}

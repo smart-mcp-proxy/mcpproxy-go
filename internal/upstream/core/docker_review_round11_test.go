@@ -26,7 +26,7 @@ import (
 func TestDockerCleanup_ImageFallback_CountCarriesOwner(t *testing.T) {
 	installFakeDocker(t, []fakeContainer{
 		{ID: ownContainerID, Name: ownContainerName, Image: "mcp/example", Status: "Up 2 minutes",
-			Labels: map[string]string{ownerLabel: "a"}},
+			Labels: withOwnInstance(map[string]string{ownerLabel: "a"})},
 	})
 	c, mainLogs, _ := newOwnershipClient("a", nil)
 
@@ -50,7 +50,7 @@ func TestDockerCleanup_ImageFallback_CountCarriesOwner(t *testing.T) {
 func TestDockerCleanup_NamePatternFallback_CountCarriesOwner(t *testing.T) {
 	installFakeDocker(t, []fakeContainer{
 		{ID: ownContainerID, Name: ownContainerName, Image: "mcp/example", Status: "Up 2 minutes",
-			Labels: map[string]string{ownerLabel: "a"}},
+			Labels: withOwnInstance(map[string]string{ownerLabel: "a"})},
 	})
 	c, mainLogs, _ := newOwnershipClient("a", nil)
 
@@ -74,7 +74,7 @@ func TestDockerCleanup_NamePatternFallback_CountCarriesOwner(t *testing.T) {
 func TestDockerCleanup_PreCreationSweep_MainLogCountCarriesOwner(t *testing.T) {
 	installFakeDocker(t, []fakeContainer{
 		{ID: ownContainerID, Name: ownContainerName, Image: "mcp/example", Status: "Up 2 minutes",
-			Labels: map[string]string{ownerLabel: "a"}},
+			Labels: withOwnInstance(map[string]string{ownerLabel: "a"})},
 	})
 	c, mainLogs, _ := newOwnershipClient("a", nil)
 

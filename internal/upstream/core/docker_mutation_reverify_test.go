@@ -29,13 +29,17 @@ import (
 // one that still does is mutated, and every record naming it carries
 // container_owner from that mutation-time read.
 
-// ownFixtureNamed is one container under id as name/owner label say.
+// ownFixtureNamed is one container under id as name/owner label say. It
+// always carries this test process's own instance label: these tests vary
+// name/owner to probe the server-name-and-canonical-name half of ownership,
+// not the instance half (TestOwnsContainer_Predicate and
+// TestContainerOwnedByAny_Predicate cover that dimension directly).
 func ownFixtureNamed(id, name, owner string) []fakeContainer {
 	labels := map[string]string{"com.mcpproxy.managed": "true"}
 	if owner != "" {
 		labels[ownerLabel] = owner
 	}
-	return []fakeContainer{{ID: id, Name: name, Image: "mcp/example", Status: "Up 2 minutes", Labels: labels}}
+	return []fakeContainer{{ID: id, Name: name, Image: "mcp/example", Status: "Up 2 minutes", Labels: withOwnInstance(labels)}}
 }
 
 // assertNoRecordNames asserts no record in either logger carries any of
@@ -168,7 +172,7 @@ func TestDockerCleanup_PreCreationReverifiesEachRow_SlashVsDashCollision(t *test
 	const secondID = "0b0b0b0b0b0b"
 	const secondName = "mcpproxy-a-b-q2w3"
 	row := func(id, name, owner string) fakeContainer {
-		return fakeContainer{ID: id, Name: name, Image: "mcp/example", Status: "Up", Labels: map[string]string{ownerLabel: owner}}
+		return fakeContainer{ID: id, Name: name, Image: "mcp/example", Status: "Up", Labels: withOwnInstance(map[string]string{ownerLabel: owner})}
 	}
 	fd := installFakeDocker(t, []fakeContainer{row(firstID, firstName, "a/b"), row(secondID, secondName, "a/b")})
 	// ps 1: the listing; ps 2: the first row's re-read. The second row is

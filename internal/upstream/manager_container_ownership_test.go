@@ -734,6 +734,15 @@ func TestSweeps_ReverifyOwnershipAtMutationTime(t *testing.T) {
 		{name: "replaced by a container whose id extends the listed one", after: []managerFakeContainer{{
 			ID: sweepOwnID + "ffffffffffffffffffffffffffffffffffffffffffffffffffff", Name: sweepOwnName, Running: true,
 			Labels: map[string]string{"com.mcpproxy.managed": "true", "com.mcpproxy.instance": core.GetInstanceID(), "com.mcpproxy.server": "a"}}}},
+		// FR-007 instance-scoping (codex finding): same server label, same
+		// canonical name, but a DIFFERENT mcpproxy instance's id — a second
+		// live mcpproxy process on this host with a server also named `a`.
+		// This must be exactly as foreign as any other relabel, on both
+		// sweeps, or one instance's shutdown/emergency cleanup would stop or
+		// rm -f another live instance's container.
+		{name: "re-labelled to another live mcpproxy instance's id", after: []managerFakeContainer{{
+			ID: sweepOwnID, Name: sweepOwnName, Running: true,
+			Labels: map[string]string{"com.mcpproxy.managed": "true", "com.mcpproxy.instance": "some-other-live-instance-id", "com.mcpproxy.server": "a"}}}},
 		{name: "unchanged", after: relabelled(sweepOwnName, "a"), wantOwner: "a"},
 		{name: "re-owned by another configured server", after: relabelled("mcpproxy-a-b-xk3q", "a/b"), wantOwner: "a/b"},
 	}
@@ -854,7 +863,7 @@ func TestVerifyDockerContainerHealthy_ReverifiesOwnershipBeforeInspect(t *testin
 	t.Run("unchanged and running - healthy, record carries id and owner", func(t *testing.T) {
 		installManagerFakeDocker(t, []managerFakeContainer{
 			{ID: sweepOwnID, Name: sweepOwnName, Running: true,
-				Labels: map[string]string{"com.mcpproxy.server": "a"}},
+				Labels: map[string]string{"com.mcpproxy.server": "a", "com.mcpproxy.instance": core.GetInstanceID()}},
 		})
 		m, mainLogs := newSweepManager(t)
 
@@ -879,7 +888,7 @@ func TestVerifyDockerContainerHealthy_ReverifiesOwnershipBeforeInspect(t *testin
 	t.Run("unchanged but stopped - unhealthy, record still carries id and owner", func(t *testing.T) {
 		installManagerFakeDocker(t, []managerFakeContainer{
 			{ID: sweepOwnID, Name: sweepOwnName, Running: false,
-				Labels: map[string]string{"com.mcpproxy.server": "a"}},
+				Labels: map[string]string{"com.mcpproxy.server": "a", "com.mcpproxy.instance": core.GetInstanceID()}},
 		})
 		m, _ := newSweepManager(t)
 
@@ -910,7 +919,7 @@ func TestVerifyDockerContainerHealthy_ReverifiesOwnershipBeforeInspect(t *testin
 func TestVerifyDockerContainerHealthy_RunningComesFromTheVerifyReadAlone(t *testing.T) {
 	fd := installManagerFakeDocker(t, []managerFakeContainer{
 		{ID: sweepOwnID, Name: sweepOwnName, Running: true,
-			Labels: map[string]string{"com.mcpproxy.server": "a"}},
+			Labels: map[string]string{"com.mcpproxy.server": "a", "com.mcpproxy.instance": core.GetInstanceID()}},
 	})
 	// After the fix's one `ps` read answers, swap to a relabelled, stopped
 	// container: any FURTHER read of this id would see foreign, not-running
