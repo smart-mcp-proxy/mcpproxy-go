@@ -216,6 +216,10 @@ func (s *Service) ReloadFromFile() (*Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config from %s: %w", current.Path, err)
 	}
+	// The loader re-applies the MCPPROXY_* env overrides but knows nothing
+	// about the serve flags; the effective config is the file PLUS both, so a
+	// hand edit of an unrelated key must not switch `--read-only` off.
+	config.ReapplyFlagOverrides(newConfig)
 
 	// Update atomically
 	if err := s.Update(newConfig, UpdateTypeReload, "file_reload"); err != nil {

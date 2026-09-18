@@ -141,3 +141,30 @@ func TestConfigWatcher_OwnSaveWithOverridesIsNotAnExternalEdit(t *testing.T) {
 	assert.Equal(t, "compact", live.ToolResponseMode, "the daemon's own save must not reload the file over the flag")
 	assert.True(t, live.ReadOnlyMode)
 }
+
+// A genuine external edit reloads the file; the loader re-applies env
+// overrides, and the runtime must re-apply the serve flags the same way, or a
+// hand edit of an unrelated key silently switches --read-only off.
+func TestReloadConfiguration_KeepsFlagOverridesEffective(t *testing.T) {
+	rt, cfgPath := newOverriddenRuntime(t)
+
+	edited, err := config.ReadFile(cfgPath)
+	require.NoError(t, err)
+	edited.ToolsLimit = 77 // the external edit
+	require.NoError(t, config.SaveConfig(edited, cfgPath))
+
+	require.NoError(t, rt.ReloadConfiguration())
+
+	live, err := rt.GetConfig()
+	require.NoError(t, err)
+	assert.Equal(t, 77, live.ToolsLimit, "the external edit is adopted")
+	assert.True(t, live.ReadOnlyMode, "--read-only survives a reload")
+	assert.Equal(t, "compact", live.ToolResponseMode, "--tool-response-mode survives a reload")
+	assert.Equal(t, ":0", live.Listen)
+
+	// …and the next save still does not persist them.
+	require.NoError(t, rt.SaveConfiguration())
+	m := readConfigJSON(t, cfgPath)
+	assertNoOverridesOnDisk(t, m)
+	assert.Equal(t, float64(77), m["tools_limit"])
+}

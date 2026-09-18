@@ -1583,6 +1583,7 @@ func (r *Runtime) ReloadConfiguration() error {
 		if loadErr != nil {
 			return fmt.Errorf("failed to reload config: %w", loadErr)
 		}
+		config.ReapplyFlagOverrides(newConfig)
 		// Already holding configCommitMu; use the locked helper so we don't
 		// re-acquire the non-reentrant mutex (would deadlock).
 		r.updateConfigLocked(newConfig, cfgPath)

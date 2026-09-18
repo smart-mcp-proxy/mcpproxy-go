@@ -194,6 +194,12 @@ type processOverride interface {
 	// unreadable, in which case the value the file held at override time is
 	// used).
 	restore(out, base *Config)
+	// loadedValue is the file value recorded when the override was applied.
+	loadedValue() any
+	// reapply layers the process value back onto a freshly loaded cfg and
+	// returns the entry with its recorded file value refreshed (loaded is
+	// what cfg held before, or fileValue when the caller knows better).
+	reapply(cfg *Config, fileValue any, useFileValue bool) processOverride
 }
 
 type typedOverride[T any] struct {
@@ -205,6 +211,7 @@ type typedOverride[T any] struct {
 
 func (o typedOverride[T]) name() string           { return o.field.Name }
 func (o typedOverride[T]) source() OverrideSource { return o.src }
+func (o typedOverride[T]) loadedValue() any       { return o.loaded }
 
 func (o typedOverride[T]) restore(out, base *Config) {
 	if !reflect.DeepEqual(o.field.Get(out), o.process) {
@@ -217,12 +224,28 @@ func (o typedOverride[T]) restore(out, base *Config) {
 	o.field.Set(out, fileValue)
 }
 
+func (o typedOverride[T]) reapply(cfg *Config, fileValue any, useFileValue bool) processOverride {
+	o.loaded = o.field.Get(cfg)
+	if v, ok := fileValue.(T); ok && useFileValue {
+		o.loaded = v
+	}
+	o.field.Set(cfg, o.process)
+	return o
+}
+
+// overrideKey identifies one registry entry: the same field may be overridden
+// by env AND by a flag (the flag, applied later, wins in memory), and both
+// records have to survive — a reload rebuilds the env set, and dropping the
+// flag record with it would turn the flag's value into "an edit" on the next
+// save.
+type overrideKey struct {
+	field  string
+	source OverrideSource
+}
+
 var (
 	processOverridesMu sync.RWMutex
-	// processOverrides is keyed by field name; a later override of the same
-	// field (a reload re-applying env, a flag applied after env) replaces the
-	// earlier one — one process value per field.
-	processOverrides = map[string]processOverride{}
+	processOverrides   = map[overrideKey]processOverride{}
 )
 
 // OverrideForProcess sets field f on cfg to value for THIS PROCESS ONLY and
@@ -232,43 +255,114 @@ func OverrideForProcess[T any](cfg *Config, f Field[T], source OverrideSource, v
 	if cfg == nil {
 		return
 	}
-	loaded := f.Get(cfg)
+	entry := newOverride(cfg, f, source, value)
 	f.Set(cfg, value)
 
 	processOverridesMu.Lock()
-	processOverrides[f.Name] = typedOverride[T]{field: f, src: source, process: value, loaded: loaded}
+	processOverrides[overrideKey{f.Name, source}] = entry
 	processOverridesMu.Unlock()
 }
 
-// clearProcessOverrides drops every override recorded from source. The loader
-// calls it for OverrideSourceEnv before re-applying the environment on each
-// load, so a reload reflects the variables set NOW; flag overrides, applied
-// once at startup, survive reloads.
-func clearProcessOverrides(source OverrideSource) {
+// newOverride builds the record for applying value to f WITHOUT setting it.
+// The recorded file value is what cfg holds now — unless this is a flag
+// layered over an env override of the same field, whose record already
+// knows the real file value.
+func newOverride[T any](cfg *Config, f Field[T], source OverrideSource, value T) typedOverride[T] {
+	loaded := f.Get(cfg)
+	if source == OverrideSourceFlag {
+		processOverridesMu.RLock()
+		env, ok := processOverrides[overrideKey{f.Name, OverrideSourceEnv}]
+		processOverridesMu.RUnlock()
+		if ok {
+			if v, isT := env.loadedValue().(T); isT {
+				loaded = v
+			}
+		}
+	}
+	return typedOverride[T]{field: f, src: source, process: value, loaded: loaded}
+}
+
+// envOverrideBatch collects the env overrides of one load and commits them in
+// ONE registry update. The loader rebuilds the env set on every load (so a
+// reload reflects the variables set now); clearing and re-adding under
+// separate locks would leave a window in which a save on another goroutine —
+// telemetry, the runtime — sees no env entries at all and persists them.
+type envOverrideBatch struct {
+	managed []string          // every field the loader consults, set or not
+	entries []processOverride // the ones that are set
+}
+
+// consider applies an env override for f when present and, either way, marks
+// f as env-managed so a stale entry for it is dropped at commit.
+func envOverride[T any](b *envOverrideBatch, cfg *Config, f Field[T], present bool, value T) {
+	b.managed = append(b.managed, f.Name)
+	if !present {
+		return
+	}
+	b.entries = append(b.entries, newOverride(cfg, f, OverrideSourceEnv, value))
+	f.Set(cfg, value)
+}
+
+// commit atomically replaces the env entries of every managed field with the
+// batch. Entries of other sources (flags) and env entries the loader does not
+// manage (api_key, recorded by Validate/EnsureAPIKey) are untouched.
+func (b *envOverrideBatch) commit() {
 	processOverridesMu.Lock()
 	defer processOverridesMu.Unlock()
-	for name, o := range processOverrides {
-		if o.source() == source {
-			delete(processOverrides, name)
+	for _, name := range b.managed {
+		delete(processOverrides, overrideKey{name, OverrideSourceEnv})
+	}
+	for _, e := range b.entries {
+		processOverrides[overrideKey{e.name(), OverrideSourceEnv}] = e
+	}
+}
+
+// ReapplyFlagOverrides layers every flag-sourced override back onto cfg — a
+// config freshly loaded from the file, on which the loader has already
+// re-applied the env overrides but knows nothing about the serve flags — and
+// refreshes each record's file value. Without it a hot reload after an
+// external edit silently switched `--read-only` (or any other flag) off.
+func ReapplyFlagOverrides(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	processOverridesMu.Lock()
+	defer processOverridesMu.Unlock()
+	for key, o := range processOverrides {
+		if key.source != OverrideSourceFlag {
+			continue
 		}
+		// Over an env override of the same field the config already carries
+		// the env value; the env record knows what the file said.
+		env, hasEnv := processOverrides[overrideKey{key.field, OverrideSourceEnv}]
+		var fileValue any
+		if hasEnv {
+			fileValue = env.loadedValue()
+		}
+		processOverrides[key] = o.reapply(cfg, fileValue, hasEnv)
 	}
 }
 
 // ResetProcessOverrides forgets every recorded override. For tests.
 func ResetProcessOverrides() {
 	processOverridesMu.Lock()
-	processOverrides = map[string]processOverride{}
+	processOverrides = map[overrideKey]processOverride{}
 	processOverridesMu.Unlock()
 }
 
 // ProcessOverrideFields lists the names of the fields currently overridden for
-// this process, sorted, for diagnostics and logging.
+// this process, sorted and de-duplicated, for diagnostics and logging.
 func ProcessOverrideFields() []string {
 	processOverridesMu.RLock()
 	defer processOverridesMu.RUnlock()
+	seen := make(map[string]struct{}, len(processOverrides))
 	names := make([]string, 0, len(processOverrides))
-	for name := range processOverrides {
-		names = append(names, name)
+	for key := range processOverrides {
+		if _, dup := seen[key.field]; dup {
+			continue
+		}
+		seen[key.field] = struct{}{}
+		names = append(names, key.field)
 	}
 	sort.Strings(names)
 	return names
@@ -284,6 +378,11 @@ func ProcessOverrideFields() []string {
 // The copy shares Servers, Registries and every nested block it does not touch
 // with effective; the ones it restores are copied first. Callers must not
 // mutate the shared structures.
+//
+// Known limitation: "edited" is inferred from the value. An explicit API edit
+// that sets an overridden field to exactly the override's value is
+// indistinguishable from a round trip and is not persisted — unreachable from
+// the Web UI, which already shows the override as the current value.
 func PersistableConfig(effective *Config, path string) *Config {
 	if effective == nil {
 		return nil

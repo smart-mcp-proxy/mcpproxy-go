@@ -188,3 +188,151 @@ func TestLoadFromFile_ReplacesEnvOverridesButKeepsFlagOverrides(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"listen"}, ProcessOverrideFields())
 }
+
+// Round-1 review findings.
+
+// EnsureAPIKey lets MCPPROXY_API_KEY win over a key the FILE holds; that is
+// an override like Validate's and must not replace the file key on disk.
+func TestEnsureAPIKey_EnvKeyOverFileKeyIsNotPersisted(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "api_key": "file-key", "mcpServers": []}`)
+	t.Setenv("MCPPROXY_API_KEY", "env-key")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "file-key", cfg.APIKey, "Validate only fills an EMPTY api_key from env")
+
+	key, generated, source := cfg.EnsureAPIKey()
+	require.Equal(t, "env-key", key)
+	require.False(t, generated)
+	require.Equal(t, APIKeySourceEnvironment, source)
+
+	require.NoError(t, SaveConfig(cfg, path))
+	assert.Equal(t, "file-key", readJSON(t, path)["api_key"])
+}
+
+// A key EnsureAPIKey generated is the one thing that must persist.
+func TestEnsureAPIKey_GeneratedKeyIsPersisted(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
+	os.Unsetenv("MCPPROXY_API_KEY")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	key, generated, _ := cfg.EnsureAPIKey()
+	require.True(t, generated)
+
+	require.NoError(t, SaveConfig(cfg, path))
+	assert.Equal(t, key, readJSON(t, path)["api_key"])
+}
+
+// The same field overridden by env AND a flag keeps both records: the flag
+// wins in memory, neither leaks, and a reload (which rebuilds the env set)
+// must not turn the flag's value into "an edit" by dropping its record.
+func TestOverrides_EnvAndFlagOnTheSameFieldBothSurviveReload(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
+	t.Setenv("MCPPROXY_LISTEN", "127.0.0.1:9000")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, "127.0.0.1:9999")
+	require.Equal(t, "127.0.0.1:9999", cfg.Listen)
+
+	// The reload: the loader rebuilds the env entries on a fresh config.
+	reloaded, err := LoadFromFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1:9000", reloaded.Listen, "the loader applies env")
+	ReapplyFlagOverrides(reloaded)
+	assert.Equal(t, "127.0.0.1:9999", reloaded.Listen, "flag overrides are re-applied on reload")
+
+	require.NoError(t, SaveConfig(reloaded, path))
+	assert.Equal(t, "127.0.0.1:8080", readJSON(t, path)["listen"])
+
+	// The original (pre-reload) effective config saves the same way.
+	require.NoError(t, SaveConfig(cfg, path))
+	assert.Equal(t, "127.0.0.1:8080", readJSON(t, path)["listen"])
+}
+
+// The flag record's load-time fallback is the FILE value, not the env value
+// the flag happened to be layered over.
+func TestOverrides_FlagOverEnvFallsBackToFileValue(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "mcpServers": []}`)
+	t.Setenv("MCPPROXY_LISTEN", "127.0.0.1:9000")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(cfg, FieldListen, OverrideSourceFlag, "127.0.0.1:9999")
+
+	persisted := PersistableConfig(cfg, filepath.Join(t.TempDir(), "missing.json"))
+	assert.Equal(t, "127.0.0.1:8080", persisted.Listen)
+}
+
+// ReapplyFlagOverrides re-layers every flag-sourced override onto a freshly
+// loaded config and refreshes the recorded file value.
+func TestReapplyFlagOverrides(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"read_only_mode": false, "logging": {"level": "info"}, "mcpServers": []}`)
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	OverrideForProcess(cfg, FieldReadOnlyMode, OverrideSourceFlag, true)
+	OverrideForProcess(cfg, FieldLogLevel, OverrideSourceFlag, "debug")
+
+	// The file changed and was reloaded.
+	require.NoError(t, os.WriteFile(path, []byte(`{"read_only_mode": false, "logging": {"level": "warn"}, "mcpServers": []}`), 0o600))
+	reloaded, err := LoadFromFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "warn", reloaded.Logging.Level)
+	ReapplyFlagOverrides(reloaded)
+	assert.True(t, reloaded.ReadOnlyMode)
+	assert.Equal(t, "debug", reloaded.Logging.Level)
+
+	persisted := PersistableConfig(reloaded, filepath.Join(t.TempDir(), "missing.json"))
+	assert.False(t, persisted.ReadOnlyMode)
+	assert.Equal(t, "warn", persisted.Logging.Level, "the fallback tracks the RELOADED file value")
+}
+
+// Rebuilding the env set on a reload must be atomic with respect to saves on
+// other goroutines: a save that lands mid-rebuild must never see an empty (or
+// half-built) registry and persist the overrides.
+func TestOverrides_EnvRebuildIsAtomicWithSaves(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "tool_response_mode": "full", "mcpServers": []}`)
+	t.Setenv("MCPPROXY_LISTEN", "0.0.0.0:9999")
+	t.Setenv("MCPPROXY_TOOL_RESPONSE_MODE", "compact")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, _ = LoadFromFile(path) // rebuilds the env entries
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		persisted := PersistableConfig(cfg, path)
+		if persisted.Listen != "127.0.0.1:8080" || persisted.ToolResponseMode != "full" {
+			close(stop)
+			<-done
+			t.Fatalf("iteration %d: env override leaked mid-rebuild: listen=%q mode=%q", i, persisted.Listen, persisted.ToolResponseMode)
+		}
+	}
+	close(stop)
+	<-done
+}
