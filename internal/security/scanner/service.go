@@ -187,6 +187,13 @@ func (s *Service) SetEmitter(emitter EventEmitter) {
 	s.emitter.Store(&emitter)
 }
 
+// SetInstanceID scopes this service's Docker container-ownership lookups to
+// the given mcpproxy instance ID (internal/upstream/core.GetInstanceID()).
+// See SourceResolver.instanceID for why this is injected rather than imported.
+func (s *Service) SetInstanceID(instanceID string) {
+	s.sourceResolver.SetInstanceID(instanceID)
+}
+
 // SetScannerDisableNoNewPrivileges controls whether scanner containers are
 // launched without `--security-opt no-new-privileges`. This is the runtime
 // knob for SecurityConfig.ScannerDisableNoNewPrivileges. See the config
