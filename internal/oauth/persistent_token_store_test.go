@@ -339,7 +339,7 @@ func TestPersistentTokenStore_PreservesDCRCredentials(t *testing.T) {
 	serverKey := GenerateServerKey(serverName, serverURL)
 
 	// Step 1: Simulate DCR saving credentials (as UpdateOAuthClientCredentials does)
-	err = db.UpdateOAuthClientCredentials(serverKey, "dcr-client-id-123", "dcr-secret-456", 54321)
+	err = db.UpdateOAuthClientCredentials(serverKey, "dcr-client-id-123", "dcr-secret-456", 54321, "http://127.0.0.1:54321/oauth/callback")
 	if err != nil {
 		t.Fatalf("Failed to save DCR credentials: %v", err)
 	}
@@ -499,7 +499,7 @@ func TestGetToken_DCROnlyRecord_ReturnsError(t *testing.T) {
 	serverKey := GenerateServerKey(serverName, serverURL)
 
 	// Simulate DCR saving only client credentials (no access token yet)
-	err = db.UpdateOAuthClientCredentials(serverKey, "dcr-client-id", "dcr-secret", 12345)
+	err = db.UpdateOAuthClientCredentials(serverKey, "dcr-client-id", "dcr-secret", 12345, "http://127.0.0.1:12345/oauth/callback")
 	if err != nil {
 		t.Fatalf("Failed to save DCR credentials: %v", err)
 	}

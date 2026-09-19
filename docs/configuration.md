@@ -609,8 +609,14 @@ exact string to the provider as `redirect_uri`:
 ```
 
 The value must be an RFC 8252 loopback redirect: `http` scheme, a loopback host
-(`127.0.0.1`, `localhost` or `::1`), an explicit port, and the
-`/oauth/callback` path. Register the same URL with the provider.
+(`127.0.0.1`, `localhost` or `::1`), and an explicit port. mcpproxy binds its
+callback listener to whatever path the URI specifies, so a provider that only
+lets you register a different one (some publish a single shared OAuth
+application whose callback path an individual user cannot change) still
+works — e.g. `http://127.0.0.1:54108/callback`. A pin with no path at all
+(`http://127.0.0.1:54108`) binds `/`, not `/oauth/callback`; `/oauth/callback`
+is only the default when `redirect_uri` is omitted entirely and mcpproxy
+allocates a dynamic port. Register the same URL with the provider.
 
 Prefer `127.0.0.1`. `localhost` is accepted, and the string is sent to the
 provider exactly as written, but the listener binds `127.0.0.1` — on a host

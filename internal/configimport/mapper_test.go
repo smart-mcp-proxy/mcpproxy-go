@@ -166,7 +166,7 @@ func TestMapToServerConfig(t *testing.T) {
 					ClientID:     "gemini-client",
 					ClientSecret: "gemini-secret",
 					Scopes:       []string{"scope1"},
-					RedirectURI:  "http://localhost:3000/callback",
+					RedirectURI:  "http://192.168.1.5:3000/callback",
 				},
 			},
 		}
@@ -179,11 +179,11 @@ func TestMapToServerConfig(t *testing.T) {
 		if server.OAuth.ClientID != "gemini-client" {
 			t.Errorf("OAuth.ClientID = %s, want gemini-client", server.OAuth.ClientID)
 		}
-		// Gemini's redirect_uri uses its own callback path, which mcpproxy's
-		// loopback callback server does not serve. Since oauth.redirect_uri
-		// became load-bearing it PINS the callback URL, so copying such a value
-		// verbatim turns an importable server into a permanent connect failure
-		// ("must use the callback path \"/oauth/callback\""). Drop it and let
+		// A non-loopback host is genuinely unusable (issue #1304 only lifted the
+		// path restriction; host/port/scheme rules still apply). Since
+		// oauth.redirect_uri became load-bearing it PINS the callback URL, so
+		// copying such a value verbatim turns an importable server into a
+		// permanent connect failure ("must use a loopback host"). Drop it and let
 		// mcpproxy allocate its own callback URL instead.
 		if server.OAuth.RedirectURI != "" {
 			t.Errorf("OAuth.RedirectURI = %s, want it dropped as unusable", server.OAuth.RedirectURI)
@@ -221,6 +221,40 @@ func TestMapToServerConfig(t *testing.T) {
 		// A value mcpproxy CAN honor is a deliberate pin and must survive import.
 		if server.OAuth.RedirectURI != "http://127.0.0.1:54108/oauth/callback" {
 			t.Errorf("OAuth.RedirectURI = %s, want it preserved", server.OAuth.RedirectURI)
+		}
+	})
+
+	// TestGeminiOAuth_CustomCallbackPathPreserved covers issue #1304 directly:
+	// Gemini CLI's real-world redirect_uri (http://localhost:7777/oauth2callback)
+	// uses a callback path mcpproxy did not used to allow. It is a loopback host
+	// with an explicit port, so it is now a usable pin and must survive import
+	// instead of being dropped.
+	t.Run("gemini_oauth_custom_callback_path_preserved", func(t *testing.T) {
+		parsed := &ParsedServer{
+			Name:         "oauth-server",
+			SourceFormat: FormatGemini,
+			Fields: map[string]interface{}{
+				"url":      "http://localhost:8080",
+				"protocol": "http",
+				"oauth": &GeminiOAuth{
+					Enabled:     true,
+					ClientID:    "gemini-client",
+					RedirectURI: "http://localhost:7777/oauth2callback",
+				},
+			},
+		}
+
+		server, _, warnings := MapToServerConfig(parsed, now)
+		if server.OAuth == nil {
+			t.Fatal("OAuth should be set")
+		}
+		if server.OAuth.RedirectURI != "http://localhost:7777/oauth2callback" {
+			t.Errorf("OAuth.RedirectURI = %s, want it preserved", server.OAuth.RedirectURI)
+		}
+		for _, w := range warnings {
+			if strings.Contains(w, "redirect_uri") && strings.Contains(w, "dropped") {
+				t.Errorf("a usable custom-path pin must not be reported as dropped, got %v", warnings)
+			}
 		}
 	})
 

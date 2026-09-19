@@ -42,7 +42,7 @@ func TestResolveCallbackPortForPersistence_UsesLiveCallbackServer(t *testing.T) 
 	serverKey := oauth.GenerateServerKey(serverName, "https://example.test/mcp")
 
 	// A record exists with no port — the pre-fix code would keep persisting 0.
-	require.NoError(t, db.UpdateOAuthClientCredentials(serverKey, "static-client", "", 0))
+	require.NoError(t, db.UpdateOAuthClientCredentials(serverKey, "static-client", "", 0, ""))
 
 	stopCallbackServerAfterTest(t, serverName)
 	callbackServer, err := oauth.GetGlobalCallbackManager().StartCallbackServer(serverName, 0)
@@ -52,6 +52,10 @@ func TestResolveCallbackPortForPersistence_UsesLiveCallbackServer(t *testing.T) 
 	got := resolveCallbackPortForPersistence(serverName, serverKey, db)
 	assert.Equal(t, callbackServer.Port, got,
 		"the live callback server port must win over the stored value")
+
+	gotURI := resolveCallbackRedirectURIForPersistence(serverName, serverKey, db)
+	assert.Equal(t, callbackServer.RedirectURI, gotURI,
+		"the live callback server's redirect URI must win over the stored value")
 }
 
 // TestResolveCallbackPortForPersistence_FallsBackToStoredPort verifies we do not
@@ -61,10 +65,13 @@ func TestResolveCallbackPortForPersistence_FallsBackToStoredPort(t *testing.T) {
 	serverName := "no-live-callback-port"
 	serverKey := oauth.GenerateServerKey(serverName, "https://example.test/mcp")
 
-	require.NoError(t, db.UpdateOAuthClientCredentials(serverKey, "static-client", "", 43117))
+	require.NoError(t, db.UpdateOAuthClientCredentials(serverKey, "static-client", "", 43117, "http://127.0.0.1:43117/oauth/callback"))
 
 	got := resolveCallbackPortForPersistence(serverName, serverKey, db)
 	assert.Equal(t, 43117, got)
+
+	gotURI := resolveCallbackRedirectURIForPersistence(serverName, serverKey, db)
+	assert.Equal(t, "http://127.0.0.1:43117/oauth/callback", gotURI)
 }
 
 // loginCycle runs one complete OAuth login for serverConfig against a real test
@@ -141,7 +148,7 @@ func TestOAuthCallbackPort_StableAcrossLogins_StaticClient(t *testing.T) {
 
 	// And the record must survive: the static client is never re-registered.
 	serverKey := oauth.GenerateServerKey(serverName, serverConfig.URL)
-	storedClientID, _, storedPort, err := db.GetOAuthClientCredentials(serverKey)
+	storedClientID, _, storedPort, _, err := db.GetOAuthClientCredentials(serverKey)
 	require.NoError(t, err)
 	assert.Equal(t, "static-client", storedClientID)
 	assert.Equal(t, firstPort, storedPort, "the live callback port must be persisted")

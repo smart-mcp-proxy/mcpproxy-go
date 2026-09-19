@@ -8,7 +8,8 @@ import (
 )
 
 // OAuthCallbackPath is the loopback path mcpproxy's OAuth callback server
-// listens on.
+// listens on when `oauth.redirect_uri` does not specify its own path (or is
+// unset, in which case mcpproxy allocates a dynamic port entirely).
 //
 // It lives here rather than in internal/oauth because internal/oauth imports
 // this package (never the other way round) and the config layer has to validate
@@ -76,59 +77,69 @@ func LoopbackBindHost(hostname string) string {
 
 // ParseLoopbackRedirectURI validates an operator-pinned OAuth redirect URI (the
 // per-server `oauth.redirect_uri` config field) and returns the loopback host to
-// bind and the port it pins.
+// bind, the port it pins, and the callback path the listener must serve.
 //
 // Providers such as GitHub OAuth Apps require the callback URL to match the
 // registered one exactly and reject wildcards, so operators need a way to nail
 // the loopback port down instead of letting mcpproxy allocate a fresh one per
 // login. The URI must therefore be an RFC 8252 loopback redirect with an
-// explicit port and mcpproxy's callback path, e.g.
+// explicit port, e.g.
 //
 //	http://127.0.0.1:54108/oauth/callback
 //
-// Anything else is rejected with an actionable error rather than silently
-// downgraded to dynamic allocation.
-func ParseLoopbackRedirectURI(rawURI string) (bindHost string, port int, err error) {
+// The path is taken verbatim from the URI rather than pinned to
+// OAuthCallbackPath: some authorization servers publish a single shared OAuth
+// application whose registered redirect path an operator cannot change (issue
+// #1304), and mcpproxy's own callback path is an implementation detail the
+// provider has no reason to agree with. A URI with no path at all (e.g.
+// "http://127.0.0.1:54108") defaults to "/" - what an HTTP client actually
+// requests for a path-less URL - not to OAuthCallbackPath, so the listener
+// matches what the provider will really send. OAuthCallbackPath remains the
+// default only when oauth.redirect_uri is unset entirely (dynamic allocation).
+// Anything else about the URI is rejected with an actionable error rather than
+// silently downgraded to dynamic allocation.
+func ParseLoopbackRedirectURI(rawURI string) (bindHost string, port int, path string, err error) {
 	trimmed := strings.TrimSpace(rawURI)
 	if trimmed == "" {
-		return "", 0, fmt.Errorf("oauth.redirect_uri is empty")
+		return "", 0, "", fmt.Errorf("oauth.redirect_uri is empty")
 	}
 
 	parsed, err := url.Parse(trimmed)
 	if err != nil {
-		return "", 0, fmt.Errorf("oauth.redirect_uri %q is not a valid URL: %w", trimmed, err)
+		return "", 0, "", fmt.Errorf("oauth.redirect_uri %q is not a valid URL: %w", trimmed, err)
 	}
 
 	if parsed.Scheme != "http" {
-		return "", 0, fmt.Errorf("oauth.redirect_uri %q must use the http scheme for a loopback redirect (RFC 8252), got %q", trimmed, parsed.Scheme)
+		return "", 0, "", fmt.Errorf("oauth.redirect_uri %q must use the http scheme for a loopback redirect (RFC 8252), got %q", trimmed, parsed.Scheme)
 	}
 
 	hostname := parsed.Hostname()
 	switch hostname {
 	case LoopbackIPv4Host, "localhost", LoopbackIPv6Host:
 	default:
-		return "", 0, fmt.Errorf("oauth.redirect_uri %q must use a loopback host (127.0.0.1, localhost or ::1), got %q", trimmed, hostname)
-	}
-
-	if parsed.Path != OAuthCallbackPath {
-		return "", 0, fmt.Errorf("oauth.redirect_uri %q must use the callback path %q, got %q", trimmed, OAuthCallbackPath, parsed.Path)
+		return "", 0, "", fmt.Errorf("oauth.redirect_uri %q must use a loopback host (127.0.0.1, localhost or ::1), got %q", trimmed, hostname)
 	}
 
 	if parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", 0, fmt.Errorf("oauth.redirect_uri %q must not contain a query string or fragment", trimmed)
+		return "", 0, "", fmt.Errorf("oauth.redirect_uri %q must not contain a query string or fragment", trimmed)
 	}
 
 	portStr := parsed.Port()
 	if portStr == "" {
-		return "", 0, fmt.Errorf("oauth.redirect_uri %q must include an explicit port to pin (e.g. http://127.0.0.1:54108%s)", trimmed, OAuthCallbackPath)
+		return "", 0, "", fmt.Errorf("oauth.redirect_uri %q must include an explicit port to pin (e.g. http://127.0.0.1:54108%s)", trimmed, OAuthCallbackPath)
 	}
 
 	parsedPort, err := strconv.Atoi(portStr)
 	if err != nil || parsedPort < 1 || parsedPort > 65535 {
-		return "", 0, fmt.Errorf("oauth.redirect_uri %q has an invalid port %q (expected 1-65535)", trimmed, portStr)
+		return "", 0, "", fmt.Errorf("oauth.redirect_uri %q has an invalid port %q (expected 1-65535)", trimmed, portStr)
 	}
 
-	return LoopbackBindHost(hostname), parsedPort, nil
+	callbackPath := parsed.Path
+	if callbackPath == "" {
+		callbackPath = "/"
+	}
+
+	return LoopbackBindHost(hostname), parsedPort, callbackPath, nil
 }
 
 // Validate performs validation on OAuthConfig
@@ -147,7 +158,7 @@ func (o *OAuthConfig) Validate() error {
 	// one, and mcpproxy refuses to silently downgrade to a random port).
 	// Reject it where the operator is typing it instead.
 	if strings.TrimSpace(o.RedirectURI) != "" {
-		if _, _, err := ParseLoopbackRedirectURI(o.RedirectURI); err != nil {
+		if _, _, _, err := ParseLoopbackRedirectURI(o.RedirectURI); err != nil {
 			return fmt.Errorf("oauth config validation failed: %w", err)
 		}
 	}
