@@ -7,7 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"slices"
+"slices"
+	"strings"RD 🔒)
 	"time"
 )
 
@@ -760,12 +761,10 @@ func MergeAnnotationOverrides(base, patch map[string]*ToolAnnotations, opts Merg
 }
 
 func indexDot(s string) int {
-	for i, c := range s {
-		if c == '.' {
-			return i
-		}
-	}
-	return -1
+	// Tool names may contain '.' and ':' (IsValidToolNameForOverride allows
+	// A-Za-z0-9._:-), so split at the LAST dot to separate tool from hint.
+	// e.g. "tool.with.dots.readOnlyHint" -> ("tool.with.dots", "readOnlyHint")
+	return strings.LastIndex(s, ".")
 }
 
 // Helper functions to copy configs (avoiding pointer aliasing)

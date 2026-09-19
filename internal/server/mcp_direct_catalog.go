@@ -165,6 +165,16 @@ type directCatalogOrigin struct {
 // deny-on-miss to allow-everything at exactly the moment upstream discovery is
 // failing.
 func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *directCatalog {
+	return buildDirectCatalogWithOverrides(tools, nil, logger)
+}
+
+// buildDirectCatalogWithOverrides is the effective-annotation-aware builder.
+// overridesByServer maps serverName -> annotation_overrides for that server.
+// Each tool's effective annotations are resolved via
+// config.EffectiveAnnotationsForTool before deriving RequiredPermission and
+// storing Annotations, so a per-server override that demotes a destructive
+// tool to read is reflected in both listing scope and dispatch tier.
+func buildDirectCatalogWithOverrides(tools []*config.ToolMetadata, overridesByServer map[string]map[string]*config.ToolAnnotations, logger *zap.Logger) *directCatalog {
 	cat := &directCatalog{
 		byDisplayName:      make(map[string]*directCatalogEntry, len(tools)),
 		displayNames:       make([]string, 0, len(tools)),
@@ -241,6 +251,18 @@ func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *direc
 		}
 
 		t := group[0]
+		var effAnnotations *config.ToolAnnotations
+		if overridesByServer != nil {
+			if ov := overridesByServer[t.ServerName]; ov != nil {
+				effAnnotations = config.EffectiveAnnotationsForTool(ov, t.Name, t.Annotations)
+			} else {
+				effAnnotations = t.Annotations
+			}
+		} else {
+			effAnnotations = t.Annotations
+		}
+		// Normalize nil effective (no hints) to nil to preserve spec nil-default,
+		// matching the upstream core client's handling.
 		entry := &directCatalogEntry{
 			DisplayName:        name,
 			ServerName:         t.ServerName,
@@ -249,8 +271,8 @@ func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *direc
 			ParamsJSON:         t.ParamsJSON,
 			OutputSchemaJSON:   t.OutputSchemaJSON,
 			Hash:               t.Hash,
-			Annotations:        t.Annotations,
-			RequiredPermission: requiredPermissionForDirectTool(t.Annotations),
+			Annotations:        effAnnotations,
+			RequiredPermission: requiredPermissionForDirectTool(effAnnotations),
 		}
 		cat.byDisplayName[name] = entry
 		cat.displayNames = append(cat.displayNames, name)
