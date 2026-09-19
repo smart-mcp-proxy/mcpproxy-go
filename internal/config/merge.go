@@ -294,6 +294,23 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 		merged.Headers = newHeaders
 	}
 
+	annotationRemovalKeys := opts.GetRemoveMarkersForMap("annotation_overrides")
+	if patch.AnnotationOverrides != nil || len(annotationRemovalKeys) > 0 || opts.ShouldRemove("annotation_overrides") {
+		newOverrides := MergeAnnotationOverrides(base.AnnotationOverrides, patch.AnnotationOverrides, opts)
+		if diff != nil && !reflect.DeepEqual(base.AnnotationOverrides, newOverrides) {
+			diff.Modified["annotation_overrides"] = FieldChange{Path: "annotation_overrides", From: base.AnnotationOverrides, To: newOverrides}
+			for _, key := range annotationRemovalKeys {
+				if _, existed := base.AnnotationOverrides[key]; existed {
+					diff.Removed = append(diff.Removed, "annotation_overrides."+key)
+				}
+			}
+			if opts.ShouldRemove("annotation_overrides") && base.AnnotationOverrides != nil {
+				diff.Removed = append(diff.Removed, "annotation_overrides")
+			}
+		}
+		merged.AnnotationOverrides = newOverrides
+	}
+
 	// Nested struct fields - deep merge or remove
 	// Handle Isolation
 	if opts.ShouldRemove("isolation") {
@@ -586,6 +603,144 @@ func MergeOAuthConfig(base, patch *OAuthConfig, removeIfNil bool) *OAuthConfig {
 	return result
 }
 
+// MergeAnnotationOverrides deep-merges annotation_overrides with RFC 7396
+// null-means-remove semantics for whole-tool deletes and per-hint
+// nulls (readOnlyHint:null, etc.). Patch semantics: nil patch preserves
+// base (omitted field); non-nil empty is a no-op (deletion only via
+// removeMarkers); whole-map null and per-tool null are signaled via
+// opts.removeMarkers ("annotation_overrides" / "annotation_overrides.<tool>").
+func MergeAnnotationOverrides(base, patch map[string]*ToolAnnotations, opts MergeOptions) map[string]*ToolAnnotations {
+	if patch == nil && len(opts.GetRemoveMarkersForMap("annotation_overrides")) == 0 && !opts.ShouldRemove("annotation_overrides") {
+		if base == nil {
+			return nil
+		}
+		dst := make(map[string]*ToolAnnotations, len(base))
+		for k, v := range base {
+			if v == nil {
+				dst[k] = nil
+				continue
+			}
+			cp := *v
+			if v.ReadOnlyHint != nil {
+				b := *v.ReadOnlyHint
+				cp.ReadOnlyHint = &b
+			}
+			if v.DestructiveHint != nil {
+				b := *v.DestructiveHint
+				cp.DestructiveHint = &b
+			}
+			if v.IdempotentHint != nil {
+				b := *v.IdempotentHint
+				cp.IdempotentHint = &b
+			}
+			if v.OpenWorldHint != nil {
+				b := *v.OpenWorldHint
+				cp.OpenWorldHint = &b
+			}
+			dst[k] = &cp
+		}
+		return dst
+	}
+	if opts.ShouldRemove("annotation_overrides") {
+		return nil
+	}
+	result := make(map[string]*ToolAnnotations, len(base))
+	for k, v := range base {
+		if v == nil {
+			result[k] = nil
+			continue
+		}
+		cp := *v
+		if v.ReadOnlyHint != nil {
+			b := *v.ReadOnlyHint
+			cp.ReadOnlyHint = &b
+		}
+		if v.DestructiveHint != nil {
+			b := *v.DestructiveHint
+			cp.DestructiveHint = &b
+		}
+		if v.IdempotentHint != nil {
+			b := *v.IdempotentHint
+			cp.IdempotentHint = &b
+		}
+		if v.OpenWorldHint != nil {
+			b := *v.OpenWorldHint
+			cp.OpenWorldHint = &b
+		}
+		result[k] = &cp
+	}
+	for k, v := range patch {
+		if v == nil {
+			continue
+		}
+		if result[k] == nil {
+			result[k] = &ToolAnnotations{}
+		}
+		if v.Title != "" {
+			result[k].Title = v.Title
+		}
+		if v.ReadOnlyHint != nil {
+			b := *v.ReadOnlyHint
+			result[k].ReadOnlyHint = &b
+		}
+		if v.DestructiveHint != nil {
+			b := *v.DestructiveHint
+			result[k].DestructiveHint = &b
+		}
+		if v.IdempotentHint != nil {
+			b := *v.IdempotentHint
+			result[k].IdempotentHint = &b
+		}
+		if v.OpenWorldHint != nil {
+			b := *v.OpenWorldHint
+			result[k].OpenWorldHint = &b
+		}
+	}
+	for _, key := range opts.GetRemoveMarkersForMap("annotation_overrides") {
+		if idx := indexDot(key); idx >= 0 {
+			toolName := key[:idx]
+			hint := key[idx+1:]
+			if entry, ok := result[toolName]; ok && entry != nil {
+				switch hint {
+				case "readOnlyHint":
+					entry.ReadOnlyHint = nil
+				case "destructiveHint":
+					entry.DestructiveHint = nil
+				case "idempotentHint":
+					entry.IdempotentHint = nil
+				case "openWorldHint":
+					entry.OpenWorldHint = nil
+				case "title":
+					entry.Title = ""
+				default:
+					delete(result, key)
+					continue
+				}
+				if entry.Title == "" && entry.ReadOnlyHint == nil && entry.DestructiveHint == nil && entry.IdempotentHint == nil && entry.OpenWorldHint == nil {
+					delete(result, toolName)
+				}
+			} else {
+				delete(result, key)
+			}
+		} else {
+			delete(result, key)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func indexDot(s string) int {
+	for i, c := range s {
+		if c == '.' {
+			return i
+		}
+	}
+	return -1
+}
+
 // Helper functions to copy configs (avoiding pointer aliasing)
 
 func CopyServerConfig(src *ServerConfig) *ServerConfig {
@@ -685,6 +840,34 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	if src.ExposePrompts != nil {
 		exposePrompts := *src.ExposePrompts
 		dst.ExposePrompts = &exposePrompts
+	}
+
+	if src.AnnotationOverrides != nil {
+		dst.AnnotationOverrides = make(map[string]*ToolAnnotations, len(src.AnnotationOverrides))
+		for k, v := range src.AnnotationOverrides {
+			if v == nil {
+				dst.AnnotationOverrides[k] = nil
+				continue
+			}
+			cp := *v
+			if v.ReadOnlyHint != nil {
+				b := *v.ReadOnlyHint
+				cp.ReadOnlyHint = &b
+			}
+			if v.DestructiveHint != nil {
+				b := *v.DestructiveHint
+				cp.DestructiveHint = &b
+			}
+			if v.IdempotentHint != nil {
+				b := *v.IdempotentHint
+				cp.IdempotentHint = &b
+			}
+			if v.OpenWorldHint != nil {
+				b := *v.OpenWorldHint
+				cp.OpenWorldHint = &b
+			}
+			dst.AnnotationOverrides[k] = &cp
+		}
 	}
 
 	// Copy nested structs
