@@ -45,10 +45,13 @@ const (
 	// but global isolation is off, so the opt-in is ignored.
 	IsolationSourceServerOptInIgnored = "server-opt-in-ignored"
 	// IsolationSourceNotStdio: structural gate — the server has no local
-	// command, so there is no child process to isolate.
+	// command, so there is no child process to isolate. PROCESS-SPAWN ONLY:
+	// it says nothing about whether separate scanner containers may run
+	// (GH #1303), so ResolveScannerIsolationMode never emits it.
 	IsolationSourceNotStdio = "not-stdio"
 	// IsolationSourceAlreadyDocker: structural gate — the server already
 	// invokes docker itself, so wrapping it would break its socket access.
+	// PROCESS-SPAWN ONLY, for the same reason as IsolationSourceNotStdio.
 	IsolationSourceAlreadyDocker = "already-docker"
 	// IsolationSourceSandboxUnavailable: capability gate — mode is "sandbox"
 	// but this host cannot enforce it (any non-Linux OS, or a Linux kernel
@@ -137,6 +140,11 @@ type ResolvedIsolation struct {
 // the server unconfined, so they must not be reported as isolated. Mode is left
 // alone there because the spawn path branches on it and still applies the
 // sandbox wrapper's rlimits on Linux — see isolationDelivered.
+//
+// This answers ONLY the process-spawn question. Two neighbouring questions have
+// their own entry points and must not be answered from this one:
+// ResolveScannerIsolationMode (may Docker-based SCANNER containers run against
+// this server) and ServerDependsOnDocker (does starting it need a daemon).
 func ResolveIsolation(globalConfig *DockerIsolationConfig, serverConfig *ServerConfig) ResolvedIsolation {
 	globalMode := globalConfig.ResolvedMode() // nil-safe; returns none for nil
 
@@ -168,6 +176,52 @@ func ResolveIsolation(globalConfig *DockerIsolationConfig, serverConfig *ServerC
 		Inherited:  inherited,
 		Source:     source,
 	}
+}
+
+// ResolveScannerIsolationMode answers a DIFFERENT question from
+// ResolveIsolation: not "do we containerise or confine THIS server's own child
+// process", but "may the security scanner run its own short-lived Docker
+// containers against this server's already-captured tool definitions"
+// (GH #1303).
+//
+// It shares ResolveIsolation's config precedence verbatim — the per-server
+// `isolation.mode` override still wins outright, a disabled global still
+// ignores per-server bool opt-ins, and an active global still honours a
+// per-server `enabled:false` opt-out — so an operator's explicit security
+// policy keeps deciding whether Docker scanners run. What it deliberately does
+// NOT apply are the two STRUCTURAL gates, which exist purely to protect process
+// spawning:
+//
+//   - not-stdio: an HTTP/SSE server has no child process for us to wrap, so
+//     there is nothing to containerise — but a scanner container does not wrap
+//     the server, it reads JSON captured over MCP;
+//   - already-docker: wrapping a command that itself invokes docker would break
+//     its access to the Docker socket — but a scanner container is a separate,
+//     short-lived process that never touches the server's own container.
+//
+// Routing those gates into the scanner question forced mode=none for every
+// remote server, silently skipped every Docker-based scanner plugin, and made
+// the skip message's own remedy ("set isolation.mode to docker for this
+// server") a dead end because the gate ignored that override too.
+//
+// It also skips the host-CAPABILITY gate (isolationDelivered), which refines
+// ResolvedIsolation.Isolated and never Mode — matching what ResolveMode returns.
+//
+// See also: ResolveIsolation (how is this server's process launched) and
+// ServerDependsOnDocker (does STARTING this server need a Docker daemon). The
+// three are distinct questions and must stay distinct (GH #1142, GH #1303).
+//
+// The returned source is one of the IsolationSource* constants — never
+// IsolationSourceNotStdio or IsolationSourceAlreadyDocker — and is for logging
+// and error text only; it is not serialised onto the isolation-explain
+// surfaces, which keep using ResolveIsolation. A nil serverConfig carries no
+// override and therefore inherits the global mode.
+func ResolveScannerIsolationMode(globalConfig *DockerIsolationConfig, serverConfig *ServerConfig) (IsolationMode, string) {
+	var iso *IsolationConfig
+	if serverConfig != nil {
+		iso = serverConfig.Isolation
+	}
+	return resolveConfiguredIsolationMode(iso, globalConfig.ResolvedMode())
 }
 
 // isolationDelivered answers "will the child process really be confined" for an
@@ -252,6 +306,9 @@ func IsDockerCommand(command string) bool {
 //
 // It is built ON TOP of the resolver plus the already-docker structural fact,
 // so there is still exactly one implementation of the isolation algorithm.
+//
+// A third, separate question — may the security scanner run its own Docker
+// containers against this server — is answered by ResolveScannerIsolationMode.
 func ServerDependsOnDocker(globalConfig *DockerIsolationConfig, serverConfig *ServerConfig) bool {
 	if serverConfig == nil {
 		return false
