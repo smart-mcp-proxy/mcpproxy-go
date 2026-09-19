@@ -2,6 +2,7 @@ package server
 
 import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 )
 
 // scannerIsolationModeFor resolves the isolation mode that governs whether the
@@ -25,7 +26,13 @@ func scannerIsolationModeFor(liveCfg *config.Config, serverName string) string {
 	}
 	for _, candidate := range liveCfg.Servers {
 		if candidate != nil && candidate.Name == serverName {
-			mode, _ := config.ResolveScannerIsolationMode(liveCfg.DockerIsolation, candidate)
+			// Route through IsolationManager.ResolveScannerMode rather than
+			// calling config.ResolveScannerIsolationMode directly, so this
+			// package and any future scanner-adjacent caller (REST/tray
+			// surfaces) share the one entry point instead of two that could
+			// silently drift.
+			im := core.NewIsolationManager(liveCfg.DockerIsolation)
+			mode, _ := im.ResolveScannerMode(candidate)
 			return string(mode)
 		}
 	}
