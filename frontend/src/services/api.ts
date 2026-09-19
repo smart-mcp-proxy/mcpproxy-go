@@ -1,7 +1,17 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, AttentionResponse, ReviewQueueResponse, ServerReviewResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, AttentionResponse, ReviewQueueResponse, ServerReviewResponse, ListProfilesResponse, ActiveProfileResponse, ToolAnnotation } from '@/types'
 import type { ProfileConfig, ProfileList, ProfileView, ProfileWriteResult, ProfileRenameResult, ProfileDeleteResult, EffectiveToolsResult, TryProfileResponse, AccessExplanation, ExplainSubjectQuery, ClientView, ClientsResponse, BulkAssignResponse, CustomClientResponse, RotateResponse, UpgradePreview, UpgradeApplyResult, ForgetClientResponse, ConnectOptions } from '@/types/api'
 
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
+
+// PatchServerRequest mirrors the PATCH /api/v1/servers/{id} body (snake_case, per oas).
+// Generated from oas/swagger.yaml but also manually extended for annotation_overrides.
+export interface PatchServerRequest extends Record<string, unknown> {
+  trust_mode?: string
+  url?: string
+  headers?: Record<string, string | null>
+  env?: Record<string, string | null>
+  annotation_overrides?: Record<string, ToolAnnotation | null>
+}
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -474,7 +484,7 @@ class APIService {
   // request field as optional and preserves anything not supplied, so callers
   // can send only what they want to change. Passing `headers: {}` clears
   // headers; omitting the field keeps the existing value.
-  async patchServer(serverName: string, patch: Record<string, unknown>): Promise<APIResponse> {
+  async patchServer(serverName: string, patch: PatchServerRequest): Promise<APIResponse> {
     return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
