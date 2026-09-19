@@ -1121,6 +1121,28 @@ components:
         working_dir:
           description: Working directory for stdio servers
           type: string
+        annotation_overrides:
+          additionalProperties:
+            $ref: '#/components/schemas/config.ToolAnnotations'
+          description: |-
+            AnnotationOverrides fixes false hints from the upstream server.
+            Map from tool name (or "*" for wildcard) to ToolAnnotations.
+            Admin-only, hot (no restart), audited.
+          type: object
+      type: object
+    config.ToolAnnotations:
+      description: MCP tool behavior hints (per-tool override)
+      properties:
+        title:
+          type: string
+        readOnlyHint:
+          type: boolean
+        destructiveHint:
+          type: boolean
+        idempotentHint:
+          type: boolean
+        openWorldHint:
+          type: boolean
       type: object
     config.TLSConfig:
       description: TLS configuration

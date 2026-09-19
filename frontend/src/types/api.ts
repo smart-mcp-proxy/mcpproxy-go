@@ -190,6 +190,9 @@ export interface SecurityScanReportSummary {
   info_level: number
 }
 
+// Tool annotation overrides (per-server per-tool, admin-only, RFC7396 null=delete)
+export type AnnotationOverrides = Record<string, ToolAnnotation | null>
+
 // Server types
 export interface ServerIsolationConfig {
   // EFFECTIVE isolation state, after global + per-server + structural
@@ -290,6 +293,8 @@ export interface Server {
   health?: HealthStatus // Unified health status calculated by the backend
   quarantine?: QuarantineStats // Tool-level quarantine stats (Spec 032)
   security_scan?: SecurityScanSummary // Security scan summary (Spec 039)
+  // Per-server per-tool annotation overrides (spec 108): map[toolName]*ToolAnnotations + wildcard "*"
+  annotation_overrides?: AnnotationOverrides
   // Spec 044: structured diagnostic error + stable error code
   error_code?: string
   diagnostic?: Diagnostic | null

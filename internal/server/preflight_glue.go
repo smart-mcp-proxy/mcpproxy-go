@@ -477,7 +477,15 @@ func (p *MCPProxyServer) preflightSnapshot() (preflight.StateReader, func(server
 			// The snapshot stores bare names on the live path and canonical
 			// "server:tool" names when they came from ToolMetadata; match both.
 			if tool.Name == toolName || tool.Name == serverName+":"+toolName {
-				return tool.Annotations
+				upstream := tool.Annotations
+				if cfg := p.currentConfig(); cfg != nil {
+					for _, sc := range cfg.Servers {
+						if sc.Name == serverName {
+							return config.EffectiveAnnotationsForTool(sc.AnnotationOverrides, toolName, upstream)
+						}
+					}
+				}
+				return upstream
 			}
 		}
 		return nil

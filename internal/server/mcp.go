@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -5222,6 +5223,44 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 	}
 
+	// Annotation overrides on add: accept annotation_overrides_json (JSON string)
+	// or direct annotation_overrides object. POST ignores nil entries.
+	if aoJSON := request.GetString("annotation_overrides_json", ""); aoJSON != "" {
+		var m map[string]*config.ToolAnnotations
+		if err := json.Unmarshal([]byte(aoJSON), &m); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid annotation_overrides_json format: %v", err)), nil
+		}
+		filtered := make(map[string]*config.ToolAnnotations, len(m))
+		for k, v := range m {
+			if v == nil {
+				continue
+			}
+			filtered[k] = v
+		}
+		if len(filtered) > 0 {
+			serverConfig.AnnotationOverrides = filtered
+		}
+	} else if rawArgs := request.GetArguments(); rawArgs != nil {
+		if raw, ok := rawArgs["annotation_overrides"]; ok {
+			data, err := json.Marshal(raw)
+			if err == nil {
+				var m map[string]*config.ToolAnnotations
+				if err := json.Unmarshal(data, &m); err == nil {
+					filtered := make(map[string]*config.ToolAnnotations, len(m))
+					for k, v := range m {
+						if v == nil {
+							continue
+						}
+						filtered[k] = v
+					}
+					if len(filtered) > 0 {
+						serverConfig.AnnotationOverrides = filtered
+					}
+				}
+			}
+		}
+	}
+
 	// #1148 round 6 (finding 4): on CREATE there is no stored value to bind a
 	// mask back to, so ANY mask this proxy rendered can only be a placeholder
 	// an agent copied out of another server's read payload — never a value
@@ -5831,6 +5870,77 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 				return nil, opts, fmt.Errorf("invalid oauth_json: %w", err)
 			}
 			patch.OAuth = &oauth
+		}
+	}
+
+	// Annotation overrides: per-server per-tool hint fixes (wildcard "*"
+	// allowed). Supports RFC7396 whole-map null, per-tool null, and per-hint
+	// null via remove markers (e.g. annotation_overrides.tool.readOnlyHint).
+	// The MCP surface accepts both annotation_overrides_json (JSON string like
+	// env_json) and direct annotation_overrides object for flexibility.
+	if aoJSON := request.GetString("annotation_overrides_json", ""); aoJSON != "" {
+		trimmed := bytes.TrimSpace([]byte(aoJSON))
+		if string(trimmed) == "null" {
+			opts = opts.WithRemoveMarker("annotation_overrides")
+		} else {
+			var m map[string]*config.ToolAnnotations
+			if err := json.Unmarshal([]byte(aoJSON), &m); err != nil {
+				return nil, opts, fmt.Errorf("invalid annotation_overrides_json format: %v", err)
+			}
+			var inner map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(aoJSON), &inner); err == nil {
+				for k, v := range inner {
+					tv := bytes.TrimSpace(v)
+					if string(tv) == "null" {
+						opts = opts.WithRemoveMarker("annotation_overrides." + k)
+					} else {
+						var hintMap map[string]json.RawMessage
+						if err := json.Unmarshal(v, &hintMap); err == nil {
+							for hk, hv := range hintMap {
+								if string(bytes.TrimSpace(hv)) == "null" {
+									opts = opts.WithRemoveMarker("annotation_overrides." + k + "." + hk)
+								}
+							}
+						}
+					}
+				}
+			}
+			patch.AnnotationOverrides = m
+		}
+	} else if rawArgs := request.GetArguments(); rawArgs != nil {
+		if raw, ok := rawArgs["annotation_overrides"]; ok {
+			data, err := json.Marshal(raw)
+			if err != nil {
+				return nil, opts, fmt.Errorf("invalid annotation_overrides format: %v", err)
+			}
+			trimmed := bytes.TrimSpace(data)
+			if string(trimmed) == "null" {
+				opts = opts.WithRemoveMarker("annotation_overrides")
+			} else {
+				var m map[string]*config.ToolAnnotations
+				if err := json.Unmarshal(data, &m); err != nil {
+					return nil, opts, fmt.Errorf("invalid annotation_overrides format: %v", err)
+				}
+				var inner map[string]json.RawMessage
+				if err := json.Unmarshal(data, &inner); err == nil {
+					for k, v := range inner {
+						tv := bytes.TrimSpace(v)
+						if string(tv) == "null" {
+							opts = opts.WithRemoveMarker("annotation_overrides." + k)
+						} else {
+							var hintMap map[string]json.RawMessage
+							if err := json.Unmarshal(v, &hintMap); err == nil {
+								for hk, hv := range hintMap {
+									if string(bytes.TrimSpace(hv)) == "null" {
+										opts = opts.WithRemoveMarker("annotation_overrides." + k + "." + hk)
+									}
+								}
+							}
+						}
+					}
+				}
+				patch.AnnotationOverrides = m
+			}
 		}
 	}
 
@@ -7141,7 +7251,15 @@ func (p *MCPProxyServer) lookupToolAnnotationsFound(serverName, toolName string)
 // while dispatch still targets "a:ns:erase" (Spec 105 FR-009).
 func (p *MCPProxyServer) lookupExactToolAnnotations(serverName, toolName string) (*config.ToolAnnotations, bool) {
 	identity := p.resolveExactToolIdentity(serverName, toolName)
-	return identity.Annotations, identity.Found
+	upstream := identity.Annotations
+	if cfg := p.currentConfig(); cfg != nil {
+		for _, sc := range cfg.Servers {
+			if sc.Name == serverName {
+				return config.EffectiveAnnotationsForTool(sc.AnnotationOverrides, toolName, upstream), identity.Found
+			}
+		}
+	}
+	return upstream, identity.Found
 }
 
 // toolIdentity is the outcome of resolving one split (server, RAW tool) pair

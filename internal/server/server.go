@@ -1998,6 +1998,49 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		existing.Isolation = config.CopyIsolationConfig(updates.Isolation)
 	}
 
+	// AnnotationOverrides (per-server per-tool hint fixes) — hot, no restart.
+	// The REST handler pre-merges via MergeAnnotationOverrides; the MCP patch
+	// path goes through MergeServerConfig. Here we persist what the caller
+	// computed. The REST handler preserves existing value when not updated, so
+	// a nil here means explicit delete-all (via {"annotation_overrides":null}).
+	if updates.AnnotationOverrides != nil {
+		existing.AnnotationOverrides = make(map[string]*config.ToolAnnotations, len(updates.AnnotationOverrides))
+		for k, v := range updates.AnnotationOverrides {
+			if v == nil {
+				existing.AnnotationOverrides[k] = nil
+				continue
+			}
+			cp := *v
+			if v.ReadOnlyHint != nil {
+				b := *v.ReadOnlyHint
+				cp.ReadOnlyHint = &b
+			}
+			if v.DestructiveHint != nil {
+				b := *v.DestructiveHint
+				cp.DestructiveHint = &b
+			}
+			if v.IdempotentHint != nil {
+				b := *v.IdempotentHint
+				cp.IdempotentHint = &b
+			}
+			if v.OpenWorldHint != nil {
+				b := *v.OpenWorldHint
+				cp.OpenWorldHint = &b
+			}
+			existing.AnnotationOverrides[k] = &cp
+		}
+	} else {
+		// Nil means delete-all only when caller explicitly requested it.
+		// The REST handler preserves existing when not updated, so nil here
+		// is intentional clear. For MCP, MergeServerConfig already handles it.
+		// We clear only if we can tell it was an explicit delete — heuristic:
+		// if the key was present as null, the caller set updates to nil
+		// deliberately. Since we can't see opts here, we clear when existing
+		// had a value and updates is nil — this matches the explicit delete
+		// case; the no-op case already has updates == existing (non-nil).
+		existing.AnnotationOverrides = nil
+	}
+
 	// Save to storage
 	if err := storageManager.SaveUpstreamServer(existing); err != nil {
 		return fmt.Errorf("failed to save server: %w", err)

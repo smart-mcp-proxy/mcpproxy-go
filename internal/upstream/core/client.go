@@ -425,6 +425,16 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 			}
 		}
 
+		// Apply per-server operator overrides (admin-only, persisted in ServerConfig) — read under RLock.
+		c.mu.RLock()
+		overrides := c.config.AnnotationOverrides
+		c.mu.RUnlock()
+		if eff := config.EffectiveAnnotationsForTool(overrides, tool.Name, toolMeta.Annotations); eff != nil {
+			toolMeta.Annotations = eff
+		} else if overrides != nil && (overrides["*"] != nil || overrides[tool.Name] != nil) {
+			toolMeta.Annotations = nil
+		}
+
 		// Compute hash for tool change detection.
 		// Hash is based on serverName + toolName + description + inputSchema + outputSchema.
 		toolMeta.Hash = hash.ComputeToolHashWithOutputSchema(c.config.Name, tool.Name, tool.Description, tool.InputSchema, outputSchemaJSON)

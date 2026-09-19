@@ -1952,6 +1952,12 @@ type AddServerRequest struct {
 	// field leaves it alone; clear an individual override by sending it
 	// explicitly (`"enabled": null`, `"image": ""`).
 	Isolation *IsolationRequest `json:"isolation,omitempty"`
+	// AnnotationOverrides carries per-server per-tool annotation fixes
+	// (map[toolName]*ToolAnnotations, wildcard "*" allowed). Nil means
+	// "leave unchanged" on PATCH; a present map is deep-merged via
+	// config.MergeAnnotationOverrides with RFC7396 null-means-delete for
+	// whole-tool entries and per-hint nulls. See config.ToolAnnotations.
+	AnnotationOverrides map[string]*config.ToolAnnotations `json:"annotation_overrides,omitempty"`
 }
 
 // IsolationRequest is the request-body representation of
@@ -2303,6 +2309,20 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.Isolation != nil {
 		serverConfig.Isolation = req.Isolation.resolve(nil)
 	}
+	// Annotation overrides: POST ignores nil entries (JSON Merge Patch null has no
+	// meaning on create) — drop nils, keep the rest as persisted.
+	if req.AnnotationOverrides != nil {
+		filtered := make(map[string]*config.ToolAnnotations, len(req.AnnotationOverrides))
+		for k, v := range req.AnnotationOverrides {
+			if v == nil {
+				continue
+			}
+			filtered[k] = v
+		}
+		if len(filtered) > 0 {
+			serverConfig.AnnotationOverrides = filtered
+		}
+	}
 
 	// #1148 round 6: on CREATE there is no stored value to bind a mask back to,
 	// so ANY mask this proxy rendered can only be a placeholder copied out of
@@ -2402,10 +2422,46 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req AddServerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
 		return
+	}
+	var req AddServerRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	// Build remove markers for annotation_overrides via raw JSON scan
+	// (RFC7396 whole-map null, per-tool null, per-hint null).
+	opts := config.DefaultMergeOptions()
+	var rawPatch map[string]json.RawMessage
+	if err := json.Unmarshal(body, &rawPatch); err == nil {
+		if raw, ok := rawPatch["annotation_overrides"]; ok {
+			trimmed := bytes.TrimSpace(raw)
+			if string(trimmed) == "null" {
+				opts = opts.WithRemoveMarker("annotation_overrides")
+			} else {
+				var inner map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &inner); err == nil {
+					for k, v := range inner {
+						tv := bytes.TrimSpace(v)
+						if string(tv) == "null" {
+							opts = opts.WithRemoveMarker("annotation_overrides." + k)
+						} else {
+							var hintMap map[string]json.RawMessage
+							if err := json.Unmarshal(v, &hintMap); err == nil {
+								for hk, hv := range hintMap {
+									if string(bytes.TrimSpace(hv)) == "null" {
+										opts = opts.WithRemoveMarker("annotation_overrides." + k + "." + hk)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// GH #938: reject an unrecognized trust_mode before anything is persisted.
@@ -2644,10 +2700,53 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		updates.Isolation = req.Isolation.resolve(existingIso)
 		hasUpdates = true
 	}
+	// Annotation overrides: manual deep-merge via config.MergeAnnotationOverrides
+	// with RFC7396 null-means-delete for whole-map, per-tool, and per-hint.
+	hadOtherUpdates := hasUpdates
+	hasAnnotationOverrideUpdate := req.AnnotationOverrides != nil || opts.ShouldRemove("annotation_overrides") || len(opts.GetRemoveMarkersForMap("annotation_overrides")) > 0
+	if hasAnnotationOverrideUpdate {
+		var baseAO map[string]*config.ToolAnnotations
+		if existingSrv != nil {
+			baseAO = existingSrv.AnnotationOverrides
+		}
+		merged := config.MergeAnnotationOverrides(baseAO, req.AnnotationOverrides, opts)
+		updates.AnnotationOverrides = merged
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.AnnotationOverrides = existingSrv.AnnotationOverrides
+	}
+	onlyAnnotationOverrideHot := hasAnnotationOverrideUpdate && !hadOtherUpdates
 
 	if !hasUpdates {
 		s.writeError(w, r, http.StatusBadRequest, "No fields to update")
 		return
+	}
+
+	// Validate annotation overrides via ValidateDetailed (write gate) before
+	// persisting. Build a temporary config with the merged server to reuse the
+	// canonical per-server validation (max 100, tool name, at least one hint).
+	if hasAnnotationOverrideUpdate {
+		if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && existingSrv != nil {
+			tmpCfg := &config.Config{Servers: make([]*config.ServerConfig, len(cfg.Servers))}
+			for i, sc := range cfg.Servers {
+				if sc != nil && sc.Name == serverName {
+					// Use the merged server for validation
+					mergedSrv := config.CopyServerConfig(sc)
+					mergedSrv.AnnotationOverrides = updates.AnnotationOverrides
+					tmpCfg.Servers[i] = mergedSrv
+				} else {
+					tmpCfg.Servers[i] = sc
+				}
+			}
+			if errs := tmpCfg.ValidateDetailed(); len(errs) > 0 {
+				for _, e := range errs {
+					if strings.Contains(e.Field, "annotation_overrides") {
+						s.writeError(w, r, http.StatusBadRequest, e.Error())
+						return
+					}
+				}
+			}
+		}
 	}
 
 	// #1148 round 6: the fail-closed net. The key-bound reverts above restored
@@ -2676,9 +2775,13 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Infow("Server updated successfully", "server", serverName)
+	restartRequired := true
+	if onlyAnnotationOverrideHot {
+		restartRequired = false
+	}
 	s.writeSuccess(w, map[string]interface{}{
 		"message":          fmt.Sprintf("Server '%s' updated successfully", serverName),
-		"restart_required": true,
+		"restart_required": restartRequired,
 	})
 }
 
