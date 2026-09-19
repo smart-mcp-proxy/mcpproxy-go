@@ -425,6 +425,32 @@ A profile is a named view over your upstream servers with a tool policy. The ful
 }
 ```
 
+### `annotation_overrides` (per-server per-tool annotation fixes)
+
+Fixes false or missing behavioural hints from an upstream MCP server without forking it. An operator can override the four MCP `ToolAnnotations` hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`; plus optional `title`) per tool, with a wildcard `"*"` that applies to every tool. A per-tool entry wins over the wildcard per hint (not whole-object replace), and both win over what the server sent. Changes are hot (no restart), admin-only, and audited to both the activity log and the tamper-evident audit sink (`config_change` line correlated via `request_id`).
+
+- **Merge:** `PATCH /api/v1/servers/{id}` merges per hint (`nil` in the patch = inherit); whole-tool delete is `{"annotation_overrides":{"tool":null}}` and whole-map clear is `{"annotation_overrides":null}` (RFC 7396).
+- **Validation:** at most 100 entries; key `"*"` is the only wildcard (otherwise `^[A-Za-z0-9._:-]+$`, no `"__"`, 1–256 chars); each entry must set at least one hint; persisted config never stores `null` entries.
+- **Effective:** resolved once at tool capture (`upstream/core/client.go`) and reused by `DeriveCallWith`, `classifyToolRisk`, and `toolannotations.ExcludeReason`. The approval hash (`tool_quarantine.go`) is intentionally **not** affected.
+
+**BrowserOS example — 24 tools, 9 marked `destructiveHint:true`, 7 with no hints (nil → destructive by default).** Fix in config:
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "browseros",
+      "url": "http://127.0.0.1:9001/mcp",
+      "annotation_overrides": {
+        "*": { "destructiveHint": false, "openWorldHint": false },
+        "act": { "destructiveHint": true, "readOnlyHint": false }
+      }
+    }
+  ]
+}
+```
+
+<<<<<<< HEAD
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `profiles[].name` | string | required | Slug `^[a-z0-9][a-z0-9_-]{0,62}$`. Reserved: `all`, `code`, `call`, `p` (URL segments), `active`, `try` (REST routes). Duplicates are a fatal error |
@@ -444,6 +470,11 @@ A profile is a named view over your upstream servers with a tool policy. The ful
 A profile that sets only `name` and `servers` behaves exactly as before: no cap, unannotated tools count as read, no rules. Invalid input (an unknown tier or `unannotated` value, a malformed pattern, `switchable_to` naming the profile itself) is refused with the same message on every surface. Both `profiles` and `anonymous_profile` are **live**: an edit takes effect without a restart, and `PATCH /api/v1/config` reports them in `changed_fields`.
 
 With `require_mcp_auth` off, a change that would let a client bound to a profile escape it by omitting its credential is refused with `409 binding_bypassable_without_auth` (see [Profiles, the binding guard](/features/profiles#the-binding-guard)). **Before downgrading to a pre-profiles-v3 binary, turn `require_mcp_auth` on**; the older binary does not know client credentials or `anonymous_profile`.
+=======
+`*` clears `destructive`/`openWorld` for all 24 tools; `act` opts that one tool back into `destructive:true`. After a save the Tools tab badges flip from red `destructive` to green `read` and `call_tool_read browseros:snapshot` succeeds without `call_tool_destructive`.
+
+See [Upstream Servers](/configuration/upstream-servers) for the per-server option table, the REST/MCP PATCH shapes, and the Web UI card in the ServerDetail Configuration tab.
+>>>>>>> db7e5ad9 (✨ FEAT: 🧪 TESTS + 📚 DOCS + 📝 AUDIT — PLATINUM COVERAGE FOR OVERRIDES 🛡️)
 
 ### MCP Servers
 
