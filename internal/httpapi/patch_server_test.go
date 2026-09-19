@@ -1154,3 +1154,53 @@ func TestHandlePatchServer_IsolationPreservesUnexposedFields(t *testing.T) {
 	assert.Equal(t, sandbox, *iso.Mode)
 	assert.Equal(t, "local", iso.LogDriver)
 }
+
+// TestPatchServer_AnnotationOverrides_AdminOnly verifies per PLAN §3.1 that
+// PATCH /api/v1/servers/{id} with annotation_overrides is admin-only:
+// an agent token must be rejected with 403, while an admin key succeeds.
+// BDD: Given a server, When an agent PATCHes annotation_overrides, Then 403;
+// When an admin PATCHes the same, Then 200 and the override is captured.
+func TestPatchServer_AnnotationOverrides_AdminOnly(t *testing.T) {
+	// Given a server with no overrides, patched via REST
+	existing := &config.ServerConfig{Name: "browseros", Protocol: "stdio", Command: "npx", Enabled: true}
+	body := []byte(`{"annotation_overrides":{"*":{"destructiveHint":false},"act":{"destructiveHint":true}}}`)
+
+	// When an agent token attempts the PATCH, Then it must be forbidden
+	t.Run("agent token is forbidden", func(t *testing.T) {
+		mock := &mockPatchServerController{
+			apiKey: "admin-secret",
+			existingServer: existing,
+			allServers: []map[string]interface{}{{"name": "browseros", "id": "browseros"}},
+		}
+		srv, agentToken := agentTokenServer(t, mock)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/browseros", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", agentToken)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusForbidden, w.Code, "agent token must be forbidden on annotation_overrides patch")
+		assert.Contains(t, w.Body.String(), "admin access")
+	})
+
+	// When an admin patches, Then it must succeed and capture the overrides
+	t.Run("admin succeeds and captures overrides", func(t *testing.T) {
+		mock := &mockPatchServerController{apiKey: "admin-secret", existingServer: existing}
+		logger := zap.NewNop().Sugar()
+		srv := NewServer(mock, logger, nil)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/browseros", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "admin-secret")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "admin must be allowed, body=%s", w.Body.String())
+		require.NotNil(t, mock.capturedUpdates)
+		require.NotNil(t, mock.capturedUpdates.AnnotationOverrides)
+		// mutation killing: wildcard must be false, per-tool act must be true
+		require.NotNil(t, mock.capturedUpdates.AnnotationOverrides["*"])
+		require.NotNil(t, mock.capturedUpdates.AnnotationOverrides["*"].DestructiveHint)
+		assert.False(t, *mock.capturedUpdates.AnnotationOverrides["*"].DestructiveHint)
+		require.NotNil(t, mock.capturedUpdates.AnnotationOverrides["act"])
+		require.NotNil(t, mock.capturedUpdates.AnnotationOverrides["act"].DestructiveHint)
+		assert.True(t, *mock.capturedUpdates.AnnotationOverrides["act"].DestructiveHint)
+	})
+}

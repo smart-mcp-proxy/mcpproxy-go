@@ -1965,3 +1965,161 @@ func TestCodeExecutionMaxParallel(t *testing.T) {
 		assert.Equal(t, 4, cfg.CodeExecutionMaxParallel)
 	})
 }
+
+// ---------------------------------------------------------------------------
+// annotation_overrides — PLAN §3.1 (PLATINUM, BDD, mutation killing)
+// ---------------------------------------------------------------------------
+
+func TestAnnotationOverrides_ValidateDetailed_RejectsEmptyHint(t *testing.T) {
+	// Given a server with annotation_overrides {"a":{}} (empty hints)
+	// When ValidateDetailed is called
+	// Then it must reject with "at least one hint must be set"
+	cfg := &Config{
+		Listen: "127.0.0.1:8080",
+		Servers: []*ServerConfig{
+			{Name: "s", Enabled: true, AnnotationOverrides: map[string]*ToolAnnotations{"a": {}}},
+		},
+	}
+	errs := cfg.ValidateDetailed()
+	var found bool
+	for _, e := range errs {
+		if e.Field == `mcpServers[0].annotation_overrides["a"]` && e.Message == "at least one hint must be set" {
+			found = true
+		}
+	}
+	assert.True(t, found, "expected validation error for empty hint, got %v", errs)
+}
+
+func TestAnnotationOverrides_ValidateDetailed_RejectsTooMany(t *testing.T) {
+	// Given 101 overrides
+	// When ValidateDetailed is called
+	// Then it must reject with max 100
+	overrides := make(map[string]*ToolAnnotations, 101)
+	for i := 0; i < 101; i++ {
+		k := fmt.Sprintf("tool_%03d", i)
+		b := true
+		overrides[k] = &ToolAnnotations{ReadOnlyHint: &b}
+	}
+	cfg := &Config{
+		Listen: "127.0.0.1:8080",
+		Servers: []*ServerConfig{
+			{Name: "s", Enabled: true, AnnotationOverrides: overrides},
+		},
+	}
+	errs := cfg.ValidateDetailed()
+	var found bool
+	for _, e := range errs {
+		if e.Field == "mcpServers[0].annotation_overrides" {
+			found = true
+			assert.Contains(t, e.Message, "too many overrides")
+		}
+	}
+	assert.True(t, found, "expected too-many validation error, got %v", errs)
+}
+
+func TestAnnotationOverrides_ValidateDetailed_WildcardAllowed(t *testing.T) {
+	// Given a server with {"*": {destructiveHint:false}}
+	// When ValidateDetailed is called
+	// Then it must pass (wildcard is valid)
+	b := false
+	cfg := &Config{
+		Listen: "127.0.0.1:8080",
+		Servers: []*ServerConfig{
+			{Name: "s", Enabled: true, AnnotationOverrides: map[string]*ToolAnnotations{"*": {DestructiveHint: &b}}},
+		},
+	}
+	errs := cfg.ValidateDetailed()
+	for _, e := range errs {
+		if e.Field == `mcpServers[0].annotation_overrides["*"]` {
+			t.Fatalf("wildcard should be allowed, got error %v", e)
+		}
+		if e.Field == "mcpServers[0].annotation_overrides" {
+			t.Fatalf("wildcard should not trigger too-many, got %v", e)
+		}
+	}
+	// also test that IsValidToolNameForOverride accepts "*"
+	assert.True(t, IsValidToolNameForOverride("*"))
+	assert.False(t, IsValidToolNameForOverride("bad*tool"))
+}
+
+func TestCopyServerConfig_DeepCopyOverrides(t *testing.T) {
+	// Given a ServerConfig with annotation_overrides containing pointer hints
+	// When CopyServerConfig is called and the copy is mutated
+	// Then the source must not be mutated (deep copy, no pointer alias)
+	bTrue := true
+	bFalse := false
+	src := &ServerConfig{
+		Name: "s",
+		AnnotationOverrides: map[string]*ToolAnnotations{
+			"*":  {DestructiveHint: &bTrue, Title: "T"},
+			"act": {ReadOnlyHint: &bFalse},
+		},
+	}
+	dst := CopyServerConfig(src)
+	require.NotNil(t, dst.AnnotationOverrides)
+	// mutate copy's hints and map
+	*dst.AnnotationOverrides["*"].DestructiveHint = false
+	dst.AnnotationOverrides["*"].Title = "Mutated"
+	dst.AnnotationOverrides["new"] = &ToolAnnotations{ReadOnlyHint: &bTrue}
+	// source must be unchanged
+	assert.True(t, *src.AnnotationOverrides["*"].DestructiveHint, "source pointer must not be aliased")
+	assert.Equal(t, "T", src.AnnotationOverrides["*"].Title)
+	_, hasNew := src.AnnotationOverrides["new"]
+	assert.False(t, hasNew, "source map must not gain new key")
+	// mutate source after copy should not affect dst map entry count
+	delete(src.AnnotationOverrides, "act")
+	_, stillHas := dst.AnnotationOverrides["act"]
+	assert.True(t, stillHas, "dst must be independent of src deletion")
+}
+
+func TestMergeAnnotationOverrides_NullDeletes(t *testing.T) {
+	// Given base {"tool": {readOnly:true}, "keep": {readOnly:true}}
+	// When MergeAnnotationOverrides with remove marker for "tool"
+	// Then "tool" is deleted, "keep" preserved — RFC7396 per-tool null
+	b := true
+	base := map[string]*ToolAnnotations{"tool": {ReadOnlyHint: &b}, "keep": {ReadOnlyHint: &b}}
+	patch := map[string]*ToolAnnotations{} // empty patch, deletion only via marker
+	opts := DefaultMergeOptions().WithRemoveMarker("annotation_overrides.tool")
+	merged := MergeAnnotationOverrides(base, patch, opts)
+	_, hasTool := merged["tool"]
+	assert.False(t, hasTool, "tool must be deleted via remove marker")
+	_, hasKeep := merged["keep"]
+	assert.True(t, hasKeep, "keep must survive")
+}
+
+func TestMergeAnnotationOverrides_PreserveOnNilPatch(t *testing.T) {
+	// Given base {"a": {readOnly:true}}
+	// When MergeAnnotationOverrides with nil patch and no markers
+	// Then base is preserved (deep copy, not nil)
+	b := true
+	base := map[string]*ToolAnnotations{"a": {ReadOnlyHint: &b}}
+	merged := MergeAnnotationOverrides(base, nil, DefaultMergeOptions())
+	require.NotNil(t, merged)
+	assert.True(t, *merged["a"].ReadOnlyHint)
+	// mutation of merged must not affect base (deep copy)
+	*merged["a"].ReadOnlyHint = false
+	assert.True(t, *base["a"].ReadOnlyHint, "base must not be aliased")
+}
+
+func TestMergeAnnotationOverrides_PerHintWins(t *testing.T) {
+	// Given base {"*": {destructiveHint:false, readOnly:true}, "act": {}}
+	// When patch adds per-tool {"act": {destructiveHint:true}}
+	// Then per-hint merge: act keeps readOnly from wildcard/base, destructive from exact wins
+	// and base not mutated.
+	bFalse := false
+	bTrue := true
+	base := map[string]*ToolAnnotations{
+		"*": {DestructiveHint: &bFalse, ReadOnlyHint: &bTrue},
+	}
+	patch := map[string]*ToolAnnotations{
+		"act": {DestructiveHint: &bTrue},
+	}
+	merged := MergeAnnotationOverrides(base, patch, DefaultMergeOptions())
+	require.NotNil(t, merged["act"])
+	assert.NotNil(t, merged["act"].DestructiveHint)
+	assert.True(t, *merged["act"].DestructiveHint, "exact must win over wildcard")
+	// whole-map nil via marker clears everything
+	optsAll := DefaultMergeOptions().WithRemoveMarker("annotation_overrides")
+	cleared := MergeAnnotationOverrides(merged, nil, optsAll)
+	assert.Nil(t, cleared, "whole-map null marker must clear overrides")
+}

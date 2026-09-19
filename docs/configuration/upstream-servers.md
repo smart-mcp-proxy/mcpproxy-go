@@ -112,6 +112,7 @@ than stopping the daemon from booting.
 | `auth_broker` | object | No | Server-edition per-user `oauth_connect` credential store — the stored credential is **not** injected into upstream calls. See [Auth Broker](../features/auth-broker.md). `mode` must be `oauth_connect`; `authorization_endpoint` and `token_endpoint` are required. |
 | `health_check_interval` | duration | No | Per-server override for the liveness `ping` cadence (`0s` disables; falls back to the global value, then the `30s` default). No-op for Docker-isolated servers. |
 | `tool_discovery_interval` | duration | No | Per-server override for the `tools/list` re-index sweep (`0s` disables; falls back to the global value, then the `5m` default). |
+| `annotation_overrides` | map[string]object | No | Per-server per-tool annotation fixes: `{"*": {destructiveHint:false}, "act": {destructiveHint:true}}`. Key is tool name or wildcard `"*"`; value is `ToolAnnotations` (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). Admin-only, hot (no restart), audited (`config_change`), at most 100 entries. Fixes false MCP hints (e.g. `browseros` marks 9 of 24 tools `destructive:true` and leaves 7 with no hints → nil-default destructive); wildcard `*` clears a hint for every tool, per-tool `act` wins per hint over `"*"`. |
 
 See [Tool Discovery & Health Check Intervals](/configuration/config-file#tool-discovery--health-check-intervals) for the global defaults, accepted ranges, and trade-offs.
 
