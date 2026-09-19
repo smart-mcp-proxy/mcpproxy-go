@@ -3109,22 +3109,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			secService.SetIsolationMode(string(cfg.DockerIsolation.ResolvedMode()))
 		}
 		secService.SetIsolationModeResolver(func(serverName string) string {
-			liveCfg := s.runtime.Config()
-			if liveCfg == nil || liveCfg.DockerIsolation == nil {
-				return ""
-			}
-			var sc *config.ServerConfig
-			for _, candidate := range liveCfg.Servers {
-				if candidate != nil && candidate.Name == serverName {
-					sc = candidate
-					break
-				}
-			}
-			if sc == nil {
-				return "" // unknown server → fall back to the engine-wide default
-			}
-			im := core.NewIsolationManager(liveCfg.DockerIsolation)
-			return string(im.ResolveMode(sc))
+			return scannerIsolationModeFor(s.runtime.Config(), serverName)
 		})
 		secService.SetInstanceID(core.GetInstanceID())
 		secService.SetEmitter(s.runtime)
