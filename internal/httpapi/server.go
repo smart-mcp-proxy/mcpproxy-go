@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
@@ -347,6 +348,8 @@ type Server struct {
 	// AuthContext (Spec 107 US4). nil in the personal build; installed by the
 	// server edition via SetSessionPrincipalResolver. See session_principal.go.
 	sessionPrincipalResolver SessionPrincipalResolver
+
+	auditSink audit.Sink
 }
 
 // usageCacheEntry is one cached usage response with the time it was stored.
@@ -455,6 +458,10 @@ func (s *Server) SetConnectService(svc *connect.Service) {
 // Detector.MaskText). Never calling this leaves payloads unmasked.
 func (s *Server) SetSensitiveMasker(detector *security.Detector) {
 	s.sensitiveMasker = detector
+}
+
+func (s *Server) SetAuditSink(sink audit.Sink) {
+	s.auditSink = sink
 }
 
 // Router returns the underlying chi.Mux for external route registration.
@@ -2310,14 +2317,32 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		serverConfig.Isolation = req.Isolation.resolve(nil)
 	}
 	// Annotation overrides: POST ignores nil entries (JSON Merge Patch null has no
-	// meaning on create) — drop nils, keep the rest as persisted.
+	// meaning on create) — drop nils, keep the rest as persisted (deep-copy
+	// *bool pointers to avoid aliasing the request map).
 	if req.AnnotationOverrides != nil {
 		filtered := make(map[string]*config.ToolAnnotations, len(req.AnnotationOverrides))
 		for k, v := range req.AnnotationOverrides {
 			if v == nil {
 				continue
 			}
-			filtered[k] = v
+			cp := *v
+			if v.ReadOnlyHint != nil {
+				b := *v.ReadOnlyHint
+				cp.ReadOnlyHint = &b
+			}
+			if v.DestructiveHint != nil {
+				b := *v.DestructiveHint
+				cp.DestructiveHint = &b
+			}
+			if v.IdempotentHint != nil {
+				b := *v.IdempotentHint
+				cp.IdempotentHint = &b
+			}
+			if v.OpenWorldHint != nil {
+				b := *v.OpenWorldHint
+				cp.OpenWorldHint = &b
+			}
+			filtered[k] = &cp
 		}
 		if len(filtered) > 0 {
 			serverConfig.AnnotationOverrides = filtered
@@ -2775,6 +2800,32 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Infow("Server updated successfully", "server", serverName)
+	if s.auditSink != nil && hasAnnotationOverrideUpdate {
+		beforeMap := httpAnnotationOverridesToAuditMap(nil)
+		if existingSrv != nil {
+			beforeMap = httpAnnotationOverridesToAuditMap(existingSrv.AnnotationOverrides)
+		}
+		afterMap := httpAnnotationOverridesToAuditMap(updates.AnnotationOverrides)
+		// Only emit when actually changed (whole-map delete, per-tool delete, or hint change)
+		changed := !httpAnnotationOverridesEqual(beforeMap, afterMap)
+		if changed {
+			if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
+				Ts:        time.Now(),
+				RequestID: reqcontext.GetRequestID(r.Context()),
+				Origin:    httpAuditOriginFromContext(r.Context()),
+				Source:    httpAuditSourceFromContext(r.Context()),
+				Caller:    httpAuditCallerFromContext(r.Context()),
+				Server:    serverName,
+				Action:    "annotation_override",
+				Before:    beforeMap,
+				After:     afterMap,
+			}); lerr == nil {
+				if raw, jerr := line.JSON(); jerr == nil {
+					_ = s.auditSink.Write(raw)
+				}
+			}
+		}
+	}
 	restartRequired := true
 	if onlyAnnotationOverrideHot {
 		restartRequired = false
@@ -2783,6 +2834,110 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		"message":          fmt.Sprintf("Server '%s' updated successfully", serverName),
 		"restart_required": restartRequired,
 	})
+}
+
+func httpAnnotationOverridesToAuditMap(m map[string]*config.ToolAnnotations) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		if v == nil {
+			out[k] = nil
+			continue
+		}
+		entry := make(map[string]interface{})
+		if v.Title != "" {
+			entry["title"] = v.Title
+		}
+		if v.ReadOnlyHint != nil {
+			entry["readOnlyHint"] = *v.ReadOnlyHint
+		}
+		if v.DestructiveHint != nil {
+			entry["destructiveHint"] = *v.DestructiveHint
+		}
+		if v.IdempotentHint != nil {
+			entry["idempotentHint"] = *v.IdempotentHint
+		}
+		if v.OpenWorldHint != nil {
+			entry["openWorldHint"] = *v.OpenWorldHint
+		}
+		out[k] = entry
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func httpAnnotationOverridesEqual(a, b map[string]interface{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok {
+			return false
+		}
+		aj, _ := json.Marshal(av)
+		bj, _ := json.Marshal(bv)
+		if string(aj) != string(bj) {
+			return false
+		}
+	}
+	return true
+}
+
+func httpAuditCallerFromContext(ctx context.Context) audit.Caller {
+	if reqcontext.GetRequestSource(ctx) == reqcontext.SourceInternal {
+		return audit.Caller{Kind: "internal"}
+	}
+	ac := auth.AuthContextFromContext(ctx)
+	if ac == nil {
+		return audit.Caller{Kind: "anonymous"}
+	}
+	switch ac.Type {
+	case auth.AuthTypeAgent:
+		c := audit.Caller{Kind: "agent_token", TokenName: ac.AgentName, TokenPrefix: ac.TokenPrefix, ProfilePin: ac.ProfilePin}
+		if ac.UserID != "" {
+			c.UserID = ac.UserID
+			c.UserEmail = ac.Email
+			c.Role = ac.Role
+			c.Provider = ac.Provider
+		}
+		return c
+	case auth.AuthTypeAdminUser:
+		return audit.Caller{Kind: "session_admin", UserID: ac.UserID, UserEmail: ac.Email, Role: "admin", Provider: ac.Provider}
+	case auth.AuthTypeUser:
+		return audit.Caller{Kind: "session_user", UserID: ac.UserID, UserEmail: ac.Email, Role: "user", Provider: ac.Provider}
+	}
+	if ac.Anonymous {
+		return audit.Caller{Kind: "anonymous"}
+	}
+	switch transport.GetConnectionSource(ctx) {
+	case transport.ConnectionSourceTray:
+		return audit.Caller{Kind: "socket"}
+	case transport.ConnectionSourceStdio:
+		return audit.Caller{Kind: "stdio"}
+	}
+	return audit.Caller{Kind: "api_key"}
+}
+
+func httpAuditOriginFromContext(ctx context.Context) string {
+	if transport.GetConnectionSource(ctx) == transport.ConnectionSourceTray {
+		return "socket"
+	}
+	return "local"
+}
+
+func httpAuditSourceFromContext(ctx context.Context) string {
+	if reqcontext.GetRequestSource(ctx) == reqcontext.SourceInternal {
+		return "internal"
+	}
+	if meta, ok := reqcontext.GetRequestMeta(ctx); ok && meta.Mount == reqcontext.MountAPI {
+		return "api"
+	}
+	return "mcp"
 }
 
 // handleConvertConfigToSecret moves a literal header / env value out of

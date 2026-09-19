@@ -750,7 +750,7 @@ type ServerConfig struct {
 	EnabledTools  []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
 	DisabledTools []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
 
-	AnnotationOverrides map[string]*ToolAnnotations `json:"annotation_overrides,omitempty" mapstructure:"annotation-overrides"`
+	AnnotationOverrides map[string]*ToolAnnotations `json:"annotation_overrides,omitempty" mapstructure:"annotation_overrides"`
 
 	// SourceRegistryID records which registry this server was added from (empty
 	// for manually-configured servers). MCP-866: surfaced in the approval /

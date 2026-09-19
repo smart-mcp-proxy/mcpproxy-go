@@ -243,6 +243,11 @@ func setupViper() {
 
 	// Replace - with _ for environment variables
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	// Annotation overrides: support both snake (annotation_overrides) and kebab
+	// (annotation-overrides) via viper alias so file JSON (snake) and any
+	// legacy kebab config both decode (mapstructure tag is snake per docs).
+	viper.RegisterAlias("annotation-overrides", "annotation_overrides")
+	viper.RegisterAlias("annotation_overrides", "annotation-overrides")
 
 	// Set defaults
 	viper.SetDefault("listen", "127.0.0.1:8080")

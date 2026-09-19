@@ -5276,6 +5276,23 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	if err := p.storage.SaveUpstreamServer(serverConfig); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", err)), nil
 	}
+	if p.auditSink != nil && serverConfig.AnnotationOverrides != nil && len(serverConfig.AnnotationOverrides) > 0 {
+		if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
+			Ts:        time.Now(),
+			RequestID: reqcontext.GetRequestID(ctx),
+			Origin:    auditOriginFromContext(ctx),
+			Source:    auditSourceFromContext(ctx),
+			Caller:    auditCallerFromContext(ctx),
+			Server:    name,
+			Action:    "annotation_override",
+			Before:    nil,
+			After:     annotationOverridesToAuditMap(serverConfig.AnnotationOverrides),
+		}); lerr == nil {
+			if raw, jerr := line.JSON(); jerr == nil {
+				_ = p.auditSink.Write(raw)
+			}
+		}
+	}
 
 	// Trigger configuration save which will notify supervisor to reconcile and connect
 	if p.mainServer != nil {
@@ -5513,6 +5530,23 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil, nil
 	}
+	if p.auditSink != nil && !annotationOverridesEqualForAudit(existingServer.AnnotationOverrides, mergedServer.AnnotationOverrides) {
+		if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
+			Ts:        time.Now(),
+			RequestID: reqcontext.GetRequestID(ctx),
+			Origin:    auditOriginFromContext(ctx),
+			Source:    auditSourceFromContext(ctx),
+			Caller:    auditCallerFromContext(ctx),
+			Server:    name,
+			Action:    "annotation_override",
+			Before:    annotationOverridesToAuditMap(existingServer.AnnotationOverrides),
+			After:     annotationOverridesToAuditMap(mergedServer.AnnotationOverrides),
+		}); lerr == nil {
+			if raw, jerr := line.JSON(); jerr == nil {
+				_ = p.auditSink.Write(raw)
+			}
+		}
+	}
 
 	// Update in upstream manager with connection monitoring
 	p.upstreamManager.RemoveServer(serverID)
@@ -5572,7 +5606,7 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 
 // handlePatchUpstream returns the resolved config diff alongside the result; see
 // handleUpdateUpstream for why (issue #1146).
-func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, *config.ConfigDiff, error) {
+func (p *MCPProxyServer) handlePatchUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, *config.ConfigDiff, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil, nil
@@ -5622,6 +5656,23 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 	// Update in storage
 	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil, nil
+	}
+	if p.auditSink != nil && !annotationOverridesEqualForAudit(existingServer.AnnotationOverrides, mergedServer.AnnotationOverrides) {
+		if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
+			Ts:        time.Now(),
+			RequestID: reqcontext.GetRequestID(ctx),
+			Origin:    auditOriginFromContext(ctx),
+			Source:    auditSourceFromContext(ctx),
+			Caller:    auditCallerFromContext(ctx),
+			Server:    name,
+			Action:    "annotation_override",
+			Before:    annotationOverridesToAuditMap(existingServer.AnnotationOverrides),
+			After:     annotationOverridesToAuditMap(mergedServer.AnnotationOverrides),
+		}); lerr == nil {
+			if raw, jerr := line.JSON(); jerr == nil {
+				_ = p.auditSink.Write(raw)
+			}
+		}
 	}
 
 	// Update in upstream manager
