@@ -54,10 +54,13 @@ If the provider requires an exact callback URL, pin it with `oauth.redirect_uri`
 }
 ```
 
-mcpproxy binds that exact port and sends that exact string to the provider. The
-value must be an RFC 8252 loopback redirect: `http` scheme, a loopback host, an
-explicit port, and the `/oauth/callback` path. A malformed value, or a pinned
-port already in use, fails the login with an explicit error naming
+mcpproxy binds that exact port and path and sends that exact string to the
+provider. The value must be an RFC 8252 loopback redirect: `http` scheme, a
+loopback host, and an explicit port; the path can be anything the provider
+requires — mcpproxy's callback listener serves whatever path the pin specifies
+(a pin with no path at all binds `/`, not `/oauth/callback` — that remains the
+default only when `redirect_uri` is omitted entirely). A malformed value, or a
+pinned port already in use, fails the login with an explicit error naming
 `redirect_uri` rather than falling back to a random port.
 
 Then re-register that exact URI on the provider side.

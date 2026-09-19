@@ -2293,7 +2293,7 @@ func (c *Config) oauthRedirectURIErrors() []ValidationError {
 		if strings.TrimSpace(server.OAuth.RedirectURI) == "" {
 			continue
 		}
-		if _, _, err := ParseLoopbackRedirectURI(server.OAuth.RedirectURI); err != nil {
+		if _, _, _, err := ParseLoopbackRedirectURI(server.OAuth.RedirectURI); err != nil {
 			errors = append(errors, ValidationError{
 				Field:   fmt.Sprintf("mcpServers[%d].oauth.redirect_uri", i),
 				Message: err.Error(),
