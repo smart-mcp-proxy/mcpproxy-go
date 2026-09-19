@@ -1131,6 +1131,40 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 	return mcp.NewTool(variant, allOpts...)
 }
 
+// callToolMetaKeys are call_tool_read/write/destructive's own top-level
+// parameters, as registered by buildCallToolVariantTool above — never part
+// of the upstream tool's own arguments.
+var callToolMetaKeys = map[string]struct{}{
+	"name":                    {},
+	"args":                    {},
+	"args_json":               {},
+	"intent_data_sensitivity": {},
+	"intent_reason":           {},
+}
+
+// flattenedCallToolArgs recovers upstream-tool arguments a caller placed as
+// top-level siblings of 'name' instead of nesting them under 'args' (#1317):
+// e.g. {"name": "server:tool", "url": "..."} instead of the documented
+// {"name": "server:tool", "args": {"url": "..."}}. Without this, such a call
+// silently dispatches with zero arguments — for a tool with a required
+// property, the pre-dispatch validator then reports that property as
+// "missing" even though the caller supplied it, just not where the schema
+// expects it. Returns nil when nothing beyond the known meta keys is
+// present, so a well-formed call is never second-guessed.
+func flattenedCallToolArgs(rawArguments map[string]interface{}) map[string]interface{} {
+	var flattened map[string]interface{}
+	for k, v := range rawArguments {
+		if _, known := callToolMetaKeys[k]; known {
+			continue
+		}
+		if flattened == nil {
+			flattened = make(map[string]interface{})
+		}
+		flattened[k] = v
+	}
+	return flattened
+}
+
 // retrieveToolsDetailOption returns the per-call serialization override
 // parameter (Spec 085 FR-005) shared by every retrieve_tools registration —
 // the default server and both routing-mode builders — so the schema never
@@ -2327,12 +2361,26 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 	}
 
-	// Fallback to legacy object format for backward compatibility
-	if args == nil && argsErrMsg == "" && request.Params.Arguments != nil {
+	// Fallback to legacy object format for backward compatibility. An empty
+	// args_json ("{}", "null") decodes without error to a nil/zero-length
+	// map, which must not win over a populated 'args' object supplied
+	// alongside it (#1317) — only args_json actually contributing a key
+	// counts as "provided", hence len() rather than a nil check.
+	if len(args) == 0 && argsErrMsg == "" && request.Params.Arguments != nil {
 		if argumentsMap, ok := request.Params.Arguments.(map[string]interface{}); ok {
 			if argsParam, ok := argumentsMap["args"]; ok {
 				if argsMap, ok := argsParam.(map[string]interface{}); ok {
 					args = argsMap
+				}
+			}
+			// #1317: some callers place the upstream tool's own parameters as
+			// top-level siblings of 'name' instead of nesting them under
+			// 'args' as the schema documents. Recover them as a last resort,
+			// only when neither 'args' nor 'args_json' produced anything, so
+			// a correctly-nested call is never second-guessed.
+			if len(args) == 0 {
+				if flattened := flattenedCallToolArgs(argumentsMap); len(flattened) > 0 {
+					args = flattened
 				}
 			}
 		}
