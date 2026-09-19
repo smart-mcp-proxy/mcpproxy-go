@@ -35,6 +35,40 @@ func profilePinFromContext(ctx context.Context) string {
 	return ""
 }
 
+// profileRequestIndexKey is an unexported context key for the (index,
+// snapshot) PAIR a /mcp/p/<slug> request was admitted and scoped against
+// (profileMiddleware / serveProfileURL). It is a package-private companion
+// to profile.WithProfileScope, not exported through the profile package,
+// because both the writer (Server) and the reader (MCPProxyServer) already
+// live in this package.
+//
+// Carrying the pair — not merely its cfg — lets every downstream profile
+// decision on this request, set_profile's admission included, reuse the
+// index the gate already built rather than re-resolving cfg's own index
+// through a second Published() lookup: a request that paused between
+// admission and here must still decide with the exact index it was
+// admitted against, never one a later publication's Published() would hand
+// back for the live runtime.Config() read at that later moment (Spec 105 PR
+// D review round 9, MUST-FIX 1 — set_profile on /mcp/p/<slug> read its own
+// independent runtime.Config() and could therefore admit or scope against a
+// config one reload ahead of, or behind, the one the URL gate used).
+type profileRequestIndexKey struct{}
+
+// withProfileRequestIndex returns a context carrying idx as the exact
+// (index, snapshot) pair downstream profile resolution on this request must
+// decide over.
+func withProfileRequestIndex(ctx context.Context, idx *profileIndex) context.Context {
+	return context.WithValue(ctx, profileRequestIndexKey{}, idx)
+}
+
+// profileRequestIndexFromContext returns the pair withProfileRequestIndex
+// injected, or (nil, false) when the request did not enter through a path
+// that pins one (e.g. the base /mcp endpoint, or a bare test server).
+func profileRequestIndexFromContext(ctx context.Context) (*profileIndex, bool) {
+	idx, ok := ctx.Value(profileRequestIndexKey{}).(*profileIndex)
+	return idx, ok
+}
+
 // currentConfig returns the live configuration snapshot (hot-reload safe),
 // falling back to the construction-time config if the runtime is unavailable.
 func (p *MCPProxyServer) currentConfig() *config.Config {
@@ -88,11 +122,14 @@ func (p *MCPProxyServer) effectiveDirectToolResponseMode() string {
 // profileScopeForSlug builds a ProfileScope for the named profile from the live
 // config, or returns nil when the slug does not match a configured profile.
 func (p *MCPProxyServer) profileScopeForSlug(slug string) *profile.ProfileScope {
-	if slug == "" {
-		return nil
-	}
-	cfg := p.currentConfig()
-	if cfg == nil {
+	return profileScopeForSlugIn(p.currentConfig(), slug)
+}
+
+// profileScopeForSlugIn is profileScopeForSlug against an explicit config
+// snapshot, for callers that must not re-read the live config between a
+// check and the scope they build from it.
+func profileScopeForSlugIn(cfg *config.Config, slug string) *profile.ProfileScope {
+	if slug == "" || cfg == nil {
 		return nil
 	}
 	for i := range cfg.Profiles {
@@ -114,8 +151,92 @@ func (p *MCPProxyServer) profileScopeForSlug(slug string) *profile.ProfileScope 
 // It returns the resolved profile slug ("" when none) and the matching
 // ProfileScope ("" ⇒ nil). A session selection that no longer matches any
 // configured profile is treated as stale: it is cleared and resolution falls
-// through to "none".
+// through to "none". Resolution reads the live config snapshot once — unless
+// the request came in through /mcp/p/<slug>, in which case it decides with the
+// exact (index, snapshot) PAIR profileMiddleware already admitted the request
+// against (profileRequestIndexFromContext), consumed directly via
+// resolveActiveProfileFromIndex — never a fresh runtime.Config() read, and
+// never a second, independent index lookup of its own. Extracting only the
+// pair's cfg and handing it to resolveActiveProfileIn (which resolves the
+// index again through profileIndexFor(cfg): an O(1) Published(cfg) match that
+// falls back to a fleet-sized For(cfg) build on a miss) would let a request
+// that paused across two publications between admission and this call land on
+// a snapshot neither of profileIndexFor's two warmed slots covers any more —
+// exactly the pair-acquisition bypass rounds 11/13 closed on the admission
+// path (profileIndexCurrent/Acquire), reopened here on the downstream
+// resolution path a paused request reaches next (round 15 MUST-FIX). Using
+// the already-resolved pair outright cannot miss: there is no lookup to fall
+// back from. Callers that hold only a snapshot — never an admitted pair —
+// use resolveActiveProfileIn, which still resolves the index via
+// profileIndexFor(cfg).
 func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *profile.ProfileScope) {
+	name, scope, _ := p.resolveActiveProfileWithIndex(ctx)
+	return name, scope
+}
+
+// resolveActiveProfileWithIndex is resolveActiveProfile, but also returns the
+// (index, snapshot) the (name, scope) pair was resolved against — the SAME
+// pair, never a second, independent lookup. A caller that must derive
+// something else from that identical pair — cacheAuthorizationWith's
+// caller-intersected ProfileServers stamp (Spec 105 PR D review round 17
+// MUST-FIX) — uses this seam instead of re-resolving the index on its own,
+// which could pair a decision made against one published snapshot with an
+// index built from a later one on a request that pauses in between, exactly
+// the class of bug rounds 9/11/14/15 closed on the admission and resolution
+// paths.
+func (p *MCPProxyServer) resolveActiveProfileWithIndex(ctx context.Context) (string, *profile.ProfileScope, *profileIndex) {
+	idx, ok := profileRequestIndexFromContext(ctx)
+	if !ok {
+		idx = p.profileIndexFor(p.currentConfig())
+	}
+	name, scope := p.resolveActiveProfileFromIndex(ctx, idx)
+	return name, scope, idx
+}
+
+// resolveActiveProfileIn is resolveActiveProfile against an explicit config
+// snapshot. handleSetProfile admits a selection against one snapshot and must
+// report the effective scope from that same snapshot: re-reading the live
+// config here would let a hot reload between the two hand back a payload whose
+// `active_profile` and `servers` disagree (or drop the just-stored selection
+// as stale) — Spec 105 PR D critique round 1.
+//
+// Every tier below that resolves a profile by name (pin, session selection)
+// does it through profileIndexFor(cfg)'s precomputed serverPos/members data
+// (EffectiveServersFor) instead of profileScopeForSlugIn, which rebuilds a
+// fleet-sized "known servers" set on every single call. resolveActiveProfile
+// runs on every admitted scoped READ (retrieve_tools, describe_tool,
+// call_tool_*, code_execution — every consumer of resolveActiveProfile in
+// mcp.go), so that rebuild previously happened once per pinned or
+// session-profiled call, at the fleet's cost, not the pin/session profile's
+// own: identical output, no timing promise broken, at O(profile size)
+// instead (Spec 105 PR D review round 14 MUST-FIX; the wildcard grant here
+// is deliberate — this tier renders the profile's OWN full membership, never
+// intersected with the caller's AllowedServers, exactly as
+// profileScopeForSlugIn always did; a caller-specific view is applied
+// separately downstream, e.g. handleSetProfile's own EffectiveServersFor
+// call and callerVisibleServers' pre-105 equivalent).
+func (p *MCPProxyServer) resolveActiveProfileIn(ctx context.Context, cfg *config.Config) (string, *profile.ProfileScope) {
+	return p.resolveActiveProfileFromIndex(ctx, p.profileIndexFor(cfg))
+}
+
+// resolveActiveProfileFromIndex is resolveActiveProfileIn over an ALREADY
+// resolved (index, snapshot) pair — the seam handleSetProfile uses to
+// finish its own admission and payload rendering on the EXACT SAME pair
+// profileIndexCurrent gave it, rather than resolving cfg's index a second,
+// independent time. Two different lookups of "the index for this cfg" can
+// legitimately disagree: profileIndexCurrent's bare-proxy fallback caches by
+// cfg's pointer identity (TestHandleSetProfile_ScopedRefusalTouchesOnlySlug-
+// AndPin relies on exactly that to reuse a manually warmed index), while a
+// test config a caller mutates IN PLACE between calls (cfg.Profiles = nil to
+// simulate a deleted profile, never replacing the *config.Config pointer —
+// TestSetProfileClearReportsPinnedScope,
+// TestReadCache_DeletedPinnedProfileRevokesCachedAccess) makes that cached
+// index's positions describe a Profiles slice the pointer no longer holds.
+// Resolving the name and rendering its servers from two independently
+// (re-)resolved indices could therefore pair a stale position with the
+// current (shorter) Profiles slice and index out of range; resolving both
+// from the ONE pair the caller already has cannot.
+func (p *MCPProxyServer) resolveActiveProfileFromIndex(ctx context.Context, idx *profileIndex) (string, *profile.ProfileScope) {
 	// 1. Agent-token pin (T3). When present it is authoritative and bounds
 	//    everything below — including the case where the pinned profile has been
 	//    removed from config since the token was minted.
@@ -130,7 +251,7 @@ func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *pro
 	//    pin against an empty server set for the same reason, so the session and
 	//    preflight paths cannot disagree about what a pinned token may see.
 	if pin := profilePinFromContext(ctx); pin != "" {
-		if scope := p.profileScopeForSlug(pin); scope != nil {
+		if scope := profileScopeFromIndex(idx, pin); scope != nil {
 			return pin, scope
 		}
 		if p.logger != nil {
@@ -150,7 +271,7 @@ func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *pro
 	if p.sessionStore != nil {
 		if sid := sessionIDFromContext(ctx); sid != "" {
 			if name := p.sessionStore.GetActiveProfile(sid); name != "" {
-				if scope := p.profileScopeForSlug(name); scope != nil {
+				if scope := profileScopeFromIndex(idx, name); scope != nil {
 					return name, scope
 				}
 				// Stored profile vanished from config — drop the stale selection.
@@ -161,4 +282,73 @@ func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *pro
 
 	// 4. No profile in effect.
 	return "", nil
+}
+
+// resolveEffectiveProfileForJustSetSlug is resolveActiveProfileFromIndex's
+// precedence (pin > URL > session selection) for the ONE caller that must
+// never re-read the session store's mutable selection to answer it:
+// handleSetProfile, immediately after it has itself just written slug via
+// SetActiveProfile. Tiers 1 (pin) and 2 (URL) are per-request context values
+// and safe to re-resolve as-is; tier 3 uses slug DIRECTLY instead of calling
+// SessionStore.GetActiveProfile — closing a race a concurrent set_profile
+// call on the SAME session could otherwise open between this call's own
+// write and its own response render: call A sets "research", call B
+// (interleaved) sets "deploy", and A's subsequent GetActiveProfile would see
+// B's "deploy" — so A's response would report active_profile: "research"
+// (A's own requested slug) with "deploy"'s servers, an FR-003 stored-
+// selection/effective-scope consistency violation (cross-model review, PR
+// D). slug is already validated selectable against idx immediately before
+// the write (handleSetProfile's own profiles.selectable(ctx, slug) check),
+// so idx.position(slug) cannot miss here the way tier 3's general "stored
+// profile vanished from config" fallback anticipates for a session's OLD
+// selection read on some later, unrelated call.
+//
+// Returns only the profile NAME, never a *ProfileScope: its one caller
+// renders through EffectiveServersFor(name, callerAllowed), which never
+// touches this scope. The first version of this function called
+// profileScopeFromIndex and discarded the *ProfileScope it built — but that
+// always resolves the WILDCARD-derived (`[]string{"*"}`) full membership,
+// an O(profile size) allocation paid for a value nothing used (cross-model
+// review round 2). idx.position is the O(1) existence check the pin/slug
+// tiers actually need.
+func (p *MCPProxyServer) resolveEffectiveProfileForJustSetSlug(ctx context.Context, idx *profileIndex, slug string) string {
+	if pin := profilePinFromContext(ctx); pin != "" {
+		if idx != nil && idx.position(pin) >= 0 {
+			return pin
+		}
+		// Stale pin (profile deleted since the token was minted): still
+		// authoritative — the caller stays deny-all under its own pin,
+		// never falls through to slug — and still worth an operator's
+		// attention, exactly as resolveActiveProfileFromIndex's own stale-
+		// pin branch logs it.
+		if p.logger != nil {
+			p.logger.Warn("agent-token profile_pin no longer matches any configured profile; resolving to a deny-all scope",
+				zap.String("profile_pin", pin))
+		}
+		return pin
+	}
+	if urlScope := profile.ProfileScopeFromContext(ctx); urlScope != nil {
+		return urlScope.Name
+	}
+	if slug != "" && idx != nil && idx.position(slug) >= 0 {
+		return slug
+	}
+	return ""
+}
+
+// profileScopeFromIndex builds the ProfileScope for slug's FULL membership
+// (declared servers ∩ configured servers, unintersected with any caller
+// credential — see resolveActiveProfileIn's doc comment) from idx, or nil
+// when idx's snapshot has no such profile. It is profileScopeForSlugIn's
+// O(profile size) counterpart, resolving through the index's precomputed
+// data instead of rebuilding a fleet-sized set on every call.
+func profileScopeFromIndex(idx *profileIndex, slug string) *profile.ProfileScope {
+	if idx == nil || idx.cfg == nil {
+		return nil
+	}
+	candidate := idx.position(slug)
+	if candidate < 0 {
+		return nil
+	}
+	return profile.NewProfileScope(slug, idx.effectiveServersForCandidate(candidate, []string{"*"}))
 }

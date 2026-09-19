@@ -399,3 +399,110 @@ func TestService_Close(t *testing.T) {
 		t.Error("Subscriber channel not closed after service close")
 	}
 }
+
+// TestService_PrePublishObserverSeesTheConfigBeforePublication pins the
+// contract AddPrePublishObserver offers a derived-index builder (Spec 105
+// PR D, the profile index): the observer runs on the exact *config.Config
+// about to be published — after the pre-publish hook has produced it —
+// while Current() still answers the previous snapshot and before any
+// subscriber has been notified. A builder keyed on that pointer therefore
+// has its index ready before a single reader can capture the snapshot.
+func TestService_PrePublishObserverSeesTheConfigBeforePublication(t *testing.T) {
+	initial := &config.Config{Listen: "127.0.0.1:8080"}
+	svc := NewService(initial, "/tmp/config.json", zap.NewNop())
+
+	// The #937 admission gate replaces the incoming config; the observer must
+	// see the gated one, never the caller's.
+	gated := &config.Config{Listen: "127.0.0.1:9090"}
+	svc.SetPrePublishHook(func(*config.Config) *config.Config { return gated })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	updates := svc.Subscribe(ctx)
+	<-updates // initial snapshot
+
+	type observation struct {
+		seen, current *config.Config
+		notified      bool
+	}
+	observed := make(chan observation, 1)
+	svc.AddPrePublishObserver(func(cfg *config.Config) {
+		o := observation{seen: cfg, current: svc.Current().Config}
+		select {
+		case <-updates:
+			o.notified = true
+		default:
+		}
+		observed <- o
+	})
+
+	require.NoError(t, svc.Update(&config.Config{Listen: "incoming"}, UpdateTypeModify, "test"))
+
+	select {
+	case o := <-observed:
+		require.Same(t, gated, o.seen, "the observer must see the config the gate hook produced")
+		require.Same(t, initial, o.current, "the observer must run before Current() moves to the new snapshot")
+		require.False(t, o.notified, "the observer must run before subscribers are notified")
+	default:
+		t.Fatal("the observer must run synchronously inside Update")
+	}
+	require.Same(t, gated, svc.Current().Config)
+	select {
+	case u := <-updates:
+		require.Same(t, gated, u.Snapshot.Config)
+	case <-time.After(time.Second):
+		t.Fatal("subscribers must still be notified after the observer ran")
+	}
+}
+
+// TestService_PrePublishObserverNilSafe: a nil observer and a nil service
+// are both ignored, and every registered observer runs on every update.
+func TestService_PrePublishObserverNilSafe(t *testing.T) {
+	var none *Service
+	none.AddPrePublishObserver(func(*config.Config) {})
+
+	svc := NewService(&config.Config{Listen: "127.0.0.1:8080"}, "/tmp/config.json", zap.NewNop())
+	svc.AddPrePublishObserver(nil)
+	runs := 0
+	svc.AddPrePublishObserver(func(*config.Config) { runs++ })
+	svc.AddPrePublishObserver(func(*config.Config) { runs++ })
+
+	require.NoError(t, svc.Update(&config.Config{Listen: "a"}, UpdateTypeModify, "one"))
+	require.NoError(t, svc.Update(&config.Config{Listen: "b"}, UpdateTypeModify, "two"))
+	require.Equal(t, 4, runs, "each observer runs once per update; nil ones are skipped")
+}
+
+// TestService_PrePublishObserverMayRegisterAnObserver (Spec 105 PR D codex
+// round 6, finding 2): observers run under the update mutex, so the observer
+// list must not be held locked while they run — an observer that registers a
+// follow-up observer deadlocked on observersMu. The list is copied under the
+// read lock and released before any observer is invoked; an observer added
+// during a publication first runs on the NEXT one.
+func TestService_PrePublishObserverMayRegisterAnObserver(t *testing.T) {
+	svc := NewService(&config.Config{Listen: "127.0.0.1:8080"}, "/tmp/config.json", zap.NewNop())
+
+	var registered sync.Once
+	innerRuns := 0
+	svc.AddPrePublishObserver(func(*config.Config) {
+		registered.Do(func() {
+			svc.AddPrePublishObserver(func(*config.Config) { innerRuns++ })
+		})
+	})
+
+	update := func(listen string) {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- svc.Update(&config.Config{Listen: listen}, UpdateTypeModify, "test") }()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("Update deadlocked: an observer registering another observer must not block publication")
+		}
+	}
+
+	update("one")
+	require.Equal(t, 0, innerRuns, "an observer registered during a publication runs from the next one on")
+	update("two")
+	require.Equal(t, 1, innerRuns, "the observer registered by another observer must run on the next publication")
+}

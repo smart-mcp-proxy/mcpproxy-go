@@ -103,9 +103,12 @@ func (s *Server) setSecurityScanner(svc securityScannerService) {
 
 // Server wraps the MCP proxy server with all its dependencies
 type Server struct {
-	logger   *zap.Logger
-	runtime  *runtime.Runtime
-	mcpProxy *MCPProxyServer
+	logger  *zap.Logger
+	runtime *runtime.Runtime
+	// profileIndexes caches the slug → profile index of the current config
+	// snapshot for the /mcp/p/<slug> gate (Spec 105 FR-004, O(1) in the fleet).
+	profileIndexes profileIndexCache
+	mcpProxy       *MCPProxyServer
 
 	// Server control
 	httpServer      *http.Server
@@ -393,6 +396,15 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	routingEvents := server.runtime.SubscribeEvents()
 	go server.listenForRoutingModeRefresh(routingEvents)
 
+	// Spec 105 FR-004: index every config snapshot before it is published —
+	// the observer runs on the exact *Config about to be stored — and the
+	// startup snapshot now, which NewService stored without running any
+	// observer (see warmProfileIndex).
+	if svc := server.runtime.ConfigService(); svc != nil {
+		svc.AddPrePublishObserver(func(cfg *config.Config) { server.profileIndexes.warmPublishing(cfg) })
+	}
+	server.warmProfileIndex()
+
 	server.runtime.StartBackgroundInitialization()
 
 	return server, nil
@@ -466,7 +478,14 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 		if strings.HasPrefix(token, auth.TokenPrefixStr) {
 			cfg := s.runtime.Config()
 			if cfg == nil {
-				next.ServeHTTP(w, r)
+				// Fail closed. Forwarding here would hand the request on with NO
+				// AuthContext, and every scope predicate downstream reads an
+				// absent context as an administrator (auth.IsScopedCaller) —
+				// the one path where an unvalidated agent token could take the
+				// administrator branches (Spec 105 PR D critique round 1).
+				s.logger.Error("Agent token presented before any configuration was published; refusing",
+					zap.String("remote_addr", r.RemoteAddr))
+				http.Error(w, `{"error":"Server not ready"}`, http.StatusServiceUnavailable)
 				return
 			}
 
@@ -663,6 +682,14 @@ func (s *Server) listenForRoutingModeRefresh(eventCh chan runtime.Event) {
 	defer s.runtime.UnsubscribeEvents(eventCh)
 
 	for evt := range eventCh {
+		// Every config event follows a snapshot publication (config.saved,
+		// config.reloaded and servers.changed are all emitted after the new
+		// *Config is current), so index the new snapshot here rather than in
+		// the first request that reads it (Spec 105 FR-004, warmProfileIndex).
+		switch evt.Type {
+		case runtime.EventTypeServersChanged, runtime.EventTypeConfigReloaded, runtime.EventTypeConfigSaved:
+			s.warmProfileIndex()
+		}
 		switch evt.Type {
 		case runtime.EventTypeServersChanged:
 			s.logger.Debug("servers changed, refreshing routing mode tools",
@@ -2400,79 +2427,232 @@ func withHSTS(next http.Handler) http.Handler {
 // injects it into the request context, then delegates to the retrieve_tools-mode
 // MCP handler (next). Auth has already run at this point via mcpAuthMiddleware.
 //
-// 404 responses:
-//   - No profiles configured at all → {"error":"no profiles configured"}
-//   - Slug not found               → {"error":"unknown profile '<slug>'","available":[...]}
+// Scoped callers (auth.IsScopedCaller — in practice agent tokens: the only
+// non-admin identity mcpAuthMiddleware mints on /mcp*; the server edition's
+// user contexts are minted on the REST router only) are admitted only through
+// a profile the same selectable-profile rule set_profile applies (reach ∩
+// token, pin honoured, zero-reach pin refused — Spec 105 FR-004, research
+// D1), evaluated for the requested slug alone (profileIndex.selectable) so
+// the refusal's cost is independent of the fleet's population. Every other outcome
+// — slug missing, profile deleted, configured but not selectable, pin
+// mismatch, empty fleet, slug-less /mcp/p — is answered by ONE constructor
+// (profileNotSelectable) so status, body and timing class cannot tell them
+// apart; the "no profiles configured" branch deliberately runs AFTER this gate.
 //
-// "available" is an administrator affordance. A profile-pinned agent token
-// reaches this branch only when its pinned profile has been deleted, and the
-// resolver treats that pin as deny-all (resolveActiveProfile) — so the error
-// omits the list rather than enumerate profiles the token may never select
-// (Spec 104 FR-016b).
+// Administrator-shaped callers (API key, socket, anonymous back-compat) keep
+// the pre-105 branches unchanged (SC-005):
+//   - No profiles configured at all → 404 {"error":"no profiles configured"}
+//   - Slug not found               → 404 {"error":"unknown profile '<slug>'","available":[...]}
 func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg := s.runtime.Config()
-
-		// FR-008: no profiles configured.
-		if cfg == nil || len(cfg.Profiles) == 0 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"error": "no profiles configured",
-			})
-			return
-		}
-
-		// Strip the /mcp/p/ prefix to obtain the slug.
-		slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
-		slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
-		slug = strings.Trim(slug, "/")
-
-		// Profiles v2 T3: a profile-pinned agent token may only operate within its
-		// pinned profile. A request to any other /mcp/p/<slug> is forbidden (403),
-		// regardless of whether that slug is a real profile. Auth has already run
-		// (mcpAuthMiddleware wraps this handler), so the pin is on the context.
-		if pin := profilePinFromContext(r.Context()); pin != "" && pin != slug {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"error": fmt.Sprintf("agent token is pinned to profile '%s' and cannot access profile '%s'", pin, slug),
-			})
-			return
-		}
-
-		// Look up profile by slug (lock-free snapshot).
-		var found *config.ProfileConfig
-		for i := range cfg.Profiles {
-			if cfg.Profiles[i].Name == slug {
-				found = &cfg.Profiles[i]
-				break
+		// Over a live runtime the (index, snapshot) pair must match this
+		// request's own runtime.Config() read exactly — Acquire, never a
+		// separate read-then-match. The cache's unconditional latest pair
+		// can sit one publication AHEAD of runtime.Config() for the
+		// microseconds between the pre-publish observer warming it and
+		// configsvc storing it (round 7/8: admitting against that ahead
+		// snapshot let a scoped caller's effective scope split from what
+		// resolveActiveProfileIn would independently resolve moments later
+		// against the still-published one). Reading runtime.Config() once
+		// and matching it afterward has its own window: a request paused
+		// between those two steps across two publications misses both
+		// prepared pairs and falls back to For, building the whole fleet
+		// inline for a scoped caller's refusal (round 11 MUST-FIX). Acquire
+		// closes it by re-reading runtime.Config() on every retry instead of
+		// freezing one read that may already be stale by the time it is
+		// matched. A bare Server with no runtime (tests) has no
+		// runtime.Config() to match, so it falls back to whatever the warm
+		// path last set.
+		var profiles *profileIndex
+		if s.runtime != nil {
+			profiles = s.profileIndexes.Acquire(s.runtime.Config)
+		} else {
+			profiles = s.profileIndexes.Current()
+			if profiles == nil {
+				profiles = s.profileIndexes.For(s.runtimeConfig())
 			}
 		}
+		s.serveProfileURL(w, r, profiles, next)
+	})
+}
 
-		// FR-009: slug not found.
-		if found == nil {
-			body := map[string]interface{}{
-				"error": fmt.Sprintf("unknown profile '%s'", slug),
+// runtimeConfig returns the runtime's current config snapshot, or nil on a
+// Server built without a runtime (bare test servers).
+func (s *Server) runtimeConfig() *config.Config {
+	if s.runtime == nil {
+		return nil
+	}
+	return s.runtime.Config()
+}
+
+// warmProfileIndex builds the profile index for the runtime's current config
+// snapshot ahead of any request. The index is fleet-sized to build (one
+// insertion per profile, one reach bitset per profile) and constant to use;
+// leaving the build to the first /mcp/p/<slug> request after startup or a
+// reload made that one request's refusal cost 4 096 insertions over a hidden
+// fleet and none over an empty one (codex review, PR D round 3). Called at
+// construction — the initial snapshot is stored without running observers —
+// and on every config event as belt-and-braces; the structural guarantee is
+// the configsvc pre-publish observer wired in NewServer, which indexes every
+// later snapshot before it is stored, so no request lands in a
+// publication-to-event window (round 5, prior item P), and every request
+// takes the index and its snapshot as one pair (round 6).
+func (s *Server) warmProfileIndex() {
+	if s.runtime == nil {
+		return
+	}
+	s.profileIndexes.warmCurrent(s.runtime.Config())
+}
+
+// serveProfileURL is profileMiddleware over ONE (index, snapshot) pair — the
+// whole gate after the pair is taken, so it can be exercised against any
+// fleet shape without a runtime behind it (the fleet-parity tests build a
+// bare Server; a live runtime over thousands of profiles spends the test
+// building per-profile indexes in the background). The snapshot it decides
+// over is the one the index was built from, profiles.cfg; it never reads
+// the live config. Same split as resolveActiveProfile / resolveActiveProfileIn.
+func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profiles *profileIndex, next http.Handler) {
+	// Strip the /mcp/p/ prefix to obtain the slug. Computed before profiles
+	// is dereferenced: a nil profiles (Acquire's bounded retries exhausted,
+	// below) still needs it to log and refuse a scoped caller uniformly.
+	slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
+	slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
+	slug = strings.Trim(slug, "/")
+
+	if profiles == nil {
+		// Acquire could not pair this request's own runtime.Config() read
+		// with a prepared index within its bounded retry budget — a
+		// publication storm outran the loop faster than it could catch up
+		// (structurally rare: the pre-publish observer means Acquire matches
+		// on its first iteration in the overwhelmingly common case). A
+		// scoped caller fails closed here, O(1): the uniform refusal never
+		// depends on a slug lookup or the fleet's population, so it stays
+		// non-disclosing even without a paired snapshot to evaluate against
+		// (Spec 105 PR D review round 11, MUST-FIX). An administrator-shaped
+		// caller is not timing-contract-bound (SC-005) and falls back to a
+		// fresh build over the live config, matching pre-105 behaviour.
+		if auth.IsScopedCaller(r.Context()) {
+			var agentName string
+			if ac := auth.AuthContextFromContext(r.Context()); ac != nil {
+				agentName = ac.AgentName
 			}
-			if profilePinFromContext(r.Context()) == "" {
-				available := make([]string, 0, len(cfg.Profiles))
-				for _, p := range cfg.Profiles {
-					available = append(available, p.Name)
-				}
-				body["available"] = available
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			_ = json.NewEncoder(w).Encode(body)
+			s.logger.Info("profile URL refused for scoped caller",
+				zap.String("agent_name", agentName),
+				zap.String("profile", slug),
+				zap.String("remote_addr", r.RemoteAddr))
+			profileNotSelectable(w, slug)
 			return
 		}
+		profiles = s.profileIndexes.For(s.runtimeConfig())
+	}
+	cfg := profiles.cfg
 
-		// Build scope from the effective server set (unknown-server warn-skip applied).
-		effectiveServers := found.EffectiveServers(cfg)
-		scope := profile.NewProfileScope(found.Name, effectiveServers)
-		ctx := profile.WithProfileScope(r.Context(), scope)
-		next.ServeHTTP(w, r.WithContext(ctx))
+	// One slug → profile index per snapshot (built before the snapshot was
+	// published, see warmProfileIndex): the gate below and the lookup after
+	// it resolve the slug directly, so neither the refusal nor the admission
+	// walks cfg.Profiles.
+
+	// Spec 105 FR-004: the selectable-profile gate for scoped callers. It
+	// evaluates the requested profile (and the pin) ONLY — never the
+	// selectable list, whose cost is fleet-sized (profileIndex.selectable).
+	if auth.IsScopedCaller(r.Context()) {
+		if !profiles.selectable(r.Context(), slug) {
+			// Silent towards the agent, not towards the operator: the gate
+			// answers before the logging handler mounted inside it, so this
+			// line is the only trace a token probing the slug space leaves.
+			var agentName string
+			if ac := auth.AuthContextFromContext(r.Context()); ac != nil {
+				agentName = ac.AgentName
+			}
+			s.logger.Info("profile URL refused for scoped caller",
+				zap.String("agent_name", agentName),
+				zap.String("profile", slug),
+				zap.String("remote_addr", r.RemoteAddr))
+			profileNotSelectable(w, slug)
+			return
+		}
+	} else if cfg == nil || len(cfg.Profiles) == 0 {
+		// FR-008: no profiles configured (administrator affordance).
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "no profiles configured",
+		})
+		return
+	}
+
+	// Look up profile by slug (lock-free snapshot). A scoped caller that
+	// passed the gate always resolves here — the predicate only admits
+	// configured profiles. The position is kept, not just the *ProfileConfig,
+	// so the effective-server computation below can reuse this exact
+	// resolution instead of resolving the slug a third time through the
+	// lookup-hook seam (round 14 MUST-FIX; TestProfileMiddleware_Gate-
+	// TouchesOnlyRequestedSlugAndPin bounds admission to slug-twice-plus-pin).
+	candidate := profiles.position(slug)
+	found := profiles.profileAt(candidate)
+
+	// FR-009: slug not found — administrator callers only, with the
+	// discovery affordance.
+	if found == nil {
+		available := make([]string, 0, len(cfg.Profiles))
+		for _, p := range cfg.Profiles {
+			available = append(available, p.Name)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":     fmt.Sprintf("unknown profile '%s'", slug),
+			"available": available,
+		})
+		return
+	}
+
+	// Build scope from the effective server set (unknown-server warn-skip
+	// applied). A scoped caller already passed the reach gate above for
+	// exactly this profile: render ITS view through the index's
+	// O(len(allowed))-cost EffectiveServersFor rather than
+	// config.EffectiveServers, which rebuilds a fleet-sized set on every
+	// call — an admitted READ must never cost the hidden server population
+	// any more than the refusal above does (Spec 105 PR D review round 14
+	// MUST-FIX). Administrators (and absent contexts) keep the unchanged,
+	// fleet-proportional EffectiveServers path: SC-005 makes no timing
+	// promise for them, and they already pay this cost on every other
+	// admin-shaped read.
+	var effectiveServers []string
+	if auth.IsScopedCaller(r.Context()) {
+		var allowed []string
+		if ac := auth.AuthContextFromContext(r.Context()); ac != nil {
+			allowed = ac.AllowedServers
+		}
+		effectiveServers = profiles.effectiveServersForCandidate(candidate, allowed)
+	} else {
+		effectiveServers = found.EffectiveServers(cfg)
+	}
+	scope := profile.NewProfileScope(found.Name, effectiveServers)
+	ctx := profile.WithProfileScope(r.Context(), scope)
+	// Pin the request to the exact (index, snapshot) PAIR admission decided
+	// with — profiles itself, not merely its cfg — so every downstream
+	// profile read on this request, resolveActiveProfile's pin tier and
+	// set_profile's own admission alike, decides over that same pair rather
+	// than an independent Published()/runtime.Config() read that a reload
+	// landing mid-request could have already moved past it (round 8; round 9
+	// MUST-FIX 1 extended this to set_profile, which previously ignored the
+	// injected context entirely).
+	ctx = withProfileRequestIndex(ctx, profiles)
+	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// profileNotSelectable writes the single refusal a scoped caller receives from
+// the profile URL whenever the requested slug is not one it may select. The
+// body echoes the caller's own slug (not a disclosure) and never carries an
+// `available` list or the pin, so a missing, deleted, unreachable or
+// pin-mismatched profile — and an empty fleet — are indistinguishable
+// (Spec 105 FR-004).
+func profileNotSelectable(w http.ResponseWriter, slug string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": fmt.Sprintf("unknown profile '%s'", slug),
 	})
 }
 

@@ -93,26 +93,26 @@
 
 ### Failing tests
 
-- [ ] T035 [US1] Generalise `mintPinnedToken` to `mintAgentToken(t, env, name, allowed, perms, pin)` in `internal/server/profile_integration_test.go:627` (H1 reuses it)
-- [ ] T036 [US1] FR003-G1/G2/G5: `a`-only unpinned token — `/mcp/p/deploy` (disjoint), `/mcp/p/nonexistent`, `/mcp/p`, `/mcp/p/`, deleted `deploy` → equal status+body, no `available`; `/mcp/p/research` positive control — `internal/server/profile_integration_test.go`
-- [ ] T037 [P] [US1] FR003-G3/G4: pinned `research` — `/mcp/p/deploy`, `/mcp/p/nope`, deleted-pin `/mcp/p/research` → identical; fleet `[deploy]` vs `nil` → identical per slug — `internal/server/profile_integration_test.go`
-- [ ] T038 [P] [US1] FR003-G6: ctx scoped `[research-srv, deploy-srv]` + `profile.WithProfileScope(research)`; `set_profile deploy` → `active_profile == "deploy"` (stored) but `servers == [research-srv]` (URL governs: URL profile ∩ token, `spec.md:112,126`); clear → `[research-srv]` — `internal/server/profile_tool_test.go`
-- [ ] T039 [P] [US1] FR003-G7: pinned `research`, `set_profile ""` → `active_profile == ""`, `servers == [research-srv]` — `internal/server/profile_pin_enforcement_test.go`
-- [ ] T040 [P] [US1] FR003-G8 (D1): pinned `empty`/ghost pin — `set_profile empty` → deleted-pin body, no mutation; `/mcp/p/empty` → uniform 404 — `internal/server/profile_tool_test.go` + `internal/server/profile_integration_test.go`
+- [x] T035 [US1] Generalise `mintPinnedToken` to `mintAgentToken(t, env, name, allowed, perms, pin)` in `internal/server/profile_integration_test.go:627` (H1 reuses it)
+- [x] T036 [US1] FR003-G1/G2/G5: `a`-only unpinned token — `/mcp/p/deploy` (disjoint), `/mcp/p/nonexistent`, `/mcp/p`, `/mcp/p/`, deleted `deploy` → equal status+body, no `available`; `/mcp/p/research` positive control — `internal/server/profile_integration_test.go`
+- [x] T037 [P] [US1] FR003-G3/G4: pinned `research` — `/mcp/p/deploy`, `/mcp/p/nope`, deleted-pin `/mcp/p/research` → identical; fleet `[deploy]` vs `nil` → identical per slug — `internal/server/profile_integration_test.go`
+- [x] T038 [P] [US1] FR003-G6: ctx scoped `[research-srv, deploy-srv]` + `profile.WithProfileScope(research)`; `set_profile deploy` → `active_profile == "deploy"` (stored) but `servers == [research-srv]` (URL governs: URL profile ∩ token, `spec.md:112,126`); clear → `[research-srv]` — `internal/server/profile_tool_test.go`
+- [x] T039 [P] [US1] FR003-G7: pinned `research`, `set_profile ""` → `active_profile == ""`, `servers == [research-srv]` — `internal/server/profile_pin_enforcement_test.go`
+- [x] T040 [P] [US1] FR003-G8 (D1): pinned `empty`/ghost pin — `set_profile empty` → deleted-pin body, no mutation; `/mcp/p/empty` → uniform 404 — `internal/server/profile_tool_test.go` + `internal/server/profile_integration_test.go`
 
 ### Implementation
 
-- [ ] T041 [US1] `profileMiddleware` evaluates `selectableProfileNames` (keyed on `auth.IsScopedCaller`) for `/mcp/p/<slug>`, `/mcp/p`, `/mcp/p/`; ONE refusal constructor (`profileNotSelectable(w)`) for missing/deleted/not-selectable/pin-mismatch/no-profiles/zero-reach; no-profiles branch moved after the gate; admin/anonymous branches unchanged — `internal/server/server.go:2320-2384,2703-2705`
-- [ ] T042 [US1] `handleSetProfile`: pin branch requires reach (D1); `servers` = effective scope after the update via `resolveActiveProfile` (pin > URL > session) ∩ token — on a URL-scoped endpoint that is the URL profile, not the stored selection; `active_profile` = stored selection; cleared pinned selection reports `active_profile == ""` — `internal/server/profile_tool.go:72-108,188-210`
-- [ ] T043 [P] [US1] Update the cleared-selection line in `docs/features/profiles.md:70-72`
+- [x] T041 [US1] `profileMiddleware` evaluates the selectable-profile rule for the requested slug ONLY (`profileIndex.selectable` over a per-snapshot slug index with precomputed per-profile reach bitsets, keyed on `auth.IsScopedCaller`; never `selectableProfileNames`, whose cost is fleet-sized — codex round 2; reach costs the same for a missing, deleted or 4 096-server candidate — codex round 3; reach is O(|token grant|), one membership test per `allowed_servers` entry against the candidate's precomputed set, never a walk of the configured servers — codex round 4; the index is warmed at construction and on every config event, not by the first request — codex round 3) for `/mcp/p/<slug>`, `/mcp/p`, `/mcp/p/`; ONE refusal constructor (`profileNotSelectable(w)`) for missing/deleted/not-selectable/pin-mismatch/no-profiles/zero-reach; no-profiles branch moved after the gate; admin/anonymous branches unchanged; every scoped refusal logs one operator-facing line (`profile URL refused for scoped caller`: agent_name, profile, remote_addr — critique round 1, S1) — `internal/server/server.go`
+- [x] T042 [US1] `handleSetProfile`: admission decides the requested slug alone through the same per-snapshot index (`profileIndex.selectable`, never the selectable list); a scoped caller's refusal is the list-free `unknown profile '<slug>'`, administrators keep the `available:` list (codex round 3); pin branch requires reach (D1); for scoped callers `servers` = effective scope after the update via `resolveActiveProfileIn` (pin > URL > session, same config snapshot as the admission check) ∩ token, rendered in profile-declared order — on a URL-scoped endpoint that is the URL profile, not the stored selection; `active_profile` = stored selection; cleared pinned selection reports `active_profile == ""`. Administrators short-circuit to the pre-105 payload (selected profile's servers / all servers on clear) — SC-005 names no FR-003 exception, so the URL-precedence reporting is agent-only (critique round 1, A1/A2) — `internal/server/profile_tool.go`
+- [x] T043 [P] [US1] Update the cleared-selection line in `docs/features/profiles.md:70-72`
 
 ### Inverted pinned tests
 
-- [ ] T044 [US1] Invert `internal/server/profile_integration_test.go:201-233,647-703,775-808`, `internal/server/profile_tool_test.go:344,356,397-411` (`TestHandleSetProfile_PinnedTokenSelectsDisjointPin` → refuses), `internal/server/profile_pin_enforcement_test.go:150,160`; keep `TestHandleSetProfile_AdminUnchanged`, `TestProfile_404UnknownSlug/404NoProfiles` as admin controls
+- [x] T044 [US1] Invert `internal/server/profile_integration_test.go:201-233,647-703,775-808`, `internal/server/profile_tool_test.go:344,356,397-411` (`TestHandleSetProfile_PinnedTokenSelectsDisjointPin` → refuses), `internal/server/profile_pin_enforcement_test.go:150,160`; keep `TestHandleSetProfile_AdminUnchanged`, `TestProfile_404UnknownSlug/404NoProfiles` as admin controls
 
 ### Verification
 
-- [ ] T045 [US1] Common verification + `go test -tags server -race ./internal/serveredition/...` (AuthTypeUser is scoped)
+- [x] T045 [US1] Common verification + `go test -tags server -race ./internal/serveredition/...` (AuthTypeUser is scoped)
 - [~] T046 [US1] Live check: daemon with two profiles; unpinned scoped token hits `/mcp/p/<disjoint>` and `/mcp/p/<missing>`; bodies diffed byte-equal
 - [~] T047 [US1] Astra rounds on FR-003/004 + FR003-G1…G8 + D1; quote final `VERDICT:`
 

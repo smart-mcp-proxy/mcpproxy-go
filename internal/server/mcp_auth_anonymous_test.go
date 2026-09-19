@@ -10,6 +10,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 )
 
@@ -112,4 +113,34 @@ func TestStdioAuthContext_IsRealAdmin(t *testing.T) {
 	require.True(t, authCtx.IsAdmin())
 	require.False(t, authCtx.Anonymous)
 	require.True(t, authCtx.CanRevealSecrets(), "stdio is a local, OS-authenticated transport")
+}
+
+// TestMCPAuthMiddleware_AgentTokenWithoutConfigIsRefused (Spec 105 PR D
+// critique round 1): an agent-token request that arrives while the runtime
+// has NO published configuration must be refused, never forwarded. Before
+// this guard the middleware passed such a request through with no
+// AuthContext at all, and every scope predicate downstream reads an absent
+// context as an administrator (auth.IsScopedCaller → false) — the one path
+// where "no identity" widened into "full identity". A 503 keeps the
+// fail-closed shape of the sibling storage-unavailable branch.
+func TestMCPAuthMiddleware_AgentTokenWithoutConfigIsRefused(t *testing.T) {
+	// A zero Runtime publishes no configuration (no config service, no legacy
+	// config). The middleware reads only s.runtime and s.logger on this path,
+	// so a bare Server is enough — publishing a nil snapshot through a real
+	// runtime's config service would wake the supervisor's reconcile loop on
+	// a nil config instead.
+	srv := &Server{runtime: &runtime.Runtime{}, logger: zap.NewNop()}
+	require.Nil(t, srv.runtime.Config(), "fixture: the runtime must publish no configuration")
+
+	reached := false
+	handler := srv.mcpAuthMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		reached = true
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/mcp/p/research", http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+auth.TokenPrefixStr+"not-validated-without-config")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "an agent token cannot be validated without a configuration: %s", rec.Body.String())
+	require.False(t, reached, "the request must not reach the MCP handler without an AuthContext")
 }

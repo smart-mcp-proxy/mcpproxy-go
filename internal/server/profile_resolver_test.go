@@ -205,3 +205,57 @@ func TestSessionStore_ActiveProfileLifecycle(t *testing.T) {
 	store.SetActiveProfile("", "research")
 	require.Equal(t, "", store.GetActiveProfile(""))
 }
+
+// TestResolveActiveProfile_UsesInjectedPairDirectly_NeverFallsBackToFor (Spec
+// 105 PR D review round 15, MUST-FIX): resolveActiveProfile must decide
+// straight from the (index, snapshot) PAIR profileMiddleware already injected
+// on the context (profileRequestIndexFromContext) — never extract only its
+// cfg and re-resolve the index a second, independent time through
+// resolveActiveProfileIn/profileIndexFor(cfg), which does an O(1)
+// Published(cfg) match that falls back to a fleet-sized For(cfg) build on a
+// miss. Here the injected snapshot (A) is aged out of BOTH the warm and
+// previous slots by two further publications before resolveActiveProfile
+// ever runs — exactly the pair-acquisition bypass rounds 11/13 closed on the
+// admission path (profileIndexCurrent/Acquire), reopened here on the
+// downstream resolution path a paused request reaches next. Using the
+// already-resolved pair outright cannot miss: there is no lookup left to
+// fall back from.
+func TestResolveActiveProfile_UsesInjectedPairDirectly_NeverFallsBackToFor(t *testing.T) {
+	cfgA := &config.Config{
+		Servers:  []*config.ServerConfig{{Name: "a-srv"}},
+		Profiles: []config.ProfileConfig{{Name: "research", Servers: []string{"a-srv"}}},
+	}
+	cfgB := &config.Config{
+		Servers:  []*config.ServerConfig{{Name: "b-srv"}},
+		Profiles: []config.ProfileConfig{{Name: "research", Servers: []string{"b-srv"}}},
+	}
+	cfgC := &config.Config{
+		Servers:  []*config.ServerConfig{{Name: "c-srv"}},
+		Profiles: []config.ProfileConfig{{Name: "research", Servers: []string{"c-srv"}}},
+	}
+
+	p := &MCPProxyServer{logger: zap.NewNop(), sessionStore: NewSessionStore(zap.NewNop())}
+	srv := &Server{logger: zap.NewNop(), mcpProxy: p}
+	p.mainServer = srv
+
+	idxA := srv.profileIndexes.warmPublishing(cfgA)
+	// Two further publications land, aging A out of BOTH the warm and the
+	// previous slots.
+	srv.profileIndexes.warmPublishing(cfgB)
+	srv.profileIndexes.warmPublishing(cfgC)
+	require.Nil(t, srv.profileIndexes.Published(cfgA), "premise: A must no longer be a Published cache hit")
+
+	ctx := withProfileRequestIndex(context.Background(), idxA)
+	ctx = auth.WithAuthContext(ctx, &auth.AuthContext{
+		Type: auth.AuthTypeAgent, ProfilePin: "research", AllowedServers: []string{"*"},
+	})
+
+	name, scope := p.resolveActiveProfile(ctx)
+	require.Equal(t, "research", name)
+	require.NotNil(t, scope)
+	require.Equal(t, []string{"a-srv"}, scope.AllowedServerNames(),
+		"must decide from the injected pair (A), never a config/index resolved independently")
+
+	require.Zero(t, srv.profileIndexes.lazyBuilds.Load(),
+		"resolveActiveProfile with an injected pair must never fall back to a fleet-sized For rebuild")
+}

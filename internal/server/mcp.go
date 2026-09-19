@@ -158,6 +158,14 @@ type MCPProxyServer struct {
 	// whole Runtime (mirrors workSessionResolver).
 	preflightRecorder func(runtime.PreflightActivity) error
 
+	// profileIndexes is the slug → profile index cache set_profile consults
+	// when no mainServer stands behind this proxy (tests build a bare
+	// MCPProxyServer). In production profileIndexCurrent takes the main
+	// Server's warm index — the (index, snapshot) pair — so one index per
+	// config snapshot serves both the /mcp/p/<slug> gate and set_profile
+	// and no request builds one (Spec 105 FR-003/FR-004).
+	profileIndexes profileIndexCache
+
 	// preflightStateSource overrides the connection-state snapshot the
 	// preflight glue reads (Spec 099). Nil in production, where
 	// preflightSnapshot resolves it from the supervisor's StateView; tests
@@ -1804,10 +1812,14 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// that is allowed to see nothing leave a new index directory behind — for a
 	// profile that may no longer exist. The post-filter below returns the same
 	// empty result set from the shared index.
-	profileName, profileScope := p.resolveActiveProfile(ctx)
+	profileName, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
 	// Spec 104 FR-016a: the cache stamp is the authorization THIS search runs
 	// under, captured now rather than re-resolved when the response is cut.
-	producer := p.cacheAuthorizationWith(ctx, profileName, profileScope)
+	// The index/snapshot pair is threaded through too (Spec 105 PR D review
+	// round 17 MUST-FIX): cacheAuthorizationWith derives the stamped
+	// ProfileServers from this exact pair, never a second, independently
+	// resolved one.
+	producer := p.cacheAuthorizationWith(ctx, profileName, profileScope, profileIdx)
 	searchIndex := p.index
 	if profileName != "" && !profileScope.DeniesAll() {
 		if pIdx, perr := p.index.ForProfile(profileName); perr == nil && pIdx != nil {
@@ -2329,8 +2341,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Spec 057 / Profiles v2: the active profile (token pin > URL > session
 	// set_profile). Resolved once, up here, because the audit attempt stamps
 	// it; the profile-scope GATE itself still runs below, after the intent
-	// gates, exactly where it always did.
-	profileSlug, profileScope := p.resolveActiveProfile(ctx)
+	// gates, exactly where it always did. WithIndex (not plain
+	// resolveActiveProfile — a pure wrapper around this that discards the
+	// index) so the SAME (name, scope, idx) triple resolved here also feeds
+	// cacheAuthorizationWith's caller-intersected ProfileServers stamp below
+	// (Spec 105 PR D review round 17) — one resolution for the whole call,
+	// never a second, independent one that could pair a decision made
+	// against this snapshot with an index built from a later one.
+	profileSlug, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
 
 	// Spec 107 T103: the audit attempt, installed BEFORE the first gate so
 	// every refusal below — the intent gates included — writes its `authz
@@ -2429,8 +2447,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// attempt) is the read_cache producer stamp (Spec 104 FR-016a), captured
 	// here — at authorization time, before the upstream call — so a profile
 	// deleted or narrowed while the call is in flight cannot re-stamp a
-	// response that was authorized under the wider scope.
-	producer := p.cacheAuthorizationWith(ctx, profileSlug, profileScope)
+	// response that was authorized under the wider scope. profileIdx is the
+	// same index that (name, scope) triple was resolved against (see above),
+	// never re-derived here — cacheAuthorizationWith's caller-intersected
+	// ProfileServers stamp needs it (Spec 105 PR D review round 17).
+	producer := p.cacheAuthorizationWith(ctx, profileSlug, profileScope, profileIdx)
 	if profileScope != nil && !profileScope.Allows(serverName) {
 		errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)

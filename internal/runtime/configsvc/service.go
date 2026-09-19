@@ -3,6 +3,7 @@ package configsvc
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +55,13 @@ type Service struct {
 	// #937 admission gate so a poisoned server can never be reconciled and
 	// indexed in the window between "config parsed" and "config gated".
 	prePublish atomic.Value // func(*config.Config) *config.Config
+
+	// prePublishObservers run after prePublish, on the exact *Config that is
+	// about to be stored — while nothing else can observe it. Read-only: they
+	// build state keyed on that pointer (Spec 105's profile index) so it is
+	// ready before the first reader can capture the snapshot.
+	observersMu         sync.RWMutex
+	prePublishObservers []func(*config.Config)
 }
 
 // NewService creates a new configuration service with the given initial config.
@@ -106,6 +114,46 @@ func (s *Service) SetPrePublishHook(hook func(*config.Config) *config.Config) {
 	s.prePublish.Store(hook)
 }
 
+// AddPrePublishObserver registers a read-only observer of every configuration
+// on its way into the snapshot. Observers run inside the update, after the
+// pre-publish hook has produced the final config and before the snapshot is
+// stored or any subscriber is notified — so they see the exact *Config that
+// will be published, at a moment nothing else can. They must not mutate it,
+// and because they run under the update mutex they must be cheap (an index
+// build of one insertion per entry, not I/O). Distinct from the single
+// SetPrePublishHook slot, which the #937 admission gate owns.
+//
+// Observers run with the update mutex held and MUST NOT publish: a call to
+// Update, UpdateIfCurrent or ReloadFromFile from inside an observer is a
+// re-entrant publish and deadlocks by design, exactly like the pre-publish
+// hook. Registering a further observer from inside one is allowed — the
+// list is not locked while observers run — and that observer first runs on
+// the next publication.
+//
+// Nil observers and a nil service are ignored. Safe to call at any time,
+// including from an observer.
+func (s *Service) AddPrePublishObserver(observe func(*config.Config)) {
+	if s == nil || observe == nil {
+		return
+	}
+	s.observersMu.Lock()
+	defer s.observersMu.Unlock()
+	s.prePublishObservers = append(s.prePublishObservers, observe)
+}
+
+// runPrePublishObservers runs every observer registered when it is called on
+// cfg (called with updateMu held, before the snapshot is stored). The list is
+// copied under the read lock and released before any observer runs, so an
+// observer may register another without deadlocking.
+func (s *Service) runPrePublishObservers(cfg *config.Config) {
+	s.observersMu.RLock()
+	observers := slices.Clone(s.prePublishObservers)
+	s.observersMu.RUnlock()
+	for _, observe := range observers {
+		observe(cfg)
+	}
+}
+
 // runPrePublishHook applies the installed hook, if any.
 func (s *Service) runPrePublishHook(cfg *config.Config) *config.Config {
 	v := s.prePublish.Load()
@@ -148,6 +196,7 @@ func (s *Service) UpdateIfCurrent(expected, newConfig *config.Config, updateType
 func (s *Service) updateLocked(newConfig *config.Config, updateType UpdateType, source string) {
 
 	newConfig = s.runPrePublishHook(newConfig)
+	s.runPrePublishObservers(newConfig)
 
 	current := s.Current()
 	s.version++
