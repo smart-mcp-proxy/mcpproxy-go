@@ -258,14 +258,21 @@ func TestStartCallbackServerOnHost_UnpinningReplacesCachedPinnedServer(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, pinned, first.RedirectURI)
 
-	// Same resolved bind host, port and path (unpinned always resolves to
+	// Same resolved bind host and path (unpinned always resolves to
 	// 127.0.0.1 + DefaultRedirectPath, matching "localhost"'s resolved bind
-	// host and this pin's default path) — but no RedirectURI this time.
+	// host and this pin's default path) — but no RedirectURI this time. The
+	// requested port is only a PREFERENCE (Spec 022): whether the OS lets a
+	// just-closed listening socket's port be rebound immediately is a kernel
+	// timing detail unrelated to what this test checks, so the assertion
+	// below uses second.Port (whatever it actually is) rather than assuming
+	// `port` was reused — asserting on the wrong-but-plausible reused port
+	// would make this test flaky under CI load for a reason that has nothing
+	// to do with the bug it guards against.
 	second, err := GetGlobalCallbackManager().StartCallbackServerOnHost(serverName, CallbackBinding{
 		Port: port,
 	})
 	require.NoError(t, err)
-	expected := fmt.Sprintf("http://127.0.0.1:%d/oauth/callback", port)
+	expected := fmt.Sprintf("http://127.0.0.1:%d/oauth/callback", second.Port)
 	assert.Equal(t, expected, second.RedirectURI,
 		"an unpinned request must not be served by a cached server still recording an old pin's spelling")
 }
