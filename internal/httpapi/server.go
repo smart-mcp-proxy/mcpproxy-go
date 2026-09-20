@@ -3179,7 +3179,6 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 
 	resolve := func(existingSrv *config.ServerConfig) (*config.ServerConfig, error) {
 		return resolveServerPatch(serverName, &req, existingSrv, opts)
-	}
 
 	var err error
 	if patcher, ok := s.controller.(ServerPatcher); ok {

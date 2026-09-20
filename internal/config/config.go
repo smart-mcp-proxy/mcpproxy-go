@@ -785,6 +785,9 @@ type ServerConfig struct {
 	EnabledTools  []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
 	DisabledTools []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
 
+	// AnnotationOverrides fixes false hints from the upstream server.
+	// Map from tool name (or "*" for wildcard) to ToolAnnotations.
+	// Admin-only, hot (no restart), audited.
 	AnnotationOverrides map[string]*ToolAnnotations `json:"annotation_overrides,omitempty" mapstructure:"annotation_overrides"`
 
 	// SourceRegistryID records which registry this server was added from (empty
@@ -1454,7 +1457,7 @@ type ToolMetadata struct {
 	Annotations      *ToolAnnotations `json:"annotations,omitempty"`
 }
 
-// ToolAnnotations represents MCP tool behavior hints
+// ToolAnnotations represents MCP tool behavior hints (per-tool override)
 type ToolAnnotations struct {
 	Title           string `json:"title,omitempty"`
 	ReadOnlyHint    *bool  `json:"readOnlyHint,omitempty"`
