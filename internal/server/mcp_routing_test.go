@@ -433,8 +433,32 @@ func TestDirectModeHandler_ServerAccessDenied(t *testing.T) {
 	// An agent token restricted to github, targeting gitlab's tool of the
 	// same raw name: the server-scope gate refuses before any tier is read,
 	// and neither upstream sees the call.
-	result := f.call(t, agentCtx([]string{"github"}, []string{auth.PermRead}, ""), "gitlab", "list_repos")
-	f.refused(t, result, "Access denied: token does not have access to server 'gitlab'")
+	//
+	// Spec 105 FR-008 gap G5 (D12): the refusal text must not name "gitlab" —
+	// this drives the REGISTERED handler directly, bypassing mcp-go's own
+	// call-time filter re-evaluation (which would answer the unregistered-name
+	// envelope first in real dispatch), so this exercises the handler's own
+	// defense-in-depth check. It is returned as the handler's OWN error (PR
+	// #1326 review round 2, chunk C), not a tool-result, so this scenario
+	// cannot use the shared f.call/f.refused helpers (which assert NO Go
+	// error at all — true for every OTHER refusal in this file, but not this
+	// one).
+	display := FormatDirectToolName("gitlab", "list_repos")
+	st, ok := f.proxy.directServer.ListTools()[display]
+	require.Truef(t, ok, "%q must be registered on the direct server", display)
+	req := mcp.CallToolRequest{}
+	req.Params.Name = display
+	req.Params.Arguments = map[string]interface{}{}
+
+	result, err := st.Handler(agentCtx([]string{"github"}, []string{auth.PermRead}, ""), req)
+	require.Nil(t, result, "the handler's own defense-in-depth refusal must not be a tool-result")
+	require.Error(t, err)
+	assert.Equal(t, "tool 'gitlab__list_repos' not found: tool not found", err.Error())
+	assert.NotContains(t, err.Error(), "does not have access",
+		"the refusal must never disclose that a scope check is what fired")
+	for server, up := range f.ups {
+		assert.Equal(t, int64(0), up.count.Load(), "a refused cell must never reach upstream %q (dispatched: %v)", server, up.dispatched())
+	}
 }
 
 func TestDirectModeHandler_AgentWithCorrectPermissions(t *testing.T) {
@@ -631,7 +655,14 @@ func TestFilterDirectModeToolsForAuth_FailsClosedOnMissingPermissionMetadata(t *
 	assert.Equal(t, []string{visible}, directToolNamesForTest(filtered))
 }
 
-func TestFilterDirectModeToolsForAuth_KeepsNonDirectTools(t *testing.T) {
+// Spec 105 FR-008 (FR008-G2): "retrieve_tools" has no "__" separator, exactly
+// like a genuine direct-surface built-in, but it is a RETRIEVE-surface
+// built-in never registered here — so with a published catalog that does not
+// admit it, it is no longer waved through on the strength of its shape alone.
+// It has no registration identity and is withheld, for a scoped agent and for
+// an administrator alike (the previous version of this test, named for the
+// opposite behaviour, pinned exactly the disclosure FR008-G2 closes).
+func TestFilterDirectModeToolsForAuth_DropsNonBuiltinSeparatorlessNames(t *testing.T) {
 	proxy := &MCPProxyServer{}
 
 	direct := FormatDirectToolName("github", "get_issue")
@@ -640,19 +671,24 @@ func TestFilterDirectModeToolsForAuth_KeepsNonDirectTools(t *testing.T) {
 		direct: auth.PermRead,
 	})
 
-	ctx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+	scoped := auth.WithAuthContext(context.Background(), &auth.AuthContext{
 		Type:           auth.AuthTypeAgent,
 		AgentName:      "test-agent",
 		AllowedServers: []string{"github"},
 		Permissions:    []string{auth.PermRead},
 	})
 
-	filtered := proxy.filterDirectModeToolsForAuth(ctx, []mcp.Tool{
-		{Name: direct},
-		{Name: nonDirect},
-	})
+	for name, ctx := range map[string]context.Context{
+		"scoped agent":  scoped,
+		"administrator": context.Background(),
+	} {
+		filtered := proxy.filterDirectModeToolsForAuth(ctx, []mcp.Tool{
+			{Name: direct},
+			{Name: nonDirect},
+		})
 
-	assert.Equal(t, []string{direct, nonDirect}, directToolNamesForTest(filtered))
+		assert.Equalf(t, []string{direct}, directToolNamesForTest(filtered), "%s", name)
+	}
 }
 
 func directToolNamesForTest(tools []mcp.Tool) []string {

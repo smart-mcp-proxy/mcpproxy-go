@@ -131,6 +131,23 @@ func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *direct
 	return p.withDirectBuiltins(p.renderDirectTools(cat)), cat
 }
 
+// builtinDirectToolNames is the explicit, POSITIVE set of tool names this
+// proxy serves on the direct surface itself, as opposed to an upstream
+// projection. Populated directly from the same constructors withDirectBuiltins
+// registers (buildDescribeToolTool, …) so the two can never drift apart.
+//
+// Spec 105 FR-008 (FR008-G2): a name is a built-in ONLY when it is in this
+// set. Earlier code inferred "built-in" from a display name that failed to
+// PARSE as server__tool — but a catalog-admitted upstream tool with an empty
+// raw name renders as "server__", which also fails to parse, and would have
+// been misclassified as a built-in by that inference alone (see
+// TestResolveDirectTool_EmptyToolNameIsNotABuiltin's history). Structural
+// inference is gone; only this explicit set — and a successful catalog
+// lookup — identify a name.
+var builtinDirectToolNames = map[string]struct{}{
+	buildDescribeToolTool().Name: {},
+}
+
 // withDirectBuiltins appends the tools mcpproxy serves itself on the direct
 // surface (FR-009/FR-018).
 //
@@ -206,6 +223,16 @@ func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.Serve
 		// what was actually registered, which is the only thing a later
 		// comparison can honestly be against.
 		entry.RenderedDescription = rendered
+
+		// Spec 105 FR-008: stamp the identity of THIS entry — the same one the
+		// handler below closes over — onto the tool object itself, so the
+		// scope and callability filters can authorize a tools/list or
+		// call-time re-evaluation against the exact publication that produced
+		// this tool, never against whatever catalog happens to be live when
+		// the filter runs (see directToolStamp's doc comment). The terminal
+		// stripDirectToolStampFilter removes it before any response reaches a
+		// client.
+		mcpTool = stampDirectTool(mcpTool, entry)
 
 		serverTools = append(serverTools, mcpserver.ServerTool{
 			Tool:    mcpTool,
@@ -376,6 +403,48 @@ func (p *MCPProxyServer) directSignatureSuffix(entry *directCatalogEntry) string
 	return "\n" + entry.ToolName + sig.Sig
 }
 
+// errDirectToolNotFound mirrors mcp-go's own ErrToolNotFound sentinel (the
+// tool-surface counterpart of errPromptNotFound in mcp_direct_scope.go).
+// Wrapping it below reproduces the exact text mcp-go emits when its own
+// tools/call dispatch cannot find the requested name at all
+// (server.go handleToolCall: `fmt.Errorf("tool '%s' not found: %w", name,
+// ErrToolNotFound)`).
+var errDirectToolNotFound = mcpserver.ErrToolNotFound
+
+// directScopeRefusalError builds the non-disclosing error makeDirectModeHandler's
+// OWN profile/server-scope checks return (Spec 105 FR-008 gap G5, D12): it
+// echoes only the caller-supplied display name, wrapping errDirectToolNotFound
+// so the TEXT is byte-identical to what mcp-go's own call-time tool filter
+// re-evaluation emits for a name it does not admit at all — never the
+// canonical owner the handler's entry closed over.
+//
+// It is returned as the HANDLER'S OWN error (the function's second return
+// value), not built with mcp.NewToolResultError, so the JSON-RPC envelope
+// KIND also converges on the filter's: both become a protocol-level error
+// response, never a successful call result with isError:true. (PR #1326
+// review round 2, chunk C: the previous NewToolResultError version was a
+// different envelope KIND — a successful result — from mcp-go's own
+// -32602 protocol error for the identical logical case, not merely
+// different wording.)
+//
+// One residual this cannot close, same as authorizeAggregatedPromptServer's
+// prompt-side twin below: mcp-go always maps a handler-returned error to
+// mcp.INTERNAL_ERROR (-32603), a code this function cannot override, while
+// mcp-go's OWN filter path answers mcp.INVALID_PARAMS (-32602) for the
+// identical text. A probe timed inside the narrow profile/config race this
+// branch exists for (see the call sites' doc comments) could still tell the
+// two apart by that numeric code alone, even though the message and the
+// result KIND can no longer distinguish "authorized-but-blocked" from
+// "genuinely doesn't exist". A ToolHandlerFunc has no way to emit an
+// arbitrary top-level JSON-RPC error code — only mcp-go's own dispatch can —
+// so full byte-for-byte envelope equality is not achievable from here without
+// forking mcp-go's dispatch loop, which this fix does not do. This is
+// documented, not silently accepted: see the PR description for the exact
+// parity this branch provides.
+func directScopeRefusalError(displayName string) error {
+	return fmt.Errorf("tool '%s' not found: %w", displayName, errDirectToolNotFound)
+}
+
 // makeDirectModeHandler creates a handler function for a direct mode tool.
 // It handles auth checks, permission enforcement, and upstream calls.
 //
@@ -453,9 +522,9 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// connection is filtered too, and it runs FIRST so a profile-pinned
 		// token cannot reach a server outside its pin through this routing mode.
 		if profileScope != nil && !profileScope.Allows(serverName) {
-			errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
-			p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
-			return mcp.NewToolResultError(errMsg), nil
+			refusalErr := directScopeRefusalError(entry.DisplayName)
+			p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", refusalErr.Error(), telemetry.BlockReasonProfileScope)
+			return nil, refusalErr
 		}
 
 		// Check auth context for server access and permissions
@@ -463,13 +532,30 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		if authCtx != nil {
 			// Check server access
 			if !authCtx.CanAccessServer(serverName) {
-				errMsg := fmt.Sprintf("Access denied: token does not have access to server '%s'", serverName)
+				// Spec 105 FR-008 gap G5 (D12): never name the server this
+				// handler's OWN entry closed over. In normal operation this
+				// branch is unreachable — mcp-go's WithToolFilter chain
+				// re-evaluates the SAME stamp-based scope decision at call
+				// time and answers the registered-name-not-found envelope
+				// before this handler ever runs (Spec 105 T087/T088), OR for
+				// the narrow live profile/config race PR #1326 review round 2
+				// (chunk C) found: the filter's stamp-based check and this
+				// handler's own profileScope/authCtx re-resolution can read a
+				// DIFFERENT active profile when a session's pin changes
+				// between the two evaluations, so the filter can pass a call
+				// this handler then refuses. Its wording must therefore
+				// match what an unregistered name gets: no owner, no scope
+				// reason, just the caller-supplied name echoed back — see
+				// directScopeRefusalError for how far that parity extends
+				// (text and envelope KIND, not the numeric JSON-RPC error
+				// code).
+				refusalErr := directScopeRefusalError(entry.DisplayName)
 				// Direct mode denied these silently: no activity record and,
 				// since issue #969, no availability counter either. Emit the
 				// same policy decision the call_tool_* variants emit at the
 				// equivalent gate so the funnel has no blind spot.
-				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonTokenScope)
-				return mcp.NewToolResultError(errMsg), nil
+				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", refusalErr.Error(), telemetry.BlockReasonTokenScope)
+				return nil, refusalErr
 			}
 
 			// Determine required permission from annotations
@@ -1020,6 +1106,13 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	directOpts = append(directOpts,
 		mcpserver.WithToolFilter(p.filterDirectModeToolsForAuth),
 		mcpserver.WithToolFilter(p.filterDirectToolsForAgentCallability),
+		// Spec 105 FR-008: TERMINAL filter, registered last so it runs after
+		// the two above — mcp-go feeds each filter's output to the next, both
+		// for tools/list and for the call-time re-evaluation of one tool — and
+		// removes the internal identity stamp those two authorize against, for
+		// EVERY caller including administrators, before any tool reaches the
+		// wire.
+		mcpserver.WithToolFilter(stripDirectToolStampFilter),
 		// FR-007: the in-band convention channel. Until now no routing-mode
 		// server carried instructions at all — only the default retrieve_tools
 		// server did — so this changes the direct server's initialize response.
@@ -1170,15 +1263,22 @@ func (p *MCPProxyServer) refreshDirectModeToolsLocked() {
 	// What the window actually exposes, measured in mcp_direct_skew_test.go
 	// rather than assumed:
 	//
-	//   - An ADDED name is in the registry first. A SCOPED session is filtered
-	//     through the catalog and sees nothing; an UNSCOPED one short-circuits
-	//     both filters and is served the raw registry, so it sees the name while
-	//     describe still answers not_found. Listed-but-undescribable — the safe
-	//     direction, for a session entitled to the whole surface anyway.
-	//   - A REMOVED name leaves the registry first, so the previous catalog can
-	//     still describe it for the width of the window. Stale, not a
-	//     disclosure: the same session could have described it one request
-	//     earlier, and gets the definition it was already served.
+	//   - Spec 105 FR-008: renderDirectTools stamps each rendered tool with the
+	//     identity of the SAME build that produced its handler (Spec 105
+	//     FR-008), and the LISTING filters read that stamp first, never a fresh
+	//     catalog lookup — so an ADDED, REMOVED, reverse-flipped or tier-changed
+	//     name is authorized correctly for every caller, scoped or not, as soon
+	//     as SetTools lands it, with no window at all.
+	//   - describe_tool is UNCHANGED by that fix and still resolves against
+	//     whichever catalog generation `p.loadDirectCatalog()` currently
+	//     returns, so it can lag the listing for the width of this window —
+	//     two OPPOSITE, both accepted, transient cross-generation residuals
+	//     that close at the publish: an added name is listed but not yet
+	//     describable (the direction Spec 102's SC-007 forbids in steady
+	//     state, tolerated here only for this one-rebuild window), and a
+	//     removed name is still describable from the previous snapshot after
+	//     it drops off the listing (stale, not a disclosure — the same
+	//     session could have described it one request earlier).
 	//
 	// Both close at the publish. The three accepted residuals (T002/T003) are
 	// the schema- and annotations-only changes, which are invisible in the
@@ -1382,6 +1482,19 @@ func buildAggregatedServerPrompts(
 	for _, qualified := range upstreamPrompts {
 		serverName, promptName, ok := strings.Cut(qualified.Name, ":")
 		if !ok {
+			continue
+		}
+		if promptName == "" {
+			// Spec 105 FR-008 (FR008-G7), the FR-006 prompt analogue: an
+			// upstream prompt with an empty raw name (a qualified name of
+			// "server:") has no registration identity to authorize it
+			// against — the same rule buildDirectCatalog now applies to an
+			// empty raw TOOL name. Withheld from every caller, administrators
+			// included, by never registering it at all.
+			if logger != nil {
+				logger.Warn("dropping aggregated prompt with an empty raw name: no registration identity to authorize it against",
+					zap.String("server", serverName))
+			}
 			continue
 		}
 
