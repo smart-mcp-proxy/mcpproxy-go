@@ -3,7 +3,11 @@ import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdat
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
 
 // PatchServerRequest mirrors the PATCH /api/v1/servers/{id} body (snake_case, per oas).
-// Generated from oas/swagger.yaml but also manually extended for annotation_overrides.
+// Hand-maintained: no `make gen` / swagger→TS codegen exists (`make swagger`
+// generates oas/swagger.yaml FROM Go via swag). annotation_overrides is pinned
+// to oas/swagger.yaml:1124 (config.ServerConfig) + config.ToolAnnotations;
+// the `| null` per-tool delete markers (RFC7396) are not expressible in the
+// swag-emitted schema, hence the manual extension.
 export interface PatchServerRequest extends Record<string, unknown> {
   trust_mode?: string
   url?: string

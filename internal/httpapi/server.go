@@ -2353,7 +2353,16 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// persisting. Reuses the PATCH pattern: temporary config with the new
 	// server appended, filtered to annotation_overrides errors.
 	if serverConfig.AnnotationOverrides != nil && len(serverConfig.AnnotationOverrides) > 0 {
-		if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+		cfg, err := s.controller.GetConfig()
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to load current config for annotation validation: %v", err))
+			return
+		}
+		if cfg == nil {
+			s.writeError(w, r, http.StatusInternalServerError, "Failed to load current config for annotation validation: nil config")
+			return
+		}
+		{
 			tmpCfg := &config.Config{Servers: make([]*config.ServerConfig, 0, len(cfg.Servers)+1)}
 			tmpCfg.Servers = append(tmpCfg.Servers, cfg.Servers...)
 			tmpCfg.Servers = append(tmpCfg.Servers, serverConfig)
@@ -2789,8 +2798,17 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	// Validate annotation overrides via ValidateDetailed (write gate) before
 	// persisting. Build a temporary config with the merged server to reuse the
 	// canonical per-server validation (max 100, tool name, at least one hint).
-	if hasAnnotationOverrideUpdate {
-		if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && existingSrv != nil {
+	if hasAnnotationOverrideUpdate && existingSrv != nil {
+		cfg, err := s.controller.GetConfig()
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to load current config for annotation validation: %v", err))
+			return
+		}
+		if cfg == nil {
+			s.writeError(w, r, http.StatusInternalServerError, "Failed to load current config for annotation validation: nil config")
+			return
+		}
+		{
 			tmpCfg := &config.Config{Servers: make([]*config.ServerConfig, len(cfg.Servers))}
 			for i, sc := range cfg.Servers {
 				if sc != nil && sc.Name == serverName {
