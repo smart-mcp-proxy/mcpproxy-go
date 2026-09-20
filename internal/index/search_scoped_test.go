@@ -180,3 +180,56 @@ func TestBleveIndex_SearchTools_HiddenPrefixLongerThanOnePage(t *testing.T) {
 	assert.Equal(t, "a", results[0].Tool.ServerName,
 		"a caller entitled only to server \"a\" must get \"a\"'s tool even when 300 hidden-server tools outrank it")
 }
+
+// TestBleveIndex_SearchToolsScoped_AppliesUnderscoreSegmentEnhancement is a
+// Spec 105 PR C review finding: SearchToolsScoped originally ran the plain
+// boolean query only, silently skipping the underscore-segment enhancement
+// SearchTools applies for identifier-style queries (bleve.go
+// underscoreSegmentQuery / augmentedToolSearchQuery) — so a scoped caller
+// searching for a real tool name like "work_upload_attachment" (segments out
+// of order) could get NO result at all where an equal-limit unscoped
+// SearchTools call finds it. Both entitled and wildcard-scoped callers must
+// now find it too, at the SAME score SearchTools(query, limit) reports.
+func TestBleveIndex_SearchToolsScoped_AppliesUnderscoreSegmentEnhancement(t *testing.T) {
+	idx, err := NewBleveIndex(t.TempDir(), zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = idx.Close() })
+
+	require.NoError(t, idx.BatchIndex([]*config.ToolMetadata{
+		{
+			Name:        "a:work_start_task_attachment_upload",
+			ServerName:  "a",
+			Description: "Create a signed request for a local file.",
+			ParamsJSON:  `{"type":"object","properties":{}}`,
+			Hash:        "target",
+		},
+		{
+			Name:        "b:network_upload_attachment",
+			ServerName:  "b",
+			Description: "Create a signed request for a remote file.",
+			ParamsJSON:  `{"type":"object","properties":{}}`,
+			Hash:        "substring-decoy",
+		},
+	}))
+
+	const query = "work_upload_attachment"
+	const limit = 10
+
+	unscoped, err := idx.SearchTools(query, limit)
+	require.NoError(t, err)
+	require.NotEmpty(t, unscoped, "fixture: the unscoped segment-enhanced query must find the target")
+	require.Equal(t, "a:work_start_task_attachment_upload", unscoped[0].Tool.Name)
+
+	onlyA := func(server string) bool { return server == "a" }
+	scoped, err := idx.SearchToolsScoped(query, limit, onlyA)
+	require.NoError(t, err)
+	require.NotEmpty(t, scoped, "a scoped caller must find the same segment-matched hit an equal-limit unscoped call finds")
+	assert.Equal(t, "a:work_start_task_attachment_upload", scoped[0].Tool.Name)
+	assert.Equal(t, unscoped[0].Score, scoped[0].Score, "the scoped hit must carry the identical (segment-boosted) score")
+
+	wildcard := func(string) bool { return true }
+	scopedWildcard, err := idx.SearchToolsScoped(query, limit, wildcard)
+	require.NoError(t, err)
+	require.NotEmpty(t, scopedWildcard)
+	assert.Equal(t, unscoped[0].Score, scopedWildcard[0].Score)
+}

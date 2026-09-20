@@ -360,43 +360,56 @@ func newToolSearchRequest(q bquery.Query, from, size int) *bleve.SearchRequest {
 	return searchReq
 }
 
+// augmentedToolSearchQuery is buildToolSearchQuery, augmented with the
+// underscore-segment enhancement using the identical adaptive rule SearchTools
+// has always applied: identifier queries often include only the meaningful
+// segments of a longer tool name, so when the plain query's top `probeSize`
+// hits contain no canonical exact match, an additional segment-aware clause
+// is added to reward boundary matches over substring hits. Extracted so
+// SearchToolsScoped (Spec 105 FR-005 G1 review finding) makes the SAME
+// decision an unscoped SearchTools(queryStr, probeSize) call would — the
+// decision is a function of the query text and the corpus alone, never of
+// scope, so a scoped caller's ranking for an underscore-style query (e.g.
+// "create_issue") can no longer silently diverge from what an equal-limit
+// unscoped call would have used.
+func (b *BleveIndex) augmentedToolSearchQuery(queryStr string, probeSize int) (*bquery.BooleanQuery, error) {
+	boolQuery := buildToolSearchQuery(queryStr)
+
+	segmentQuery := underscoreSegmentQuery(queryStr)
+	if segmentQuery == nil {
+		return boolQuery, nil
+	}
+
+	probe, err := b.index.Search(newToolSearchRequest(boolQuery, 0, probeSize))
+	if err != nil {
+		return nil, fmt.Errorf("underscore segment probe failed: %w", err)
+	}
+	for _, hit := range probe.Hits {
+		if fieldsContainExactToolName(hit.Fields, queryStr) {
+			return boolQuery, nil // exact match already at the top: no boost needed
+		}
+	}
+
+	boolQuery.AddShould(segmentQuery)
+	return boolQuery, nil
+}
+
 // SearchTools searches for tools using multiple query strategies for better results
 func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchResult, error) {
 	if queryStr == "" {
 		return nil, fmt.Errorf("search query cannot be empty")
 	}
 
-	boolQuery := buildToolSearchQuery(queryStr)
-	searchReq := newToolSearchRequest(boolQuery, 0, limit)
+	boolQuery, err := b.augmentedToolSearchQuery(queryStr, limit)
+	if err != nil {
+		return nil, err
+	}
 
 	b.logger.Debug("Searching tools with enhanced query", zap.String("query", queryStr), zap.Int("limit", limit))
 
-	searchResult, err := b.index.Search(searchReq)
+	searchResult, err := b.index.Search(newToolSearchRequest(boolQuery, 0, limit))
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
-	}
-
-	// Identifier queries often include only the meaningful segments of a
-	// longer tool name. If the legacy query did not find a canonical exact
-	// match, repeat it with an additional segment-aware signal. This preserves
-	// exact-name scores while letting boundary matches outrank substring hits.
-	segmentQuery := underscoreSegmentQuery(queryStr)
-	if segmentQuery != nil {
-		hasExactToolName := false
-		for _, hit := range searchResult.Hits {
-			if fieldsContainExactToolName(hit.Fields, queryStr) {
-				hasExactToolName = true
-				break
-			}
-		}
-
-		if !hasExactToolName {
-			boolQuery.AddShould(segmentQuery)
-			searchResult, err = b.index.Search(searchReq)
-			if err != nil {
-				return nil, fmt.Errorf("underscore segment search failed: %w", err)
-			}
-		}
 	}
 
 	// Convert results
@@ -420,8 +433,13 @@ const scopedSearchMinPage = 256
 // (Spec 107 T075a; Spec 105 "Ranking under scope"): the result is the top-
 // `limit` of the SAME ranked search, filtered to servers `inScope` admits
 // BEFORE the cut, with the unfiltered scores. It runs the identical boolean
-// query (no extra clause — a Must term on server_name would change scores)
-// and the identical score-then-id sort, and pages through the ranked result
+// query — including the underscore-segment enhancement SearchTools(queryStr,
+// limit) would apply for the same query and limit (augmentedToolSearchQuery;
+// Spec 105 FR-005 G1 review finding — a scoped caller's ranking for an
+// identifier-style query must not silently miss the boost an equal-limit
+// unscoped call would have used), and never a Must term on server_name
+// (that would change scores) — and the identical score-then-id sort, and
+// pages through the ranked result
 // EXHAUSTIVELY with From/Size: each page is filtered through inScope, and
 // paging stops only when `limit` in-scope hits have been collected or the
 // window has passed searchResult.Total. There is deliberately NO result cap:
@@ -438,7 +456,10 @@ func (b *BleveIndex) SearchToolsScoped(queryStr string, limit int, inScope func(
 		return []*config.SearchResult{}, nil
 	}
 
-	q := buildToolSearchQuery(queryStr)
+	q, err := b.augmentedToolSearchQuery(queryStr, limit)
+	if err != nil {
+		return nil, err
+	}
 	pageSize := limit
 	if pageSize < scopedSearchMinPage {
 		pageSize = scopedSearchMinPage
@@ -642,8 +663,24 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 // than the whole index regardless of which physical index (shared or
 // per-profile) backs the search that produced the response. A nil inScope
 // admits nothing (fail closed, matching SearchToolsScoped).
+//
+// The facet's term size is the document count itself, never a fixed
+// constant: a `server_name` facet returns at most that many distinct terms
+// (one document contributes to exactly one term), so this is a PROVEN exact
+// upper bound rather than a "should be big enough" guess — a fixed cap (the
+// pattern GetAllIndexedServerNames uses) can silently spill excess servers
+// into Bleve's "Other" bucket and undercount an authorized population once
+// the fleet exceeds it (Spec 105 PR C review finding).
 func (b *BleveIndex) ScopedDocumentCount(inScope func(serverName string) bool) (uint64, error) {
 	if inScope == nil {
+		return 0, nil
+	}
+
+	docCount, err := b.index.DocCount()
+	if err != nil {
+		return 0, fmt.Errorf("failed to read document count for scoped facet sizing: %w", err)
+	}
+	if docCount == 0 {
 		return 0, nil
 	}
 
@@ -651,7 +688,7 @@ func (b *BleveIndex) ScopedDocumentCount(inScope func(serverName string) bool) (
 	searchReq := bleve.NewSearchRequest(query)
 	searchReq.Size = 0 // facet-only, like GetAllIndexedServerNames
 
-	facet := bleve.NewFacetRequest("server_name", 10000) // generous upper bound
+	facet := bleve.NewFacetRequest("server_name", int(docCount))
 	searchReq.AddFacet("servers", facet)
 
 	searchResult, err := b.index.Search(searchReq)
