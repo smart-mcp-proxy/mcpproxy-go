@@ -185,6 +185,23 @@ func (im *IsolationManager) ResolveMode(serverConfig *config.ServerConfig) confi
 	return im.ResolveIsolation(serverConfig).Mode
 }
 
+// ResolveScannerMode resolves the isolation mode governing whether DOCKER-BASED
+// security scanner plugins may run against this server, and why (GH #1303).
+//
+// It is NOT the process-isolation mode: ResolveMode/ShouldIsolate remain the
+// only answer to "how is this server's child process launched". Scanner plugins
+// run in their own short-lived containers over tool definitions already
+// captured over MCP, so the process-spawn structural gates (no local command to
+// wrap; the command already invokes docker) do not apply — see
+// config.ResolveScannerIsolationMode.
+//
+// Unlike ResolveIsolation this emits no ignored-opt-in warning: that warning is
+// about the spawn decision and is deduped per server name, so firing it here
+// would suppress the one the spawn path owes the operator.
+func (im *IsolationManager) ResolveScannerMode(serverConfig *config.ServerConfig) (config.IsolationMode, string) {
+	return config.ResolveScannerIsolationMode(im.globalConfig, serverConfig)
+}
+
 // warnPerServerIgnoredOnce emits a one-time warning (deduped by server name)
 // when a per-server isolation opt-in is being ignored because the global
 // flag is off.
