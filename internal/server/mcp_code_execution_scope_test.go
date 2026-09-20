@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -312,4 +313,40 @@ func TestCodeExecution_LiveClientConnectedWhileSnapshotSaysDisconnected_RefusesU
 			assert.Equal(t, int64(1), up.count.Load())
 		})
 	}
+}
+
+// Spec 105 PR G, FR-010 gap G7 (T099, sandbox half): effective scope is
+// profile ∩ token, checked in ONE evaluation inside the sandbox too — a
+// server inside the token's pinned profile but outside the token's OWN
+// allowed-server list must be indistinguishable from a server that does not
+// exist at all. Before this fix, the sandbox's profile-derived
+// allowedServerMap check and its separate authInfo.CanAccessServer check
+// answered with two DIFFERENT envelope codes (ErrorCodeServerNotAllowed vs
+// ErrorCodeAccessDenied) and two different message templates depending on
+// which one excluded the server — telling "in the pin, not the token" apart
+// from "in neither" even though both are outside this token's own effective
+// reach.
+func TestCodeExecution_PinWiderThanToken_IndistinguishableFromNonexistent(t *testing.T) {
+	proxy, _ := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+	proxy.config.Profiles = []config.ProfileConfig{
+		{Name: "P", Servers: []string{"a", "b"}},
+	}
+
+	ctx := agentCtx([]string{"a"}, []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}, "P")
+
+	callB := runSandboxCallTool(t, proxy, ctx, "b", "t")
+	callZZZ := runSandboxCallTool(t, proxy, ctx, "zzz", "t")
+
+	assert.False(t, callB.OK, "'b' is in the pin but outside the token's own scope — must refuse")
+	assert.False(t, callZZZ.OK, "'zzz' does not exist — must refuse")
+	assert.Equal(t, callZZZ.Code, callB.Code,
+		"the envelope CODE must be identical whether the server is in the pin-but-not-token, or in neither")
+
+	// The message echoes the caller's own supplied server name, which
+	// discloses nothing; normalize that one segment out before comparing the
+	// template.
+	normB := strings.Replace(callB.Message, "'b'", "'<target>'", 1)
+	normZZZ := strings.Replace(callZZZ.Message, "'zzz'", "'<target>'", 1)
+	assert.Equal(t, normZZZ, normB,
+		"the envelope message TEMPLATE must be identical (same shape), got b=%q zzz=%q", callB.Message, callZZZ.Message)
 }

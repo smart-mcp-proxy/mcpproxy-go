@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -128,19 +129,187 @@ func directIdentityInScope(
 	isScopedAgent bool,
 	owner, tier string,
 ) bool {
+	if !directScopeAllows(authCtx, profileScope, isScopedAgent, owner) {
+		return false
+	}
+	if !isScopedAgent {
+		return true
+	}
+	if tier != "" && !authCtx.HasPermission(tier) {
+		return false
+	}
+	return true
+}
+
+// isScopeRestrictedCaller reports whether authCtx is a caller whose
+// server-access and permission-tier gates (directScopeAllows,
+// directIdentityInScope, and every FR-010 hidden-collision resolution built
+// on them) must be evaluated against its OWN AllowedServers/Permissions.
+//
+// codex round-2 review, MUST-FIX: every one of those call sites computed
+// this as `authCtx != nil && authCtx.Type == auth.AuthTypeAgent` — which
+// silently treated a server-edition "user" identity (auth.AuthTypeUser, a
+// REAL scoped OAuth caller, not an administrator: auth.AuthContext.IsAdmin()
+// is false for it) as unrestricted, exactly like an admin. spec.md's
+// EffectiveScope definition names "user" as a distinct, scoped CallerKind
+// alongside "agent" — this predicate is what actually implements that
+// distinction: any non-nil, non-administrator AuthContext is scope-
+// restricted, never merely one literal Type value. An administrator
+// (admin/admin_user) or a nil context (stdio/in-process caller) is
+// unrestricted, by design — auth.AuthContext.IsAdmin() is not nil-safe, so
+// the nil check must run first.
+func isScopeRestrictedCaller(authCtx *auth.AuthContext) bool {
+	return authCtx != nil && !authCtx.IsAdmin()
+}
+
+// directScopeAllows is directIdentityInScope's SERVER-only half: profile
+// scope plus, for a scoped agent, token server scope — deliberately never the
+// permission tier. It exists so the call-time re-evaluation of the direct
+// discovery filters (Spec 105 FR-010 D13) can authorize a tool's SERVER
+// without also excluding it for its TIER, leaving that decision to the
+// handler, which answers insufficient-permission instead of an unregistered-
+// name -32602. See directRequestKindFromContext's doc comment for why list
+// time and call time need different answers from the same filter chain.
+func directScopeAllows(
+	authCtx *auth.AuthContext,
+	profileScope *profile.ProfileScope,
+	isScopedAgent bool,
+	owner string,
+) bool {
 	if !profileScope.Allows(owner) {
 		return false
 	}
 	if !isScopedAgent {
 		return true
 	}
-	if !authCtx.CanAccessServer(owner) {
+	return authCtx.CanAccessServer(owner)
+}
+
+// ---------------------------------------------------------------------------
+// list vs. call-time re-evaluation (Spec 105 FR-010 D13, gap G6)
+// ---------------------------------------------------------------------------
+//
+// mcp-go's WithToolFilter chain runs UNCHANGED at both tools/list and the
+// call-time re-evaluation of one tool (passesToolFilters, mcp-go
+// server.go): the ToolFilterFunc signature carries no signal distinguishing
+// the two, and a filter that excludes a tool answers "not found" at BOTH —
+// there is no way for a handler this proxy registered to run for a tool the
+// filter chain already dropped.
+//
+// That single chain must nonetheless answer two different questions
+// depending on which call produced it (spec.md FR-010(2) precedence, D13):
+//   - tools/list: withhold a tool the caller could not invoke, for ANY
+//     reason — hidden server, over its permission tier, or not callable
+//     (disabled/quarantined/pending/changed). Unchanged from pre-105.
+//   - tools/call re-evaluation: withhold ONLY a tool on a server outside the
+//     caller's scope (unregistered-name -32602, indistinguishable from
+//     absent). A tool on an AUTHORIZED server that the caller may not invoke
+//     for its TIER must instead reach the registered handler
+//     (makeDirectModeHandler), which already answers insufficient-permission
+//     BEFORE its own callability check — so an over-tier tool that is ALSO
+//     locked (pending/changed/etc) still answers insufficient-permission,
+//     tier-first, exactly as FR-010(2) requires. A tool that is in scope,
+//     within tier, but locked stays a -32602 exclusion here, unchanged.
+//
+// The mechanism: p.hooks (shared across every routing-mode server, wired in
+// initRoutingModeServers) carries two callbacks that write the REAL parsed
+// method (mcp.MethodToolsList / mcp.MethodToolsCall) into a mutable box a
+// caller must have already placed on ctx — mcp-go's own dispatch loop
+// (request_handler.go) calls the "before" hook with the SAME ctx it then
+// hands to handleListTools/handleToolCall, synchronously, on one goroutine,
+// so by the time our filters run the box already holds this request's real
+// kind. The box is installed once, in mcpAuthMiddleware (server.go), which
+// wraps every /mcp* endpoint — so every real HTTP request carries it before
+// mcp-go's HandleMessage ever sees it. A ctx with no box (a test that
+// bypasses the HTTP middleware and calls HandleMessage directly, or any
+// caller that never went through it) reads as directRequestKindUnknown,
+// which every consumer below treats as list-time — the MORE restrictive
+// behaviour — so an uninstrumented caller can never accidentally receive the
+// call-time relaxation.
+
+// directRequestKind is the two-value signal above (plus "unknown").
+type directRequestKind int
+
+const (
+	directRequestKindUnknown directRequestKind = iota
+	directRequestKindList
+	directRequestKindCall
+)
+
+// directRequestKindCtxKey is the ctx key for the mutable box below.
+type directRequestKindCtxKey struct{}
+
+// directRequestKindBox is the mutable cell mcpAuthMiddleware installs and
+// the BeforeListTools/BeforeCallTool hooks write into. A pointer, not a
+// value: context.WithValue makes a new immutable binding per call, but every
+// holder of THIS pointer — the hook, and the filter that reads it later in
+// the same synchronous call chain — shares the one cell it points to.
+type directRequestKindBox struct {
+	kind directRequestKind
+}
+
+// withDirectRequestKindBox installs an empty (unknown) box on ctx. Call
+// exactly once per inbound request, before mcp-go's HandleMessage runs.
+func withDirectRequestKindBox(ctx context.Context) context.Context {
+	return context.WithValue(ctx, directRequestKindCtxKey{}, &directRequestKindBox{})
+}
+
+// setDirectRequestKind writes kind into ctx's box. A no-op when ctx carries
+// no box (nothing to synchronize through), never an error: the hooks fire on
+// every routing-mode server, most of which never look at the box at all.
+func setDirectRequestKind(ctx context.Context, kind directRequestKind) {
+	if box, ok := ctx.Value(directRequestKindCtxKey{}).(*directRequestKindBox); ok {
+		box.kind = kind
+	}
+}
+
+// directRequestKindFromContext reads the box's current value, or
+// directRequestKindUnknown when ctx carries none.
+func directRequestKindFromContext(ctx context.Context) directRequestKind {
+	if box, ok := ctx.Value(directRequestKindCtxKey{}).(*directRequestKindBox); ok {
+		return box.kind
+	}
+	return directRequestKindUnknown
+}
+
+// isDirectCallTimeRequest reports whether ctx is inside the call-time
+// re-evaluation of one tool, as opposed to a tools/list enumeration (or an
+// uninstrumented caller, which reads as list-time — see the package doc
+// comment above for why that is the safe default).
+func isDirectCallTimeRequest(ctx context.Context) bool {
+	return directRequestKindFromContext(ctx) == directRequestKindCall
+}
+
+// directCallTimeTierExceeded reports whether, AT CALL TIME ONLY, a scoped
+// agent caller lacks the tier a direct tool requires. It is the ONE
+// condition under which every filter after the pure-scope check must let a
+// tool through unfiltered despite whatever ELSE would exclude it (an
+// approval lock, quarantine, disablement): the caller's own tier gate must
+// be what answers, first, so the handler reports insufficient-permission
+// rather than mcp-go answering an unregistered-name -32602 (FR-010(2)
+// tier-first precedence, gap G6).
+//
+// false at list time (list withholds unconditionally on tier, unchanged) and
+// false for a non-agent caller or an unstamped/tierless tool (nothing to
+// exceed).
+func directCallTimeTierExceeded(ctx context.Context, authCtx *auth.AuthContext, isScopedAgent bool, tier string) bool {
+	if !isScopedAgent || tier == "" {
 		return false
 	}
-	if tier != "" && !authCtx.HasPermission(tier) {
+	if !isDirectCallTimeRequest(ctx) {
 		return false
 	}
-	return true
+	return !authCtx.HasPermission(tier)
+}
+
+// directRequestKindMiddleware installs an empty directRequestKindBox on every
+// request's ctx. See mcpAuthMiddleware (server.go), the one production
+// caller, for why this must wrap the handler chain BEFORE mcp-go's
+// HandleMessage runs.
+func directRequestKindMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(withDirectRequestKindBox(r.Context())))
+	})
 }
 
 // requiredPermissionForDirectTool derives the agent-token permission a direct
@@ -174,7 +343,7 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 
 	authCtx := auth.AuthContextFromContext(ctx)
 	_, profileScope := p.resolveActiveProfile(ctx)
-	isScopedAgent := authCtx != nil && authCtx.Type == auth.AuthTypeAgent
+	isScopedAgent := isScopeRestrictedCaller(authCtx)
 
 	// Spec 105 FR-008 (FR008-G7): a tool with no registration identity is
 	// withheld from EVERY caller, administrators included, so this filter can
@@ -191,6 +360,20 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 			if stamp.rawName == "" {
 				// Defense in depth: buildDirectCatalog refuses to admit an
 				// empty raw name, so a stamp should never carry one.
+				continue
+			}
+			// Spec 105 FR-010 D13/gap G6: at call time, an over-tier tool on
+			// an AUTHORIZED server is let through so the registered handler
+			// (which checks tier before callability) answers
+			// insufficient-permission, instead of this filter excluding it
+			// into mcp-go's unregistered-name -32602. Listing is unaffected —
+			// isDirectCallTimeRequest is false there, so directIdentityInScope
+			// keeps applying the tier check exactly as before.
+			if directCallTimeTierExceeded(ctx, authCtx, isScopedAgent, stamp.tier) {
+				if !directScopeAllows(authCtx, profileScope, isScopedAgent, stamp.owner) {
+					continue
+				}
+				filtered = append(filtered, tool)
 				continue
 			}
 			if !directIdentityInScope(authCtx, profileScope, isScopedAgent, stamp.owner, stamp.tier) {
@@ -260,6 +443,13 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 		case directResolveFound:
 		}
 
+		if directCallTimeTierExceeded(ctx, authCtx, isScopedAgent, entry.RequiredPermission) {
+			if !directScopeAllows(authCtx, profileScope, isScopedAgent, entry.ServerName) {
+				continue
+			}
+			filtered = append(filtered, tool)
+			continue
+		}
 		if !directEntryInScope(authCtx, profileScope, isScopedAgent, entry) {
 			continue
 		}

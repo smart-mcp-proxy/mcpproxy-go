@@ -2573,7 +2573,25 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// never re-derived here — cacheAuthorizationWith's caller-intersected
 	// ProfileServers stamp needs it (Spec 105 PR D review round 17).
 	producer := p.cacheAuthorizationWith(ctx, profileSlug, profileScope, profileIdx)
-	if profileScope != nil && !profileScope.Allows(serverName) {
+	// Spec 105 FR-010 gap G7: effective scope is profile ∩ token, checked in
+	// ONE evaluation with ONE refusal body for a scoped agent caller — never
+	// the profile-only check alone, which used to run here regardless of
+	// caller kind and could answer a DIFFERENT body ("server 'b' is not in
+	// profile 'P'") than the token-scope check further below ("Server 'b' is
+	// not in scope for this agent token") for the SAME server, depending on
+	// which of the two excluded it. A server inside the pin but outside the
+	// token (or the reverse) must be indistinguishable from a nonexistent
+	// one. Administrators keep today's profile-only text unchanged — they
+	// have no token scope to intersect with.
+	scopeAuthCtx := auth.AuthContextFromContext(ctx)
+	scopedCallerForScope := scopeAuthCtx != nil && !scopeAuthCtx.IsAdmin()
+	if scopedCallerForScope {
+		if !p.serverInScope(scopeAuthCtx, profileScope, serverName) {
+			errMsg := fmt.Sprintf("Server '%s' is not in scope for this agent token", serverName)
+			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenScope)
+			return mcp.NewToolResultError(errMsg), nil
+		}
+	} else if profileScope != nil && !profileScope.Allows(serverName) {
 		errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
 		return mcp.NewToolResultError(errMsg), nil
@@ -2621,19 +2639,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.dispatchGatePause(serverName, actualToolName)
 	}
 
-	// Spec 028: Enforce agent token scope restrictions. The server-scope and
-	// variant-permission gates run before the identity gate so a scoped
-	// caller learns nothing about a server outside its scope from the shape
-	// of the refusal.
-	authCtx := auth.AuthContextFromContext(ctx)
-	scopedCaller := authCtx != nil && !authCtx.IsAdmin()
+	// Spec 028: Enforce agent token scope restrictions. The server-scope gate
+	// above (effective scope = profile ∩ token, Spec 105 FR-010 G7) already
+	// ran before the identity gate so a scoped caller learns nothing about a
+	// server outside its scope from the shape of the refusal; only the
+	// variant-permission gate remains here.
+	authCtx := scopeAuthCtx
+	scopedCaller := scopedCallerForScope
 	if scopedCaller {
-		// Check server scope
-		if !authCtx.CanAccessServer(serverName) {
-			errMsg := fmt.Sprintf("Server '%s' is not in scope for this agent token", serverName)
-			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenScope)
-			return mcp.NewToolResultError(errMsg), nil
-		}
 		// Check permission scope — map tool variant to required permission
 		var requiredPerm string
 		switch toolVariant {
@@ -2886,8 +2899,23 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// the admission queue and immediately before the transport.
 		certified = live
 	} else {
-		// Get list of available servers for helpful error message
+		// Get list of available servers for helpful error message. Spec 105
+		// FR-010 G1/T100: for a scoped agent caller this list is filtered
+		// through the SAME effective-scope predicate (serverInScope =
+		// profile ∩ token) the dispatch gates above already evaluated — an
+		// unauthorized server's mere existence must not leak into a hint
+		// meant to help the caller find ITS OWN servers. Administrators are
+		// unaffected: their branch below is untouched.
 		availableServers := p.upstreamManager.GetAllServerNames()
+		if scopedCaller {
+			visible := make([]string, 0, len(availableServers))
+			for _, name := range availableServers {
+				if p.serverInScope(authCtx, profileScope, name) {
+					visible = append(visible, name)
+				}
+			}
+			availableServers = visible
+		}
 		serverList := strings.Join(availableServers, ", ")
 		if len(availableServers) == 0 {
 			serverList = "(no servers configured)"

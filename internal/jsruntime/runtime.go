@@ -87,6 +87,18 @@ type AuthInfo struct {
 	Permissions    []string // Permission tiers: "read", "write", "destructive"
 }
 
+// isAdmin reports whether this identity is one of the two administrator
+// AuthInfo.Type values — the same short-circuit CanAccessServer and
+// HasPermission apply internally, promoted to its own predicate (Spec 105
+// FR-010 gap G7) so a caller outside those two methods can ask the same
+// question without re-deriving it. A nil receiver is NOT an administrator
+// here (unlike the two methods above, whose nil-tolerant "everything is
+// allowed" default exists for the STDIO/in-process caller that carries no
+// AuthInfo at all — a different case from "this AuthInfo IS one").
+func (a *AuthInfo) isAdmin() bool {
+	return a != nil && (a.Type == "admin" || a.Type == "admin_user")
+}
+
 // CanAccessServer checks whether this auth context can access the named server.
 func (a *AuthInfo) CanAccessServer(name string) bool {
 	if a == nil || a.Type == "admin" || a.Type == "admin_user" {
@@ -542,17 +554,38 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string, ar
 	// Check allowed servers. When restrictToAllowed is set (active Spec 057
 	// profile), the map is enforced even when empty — an empty effective set
 	// means "deny everything". Otherwise an empty map means "no restriction".
-	if (ec.restrictToAllowed || len(ec.allowedServerMap) > 0) && !ec.allowedServerMap[serverName] {
+	//
+	// Spec 105 FR-010 gap G7: when this execution carries a real agent
+	// token, the profile-derived allowedServerMap and the token's OWN server
+	// scope are two independent restrictions on the SAME effective set
+	// (profile ∩ token) and must answer with ONE refusal regardless of
+	// which one excludes a given server — a server inside the profile pin
+	// but outside the token, and a server outside BOTH (or nonexistent),
+	// must be indistinguishable. Evaluate both before returning either error
+	// so the ONE body always used for an agent caller (ErrorCodeAccessDenied)
+	// is what a bare profile-map miss also gets.
+	//
+	// "carries a real agent token" is NOT "authInfo != nil": mcp_code_
+	// execution.go's applyProfileScopeToExecution populates AuthInfo for
+	// EVERY authenticated caller, administrators included (an HTTP admin's
+	// AuthInfo.Type is "admin"/"admin_user"). Routing an admin through the
+	// agent-only branch above would rename a profile-only exclusion's
+	// wording to the token-scope body even though the admin holds no token
+	// to conflate it with — a caller-kind regression codex round-1 review
+	// caught. isAdmin() is the same short-circuit CanAccessServer and
+	// HasPermission already apply internally. Administrators — real ones
+	// (authInfo.isAdmin()) and the stdio/in-process caller that carries no
+	// AuthInfo at all (authInfo == nil) — both fall through to the
+	// profile-only branch below, unchanged from pre-105.
+	profileDenies := (ec.restrictToAllowed || len(ec.allowedServerMap) > 0) && !ec.allowedServerMap[serverName]
+	if ec.authInfo != nil && !ec.authInfo.isAdmin() {
+		if profileDenies || !ec.authInfo.CanAccessServer(serverName) {
+			ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, "", args)
+			return errorEnvelope(ErrorCodeAccessDenied, fmt.Sprintf("token does not have access to server '%s'", serverName)), "", nil
+		}
+	} else if profileDenies {
 		ec.reportAuthzRefusal(serverName, toolName, ErrorCodeServerNotAllowed, "", args)
 		return errorEnvelope(ErrorCodeServerNotAllowed, fmt.Sprintf("server not allowed: %s", serverName)), "", nil
-	}
-
-	// Auth context enforcement (Spec 031): the token's server scope answers
-	// before anything about the tool is looked up, so an out-of-scope server
-	// is refused without disclosing whether the name resolves on it.
-	if ec.authInfo != nil && !ec.authInfo.CanAccessServer(serverName) {
-		ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, "", args)
-		return errorEnvelope(ErrorCodeAccessDenied, fmt.Sprintf("token does not have access to server '%s'", serverName)), "", nil
 	}
 
 	// Determine required permission via annotation lookup. The gate-capturing
