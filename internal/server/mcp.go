@@ -5249,24 +5249,26 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	} else if rawArgs := request.GetArguments(); rawArgs != nil {
 		if raw, ok := rawArgs["annotation_overrides"]; ok {
 			data, err := json.Marshal(raw)
-			if err == nil {
-				var m map[string]*config.ToolAnnotations
-				if err := json.Unmarshal(data, &m); err == nil {
-					cloned := config.CloneAnnotationOverrides(m)
-					filtered := make(map[string]*config.ToolAnnotations, len(cloned))
-					for k, v := range cloned {
-						if v == nil {
-							continue
-						}
-						filtered[k] = v
-					}
-					if errRes := validateAnnotationOverridesForAdd(name, filtered); errRes != nil {
-						return errRes, nil
-					}
-					if len(filtered) > 0 {
-						serverConfig.AnnotationOverrides = filtered
-					}
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Invalid annotation_overrides format: %v", err)), nil
+			}
+			var m map[string]*config.ToolAnnotations
+			if err := json.Unmarshal(data, &m); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Invalid annotation_overrides format: %v", err)), nil
+			}
+			cloned := config.CloneAnnotationOverrides(m)
+			filtered := make(map[string]*config.ToolAnnotations, len(cloned))
+			for k, v := range cloned {
+				if v == nil {
+					continue
 				}
+				filtered[k] = v
+			}
+			if errRes := validateAnnotationOverridesForAdd(name, filtered); errRes != nil {
+				return errRes, nil
+			}
+			if len(filtered) > 0 {
+				serverConfig.AnnotationOverrides = filtered
 			}
 		}
 	}

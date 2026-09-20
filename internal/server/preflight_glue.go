@@ -398,7 +398,7 @@ func annotationOverridesByServer(cfg *config.Config) map[string]map[string]*conf
 		if out == nil {
 			out = make(map[string]map[string]*config.ToolAnnotations)
 		}
-		out[sc.Name] = sc.AnnotationOverrides
+		out[sc.Name] = config.CloneAnnotationOverrides(sc.AnnotationOverrides)
 	}
 	return out
 }

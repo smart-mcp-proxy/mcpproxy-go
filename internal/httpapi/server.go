@@ -2349,6 +2349,25 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Validate annotation overrides via ValidateDetailed (write gate) before
+	// persisting. Reuses the PATCH pattern: temporary config with the new
+	// server appended, filtered to annotation_overrides errors.
+	if serverConfig.AnnotationOverrides != nil && len(serverConfig.AnnotationOverrides) > 0 {
+		if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+			tmpCfg := &config.Config{Servers: make([]*config.ServerConfig, 0, len(cfg.Servers)+1)}
+			tmpCfg.Servers = append(tmpCfg.Servers, cfg.Servers...)
+			tmpCfg.Servers = append(tmpCfg.Servers, serverConfig)
+			if errs := tmpCfg.ValidateDetailed(); len(errs) > 0 {
+				for _, e := range errs {
+					if strings.Contains(e.Field, "annotation_overrides") {
+						s.writeError(w, r, http.StatusBadRequest, e.Error())
+						return
+					}
+				}
+			}
+		}
+	}
+
 	// #1148 round 6: on CREATE there is no stored value to bind a mask back to,
 	// so ANY mask this proxy rendered can only be a placeholder copied out of
 	// another server's read payload — never a value worth persisting. Refusing
