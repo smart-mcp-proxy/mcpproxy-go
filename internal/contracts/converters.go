@@ -50,6 +50,9 @@ func ConvertServerConfig(cfg *config.ServerConfig, globalIsolation *config.Docke
 		// F9: surface the per-server prompt-aggregation override so a caller that
 		// PATCHed it can read it back.
 		ExposePrompts: cfg.ExposePrompts,
+		// Surface the per-server annotation overrides so a caller that PATCHed
+		// them (or the Web UI editor) can read them back.
+		AnnotationOverrides: cfg.AnnotationOverrides,
 		// Spec 093: surface the per-server concurrency overrides (tri-state) so a
 		// caller that PATCHed a limit can read it back.
 		MaxConcurrentRequests: cfg.MaxConcurrentRequests,

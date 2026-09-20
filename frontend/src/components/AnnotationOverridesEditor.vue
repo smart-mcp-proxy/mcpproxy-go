@@ -16,8 +16,12 @@
               <span class="badge badge-outline badge-sm" title="Applies to all tools">* wildcard</span>
             </td>
             <td>
-              <AnnotationBadges v-if="effectiveFor('*')" :annotations="effectiveFor('*')!" class="scale-90 origin-left" />
-              <span v-else class="text-xs text-base-content/50">inherit (no override)</span>
+              <span class="inline-flex items-center gap-1 flex-wrap">
+                <AnnotationBadges v-if="effectiveFor('*')" :annotations="effectiveFor('*')!" class="scale-90 origin-left" />
+                <span v-else class="text-xs text-base-content/50">inherit (no override)</span>
+                <span v-if="effectiveFor('*')?.destructiveHint === false" class="badge badge-sm badge-success" title="Operator override: explicitly marked non-destructive">✓ Non-destructive</span>
+                <span v-if="effectiveFor('*')?.readOnlyHint === false" class="badge badge-sm badge-warning" title="Operator override: explicitly marked writable">✏️ Write</span>
+              </span>
             </td>
             <td>
               <button
@@ -44,8 +48,12 @@
           >
             <td class="font-mono text-xs break-all">{{ toolName }}</td>
             <td>
-              <AnnotationBadges v-if="effectiveFor(toolName)" :annotations="effectiveFor(toolName)!" class="scale-90 origin-left" />
-              <span v-else class="text-xs text-base-content/50">—</span>
+              <span class="inline-flex items-center gap-1 flex-wrap">
+                <AnnotationBadges v-if="effectiveFor(toolName)" :annotations="effectiveFor(toolName)!" class="scale-90 origin-left" />
+                <span v-else class="text-xs text-base-content/50">—</span>
+                <span v-if="effectiveFor(toolName)?.destructiveHint === false" class="badge badge-sm badge-success" title="Operator override: explicitly marked non-destructive">✓ Non-destructive</span>
+                <span v-if="effectiveFor(toolName)?.readOnlyHint === false" class="badge badge-sm badge-warning" title="Operator override: explicitly marked writable">✏️ Write</span>
+              </span>
             </td>
             <td class="flex gap-1">
               <button

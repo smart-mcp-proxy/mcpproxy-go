@@ -2077,6 +2077,19 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		s.runtime.UpdateConfig(currentConfig, "")
 	}
 
+	// Push the refreshed config to the live manager client so hot-reloadable
+	// fields (notably annotation_overrides) take effect on the next ListTools
+	// without a reconnect. Transport-affecting changes are handled by the
+	// manager's own AddServerConfig comparison on the next sync; here we only
+	// refresh the pointer both managed and core clients read (SetConfig also
+	// pushes overrides down to core, mirroring the ExposePrompts pattern).
+	// Discovery is re-triggered by OnUpstreamServerChange below.
+	if um := s.runtime.UpstreamManager(); um != nil {
+		if client, exists := um.GetClient(serverName); exists {
+			client.SetConfig(existing)
+		}
+	}
+
 	// Save configuration to file
 	if err := s.SaveConfiguration(); err != nil {
 		s.logger.Warn("Failed to save configuration after updating server", zap.Error(err))

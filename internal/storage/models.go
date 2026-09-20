@@ -211,6 +211,14 @@ type UpstreamRecord struct {
 	// ExposePrompts is the per-server override for exposing upstream prompts
 	// through mcpproxy's aggregated prompts/list and prompts/get.
 	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// AnnotationOverrides carries per-server per-tool annotation fixes
+	// (operator-curated hint corrections for upstream servers that mislabel
+	// their tools, e.g. browseros marking reads destructive). Persisted to
+	// BBolt for the same reason as TrustMode above: SaveConfiguration rebuilds
+	// the JSON server list from these records, so a REST/UI/MCP-set override
+	// would be wiped on the next save/restart without it. Back-compat by
+	// omission: records written before this field existed decode with nil.
+	AnnotationOverrides map[string]*config.ToolAnnotations `json:"annotation_overrides,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics
