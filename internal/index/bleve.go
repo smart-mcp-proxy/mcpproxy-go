@@ -635,6 +635,44 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 	return tools, nil
 }
 
+// ScopedDocumentCount returns the number of indexed documents belonging to
+// servers inScope admits (Spec 105 FR-005 G4): a `server_name` facet term
+// count, summed over only the terms inScope admits, so a scoped caller's
+// `debug.total_indexed_tools` counts its own authorized population rather
+// than the whole index regardless of which physical index (shared or
+// per-profile) backs the search that produced the response. A nil inScope
+// admits nothing (fail closed, matching SearchToolsScoped).
+func (b *BleveIndex) ScopedDocumentCount(inScope func(serverName string) bool) (uint64, error) {
+	if inScope == nil {
+		return 0, nil
+	}
+
+	query := bleve.NewMatchAllQuery()
+	searchReq := bleve.NewSearchRequest(query)
+	searchReq.Size = 0 // facet-only, like GetAllIndexedServerNames
+
+	facet := bleve.NewFacetRequest("server_name", 10000) // generous upper bound
+	searchReq.AddFacet("servers", facet)
+
+	searchResult, err := b.index.Search(searchReq)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query scoped document count: %w", err)
+	}
+
+	facetResult, ok := searchResult.Facets["servers"]
+	if !ok {
+		return 0, nil // no facet result means no documents
+	}
+
+	var total uint64
+	for _, term := range facetResult.Terms.Terms() {
+		if inScope(term.Term) {
+			total += uint64(term.Count)
+		}
+	}
+	return total, nil
+}
+
 // GetAllIndexedServerNames returns the unique set of server names present in the index.
 func (b *BleveIndex) GetAllIndexedServerNames() ([]string, error) {
 	// Use a MatchAll query to scan every document, requesting only the server_name field
