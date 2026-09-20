@@ -2241,6 +2241,20 @@ func (m *Manager) RetryConnection(serverName string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), retryTimeout)
 		defer cancel()
 
+		// #1317 round 6: this Disconnect()+Connect() sequence is a fourth
+		// automatic reconnect path (OAuth completion, config-change and
+		// token-monitor triggers all reach RetryConnection) that bypasses
+		// tryReconnect/Connect/TryReconnectSync's own guard entirely. A
+		// transient/ambiguous error elsewhere on this client must not kill a
+		// genuinely healthy, still in-flight call here either. Skipping is a
+		// delay, not an abandoned retry: the health loop and the periodic
+		// backgroundConnections sweep both retry this same client later.
+		if client.GuardReconnectAgainstInFlightCall() {
+			m.logger.Info("Connection retry deferred: a tool call is still in flight",
+				zap.String("server", serverName))
+			return
+		}
+
 		// Important: Ensure a clean reconnect only if not already connected.
 		// Managed state guards above should make this idempotent.
 		if derr := client.Disconnect(); derr != nil {
