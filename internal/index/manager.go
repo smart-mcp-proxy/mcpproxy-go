@@ -182,6 +182,15 @@ func (m *Manager) GetStats() (map[string]interface{}, error) {
 	return stats, nil
 }
 
+// ScopedDocumentCount is GetDocumentCount filtered to servers inScope admits
+// (Spec 105 FR-005 G4). See BleveIndex.ScopedDocumentCount.
+func (m *Manager) ScopedDocumentCount(inScope func(serverName string) bool) (uint64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.bleveIndex.ScopedDocumentCount(inScope)
+}
+
 // GetAllIndexedServerNames returns all unique server names in the index.
 func (m *Manager) GetAllIndexedServerNames() ([]string, error) {
 	m.mu.RLock()
