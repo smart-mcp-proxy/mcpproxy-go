@@ -52,15 +52,19 @@ const (
 // config API, the MCP `upstream_servers` tool and this flow all reject exactly
 // the same values. See that function for the rationale.
 func ParsePinnedRedirectURI(rawURI string) (int, error) {
-	_, port, err := config.ParseLoopbackRedirectURI(rawURI)
+	_, port, _, err := config.ParseLoopbackRedirectURI(rawURI)
 	return port, err
 }
 
 // ParsePinnedRedirectURIBinding is ParsePinnedRedirectURI plus the loopback host
-// the callback listener must bind. A pinned `http://[::1]:PORT/oauth/callback`
-// is only honored if something actually listens on ::1 — binding 127.0.0.1 for
-// it produced an authorize URL nobody could call back to.
-func ParsePinnedRedirectURIBinding(rawURI string) (bindHost string, port int, err error) {
+// the callback listener must bind and the callback path it must serve. A pinned
+// `http://[::1]:PORT/oauth/callback` is only honored if something actually
+// listens on ::1 — binding 127.0.0.1 for it produced an authorize URL nobody
+// could call back to. The path defaults to "/" (not DefaultRedirectPath) when
+// the pinned URI has none - what an HTTP client actually requests for a
+// path-less URL (issue #1304: some providers publish a shared OAuth
+// application whose registered redirect path an operator cannot change).
+func ParsePinnedRedirectURIBinding(rawURI string) (bindHost string, port int, path string, err error) {
 	return config.ParseLoopbackRedirectURI(rawURI)
 }
 
@@ -151,7 +155,10 @@ type CallbackServer struct {
 	// only honored when the listener is on the same family, so the binding is
 	// recorded rather than assumed.
 	BindHost string
-	logger   *zap.Logger
+	// Path is the callback path this listener's mux actually serves. Defaults
+	// to DefaultRedirectPath; a pinned `oauth.redirect_uri` can override it.
+	Path   string
+	logger *zap.Logger
 
 	waitersMu sync.Mutex
 	waiters   map[string]chan map[string]string
@@ -941,9 +948,10 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	// wildcards, so an operator must be able to nail the port down (issue #975).
 	var pinnedRedirectURI string
 	var pinnedPort int
+	var pinnedPath string
 	bindHost := config.LoopbackIPv4Host
 	if serverConfig.OAuth != nil && strings.TrimSpace(serverConfig.OAuth.RedirectURI) != "" {
-		host, port, err := ParsePinnedRedirectURIBinding(serverConfig.OAuth.RedirectURI)
+		host, port, path, err := ParsePinnedRedirectURIBinding(serverConfig.OAuth.RedirectURI)
 		if err != nil {
 			// Fail loudly: silently falling back to a random port would leave the
 			// operator believing they pinned the callback URL when they had not.
@@ -959,6 +967,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		}
 		pinnedRedirectURI = strings.TrimSpace(serverConfig.OAuth.RedirectURI)
 		pinnedPort = port
+		pinnedPath = path
 		// Bind the family the operator pinned. Binding 127.0.0.1 for a pinned
 		// `http://[::1]:PORT/...` produced an authorize URL whose callback hit a
 		// closed port, and the login then hung to the callback timeout.
@@ -977,12 +986,13 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	var serverKey string
 	var storedClientID string
 	var storedPort int
+	var storedRedirectURI string
 	if storage != nil {
 		serverKey = GenerateServerKey(serverConfig.Name, serverConfig.URL)
 		var storedErr error
-		storedClientID, _, storedPort, storedErr = storage.GetOAuthClientCredentials(serverKey)
+		storedClientID, _, storedPort, storedRedirectURI, storedErr = storage.GetOAuthClientCredentials(serverKey)
 		if storedErr != nil {
-			storedClientID, storedPort = "", 0
+			storedClientID, storedPort, storedRedirectURI = "", 0, ""
 		}
 	}
 
@@ -1004,7 +1014,23 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	// Spec 022 credential hygiene, independent of the pin. Only DCR-issued
 	// credentials are ever cleared: a static client_id is operator-supplied,
 	// cannot be re-registered, and clearing it would only destroy configuration.
+	//
+	// A DCR client_id is registered against the EXACT redirect_uri it was
+	// created with (host spelling, port and path all included), so any change
+	// that alters what will actually be sent this time — adding, removing or
+	// editing a pin, including one that only changes host spelling or
+	// percent-encoding — must be caught, not just a changed port or path
+	// (issue #1304, cross-model review rounds 3-4).
 	if storage != nil && storedClientID != "" && !hasStaticClientID {
+		expectedRedirectURI := pinnedRedirectURI
+		if pinnedPort == 0 {
+			// Not pinned this time: mcpproxy will bind the historical default
+			// path on whatever port it ends up using — storedPort when reusing
+			// one (the `case storedPort > 0` branch above), which is exactly
+			// what StartCallbackServerOnHost will try first.
+			expectedRedirectURI = fmt.Sprintf("http://%s%s", net.JoinHostPort(config.LoopbackIPv4Host, strconv.Itoa(storedPort)), DefaultRedirectPath)
+		}
+
 		switch {
 		case storedPort == 0:
 			// Legacy DCR credentials exist but the port is unknown. Clear them to
@@ -1013,19 +1039,55 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				zap.String("server", serverConfig.Name),
 				zap.String("client_id", storedClientID))
 			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
-		case pinnedPort > 0 && storedPort != pinnedPort:
-			// The registration was created for a different callback port than the
-			// one now pinned, so the provider will reject the redirect_uri this
-			// client_id is paired with. This is the feature's most likely upgrade
-			// path: log in unpinned (DCR registers port A), then add
-			// oauth.redirect_uri with port B because the moving port was rejected.
-			// Re-register rather than fail forever.
-			logger.Warn("⚠️ Stored DCR credentials were registered for a different callback port than oauth.redirect_uri pins, clearing for re-registration",
+		case storedRedirectURI == "" && pinnedPort > 0:
+			// A legacy record (predates persisting the exact redirect_uri, or
+			// was never pinned before) is about to be used under a pin. Whether
+			// it still matches cannot be verified from a port number alone —
+			// the previous registration might have used a different host
+			// spelling or, pre-fix, could only ever have used
+			// "/oauth/callback" while the new pin may specify a different path
+			// — so always re-register rather than risk a silent
+			// redirect_uri_mismatch. This costs at most one extra
+			// registration for an operator whose unchanged pin happens to
+			// match exactly; the fresh registration then persists the exact
+			// URI and this branch never fires again for it.
+			logger.Warn("⚠️ DCR credentials with no persisted redirect_uri are about to be used under a pin, clearing for re-registration",
 				zap.String("server", serverConfig.Name),
 				zap.String("client_id", storedClientID),
-				zap.Int("stored_port", storedPort),
-				zap.Int("pinned_port", pinnedPort))
+				zap.String("pinned_redirect_uri", pinnedRedirectURI))
 			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
+		case storedRedirectURI != "" && storedRedirectURI != expectedRedirectURI:
+			// The registration was created for a different redirect_uri than
+			// the one about to be used, so the provider will reject it. This is
+			// the feature's most likely upgrade path: log in unpinned (DCR
+			// registers a default-path URI), then add oauth.redirect_uri
+			// because the provider needed an exact port or a different
+			// callback path (issue #1304) — or remove a pin, which is the same
+			// problem in reverse. Re-register rather than fail forever.
+			logger.Warn("⚠️ Stored DCR credentials were registered for a different redirect_uri than the one about to be used, clearing for re-registration",
+				zap.String("server", serverConfig.Name),
+				zap.String("client_id", storedClientID),
+				zap.String("stored_redirect_uri", storedRedirectURI),
+				zap.String("expected_redirect_uri", expectedRedirectURI))
+			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
+			// NOT handled here, deliberately: storedRedirectURI == "" (legacy)
+			// while pinnedPort == 0 (currently unpinned). Cross-model review
+			// flagged that such a record could theoretically have been pinned
+			// to a non-default HOST before ("localhost"/"::1", never a
+			// non-default PATH — path was hardcoded before this feature
+			// existed) and now silently mismatches after the pin is removed.
+			// That risk is real but pre-existing and out of this issue's scope
+			// (issue #1304 is about the PATH; host pinning already existed and
+			// was never hygiene-checked at all before this fix). Clearing
+			// every such record unconditionally would force a one-time
+			// re-login for essentially every already-deployed DCR-connected
+			// server on the very first run after upgrading to this fix — on
+			// the day it ships, storedRedirectURI is empty for 100% of
+			// existing installations, not just ones that ever used a pin —
+			// which is a far larger, more disruptive regression than the
+			// narrow edge case (pin a non-default host, then remove the pin)
+			// it would close. Left as a known limitation rather than traded
+			// for a universal forced re-auth.
 		}
 	}
 
@@ -1037,10 +1099,12 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 
 	// Start our own callback server to get exact port for Cloudflare OAuth
 	callbackServer, err := globalCallbackManager.StartCallbackServerOnHost(serverConfig.Name, CallbackBinding{
-		Host:   bindHost,
-		Port:   preferredPort,
-		Pinned: pinnedPort > 0,
-		Logger: logger,
+		Host:        bindHost,
+		Port:        preferredPort,
+		Path:        pinnedPath,
+		RedirectURI: pinnedRedirectURI,
+		Pinned:      pinnedPort > 0,
+		Logger:      logger,
 	})
 	if err != nil {
 		logger.Error("Failed to start OAuth callback server",
@@ -1203,7 +1267,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		// above may have just cleared a registration that is no longer valid for
 		// this callback port.
 		if storage != nil {
-			persistedClientID, persistedClientSecret, _, err := storage.GetOAuthClientCredentials(serverKey)
+			persistedClientID, persistedClientSecret, _, _, err := storage.GetOAuthClientCredentials(serverKey)
 			if err == nil && persistedClientID != "" {
 				clientID = persistedClientID
 				clientSecret = persistedClientSecret
@@ -1263,6 +1327,23 @@ type CallbackBinding struct {
 	Host string
 	// Port is the port to try first. 0 means dynamic allocation.
 	Port int
+	// Path is the callback path the listener must serve. Empty means
+	// DefaultRedirectPath. An operator's `oauth.redirect_uri` can pin a
+	// different path (issue #1304) when the provider's registered callback URL
+	// uses one mcpproxy does not control.
+	Path string
+	// RedirectURI, when set, is the EXACT verbatim string a pin supplies
+	// (operator-typed, sent to the provider unchanged) and is recorded as-is on
+	// the resulting CallbackServer instead of being reconstructed from
+	// Host/Port/Path. Reconstruction round-trips the decoded Path back into a
+	// URL string, which is only safe for DefaultRedirectPath's fixed ASCII
+	// value — an operator-pinned path can contain characters (e.g. a decoded
+	// "?" from a percent-encoded pin) that change meaning when
+	// naively re-embedded in a fresh URL string, and the host spelling the
+	// operator typed (e.g. "localhost") is lost once resolved to a bind
+	// address. Empty means "reconstruct as before" (the unpinned/dynamic case,
+	// where Path is always the fixed DefaultRedirectPath).
+	RedirectURI string
 	// Pinned reports whether Port came from an operator's `oauth.redirect_uri`
 	// rather than from the Spec 022 stored-port record.
 	//
@@ -1282,6 +1363,13 @@ func (b CallbackBinding) host() string {
 		return config.LoopbackIPv4Host
 	}
 	return b.Host
+}
+
+func (b CallbackBinding) path() string {
+	if b.Path == "" {
+		return DefaultRedirectPath
+	}
+	return b.Path
 }
 
 // StartCallbackServer starts a new OAuth callback server for the given server name.
@@ -1322,11 +1410,31 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 	logger := m.subjectLoggerLocked(binding.Logger)
 	bindHost := binding.host()
 	preferredPort := binding.Port
+	path := binding.path()
 
 	// Check if we already have a server for this name
 	if existing, exists := m.servers[serverName]; exists {
+		// wantRedirectURI is what THIS attempt would want the callback server's
+		// RedirectURI to be: binding.RedirectURI verbatim for a pin, or the
+		// same reconstructed form StartCallbackServerOnHost uses for an
+		// unpinned request. Two attempts can resolve to the same
+		// bindHost/port/path while wanting different exact strings - e.g. a
+		// PRIOR pinned attempt cached "http://localhost:P/cb" and THIS attempt
+		// is unpinned (a config hot-reload that removed the pin) and wants the
+		// canonical "http://127.0.0.1:P/oauth/callback" - and reusing the
+		// cached server on host/port/path alone would leave
+		// CallbackServer.RedirectURI (and anything that persists it) holding
+		// the OLD spelling. Comparing the exact string this attempt wants,
+		// unconditionally, catches that; a healthy reuse (nothing changed)
+		// always reconstructs the same string the cache already holds.
+		wantRedirectURI := binding.RedirectURI
+		if wantRedirectURI == "" {
+			wantRedirectURI = fmt.Sprintf("http://%s%s", net.JoinHostPort(bindHost, strconv.Itoa(existing.Port)), path)
+		}
 		matchesBinding := existing.BindHost == bindHost &&
-			(preferredPort == 0 || existing.Port == preferredPort)
+			existing.Path == path &&
+			(preferredPort == 0 || existing.Port == preferredPort) &&
+			existing.RedirectURI == wantRedirectURI
 
 		switch {
 		case matchesBinding:
@@ -1344,8 +1452,10 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 				zap.String("server", serverName),
 				zap.String("cached_bind_host", existing.BindHost),
 				zap.Int("cached_port", existing.Port),
+				zap.String("cached_path", existing.Path),
 				zap.String("requested_bind_host", bindHost),
 				zap.Int("requested_port", preferredPort),
+				zap.String("requested_path", path),
 				zap.Bool("pinned", binding.Pinned),
 				zap.Int("waiters_dropped", existing.waiterCount()))
 			if err := m.stopCallbackServerLocked(serverName, logger); err != nil {
@@ -1402,38 +1512,45 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 	addr := listener.Addr().(*net.TCPAddr)
 	port := addr.Port
 	listenAddr := net.JoinHostPort(bindHost, strconv.Itoa(port))
-	// JoinHostPort brackets an IPv6 literal, which is what the redirect URI
-	// needs too ("http://[::1]:PORT/oauth/callback").
-	redirectURI := fmt.Sprintf("http://%s%s", listenAddr, DefaultRedirectPath)
-
-	// Create HTTP server with dedicated mux
-	mux := http.NewServeMux()
-	server := &http.Server{
-		Addr:              listenAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second, // Security: prevent Slowloris attacks
-		ReadTimeout:       30 * time.Second, // Extended timeout for OAuth discovery
-		WriteTimeout:      30 * time.Second, // Extended timeout for OAuth responses
+	// The stored/reported redirect URI. binding.RedirectURI (set only for a
+	// pin) is the operator's EXACT verbatim string - never reconstructed, so
+	// host spelling ("localhost" vs the resolved bind address) and any
+	// percent-encoding in the path survive unchanged. Reconstructing via
+	// fmt.Sprintf is only safe for the unpinned case, where path is always the
+	// fixed, plain-ASCII DefaultRedirectPath - JoinHostPort brackets an IPv6
+	// literal, which is what the redirect URI needs too
+	// ("http://[::1]:PORT/oauth/callback").
+	redirectURI := binding.RedirectURI
+	if redirectURI == "" {
+		redirectURI = fmt.Sprintf("http://%s%s", listenAddr, path)
 	}
 
 	// Create callback server instance
 	callbackServer := &CallbackServer{
 		Port:        port,
 		RedirectURI: redirectURI,
-		Server:      server,
 		ServerName:  serverName,
 		BindHost:    bindHost,
-		logger:      logger.With(zap.String("server", serverName), zap.String("bind_host", bindHost), zap.Int("port", port)),
+		Path:        path,
+		logger:      logger.With(zap.String("server", serverName), zap.String("bind_host", bindHost), zap.Int("port", port), zap.String("path", path)),
 		waiters:     make(map[string]chan map[string]string),
 	}
 
-	// Set up HTTP handler for OAuth callback
-	mux.HandleFunc(DefaultRedirectPath, func(w http.ResponseWriter, r *http.Request) {
-		callbackServer.handleCallback(w, r)
-	})
-
-	// Add a debug handler for the root path to see all requests
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	// The handler is a plain http.HandlerFunc, deliberately NOT registered
+	// through http.ServeMux, for two reasons found in cross-model review of
+	// issue #1304 (an operator-configurable callback path):
+	//   - Go 1.22+'s ServeMux treats "{"/"}" and a trailing "..." in a
+	//     PATTERN as wildcard syntax, so registering an arbitrary
+	//     operator-supplied path as a pattern could panic on a malformed one.
+	//   - ServeMux unconditionally 301-redirects any request whose path is not
+	//     already "clean" (e.g. "/oauth//callback", or one with "."/".."
+	//     segments) to the cleaned path BEFORE any handler runs. A pinned path
+	//     that is not already in clean form would then never reach the exact
+	//     comparison below at all - the provider's callback request gets
+	//     redirected instead of delivered, and the login hangs.
+	// A raw handler function receives r.URL.Path exactly as net/http parsed
+	// it, with neither risk.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callbackServer.logger.Info("📥 HTTP request received on callback server",
 			zap.String("method", r.Method),
 			zap.String("path", r.URL.Path),
@@ -1441,7 +1558,7 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 			zap.String("user_agent", r.UserAgent()),
 			zap.String("remote_addr", r.RemoteAddr))
 
-		if r.URL.Path == DefaultRedirectPath {
+		if r.URL.Path == path {
 			callbackServer.handleCallback(w, r)
 		} else {
 			w.Header().Set("Content-Type", "text/html")
@@ -1455,12 +1572,21 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 						<p>Port: %d</p>
 					</body>
 				</html>
-			`, html.EscapeString(r.URL.Path), DefaultRedirectPath, html.EscapeString(serverName), port)
+			`, html.EscapeString(r.URL.Path), html.EscapeString(path), html.EscapeString(serverName), port)
 			if _, err := w.Write([]byte(debugPage)); err != nil {
 				callbackServer.logger.Error("Error writing debug page", zap.Error(err))
 			}
 		}
 	})
+
+	server := &http.Server{
+		Addr:              listenAddr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second, // Security: prevent Slowloris attacks
+		ReadTimeout:       30 * time.Second, // Extended timeout for OAuth discovery
+		WriteTimeout:      30 * time.Second, // Extended timeout for OAuth responses
+	}
+	callbackServer.Server = server
 
 	// Start the server using the existing listener
 	go func() {

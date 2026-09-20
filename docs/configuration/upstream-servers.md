@@ -80,11 +80,17 @@ port must still match exactly. Set `redirect_uri` to pin it:
 }
 ```
 
-mcpproxy binds that exact port and sends that exact string to the provider.
-Register the identical URL with the provider.
+mcpproxy binds that exact port and path and sends that exact string to the
+provider. Register the identical URL with the provider.
 
 The value must be an RFC 8252 loopback redirect: `http` scheme, a loopback host,
-an explicit port, and the `/oauth/callback` path. Prefer `127.0.0.1`;
+and an explicit port. The path can be anything — some providers publish a
+single shared OAuth application with a fixed callback path an operator cannot
+change (e.g. `http://localhost:18080/callback`), and mcpproxy's own callback
+path is just an implementation detail, so it binds its listener to whatever
+path the pin specifies. A pin with no path at all binds `/`; `/oauth/callback`
+is only the default when `redirect_uri` is omitted entirely and mcpproxy
+allocates a dynamic port. Prefer `127.0.0.1`;
 `localhost` is accepted but the listener binds `127.0.0.1`, while
 `http://[::1]:PORT/oauth/callback` binds the IPv6 loopback.
 
