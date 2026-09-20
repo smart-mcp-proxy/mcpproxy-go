@@ -46,8 +46,43 @@ Releases follow [Semantic Versioning](https://semver.org/).
   agent can gate a multi-step plan without leaving the MCP session. Optional `filters`
   (`read_only_only`, `exclude_destructive`, `exclude_open_world`); every run is on the activity
   record, and the returned `request_id` finds it. (spec 099, [#969](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/969))
+- **oauth:** the OAuth callback path is now configurable via `redirect_uri` instead of being
+  hardcoded, for deployments that front the callback behind a reverse proxy or a fixed path
+  requirement. ([#1316](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1316))
+- **server edition / sso:** generic OIDC front door — IdP-group-to-server allowlist grants, one
+  entitlement predicate shared by REST and the Web UI, and a tenant session principal on the
+  core REST API. (spec 107 PR-C, [#1293](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1293))
+- **server edition / sso:** an attributable JSONL audit line is now emitted at every
+  authorization decision and tool-call funnel, so a tenant admin can trace who did what.
+  (spec 107 PR-D, [#1296](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1296))
 
 ### Bug Fixes
+
+- **security/scope:** `set_profile` and `/mcp/p` now report the intersection of an agent
+  token's grant and the requested profile through a single selectable-profile predicate; a
+  non-selectable profile is refused identically to a nonexistent one, closing a scope-disclosure
+  gap. (spec 105 PR D, FR-003/004, [#1283](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1283))
+- **security/scope:** log lines now attribute to the record's actual subject, the OAuth callback
+  log is bound to the authenticated subject rather than the request, and container ownership
+  labels use the canonical identity — previously a narrowly-scoped token's actions could be
+  logged under the wrong identity. (spec 105 PR E, FR-007, [#1284](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1284))
+- **security/scope:** stored-script enumeration is now administrator-only; a non-admin agent
+  token could previously list stored scripts outside its grant. (spec 105 PR H0, FR-012,
+  [#1285](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1285))
+- **isolation:** scanner (security-scan) isolation mode is now resolved separately from process
+  (spawn) isolation — a remote HTTP/HTTPS upstream server was previously skipping Docker
+  security scanners entirely because both modes resolved to the same "none" decision.
+  ([GH #1303](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1303),
+  [#1315](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1315))
+- **upstream/stdio:** an ambiguous health-check failure on a stdio server no longer kills an
+  in-flight tool call — only a confirmed-dead process does. Also fixes `call_tool_write`
+  silently dropping its arguments on the affected path.
+  ([#1317](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1317),
+  [#1320](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1320))
+- **config:** persisted vs. effective configuration are now split — `serve` flags, `MCPPROXY_*`
+  env vars and an API key sourced from the environment are honored for the running process but
+  are never written back into `mcp_config.json`, so they can't leak into the persisted file or
+  survive a restart unintentionally. ([#1302](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1302))
 
 - **mcp/describe_tool:** on the direct surface, the returned definition named the tool
   `<server>:<tool>` and recommended a `call_with` intent variant — neither of which that surface
