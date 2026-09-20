@@ -783,11 +783,17 @@
                       :description="tool.description"
                       :findings="findingGroupForTool(tool.name)?.findings"
                     />
-                    <AnnotationBadges
-                      v-if="tool.annotations"
-                      :annotations="tool.annotations"
-                      class="mt-2"
-                    />
+                    <span class="inline-flex items-center gap-1 flex-wrap mt-2">
+                      <AnnotationBadges
+                        v-if="tool.annotations"
+                        :annotations="tool.annotations"
+                      />
+                      <!-- Author's AnnotationBadges renders truthy hints only, so an
+                           explicit false (operator override, already effective here)
+                           would leave the card badge-less. Mirror the editor fix. -->
+                      <span v-if="tool.annotations?.destructiveHint === false" class="badge badge-sm badge-success" title="Operator override: explicitly marked non-destructive">✓ Non-destructive</span>
+                      <span v-if="tool.annotations?.readOnlyHint === false" class="badge badge-sm badge-warning" title="Operator override: explicitly marked writable">✏️ Write</span>
+                    </span>
                     <div v-if="tool.input_schema" class="card-actions justify-end mt-4">
                       <button
                         class="btn btn-sm btn-outline"
