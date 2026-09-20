@@ -3,7 +3,6 @@ package upstream
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -21,30 +20,14 @@ import (
 // now goes through dockerResolverFn (shellwrap-backed) instead of relying on
 // $PATH for the bare "docker" binary.
 //
-// We exercise the real resolver indirectly: the test installs a fake docker
-// shim into a temp dir, points dockerResolverFn at it, drops $PATH to the
-// launchd minimum, and asserts that checkDockerAvailability still succeeds.
-// Without the fix, exec.Command("docker") would error with `executable file
-// not found in $PATH` regardless of how the resolver was wired.
+// The command runner is injected so the test asserts the resolved executable
+// directly without depending on process startup or a wall-clock deadline.
 func TestCheckDockerAvailability_UsesShellwrapResolver(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("launchd PATH scenario is macOS/Linux only")
 	}
 
-	tmpDir := t.TempDir()
-	dockerPath := filepath.Join(tmpDir, "docker")
-
-	// Fake docker that prints a server version when invoked with `info`.
-	// Anything else exits non-zero so we know the call shape was correct.
-	script := `#!/bin/sh
-case "$1" in
-  info) printf '"24.0.0"\n'; exit 0 ;;
-  *)    exit 99 ;;
-esac
-`
-	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake docker: %v", err)
-	}
+	dockerPath := filepath.Join(t.TempDir(), "docker")
 
 	// Simulate launchd's minimal PATH — fake docker is NOT on it. If the
 	// production code resolved via os.Getenv("PATH") we would fail here.
@@ -56,17 +39,25 @@ esac
 		return dockerPath, nil
 	}
 
-	m := &Manager{logger: zap.NewNop()}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	var resolvedBin string
+	m := &Manager{
+		logger: zap.NewNop(),
+		dockerInfoRunner: func(_ context.Context, dockerBin string) error {
+			resolvedBin = dockerBin
+			return nil
+		},
+	}
 
-	if err := m.checkDockerAvailability(ctx); err != nil {
+	if err := m.checkDockerAvailability(context.Background()); err != nil {
 		t.Fatalf("expected docker to be reachable via resolver, got: %v", err)
+	}
+	if resolvedBin != dockerPath {
+		t.Fatalf("docker executable = %q, want resolved path %q", resolvedBin, dockerPath)
 	}
 }
 
 // TestCheckDockerAvailability_FallbackOnResolverFailure ensures that even when
-// the resolver itself errors out we still attempt a bare-name exec — preserving
+// the resolver itself errors out we still select the bare executable name — preserving
 // the original behaviour for hosts where the shellwrap probes legitimately
 // cannot find docker but it IS on the parent's PATH.
 func TestCheckDockerAvailability_FallbackOnResolverFailure(t *testing.T) {
@@ -74,30 +65,26 @@ func TestCheckDockerAvailability_FallbackOnResolverFailure(t *testing.T) {
 		t.Skip("/bin/sh-style fake docker is POSIX only")
 	}
 
-	tmpDir := t.TempDir()
-	dockerPath := filepath.Join(tmpDir, "docker")
-	script := `#!/bin/sh
-exit 0
-`
-	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake docker: %v", err)
-	}
-
-	// Resolver fails — the fallback should still exec via bare PATH.
-	t.Setenv("PATH", tmpDir)
-
 	original := dockerResolverFn
 	t.Cleanup(func() { dockerResolverFn = original })
 	dockerResolverFn = func(*zap.Logger) (string, error) {
 		return "", errors.New("simulated resolver failure")
 	}
 
-	m := &Manager{logger: zap.NewNop()}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	var resolvedBin string
+	m := &Manager{
+		logger: zap.NewNop(),
+		dockerInfoRunner: func(_ context.Context, dockerBin string) error {
+			resolvedBin = dockerBin
+			return nil
+		},
+	}
 
-	if err := m.checkDockerAvailability(ctx); err != nil {
+	if err := m.checkDockerAvailability(context.Background()); err != nil {
 		t.Fatalf("expected fallback bare-name exec to succeed, got: %v", err)
+	}
+	if resolvedBin != "docker" {
+		t.Fatalf("docker executable = %q, want bare-name fallback", resolvedBin)
 	}
 }
 
