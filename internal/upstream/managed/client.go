@@ -983,15 +983,12 @@ func (mc *Client) SetConfigAt(cfg *config.ServerConfig, gen int64) bool {
 // SetConfig atomically swaps the server configuration. Lock-free; callers must
 // not hold mc.mu (they don't need to — the swap is atomic).
 //
-// Also pushes ExposePrompts down to the coreClient (PR #973 review, P2):
-// coreClient.config is set once at connect time and never reassigned, so
-// without this a hot-reloaded expose_prompts value would stay frozen at
-// whatever was in effect when the connection was created, until the next
-// reconnect-forcing change or restart.
-//
-// The instance keeps the commit generation it holds (Spec 116): SetConfig is
-// the legacy path that does not know one.
-func (mc *Client) SetConfig(config *config.ServerConfig) {
+// Also pushes ExposePrompts and AnnotationOverrides down to the coreClient
+// (PR #973 review, P2 pattern): coreClient.config is set once at connect
+// time and never reassigned, so without this a hot-reloaded expose_prompts
+// or annotation_overrides value would stay frozen at whatever was in effect
+// when the connection was created, until the next reconnect-forcing change
+// or restart.nc (mc *Client) SetConfig(config *config.ServerConfig) {
 	for {
 		cur := mc.cfg.Load()
 		next := &stampedConfig{cfg: config}
@@ -1010,6 +1007,7 @@ func (mc *Client) SetConfig(config *config.ServerConfig) {
 func (mc *Client) applyConfigSideEffects(config *config.ServerConfig) {
 	if mc.coreClient != nil && config != nil {
 		mc.coreClient.SetExposePrompts(config.ExposePrompts)
+		mc.coreClient.SetAnnotationOverrides(config.AnnotationOverrides)
 	}
 	mc.warnForwardHeaders()
 }

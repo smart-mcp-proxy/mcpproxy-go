@@ -281,6 +281,15 @@ type UpstreamRecord struct {
 	// from these records: a field absent here is wiped on the next mutation.
 	ForwardHeaders []string `json:"forward_headers,omitempty"`
 
+	// AnnotationOverrides carries per-server per-tool annotation fixes
+	// (operator-curated hint corrections for upstream servers that mislabel
+	// their tools, e.g. browseros marking reads destructive). Persisted to
+	// BBolt for the same reason as TrustMode above: SaveConfiguration rebuilds
+	// the JSON server list from these records, so a REST/UI/MCP-set override
+	// would be wiped on the next save/restart without it. Back-compat by
+	// omission: records written before this field existed decode with nil.
+	AnnotationOverrides map[string]*config.ToolAnnotations `json:"annotation_overrides,omitempty"`
+
 	// Generation and Incarnation are the committed ServerGen of the config
 	// commit that last wrote this row (Spec 116). A row written before Spec
 	// 116 reads as zero; the next commit that writes it stamps it.
@@ -291,7 +300,6 @@ type UpstreamRecord struct {
 	// client and completion writes bound to {Incarnation, OAuthEpoch} land
 	// only while the row still carries both. 0 on a row written before PR2b.
 	OAuthEpoch int64 `json:"oauth_epoch,omitempty"`
-}
 
 // ToolStatRecord represents tool usage statistics
 type ToolStatRecord struct {

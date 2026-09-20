@@ -104,13 +104,17 @@ type Server struct {
 	// prompt-aggregation override. Tri-state *bool — nil/omitted means "inherit
 	// default aggregation". Surfaced on GET so a caller that PATCHed the override
 	// can read it back; PATCH/POST accept it via AddServerRequest.
-	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	ExposePrompts *bool                `json:"expose_prompts,omitempty"`
 	// ForwardHeaders mirrors config.ServerConfig.ForwardHeaders (Spec 112): the
 	// allowlist of inbound MCP client header NAMES forwarded to this server on
 	// tools/call. Names only, never values. Omitted when empty.
 	ForwardHeaders []string             `json:"forward_headers,omitempty"`
-	SecurityScan   *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary
-	// Spec 044 — structured diagnostic error and stable error code. Both
+	// AnnotationOverrides mirrors config.ServerConfig.AnnotationOverrides:
+	// per-server per-tool annotation fixes. Surfaced on GET so a caller that
+	// PATCHed overrides (or the Web UI editor) can read them back; PATCH/POST
+	// accept them via AddServerRequest. Omitted when empty.
+	AnnotationOverrides map[string]*config.ToolAnnotations `json:"annotation_overrides,omitempty"`
+	SecurityScan  *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary/ Spec 044 — structured diagnostic error and stable error code. Both
 	// are populated when the server is in a failed state and the error
 	// has been classified by internal/diagnostics. Healthy servers omit
 	// these fields.

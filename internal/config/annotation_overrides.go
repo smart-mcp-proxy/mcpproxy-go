@@ -98,6 +98,41 @@ func boolPtrEqual(a, b *bool) bool {
 	return *a == *b
 }
 
+// CloneAnnotationOverrides deep-copies an annotation_overrides map (values and
+// their *bool hints) so hot-reload snapshots never alias the caller's map.
+// Nil in, nil out; nil values are preserved as nil.
+func CloneAnnotationOverrides(m map[string]*ToolAnnotations) map[string]*ToolAnnotations {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]*ToolAnnotations, len(m))
+	for k, v := range m {
+		if v == nil {
+			out[k] = nil
+			continue
+		}
+		cp := *v
+		if v.ReadOnlyHint != nil {
+			b := *v.ReadOnlyHint
+			cp.ReadOnlyHint = &b
+		}
+		if v.DestructiveHint != nil {
+			b := *v.DestructiveHint
+			cp.DestructiveHint = &b
+		}
+		if v.IdempotentHint != nil {
+			b := *v.IdempotentHint
+			cp.IdempotentHint = &b
+		}
+		if v.OpenWorldHint != nil {
+			b := *v.OpenWorldHint
+			cp.OpenWorldHint = &b
+		}
+		out[k] = &cp
+	}
+	return out
+}
+
 // NormalizeAnnotationOverrides prunes empty entries where all hints are nil
 // and Title is empty (legacy "* {}"), and enforces the 100-entry cap by
 // truncating (validation will still reject >100 on write, but load-time

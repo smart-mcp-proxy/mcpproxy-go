@@ -86,6 +86,37 @@ describe('AnnotationOverridesEditor', () => {
     expect(payload['act'].destructiveHint).toBe(true)
   })
 
+  it('Given explicit destructiveHint:false When rendered Then Non-destructive badge is visible (override not silent)', async () => {
+    const wrapper = mount(AnnotationOverridesEditor, {
+      props: {
+        serverName: 'browseros',
+        tools,
+        overrides: { act: { destructiveHint: false } } as any,
+        upstreamAnnotations: upstream,
+      },
+    })
+    const row = wrapper.find('[data-test="annotation-override-row-act"]')
+    expect(row.exists()).toBe(true)
+    // Author's AnnotationBadges only renders truthy hints, so without this the
+    // override would be invisible (title only). Mutation: removing the badge
+    // span must fail this test.
+    expect(row.text()).toContain('Non-destructive')
+  })
+
+  it('Given explicit readOnlyHint:false When rendered Then Write badge is visible', async () => {
+    const wrapper = mount(AnnotationOverridesEditor, {
+      props: {
+        serverName: 'browseros',
+        tools,
+        overrides: { navigate: { destructiveHint: false, readOnlyHint: false } } as any,
+        upstreamAnnotations: upstream,
+      },
+    })
+    const row = wrapper.find('[data-test="annotation-override-row-navigate"]')
+    expect(row.exists()).toBe(true)
+    expect(row.text()).toContain('Write')
+  })
+
   it('Given existing override When deleted Then save emits null marker for that tool', async () => {
     const wrapper = mount(AnnotationOverridesEditor, {
       props: {

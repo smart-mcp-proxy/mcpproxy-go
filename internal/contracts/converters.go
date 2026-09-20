@@ -52,7 +52,9 @@ func ConvertServerConfig(cfg *config.ServerConfig, globalIsolation *config.Docke
 		ExposePrompts: cfg.ExposePrompts,
 		// Spec 112: allowlist of forwarded client header names (no values).
 		ForwardHeaders: append([]string(nil), cfg.ForwardHeaders...),
-		// Spec 093: surface the per-server concurrency overrides (tri-state) so a
+		// Surface the per-server annotation overrides so a caller that PATCHed
+		// them (or the Web UI editor) can read them back.
+		AnnotationOverrides: cfg.AnnotationOverrides,// Spec 093: surface the per-server concurrency overrides (tri-state) so a
 		// caller that PATCHed a limit can read it back.
 		MaxConcurrentRequests: cfg.MaxConcurrentRequests,
 		QueueSize:             cfg.QueueSize,
