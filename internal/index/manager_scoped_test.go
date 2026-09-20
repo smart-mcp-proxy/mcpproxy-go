@@ -25,15 +25,23 @@ import (
 // is that proof, at both a small hand-built scale and the 527-tool
 // LiveMCPBench snapshot the fleet-scale specs already use.
 //
-// Multi-word queries only (see queries below): the underscore-segment
-// enhancement SearchTools applies for identifier-style queries
-// (bleve.go:underscoreSegmentQuery) is adaptive on the FIRST unfiltered
-// window's own hits — a decision that has no well-defined generalisation to
-// an arbitrary scoped/exhaustive comparison, and SearchToolsScoped
-// deliberately does not attempt to replicate it (buildToolSearchQuery is the
-// one query both paths run — see its doc comment in bleve.go). That is a
-// pre-existing property of the unscoped ranking heuristic, orthogonal to the
-// FR-005 G1 scope-before-cut gap this PR closes, so this equality proof is
+// Multi-word (space-separated) queries only (see queries below): the
+// underscore-segment enhancement SearchTools applies for identifier-style
+// queries (bleve.go:underscoreSegmentQuery) is now ALSO applied by
+// SearchToolsScoped via the shared augmentedToolSearchQuery(queryStr, limit)
+// helper (Spec 105 PR C review round 1 MUST-FIX — see
+// search_scoped_test.go's TestBleveIndex_SearchToolsScoped_
+// AppliesUnderscoreSegmentEnhancement), so the two no longer risk diverging
+// for an underscore-style query at the SAME limit. What is still excluded
+// from THIS equality proof is the reference derivation's own probe window:
+// the enhancement decision reads the top `limit` unfiltered hits, while D6's
+// exhaustive reference derivation below deliberately searches with
+// Size = document count (every hit, not just `limit`) to build its filtered
+// candidate list — so for an underscore query the two derivations can probe
+// different windows and reach a different augmentation decision even though
+// SearchToolsScoped and an equal-limit SearchTools now always agree with
+// each other. That is a property of this test's own two-derivation
+// comparison, not a gap in the production code, so this equality proof is
 // stated for the query shapes FR-005's own fixture uses: single- and
 // multi-word text queries.
 

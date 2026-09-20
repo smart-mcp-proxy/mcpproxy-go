@@ -198,7 +198,7 @@
 
 - [x] T077 [US1] Common verification; `TestFilterDiagnostics_WindowUsesNormalizedLimit`, `TestSurfaceIsolation_RetrieveTools*`, `TestRetrieveTools_TruncatedPayloadReadableViaReadCache` and all four `retrieve_full_*` goldens green; `isToolCallable` untouched (quarantine-blind)
 - [x] T078 [US1] FR-011 pre-check: `scope_latency_test.go` prototype on the 527-tool snapshot (`loadDeferredLargeCorpus`) for `retrieve_tools`, scoped-vs-admin ≤ 20 ms, skipped under `-race`; local merge-base p95 table in the PR body — `internal/server/scope_latency_test.go` (new; H1 extends to four operations + CI job)
-- [~] T079 [US1] Astra rounds on FR-005 + FR005-G1…G5 + D3/D6; quote final `VERDICT:`
+- [x] T079 [US1] Cross-model review (opencode quota exhausted on both Terra and Sol — confirmed live before each round, per CLAUDE.md fallback rule; fell back to `codex exec --model gpt-5.6-sol`) on FR-005 + FR005-G1…G5 + D3/D6, 2 rounds. Round 1: 2 MUST-FIX (SearchToolsScoped silently skipped SearchTools' underscore-segment enhancement; ScopedDocumentCount's facet was capped at a fixed 10000 terms) — both fixed (shared `augmentedToolSearchQuery` helper; facet sized to `DocCount()`, a proven exact bound) with a new regression test. Round 2: `VERDICT: CLEAN`, no MUST-FIX.
 
 ---
 
