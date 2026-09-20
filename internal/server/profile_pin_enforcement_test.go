@@ -115,7 +115,12 @@ func TestDirectModeHonorsTokenProfilePin(t *testing.T) {
 	result, err := handler(ctx, mcp.CallToolRequest{})
 	require.NoError(t, err)
 	require.True(t, result.IsError, "a call outside the pinned profile must be refused")
-	assert.Contains(t, resultText(t, result), "is not in profile 'research'")
+	// Spec 105 FR-008 gap G5 (D12): the refusal must not name the profile-out
+	// server "deploy-srv" — invoking the registered handler directly, as this
+	// test does, exercises its defense-in-depth check, which now echoes only
+	// the caller-supplied tool name, matching an unregistered name's wording.
+	assert.Contains(t, resultText(t, result), "tool 'deploy-srv__ship' not found")
+	assert.NotContains(t, resultText(t, result), "is not in profile")
 
 	// Profile deleted → deny-all on both discovery and dispatch.
 	cfg.Profiles = nil

@@ -59,28 +59,44 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 	evaluator := newDirectCallabilityEvaluator(p)
 	filtered := make([]mcp.Tool, 0, len(tools))
 	for _, tool := range tools {
-		// Same catalog resolution as filterDirectModeToolsForAuth (D10). The two
-		// filters run over the same listing, so if they resolved names
-		// differently — one by catalog, one by first-"__" parse — a server whose
-		// name contains "__" could be scope-checked as one origin and
-		// callability-checked as another.
-		entry, decision := p.resolveDirectTool(tool.Name)
-
 		var serverName, toolName string
-		switch decision {
-		case directResolveBuiltin:
-			// Built-ins are this proxy's own tools; there is no upstream
-			// approval record to evaluate.
-			filtered = append(filtered, tool)
-			continue
-		case directResolveDenied:
-			continue
-		case directResolveNoCatalog:
-			// The parse cannot fail: a separator-less name was already classified
-			// as a built-in above.
-			serverName, toolName, _ = ParseDirectToolName(tool.Name)
-		case directResolveFound:
-			serverName, toolName = entry.ServerName, entry.ToolName
+
+		if stamp, stamped := readDirectToolStamp(tool); stamped {
+			// Spec 105 FR-008: the identity STAMPED on this exact tool object,
+			// never re-derived from a fresh catalog lookup (see
+			// directToolStamp's doc comment).
+			if stamp.rawName == "" {
+				continue
+			}
+			serverName, toolName = stamp.owner, stamp.rawName
+		} else {
+			// No stamp: fall back to the pre-105 catalog/builtin resolution,
+			// exactly as filterDirectModeToolsForAuth does. Same catalog
+			// resolution the scope filter uses (D10): the two filters run over
+			// the same listing, so if they resolved names differently — one by
+			// catalog, one by first-"__" parse — a server whose name contains
+			// "__" could be scope-checked as one origin and
+			// callability-checked as another.
+			//
+			// Same residual as filterDirectModeToolsForAuth's fallback branch
+			// (see its doc comment): an unstamped mcp-go SESSION tool sharing a
+			// global tool's name would resolve here too. Not reachable today —
+			// mcpproxy-go registers no session-specific tools on this surface.
+			entry, decision := p.resolveDirectTool(tool.Name)
+
+			switch decision {
+			case directResolveBuiltin:
+				// Built-ins are this proxy's own tools; there is no upstream
+				// approval record to evaluate.
+				filtered = append(filtered, tool)
+				continue
+			case directResolveDenied:
+				continue
+			case directResolveNoCatalog:
+				serverName, toolName, _ = ParseDirectToolName(tool.Name)
+			case directResolveFound:
+				serverName, toolName = entry.ServerName, entry.ToolName
+			}
 		}
 
 		if evaluator.evaluate(serverName, toolName).callable {

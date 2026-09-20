@@ -166,6 +166,20 @@ func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *direc
 		if t == nil {
 			continue
 		}
+		if t.Name == "" {
+			// Spec 105 FR-008 (FR008-G7): an upstream tool with an empty raw
+			// name renders as "server__" and has no registration identity to
+			// authorize it against — the direct-surface analogue of the
+			// FR-006 empty-prompt-name rule. Refused admission here, at the
+			// source, rather than admitted and relied on to be caught by a
+			// downstream filter: withheld from every caller, administrators
+			// included (SC-005 exception).
+			if logger != nil {
+				logger.Warn("Withholding direct tool with an empty raw name: no registration identity to authorize it against",
+					zap.String("server_name", t.ServerName))
+			}
+			continue
+		}
 		name := FormatDirectToolName(t.ServerName, t.Name)
 		if _, seen := grouped[name]; !seen {
 			order = append(order, name)
@@ -367,12 +381,6 @@ const (
 	directResolveNoCatalog
 )
 
-// builtinDirectToolNames is an explicit allowlist for built-ins whose display
-// name WOULD parse as server__tool and so cannot be recognised structurally.
-// Empty today; it exists so adding such a built-in is a deliberate act rather
-// than an accidental denial.
-var builtinDirectToolNames = map[string]struct{}{}
-
 // resolveDirectTool maps a direct display name to its catalog entry.
 //
 // This replaces ParseDirectToolName as the resolution path for the discovery
@@ -393,28 +401,24 @@ func (p *MCPProxyServer) resolveDirectTool(displayName string) (*directCatalogEn
 	// through the scope, tier and callability gates like any other.
 	//
 	// This ordering is load-bearing, and getting it wrong was a real disclosure
-	// bug. The structural test below assumes every upstream display name parses,
-	// because FormatDirectToolName always inserts "__". It does not: an upstream
-	// tool whose NAME IS EMPTY renders as "server__", which ParseDirectToolName
-	// rejects (the tool half is empty). That name was therefore classified as a
-	// proxy built-in, and both direct filters pass built-ins through
-	// unconditionally — so an agent token scoped to other servers could see the
-	// name, description and annotations of a tool on a server outside its scope.
-	// Found by adversarial QA, not by any unit test, because no fixture had ever
+	// bug: an upstream tool whose NAME IS EMPTY renders as "server__", which
+	// ParseDirectToolName rejects (the tool half is empty). A name with no
+	// "__" separator was therefore once inferred a proxy built-in structurally
+	// — and both direct filters pass built-ins through unconditionally — so an
+	// agent token scoped to other servers could see the name, description and
+	// annotations of a tool on a server outside its scope. Found by
+	// adversarial QA, not by any unit test, because no fixture had ever
 	// contained a nameless tool.
+	//
+	// Spec 105 FR-008 (FR008-G7) closes this at its source: buildDirectCatalog
+	// now refuses to admit an entry with an empty raw tool name at all, so
+	// "server__" is never in this catalog to begin with, and the structural
+	// "no separator -> built-in" inference below is gone entirely — a name is
+	// a built-in ONLY via the explicit builtinDirectToolNames set checked
+	// above. A name that is neither stamped in the catalog nor a recognised
+	// built-in has no registration identity and falls through to denial.
 	if entry, ok := cat.Lookup(displayName); ok {
 		return entry, directResolveFound
-	}
-
-	// A name with no "__" separator that the catalog does NOT admit is something
-	// this proxy registered itself — describe_tool, retrieve_tools on a shared
-	// surface — and denying it would delete built-ins off their own surface.
-	//
-	// This is the structural half of D13 rule 2's "built-ins by explicit name
-	// set". The set above covers the residual case a structural test cannot: a
-	// built-in whose name happens to contain "__".
-	if _, _, ok := ParseDirectToolName(displayName); !ok {
-		return nil, directResolveBuiltin
 	}
 
 	if cat == nil {

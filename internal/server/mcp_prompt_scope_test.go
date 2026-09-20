@@ -129,11 +129,15 @@ func aggregatedPromptForTest(server, prompt string) mcp.Prompt {
 	}
 }
 
-// TestFilterAggregatedPromptsForAuth_UnstampedFailsClosed (Spec 104 FR-016g):
-// an upstream prompt with no canonical-owner stamp cannot have come from
-// buildAggregatedServerPrompts, so the filter must not guess its owner from the
-// display name (that re-parse is the original leak). It is dropped for scoped
-// callers and left alone for unscoped ones.
+// TestFilterAggregatedPromptsForAuth_UnstampedFailsClosed (Spec 104 FR-016g;
+// Spec 105 FR-006/FR-008 FR008-G7): an upstream prompt with no canonical-owner
+// stamp cannot have come from buildAggregatedServerPrompts, so the filter must
+// not guess its owner from the display name (that re-parse is the original
+// leak). It has no registration identity at all, so it is dropped for EVERY
+// caller — scoped, unrestricted agent, and administrator alike (SC-005
+// exception) — never only for a scoped one. Withholding it used to be
+// conditioned on `enforce` (scoped agent or active profile), which left it
+// visible to an unscoped or administrator caller; that condition is gone.
 func TestFilterAggregatedPromptsForAuth_UnstampedFailsClosed(t *testing.T) {
 	proxy := &MCPProxyServer{}
 	unstamped := mcp.Prompt{Name: FormatDirectPromptName("github", "looks_in_scope")}
@@ -144,12 +148,22 @@ func TestFilterAggregatedPromptsForAuth_UnstampedFailsClosed(t *testing.T) {
 		AllowedServers: []string{"github"},
 		Permissions:    []string{auth.PermRead},
 	})
+	unrestricted := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "unrestricted-bot",
+		AllowedServers: []string{"*"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
 
-	got := proxy.filterAggregatedPromptsForAuth(scoped, []mcp.Prompt{unstamped, stamped})
-	assert.ElementsMatch(t, []string{stamped.Name}, promptNamesForTest(got), "unstamped upstream prompt is dropped for a scoped caller")
-
-	got = proxy.filterAggregatedPromptsForAuth(context.Background(), []mcp.Prompt{unstamped, stamped})
-	assert.ElementsMatch(t, []string{unstamped.Name, stamped.Name}, promptNamesForTest(got), "unscoped callers are not filtered")
+	for name, ctx := range map[string]context.Context{
+		"scoped agent":       scoped,
+		"unrestricted agent": unrestricted,
+		"administrator":      context.Background(),
+	} {
+		got := proxy.filterAggregatedPromptsForAuth(ctx, []mcp.Prompt{unstamped, stamped})
+		assert.ElementsMatchf(t, []string{stamped.Name}, promptNamesForTest(got),
+			"%s: an unstamped prompt has no registration identity and is withheld from every caller", name)
+	}
 }
 
 // TestStripAggregatedPromptServer_PreservesUpstreamMeta verifies the stamp is
@@ -403,5 +417,78 @@ func TestAggregatedPrompt_LateEnableStillFiltered(t *testing.T) {
 			}
 			assert.Subset(t, adminNames, []string{"a__greeting", "hidden__greeting"})
 		})
+	}
+}
+
+// TestBuildAggregatedServerPrompts_DropsEmptyPromptName is Spec 105 FR-008
+// (FR008-G7), the FR-006 prompt analogue: an upstream prompt with an empty
+// raw name ("server:") has no registration identity — the direct-surface
+// equivalent of an upstream tool named "" — and buildAggregatedServerPrompts
+// must never register it at all, for any caller.
+func TestBuildAggregatedServerPrompts_DropsEmptyPromptName(t *testing.T) {
+	upstreamPrompts := []mcp.Prompt{
+		{Name: "a:"},       // empty raw prompt name
+		{Name: "a:review"}, // normal
+	}
+	getPrompt := func(_ context.Context, _ string, _ map[string]string) (*mcp.GetPromptResult, error) {
+		return &mcp.GetPromptResult{}, nil
+	}
+
+	all := buildAggregatedServerPrompts(nil, upstreamPrompts, getPrompt, nil, nil)
+
+	names := make([]string, 0, len(all))
+	for _, sp := range all {
+		names = append(names, sp.Prompt.Name)
+	}
+	assert.NotContains(t, names, "a__", "an empty raw prompt name must never be registered")
+	assert.Contains(t, names, "a__review", "the sibling prompt from the same server is unaffected")
+}
+
+// TestUnstampedPrompt_WithheldFromListAndGet_ForAdminAndAgent is Spec 105
+// FR008-G7's SC-005 fixture: a prompt with no accepted registration (no
+// canonical-owner stamp) is withheld from prompts/list and refused by
+// prompts/get, for an agent token AND for an administrator — never only for
+// a scoped caller, unlike every other withholding rule in this file.
+func TestUnstampedPrompt_WithheldFromListAndGet_ForAdminAndAgent(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	proxy.config.EnablePrompts = true
+
+	unstamped := mcp.Prompt{Name: "ghost__unstamped"}
+	proxy.server.SetPrompts(mcpserver.ServerPrompt{
+		Prompt: unstamped,
+		Handler: func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			return &mcp.GetPromptResult{Messages: []mcp.PromptMessage{}}, nil
+		},
+	})
+
+	agentCtxForTest := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "unrestricted",
+		AllowedServers: []string{"*"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+	adminCtxForTest := auth.WithAuthContext(context.Background(), auth.AdminContext())
+
+	initMsg := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`)
+
+	for name, ctx := range map[string]context.Context{"unrestricted agent": agentCtxForTest, "administrator": adminCtxForTest} {
+		require.NotNilf(t, proxy.server.HandleMessage(ctx, initMsg), "%s", name)
+
+		listEncoded, err := json.Marshal(proxy.server.HandleMessage(ctx, []byte(`{"jsonrpc":"2.0","id":2,"method":"prompts/list","params":{}}`)))
+		require.NoErrorf(t, err, "%s", name)
+		var listEnvelope map[string]interface{}
+		require.NoError(t, json.Unmarshal(listEncoded, &listEnvelope))
+		require.Nilf(t, listEnvelope["error"], "%s: prompts/list must succeed: %v", name, listEnvelope)
+		var listedNames []string
+		for _, pr := range listEnvelope["result"].(map[string]interface{})["prompts"].([]interface{}) {
+			listedNames = append(listedNames, pr.(map[string]interface{})["name"].(string))
+		}
+		assert.NotContainsf(t, listedNames, "ghost__unstamped", "%s: an unstamped prompt is withheld from EVERYONE (SC-005)", name)
+
+		getEncoded, err := json.Marshal(proxy.server.HandleMessage(ctx, []byte(`{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"ghost__unstamped"}}`)))
+		require.NoErrorf(t, err, "%s", name)
+		var getEnvelope map[string]interface{}
+		require.NoError(t, json.Unmarshal(getEncoded, &getEnvelope))
+		assert.NotNilf(t, getEnvelope["error"], "%s: prompts/get must refuse an unstamped prompt: %v", name, getEnvelope)
 	}
 }
