@@ -444,24 +444,34 @@ epics:
         depends_on: [scope-retrieve-tools]
       - id: scope-selectable-profile-predicate
         title: "FR-003/FR-004 remainder: selectable-profile predicate for UNPINNED tokens on /mcp/p/<slug>, /mcp/p, /mcp/p/ and set_profile; identical status+body across missing / deleted / not-selectable / pin-mismatch / no-profiles (#1225 + #1227 follow-up lists)"
-        status: todo
+        status: done
         priority: P1
+        pr: "#1283"
         depends_on: [scope-fix-set-profile, scope-fix-prompts-profile-url]
       - id: scope-cache-legacy-invalidation
         title: "FR-002 + FR-001 remainder: legacy/unstamped and internal (registry, guesser) cache entries refused for every caller and durably invalidated; monotone recursive provenance; existence-non-disclosing refusal on MCP and REST (#1226 follow-up list)"
-        status: todo
+        status: done
         priority: P2
+        pr: "#1282"
         depends_on: [scope-fix-read-cache]
       - id: scope-log-attribution
         title: "FR-007 remainder: per-record canonical log ownership (a/b vs a_b share one file), filter-before-limit + authorized lines_returned, subject-bound OAuth-callback logging, canonical container ownership in Docker cleanup (#1224 follow-up list)"
-        status: todo
+        status: done
         priority: P2
+        pr: "#1284"
         depends_on: [scope-fix-tail-log]
       - id: scope-target-identity-producers
         title: "FR-009 remainder: producer-side exact-name identity (checkToolApprovals / differential index collapse ns:erase to erase), direct-name dispatch + preflight share lookupToolApproval, unresolved/stale identity refuses scoped callers, full 54-cell acceptance tables (#1223 follow-up list)"
-        status: todo
+        status: done
         priority: P2
+        pr: "#1279"
         depends_on: [scope-fix-target-tier]
+      - id: scope-fix-stored-script-admin
+        title: "FR-012: stored-script enumeration is administrator-only (PR H0)"
+        status: done
+        priority: P2
+        pr: "#1285"
+        depends_on: []
       - id: scope-regression-suite
         title: "FR-011/FR-013/FR-014: two-fixture differential oracle with sentinels across the applicability matrix, credential-authenticated HTTP matrix over every /mcp surface, admin p95 perf gate on the frozen 527-tool snapshot"
         status: todo
@@ -802,7 +812,7 @@ epics:
 
   - id: sso
     title: Spec 107 server edition SSO front door hardened for real IdPs
-    status: in_review
+    status: done
     priority: P2
     spec: specs/107-server-edition-sso-hardening
     depends_on: []
@@ -825,7 +835,7 @@ epics:
         pr: "#1293"
       - id: sso-pr-d-audit-line
         title: PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3)
-        status: in_review
+        status: done
         depends_on: [sso-pr-c-group-allowlist]
         pr: "#1296"
 

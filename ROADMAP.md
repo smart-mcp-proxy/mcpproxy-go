@@ -81,7 +81,6 @@ graph LR
 - 🔵 **MCP protocol upgrade to 2026-07-28 revision** — In progress · P1
 - 🔵 **Planning/docs truth automation** — In progress · P2
 - 🔵 **Discovery-quality eval harness (Spec 065 second half)** — In progress · P3
-- 🟡 **Spec 107 server edition SSO front door hardened for real IdPs** — In review · P2
 - ⚪ **Windows native tray app** — Todo · P2
 - ⚫ **Server marketplace** — Todo · P3 · parked
 - ⚫ **Audit SIEM integration** — Todo · P3 · parked
@@ -92,6 +91,7 @@ graph LR
 - 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
 - 🟢 **Tray↔core decoupling: socket/REST API only, no config-file reads** — Done · P2
+- 🟢 **Spec 107 server edition SSO front door hardened for real IdPs** — Done · P2
 
 ## Epic details
 
@@ -227,6 +227,7 @@ graph LR
   scope_cache_legacy_invalidation["FR-002 + FR-001 remainder: legacy/unstamped a…"]
   scope_log_attribution["FR-007 remainder: per-record canonical log ow…"]
   scope_target_identity_producers["FR-009 remainder: producer-side exact-name id…"]
+  scope_fix_stored_script_admin["FR-012: stored-script enumeration is administ…"]
   scope_regression_suite["FR-011/FR-013/FR-014: two-fixture differentia…"]
 
   scope_retrieve_tools --> scope_refusal_shapes
@@ -241,8 +242,8 @@ graph LR
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class scope_fix_target_tier,scope_fix_tail_log,scope_fix_set_profile,scope_fix_read_cache,scope_fix_prompts_profile_url done;
-  class scope_retrieve_tools,scope_direct_publication,scope_refusal_shapes,scope_selectable_profile_predicate,scope_cache_legacy_invalidation,scope_log_attribution,scope_target_identity_producers,scope_regression_suite todo;
+  class scope_fix_target_tier,scope_fix_tail_log,scope_fix_set_profile,scope_fix_read_cache,scope_fix_prompts_profile_url,scope_selectable_profile_predicate,scope_cache_legacy_invalidation,scope_log_attribution,scope_target_identity_producers,scope_fix_stored_script_admin done;
+  class scope_retrieve_tools,scope_direct_publication,scope_refusal_shapes,scope_regression_suite todo;
 ```
 
 | Task | Status | Refs |
@@ -255,10 +256,11 @@ graph LR
 | FR-005: retrieve_tools filters by scope BEFORE limiting; indexed counts, usage ranking, debug output and session risk computed over the authorized population only | ⚪ Todo | — |
 | FR-008: direct-surface definitions take owner and tier from their own registration identity at every publication seam, both skew directions, full and deferred | ⚪ Todo | — |
 | FR-010: scope-first refusal precedence; dispatch denials and 'available servers' never name hidden servers; describe_tool not-found and alias resolution computed over the authorized corpus | ⚪ Todo | — |
-| FR-003/FR-004 remainder: selectable-profile predicate for UNPINNED tokens on /mcp/p/<slug>, /mcp/p, /mcp/p/ and set_profile; identical status+body across missing / deleted / not-selectable / pin-mismatch / no-profiles (#1225 + #1227 follow-up lists) | ⚪ Todo | — |
-| FR-002 + FR-001 remainder: legacy/unstamped and internal (registry, guesser) cache entries refused for every caller and durably invalidated; monotone recursive provenance; existence-non-disclosing refusal on MCP and REST (#1226 follow-up list) | ⚪ Todo | — |
-| FR-007 remainder: per-record canonical log ownership (a/b vs a_b share one file), filter-before-limit + authorized lines_returned, subject-bound OAuth-callback logging, canonical container ownership in Docker cleanup (#1224 follow-up list) | ⚪ Todo | — |
-| FR-009 remainder: producer-side exact-name identity (checkToolApprovals / differential index collapse ns:erase to erase), direct-name dispatch + preflight share lookupToolApproval, unresolved/stale identity refuses scoped callers, full 54-cell acceptance tables (#1223 follow-up list) | ⚪ Todo | — |
+| FR-003/FR-004 remainder: selectable-profile predicate for UNPINNED tokens on /mcp/p/<slug>, /mcp/p, /mcp/p/ and set_profile; identical status+body across missing / deleted / not-selectable / pin-mismatch / no-profiles (#1225 + #1227 follow-up lists) | 🟢 Done | #1283 |
+| FR-002 + FR-001 remainder: legacy/unstamped and internal (registry, guesser) cache entries refused for every caller and durably invalidated; monotone recursive provenance; existence-non-disclosing refusal on MCP and REST (#1226 follow-up list) | 🟢 Done | #1282 |
+| FR-007 remainder: per-record canonical log ownership (a/b vs a_b share one file), filter-before-limit + authorized lines_returned, subject-bound OAuth-callback logging, canonical container ownership in Docker cleanup (#1224 follow-up list) | 🟢 Done | #1284 |
+| FR-009 remainder: producer-side exact-name identity (checkToolApprovals / differential index collapse ns:erase to erase), direct-name dispatch + preflight share lookupToolApproval, unresolved/stale identity refuses scoped callers, full 54-cell acceptance tables (#1223 follow-up list) | 🟢 Done | #1279 |
+| FR-012: stored-script enumeration is administrator-only (PR H0) | 🟢 Done | #1285 |
 | FR-011/FR-013/FR-014: two-fixture differential oracle with sentinels across the applicability matrix, credential-authenticated HTTP matrix over every /mcp surface, admin p95 perf gate on the frozen 527-tool snapshot | ⚪ Todo | — |
 
 </details>
@@ -424,39 +426,6 @@ graph LR
 | Task | Status | Refs |
 | --- | --- | --- |
 | Promote retrieval-D1 from report-only to PR-blocking (spec 065 FR-009/SC-005), and adjudicate the CN-002 frozen-corpus question | ⚪ Todo | `MCP-742` |
-
-</details>
-
-<details>
-<summary>🟡 Spec 107 server edition SSO front door hardened for real IdPs — In review · P2</summary>
-
-> Generic OIDC, IdP-group -> server allowlist, attributable JSONL audit line; freeze the latent multiuser/credential-injection code. Research: docs/research/server-edition-2026-09-14 (#1281).
-
-Spec: [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/)
-
-```mermaid
-graph LR
-  sso_pr_a_freeze_cut["PR-A freeze/cut latent code + config normalis…"]
-  sso_pr_b_oidc_front_door["PR-B generic OIDC provider + front door behin…"]
-  sso_pr_c_group_allowlist["PR-C one entitlement predicate, group grants,…"]
-  sso_pr_d_audit_line["PR-D attributable JSONL audit line + auth_eve…"]
-
-  sso_pr_a_freeze_cut --> sso_pr_b_oidc_front_door
-  sso_pr_b_oidc_front_door --> sso_pr_c_group_allowlist
-  sso_pr_c_group_allowlist --> sso_pr_d_audit_line
-
-  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
-  class sso_pr_a_freeze_cut,sso_pr_b_oidc_front_door,sso_pr_c_group_allowlist done;
-  class sso_pr_d_audit_line in_review;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6) | 🟢 Done | #1287 |
-| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | 🟢 Done | #1292 |
-| PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4) | 🟢 Done | #1293 |
-| PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3) | 🟡 In review | #1296 |
 
 </details>
 
@@ -881,6 +850,37 @@ graph LR
 
 </details>
 
+<details>
+<summary>🟢 Spec 107 server edition SSO front door hardened for real IdPs — Done · P2</summary>
+
+> Generic OIDC, IdP-group -> server allowlist, attributable JSONL audit line; freeze the latent multiuser/credential-injection code. Research: docs/research/server-edition-2026-09-14 (#1281).
+
+Spec: [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/)
+
+```mermaid
+graph LR
+  sso_pr_a_freeze_cut["PR-A freeze/cut latent code + config normalis…"]
+  sso_pr_b_oidc_front_door["PR-B generic OIDC provider + front door behin…"]
+  sso_pr_c_group_allowlist["PR-C one entitlement predicate, group grants,…"]
+  sso_pr_d_audit_line["PR-D attributable JSONL audit line + auth_eve…"]
+
+  sso_pr_a_freeze_cut --> sso_pr_b_oidc_front_door
+  sso_pr_b_oidc_front_door --> sso_pr_c_group_allowlist
+  sso_pr_c_group_allowlist --> sso_pr_d_audit_line
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class sso_pr_a_freeze_cut,sso_pr_b_oidc_front_door,sso_pr_c_group_allowlist,sso_pr_d_audit_line done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6) | 🟢 Done | #1287 |
+| PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7) | 🟢 Done | #1292 |
+| PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4) | 🟢 Done | #1293 |
+| PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3) | 🟢 Done | #1296 |
+
+</details>
+
 ## Epics
 
 | Epic | Status | Priority | Progress | Spec | PR |
@@ -895,7 +895,6 @@ graph LR
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 19/81 (23%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
-| Spec 107 server edition SSO front door hardened for real IdPs | In review | P2 | 102/126 (81%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Auto routing mode: budget-fitted tool surface per session (spec 104) | Todo | P1 | — | [104-auto-routing-mode](./specs/104-auto-routing-mode/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
@@ -915,6 +914,7 @@ graph LR
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | Deferred-schema serialization for the direct tools/list surface (spec 102) | Done | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) | #1063 |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
+| Spec 107 server edition SSO front door hardened for real IdPs | Done | P2 | 126/126 (100%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
 
 ## Shipped (archived)
 
@@ -1036,4 +1036,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
 | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `in-flight` | 42/109 (39%) |
 | [106-security-residual-fixes](./specs/106-security-residual-fixes/) | `shipped` | 18/19 (95%) |
-| [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `in-flight` | 102/126 (81%) |
+| [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `shipped` | 126/126 (100%) |
