@@ -347,24 +347,26 @@ func TestSkew_OriginFlipNeverSplitsScopeFromDispatch(t *testing.T) {
 		// The registry already holds the NEW origin's handler, invoked here
 		// directly (bypassing mcp-go's own call-time filter re-evaluation,
 		// which — now that the filters are stamp-based — would already refuse
-		// this with the SAME envelope a wholly unregistered name gets, before
-		// the handler ever ran; see TestDirectFullMode_InSeamScopeRefusalMatchesUnregisteredName).
+		// this with the SAME text a wholly unregistered name gets, before the
+		// handler ever ran; see TestDirectProtocol_StampNeverOnWire_FilterReEvaluatedAtCallTime).
 		// This is the handler's OWN defense-in-depth check, and D12 forbids it
-		// from naming either origin.
+		// from naming either origin. It is now returned as the handler's own
+		// error (PR #1326 review round 2, chunk C), not a NewToolResultError,
+		// so the envelope KIND also converges on the filter's protocol-level
+		// refusal rather than staying a successful isError:true result.
 		result, err := f.registeredHandler(t, display)(oldOnly, mcp.CallToolRequest{
 			Params: mcp.CallToolParams{Name: display},
 		})
-		require.NoError(t, err)
-		require.True(t, result.IsError,
-			"a token scoped to the old origin must not reach the new one through a stale listing")
-		text := result.Content[0].(mcp.TextContent).Text
+		require.Nil(t, result, "the handler's own defense-in-depth refusal must not be a tool-result")
+		require.Error(t, err, "a token scoped to the old origin must not reach the new one through a stale listing")
+		text := err.Error()
 		// "a__b__c" (the caller-supplied display name, which D12 permits
 		// echoing) happens to contain "a__b" as a raw substring, so the
 		// disclosure check is against the OLD message's own distinguishing
 		// phrasing — naming the origin AS a server, in a sentence that
 		// confirms a scope check fired — not against that coincidental
 		// substring.
-		assert.Equal(t, "tool 'a__b__c' not found", text,
+		assert.Equal(t, "tool 'a__b__c' not found: tool not found", text,
 			"the refusal must be worded exactly like an unregistered name's, never naming the origin actually dispatched to (D12)")
 		assert.NotContains(t, text, "does not have access", "nor disclose that a scope check is what fired")
 		assert.NotContains(t, text, "Owned by", "nor leak the entry's own description")

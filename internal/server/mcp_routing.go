@@ -403,14 +403,46 @@ func (p *MCPProxyServer) directSignatureSuffix(entry *directCatalogEntry) string
 	return "\n" + entry.ToolName + sig.Sig
 }
 
-// directScopeRefusalMessage is the non-disclosing text makeDirectModeHandler's
+// errDirectToolNotFound mirrors mcp-go's own ErrToolNotFound sentinel (the
+// tool-surface counterpart of errPromptNotFound in mcp_direct_scope.go).
+// Wrapping it below reproduces the exact text mcp-go emits when its own
+// tools/call dispatch cannot find the requested name at all
+// (server.go handleToolCall: `fmt.Errorf("tool '%s' not found: %w", name,
+// ErrToolNotFound)`).
+var errDirectToolNotFound = mcpserver.ErrToolNotFound
+
+// directScopeRefusalError builds the non-disclosing error makeDirectModeHandler's
 // OWN profile/server-scope checks return (Spec 105 FR-008 gap G5, D12): it
-// echoes only the caller-supplied display name, mirroring the wording mcp-go
-// itself uses for a name that is not registered at all, and never the
-// canonical owner the handler's entry closed over. See the call sites for why
-// this branch is defense in depth rather than the normal refusal path.
-func directScopeRefusalMessage(displayName string) string {
-	return fmt.Sprintf("tool '%s' not found", displayName)
+// echoes only the caller-supplied display name, wrapping errDirectToolNotFound
+// so the TEXT is byte-identical to what mcp-go's own call-time tool filter
+// re-evaluation emits for a name it does not admit at all — never the
+// canonical owner the handler's entry closed over.
+//
+// It is returned as the HANDLER'S OWN error (the function's second return
+// value), not built with mcp.NewToolResultError, so the JSON-RPC envelope
+// KIND also converges on the filter's: both become a protocol-level error
+// response, never a successful call result with isError:true. (PR #1326
+// review round 2, chunk C: the previous NewToolResultError version was a
+// different envelope KIND — a successful result — from mcp-go's own
+// -32602 protocol error for the identical logical case, not merely
+// different wording.)
+//
+// One residual this cannot close, same as authorizeAggregatedPromptServer's
+// prompt-side twin below: mcp-go always maps a handler-returned error to
+// mcp.INTERNAL_ERROR (-32603), a code this function cannot override, while
+// mcp-go's OWN filter path answers mcp.INVALID_PARAMS (-32602) for the
+// identical text. A probe timed inside the narrow profile/config race this
+// branch exists for (see the call sites' doc comments) could still tell the
+// two apart by that numeric code alone, even though the message and the
+// result KIND can no longer distinguish "authorized-but-blocked" from
+// "genuinely doesn't exist". A ToolHandlerFunc has no way to emit an
+// arbitrary top-level JSON-RPC error code — only mcp-go's own dispatch can —
+// so full byte-for-byte envelope equality is not achievable from here without
+// forking mcp-go's dispatch loop, which this fix does not do. This is
+// documented, not silently accepted: see the PR description for the exact
+// parity this branch provides.
+func directScopeRefusalError(displayName string) error {
+	return fmt.Errorf("tool '%s' not found: %w", displayName, errDirectToolNotFound)
 }
 
 // makeDirectModeHandler creates a handler function for a direct mode tool.
@@ -490,9 +522,9 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// connection is filtered too, and it runs FIRST so a profile-pinned
 		// token cannot reach a server outside its pin through this routing mode.
 		if profileScope != nil && !profileScope.Allows(serverName) {
-			errMsg := directScopeRefusalMessage(entry.DisplayName)
-			p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonProfileScope)
-			return mcp.NewToolResultError(errMsg), nil
+			refusalErr := directScopeRefusalError(entry.DisplayName)
+			p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", refusalErr.Error(), telemetry.BlockReasonProfileScope)
+			return nil, refusalErr
 		}
 
 		// Check auth context for server access and permissions
@@ -505,20 +537,25 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 				// branch is unreachable — mcp-go's WithToolFilter chain
 				// re-evaluates the SAME stamp-based scope decision at call
 				// time and answers the registered-name-not-found envelope
-				// before this handler ever runs (Spec 105 T087/T088) — so it
-				// exists only as defense in depth for a caller that invokes a
-				// registered handler directly, bypassing that re-evaluation
-				// (tests, and any future direct-dispatch path). Its wording
-				// must therefore match what an unregistered name gets: no
-				// owner, no scope reason, just the caller-supplied name
-				// echoed back.
-				errMsg := directScopeRefusalMessage(entry.DisplayName)
+				// before this handler ever runs (Spec 105 T087/T088), OR for
+				// the narrow live profile/config race PR #1326 review round 2
+				// (chunk C) found: the filter's stamp-based check and this
+				// handler's own profileScope/authCtx re-resolution can read a
+				// DIFFERENT active profile when a session's pin changes
+				// between the two evaluations, so the filter can pass a call
+				// this handler then refuses. Its wording must therefore
+				// match what an unregistered name gets: no owner, no scope
+				// reason, just the caller-supplied name echoed back — see
+				// directScopeRefusalError for how far that parity extends
+				// (text and envelope KIND, not the numeric JSON-RPC error
+				// code).
+				refusalErr := directScopeRefusalError(entry.DisplayName)
 				// Direct mode denied these silently: no activity record and,
 				// since issue #969, no availability counter either. Emit the
 				// same policy decision the call_tool_* variants emit at the
 				// equivalent gate so the funnel has no blind spot.
-				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonTokenScope)
-				return mcp.NewToolResultError(errMsg), nil
+				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", refusalErr.Error(), telemetry.BlockReasonTokenScope)
+				return nil, refusalErr
 			}
 
 			// Determine required permission from annotations

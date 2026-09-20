@@ -55,6 +55,23 @@ func TestDirectToolCallabilityBlock_ConfigDeniedTool(t *testing.T) {
 		Enabled:       true,
 		DisabledTools: []string{"delete_repo"},
 	}))
+	// A pre-existing APPROVED record isolates this test's target: the tool
+	// case (config-denied) from the approval-lock gate. Without one, a fresh
+	// direct-mode evaluation with no approval record at all synthesizes an
+	// implicit "pending" record while the quarantine gate is active (Spec 105
+	// FR-009), and — per PR #1326 review round 2 finding #1 — the approval
+	// lock now correctly wins over a plain config denial, matching the
+	// established handleCallToolVariant/handleCallTool precedence
+	// (toolGate.lockStatus checked before the generic/config-denied block).
+	// That combined scenario is covered by
+	// TestDirectBlockReasonKey_AgreesWithResponse_ConfigDeniedAndApprovalLocked
+	// in preflight_telemetry_test.go; this test isolates the config-denied
+	// response body in the case that ambiguity does not arise.
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "delete_repo",
+		Status:     storage.ToolApprovalStatusApproved,
+	}))
 
 	result := proxy.directToolCallabilityBlock(context.Background(), "github", "delete_repo", map[string]interface{}{})
 	require.NotNil(t, result)

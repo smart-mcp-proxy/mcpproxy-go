@@ -435,14 +435,30 @@ func TestDirectModeHandler_ServerAccessDenied(t *testing.T) {
 	// and neither upstream sees the call.
 	//
 	// Spec 105 FR-008 gap G5 (D12): the refusal text must not name "gitlab" —
-	// f.call drives the REGISTERED handler directly, bypassing mcp-go's own
+	// this drives the REGISTERED handler directly, bypassing mcp-go's own
 	// call-time filter re-evaluation (which would answer the unregistered-name
 	// envelope first in real dispatch), so this exercises the handler's own
-	// defense-in-depth check.
-	result := f.call(t, agentCtx([]string{"github"}, []string{auth.PermRead}, ""), "gitlab", "list_repos")
-	f.refused(t, result, "tool 'gitlab__list_repos' not found")
-	assert.NotContains(t, result.Content[0].(mcp.TextContent).Text, "does not have access",
+	// defense-in-depth check. It is returned as the handler's OWN error (PR
+	// #1326 review round 2, chunk C), not a tool-result, so this scenario
+	// cannot use the shared f.call/f.refused helpers (which assert NO Go
+	// error at all — true for every OTHER refusal in this file, but not this
+	// one).
+	display := FormatDirectToolName("gitlab", "list_repos")
+	st, ok := f.proxy.directServer.ListTools()[display]
+	require.Truef(t, ok, "%q must be registered on the direct server", display)
+	req := mcp.CallToolRequest{}
+	req.Params.Name = display
+	req.Params.Arguments = map[string]interface{}{}
+
+	result, err := st.Handler(agentCtx([]string{"github"}, []string{auth.PermRead}, ""), req)
+	require.Nil(t, result, "the handler's own defense-in-depth refusal must not be a tool-result")
+	require.Error(t, err)
+	assert.Equal(t, "tool 'gitlab__list_repos' not found: tool not found", err.Error())
+	assert.NotContains(t, err.Error(), "does not have access",
 		"the refusal must never disclose that a scope check is what fired")
+	for server, up := range f.ups {
+		assert.Equal(t, int64(0), up.count.Load(), "a refused cell must never reach upstream %q (dispatched: %v)", server, up.dispatched())
+	}
 }
 
 func TestDirectModeHandler_AgentWithCorrectPermissions(t *testing.T) {

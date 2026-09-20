@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -76,7 +77,52 @@ func TestDirectProtocol_StampNeverOnWire_FilterReEvaluatedAtCallTime(t *testing.
 	var callEnvelope map[string]interface{}
 	require.NoError(t, json.Unmarshal(callEncoded, &callEnvelope))
 	require.NotNil(t, callEnvelope["error"], "a hidden REGISTERED tool must still be refused at call time: %v", callEnvelope)
+	require.Nil(t, callEnvelope["result"], "a refusal must never carry a result alongside the error")
 	callErr := callEnvelope["error"].(map[string]interface{})
 	assert.Equal(t, float64(mcp.INVALID_PARAMS), callErr["code"])
 	assert.Contains(t, callErr["message"], "not found")
+
+	// PR #1326 review round 2, chunk C/finding #3: full envelope equality, not
+	// just error code + substring. A hidden-but-registered tool's refusal must
+	// be BYTE-IDENTICAL in shape and wording to what mcp-go answers for a name
+	// that was never registered at all — the whole point of D12 is that a
+	// caller cannot distinguish "authorized-but-blocked" from "genuinely
+	// doesn't exist".
+	unregisteredEncoded, err := json.Marshal(f.proxy.directServer.HandleMessage(aOnly,
+		[]byte(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"totally__unregistered","arguments":{}}}`)))
+	require.NoError(t, err)
+
+	var unregisteredEnvelope map[string]interface{}
+	require.NoError(t, json.Unmarshal(unregisteredEncoded, &unregisteredEnvelope))
+	require.NotNil(t, unregisteredEnvelope["error"], "a genuinely unregistered name must be refused too: %v", unregisteredEnvelope)
+	require.Nil(t, unregisteredEnvelope["result"])
+	unregisteredErr := unregisteredEnvelope["error"].(map[string]interface{})
+
+	// Only jsonrpc/id/error may appear in either envelope — id legitimately
+	// differs (3 vs 4, the request's own id echoed back), so it is excluded
+	// from the equality check below rather than asserted equal.
+	assert.ElementsMatchf(t, mapKeysForTest(callEnvelope), mapKeysForTest(unregisteredEnvelope),
+		"the top-level envelope shape (jsonrpc/id/error, no result) must match exactly")
+	assert.ElementsMatchf(t, mapKeysForTest(callErr), mapKeysForTest(unregisteredErr),
+		"the error object's own field set (code/message, no extra data) must match exactly")
+
+	assert.Equal(t, unregisteredErr["code"], callErr["code"],
+		"a hidden-but-registered tool's refusal code must be byte-identical to a genuinely unregistered name's")
+	// The message text is identical once the caller-supplied name is
+	// substituted back in — that substitution is the ONLY difference D12
+	// permits (the caller-supplied name may be echoed), never a distinct
+	// scope-reason phrase, code, or extra field.
+	wantMessage := strings.Replace(unregisteredErr["message"].(string), "totally__unregistered", "b__read", 1)
+	assert.Equal(t, wantMessage, callErr["message"],
+		"a hidden-but-registered tool's refusal text must be byte-identical to a genuinely unregistered name's, with only the echoed name differing")
+}
+
+// mapKeysForTest returns m's top-level keys, for an order-independent
+// envelope-shape comparison via assert.ElementsMatch.
+func mapKeysForTest(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }

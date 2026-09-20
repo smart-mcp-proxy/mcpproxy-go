@@ -454,12 +454,30 @@ func TestUnstampedPrompt_WithheldFromListAndGet_ForAdminAndAgent(t *testing.T) {
 	proxy.config.EnablePrompts = true
 
 	unstamped := mcp.Prompt{Name: "ghost__unstamped"}
-	proxy.server.SetPrompts(mcpserver.ServerPrompt{
-		Prompt: unstamped,
-		Handler: func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-			return &mcp.GetPromptResult{Messages: []mcp.PromptMessage{}}, nil
+	// Positive control (PR #1326 review round 2, chunk D/E): a prompt WITH a
+	// genuine registration identity, registered alongside the withheld one.
+	// Without this the test can pass for the wrong reason — if
+	// prompts/list or prompts/get were broken entirely (returning nothing,
+	// or erroring on every request), the unstamped prompt would still be
+	// "absent" and every prompts/get would still be "refused", and the test
+	// would say nothing went wrong.
+	stamped := aggregatedPromptForTest("real", "control")
+	proxy.server.SetPrompts(
+		mcpserver.ServerPrompt{
+			Prompt: unstamped,
+			Handler: func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				return &mcp.GetPromptResult{Messages: []mcp.PromptMessage{}}, nil
+			},
 		},
-	})
+		mcpserver.ServerPrompt{
+			Prompt: stamped,
+			Handler: func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				return &mcp.GetPromptResult{Messages: []mcp.PromptMessage{
+					{Role: mcp.RoleUser, Content: mcp.TextContent{Text: "control"}},
+				}}, nil
+			},
+		},
+	)
 
 	agentCtxForTest := auth.WithAuthContext(context.Background(), &auth.AuthContext{
 		Type:           auth.AuthTypeAgent,
@@ -484,11 +502,31 @@ func TestUnstampedPrompt_WithheldFromListAndGet_ForAdminAndAgent(t *testing.T) {
 			listedNames = append(listedNames, pr.(map[string]interface{})["name"].(string))
 		}
 		assert.NotContainsf(t, listedNames, "ghost__unstamped", "%s: an unstamped prompt is withheld from EVERYONE (SC-005)", name)
+		// Positive control: the properly-stamped sibling prompt IS listed,
+		// proving prompts/list is not simply returning an empty/broken result
+		// that would vacuously satisfy the NotContains check above.
+		assert.Containsf(t, listedNames, stamped.Name, "%s: a properly stamped prompt must still be listed", name)
 
 		getEncoded, err := json.Marshal(proxy.server.HandleMessage(ctx, []byte(`{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"ghost__unstamped"}}`)))
 		require.NoErrorf(t, err, "%s", name)
 		var getEnvelope map[string]interface{}
 		require.NoError(t, json.Unmarshal(getEncoded, &getEnvelope))
-		assert.NotNilf(t, getEnvelope["error"], "%s: prompts/get must refuse an unstamped prompt: %v", name, getEnvelope)
+		require.NotNilf(t, getEnvelope["error"], "%s: prompts/get must refuse an unstamped prompt: %v", name, getEnvelope)
+		unstampedGetErr := getEnvelope["error"].(map[string]interface{})
+		assert.Containsf(t, unstampedGetErr["message"], "not found",
+			"%s: the refusal must be the absent-equivalent wording, not some other failure", name)
+
+		// Positive control: prompts/get on the properly-stamped sibling must
+		// actually succeed and return its content — proving prompts/get is
+		// not simply erroring on every request, which would vacuously
+		// satisfy the refusal assertion above.
+		controlGetEncoded, err := json.Marshal(proxy.server.HandleMessage(ctx,
+			[]byte(`{"jsonrpc":"2.0","id":5,"method":"prompts/get","params":{"name":"`+stamped.Name+`"}}`)))
+		require.NoErrorf(t, err, "%s", name)
+		var controlGetEnvelope map[string]interface{}
+		require.NoError(t, json.Unmarshal(controlGetEncoded, &controlGetEnvelope))
+		require.Nilf(t, controlGetEnvelope["error"], "%s: prompts/get on the stamped control prompt must succeed: %v", name, controlGetEnvelope)
+		controlMessages := controlGetEnvelope["result"].(map[string]interface{})["messages"].([]interface{})
+		require.Lenf(t, controlMessages, 1, "%s", name)
 	}
 }

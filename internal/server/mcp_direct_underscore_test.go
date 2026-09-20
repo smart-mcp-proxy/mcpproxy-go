@@ -84,9 +84,9 @@ func TestDirectUnderscoreServer_SteadyState(t *testing.T) {
 			result, err := f.registeredHandler(t, "__a__review")(aOnly, mcp.CallToolRequest{
 				Params: mcp.CallToolParams{Name: "__a__review"},
 			})
-			require.NoError(t, err)
-			require.True(t, result.IsError)
-			assert.Equal(t, "tool '__a__review' not found", result.Content[0].(mcp.TextContent).Text,
+			require.Nil(t, result, "the handler's own defense-in-depth refusal must not be a tool-result")
+			require.Error(t, err)
+			assert.Equal(t, "tool '__a__review' not found: tool not found", err.Error(),
 				"withheld with the same non-disclosing wording an unregistered name gets, never naming __a (D12)")
 		})
 	}

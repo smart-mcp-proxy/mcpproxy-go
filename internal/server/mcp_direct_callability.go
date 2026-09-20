@@ -157,17 +157,62 @@ func (p *MCPProxyServer) directToolCallabilityBlockWithReason(ctx context.Contex
 	return p.directToolCallabilityResult(ctx, decision, args), directBlockReasonKey(decision)
 }
 
-// directBlockReasonKey classifies a direct-mode callability block onto the
-// closed telemetry.BlockReason* enum. The branches mirror
-// directToolCallabilityResult exactly, so the counted reason always matches the
-// payload the caller was handed.
-func directBlockReasonKey(decision directCallabilityDecision) string {
+// directRefusalKind is the ONE precedence order a direct-mode callability
+// block resolves to, shared by directBlockReasonKey (telemetry) and
+// directToolCallabilityResult (the response body) so the two can never
+// disagree about which gate "fired" for a tool that trips more than one at
+// once (PR #1326 review round 2, chunk B: a tool can be BOTH config-denied
+// AND pending/changed approval at the same time, and the two functions used
+// to classify that case differently — the response said config-denied, the
+// telemetry said pending).
+//
+// The order mirrors the established dispatch precedence every OTHER path
+// already uses (handleCallToolVariant / handleCallTool in mcp.go, via
+// toolGate.lockStatus): quarantine, then the approval lock (pending/changed),
+// then the generic/config-denied block. Direct mode's RESPONSE function had
+// drifted from that precedence (config-denied was checked before the
+// approval lock); this converges it rather than inventing a third order.
+type directRefusalKind int
+
+const (
+	directRefusalNone directRefusalKind = iota
+	directRefusalQuarantined
+	directRefusalPending
+	directRefusalChanged
+	directRefusalConfigDenied
+	directRefusalGeneric
+)
+
+// classifyDirectRefusal is the single source of truth for which refusal a
+// blocked directCallabilityDecision represents. Both directBlockReasonKey and
+// directToolCallabilityResult switch on its result instead of re-deriving
+// their own branch order, so they cannot drift apart again.
+func classifyDirectRefusal(decision directCallabilityDecision) directRefusalKind {
 	switch {
 	case decision.serverConfig != nil && decision.serverConfig.Quarantined:
-		return telemetry.BlockReasonServerQuarantined
+		return directRefusalQuarantined
 	case decision.approvalStatus == storage.ToolApprovalStatusPending:
-		return telemetry.BlockReasonToolPendingApproval
+		return directRefusalPending
 	case decision.approvalStatus == storage.ToolApprovalStatusChanged:
+		return directRefusalChanged
+	case decision.configDenied:
+		return directRefusalConfigDenied
+	default:
+		return directRefusalGeneric
+	}
+}
+
+// directBlockReasonKey classifies a direct-mode callability block onto the
+// closed telemetry.BlockReason* enum, from the SAME classification
+// directToolCallabilityResult uses, so the counted reason always matches the
+// payload the caller was handed.
+func directBlockReasonKey(decision directCallabilityDecision) string {
+	switch classifyDirectRefusal(decision) {
+	case directRefusalQuarantined:
+		return telemetry.BlockReasonServerQuarantined
+	case directRefusalPending:
+		return telemetry.BlockReasonToolPendingApproval
+	case directRefusalChanged:
 		return telemetry.BlockReasonToolChanged
 	default:
 		// Disabled server, config-denied tool, per-tool disable, and the
@@ -312,22 +357,16 @@ func (e *directCallabilityEvaluator) getToolApproval(serverName, toolName string
 }
 
 func (p *MCPProxyServer) directToolCallabilityResult(ctx context.Context, decision directCallabilityDecision, args map[string]interface{}) *mcp.CallToolResult {
-	if decision.serverConfig != nil && decision.serverConfig.Quarantined {
+	switch classifyDirectRefusal(decision) {
+	case directRefusalQuarantined:
 		return p.handleQuarantinedToolCall(ctx, decision.serverName, decision.toolName, args)
-	}
-
-	if decision.configDenied {
+	case directRefusalPending:
+		return toolPendingApprovalResult(decision.serverName, decision.toolName, decision.approval)
+	case directRefusalChanged:
+		return toolChangedApprovalResult(decision.serverName, decision.toolName, decision.approval)
+	case directRefusalConfigDenied:
 		return mcp.NewToolResultError(blockedToolMessageFor(true))
+	default:
+		return mcp.NewToolResultError(p.blockedToolMessage(decision.serverName, decision.toolName))
 	}
-
-	if decision.approval != nil {
-		switch decision.approvalStatus {
-		case storage.ToolApprovalStatusPending:
-			return toolPendingApprovalResult(decision.serverName, decision.toolName, decision.approval)
-		case storage.ToolApprovalStatusChanged:
-			return toolChangedApprovalResult(decision.serverName, decision.toolName, decision.approval)
-		}
-	}
-
-	return mcp.NewToolResultError(p.blockedToolMessage(decision.serverName, decision.toolName))
 }
