@@ -357,14 +357,26 @@ stdio) keep every capability they have today; the exceptions where an
 administrator's answer deliberately differs from a token's are named and tested
 one by one.
 
-> **Rollout status.** This invariant is being landed surface by surface as the
-> agent-scope hardening series (Spec 105) merges; each release's notes list the
-> surfaces it closes. The rules on this page that are stated as present-tense
-> guarantees — the stored-script rules below, the REST doors listed above and
-> the `read_cache` rule — are enforced by the version that documents them. Until
-> the series is complete, a listing or suggestion on a surface not yet covered
-> can still name an out-of-scope resource; treat that as a known gap, not a
-> configuration mistake.
+> **Rollout status.** The agent-scope hardening series (Spec 105, nine PRs —
+> `A` exact target-tier identity, `B` cache legacy/internal-entry refusal,
+> `D` selectable-profile predicate, `E` per-record log attribution, `H0`
+> stored-script enumeration, `C` scoped `retrieve_tools`, `F` direct-surface
+> publication identity, `G` scope-first refusal shapes, and `H1` — the
+> regression suite this page's guarantees are proven against, covering
+> User Stories 1–3 by id) has shipped its code for every functional
+> requirement (FR-001 through FR-014) across those PRs, and every acceptance
+> scenario in User Stories 1–3 now has a proving test registered by id
+> (`TestScopeCoverage_EveryUserStoryScenario`,
+> `internal/server/scope_differential_test.go`). Most of those tests re-run
+> the dedicated, per-FR differential fixture each PR shipped for its own
+> gaps (e.g. `mcp_retrieve_scope_test.go` for FR-005, `mcp_direct_skew_test.go`
+> for FR-008); a smaller number run directly against the general two-fixture
+> `{a, b, a__b}` harness this file introduces. The rules on this page are
+> stated as present-tense guarantees on that basis, not because every one is
+> proven through the general three-server harness specifically. A hidden
+> server can still influence what an authorized caller experiences only
+> through the **retained, documented effects** named below — never by
+> being named, listed or dispatched to.
 
 > **Who counts as an administrator.** The admin API key, the tray over the
 > local socket, native stdio, an in-process caller — and, under the default
