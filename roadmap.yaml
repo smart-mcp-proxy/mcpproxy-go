@@ -429,13 +429,15 @@ epics:
         depends_on: []
       - id: scope-retrieve-tools
         title: "FR-005: retrieve_tools filters by scope BEFORE limiting; indexed counts, usage ranking, debug output and session risk computed over the authorized population only"
-        status: todo
+        status: done
         priority: P1
+        pr: "#1325"
         depends_on: []
       - id: scope-direct-publication
         title: "FR-008: direct-surface definitions take owner and tier from their own registration identity at every publication seam, both skew directions, full and deferred"
-        status: todo
+        status: done
         priority: P1
+        pr: "#1326"
         depends_on: []
       - id: scope-refusal-shapes
         title: "FR-010: scope-first refusal precedence; dispatch denials and 'available servers' never name hidden servers; describe_tool not-found and alias resolution computed over the authorized corpus"
