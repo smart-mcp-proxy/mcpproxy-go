@@ -1002,6 +1002,48 @@ func (m *Manager) GetToolStats(topN int) ([]map[string]interface{}, error) {
 	return result, nil
 }
 
+// GetToolStatsFiltered is GetToolStats restricted to records keep admits
+// (Spec 105 FR-005 G2): the sort-then-cut-to-topN happens AFTER filtering,
+// unlike GetToolStatistics/GetToolStats which cut first — a caller whose
+// authorized population excludes some records must never let a hidden or
+// unapproved tool's usage count evict an authorized tool from the topN
+// window. keep receives the full "server:tool" name exactly as recorded by
+// IncrementToolUsage. A nil keep behaves like GetToolStats (nothing filtered).
+func (m *Manager) GetToolStatsFiltered(keep func(toolName string) bool, topN int) ([]map[string]interface{}, error) {
+	m.mu.RLock()
+	records, err := m.db.ListToolStats()
+	m.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]*ToolStatRecord, 0, len(records))
+	for _, record := range records {
+		if keep == nil || keep(record.ToolName) {
+			filtered = append(filtered, record)
+		}
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].Count > filtered[j].Count
+	})
+	if topN > 0 && len(filtered) > topN {
+		filtered = filtered[:topN]
+	}
+
+	// Non-nil so usage_summary.top_tools serializes as [] — never null
+	// (issue #953: strict MCP clients crash iterating a null array).
+	result := make([]map[string]interface{}, 0, len(filtered))
+	for _, record := range filtered {
+		result = append(result, map[string]interface{}{
+			"tool_name": record.ToolName,
+			"count":     record.Count,
+		})
+	}
+
+	return result, nil
+}
+
 // Server Identity Management
 
 // RegisterServerIdentity registers or updates a server identity

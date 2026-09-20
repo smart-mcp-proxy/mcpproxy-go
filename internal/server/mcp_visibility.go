@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
@@ -207,6 +209,49 @@ func (p *MCPProxyServer) serverInScope(authCtx *auth.AuthContext, profileScope *
 		return false
 	}
 	return profileScope.Allows(serverName)
+}
+
+// scopedIndexedToolCount returns the number of indexed tools belonging to
+// servers discoverable admits (Spec 105 FR-005 G4): a scoped caller's
+// `debug.total_indexed_tools` must count its own authorized population, not
+// the whole fleet's document count, regardless of whether the search that
+// produced the response ran against the shared index or an already-scoped
+// per-profile one — this always re-derives the count from the shared index's
+// server_name facet, so the two paths can never disagree about the count for
+// the identical effective scope.
+func (p *MCPProxyServer) scopedIndexedToolCount(discoverable func(serverName string) bool) int {
+	count, err := p.index.ScopedDocumentCount(discoverable)
+	if err != nil {
+		p.logger.Warn("Failed to get scoped document count", zap.Error(err))
+		return 0
+	}
+	if count > 0x7FFFFFFF { // Check for potential overflow
+		return 0x7FFFFFFF
+	}
+	return int(count)
+}
+
+// usageStatEligible reports whether a recorded tool-usage stat for
+// (serverName, toolName) belongs to the CURRENT authorized population and is
+// fully approved (Spec 105 FR-005 G2): a scoped caller's usage_summary must
+// exclude a stale record for a tool that was removed, hidden by scope, or is
+// still pending/changed review. Population membership alone would admit a
+// pending tool (it is indexed); approval alone never checks that the tool
+// still exists (mcp_direct_callability.go) — both are required. Deliberately
+// stricter than indexedToolVisible (the SEARCH gate, which stays permissive
+// for pending/changed tools per FR-006 byte-identity): usage ranking is not
+// search, and a still-under-review tool should not be recommended by name.
+func (p *MCPProxyServer) usageStatEligible(authCtx *auth.AuthContext, profileScope *profile.ProfileScope, serverName, toolName string) bool {
+	if !p.serverInScope(authCtx, profileScope, serverName) {
+		return false
+	}
+	if p.lookupIndexedTool(serverName, toolName) == nil {
+		return false
+	}
+	if !p.isExactToolCallable(serverName, toolName) {
+		return false
+	}
+	return p.describeGateReason(serverName, toolName) == ""
 }
 
 // toolIndexed reports whether the tool is present in the shared search index

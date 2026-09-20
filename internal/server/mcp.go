@@ -1855,31 +1855,72 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// resolved one.
 	producer := p.cacheAuthorizationWith(ctx, profileName, profileScope, profileIdx)
 	searchIndex := p.index
+	// sharedIndexFallback is true only when a profile IS in effect but its
+	// physical per-profile index could not be opened, so searchIndex stays the
+	// shared (whole-fleet) index instead of a store already limited to the
+	// profile's own servers (Spec 105 FR-005 D3).
+	sharedIndexFallback := false
 	if profileName != "" && !profileScope.DeniesAll() {
 		if pIdx, perr := p.index.ForProfile(profileName); perr == nil && pIdx != nil {
 			searchIndex = pIdx
 		} else if perr != nil {
+			sharedIndexFallback = true
 			p.logger.Warn("per-profile index unavailable; falling back to shared index with post-filter",
 				zap.String("profile", profileName), zap.Error(perr))
 		}
 	}
 
-	// Perform search using the resolved index manager
-	results, err := searchIndex.Search(query, limit)
+	// Spec 028 + blocked tool semantics: filter results to only include callable tools
+	// from servers the agent can access. Disabled/blocked tools are treated as non-existent
+	// for runtime discovery. The auth context is hoisted out of the search and the loop
+	// below because it's a per-request value and AuthContextFromContext does a
+	// context.Value lookup we don't want to repeat per result.
+	authCtx := auth.AuthContextFromContext(ctx)
+	// Spec 057 / Profiles v2: profileScope was resolved above (token pin > URL >
+	// session) and filters independently of agent-scope (nil = allow all).
+
+	// serverDiscoverable applies the agent-scope (Spec 049 FR-007) and profile
+	// (Spec 057) filters BEFORE classification so an agent never learns a tool
+	// exists on a server it cannot access. It delegates to the shared
+	// visibility resolver's scope step (Spec 085, mcp_visibility.go) — shared
+	// by the search below, the callable-result loop, the quarantined-tool
+	// discovery pass, and describe_tool, so they never drift.
+	serverDiscoverable := func(serverName string) bool {
+		return p.serverInScope(authCtx, profileScope, serverName)
+	}
+
+	// Spec 105 FR-005 G1: a scoped caller's search MUST filter to its
+	// authorized population BEFORE the ranked result is cut to `limit` — an
+	// out-of-scope hit that outranks an authorized one must never displace it
+	// from the window. Search(query, limit) alone cannot do this: it ranks and
+	// cuts over the WHOLE corpus a physical index holds, and the post-filter
+	// loop below runs only after the cut. SearchToolsScoped instead filters
+	// the SAME ranked stream through serverDiscoverable before collecting
+	// `limit` hits (index/bleve.go), so it is correct regardless of which
+	// physical index (shared or per-profile) backs the search — a per-profile
+	// index still needs it when the caller's OWN token scope is narrower than
+	// the profile's server set.
+	//
+	// A profile-scoped administrator on the shared-index fallback gets the
+	// same treatment (D3, SC-005 named exception): with no per-profile index
+	// to rely on, the shared search must filter before the cut too, or a
+	// `limit:1` request whose top hit sits outside the profile would return an
+	// empty page instead of the best authorized hit. Every OTHER administrator
+	// path (unprofiled, or profiled with a working per-profile index) keeps
+	// plain Search — byte-for-byte with the pre-105 behaviour.
+	useScopedSearch := auth.IsScopedCaller(ctx) || (profileName != "" && sharedIndexFallback)
+
+	var results []*config.SearchResult
+	if useScopedSearch {
+		results, err = searchIndex.SearchToolsScoped(query, limit, serverDiscoverable)
+	} else {
+		results, err = searchIndex.Search(query, limit)
+	}
 	if err != nil {
 		p.logger.Error("Search failed", zap.String("query", query), zap.Error(err))
 		p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
 	}
-
-	// Spec 028 + blocked tool semantics: filter results to only include callable tools
-	// from servers the agent can access. Disabled/blocked tools are treated as non-existent
-	// for runtime discovery. The auth context is hoisted out of the loop because it's a
-	// per-request value and AuthContextFromContext does a context.Value lookup we don't
-	// want to repeat per result.
-	authCtx := auth.AuthContextFromContext(ctx)
-	// Spec 057 / Profiles v2: profileScope was resolved above (token pin > URL >
-	// session) and filters independently of agent-scope (nil = allow all).
 
 	// Spec 049: opt-in discovery of locked tools. When false (default) the
 	// behavior below is byte-for-byte identical to before — disabled tools are
@@ -1889,16 +1930,6 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	if includeDisabled {
 		p.recordIncludeDisabled()
 		args["include_disabled"] = true
-	}
-
-	// serverDiscoverable applies the agent-scope (Spec 049 FR-007) and profile
-	// (Spec 057) filters BEFORE classification so an agent never learns a tool
-	// exists on a server it cannot access. It delegates to the shared
-	// visibility resolver's scope step (Spec 085, mcp_visibility.go) — shared
-	// by the callable-result loop, the quarantined-tool discovery pass below,
-	// and describe_tool, so they never drift.
-	serverDiscoverable := func(serverName string) bool {
-		return p.serverInScope(authCtx, profileScope, serverName)
 	}
 
 	var callableResults []*config.SearchResult
@@ -2157,7 +2188,17 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if sup := p.mainServer.runtime.Supervisor(); sup != nil {
 			snapshot := sup.StateView().Snapshot()
-			risk := analyzeSessionRisk(snapshot)
+			// Spec 105 FR-005 G3: a scoped caller's session_risk must reflect
+			// only its own authorized servers' tool annotations — otherwise the
+			// level (and the lethal-trifecta verdict) leaks the existence and
+			// shape of a hidden server's tools. Administrators are unaffected
+			// (not a named SC-005 exception): they keep the whole-fleet view.
+			var risk SessionRisk
+			if auth.IsScopedCaller(ctx) {
+				risk = analyzeSessionRiskScoped(snapshot, serverDiscoverable)
+			} else {
+				risk = analyzeSessionRisk(snapshot)
+			}
 			includeWarning := false
 			if p.config != nil && p.config.ToolResponseSessionRiskWarning {
 				includeWarning = true
@@ -2171,8 +2212,18 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 
 	// Add debug information if requested
 	if debugMode {
+		// Spec 105 FR-005 G4: total_indexed_tools must count the scoped
+		// caller's own authorized population, not the whole fleet's document
+		// count — regardless of whether search itself ran against the shared
+		// index or an already-scoped per-profile one (scopedIndexedToolCount
+		// re-derives it from the shared index's server_name facet, so both
+		// paths agree). Administrators are unaffected (not an SC-005 exception).
+		totalIndexedTools := p.getIndexedToolCount()
+		if auth.IsScopedCaller(ctx) {
+			totalIndexedTools = p.scopedIndexedToolCount(serverDiscoverable)
+		}
 		response["debug"] = map[string]interface{}{
-			"total_indexed_tools": p.getIndexedToolCount(),
+			"total_indexed_tools": totalIndexedTools,
 			"search_backend":      "BM25",
 			"query_analysis":      p.analyzeQuery(query),
 			"limit_applied":       limit,
@@ -2186,8 +2237,30 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 
 	// Add tool statistics summary if requested
 	if includeStats {
-		stats, err := p.storage.GetToolStats(10)
-		if err == nil {
+		// Spec 105 FR-005 G2: a scoped caller's usage ranking must be computed
+		// over its authorized population's APPROVED tools only — a stale usage
+		// record for a tool that was removed, hidden, or is still pending
+		// review must never resurface. Population membership alone would admit
+		// a pending tool (it is indexed); approval alone never checks the tool
+		// still exists (mcp_direct_callability.go) — both gates are required.
+		// The sort-then-cut happens AFTER filtering (GetToolStatsFiltered), so
+		// a used-but-hidden tool can never evict an authorized one from the
+		// top-10 window. Administrators are unaffected (not an SC-005
+		// exception): GetToolStats(10) stays byte-for-byte, quarantine-blind.
+		var stats []map[string]interface{}
+		var statsErr error
+		if auth.IsScopedCaller(ctx) {
+			stats, statsErr = p.storage.GetToolStatsFiltered(func(fullToolName string) bool {
+				serverName, rawToolName, ok := splitServerTool(fullToolName)
+				if !ok {
+					return false
+				}
+				return p.usageStatEligible(authCtx, profileScope, serverName, rawToolName)
+			}, 10)
+		} else {
+			stats, statsErr = p.storage.GetToolStats(10)
+		}
+		if statsErr == nil {
 			response["usage_summary"] = map[string]interface{}{
 				"top_tools": stats,
 			}
