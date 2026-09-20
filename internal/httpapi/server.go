@@ -2374,6 +2374,26 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Infow("Server added successfully", "server", req.Name, "quarantined", quarantined)
+	if s.auditSink != nil && serverConfig.AnnotationOverrides != nil && len(serverConfig.AnnotationOverrides) > 0 {
+		afterMap := httpAnnotationOverridesToAuditMap(serverConfig.AnnotationOverrides)
+		if len(afterMap) > 0 {
+			if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
+				Ts:        time.Now(),
+				RequestID: reqcontext.GetRequestID(r.Context()),
+				Origin:    httpAuditOriginFromContext(r.Context()),
+				Source:    httpAuditSourceFromContext(r.Context()),
+				Caller:    httpAuditCallerFromContext(r.Context()),
+				Server:    req.Name,
+				Action:    "annotation_override",
+				Before:    nil,
+				After:     afterMap,
+			}); lerr == nil {
+				if raw, jerr := line.JSON(); jerr == nil {
+					_ = s.auditSink.Write(raw)
+				}
+			}
+		}
+	}
 	s.writeSuccess(w, contracts.ServerActionResponse{
 		Server:  req.Name,
 		Action:  "add",

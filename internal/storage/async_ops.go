@@ -211,7 +211,7 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		QueueSize:                serverConfig.QueueSize,
 		QueueTimeout:             serverConfig.QueueTimeout,
 		ExposePrompts:            serverConfig.ExposePrompts,
-		AnnotationOverrides:      serverConfig.AnnotationOverrides,
+		AnnotationOverrides:      config.CloneAnnotationOverrides(serverConfig.AnnotationOverrides),
 	}
 	return am.db.SaveUpstream(record)
 }

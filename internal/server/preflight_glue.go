@@ -115,6 +115,10 @@ func (p *MCPProxyServer) evaluatePreflight(
 		Tier:      tier,
 		Scope:     scope,
 		Filters:   filters,
+		// Thread the per-server overrides into the evaluator so the
+		// annotation filters judge effective (not raw upstream) hints, even
+		// for pure-unit IndexReaders that return unenriched annotations.
+		AnnotationOverrides: annotationOverridesByServer(cfg),
 		// With a real snapshot in hand, a configured server missing from it is
 		// state the supervisor has not published yet (startup / reconcile /
 		// config-add windows) — the evaluator answers the retryable
@@ -378,6 +382,25 @@ func bareToolName(name string) string {
 		return name[idx+1:]
 	}
 	return name
+}
+
+// annotationOverridesByServer projects the live config's per-server
+// annotation_overrides for the preflight evaluator (nil when none).
+func annotationOverridesByServer(cfg *config.Config) map[string]map[string]*config.ToolAnnotations {
+	if cfg == nil {
+		return nil
+	}
+	var out map[string]map[string]*config.ToolAnnotations
+	for _, sc := range cfg.Servers {
+		if sc == nil || sc.AnnotationOverrides == nil {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]map[string]*config.ToolAnnotations)
+		}
+		out[sc.Name] = sc.AnnotationOverrides
+	}
+	return out
 }
 
 func (r *preflightIndexReader) IndexedServerNames() ([]string, error) {
