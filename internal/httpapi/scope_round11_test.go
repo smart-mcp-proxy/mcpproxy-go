@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -33,9 +34,8 @@ import (
 const (
 	activationClientAlpha = "cursor-on-operators-laptop"
 	activationClientBeta  = "claude-desktop-on-operators-laptop"
-	// A count no other field of a /status response can produce: the sibling
-	// numbers are unix timestamps and single-digit server counts, so a raw-body
-	// "4711" assertion cannot pass for an unrelated reason.
+	// A distinctive count whose complete JSON number token is checked below.
+	// The bare digits may also occur inside an unrelated unix timestamp.
 	activationCalls24h    = 4711
 	activationSavedBucket = "10k_100k"
 )
@@ -119,7 +119,8 @@ func TestGetStatus_ActivationBlockIsOperatorOnly(t *testing.T) {
 	body := agent.Body.String()
 	assert.NotContains(t, body, activationClientAlpha, "MCP-client inventory leaked to a scoped caller")
 	assert.NotContains(t, body, activationClientBeta, "MCP-client inventory leaked to a scoped caller")
-	assert.NotContains(t, body, "4711", "exact deployment-wide retrieve_tools count leaked to a scoped caller")
+	assert.NotRegexp(t, fmt.Sprintf(`":%d[,}]`, activationCalls24h), body,
+		"exact deployment-wide retrieve_tools count leaked to a scoped caller")
 	assert.NotContains(t, body, activationSavedBucket, "deployment-wide tokens-saved bucket leaked to a scoped caller")
 	// Key names too, so a projection that kept the numbers under a renamed or
 	// re-nested key would still fail.
