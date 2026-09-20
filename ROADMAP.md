@@ -242,8 +242,8 @@ graph LR
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class scope_fix_target_tier,scope_fix_tail_log,scope_fix_set_profile,scope_fix_read_cache,scope_fix_prompts_profile_url,scope_retrieve_tools,scope_direct_publication,scope_selectable_profile_predicate,scope_cache_legacy_invalidation,scope_log_attribution,scope_target_identity_producers,scope_fix_stored_script_admin done;
-  class scope_refusal_shapes,scope_regression_suite todo;
+  class scope_fix_target_tier,scope_fix_tail_log,scope_fix_set_profile,scope_fix_read_cache,scope_fix_prompts_profile_url,scope_retrieve_tools,scope_direct_publication,scope_refusal_shapes,scope_selectable_profile_predicate,scope_cache_legacy_invalidation,scope_log_attribution,scope_target_identity_producers,scope_fix_stored_script_admin done;
+  class scope_regression_suite todo;
 ```
 
 | Task | Status | Refs |
@@ -255,7 +255,7 @@ graph LR
 | FR-006 + FR-004 (deleted pin): aggregated prompts authorized by canonical registration owner; profile URL / set_profile stop enumerating on a deleted pin | 🟢 Done | #1227 |
 | FR-005: retrieve_tools filters by scope BEFORE limiting; indexed counts, usage ranking, debug output and session risk computed over the authorized population only | 🟢 Done | #1325 |
 | FR-008: direct-surface definitions take owner and tier from their own registration identity at every publication seam, both skew directions, full and deferred | 🟢 Done | #1326 |
-| FR-010: scope-first refusal precedence; dispatch denials and 'available servers' never name hidden servers; describe_tool not-found and alias resolution computed over the authorized corpus | ⚪ Todo | — |
+| FR-010: scope-first refusal precedence; dispatch denials and 'available servers' never name hidden servers; describe_tool not-found and alias resolution computed over the authorized corpus | 🟢 Done | #1328 |
 | FR-003/FR-004 remainder: selectable-profile predicate for UNPINNED tokens on /mcp/p/<slug>, /mcp/p, /mcp/p/ and set_profile; identical status+body across missing / deleted / not-selectable / pin-mismatch / no-profiles (#1225 + #1227 follow-up lists) | 🟢 Done | #1283 |
 | FR-002 + FR-001 remainder: legacy/unstamped and internal (registry, guesser) cache entries refused for every caller and durably invalidated; monotone recursive provenance; existence-non-disclosing refusal on MCP and REST (#1226 follow-up list) | 🟢 Done | #1282 |
 | FR-007 remainder: per-record canonical log ownership (a/b vs a_b share one file), filter-before-limit + authorized lines_returned, subject-bound OAuth-callback logging, canonical container ownership in Docker cleanup (#1224 follow-up list) | 🟢 Done | #1284 |
