@@ -644,6 +644,89 @@ func TestExecuteAuthContext_ServerAccessDenied(t *testing.T) {
 	}
 }
 
+// Spec 105 PR G, FR-010 gap G7 — codex round-1 review MUST-FIX: an
+// administrator (or admin_user) carrying a profile restriction must keep the
+// PRE-fix ErrorCodeServerNotAllowed / "server not allowed: ..." wording, not
+// the agent-token ErrorCodeAccessDenied / "token does not have access ..."
+// body the unified profile∩token check introduced. AuthInfo is populated for
+// EVERY authenticated HTTP caller (mcp_code_execution.go's
+// applyProfileScopeToExecution), administrators included, so `authInfo !=
+// nil` alone is not "this is an agent token" — only Type=="agent" (or
+// "user") is a real token with its own AllowedServers to intersect against
+// the profile map; Type=="admin"/"admin_user" has no such token, and
+// resolveDispatchGates must treat it exactly like the no-AuthInfo
+// stdio/in-process case.
+func TestExecuteAuthContext_ProfileScopedAdmin_KeepsServerNotAllowedWording(t *testing.T) {
+	for _, adminType := range []string{"admin", "admin_user"} {
+		t.Run(adminType, func(t *testing.T) {
+			caller := newMockToolCaller()
+			code := `
+				var res = call_tool("weather", "get_forecast", {});
+				({ ok: res.ok, code: res.error ? res.error.code : null, msg: res.error ? res.error.message : null })
+			`
+			opts := ExecutionOptions{
+				// The profile restricts the sandbox to "github" only —
+				// "weather" is outside the profile, not the (nonexistent)
+				// token scope.
+				RestrictToAllowed: true,
+				AllowedServers:    []string{"github"},
+				AuthContext: &AuthInfo{
+					Type: adminType,
+					// An admin's AuthInfo carries no AllowedServers/
+					// Permissions restriction of its own (CanAccessServer/
+					// HasPermission both short-circuit true for this Type) —
+					// exactly what makes this cell distinguishable from an
+					// agent token's.
+				},
+			}
+
+			result := Execute(context.Background(), caller, code, opts)
+			if !result.Ok {
+				t.Fatalf("expected ok=true (the script itself must run), got error: %v", result.Error)
+			}
+			resultMap := result.Value.(map[string]interface{})
+			if resultMap["ok"] != false {
+				t.Fatalf("expected the nested call to be refused, got ok=%v", resultMap["ok"])
+			}
+			if resultMap["code"] != string(ErrorCodeServerNotAllowed) {
+				t.Errorf("expected %s (unchanged pre-105 wording for a %s), got %v (%v)",
+					ErrorCodeServerNotAllowed, adminType, resultMap["code"], resultMap["msg"])
+			}
+			// codex round-2 review, MUST-FIX: the previous `if msg != ""`
+			// guard made this assertion vacuously pass for an empty,
+			// missing, or non-string "msg" — require the exact wording
+			// unconditionally.
+			msg, ok := resultMap["msg"].(string)
+			if !ok {
+				t.Fatalf("expected msg to be a string, got %T (%v)", resultMap["msg"], resultMap["msg"])
+			}
+			if msg != "server not allowed: weather" {
+				t.Errorf("expected the profile-only wording, got %q", msg)
+			}
+			if len(caller.calls) != 0 {
+				t.Errorf("expected 0 upstream calls, got %d", len(caller.calls))
+			}
+
+			// Control: a server INSIDE the profile still dispatches for this
+			// admin — the profile restriction itself is still enforced, only
+			// its wording (and refusal code) must not shift to the
+			// agent-token body.
+			controlCode := `
+				var res = call_tool("github", "list_repos", {});
+				({ ok: res.ok })
+			`
+			controlResult := Execute(context.Background(), caller, controlCode, opts)
+			if !controlResult.Ok {
+				t.Fatalf("control: expected ok=true, got error: %v", controlResult.Error)
+			}
+			controlMap := controlResult.Value.(map[string]interface{})
+			if controlMap["ok"] != true {
+				t.Fatalf("control: an in-profile server must still dispatch for this %s, got %v", adminType, controlMap)
+			}
+		})
+	}
+}
+
 // TestExecuteAuthContext_PermissionDenied tests auth enforcement blocks insufficient permissions
 func TestExecuteAuthContext_PermissionDenied(t *testing.T) {
 	caller := newMockToolCaller()

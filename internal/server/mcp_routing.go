@@ -1072,6 +1072,22 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		mcpserver.WithRecovery(),
 	}
 	if p.hooks != nil {
+		// Spec 105 FR-010 D13/gap G6: mark which real JSON-RPC method
+		// produced this request — mcp-go calls these with the SAME ctx it
+		// then hands to handleListTools/handleToolCall, synchronously, so the
+		// direct-mode discovery filters (mcp_direct_scope.go,
+		// mcp_direct_callability.go) can tell a tools/list enumeration from
+		// the call-time re-evaluation of one tool, which the filter API
+		// itself does not distinguish. See
+		// directRequestKindFromContext's doc comment for the full mechanism
+		// and why every routing-mode server (not just directServer) safely
+		// shares this hook.
+		p.hooks.AddBeforeListTools(func(ctx context.Context, _ any, _ *mcp.ListToolsRequest) {
+			setDirectRequestKind(ctx, directRequestKindList)
+		})
+		p.hooks.AddBeforeCallTool(func(ctx context.Context, _ any, _ *mcp.CallToolRequest) {
+			setDirectRequestKind(ctx, directRequestKindCall)
+		})
 		opts = append(opts, mcpserver.WithHooks(p.hooks))
 	}
 	// Advertise prompts on every routing-mode server, not just the default

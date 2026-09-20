@@ -59,6 +59,22 @@ type directCatalog struct {
 	// display name; only the canonical form is withheld, because it cannot name
 	// one of them.
 	ambiguousCanonical map[string]struct{}
+
+	// canonicalShadow records, for every canonical string withdrawn from
+	// byCanonical (an entry in ambiguousCanonical), every entry that string
+	// could name — Spec 105 FR010-G3. Resolution over this list is deferred
+	// to REQUEST time (LookupCanonicalForAuth), never decided once here: this
+	// build is scope-blind by construction (one snapshot serves every
+	// caller), so deciding a winner here would either pick one caller's
+	// authorized entry over another's, or withhold an id from EVERY caller
+	// merely because it collides with something a given caller cannot even
+	// see. Administrator resolution is unaffected: LookupCanonicalForAuth's
+	// fast path is exactly LookupCanonical's answer for an unambiguous id,
+	// and for an ambiguous one an administrator's authorization predicate
+	// admits every shadow candidate — so it still lands on "more than one
+	// authorized, therefore absent", byte-identical to what LookupCanonical
+	// itself answers (see TestDescribeDirect_DisplayAndCanonicalNamespaceOverlap).
+	canonicalShadow map[string][]*directCatalogEntry
 }
 
 // directCatalogEntry is one tool as the direct surface sees it.
@@ -154,6 +170,7 @@ func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *direc
 		displayNames:       make([]string, 0, len(tools)),
 		byCanonical:        make(map[string]*directCatalogEntry, len(tools)),
 		ambiguousCanonical: make(map[string]struct{}),
+		canonicalShadow:    make(map[string][]*directCatalogEntry),
 	}
 
 	// First pass: group by display name so a collision is detected before any
@@ -243,9 +260,14 @@ func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *direc
 		// BOTH lose the canonical form rather than one silently shadowing the
 		// other.
 		canonical := entry.ServerName + ":" + entry.ToolName
-		if _, dup := cat.byCanonical[canonical]; dup {
+		if prior, dup := cat.byCanonical[canonical]; dup {
 			delete(cat.byCanonical, canonical)
 			cat.ambiguousCanonical[canonical] = struct{}{}
+			// Spec 105 FR010-G3: both candidates go on the shadow list — the
+			// entry that occupied byCanonical first, and this one — so a
+			// per-request, per-caller resolution can still pick whichever one
+			// (if either) the requester is authorized to see.
+			cat.canonicalShadow[canonical] = append(cat.canonicalShadow[canonical], prior, entry)
 			if logger != nil {
 				logger.Warn("Withholding ambiguous canonical direct id: two distinct display names flatten to it, so it resolves in neither form",
 					zap.String("canonical_id", canonical))
@@ -253,6 +275,7 @@ func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *direc
 			continue
 		}
 		if _, ambiguous := cat.ambiguousCanonical[canonical]; ambiguous {
+			cat.canonicalShadow[canonical] = append(cat.canonicalShadow[canonical], entry)
 			continue
 		}
 		cat.byCanonical[canonical] = entry
@@ -276,6 +299,10 @@ func buildDirectCatalog(tools []*config.ToolMetadata, logger *zap.Logger) *direc
 		}
 		delete(cat.byCanonical, canonical)
 		cat.ambiguousCanonical[canonical] = struct{}{}
+		// Spec 105 FR010-G3: the entry whose OWN canonical form this string
+		// is, plus the entry it clashes with (the one whose DISPLAY name
+		// happens to equal that string), both go on the shadow list.
+		cat.canonicalShadow[canonical] = append(cat.canonicalShadow[canonical], entry, other)
 		if logger != nil {
 			logger.Warn("Withholding ambiguous direct id: it is one tool's display name and another's canonical id, so it resolves only as the display name",
 				zap.String("id", canonical))
@@ -309,6 +336,47 @@ func (c *directCatalog) LookupCanonical(canonicalID string) (*directCatalogEntry
 	}
 	e, ok := c.byCanonical[canonicalID]
 	return e, ok
+}
+
+// LookupCanonicalForAuth resolves a canonical "<server>:<tool>" id the way
+// LookupCanonical does when the id is unambiguous — byte-identical for every
+// caller, administrators included (Spec 105 FR-010: administrator resolution
+// is unchanged). When the id was withdrawn from byCanonical for colliding
+// with another entry, it instead resolves against the shadow candidate list,
+// filtered to the ones `authorized` admits: exactly one authorized candidate
+// resolves as if the others never existed, so a HIDDEN colliding entry can
+// never suppress an id an AUTHORIZED entry would otherwise answer to
+// (FR010-G3). Zero or more than one authorized candidate is a genuine
+// ambiguity from this caller's own point of view too (an administrator who
+// can see every candidate always lands here) and resolves to nothing, same
+// as an absent id.
+func (c *directCatalog) LookupCanonicalForAuth(canonicalID string, authorized func(*directCatalogEntry) bool) (*directCatalogEntry, bool) {
+	if c == nil {
+		return nil, false
+	}
+	if e, ok := c.byCanonical[canonicalID]; ok {
+		return e, true
+	}
+	candidates := c.canonicalShadow[canonicalID]
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	var match *directCatalogEntry
+	for _, candidate := range candidates {
+		if !authorized(candidate) {
+			continue
+		}
+		if match != nil {
+			// More than one candidate is authorized for this caller: a real
+			// ambiguity, not a disclosure artefact.
+			return nil, false
+		}
+		match = candidate
+	}
+	if match == nil {
+		return nil, false
+	}
+	return match, true
 }
 
 // DisplayNames returns the sorted display names this catalog admits.

@@ -243,26 +243,26 @@
 
 ### Failing tests
 
-- [ ] T094 [US1] FR010-G1: fixture A `a` (no client) + `b`,`a__b` added after `PhaseReady`; `a`-only `call_tool_read a:t` → text identical across fixtures, no sentinel (order-insensitive) — `internal/server/mcp_auth_scope_test.go`
-- [ ] T095 [P] [US1] FR010-G2: index `B:read` (+ hidden `b:read` in A); token `[B]`; `describe_tool b:read` definition → equal responses with `B:read` suggestion; `describe_plain_corpus_test.go` bytes unchanged — `internal/server/mcp_describe_tool_scope_test.go` (new)
-- [ ] T096 [P] [US1] FR010-G3: catalog A `{x:y:z sentinel, x__y:z}` vs B `{x__y:z}`; token `[x__y]`; `describe_tool x__y:z` definition + check → identical, no sentinel; admin `not_found` control (`TestDescribeDirect_DisplayAndCanonicalNamespaceOverlap`) green — `internal/server/mcp_describe_direct_test.go`
-- [ ] T097 [P] [US1] FR010-G4: catalog A hidden `B:read` + authorized `b:Read`; token `[b]`; `describe_tool b:read` → suggestion `b:Read` in both fixtures — `internal/server/mcp_describe_direct_test.go`
-- [ ] T098 [P] [US1] FR010-G6: real proxy; ctx `[a]`,`{read}`; `p.directServer.HandleMessage` `tools/call a__write_tool` → isError `Permission denied … 'write'`, zero upstream (HEAD `-32602`) — `internal/server/mcp_direct_scope_test.go`
-- [ ] T099 [P] [US1] FR010-G7: token `{[a], pin P={a,b}}`; `call_tool_read b:t` vs `zzz:t` → identical text; sandbox `call_tool('b')` vs `('zzz')` → identical envelope — `internal/server/mcp_auth_scope_test.go` + `internal/server/mcp_code_execution_scope_test.go`
+- [x] T094 [US1] FR010-G1: fixture A `a` (no client) + `b`,`a__b` added after `PhaseReady`; `a`-only `call_tool_read a:t` → text identical across fixtures, no sentinel (order-insensitive) — `internal/server/mcp_auth_scope_test.go`
+- [x] T095 [P] [US1] FR010-G2: index `B:read` (+ hidden `b:read` in A); token `[B]`; `describe_tool b:read` definition → equal responses with `B:read` suggestion; `describe_plain_corpus_test.go` bytes unchanged — `internal/server/mcp_describe_tool_scope_test.go` (new)
+- [x] T096 [P] [US1] FR010-G3: catalog A `{x:y:z sentinel, x__y:z}` vs B `{x__y:z}`; token `[x__y]`; `describe_tool x__y:z` definition + check → identical, no sentinel; admin `not_found` control (`TestDescribeDirect_DisplayAndCanonicalNamespaceOverlap`) green — `internal/server/mcp_describe_direct_test.go`
+- [x] T097 [P] [US1] FR010-G4: catalog A hidden `B:read` + authorized `b:Read`; token `[b]`; `describe_tool b:read` → suggestion `b:Read` in both fixtures — `internal/server/mcp_describe_direct_test.go`
+- [x] T098 [P] [US1] FR010-G6: real proxy; ctx `[a]`,`{read}`; `p.directServer.HandleMessage` `tools/call a__write_tool` → isError `Permission denied … 'write'`, zero upstream (HEAD `-32602`) — `internal/server/mcp_direct_scope_test.go`
+- [x] T099 [P] [US1] FR010-G7: token `{[a], pin P={a,b}}`; `call_tool_read b:t` vs `zzz:t` → identical text; sandbox `call_tool('b')` vs `('zzz')` → identical envelope — `internal/server/mcp_auth_scope_test.go` + `internal/server/mcp_code_execution_scope_test.go`
 
 ### Implementation
 
-- [ ] T100 [US1] `Available servers:` filtered through `serverInScope` for scoped callers — `internal/server/mcp.go:2473-2495`
-- [ ] T101 [US1] Effective set = profile ∩ token evaluated once, one body for agent callers on `call_tool_*` (`internal/server/mcp.go:2262-2293`), sandbox allow-list (`internal/server/mcp_code_execution.go:1198-1229`) and nested refusal (`internal/jsruntime/runtime.go:383-410`); admins on `/mcp/p` keep today's text
-- [ ] T102 [US1] describe_tool definition mode: `toolVisibleToSession` evaluates scope before index presence (`internal/server/mcp_visibility.go:51-72`); not-found + case-correction through `visibleCorpus.notFoundResult` over the authorized corpus (`internal/server/mcp_describe_tool.go:123-160`); direct case-correction `continue` on invisible match (`internal/server/mcp_describe_direct.go:133-155`)
-- [ ] T103 [US1] Shadow canonical map in the direct catalog so an authorized canonical id resolves even when a hidden display entry collides — `internal/server/mcp_direct_catalog.go:227-268`, `internal/server/mcp_describe_direct.go:54-103`
-- [ ] T104 [US1] Call-time `WithToolFilter` evaluates scope → tier → callability in spec order (D13): hidden → `-32602`; over-tier on an authorized server → passed through to the handler (insufficient-permission); in-scope within-tier but disabled/quarantined/pending/changed → `-32602` unchanged; `tools/list` predicate still withholds over-tier and non-callable — `internal/server/mcp_direct_scope.go:115-143`, `internal/server/mcp_routing.go:958-961`
-- [ ] T104a [P] [US1] FR010 precedence regression through `HandleMessage`: disabled/quarantined/pending/changed alone → `-32602` unchanged; over-tier alone → insufficient-permission; over-tier + pending → insufficient-permission (tier-first, `spec.md:133`); re-drive the generated FR-009 direct table from T009 through `HandleMessage` (D15) — `internal/server/mcp_direct_scope_test.go`
+- [x] T100 [US1] `Available servers:` filtered through `serverInScope` for scoped callers — `internal/server/mcp.go:2473-2495`
+- [x] T101 [US1] Effective set = profile ∩ token evaluated once, one body for agent callers on `call_tool_*` (`internal/server/mcp.go:2262-2293`), sandbox allow-list (`internal/server/mcp_code_execution.go:1198-1229`) and nested refusal (`internal/jsruntime/runtime.go:383-410`); admins on `/mcp/p` keep today's text
+- [x] T102 [US1] describe_tool definition mode: `toolVisibleToSession` evaluates scope before index presence (`internal/server/mcp_visibility.go:51-72`); not-found + case-correction through `visibleCorpus.notFoundResult` over the authorized corpus (`internal/server/mcp_describe_tool.go:123-160`); direct case-correction `continue` on invisible match (`internal/server/mcp_describe_direct.go:133-155`)
+- [x] T103 [US1] Shadow canonical map in the direct catalog so an authorized canonical id resolves even when a hidden display entry collides — `internal/server/mcp_direct_catalog.go:227-268`, `internal/server/mcp_describe_direct.go:54-103`
+- [x] T104 [US1] Call-time `WithToolFilter` evaluates scope → tier → callability in spec order (D13): hidden → `-32602`; over-tier on an authorized server → passed through to the handler (insufficient-permission); in-scope within-tier but disabled/quarantined/pending/changed → `-32602` unchanged; `tools/list` predicate still withholds over-tier and non-callable — `internal/server/mcp_direct_scope.go:115-143`, `internal/server/mcp_routing.go:958-961`
+- [x] T104a [P] [US1] FR010 precedence regression through `HandleMessage`: disabled/quarantined/pending/changed alone → `-32602` unchanged; over-tier alone → insufficient-permission; over-tier + pending → insufficient-permission (tier-first, `spec.md:133`); re-drive the generated FR-009 direct table from T009 through `HandleMessage` (D15) — `internal/server/mcp_direct_scope_test.go`
 
 ### Verification
 
-- [ ] T105 [US1] Common verification; `mcp_auth_scope_test.go:84` updated; admin controls green
-- [~] T106 [US1] Astra rounds on FR-010 + FR010-G1…G7; quote final `VERDICT:`
+- [x] T105 [US1] Common verification; `mcp_auth_scope_test.go:84` updated; admin controls green
+- [x] T106 [US1] Cross-model review on FR-010 + FR010-G1…G7 (codex exec, gpt-5.6-sol — opencode terra/sol/astra quota-exhausted, confirmed). 4 rounds: round 1 (3 MUST-FIX: jsruntime `authInfo != nil` misread as agent-only, indexed/direct describe_tool profile-scoped-admin regressions), round 2 (3 MUST-FIX: `AuthTypeUser` misclassified as admin across the direct-mode scope predicates, canonical-shadow predicate missing callability, a vacuous test assertion), round 3 (1 MUST-FIX: the `AuthTypeUser` fix's regression tests didn't exercise the G3/G4 branches they claimed to), round 4: `VERDICT: clean`. A related but out-of-FR-010's-mandate instance of the same `AuthTypeUser` pattern (prompt filtering, direct-mode callability hiding) was deliberately left unfixed per round-3's confirmation that the callability-hiding split is intentional design, not a bug, and flagged as a separate follow-up task.
 
 ---
 
