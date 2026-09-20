@@ -2090,6 +2090,29 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		}
 	}
 
+	// Annotation-override immediacy: the served tools list (GET
+	// /api/v1/servers/{id}/tools) is the StateView snapshot, refreshed only by
+	// discovery. SetConfig above makes the NEXT ListTools return effective
+	// annotations, but without this the PATCH 200 races the background sweep
+	// (OnUpstreamServerChange → async DiscoverAndIndexTools) and serves stale
+	// hints for ~one re-list. Re-list THIS server synchronously via the
+	// author's existing authoritative single-server hook, so the next GET
+	// after PATCH converges with no fleet sweep, reconnect, or restart.
+	// Best-effort: on failure only log; the background sweep below still
+	// converges eventually.
+	if !annotationOverridesEqualForAudit(beforeAOForAudit, existing.AnnotationOverrides) {
+		rctx := ctx
+		if rctx == nil {
+			rctx = context.Background()
+		}
+		rctx, cancel := context.WithTimeout(rctx, 30*time.Second)
+		if rerr := s.runtime.RefreshServerTools(rctx, serverName); rerr != nil {
+			s.logger.Warn("Annotation-override refresh failed; background sweep will converge",
+				zap.String("server", serverName), zap.Error(rerr))
+		}
+		cancel()
+	}
+
 	// Save configuration to file
 	if err := s.SaveConfiguration(); err != nil {
 		s.logger.Warn("Failed to save configuration after updating server", zap.Error(err))

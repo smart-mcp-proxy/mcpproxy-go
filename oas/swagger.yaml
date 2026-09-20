@@ -961,6 +961,14 @@ components:
       type: object
     config.ServerConfig:
       properties:
+        annotation_overrides:
+          additionalProperties:
+            $ref: '#/components/schemas/config.ToolAnnotations'
+          description: |-
+            AnnotationOverrides fixes false hints from the upstream server.
+            Map from tool name (or "*" for wildcard) to ToolAnnotations.
+            Admin-only, hot (no restart), audited.
+          type: object
         args:
           items:
             type: string
@@ -1121,28 +1129,6 @@ components:
         working_dir:
           description: Working directory for stdio servers
           type: string
-        annotation_overrides:
-          additionalProperties:
-            $ref: '#/components/schemas/config.ToolAnnotations'
-          description: |-
-            AnnotationOverrides fixes false hints from the upstream server.
-            Map from tool name (or "*" for wildcard) to ToolAnnotations.
-            Admin-only, hot (no restart), audited.
-          type: object
-      type: object
-    config.ToolAnnotations:
-      description: MCP tool behavior hints (per-tool override)
-      properties:
-        title:
-          type: string
-        readOnlyHint:
-          type: boolean
-        destructiveHint:
-          type: boolean
-        idempotentHint:
-          type: boolean
-        openWorldHint:
-          type: boolean
       type: object
     config.TLSConfig:
       description: TLS configuration
@@ -1196,6 +1182,19 @@ components:
           type: boolean
         encoding:
           description: Default encoding (e.g., "cl100k_base")
+          type: string
+      type: object
+    config.ToolAnnotations:
+      properties:
+        destructiveHint:
+          type: boolean
+        idempotentHint:
+          type: boolean
+        openWorldHint:
+          type: boolean
+        readOnlyHint:
+          type: boolean
+        title:
           type: string
       type: object
     config.TracingExporterConfig:
@@ -2583,6 +2582,15 @@ components:
       type: object
     contracts.Server:
       properties:
+        annotation_overrides:
+          additionalProperties:
+            $ref: '#/components/schemas/config.ToolAnnotations'
+          description: |-
+            AnnotationOverrides mirrors config.ServerConfig.AnnotationOverrides:
+            per-server per-tool annotation fixes. Surfaced on GET so a caller that
+            PATCHed overrides (or the Web UI editor) can read them back; PATCH/POST
+            accept them via AddServerRequest. Omitted when empty.
+          type: object
         args:
           items:
             type: string
@@ -3209,6 +3217,16 @@ components:
       type: object
     httpapi.AddServerRequest:
       properties:
+        annotation_overrides:
+          additionalProperties:
+            $ref: '#/components/schemas/config.ToolAnnotations'
+          description: |-
+            AnnotationOverrides carries per-server per-tool annotation fixes
+            (map[toolName]*ToolAnnotations, wildcard "*" allowed). Nil means
+            "leave unchanged" on PATCH; a present map is deep-merged via
+            config.MergeAnnotationOverrides with RFC7396 null-means-delete for
+            whole-tool entries and per-hint nulls. See config.ToolAnnotations.
+          type: object
         args:
           items:
             type: string

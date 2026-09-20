@@ -2783,6 +2783,15 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 			baseAO = existingSrv.AnnotationOverrides
 		}
 		merged := config.MergeAnnotationOverrides(baseAO, req.AnnotationOverrides, opts)
+		if merged == nil && len(baseAO) > 0 {
+			// Merge reports "empty" as nil, which UpdateServer reads as
+			// "preserve". An explicit mutation that empties the map (last
+			// override deleted) is a clear, not a no-op: persist the empty
+			// non-nil sentinel so the delete survives and the immediacy
+			// refresh fires. Semantically identical downstream (no override
+			// for any tool; loader normalizes empty back to nil).
+			merged = make(map[string]*config.ToolAnnotations)
+		}
 		updates.AnnotationOverrides = merged
 		hasUpdates = true
 	} else if existingSrv != nil {

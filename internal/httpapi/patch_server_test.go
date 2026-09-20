@@ -1204,3 +1204,37 @@ func TestPatchServer_AnnotationOverrides_AdminOnly(t *testing.T) {
 		assert.True(t, *mock.capturedUpdates.AnnotationOverrides["act"].DestructiveHint)
 	})
 }
+
+// TestPatchServer_AnnotationOverrides_DeleteToEmptyPersistsClear verifies the
+// delete-to-empty edge: PATCH {"annotation_overrides":{"navigate":null}} when
+// "navigate" is the ONLY override merges to nil, which UpdateServer would
+// read as "preserve" and silently drop the delete. The handler must persist
+// the empty non-nil sentinel instead, so the clear survives and the
+// immediacy refresh fires. restart_required stays false (hot path).
+// BDD: Given one override, When the last tool entry is deleted via null,
+// Then UpdateServer receives an empty (not nil) map and no restart is needed.
+func TestPatchServer_AnnotationOverrides_DeleteToEmptyPersistsClear(t *testing.T) {
+	bFalse := false
+	existing := &config.ServerConfig{Name: "browseros", Protocol: "stdio", Command: "npx", Enabled: true,
+		AnnotationOverrides: map[string]*config.ToolAnnotations{
+			"navigate": {DestructiveHint: &bFalse},
+		},
+	}
+	mock := &mockPatchServerController{apiKey: "admin-secret", existingServer: existing}
+	logger := zap.NewNop().Sugar()
+	srv := NewServer(mock, logger, nil)
+
+	body := []byte(`{"annotation_overrides":{"navigate":null}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/browseros", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "admin-secret")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "delete must succeed, body=%s", w.Body.String())
+	require.NotNil(t, mock.capturedUpdates, "UpdateServer should have been called")
+	require.NotNil(t, mock.capturedUpdates.AnnotationOverrides,
+		"delete-to-empty must persist an empty (non-nil) map, not nil-as-preserve")
+	assert.Empty(t, mock.capturedUpdates.AnnotationOverrides, "all overrides must be cleared")
+	assert.Contains(t, w.Body.String(), `"restart_required":false`, "override-only mutation stays hot")
+}
