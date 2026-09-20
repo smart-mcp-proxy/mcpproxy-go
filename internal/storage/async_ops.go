@@ -212,7 +212,7 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		QueueSize:                serverConfig.QueueSize,
 		QueueTimeout:             serverConfig.QueueTimeout,
 		ExposePrompts:            serverConfig.ExposePrompts,
-		AnnotationOverrides:      serverConfig.AnnotationOverrides,
+		AnnotationOverrides:      config.CloneAnnotationOverrides(serverConfig.AnnotationOverrides),
 	}
 	// Same invariant as Manager.SaveUpstreamServer: never lower a recorded
 	// quarantine without an explicit decision (only quarantineServerSync may).

@@ -151,7 +151,7 @@ func upstreamRecordFromConfig(serverConfig *config.ServerConfig) *UpstreamRecord
 		QueueSize:                serverConfig.QueueSize,
 		QueueTimeout:             serverConfig.QueueTimeout,
 		ExposePrompts:            serverConfig.ExposePrompts,
-		AnnotationOverrides:      serverConfig.AnnotationOverrides,
+		AnnotationOverrides:      config.CloneAnnotationOverrides(serverConfig.AnnotationOverrides),
 	}
 }
 
@@ -239,7 +239,9 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 	}
 
 	return serverConfigFromRecord(record), nil
-		AnnotationOverrides:      record.AnnotationOverrides,
+		AnnotationOverrides:      config.CloneAnnotationOverrides(record.AnnotationOverrides),
+	}, nil
+}FRESH 🔒)
 	}, nil
 }
 
@@ -290,7 +292,7 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 			QueueSize:                record.QueueSize,
 			QueueTimeout:             record.QueueTimeout,
 			ExposePrompts:            record.ExposePrompts,
-			AnnotationOverrides:      record.AnnotationOverrides,
+			AnnotationOverrides:      config.CloneAnnotationOverrides(record.AnnotationOverrides),
 		})
 >>>>>>> 551e326e (✨ FIX: 🔥 HOT-RELOAD + 💾 PERSISTENCE + 🎨 EXPLICIT-FALSE BADGES FOR OVERRIDES 🛡️)
 	}

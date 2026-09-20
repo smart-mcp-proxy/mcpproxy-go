@@ -1731,7 +1731,12 @@ func (p *MCPProxyServer) lookupToolGate(serverName, toolName string) (string, js
 		}
 		gate := captured.gate
 		if gate.serverQuarantined() || gate.serverDisabled() {
-			return tierForAnnotations(gate.identity.Annotations, gate.identity.Found), captured
+			var eff *config.ToolAnnotations
+			eff = gate.identity.Annotations
+			if gate.serverConfig != nil {
+				eff = config.EffectiveAnnotationsForTool(gate.serverConfig.AnnotationOverrides, toolName, eff)
+			}
+			return tierForAnnotations(eff, gate.identity.Found), captured
 		}
 		identity, record = gate.identity, gate.serverConfig
 	} else {
@@ -1761,7 +1766,14 @@ func (p *MCPProxyServer) lookupToolGate(serverName, toolName string) (string, js
 			}
 		}
 	}
-	return tierForAnnotations(identity.Annotations, identity.Found), captured
+	// The StateView snapshot annotations lag one discovery cycle after a hot
+	// override; re-resolve through the already-held persisted record (same
+	// pattern as lookupExactToolAnnotations) so the tier reflects the hot value.
+	eff := identity.Annotations
+	if record != nil {
+		eff = config.EffectiveAnnotationsForTool(record.AnnotationOverrides, toolName, eff)
+	}
+	return tierForAnnotations(eff, identity.Found), captured
 }
 
 // tokenTierRefusalText is the target-tier refusal handleCallToolVariant
