@@ -21,6 +21,7 @@
                 <span v-else class="text-xs text-base-content/50">inherit (no override)</span>
                 <span v-if="effectiveFor('*')?.destructiveHint === false" class="badge badge-sm badge-success" title="Operator override: explicitly marked non-destructive">✓ Non-destructive</span>
                 <span v-if="effectiveFor('*')?.readOnlyHint === false" class="badge badge-sm badge-warning" title="Operator override: explicitly marked writable">✏️ Write</span>
+                <span v-if="isSafeDraft('*')" class="badge badge-sm badge-warning" data-test="annotation-override-safedraft-*" title="Mark-safe preset drafted, not yet saved">Safe-draft (unsaved)</span>
               </span>
             </td>
             <td>
@@ -39,6 +40,14 @@
               >
                 Delete
               </button>
+              <button
+                class="btn btn-outline btn-xs"
+                data-test="annotation-override-marksafe-*"
+                title="Draft a read-only + non-destructive wildcard override (unsaved until Save overrides)"
+                @click="openMarkAllModal"
+              >
+                Mark all read-only safe…
+              </button>
             </td>
           </tr>
           <tr
@@ -53,6 +62,8 @@
                 <span v-else class="text-xs text-base-content/50">—</span>
                 <span v-if="effectiveFor(toolName)?.destructiveHint === false" class="badge badge-sm badge-success" title="Operator override: explicitly marked non-destructive">✓ Non-destructive</span>
                 <span v-if="effectiveFor(toolName)?.readOnlyHint === false" class="badge badge-sm badge-warning" title="Operator override: explicitly marked writable">✏️ Write</span>
+                <span v-if="isSafeDraft(toolName)" class="badge badge-sm badge-warning" :data-test="`annotation-override-safedraft-${toolName}`" title="Mark-safe preset drafted, not yet saved">Safe-draft (unsaved)</span>
+                <span v-if="needsOpenWorldWarning(toolName)" class="badge badge-sm badge-warning" :data-test="`annotation-override-openworld-warn-${toolName}`" title="Upstream openWorldHint is not false, so the read-only tool filter may still exclude this tool">⚠ Open-world: may stay hidden from read-only filter</span>
               </span>
             </td>
             <td class="flex gap-1">
@@ -62,6 +73,15 @@
                 @click="openEdit(toolName)"
               >
                 {{ hasOverride(toolName) ? 'Edit' : 'Add' }}
+              </button>
+              <button
+                v-if="effectiveFor(toolName)?.readOnlyHint !== true"
+                class="btn btn-ghost btn-xs"
+                :data-test="`annotation-override-marksafe-${toolName}`"
+                title="Draft a read-only + non-destructive override for this tool (unsaved until Save overrides)"
+                @click="markSafe(toolName)"
+              >
+                ✓ Mark safe
               </button>
               <button
                 v-if="hasOverride(toolName)"
@@ -127,13 +147,53 @@
       </div>
     </div>
 
+    <!-- Mark-all confirm modal (inline card, same pattern as the popover above) -->
+    <div v-if="showMarkAllModal" class="card bg-base-200 p-4 space-y-3" data-test="annotation-override-marksafe-modal">
+      <h4 class="font-semibold text-sm">Mark all tools read-only safe?</h4>
+      <p class="text-xs text-base-content/70">
+        {{ markAllImpact.become }}/{{ markAllImpact.total }} tools become read-visible<span v-if="markAllImpact.conditionalOpen.length > 0">; {{ markAllImpact.conditionalOpen.length }} read-visible BUT network-unverified (⚠ nil openWorldHint: {{ markAllImpact.conditionalOpen.slice(0, 5).join(', ') }}<span v-if="markAllImpact.conditionalOpen.length > 5"> + {{ markAllImpact.conditionalOpen.length - 5 }} more</span>)</span>;
+        {{ markAllImpact.blockedOpen.length }} tools still excluded by exclude_open_world<span v-if="markAllImpact.blockedOpen.length > 0"> ({{ markAllImpact.blockedOpen.slice(0, 5).join(', ') }}<span v-if="markAllImpact.blockedOpen.length > 5"> + {{ markAllImpact.blockedOpen.length - 5 }} more</span>)</span>.
+        This only writes a draft — nothing is saved until Save overrides. Open-world hints are never changed.
+      </p>
+      <label class="form-control">
+        <span class="label-text text-xs">Reason</span>
+        <select
+          v-model="markAllReason"
+          class="select select-bordered select-sm"
+          data-test="annotation-override-marksafe-reason"
+        >
+          <option value="">Select reason…</option>
+          <option v-for="r in markSafeReasons" :key="r" :value="r">{{ r }}</option>
+        </select>
+      </label>
+      <label class="flex items-center gap-2 text-xs cursor-pointer">
+        <input
+          v-model="markAllAck"
+          type="checkbox"
+          class="checkbox checkbox-sm"
+          data-test="annotation-override-marksafe-ack"
+        />
+        <span>I understand this drafts a read-only + non-destructive wildcard override for every tool.</span>
+      </label>
+      <div class="flex gap-2">
+        <button
+          class="btn btn-primary btn-sm"
+          data-test="annotation-override-marksafe-confirm"
+          :disabled="!markAllAck || !markAllReason"
+          @click="confirmMarkAll"
+        >Confirm draft</button>
+        <button class="btn btn-ghost btn-sm" data-test="annotation-override-marksafe-cancel" @click="cancelMarkAll">Cancel</button>
+      </div>
+    </div>
+
     <!-- Save all -->
-    <div class="flex gap-2">
+    <div class="flex gap-2 items-center">
       <button class="btn btn-primary btn-sm" data-test="annotation-overrides-save-all" :disabled="saving" @click="saveAll">
         <span v-if="saving" class="loading loading-spinner loading-xs"></span>
         Save overrides
       </button>
       <button class="btn btn-ghost btn-sm" :disabled="saving" @click="resetLocal">Reset</button>
+      <span v-if="unsavedCount > 0" class="badge badge-warning badge-sm" data-test="annotation-overrides-unsaved-count">{{ unsavedCount }} unsaved</span>
     </div>
   </div>
 </template>
@@ -169,6 +229,32 @@ const draft = reactive<Record<HintKey, boolean | undefined>>({
 const draftTitle = ref('')
 const newToolName = ref('')
 const saving = ref(false)
+// Tools whose current local draft was created by a Mark-safe preset and not
+// yet saved or hand-edited. Drives the amber Safe-draft badge only; the
+// draft itself lives in localOverrides like any popover Apply.
+// Reactivity note (explicit): Vue tracks Set identity on ref(), so a bare
+// .add/.delete on markSafeDrafts.value alone does not reliably re-render.
+// All mutators below go through addSafeDraft/clearSafeDraft, which replace
+// the Set instance (new Set(old) +/- entry). Covered by unit test
+// "Safe-draft badge tracks explicit Set replacement".
+const markSafeDrafts = ref<Set<string>>(new Set())
+
+function addSafeDraft(tool: string) {
+  if (markSafeDrafts.value.has(tool)) return
+  markSafeDrafts.value = new Set(markSafeDrafts.value).add(tool)
+}
+
+function clearSafeDraft(tool: string) {
+  if (!markSafeDrafts.value.has(tool)) return
+  const next = new Set(markSafeDrafts.value)
+  next.delete(tool)
+  markSafeDrafts.value = next
+}
+// Wildcard Mark-all confirm modal state (draft-preset, never instant-apply).
+const showMarkAllModal = ref(false)
+const markAllAck = ref(false)
+const markAllReason = ref('')
+const markSafeReasons = ['False positive', 'Vendor attestation', 'Local-only verified', 'Other']
 
 // sync props -> local
 function syncFromProps() {
@@ -178,6 +264,7 @@ function syncFromProps() {
   }
   localOverrides.value = next
   pendingDeletes.value = new Set()
+  markSafeDrafts.value = new Set()
 }
 watch(() => props.overrides, syncFromProps, { immediate: true, deep: true })
 
@@ -285,6 +372,8 @@ function applyEdit() {
     localOverrides.value[tool] = ann
     pendingDeletes.value.delete(tool)
   }
+  // A hand-applied popover edit supersedes any preset draft for this tool.
+  clearSafeDraft(tool)
   // trigger reactivity
   localOverrides.value = { ...localOverrides.value }
   editingTool.value = null
@@ -296,13 +385,144 @@ function removeOverride(tool: string) {
     localOverrides.value = { ...localOverrides.value }
   }
   pendingDeletes.value.add(tool)
+  clearSafeDraft(tool)
   if (editingTool.value === tool) editingTool.value = null
 }
 
 function resetLocal() {
   syncFromProps()
   editingTool.value = null
+  cancelMarkAll()
 }
+
+// Mark-safe preset (variant A: draft-only, client-side). Writes an exact-tool
+// draft of {readOnlyHint:true, destructiveHint:false} into localOverrides —
+// the same shape as a popover Apply — and clears any pending delete, so the
+// existing Save-all/Reset/Delete/popover paths pick it up with no new save
+// path. Bulk-JSON (ServerDetail rawJson/applyRawJson) is NOT integrated: it
+// PATCHes textarea content (saved state only) and bypasses localOverrides,
+// so an unsaved preset draft is orphaned by Apply-JSON until Save+refetch.
+// ServerDetail guards Apply-JSON with a confirm while hasUnsavedDrafts().
+// openWorldHint is never set by the preset: it stays inherit (or keeps a
+// previously hand-set explicit value), because a wildcard
+// destructiveHint:false does not make openWorld:true tools read-visible.
+// Per-tool drafts stamp title "[mark-safe: single-tool]" so the audit trail
+// matches the wildcard "[mark-safe: <reason>]" format.
+function markSafe(tool: string) {
+  if (!tool) return
+  const existing = localOverrides.value[tool]
+  const ann: ToolAnnotation = { ...(existing || {}) }
+  ann.readOnlyHint = true
+  ann.destructiveHint = false
+  ann.title = withMarkSafeSuffix(existing?.title, 'single-tool')
+  localOverrides.value = { ...localOverrides.value, [tool]: ann }
+  pendingDeletes.value.delete(tool)
+  addSafeDraft(tool)
+  if (editingTool.value === tool) editingTool.value = null
+}
+
+function isSafeDraft(tool: string): boolean {
+  return markSafeDrafts.value.has(tool) && tool in localOverrides.value
+}
+
+// Inline warning: effective read-only but effective openWorldHint is not
+// explicitly false, so the read_only_only / exclude_open_world filters may
+// still hide this tool. Shown for preset and hand-made drafts alike. Uses
+// effectiveFor (upstream + wildcard draft + exact draft) so a hand-set
+// openWorld:false on either level clears the badge.
+function needsOpenWorldWarning(tool: string): boolean {
+  if (tool === '*') return false
+  const eff = effectiveFor(tool)
+  if (eff?.readOnlyHint !== true) return false
+  return eff?.openWorldHint !== false
+}
+
+// Wildcard preset impact, computed from props (tools + upstream) and existing
+// drafts (exact + wildcard): after a *:{readOnly:true, destructive:false}
+// draft, a tool becomes read-visible only when its effective openWorldHint
+// is explicitly false. Nil/undefined openWorld is NOT a success — it is
+// network-unverified (backend default decides), matching the row ⚠ badge
+// (needsOpenWorldWarning). Blocked = effective openWorld true (still
+// excluded by exclude_open_world).
+const markAllImpact = computed(() => {
+  const names = sortedToolNames.value
+  let become = 0
+  const conditionalOpen: string[] = []
+  const blockedOpen: string[] = []
+  for (const n of names) {
+    const exact = localOverrides.value[n] as ToolAnnotation | undefined
+    const wild = localOverrides.value['*'] as ToolAnnotation | undefined
+    const up = props.upstreamAnnotations?.[n] as ToolAnnotation | null | undefined
+    const ow = exact?.openWorldHint ?? wild?.openWorldHint ?? up?.openWorldHint
+    if (ow === true) {
+      blockedOpen.push(n)
+      continue
+    }
+    const ro = exact?.readOnlyHint ?? true
+    if (ro !== true) continue
+    if (ow === false) become++
+    else conditionalOpen.push(n)
+  }
+  return { become, conditionalOpen, total: names.length, blockedOpen }
+})
+
+function openMarkAllModal() {
+  showMarkAllModal.value = true
+  markAllAck.value = false
+  markAllReason.value = ''
+}
+
+function cancelMarkAll() {
+  showMarkAllModal.value = false
+  markAllAck.value = false
+  markAllReason.value = ''
+}
+
+function withMarkSafeSuffix(title: string | undefined, reason: string): string {
+  const suffix = `[mark-safe: ${reason}]`
+  const base = (title || '').replace(/\s*\[mark-safe:[^\]]*\]\s*/g, '').trim()
+  return base ? `${base} ${suffix}` : suffix
+}
+
+function confirmMarkAll() {
+  if (!markAllAck.value || !markAllReason.value) return
+  const existing = localOverrides.value['*']
+  const ann: ToolAnnotation = { ...(existing || {}) }
+  ann.readOnlyHint = true
+  ann.destructiveHint = false
+  // Reason travels in the draft title so it survives into audit without backend change.
+  ann.title = withMarkSafeSuffix(existing?.title, markAllReason.value)
+  localOverrides.value = { ...localOverrides.value, '*': ann }
+  pendingDeletes.value.delete('*')
+  addSafeDraft('*')
+  cancelMarkAll()
+}
+
+function sameAnn(a: ToolAnnotation | null | undefined, b: ToolAnnotation | null | undefined): boolean {
+  const na = a ?? null
+  const nb = b ?? null
+  if (!na && !nb) return true
+  if (!na || !nb) return false
+  return na.title === nb.title
+    && na.readOnlyHint === nb.readOnlyHint
+    && na.destructiveHint === nb.destructiveHint
+    && na.idempotentHint === nb.idempotentHint
+    && na.openWorldHint === nb.openWorldHint
+}
+
+// Unsaved-draft counter near Save-all: local drafts differing from saved
+// props plus deletes of saved keys.
+const unsavedCount = computed(() => {
+  let n = 0
+  const saved = props.overrides || {}
+  for (const [k, v] of Object.entries(localOverrides.value)) {
+    if (!sameAnn(v, saved[k] ?? null)) n++
+  }
+  for (const k of pendingDeletes.value) {
+    if (saved[k]) n++
+  }
+  return n
+})
 
 function saveAll() {
   saving.value = true
@@ -316,5 +536,19 @@ function saveAll() {
   setTimeout(() => (saving.value = false), 800)
 }
 
-defineExpose({ openEdit })
+// Shortcut-button predicate shared with the ServerDetail Tools-tab shortcut:
+// hidden exactly when the effective (upstream + wildcard + exact drafts)
+// annotation is read-visible. ServerDetail reuses this via the exposed
+// method so both buttons compute visibility from the same effective source.
+function isMarkSafeVisible(tool: string): boolean {
+  return effectiveFor(tool)?.readOnlyHint !== true
+}
+
+// Dirty-check for the Bulk-JSON guard in ServerDetail: true while any
+// unsaved preset/popover draft exists that Apply-JSON would orphan.
+function hasUnsavedDrafts(): boolean {
+  return unsavedCount.value > 0
+}
+
+defineExpose({ openEdit, markSafe, effectiveFor, isMarkSafeVisible, confirmMarkAll, cancelMarkAll, hasUnsavedDrafts, unsavedCount })
 </script>

@@ -749,6 +749,14 @@
                         :disabled="isToolConfigDenied(tool.name)"
                         @click="focusAnnotationOverride(tool.name)"
                       >✎ Override</button>
+                      <button
+                        v-if="isMarkSafeVisible(tool.name)"
+                        :data-test="`tool-annotation-marksafe-${tool.name}`"
+                        class="btn btn-ghost btn-xs"
+                        title="Draft a read-only + non-destructive override for this tool (unsaved until Save overrides)"
+                        :disabled="isToolConfigDenied(tool.name)"
+                        @click="markToolSafe(tool.name)"
+                      >✓ Mark safe</button>
                       <label
                         v-if="isToolToggleAvailable(tool.name)"
                         class="flex items-center gap-2 cursor-pointer"
@@ -3577,7 +3585,10 @@ const toolAnnotationsMap = computed<Record<string, ToolAnnotation>>(() => {
   return m
 })
 
-// Raw JSON bulk fallback (100 entries)
+// Raw JSON bulk fallback (100 entries). NOTE: rawJson/applyRawJson operate
+// on SAVED state only and bypass the editor's localOverrides drafts. Choice:
+// block/warn (confirm) while the editor holds unsaved drafts instead of
+// merging, so Apply-JSON can never silently orphan a Mark-safe preset draft.
 const rawJson = ref('')
 const rawJsonError = ref('')
 const annotationOverridesHighlighted = ref(false)
@@ -3610,6 +3621,19 @@ async function saveAnnotationOverrides(overrides: Record<string, ToolAnnotation 
 
 async function applyRawJson() {
   if (!server.value) return
+  // Dirty-check: Apply-JSON PATCHes textarea content directly and would
+  // orphan unsaved editor drafts (incl. Mark-safe presets). Warn first.
+  try {
+    const maybe = annotationEditorRef.value as unknown as { hasUnsavedDrafts?: () => boolean } | null
+    if (maybe?.hasUnsavedDrafts?.()) {
+      const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
+        ? window.confirm('Unsaved annotation drafts (possibly Mark-safe presets) exist. Apply JSON will overwrite saved overrides and orphan those drafts. Continue?')
+        : false
+      if (!ok) return
+    }
+  } catch {
+    // If the guard itself fails, fall through to the normal JSON path.
+  }
   rawJsonError.value = ''
   let parsed: Record<string, unknown>
   try {
@@ -3646,6 +3670,62 @@ function focusAnnotationOverride(toolName: string) {
       // pre-open popover for that tool if editor exposes openEdit
       const maybe = annotationEditorRef.value as unknown as { openEdit?: (name: string) => void }
       if (maybe.openEdit) maybe.openEdit(toolName)
+    }
+  })
+}
+
+// Mark-safe shortcut visibility: same effective source as the editor row
+// button (upstream + saved wildcard/exact overrides, plus live editor drafts
+// when the editor ref is mounted). markSafeTick forces a parent re-render
+// right after a shortcut-created draft so the button hides instantly;
+// drafts created inside the editor sync on the next parent render/save.
+const markSafeTick = ref(0)
+function savedEffectiveFor(toolName: string): ToolAnnotation | null {
+  const saved = (server.value as unknown as { annotation_overrides?: Record<string, ToolAnnotation> })?.annotation_overrides || {}
+  const upstream = toolAnnotationsMap.value[toolName] as ToolAnnotation | undefined
+  const wild = saved['*'] ?? null
+  const exact = saved[toolName] ?? null
+  if (!wild && !exact) return (upstream as ToolAnnotation | undefined) ?? null
+  const base: ToolAnnotation = { ...(upstream || {}) } as ToolAnnotation
+  for (const ov of [wild, exact]) {
+    if (!ov) continue
+    if (ov.title) base.title = ov.title
+    if (ov.readOnlyHint !== undefined) base.readOnlyHint = ov.readOnlyHint
+    if (ov.destructiveHint !== undefined) base.destructiveHint = ov.destructiveHint
+    if (ov.idempotentHint !== undefined) base.idempotentHint = ov.idempotentHint
+    if (ov.openWorldHint !== undefined) base.openWorldHint = ov.openWorldHint
+  }
+  return base
+}
+function isMarkSafeVisible(toolName: string): boolean {
+  // Establish a reactive dependency so shortcut-created drafts hide instantly.
+  void markSafeTick.value
+  try {
+    const maybe = annotationEditorRef.value as unknown as { isMarkSafeVisible?: (n: string) => boolean } | null
+    if (maybe?.isMarkSafeVisible) return maybe.isMarkSafeVisible(toolName)
+  } catch {
+    // Fall through to the saved-effective computation below.
+  }
+  return savedEffectiveFor(toolName)?.readOnlyHint !== true
+}
+
+// Mark-safe shortcut: same single code path as the editor preset button —
+// scroll to the overrides card, then delegate to the editor's markSafe()
+// (draft-only; the operator still clicks Save overrides). Never duplicates
+// save logic and never opens the popover.
+function markToolSafe(toolName: string) {
+  activeTab.value = 'config'
+  void nextTick(() => {
+    const card = document.querySelector('[data-test="annotation-overrides-card"]')
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      annotationOverridesHighlighted.value = true
+      setTimeout(() => (annotationOverridesHighlighted.value = false), 2000)
+    }
+    if (toolName && annotationEditorRef.value) {
+      const maybe = annotationEditorRef.value as unknown as { markSafe?: (name: string) => void }
+      if (maybe.markSafe) maybe.markSafe(toolName)
+      markSafeTick.value++
     }
   })
 }
