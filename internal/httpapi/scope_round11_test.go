@@ -119,7 +119,9 @@ func TestGetStatus_ActivationBlockIsOperatorOnly(t *testing.T) {
 	body := agent.Body.String()
 	assert.NotContains(t, body, activationClientAlpha, "MCP-client inventory leaked to a scoped caller")
 	assert.NotContains(t, body, activationClientBeta, "MCP-client inventory leaked to a scoped caller")
-	assert.NotRegexp(t, fmt.Sprintf(`":%d[,}]`, activationCalls24h), body,
+	assert.NotContains(t, body, fmt.Sprintf(`":%d,`, activationCalls24h),
+		"exact deployment-wide retrieve_tools count leaked to a scoped caller")
+	assert.NotContains(t, body, fmt.Sprintf(`":%d}`, activationCalls24h),
 		"exact deployment-wide retrieve_tools count leaked to a scoped caller")
 	assert.NotContains(t, body, activationSavedBucket, "deployment-wide tokens-saved bucket leaked to a scoped caller")
 	// Key names too, so a projection that kept the numbers under a renamed or
