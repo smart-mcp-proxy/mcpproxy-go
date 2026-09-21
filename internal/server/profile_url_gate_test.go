@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -180,6 +181,87 @@ func profileGateRefusal(t *testing.T, handler http.Handler, agent *auth.AuthCont
 	return rec
 }
 
+// settleBackgroundGoroutines waits for the process's live goroutine count to
+// stop moving before an allocation-parity measurement starts. internal/server
+// runs its tests in one shared binary; a goroutine still winding down from an
+// earlier test (a runtime fixture's shutdown, an SSE/HTTP client closing
+// against an already-stopped httptest server) can still be allocating when a
+// later, unrelated test opens its testing.AllocsPerRun window — AllocsPerRun
+// counts every goroutine's mallocs process-wide, not just the calling one's.
+// This is a SINGLE settle pass before measurement begins, not one per sample:
+// a prior attempt forced runtime.GC() between every measurement instead and
+// made the flakiness worse, not better — each GC is itself a stop-the-world
+// synchronization point that hands other goroutines a fresh chance to run
+// right as the next window opens, and doing that hundreds of times over a
+// run added churn rather than removing it.
+func settleBackgroundGoroutines(t *testing.T) {
+	t.Helper()
+	last := goruntime.NumGoroutine()
+	stable := 0
+	deadline := time.Now().Add(2 * time.Second)
+	for stable < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		n := goruntime.NumGoroutine()
+		if n == last {
+			stable++
+		} else {
+			stable = 0
+			last = n
+		}
+	}
+}
+
+// retryUntilAllocsMatch takes one fresh testing.AllocsPerRun reading of every
+// case in "cases" and returns as soon as all of them agree with "baseline"
+// on the SAME attempt, sleeping a real 20ms between attempts otherwise (up
+// to "attempts" tries) — the shape TestProfileMiddleware_RefusalWorkIndepen-
+// dentOfFleet originally used inline, now shared with its sibling
+// TestSelectableProfileNames_PinOutcomesDoSameWork.
+//
+// A round-robin MINIMUM-of-many-samples was tried first (keep, per case, the
+// lowest reading seen over several back-to-back rounds) on the theory that
+// process-wide noise only ever ADDS allocations. It does not work here:
+// measured directly under `go test -race`, two fleets of different size can
+// differ by exactly one allocation on EVERY back-to-back call, with no
+// fluctuation at all across dozens of tight-loop rounds — go's race build
+// disables the tiny-object allocator (objects that would normally share one
+// heap slot each get their own; see runtime/malloc.go's raceenabled checks),
+// and which case's measurement window absorbs the resulting off-by-one comes
+// down to incidental free-list/size-class state that repeated sampling with
+// no gap in between never disturbs, so the minimum converges on two
+// different, both "clean," values instead of one shared value. A REAL sleep
+// between attempts does let it move: confirmed by direct comparison in
+// isolation under -race, requiring an exact match across every case on one
+// shared attempt (this function) passes reliably where round-robin-minimum
+// sampling with the identical total sleep budget fails on every run. Forcing
+// this with runtime.GC() between measurements instead of sleeping was tried
+// even earlier and made the flakiness worse, not better — see
+// settleBackgroundGoroutines above, which handles the OTHER, independent
+// noise source (a goroutine leftover from an earlier test in this package's
+// shared binary) with a single settle pass before measurement starts.
+func retryUntilAllocsMatch(attempts, runs int, baseline string, cases map[string]func()) map[string]float64 {
+	restore := goruntime.GOMAXPROCS(1)
+	defer goruntime.GOMAXPROCS(restore)
+
+	allocs := make(map[string]float64, len(cases))
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(20 * time.Millisecond)
+		}
+		for name, fn := range cases {
+			allocs[name] = testing.AllocsPerRun(runs, fn)
+		}
+		same := true
+		for name := range cases {
+			same = same && allocs[name] == allocs[baseline]
+		}
+		if same {
+			break
+		}
+	}
+	return allocs
+}
+
 // TestProfileMiddleware_RefusalWorkIndependentOfFleet (Spec 105 PR D codex
 // round 2, finding 1): the uniform refusal must not cost work proportional to
 // the number of OTHER profiles the operator has configured. A gate that
@@ -195,10 +277,12 @@ func profileGateRefusal(t *testing.T, handler http.Handler, agent *auth.AuthCont
 // profiles, for every refusal branch. (HEAD before the fix: 31 allocations
 // over the empty fleet, ~4 129 over the large one — 1.7 µs vs 0.9 ms at
 // 10 000 profiles.) AllocsPerRun counts every goroutine's mallocs and the
-// package's other tests may leave background work behind, so a reading is
-// retried into a quiet window — noise only ever adds, and a fleet-
-// proportional gate is off by thousands, so it can never pass. The pure
-// predicate is pinned at zero allocations without any retry in
+// package's other tests may leave background work behind, plus a `-race`-
+// only allocator artifact independent of that (see retryUntilAllocsMatch),
+// so a reading is retried into an attempt where the four fleets agree —
+// noise only ever adds, and a fleet-proportional gate is off by thousands,
+// so it can never pass regardless of how the noise is filtered. The pure
+// predicate is pinned at zero allocations the same way in
 // TestProfileIndex_SelectableAllocatesNothing.
 func TestProfileMiddleware_RefusalWorkIndependentOfFleet(t *testing.T) {
 	fleets := profileGateFleets()
@@ -211,26 +295,19 @@ func TestProfileMiddleware_RefusalWorkIndependentOfFleet(t *testing.T) {
 	for _, f := range fleets {
 		f.srv.profileIndexes.For(f.cfg)
 	}
+	settleBackgroundGoroutines(t)
 
 	for name, c := range profileGateRefusalCases {
 		t.Run(name, func(t *testing.T) {
-			var allocs map[string]float64
-			for attempt := 0; attempt < 10; attempt++ {
-				allocs = map[string]float64{}
-				for fleet, f := range fleets {
-					handler := f.handler(next)
-					allocs[fleet] = testing.AllocsPerRun(20, func() { profileGateRefusal(t, handler, c.agent, c.path) })
-				}
-				same := true
-				for fleet := range fleets {
-					same = same && allocs[fleet] == allocs["no profiles"]
-				}
-				if same {
-					return
-				}
-				time.Sleep(20 * time.Millisecond)
+			cases := make(map[string]func(), len(fleets))
+			for fleet, f := range fleets {
+				handler := f.handler(next)
+				cases[fleet] = func() { profileGateRefusal(t, handler, c.agent, c.path) }
 			}
-			t.Fatalf("%s must allocate exactly like the empty fleet on every fleet: %v", name, allocs)
+			allocs := retryUntilAllocsMatch(15, 20, "no profiles", cases)
+			for _, got := range allocs {
+				require.Equal(t, allocs["no profiles"], got, "%s must allocate exactly like the empty fleet on every fleet: %v", name, allocs)
+			}
 		})
 	}
 }
