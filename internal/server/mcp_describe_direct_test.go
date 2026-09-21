@@ -12,6 +12,9 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -654,4 +657,340 @@ func TestDescribeDirect_DisplayAndCanonicalNamespaceOverlap(t *testing.T) {
 	cat := p.loadDirectCatalog()
 	_, resolvesCanonically := cat.LookupCanonical("x__y:z")
 	assert.False(t, resolvesCanonically, "the ambiguous canonical id must resolve to nothing")
+}
+
+// Spec 105 PR G, FR-010 gap G3 (T096): the test above establishes that an
+// UNRESTRICTED caller sees both candidates behind the ambiguous string
+// "x__y:z" and correctly gets nothing back — a real ambiguity from an
+// unrestricted point of view. A token authorized for "x__y" ALONE can see
+// only ONE side of that collision: the same string must resolve to its OWN
+// authorized tool, identically whether or not the hidden "x" server (whose
+// display name happens to collide with it) exists at all — a hidden
+// colliding entry must never suppress an id an authorized entry would
+// otherwise answer to.
+func directCanonicalOverlapFixture(t *testing.T, includeHidden bool) *MCPProxyServer {
+	t.Helper()
+	p := createTestMCPProxyServer(t)
+
+	var tools []*config.ToolMetadata
+	if includeHidden {
+		tools = append(tools, &config.ToolMetadata{
+			ServerName: "x", Name: "y:z",
+			Description: "HIDDEN_SENTINEL display-name owner",
+			ParamsJSON:  `{"type":"object"}`, Hash: "h-display",
+		})
+	}
+	tools = append(tools, &config.ToolMetadata{
+		ServerName: "x__y", Name: "z",
+		Description: "authorized canonical-id owner",
+		ParamsJSON:  `{"type":"object"}`, Hash: "h-canonical",
+	})
+
+	for _, srv := range []string{"x", "x__y"} {
+		require.NoError(t, p.storage.SaveUpstreamServer(&config.ServerConfig{Name: srv, Enabled: true}))
+	}
+	for _, tool := range tools {
+		require.NoError(t, p.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: tool.ServerName, ToolName: tool.Name, Status: storage.ToolApprovalStatusApproved,
+		}))
+	}
+	p.publishDirectCatalog(buildDirectCatalog(tools, nil))
+	return p
+}
+
+func xyScopedCtx() context.Context {
+	return auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "xy-scoped",
+		AllowedServers: []string{"x__y"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+}
+
+// xyScopedUserCtx is xyScopedCtx's AuthTypeUser twin (codex round-3 review,
+// MUST-FIX): the caller-kind fix (isScopeRestrictedCaller) must extend to a
+// server-edition "user" identity exactly like it does to an agent token —
+// Type is the only field that differs from xyScopedCtx.
+func xyScopedUserCtx() context.Context {
+	return auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeUser,
+		AgentName:      "xy-scoped-user",
+		AllowedServers: []string{"x__y"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+}
+
+func TestDescribeDirect_AuthorizedCanonicalSurvivesHiddenDisplayCollision(t *testing.T) {
+	resolve := func(t *testing.T, includeHidden bool) describeToolResponse {
+		t.Helper()
+		p := directCanonicalOverlapFixture(t, includeHidden)
+		return callDescribeDirect(t, p, xyScopedCtx(), []interface{}{"x__y:z"})
+	}
+
+	withHidden := resolve(t, true)
+	withoutHidden := resolve(t, false)
+
+	require.Empty(t, withHidden.Errors,
+		"the authorized canonical id must resolve even though a hidden display-name collision exists")
+	require.Len(t, withHidden.Definitions, 1)
+	require.Empty(t, withoutHidden.Errors)
+	require.Len(t, withoutHidden.Definitions, 1)
+
+	assert.Equal(t, withoutHidden.Definitions, withHidden.Definitions,
+		"the resolved definition must not depend on whether the hidden collision exists")
+	assert.Equal(t, "x__y", withHidden.Definitions[0]["server"])
+	raw, err := json.Marshal(withHidden)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "HIDDEN_SENTINEL")
+
+	// The same must hold in check mode.
+	checkOne := func(t *testing.T, includeHidden bool) describeCheckResult {
+		t.Helper()
+		p := directCanonicalOverlapFixture(t, includeHidden)
+		// This fixture carries no runtime, so check mode's activity-record
+		// write needs a stub recorder or it refuses the whole call (see
+		// newDirectCheckFixture).
+		p.preflightRecorder = func(_ internalRuntime.PreflightActivity) error { return nil }
+		req := mcp.CallToolRequest{}
+		req.Params.Arguments = map[string]interface{}{"tool_ids": []interface{}{"x__y:z"}, "check": true}
+		result, err := p.describeToolHandler(describeSurfaceDirect)(xyScopedCtx(), req)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		require.False(t, result.IsError, "check returned an error result: %v", result.Content)
+		var payload describeCheckPayload
+		require.NoError(t, json.Unmarshal([]byte(result.Content[0].(mcp.TextContent).Text), &payload))
+		require.Len(t, payload.Results, 1)
+		return payload.Results[0]
+	}
+
+	checkWithHidden := checkOne(t, true)
+	checkWithoutHidden := checkOne(t, false)
+	assert.Equal(t, checkWithoutHidden, checkWithHidden,
+		"check-mode verdict must not depend on whether the hidden collision exists")
+	assert.Equal(t, string(preflight.StatusReady), checkWithHidden.Status,
+		"the authorized canonical id must check as ready even though a hidden collision exists")
+
+	// Administrator control: TestDescribeDirect_DisplayAndCanonicalNamespaceOverlap
+	// above pins that an unrestricted caller still gets nothing back for the
+	// ambiguous canonical form — unaffected by this fix.
+}
+
+// codex round-3 review, MUST-FIX: TestDescribeDirect_
+// AuthorizedCanonicalSurvivesHiddenDisplayCollision only exercised an
+// AuthTypeAgent caller, so it would still pass if isScopeRestrictedCaller's
+// AuthTypeUser branch in resolveDirectDescribeIDIn (mcp_describe_direct.go)
+// had been left as the old agent-only check. Same fixture, same assertions,
+// AuthTypeUser caller.
+func TestDescribeDirect_AuthorizedCanonicalSurvivesHiddenDisplayCollision_UserType(t *testing.T) {
+	resolve := func(t *testing.T, includeHidden bool) describeToolResponse {
+		t.Helper()
+		p := directCanonicalOverlapFixture(t, includeHidden)
+		return callDescribeDirect(t, p, xyScopedUserCtx(), []interface{}{"x__y:z"})
+	}
+
+	withHidden := resolve(t, true)
+	withoutHidden := resolve(t, false)
+
+	require.Empty(t, withHidden.Errors,
+		"an AuthTypeUser caller authorized for the canonical owner must resolve it too, exactly like an agent token")
+	require.Len(t, withHidden.Definitions, 1)
+	require.Empty(t, withoutHidden.Errors)
+	require.Len(t, withoutHidden.Definitions, 1)
+	assert.Equal(t, withoutHidden.Definitions, withHidden.Definitions)
+	assert.Equal(t, "x__y", withHidden.Definitions[0]["server"])
+}
+
+// Spec 105 PR G, FR-010 gap G4 (T097): the direct surface's own case-
+// correction resolver (suggestDirectToolID) must not let a hidden
+// case-equivalent candidate suppress a suggestion for a DIFFERENT,
+// authorized candidate. Fixture: server "b" (authorized) tool "Read"
+// (canonical "b:Read"); server "B" (hidden, case-only difference) tool
+// "read" (canonical "B:read", sorts before "b:Read"). A "b"-only token
+// asking for "b:read" (matching neither exactly) must get the "b:Read"
+// suggestion whether or not the hidden "B" server exists.
+func directCaseCollisionFixture(t *testing.T, includeHidden bool) *MCPProxyServer {
+	t.Helper()
+	p := createTestMCPProxyServer(t)
+
+	tools := []*config.ToolMetadata{
+		{ServerName: "b", Name: "Read", Description: "authorized read tool",
+			ParamsJSON: `{"type":"object"}`, Hash: "h-b-Read"},
+	}
+	if includeHidden {
+		tools = append(tools, &config.ToolMetadata{
+			ServerName: "B", Name: "read", Description: "HIDDEN_SENTINEL read tool",
+			ParamsJSON: `{"type":"object"}`, Hash: "h-B-read",
+		})
+	}
+	for _, srv := range []string{"b", "B"} {
+		require.NoError(t, p.storage.SaveUpstreamServer(&config.ServerConfig{Name: srv, Enabled: true}))
+	}
+	for _, tool := range tools {
+		require.NoError(t, p.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: tool.ServerName, ToolName: tool.Name, Status: storage.ToolApprovalStatusApproved,
+		}))
+	}
+	p.publishDirectCatalog(buildDirectCatalog(tools, nil))
+	return p
+}
+
+func bScopedDirectCtx() context.Context {
+	return auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "b-scoped-direct",
+		AllowedServers: []string{"b"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+}
+
+func TestDescribeDirect_CaseCorrectionSurvivesHiddenCaseCollision(t *testing.T) {
+	resolve := func(t *testing.T, includeHidden bool) map[string]interface{} {
+		t.Helper()
+		p := directCaseCollisionFixture(t, includeHidden)
+		resp := callDescribeDirect(t, p, bScopedDirectCtx(), []interface{}{"b:read"})
+		require.Empty(t, resp.Definitions, "a lowercase id must never resolve — case is never folded on a resolution path")
+		require.Len(t, resp.Errors, 1)
+		return resp.Errors[0]
+	}
+
+	withHidden := resolve(t, true)
+	withoutHidden := resolve(t, false)
+
+	assert.Equal(t, withoutHidden, withHidden,
+		"the response must be identical whether or not the hidden case-collision exists")
+	assert.Equal(t, describeErrNotFound, withHidden["error"])
+	assert.Contains(t, withHidden["remediation"], "b:Read",
+		"the case-correction suggestion must survive even though a hidden collision exists")
+
+	for _, resp := range []map[string]interface{}{withHidden, withoutHidden} {
+		for _, v := range resp {
+			if s, ok := v.(string); ok {
+				assert.NotContains(t, s, "HIDDEN_SENTINEL", "no hidden content may leak into the response")
+			}
+		}
+	}
+}
+
+// codex round-3 review, MUST-FIX: an AuthTypeUser twin of
+// TestDescribeDirect_CaseCorrectionSurvivesHiddenCaseCollision — proves
+// suggestDirectToolID's isScopeRestrictedCaller branch (mcp_describe_direct.go)
+// actually exercises a non-agent scoped caller, not just AuthTypeAgent.
+func TestDescribeDirect_CaseCorrectionSurvivesHiddenCaseCollision_UserType(t *testing.T) {
+	userCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeUser,
+		AgentName:      "b-scoped-direct-user",
+		AllowedServers: []string{"b"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+
+	resolve := func(t *testing.T, includeHidden bool) map[string]interface{} {
+		t.Helper()
+		p := directCaseCollisionFixture(t, includeHidden)
+		resp := callDescribeDirect(t, p, userCtx, []interface{}{"b:read"})
+		require.Empty(t, resp.Definitions)
+		require.Len(t, resp.Errors, 1)
+		return resp.Errors[0]
+	}
+
+	withHidden := resolve(t, true)
+	withoutHidden := resolve(t, false)
+
+	assert.Equal(t, withoutHidden, withHidden)
+	assert.Contains(t, withHidden["remediation"], "b:Read",
+		"an AuthTypeUser caller must get the same case-correction suggestion an agent token gets")
+}
+
+// Spec 105 PR G, FR-010 gap G3/G4 — codex round-1 review MUST-FIX: a
+// PROFILE-SCOPED ADMINISTRATOR is not a scoped agent and is not named as an
+// SC-005 exception for FR-010 ("administrator resolution unchanged and
+// tested separately"). Both the canonical-shadow resolution
+// (TestDescribeDirect_AuthorizedCanonicalSurvivesHiddenDisplayCollision's
+// agent-token fix) and the case-correction continue-past-invisible-match fix
+// (TestDescribeDirect_CaseCorrectionSurvivesHiddenCaseCollision's) must NOT
+// extend to a profile-scoped admin: it must keep getting exactly the
+// PRE-fix answer — not found for the ambiguous canonical id, and no
+// suggestion once the first case-fold match turns out invisible — even
+// though its own profile would, on its own, "authorize" only one side of
+// each collision.
+func TestDescribeDirect_ProfileScopedAdmin_CollisionResolutionUnchanged(t *testing.T) {
+	profileScopedAdmin := func(allowed ...string) context.Context {
+		return profile.WithProfileScope(
+			auth.WithAuthContext(context.Background(), auth.AdminContext()),
+			profile.NewProfileScope("P", allowed),
+		)
+	}
+
+	t.Run("ambiguous canonical id never resolves, even though the profile admits only one side", func(t *testing.T) {
+		p := directCanonicalOverlapFixture(t, true)
+		resp := callDescribeDirect(t, p, profileScopedAdmin("x__y"), []interface{}{"x__y:z"})
+		assert.Empty(t, resp.Definitions,
+			"a profile-scoped admin must NOT resolve the ambiguous canonical id — that is an agent-token-only fix")
+		byID := describeErrorsByID(resp)
+		require.Contains(t, byID, "x__y:z")
+		assert.Equal(t, describeErrNotFound, byID["x__y:z"]["error"])
+	})
+
+	t.Run("case-correction stops at the first invisible match, no suggestion", func(t *testing.T) {
+		p := directCaseCollisionFixture(t, true)
+		resp := callDescribeDirect(t, p, profileScopedAdmin("b"), []interface{}{"b:read"})
+		assert.Empty(t, resp.Definitions)
+		byID := describeErrorsByID(resp)
+		require.Contains(t, byID, "b:read")
+		assert.Equal(t, describeErrNotFound, byID["b:read"]["error"])
+		assert.Equal(t, describeNotFoundRemediation, byID["b:read"]["remediation"],
+			"a profile-scoped admin must get the plain not-found remediation, no case-correction suggestion")
+	})
+}
+
+// codex round-2 review, MUST-FIX: the canonical-shadow disambiguation
+// predicate (LookupCanonicalForAuth's `authorized` closure in
+// resolveDirectDescribeIDIn) used to check SCOPE alone (directEntryInScope),
+// not full visibility. A candidate that is scope-authorized but
+// CALLABILITY-locked (pending/changed/disabled/quarantined) is not actually
+// reachable by this caller, so counting it as "authorized" made a
+// genuinely callable candidate look ambiguous against it: BOTH candidates
+// can be on servers this caller may access, yet only one is dispatchable.
+//
+// Fixture: server "x" (caller-authorized) tool "y:z" PENDING approval;
+// server "x__y" (also caller-authorized) tool "z" APPROVED. Both origins
+// flatten to the ambiguous canonical string "x__y:z" (same collision as
+// TestDescribeDirect_AuthorizedCanonicalSurvivesHiddenDisplayCollision),
+// but here neither is "hidden" by scope — only one is locked. The
+// authorized, callable candidate must still resolve.
+func TestDescribeDirect_CanonicalShadowExcludesCallabilityLockedCandidate(t *testing.T) {
+	tools := []*config.ToolMetadata{
+		{ServerName: "x", Name: "y:z", Description: "Locked display-name owner",
+			ParamsJSON: `{"type":"object"}`, Hash: "h-display-locked"},
+		{ServerName: "x__y", Name: "z", Description: "Callable canonical-id owner",
+			ParamsJSON: `{"type":"object"}`, Hash: "h-canonical-callable"},
+	}
+	require.Equal(t, FormatDirectToolName("x", "y:z"), "x__y"+":"+"z",
+		"the fixture must actually collide, or this test proves nothing")
+
+	p := createTestMCPProxyServer(t)
+	for _, srv := range []string{"x", "x__y"} {
+		require.NoError(t, p.storage.SaveUpstreamServer(&config.ServerConfig{Name: srv, Enabled: true}))
+	}
+	require.NoError(t, p.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "x", ToolName: "y:z", Status: storage.ToolApprovalStatusPending,
+	}))
+	require.NoError(t, p.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "x__y", ToolName: "z", Status: storage.ToolApprovalStatusApproved,
+	}))
+	p.publishDirectCatalog(buildDirectCatalog(tools, nil))
+
+	// Authorized for BOTH servers — the collision is entirely within this
+	// caller's own scope; only callability distinguishes the two.
+	bothAuthorized := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "both-authorized",
+		AllowedServers: []string{"x", "x__y"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+
+	resp := callDescribeDirect(t, p, bothAuthorized, []interface{}{"x__y:z"})
+	require.Empty(t, resp.Errors,
+		"the callable candidate must resolve even though a scope-authorized-but-locked candidate shares its canonical string")
+	require.Len(t, resp.Definitions, 1)
+	assert.Equal(t, "x__y", resp.Definitions[0]["server"])
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
@@ -172,7 +173,36 @@ func (p *MCPProxyServer) resolveDescribeDefinition(
 	visible, reason := p.toolVisibleToSession(ctx, serverName, toolName)
 	if !visible {
 		code, remediation := p.describeVisibilityError(reason, serverName, toolName)
-		if reason == visReasonNotIndexed {
+		// Spec 105 FR-010 G2: the case-correction suggestion is attempted for
+		// visReasonNotIndexed AND visReasonServerNotInScope alike, not only
+		// the former. suggestCanonicalToolID itself only ever offers a
+		// correction that is VISIBLE to this session (over the authorized
+		// corpus), so broadening which reasons attempt it cannot disclose
+		// anything — what it fixes is the other direction: an id whose
+		// literal (server, tool) pair happens to be a HIDDEN document (so the
+		// reason is server_not_in_scope, not not_indexed) must offer the same
+		// suggestion a nonexistent id with no hidden collision would, or the
+		// hidden document's mere existence silently swallows a did-you-mean
+		// the caller would otherwise receive. visReasonToolUnresolved is left
+		// out deliberately: that reason fires only for a server already
+		// inside scope, and its remediation ("discovery has not completed" vs
+		// plain not-found) is chosen by resolution state, not by a
+		// disclosure concern this gap is about.
+		//
+		// Gated to SCOPED AGENT callers (codex round-1 review, MUST-FIX): a
+		// profile-scoped administrator is not a scoped agent and is not one
+		// of FR-010's named exceptions to SC-005 byte-parity — it must keep
+		// the PRE-fix rule (suggestion attempted only on visReasonNotIndexed)
+		// exactly, even though that leaves the admin-facing asymmetry this
+		// widening fixes for agent tokens unfixed for admins. That asymmetry
+		// is out of this gap's scope, not a regression: FR-010 is explicit
+		// that "administrator resolution [is] unchanged and tested
+		// separately".
+		suggestReasons := reason == visReasonNotIndexed
+		if auth.IsScopedCaller(ctx) {
+			suggestReasons = suggestReasons || reason == visReasonServerNotInScope
+		}
+		if suggestReasons {
 			if canonical, ok := p.suggestCanonicalToolID(ctx, serverName, toolName); ok {
 				remediation = fmt.Sprintf("Tool not found. Tool ids are case-sensitive — did you mean '%s'?", canonical)
 			}

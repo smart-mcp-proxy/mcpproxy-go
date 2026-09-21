@@ -841,7 +841,19 @@ func TestForEachProfileSelectable_VisitsEveryProfileRegardlessOfOutcome(t *testi
 // finding 1): the URL gate's predicate does constant, allocation-free work —
 // zero allocations for every refusal and admission branch, over a fleet of
 // one profile and of 4 097 — so a scoped caller's refusal cannot reveal how
-// many other profiles exist. Pure function, so exact and retry-free.
+// many other profiles exist. Pure function, so the outcome is deterministic,
+// but the MEASUREMENT is not: AllocsPerRun counts process-wide mallocs (see
+// the identical note on TestSelectableProfileNames_PinOutcomesDoSameWork
+// above), so a goroutine still winding down from an earlier test in this
+// package's shared binary — a runtime fixture's shutdown, an SSE/HTTP client
+// closing against an already-stopped httptest server — inflates whichever
+// case's window it overlaps (CI, Server Edition job, 2026-09-20: 13 on
+// "scoped, absent slug" over the 4096-server fleet, zero everywhere else on
+// the identical commit's very next run). Noise only ever ADDS allocations, so
+// the minimum over a few samples per case is the deterministic figure this
+// test is about — never widen it into a non-zero budget, which would mask an
+// actual regression on this hot path instead of just filtering scheduler
+// noise.
 func TestProfileIndex_SelectableAllocatesNothing(t *testing.T) {
 	fleets := map[string]*profileIndex{
 		"no profiles": newProfileIndex(&config.Config{Servers: []*config.ServerConfig{{Name: "pin-srv"}, {Name: "other-srv"}}}),
@@ -868,8 +880,11 @@ func TestProfileIndex_SelectableAllocatesNothing(t *testing.T) {
 	}
 	for fleet, idx := range fleets {
 		for name, c := range cases {
-			allocs := testing.AllocsPerRun(50, func() { idx.selectable(c.ctx, c.slug) })
-			require.Zero(t, allocs, "%s over fleet %q must not allocate", name, fleet)
+			best := math.Inf(1)
+			for i := 0; i < 7; i++ {
+				best = math.Min(best, testing.AllocsPerRun(50, func() { idx.selectable(c.ctx, c.slug) }))
+			}
+			require.Zero(t, best, "%s over fleet %q must not allocate", name, fleet)
 		}
 	}
 }

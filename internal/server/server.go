@@ -436,6 +436,19 @@ func (s *Server) trustedProxiesProvider() config.TrustedProxiesProvider {
 // requests get admin context for backward compatibility. Tray connections
 // always bypass auth.
 func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
+	// Spec 105 FR-010 D13/gap G6: install the mutable direct-request-kind box
+	// (mcp_direct_scope.go) on every request's ctx BEFORE it reaches mcp-go's
+	// HandleMessage, which is what lets the BeforeListTools/BeforeCallTool
+	// hooks (initRoutingModeServers) write this request's real kind into it —
+	// the box must already be present when the hook runs, or the write is a
+	// no-op and the direct discovery filters fall back to their safe
+	// (list-time) default. Wrapping `next` here, rather than adding the box
+	// separately in each of this middleware's several return branches, means
+	// every branch's `next.ServeHTTP(w, r.WithContext(ctx))` carries it
+	// automatically, on top of whatever AuthContext that branch attaches.
+	// Harmless on every endpoint but /mcp/all, whose filters are the only
+	// consumers.
+	next = directRequestKindMiddleware(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := httpapi.ExtractToken(r)
 		if token == "" {

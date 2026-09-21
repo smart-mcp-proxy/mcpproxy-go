@@ -64,7 +64,7 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 	evaluator := newDirectCallabilityEvaluator(p)
 	filtered := make([]mcp.Tool, 0, len(tools))
 	for _, tool := range tools {
-		var serverName, toolName string
+		var serverName, toolName, tier string
 
 		if stamp, stamped := readDirectToolStamp(tool); stamped {
 			// Spec 105 FR-008: the identity STAMPED on this exact tool object,
@@ -73,7 +73,7 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 			if stamp.rawName == "" {
 				continue
 			}
-			serverName, toolName = stamp.owner, stamp.rawName
+			serverName, toolName, tier = stamp.owner, stamp.rawName, stamp.tier
 		} else {
 			// No stamp: fall back to the pre-105 catalog/builtin resolution,
 			// exactly as filterDirectModeToolsForAuth does. Same catalog
@@ -100,8 +100,25 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 			case directResolveNoCatalog:
 				serverName, toolName, _ = ParseDirectToolName(tool.Name)
 			case directResolveFound:
-				serverName, toolName = entry.ServerName, entry.ToolName
+				serverName, toolName, tier = entry.ServerName, entry.ToolName, entry.RequiredPermission
 			}
+		}
+
+		// Spec 105 FR-010 D13/gap G6: tier-first precedence. At call time, a
+		// tool the caller is over-tier for must reach the handler (which
+		// checks tier BEFORE callability) even when it is ALSO
+		// disabled/quarantined/pending/changed — so "over-tier + locked"
+		// answers insufficient-permission, not this filter's -32602. The
+		// scope+tier filter ahead of this one in the chain already let such a
+		// tool through (directCallTimeTierExceeded, mcp_direct_scope.go); this
+		// filter must not re-exclude it for callability. list time and an
+		// in-scope, within-tier caller are unaffected: the condition is false
+		// and evaluate().callable applies exactly as before. authCtx is
+		// guaranteed a scoped agent token here — the early return above sent
+		// every other caller home before this loop started.
+		if directCallTimeTierExceeded(ctx, authCtx, true, tier) {
+			filtered = append(filtered, tool)
+			continue
 		}
 
 		if evaluator.evaluate(serverName, toolName).callable {

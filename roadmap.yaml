@@ -441,8 +441,9 @@ epics:
         depends_on: []
       - id: scope-refusal-shapes
         title: "FR-010: scope-first refusal precedence; dispatch denials and 'available servers' never name hidden servers; describe_tool not-found and alias resolution computed over the authorized corpus"
-        status: todo
+        status: done
         priority: P1
+        pr: "#1328"
         depends_on: [scope-retrieve-tools]
       - id: scope-selectable-profile-predicate
         title: "FR-003/FR-004 remainder: selectable-profile predicate for UNPINNED tokens on /mcp/p/<slug>, /mcp/p, /mcp/p/ and set_profile; identical status+body across missing / deleted / not-selectable / pin-mismatch / no-profiles (#1225 + #1227 follow-up lists)"
