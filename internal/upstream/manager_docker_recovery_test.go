@@ -15,40 +15,75 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
+// TestRunDockerInfo_ExecutesResolvedBinary exercises runDockerInfo's real
+// exec.CommandContext(...).Run() invocation shape end-to-end against a real
+// subprocess, so a regression in the argument/flag shape (wrong dockerBin
+// position, broken --format string) is caught even though the tests below
+// inject dockerInfoRunnerFn and never call this function.
+func TestRunDockerInfo_ExecutesResolvedBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/bin/sh-style fake docker is POSIX only")
+	}
+
+	dockerPath := filepath.Join(t.TempDir(), "docker")
+	// Requires the exact argv runDockerInfo passes (not just $1 == info), so a
+	// regression in argument count, the --format flag, or the Go template
+	// string fails this test instead of slipping through unnoticed.
+	script := `#!/bin/sh
+if [ "$#" -eq 3 ] && [ "$1" = "info" ] && [ "$2" = "--format" ] && [ "$3" = '{{json .ServerVersion}}' ]; then
+  printf '"24.0.0"\n'
+  exit 0
+fi
+exit 99
+`
+	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := runDockerInfo(ctx, dockerPath); err != nil {
+		t.Fatalf("expected fake docker info to succeed, got: %v", err)
+	}
+}
+
+// TestRunDockerInfo_PropagatesNonZeroExit ensures a real non-zero process exit
+// (not just a synthetic Go error) surfaces as an error from runDockerInfo.
+func TestRunDockerInfo_PropagatesNonZeroExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/bin/sh-style fake docker is POSIX only")
+	}
+
+	dockerPath := filepath.Join(t.TempDir(), "docker")
+	if err := os.WriteFile(dockerPath, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := runDockerInfo(ctx, dockerPath); err == nil {
+		t.Fatal("expected non-zero exit to surface as an error")
+	}
+}
+
 // TestCheckDockerAvailability_UsesShellwrapResolver verifies that a launchd-style
 // minimal PATH (the situation when mcpproxy is launched from /Applications/...app
 // or a LoginItem) does not break docker lookup, because checkDockerAvailability
 // now goes through dockerResolverFn (shellwrap-backed) instead of relying on
 // $PATH for the bare "docker" binary.
 //
-// We exercise the real resolver indirectly: the test installs a fake docker
-// shim into a temp dir, points dockerResolverFn at it, drops $PATH to the
-// launchd minimum, and asserts that checkDockerAvailability still succeeds.
-// Without the fix, exec.Command("docker") would error with `executable file
-// not found in $PATH` regardless of how the resolver was wired.
+// dockerInfoRunnerFn is faked so the test asserts the resolved executable
+// directly without depending on process startup or a wall-clock deadline; the
+// real exec.CommandContext(...).Run() shape is covered separately by
+// TestRunDockerInfo_ExecutesResolvedBinary above.
 func TestCheckDockerAvailability_UsesShellwrapResolver(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("launchd PATH scenario is macOS/Linux only")
 	}
 
-	tmpDir := t.TempDir()
-	dockerPath := filepath.Join(tmpDir, "docker")
-
-	// Fake docker that prints a server version when invoked with `info`.
-	// Anything else exits non-zero so we know the call shape was correct.
-	script := `#!/bin/sh
-case "$1" in
-  info) printf '"24.0.0"\n'; exit 0 ;;
-  *)    exit 99 ;;
-esac
-`
-	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake docker: %v", err)
-	}
-
-	// Simulate launchd's minimal PATH — fake docker is NOT on it. If the
-	// production code resolved via os.Getenv("PATH") we would fail here.
-	t.Setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+	dockerPath := filepath.Join(t.TempDir(), "docker")
 
 	original := dockerResolverFn
 	t.Cleanup(func() { dockerResolverFn = original })
@@ -56,17 +91,26 @@ esac
 		return dockerPath, nil
 	}
 
-	m := &Manager{logger: zap.NewNop()}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	var resolvedBin string
+	originalRunner := dockerInfoRunnerFn
+	t.Cleanup(func() { dockerInfoRunnerFn = originalRunner })
+	dockerInfoRunnerFn = func(_ context.Context, dockerBin string) error {
+		resolvedBin = dockerBin
+		return nil
+	}
 
-	if err := m.checkDockerAvailability(ctx); err != nil {
+	m := &Manager{logger: zap.NewNop()}
+
+	if err := m.checkDockerAvailability(context.Background()); err != nil {
 		t.Fatalf("expected docker to be reachable via resolver, got: %v", err)
+	}
+	if resolvedBin != dockerPath {
+		t.Fatalf("docker executable = %q, want resolved path %q", resolvedBin, dockerPath)
 	}
 }
 
 // TestCheckDockerAvailability_FallbackOnResolverFailure ensures that even when
-// the resolver itself errors out we still attempt a bare-name exec — preserving
+// the resolver itself errors out we still select the bare executable name — preserving
 // the original behaviour for hosts where the shellwrap probes legitimately
 // cannot find docker but it IS on the parent's PATH.
 func TestCheckDockerAvailability_FallbackOnResolverFailure(t *testing.T) {
@@ -74,30 +118,27 @@ func TestCheckDockerAvailability_FallbackOnResolverFailure(t *testing.T) {
 		t.Skip("/bin/sh-style fake docker is POSIX only")
 	}
 
-	tmpDir := t.TempDir()
-	dockerPath := filepath.Join(tmpDir, "docker")
-	script := `#!/bin/sh
-exit 0
-`
-	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake docker: %v", err)
-	}
-
-	// Resolver fails — the fallback should still exec via bare PATH.
-	t.Setenv("PATH", tmpDir)
-
 	original := dockerResolverFn
 	t.Cleanup(func() { dockerResolverFn = original })
 	dockerResolverFn = func(*zap.Logger) (string, error) {
 		return "", errors.New("simulated resolver failure")
 	}
 
-	m := &Manager{logger: zap.NewNop()}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	var resolvedBin string
+	originalRunner := dockerInfoRunnerFn
+	t.Cleanup(func() { dockerInfoRunnerFn = originalRunner })
+	dockerInfoRunnerFn = func(_ context.Context, dockerBin string) error {
+		resolvedBin = dockerBin
+		return nil
+	}
 
-	if err := m.checkDockerAvailability(ctx); err != nil {
+	m := &Manager{logger: zap.NewNop()}
+
+	if err := m.checkDockerAvailability(context.Background()); err != nil {
 		t.Fatalf("expected fallback bare-name exec to succeed, got: %v", err)
+	}
+	if resolvedBin != "docker" {
+		t.Fatalf("docker executable = %q, want bare-name fallback", resolvedBin)
 	}
 }
 

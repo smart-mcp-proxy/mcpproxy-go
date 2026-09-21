@@ -247,30 +247,78 @@ func TestMaskTextMasksBeyondTheDetectionCap(t *testing.T) {
 	}
 }
 
-// Removing the replacement cap makes "a payload stuffed with secrets" the
-// worst case, so it must not be quadratic: a full-size activity response
-// (64KB, the activity_max_response_size cap) of nothing but distinct tokens
-// still has to mask in well under a second.
-func TestMaskTextStaysCheapOnAPayloadFullOfSecrets(t *testing.T) {
-	d := NewDetector(nil)
-
+// secretsPayload builds text of at least targetLen bytes made entirely of
+// distinct GitHub-PAT-shaped tokens ("key<i>=ghp_<i zero-padded to 36 digits>"),
+// the worst case for masking: every token is a separate match, none share a
+// value, so no dedup/caching in the detector can shortcut the work.
+func secretsPayload(targetLen int) string {
 	var b strings.Builder
-	for i := 0; b.Len() < 64*1024; i++ {
+	for i := 0; b.Len() < targetLen; i++ {
 		fmt.Fprintf(&b, "key%d=ghp_%036d\n", i, i)
 	}
-	text := b.String()
+	return b.String()
+}
 
-	start := time.Now()
+// A full-size activity response made entirely of distinct tokens exercises the
+// worst-case masking shape without making correctness depend on host timing.
+func TestMaskTextHandlesAPayloadFullOfSecrets(t *testing.T) {
+	d := NewDetector(nil)
+
+	text := secretsPayload(64 * 1024)
+
 	masked, _ := d.MaskText(text)
-	elapsed := time.Since(start)
 
 	if strings.Contains(masked, "ghp_0000") {
 		t.Fatal("tokens survived masking")
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("masking a %d-byte payload took %s", len(text), elapsed)
+}
+
+// TestMaskTextScalesLinearlyOnAPayloadFullOfSecrets guards against
+// reintroducing the O(n^2) behavior TestMaskTextStaysCheapOnAPayloadFullOfSecrets
+// used to catch (removed because an absolute wall-clock ceiling was flaky under
+// CI load — see BenchmarkMaskTextPayloadFullOfSecrets below for the profiling
+// counterpart). Instead of a fixed threshold, it compares masking a payload
+// against one 4x the size: linear work predicts ~4x the time, so a generous
+// growth ceiling still catches real quadratic blowups (~16x) while absorbing
+// routine scheduler/GC noise from the comparison running in the same process.
+func TestMaskTextScalesLinearlyOnAPayloadFullOfSecrets(t *testing.T) {
+	if testing.Short() {
+		t.Skip("timing-sensitive; skipped under -short")
 	}
-	t.Logf("masked %d bytes in %s", len(text), elapsed)
+
+	measure := func(targetLen int) time.Duration {
+		d := NewDetector(nil)
+		text := secretsPayload(targetLen)
+		start := time.Now()
+		d.MaskText(text)
+		return time.Since(start)
+	}
+
+	// Warm up (first run pays for allocator/CPU-cache warmup, not algorithmic cost).
+	measure(16 * 1024)
+
+	small := measure(16 * 1024)
+	large := measure(64 * 1024) // 4x the payload
+
+	// The absolute floor keeps this from firing on noise when both runs are
+	// too fast for the ratio to mean anything.
+	if large > 10*small && large > 50*time.Millisecond {
+		t.Fatalf("masking a payload 4x the size took %s vs %s for the baseline — looks like a complexity regression, not scheduler noise", large, small)
+	}
+}
+
+func BenchmarkMaskTextPayloadFullOfSecrets(b *testing.B) {
+	d := NewDetector(nil)
+	text := secretsPayload(64 * 1024)
+
+	b.SetBytes(int64(len(text)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, changed := d.MaskText(text); !changed {
+			b.Fatal("payload was not masked")
+		}
+	}
 }
 
 // Turning detection off later must not retroactively serve the credentials in
