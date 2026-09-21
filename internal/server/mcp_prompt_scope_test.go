@@ -68,6 +68,13 @@ func TestFilterAggregatedPromptsForAuth(t *testing.T) {
 			profile.NewProfileScope("dev", servers),
 		)
 	}
+	userCtx := func(servers ...string) context.Context {
+		return auth.WithAuthContext(context.Background(), &auth.AuthContext{
+			Type:           auth.AuthTypeUser,
+			UserID:         "u1",
+			AllowedServers: servers,
+		})
+	}
 
 	tests := []struct {
 		name string
@@ -92,6 +99,20 @@ func TestFilterAggregatedPromptsForAuth(t *testing.T) {
 		{
 			name: "wildcard agent token sees everything",
 			ctx:  agentCtx("*"),
+			want: []string{builtinSetup, builtinTrbl, githubPrompt, gitlabPrompt},
+		},
+		{
+			// Regression: Spec 105 PR G. isScopeRestrictedCaller must key off
+			// IsAdmin(), not Type == AuthTypeAgent — a server-edition OAuth
+			// "user" is scope-restricted too (cache_authz.go's CallerKindUser),
+			// and a Type-only check let it see every server's prompts.
+			name: "scoped OAuth user sees only its server's prompts plus built-ins",
+			ctx:  userCtx("github"),
+			want: []string{builtinSetup, builtinTrbl, githubPrompt},
+		},
+		{
+			name: "OAuth admin user sees everything",
+			ctx:  auth.WithAuthContext(context.Background(), auth.AdminUserContext("a1", "admin@example.com", "Admin", "google")),
 			want: []string{builtinSetup, builtinTrbl, githubPrompt, gitlabPrompt},
 		},
 		{

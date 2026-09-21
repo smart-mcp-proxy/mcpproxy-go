@@ -396,7 +396,7 @@ epics:
 
   - id: agent-scope-hardening
     title: "Agent-token scope hardening: every MCP request authorized by its own scope (spec 105)"
-    status: in_progress
+    status: done
     priority: P1
     spec: specs/105-agent-scope-hardening
     depends_on: [schema-deferred]
@@ -477,8 +477,9 @@ epics:
         depends_on: []
       - id: scope-regression-suite
         title: "FR-011/FR-013/FR-014: two-fixture differential oracle with sentinels across the applicability matrix, credential-authenticated HTTP matrix over every /mcp surface, admin p95 perf gate on the frozen 527-tool snapshot"
-        status: todo
+        status: done
         priority: P2
+        pr: "#1332"
         depends_on: [scope-retrieve-tools, scope-direct-publication, scope-refusal-shapes]
 
   - id: auto-routing-mode
