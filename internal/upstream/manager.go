@@ -50,6 +50,12 @@ func runDockerInfo(ctx context.Context, dockerBin string) error {
 	return exec.CommandContext(ctx, dockerBin, "info", "--format", "{{json .ServerVersion}}").Run()
 }
 
+// dockerInfoRunnerFn runs the resolved docker binary's `info` command.
+// Overridable in tests, mirroring dockerResolverFn above so the two sibling
+// fakes checkDockerAvailability needs (which binary, and running it) share one
+// injection idiom instead of two.
+var dockerInfoRunnerFn = runDockerInfo
+
 // Docker recovery constants - internal implementation defaults
 const (
 	dockerCheckInterval      = 30 * time.Second // How often to check Docker availability
@@ -139,7 +145,6 @@ type Manager struct {
 	dockerRecoveryState  *storage.DockerRecoveryState
 	dockerRecoveryCancel context.CancelFunc
 	storageMgr           *storage.Manager // Reference to storage manager for Docker state persistence
-	dockerInfoRunner     func(context.Context, string) error
 
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
@@ -220,7 +225,6 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 		shutdownCtx:       shutdownCtx,
 		shutdownCancel:    shutdownCancel,
 		storageMgr:        storageMgr,
-		dockerInfoRunner:  runDockerInfo,
 		limiters:          limiter.NewRegistry(),
 	}
 	manager.globalConfig.Store(globalConfig)
@@ -3041,13 +3045,7 @@ func (m *Manager) checkDockerAvailability(ctx context.Context) error {
 		dockerBin = "docker"
 	}
 
-	runInfo := m.dockerInfoRunner
-	if runInfo == nil {
-		// Keep zero-value Managers usable in focused tests and small callers.
-		runInfo = runDockerInfo
-	}
-
-	if err := runInfo(checkCtx, dockerBin); err != nil {
+	if err := dockerInfoRunnerFn(checkCtx, dockerBin); err != nil {
 		return fmt.Errorf("docker unavailable: %w", err)
 	}
 	return nil
