@@ -496,13 +496,14 @@ var builtinPromptNames = map[string]struct{}{
 	troubleshootServerPrompt().Name: {},
 }
 
-// filterAggregatedPromptsForAuth filters prompts/list AND prompts/get for scoped
-// agent tokens and for any request with an active profile. It is the prompt
-// analogue of filterDirectModeToolsForAuth and the list-side half of the
-// aggregated-prompt gate (the handler-side half is
-// authorizeAggregatedPromptServer): without it a scoped agent token could
-// discover any upstream server's prompt even when the tool filters hid that
-// server (PR #973 review, finding F1). mcp-go enforces this on both list and
+// filterAggregatedPromptsForAuth filters prompts/list AND prompts/get for
+// scope-restricted callers (agent tokens and OAuth-authenticated users — see
+// isScopeRestrictedCaller) and for any request with an active profile. It is
+// the prompt analogue of filterDirectModeToolsForAuth and the list-side half
+// of the aggregated-prompt gate (the handler-side half is
+// authorizeAggregatedPromptServer): without it a scope-restricted caller
+// could discover any upstream server's prompt even when the tool filters hid
+// that server (PR #973 review, finding F1). mcp-go enforces this on both list and
 // get (server.go filteredPrompts / passesPromptFilters, v1.0.0), so a prompt
 // dropped here is neither discoverable nor retrievable.
 //
@@ -531,8 +532,8 @@ func (p *MCPProxyServer) filterAggregatedPromptsForAuth(ctx context.Context, pro
 
 	authCtx := auth.AuthContextFromContext(ctx)
 	_, profileScope := p.resolveActiveProfile(ctx)
-	isScopedAgent := authCtx != nil && authCtx.Type == auth.AuthTypeAgent
-	enforce := isScopedAgent || profileScope != nil
+	isScopeRestricted := isScopeRestrictedCaller(authCtx)
+	enforce := isScopeRestricted || profileScope != nil
 	allowed := promptServerAllowed(authCtx, profileScope)
 
 	filtered := make([]mcp.Prompt, 0, len(prompts))
@@ -566,18 +567,18 @@ func (p *MCPProxyServer) filterAggregatedPromptsForAuth(ctx context.Context, pro
 }
 
 // promptServerAllowed returns the per-server access predicate for one caller:
-// profile scope (Allows) plus, for scoped agent tokens, server scope
+// profile scope (Allows) plus, for scope-restricted callers, server scope
 // (CanAccessServer). profileScope.Allows tolerates a nil receiver (returns
-// true), so the scoped-agent-without-profile case falls through correctly.
+// true), so the scope-restricted-without-profile case falls through correctly.
 // It is the ONE definition of "may this caller touch prompts on server X",
 // shared by the list/get filter and by every aggregated prompt handler.
 func promptServerAllowed(authCtx *auth.AuthContext, profileScope *profile.ProfileScope) func(serverName string) bool {
-	isScopedAgent := authCtx != nil && authCtx.Type == auth.AuthTypeAgent
+	isScopeRestricted := isScopeRestrictedCaller(authCtx)
 	return func(serverName string) bool {
 		if !profileScope.Allows(serverName) {
 			return false
 		}
-		return !isScopedAgent || authCtx.CanAccessServer(serverName)
+		return !isScopeRestricted || authCtx.CanAccessServer(serverName)
 	}
 }
 

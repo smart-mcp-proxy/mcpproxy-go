@@ -302,6 +302,69 @@ func TestDescribeDirect_ServerScopeGate(t *testing.T) {
 	assert.Equal(t, describeErrNotFound, byID["github__read_file"]["error"])
 }
 
+// TestDescribeDirect_ServerScopeGate_UserType is TestDescribeDirect_ServerScopeGate's
+// Spec 105 PR G regression: describe's isScopeRestrictedCaller gate must
+// scope-check a server-edition OAuth "user" exactly like an agent token, not
+// wave it through as an unrestricted (admin-like) caller — see
+// directEntryVisibleToSession, which must stay in parity with the listing
+// gate this same fix landed in (mcp_direct_scope.go).
+func TestDescribeDirect_ServerScopeGate_UserType(t *testing.T) {
+	p := newDirectDescribeProxy(t)
+
+	elsewhere := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeUser,
+		UserID:         "u-other",
+		AllowedServers: []string{"gitlab"},
+	})
+
+	resp := callDescribeDirect(t, p, elsewhere, []interface{}{"github__read_file"})
+	assert.Empty(t, resp.Definitions)
+	byID := describeErrorsByID(resp)
+	require.Contains(t, byID, "github__read_file")
+	assert.Equal(t, describeErrNotFound, byID["github__read_file"]["error"])
+}
+
+// TestDescribeDirect_CallabilityGate_UserType is the describe-time half of
+// TestFilterDirectToolsForAgentCallability_UserTypeIsScopeRestrictedToo
+// (mcp_direct_callability_test.go), which only proved the listing side of
+// the fix. directEntryVisibleToSession runs directEntryInScope BEFORE
+// directEntryCallable, so a caller scoped OUT of the server (as
+// TestDescribeDirect_ServerScopeGate_UserType uses) never reaches the
+// callability check at all — it is not a regression test for
+// directEntryCallable's own isScopeRestrictedCaller fix. This one scopes the
+// OAuth user INTO "github" so the pending tool must be refused by
+// callability specifically, with an approved sibling on the same server as
+// the positive control (codex gpt-5.6-sol cross-review, round 1: the
+// describe-side gate had no non-vacuous AuthTypeUser coverage).
+func TestDescribeDirect_CallabilityGate_UserType(t *testing.T) {
+	p := newDirectDescribeProxy(t)
+	require.NoError(t, p.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "read_file",
+		Status:     storage.ToolApprovalStatusPending,
+	}))
+
+	scopedUser := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeUser,
+		UserID:         "u1",
+		AllowedServers: []string{"github"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+
+	resp := callDescribeDirect(t, p, scopedUser, []interface{}{"github__read_file", "github__create_issue"})
+	byID := describeErrorsByID(resp)
+	require.Contains(t, byID, "github__read_file",
+		"a pending tool must be refused by callability for a scoped OAuth user, exactly like an agent token")
+	assert.Equal(t, describeErrNotFound, byID["github__read_file"]["error"])
+
+	defsByName := map[string]bool{}
+	for _, def := range resp.Definitions {
+		defsByName[def["name"].(string)] = true
+	}
+	assert.True(t, defsByName["github__create_issue"],
+		"positive control: an approved sibling on the same in-scope server must still describe")
+}
+
 // T044: catalog divergence. A tool that is pending approval is still LISTED for
 // a non-agent session, so it must still describe — from the catalog snapshot.
 // An index-backed resolver answers not_found here, which would make deferral
