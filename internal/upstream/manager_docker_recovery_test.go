@@ -26,11 +26,15 @@ func TestRunDockerInfo_ExecutesResolvedBinary(t *testing.T) {
 	}
 
 	dockerPath := filepath.Join(t.TempDir(), "docker")
+	// Requires the exact argv runDockerInfo passes (not just $1 == info), so a
+	// regression in argument count, the --format flag, or the Go template
+	// string fails this test instead of slipping through unnoticed.
 	script := `#!/bin/sh
-case "$1" in
-  info) printf '"24.0.0"\n'; exit 0 ;;
-  *)    exit 99 ;;
-esac
+if [ "$#" -eq 3 ] && [ "$1" = "info" ] && [ "$2" = "--format" ] && [ "$3" = '{{json .ServerVersion}}' ]; then
+  printf '"24.0.0"\n'
+  exit 0
+fi
+exit 99
 `
 	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake docker: %v", err)
