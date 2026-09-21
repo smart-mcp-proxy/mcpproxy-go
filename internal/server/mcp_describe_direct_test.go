@@ -299,6 +299,28 @@ func TestDescribeDirect_ServerScopeGate(t *testing.T) {
 	assert.Equal(t, describeErrNotFound, byID["github__read_file"]["error"])
 }
 
+// TestDescribeDirect_ServerScopeGate_UserType is TestDescribeDirect_ServerScopeGate's
+// Spec 105 PR G regression: describe's isScopeRestrictedCaller gate must
+// scope-check a server-edition OAuth "user" exactly like an agent token, not
+// wave it through as an unrestricted (admin-like) caller — see
+// directEntryVisibleToSession, which must stay in parity with the listing
+// gate this same fix landed in (mcp_direct_scope.go).
+func TestDescribeDirect_ServerScopeGate_UserType(t *testing.T) {
+	p := newDirectDescribeProxy(t)
+
+	elsewhere := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeUser,
+		UserID:         "u-other",
+		AllowedServers: []string{"gitlab"},
+	})
+
+	resp := callDescribeDirect(t, p, elsewhere, []interface{}{"github__read_file"})
+	assert.Empty(t, resp.Definitions)
+	byID := describeErrorsByID(resp)
+	require.Contains(t, byID, "github__read_file")
+	assert.Equal(t, describeErrNotFound, byID["github__read_file"]["error"])
+}
+
 // T044: catalog divergence. A tool that is pending approval is still LISTED for
 // a non-agent session, so it must still describe — from the catalog snapshot.
 // An index-backed resolver answers not_found here, which would make deferral

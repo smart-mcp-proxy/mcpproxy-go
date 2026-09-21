@@ -118,6 +118,23 @@ func stripDirectToolStampFilter(_ context.Context, tools []mcp.Tool) []mcp.Tool 
 	return out
 }
 
+// isScopeRestrictedCaller reports whether authCtx must have its server access
+// checked against its own AllowedServers/Permissions, rather than getting the
+// unrestricted view an administrator gets.
+//
+// This is deliberately keyed on IsAdmin(), not on Type == AuthTypeAgent: a
+// server-edition OAuth "user" is a real, scoped identity too (Role: "user",
+// its own AllowedServers via Spec 107 PR-C group grants — see
+// cache_authz.go's CallerKindUser case, which documents the same "caller-
+// bounded exactly like an Agent" rule for the cache read/write gate). A
+// Type == AuthTypeAgent check alone treats a "user" context as unrestricted
+// the way only "admin"/"admin_user" should be — a scoped user token would
+// see and reach every configured server through this surface, not only the
+// ones it was granted.
+func isScopeRestrictedCaller(authCtx *auth.AuthContext) bool {
+	return authCtx != nil && !authCtx.IsAdmin()
+}
+
 // directIdentityInScope is directEntryInScope's identity-only twin: the same
 // scope+tier predicate, evaluated against a bare (owner, tier) pair rather
 // than a *directCatalogEntry, so a caller resolving through a stamp (Spec 105
@@ -125,13 +142,13 @@ func stripDirectToolStampFilter(_ context.Context, tools []mcp.Tool) []mcp.Tool 
 func directIdentityInScope(
 	authCtx *auth.AuthContext,
 	profileScope *profile.ProfileScope,
-	isScopedAgent bool,
+	isScopeRestricted bool,
 	owner, tier string,
 ) bool {
 	if !profileScope.Allows(owner) {
 		return false
 	}
-	if !isScopedAgent {
+	if !isScopeRestricted {
 		return true
 	}
 	if !authCtx.CanAccessServer(owner) {
@@ -152,14 +169,15 @@ func requiredPermissionForDirectTool(annotations *config.ToolAnnotations) string
 	return contracts.ToolVariantToOperationType[contracts.DeriveCallWith(annotations)]
 }
 
-// filterDirectModeToolsForAuth filters tools/list for scoped agent tokens and
-// for any request with an active profile.
+// filterDirectModeToolsForAuth filters tools/list for scope-restricted
+// callers (agent tokens and OAuth-authenticated users — see
+// isScopeRestrictedCaller) and for any request with an active profile.
 //
 // Direct mode registers upstream tools globally as server__tool. Without this
-// filter, scoped agent tokens prevent execution but still disclose tool names,
-// descriptions, and schemas for servers outside their scope. Call-time auth is
-// still authoritative; this filter only removes tools that the current token
-// could not call from discovery responses.
+// filter, a scope-restricted caller's server access prevents execution but
+// still discloses tool names, descriptions, and schemas for servers outside
+// its scope. Call-time auth is still authoritative; this filter only removes
+// tools that the current caller could not call from discovery responses.
 //
 // The profile filter (Spec 057) is applied to EVERY auth type, not just agent
 // tokens: an unauthenticated /mcp/p/<slug> connection runs as an admin context
@@ -174,7 +192,7 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 
 	authCtx := auth.AuthContextFromContext(ctx)
 	_, profileScope := p.resolveActiveProfile(ctx)
-	isScopedAgent := authCtx != nil && authCtx.Type == auth.AuthTypeAgent
+	isScopeRestricted := isScopeRestrictedCaller(authCtx)
 
 	// Spec 105 FR-008 (FR008-G7): a tool with no registration identity is
 	// withheld from EVERY caller, administrators included, so this filter can
@@ -193,7 +211,7 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 				// empty raw name, so a stamp should never carry one.
 				continue
 			}
-			if !directIdentityInScope(authCtx, profileScope, isScopedAgent, stamp.owner, stamp.tier) {
+			if !directIdentityInScope(authCtx, profileScope, isScopeRestricted, stamp.owner, stamp.tier) {
 				continue
 			}
 			filtered = append(filtered, tool)
@@ -247,7 +265,7 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 			if !profileScope.Allows(serverName) {
 				continue
 			}
-			if isScopedAgent {
+			if isScopeRestricted {
 				// With no catalog there is no permission tier to check, and the
 				// retired directToolPermissions map behaved identically — a
 				// missing tier DROPPED the tool. Failing closed on an unknown
@@ -260,7 +278,7 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 		case directResolveFound:
 		}
 
-		if !directEntryInScope(authCtx, profileScope, isScopedAgent, entry) {
+		if !directEntryInScope(authCtx, profileScope, isScopeRestricted, entry) {
 			continue
 		}
 
@@ -281,7 +299,7 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 func directEntryInScope(
 	authCtx *auth.AuthContext,
 	profileScope *profile.ProfileScope,
-	isScopedAgent bool,
+	isScopeRestricted bool,
 	entry *directCatalogEntry,
 ) bool {
 	if entry == nil {
@@ -293,7 +311,7 @@ func directEntryInScope(
 	// essentially every tool — and hide the catalog from read- and
 	// write-scoped tokens while dispatch happily allowed the same calls
 	// (D13 rule 3).
-	return directIdentityInScope(authCtx, profileScope, isScopedAgent, entry.ServerName, entry.RequiredPermission)
+	return directIdentityInScope(authCtx, profileScope, isScopeRestricted, entry.ServerName, entry.RequiredPermission)
 }
 
 // builtinPromptNames is the set of prompt display names mcpproxy serves itself
@@ -306,13 +324,14 @@ var builtinPromptNames = map[string]struct{}{
 	troubleshootServerPrompt().Name: {},
 }
 
-// filterAggregatedPromptsForAuth filters prompts/list AND prompts/get for scoped
-// agent tokens and for any request with an active profile. It is the prompt
-// analogue of filterDirectModeToolsForAuth and the list-side half of the
-// aggregated-prompt gate (the handler-side half is
-// authorizeAggregatedPromptServer): without it a scoped agent token could
-// discover any upstream server's prompt even when the tool filters hid that
-// server (PR #973 review, finding F1). mcp-go enforces this on both list and
+// filterAggregatedPromptsForAuth filters prompts/list AND prompts/get for
+// scope-restricted callers (agent tokens and OAuth-authenticated users — see
+// isScopeRestrictedCaller) and for any request with an active profile. It is
+// the prompt analogue of filterDirectModeToolsForAuth and the list-side half
+// of the aggregated-prompt gate (the handler-side half is
+// authorizeAggregatedPromptServer): without it a scope-restricted caller
+// could discover any upstream server's prompt even when the tool filters hid
+// that server (PR #973 review, finding F1). mcp-go enforces this on both list and
 // get (server.go filteredPrompts / passesPromptFilters, v1.0.0), so a prompt
 // dropped here is neither discoverable nor retrievable.
 //
@@ -341,8 +360,8 @@ func (p *MCPProxyServer) filterAggregatedPromptsForAuth(ctx context.Context, pro
 
 	authCtx := auth.AuthContextFromContext(ctx)
 	_, profileScope := p.resolveActiveProfile(ctx)
-	isScopedAgent := authCtx != nil && authCtx.Type == auth.AuthTypeAgent
-	enforce := isScopedAgent || profileScope != nil
+	isScopeRestricted := isScopeRestrictedCaller(authCtx)
+	enforce := isScopeRestricted || profileScope != nil
 	allowed := promptServerAllowed(authCtx, profileScope)
 
 	filtered := make([]mcp.Prompt, 0, len(prompts))
@@ -376,18 +395,18 @@ func (p *MCPProxyServer) filterAggregatedPromptsForAuth(ctx context.Context, pro
 }
 
 // promptServerAllowed returns the per-server access predicate for one caller:
-// profile scope (Allows) plus, for scoped agent tokens, server scope
+// profile scope (Allows) plus, for scope-restricted callers, server scope
 // (CanAccessServer). profileScope.Allows tolerates a nil receiver (returns
-// true), so the scoped-agent-without-profile case falls through correctly.
+// true), so the scope-restricted-without-profile case falls through correctly.
 // It is the ONE definition of "may this caller touch prompts on server X",
 // shared by the list/get filter and by every aggregated prompt handler.
 func promptServerAllowed(authCtx *auth.AuthContext, profileScope *profile.ProfileScope) func(serverName string) bool {
-	isScopedAgent := authCtx != nil && authCtx.Type == auth.AuthTypeAgent
+	isScopeRestricted := isScopeRestrictedCaller(authCtx)
 	return func(serverName string) bool {
 		if !profileScope.Allows(serverName) {
 			return false
 		}
-		return !isScopedAgent || authCtx.CanAccessServer(serverName)
+		return !isScopeRestricted || authCtx.CanAccessServer(serverName)
 	}
 }
 

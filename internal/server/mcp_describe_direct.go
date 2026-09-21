@@ -95,9 +95,9 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 func (p *MCPProxyServer) directEntryVisibleToSession(ctx context.Context, entry *directCatalogEntry) bool {
 	authCtx := auth.AuthContextFromContext(ctx)
 	_, profileScope := p.resolveActiveProfile(ctx)
-	isScopedAgent := authCtx != nil && authCtx.Type == auth.AuthTypeAgent
+	isScopeRestricted := isScopeRestrictedCaller(authCtx)
 
-	if !directEntryInScope(authCtx, profileScope, isScopedAgent, entry) {
+	if !directEntryInScope(authCtx, profileScope, isScopeRestricted, entry) {
 		return false
 	}
 	return p.directEntryCallable(authCtx, entry)

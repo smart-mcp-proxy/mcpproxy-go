@@ -224,6 +224,53 @@ func TestFilterDirectToolsForAgentCallability_AgentOnly(t *testing.T) {
 	assert.Equal(t, tools, proxy.filterDirectToolsForAgentCallability(context.Background(), tools))
 }
 
+// TestFilterDirectToolsForAgentCallability_UserTypeIsScopeRestrictedToo is the
+// Spec 105 PR G regression for this gate: it used to key on
+// `authCtx.Type == auth.AuthTypeAgent`, which let a server-edition OAuth
+// "user" context fall through to the operator-visible branch (unfiltered,
+// same as admin) and see pending/disabled tools it cannot actually call. A
+// "user" is not an administrator — server-edition-multiuser-auth.md reserves
+// "sees all activity, manages users" for the admin role — so it must be
+// gated exactly like an agent token here too (isScopeRestrictedCaller).
+func TestFilterDirectToolsForAgentCallability_UserTypeIsScopeRestrictedToo(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "github", Enabled: true}))
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "allowed",
+		Status:     storage.ToolApprovalStatusApproved,
+	}))
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "pending",
+		Status:     storage.ToolApprovalStatusPending,
+	}))
+
+	tools := []mcp.Tool{
+		{Name: FormatDirectToolName("github", "allowed")},
+		{Name: FormatDirectToolName("github", "pending")},
+	}
+	publishPermsCatalog(proxy, map[string]string{
+		FormatDirectToolName("github", "allowed"): auth.PermRead,
+		FormatDirectToolName("github", "pending"): auth.PermRead,
+	})
+
+	userCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeUser,
+		UserID:         "u1",
+		AllowedServers: []string{"github"},
+	})
+
+	filtered := proxy.filterDirectToolsForAgentCallability(userCtx, tools)
+	assert.Equal(t, []string{FormatDirectToolName("github", "allowed")}, directCallabilityToolNamesForTest(filtered),
+		"a scoped OAuth user must not see a tool pending approval, same as an equivalently-scoped agent token")
+
+	// Positive control: an OAuth admin_user keeps the operator-visible view.
+	adminUserCtx := auth.WithAuthContext(context.Background(), auth.AdminUserContext("a1", "admin@example.com", "Admin", "google"))
+	assert.Equal(t, tools, proxy.filterDirectToolsForAgentCallability(adminUserCtx, tools),
+		"an OAuth admin user keeps the operator-visible discovery behavior, like api-key admin")
+}
+
 func directCallabilityToolNamesForTest(tools []mcp.Tool) []string {
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {

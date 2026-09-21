@@ -42,17 +42,22 @@ func newDirectCallabilityEvaluator(proxy *MCPProxyServer) *directCallabilityEval
 	}
 }
 
-// filterDirectToolsForAgentCallability hides direct-mode tools that an agent
-// token cannot actually invoke because they are disabled, quarantined, pending
-// approval, or changed since approval. Non-agent contexts keep the existing
-// operator-visible discovery behavior.
+// filterDirectToolsForAgentCallability hides direct-mode tools that a
+// scope-restricted caller (an agent token or an OAuth-authenticated user —
+// see isScopeRestrictedCaller) cannot actually invoke because they are
+// disabled, quarantined, pending approval, or changed since approval.
+// Administrator contexts keep the existing operator-visible discovery
+// behavior: server-edition-multiuser-auth.md documents the admin role as the
+// one that "sees all activity, manages users" and reviews pending/quarantined
+// tools, which a plain "user" account is not (it is caller-bounded exactly
+// like an agent token — see cache_authz.go's CallerKindUser case).
 func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
 	if len(tools) == 0 {
 		return tools
 	}
 
 	authCtx := auth.AuthContextFromContext(ctx)
-	if authCtx == nil || authCtx.Type != auth.AuthTypeAgent {
+	if !isScopeRestrictedCaller(authCtx) {
 		return tools
 	}
 
@@ -107,19 +112,22 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 	return filtered
 }
 
-// directEntryCallable is the agent-callability half of the direct listing gate,
+// directEntryCallable is the callability half of the direct listing gate,
 // for callers that already hold a resolved catalog entry (Spec 102 US2).
 //
-// Non-agent sessions are unfiltered here, exactly as the loop above leaves them:
-// the direct listing deliberately RETAINS tool-level pending/changed/disabled
-// states for an operator, and describe_tool must therefore keep describing them
-// — a listed tool is never undescribable (SC-007). Only agent tokens, which
-// cannot see those tools in their own listing, are gated.
+// Administrator sessions are unfiltered here, exactly as the loop above
+// leaves them: the direct listing deliberately RETAINS tool-level
+// pending/changed/disabled states for an operator, and describe_tool must
+// therefore keep describing them — a listed tool is never undescribable
+// (SC-007). Only scope-restricted callers (agent tokens and OAuth
+// users — see isScopeRestrictedCaller), which cannot see those tools in
+// their own listing, are gated. This MUST stay in parity with
+// filterDirectToolsForAgentCallability above — the same SC-007 invariant.
 func (p *MCPProxyServer) directEntryCallable(authCtx *auth.AuthContext, entry *directCatalogEntry) bool {
 	if entry == nil {
 		return false
 	}
-	if authCtx == nil || authCtx.Type != auth.AuthTypeAgent {
+	if !isScopeRestrictedCaller(authCtx) {
 		return true
 	}
 	return newDirectCallabilityEvaluator(p).evaluate(entry.ServerName, entry.ToolName).callable
