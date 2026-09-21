@@ -1,0 +1,130 @@
+name: Scope Latency (Spec 105 FR-011)
+
+# T112a: the FR-011 merge-base regression gate. internal/server's
+# scope_latency_test.go measures administrator p95 for four operations
+# (retrieve_tools, read_cache, prompts/list, tools/list) on the 527-tool
+# LiveMCPBench snapshot; this workflow runs that SAME test file — HEAD's
+# copy, unmodified — against both the merge-base revision and HEAD, then
+# fails if administrator p95 regressed by more than max(10%, 5ms) on any
+# operation, or if either run produced no measurement for one.
+#
+# Why HEAD's test file runs against the merge-base checkout, not the
+# merge-base's own copy: the test file is test-only and backward compatible
+# with the pre-feature production API (it calls handleRetrieveTools,
+# handleReadCache, server.HandleMessage and directServer.HandleMessage,
+# none of which this feature's PRs changed the signature of), so copying it
+# over the merge-base checkout compiles and runs there unchanged — this is
+# the ONLY way to compare "the same measurement code" across two revisions
+# whose production code differs (research D10).
+#
+# Non-race, single job, reference (GitHub-hosted ubuntu-latest) runner: the
+# race detector's instrumentation overhead swamps the microsecond/millisecond
+# deltas this measures (scope_latency_test.go's raceEnabled skip already
+# documents this), and a self-hosted "reference runner" is not available to
+# this repository, so ubuntu-latest is the closest available reference
+# baseline, run non-race for the same reason the in-repo tests are.
+#
+# A generous, well-reasoned threshold (10% relative or 5ms absolute, per
+# FR-011) is used deliberately over a tighter one: this epic already hit real
+# CI flakiness from over-tight allocation/timing assertions on PRs F and G
+# today (2026-09-20) — see CLAUDE.md's cross-model-review note on that PR's
+# history. This workflow is NOT (yet) a required status check; a tight gate
+# that flakes is worse than no gate, so start generous and tighten only with
+# real multi-run evidence.
+
+on:
+  pull_request:
+    paths:
+      - "internal/server/**"
+      - "internal/index/**"
+      - "cmd/scope-latency-compare/**"
+      - ".github/workflows/scope-latency.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  scope-latency:
+    name: FR-011 merge-base regression
+    runs-on: ubuntu-latest
+    # Advisory only: a flaky or newly-added perf gate must not block merges
+    # before it has a track record. Flip to false once the maintainer has
+    # watched it green on a handful of real PRs.
+    continue-on-error: true
+    steps:
+      - name: Checkout HEAD
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: head
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: head/go.sum
+
+      - name: Determine merge-base
+        id: mergebase
+        working-directory: head
+        run: |
+          git fetch origin "${{ github.event.pull_request.base.sha }}" --depth=1
+          base_sha=$(git merge-base "${{ github.event.pull_request.base.sha }}" HEAD)
+          echo "sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "Merge-base: $base_sha"
+
+      - name: Checkout merge-base into a second directory
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: base
+          ref: ${{ steps.mergebase.outputs.sha }}
+
+      - name: Copy HEAD's latency test + fixtures over the merge-base checkout
+        run: |
+          set -euo pipefail
+          cp head/internal/server/scope_latency_test.go base/internal/server/scope_latency_test.go
+          rm -rf base/internal/server/testdata/scope_latency
+          if [ -d head/internal/server/testdata/scope_latency ]; then
+            cp -R head/internal/server/testdata/scope_latency base/internal/server/testdata/scope_latency
+          fi
+          # scope_fixture_test.go, mcp_retrieve_scope_test.go (loadDeferredLargeCorpus,
+          # createTestProxyWithRuntime) and friends are shared test helpers the
+          # latency file calls into; the merge-base checkout already has its OWN
+          # copies of those (they predate this PR on every commit in the merge
+          # order — Phase 1's T001/T002 landed with PR A, long before H1), so
+          # nothing else needs copying across. A future PR that adds a NEW
+          # shared helper the latency file depends on must add it here too.
+
+      - name: Run scope latency measurements (merge-base)
+        working-directory: base
+        env:
+          SCOPE_LATENCY_RESULTS_FILE: ${{ github.workspace }}/base-results.txt
+        run: |
+          go test ./internal/server/... \
+            -run 'TestRetrieveTools_ScopeLatency_ScopedVsAdmin|TestScopeLatency_' \
+            -v -timeout 10m
+
+      - name: Run scope latency measurements (HEAD)
+        working-directory: head
+        env:
+          SCOPE_LATENCY_RESULTS_FILE: ${{ github.workspace }}/head-results.txt
+        run: |
+          go test ./internal/server/... \
+            -run 'TestRetrieveTools_ScopeLatency_ScopedVsAdmin|TestScopeLatency_' \
+            -v -timeout 10m
+
+      - name: Compare administrator p95 across revisions
+        working-directory: head
+        run: |
+          go run ./cmd/scope-latency-compare "${{ github.workspace }}/base-results.txt" "${{ github.workspace }}/head-results.txt"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scope-latency-results
+          path: |
+            base-results.txt
+            head-results.txt
+          retention-days: 14
