@@ -74,13 +74,14 @@ func TestGetServers_RevealRequiresAuthenticatedAdmin(t *testing.T) {
 	})
 
 	t.Run("no auth context at all is unprivileged", func(t *testing.T) {
-		// The middleware's testing/bootstrap passthrough forwards with NO
-		// AuthContext. Absence of an identity must not satisfy a gate that a
-		// scoped token fails.
+		// A handler reached with NO AuthContext: absence of an identity must
+		// not satisfy a gate that a scoped token fails. See
+		// noAuthContextRequest for why this no longer goes through the router.
 		ctrl := &scopeController{cfg: scopeFixtureConfig(true), servers: scopeFixtureServers(), withManagement: true}
-		srv := NewServer(passthroughController{ctrl}, zap.NewNop().Sugar(), nil)
+		srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
 
-		rec := scopeGet(t, srv, "/api/v1/servers", "")
+		rec := httptest.NewRecorder()
+		srv.handleGetServers(rec, noAuthContextRequest(t, "/api/v1/servers", nil))
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 		data := scopeDecodeData(t, rec)
 		entry := scopeServerEntry(t, data, "alpha")
@@ -90,13 +91,6 @@ func TestGetServers_RevealRequiresAuthenticatedAdmin(t *testing.T) {
 			"an unauthenticated caller must not be handed raw credentials")
 	})
 }
-
-// passthroughController forces apiKeyAuthMiddleware down its no-usable-config
-// branch (GetCurrentConfig returns a non-*config.Config), which forwards the
-// request with a nil AuthContext.
-type passthroughController struct{ *scopeController }
-
-func (p passthroughController) GetCurrentConfig() interface{} { return map[string]interface{}{} }
 
 // TestGetServerDiagnostics_RevealRequiresAuthenticatedAdmin covers the
 // per-server diagnostics door, where health.detail echoes the raw connect error
@@ -205,9 +199,10 @@ func TestGetServers_AdminContextsUnfiltered(t *testing.T) {
 		assert.ElementsMatch(t, []string{"alpha", "beta"}, scopeServerNames(t, scopeDecodeData(t, rec)))
 	})
 
-	t.Run("no auth context passthrough", func(t *testing.T) {
-		srv := NewServer(passthroughController{newCtrl()}, zap.NewNop().Sugar(), nil)
-		rec := scopeGet(t, srv, "/api/v1/servers", "")
+	t.Run("no auth context is unrestricted", func(t *testing.T) {
+		srv := NewServer(newCtrl(), zap.NewNop().Sugar(), nil)
+		rec := httptest.NewRecorder()
+		srv.handleGetServers(rec, noAuthContextRequest(t, "/api/v1/servers", nil))
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 		assert.ElementsMatch(t, []string{"alpha", "beta"}, scopeServerNames(t, scopeDecodeData(t, rec)),
 			"absence of a token must be treated as unrestricted, exactly as auth.AuthorizeServerOp does")

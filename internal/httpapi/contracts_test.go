@@ -16,6 +16,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -28,7 +29,7 @@ import (
 type MockServerController struct{}
 
 // mockManagementService provides a test implementation of management service methods
-type mockManagementService struct{}
+type mockManagementService struct{ management.Service }
 
 func (m *mockManagementService) ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
 	return []*contracts.Server{
@@ -91,7 +92,7 @@ func (m *mockManagementService) TriggerOAuthLogout(ctx context.Context, name str
 
 func (m *MockServerController) IsRunning() bool          { return true }
 func (m *MockServerController) GetListenAddress() string { return ":8080" }
-func (m *MockServerController) GetManagementService() interface{} {
+func (m *MockServerController) GetManagementService() management.Service {
 	return &mockManagementService{}
 }
 func (m *MockServerController) GetUpstreamStats() map[string]interface{} {
@@ -236,7 +237,15 @@ func (m *MockServerController) GetSecretResolver() *secret.Resolver { return nil
 func (m *MockServerController) NotifySecretsChanged(_ context.Context, _, _ string) error {
 	return nil
 }
-func (m *MockServerController) GetCurrentConfig() interface{} { return map[string]interface{}{} }
+
+// mockControllerAPIKey is the admin key every request through a
+// MockServerController-backed server must present: since SEC-02 the auth
+// middleware refuses a request it cannot authenticate instead of forwarding it.
+const mockControllerAPIKey = "mock-controller-admin-key"
+
+func (m *MockServerController) GetCurrentConfig() *config.Config {
+	return &config.Config{APIKey: mockControllerAPIKey}
+}
 
 // Tool call history methods
 func (m *MockServerController) GetToolCalls(_ int, _ int, _ storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
@@ -436,6 +445,7 @@ func TestAPIContractCompliance(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create request
 			req := httptest.NewRequest(tt.method, tt.path, http.NoBody)
+			req.Header.Set("X-API-Key", mockControllerAPIKey)
 			w := httptest.NewRecorder()
 
 			// Execute request
@@ -572,6 +582,7 @@ func TestEndpointResponseTypes(t *testing.T) {
 	for _, tt := range actionTests {
 		t.Run(tt.path, func(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, http.NoBody)
+			req.Header.Set("X-API-Key", mockControllerAPIKey)
 			w := httptest.NewRecorder()
 
 			server.ServeHTTP(w, req)
@@ -598,6 +609,7 @@ func TestEndpointResponseTypes(t *testing.T) {
 	// Test login endpoint (Spec 020: returns OAuthStartResponse instead of ServerActionResponse)
 	t.Run("/api/v1/servers/test-server/login", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/api/v1/servers/test-server/login", http.NoBody)
+		req.Header.Set("X-API-Key", mockControllerAPIKey)
 		w := httptest.NewRecorder()
 
 		server.ServeHTTP(w, req)
@@ -632,6 +644,7 @@ func TestInfoEndpointReturnsVersion(t *testing.T) {
 	server := NewServer(controller, logger, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/info", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 
 	server.ServeHTTP(w, req)
@@ -676,6 +689,7 @@ func TestInfoEndpointIncludesUpdateInfo(t *testing.T) {
 	server := NewServer(controller, logger, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/info", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 
 	server.ServeHTTP(w, req)
@@ -748,6 +762,7 @@ func BenchmarkAPIResponseMarshaling(b *testing.B) {
 	server := NewServer(controller, logger, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/servers", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

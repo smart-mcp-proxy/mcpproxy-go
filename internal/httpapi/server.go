@@ -40,7 +40,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
 
@@ -143,7 +142,11 @@ type ServerController interface {
 	QuarantineServer(serverName string, quarantined bool) error
 	GetQuarantinedServers() ([]map[string]interface{}, error)
 	UnquarantineServer(serverName string) error
-	GetManagementService() interface{} // Returns the management service for unified operations
+	// GetManagementService returns the unified lifecycle/diagnostics service.
+	// Typed, not interface{}: handlers must get a compile-time contract rather
+	// than re-deriving a method set with ad-hoc assertions that fail at
+	// runtime (ARC-04). May be nil before the service is installed.
+	GetManagementService() management.Service
 	DiscoverServerTools(ctx context.Context, serverName string) error
 
 	// Tools and search
@@ -165,7 +168,10 @@ type ServerController interface {
 
 	// Secrets management
 	GetSecretResolver() *secret.Resolver
-	GetCurrentConfig() interface{}
+	// GetCurrentConfig returns the live config snapshot, or nil when none is
+	// installed. Typed so apiKeyAuthMiddleware cannot be handed a value it
+	// fails to recognise and then wave through unauthenticated (SEC-02).
+	GetCurrentConfig() *config.Config
 	NotifySecretsChanged(ctx context.Context, operation, secretName string) error
 
 	// Tool call history. The ToolCallScope argument is the caller's server
@@ -483,19 +489,17 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// Get config from controller
-			configInterface := s.controller.GetCurrentConfig()
-			if configInterface == nil {
-				// No config available (testing scenario) - allow through
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// Cast to config type
-			cfg, ok := configInterface.(*config.Config)
-			if !ok {
-				// Config is not the expected type (testing scenario) - allow through
-				next.ServeHTTP(w, r)
+			// SECURITY: no configuration means there is nothing to
+			// authenticate against, so the request cannot be authenticated —
+			// refuse it. This used to forward the request to the handler
+			// ("testing scenario"), which is an unauthenticated REST API for
+			// any controller that returns nil here (SEC-02).
+			cfg := s.controller.GetCurrentConfig()
+			if cfg == nil {
+				s.logger.Errorw("Request rejected - configuration unavailable, cannot authenticate",
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr))
+				s.writeError(w, r, http.StatusServiceUnavailable, "Configuration not available - cannot authenticate request")
 				return
 			}
 
@@ -1686,9 +1690,7 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
 		// Use new management service path
-		servers, stats, err := mgmtSvc.(interface {
-			ListServers(context.Context) ([]*contracts.Server, *contracts.ServerStats, error)
-		}).ListServers(r.Context())
+		servers, stats, err := mgmtSvc.ListServers(r.Context())
 
 		if err != nil {
 			s.logger.Errorw("Failed to list servers via management service", "error", err)
@@ -2224,19 +2226,17 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// separate admission override); the request Quarantined boolean (#370) still
 	// wins after, as a distinct pre-existing escape hatch.
 	quarantined := true
-	if cfgIface := s.controller.GetCurrentConfig(); cfgIface != nil {
-		if cfg, ok := cfgIface.(*config.Config); ok && cfg != nil {
-			// Carry BOTH the explicit trust_mode AND the legacy
-			// auto_approve_tool_changes so EffectiveTrustMode() resolves the same
-			// admission decision it will resolve on the persisted server: a client
-			// that sets auto_approve_tool_changes:true but omits trust_mode must be
-			// admitted as auto (not left quarantined while the saved server reads
-			// auto — a contradictory state). (codex review, spec 086.)
-			quarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{
-				TrustMode:              req.TrustMode,
-				AutoApproveToolChanges: req.AutoApproveToolChanges,
-			})
-		}
+	if cfg := s.controller.GetCurrentConfig(); cfg != nil {
+		// Carry BOTH the explicit trust_mode AND the legacy
+		// auto_approve_tool_changes so EffectiveTrustMode() resolves the same
+		// admission decision it will resolve on the persisted server: a client
+		// that sets auto_approve_tool_changes:true but omits trust_mode must be
+		// admitted as auto (not left quarantined while the saved server reads
+		// auto — a contradictory state). (codex review, spec 086.)
+		quarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{
+			TrustMode:              req.TrustMode,
+			AutoApproveToolChanges: req.AutoApproveToolChanges,
+		})
 	}
 	if req.Quarantined != nil {
 		quarantined = *req.Quarantined
@@ -2865,9 +2865,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		err := mgmtSvc.(interface {
-			EnableServer(context.Context, string, bool) error
-		}).EnableServer(r.Context(), serverID, true)
+		err := mgmtSvc.EnableServer(r.Context(), serverID, true)
 
 		if err != nil {
 			s.logger.Errorw("Failed to enable server via management service", "server", serverID, "error", err)
@@ -2932,9 +2930,7 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		err := mgmtSvc.(interface {
-			EnableServer(context.Context, string, bool) error
-		}).EnableServer(r.Context(), serverID, false)
+		err := mgmtSvc.EnableServer(r.Context(), serverID, false)
 
 		if err != nil {
 			s.logger.Errorw("Failed to disable server via management service", "server", serverID, "error", err)
@@ -3021,10 +3017,8 @@ func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Requ
 // @Router /api/v1/servers/restart_all [post]
 func (s *Server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		RestartAll(ctx context.Context) (*management.BulkOperationResult, error)
-	})
-	if !ok {
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
 		s.logger.Error("Failed to get management service")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
@@ -3053,10 +3047,8 @@ func (s *Server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 // @Router /api/v1/servers/enable_all [post]
 func (s *Server) handleEnableAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		EnableAll(ctx context.Context) (*management.BulkOperationResult, error)
-	})
-	if !ok {
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
 		s.logger.Error("Failed to get management service")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
@@ -3085,10 +3077,8 @@ func (s *Server) handleEnableAll(w http.ResponseWriter, r *http.Request) {
 // @Router /api/v1/servers/disable_all [post]
 func (s *Server) handleDisableAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		DisableAll(ctx context.Context) (*management.BulkOperationResult, error)
-	})
-	if !ok {
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
 		s.logger.Error("Failed to get management service")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
@@ -3127,9 +3117,7 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		err := mgmtSvc.(interface {
-			RestartServer(context.Context, string) error
-		}).RestartServer(r.Context(), serverID)
+		err := mgmtSvc.RestartServer(r.Context(), serverID)
 
 		if err != nil {
 			// Check if error is OAuth-related (expected state, not a failure)
@@ -3367,11 +3355,9 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call management service TriggerOAuthLoginQuick (Spec 020 fix: returns actual browser status)
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		TriggerOAuthLoginQuick(ctx context.Context, name string) (*core.OAuthStartResult, error)
-	})
-	if !ok {
-		s.logger.Error("Management service not available or missing TriggerOAuthLoginQuick method")
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
+		s.logger.Error("Management service not available")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
@@ -3472,11 +3458,9 @@ func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call management service TriggerOAuthLogout
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		TriggerOAuthLogout(ctx context.Context, name string) error
-	})
-	if !ok {
-		s.logger.Error("Management service not available or missing TriggerOAuthLogout method")
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
+		s.logger.Error("Management service not available")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
@@ -3599,11 +3583,9 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// NEW: Call management service instead of controller (T016)
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
-	})
-	if !ok {
-		s.logger.Error("Management service not available or missing GetServerTools method")
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
+		s.logger.Error("Management service not available")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
@@ -3730,9 +3712,8 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 	// explicit guard in the loop below (#1064). Fall back to the controller
 	// path when the management service is unavailable (keeps unit tests +
 	// minimal deployments working).
-	mgmtSvc, hasMgmt := s.controller.GetManagementService().(interface {
-		GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
-	})
+	mgmtSvc := s.controller.GetManagementService()
+	hasMgmt := mgmtSvc != nil
 	getTools := func(name string) ([]map[string]interface{}, error) {
 		if hasMgmt {
 			return mgmtSvc.GetServerTools(r.Context(), name)
@@ -4579,9 +4560,7 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		diag, err := mgmtSvc.(interface {
-			Doctor(context.Context) (*contracts.Diagnostics, error)
-		}).Doctor(r.Context())
+		diag, err := mgmtSvc.Doctor(r.Context())
 
 		if err != nil {
 			s.logger.Errorw("Failed to get diagnostics via management service", "error", err)

@@ -22,7 +22,7 @@ type mockPerServerDiagController struct {
 	reveal bool
 }
 
-func (m *mockPerServerDiagController) GetCurrentConfig() any {
+func (m *mockPerServerDiagController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 

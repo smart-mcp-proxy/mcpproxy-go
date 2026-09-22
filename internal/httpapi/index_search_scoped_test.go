@@ -147,7 +147,13 @@ func doScopedSearch(t *testing.T, controller ServerController, ctx context.Conte
 		req = req.WithContext(ctx)
 	}
 	w := httptest.NewRecorder()
-	server.ServeHTTP(w, req)
+	// The handler is invoked directly rather than through ServeHTTP: these
+	// tests supply the caller's AuthContext themselves, and the auth
+	// middleware would replace it with whatever it derives from the request's
+	// credentials — turning every scoped fixture below into an admin one.
+	// (Before SEC-02 the middleware happened to forward this request
+	// untouched because the mock controller had no readable config.)
+	server.handleSearchTools(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 

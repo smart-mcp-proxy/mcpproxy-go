@@ -11,6 +11,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -205,7 +206,7 @@ type mockControllerEmptyKey struct {
 	baseController
 }
 
-func (m *mockControllerEmptyKey) GetCurrentConfig() any {
+func (m *mockControllerEmptyKey) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: "", // Empty API key
 	}
@@ -216,7 +217,7 @@ type mockControllerWithKey struct {
 	apiKey string
 }
 
-func (m *mockControllerWithKey) GetCurrentConfig() any {
+func (m *mockControllerWithKey) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
@@ -253,7 +254,7 @@ func (m *baseController) GetQuarantinedServers() ([]map[string]interface{}, erro
 	return nil, nil
 }
 func (m *baseController) UnquarantineServer(serverName string) error { return nil }
-func (m *baseController) GetManagementService() interface{}          { return nil }
+func (m *baseController) GetManagementService() management.Service   { return nil }
 func (m *baseController) GetServerTools(serverName string) ([]map[string]interface{}, error) {
 	return nil, nil
 }

@@ -10,12 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -110,6 +112,11 @@ func scopeFixtureConfig(reveal bool) *config.Config {
 // distinct type from mockManagementService so the fixture is under this test's
 // control.
 type scopeMgmtService struct {
+	// Embedded so the fixture satisfies the whole typed seam while
+	// implementing only the two methods these tests drive. The embedded
+	// interface is nil: an unexpected call panics loudly rather than
+	// silently returning a zero value.
+	management.Service
 	servers []contracts.Server
 }
 
@@ -152,7 +159,7 @@ type scopeController struct {
 	subs []chan internalRuntime.Event
 }
 
-func (c *scopeController) GetManagementService() interface{} {
+func (c *scopeController) GetManagementService() management.Service {
 	if !c.withManagement {
 		return nil
 	}
@@ -162,7 +169,7 @@ func (c *scopeController) GetManagementService() interface{} {
 // GetCurrentConfig must return a real *config.Config or apiKeyAuthMiddleware
 // forwards the request with NO AuthContext at all and every scoped assertion
 // below would pass for the wrong reason.
-func (c *scopeController) GetCurrentConfig() interface{} { return c.cfg }
+func (c *scopeController) GetCurrentConfig() *config.Config { return c.cfg }
 
 func (c *scopeController) GetConfig() (*config.Config, error) { return c.cfg, nil }
 
@@ -366,6 +373,30 @@ func scopeGet(t *testing.T, srv *Server, path, apiKey string) *httptest.Response
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	return rec
+}
+
+// noAuthContextRequest builds a GET that reaches a handler with NO AuthContext
+// in its context, supplying chi URL params directly.
+//
+// Until SEC-02 the auth middleware manufactured exactly this shape: a request
+// whose config it could not read was forwarded to the handler unauthenticated.
+// It now refuses those (503), but the floors pinned by the tests that used to
+// enter this way — Spec 099 FR-018a's disclosure tier, and
+// auth.AuthorizeServerOp's unrestricted-on-absence default — are properties of
+// the HANDLERS and the subtree gate, not of that branch. So those tests drive
+// this request straight at the code under test instead of vanishing with the
+// branch that used to reach it.
+func noAuthContextRequest(t *testing.T, path string, urlParams map[string]string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+	rctx := chi.NewRouteContext()
+	for k, v := range urlParams {
+		rctx.URLParams.Add(k, v)
+	}
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	require.Nil(t, auth.AuthContextFromContext(req.Context()),
+		"precondition: the request must carry no AuthContext")
+	return req
 }
 
 // scopeDecodeData decodes the `data` object of the standard API envelope.

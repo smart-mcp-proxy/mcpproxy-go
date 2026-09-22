@@ -42,6 +42,7 @@ func TestAddFromRegistry_SlashServerIDUnescaped(t *testing.T) {
 
 	// microsoft/markitdown, percent-encoded as a single path segment.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/registries/github-mcp/servers/microsoft%2Fmarkitdown/add", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
@@ -65,6 +66,7 @@ func TestAddFromRegistry_NilConfigIsAnError(t *testing.T) {
 	srv := NewServer(ctrl, zaptest.NewLogger(t).Sugar(), nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/registries/reg1/servers/srv1/add", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("X-API-Key", "admin-secret")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)

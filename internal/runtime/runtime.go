@@ -27,6 +27,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
@@ -158,9 +159,14 @@ type Runtime struct {
 	// outcome of the PREVIOUS process instance, derived exactly once in New
 	// when the marker is armed (FR-010/FR-011) and handed to the telemetry
 	// service in SetTelemetry.
-	prechurnStore     telemetry.PreChurnStore
-	previousShutdown  string
-	managementService interface{}      // Initialized later to avoid import cycle
+	prechurnStore    telemetry.PreChurnStore
+	previousShutdown string
+	// managementService is the unified lifecycle/diagnostics service. It is
+	// installed after New (SetManagementService) because the service is built
+	// on top of the Runtime, not because the type has to be erased: the
+	// management package does not import runtime, so the field carries the
+	// real interface and every consumer gets a compile-time contract.
+	managementService management.Service
 	activityService   *ActivityService // Activity logging service
 
 	// rejectionMetric counts a concurrency shed SYNCHRONOUSLY at the rejection
@@ -1118,8 +1124,9 @@ func (r *Runtime) NotifySecretsChanged(ctx context.Context, operation, secretNam
 	return nil
 }
 
-// GetCurrentConfig returns the current configuration
-func (r *Runtime) GetCurrentConfig() interface{} {
+// GetCurrentConfig returns the current configuration. It may be nil only
+// before the config is installed; New rejects a nil config outright.
+func (r *Runtime) GetCurrentConfig() *config.Config {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.cfg
@@ -2287,15 +2294,17 @@ func (r *Runtime) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 	return r.upstreamManager.GetDockerRecoveryStatus()
 }
 
-// SetManagementService stores the management service instance.
-// This is called after runtime initialization to avoid import cycles.
-func (r *Runtime) SetManagementService(svc interface{}) {
+// SetManagementService stores the management service instance. It is called
+// after runtime initialization because the service is CONSTRUCTED on top of
+// the Runtime (it takes one as its RuntimeOperations), not because of an
+// import cycle — internal/management does not import internal/runtime.
+func (r *Runtime) SetManagementService(svc management.Service) {
 	r.managementService = svc
 }
 
 // GetManagementService returns the management service instance.
 // Returns nil if service hasn't been set yet.
-func (r *Runtime) GetManagementService() interface{} {
+func (r *Runtime) GetManagementService() management.Service {
 	return r.managementService
 }
 

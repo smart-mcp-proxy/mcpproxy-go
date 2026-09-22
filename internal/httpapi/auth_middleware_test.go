@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,7 +48,7 @@ type testControllerWithConfig struct {
 	cfg *config.Config
 }
 
-func (m *testControllerWithConfig) GetCurrentConfig() interface{} {
+func (m *testControllerWithConfig) GetCurrentConfig() *config.Config {
 	return m.cfg
 }
 
@@ -398,4 +399,43 @@ func TestAPIKeyAuth_NoTokenStore_RejectsAgentToken(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code,
 		"Agent token should be rejected when token store is not configured")
+}
+
+// --- SEC-02: the middleware must fail CLOSED when it cannot read a config ---
+
+// failClosedController models a ServerController that hands the middleware no
+// configuration at all. apiKeyAuthMiddleware used to read that as a "testing
+// scenario" and forward the request unauthenticated; there is no configuration
+// to authenticate against, so the only safe answer is to refuse.
+//
+// reachedHandler is the real oracle: asserting only on the status code passes
+// vacuously if some unrelated 503 fires before routing.
+type failClosedController struct {
+	baseController
+	reachedHandler atomic.Bool
+}
+
+func (c *failClosedController) GetCurrentConfig() *config.Config { return nil }
+
+// GetAllServers is the sentinel: GET /api/v1/servers falls back to it because
+// baseController has no management service.
+func (c *failClosedController) GetAllServers() ([]map[string]interface{}, error) {
+	c.reachedHandler.Store(true)
+	return []map[string]interface{}{}, nil
+}
+
+func TestAPIKeyAuth_NilConfigFailsClosed(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	ctrl := &failClosedController{}
+	srv := NewServer(ctrl, logger, nil)
+
+	// A plain TCP request with no credentials of any kind.
+	req := httptest.NewRequest("GET", "/api/v1/servers", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code,
+		"an unreadable config must refuse the request, not forward it unauthenticated")
+	assert.False(t, ctrl.reachedHandler.Load(),
+		"the handler must NOT run: a nil config means the request was never authenticated")
 }

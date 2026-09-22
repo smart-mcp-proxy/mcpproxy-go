@@ -656,7 +656,7 @@ func (s *Server) UnsubscribeEvents(ch chan runtime.Event) {
 
 // GetManagementService returns the management service instance from runtime.
 // Returns nil if service hasn't been set yet.
-func (s *Server) GetManagementService() interface{} {
+func (s *Server) GetManagementService() management.Service {
 	if s.runtime == nil {
 		return nil
 	}
@@ -3141,7 +3141,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		// security_scan from every server on every SSE delivery — same bug
 		// class as the pre-existing quarantine-stats staleness PR #463
 		// already fixes for Quarantine.
-		if mgmtSvc, ok := s.runtime.GetManagementService().(management.Service); ok && mgmtSvc != nil {
+		if mgmtSvc := s.runtime.GetManagementService(); mgmtSvc != nil {
 			mgmtSvc.SetScanSummaryEnricher(&scanSummaryEnricherAdapter{scanner: secService})
 		}
 		s.setSecurityScanner(secService)
@@ -3924,7 +3924,7 @@ func (s *Server) EmitActiveProfileChanged(profile string) {
 }
 
 // GetCurrentConfig returns the current configuration
-func (s *Server) GetCurrentConfig() interface{} {
+func (s *Server) GetCurrentConfig() *config.Config {
 	return s.runtime.GetCurrentConfig()
 }
 

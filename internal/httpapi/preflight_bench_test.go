@@ -129,7 +129,7 @@ func newBenchPreflightController(servers, toolsPerServer int) *benchPreflightCon
 	}
 }
 
-func (c *benchPreflightController) GetCurrentConfig() interface{} {
+func (c *benchPreflightController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: preflightTestAPIKey}
 }
 

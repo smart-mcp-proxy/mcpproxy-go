@@ -25,7 +25,7 @@ type updateFailureController struct {
 	err      error
 }
 
-func (c *updateFailureController) GetCurrentConfig() interface{} {
+func (c *updateFailureController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: c.apiKey}
 }
 

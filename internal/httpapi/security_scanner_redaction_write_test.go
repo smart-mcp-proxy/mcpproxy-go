@@ -25,6 +25,7 @@ const scannerRealSecret = "sk-live-REAL-VENDOR-KEY"
 func putScannerConfig(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/security/scanners/mcp-scan/config", bytes.NewBufferString(body))
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -54,6 +55,7 @@ func TestConfigureScanner_RejectsRedactionSentinel(t *testing.T) {
 
 	// 1. Read the document back the way any API client would.
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/security/scanners/mcp-scan/status", nil)
+	getReq.Header.Set("X-API-Key", mockControllerAPIKey)
 	getRec := httptest.NewRecorder()
 	srv.ServeHTTP(getRec, getReq)
 	require.Equal(t, http.StatusOK, getRec.Code, "body: %s", getRec.Body.String())

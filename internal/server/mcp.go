@@ -4598,9 +4598,7 @@ func (p *MCPProxyServer) handleEnableUpstream(ctx context.Context, request mcp.C
 	// Try to use management service if available
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if mgmtSvc := p.mainServer.runtime.GetManagementService(); mgmtSvc != nil {
-			err := mgmtSvc.(interface {
-				EnableServer(context.Context, string, bool) error
-			}).EnableServer(ctx, serverName, enabled)
+			err := mgmtSvc.EnableServer(ctx, serverName, enabled)
 
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Failed to %s server '%s': %v",
@@ -4641,9 +4639,7 @@ func (p *MCPProxyServer) handleRestartUpstream(ctx context.Context, request mcp.
 	// Try to use management service if available
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if mgmtSvc := p.mainServer.runtime.GetManagementService(); mgmtSvc != nil {
-			err := mgmtSvc.(interface {
-				RestartServer(context.Context, string) error
-			}).RestartServer(ctx, serverName)
+			err := mgmtSvc.RestartServer(ctx, serverName)
 
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Failed to restart server '%s': %v", serverName, err)), nil
@@ -4707,9 +4703,7 @@ func (p *MCPProxyServer) handleDoctor(ctx context.Context, request mcp.CallToolR
 	// Try to use management service if available
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if mgmtSvc := p.mainServer.runtime.GetManagementService(); mgmtSvc != nil {
-			diag, err := mgmtSvc.(interface {
-				Doctor(context.Context) (*contracts.Diagnostics, error)
-			}).Doctor(ctx)
+			diag, err := mgmtSvc.Doctor(ctx)
 
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Failed to run diagnostics: %v", err)), nil

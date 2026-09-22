@@ -25,7 +25,7 @@ type codeExecDeadlineController struct {
 	hasDL    bool
 }
 
-func (c *codeExecDeadlineController) GetCurrentConfig() interface{} { return c.cfg }
+func (c *codeExecDeadlineController) GetCurrentConfig() *config.Config { return c.cfg }
 
 func (c *codeExecDeadlineController) CallTool(ctx context.Context, _ string, _ map[string]interface{}) (interface{}, error) {
 	c.deadline, c.hasDL = ctx.Deadline()

@@ -51,7 +51,9 @@ type removedKeysController struct {
 	applied int
 }
 
-func (m *removedKeysController) GetCurrentConfig() any { return &config.Config{APIKey: "test-key"} }
+func (m *removedKeysController) GetCurrentConfig() *config.Config {
+	return &config.Config{APIKey: "test-key"}
+}
 func (m *removedKeysController) GetConfig() (*config.Config, error) {
 	return m.live, nil
 }

@@ -60,6 +60,7 @@ func decodeData(t *testing.T, w *httptest.ResponseRecorder, into interface{}) {
 func TestSearchRegistryServers_KeyMissingIsUnavailableNot500(t *testing.T) {
 	srv := NewServer(&keyMissingController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/registries/needs-key/servers", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -80,6 +81,7 @@ func TestSearchRegistryServers_KeyMissingIsUnavailableNot500(t *testing.T) {
 func TestSearchRegistryServers_CacheFreshnessSurfaced(t *testing.T) {
 	srv := NewServer(&cachedController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/registries/pulse/servers", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -100,6 +102,7 @@ func TestSearchRegistryServers_CacheFreshnessSurfaced(t *testing.T) {
 func TestRefreshRegistryCache_Endpoint(t *testing.T) {
 	srv := NewServer(&refreshCountController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/registries/pulse/refresh", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -150,6 +153,7 @@ func (c *provenanceController) ListRegistries() ([]interface{}, error) {
 func TestListRegistries_SurfacesProvenanceAndTrusted(t *testing.T) {
 	srv := NewServer(&provenanceController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/registries", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -234,6 +238,7 @@ func (c *removeController) RemoveRegistrySourceRef(id string) (*config.RegistryE
 func TestRemoveRegistrySource_RemovesCustom(t *testing.T) {
 	srv := NewServer(&removeController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/registries/acme", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -254,6 +259,7 @@ func TestRemoveRegistrySource_RemovesCustom(t *testing.T) {
 func TestRemoveRegistrySource_RefusesBuiltin(t *testing.T) {
 	srv := NewServer(&removeController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/registries/official", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -266,6 +272,7 @@ func TestRemoveRegistrySource_RefusesBuiltin(t *testing.T) {
 func TestRemoveRegistrySource_NotFound(t *testing.T) {
 	srv := NewServer(&removeController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/registries/ghost", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -305,6 +312,7 @@ func (c *editController) EditRegistrySourceRef(id, name, rawURL, _ string) (*con
 func TestEditRegistrySource_UpdatesCustom(t *testing.T) {
 	srv := NewServer(&editController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/registries/acme", strings.NewReader(`{"name":"Acme Prod","url":"https://acme.example/api"}`))
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -329,6 +337,7 @@ func TestEditRegistrySource_UpdatesCustom(t *testing.T) {
 func TestEditRegistrySource_RefusesBuiltin(t *testing.T) {
 	srv := NewServer(&editController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/registries/official", strings.NewReader(`{"name":"hijack"}`))
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -342,6 +351,7 @@ func TestEditRegistrySource_RefusesBuiltin(t *testing.T) {
 func TestEditRegistrySource_NotFound(t *testing.T) {
 	srv := NewServer(&editController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/registries/ghost", strings.NewReader(`{"name":"x"}`))
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)

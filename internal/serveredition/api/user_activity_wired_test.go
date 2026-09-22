@@ -38,7 +38,7 @@ type stubServerController struct {
 	cfg *config.Config
 }
 
-func (c *stubServerController) GetCurrentConfig() interface{} { return c.cfg }
+func (c *stubServerController) GetCurrentConfig() *config.Config { return c.cfg }
 
 // GetConfig backs internal/httpapi's trustedProxiesProvider (server.go:680),
 // which TagRequestMeta calls on EVERY /api/v1 request ahead of

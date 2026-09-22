@@ -37,7 +37,7 @@ func (m *mockPatchServerController) GetAllServers() ([]map[string]interface{}, e
 	return m.allServers, nil
 }
 
-func (m *mockPatchServerController) GetCurrentConfig() any {
+func (m *mockPatchServerController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 

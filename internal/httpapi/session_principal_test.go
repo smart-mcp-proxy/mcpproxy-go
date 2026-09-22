@@ -46,7 +46,7 @@ type sessionTestController struct {
 	cfg *config.Config
 }
 
-func (m *sessionTestController) GetCurrentConfig() interface{}      { return m.cfg }
+func (m *sessionTestController) GetCurrentConfig() *config.Config   { return m.cfg }
 func (m *sessionTestController) GetConfig() (*config.Config, error) { return m.cfg, nil }
 
 // principalProbeResponse reports exactly what apiKeyAuthMiddleware installed

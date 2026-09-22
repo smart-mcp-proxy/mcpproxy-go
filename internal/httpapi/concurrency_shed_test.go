@@ -30,7 +30,7 @@ type shedController struct {
 	err    error
 }
 
-func (m *shedController) GetCurrentConfig() any {
+func (m *shedController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 

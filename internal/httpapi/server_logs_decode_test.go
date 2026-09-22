@@ -37,6 +37,7 @@ func TestGetServerLogs_SlashServerIDUnescaped(t *testing.T) {
 	server := NewServer(controller, logger, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers/io.github.evidai%2Fpolymarket-guard/logs?tail=10", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 

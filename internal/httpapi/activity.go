@@ -1127,9 +1127,8 @@ func (s *Server) handleActivityUsage(w http.ResponseWriter, r *http.Request) {
 // the value hot-reloads with config.
 func (s *Server) usageCacheTTL() time.Duration {
 	def := time.Duration(config.DefaultObservabilityConfig().UsageCacheTTL)
-	cfgIface := s.controller.GetCurrentConfig()
-	cfg, ok := cfgIface.(*config.Config)
-	if !ok || cfg == nil || cfg.Observability == nil {
+	cfg := s.controller.GetCurrentConfig()
+	if cfg == nil || cfg.Observability == nil {
 		return def
 	}
 	if d := time.Duration(cfg.Observability.UsageCacheTTL); d > 0 {

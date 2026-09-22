@@ -46,7 +46,7 @@ type mockToolQuarantineController struct {
 	blockedServer          string
 }
 
-func (m *mockToolQuarantineController) GetCurrentConfig() any {
+func (m *mockToolQuarantineController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
@@ -702,7 +702,7 @@ type mockUnquarantineController struct {
 	lastQuarantined     bool
 }
 
-func (m *mockUnquarantineController) GetCurrentConfig() any {
+func (m *mockUnquarantineController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
@@ -824,7 +824,7 @@ type mockToolToggleController struct {
 	mockToolQuarantineController
 }
 
-func (m *mockToolToggleController) GetCurrentConfig() any {
+func (m *mockToolToggleController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 

@@ -27,7 +27,7 @@ type mockSessionController struct {
 	callCount int
 }
 
-func (m *mockSessionController) GetCurrentConfig() any {
+func (m *mockSessionController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 

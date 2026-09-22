@@ -11,6 +11,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 
@@ -243,7 +244,7 @@ type refreshAdminController struct {
 	apiKey string
 }
 
-func (c *refreshAdminController) GetCurrentConfig() any {
+func (c *refreshAdminController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: c.apiKey}
 }
 
@@ -401,7 +402,7 @@ type mockAddServerController struct {
 	captured     *config.ServerConfig
 }
 
-func (m *mockAddServerController) GetCurrentConfig() any {
+func (m *mockAddServerController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
@@ -422,7 +423,7 @@ type mockRemoveServerController struct {
 	existsServer string
 }
 
-func (m *mockRemoveServerController) GetCurrentConfig() any {
+func (m *mockRemoveServerController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
@@ -565,6 +566,7 @@ func TestRequestIDInLogs(t *testing.T) {
 
 // mockOAuthManagementService implements TriggerOAuthLoginQuick for server login tests
 type mockOAuthManagementService struct {
+	management.Service
 	triggerError  error
 	triggerResult *core.OAuthStartResult
 }
@@ -591,13 +593,13 @@ type mockLoginController struct {
 	mgmtSvc *mockOAuthManagementService
 }
 
-func (m *mockLoginController) GetCurrentConfig() any {
+func (m *mockLoginController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
 }
 
-func (m *mockLoginController) GetManagementService() interface{} {
+func (m *mockLoginController) GetManagementService() management.Service {
 	return m.mgmtSvc
 }
 

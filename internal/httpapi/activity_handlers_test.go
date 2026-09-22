@@ -27,7 +27,7 @@ type mockActivityController struct {
 	activities []*storage.ActivityRecord
 }
 
-func (m *mockActivityController) GetCurrentConfig() any {
+func (m *mockActivityController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
