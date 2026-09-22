@@ -82,8 +82,11 @@ func backupFile(path string) (string, error) {
 // staging) between the check and the rename; running the SAME check here, at
 // this exact point, closes that gap down to the (unavoidable without an
 // OS-level lock across the whole read-modify-write sequence) span between
-// this call and the os.Rename two lines below — a few fast local syscalls,
-// not a real I/O operation an external writer could plausibly land inside.
+// this call and the os.Rename two lines below. Go's os.Rename itself still
+// does a metadata lookup (Lstat on Unix) before the actual rename/replace
+// syscall, so this is not literally zero I/O, but it is the practical
+// floor: one fast local metadata lookup, not a copy or any work an external
+// writer could meaningfully race against.
 func atomicWriteFile(path string, data []byte, perm os.FileMode, preRename func() error) error {
 	dir := filepath.Dir(path)
 

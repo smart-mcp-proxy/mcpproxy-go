@@ -681,12 +681,14 @@ func (s *Service) guardJsoncComments(cfgPath string) error {
 //     true last moment before the rename that actually replaces the file.
 //
 // A residual gap remains between this second call (inside atomicWriteFile,
-// immediately before os.Rename) and the rename itself — a handful of fast
-// local syscalls, not a real I/O operation. Fully eliminating even that needs
-// an OS-level file lock (e.g. flock) held across the whole read-modify-write
-// sequence, which is a larger architectural change deserving its own review,
-// not folded into this fix (tracked alongside the other deferred TOCTOU
-// findings — see the comment block in ConnectWithPrecondition).
+// immediately before os.Rename) and the rename itself — practically just the
+// single Lstat os.Rename performs internally on Unix before replacing the
+// file, not a copy or anything an external writer could meaningfully race
+// against. Fully eliminating even that needs an OS-level file lock (e.g.
+// flock) held across the whole read-modify-write sequence, which is a larger
+// architectural change deserving its own review, not folded into this fix
+// (tracked alongside the other deferred TOCTOU findings — see the comment
+// block in ConnectWithPrecondition).
 //
 // This is deliberately forgiving about everything except the one thing it
 // exists to catch: a vanished file, a still-absent-or-object-shaped section,
