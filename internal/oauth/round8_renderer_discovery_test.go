@@ -47,6 +47,9 @@ var exportedStringFuncs = map[string]func(string) string{
 	// Issue #1158, review round 2. Both emit masks, so the fail-closed net has
 	// to know their markers even though no write door echoes them back.
 	"LogSafeURL":           LogSafeURL,
+	"LogSafeQueryString":   LogSafeQueryString,
+	"LogSafeRequestURL":    LogSafeRequestURL,
+	"LogSafeRequestPath":   LogSafeRequestPath,
 	"LogSafeCallbackQuery": LogSafeCallbackQuery,
 }
 

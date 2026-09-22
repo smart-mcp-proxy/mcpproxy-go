@@ -514,31 +514,20 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 
 	if wasGenerated {
-		// Frame the auto-generated key message for visibility
-		frameMsg := strings.Repeat("*", 80)
-		logger.Warn(frameMsg)
-		logger.Warn("API key was auto-generated for security. To access the Web UI and REST API, use this key:")
-		logger.Warn("",
-			zap.String("api_key", apiKey),
-			zap.String("web_ui_url", fmt.Sprintf("http://%s/ui/?apikey=%s", cfg.Listen, apiKey)),
-			zap.String("source", source.String()))
-		logger.Warn("Note: This key will be saved to your config file for persistence")
-		logger.Warn(frameMsg)
-
-		// Save the auto-generated key to config file for persistence
+		// Save the auto-generated key to config file for persistence, then
+		// report it. SEC-01: the raw key goes to the human sink only - see
+		// announceGeneratedAPIKey.
 		saver.setGeneratedAPIKey(apiKey)
 		configPathToSave := saver.path
+		saveErr := saver.save(cfg, configPathToSave)
 
-		if err := saver.save(cfg, configPathToSave); err != nil {
-			logger.Warn("Failed to save auto-generated API key to config file",
-				zap.Error(err),
-				zap.String("config_path", configPathToSave))
-			logger.Warn("The API key will be regenerated on next restart. To persist it, manually add it to your config file:")
-			logger.Warn("", zap.String("api_key", apiKey))
-		} else {
-			logger.Info("Auto-generated API key saved to config file",
-				zap.String("config_path", configPathToSave))
-		}
+		announceGeneratedAPIKey(logger, os.Stderr, stderrIsTerminal(), generatedAPIKeyInfo{
+			APIKey:     apiKey,
+			Listen:     cfg.Listen,
+			Source:     source.String(),
+			ConfigPath: configPathToSave,
+			SaveErr:    saveErr,
+		})
 	} else {
 		// Mask API key when it comes from environment or config file
 		maskedKey := maskAPIKey(apiKey)

@@ -475,7 +475,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			source := transport.GetConnectionSource(r.Context())
 			if source == transport.ConnectionSourceTray {
 				s.logger.Debugw("Tray connection - skipping API key validation",
-					zap.String("path", r.URL.Path),
+					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 					zap.String("remote_addr", r.RemoteAddr),
 					zap.String("source", string(source)))
 				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
@@ -503,7 +503,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			// Empty API key is not allowed - this prevents accidental exposure
 			if cfg.APIKey == "" {
 				s.logger.Warnw("TCP connection rejected - API key not configured",
-					zap.String("path", r.URL.Path),
+					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 					zap.String("remote_addr", r.RemoteAddr))
 				s.writeError(w, r, http.StatusUnauthorized, "API key authentication required but not configured. Please set MCPPROXY_API_KEY or configure api_key in config file.")
 				return
@@ -549,7 +549,7 @@ func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Reque
 	}
 
 	s.logger.Warnw("TCP connection with missing API key",
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
@@ -565,14 +565,14 @@ func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Reques
 	}
 	if token != "" && token == cfg.APIKey {
 		s.logger.Debugw("TCP connection with valid API key",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 			zap.String("remote_addr", r.RemoteAddr))
 		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
 		next.ServeHTTP(w, r.WithContext(ctx))
 		return
 	}
 	s.logger.Warnw("TCP connection with invalid API key",
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
@@ -592,7 +592,7 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 	}
 	if token != "" && token == cfg.APIKey {
 		s.logger.Debugw("TCP connection with valid API key",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 			zap.String("remote_addr", r.RemoteAddr))
 		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -604,7 +604,7 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 	}
 
 	s.logger.Warnw("TCP connection with invalid API key",
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
@@ -613,7 +613,7 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, next http.Handler, token string) {
 	if s.tokenStore == nil || s.dataDir == "" {
 		s.logger.Warnw("Agent token presented but token store not configured",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 			zap.String("remote_addr", r.RemoteAddr))
 		s.writeError(w, r, http.StatusUnauthorized, "Agent tokens are not configured on this server")
 		return
@@ -629,7 +629,7 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	agentToken, err := s.tokenStore.ValidateAgentToken(token, hmacKey)
 	if err != nil {
 		s.logger.Warnw("Agent token validation failed",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 			zap.String("remote_addr", r.RemoteAddr),
 			zap.String("error", err.Error()))
 		s.writeError(w, r, http.StatusUnauthorized, fmt.Sprintf("Agent token invalid: %s", err.Error()))
@@ -665,7 +665,7 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	s.logger.Debugw("Agent token authenticated",
 		zap.String("agent_name", agentToken.Name),
 		zap.String("token_prefix", agentToken.TokenPrefix),
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 		zap.String("remote_addr", r.RemoteAddr))
 
 	next.ServeHTTP(w, r.WithContext(ctx))
@@ -1139,16 +1139,24 @@ func (s *Server) httpLoggingMiddleware() func(http.Handler) http.Handler {
 
 			duration := time.Since(start)
 
-			// Log request details to http.log
+			// Log request details to http.log.
+			//
+			// SEC-01: `query` and `referer` both carry `?apikey=` — it is an
+			// accepted credential source (see resolveAuth), the Web UI's SSE
+			// stream and the tray client send the ROOT admin key that way, and
+			// the Web UI is opened as /ui/?apikey=<KEY> so same-origin
+			// subresource requests put it in the Referer too. Unredacted, this
+			// line wrote the admin credential to disk on every request. The
+			// renderers are internal/oauth's — one rule for every log sink.
 			s.httpLogger.Info("HTTP API Request",
 				zap.String("method", r.Method),
-				zap.String("path", r.URL.Path),
-				zap.String("query", r.URL.RawQuery),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
+				zap.String("query", oauth.LogSafeQueryString(r.URL.RawQuery)),
 				zap.String("remote_addr", r.RemoteAddr),
 				zap.String("user_agent", r.UserAgent()),
 				zap.Int("status", ww.statusCode),
 				zap.Duration("duration", duration),
-				zap.String("referer", r.Referer()),
+				zap.String("referer", oauth.LogSafeRequestURL(r.Referer())),
 				zap.Int64("content_length", r.ContentLength),
 			)
 		})
