@@ -544,23 +544,23 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheWriter
 	}
 }
 
-// TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheFinalPreWriteCheck
-// closes the must-fix round-3 cross-model review found in the fix above:
-// connectJSON/connectTOML's OWN read (the "writer's own read" the previous
-// test proves is authoritative) is STILL not adjacent to the actual write —
-// backupFile performs real file I/O in between, widening the window in which
-// an external process can replace the servers section with a non-object
-// value AFTER the writer already decided it was safe to proceed. Repro: both
+// TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtThePreBackupCheck
+// closes the must-fix round-3 cross-model review found: connectJSON/
+// connectTOML's OWN read (the "writer's own read" the previous test proves is
+// authoritative) is STILL not adjacent to the actual write — backupFile
+// performs real file I/O in between, widening the window in which an
+// external process can replace the servers section with a non-object value
+// AFTER the writer already decided it was safe to proceed. Repro: both
 // preWriteState's read and connectJSON's readOrCreateJSON read see an
 // OBJECT-shaped section (so the earlier, top-of-function check passes
-// cleanly); only the SECOND, closer-to-backup/write check's read observes
-// the section having been replaced with a non-object value in between. The
-// write must still refuse, before any backup is created.
-func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheFinalPreWriteCheck(t *testing.T) {
+// cleanly); only the pre-backup check's read observes the section having
+// been replaced with a non-object value in between. The write must still
+// refuse, before any backup is created.
+func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtThePreBackupCheck(t *testing.T) {
 	svc, home := testService(t)
 	cfgPath := ConfigPath("claude-code", home)
 	const objectShaped = `{"mcpServers":{}}`
-	const racedNonObject = `{"mcpServers":"raced-in-during-backup"}`
+	const racedNonObject = `{"mcpServers":"raced-in-before-backup"}`
 	writeFileT(t, cfgPath, objectShaped)
 
 	reads := 0
@@ -569,7 +569,7 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheFinalP
 		if reads <= 2 {
 			// preWriteState's read (#1) and connectJSON's own readOrCreateJSON
 			// read (#2): both still object-shaped, so the top-of-function check
-			// passes and the function proceeds toward backup/write.
+			// passes and the function proceeds toward the pre-backup check.
 			return []byte(objectShaped), nil
 		}
 		// The THIRD read — refuseIfServersSectionRaced, immediately before
@@ -579,10 +579,10 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheFinalP
 
 	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
 	if reads != 3 {
-		t.Fatalf("expected exactly 3 reads (preWriteState + the writer's own + the final pre-backup check), got %d", reads)
+		t.Fatalf("expected exactly 3 reads (preWriteState + the writer's own + the pre-backup check), got %d", reads)
 	}
 	if err == nil {
-		t.Fatalf("expected the final pre-write check to catch the raced-in non-object section, got res=%+v err=nil", res)
+		t.Fatalf("expected the pre-backup check to catch the raced-in non-object section, got res=%+v err=nil", res)
 	}
 	if res != nil {
 		t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
@@ -594,7 +594,66 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheFinalP
 		t.Fatalf("the ON-DISK file (never touched by the mocked reads) must be untouched after a refusal:\n got:  %s\n want: %s", got, objectShaped)
 	}
 	if n := backupCount(t, cfgPath); n != 0 {
-		t.Fatalf("a refused write must not create a backup — the check must run BEFORE backupFile, found %d", n)
+		t.Fatalf("a refused write must not create a backup — this check runs BEFORE backupFile, found %d", n)
+	}
+}
+
+// TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAfterBackup
+// closes the must-fix round-4 cross-model review found in the fix above:
+// backupFile performs real Stat/Open/copy I/O — genuinely slow enough to
+// race in practice — so a change landing DURING that backup (i.e. AFTER the
+// pre-backup check already passed) was still able to slip through to
+// atomicWriteFile undetected. Repro: preWriteState's read, connectJSON's own
+// read, AND the pre-backup check's read all see an OBJECT-shaped section (so
+// backupFile actually runs and a backup file IS created — that's expected
+// and consistent with how a later atomicWriteFile failure already behaves in
+// this codebase); only the THIRD, post-backup/pre-write check's read
+// observes the section having been replaced with a non-object value. The
+// write must still refuse, and the on-disk config must be untouched (the
+// backup file's existence does not imply the config itself was mutated).
+func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAfterBackup(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	const objectShaped = `{"mcpServers":{}}`
+	const racedNonObject = `{"mcpServers":"raced-in-during-backup-io"}`
+	writeFileT(t, cfgPath, objectShaped)
+
+	reads := 0
+	svc.setReadFile(func(path string) ([]byte, error) {
+		reads++
+		if reads <= 3 {
+			// preWriteState (#1), connectJSON's own read (#2), and the
+			// pre-backup check (#3): all still object-shaped, so backupFile
+			// actually runs.
+			return []byte(objectShaped), nil
+		}
+		// The FOURTH read — refuseIfServersSectionRaced, immediately before
+		// atomicWriteFile — observes the file AFTER the simulated edit landing
+		// during backupFile's own I/O.
+		return []byte(racedNonObject), nil
+	})
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
+	if reads != 4 {
+		t.Fatalf("expected exactly 4 reads (preWriteState + the writer's own + the pre-backup check + the post-backup check), got %d", reads)
+	}
+	if err == nil {
+		t.Fatalf("expected the post-backup check to catch the raced-in non-object section, got res=%+v err=nil", res)
+	}
+	if res != nil {
+		t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+	}
+	if !strings.Contains(err.Error(), "mcpServers") {
+		t.Fatalf("expected the refusal to name the section, got: %v", err)
+	}
+	if got := readConfigT(t, cfgPath); got != objectShaped {
+		t.Fatalf("the ON-DISK config file (never touched by the mocked reads) must be untouched after a refusal:\n got:  %s\n want: %s", got, objectShaped)
+	}
+	// backupFile runs BEFORE this refusal, so — unlike the pre-backup-check
+	// test above — a backup IS expected here; its existence must not be
+	// confused with the config itself having been mutated (asserted above).
+	if n := backupCount(t, cfgPath); n != 1 {
+		t.Fatalf("expected exactly 1 backup (created before the post-backup check refused), got %d", n)
 	}
 }
 

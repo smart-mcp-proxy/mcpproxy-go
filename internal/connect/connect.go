@@ -500,9 +500,11 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 	// independent reads of the file, so a check here alone would leave a TOCTOU
 	// window — the config could still be object-shaped now and mutated to a
 	// non-object section before the write's own read runs, bypassing an
-	// upstream-only guard. The write functions carry the authoritative,
-	// last-read check instead (see the comment at their servers-section type
-	// assertion), so THAT specific drift class is fully protected without racing.
+	// upstream-only guard. The write functions instead re-check this repeatedly,
+	// close to each I/O step that could widen the window (see
+	// refuseIfServersSectionRaced and its call sites in connectJSON/
+	// connectTOML) — shrinking, not eliminating, the drift window; the residual
+	// gap immediately before atomicWriteFile's own rename is documented there.
 	//
 	// KNOWN, PRE-EXISTING, OUT-OF-SCOPE LIMITATION (surfaced by cross-model
 	// review of this fix, not introduced by it — present since Spec 091
@@ -656,14 +658,29 @@ func (s *Service) guardJsoncComments(cfgPath string) error {
 
 // refuseIfServersSectionRaced re-reads cfgPath and reports whether the
 // servers section (serversKey, decoded per format — "json" or "toml") has
-// become present-but-not-an-object since an earlier read. It is the second
-// of two checks connectJSON/connectTOML run against the same drift class
-// (Spec 091 FR-005 gap): the first, at the top of each function, uses the
-// read those functions already need for their existence/force/adoption
-// decisions, but that read is not adjacent to the actual write — backupFile
-// performs its own real I/O afterward — so calling this again immediately
-// before backup/write shrinks the exploitable window instead of leaving it
-// at the width of the whole function body.
+// become present-but-not-an-object since an earlier read. connectJSON/
+// connectTOML each call this TWICE against the same drift class (Spec 091
+// FR-005 gap), because the function body's own read (used for their
+// existence/force/adoption decisions) is not adjacent to the actual write —
+// several real I/O steps happen in between:
+//
+//   - immediately before backupFile: a fast-fail so an already-bad section
+//     (unchanged since the top-of-function read) does not even earn a
+//     backup file, and so a change landing during the EARLIER part of the
+//     function body (existence/adoption decisions, which do no I/O of their
+//     own) is caught.
+//   - immediately before atomicWriteFile (after backupFile and marshaling):
+//     backupFile performs its own Stat/Open/copy — genuinely slow enough on
+//     a loaded filesystem to be practically raceable, per round-4
+//     cross-model review — so a change landing DURING backup is caught by
+//     THIS second call rather than slipping through to the write.
+//
+// A residual gap remains between this second call and atomicWriteFile's own
+// temp-file-write-then-rename — fully eliminating that needs an OS-level file
+// lock (e.g. flock) held across the whole read-modify-write sequence, which
+// is a larger architectural change deserving its own review, not folded into
+// this fix (tracked alongside the other deferred TOCTOU findings — see the
+// comment block in ConnectWithPrecondition).
 //
 // This is deliberately forgiving about everything except the one thing it
 // exists to catch: a vanished file, a still-absent-or-object-shaped section,
@@ -768,16 +785,9 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		}
 	}
 
-	// SECOND, closer-to-the-write check for the same drift class (Spec 091
-	// FR-005 gap; round-3 cross-model review finding): the read at the top of
-	// this function is not actually adjacent to the write below — backupFile
-	// performs its own real file I/O in between, widening the window in which
-	// an external process could replace the servers section with a non-object
-	// value after this function already decided it was safe to proceed. A
-	// fresh, minimal re-check right here, immediately before backup/write,
-	// shrinks that window to the (unavoidable without an OS-level lock across
-	// the whole read-modify-write sequence) gap between THIS check and
-	// atomicWriteFile's rename.
+	// SECOND check for the same drift class (Spec 091 FR-005 gap; round-3
+	// cross-model review finding): a fast-fail, before backupFile's own real
+	// I/O, for a change that landed since the top-of-function read.
 	if err := s.refuseIfServersSectionRaced(cfgPath, serversKey, "json"); err != nil {
 		return nil, err
 	}
@@ -798,6 +808,18 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	encoded, err := marshalJSONIndent(data)
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+
+	// THIRD check (round-4 cross-model review finding): backupFile above just
+	// performed real Stat/Open/copy I/O — genuinely slow enough to race in
+	// practice — so the section could have been replaced with a non-object
+	// value DURING that backup, after the second check already passed. This
+	// re-check, as close as possible to the actual write, is what catches
+	// that window; see refuseIfServersSectionRaced's doc comment for the
+	// (unavoidable without OS-level locking) residual gap that remains
+	// between this point and atomicWriteFile's own rename.
+	if err := s.refuseIfServersSectionRaced(cfgPath, serversKey, "json"); err != nil {
+		return nil, err
 	}
 
 	if err := atomicWriteFile(cfgPath, encoded, perm); err != nil {
@@ -943,9 +965,9 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 		action = "updated"
 	}
 
-	// Second, closer-to-the-write check — see the equivalent comment in
-	// connectJSON for why the check above alone leaves a window (backupFile's
-	// own I/O in between).
+	// Second check — a fast-fail before backupFile's own real I/O. See
+	// refuseIfServersSectionRaced's doc comment for why this alone still
+	// leaves a window, and the third check below that closes it.
 	if err := s.refuseIfServersSectionRaced(cfgPath, "mcp_servers", "toml"); err != nil {
 		return nil, err
 	}
@@ -967,6 +989,14 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	enc := toml.NewEncoder(&buf)
 	if err := enc.Encode(data); err != nil {
 		return nil, fmt.Errorf("encode TOML: %w", err)
+	}
+
+	// Third check (round-4 cross-model review finding): backupFile above just
+	// performed real I/O, so re-check as close as possible to the actual
+	// write — see connectJSON's equivalent comment for the residual gap that
+	// remains between this point and atomicWriteFile's own rename.
+	if err := s.refuseIfServersSectionRaced(cfgPath, "mcp_servers", "toml"); err != nil {
+		return nil, err
 	}
 
 	if err := atomicWriteFile(cfgPath, buf.Bytes(), perm); err != nil {
