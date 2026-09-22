@@ -135,7 +135,7 @@ mcpproxy upstream logs <name> --follow    # per-server logs
 tail -f ~/Library/Logs/mcpproxy/main.log  # main log (macOS; Linux: ~/.mcpproxy/logs/main.log)
 ```
 
-**Exit codes**: 0 success · 1 general · 2 port conflict · 3 DB locked · 4 config · 5 permission.
+**Exit codes**: 0 success · 1 general · 2 port conflict · 3 DB locked · 4 config · 5 permission · 6 shutdown timeout (graceful shutdown exceeded its 60s hard deadline after SIGINT/SIGTERM).
 
 ## Development Guidelines
 
