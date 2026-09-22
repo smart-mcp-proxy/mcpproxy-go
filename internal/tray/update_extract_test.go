@@ -110,10 +110,11 @@ func serveVerifiedAsset(t *testing.T, assetName string, archive []byte) (*GitHub
 // .github/workflows/release.yml produces, so a "first entry wins" or a
 // HasSuffix("mcpproxy") rule picks the wrong file.
 func TestApp_SelfUpdate_InstallsTheTrayBinaryNotTheCore(t *testing.T) {
-	const (
-		corePayload = "PRETEND CORE BINARY"
-		trayPayload = "PRETEND TRAY BINARY"
-	)
+	// Every member carries a payload that NAMES it, so the assertion pins the
+	// exact member extracted rather than merely "something tray-shaped": if
+	// the selection ever stopped honouring runtime.GOOS, an archive whose two
+	// tray members shared one payload would still pass.
+	payloadFor := func(member string) string { return "BINARY:" + member }
 
 	tests := []struct {
 		name      string
@@ -126,18 +127,18 @@ func TestApp_SelfUpdate_InstallsTheTrayBinaryNotTheCore(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			coreName, trayName := "mcpproxy", "mcpproxy-tray"
+			coreName := "mcpproxy"
 			if strings.HasSuffix(tt.assetName, assetZipExt) {
-				coreName, trayName = "mcpproxy.exe", "mcpproxy-tray.exe"
+				coreName = "mcpproxy.exe"
 			}
-			// The archive always ships BOTH members under their canonical
-			// names, whatever this test happens to run on; trayBinaryName()
-			// is what decides which one the running tray installs.
+			// The core is listed FIRST, as .github/workflows/release.yml
+			// produces it, so a "first entry wins" or HasSuffix("mcpproxy")
+			// rule picks it. Both tray spellings are present with distinct
+			// payloads; trayBinaryName() decides which one this build takes.
 			archive := tt.archive(t,
-				archiveMember{coreName, []byte(corePayload)},
-				archiveMember{trayName, []byte(trayPayload)},
-				archiveMember{"mcpproxy-tray", []byte(trayPayload)},
-				archiveMember{"mcpproxy-tray.exe", []byte(trayPayload)},
+				archiveMember{coreName, []byte(payloadFor(coreName))},
+				archiveMember{"mcpproxy-tray", []byte(payloadFor("mcpproxy-tray"))},
+				archiveMember{"mcpproxy-tray.exe", []byte(payloadFor("mcpproxy-tray.exe"))},
 			)
 			release, url := serveVerifiedAsset(t, tt.assetName, archive)
 
@@ -162,9 +163,16 @@ func TestApp_SelfUpdate_InstallsTheTrayBinaryNotTheCore(t *testing.T) {
 			if got := applied.Load(); got != 1 {
 				t.Fatalf("applyUpdate called %d times, want 1", got)
 			}
-			if gotPayload != trayPayload {
-				t.Errorf("installed %q, want the tray binary %q — installing the core binary over %s bricks the tray",
-					gotPayload, trayPayload, trayBinaryName())
+			// The expectation is an independent literal, NOT
+			// payloadFor(trayBinaryName()): deriving it from the function
+			// under test would make this assertion move with any bug in it.
+			wantMember := "mcpproxy-tray"
+			if runtime.GOOS == osWindows {
+				wantMember = "mcpproxy-tray.exe"
+			}
+			if want := payloadFor(wantMember); gotPayload != want {
+				t.Errorf("installed %q, want %q — this process replaces its own executable, so anything but %s bricks the tray",
+					gotPayload, want, wantMember)
 			}
 			exe, err := os.Executable()
 			if err != nil {
@@ -234,33 +242,47 @@ func TestApp_SelfUpdate_RefusesArchiveWithoutTrayBinary(t *testing.T) {
 // TestApp_SelfUpdate_MatchesNestedMemberOnBaseName: archives currently store
 // members at the root, but matching on base name means a future layout that
 // nests them under a directory keeps working — and, crucially, that a member
-// named "not-mcpproxy-tray" does NOT satisfy the match the way HasSuffix did.
+// named "mcpproxy-mcpproxy-tray" does NOT satisfy the match the way the old
+// HasSuffix rule did. Both formats are covered: they are separate code paths.
 func TestApp_SelfUpdate_MatchesNestedMemberOnBaseName(t *testing.T) {
 	const trayPayload = "NESTED TRAY BINARY"
-	assetName := "mcpproxy-latest-darwin-arm64" + assetTarGzExt
 
-	archive := buildTarGzMembers(t,
-		archiveMember{"mcpproxy-" + trayBinaryName(), []byte("DECOY: suffix-matches but is not the tray binary")},
-		archiveMember{"mcpproxy-0.68.0-darwin-arm64/" + trayBinaryName(), []byte(trayPayload)},
-	)
-	release, url := serveVerifiedAsset(t, assetName, archive)
-
-	var gotPayload string
-	app := New(NewMockServer(), zaptest.NewLogger(t).Sugar(), "1.0.0", func() {})
-	app.applyUpdateFn = func(r io.Reader, _ update.Options) error {
-		b, err := io.ReadAll(r)
-		if err != nil {
-			return err
-		}
-		gotPayload = string(b)
-		return nil
+	tests := []struct {
+		name      string
+		assetName string
+		build     func(t *testing.T, members ...archiveMember) []byte
+	}{
+		{"tar.gz", "mcpproxy-latest-darwin-arm64" + assetTarGzExt, buildTarGzMembers},
+		{"zip", "mcpproxy-latest-windows-amd64" + assetZipExt, buildZipMembers},
 	}
 
-	if err := app.downloadAndApplyUpdate(release, assetName, url); err != nil {
-		t.Fatalf("downloadAndApplyUpdate: %v", err)
-	}
-	if gotPayload != trayPayload {
-		t.Errorf("installed %q, want %q (base-name match, not suffix match)", gotPayload, trayPayload)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			member := trayBinaryName()
+			archive := tt.build(t,
+				archiveMember{"mcpproxy-" + member, []byte("DECOY: suffix-matches but is not the tray binary")},
+				archiveMember{"mcpproxy-0.68.0-darwin-arm64/" + member, []byte(trayPayload)},
+			)
+			release, url := serveVerifiedAsset(t, tt.assetName, archive)
+
+			var gotPayload string
+			app := New(NewMockServer(), zaptest.NewLogger(t).Sugar(), "1.0.0", func() {})
+			app.applyUpdateFn = func(r io.Reader, _ update.Options) error {
+				b, err := io.ReadAll(r)
+				if err != nil {
+					return err
+				}
+				gotPayload = string(b)
+				return nil
+			}
+
+			if err := app.downloadAndApplyUpdate(release, tt.assetName, url); err != nil {
+				t.Fatalf("downloadAndApplyUpdate: %v", err)
+			}
+			if gotPayload != trayPayload {
+				t.Errorf("installed %q, want %q (base-name match, not suffix match)", gotPayload, trayPayload)
+			}
+		})
 	}
 }
 

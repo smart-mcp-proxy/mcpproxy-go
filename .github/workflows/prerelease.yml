@@ -255,6 +255,18 @@ jobs:
             go build -ldflags "${LDFLAGS} -H windowsgui" -o mcpproxy-tray.exe ./cmd/mcpproxy-tray
           fi
 
+          # Same guard as release.yml: the archive adds the tray by name and
+          # the tray self-update fails closed without it, so a missing binary
+          # must fail the build rather than ship a tray-less archive.
+          if [ "${{ matrix.goos }}" = "darwin" ] && [ ! -f "mcpproxy-tray" ]; then
+            echo "::error::mcpproxy-tray build produced no binary; the archive would strand every tray self-update"
+            exit 1
+          fi
+          if [ "${{ matrix.goos }}" = "windows" ] && [ ! -f "mcpproxy-tray.exe" ]; then
+            echo "::error::mcpproxy-tray.exe build produced no binary; the archive would strand every tray self-update"
+            exit 1
+          fi
+
           # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             chmod +x scripts/build-swift-app.sh

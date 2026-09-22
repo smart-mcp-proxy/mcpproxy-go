@@ -464,6 +464,15 @@ jobs:
             fi
 
             go build -ldflags "${TRAY_LDFLAGS}" -o ${TRAY_BINARY} ./cmd/mcpproxy-tray
+
+            # The archive step below adds this binary by name, and the tray's
+            # self-update extracts that exact member and fails closed when it
+            # is missing. A silently tray-less archive would therefore strand
+            # every tray on this platform, so fail the build instead.
+            if [ ! -f "${TRAY_BINARY}" ]; then
+              echo "::error::mcpproxy-tray build produced no ${TRAY_BINARY}; the archive would strand every tray self-update"
+              exit 1
+            fi
           fi
 
           # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)
