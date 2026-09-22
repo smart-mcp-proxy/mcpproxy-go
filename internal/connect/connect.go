@@ -490,9 +490,19 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 	// and the write must cover the SAME entry — re-resolving per step is what
 	// let a token hash one entry while the write replaced or deleted another
 	// (Spec 091 FR-005).
-	fileExists, existing, _, err := s.preWriteState(client, cfgPath, serverName)
+	fileExists, existing, accessState, err := s.preWriteState(client, cfgPath, serverName)
 	if err != nil {
 		return nil, s.asAccessError(client, cfgPath, err)
+	}
+
+	// A servers section that exists but is not an object never reaches the
+	// precondition token at all — the token only hashes the resolved ENTRY, so
+	// it cannot see the section's own raw value drifting. Refuse unconditionally
+	// (independent of whether a token was even echoed) rather than let connectJSON
+	// / connectTOML's own type assertion silently discard the value under a fresh
+	// map. This mirrors how a fully unparseable config already refuses.
+	if accessState == accessMalformed {
+		return nil, fmt.Errorf("%s could not be parsed as a valid config, or its %q section is not an object; refusing to write — fix the config manually and retry", cfgPath, client.ServerKey)
 	}
 
 	// Precondition check BEFORE any backup or write, so a refusal is completely

@@ -229,9 +229,21 @@ func (s *Service) resolveExistingEntry(client ClientDef, raw []byte, serverName 
 		return nil, false
 	}
 
-	serversMap, ok := data[client.ServerKey].(map[string]interface{})
-	if !ok {
+	rawSection, keyPresent := data[client.ServerKey]
+	if !keyPresent {
+		// No servers section yet: a legitimate create case, not malformed.
 		return nil, true
+	}
+	serversMap, ok := rawSection.(map[string]interface{})
+	if !ok {
+		// The key is present but its value is not an object — a string, number,
+		// array or bool from a hand-edited config. This must NOT fall through to
+		// "no entries yet": the precondition token only ever hashes the
+		// RESOLVED ENTRY, never the section's own raw value, so two different
+		// non-object section values would mint identical tokens and the write
+		// would silently replace the value with a fresh map. Reporting malformed
+		// here makes preWriteState refuse the connect outright instead.
+		return nil, false
 	}
 	if value, ok := serversMap[serverName]; ok {
 		return newExistingEntry(serverName, value), true

@@ -400,6 +400,131 @@ func TestConnectWithPrecondition_NonObjectEntryDriftRefuses(t *testing.T) {
 	})
 }
 
+// TestPreview_NonObjectServersSection_IsMalformed closes a DIFFERENT drift
+// class than TestPreview_PreconditionToken_NonObjectEntryDrift above: that one
+// covers the individual ENTRY (data["mcpServers"]["mcpproxy"]) holding a
+// non-object value. This one covers the SERVERS SECTION ITSELF
+// (data["mcpServers"], or data["mcp_servers"] for Codex/TOML) holding a
+// non-object value — a string, number, array or bool from a hand-edited
+// config.
+//
+// resolveExistingEntry used to type-assert data[client.ServerKey].(map[string
+// ]interface{}) and, on failure, report "no servers section" — indistinguishable
+// from the key being absent entirely. That collapsed every non-object section
+// value into the same "create" classification, so the precondition token (which
+// only hashes the RESOLVED ENTRY, never the section's own raw value/type) could
+// not detect the section's value changing between preview and write, and the
+// write silently replaced it with a fresh map. The fix treats "key present but
+// not an object" as malformed — a distinct, refusable state — rather than
+// falling through to "create".
+func TestPreview_NonObjectServersSection_IsMalformed(t *testing.T) {
+	t.Run("JSON client (claude-code)", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		writeFileT(t, cfgPath, `{"mcpServers":"old"}`)
+
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview should not hard-error on a non-object servers section: %v", err)
+		}
+		if preview.AccessState != accessMalformed {
+			t.Fatalf("expected access_state=%q for a non-object servers section, got %q", accessMalformed, preview.AccessState)
+		}
+	})
+
+	t.Run("TOML client (codex)", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("codex", home)
+		writeFileT(t, cfgPath, `mcp_servers = "old"`+"\n")
+
+		preview, err := svc.Preview("codex", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview should not hard-error on a non-object servers section: %v", err)
+		}
+		if preview.AccessState != accessMalformed {
+			t.Fatalf("expected access_state=%q for a non-object servers section, got %q", accessMalformed, preview.AccessState)
+		}
+	})
+}
+
+// TestConnectWithPrecondition_NonObjectServersSection_RefusesDrift is the exact
+// repro from the cross-model review of PR #1339: write a config whose servers
+// section is a non-object value, preview it (which used to report "no existing
+// entry, this will create one" and mint a token blind to the section's value),
+// change the section's value externally, then submit connect with the stale
+// token. Before the fix this SUCCEEDED and silently destroyed the "new" value;
+// it must now refuse.
+func TestConnectWithPrecondition_NonObjectServersSection_RefusesDrift(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	writeFileT(t, cfgPath, `{"mcpServers":"old"}`)
+
+	preview, err := svc.Preview("claude-code", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if preview.EntryExists {
+		t.Fatal("a malformed section must not report an entry that would be overwritten")
+	}
+
+	const drifted = `{"mcpServers":"new"}`
+	writeFileT(t, cfgPath, drifted)
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, preview.PreconditionToken)
+	if err == nil && res != nil && res.Success {
+		t.Fatalf("connect must refuse when the servers section is not an object, got success: %+v", res)
+	}
+	if got := readConfigT(t, cfgPath); got != drifted {
+		t.Fatalf("config must be untouched after a refusal:\n got:  %s\n want: %s", got, drifted)
+	}
+	if n := backupCount(t, cfgPath); n != 0 {
+		t.Fatalf("a refused write must not create a backup, found %d", n)
+	}
+}
+
+// TestConnect_NonObjectServersSection_RefusesWithoutToken proves the guard does
+// not depend on the precondition-token flow: a tokenless Connect() call (the
+// Web UI / CLI's existing behavior, Spec 091 contracts §2) must also refuse
+// rather than silently discarding the section's value, for both JSON and TOML
+// clients.
+func TestConnect_NonObjectServersSection_RefusesWithoutToken(t *testing.T) {
+	t.Run("JSON client (vscode)", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("vscode", home)
+		const original = `{"servers":["not","an","object"]}`
+		writeFileT(t, cfgPath, original)
+
+		res, err := svc.Connect("vscode", "mcpproxy", true)
+		if err == nil && res != nil && res.Success {
+			t.Fatalf("connect must refuse when the servers section is not an object, got success: %+v", res)
+		}
+		if got := readConfigT(t, cfgPath); got != original {
+			t.Fatalf("config must be untouched after a refusal:\n got:  %s\n want: %s", got, original)
+		}
+		if n := backupCount(t, cfgPath); n != 0 {
+			t.Fatalf("a refused write must not create a backup, found %d", n)
+		}
+	})
+
+	t.Run("TOML client (codex)", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("codex", home)
+		const original = "mcp_servers = 42\n"
+		writeFileT(t, cfgPath, original)
+
+		res, err := svc.Connect("codex", "mcpproxy", true)
+		if err == nil && res != nil && res.Success {
+			t.Fatalf("connect must refuse when the servers section is not an object, got success: %+v", res)
+		}
+		if got := readConfigT(t, cfgPath); got != original {
+			t.Fatalf("config must be untouched after a refusal:\n got:  %s\n want: %s", got, original)
+		}
+		if n := backupCount(t, cfgPath); n != 0 {
+			t.Fatalf("a refused write must not create a backup, found %d", n)
+		}
+	})
+}
+
 // The token binds a preview to the entry the write would produce, so the
 // REQUESTED name is part of that binding. It used to be absent from the
 // preimage: only the RESOLVED name was hashed, and that is the empty string
