@@ -262,3 +262,50 @@ func NewAuthEvent(in AuthEventInput) (Line, error) {
 
 	return Line{fields: f}, nil
 }
+
+// ---------------------------------------------------------------------------
+// config_change
+// ---------------------------------------------------------------------------
+
+// ConfigChangeInput builds one `config_change` line: exactly one per
+// privileged server configuration mutation (annotation_overrides). Written
+// to the tamper-evident audit sink, correlated via request_id (NIST AU-2,
+// OWASP ASVS 7.x).
+type ConfigChangeInput struct {
+	Ts        time.Time
+	RequestID string
+	Origin    string
+	Source    string
+	Caller    Caller
+	Server    string // affected server name
+	Action    string // e.g., "annotation_override"
+	Before    map[string]interface{} // previous annotation_overrides snapshot (JSON-marshalable)
+	After     map[string]interface{} // new annotation_overrides snapshot (JSON-marshalable)
+}
+
+// NewConfigChange builds and structurally validates a `config_change` line.
+func NewConfigChange(in ConfigChangeInput) (Line, error) {
+	if in.Server == "" {
+		return Line{}, fmt.Errorf("audit.NewConfigChange: server is required")
+	}
+	if in.Action == "" {
+		return Line{}, fmt.Errorf("audit.NewConfigChange: action is required")
+	}
+	f := newBase("config_change", in.Ts, in.RequestID, in.Origin, in.Source, in.Caller)
+	f["server"] = maskCredential(in.Server)
+	f["action"] = in.Action
+	if in.Before != nil {
+		f["before"] = in.Before
+	}
+	if in.After != nil {
+		f["after"] = in.After
+	}
+	return Line{fields: f}, nil
+}
+
+// EmitActivityConfigChange helper note: the activity event bus (runtime/event_bus.go:753)
+// already emits activity.config_change for operational visibility. This
+// audit line complements it with a tamper-evident, append-only record in
+// the audit sink, correlated by the same request_id via reqcontext.GetRequestID.
+// When the audit sink is disabled (personal edition), the activity log is
+// the fallback (AU-9(4) retention).

@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
@@ -347,6 +348,8 @@ type Server struct {
 	// AuthContext (Spec 107 US4). nil in the personal build; installed by the
 	// server edition via SetSessionPrincipalResolver. See session_principal.go.
 	sessionPrincipalResolver SessionPrincipalResolver
+
+	auditSink audit.Sink
 }
 
 // usageCacheEntry is one cached usage response with the time it was stored.
@@ -455,6 +458,10 @@ func (s *Server) SetConnectService(svc *connect.Service) {
 // Detector.MaskText). Never calling this leaves payloads unmasked.
 func (s *Server) SetSensitiveMasker(detector *security.Detector) {
 	s.sensitiveMasker = detector
+}
+
+func (s *Server) SetAuditSink(sink audit.Sink) {
+	s.auditSink = sink
 }
 
 // Router returns the underlying chi.Mux for external route registration.
@@ -1952,6 +1959,12 @@ type AddServerRequest struct {
 	// field leaves it alone; clear an individual override by sending it
 	// explicitly (`"enabled": null`, `"image": ""`).
 	Isolation *IsolationRequest `json:"isolation,omitempty"`
+	// AnnotationOverrides carries per-server per-tool annotation fixes
+	// (map[toolName]*ToolAnnotations, wildcard "*" allowed). Nil means
+	// "leave unchanged" on PATCH; a present map is deep-merged via
+	// config.MergeAnnotationOverrides with RFC7396 null-means-delete for
+	// whole-tool entries and per-hint nulls. See config.ToolAnnotations.
+	AnnotationOverrides map[string]*config.ToolAnnotations `json:"annotation_overrides,omitempty"`
 }
 
 // IsolationRequest is the request-body representation of
@@ -2303,6 +2316,66 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.Isolation != nil {
 		serverConfig.Isolation = req.Isolation.resolve(nil)
 	}
+	// Annotation overrides: POST ignores nil entries (JSON Merge Patch null has no
+	// meaning on create) — drop nils, keep the rest as persisted (deep-copy
+	// *bool pointers to avoid aliasing the request map).
+	if req.AnnotationOverrides != nil {
+		filtered := make(map[string]*config.ToolAnnotations, len(req.AnnotationOverrides))
+		for k, v := range req.AnnotationOverrides {
+			if v == nil {
+				continue
+			}
+			cp := *v
+			if v.ReadOnlyHint != nil {
+				b := *v.ReadOnlyHint
+				cp.ReadOnlyHint = &b
+			}
+			if v.DestructiveHint != nil {
+				b := *v.DestructiveHint
+				cp.DestructiveHint = &b
+			}
+			if v.IdempotentHint != nil {
+				b := *v.IdempotentHint
+				cp.IdempotentHint = &b
+			}
+			if v.OpenWorldHint != nil {
+				b := *v.OpenWorldHint
+				cp.OpenWorldHint = &b
+			}
+			filtered[k] = &cp
+		}
+		if len(filtered) > 0 {
+			serverConfig.AnnotationOverrides = filtered
+		}
+	}
+
+	// Validate annotation overrides via ValidateDetailed (write gate) before
+	// persisting. Reuses the PATCH pattern: temporary config with the new
+	// server appended, filtered to annotation_overrides errors.
+	if len(serverConfig.AnnotationOverrides) > 0 {
+		cfg, err := s.controller.GetConfig()
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to load current config for annotation validation: %v", err))
+			return
+		}
+		if cfg == nil {
+			s.writeError(w, r, http.StatusInternalServerError, "Failed to load current config for annotation validation: nil config")
+			return
+		}
+		{
+			tmpCfg := &config.Config{Servers: make([]*config.ServerConfig, 0, len(cfg.Servers)+1)}
+			tmpCfg.Servers = append(tmpCfg.Servers, cfg.Servers...)
+			tmpCfg.Servers = append(tmpCfg.Servers, serverConfig)
+			if errs := tmpCfg.ValidateDetailed(); len(errs) > 0 {
+				for _, e := range errs {
+					if strings.Contains(e.Field, "annotation_overrides") {
+						s.writeError(w, r, http.StatusBadRequest, e.Error())
+						return
+					}
+				}
+			}
+		}
+	}
 
 	// #1148 round 6: on CREATE there is no stored value to bind a mask back to,
 	// so ANY mask this proxy rendered can only be a placeholder copied out of
@@ -2329,6 +2402,26 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Infow("Server added successfully", "server", req.Name, "quarantined", quarantined)
+	if s.auditSink != nil && len(serverConfig.AnnotationOverrides) > 0 {
+		afterMap := httpAnnotationOverridesToAuditMap(serverConfig.AnnotationOverrides)
+		if len(afterMap) > 0 {
+			if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
+				Ts:        time.Now(),
+				RequestID: reqcontext.GetRequestID(r.Context()),
+				Origin:    httpAuditOriginFromContext(r.Context()),
+				Source:    httpAuditSourceFromContext(r.Context()),
+				Caller:    httpAuditCallerFromContext(r.Context()),
+				Server:    req.Name,
+				Action:    "annotation_override",
+				Before:    nil,
+				After:     afterMap,
+			}); lerr == nil {
+				if raw, jerr := line.JSON(); jerr == nil {
+					_ = s.auditSink.Write(raw)
+				}
+			}
+		}
+	}
 	s.writeSuccess(w, contracts.ServerActionResponse{
 		Server:  req.Name,
 		Action:  "add",
@@ -2402,10 +2495,46 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req AddServerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
 		return
+	}
+	var req AddServerRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	// Build remove markers for annotation_overrides via raw JSON scan
+	// (RFC7396 whole-map null, per-tool null, per-hint null).
+	opts := config.DefaultMergeOptions()
+	var rawPatch map[string]json.RawMessage
+	if err := json.Unmarshal(body, &rawPatch); err == nil {
+		if raw, ok := rawPatch["annotation_overrides"]; ok {
+			trimmed := bytes.TrimSpace(raw)
+			if string(trimmed) == "null" {
+				opts = opts.WithRemoveMarker("annotation_overrides")
+			} else {
+				var inner map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &inner); err == nil {
+					for k, v := range inner {
+						tv := bytes.TrimSpace(v)
+						if string(tv) == "null" {
+							opts = opts.WithRemoveMarker("annotation_overrides." + k)
+						} else {
+							var hintMap map[string]json.RawMessage
+							if err := json.Unmarshal(v, &hintMap); err == nil {
+								for hk, hv := range hintMap {
+									if string(bytes.TrimSpace(hv)) == "null" {
+										opts = opts.WithRemoveMarker("annotation_overrides." + k + "." + hk)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// GH #938: reject an unrecognized trust_mode before anything is persisted.
@@ -2644,10 +2773,71 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		updates.Isolation = req.Isolation.resolve(existingIso)
 		hasUpdates = true
 	}
+	// Annotation overrides: manual deep-merge via config.MergeAnnotationOverrides
+	// with RFC7396 null-means-delete for whole-map, per-tool, and per-hint.
+	hadOtherUpdates := hasUpdates
+	hasAnnotationOverrideUpdate := req.AnnotationOverrides != nil || opts.ShouldRemove("annotation_overrides") || len(opts.GetRemoveMarkersForMap("annotation_overrides")) > 0
+	if hasAnnotationOverrideUpdate {
+		var baseAO map[string]*config.ToolAnnotations
+		if existingSrv != nil {
+			baseAO = existingSrv.AnnotationOverrides
+		}
+		merged := config.MergeAnnotationOverrides(baseAO, req.AnnotationOverrides, opts)
+		if merged == nil && len(baseAO) > 0 {
+			// Merge reports "empty" as nil, which UpdateServer reads as
+			// "preserve". An explicit mutation that empties the map (last
+			// override deleted) is a clear, not a no-op: persist the empty
+			// non-nil sentinel so the delete survives and the immediacy
+			// refresh fires. Semantically identical downstream (no override
+			// for any tool; loader normalizes empty back to nil).
+			merged = make(map[string]*config.ToolAnnotations)
+		}
+		updates.AnnotationOverrides = merged
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.AnnotationOverrides = existingSrv.AnnotationOverrides
+	}
+	onlyAnnotationOverrideHot := hasAnnotationOverrideUpdate && !hadOtherUpdates
 
 	if !hasUpdates {
 		s.writeError(w, r, http.StatusBadRequest, "No fields to update")
 		return
+	}
+
+	// Validate annotation overrides via ValidateDetailed (write gate) before
+	// persisting. Build a temporary config with the merged server to reuse the
+	// canonical per-server validation (max 100, tool name, at least one hint).
+	if hasAnnotationOverrideUpdate && existingSrv != nil {
+		cfg, err := s.controller.GetConfig()
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to load current config for annotation validation: %v", err))
+			return
+		}
+		if cfg == nil {
+			s.writeError(w, r, http.StatusInternalServerError, "Failed to load current config for annotation validation: nil config")
+			return
+		}
+		{
+			tmpCfg := &config.Config{Servers: make([]*config.ServerConfig, len(cfg.Servers))}
+			for i, sc := range cfg.Servers {
+				if sc != nil && sc.Name == serverName {
+					// Use the merged server for validation
+					mergedSrv := config.CopyServerConfig(sc)
+					mergedSrv.AnnotationOverrides = updates.AnnotationOverrides
+					tmpCfg.Servers[i] = mergedSrv
+				} else {
+					tmpCfg.Servers[i] = sc
+				}
+			}
+			if errs := tmpCfg.ValidateDetailed(); len(errs) > 0 {
+				for _, e := range errs {
+					if strings.Contains(e.Field, "annotation_overrides") {
+						s.writeError(w, r, http.StatusBadRequest, e.Error())
+						return
+					}
+				}
+			}
+		}
 	}
 
 	// #1148 round 6: the fail-closed net. The key-bound reverts above restored
@@ -2676,10 +2866,141 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Infow("Server updated successfully", "server", serverName)
+	if s.auditSink != nil && hasAnnotationOverrideUpdate {
+		beforeMap := httpAnnotationOverridesToAuditMap(nil)
+		if existingSrv != nil {
+			beforeMap = httpAnnotationOverridesToAuditMap(existingSrv.AnnotationOverrides)
+		}
+		afterMap := httpAnnotationOverridesToAuditMap(updates.AnnotationOverrides)
+		// Only emit when actually changed (whole-map delete, per-tool delete, or hint change)
+		changed := !httpAnnotationOverridesEqual(beforeMap, afterMap)
+		if changed {
+			if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
+				Ts:        time.Now(),
+				RequestID: reqcontext.GetRequestID(r.Context()),
+				Origin:    httpAuditOriginFromContext(r.Context()),
+				Source:    httpAuditSourceFromContext(r.Context()),
+				Caller:    httpAuditCallerFromContext(r.Context()),
+				Server:    serverName,
+				Action:    "annotation_override",
+				Before:    beforeMap,
+				After:     afterMap,
+			}); lerr == nil {
+				if raw, jerr := line.JSON(); jerr == nil {
+					_ = s.auditSink.Write(raw)
+				}
+			}
+		}
+	}
+	restartRequired := !onlyAnnotationOverrideHot
 	s.writeSuccess(w, map[string]interface{}{
 		"message":          fmt.Sprintf("Server '%s' updated successfully", serverName),
-		"restart_required": true,
+		"restart_required": restartRequired,
 	})
+}
+
+func httpAnnotationOverridesToAuditMap(m map[string]*config.ToolAnnotations) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		if v == nil {
+			out[k] = nil
+			continue
+		}
+		entry := make(map[string]interface{})
+		if v.Title != "" {
+			entry["title"] = v.Title
+		}
+		if v.ReadOnlyHint != nil {
+			entry["readOnlyHint"] = *v.ReadOnlyHint
+		}
+		if v.DestructiveHint != nil {
+			entry["destructiveHint"] = *v.DestructiveHint
+		}
+		if v.IdempotentHint != nil {
+			entry["idempotentHint"] = *v.IdempotentHint
+		}
+		if v.OpenWorldHint != nil {
+			entry["openWorldHint"] = *v.OpenWorldHint
+		}
+		out[k] = entry
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func httpAnnotationOverridesEqual(a, b map[string]interface{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok {
+			return false
+		}
+		aj, _ := json.Marshal(av)
+		bj, _ := json.Marshal(bv)
+		if string(aj) != string(bj) {
+			return false
+		}
+	}
+	return true
+}
+
+func httpAuditCallerFromContext(ctx context.Context) audit.Caller {
+	if reqcontext.GetRequestSource(ctx) == reqcontext.SourceInternal {
+		return audit.Caller{Kind: "internal"}
+	}
+	ac := auth.AuthContextFromContext(ctx)
+	if ac == nil {
+		return audit.Caller{Kind: "anonymous"}
+	}
+	switch ac.Type {
+	case auth.AuthTypeAgent:
+		c := audit.Caller{Kind: "agent_token", TokenName: ac.AgentName, TokenPrefix: ac.TokenPrefix, ProfilePin: ac.ProfilePin}
+		if ac.UserID != "" {
+			c.UserID = ac.UserID
+			c.UserEmail = ac.Email
+			c.Role = ac.Role
+			c.Provider = ac.Provider
+		}
+		return c
+	case auth.AuthTypeAdminUser:
+		return audit.Caller{Kind: "session_admin", UserID: ac.UserID, UserEmail: ac.Email, Role: "admin", Provider: ac.Provider}
+	case auth.AuthTypeUser:
+		return audit.Caller{Kind: "session_user", UserID: ac.UserID, UserEmail: ac.Email, Role: "user", Provider: ac.Provider}
+	}
+	if ac.Anonymous {
+		return audit.Caller{Kind: "anonymous"}
+	}
+	switch transport.GetConnectionSource(ctx) {
+	case transport.ConnectionSourceTray:
+		return audit.Caller{Kind: "socket"}
+	case transport.ConnectionSourceStdio:
+		return audit.Caller{Kind: "stdio"}
+	}
+	return audit.Caller{Kind: "api_key"}
+}
+
+func httpAuditOriginFromContext(ctx context.Context) string {
+	if transport.GetConnectionSource(ctx) == transport.ConnectionSourceTray {
+		return "socket"
+	}
+	return "local"
+}
+
+func httpAuditSourceFromContext(ctx context.Context) string {
+	if reqcontext.GetRequestSource(ctx) == reqcontext.SourceInternal {
+		return "internal"
+	}
+	if meta, ok := reqcontext.GetRequestMeta(ctx); ok && meta.Mount == reqcontext.MountAPI {
+		return "api"
+	}
+	return "mcp"
 }
 
 // handleConvertConfigToSecret moves a literal header / env value out of

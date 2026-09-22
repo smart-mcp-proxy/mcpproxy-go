@@ -93,6 +93,11 @@ type Server struct {
 	// default aggregation". Surfaced on GET so a caller that PATCHed the override
 	// can read it back; PATCH/POST accept it via AddServerRequest.
 	ExposePrompts *bool                `json:"expose_prompts,omitempty"`
+	// AnnotationOverrides mirrors config.ServerConfig.AnnotationOverrides:
+	// per-server per-tool annotation fixes. Surfaced on GET so a caller that
+	// PATCHed overrides (or the Web UI editor) can read them back; PATCH/POST
+	// accept them via AddServerRequest. Omitted when empty.
+	AnnotationOverrides map[string]*config.ToolAnnotations `json:"annotation_overrides,omitempty"`
 	SecurityScan  *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary
 	// Spec 044 — structured diagnostic error and stable error code. Both
 	// are populated when the server is in a failed state and the error

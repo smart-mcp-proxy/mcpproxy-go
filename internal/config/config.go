@@ -750,6 +750,11 @@ type ServerConfig struct {
 	EnabledTools  []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
 	DisabledTools []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
 
+	// AnnotationOverrides fixes false hints from the upstream server.
+	// Map from tool name (or "*" for wildcard) to ToolAnnotations.
+	// Admin-only, hot (no restart), audited.
+	AnnotationOverrides map[string]*ToolAnnotations `json:"annotation_overrides,omitempty" mapstructure:"annotation_overrides"`
+
 	// SourceRegistryID records which registry this server was added from (empty
 	// for manually-configured servers). MCP-866: surfaced in the approval /
 	// quarantine view so a reviewer can see a server's origin.
@@ -1406,7 +1411,7 @@ type ToolMetadata struct {
 	Annotations      *ToolAnnotations `json:"annotations,omitempty"`
 }
 
-// ToolAnnotations represents MCP tool behavior hints
+// ToolAnnotations represents MCP tool behavior hints (per-tool override)
 type ToolAnnotations struct {
 	Title           string `json:"title,omitempty"`
 	ReadOnlyHint    *bool  `json:"readOnlyHint,omitempty"`
@@ -2051,6 +2056,36 @@ func IsValidTrustMode(s string) bool {
 	}
 }
 
+// IsValidToolNameForOverride reports whether name is a valid key for
+// annotation_overrides. The wildcard "*" is allowed as a standalone key;
+// otherwise the name must be 1..256 chars, must not have leading/trailing
+// whitespace, must match ^[A-Za-z0-9._:-]+$ and must not contain "__"
+// (reserved for direct-mode server__tool separator).
+func IsValidToolNameForOverride(name string) bool {
+	if name == "*" {
+		return true
+	}
+	if len(name) == 0 || len(name) > 256 {
+		return false
+	}
+	if strings.TrimSpace(name) != name {
+		return false
+	}
+	if strings.Contains(name, "__") {
+		return false
+	}
+	if strings.Contains(name, "*") {
+		return false
+	}
+	for _, r := range name {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == ':' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // EnvTPABundlePath is the environment override for the offline TPA
 // signature-bundle location (spec 086 FR-019). It outranks
 // security.tpa_bundle_path on EVERY path that resolves the corpus — the loader,
@@ -2602,6 +2637,35 @@ func (c *Config) validateDetailedCore() []ValidationError {
 		// MCP-3322: per-server MCP `initialize` handshake deadline override.
 		if e := validateIntervalBound(fieldPrefix+".init_timeout", server.InitTimeout, time.Second, 30*time.Minute); e != nil {
 			errors = append(errors, *e)
+		}
+
+		if len(server.AnnotationOverrides) > 100 {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("%s.annotation_overrides", fieldPrefix),
+				Message: "too many overrides (max 100)",
+			})
+		}
+		for k, v := range server.AnnotationOverrides {
+			if k != "*" && !IsValidToolNameForOverride(k) {
+				errors = append(errors, ValidationError{
+					Field:   fmt.Sprintf("%s.annotation_overrides[%q]", fieldPrefix, k),
+					Message: "invalid tool name (use \"*\" or alphanumeric._:-)",
+				})
+				continue
+			}
+			if v == nil {
+				errors = append(errors, ValidationError{
+					Field:   fmt.Sprintf("%s.annotation_overrides[%q]", fieldPrefix, k),
+					Message: "nil override",
+				})
+				continue
+			}
+			if v.Title == "" && v.ReadOnlyHint == nil && v.DestructiveHint == nil && v.IdempotentHint == nil && v.OpenWorldHint == nil {
+				errors = append(errors, ValidationError{
+					Field:   fmt.Sprintf("%s.annotation_overrides[%q]", fieldPrefix, k),
+					Message: "at least one hint must be set",
+				})
+			}
 		}
 	}
 

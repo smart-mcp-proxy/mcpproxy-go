@@ -126,7 +126,18 @@ func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *direct
 		return p.withDirectBuiltins(nil), emptyDirectCatalog(mode, p.logger)
 	}
 
-	cat := buildDirectCatalog(tools, p.logger)
+	// Resolve per-server effective annotations for direct catalog permission
+	// derivation — a per-server override that changes a tool's tier must be
+	// reflected in listing scope (filterDirectModeToolsForAuth) and dispatch.
+	overridesByServer := make(map[string]map[string]*config.ToolAnnotations)
+	if cfg := p.currentConfig(); cfg != nil {
+		for _, sc := range cfg.Servers {
+			if sc != nil && sc.AnnotationOverrides != nil {
+				overridesByServer[sc.Name] = sc.AnnotationOverrides
+			}
+		}
+	}
+	cat := buildDirectCatalogWithOverrides(tools, overridesByServer, p.logger)
 	cat.mode = mode
 	return p.withDirectBuiltins(p.renderDirectTools(cat)), cat
 }

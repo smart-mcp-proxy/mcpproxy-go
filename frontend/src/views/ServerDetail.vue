@@ -741,27 +741,44 @@
                         :count="findingGroupForTool(tool.name)!.findings.length"
                       />
                     </div>
-                    <label
-                      v-if="isToolToggleAvailable(tool.name)"
-                      class="flex items-center gap-2 cursor-pointer shrink-0"
-                    >
-                      <span class="text-xs text-base-content/70">
-                        <span v-if="isToolToggleLoading(tool.name)" class="loading loading-spinner loading-xs mr-1"></span>
-                        {{ isToolEnabled(tool.name) ? 'Enabled' : 'Disabled' }}
-                      </span>
-                      <input
-                        type="checkbox"
-                        class="toggle toggle-sm toggle-primary"
-                        :checked="isToolEnabled(tool.name)"
-                        :disabled="isToolToggleLoading(tool.name) || bulkToolToggleLoading"
-                        @change="toggleToolEnabled(tool.name, ($event.target as HTMLInputElement).checked)"
-                      />
-                    </label>
-                    <span
-                      v-else-if="isToolConfigDenied(tool.name)"
-                      class="text-xs text-base-content/40 shrink-0 italic"
-                      title="Remove from disabled_tools or add to enabled_tools in mcp_config.json to unlock"
-                    >🔒 locked by config</span>
+                    <div class="flex items-center gap-2 shrink-0">
+                      <button
+                        :data-test="`tool-annotation-edit-${tool.name}`"
+                        class="btn btn-ghost btn-xs"
+                        title="Override annotations for this tool"
+                        :disabled="isToolConfigDenied(tool.name)"
+                        @click="focusAnnotationOverride(tool.name)"
+                      >✎ Override</button>
+                      <button
+                        v-if="isMarkSafeVisible(tool.name)"
+                        :data-test="`tool-annotation-marksafe-${tool.name}`"
+                        class="btn btn-ghost btn-xs"
+                        title="Draft a read-only + non-destructive override for this tool (unsaved until Save overrides)"
+                        :disabled="isToolConfigDenied(tool.name)"
+                        @click="markToolSafe(tool.name)"
+                      >✓ Mark safe</button>
+                      <label
+                        v-if="isToolToggleAvailable(tool.name)"
+                        class="flex items-center gap-2 cursor-pointer"
+                      >
+                        <span class="text-xs text-base-content/70">
+                          <span v-if="isToolToggleLoading(tool.name)" class="loading loading-spinner loading-xs mr-1"></span>
+                          {{ isToolEnabled(tool.name) ? 'Enabled' : 'Disabled' }}
+                        </span>
+                        <input
+                          type="checkbox"
+                          class="toggle toggle-sm toggle-primary"
+                          :checked="isToolEnabled(tool.name)"
+                          :disabled="isToolToggleLoading(tool.name) || bulkToolToggleLoading"
+                          @change="toggleToolEnabled(tool.name, ($event.target as HTMLInputElement).checked)"
+                        />
+                      </label>
+                      <span
+                        v-else-if="isToolConfigDenied(tool.name)"
+                        class="text-xs text-base-content/40 italic"
+                        title="Remove from disabled_tools or add to enabled_tools in mcp_config.json to unlock"
+                      >🔒 locked by config</span>
+                    </div>
                   </div>
                   <div
                     class="transition-opacity"
@@ -774,11 +791,17 @@
                       :description="tool.description"
                       :findings="findingGroupForTool(tool.name)?.findings"
                     />
-                    <AnnotationBadges
-                      v-if="tool.annotations"
-                      :annotations="tool.annotations"
-                      class="mt-2"
-                    />
+                    <span class="inline-flex items-center gap-1 flex-wrap mt-2">
+                      <AnnotationBadges
+                        v-if="tool.annotations"
+                        :annotations="tool.annotations"
+                      />
+                      <!-- Author's AnnotationBadges renders truthy hints only, so an
+                           explicit false (operator override, already effective here)
+                           would leave the card badge-less. Mirror the editor fix. -->
+                      <span v-if="tool.annotations?.destructiveHint === false" class="badge badge-sm badge-success" title="Operator override: explicitly marked non-destructive">✓ Non-destructive</span>
+                      <span v-if="tool.annotations?.readOnlyHint === false" class="badge badge-sm badge-warning" title="Operator override: explicitly marked writable">✏️ Write</span>
+                    </span>
                     <div v-if="tool.input_schema" class="card-actions justify-end mt-4">
                       <button
                         class="btn btn-sm btn-outline"
@@ -942,9 +965,34 @@
               </div>
             </div>
 
+            <!-- Annotation Overrides (spec 108) — after trust-mode-card -->
+            <div
+              class="card bg-base-100 shadow-sm"
+              :class="annotationOverridesHighlighted ? 'ring-2 ring-primary' : ''"
+              data-test="annotation-overrides-card"
+            >
+              <div class="card-body py-4">
+                <h3 class="card-title text-base">Annotation Overrides</h3>
+                <p class="text-sm text-base-content/60">Fix false hints from the upstream server. “*” applies to all tools; a tool row wins per-hint. Inherit = use what the server sent. Changes apply immediately (no restart) and are audited.</p>
+                <AnnotationOverridesEditor
+                  ref="annotationEditorRef"
+                  class="mt-3"
+                  :server-name="server.name"
+                  :tools="serverTools"
+                  :overrides="(server as unknown as { annotation_overrides?: Record<string, ToolAnnotation> }).annotation_overrides || {}"
+                  :upstream-annotations="toolAnnotationsMap"
+                  @save="saveAnnotationOverrides"
+                />
+                <!-- Raw JSON bulk fallback for 100 entries (critic: mass edit) -->
+                <details class="collapse collapse-arrow bg-base-200 mt-3"><summary class="collapse-title text-sm">Bulk edit as JSON</summary>
+                  <div class="collapse-content"><textarea v-model="rawJson" class="textarea textarea-bordered w-full font-mono text-xs" rows="6" data-test="annotation-overrides-raw"></textarea><p v-if="rawJsonError" class="text-error text-xs mt-1">{{ rawJsonError }}</p><button class="btn btn-sm mt-2" data-test="annotation-overrides-apply-raw" @click="applyRawJson">Apply JSON</button></div>
+                </details>
+              </div>
+            </div>
+
             <!-- Connection (HTTP/SSE). Audit F11: the endpoint is editable here
-                 so the "Edit URL" remedy offered on an unresolvable host lands on
-                 the control that fixes it, not on a read-only echo of it. -->
+                  so the "Edit URL" remedy offered on an unresolvable host lands on
+                  the control that fixes it, not on a read-only echo of it. -->
             <div
               v-if="server.url"
               class="card bg-base-100 shadow-sm"
@@ -1629,12 +1677,13 @@ import { formatDateTime } from '@/utils/datetime'
 import SignInPanel from '@/components/diagnostics/SignInPanel.vue'
 import KVValueCell from '@/components/KVValueCell.vue'
 import TrustModeSelector from '@/components/TrustModeSelector.vue'
+import AnnotationOverridesEditor from '@/components/AnnotationOverridesEditor.vue'
 import HoldEvidenceBadge from '@/components/HoldEvidenceBadge.vue'
 import ToolDescription from '@/components/ToolDescription.vue'
 import FindingChip from '@/components/FindingChip.vue'
 import FlaggedToolsPanel from '@/components/FlaggedToolsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
+import type { Server, Tool, ToolApproval, SecurityScanReport, ToolAnnotation } from '@/types'
 import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
@@ -3525,6 +3574,160 @@ async function saveTrustMode(mode: TrustMode) {
   } finally {
     trustModeSaving.value = false
   }
+}
+
+// ── Annotation overrides (spec 108) ───────────────────────────────────────
+const toolAnnotationsMap = computed<Record<string, ToolAnnotation>>(() => {
+  const m: Record<string, ToolAnnotation> = {}
+  for (const t of serverTools.value) {
+    if (t.annotations) m[t.name] = t.annotations as ToolAnnotation
+  }
+  return m
+})
+
+// Raw JSON bulk fallback (100 entries). NOTE: rawJson/applyRawJson operate
+// on SAVED state only and bypass the editor's localOverrides drafts. Choice:
+// block/warn (confirm) while the editor holds unsaved drafts instead of
+// merging, so Apply-JSON can never silently orphan a Mark-safe preset draft.
+const rawJson = ref('')
+const rawJsonError = ref('')
+const annotationOverridesHighlighted = ref(false)
+const annotationEditorRef = ref<InstanceType<typeof AnnotationOverridesEditor> | null>(null)
+
+watch(
+  () => (server.value as unknown as { annotation_overrides?: Record<string, ToolAnnotation> })?.annotation_overrides,
+  (v) => {
+    rawJson.value = JSON.stringify(v || {}, null, 2)
+    rawJsonError.value = ''
+  },
+  { immediate: true, deep: true },
+)
+
+async function saveAnnotationOverrides(overrides: Record<string, ToolAnnotation | null>) {
+  if (!server.value) return
+  try {
+    const resp = await api.patchServer(server.value.name, { annotation_overrides: overrides } as unknown as Record<string, unknown>)
+    if (!resp.success) {
+      systemStore.addToast({ type: 'error', title: 'Annotation overrides save failed', message: resp.error || 'Unknown error' })
+      return
+    }
+    systemStore.addToast({ type: 'success', title: 'Annotation overrides saved', message: 'Changes apply immediately (no restart) and are audited.' })
+    await serversStore.fetchServers(true)
+    await loadTools()
+  } catch (e: unknown) {
+    systemStore.addToast({ type: 'error', title: 'Annotation overrides save failed', message: e instanceof Error ? e.message : String(e) })
+  }
+}
+
+async function applyRawJson() {
+  if (!server.value) return
+  // Dirty-check: Apply-JSON PATCHes textarea content directly and would
+  // orphan unsaved editor drafts (incl. Mark-safe presets). Warn first.
+  try {
+    const maybe = annotationEditorRef.value as unknown as { hasUnsavedDrafts?: () => boolean } | null
+    if (maybe?.hasUnsavedDrafts?.()) {
+      const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
+        ? window.confirm('Unsaved annotation drafts (possibly Mark-safe presets) exist. Apply JSON will overwrite saved overrides and orphan those drafts. Continue?')
+        : false
+      if (!ok) return
+    }
+  } catch {
+    // If the guard itself fails, fall through to the normal JSON path.
+  }
+  rawJsonError.value = ''
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(rawJson.value || '{}')
+  } catch (e: unknown) {
+    rawJsonError.value = e instanceof Error ? e.message : 'Invalid JSON'
+    return
+  }
+  try {
+    const resp = await api.patchServer(server.value.name, { annotation_overrides: parsed } as unknown as Record<string, unknown>)
+    if (!resp.success) {
+      rawJsonError.value = resp.error || 'Save failed'
+      systemStore.addToast({ type: 'error', title: 'Annotation overrides save failed', message: resp.error || 'Unknown error' })
+      return
+    }
+    systemStore.addToast({ type: 'success', title: 'Annotation overrides saved', message: '' })
+    await serversStore.fetchServers(true)
+    await loadTools()
+  } catch (e: unknown) {
+    rawJsonError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function focusAnnotationOverride(toolName: string) {
+  activeTab.value = 'config'
+  void nextTick(() => {
+    const card = document.querySelector('[data-test="annotation-overrides-card"]')
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      annotationOverridesHighlighted.value = true
+      setTimeout(() => (annotationOverridesHighlighted.value = false), 2000)
+    }
+    if (toolName && annotationEditorRef.value) {
+      // pre-open popover for that tool if editor exposes openEdit
+      const maybe = annotationEditorRef.value as unknown as { openEdit?: (name: string) => void }
+      if (maybe.openEdit) maybe.openEdit(toolName)
+    }
+  })
+}
+
+// Mark-safe shortcut visibility: same effective source as the editor row
+// button (upstream + saved wildcard/exact overrides, plus live editor drafts
+// when the editor ref is mounted). markSafeTick forces a parent re-render
+// right after a shortcut-created draft so the button hides instantly;
+// drafts created inside the editor sync on the next parent render/save.
+const markSafeTick = ref(0)
+function savedEffectiveFor(toolName: string): ToolAnnotation | null {
+  const saved = (server.value as unknown as { annotation_overrides?: Record<string, ToolAnnotation> })?.annotation_overrides || {}
+  const upstream = toolAnnotationsMap.value[toolName] as ToolAnnotation | undefined
+  const wild = saved['*'] ?? null
+  const exact = saved[toolName] ?? null
+  if (!wild && !exact) return (upstream as ToolAnnotation | undefined) ?? null
+  const base: ToolAnnotation = { ...(upstream || {}) } as ToolAnnotation
+  for (const ov of [wild, exact]) {
+    if (!ov) continue
+    if (ov.title) base.title = ov.title
+    if (ov.readOnlyHint !== undefined) base.readOnlyHint = ov.readOnlyHint
+    if (ov.destructiveHint !== undefined) base.destructiveHint = ov.destructiveHint
+    if (ov.idempotentHint !== undefined) base.idempotentHint = ov.idempotentHint
+    if (ov.openWorldHint !== undefined) base.openWorldHint = ov.openWorldHint
+  }
+  return base
+}
+function isMarkSafeVisible(toolName: string): boolean {
+  // Establish a reactive dependency so shortcut-created drafts hide instantly.
+  void markSafeTick.value
+  try {
+    const maybe = annotationEditorRef.value as unknown as { isMarkSafeVisible?: (n: string) => boolean } | null
+    if (maybe?.isMarkSafeVisible) return maybe.isMarkSafeVisible(toolName)
+  } catch {
+    // Fall through to the saved-effective computation below.
+  }
+  return savedEffectiveFor(toolName)?.readOnlyHint !== true
+}
+
+// Mark-safe shortcut: same single code path as the editor preset button —
+// scroll to the overrides card, then delegate to the editor's markSafe()
+// (draft-only; the operator still clicks Save overrides). Never duplicates
+// save logic and never opens the popover.
+function markToolSafe(toolName: string) {
+  activeTab.value = 'config'
+  void nextTick(() => {
+    const card = document.querySelector('[data-test="annotation-overrides-card"]')
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      annotationOverridesHighlighted.value = true
+      setTimeout(() => (annotationOverridesHighlighted.value = false), 2000)
+    }
+    if (toolName && annotationEditorRef.value) {
+      const maybe = annotationEditorRef.value as unknown as { markSafe?: (name: string) => void }
+      if (maybe.markSafe) maybe.markSafe(toolName)
+      markSafeTick.value++
+    }
+  })
 }
 
 async function saveEdit(scope: 'header' | 'env', k: string, val: string) {

@@ -1,6 +1,20 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse, ToolAnnotation } from '@/types'
 
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
+
+// PatchServerRequest mirrors the PATCH /api/v1/servers/{id} body (snake_case, per oas).
+// Hand-maintained: no `make gen` / swagger→TS codegen exists (`make swagger`
+// generates oas/swagger.yaml FROM Go via swag). annotation_overrides is pinned
+// to oas/swagger.yaml:1124 (config.ServerConfig) + config.ToolAnnotations;
+// the `| null` per-tool delete markers (RFC7396) are not expressible in the
+// swag-emitted schema, hence the manual extension.
+export interface PatchServerRequest extends Record<string, unknown> {
+  trust_mode?: string
+  url?: string
+  headers?: Record<string, string | null>
+  env?: Record<string, string | null>
+  annotation_overrides?: Record<string, ToolAnnotation | null>
+}
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -349,7 +363,7 @@ class APIService {
   // request field as optional and preserves anything not supplied, so callers
   // can send only what they want to change. Passing `headers: {}` clears
   // headers; omitting the field keeps the existing value.
-  async patchServer(serverName: string, patch: Record<string, unknown>): Promise<APIResponse> {
+  async patchServer(serverName: string, patch: PatchServerRequest): Promise<APIResponse> {
     return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),

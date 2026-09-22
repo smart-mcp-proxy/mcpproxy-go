@@ -115,6 +115,10 @@ func (p *MCPProxyServer) evaluatePreflight(
 		Tier:      tier,
 		Scope:     scope,
 		Filters:   filters,
+		// Thread the per-server overrides into the evaluator so the
+		// annotation filters judge effective (not raw upstream) hints, even
+		// for pure-unit IndexReaders that return unenriched annotations.
+		AnnotationOverrides: annotationOverridesByServer(cfg),
 		// With a real snapshot in hand, a configured server missing from it is
 		// state the supervisor has not published yet (startup / reconcile /
 		// config-add windows) — the evaluator answers the retryable
@@ -380,6 +384,25 @@ func bareToolName(name string) string {
 	return name
 }
 
+// annotationOverridesByServer projects the live config's per-server
+// annotation_overrides for the preflight evaluator (nil when none).
+func annotationOverridesByServer(cfg *config.Config) map[string]map[string]*config.ToolAnnotations {
+	if cfg == nil {
+		return nil
+	}
+	var out map[string]map[string]*config.ToolAnnotations
+	for _, sc := range cfg.Servers {
+		if sc == nil || sc.AnnotationOverrides == nil {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]map[string]*config.ToolAnnotations)
+		}
+		out[sc.Name] = config.CloneAnnotationOverrides(sc.AnnotationOverrides)
+	}
+	return out
+}
+
 func (r *preflightIndexReader) IndexedServerNames() ([]string, error) {
 	names, err := r.index.GetAllIndexedServerNames()
 	if err != nil {
@@ -477,7 +500,15 @@ func (p *MCPProxyServer) preflightSnapshot() (preflight.StateReader, func(server
 			// The snapshot stores bare names on the live path and canonical
 			// "server:tool" names when they came from ToolMetadata; match both.
 			if tool.Name == toolName || tool.Name == serverName+":"+toolName {
-				return tool.Annotations
+				upstream := tool.Annotations
+				if cfg := p.currentConfig(); cfg != nil {
+					for _, sc := range cfg.Servers {
+						if sc.Name == serverName {
+							return config.EffectiveAnnotationsForTool(sc.AnnotationOverrides, toolName, upstream)
+						}
+					}
+				}
+				return upstream
 			}
 		}
 		return nil

@@ -389,6 +389,16 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	// scanner layer, never round-tripped, and the residual net still refuses a
 	// mask arriving in it.
 	"security_scan.deep_scan.scanners_failed[].reason": MaskDecisionNotSecret,
+
+	// Annotation overrides: per-server per-tool hint fixes (admin-only, hot,
+	// audited). No credential material — the hints are booleans and an optional
+	// title string — so NotSecret; the residual net still refuses an echoed mask.
+	"annotation_overrides":         MaskDecisionNotSecret,
+	"annotation_overrides{}.title": MaskDecisionNotSecret,
+	// Bool hint leaves (readOnlyHint etc.) are structurally non-text (see
+	// carriesText: *bool is not a string), so no decision is needed for them,
+	// but the map container and its title leaf must be recorded for the
+	// CoverEveryNestedLeaf guard.
 }
 
 func init() {

@@ -1942,6 +1942,7 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	if err != nil || existing == nil {
 		return fmt.Errorf("server '%s' not found", serverName)
 	}
+	beforeAOForAudit := copyAnnotationOverridesForAudit(existing.AnnotationOverrides)
 
 	// Apply non-zero/non-nil fields from updates
 	if updates.URL != "" {
@@ -2011,21 +2012,121 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		existing.Isolation = config.CopyIsolationConfig(updates.Isolation)
 	}
 
+	// AnnotationOverrides (per-server per-tool hint fixes) — hot, no restart.
+	// The REST handler pre-merges via MergeAnnotationOverrides; the MCP patch
+	// path goes through MergeServerConfig. Here we persist what the caller
+	// computed. A nil patch preserves existing (delete-all only via explicit
+	// {"annotation_overrides":null} marker handled by the merge layer).
+	if updates.AnnotationOverrides != nil {
+		existing.AnnotationOverrides = make(map[string]*config.ToolAnnotations, len(updates.AnnotationOverrides))
+		for k, v := range updates.AnnotationOverrides {
+			if v == nil {
+				existing.AnnotationOverrides[k] = nil
+				continue
+			}
+			cp := *v
+			if v.ReadOnlyHint != nil {
+				b := *v.ReadOnlyHint
+				cp.ReadOnlyHint = &b
+			}
+			if v.DestructiveHint != nil {
+				b := *v.DestructiveHint
+				cp.DestructiveHint = &b
+			}
+			if v.IdempotentHint != nil {
+				b := *v.IdempotentHint
+				cp.IdempotentHint = &b
+			}
+			if v.OpenWorldHint != nil {
+				b := *v.OpenWorldHint
+				cp.OpenWorldHint = &b
+			}
+			if v.Title != "" {
+				cp.Title = v.Title
+			}
+			existing.AnnotationOverrides[k] = &cp
+		}
+	}
+	// nil patch preserves existing (delete only via explicit marker handled by
+	// MergeServerConfig/MergeAnnotationOverrides and the REST handler's pre-merge).
+	// This matches the nil-preserve contract for AutoApproveToolChanges/TrustMode/InitTimeout.
+
 	// Save to storage
 	if err := storageManager.SaveUpstreamServer(existing); err != nil {
 		return fmt.Errorf("failed to save server: %w", err)
 	}
+	if s.auditSink != nil && updates.AnnotationOverrides != nil && auditSourceFromContext(ctx) != "api" {
+		afterAOForAudit := existing.AnnotationOverrides
+		if !annotationOverridesEqualForAudit(beforeAOForAudit, afterAOForAudit) {
+			beforeMap := annotationOverridesToAuditMap(beforeAOForAudit)
+			afterMap := annotationOverridesToAuditMap(afterAOForAudit)
+			if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
+				Ts:        time.Now(),
+				RequestID: reqcontext.GetRequestID(ctx),
+				Origin:    auditOriginFromContext(ctx),
+				Source:    auditSourceFromContext(ctx),
+				Caller:    auditCallerFromContext(ctx),
+				Server:    serverName,
+				Action:    "annotation_override",
+				Before:    beforeMap,
+				After:     afterMap,
+			}); lerr == nil {
+				if raw, jerr := line.JSON(); jerr == nil {
+					_ = s.auditSink.Write(raw)
+				}
+			}
+		}
+	}
 
-	// Update runtime config
-	currentConfig := s.runtime.Config()
-	if currentConfig != nil {
-		for i, sc := range currentConfig.Servers {
+	// Update runtime config — copy-on-write: Config() is the published
+	// snapshot that DiscoverAndIndexTools and others range over without a
+	// lock, so mutating its Servers slice in place is a DATA RACE.
+	if currentConfig := s.runtime.Config(); currentConfig != nil {
+		updated := *currentConfig
+		updated.Servers = append([]*config.ServerConfig(nil), currentConfig.Servers...)
+		for i, sc := range updated.Servers {
 			if sc.Name == serverName {
-				currentConfig.Servers[i] = existing
+				updated.Servers[i] = existing
 				break
 			}
 		}
-		s.runtime.UpdateConfig(currentConfig, "")
+		s.runtime.UpdateConfig(&updated, "")
+	}
+
+	// Push the refreshed config to the live manager client so hot-reloadable
+	// fields (notably annotation_overrides) take effect on the next ListTools
+	// without a reconnect. Transport-affecting changes are handled by the
+	// manager's own AddServerConfig comparison on the next sync; here we only
+	// refresh the pointer both managed and core clients read (SetConfig also
+	// pushes overrides down to core, mirroring the ExposePrompts pattern).
+	// Discovery is re-triggered by OnUpstreamServerChange below.
+	if um := s.runtime.UpstreamManager(); um != nil {
+		if client, exists := um.GetClient(serverName); exists {
+			client.SetConfig(existing)
+		}
+	}
+
+	// Annotation-override immediacy: the served tools list (GET
+	// /api/v1/servers/{id}/tools) is the StateView snapshot, refreshed only by
+	// discovery. SetConfig above makes the NEXT ListTools return effective
+	// annotations, but without this the PATCH 200 races the background sweep
+	// (OnUpstreamServerChange → async DiscoverAndIndexTools) and serves stale
+	// hints for ~one re-list. Re-list THIS server synchronously via the
+	// author's existing authoritative single-server hook, so the next GET
+	// after PATCH converges with no fleet sweep, reconnect, or restart.
+	// Best-effort: on failure only log; the background sweep below still
+	// converges eventually.
+	if !annotationOverridesEqualForAudit(beforeAOForAudit, existing.AnnotationOverrides) {
+		rctx := ctx
+		if rctx == nil {
+			rctx = context.Background()
+		}
+		rctx, cancel := context.WithTimeout(rctx, 30*time.Second)
+		if rerr := s.runtime.RefreshServerTools(rctx, serverName); rerr != nil {
+			s.logger.Warn("Annotation-override refresh failed; background sweep will converge",
+				zap.String("server", serverName), zap.Error(rerr))
+		}
+		cancel()
 	}
 
 	// Save configuration to file
@@ -2039,6 +2140,113 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	s.logger.Info("Server updated successfully", zap.String("name", serverName))
 
 	return nil
+}
+
+func copyAnnotationOverridesForAudit(m map[string]*config.ToolAnnotations) map[string]*config.ToolAnnotations {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]*config.ToolAnnotations, len(m))
+	for k, v := range m {
+		if v == nil {
+			out[k] = nil
+			continue
+		}
+		cp := *v
+		if v.ReadOnlyHint != nil {
+			b := *v.ReadOnlyHint
+			cp.ReadOnlyHint = &b
+		}
+		if v.DestructiveHint != nil {
+			b := *v.DestructiveHint
+			cp.DestructiveHint = &b
+		}
+		if v.IdempotentHint != nil {
+			b := *v.IdempotentHint
+			cp.IdempotentHint = &b
+		}
+		if v.OpenWorldHint != nil {
+			b := *v.OpenWorldHint
+			cp.OpenWorldHint = &b
+		}
+		out[k] = &cp
+	}
+	return out
+}
+
+func annotationOverridesEqualForAudit(a, b map[string]*config.ToolAnnotations) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok {
+			return false
+		}
+		if av == nil && bv == nil {
+			continue
+		}
+		if av == nil || bv == nil {
+			return false
+		}
+		if av.Title != bv.Title {
+			return false
+		}
+		if !boolPtrEqualForAudit(av.ReadOnlyHint, bv.ReadOnlyHint) {
+			return false
+		}
+		if !boolPtrEqualForAudit(av.DestructiveHint, bv.DestructiveHint) {
+			return false
+		}
+		if !boolPtrEqualForAudit(av.IdempotentHint, bv.IdempotentHint) {
+			return false
+		}
+		if !boolPtrEqualForAudit(av.OpenWorldHint, bv.OpenWorldHint) {
+			return false
+		}
+	}
+	return true
+}
+
+func boolPtrEqualForAudit(a, b *bool) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func annotationOverridesToAuditMap(m map[string]*config.ToolAnnotations) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		if v == nil {
+			out[k] = nil
+			continue
+		}
+		entry := make(map[string]interface{})
+		if v.Title != "" {
+			entry["title"] = v.Title
+		}
+		if v.ReadOnlyHint != nil {
+			entry["readOnlyHint"] = *v.ReadOnlyHint
+		}
+		if v.DestructiveHint != nil {
+			entry["destructiveHint"] = *v.DestructiveHint
+		}
+		if v.IdempotentHint != nil {
+			entry["idempotentHint"] = *v.IdempotentHint
+		}
+		if v.OpenWorldHint != nil {
+			entry["openWorldHint"] = *v.OpenWorldHint
+		}
+		out[k] = entry
+	}
+	return out
 }
 
 // RemoveServer removes an upstream server from the configuration.
@@ -3004,6 +3212,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// MCP-32: pass the observability manager so /metrics is served (and HTTP
 	// request metrics/tracing middleware applied) when enabled.
 	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar(), s.observability)
+	if s.auditSink != nil {
+		httpAPIServer.SetAuditSink(s.auditSink)
+	}
 	// Wire agent token management (Spec 028)
 	if sm := s.runtime.StorageManager(); sm != nil {
 		cfg := s.runtime.Config()

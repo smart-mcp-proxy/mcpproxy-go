@@ -466,6 +466,52 @@ func TestRetrieveToolsCallWithAnnotations(t *testing.T) {
 	}
 }
 
+// TestBuildPatchConfig_AnnotationOverrides_Marker verifies that a MCP patch
+// with annotation_overrides per-tool null markers is translated into
+// MergeOptions remove markers, so the merge deletes that tool entry.
+// BDD: Given base {"tool":{readOnly:true}}, When MCP patch carries
+// {"annotation_overrides":{"tool":null}}, Then buildPatchConfig returns
+// a marker for annotation_overrides.tool and the merged result drops it.
+func TestBuildPatchConfig_AnnotationOverrides_Marker(t *testing.T) {
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	bTrue := true
+	existing := &config.ServerConfig{
+		Name: "browseros", Protocol: "stdio", Enabled: true,
+		AnnotationOverrides: map[string]*config.ToolAnnotations{
+			"tool": {ReadOnlyHint: &bTrue},
+			"keep": {ReadOnlyHint: &bTrue},
+		},
+	}
+	// MCP request with per-tool null: {"annotation_overrides":{"tool":null}}
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Arguments: map[string]interface{}{
+			"operation": "patch",
+			"name": "browseros",
+			"annotation_overrides": map[string]interface{}{"tool": nil},
+		},
+	}}
+	patch, opts, err := proxy.buildPatchConfigFromRequest(req, existing)
+	require.NoError(t, err)
+	markers := opts.GetRemoveMarkersForMap("annotation_overrides")
+	require.Contains(t, markers, "tool", "per-tool null must become a remove marker")
+	// whole-map null variant via annotation_overrides_json
+	req3 := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Arguments: map[string]interface{}{
+			"operation": "patch",
+			"name": "browseros",
+			"annotation_overrides_json": "null",
+		},
+	}}
+	_, opts3, err := proxy.buildPatchConfigFromRequest(req3, existing)
+	require.NoError(t, err)
+	require.True(t, opts3.ShouldRemove("annotation_overrides"), "whole-map null must set ShouldRemove")
+	merged := config.MergeAnnotationOverrides(existing.AnnotationOverrides, patch.AnnotationOverrides, opts)
+	_, hasTool := merged["tool"]
+	require.False(t, hasTool, "tool must be deleted after merge with marker")
+	_, hasKeep := merged["keep"]
+	require.True(t, hasKeep, "keep must survive")
+}
+
 func TestUpstreamServerOperations(t *testing.T) {
 	// Test basic server operations parsing
 	t.Run("BasicServerOperations", func(t *testing.T) {
