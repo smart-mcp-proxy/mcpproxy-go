@@ -490,20 +490,19 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 	// and the write must cover the SAME entry — re-resolving per step is what
 	// let a token hash one entry while the write replaced or deleted another
 	// (Spec 091 FR-005).
-	fileExists, existing, accessState, err := s.preWriteState(client, cfgPath, serverName)
+	fileExists, existing, _, err := s.preWriteState(client, cfgPath, serverName)
 	if err != nil {
 		return nil, s.asAccessError(client, cfgPath, err)
 	}
 
-	// A servers section that exists but is not an object never reaches the
-	// precondition token at all — the token only hashes the resolved ENTRY, so
-	// it cannot see the section's own raw value drifting. Refuse unconditionally
-	// (independent of whether a token was even echoed) rather than let connectJSON
-	// / connectTOML's own type assertion silently discard the value under a fresh
-	// map. This mirrors how a fully unparseable config already refuses.
-	if accessState == accessMalformed {
-		return nil, fmt.Errorf("%s could not be parsed as a valid config, or its %q section is not an object; refusing to write — fix the config manually and retry", cfgPath, client.ServerKey)
-	}
+	// Deliberately NOT refusing here on a malformed accessState: this resolution
+	// and the write's own read (inside connectJSON/connectTOML) are two
+	// independent reads of the file, so a check here alone would leave a TOCTOU
+	// window — the config could still be object-shaped now and mutated to a
+	// non-object section before the write's own read runs, bypassing an
+	// upstream-only guard. The write functions carry the authoritative,
+	// last-read check instead (see the comment at their servers-section type
+	// assertion), so this state is fully protected without racing.
 
 	// Precondition check BEFORE any backup or write, so a refusal is completely
 	// inert (Spec 091 FR-005).
@@ -649,11 +648,23 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		return nil, err
 	}
 
-	// Get or create the servers section
+	// Get or create the servers section. This is the AUTHORITATIVE check for a
+	// non-object section (Spec 091 FR-005 gap): data was just read fresh above,
+	// so — unlike a check earlier in the call chain — there is no window for the
+	// file to change between this read and the mutation below. A key that is
+	// PRESENT but not an object (a hand-edited string/number/array/bool) must
+	// refuse, not silently fall through to "no entries yet": the code below
+	// would otherwise replace it with a brand-new empty map, discarding whatever
+	// was there without ever giving drift detection a chance to catch it.
 	serversKey := client.ServerKey
-	serversMap, ok := data[serversKey].(map[string]interface{})
-	if !ok {
+	rawSection, keyPresent := data[serversKey]
+	var serversMap map[string]interface{}
+	if !keyPresent {
 		serversMap = make(map[string]interface{})
+	} else if m, ok := rawSection.(map[string]interface{}); ok {
+		serversMap = m
+	} else {
+		return nil, fmt.Errorf("%s: %q is not a JSON object; refusing to overwrite it — fix the config manually and retry", cfgPath, serversKey)
 	}
 
 	action := "created"
@@ -823,14 +834,18 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 		return nil, err
 	}
 
-	// Get or create mcp_servers section
-	serversRaw, ok := data["mcp_servers"]
+	// Get or create mcp_servers section. See the equivalent comment in
+	// connectJSON: this is the authoritative, last-read check for a non-object
+	// section (Spec 091 FR-005 gap) — present-but-wrong-type must refuse, not
+	// silently fall through to a fresh empty table that discards the value.
+	rawSection, keyPresent := data["mcp_servers"]
 	var serversMap map[string]interface{}
-	if ok {
-		serversMap, _ = serversRaw.(map[string]interface{})
-	}
-	if serversMap == nil {
+	if !keyPresent {
 		serversMap = make(map[string]interface{})
+	} else if m, ok := rawSection.(map[string]interface{}); ok {
+		serversMap = m
+	} else {
+		return nil, fmt.Errorf("%s: %q is not a TOML table; refusing to overwrite it — fix the config manually and retry", cfgPath, "mcp_servers")
 	}
 
 	action := "created"
@@ -991,6 +1006,14 @@ func (s *Service) readOrCreateJSON(path string) (map[string]interface{}, os.File
 	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return nil, perm, fmt.Errorf("parse JSON in %s: %w", path, err)
 	}
+	if data == nil {
+		// A config file containing exactly the JSON literal `null` (or nested
+		// only in whitespace/comments that lenient-parse to null) decodes
+		// successfully with a nil top-level map — encoding/json leaves the target
+		// untouched for a JSON null. Treating that as "no top-level object yet"
+		// (same as a missing file) avoids a nil-map write panic below.
+		data = make(map[string]interface{})
+	}
 
 	return data, perm, nil
 }
@@ -1015,6 +1038,12 @@ func (s *Service) readOrCreateTOML(path string) (map[string]interface{}, os.File
 	var data map[string]interface{}
 	if _, err := toml.Decode(string(raw), &data); err != nil {
 		return nil, perm, fmt.Errorf("parse TOML in %s: %w", path, err)
+	}
+	if data == nil {
+		// Defensive: BurntSushi/toml initializes the map even for empty input
+		// today, but a nil top-level map here would panic the same way the JSON
+		// path's null-document case did.
+		data = make(map[string]interface{})
 	}
 
 	return data, perm, nil
@@ -1121,9 +1150,16 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		return entryLocation{}, false, false
 	}
 
-	serversMap, ok := data[client.ServerKey].(map[string]interface{})
-	if !ok {
+	rawSection, keyPresent := data[client.ServerKey]
+	if !keyPresent {
 		return entryLocation{}, false, true
+	}
+	serversMap, ok := rawSection.(map[string]interface{})
+	if !ok {
+		// Present but not an object — same malformed classification as
+		// resolveExistingEntry/preWriteState, so GetStatus does not report
+		// "not connected" for a config a connect/preview call would refuse.
+		return entryLocation{}, false, false
 	}
 
 	// Anchor on the credential-free base URL so both new clean entries and
@@ -1318,7 +1354,10 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, pars
 
 	serversMap, ok := serversRaw.(map[string]interface{})
 	if !ok {
-		return entryLocation{}, false, true
+		// Present but not a table — same malformed classification as
+		// resolveExistingEntry/preWriteState, so GetStatus does not report
+		// "not connected" for a config a connect/preview call would refuse.
+		return entryLocation{}, false, false
 	}
 
 	baseURL := s.baseURL()
