@@ -519,14 +519,28 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheWriter
 	})
 
 	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
-	if reads < 2 {
-		t.Fatalf("expected the writer to perform its own independent read, only saw %d read(s)", reads)
+	// Exactly 2 reads for this client/path: preWriteState's (no jsonc guard for
+	// claude-code, no precondition token to additionally resolve) and
+	// connectJSON's own readOrCreateJSON. A count outside this range would mean
+	// the test's own premise — "read #1 sees the pre-race state, read #2+ sees
+	// the raced-in one" — no longer matches what actually ran.
+	if reads != 2 {
+		t.Fatalf("expected exactly 2 reads (preWriteState + the writer's own), got %d", reads)
 	}
 	if err == nil {
 		t.Fatalf("expected the writer's own read to catch the raced-in non-object section, got res=%+v err=nil", res)
 	}
 	if res != nil {
 		t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+	}
+	if !strings.Contains(err.Error(), "mcpServers") || !strings.Contains(err.Error(), "not a JSON object") {
+		t.Fatalf("expected the refusal to name the section and explain why, got: %v", err)
+	}
+	if got := readConfigT(t, cfgPath); got != objectShaped {
+		t.Fatalf("the ON-DISK file (never touched by the mocked reads) must be untouched after a refusal:\n got:  %s\n want: %s", got, objectShaped)
+	}
+	if n := backupCount(t, cfgPath); n != 0 {
+		t.Fatalf("a refused write must not create a backup, found %d", n)
 	}
 }
 
@@ -622,6 +636,33 @@ func TestConnect_NullTopLevelDocument_DoesNotPanic(t *testing.T) {
 	})
 }
 
+// TestUndo_NullBackup_DoesNotPanic pins a SIBLING crash of
+// TestConnect_NullTopLevelDocument_DoesNotPanic that round-2 cross-model
+// review found: replayConnectWrite (internal/connect/undo.go) has its own
+// independent JSON parse, and a backup file containing exactly `null`
+// resets its pre-initialized `data` map back to nil the same way — but this
+// path panicked at `data[client.ServerKey] = serversMap` instead. Repro:
+// connect against a null-content config (which backs up the null bytes
+// verbatim), then Undo with the returned backup name.
+func TestUndo_NullBackup_DoesNotPanic(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	writeFileT(t, cfgPath, "null")
+
+	connectRes, err := svc.Connect("claude-code", "mcpproxy", false)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	undoRes, err := svc.Undo("claude-code", "mcpproxy", filepath.Base(connectRes.BackupPath))
+	if err != nil {
+		t.Fatalf("Undo must not error on a null-content backup: %v", err)
+	}
+	if !undoRes.Success {
+		t.Fatalf("expected Undo to succeed, got %+v", undoRes)
+	}
+}
+
 // TestGetStatus_NonObjectServersSection_IsMalformed closes the should-fix the
 // cross-model review flagged: GetStatus used to disagree with Preview/Connect
 // for the exact same config — findEntryJSONBytes/findEntryTOMLBytes collapsed
@@ -680,16 +721,26 @@ func TestConnectWithPrecondition_GenuineIOErrorIsNotMaskedAsNonObjectSection(t *
 	writeFileT(t, cfgPath, `{"mcpServers":{}}`)
 
 	injected := errors.New("injected-io-failure: input/output error")
+	reads := 0
 	svc.setReadFile(func(path string) ([]byte, error) {
+		reads++
 		return nil, injected
 	})
 
 	_, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
+	// preWriteState's read fails first (classified accessMalformed, not
+	// propagated as an error there by design), so the writer's own read is what
+	// actually surfaces this error — pinning that this test exercises
+	// readOrCreateJSON's wrapped-error path, not a check that short-circuits
+	// before ever reaching it.
+	if reads != 2 {
+		t.Fatalf("expected exactly 2 reads (preWriteState + the writer's own), got %d", reads)
+	}
 	if err == nil {
 		t.Fatal("expected an error for an unreadable config")
 	}
-	if !errors.Is(err, injected) && !strings.Contains(err.Error(), injected.Error()) {
-		t.Fatalf("expected the genuine I/O error to propagate, not be masked as a non-object section: %v", err)
+	if !errors.Is(err, injected) {
+		t.Fatalf("expected the genuine I/O error to survive via %%w-wrapping, not be masked as a non-object section: %v", err)
 	}
 	if strings.Contains(err.Error(), "is not a JSON object") {
 		t.Fatalf("a genuine I/O error must not be reported as a non-object servers section: %v", err)

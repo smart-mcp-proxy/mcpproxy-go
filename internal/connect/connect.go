@@ -502,7 +502,28 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 	// non-object section before the write's own read runs, bypassing an
 	// upstream-only guard. The write functions carry the authoritative,
 	// last-read check instead (see the comment at their servers-section type
-	// assertion), so this state is fully protected without racing.
+	// assertion), so THAT specific drift class is fully protected without racing.
+	//
+	// KNOWN, PRE-EXISTING, OUT-OF-SCOPE LIMITATION (surfaced by cross-model
+	// review of this fix, not introduced by it — present since Spec 091
+	// shipped): the precondition TOKEN itself is only checked against THIS
+	// read, not against the write's own later, independent read. An entry that
+	// is still object-shaped on both reads but whose VALUE changed between them
+	// is not re-validated — with force=true the write clobbers content the
+	// user's token did not actually describe. Closing that requires threading
+	// one shared `data` read through preWriteState AND connectJSON/connectTOML
+	// (today they each call s.read independently), which is a larger,
+	// security-sensitive refactor of the FR-005 precondition mechanism itself
+	// and deserves its own dedicated PR + review cycle rather than being folded
+	// into this one — the same reasoning that scoped THIS fix to the
+	// non-object-section gap in the first place. Tracked separately.
+	//
+	// A second, narrower instance of the same two-independent-reads shape:
+	// guardJsoncComments (below, inside connectJSON) reads the file once to
+	// detect comments, then readOrCreateJSON reads it again; a file that
+	// gains comments in between is parsed leniently and rewritten as plain
+	// JSON, silently stripping them. Also pre-existing (the comment guard
+	// predates this fix) and also tracked separately rather than fixed here.
 
 	// Precondition check BEFORE any backup or write, so a refusal is completely
 	// inert (Spec 091 FR-005).
