@@ -654,6 +654,50 @@ func (s *Service) guardJsoncComments(cfgPath string) error {
 	return nil
 }
 
+// refuseIfServersSectionRaced re-reads cfgPath and reports whether the
+// servers section (serversKey, decoded per format — "json" or "toml") has
+// become present-but-not-an-object since an earlier read. It is the second
+// of two checks connectJSON/connectTOML run against the same drift class
+// (Spec 091 FR-005 gap): the first, at the top of each function, uses the
+// read those functions already need for their existence/force/adoption
+// decisions, but that read is not adjacent to the actual write — backupFile
+// performs its own real I/O afterward — so calling this again immediately
+// before backup/write shrinks the exploitable window instead of leaving it
+// at the width of the whole function body.
+//
+// This is deliberately forgiving about everything except the one thing it
+// exists to catch: a vanished file, a still-absent-or-object-shaped section,
+// or any read/parse failure all return nil — those are not this guard's
+// class of problem, and the imminent backup/write attempt (or its own
+// pre-existing error handling) is what surfaces them. Only "parsed fine AND
+// the key is present AND it is not the right container type" refuses.
+func (s *Service) refuseIfServersSectionRaced(cfgPath, serversKey, format string) error {
+	raw, err := s.read(cfgPath)
+	if err != nil {
+		return nil
+	}
+	var data map[string]interface{}
+	if format == "toml" {
+		if _, derr := toml.Decode(string(raw), &data); derr != nil {
+			return nil
+		}
+	} else if derr := unmarshalLenientJSON(raw, &data); derr != nil {
+		return nil
+	}
+	rawSection, present := data[serversKey]
+	if !present {
+		return nil
+	}
+	if _, ok := rawSection.(map[string]interface{}); ok {
+		return nil
+	}
+	containerWord := "a JSON object"
+	if format == "toml" {
+		containerWord = "a TOML table"
+	}
+	return fmt.Errorf("%s: %q was changed to a non-object value while MCPProxy was about to write it (expected %s); refusing to overwrite it — retry", cfgPath, serversKey, containerWord)
+}
+
 // connectJSON writes the entry, adopting the entry `resolved` names when it
 // differs from serverName. The resolution is passed in rather than recomputed
 // so the write acts on exactly the entry the preview described and the
@@ -669,14 +713,14 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		return nil, err
 	}
 
-	// Get or create the servers section. This is the AUTHORITATIVE check for a
-	// non-object section (Spec 091 FR-005 gap): data was just read fresh above,
-	// so — unlike a check earlier in the call chain — there is no window for the
-	// file to change between this read and the mutation below. A key that is
-	// PRESENT but not an object (a hand-edited string/number/array/bool) must
-	// refuse, not silently fall through to "no entries yet": the code below
-	// would otherwise replace it with a brand-new empty map, discarding whatever
-	// was there without ever giving drift detection a chance to catch it.
+	// Get or create the servers section. A key that is PRESENT but not an
+	// object (a hand-edited string/number/array/bool) must refuse, not
+	// silently fall through to "no entries yet": the code below would
+	// otherwise replace it with a brand-new empty map, discarding whatever was
+	// there without ever giving drift detection a chance to catch it. This is
+	// the first of TWO checks against this drift class — see the second one
+	// immediately before the backup/write below for why one alone is not
+	// authoritative.
 	serversKey := client.ServerKey
 	rawSection, keyPresent := data[serversKey]
 	var serversMap map[string]interface{}
@@ -722,6 +766,20 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 			delete(serversMap, adoptedName)
 			action = "updated"
 		}
+	}
+
+	// SECOND, closer-to-the-write check for the same drift class (Spec 091
+	// FR-005 gap; round-3 cross-model review finding): the read at the top of
+	// this function is not actually adjacent to the write below — backupFile
+	// performs its own real file I/O in between, widening the window in which
+	// an external process could replace the servers section with a non-object
+	// value after this function already decided it was safe to proceed. A
+	// fresh, minimal re-check right here, immediately before backup/write,
+	// shrinks that window to the (unavoidable without an OS-level lock across
+	// the whole read-modify-write sequence) gap between THIS check and
+	// atomicWriteFile's rename.
+	if err := s.refuseIfServersSectionRaced(cfgPath, serversKey, "json"); err != nil {
+		return nil, err
 	}
 
 	// Create backup before modifying
@@ -856,9 +914,10 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	}
 
 	// Get or create mcp_servers section. See the equivalent comment in
-	// connectJSON: this is the authoritative, last-read check for a non-object
-	// section (Spec 091 FR-005 gap) — present-but-wrong-type must refuse, not
-	// silently fall through to a fresh empty table that discards the value.
+	// connectJSON: present-but-wrong-type must refuse, not silently fall
+	// through to a fresh empty table that discards the value. This is the
+	// first of two checks against this drift class — see the second,
+	// closer-to-the-write one below.
 	rawSection, keyPresent := data["mcp_servers"]
 	var serversMap map[string]interface{}
 	if !keyPresent {
@@ -882,6 +941,13 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 			}, nil
 		}
 		action = "updated"
+	}
+
+	// Second, closer-to-the-write check — see the equivalent comment in
+	// connectJSON for why the check above alone leaves a window (backupFile's
+	// own I/O in between).
+	if err := s.refuseIfServersSectionRaced(cfgPath, "mcp_servers", "toml"); err != nil {
+		return nil, err
 	}
 
 	// Backup

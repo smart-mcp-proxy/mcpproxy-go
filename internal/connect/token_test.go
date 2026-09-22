@@ -544,6 +544,60 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheWriter
 	}
 }
 
+// TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheFinalPreWriteCheck
+// closes the must-fix round-3 cross-model review found in the fix above:
+// connectJSON/connectTOML's OWN read (the "writer's own read" the previous
+// test proves is authoritative) is STILL not adjacent to the actual write —
+// backupFile performs real file I/O in between, widening the window in which
+// an external process can replace the servers section with a non-object
+// value AFTER the writer already decided it was safe to proceed. Repro: both
+// preWriteState's read and connectJSON's readOrCreateJSON read see an
+// OBJECT-shaped section (so the earlier, top-of-function check passes
+// cleanly); only the SECOND, closer-to-backup/write check's read observes
+// the section having been replaced with a non-object value in between. The
+// write must still refuse, before any backup is created.
+func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheFinalPreWriteCheck(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	const objectShaped = `{"mcpServers":{}}`
+	const racedNonObject = `{"mcpServers":"raced-in-during-backup"}`
+	writeFileT(t, cfgPath, objectShaped)
+
+	reads := 0
+	svc.setReadFile(func(path string) ([]byte, error) {
+		reads++
+		if reads <= 2 {
+			// preWriteState's read (#1) and connectJSON's own readOrCreateJSON
+			// read (#2): both still object-shaped, so the top-of-function check
+			// passes and the function proceeds toward backup/write.
+			return []byte(objectShaped), nil
+		}
+		// The THIRD read — refuseIfServersSectionRaced, immediately before
+		// backupFile — observes the file AFTER the simulated concurrent edit.
+		return []byte(racedNonObject), nil
+	})
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
+	if reads != 3 {
+		t.Fatalf("expected exactly 3 reads (preWriteState + the writer's own + the final pre-backup check), got %d", reads)
+	}
+	if err == nil {
+		t.Fatalf("expected the final pre-write check to catch the raced-in non-object section, got res=%+v err=nil", res)
+	}
+	if res != nil {
+		t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+	}
+	if !strings.Contains(err.Error(), "mcpServers") {
+		t.Fatalf("expected the refusal to name the section, got: %v", err)
+	}
+	if got := readConfigT(t, cfgPath); got != objectShaped {
+		t.Fatalf("the ON-DISK file (never touched by the mocked reads) must be untouched after a refusal:\n got:  %s\n want: %s", got, objectShaped)
+	}
+	if n := backupCount(t, cfgPath); n != 0 {
+		t.Fatalf("a refused write must not create a backup — the check must run BEFORE backupFile, found %d", n)
+	}
+}
+
 // TestConnect_NonObjectServersSection_RefusesWithoutToken proves the guard does
 // not depend on the precondition-token flow: a tokenless Connect() call (the
 // Web UI / CLI's existing behavior, Spec 091 contracts §2) must also refuse
