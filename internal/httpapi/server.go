@@ -2352,7 +2352,7 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// Validate annotation overrides via ValidateDetailed (write gate) before
 	// persisting. Reuses the PATCH pattern: temporary config with the new
 	// server appended, filtered to annotation_overrides errors.
-	if serverConfig.AnnotationOverrides != nil && len(serverConfig.AnnotationOverrides) > 0 {
+	if len(serverConfig.AnnotationOverrides) > 0 {
 		cfg, err := s.controller.GetConfig()
 		if err != nil {
 			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to load current config for annotation validation: %v", err))
@@ -2402,7 +2402,7 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Infow("Server added successfully", "server", req.Name, "quarantined", quarantined)
-	if s.auditSink != nil && serverConfig.AnnotationOverrides != nil && len(serverConfig.AnnotationOverrides) > 0 {
+	if s.auditSink != nil && len(serverConfig.AnnotationOverrides) > 0 {
 		afterMap := httpAnnotationOverridesToAuditMap(serverConfig.AnnotationOverrides)
 		if len(afterMap) > 0 {
 			if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
@@ -2892,10 +2892,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	restartRequired := true
-	if onlyAnnotationOverrideHot {
-		restartRequired = false
-	}
+	restartRequired := !onlyAnnotationOverrideHot
 	s.writeSuccess(w, map[string]interface{}{
 		"message":          fmt.Sprintf("Server '%s' updated successfully", serverName),
 		"restart_required": restartRequired,
