@@ -1110,7 +1110,7 @@ func TestAtomicWriteFile(t *testing.T) {
 	path := filepath.Join(dir, "subdir", "test.json")
 
 	content := []byte(`{"atomic": true}`)
-	if err := atomicWriteFile(path, content, 0o644); err != nil {
+	if err := atomicWriteFile(path, content, 0o644, nil); err != nil {
 		t.Fatalf("atomicWriteFile failed: %v", err)
 	}
 

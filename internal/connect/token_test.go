@@ -599,18 +599,32 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtThePreBac
 }
 
 // TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAfterBackup
-// closes the must-fix round-4 cross-model review found in the fix above:
-// backupFile performs real Stat/Open/copy I/O — genuinely slow enough to
-// race in practice — so a change landing DURING that backup (i.e. AFTER the
-// pre-backup check already passed) was still able to slip through to
-// atomicWriteFile undetected. Repro: preWriteState's read, connectJSON's own
-// read, AND the pre-backup check's read all see an OBJECT-shaped section (so
-// backupFile actually runs and a backup file IS created — that's expected
-// and consistent with how a later atomicWriteFile failure already behaves in
-// this codebase); only the THIRD, post-backup/pre-write check's read
-// observes the section having been replaced with a non-object value. The
-// write must still refuse, and the on-disk config must be untouched (the
-// backup file's existence does not imply the config itself was mutated).
+// closes the must-fix round-4 cross-model review found: backupFile performs
+// real Stat/Open/copy I/O — genuinely slow enough to race in practice — so a
+// change landing DURING that backup (i.e. AFTER the pre-backup check already
+// passed) was still able to slip through to atomicWriteFile undetected.
+// Repro: preWriteState's read, connectJSON's own read, AND the pre-backup
+// check's read all see an OBJECT-shaped section (so backupFile actually runs
+// and a backup file IS created — that's expected and consistent with how a
+// later atomicWriteFile failure already behaves in this codebase); only the
+// final check's read observes the section having been replaced with a
+// non-object value. The write must still refuse, and the on-disk config must
+// be untouched (the backup file's existence does not imply the config itself
+// was mutated).
+//
+// Round 5 found the round-4 fix's placement — a call made BEFORE invoking
+// atomicWriteFile — still left atomicWriteFile's own temp-file staging
+// (MkdirAll/CreateTemp/Write/Close/Chmod) as a real, uninstrumented I/O
+// window before the rename. The final check now runs as atomicWriteFile's
+// preRename hook instead — structurally after that staging, immediately
+// before os.Rename — which this test's black-box read-counting cannot
+// directly distinguish from the round-4 placement (none of the temp-file
+// staging steps touch the s.read seam this mock intercepts, so the read
+// COUNT is identical either way); the placement itself is verified by
+// reading atomicWriteFile's implementation (backup.go) and its call sites
+// here, not by this test alone. What this test DOES still prove, unchanged:
+// a value raced in after backupFile completes is caught before any bytes of
+// the actual config file are replaced.
 func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAfterBackup(t *testing.T) {
 	svc, home := testService(t)
 	cfgPath := ConfigPath("claude-code", home)

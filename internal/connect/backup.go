@@ -68,7 +68,23 @@ func backupFile(path string) (string, error) {
 
 // atomicWriteFile writes data to path atomically by writing to a temp file
 // in the same directory and renaming. This prevents partial writes.
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+// atomicWriteFile stages data into a temp file in the same directory and
+// renames it over path, so a reader never observes a partially-written file.
+//
+// preRename, when non-nil, is called AFTER every real filesystem operation
+// that stages the temp file (MkdirAll, CreateTemp, Write, Close, Chmod) and
+// IMMEDIATELY before the rename that actually replaces path's content — the
+// last point at which this function can still back out. A non-nil return
+// aborts: the temp file is removed and path is left untouched. This exists
+// for connectJSON/connectTOML's servers-section race guard (Spec 091 FR-005
+// gap, round-5 cross-model review of PR #1340): those callers' own re-checks
+// before calling this function still left a real, I/O-bearing gap (temp-file
+// staging) between the check and the rename; running the SAME check here, at
+// this exact point, closes that gap down to the (unavoidable without an
+// OS-level lock across the whole read-modify-write sequence) span between
+// this call and the os.Rename two lines below — a few fast local syscalls,
+// not a real I/O operation an external writer could plausibly land inside.
+func atomicWriteFile(path string, data []byte, perm os.FileMode, preRename func() error) error {
 	dir := filepath.Dir(path)
 
 	// Ensure the directory exists
@@ -100,6 +116,12 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 
 	if err := os.Chmod(tmpName, perm); err != nil {
 		return fmt.Errorf("chmod temp file: %w", err)
+	}
+
+	if preRename != nil {
+		if err := preRename(); err != nil {
+			return err
+		}
 	}
 
 	if err := os.Rename(tmpName, path); err != nil {

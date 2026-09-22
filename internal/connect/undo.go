@@ -183,7 +183,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	if info, statErr := os.Stat(cfgPath); statErr == nil {
 		perm = info.Mode()
 	}
-	if err := atomicWriteFile(cfgPath, backupRaw, perm); err != nil {
+	if err := atomicWriteFile(cfgPath, backupRaw, perm, nil); err != nil {
 		return nil, fmt.Errorf("restore from backup: %w", err)
 	}
 

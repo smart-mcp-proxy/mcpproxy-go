@@ -660,27 +660,33 @@ func (s *Service) guardJsoncComments(cfgPath string) error {
 // servers section (serversKey, decoded per format — "json" or "toml") has
 // become present-but-not-an-object since an earlier read. connectJSON/
 // connectTOML each call this TWICE against the same drift class (Spec 091
-// FR-005 gap), because the function body's own read (used for their
-// existence/force/adoption decisions) is not adjacent to the actual write —
-// several real I/O steps happen in between:
+// FR-005 gap) — on top of the type assertion the function body's own read
+// already does for its existence/force/adoption decisions — because that
+// first read is not adjacent to the actual write: several real I/O steps
+// happen in between:
 //
 //   - immediately before backupFile: a fast-fail so an already-bad section
 //     (unchanged since the top-of-function read) does not even earn a
 //     backup file, and so a change landing during the EARLIER part of the
 //     function body (existence/adoption decisions, which do no I/O of their
 //     own) is caught.
-//   - immediately before atomicWriteFile (after backupFile and marshaling):
-//     backupFile performs its own Stat/Open/copy — genuinely slow enough on
-//     a loaded filesystem to be practically raceable, per round-4
-//     cross-model review — so a change landing DURING backup is caught by
-//     THIS second call rather than slipping through to the write.
+//   - as atomicWriteFile's preRename hook (NOT a call made before
+//     atomicWriteFile — round-5 cross-model review found that placement
+//     alone still left atomicWriteFile's own temp-file staging
+//     (MkdirAll/CreateTemp/Write/Close/Chmod) as a real, I/O-bearing window):
+//     backupFile performs its own Stat/Open/copy, genuinely slow enough on a
+//     loaded filesystem to be practically raceable (round-4), and then
+//     atomicWriteFile's staging adds more of the same (round-5) — so a
+//     change landing during EITHER is caught by this call running at the
+//     true last moment before the rename that actually replaces the file.
 //
-// A residual gap remains between this second call and atomicWriteFile's own
-// temp-file-write-then-rename — fully eliminating that needs an OS-level file
-// lock (e.g. flock) held across the whole read-modify-write sequence, which
-// is a larger architectural change deserving its own review, not folded into
-// this fix (tracked alongside the other deferred TOCTOU findings — see the
-// comment block in ConnectWithPrecondition).
+// A residual gap remains between this second call (inside atomicWriteFile,
+// immediately before os.Rename) and the rename itself — a handful of fast
+// local syscalls, not a real I/O operation. Fully eliminating even that needs
+// an OS-level file lock (e.g. flock) held across the whole read-modify-write
+// sequence, which is a larger architectural change deserving its own review,
+// not folded into this fix (tracked alongside the other deferred TOCTOU
+// findings — see the comment block in ConnectWithPrecondition).
 //
 // This is deliberately forgiving about everything except the one thing it
 // exists to catch: a vanished file, a still-absent-or-object-shaped section,
@@ -735,9 +741,9 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// silently fall through to "no entries yet": the code below would
 	// otherwise replace it with a brand-new empty map, discarding whatever was
 	// there without ever giving drift detection a chance to catch it. This is
-	// the first of TWO checks against this drift class — see the second one
-	// immediately before the backup/write below for why one alone is not
-	// authoritative.
+	// the first of THREE checks against this drift class — see the second,
+	// pre-backup one below and the third, inside atomicWriteFile's preRename
+	// hook, for why this one alone is not authoritative.
 	serversKey := client.ServerKey
 	rawSection, keyPresent := data[serversKey]
 	var serversMap map[string]interface{}
@@ -810,19 +816,19 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
 
-	// THIRD check (round-4 cross-model review finding): backupFile above just
-	// performed real Stat/Open/copy I/O — genuinely slow enough to race in
-	// practice — so the section could have been replaced with a non-object
-	// value DURING that backup, after the second check already passed. This
-	// re-check, as close as possible to the actual write, is what catches
-	// that window; see refuseIfServersSectionRaced's doc comment for the
-	// (unavoidable without OS-level locking) residual gap that remains
-	// between this point and atomicWriteFile's own rename.
-	if err := s.refuseIfServersSectionRaced(cfgPath, serversKey, "json"); err != nil {
-		return nil, err
-	}
-
-	if err := atomicWriteFile(cfgPath, encoded, perm); err != nil {
+	// THIRD check (round-4/round-5 cross-model review findings): backupFile
+	// above just performed real Stat/Open/copy I/O — genuinely slow enough to
+	// race in practice — so the section could have been replaced with a
+	// non-object value DURING that backup, after the second check already
+	// passed. Passing this as atomicWriteFile's preRename hook (rather than
+	// calling it here, before atomicWriteFile) is what actually closes that
+	// window down to a few local syscalls: atomicWriteFile itself stages the
+	// temp file (MkdirAll/CreateTemp/Write/Close/Chmod — also real I/O) before
+	// this runs, so a check called from here would still leave THAT staging
+	// gap open, per round 5.
+	if err := atomicWriteFile(cfgPath, encoded, perm, func() error {
+		return s.refuseIfServersSectionRaced(cfgPath, serversKey, "json")
+	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 
@@ -911,7 +917,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
 
-	if err := atomicWriteFile(cfgPath, encoded, perm); err != nil {
+	if err := atomicWriteFile(cfgPath, encoded, perm, nil); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 
@@ -938,8 +944,9 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	// Get or create mcp_servers section. See the equivalent comment in
 	// connectJSON: present-but-wrong-type must refuse, not silently fall
 	// through to a fresh empty table that discards the value. This is the
-	// first of two checks against this drift class — see the second,
-	// closer-to-the-write one below.
+	// first of three checks against this drift class — see the second,
+	// pre-backup one below and the third, inside atomicWriteFile's preRename
+	// hook.
 	rawSection, keyPresent := data["mcp_servers"]
 	var serversMap map[string]interface{}
 	if !keyPresent {
@@ -991,15 +998,12 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 		return nil, fmt.Errorf("encode TOML: %w", err)
 	}
 
-	// Third check (round-4 cross-model review finding): backupFile above just
-	// performed real I/O, so re-check as close as possible to the actual
-	// write — see connectJSON's equivalent comment for the residual gap that
-	// remains between this point and atomicWriteFile's own rename.
-	if err := s.refuseIfServersSectionRaced(cfgPath, "mcp_servers", "toml"); err != nil {
-		return nil, err
-	}
-
-	if err := atomicWriteFile(cfgPath, buf.Bytes(), perm); err != nil {
+	// Third check (round-4/round-5 findings) — see connectJSON's equivalent
+	// comment for why this must be atomicWriteFile's preRename hook rather
+	// than a call from here.
+	if err := atomicWriteFile(cfgPath, buf.Bytes(), perm, func() error {
+		return s.refuseIfServersSectionRaced(cfgPath, "mcp_servers", "toml")
+	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 
@@ -1084,7 +1088,7 @@ func (s *Service) disconnectTOML(client *ClientDef, cfgPath, serverName string) 
 		return nil, fmt.Errorf("encode TOML: %w", err)
 	}
 
-	if err := atomicWriteFile(cfgPath, buf.Bytes(), perm); err != nil {
+	if err := atomicWriteFile(cfgPath, buf.Bytes(), perm, nil); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 
