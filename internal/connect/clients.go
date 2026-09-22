@@ -1,5 +1,5 @@
 // Package connect provides functionality to register MCPProxy as an MCP server
-// in various client configuration files (Claude Code, Cursor, VS Code, Windsurf, Codex, Gemini).
+// in various client configuration files (Claude Code, Cursor, VS Code, Windsurf, Codex, Gemini, ZCode).
 package connect
 
 import (
@@ -10,10 +10,15 @@ import (
 
 // ClientDef describes a known MCP client and its configuration file format.
 type ClientDef struct {
-	ID        string // Unique identifier, e.g. "claude-code"
-	Name      string // Human-readable name, e.g. "Claude Code"
-	Format    string // File format: "json" or "toml"
-	ServerKey string // Top-level key for server entries: "mcpServers" or "servers"
+	ID     string // Unique identifier, e.g. "claude-code"
+	Name   string // Human-readable name, e.g. "Claude Code"
+	Format string // File format: "json" or "toml"
+	// ServerKey is the human-readable label for the config section server
+	// entries live under ("mcpServers", "servers", ...), and doubles as the
+	// literal top-level key for every client except those special-cased in
+	// serversMapPath (e.g. ZCode's "mcp.servers" is a nested path, not a
+	// literal top-level key).
+	ServerKey string
 	Supported bool   // Whether this client can be connected (directly or via a bridge)
 	Reason    string // Explanation when Supported is false
 	Note      string // Optional caveat shown for supported clients (e.g. bridge requirement)
@@ -88,6 +93,25 @@ var allClients = []ClientDef{
 		ServerKey: "mcp",
 		Supported: true,
 		Icon:      "opencode",
+	},
+	{
+		ID:     "zcode",
+		Name:   "ZCode",
+		Format: "json",
+		// Display label only — the literal access path is nested; see
+		// serversMapPath.
+		ServerKey: "mcp.servers",
+		Supported: true,
+		// ZCode also reads ~/.agents/mcp.json (top-level mcpServers) as a
+		// same-scope fallback, but ONLY while ~/.zcode/cli/config.json itself
+		// defines no MCP servers — the moment it defines any (including ours),
+		// the fallback is ignored entirely for that scope (ZCode's own
+		// diagnosing-mcp skill doc, §2/pitfall 12). So a user whose servers
+		// live in .agents/mcp.json would see them silently stop loading in
+		// ZCode once mcpproxy connects. Nothing is deleted or corrupted, but
+		// it's worth surfacing before the user clicks Connect.
+		Note: "If your MCP servers are defined in ~/.agents/mcp.json, they will stop loading in ZCode while this entry is present in ~/.zcode/cli/config.json.",
+		Icon: "zcode",
 	},
 }
 
@@ -168,8 +192,78 @@ func ConfigPath(clientID, homeDir string) string {
 	case "opencode":
 		return filepath.Join(opencodeConfigDir(homeDir), "opencode.json")
 
+	case "zcode":
+		// Same fixed-dotfile-under-$HOME pattern as Cursor/Windsurf: ZCode's own
+		// "diagnosing-mcp" skill documents this as the one user-level config file
+		// (`mcp.servers` field) on every OS — no platform app-data branching.
+		return filepath.Join(homeDir, ".zcode", "cli", "config.json")
+
 	default:
 		return ""
+	}
+}
+
+// serversMapPath returns the sequence of nested JSON/TOML keys leading to a
+// client's servers map, for the one client whose ServerKey is not a literal
+// top-level key. Returns nil for every other client, telling
+// getServersMap/setServersMap to fall back to the plain client.ServerKey
+// lookup they used before this existed.
+//
+// ZCode's config schema is strict (an unknown top-level-adjacent key drops a
+// server entry silently), and its documented shape nests server entries two
+// levels deep — {"mcp": {"servers": {...}}} — unlike every other supported
+// client's single flat key.
+func serversMapPath(clientID string) []string {
+	if clientID == "zcode" {
+		return []string{"mcp", "servers"}
+	}
+	return nil
+}
+
+// getServersMap resolves a client's servers map from parsed config data,
+// following serversMapPath when the client needs one and falling back to the
+// flat client.ServerKey lookup otherwise.
+func getServersMap(client *ClientDef, data map[string]interface{}) (map[string]interface{}, bool) {
+	path := serversMapPath(client.ID)
+	if path == nil {
+		m, ok := data[client.ServerKey].(map[string]interface{})
+		return m, ok
+	}
+	cur := data
+	for i, key := range path {
+		m, ok := cur[key].(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		if i == len(path)-1 {
+			return m, true
+		}
+		cur = m
+	}
+	return nil, false
+}
+
+// setServersMap writes serversMap back into data at a client's servers
+// location, creating any missing intermediate objects along the way (without
+// disturbing sibling keys already there) when the client needs a nested path.
+func setServersMap(client *ClientDef, data map[string]interface{}, serversMap map[string]interface{}) {
+	path := serversMapPath(client.ID)
+	if path == nil {
+		data[client.ServerKey] = serversMap
+		return
+	}
+	cur := data
+	for i, key := range path {
+		if i == len(path)-1 {
+			cur[key] = serversMap
+			return
+		}
+		next, ok := cur[key].(map[string]interface{})
+		if !ok {
+			next = make(map[string]interface{})
+			cur[key] = next
+		}
+		cur = next
 	}
 }
 
@@ -254,9 +348,10 @@ func (s *Service) checkedPaths(clientID string) []string {
 // the query fallback authenticate identically.
 func buildServerEntry(clientID string, p serverEntryParams) map[string]interface{} {
 	switch clientID {
-	case "claude-code", "vscode":
-		// Claude Code (~/.claude.json) and VS Code (mcp.json) "type":"http"
-		// entries support a "headers" object.
+	case "claude-code", "vscode", "zcode":
+		// Claude Code (~/.claude.json), VS Code (mcp.json) and ZCode
+		// (~/.zcode/cli/config.json, mcp.servers) "type":"http" entries all
+		// support a "headers" object.
 		return withAPIKeyHeader(map[string]interface{}{
 			"type": "http",
 			"url":  p.baseURL,

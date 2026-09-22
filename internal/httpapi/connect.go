@@ -74,7 +74,7 @@ func (s *Server) handleGetConnectStatus(w http.ResponseWriter, r *http.Request) 
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string true "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       client path   string true "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Success     200    {object} contracts.APIResponse "ClientStatus"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
@@ -123,7 +123,7 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client      path  string true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       client      path  string true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       server_name query string false "Entry name to preview (defaults to mcpproxy); mirror the value passed to POST connect"
 // @Success     200    {object} contracts.APIResponse "ConnectPreview"
 // @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
@@ -178,7 +178,7 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       body   body   ConnectRequest false "Optional connection parameters (server_name, force, precondition_token)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request"
@@ -250,7 +250,7 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       body   body   ConnectRequest false "Optional parameters (server_name)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request"
@@ -325,7 +325,7 @@ type UndoConnectRequest struct {
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string             true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       client path   string             true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       body   body   UndoConnectRequest false "Undo parameters (server_name, backup_name = the bare filename of the backup the preceding connect returned)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult (action restored|deleted)"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request (e.g. backup_name is a path, or not a backup of this client's config)"

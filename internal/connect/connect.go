@@ -640,8 +640,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	}
 
 	// Get or create the servers section
-	serversKey := client.ServerKey
-	serversMap, ok := data[serversKey].(map[string]interface{})
+	serversMap, ok := getServersMap(client, data)
 	if !ok {
 		serversMap = make(map[string]interface{})
 	}
@@ -692,7 +691,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// require_mcp_auth is on).
 	entry := buildServerEntry(client.ID, s.entryParams(false))
 	serversMap[serverName] = entry
-	data[serversKey] = serversMap
+	setServersMap(client, data, serversMap)
 
 	// Write atomically
 	encoded, err := marshalJSONIndent(data)
@@ -705,7 +704,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	}
 
 	// Verify by re-reading
-	if err := s.verifyJSONEntry(cfgPath, serversKey, serverName); err != nil {
+	if err := s.verifyJSONEntry(client, cfgPath, serverName); err != nil {
 		return nil, fmt.Errorf("verification failed: %w", err)
 	}
 
@@ -745,8 +744,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	serversKey := client.ServerKey
-	serversMap, ok := data[serversKey].(map[string]interface{})
+	serversMap, ok := getServersMap(client, data)
 	if !ok {
 		return &ConnectResult{
 			Success:    false,
@@ -754,7 +752,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 			ConfigPath: cfgPath,
 			ServerName: serverName,
 			Action:     "not_found",
-			Message:    fmt.Sprintf("No %s section found in %s", serversKey, client.Name),
+			Message:    fmt.Sprintf("No %s section found in %s", client.ServerKey, client.Name),
 		}, nil
 	}
 
@@ -776,7 +774,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 	}
 
 	delete(serversMap, serverName)
-	data[serversKey] = serversMap
+	setServersMap(client, data, serversMap)
 
 	info, _ := os.Stat(cfgPath)
 	perm := os.FileMode(0o644)
@@ -1021,7 +1019,7 @@ func marshalJSONIndent(data interface{}) ([]byte, error) {
 }
 
 // verifyJSONEntry re-reads the config file and checks that the expected entry exists.
-func (s *Service) verifyJSONEntry(path, serversKey, serverName string) error {
+func (s *Service) verifyJSONEntry(client *ClientDef, path, serverName string) error {
 	raw, err := s.read(path)
 	if err != nil {
 		return fmt.Errorf("re-read %s: %w", path, err)
@@ -1030,9 +1028,9 @@ func (s *Service) verifyJSONEntry(path, serversKey, serverName string) error {
 	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return fmt.Errorf("re-parse %s: %w", path, err)
 	}
-	serversMap, ok := data[serversKey].(map[string]interface{})
+	serversMap, ok := getServersMap(client, data)
 	if !ok {
-		return fmt.Errorf("missing %s key after write", serversKey)
+		return fmt.Errorf("missing %s key after write", client.ServerKey)
 	}
 	if _, exists := serversMap[serverName]; !exists {
 		return fmt.Errorf("entry %q missing after write", serverName)
@@ -1111,7 +1109,7 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		return entryLocation{}, false, false
 	}
 
-	serversMap, ok := data[client.ServerKey].(map[string]interface{})
+	serversMap, ok := getServersMap(&client, data)
 	if !ok {
 		return entryLocation{}, false, true
 	}
@@ -1218,6 +1216,7 @@ var trailingCommaPattern = regexp.MustCompile(`,\s*([}\]])`)
 
 func unmarshalLenientJSON(raw []byte, out interface{}) error {
 	if err := json.Unmarshal(raw, out); err == nil {
+		normalizeNilConfigMap(out)
 		return nil
 	}
 	// JSONC tolerance (#922): OpenCode bootstraps opencode.jsonc, which may
@@ -1228,7 +1227,25 @@ func unmarshalLenientJSON(raw []byte, out interface{}) error {
 		return cerr
 	}
 	cleaned = trailingCommaPattern.ReplaceAll(cleaned, []byte(`$1`))
-	return json.Unmarshal(cleaned, out)
+	if err := json.Unmarshal(cleaned, out); err != nil {
+		return err
+	}
+	normalizeNilConfigMap(out)
+	return nil
+}
+
+// normalizeNilConfigMap replaces a nil map[string]interface{} left by
+// unmarshaling a top-level JSON `null` with an empty map. A config file
+// containing exactly `null` parses without error, but every caller that goes
+// on to write into the result (setServersMap, connectJSON's data[serversKey]
+// assignment) would otherwise panic with "assignment to entry in nil map" —
+// and the same nil can flow into undo's replayConnectWrite via a backup file
+// that was itself "null". Callers that only read from the map are unaffected
+// either way (indexing a nil map is safe), so this is a no-op for them.
+func normalizeNilConfigMap(out interface{}) {
+	if p, ok := out.(*map[string]interface{}); ok && *p == nil {
+		*p = make(map[string]interface{})
+	}
 }
 
 // stripJSONComments removes // line and /* */ block comments from JSONC input,

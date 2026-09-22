@@ -4497,7 +4497,7 @@ paths:
         Creates a backup of the existing config before modifying.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode)
+          codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -4555,7 +4555,7 @@ paths:
         accessible|absent|denied|malformed and populates remediation when denied.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode)
+          codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -4598,7 +4598,7 @@ paths:
         force=true). force=true never rescues a stale token.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode)
+          codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -4674,7 +4674,7 @@ paths:
         treat its presence as "Connect unavailable").
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode)
+          codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true
@@ -4732,7 +4732,7 @@ paths:
         as backup_path in the result.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
-          codex, gemini, opencode)
+          codex, gemini, opencode, zcode)
         in: path
         name: client
         required: true

@@ -231,7 +231,7 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 			return nil, fmt.Errorf("parse backup JSON: %w", err)
 		}
 	}
-	serversMap, _ := data[client.ServerKey].(map[string]interface{})
+	serversMap, _ := getServersMap(client, data)
 	if serversMap == nil {
 		serversMap = make(map[string]interface{})
 	}
@@ -243,6 +243,6 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 		}
 	}
 	serversMap[serverName] = buildServerEntry(client.ID, s.entryParams(false))
-	data[client.ServerKey] = serversMap
+	setServersMap(client, data, serversMap)
 	return marshalJSONIndent(data)
 }
