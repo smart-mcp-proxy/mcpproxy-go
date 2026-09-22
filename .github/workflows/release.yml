@@ -449,14 +449,21 @@ jobs:
           if [ "$EDITION" != "server" ] && { [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; }; then
             echo "Building mcpproxy-tray for ${{ matrix.goos }}..."
 
-            # Determine tray binary name
+            # Determine tray binary name, and on Windows link it as a GUI
+            # (not console) executable. Without -H windowsgui the tray pops a
+            # console window on every launch; scripts/build-windows-installer.ps1
+            # has always passed it, and the archived copy must match, because a
+            # tray self-update extracts THIS binary and installs it over the
+            # installer's copy (internal/tray applyArchiveUpdate).
+            TRAY_LDFLAGS="${LDFLAGS}"
             if [ "${{ matrix.goos }}" = "windows" ]; then
               TRAY_BINARY="mcpproxy-tray.exe"
+              TRAY_LDFLAGS="${LDFLAGS} -H windowsgui"
             else
               TRAY_BINARY="mcpproxy-tray"
             fi
 
-            go build -ldflags "${LDFLAGS}" -o ${TRAY_BINARY} ./cmd/mcpproxy-tray
+            go build -ldflags "${TRAY_LDFLAGS}" -o ${TRAY_BINARY} ./cmd/mcpproxy-tray
           fi
 
           # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)

@@ -248,7 +248,11 @@ jobs:
             go build -ldflags "${LDFLAGS}" -o mcpproxy-tray ./cmd/mcpproxy-tray
           elif [ "${{ matrix.goos }}" = "windows" ]; then
             echo "Building mcpproxy-tray.exe for Windows..."
-            go build -ldflags "${LDFLAGS}" -o mcpproxy-tray.exe ./cmd/mcpproxy-tray
+            # -H windowsgui matches scripts/build-windows-installer.ps1: the
+            # tray must link as a GUI executable or it opens a console window
+            # on launch, and a self-update installs this copy over the
+            # installer's.
+            go build -ldflags "${LDFLAGS} -H windowsgui" -o mcpproxy-tray.exe ./cmd/mcpproxy-tray
           fi
 
           # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)
