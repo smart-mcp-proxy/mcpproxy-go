@@ -446,6 +446,92 @@ func TestPreview_NonObjectServersSection_IsMalformed(t *testing.T) {
 			t.Fatalf("expected access_state=%q for a non-object servers section, got %q", accessMalformed, preview.AccessState)
 		}
 	})
+
+	// ZCode (added by #1339, merged into main after this fix was written) is
+	// the one client with a NESTED servers path (mcp.servers, via
+	// serversMapPath) rather than a flat top-level key — proving the fix
+	// generalizes via resolveServersMapState, not just the flat case.
+	t.Run("JSON client with nested servers path (zcode), leaf non-object", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("zcode", home)
+		writeFileT(t, cfgPath, `{"mcp":{"servers":"old"}}`)
+
+		preview, err := svc.Preview("zcode", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview should not hard-error on a non-object servers section: %v", err)
+		}
+		if preview.AccessState != accessMalformed {
+			t.Fatalf("expected access_state=%q for a non-object servers section, got %q", accessMalformed, preview.AccessState)
+		}
+	})
+
+	t.Run("JSON client with nested servers path (zcode), intermediate non-object", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("zcode", home)
+		// The INTERMEDIATE level ("mcp") is non-object here, not the leaf
+		// ("servers") — resolveServersMapState must catch this too, since a
+		// hand-edited config could corrupt either level of a nested path.
+		writeFileT(t, cfgPath, `{"mcp":"old"}`)
+
+		preview, err := svc.Preview("zcode", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview should not hard-error on a non-object servers section: %v", err)
+		}
+		if preview.AccessState != accessMalformed {
+			t.Fatalf("expected access_state=%q for a non-object intermediate level, got %q", accessMalformed, preview.AccessState)
+		}
+	})
+}
+
+// TestConnect_ZCode_NonObjectServersSection_RefusesWithoutToken is the ZCode
+// counterpart to TestConnect_NonObjectServersSection_RefusesWithoutToken,
+// added once ZCode (#1339) actually existed in this codebase — the original
+// task asked for coverage on "at least one flat-key client and zcode, to
+// prove the fix isn't client-specific." Both the leaf and the intermediate
+// non-object cases must refuse the write, at either nesting level, without
+// creating a backup or touching the file.
+func TestConnect_ZCode_NonObjectServersSection_RefusesWithoutToken(t *testing.T) {
+	t.Run("leaf (mcp.servers) is non-object", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("zcode", home)
+		const original = `{"mcp":{"servers":42}}`
+		writeFileT(t, cfgPath, original)
+
+		res, err := svc.Connect("zcode", "mcpproxy", true)
+		if err == nil {
+			t.Fatalf("expected a refusal error, got res=%+v err=nil", res)
+		}
+		if res != nil {
+			t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+		}
+		if got := readConfigT(t, cfgPath); got != original {
+			t.Fatalf("config must be untouched after a refusal:\n got:  %s\n want: %s", got, original)
+		}
+		if n := backupCount(t, cfgPath); n != 0 {
+			t.Fatalf("a refused write must not create a backup, found %d", n)
+		}
+	})
+
+	t.Run("intermediate (mcp) is non-object", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("zcode", home)
+		const original = `{"mcp":["not","an","object"]}`
+		writeFileT(t, cfgPath, original)
+
+		res, err := svc.Connect("zcode", "mcpproxy", true)
+		if err == nil {
+			t.Fatalf("expected a refusal error, got res=%+v err=nil", res)
+		}
+		if res != nil {
+			t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+		}
+		if got := readConfigT(t, cfgPath); got != original {
+			t.Fatalf("config must be untouched after a refusal:\n got:  %s\n want: %s", got, original)
+		}
+		if n := backupCount(t, cfgPath); n != 0 {
+			t.Fatalf("a refused write must not create a backup, found %d", n)
+		}
+	})
 }
 
 // TestConnectWithPrecondition_NonObjectServersSection_RefusesDrift is the exact

@@ -27,7 +27,7 @@ func GetConnectCommand() *cobra.Command {
 AI coding clients. This modifies the client's config file to add an HTTP/SSE
 entry pointing to the running MCPProxy instance.
 
-Supported clients: claude-code, cursor, windsurf, vscode, codex, gemini, opencode
+Supported clients: claude-code, cursor, windsurf, vscode, codex, gemini, opencode, zcode
 
 A backup of the original config file is created before any modification.
 

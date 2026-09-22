@@ -227,20 +227,16 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 	}
 
 	if len(backupRaw) > 0 {
+		// unmarshalLenientJSON normalizes a top-level JSON `null` back to a
+		// non-nil map on success (a backup that is exactly "null" would
+		// otherwise reset the pre-initialized `data` above to nil and panic on
+		// the setServersMap write below), so no additional nil check is needed
+		// here.
 		if err := unmarshalLenientJSON(backupRaw, &data); err != nil {
 			return nil, fmt.Errorf("parse backup JSON: %w", err)
 		}
-		if data == nil {
-			// A backup containing exactly the JSON literal `null` unmarshals
-			// successfully but RESETS the pre-initialized `data` map above back to
-			// nil (encoding/json's null-into-pointer behavior applies even when the
-			// pointee already held a map) — the same nil-map class fixed in
-			// readOrCreateJSON, but here it panicked at the `data[client.ServerKey]
-			// = serversMap` assignment below instead.
-			data = make(map[string]interface{})
-		}
 	}
-	serversMap, _ := data[client.ServerKey].(map[string]interface{})
+	serversMap, _ := getServersMap(client, data)
 	if serversMap == nil {
 		serversMap = make(map[string]interface{})
 	}
@@ -252,6 +248,6 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 		}
 	}
 	serversMap[serverName] = buildServerEntry(client.ID, s.entryParams(false))
-	data[client.ServerKey] = serversMap
+	setServersMap(client, data, serversMap)
 	return marshalJSONIndent(data)
 }

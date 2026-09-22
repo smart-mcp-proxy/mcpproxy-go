@@ -595,6 +595,7 @@ function clientIcon(client: ClientStatus): string {
     'zed': '\u26A1',
     'cline': '\u{1F916}',
     'continue': '\u27A1\uFE0F',
+    'zcode': '\u{1F9BE}',
   }
   return iconMap[client.id] || client.icon || '\u{1F527}'
 }

@@ -656,9 +656,11 @@ func (s *Service) guardJsoncComments(cfgPath string) error {
 	return nil
 }
 
-// refuseIfServersSectionRaced re-reads cfgPath and reports whether the
-// servers section (serversKey, decoded per format — "json" or "toml") has
-// become present-but-not-an-object since an earlier read. connectJSON/
+// refuseIfServersSectionRaced re-reads cfgPath and reports whether client's
+// servers section (following serversMapPath for a nested-schema client like
+// ZCode, or the flat client.ServerKey lookup otherwise — the same resolution
+// resolveServersMapState uses everywhere else) has become present-but-not-
+// an-object since an earlier read. connectJSON/
 // connectTOML each call this TWICE against the same drift class (Spec 091
 // FR-005 gap) — on top of the type assertion the function body's own read
 // already does for its existence/force/adoption decisions — because that
@@ -696,31 +698,28 @@ func (s *Service) guardJsoncComments(cfgPath string) error {
 // class of problem, and the imminent backup/write attempt (or its own
 // pre-existing error handling) is what surfaces them. Only "parsed fine AND
 // the key is present AND it is not the right container type" refuses.
-func (s *Service) refuseIfServersSectionRaced(cfgPath, serversKey, format string) error {
+func (s *Service) refuseIfServersSectionRaced(client *ClientDef, cfgPath string) error {
 	raw, err := s.read(cfgPath)
 	if err != nil {
 		return nil
 	}
 	var data map[string]interface{}
-	if format == "toml" {
+	if client.Format == "toml" {
 		if _, derr := toml.Decode(string(raw), &data); derr != nil {
 			return nil
 		}
 	} else if derr := unmarshalLenientJSON(raw, &data); derr != nil {
 		return nil
 	}
-	rawSection, present := data[serversKey]
-	if !present {
-		return nil
-	}
-	if _, ok := rawSection.(map[string]interface{}); ok {
+	_, _, malformed := resolveServersMapState(client, data)
+	if !malformed {
 		return nil
 	}
 	containerWord := "a JSON object"
-	if format == "toml" {
+	if client.Format == "toml" {
 		containerWord = "a TOML table"
 	}
-	return fmt.Errorf("%s: %q was changed to a non-object value while MCPProxy was about to write it (expected %s); refusing to overwrite it — retry", cfgPath, serversKey, containerWord)
+	return fmt.Errorf("%s: %q was changed to a non-object value while MCPProxy was about to write it (expected %s); refusing to overwrite it — retry", cfgPath, client.ServerKey, containerWord)
 }
 
 // connectJSON writes the entry, adopting the entry `resolved` names when it
@@ -738,23 +737,22 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		return nil, err
 	}
 
-	// Get or create the servers section. A key that is PRESENT but not an
-	// object (a hand-edited string/number/array/bool) must refuse, not
-	// silently fall through to "no entries yet": the code below would
-	// otherwise replace it with a brand-new empty map, discarding whatever was
-	// there without ever giving drift detection a chance to catch it. This is
-	// the first of THREE checks against this drift class — see the second,
-	// pre-backup one below and the third, inside atomicWriteFile's preRename
-	// hook, for why this one alone is not authoritative.
-	serversKey := client.ServerKey
-	rawSection, keyPresent := data[serversKey]
-	var serversMap map[string]interface{}
-	if !keyPresent {
+	// Get or create the servers section. A key along the path (see
+	// serversMapPath — flat for most clients, nested for ZCode) that is
+	// PRESENT but not an object (a hand-edited string/number/array/bool, or a
+	// non-table intermediate level) must refuse, not silently fall through to
+	// "no entries yet": the code below would otherwise replace it with a
+	// brand-new empty map, discarding whatever was there without ever giving
+	// drift detection a chance to catch it. This is the first of THREE checks
+	// against this drift class — see the second, pre-backup one below and the
+	// third, inside atomicWriteFile's preRename hook, for why this one alone
+	// is not authoritative.
+	serversMap, found, malformed := resolveServersMapState(client, data)
+	if malformed {
+		return nil, fmt.Errorf("%s: %q is not a JSON object; refusing to overwrite it — fix the config manually and retry", cfgPath, client.ServerKey)
+	}
+	if !found {
 		serversMap = make(map[string]interface{})
-	} else if m, ok := rawSection.(map[string]interface{}); ok {
-		serversMap = m
-	} else {
-		return nil, fmt.Errorf("%s: %q is not a JSON object; refusing to overwrite it — fix the config manually and retry", cfgPath, serversKey)
 	}
 
 	action := "created"
@@ -796,7 +794,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// SECOND check for the same drift class (Spec 091 FR-005 gap; round-3
 	// cross-model review finding): a fast-fail, before backupFile's own real
 	// I/O, for a change that landed since the top-of-function read.
-	if err := s.refuseIfServersSectionRaced(cfgPath, serversKey, "json"); err != nil {
+	if err := s.refuseIfServersSectionRaced(client, cfgPath); err != nil {
 		return nil, err
 	}
 
@@ -810,7 +808,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// require_mcp_auth is on).
 	entry := buildServerEntry(client.ID, s.entryParams(false))
 	serversMap[serverName] = entry
-	data[serversKey] = serversMap
+	setServersMap(client, data, serversMap)
 
 	// Write atomically
 	encoded, err := marshalJSONIndent(data)
@@ -829,13 +827,13 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// this runs, so a check called from here would still leave THAT staging
 	// gap open, per round 5.
 	if err := atomicWriteFile(cfgPath, encoded, perm, func() error {
-		return s.refuseIfServersSectionRaced(cfgPath, serversKey, "json")
+		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 
 	// Verify by re-reading
-	if err := s.verifyJSONEntry(cfgPath, serversKey, serverName); err != nil {
+	if err := s.verifyJSONEntry(client, cfgPath, serverName); err != nil {
 		return nil, fmt.Errorf("verification failed: %w", err)
 	}
 
@@ -875,8 +873,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	serversKey := client.ServerKey
-	serversMap, ok := data[serversKey].(map[string]interface{})
+	serversMap, ok := getServersMap(client, data)
 	if !ok {
 		return &ConnectResult{
 			Success:    false,
@@ -884,7 +881,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 			ConfigPath: cfgPath,
 			ServerName: serverName,
 			Action:     "not_found",
-			Message:    fmt.Sprintf("No %s section found in %s", serversKey, client.Name),
+			Message:    fmt.Sprintf("No %s section found in %s", client.ServerKey, client.Name),
 		}, nil
 	}
 
@@ -906,7 +903,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 	}
 
 	delete(serversMap, serverName)
-	data[serversKey] = serversMap
+	setServersMap(client, data, serversMap)
 
 	info, _ := os.Stat(cfgPath)
 	perm := os.FileMode(0o644)
@@ -949,14 +946,12 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	// first of three checks against this drift class — see the second,
 	// pre-backup one below and the third, inside atomicWriteFile's preRename
 	// hook.
-	rawSection, keyPresent := data["mcp_servers"]
-	var serversMap map[string]interface{}
-	if !keyPresent {
+	serversMap, found, malformed := resolveServersMapState(client, data)
+	if malformed {
+		return nil, fmt.Errorf("%s: %q is not a TOML table; refusing to overwrite it — fix the config manually and retry", cfgPath, client.ServerKey)
+	}
+	if !found {
 		serversMap = make(map[string]interface{})
-	} else if m, ok := rawSection.(map[string]interface{}); ok {
-		serversMap = m
-	} else {
-		return nil, fmt.Errorf("%s: %q is not a TOML table; refusing to overwrite it — fix the config manually and retry", cfgPath, "mcp_servers")
 	}
 
 	action := "created"
@@ -977,7 +972,7 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	// Second check — a fast-fail before backupFile's own real I/O. See
 	// refuseIfServersSectionRaced's doc comment for why this alone still
 	// leaves a window, and the third check below that closes it.
-	if err := s.refuseIfServersSectionRaced(cfgPath, "mcp_servers", "toml"); err != nil {
+	if err := s.refuseIfServersSectionRaced(client, cfgPath); err != nil {
 		return nil, err
 	}
 
@@ -991,7 +986,7 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	// exactly what preview renders (Spec 078 FR-002).
 	entry := buildServerEntry(client.ID, s.entryParams(false))
 	serversMap[serverName] = entry
-	data["mcp_servers"] = serversMap
+	setServersMap(client, data, serversMap)
 
 	// Encode TOML
 	var buf bytes.Buffer
@@ -1004,7 +999,7 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	// comment for why this must be atomicWriteFile's preRename hook rather
 	// than a call from here.
 	if err := atomicWriteFile(cfgPath, buf.Bytes(), perm, func() error {
-		return s.refuseIfServersSectionRaced(cfgPath, "mcp_servers", "toml")
+		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
@@ -1125,17 +1120,12 @@ func (s *Service) readOrCreateJSON(path string) (map[string]interface{}, os.File
 		perm = info.Mode()
 	}
 
+	// unmarshalLenientJSON normalizes a top-level JSON `null` (which decodes
+	// successfully but would otherwise leave a nil map) back to a non-nil
+	// empty map on success, so no additional nil check is needed here.
 	var data map[string]interface{}
 	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return nil, perm, fmt.Errorf("parse JSON in %s: %w", path, err)
-	}
-	if data == nil {
-		// A config file containing exactly the JSON literal `null` (or nested
-		// only in whitespace/comments that lenient-parse to null) decodes
-		// successfully with a nil top-level map — encoding/json leaves the target
-		// untouched for a JSON null. Treating that as "no top-level object yet"
-		// (same as a missing file) avoids a nil-map write panic below.
-		data = make(map[string]interface{})
 	}
 
 	return data, perm, nil
@@ -1183,7 +1173,7 @@ func marshalJSONIndent(data interface{}) ([]byte, error) {
 }
 
 // verifyJSONEntry re-reads the config file and checks that the expected entry exists.
-func (s *Service) verifyJSONEntry(path, serversKey, serverName string) error {
+func (s *Service) verifyJSONEntry(client *ClientDef, path, serverName string) error {
 	raw, err := s.read(path)
 	if err != nil {
 		return fmt.Errorf("re-read %s: %w", path, err)
@@ -1192,9 +1182,9 @@ func (s *Service) verifyJSONEntry(path, serversKey, serverName string) error {
 	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return fmt.Errorf("re-parse %s: %w", path, err)
 	}
-	serversMap, ok := data[serversKey].(map[string]interface{})
+	serversMap, ok := getServersMap(client, data)
 	if !ok {
-		return fmt.Errorf("missing %s key after write", serversKey)
+		return fmt.Errorf("missing %s key after write", client.ServerKey)
 	}
 	if _, exists := serversMap[serverName]; !exists {
 		return fmt.Errorf("entry %q missing after write", serverName)
@@ -1273,16 +1263,15 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		return entryLocation{}, false, false
 	}
 
-	rawSection, keyPresent := data[client.ServerKey]
-	if !keyPresent {
-		return entryLocation{}, false, true
-	}
-	serversMap, ok := rawSection.(map[string]interface{})
-	if !ok {
+	serversMap, keyFound, malformed := resolveServersMapState(&client, data)
+	if malformed {
 		// Present but not an object — same malformed classification as
 		// resolveExistingEntry/preWriteState, so GetStatus does not report
 		// "not connected" for a config a connect/preview call would refuse.
 		return entryLocation{}, false, false
+	}
+	if !keyFound {
+		return entryLocation{}, false, true
 	}
 
 	// Anchor on the credential-free base URL so both new clean entries and
@@ -1387,6 +1376,7 @@ var trailingCommaPattern = regexp.MustCompile(`,\s*([}\]])`)
 
 func unmarshalLenientJSON(raw []byte, out interface{}) error {
 	if err := json.Unmarshal(raw, out); err == nil {
+		normalizeNilConfigMap(out)
 		return nil
 	}
 	// JSONC tolerance (#922): OpenCode bootstraps opencode.jsonc, which may
@@ -1397,7 +1387,25 @@ func unmarshalLenientJSON(raw []byte, out interface{}) error {
 		return cerr
 	}
 	cleaned = trailingCommaPattern.ReplaceAll(cleaned, []byte(`$1`))
-	return json.Unmarshal(cleaned, out)
+	if err := json.Unmarshal(cleaned, out); err != nil {
+		return err
+	}
+	normalizeNilConfigMap(out)
+	return nil
+}
+
+// normalizeNilConfigMap replaces a nil map[string]interface{} left by
+// unmarshaling a top-level JSON `null` with an empty map. A config file
+// containing exactly `null` parses without error, but every caller that goes
+// on to write into the result (setServersMap, connectJSON's data[serversKey]
+// assignment) would otherwise panic with "assignment to entry in nil map" —
+// and the same nil can flow into undo's replayConnectWrite via a backup file
+// that was itself "null". Callers that only read from the map are unaffected
+// either way (indexing a nil map is safe), so this is a no-op for them.
+func normalizeNilConfigMap(out interface{}) {
+	if p, ok := out.(*map[string]interface{}); ok && *p == nil {
+		*p = make(map[string]interface{})
+	}
 }
 
 // stripJSONComments removes // line and /* */ block comments from JSONC input,
