@@ -235,10 +235,20 @@ jobs:
           # it is not made here.
           go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
 
-          # Build tray binary for macOS
+          # Build tray binary for the platforms with GUI support, matching
+          # release.yml. Windows matters here even though the RC tray reaches
+          # users through the Inno installer (built further below, AFTER the
+          # archives): that installed tray self-updates by downloading this
+          # job's .zip and extracting the mcpproxy-tray.exe member by name, so
+          # a zip built without it leaves every Windows RC tray unable to
+          # update. As in release.yml, the archived tray is unsigned — SignPath
+          # signs installers, not archive members.
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             echo "Building mcpproxy-tray for macOS..."
             go build -ldflags "${LDFLAGS}" -o mcpproxy-tray ./cmd/mcpproxy-tray
+          elif [ "${{ matrix.goos }}" = "windows" ]; then
+            echo "Building mcpproxy-tray.exe for Windows..."
+            go build -ldflags "${LDFLAGS}" -o mcpproxy-tray.exe ./cmd/mcpproxy-tray
           fi
 
           # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)
