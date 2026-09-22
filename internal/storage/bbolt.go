@@ -39,8 +39,10 @@ type BoltDB struct {
 func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	dbPath := filepath.Join(dataDir, "config.db")
 
-	// Try to open with timeout, if it fails, immediately return database locked error
-	db, err := bbolt.Open(dbPath, 0644, &bbolt.Options{
+	// Try to open with timeout, if it fails, immediately return database locked error.
+	// The database holds OAuth tokens and DCR client secrets, so it is created
+	// owner-only (0600).
+	db, err := bbolt.Open(dbPath, 0600, &bbolt.Options{
 		Timeout: 10 * time.Second,
 	})
 	if err != nil {
@@ -59,6 +61,10 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 		return nil, fmt.Errorf("failed to open bolt database: %w", err)
 	}
 
+	// The mode passed to bbolt.Open only applies when the file is created, so
+	// databases created by older builds keep their 0644 mode. Tighten them here.
+	tightenFilePermissions(dbPath, logger)
+
 	boltDB := &BoltDB{
 		db:     db,
 		logger: logger,
@@ -71,6 +77,31 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	}
 
 	return boltDB, nil
+}
+
+// tightenFilePermissions clears group and other permission bits from path,
+// leaving owner bits untouched so a deliberately stricter mode is never widened.
+// It is best-effort: any failure is logged at debug level and ignored, because a
+// mode that cannot be tightened (read-only mount, exotic filesystem, Windows)
+// must never prevent the proxy from starting.
+func tightenFilePermissions(path string, logger *zap.SugaredLogger) {
+	info, err := os.Stat(path)
+	if err != nil {
+		logger.Debugf("Could not stat %s to check file permissions: %v", path, err)
+		return
+	}
+
+	perm := info.Mode().Perm()
+	if perm&0o077 == 0 {
+		return
+	}
+
+	if err := os.Chmod(path, perm&^0o077); err != nil {
+		logger.Debugf("Could not tighten permissions on %s: %v", path, err)
+		return
+	}
+
+	logger.Debugf("Tightened permissions on %s from %#o to %#o", path, perm, perm&^0o077)
 }
 
 // Close closes the database
@@ -663,11 +694,54 @@ func (b *BoltDB) DeleteServerPromptApprovals(serverName string) error {
 
 // Generic operations
 
-// Backup creates a backup of the database
+// Backup creates a backup of the database.
+// The copy carries the same secrets as the live database and the destination is
+// caller-chosen (potentially outside the 0700 data directory), so it is written
+// owner-only.
 func (b *BoltDB) Backup(destPath string) error {
-	return b.db.View(func(tx *bbolt.Tx) error {
-		return tx.CopyFile(destPath, 0644)
-	})
+	// bbolt's Tx.CopyFile opens the destination with O_CREATE|O_TRUNC, so its
+	// mode argument is ignored when the file already exists: writing straight to
+	// destPath would pour the database into whatever permissions a stale backup
+	// happened to carry, and a chmod afterwards comes too late. Stage the copy in
+	// an owner-only temporary file (os.CreateTemp creates it 0600) next to the
+	// destination, then rename it into place - the rename keeps the temp file's
+	// inode and so carries the 0600 mode with it (atomically on POSIX; Go makes
+	// no atomicity promise on Windows).
+	tmpFile, err := os.CreateTemp(filepath.Dir(destPath), ".config.db.backup-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary backup file: %w", err)
+	}
+
+	tmpPath := tmpFile.Name()
+	renamed := false
+	defer func() {
+		tmpFile.Close() //nolint:errcheck // best-effort cleanup; Close below is the checked one
+		if !renamed {
+			os.Remove(tmpPath) //nolint:errcheck // best-effort cleanup
+		}
+	}()
+
+	if err := b.db.View(func(tx *bbolt.Tx) error {
+		_, writeErr := tx.WriteTo(tmpFile)
+		return writeErr
+	}); err != nil {
+		return fmt.Errorf("failed to write backup: %w", err)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("failed to flush backup: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close backup: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return fmt.Errorf("failed to move backup into place: %w", err)
+	}
+	renamed = true
+
+	return nil
 }
 
 // Stats returns database statistics
