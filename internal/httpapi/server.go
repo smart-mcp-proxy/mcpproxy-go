@@ -563,7 +563,9 @@ func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Reques
 		s.handleAgentTokenAuth(w, r, next, token)
 		return
 	}
-	if token != "" && token == cfg.APIKey {
+	// Timing-safe compare. ConstantTimeEqual also rejects an empty token, so
+	// it subsumes the previous `token != ""` guard.
+	if auth.ConstantTimeEqual(token, cfg.APIKey) {
 		s.logger.Debugw("TCP connection with valid API key",
 			zap.String("path", r.URL.Path),
 			zap.String("remote_addr", r.RemoteAddr))
@@ -590,7 +592,9 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 		s.handleAgentTokenAuth(w, r, next, token)
 		return
 	}
-	if token != "" && token == cfg.APIKey {
+	// Timing-safe compare. ConstantTimeEqual also rejects an empty token, so
+	// it subsumes the previous `token != ""` guard.
+	if auth.ConstantTimeEqual(token, cfg.APIKey) {
 		s.logger.Debugw("TCP connection with valid API key",
 			zap.String("path", r.URL.Path),
 			zap.String("remote_addr", r.RemoteAddr))
