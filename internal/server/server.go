@@ -2282,16 +2282,19 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 		}
 	}
 
-	// Update runtime config
-	currentConfig := s.runtime.Config()
-	if currentConfig != nil {
-		for i, sc := range currentConfig.Servers {
+	// Update runtime config — copy-on-write: Config() is the published
+	// snapshot that DiscoverAndIndexTools and others range over without a
+	// lock, so mutating its Servers slice in place is a DATA RACE.
+	if currentConfig := s.runtime.Config(); currentConfig != nil {
+		updated := *currentConfig
+		updated.Servers = append([]*config.ServerConfig(nil), currentConfig.Servers...)
+		for i, sc := range updated.Servers {
 			if sc.Name == serverName {
-				currentConfig.Servers[i] = existing
+				updated.Servers[i] = existing
 				break
 			}
 		}
-		s.runtime.UpdateConfig(currentConfig, "")
+		s.runtime.UpdateConfig(&updated, "")
 	}
 
 	// Push the refreshed config to the live manager client so hot-reloadable

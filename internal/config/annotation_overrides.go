@@ -61,43 +61,6 @@ func EffectiveAnnotationsForTool(overrides map[string]*ToolAnnotations, toolName
 	return base
 }
 
-// annotationsEqual reports value equality for two ToolAnnotations, comparing
-// Title and dereferenced *bool hints (nil == nil). Pointer identity is ignored.
-func annotationsEqual(a, b *ToolAnnotations) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	if a.Title != b.Title {
-		return false
-	}
-	if !boolPtrEqual(a.ReadOnlyHint, b.ReadOnlyHint) {
-		return false
-	}
-	if !boolPtrEqual(a.DestructiveHint, b.DestructiveHint) {
-		return false
-	}
-	if !boolPtrEqual(a.IdempotentHint, b.IdempotentHint) {
-		return false
-	}
-	if !boolPtrEqual(a.OpenWorldHint, b.OpenWorldHint) {
-		return false
-	}
-	return true
-}
-
-func boolPtrEqual(a, b *bool) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return *a == *b
-}
-
 // CloneAnnotationOverrides deep-copies an annotation_overrides map (values and
 // their *bool hints) so hot-reload snapshots never alias the caller's map.
 // Nil in, nil out; nil values are preserved as nil.

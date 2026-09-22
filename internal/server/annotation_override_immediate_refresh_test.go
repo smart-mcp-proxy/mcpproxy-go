@@ -34,37 +34,8 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
-// servedHints returns the (destructiveHint, readOnlyHint) the production GET
-// path would serve for the named tool (Runtime.GetServerTools → StateView
-// snapshot). The snapshot carries *config.ToolAnnotations, not JSON maps.
-func servedHints(t *testing.T, rt *runtime.Runtime, server, tool string) (destructive, readOnly *bool) {
-	t.Helper()
-	tools, err := rt.GetServerTools(server)
-	require.NoError(t, err)
-	for _, tm := range tools {
-		if tm["name"] == tool {
-			ann, ok := tm["annotations"].(*config.ToolAnnotations)
-			require.True(t, ok, "served annotations must be *config.ToolAnnotations, got %T", tm["annotations"])
-			if ann == nil {
-				return nil, nil
-			}
-			return ann.DestructiveHint, ann.ReadOnlyHint
-		}
-	}
-	t.Fatalf("tool %q not served for server %q", tool, server)
-	return nil, nil
-}
-
-func boolVal(b *bool) interface{} {
-	if b == nil {
-		return nil
-	}
-	return *b
-}
-
 // servedAnnotations is the map form the existing test body expects (keys
-// "destructiveHint"/"readOnlyHint" etc). Kept for the test assertions that
-// compare via map lookup; built from the same StateView snapshot as servedHints.
+// "destructiveHint"/"readOnlyHint" etc) for assertions that compare via map lookup.
 func servedAnnotations(t *testing.T, rt *runtime.Runtime, server, tool string) map[string]interface{} {
 	t.Helper()
 	tools, err := rt.GetServerTools(server)
