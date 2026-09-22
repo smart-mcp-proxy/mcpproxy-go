@@ -131,6 +131,26 @@ func (m *scopeMgmtService) ListServers(context.Context) ([]*contracts.Server, *c
 	return out, stats, nil
 }
 
+// Doctor mirrors the production management service (internal/management.Doctor),
+// including its #1166 scope gate: a server the caller may not enumerate
+// contributes nothing to the diagnosis it is handed. Reporting one upstream
+// error per surviving server lets a scoped-caller test confirm the hidden
+// server is absent.
+func (m *scopeMgmtService) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
+	diag := &contracts.Diagnostics{}
+	for i := range m.servers {
+		if !auth.CanEnumerateServer(ctx, m.servers[i].Name) {
+			continue
+		}
+		diag.UpstreamErrors = append(diag.UpstreamErrors, contracts.UpstreamError{
+			ServerName:   m.servers[i].Name,
+			ErrorMessage: "fixture error for " + m.servers[i].Name,
+		})
+	}
+	diag.TotalIssues = len(diag.UpstreamErrors)
+	return diag, nil
+}
+
 func (m *scopeMgmtService) GetServerTools(_ context.Context, name string) ([]map[string]interface{}, error) {
 	return []map[string]interface{}{
 		{"name": name + "_tool", "server_name": name, "description": "tool of " + name},
