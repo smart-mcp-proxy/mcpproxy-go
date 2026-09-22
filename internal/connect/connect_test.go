@@ -346,6 +346,50 @@ func TestConnect_ClaudeCode_AuthOn_UsesHeader(t *testing.T) {
 	}
 }
 
+// TestConnect_TopLevelJSONNullDoesNotPanic reproduces a config file whose
+// entire content is the 4-byte JSON literal `null` (e.g. a corrupted or
+// half-written file). json.Unmarshal accepts this without error but leaves
+// the destination map nil, and every write path in this package used to
+// assume a non-nil map — `data[serversKey] = serversMap` and the nested
+// setServersMap both panic with "assignment to entry in nil map" on a nil
+// map. This is not client-specific (both the flat-key and nested-key paths
+// route through the same unmarshalLenientJSON), so it's exercised once per
+// path shape.
+func TestConnect_TopLevelJSONNullDoesNotPanic(t *testing.T) {
+	for _, clientID := range []string{"cursor", "zcode"} {
+		t.Run(clientID, func(t *testing.T) {
+			svc, home := testService(t)
+			cfgPath := ConfigPath(clientID, home)
+			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cfgPath, []byte("null"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			res, err := svc.Connect(clientID, "", false)
+			if err != nil {
+				t.Fatalf("Connect panicked or errored on a top-level null config: %v", err)
+			}
+			if !res.Success || res.Action != "created" {
+				t.Fatalf("expected created success, got %+v", res)
+			}
+
+			raw, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var data map[string]interface{}
+			if err := json.Unmarshal(raw, &data); err != nil {
+				t.Fatal(err)
+			}
+			if data == nil {
+				t.Fatal("expected a real config object written, got null-equivalent")
+			}
+		})
+	}
+}
+
 func TestConfigPath_ZCode(t *testing.T) {
 	homeDir := t.TempDir()
 	got := ConfigPath("zcode", homeDir)
@@ -963,6 +1007,19 @@ func TestDisconnect_TOML(t *testing.T) {
 // Claude Desktop only speaks stdio, so mcpproxy connects via an mcp-remote
 // stdio bridge instead of a direct HTTP/SSE URL. It must be a supported,
 // one-click client.
+func TestZCode_NoteWarnsAboutAgentsFallbackShadowing(t *testing.T) {
+	client := FindClient("zcode")
+	if client == nil {
+		t.Fatal("expected zcode client definition")
+	}
+	if client.Note == "" {
+		t.Error("zcode should carry a note explaining the .agents/mcp.json shadowing caveat")
+	}
+	if !strings.Contains(client.Note, ".agents/mcp.json") {
+		t.Errorf("zcode note should mention .agents/mcp.json, got: %q", client.Note)
+	}
+}
+
 func TestClaudeDesktop_SupportedWithBridgeNote(t *testing.T) {
 	client := FindClient("claude-desktop")
 	if client == nil {

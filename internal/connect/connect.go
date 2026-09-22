@@ -1216,6 +1216,7 @@ var trailingCommaPattern = regexp.MustCompile(`,\s*([}\]])`)
 
 func unmarshalLenientJSON(raw []byte, out interface{}) error {
 	if err := json.Unmarshal(raw, out); err == nil {
+		normalizeNilConfigMap(out)
 		return nil
 	}
 	// JSONC tolerance (#922): OpenCode bootstraps opencode.jsonc, which may
@@ -1226,7 +1227,25 @@ func unmarshalLenientJSON(raw []byte, out interface{}) error {
 		return cerr
 	}
 	cleaned = trailingCommaPattern.ReplaceAll(cleaned, []byte(`$1`))
-	return json.Unmarshal(cleaned, out)
+	if err := json.Unmarshal(cleaned, out); err != nil {
+		return err
+	}
+	normalizeNilConfigMap(out)
+	return nil
+}
+
+// normalizeNilConfigMap replaces a nil map[string]interface{} left by
+// unmarshaling a top-level JSON `null` with an empty map. A config file
+// containing exactly `null` parses without error, but every caller that goes
+// on to write into the result (setServersMap, connectJSON's data[serversKey]
+// assignment) would otherwise panic with "assignment to entry in nil map" —
+// and the same nil can flow into undo's replayConnectWrite via a backup file
+// that was itself "null". Callers that only read from the map are unaffected
+// either way (indexing a nil map is safe), so this is a no-op for them.
+func normalizeNilConfigMap(out interface{}) {
+	if p, ok := out.(*map[string]interface{}); ok && *p == nil {
+		*p = make(map[string]interface{})
+	}
 }
 
 // stripJSONComments removes // line and /* */ block comments from JSONC input,

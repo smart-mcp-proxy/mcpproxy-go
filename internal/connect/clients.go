@@ -102,7 +102,16 @@ var allClients = []ClientDef{
 		// serversMapPath.
 		ServerKey: "mcp.servers",
 		Supported: true,
-		Icon:      "zcode",
+		// ZCode also reads ~/.agents/mcp.json (top-level mcpServers) as a
+		// same-scope fallback, but ONLY while ~/.zcode/cli/config.json itself
+		// defines no MCP servers — the moment it defines any (including ours),
+		// the fallback is ignored entirely for that scope (ZCode's own
+		// diagnosing-mcp skill doc, §2/pitfall 12). So a user whose servers
+		// live in .agents/mcp.json would see them silently stop loading in
+		// ZCode once mcpproxy connects. Nothing is deleted or corrupted, but
+		// it's worth surfacing before the user clicks Connect.
+		Note: "If your MCP servers are defined in ~/.agents/mcp.json, they will stop loading in ZCode while this entry is present in ~/.zcode/cli/config.json.",
+		Icon: "zcode",
 	},
 }
 
