@@ -901,9 +901,22 @@ func (s *Server) setupRoutes() {
 
 	// Observability /metrics endpoint (MCP-32). Independent of the health
 	// endpoints below: enabling metrics must not change readiness semantics.
+	//
+	// SEC-07: the exporter is admin-only. It was registered on the bare router,
+	// outside the /api/v1 group, so it answered any caller that could reach the
+	// listener with fleet-wide tool/server counters and API topology. It now
+	// carries the same credential chain as /events (same With() pattern) plus an
+	// admin gate, because apiKeyAuthMiddleware alone still admits scope-restricted
+	// agent tokens — which must not read fleet-wide aggregates. Scrapers
+	// authenticate with the global API key (X-API-Key, or Prometheus'
+	// `authorization: {credentials: <api key>}`); the tray keeps its Unix-socket
+	// bypass. The health/readiness probes below stay deliberately open.
 	if s.observability != nil {
 		if metrics := s.observability.Metrics(); metrics != nil {
-			s.router.Handle("/metrics", metrics.Handler())
+			tagMetrics := TagRequestMeta(reqcontext.MountAPI, s.trustedProxiesProvider())
+			s.router.
+				With(tagMetrics, s.apiKeyAuthMiddleware(), s.requireAdminReadMiddleware("Admin credentials required to read metrics")).
+				Handle("/metrics", metrics.Handler())
 		}
 	}
 
