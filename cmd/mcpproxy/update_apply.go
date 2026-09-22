@@ -1,9 +1,6 @@
 package main
 
 import (
-	"archive/tar"
-	"archive/zip"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -23,10 +20,10 @@ import (
 // every rule below is unit-testable against real files in a t.TempDir().
 
 const (
-	// maxArchiveMemberBytes bounds a single extracted archive member. The core
-	// binary is ~60-90 MB; the cap exists so a malicious archive cannot fill
-	// the disk before the checksum comparison would have rejected it.
-	maxArchiveMemberBytes = 512 << 20
+	// maxArchiveMemberBytes bounds a single extracted archive member. The
+	// implementation lives in internal/updatecheck so the tray's self-update
+	// path enforces exactly the same cap.
+	maxArchiveMemberBytes = updatecheck.MaxArchiveMemberBytes
 
 	// verifyExecTimeout bounds the post-swap `<new binary> --version` probe
 	// (FR-021: success means the new binary actually runs).
@@ -57,91 +54,12 @@ func verifyFileSHA256(path, wantHex string) error {
 }
 
 // extractBinary pulls the single archive member named memberName (matched on
-// base name, so a future archive that nests files still works) into destPath,
-// which is created with mode 0o700 — the caller re-applies the real mode when
-// swapping it into place.
+// base name) into destPath. The implementation lives in internal/updatecheck
+// so the tray's self-update path selects its archive member by the same rule —
+// a release archive ships both the core and the tray binary, and picking the
+// wrong one installs a working binary over the wrong file.
 func extractBinary(archivePath, memberName, destPath string) error {
-	switch {
-	case strings.HasSuffix(archivePath, ".zip"):
-		return extractFromZip(archivePath, memberName, destPath)
-	case strings.HasSuffix(archivePath, ".tar.gz"), strings.HasSuffix(archivePath, ".tgz"):
-		return extractFromTarGz(archivePath, memberName, destPath)
-	default:
-		return fmt.Errorf("unsupported archive format: %s", filepath.Base(archivePath))
-	}
-}
-
-func extractFromTarGz(archivePath, memberName, destPath string) error {
-	f, err := os.Open(archivePath) // #nosec G304 -- self-downloaded temp file
-	if err != nil {
-		return fmt.Errorf("open archive: %w", err)
-	}
-	defer f.Close()
-
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return fmt.Errorf("open gzip stream: %w", err)
-	}
-	defer gz.Close()
-
-	tr := tar.NewReader(gz)
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("read archive: %w", err)
-		}
-		if hdr.Typeflag != tar.TypeReg || filepath.Base(hdr.Name) != memberName {
-			continue
-		}
-		return writeMember(tr, destPath)
-	}
-	return fmt.Errorf("archive does not contain %q", memberName)
-}
-
-func extractFromZip(archivePath, memberName, destPath string) error {
-	zr, err := zip.OpenReader(archivePath)
-	if err != nil {
-		return fmt.Errorf("open archive: %w", err)
-	}
-	defer zr.Close()
-
-	for _, entry := range zr.File {
-		if entry.FileInfo().IsDir() || filepath.Base(entry.Name) != memberName {
-			continue
-		}
-		rc, err := entry.Open()
-		if err != nil {
-			return fmt.Errorf("open archive member: %w", err)
-		}
-		defer rc.Close()
-		return writeMember(rc, destPath)
-	}
-	return fmt.Errorf("archive does not contain %q", memberName)
-}
-
-// writeMember copies at most maxArchiveMemberBytes from r into destPath.
-func writeMember(r io.Reader, destPath string) error {
-	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, 0o700) // #nosec G304 -- destPath is our own temp path
-	if err != nil {
-		return fmt.Errorf("create staged binary: %w", err)
-	}
-	written, err := io.Copy(out, io.LimitReader(r, maxArchiveMemberBytes+1))
-	if err != nil {
-		out.Close()
-		return fmt.Errorf("write staged binary: %w", err)
-	}
-	if written > maxArchiveMemberBytes {
-		out.Close()
-		return fmt.Errorf("archive member exceeds the %d-byte limit", int64(maxArchiveMemberBytes))
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		return fmt.Errorf("flush staged binary: %w", err)
-	}
-	return out.Close()
+	return updatecheck.ExtractBinary(archivePath, memberName, destPath)
 }
 
 // ensureTargetWritable reports why the binary cannot be replaced, naming the
