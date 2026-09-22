@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpx"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/launch"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
@@ -761,6 +762,64 @@ func (s *Server) trustedProxiesProvider() config.TrustedProxiesProvider {
 	}
 }
 
+// trustedHostsProvider yields the LIVE trusted_hosts list through the
+// controller's config, evaluated per request so hot-reload takes effect
+// without a restart. Same shape as trustedProxiesProvider: the nil guards are
+// load-bearing because test controllers return a nil config.
+func (s *Server) trustedHostsProvider() func() []string {
+	return func() []string {
+		if s.controller == nil {
+			return nil
+		}
+		if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+			return cfg.TrustedHosts
+		}
+		return nil
+	}
+}
+
+// corsMiddleware replaces the former unconditional
+// "Access-Control-Allow-Origin: *" (SEC-04). It echoes the request Origin only
+// when that origin passes the same allowlist the MCP surface uses
+// (httpx.OriginAllowed: loopback on any port, or a host in config
+// trusted_hosts) and emits nothing at all otherwise - including when there is
+// no Origin header, which is every non-browser client. The embedded Web UI is
+// same-origin under /ui/, so nothing legitimate needs the wildcard.
+//
+// The OPTIONS short-circuit stays ahead of apiKeyAuthMiddleware: browsers
+// never send credentials on a preflight, so gating it behind the API key would
+// break legitimate cross-origin use.
+func (s *Server) corsMiddleware() func(http.Handler) http.Handler {
+	trustedHosts := s.trustedHostsProvider()
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Add, never Set: another layer may already have written a Vary
+			// and clobbering it would poison shared caches.
+			w.Header().Add("Vary", "Origin")
+
+			origin := r.Header.Get("Origin")
+			if origin != "" && httpx.OriginAllowed(origin, trustedHosts()) {
+				// Echo the concrete origin rather than "*", even when
+				// trusted_hosts is ["*"]: a reflected origin is what lets a
+				// browser cache the response per origin alongside Vary, and
+				// "*" is illegal on a credentialed response. (Reflecting an
+				// arbitrary origin is NOT itself a substitute for the
+				// allowlist — trusted_hosts ["*"] deliberately disables it.)
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+			}
+
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
 	s.logger.Debug("Setting up HTTP API routes")
@@ -780,21 +839,9 @@ func (s *Server) setupRoutes() {
 	s.router.Use(s.correlationIDMiddleware()) // Correlation ID and request source tracking
 	s.logger.Debug("Core middleware configured (request ID, logging, recovery, correlation ID)")
 
-	// CORS headers for browser access
-	s.router.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
-
-			if r.Method == "OPTIONS" {
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	})
+	// CORS headers for browser access (SEC-04). Registered with Use so it
+	// covers every route on this router, /events included.
+	s.router.Use(s.corsMiddleware())
 
 	// Health and readiness endpoints (Kubernetes-compatible with legacy aliases)
 	// See healthzHandler() and readyzHandler() for swagger documentation
@@ -3954,7 +4001,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// No Access-Control-Allow-Origin here: /events is a chi route on the same
+	// router, so corsMiddleware already decided this response's CORS headers.
+	// A second write would only be a place for the two policies to drift.
 	w.Header().Set("X-Accel-Buffering", "no") // Disable nginx buffering
 
 	// For HEAD requests, just return headers without body

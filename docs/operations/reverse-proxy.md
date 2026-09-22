@@ -74,6 +74,24 @@ client served **from your public domain** works as soon as that domain is in
 frontend hosted on a **different** origin must have its own host added to
 `trusted_hosts` too, or its requests are rejected.
 
+### CORS on the REST API and `/events`
+
+The same allowlist decides CORS on the REST API (`/api/v1/*`) and the SSE stream
+(`/events`): MCPProxy echoes the request `Origin` in
+`Access-Control-Allow-Origin` only when that origin is loopback or in
+`trusted_hosts`, and sends no CORS headers at all otherwise. Every response
+carries `Vary: Origin`.
+
+:::caution Behaviour change
+Earlier versions sent `Access-Control-Allow-Origin: *` on these endpoints
+unconditionally. If a **separate** web app calls the REST API cross-origin from a
+public domain, add that app's host to `trusted_hosts` — unlike the `Host` check,
+which only ever applied to the MCP endpoints, this one applies to the REST
+surface, so a REST-only proxied deployment may have been running with
+`trusted_hosts` empty. The embedded Web UI is same-origin under `/ui/` and is
+unaffected, as are non-browser clients, which send no `Origin` at all.
+:::
+
 ## `trusted_proxies` — forwarded headers {#trusted_proxies-forwarded-headers}
 
 A reverse proxy rewrites the connection MCPProxy sees: the peer address becomes the
