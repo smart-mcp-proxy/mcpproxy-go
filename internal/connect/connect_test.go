@@ -346,6 +346,193 @@ func TestConnect_ClaudeCode_AuthOn_UsesHeader(t *testing.T) {
 	}
 }
 
+func TestConfigPath_ZCode(t *testing.T) {
+	homeDir := t.TempDir()
+	got := ConfigPath("zcode", homeDir)
+	want := filepath.Join(homeDir, ".zcode", "cli", "config.json")
+	if got != want {
+		t.Errorf("ConfigPath(zcode) = %q, want %q", got, want)
+	}
+}
+
+// TestConnect_ZCode_NestedServersKey verifies ZCode's entry is written under
+// the nested {"mcp":{"servers":{...}}} path its own config schema requires
+// (~/.zcode/cli/config.json, per the diagnosing-mcp skill doc) rather than a
+// flat top-level key like every other client, and that an unrelated
+// pre-existing root key survives the write untouched.
+func TestConnect_ZCode_NestedServersKey(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("zcode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{"logging":{"level":"info"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Connect("zcode", "", false)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	if !res.Success || res.Action != "created" {
+		t.Fatalf("expected created success, got %+v", res)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	if logging, ok := data["logging"].(map[string]interface{}); !ok || logging["level"] != "info" {
+		t.Fatalf("expected sibling logging key preserved, got %v", data["logging"])
+	}
+	mcp, ok := data["mcp"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected top-level mcp object, got %T", data["mcp"])
+	}
+	servers, ok := mcp["servers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected mcp.servers object, got %T", mcp["servers"])
+	}
+	entry, ok := servers["mcpproxy"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected mcp.servers.mcpproxy entry, got %v", servers["mcpproxy"])
+	}
+	if entry["type"] != "http" || entry["url"] != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("unexpected entry shape: %v", entry)
+	}
+}
+
+// TestConnect_ZCode_PreservesSiblingServer verifies an unrelated server
+// already registered under mcp.servers survives a connect alongside the new
+// mcpproxy entry.
+func TestConnect_ZCode_PreservesSiblingServer(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("zcode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{"mcp":{"servers":{"other":{"type":"stdio","command":"foo"}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Connect("zcode", "", false); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	servers := data["mcp"].(map[string]interface{})["servers"].(map[string]interface{})
+	if _, ok := servers["other"]; !ok {
+		t.Fatalf("expected sibling server 'other' preserved, got %v", servers)
+	}
+	if _, ok := servers["mcpproxy"]; !ok {
+		t.Fatalf("expected mcpproxy entry added, got %v", servers)
+	}
+}
+
+func TestConnect_ZCode_AuthOn_UsesHeader(t *testing.T) {
+	svc, _ := testServiceWithKey(t)
+	svc.WithRequireMCPAuth(true)
+
+	result, err := svc.Connect("zcode", "", false)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(result.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	entry := data["mcp"].(map[string]interface{})["servers"].(map[string]interface{})["mcpproxy"].(map[string]interface{})
+	if entry["url"] != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("expected clean url with header carrier, got %v", entry["url"])
+	}
+	headers, ok := entry["headers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected headers object, got %T", entry["headers"])
+	}
+	if headers["X-API-Key"] != "test-key-123" {
+		t.Errorf("expected X-API-Key header, got %v", headers["X-API-Key"])
+	}
+}
+
+// TestDisconnect_ZCode_RemovesNestedEntryOnly verifies disconnect removes just
+// the mcpproxy entry from the nested mcp.servers map, leaving the sibling
+// server and unrelated root keys intact, and that GetStatus correctly reports
+// Connected=false afterward (round-tripping through the same nested lookup
+// GetStatus/entryAccess uses).
+func TestDisconnect_ZCode_RemovesNestedEntryOnly(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("zcode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{"logging":{"level":"info"},"mcp":{"servers":{"other":{"type":"stdio","command":"foo"}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Connect("zcode", "", false); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	status, err := svc.GetStatus("zcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Connected {
+		t.Fatalf("expected Connected=true after connect, got %+v", status)
+	}
+
+	res, err := svc.Disconnect("zcode", "")
+	if err != nil {
+		t.Fatalf("Disconnect failed: %v", err)
+	}
+	if !res.Success || res.Action != "removed" {
+		t.Fatalf("expected removed success, got %+v", res)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	if logging, ok := data["logging"].(map[string]interface{}); !ok || logging["level"] != "info" {
+		t.Fatalf("expected sibling logging key preserved, got %v", data["logging"])
+	}
+	servers := data["mcp"].(map[string]interface{})["servers"].(map[string]interface{})
+	if _, ok := servers["mcpproxy"]; ok {
+		t.Fatalf("expected mcpproxy entry removed, got %v", servers)
+	}
+	if _, ok := servers["other"]; !ok {
+		t.Fatalf("expected sibling server 'other' preserved, got %v", servers)
+	}
+
+	status, err = svc.GetStatus("zcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Connected {
+		t.Fatalf("expected Connected=false after disconnect, got %+v", status)
+	}
+}
+
 func TestConnect_ExistingFile_PreservesOtherEntries(t *testing.T) {
 	svc, homeDir := testService(t)
 
@@ -1212,8 +1399,8 @@ func TestFindClient(t *testing.T) {
 
 func TestGetAllClients(t *testing.T) {
 	clients := GetAllClients()
-	if len(clients) != 8 {
-		t.Errorf("Expected 8 clients, got %d", len(clients))
+	if len(clients) != 9 {
+		t.Errorf("Expected 9 clients, got %d", len(clients))
 	}
 
 	// Verify all have non-empty IDs and names

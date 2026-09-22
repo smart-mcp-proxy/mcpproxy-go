@@ -904,7 +904,7 @@ Drop a registry's cached server lists. Returns
 #### GET /api/v1/connect
 
 Lists the connection status of every known MCP client (Claude Desktop, Cursor,
-VS Code, Codex, Gemini, OpenCode, …).
+VS Code, Codex, Gemini, OpenCode, ZCode, …).
 
 As of Spec 075, the overall listing determines each client's installed state
 using **file-existence metadata only** (`os.Stat`) and performs **zero config

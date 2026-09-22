@@ -229,7 +229,7 @@ func (s *Service) resolveExistingEntry(client ClientDef, raw []byte, serverName 
 		return nil, false
 	}
 
-	serversMap, ok := data[client.ServerKey].(map[string]interface{})
+	serversMap, ok := getServersMap(&client, data)
 	if !ok {
 		return nil, true
 	}
