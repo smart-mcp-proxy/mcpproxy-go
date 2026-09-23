@@ -4,9 +4,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -575,16 +577,29 @@ func TestConnectWithPrecondition_NonObjectServersSection_RefusesDrift(t *testing
 	}
 }
 
-// TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheWriterRead
-// proves the guard is not a single upstream check that a concurrent external
-// edit could slip past (the TOCTOU a naive "check preWriteState, then write"
-// design would have): the file is OBJECT-shaped on the FIRST read (matching
-// what preWriteState/the precondition resolution sees) and is mutated to a
-// non-object section before the SECOND, independent read the writer itself
-// performs. The write must still refuse and must not touch the file — the
-// authoritative check has to live at the actual point of mutation, using
-// whatever was read there, not a value resolved earlier in the call.
-func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheWriterRead(t *testing.T) {
+// TestConnectWithPrecondition_NonObjectServersSection_InitialCheckUsesSharedRead
+// replaces the pre-#1352 "RaceIsClosedAtTheWriterRead" test: that test proved
+// a race landing between preWriteState's read and "connectJSON's own,
+// independent read" was still caught, because connectJSON used to open the
+// file a second time before its type-assertion check. PR #1352 removed that
+// second read entirely — connectJSON's initial servers-section check now
+// parses pre.raw, the SAME bytes preWriteState already read, instead of
+// opening the file again (see parseOrCreateJSON). That means this initial
+// check can no longer observe, by itself, a race that lands AFTER
+// preWriteState's read: there is only one read up to this point, not two.
+//
+// This test pins that: exactly ONE read happens before the write proceeds
+// past the initial check, so a race injected right after that read is NOT
+// (and structurally cannot be) caught by the initial check — it is instead
+// caught by the next real read, refuseIfServersSectionRaced's pre-backup call
+// (see TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtThePreBackupCheck,
+// updated for the same one-fewer-reads reason). Losing the ability to catch a
+// race at THIS specific checkpoint is not a regression: #1352's whole point is
+// that a second, independent read here was itself the bug (a stale token could
+// ride whatever that second read happened to contain) — collapsing it to a
+// single shared read is what closes that hole, and the pre-backup/preRename
+// checks below remain to catch drift landing in the window this read cannot see.
+func TestConnectWithPrecondition_NonObjectServersSection_InitialCheckUsesSharedRead(t *testing.T) {
 	svc, home := testService(t)
 	cfgPath := ConfigPath("claude-code", home)
 	const objectShaped = `{"mcpServers":{}}`
@@ -595,32 +610,24 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheWriter
 	svc.setReadFile(func(path string) ([]byte, error) {
 		reads++
 		if reads == 1 {
-			// The read inside ConnectWithPrecondition's own preWriteState call:
-			// still object-shaped, so no upstream check (if one existed) would fire.
+			// preWriteState's read: object-shaped, so the initial check (which
+			// now parses these SAME bytes via pre.raw) passes.
 			return []byte(objectShaped), nil
 		}
-		// Every subsequent read — including the writer's own — observes the file
+		// Any later read (the pre-backup / preRename checks) observes the file
 		// AFTER the simulated concurrent edit.
 		return []byte(racedNonObject), nil
 	})
 
 	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
-	// Exactly 2 reads for this client/path: preWriteState's (no jsonc guard for
-	// claude-code, no precondition token to additionally resolve) and
-	// connectJSON's own readOrCreateJSON. A count outside this range would mean
-	// the test's own premise — "read #1 sees the pre-race state, read #2+ sees
-	// the raced-in one" — no longer matches what actually ran.
-	if reads != 2 {
-		t.Fatalf("expected exactly 2 reads (preWriteState + the writer's own), got %d", reads)
-	}
 	if err == nil {
-		t.Fatalf("expected the writer's own read to catch the raced-in non-object section, got res=%+v err=nil", res)
+		t.Fatalf("expected a later check to catch the raced-in non-object section, got res=%+v err=nil", res)
 	}
 	if res != nil {
 		t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
 	}
-	if !strings.Contains(err.Error(), "mcpServers") || !strings.Contains(err.Error(), "not a JSON object") {
-		t.Fatalf("expected the refusal to name the section and explain why, got: %v", err)
+	if !strings.Contains(err.Error(), "mcpServers") {
+		t.Fatalf("expected the refusal to name the section, got: %v", err)
 	}
 	if got := readConfigT(t, cfgPath); got != objectShaped {
 		t.Fatalf("the ON-DISK file (never touched by the mocked reads) must be untouched after a refusal:\n got:  %s\n want: %s", got, objectShaped)
@@ -631,17 +638,18 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheWriter
 }
 
 // TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtThePreBackupCheck
-// closes the must-fix round-3 cross-model review found: connectJSON/
-// connectTOML's OWN read (the "writer's own read" the previous test proves is
-// authoritative) is STILL not adjacent to the actual write — backupFile
-// performs real file I/O in between, widening the window in which an
-// external process can replace the servers section with a non-object value
-// AFTER the writer already decided it was safe to proceed. Repro: both
-// preWriteState's read and connectJSON's readOrCreateJSON read see an
-// OBJECT-shaped section (so the earlier, top-of-function check passes
-// cleanly); only the pre-backup check's read observes the section having
-// been replaced with a non-object value in between. The write must still
-// refuse, before any backup is created.
+// closes the must-fix round-3 cross-model review found: the initial
+// servers-section check (which, since PR #1352, parses pre.raw rather than
+// performing its own read — see
+// TestConnectWithPrecondition_NonObjectServersSection_InitialCheckUsesSharedRead)
+// is not adjacent to the actual write — backupFile performs real file I/O in
+// between, widening the window in which an external process can replace the
+// servers section with a non-object value AFTER the write already decided it
+// was safe to proceed. Repro: preWriteState's read sees an OBJECT-shaped
+// section (so the initial, pre.raw-based check passes cleanly); only the
+// pre-backup check's OWN, independent read observes the section having been
+// replaced with a non-object value in between. The write must still refuse,
+// before any backup is created.
 func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtThePreBackupCheck(t *testing.T) {
 	svc, home := testService(t)
 	cfgPath := ConfigPath("claude-code", home)
@@ -652,20 +660,25 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtThePreBac
 	reads := 0
 	svc.setReadFile(func(path string) ([]byte, error) {
 		reads++
-		if reads <= 2 {
-			// preWriteState's read (#1) and connectJSON's own readOrCreateJSON
-			// read (#2): both still object-shaped, so the top-of-function check
-			// passes and the function proceeds toward the pre-backup check.
+		if reads == 1 {
+			// preWriteState's read: object-shaped, so the initial (pre.raw-based,
+			// read-free) check passes and the function proceeds toward the
+			// pre-backup check.
 			return []byte(objectShaped), nil
 		}
-		// The THIRD read — refuseIfServersSectionRaced, immediately before
+		// The SECOND read — refuseIfServersSectionRaced, immediately before
 		// backupFile — observes the file AFTER the simulated concurrent edit.
 		return []byte(racedNonObject), nil
 	})
 
 	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
-	if reads != 3 {
-		t.Fatalf("expected exactly 3 reads (preWriteState + the writer's own + the pre-backup check), got %d", reads)
+	// Exactly 2 reads: preWriteState's, and the pre-backup
+	// refuseIfServersSectionRaced call. Since PR #1352 removed connectJSON's
+	// own independent read (its initial check now shares preWriteState's
+	// bytes via pre.raw), this pre-backup call is the first FRESH read after
+	// preWriteState's — one fewer than before that refactor.
+	if reads != 2 {
+		t.Fatalf("expected exactly 2 reads (preWriteState + the pre-backup check), got %d", reads)
 	}
 	if err == nil {
 		t.Fatalf("expected the pre-backup check to catch the raced-in non-object section, got res=%+v err=nil", res)
@@ -689,14 +702,13 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtThePreBac
 // real Stat/Open/copy I/O — genuinely slow enough to race in practice — so a
 // change landing DURING that backup (i.e. AFTER the pre-backup check already
 // passed) was still able to slip through to atomicWriteFile undetected.
-// Repro: preWriteState's read, connectJSON's own read, AND the pre-backup
-// check's read all see an OBJECT-shaped section (so backupFile actually runs
-// and a backup file IS created — that's expected and consistent with how a
-// later atomicWriteFile failure already behaves in this codebase); only the
-// final check's read observes the section having been replaced with a
-// non-object value. The write must still refuse, and the on-disk config must
-// be untouched (the backup file's existence does not imply the config itself
-// was mutated).
+// Repro: preWriteState's read AND the pre-backup check's read both see an
+// OBJECT-shaped section (so backupFile actually runs and a backup file IS
+// created — that's expected and consistent with how a later atomicWriteFile
+// failure already behaves in this codebase); only the final check's read
+// observes the section having been replaced with a non-object value. The
+// write must still refuse, and the on-disk config must be untouched (the
+// backup file's existence does not imply the config itself was mutated).
 //
 // Round 5 found the round-4 fix's placement — a call made BEFORE invoking
 // atomicWriteFile — still left atomicWriteFile's own temp-file staging
@@ -711,6 +723,10 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtThePreBac
 // here, not by this test alone. What this test DOES still prove, unchanged:
 // a value raced in after backupFile completes is caught before any bytes of
 // the actual config file are replaced.
+//
+// The expected read count (3, not the pre-#1352 4) reflects PR #1352
+// removing connectJSON's own independent read — see
+// TestConnectWithPrecondition_NonObjectServersSection_InitialCheckUsesSharedRead.
 func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAfterBackup(t *testing.T) {
 	svc, home := testService(t)
 	cfgPath := ConfigPath("claude-code", home)
@@ -721,21 +737,20 @@ func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAfterBackup
 	reads := 0
 	svc.setReadFile(func(path string) ([]byte, error) {
 		reads++
-		if reads <= 3 {
-			// preWriteState (#1), connectJSON's own read (#2), and the
-			// pre-backup check (#3): all still object-shaped, so backupFile
-			// actually runs.
+		if reads <= 2 {
+			// preWriteState (#1) and the pre-backup check (#2): both still
+			// object-shaped, so backupFile actually runs.
 			return []byte(objectShaped), nil
 		}
-		// The FOURTH read — refuseIfServersSectionRaced, immediately before
-		// atomicWriteFile — observes the file AFTER the simulated edit landing
+		// The THIRD read — refuseIfServersSectionRaced, as atomicWriteFile's
+		// preRename hook — observes the file AFTER the simulated edit landing
 		// during backupFile's own I/O.
 		return []byte(racedNonObject), nil
 	})
 
 	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
-	if reads != 4 {
-		t.Fatalf("expected exactly 4 reads (preWriteState + the writer's own + the pre-backup check + the post-backup check), got %d", reads)
+	if reads != 3 {
+		t.Fatalf("expected exactly 3 reads (preWriteState + the pre-backup check + the post-backup check), got %d", reads)
 	}
 	if err == nil {
 		t.Fatalf("expected the post-backup check to catch the raced-in non-object section, got res=%+v err=nil", res)
@@ -811,10 +826,11 @@ func TestConnect_NonObjectServersSection_RefusesWithoutToken(t *testing.T) {
 // literal `null` (or a TOML document that otherwise decodes to a nil map)
 // decodes successfully with a NIL top-level map — encoding/json leaves the
 // unmarshal target untouched for a JSON null, it is not an error. Before the
-// fix, readOrCreateJSON/readOrCreateTOML returned that nil map unchanged, and
-// connectJSON/connectTOML's final `data[serversKey] = serversMap` assignment
-// panicked with "assignment to entry in nil map" — a DoS reachable through the
-// plain tokenless Connect() path with no precondition token involved at all.
+// fix, readOrCreateJSON/readOrCreateTOML (now parseOrCreateJSON/
+// parseOrCreateTOML) returned that nil map unchanged, and connectJSON/
+// connectTOML's final `data[serversKey] = serversMap` assignment panicked
+// with "assignment to entry in nil map" — a DoS reachable through the plain
+// tokenless Connect() path with no precondition token involved at all.
 func TestConnect_NullTopLevelDocument_DoesNotPanic(t *testing.T) {
 	t.Run("JSON client (claude-code)", func(t *testing.T) {
 		svc, home := testService(t)
@@ -924,10 +940,11 @@ func TestGetStatus_NonObjectServersSection_IsMalformed(t *testing.T) {
 // wrong type" from other malformed causes (a stat/read I/O error, e.g.
 // syscall.EIO), so a blanket refusal message there would hide the real cause.
 // The fix instead lets a genuine read error propagate through its own
-// existing path unchanged (connectJSON/connectTOML's readOrCreateJSON/TOML
-// error wrapping), while the NEW, section-specific check only ever fires
-// after a successful parse. Prove the injected I/O error's own message
-// survives, rather than being replaced by the generic "not an object" text.
+// existing path unchanged (parseOrCreateJSON/parseOrCreateTOML's error
+// wrapping of preWriteState's own readErr), while the NEW, section-specific
+// check only ever fires after a successful parse. Prove the injected I/O
+// error's own message survives, rather than being replaced by the generic
+// "not an object" text.
 func TestConnectWithPrecondition_GenuineIOErrorIsNotMaskedAsNonObjectSection(t *testing.T) {
 	svc, home := testService(t)
 	cfgPath := ConfigPath("claude-code", home)
@@ -941,13 +958,15 @@ func TestConnectWithPrecondition_GenuineIOErrorIsNotMaskedAsNonObjectSection(t *
 	})
 
 	_, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
-	// preWriteState's read fails first (classified accessMalformed, not
-	// propagated as an error there by design), so the writer's own read is what
-	// actually surfaces this error — pinning that this test exercises
-	// readOrCreateJSON's wrapped-error path, not a check that short-circuits
-	// before ever reaching it.
-	if reads != 2 {
-		t.Fatalf("expected exactly 2 reads (preWriteState + the writer's own), got %d", reads)
+	// preWriteState's read fails (classified accessMalformed, not propagated
+	// as an error there by design) and records readErr; parseOrCreateJSON
+	// surfaces that SAME readErr directly instead of attempting its own
+	// second read — PR #1352 removed the second read this test used to
+	// exercise, so exactly 1 read happens now, not 2. This still pins that
+	// the error reaches the caller via parseOrCreateJSON's wrapped-error
+	// path, not a check that silently swallows it.
+	if reads != 1 {
+		t.Fatalf("expected exactly 1 read (preWriteState's own; PR #1352 removed the writer's independent second read), got %d", reads)
 	}
 	if err == nil {
 		t.Fatal("expected an error for an unreadable config")
@@ -957,6 +976,222 @@ func TestConnectWithPrecondition_GenuineIOErrorIsNotMaskedAsNonObjectSection(t *
 	}
 	if strings.Contains(err.Error(), "is not a JSON object") {
 		t.Fatalf("a genuine I/O error must not be reported as a non-object servers section: %v", err)
+	}
+}
+
+// TestConnectWithPrecondition_WriteActsOnThePreconditionReadNotASecondRead
+// closes a narrower TOCTOU than the drift classes above: ConnectWithPrecondition
+// used to resolve pre-write state (and check the precondition token) via ONE
+// read, then dispatch to connectJSON/connectTOML, which performed their OWN
+// independent SECOND read of the same file before mutating it — the token was
+// never re-validated against that second read. If the file changed between the
+// two reads (e.g. an external process rewrote it in that window) and force=true
+// rode with a token that was only ever checked against the FIRST read, the
+// write would silently act on whatever the second, unreviewed read contained.
+//
+// This scripts the read seam to return DIFFERENT content on the second call
+// than the first, simulating exactly that race, and proves the write commits
+// only what the precondition token actually validated. Scope: this proves the
+// specific two-independent-reads bug is closed (a regression that
+// reintroduces a second `s.read` in the write path would fail this test). It
+// does not, and cannot, prove protection against a real external rewrite
+// landing in the residual window between this single read and the actual
+// `atomicWriteFile` call — closing that would need OS-level file locking,
+// which is out of scope here (see the comment in ConnectWithPrecondition).
+func TestConnectWithPrecondition_WriteActsOnThePreconditionReadNotASecondRead(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	const original = `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:9999/mcp"}}}`
+	writeFileT(t, cfgPath, original)
+
+	preview, err := svc.Preview("claude-code", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if !preview.EntryExists {
+		t.Fatal("fixture should classify as replace")
+	}
+
+	// A different object under the mcpproxy key, plus an entirely new sibling
+	// entry — as if another process rewrote the file in the window between the
+	// precondition check and the write itself. The precondition token was
+	// derived from `original` alone and never observed this content.
+	const driftedAfterPreconditionCheck = `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://10.0.0.5:1234/mcp"},"unreviewed-sibling":{"type":"stdio","command":"injected"}}}`
+
+	// Serve the drift only while the real file on disk still shows the
+	// PRE-write state (neither `original` nor the drifted content embeds the
+	// proxy's own address, 127.0.0.1:8080 — only the freshly built entry
+	// does). Once the real write lands, further reads — the post-write
+	// verification — must see the true, current disk content, not the
+	// simulated drift, or this test would fail for a reason unrelated to the
+	// race it is meant to prove.
+	readCount := 0
+	realRead := os.ReadFile
+	svc.setReadFile(func(path string) ([]byte, error) {
+		if path != cfgPath {
+			return realRead(path)
+		}
+		current, rerr := realRead(path)
+		if rerr == nil && strings.Contains(string(current), "127.0.0.1:8080") {
+			return current, rerr
+		}
+		readCount++
+		// The precondition check's own read (call 1) must see the real,
+		// unmodified file so the token still validates. Only a SECOND,
+		// independent read of the file — the bug this test targets — would
+		// ever observe the drifted content.
+		if readCount == 2 {
+			return []byte(driftedAfterPreconditionCheck), nil
+		}
+		return current, rerr
+	})
+
+	// force=true rides with a token that was only ever checked against the
+	// first read — exactly the scenario the fix must not let slip through.
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, preview.PreconditionToken)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Success || res.Action != "updated" {
+		t.Fatalf("expected the precondition-authorized replace to succeed, got %+v", res)
+	}
+
+	final := readConfigT(t, cfgPath)
+	if strings.Contains(final, "unreviewed-sibling") {
+		t.Fatal("the write acted on a second, independent read instead of the one the precondition token validated — content the token never saw was silently committed")
+	}
+}
+
+// TestConnectWithPrecondition_AdoptedDeleteActsOnThePreconditionReadNotASecondRead
+// is the same class of race as the test above, exercised through OpenCode's
+// adopted-entry delete path — the most destructive shape the bug could take:
+// connectJSON deletes an entry by NAME (`resolved.name`, resolved from the
+// FIRST, precondition-checked read) against whatever map a second, unchecked
+// read produced. If something else repurposed that same key for unrelated
+// content in the window between the two reads, a second-read-based delete
+// would silently destroy it — content the precondition token never even saw,
+// let alone authorized removing.
+func TestConnectWithPrecondition_AdoptedDeleteActsOnThePreconditionReadNotASecondRead(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("opencode", home)
+	const original = `{"mcp":{"proxy-alt":{"type":"remote","url":"http://127.0.0.1:8080/mcp"}}}`
+	writeFileT(t, cfgPath, original)
+
+	preview, err := svc.Preview("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if preview.ExistingEntrySummary == nil || preview.ExistingEntrySummary.EntryName != "proxy-alt" {
+		t.Fatalf("fixture should adopt proxy-alt, got %+v", preview.ExistingEntrySummary)
+	}
+
+	// Between the precondition read and a (bug-era) second independent read,
+	// something else repurposes the "proxy-alt" key for an entry that has
+	// nothing to do with mcpproxy, alongside an unrelated sibling. The
+	// precondition token was computed against the OLD "proxy-alt" (an
+	// mcpproxy-pointing entry) — it never authorized deleting THIS content.
+	const driftedUnrelatedEntry = `{"mcp":{"proxy-alt":{"type":"remote","url":"https://api.github.com/mcp"},"unrelated-sibling":{"type":"stdio","command":"keep-me"}}}`
+
+	// Serve the drift only while the real file on disk still shows the
+	// PRE-write state — the precondition check's own read must see it too, or
+	// the token would not even validate. Once the real write lands (the file
+	// gains the "mcpproxy" key), any further read — the post-write
+	// verification — must see the true, current disk content, not the
+	// simulated drift, or this test would fail for a reason that has nothing
+	// to do with the race it is meant to prove.
+	readCount := 0
+	realRead := os.ReadFile
+	svc.setReadFile(func(path string) ([]byte, error) {
+		if path != cfgPath {
+			return realRead(path)
+		}
+		current, rerr := realRead(path)
+		if rerr == nil && strings.Contains(string(current), `"mcpproxy"`) {
+			return current, rerr
+		}
+		readCount++
+		if readCount == 2 {
+			return []byte(driftedUnrelatedEntry), nil
+		}
+		return current, rerr
+	})
+
+	res, err := svc.ConnectWithPrecondition("opencode", "mcpproxy", true, preview.PreconditionToken)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("expected the precondition-authorized adopted replace to succeed, got %+v", res)
+	}
+
+	final := readConfigT(t, cfgPath)
+	if strings.Contains(final, "api.github.com") || strings.Contains(final, "unrelated-sibling") {
+		t.Fatal("the adopted-entry delete must act on the SAME read the precondition token validated — it must never observe, and so never destroy, content that only exists in a later, independent read")
+	}
+}
+
+// TestConnectWithPrecondition_TransientStatErrorRefusesInsteadOfOverwriting
+// pins a correctness edge of the single-read refactor: preWriteState's stat
+// can itself fail for a reason other than "not there" (a transient I/O error,
+// not a permission denial). That failure means the content is UNKNOWN, not
+// empty, so the write must refuse rather than let parseOrCreateJSON treat a
+// nil `raw` as "file absent, start fresh" and silently overwrite whatever was
+// really there with a brand-new, near-empty config.
+func TestConnectWithPrecondition_TransientStatErrorRefusesInsteadOfOverwriting(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	const original = `{"mcpServers":{"other":{"type":"http","url":"http://127.0.0.1:7000/mcp"}}}`
+	writeFileT(t, cfgPath, original)
+
+	svc.setStat(func(path string) (os.FileInfo, error) {
+		if path == cfgPath {
+			return nil, errors.New("simulated transient I/O error")
+		}
+		return os.Stat(path)
+	})
+
+	// Tokenless (legacy) call: force is irrelevant here — the write must never
+	// even reach the point of deciding whether an entry exists, because it
+	// cannot honestly answer that without knowing the file's content.
+	if _, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, ""); err == nil {
+		t.Fatal("expected an error: the config's content is unknown after a transient stat failure, not empty")
+	}
+
+	if got := readConfigT(t, cfgPath); got != original {
+		t.Fatalf("a transient stat error must never cause a silent overwrite:\n got:  %s\n want: %s", got, original)
+	}
+}
+
+// TestConnectWithPrecondition_FileVanishedBetweenStatAndReadSelfHeals is the
+// mirror case: the file genuinely existed at stat time but is gone by the time
+// of the read (removed in that narrow window). Unlike an unknown-content stat
+// error, this IS "no file" — so a tokenless write should self-heal into a
+// create, exactly as if the file had never existed, rather than surfacing a
+// spurious read error.
+func TestConnectWithPrecondition_FileVanishedBetweenStatAndReadSelfHeals(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	writeFileT(t, cfgPath, `{"mcpServers":{}}`)
+
+	// Only the FIRST read of cfgPath simulates the vanished-file race; a
+	// second read (the post-write verification, which runs against the file
+	// this call itself just created) must see the real, current disk state.
+	vanished := false
+	realRead := os.ReadFile
+	svc.setReadFile(func(path string) ([]byte, error) {
+		if path == cfgPath && !vanished {
+			vanished = true
+			return nil, &fs.PathError{Op: "open", Path: path, Err: syscall.ENOENT}
+		}
+		return realRead(path)
+	})
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, "")
+	if err != nil {
+		t.Fatalf("a file that vanished between stat and read must self-heal as a create, got error: %v", err)
+	}
+	if !res.Success || res.Action != "created" {
+		t.Fatalf("expected a successful create, got %+v", res)
 	}
 }
 

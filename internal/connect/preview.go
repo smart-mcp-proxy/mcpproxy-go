@@ -85,16 +85,16 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 	// Determine create-vs-overwrite via an on-demand read. This is the same
 	// scoped, explicit-action read semantics as GetStatus: only touched when the
 	// file exists, so an absent config raises no macOS App-Data prompt.
-	fileExists, existing, accessState, err := s.preWriteState(client, cfgPath, serverName)
+	pre, err := s.preWriteState(client, cfgPath, serverName)
 	if err != nil {
 		// A denial must surface the actionable remediation, never a misleading
 		// "no changes" preview (Spec 078 FR-012).
 		return nil, err
 	}
 	var existingSummary *EntrySummary
-	if existing != nil {
+	if pre.existing != nil {
 		// Sanitized projections only — never the entry itself (Spec 091 FR-003).
-		existingSummary = buildEntrySummary(existing.name, existing.entry)
+		existingSummary = buildEntrySummary(pre.existing.name, pre.existing.entry)
 	}
 
 	// Build the entry from the SAME constructor the write uses, with the
@@ -116,16 +116,16 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		ServerName:           serverName,
 		Entry:                maskedEntry,
 		EntryText:            entryText,
-		EntryExists:          existing != nil,
+		EntryExists:          pre.existing != nil,
 		ContainsAPIKey:       s.containsCredential(),
 		Bridge:               client.Bridge,
-		AccessState:          accessState,
+		AccessState:          pre.accessState,
 		ExistingEntrySummary: existingSummary,
 		// The token binds THIS preview to the operation it described — this
 		// client, this file, this requested entry name — and to the state it
 		// just observed, over the unmasked pending entry the write would
 		// produce (Spec 091 FR-005).
-		PreconditionToken: s.preconditionToken(clientID, cfgPath, serverName, fileExists, existing,
+		PreconditionToken: s.preconditionToken(clientID, cfgPath, serverName, pre.fileExists, pre.existing,
 			buildServerEntry(clientID, s.entryParams(false))),
 		// Run the write's own refusal guards so the form learns "not
 		// connectable" from the preview, never from a failed click (FR-003).
@@ -133,7 +133,7 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		// the commented-.jsonc refusal — a commented file parses leniently, so
 		// without this the preview would render a clean, enabled Connect for a
 		// write that always refuses.
-		ConnectRefusal: refusalText(connectRefusal(client, cfgPath), s.guardJsoncComments(cfgPath)),
+		ConnectRefusal: refusalText(connectRefusal(client, cfgPath), guardJsoncCommentsBytes(cfgPath, pre.raw)),
 	}, nil
 }
 
@@ -149,49 +149,102 @@ func refusalText(errs ...error) string {
 	return ""
 }
 
+// preWriteResult bundles preWriteState's resolution — including the exact
+// bytes and permission it read — so a caller that already checked the
+// precondition token against this state can act on THIS SAME read instead of
+// opening the file again. Two independent reads of the same path are never
+// guaranteed to see the same bytes: an external process can rewrite the file
+// in the window between them, and a second, unchecked read would let a write
+// authorized by the token silently act on content the token never described
+// (the TOCTOU this struct exists to close).
+type preWriteResult struct {
+	fileExists  bool
+	existing    *existingEntry // nil when no entry would be replaced
+	accessState string
+	raw         []byte      // exact bytes read when fileExists and readable; nil otherwise
+	perm        os.FileMode // mode to preserve on rewrite; 0644 when the file is absent
+	// readErr is set when the file exists but its content could not be
+	// obtained for a reason other than "absent" (accessState already reflects
+	// why). A write step surfaces it instead of attempting its own read.
+	readErr error
+}
+
 // preWriteState resolves the raw pre-write state shared by the preview and the
 // write's precondition check: whether the config file exists, which entry the
-// write would actually replace (adoption-aware, nil when none), and the Spec 075
-// access classification. Both callers must derive the token from the SAME
-// resolution — that is the whole point of the guarantee — so the lookup lives
-// here rather than being duplicated.
+// write would actually replace (adoption-aware, nil when none), the Spec 075
+// access classification, and the exact bytes read. Every caller — the preview,
+// the precondition check, and the write itself — must derive their answer from
+// this SAME resolution; re-reading the file at any later step reopens the
+// TOCTOU window the precondition token exists to close.
 //
 // A permission denial is returned as the typed *AccessError (403 + remediation);
 // an unreadable-but-not-denied or unparseable config yields the corresponding
 // access state with no resolved entry.
-func (s *Service) preWriteState(client *ClientDef, cfgPath, serverName string) (fileExists bool, existing *existingEntry, accessState string, err error) {
-	if _, statErr := s.stat(cfgPath); statErr != nil {
+func (s *Service) preWriteState(client *ClientDef, cfgPath, serverName string) (preWriteResult, error) {
+	result := preWriteResult{perm: os.FileMode(0o644)}
+
+	info, statErr := s.stat(cfgPath)
+	if statErr != nil {
 		// ONLY "not there" is an absent config. Any other stat failure —
 		// a permission-blocked file or parent directory above all — means we do
 		// not know what is there, and reporting "absent" would render the create
 		// promise ("it will be created, and Undo removes it") over a write that
 		// cannot succeed, leaving the user to discover the denial by clicking.
 		if os.IsNotExist(statErr) {
-			return false, nil, accessAbsent, nil
+			result.accessState = accessAbsent
+			return result, nil
 		}
-		state := classifyAccess(statErr)
-		if state == accessDenied {
-			return true, nil, state, s.newAccessError(client, cfgPath, statErr)
+		result.fileExists = true
+		result.accessState = classifyAccess(statErr)
+		// A stat failure means the content is unknown, not empty — recorded as
+		// readErr so a write step refuses instead of silently starting fresh
+		// over content it never actually saw (a transient stat error must not
+		// look identical to "there is nothing here").
+		result.readErr = statErr
+		if result.accessState == accessDenied {
+			return result, s.newAccessError(client, cfgPath, statErr)
 		}
 		// Anything else is classified conservatively (malformed): no create
 		// promise, and the form offers no Connect control.
-		return true, nil, state, nil
+		return result, nil
 	}
+	result.fileExists = true
+	if info != nil {
+		result.perm = info.Mode()
+	}
+
 	raw, rerr := s.read(cfgPath)
 	if rerr != nil {
-		state := classifyAccess(rerr)
-		if state == accessDenied {
-			return true, nil, state, s.newAccessError(client, cfgPath, rerr)
+		result.accessState = classifyAccess(rerr)
+		if result.accessState == accessAbsent {
+			// The file existed at stat time but is gone by the time of the
+			// read (it was removed in that narrow window). This is genuinely
+			// "no file" — not a value the write should error over — so it is
+			// reported exactly like the file never having existed: a
+			// tokenless write starts fresh, and a caller holding a
+			// precondition token that assumed the file was there correctly
+			// sees the mismatch via fileExists.
+			result.fileExists = false
+			return result, nil
 		}
-		return true, nil, state, nil
+		result.readErr = rerr
+		if result.accessState == accessDenied {
+			return result, s.newAccessError(client, cfgPath, rerr)
+		}
+		return result, nil
 	}
+	result.raw = raw
+
 	resolved, parsedOK := s.resolveExistingEntry(*client, raw, serverName)
 	if !parsedOK {
 		// Unparseable config: the preview cannot claim "create" or "overwrite"
 		// honestly; report malformed and let the UI degrade.
-		return true, nil, accessMalformed, nil
+		result.accessState = accessMalformed
+		return result, nil
 	}
-	return true, resolved, accessAccessible, nil
+	result.existing = resolved
+	result.accessState = accessAccessible
+	return result, nil
 }
 
 // existingEntry is the entry a write would actually replace: the key it lives
