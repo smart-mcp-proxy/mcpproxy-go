@@ -53,8 +53,9 @@ type ActivityRecord struct {
 	// Caller identity (Spec 028), lifted out of the internal `_auth_*` argument
 	// keys that the REST boundary strips. Only these two filterable fields are
 	// surfaced; the token prefix and server-edition user identity stay internal.
+	// A scoped (non-admin) caller sees them only on rows it made itself.
 
-	AuthType  string `json:"auth_type,omitempty"`  // "admin" or "agent"; empty on records written without an auth context
+	AuthType  string `json:"auth_type,omitempty"`  // "admin", "agent", "user" or "admin_user"; empty without an auth context or on another caller's row for a scoped caller
 	AgentName string `json:"agent_name,omitempty"` // Agent token name when auth_type is "agent"
 
 	// Byte sizes measured pre-truncation, mirroring storage.ActivityRecord

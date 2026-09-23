@@ -1317,8 +1317,8 @@ components:
           description: Tool call arguments
           type: object
         auth_type:
-          description: '"admin" or "agent"; empty on records written without an auth
-            context'
+          description: '"admin", "agent", "user" or "admin_user"; empty without an
+            auth context or on another caller''s row for a scoped caller'
           type: string
         detection_types:
           description: List of detection types found

@@ -1184,6 +1184,11 @@ export const activityAgentNames = (activities: ActivityAuthFields[]): string[] =
   return Array.from(names).sort()
 }
 
+// The "Admin" option covers both admin kinds: the API-key admin and the
+// server edition's OAuth-authenticated `admin_user`.
+const AUTH_TYPE_ALIASES: Record<string, string[]> = { admin: ['admin', 'admin_user'] }
+
 /** Whether a row passes the Auth Type / Agent filters ('' = no filter). */
 export const matchesAuthFilter = (a: ActivityAuthFields, authType: string, agentName: string): boolean =>
-  (!authType || a.auth_type === authType) && (!agentName || a.agent_name === agentName)
+  (!authType || (AUTH_TYPE_ALIASES[authType] ?? [authType]).includes(a.auth_type ?? '')) &&
+  (!agentName || a.agent_name === agentName)

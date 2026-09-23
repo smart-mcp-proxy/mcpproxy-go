@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -214,6 +215,7 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	for i, a := range activities {
 		contractActivities[i] = storageToContractActivity(a)
 		s.maskActivityPayloads(&contractActivities[i])
+		redactForeignIdentity(r.Context(), &contractActivities[i])
 		if excludePayloads {
 			contractActivities[i].Arguments = nil
 			contractActivities[i].Response = ""
@@ -272,6 +274,7 @@ func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request)
 
 	record := storageToContractActivity(activity)
 	s.maskActivityPayloads(&record)
+	redactForeignIdentity(r.Context(), &record)
 
 	response := contracts.ActivityDetailResponse{
 		Activity: record,
@@ -424,6 +427,24 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 		DetectionTypes:   detectionTypes,
 		MaxSeverity:      maxSeverity,
 	}
+}
+
+// redactForeignIdentity blanks auth_type/agent_name on a record the caller did
+// not make, when the caller is scoped (a non-admin). Activity visibility is
+// scoped by SERVER, so without this a scoped agent token reading a shared
+// server's log would learn every other agent token's name — an inventory that
+// is otherwise admin-only (GET /api/v1/tokens). Its own rows keep their
+// identity so it can still filter on itself.
+func redactForeignIdentity(ctx context.Context, record *contracts.ActivityRecord) {
+	if !auth.IsScopedCaller(ctx) {
+		return
+	}
+	ac := auth.AuthContextFromContext(ctx)
+	if ac.Type == auth.AuthTypeAgent && record.AuthType == auth.AuthTypeAgent && record.AgentName == ac.AgentName {
+		return
+	}
+	record.AuthType = ""
+	record.AgentName = ""
 }
 
 // authArgString reads one internal `_auth_*` identity key (Spec 028) from a
@@ -649,6 +670,7 @@ func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// JSON Lines format - one JSON object per line
 			contractActivity := storageToContractActivityForExport(activity, includeBodies)
+			redactForeignIdentity(r.Context(), &contractActivity)
 			jsonBytes, err := json.Marshal(contractActivity)
 			if err != nil {
 				s.logger.Errorw("Failed to marshal activity for export", "error", err, "id", activity.ID)

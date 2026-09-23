@@ -14,6 +14,7 @@ const rows = [
   { id: '3', auth_type: 'admin' },
   { id: '4' }, // written without an auth context (CLI, internal)
   { id: '5', auth_type: 'agent', agent_name: 'ci-bot' },
+  { id: '7', auth_type: 'admin_user' }, // server edition: OAuth-authenticated admin
   // The old, never-populated location must not be what the filter reads.
   { id: '6', metadata: { _auth_auth_type: 'agent', _auth_agent_name: 'ghost' } },
 ]
@@ -30,8 +31,8 @@ describe('Activity auth filters (Spec 028)', () => {
     expect(ids('agent', '')).toEqual(['1', '2', '5'])
   })
 
-  it('Auth Type = Admin keeps the admin rows', () => {
-    expect(ids('admin', '')).toEqual(['3'])
+  it('Auth Type = Admin keeps API-key and OAuth (server edition) admin rows', () => {
+    expect(ids('admin', '')).toEqual(['3', '7'])
   })
 
   it('an agent name narrows to that agent', () => {

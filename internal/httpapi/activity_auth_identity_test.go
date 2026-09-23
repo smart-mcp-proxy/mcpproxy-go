@@ -82,3 +82,39 @@ func TestActivityList_OmitsAuthIdentityWhenAbsent(t *testing.T) {
 	assert.NotContains(t, activity, "auth_type")
 	assert.NotContains(t, activity, "agent_name")
 }
+
+// A scoped caller (agent token) is entitled to rows by SERVER, not by caller.
+// Lifting the identity must not hand it the names of every other agent token
+// that touched a shared server — that inventory is admin-only (GET /tokens).
+// Its own rows keep their identity; everyone else's are blanked.
+func TestActivity_ScopedCallerSeesOnlyOwnIdentity(t *testing.T) {
+	own := agentActivityRecord()
+	own.ID = "activity-own"
+	own.Arguments["_auth_agent_name"] = "scoped-ci"
+	other := agentActivityRecord()
+	other.ID = "activity-other"
+	other.Arguments["_auth_agent_name"] = "finance-bot"
+	admin := agentActivityRecord()
+	admin.ID = "activity-admin"
+	admin.Arguments = map[string]interface{}{"_auth_auth_type": "admin"}
+
+	ctrl := &mockActivityController{apiKey: "test-key", activities: []*storage.ActivityRecord{own, other, admin}}
+	srv, token := scopedAgentServer(t, ctrl, []string{"*"})
+
+	identity := func(a map[string]interface{}) [2]interface{} { return [2]interface{}{a["auth_type"], a["agent_name"]} }
+
+	data := scopeDecodeData(t, scopeGet(t, srv, "/api/v1/activity", token))
+	got := map[string][2]interface{}{}
+	for _, row := range data["activities"].([]interface{}) {
+		a := row.(map[string]interface{})
+		got[a["id"].(string)] = identity(a)
+	}
+	assert.Equal(t, [2]interface{}{"agent", "scoped-ci"}, got["activity-own"])
+	assert.Equal(t, [2]interface{}{nil, nil}, got["activity-other"], "another agent's name leaked to a scoped caller")
+	assert.Equal(t, [2]interface{}{nil, nil}, got["activity-admin"])
+
+	detail := scopeDecodeData(t, scopeGet(t, srv, "/api/v1/activity/activity-other", token))
+	assert.Equal(t, [2]interface{}{nil, nil}, identity(detail["activity"].(map[string]interface{})))
+	detail = scopeDecodeData(t, scopeGet(t, srv, "/api/v1/activity/activity-own", token))
+	assert.Equal(t, [2]interface{}{"agent", "scoped-ci"}, identity(detail["activity"].(map[string]interface{})))
+}

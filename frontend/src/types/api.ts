@@ -863,8 +863,12 @@ export interface ActivityRecord {
    */
   parent_id?: string
   metadata?: Record<string, any>
-  /** Spec 028: caller identity. Absent on records written without an auth context. */
-  auth_type?: 'admin' | 'agent' | string
+  /**
+   * Spec 028: caller identity — 'admin' | 'agent', plus 'user' | 'admin_user' on
+   * the server edition. Absent on records written without an auth context, and
+   * blanked for a scoped caller on rows it did not make.
+   */
+  auth_type?: 'admin' | 'agent' | 'user' | 'admin_user'
   /** Spec 028: agent token name when auth_type is "agent". */
   agent_name?: string
   // Spec 026: Sensitive data detection fields
