@@ -643,17 +643,21 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 
 // ---------- JSON helpers ----------
 
-// connectJSON adds or updates the mcpproxy entry in a JSON config file.
 // guardJsoncComments refuses to rewrite a .jsonc file that actually uses
 // comments: mcpproxy re-serializes plain JSON, which would silently strip them
 // (#922). Comment-free .jsonc (OpenCode's bootstrap stub) rewrites safely.
 // Absent or unreadable files pass — the normal read/write path handles those.
 //
-// It reads the file itself; used by disconnectJSON, which has no pre-resolved
-// read to share (Disconnect never goes through preWriteState). Preview and
-// connectJSON instead call guardJsoncCommentsBytes over bytes preWriteState
-// already read, so the precondition-guarded write path never opens the file
-// twice.
+// It reads the file itself; used only by the read-only preview path
+// (preview.go), which has nothing to write and so nothing to race against.
+// The write paths must NOT call this — they check guardJsoncCommentsBytes
+// against bytes they already hold instead: connectJSON and connectTOML share
+// preWriteState's single pre-write read (pre.raw), and disconnectJSON checks
+// the same bytes its own single s.read call goes on to parse. A second,
+// independent read here would reopen the TOCTOU those closed: a file that
+// gains comments between this read and the later one would pass the guard on
+// stale bytes and then get silently rewritten as plain JSON, stripping the
+// comments the guard exists to protect.
 func (s *Service) guardJsoncComments(cfgPath string) error {
 	if !strings.HasSuffix(cfgPath, ".jsonc") {
 		return nil
@@ -666,8 +670,11 @@ func (s *Service) guardJsoncComments(cfgPath string) error {
 }
 
 // guardJsoncCommentsBytes is the pure, read-free core of guardJsoncComments,
-// operating on bytes the caller already has. raw is nil for an absent or
-// unreadable file, which passes exactly as guardJsoncComments' own read
+// operating on bytes the caller already has — connectJSON/connectTOML's
+// shared pre-write read, or disconnectJSON's own single read — so the check
+// and the parse/write that follows run against one snapshot of the file
+// instead of two independent reads that could race. raw is nil for an absent
+// or unreadable file, which passes exactly as guardJsoncComments' own read
 // failure does — the normal read/write path handles those.
 func guardJsoncCommentsBytes(cfgPath string, raw []byte) error {
 	if !strings.HasSuffix(cfgPath, ".jsonc") || raw == nil {
@@ -878,9 +885,6 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 
 // disconnectJSON removes the mcpproxy entry from a JSON config file.
 func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) (*ConnectResult, error) {
-	if err := s.guardJsoncComments(cfgPath); err != nil {
-		return nil, err
-	}
 	raw, err := s.read(cfgPath)
 	if os.IsNotExist(err) {
 		return &ConnectResult{
@@ -894,6 +898,12 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
+	}
+	// Guard against the SAME bytes just read, not a second independent read of
+	// the file (see guardJsoncCommentsBytes) — otherwise this reopens the exact
+	// TOCTOU the guard exists to close, just on the disconnect path.
+	if err := guardJsoncCommentsBytes(cfgPath, raw); err != nil {
+		return nil, err
 	}
 
 	var data map[string]interface{}
