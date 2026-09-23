@@ -3925,6 +3925,9 @@ func (s *Server) EmitActiveProfileChanged(profile string) {
 
 // GetCurrentConfig returns the current configuration
 func (s *Server) GetCurrentConfig() *config.Config {
+	if s.runtime == nil {
+		return nil
+	}
 	return s.runtime.GetCurrentConfig()
 }
 

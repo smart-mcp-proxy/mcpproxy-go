@@ -436,6 +436,8 @@ func TestAPIKeyAuth_NilConfigFailsClosed(t *testing.T) {
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code,
 		"an unreadable config must refuse the request, not forward it unauthenticated")
+	assert.Contains(t, w.Body.String(), "cannot authenticate",
+		"the 503 body must explain why, not just carry the right status code")
 	assert.False(t, ctrl.reachedHandler.Load(),
 		"the handler must NOT run: a nil config means the request was never authenticated")
 }
