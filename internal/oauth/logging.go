@@ -1011,6 +1011,41 @@ func LogSafeURL(rawURL string) string {
 	return AuditRedaction.URLValueDeep(rawURL)
 }
 
+// maxLogSafeRequestBytes bounds the work LogSafeRequestPath, LogSafeQueryString
+// and LogSafeRequestURL will do on a single UNTRUSTED input.
+//
+// SEC-01 second-lens review (PR #1350): internal/httpapi's httpLoggingMiddleware
+// runs these three renderers on r.URL.Path, r.URL.RawQuery and r.Referer() for
+// EVERY request, mounted at the chi router root before apiKeyAuthMiddleware —
+// so they run pre-auth, on every connection the listener accepts, logged AFTER
+// the response is written and so unbounded by http.Server's ReadTimeout /
+// WriteTimeout / ReadHeaderTimeout (none of which interrupt a goroutine already
+// running handler code). logSafeURLComponent splits its input on '/' and calls
+// the shared value-shaped detector (Detector.MaskText — every built-in regex
+// pattern plus a Shannon-entropy pass, allocating a fresh map per pattern per
+// call) once PER SEGMENT, so a request path built from many minimal segments
+// turns one request into hundreds of thousands of full detector passes, well
+// inside the pre-existing 1MB MaxHeaderBytes budget the request line shares
+// (internal/server/server.go) — an unauthenticated CPU/allocation amplification
+// this redaction fix itself introduced.
+//
+// A few KB is already generous for what an access log line needs to be useful,
+// so the fix bounds the INPUT rather than the algorithm: every entry point cuts
+// its argument to this length, on a rune boundary, before any redaction rule
+// runs — so the cost of rendering one log field cannot scale with what the
+// client sent.
+const maxLogSafeRequestBytes = 4096
+
+// capLogSafeRequestInput cuts s to maxLogSafeRequestBytes, marking the cut, so
+// every redaction rule downstream runs over a bounded string regardless of how
+// long the caller-supplied s is.
+func capLogSafeRequestInput(s string) string {
+	if len(s) <= maxLogSafeRequestBytes {
+		return s
+	}
+	return s[:safeTruncateBytes(s, maxLogSafeRequestBytes)] + capEllipsis
+}
+
 // LogSafeQueryString is LogSafeURL for a BARE query string — `r.URL.RawQuery`,
 // with no scheme, host or path in front of it.
 //
@@ -1031,6 +1066,7 @@ func LogSafeQueryString(rawQuery string) string {
 	if rawQuery == "" {
 		return rawQuery
 	}
+	rawQuery = capLogSafeRequestInput(rawQuery)
 	return AuditRedaction.finish(rawQuery, redactRawQueryParams(rawQuery, AuditRedaction.masker()))
 }
 
@@ -1069,6 +1105,7 @@ func LogSafeRequestURL(rawURL string) string {
 	if rawURL == "" {
 		return rawURL
 	}
+	rawURL = capLogSafeRequestInput(rawURL)
 	scrubbed := redactURLUserinfo(rawURL)
 	main, fragment, hasFragment := strings.Cut(scrubbed, "#")
 	base, rawQuery, hasQuery := strings.Cut(main, "?")
@@ -1089,8 +1126,13 @@ func LogSafeRequestURL(rawURL string) string {
 // access line and on every authentication decision, and a path is as
 // client-controlled as the query beside it, so it had the same shape of
 // exposure LogSafeRequestURL now closes for the Referer.
+//
+// Capped at entry (SEC-01 second-lens review, PR #1350): logSafeURLComponent
+// splits on '/' and runs the full value-shaped detector per segment, so an
+// uncapped path let a client turn one request into an unbounded number of
+// detector passes. See maxLogSafeRequestBytes.
 func LogSafeRequestPath(path string) string {
-	return logSafeURLComponent(path)
+	return logSafeURLComponent(capLogSafeRequestInput(path))
 }
 
 // logSafeURLComponent renders the part of a URL that is NOT a query string -
