@@ -255,18 +255,6 @@ jobs:
             go build -ldflags "${LDFLAGS} -H windowsgui" -o mcpproxy-tray.exe ./cmd/mcpproxy-tray
           fi
 
-          # Same guard as release.yml: the archive adds the tray by name and
-          # the tray self-update fails closed without it, so a missing binary
-          # must fail the build rather than ship a tray-less archive.
-          if [ "${{ matrix.goos }}" = "darwin" ] && [ ! -f "mcpproxy-tray" ]; then
-            echo "::error::mcpproxy-tray build produced no binary; the archive would strand every tray self-update"
-            exit 1
-          fi
-          if [ "${{ matrix.goos }}" = "windows" ] && [ ! -f "mcpproxy-tray.exe" ]; then
-            echo "::error::mcpproxy-tray.exe build produced no binary; the archive would strand every tray self-update"
-            exit 1
-          fi
-
           # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             chmod +x scripts/build-swift-app.sh
@@ -463,6 +451,12 @@ jobs:
           elif [ "${{ matrix.goos }}" = "darwin" ] && [ -f "mcpproxy-tray" ]; then
             FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray"
             echo "Including mcpproxy-tray in archive"
+          elif [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; then
+            # Same rule as release.yml: fail rather than ship a core-only
+            # archive that would strand every tray self-update. Linux has no
+            # tray and falls through untouched.
+            echo "::error::no tray binary to archive for ${{ matrix.goos }}; a core-only archive would strand every tray self-update"
+            exit 1
           fi
 
           if [ "${{ matrix.archive_format }}" = "zip" ]; then

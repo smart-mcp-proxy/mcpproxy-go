@@ -297,7 +297,10 @@ func TestTrayBinaryName(t *testing.T) {
 	if got := trayBinaryName(); got != want {
 		t.Errorf("trayBinaryName() = %q, want %q", got, want)
 	}
-	if base := filepath.Base(want); base != want {
-		t.Errorf("trayBinaryName() must be a bare base name, got %q", want)
+	// Against the RETURN VALUE, not the literal above: ExtractBinary compares
+	// filepath.Base(member), so a name carrying a directory could never match
+	// anything. Checking `want` here (as this did originally) was a tautology.
+	if got := trayBinaryName(); filepath.Base(got) != got {
+		t.Errorf("trayBinaryName() = %q, want a bare base name with no path separator", got)
 	}
 }

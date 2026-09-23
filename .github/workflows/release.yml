@@ -464,15 +464,6 @@ jobs:
             fi
 
             go build -ldflags "${TRAY_LDFLAGS}" -o ${TRAY_BINARY} ./cmd/mcpproxy-tray
-
-            # The archive step below adds this binary by name, and the tray's
-            # self-update extracts that exact member and fails closed when it
-            # is missing. A silently tray-less archive would therefore strand
-            # every tray on this platform, so fail the build instead.
-            if [ ! -f "${TRAY_BINARY}" ]; then
-              echo "::error::mcpproxy-tray build produced no ${TRAY_BINARY}; the archive would strand every tray self-update"
-              exit 1
-            fi
           fi
 
           # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)
@@ -724,6 +715,15 @@ jobs:
             cp mcpproxy-tray "${TARBALL_STAGE}/"
             FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray"
             echo "Including mcpproxy-tray in archive"
+          elif [ "$EDITION" != "server" ] && { [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; }; then
+            # The tray self-update extracts the mcpproxy-tray member by exact
+            # name and fails closed without it, so a tray-less archive strands
+            # every tray on this platform. This branch is the one that used to
+            # degrade silently: the conditions above simply did not fire and
+            # the archive shipped core-only. Linux and the server edition fall
+            # through untouched — neither ships a tray.
+            echo "::error::no tray binary to archive for ${{ matrix.goos }}; a core-only archive would strand every tray self-update"
+            exit 1
           fi
 
           ARCHIVE_OUT="$(pwd)"
