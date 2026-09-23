@@ -2,6 +2,7 @@ package storage
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -10,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // skipOnWindows guards the permission assertions below: os.Chmod on Windows only
@@ -150,4 +153,52 @@ func TestBackupTightensExistingDestination(t *testing.T) {
 	entries, err := os.ReadDir(destDir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "backup must not leave temporary files behind: %v", entries)
+}
+
+// TestTightenFilePermissionsLogsStatFailureAtWarn covers SEC-03 follow-up
+// review: the database holds OAuth tokens and DCR client secrets, so an
+// operator running at the project's default log level (Info) must be able to
+// see that the permission-tightening migration did not run, instead of the
+// failure disappearing into Debug output nobody has enabled.
+func TestTightenFilePermissionsLogsStatFailureAtWarn(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core).Sugar()
+
+	tightenFilePermissions(filepath.Join(t.TempDir(), "does-not-exist.db"), logger)
+
+	entries := logs.FilterMessageSnippet("Could not stat").All()
+	require.Len(t, entries, 1, "a stat failure must be logged")
+	require.Equal(t, zapcore.WarnLevel, entries[0].Level,
+		"a stat failure must be visible at the project's default (Info) log level")
+}
+
+// TestTightenFilePermissionsLogsChmodFailureAtWarn reproduces one of the
+// review's named real-world causes (macOS uchg/schg flag) for a chmod that
+// cannot succeed even though the process owns the file: darwin's immutable
+// flag makes chmod fail with EPERM regardless of ownership.
+func TestTightenFilePermissionsLogsChmodFailureAtWarn(t *testing.T) {
+	skipOnWindows(t)
+	if runtime.GOOS != "darwin" {
+		t.Skip("uses chflags uchg to force an owner-proof chmod failure; darwin-only")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.db")
+	require.NoError(t, os.WriteFile(path, []byte("x"), 0o644))
+
+	require.NoError(t, exec.Command("chflags", "uchg", path).Run())
+	defer func() {
+		_ = exec.Command("chflags", "nouchg", path).Run()
+	}()
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	logger := zap.New(core).Sugar()
+
+	tightenFilePermissions(path, logger)
+
+	entries := logs.FilterMessageSnippet("Could not tighten permissions").All()
+	require.Len(t, entries, 1, "a chmod failure must be logged")
+	require.Equal(t, zapcore.WarnLevel, entries[0].Level,
+		"a chmod failure must be visible at the project's default (Info) log level, "+
+			"since it means the DB is left silently world-readable")
 }

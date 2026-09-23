@@ -81,13 +81,16 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 
 // tightenFilePermissions clears group and other permission bits from path,
 // leaving owner bits untouched so a deliberately stricter mode is never widened.
-// It is best-effort: any failure is logged at debug level and ignored, because a
-// mode that cannot be tightened (read-only mount, exotic filesystem, Windows)
-// must never prevent the proxy from starting.
+// It is best-effort and never prevents the proxy from starting: a mode that
+// cannot be tightened (read-only mount, exotic filesystem, Windows) is logged
+// at warn level (the default log level is info) rather than blocking startup,
+// because the file holds OAuth tokens and DCR client secrets and a failure
+// here means it silently stays group/world readable - that must be visible
+// to an operator without enabling debug logging.
 func tightenFilePermissions(path string, logger *zap.SugaredLogger) {
 	info, err := os.Stat(path)
 	if err != nil {
-		logger.Debugf("Could not stat %s to check file permissions: %v", path, err)
+		logger.Warnf("Could not stat %s to check file permissions: %v", path, err)
 		return
 	}
 
@@ -97,11 +100,11 @@ func tightenFilePermissions(path string, logger *zap.SugaredLogger) {
 	}
 
 	if err := os.Chmod(path, perm&^0o077); err != nil {
-		logger.Debugf("Could not tighten permissions on %s: %v", path, err)
+		logger.Warnf("Could not tighten permissions on %s: %v", path, err)
 		return
 	}
 
-	logger.Debugf("Tightened permissions on %s from %#o to %#o", path, perm, perm&^0o077)
+	logger.Infof("Tightened permissions on %s from %#o to %#o", path, perm, perm&^0o077)
 }
 
 // Close closes the database
