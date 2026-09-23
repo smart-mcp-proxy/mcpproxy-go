@@ -441,15 +441,21 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 // is otherwise admin-only (GET /api/v1/tokens). Its own rows keep their
 // identity so it can still filter on itself.
 //
-// "Own" is decided by the stored token prefix, not the name: token names are
-// unique per owner only, so another tenant's token can share the caller's name.
+// "Own" needs the stored token prefix AND name to match the caller's: names
+// are unique per owner only (another tenant's token can share one), and the
+// 12-char prefix carries just 16 random bits, so neither alone identifies it.
+//
+// It also strips the internal `_auth_*` keys from Arguments, which the bodies
+// export otherwise returns verbatim — the same inventory by another route.
 func redactForeignIdentity(ctx context.Context, storedArgs map[string]interface{}, record *contracts.ActivityRecord) {
 	if !auth.IsScopedCaller(ctx) {
 		return
 	}
+	record.Arguments = security.StripInternalArgs(record.Arguments)
 	ac := auth.AuthContextFromContext(ctx)
 	if ac.Type == auth.AuthTypeAgent && ac.TokenPrefix != "" &&
-		authArgString(storedArgs, "_auth_token_prefix") == ac.TokenPrefix {
+		authArgString(storedArgs, "_auth_token_prefix") == ac.TokenPrefix &&
+		authArgString(storedArgs, "_auth_agent_name") == ac.AgentName {
 		return
 	}
 	record.AuthType = ""

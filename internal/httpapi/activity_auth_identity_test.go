@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 
@@ -104,10 +105,16 @@ func TestActivity_ScopedCallerSeesOnlyOwnIdentity(t *testing.T) {
 	namesake.ID = "activity-namesake"
 	namesake.Arguments["_auth_agent_name"] = "scoped-ci"
 	namesake.Arguments["_auth_token_prefix"] = "mcp_agt_0000"
+	// The 12-char prefix carries only 16 random bits, so a foreign token can
+	// share it; together with a different name it is still someone else.
+	prefixTwin := agentActivityRecord()
+	prefixTwin.ID = "activity-prefix-twin"
+	prefixTwin.Arguments["_auth_agent_name"] = "finance-bot"
 
-	ctrl := &mockActivityController{apiKey: "test-key", activities: []*storage.ActivityRecord{own, other, admin, namesake}}
+	ctrl := &mockActivityController{apiKey: "test-key", activities: []*storage.ActivityRecord{own, other, admin, namesake, prefixTwin}}
 	srv, token := scopedAgentServer(t, ctrl, []string{"*"})
 	own.Arguments["_auth_token_prefix"] = auth.TokenPrefix(token)
+	prefixTwin.Arguments["_auth_token_prefix"] = auth.TokenPrefix(token)
 
 	identity := func(a map[string]interface{}) [2]interface{} { return [2]interface{}{a["auth_type"], a["agent_name"]} }
 
@@ -117,13 +124,55 @@ func TestActivity_ScopedCallerSeesOnlyOwnIdentity(t *testing.T) {
 		a := row.(map[string]interface{})
 		got[a["id"].(string)] = identity(a)
 	}
+	// A dropped row would read back as the zero value — the same as a
+	// redacted one — so pin the row count before asserting on identities.
+	require.Len(t, got, 5)
 	assert.Equal(t, [2]interface{}{"agent", "scoped-ci"}, got["activity-own"])
 	assert.Equal(t, [2]interface{}{nil, nil}, got["activity-other"], "another agent's name leaked to a scoped caller")
 	assert.Equal(t, [2]interface{}{nil, nil}, got["activity-admin"])
 	assert.Equal(t, [2]interface{}{nil, nil}, got["activity-namesake"], "a same-named token of another owner was treated as the caller")
+	assert.Equal(t, [2]interface{}{nil, nil}, got["activity-prefix-twin"], "a prefix collision alone was treated as the caller")
 
 	detail := scopeDecodeData(t, scopeGet(t, srv, "/api/v1/activity/activity-other", token))
 	assert.Equal(t, [2]interface{}{nil, nil}, identity(detail["activity"].(map[string]interface{})))
 	detail = scopeDecodeData(t, scopeGet(t, srv, "/api/v1/activity/activity-own", token))
 	assert.Equal(t, [2]interface{}{"agent", "scoped-ci"}, identity(detail["activity"].(map[string]interface{})))
+}
+
+// The bodies export returns stored arguments verbatim. For a scoped caller the
+// internal `_auth_*` keys in them are the same identity inventory the typed
+// fields are redacted for, so they must not ride along.
+func TestActivityExport_ScopedCallerGetsNoInternalAuthArgs(t *testing.T) {
+	ctrl := &streamingActivityController{mockActivityController{apiKey: "test-key", activities: []*storage.ActivityRecord{agentActivityRecord()}}}
+	srv, token := scopedAgentServer(t, ctrl, []string{"*"})
+
+	rec := scopeGet(t, srv, "/api/v1/activity/export?format=json&include_bodies=true", token)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	body := rec.Body.String()
+	require.Contains(t, body, `"message":"hi"`, "export lost the caller-visible arguments")
+	assert.NotContains(t, body, "_auth_")
+	assert.NotContains(t, body, "u@example.com")
+
+	// The admin compliance export keeps full fidelity.
+	admin := NewServer(&streamingActivityController{mockActivityController{apiKey: "test-key", activities: []*storage.ActivityRecord{agentActivityRecord()}}}, zap.NewNop().Sugar(), nil)
+	rec = scopeGet(t, admin, "/api/v1/activity/export?format=json&include_bodies=true", "test-key")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "_auth_agent_name")
+}
+
+// streamingActivityController feeds the export door, which reads
+// StreamActivities rather than ListActivities.
+type streamingActivityController struct {
+	mockActivityController
+}
+
+func (m *streamingActivityController) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+	ch := make(chan *storage.ActivityRecord, len(m.activities))
+	for _, a := range m.activities {
+		if filter.Matches(a) {
+			ch <- a
+		}
+	}
+	close(ch)
+	return ch
 }
