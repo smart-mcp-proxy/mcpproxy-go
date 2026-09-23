@@ -50,6 +50,13 @@ type ActivityRecord struct {
 	ParentID          string                 `json:"parent_id,omitempty"`                      // Correlation id of the parent call (the code_execution whose sandbox issued this sub-call)
 	Metadata          map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`  // Additional context-specific data
 
+	// Caller identity (Spec 028), lifted out of the internal `_auth_*` argument
+	// keys that the REST boundary strips. Only these two filterable fields are
+	// surfaced; the token prefix and server-edition user identity stay internal.
+
+	AuthType  string `json:"auth_type,omitempty"`  // "admin" or "agent"; empty on records written without an auth context
+	AgentName string `json:"agent_name,omitempty"` // Agent token name when auth_type is "agent"
+
 	// Byte sizes measured pre-truncation, mirroring storage.ActivityRecord
 	// (Spec 069 A1). They are the only cost signal a bodies-off export carries:
 	// with payloads suppressed there is no text left to measure, so a consumer

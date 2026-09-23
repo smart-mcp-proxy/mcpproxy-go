@@ -1163,3 +1163,27 @@ export const paginateActivities = (
 export const calculateTotalPages = (totalItems: number, pageSize: number): number => {
   return Math.ceil(totalItems / pageSize)
 }
+
+// --- caller identity filters (Spec 028) --------------------------------------
+//
+// The identity is the top-level `auth_type` / `agent_name` the API lifts out of
+// the internal `_auth_*` argument keys. It is NOT in `metadata`: reading it from
+// there left the Agent dropdown empty and made Auth Type = Agent hide every row.
+
+export interface ActivityAuthFields {
+  auth_type?: string
+  agent_name?: string
+}
+
+/** Distinct agent-token names present in the rows, sorted. */
+export const activityAgentNames = (activities: ActivityAuthFields[]): string[] => {
+  const names = new Set<string>()
+  for (const a of activities) {
+    if (a.agent_name) names.add(a.agent_name)
+  }
+  return Array.from(names).sort()
+}
+
+/** Whether a row passes the Auth Type / Agent filters ('' = no filter). */
+export const matchesAuthFilter = (a: ActivityAuthFields, authType: string, agentName: string): boolean =>
+  (!authType || a.auth_type === authType) && (!agentName || a.agent_name === agentName)

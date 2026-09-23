@@ -1310,9 +1310,16 @@ components:
       type: object
     contracts.ActivityRecord:
       properties:
+        agent_name:
+          description: Agent token name when auth_type is "agent"
+          type: string
         arguments:
           description: Tool call arguments
           type: object
+        auth_type:
+          description: '"admin" or "agent"; empty on records written without an auth
+            context'
+          type: string
         detection_types:
           description: List of detection types found
           items:

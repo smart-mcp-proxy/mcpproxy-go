@@ -417,11 +417,24 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 		RequestID:         a.RequestID,
 		ParentID:          a.ParentID,
 		Metadata:          a.Metadata,
+		AuthType:          authArgString(a.Arguments, "_auth_auth_type"),
+		AgentName:         authArgString(a.Arguments, "_auth_agent_name"),
 		// Sensitive data detection fields (Spec 026)
 		HasSensitiveData: hasSensitiveData,
 		DetectionTypes:   detectionTypes,
 		MaxSeverity:      maxSeverity,
 	}
+}
+
+// authArgString reads one internal `_auth_*` identity key (Spec 028) from a
+// record's stored arguments. maskActivityPayloads strips those keys from the
+// payload view, so the identity has to be lifted into typed fields here or the
+// Web UI has nothing to filter on.
+func authArgString(args map[string]interface{}, key string) string {
+	if s, ok := args[key].(string); ok {
+		return s
+	}
+	return ""
 }
 
 // extractSensitiveDataInfo extracts sensitive data detection info from activity metadata.
@@ -514,6 +527,8 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 		RequestID:         a.RequestID,
 		ParentID:          a.ParentID,
 		Metadata:          a.Metadata,
+		AuthType:          authArgString(a.Arguments, "_auth_auth_type"),
+		AgentName:         authArgString(a.Arguments, "_auth_agent_name"),
 		// Pre-truncation byte lengths (Spec 069 A1). Copied unconditionally,
 		// NOT under includeBodies: they are sizes, not content, and the
 		// bodies-off export is exactly the case where they are the only cost
