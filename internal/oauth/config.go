@@ -1701,8 +1701,8 @@ func callbackPage(title, message string) string {
 
 // handleRequest is the callback listener's only handler: it logs the request,
 // then either delivers a real callback or renders the debug page. A method
-// rather than a closure in StartCallbackServer so the log fields it writes are
-// reachable from a test without binding a listener; it reads c.Path,
+// rather than a closure in StartCallbackServerOnHost so the log fields it
+// writes are reachable from a test without binding a listener; it reads c.Path,
 // c.ServerName and c.Port, which are exactly the values the closure captured.
 //
 // SEC-01 follow-up: `path` goes through LogSafeRequestPath like every other
