@@ -1550,34 +1550,7 @@ func (m *CallbackServerManager) StartCallbackServerOnHost(serverName string, bin
 	//     redirected instead of delivered, and the login hangs.
 	// A raw handler function receives r.URL.Path exactly as net/http parsed
 	// it, with neither risk.
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callbackServer.logger.Info("📥 HTTP request received on callback server",
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path),
-			zap.String("query", LogSafeCallbackQuery(r.URL.RawQuery)),
-			zap.String("user_agent", r.UserAgent()),
-			zap.String("remote_addr", r.RemoteAddr))
-
-		if r.URL.Path == path {
-			callbackServer.handleCallback(w, r)
-		} else {
-			w.Header().Set("Content-Type", "text/html")
-			debugPage := fmt.Sprintf(`
-				<html>
-					<body>
-						<h1>OAuth Callback Server Debug</h1>
-						<p>Path: %s</p>
-						<p>Expected: %s</p>
-						<p>Server: %s</p>
-						<p>Port: %d</p>
-					</body>
-				</html>
-			`, html.EscapeString(r.URL.Path), html.EscapeString(path), html.EscapeString(serverName), port)
-			if _, err := w.Write([]byte(debugPage)); err != nil {
-				callbackServer.logger.Error("Error writing debug page", zap.Error(err))
-			}
-		}
-	})
+	handler := http.HandlerFunc(callbackServer.handleRequest)
 
 	server := &http.Server{
 		Addr:              listenAddr,
@@ -1726,11 +1699,56 @@ func callbackPage(title, message string) string {
 	`, html.EscapeString(title), html.EscapeString(message), closeScript)
 }
 
+// handleRequest is the callback listener's only handler: it logs the request,
+// then either delivers a real callback or renders the debug page. A method
+// rather than a closure in StartCallbackServer so the log fields it writes are
+// reachable from a test without binding a listener; it reads c.Path,
+// c.ServerName and c.Port, which are exactly the values the closure captured.
+//
+// SEC-01 follow-up: `path` goes through LogSafeRequestPath like every other
+// field on this line. The callback path is normally a fixed, operator-
+// configured value, so this closes an inconsistency rather than a demonstrated
+// leak — but there is no mux in front of this handler (deliberately, see
+// StartCallbackServer), so EVERY path reaches the log line including the ones
+// that fall through to the debug page; the listener is a plain loopback HTTP
+// server any local process can reach for the whole login window; and
+// r.URL.Path arrives percent-DECODED, so an encoded `?apikey=<KEY>` or
+// `Bearer <token>` in the request target lands here as the real thing.
+func (c *CallbackServer) handleRequest(w http.ResponseWriter, r *http.Request) {
+	c.logger.Info("📥 HTTP request received on callback server",
+		zap.String("method", r.Method),
+		zap.String("path", LogSafeRequestPath(r.URL.Path)),
+		zap.String("query", LogSafeCallbackQuery(r.URL.RawQuery)),
+		zap.String("user_agent", r.UserAgent()),
+		zap.String("remote_addr", r.RemoteAddr))
+
+	if r.URL.Path == c.Path {
+		c.handleCallback(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html")
+	debugPage := fmt.Sprintf(`
+		<html>
+			<body>
+				<h1>OAuth Callback Server Debug</h1>
+				<p>Path: %s</p>
+				<p>Expected: %s</p>
+				<p>Server: %s</p>
+				<p>Port: %d</p>
+			</body>
+		</html>
+	`, html.EscapeString(r.URL.Path), html.EscapeString(c.Path), html.EscapeString(c.ServerName), c.Port)
+	if _, err := w.Write([]byte(debugPage)); err != nil {
+		c.logger.Error("Error writing debug page", zap.Error(err))
+	}
+}
+
 // handleCallback handles OAuth callback requests
 func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) {
 	c.logger.Info("🎯 OAuth callback received",
 		zap.String("method", r.Method),
-		zap.String("path", r.URL.Path),
+		zap.String("path", LogSafeRequestPath(r.URL.Path)),
 		zap.String("query", LogSafeCallbackQuery(r.URL.RawQuery)),
 		zap.String("remote_addr", r.RemoteAddr),
 		zap.String("user_agent", r.UserAgent()))

@@ -2741,12 +2741,12 @@ func (s *Server) extendedDeadline(d time.Duration, next http.Handler) http.Handl
 		rc := http.NewResponseController(w)
 		if err := rc.SetWriteDeadline(deadline); err != nil {
 			s.logger.Debug("Could not extend the write deadline for a long-running route",
-				zap.String("path", r.URL.Path),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 				zap.Error(err))
 		}
 		if err := rc.SetReadDeadline(deadline); err != nil {
 			s.logger.Debug("Could not extend the read deadline for a long-running route",
-				zap.String("path", r.URL.Path),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 				zap.Error(err))
 		}
 		next.ServeHTTP(w, r)
@@ -2792,13 +2792,13 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 		rc := http.NewResponseController(w)
 		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
 			s.logger.Debug("Could not clear the write deadline for a streaming route",
-				zap.String("path", r.URL.Path),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 				zap.Error(err))
 		}
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			if err := rc.SetReadDeadline(time.Time{}); err != nil {
 				s.logger.Debug("Could not clear the read deadline for a streaming route",
-					zap.String("path", r.URL.Path),
+					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 					zap.Error(err))
 			}
 		}
@@ -2897,55 +2897,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux := http.NewServeMux()
 
 	// Create a logging wrapper for debugging client connections
-	loggingHandler := func(handler http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-
-			// Extract connection source from context
-			source := GetConnectionSource(r.Context())
-
-			// Log incoming request with connection details
-			s.logger.Debug("MCP client request received",
-				zap.String("method", r.Method),
-				zap.String("path", r.URL.Path),
-				zap.String("remote_addr", r.RemoteAddr),
-				zap.String("source", string(source)),
-				zap.String("user_agent", r.UserAgent()),
-				zap.String("content_type", r.Header.Get("Content-Type")),
-				zap.String("connection", r.Header.Get("Connection")),
-				zap.Int64("content_length", r.ContentLength),
-			)
-
-			// Create response writer wrapper to capture status and errors
-			wrappedWriter := &responseWriter{ResponseWriter: w, statusCode: 200}
-
-			// Handle the request
-			handler.ServeHTTP(wrappedWriter, r)
-
-			duration := time.Since(start)
-
-			// Log response with timing and status
-			if wrappedWriter.statusCode >= 400 {
-				s.logger.Warn("MCP client request completed with error",
-					zap.String("method", r.Method),
-					zap.String("path", r.URL.Path),
-					zap.String("remote_addr", r.RemoteAddr),
-					zap.String("source", string(source)),
-					zap.Int("status_code", wrappedWriter.statusCode),
-					zap.Duration("duration", duration),
-				)
-			} else {
-				s.logger.Debug("MCP client request completed successfully",
-					zap.String("method", r.Method),
-					zap.String("path", r.URL.Path),
-					zap.String("remote_addr", r.RemoteAddr),
-					zap.String("source", string(source)),
-					zap.Int("status_code", wrappedWriter.statusCode),
-					zap.Duration("duration", duration),
-				)
-			}
-		})
-	}
+	loggingHandler := s.mcpLoggingHandler
 
 	// Standard MCP endpoint according to the specification
 	// Wrap with auth middleware to inject AuthContext for agent token scope enforcement.
@@ -4616,4 +4568,72 @@ func (p *configServerInfoProvider) IsConnected(serverName string) bool {
 		return false
 	}
 	return serverStatus.Connected
+}
+
+// mcpLoggingHandler wraps an MCP route with the request/response debug lines
+// that every /mcp mount shares. Extracted from startCustomHTTPServer so the
+// log fields it writes are reachable from a test without binding a listener.
+func (s *Server) mcpLoggingHandler(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Extract connection source from context
+		source := GetConnectionSource(r.Context())
+
+		// SEC-01 follow-up: `/mcp/` and `/mcp/p/` are SUBTREE patterns, so
+		// everything after the prefix is whatever the caller sent, and
+		// r.URL.Path arrives percent-DECODED — an `?apikey=<KEY>` or a
+		// `Bearer <token>` encoded into the request target reaches this field
+		// as the real thing. The renderer is internal/oauth's, the same one
+		// internal/httpapi's access log uses: one rule for every log sink.
+		//
+		// Rendered ONCE for all three lines below. zap evaluates a field's
+		// value eagerly, so this runs whether or not Debug is enabled, and the
+		// renderer walks the path per segment; doing it twice per request
+		// would double that cost for nothing. Its input is capped inside
+		// LogSafeRequestPath (see maxLogSafeRequestBytes), which is what keeps
+		// the work per request bounded on this anonymous-by-default endpoint.
+		safePath := oauth.LogSafeRequestPath(r.URL.Path)
+
+		// Log incoming request with connection details
+		s.logger.Debug("MCP client request received",
+			zap.String("method", r.Method),
+			zap.String("path", safePath),
+			zap.String("remote_addr", r.RemoteAddr),
+			zap.String("source", string(source)),
+			zap.String("user_agent", r.UserAgent()),
+			zap.String("content_type", r.Header.Get("Content-Type")),
+			zap.String("connection", r.Header.Get("Connection")),
+			zap.Int64("content_length", r.ContentLength),
+		)
+
+		// Create response writer wrapper to capture status and errors
+		wrappedWriter := &responseWriter{ResponseWriter: w, statusCode: 200}
+
+		// Handle the request
+		handler.ServeHTTP(wrappedWriter, r)
+
+		duration := time.Since(start)
+
+		// Log response with timing and status
+		if wrappedWriter.statusCode >= 400 {
+			s.logger.Warn("MCP client request completed with error",
+				zap.String("method", r.Method),
+				zap.String("path", safePath),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("source", string(source)),
+				zap.Int("status_code", wrappedWriter.statusCode),
+				zap.Duration("duration", duration),
+			)
+		} else {
+			s.logger.Debug("MCP client request completed successfully",
+				zap.String("method", r.Method),
+				zap.String("path", safePath),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("source", string(source)),
+				zap.Int("status_code", wrappedWriter.statusCode),
+				zap.Duration("duration", duration),
+			)
+		}
+	})
 }
