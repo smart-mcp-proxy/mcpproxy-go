@@ -63,7 +63,13 @@ global API key** — the exporter carries fleet-wide tool, server and request
 topology, so it is treated as admin-only data. Present the key as either:
 
 - `X-API-Key: <api key>`, or
-- `Authorization: Bearer <api key>`.
+- `Authorization: Bearer <api key>`, or
+- `?apikey=<api key>` query parameter (same precedence as the rest of the
+  REST API — see [rest-api.md](../api/rest-api.md)).
+
+> **Caution:** prefer a header over the `?apikey=` query parameter for
+> scrapers. Query strings are the credential form most likely to be copied
+> into an intermediary or reverse-proxy's access logs.
 
 Agent tokens (`mcp_agt_`) are rejected with `403`: they are scope-restricted
 and must not read fleet-wide aggregates. The tray's Unix-socket connection is

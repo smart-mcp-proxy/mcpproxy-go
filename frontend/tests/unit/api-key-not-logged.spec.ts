@@ -44,6 +44,11 @@ describe('api service does not log key material', () => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     localStorage.clear()
+    // Always clear a ?apikey= left on the jsdom URL by the query-parameter
+    // test below, even if that test's assertions threw first — otherwise the
+    // secret lingers in window.location for whatever spec runs next in this
+    // module.
+    window.history.replaceState({}, '', '/')
   })
 
   it('never writes the key or its prefix to the console', async () => {
@@ -131,7 +136,5 @@ describe('api service does not log key material', () => {
     const logged = collectConsoleOutput(spies)
     expect(logged).not.toContain(SECRET)
     expect(logged).not.toContain(SECRET.substring(0, 8))
-
-    window.history.replaceState({}, '', '/')
   })
 })
