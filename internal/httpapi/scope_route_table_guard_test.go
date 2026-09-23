@@ -30,8 +30,12 @@ import (
 //   scopeOpen:     reachable, and carries nothing about a server outside the
 //     caller's grant. Allowlisted with a written reason.
 //
-// Filtered and open look the same on the wire (not the 403). They are kept as
-// separate classes so the `why` on each says which it is.
+// Filtered and open both reach the handler for the probe token — a 2xx, never
+// the fixed 403. They are kept as separate classes so the `why` on each says
+// which it is. A handful reach a documented 404/400/503 BEFORE the gate on the
+// synthetic path params the walk uses (no such record, dependency not wired);
+// those are enumerated in shortCircuitCodes and their real scoped-caller oracle
+// is the named test in `why`, not this walk.
 
 type scopeClass int
 
@@ -112,11 +116,13 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/connect/{client}":              {scopeOpen, "MCP client connect status; reads stay open"},
 	"/api/v1/connect/{client}/preview":      {scopeOpen, "MCP client config preview; reads stay open"},
 
-	// /diagnostics and its /doctor alias aggregate per-server health. The
-	// management service (internal/management.Doctor) drops servers the caller
-	// cannot enumerate before building the report, and the legacy fallback path
-	// filters through visibleServers; TestDiagnostics_ScopedCallerDoesNotSeeHiddenServer.
-	"/api/v1/diagnostics": {scopeFiltered, "management Doctor / visibleServers drop unentitled servers (#1166)"},
+	// /diagnostics and its /doctor alias aggregate per-server health, on two
+	// paths with two separate gates: the management path delegates to
+	// internal/management.Doctor, whose CanEnumerateServer drop is proven by
+	// TestDoctor_ScopedTokenSeesOnlyAllowedServers (internal/management); the
+	// legacy fallback filters through visibleServers in handleGetDiagnostics
+	// itself, proven here by TestDiagnostics_LegacyPathScopedCallerDoesNotSeeHiddenServer.
+	"/api/v1/diagnostics": {scopeFiltered, "management Doctor (TestDoctor_ScopedTokenSeesOnlyAllowedServers) / legacy visibleServers (TestDiagnostics_LegacyPathScopedCallerDoesNotSeeHiddenServer) drop unentitled servers (#1166)"},
 	"/api/v1/doctor":      {scopeFiltered, "alias of /diagnostics; same scope gate"},
 }
 
@@ -128,16 +134,41 @@ var getRouteScopes = map[string]routeScope{
 const minGetRoutes = 40
 
 // routeParamSubstitutions fills chi path params. {id} on the /servers/{id}
-// subtree is the entitled server, so the scope gate lets the request through to
-// the handler and the route demonstrates filtering rather than a bare 404. The
-// same value on the other {id} routes (activity, registries, tool-calls) is
-// harmless, since those are refused or filtered before the value matters.
+// subtree is the entitled server, so where a record exists the scope gate lets
+// the request through to the handler (a 2xx below). Where no record exists for
+// the synthetic value — /servers/{id}/scan/{status,report,files} (no scan for
+// alpha), the /{id} detail routes (no such activity/tool-call/job), a scanner id
+// that is not a configured plugin — the handler answers 404/400/503 BEFORE the
+// scope gate runs. Those are enumerated in shortCircuitCodes so the walk asserts
+// the exact pre-gate code instead of a loose "not 403", and their real
+// scoped-caller oracle is the named test in each getRouteScopes `why`.
 var routeParamSubstitutions = map[string]string{
 	"{id}":     "alpha",
 	"{name}":   "alpha",
 	"{tool}":   "alpha_tool",
 	"{client}": "claude-desktop",
 	"{jobId}":  "job-1",
+}
+
+// shortCircuitCodes are the non-refused routes that, driven with the probe token
+// and the SYNTHETIC params above, answer before the scope gate is reached. The
+// live walk asserts each returns exactly this code — not 2xx — because a scoped
+// token never exercises the gate on these inputs; deleting the gate would leave
+// the code here unchanged. The gate for each is proven by the test cited in its
+// getRouteScopes `why`. A route that STOPS short-circuiting (e.g. a handler that
+// begins serving the synthetic id) trips this and must be re-examined.
+var shortCircuitCodes = map[string]int{
+	"/api/v1/index/search":                  http.StatusBadRequest,         // no ?q= on the probe request
+	"/api/v1/connect":                       http.StatusServiceUnavailable, // connect manager not wired in the fixture
+	"/api/v1/connect/{client}":              http.StatusServiceUnavailable,
+	"/api/v1/connect/{client}/preview":      http.StatusServiceUnavailable,
+	"/api/v1/activity/{id}":                 http.StatusNotFound, // synthetic id absent → 404 before canSeeServer
+	"/api/v1/tool-calls/{id}":               http.StatusNotFound, // synthetic id absent → 404 before canSeeServer
+	"/api/v1/security/scans/{jobId}/report": http.StatusNotFound, // synthetic jobId absent → 404 before canSeeServer
+	"/api/v1/servers/{id}/scan/status":      http.StatusNotFound, // no scan record for alpha in the fixture
+	"/api/v1/servers/{id}/scan/report":      http.StatusNotFound, // no scan record for alpha in the fixture
+	"/api/v1/servers/{id}/scan/files":       http.StatusNotFound, // no scan record for alpha in the fixture
+	"/api/v1/security/scanners/{id}/status": http.StatusNotFound, // "alpha" is not a configured scanner plugin
 }
 
 func fillRouteParams(pattern string) string {
@@ -209,29 +240,64 @@ func TestScopeRouteTableGuard(t *testing.T) {
 					"%s answered 403 but not the scope-layer denial body — is this the right refusal?", route)
 				return
 			}
-			require.NotEqualf(t, http.StatusForbidden, rec.Code,
-				"%s is classified %v (%s) — a scoped token must reach it (filtered downstream), not get the fixed 403: body=%s",
-				route, rc.class, rc.why, rec.Body.String())
+			// Routes that short-circuit before the gate on synthetic params:
+			// hold the exact pre-gate code, so a route that starts reaching the
+			// handler (and thus the gate) is caught and re-examined.
+			if want, ok := shortCircuitCodes[route]; ok {
+				require.Equalf(t, want, rec.Code,
+					"%s is a documented pre-gate short-circuit (%s) expected to answer %d, got %d body=%s — "+
+						"if it now reaches the handler, drop it from shortCircuitCodes and require 2xx",
+					route, rc.why, want, rec.Code, rec.Body.String())
+				return
+			}
+			// Everything else must actually reach the handler: a 2xx, never the
+			// fixed 403 and never a 4xx/5xx that died before the gate. "not 403"
+			// alone let a 404/503 masquerade as a reached-and-filtered route.
+			require.GreaterOrEqualf(t, rec.Code, http.StatusOK,
+				"%s is classified %v (%s) — a scoped token must reach the handler (2xx, filtered downstream), got %d body=%s",
+				route, rc.class, rc.why, rec.Code, rec.Body.String())
+			require.Lessf(t, rec.Code, http.StatusMultipleChoices,
+				"%s is classified %v (%s) — a scoped token must reach the handler (2xx, filtered downstream), got %d body=%s. "+
+					"If this is a legitimate pre-gate short-circuit, add it to shortCircuitCodes with a reason",
+				route, rc.class, rc.why, rec.Code, rec.Body.String())
 		})
 	}
 }
 
-// TestDiagnostics_ScopedCallerDoesNotSeeHiddenServer backs the scopeFiltered
-// classification of /diagnostics (and /doctor) in getRouteScopes: the door stays
-// readable for a scoped caller, but a server outside the token's grant does not
-// appear in the diagnosis. The admin control is what makes it an oracle; without
-// it the assertion would pass just as happily against an empty report.
-func TestDiagnostics_ScopedCallerDoesNotSeeHiddenServer(t *testing.T) {
-	srv, token := scopeRound10Server(t, nil)
+// TestDiagnostics_LegacyPathScopedCallerDoesNotSeeHiddenServer backs the
+// scopeFiltered classification of /diagnostics (and /doctor) on the LEGACY path.
+//
+// withManagement:false selects the fallback branch of handleGetDiagnostics,
+// whose own visibleServers() call is the gate under test — deleting that call
+// leaks the hidden server here. The management path is a separate gate in
+// internal/management.Doctor, proven by TestDoctor_ScopedTokenSeesOnlyAllowedServers;
+// driving the httpapi handler with the management mock (as the earlier version of
+// this test did) only exercised the mock's own filter loop, so dropping the real
+// CanEnumerateServer check left it green. The legacy branch had no scoped-caller
+// coverage before this.
+func TestDiagnostics_LegacyPathScopedCallerDoesNotSeeHiddenServer(t *testing.T) {
+	// Both servers must carry an error so each surfaces in the legacy
+	// upstream-errors list when visible: beta already has one; give alpha one in
+	// this local copy so "alpha still present" is a real positive control and the
+	// beta assertion cannot pass against an empty report. The shared fixture is
+	// left untouched.
+	servers := scopeFixtureServers()
+	for i := range servers {
+		if servers[i].LastError == "" {
+			servers[i].LastError = "fixture error for " + servers[i].Name
+		}
+	}
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: servers, withManagement: false}
+	srv, token := scopedAgentServer(t, ctrl, []string{"alpha"})
 
 	admin := scopeGet(t, srv, "/api/v1/diagnostics", scopeAdminAPIKey)
 	require.Equal(t, http.StatusOK, admin.Code)
 	require.Containsf(t, admin.Body.String(), "beta",
-		"positive control: an admin must see the hidden server, or this proves nothing about who was filtered: %s", admin.Body.String())
+		"positive control: an admin must see the hidden server on the legacy path, or this proves nothing about who was filtered: %s", admin.Body.String())
 
 	scoped := scopeGet(t, srv, "/api/v1/diagnostics", token)
 	require.Equal(t, http.StatusOK, scoped.Code, "diagnostics stays readable for a scoped caller, only narrowed")
 	body := scoped.Body.String()
 	require.Contains(t, body, "alpha", "the caller's own entitled server must still appear")
-	require.NotContainsf(t, body, "beta", "a server outside the token's grant must not appear in the diagnosis: %s", body)
+	require.NotContainsf(t, body, "beta", "visibleServers must drop a server outside the token's grant from the legacy diagnostics path: %s", body)
 }
