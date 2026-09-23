@@ -35,6 +35,15 @@ import (
 // exportedStringFuncs binds every exported `func(string) string` in this
 // package that renders or rewrites a value. TestExportedStringFuncs_AreAllBound
 // fails when the package grows one that is missing here.
+//
+// LogSafeQueryString, LogSafeRequestURL and LogSafeRequestPath are wrapped in
+// a closure that calls them with no knownSecrets: SEC-01's follow-up (PR
+// #1350) grew them a trailing `...string` for exact-value redaction (see
+// isStringVariadicToString below), which no longer matches the map's
+// `func(string) string` value type, but the property this map exists to
+// check — that the rendering carries a marker the fail-closed net recognises
+// — must still hold for their name-rule/shape-rule output with no secret
+// configured, exactly as it did before the signature grew.
 var exportedStringFuncs = map[string]func(string) string{
 	"MaskValue":            MaskValue,
 	"AuditMaskValue":       AuditMaskValue,
@@ -47,9 +56,9 @@ var exportedStringFuncs = map[string]func(string) string{
 	// Issue #1158, review round 2. Both emit masks, so the fail-closed net has
 	// to know their markers even though no write door echoes them back.
 	"LogSafeURL":           LogSafeURL,
-	"LogSafeQueryString":   LogSafeQueryString,
-	"LogSafeRequestURL":    LogSafeRequestURL,
-	"LogSafeRequestPath":   LogSafeRequestPath,
+	"LogSafeQueryString":   func(s string) string { return LogSafeQueryString(s) },
+	"LogSafeRequestURL":    func(s string) string { return LogSafeRequestURL(s) },
+	"LogSafeRequestPath":   func(s string) string { return LogSafeRequestPath(s) },
 	"LogSafeCallbackQuery": LogSafeCallbackQuery,
 }
 
@@ -240,7 +249,7 @@ func discoverExportedStringFuncs(t *testing.T) []string {
 					continue
 				}
 				if fn.Recv == nil {
-					if isStringToString(fn.Type) {
+					if isStringToString(fn.Type) || isStringVariadicToString(fn.Type) {
 						names = append(names, fn.Name.Name)
 					}
 					continue
@@ -310,6 +319,32 @@ func rendersAValue(ft *ast.FuncType) bool {
 func isStringIdent(e ast.Expr) bool {
 	id, ok := e.(*ast.Ident)
 	return ok && id.Name == "string"
+}
+
+// isStringVariadicToString reports whether ft is `func(string, ...string) string`
+// — one required string argument, a trailing `...string`, one string result.
+// This is the shape LogSafeRequestPath, LogSafeQueryString and
+// LogSafeRequestURL grew for the SEC-01 known-secret exact-match pass (PR
+// #1350 follow-up): the trailing knownSecrets is redacted by exact value
+// before any other rule runs, so a function of this shape is exactly as much
+// a mask rendering as isStringToString's narrower `func(string) string` and
+// belongs in the same discovery net.
+func isStringVariadicToString(ft *ast.FuncType) bool {
+	if ft.Params == nil || ft.Results == nil {
+		return false
+	}
+	if len(ft.Results.List) != 1 || !isStringIdent(ft.Results.List[0].Type) {
+		return false
+	}
+	fields := ft.Params.List
+	if len(fields) != 2 {
+		return false
+	}
+	if !isStringIdent(fields[0].Type) || len(fields[0].Names) > 1 {
+		return false
+	}
+	ell, ok := fields[1].Type.(*ast.Ellipsis)
+	return ok && isStringIdent(ell.Elt)
 }
 
 // packageDir returns the directory this test file lives in.

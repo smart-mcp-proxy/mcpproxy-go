@@ -1046,6 +1046,70 @@ func capLogSafeRequestInput(s string) string {
 	return s[:safeTruncateBytes(s, maxLogSafeRequestBytes)] + capEllipsis
 }
 
+// minKnownSecretLen guards redactKnownSecrets against a pathologically short
+// needle. Every real caller passes a generated credential (the 64-hex admin
+// key, an mcp_agt_ token) that clears this by a wide margin; the floor exists
+// so a future caller that accidentally hands this a one- or two-character
+// value (an empty-string guard that slipped, a config default) cannot turn
+// exact-match redaction into "black out every path that happens to contain
+// this common substring".
+const minKnownSecretLen = 8
+
+// redactKnownSecrets replaces every exact, case-sensitive occurrence of a
+// caller-supplied secret with the audit marker, before any name- or
+// shape-based rule below runs.
+//
+// SEC-01 gap fix (PR #1350, live-verification follow-up): LogSafeRequestPath
+// masks a credential by NAME (`apikey=<value>`) or by VENDOR SHAPE
+// (`ghp_…`), but mcpproxy's own auto-generated admin API key
+// (config.generateAPIKey) is, in the ordinary case, bare 64-character hex
+// with no enclosing name and no vendor prefix, and hex's 4-bit-per-symbol
+// ceiling means even a perfectly random hex string's Shannon entropy (max
+// 4.0) never clears the value-shaped detector's 4.5 threshold — so NEITHER
+// existing rule can ever catch it, in any position, no matter how they are
+// tuned. A live instance reproduced the key landing verbatim in main.log as
+// a bare PATH SEGMENT.
+//
+// "In the ordinary case" because generateAPIKey's crypto/rand failure
+// fallback emits `mcpproxy_<nanos>` instead (a different, non-hex shape),
+// and an operator can override the key entirely via MCPPROXY_API_KEY or
+// config file with any string. Exact-match redaction does not care which
+// shape it is — that is precisely why it is the fix here rather than a rule
+// tied to "64 hex chars".
+//
+// The alternative — a shape rule for "a full path/query segment that is
+// exactly 64 hex chars" — was rejected: this same API logs SHA-256 tool
+// hashes and other 64-hex-char identifiers (activity/request ids) as
+// legitimate, diagnostically useful path segments, so a shape rule tight
+// enough to name the key's format is also tight enough to name theirs, and a
+// looser one is back to false positives on ordinary log lines. Exact-value
+// match has none of that ambiguity: it only ever matches the bytes of a
+// secret this process actually holds right now, so it has zero false
+// positives by construction, and it covers every SHAPE the secret might sit
+// in at once — path, query, referer, fragment — including ones nobody has
+// thought to write a rule for yet. Its cost, paid once at each of the three
+// entry points below rather than per rule, is that the caller must know and
+// pass the live secret; internal/httpapi's Server.currentAdminAPIKey reads it
+// fresh from the controller on every call, so a rotated key is covered
+// immediately and there is nothing to keep in sync.
+//
+// The admin key is the only secret plumbed this way. An mcp_agt_ agent
+// token IS vendor-shaped (see agentTokenPattern in
+// internal/security/patterns/tokens.go) and so is already covered by
+// MaskDetectedSecrets below without needing its live value threaded through
+// — see TestLogSafeRequestPath_AgentTokenCoveredByShapeRule.
+func redactKnownSecrets(s string, secrets []string) string {
+	for _, secret := range secrets {
+		if len(secret) < minKnownSecretLen {
+			continue
+		}
+		if strings.Contains(s, secret) {
+			s = strings.ReplaceAll(s, secret, redactedMarker)
+		}
+	}
+	return s
+}
+
 // LogSafeQueryString is LogSafeURL for a BARE query string — `r.URL.RawQuery`,
 // with no scheme, host or path in front of it.
 //
@@ -1062,10 +1126,16 @@ func capLogSafeRequestInput(s string) string {
 // header value, and url.ParseRequestURI leaves a literal '#' in RawQuery — and
 // every parse-dependent path falls back to a regex with no `apikey` rule, which
 // is how the credential got published in the first place.
-func LogSafeQueryString(rawQuery string) string {
+//
+// knownSecrets, when given, are redacted by EXACT VALUE before the name and
+// value-shaped rules run — see redactKnownSecrets. Omit it (or pass "") for
+// the internal recursive uses in this file, which run on a string a caller
+// above has already put through this pass once.
+func LogSafeQueryString(rawQuery string, knownSecrets ...string) string {
 	if rawQuery == "" {
 		return rawQuery
 	}
+	rawQuery = redactKnownSecrets(rawQuery, knownSecrets)
 	rawQuery = capLogSafeRequestInput(rawQuery)
 	return AuditRedaction.finish(rawQuery, redactRawQueryParams(rawQuery, AuditRedaction.masker()))
 }
@@ -1101,10 +1171,16 @@ func LogSafeQueryString(rawQuery string) string {
 // That is a shape mcpproxy's own authorize URLs have and a browser Referer does
 // not, and buying it back would mean parsing - the one thing an untrusted URL
 // cannot be relied on to survive.
-func LogSafeRequestURL(rawURL string) string {
+//
+// knownSecrets, when given, are redacted by EXACT VALUE against the WHOLE raw
+// string before it is taken apart — see redactKnownSecrets. This is what
+// catches the admin key sitting in the path or fragment of a Referer with no
+// `apikey=` wrapper at all, which none of the piecewise rules above can.
+func LogSafeRequestURL(rawURL string, knownSecrets ...string) string {
 	if rawURL == "" {
 		return rawURL
 	}
+	rawURL = redactKnownSecrets(rawURL, knownSecrets)
 	rawURL = capLogSafeRequestInput(rawURL)
 	scrubbed := redactURLUserinfo(rawURL)
 	main, fragment, hasFragment := strings.Cut(scrubbed, "#")
@@ -1131,7 +1207,17 @@ func LogSafeRequestURL(rawURL string) string {
 // splits on '/' and runs the full value-shaped detector per segment, so an
 // uncapped path let a client turn one request into an unbounded number of
 // detector passes. See maxLogSafeRequestBytes.
-func LogSafeRequestPath(path string) string {
+//
+// knownSecrets, when given, are redacted by EXACT VALUE before the path is
+// split into segments — see redactKnownSecrets. This is the fix for the
+// admin key surviving as a bare PATH SEGMENT: it has no `name=` wrapper for
+// the per-segment name rule to key on and, being plain hex, tops out at 4.0
+// bits/char of Shannon entropy — under the value-shaped detector's 4.5
+// threshold — so no shape-based rule below this call can ever catch it.
+// internal/httpapi.Server.currentAdminAPIKey is the one caller that passes
+// it, reading the live key fresh on every request.
+func LogSafeRequestPath(path string, knownSecrets ...string) string {
+	path = redactKnownSecrets(path, knownSecrets)
 	return logSafeURLComponent(capLogSafeRequestInput(path))
 }
 

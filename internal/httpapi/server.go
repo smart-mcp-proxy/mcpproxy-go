@@ -464,6 +464,31 @@ func (s *Server) Router() *chi.Mux {
 	return s.router
 }
 
+// currentAdminAPIKey returns the currently-configured admin API key, read
+// fresh from the controller on every call, or "" when config is unavailable
+// (the same testing scenario apiKeyAuthMiddleware already tolerates).
+//
+// SEC-01 gap fix (PR #1350, live-verification follow-up): every
+// oauth.LogSafeRequestPath / LogSafeQueryString / LogSafeRequestURL call site
+// below passes this so the admin key is redacted by EXACT VALUE wherever it
+// appears in a path, query or referer — the one rule that catches it with no
+// vendor shape to key on. Reading it fresh (rather than caching it once) means
+// a key rotated between requests is covered immediately, with nothing to keep
+// in sync; the cost is one more RLock through the controller per log line,
+// the same one apiKeyAuthMiddleware already pays for every authenticated
+// request. See oauth.redactKnownSecrets for the full false-positive analysis.
+func (s *Server) currentAdminAPIKey() string {
+	if s.controller == nil {
+		return ""
+	}
+	cfgIface := s.controller.GetCurrentConfig()
+	cfg, ok := cfgIface.(*config.Config)
+	if !ok || cfg == nil {
+		return ""
+	}
+	return cfg.APIKey
+}
+
 // apiKeyAuthMiddleware creates middleware for API key authentication.
 // Connections from Unix socket/named pipe (tray) are trusted and skip API key validation.
 // Supports both global API key (admin) and agent tokens (mcp_agt_ prefix) with scope enforcement.
@@ -475,7 +500,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			source := transport.GetConnectionSource(r.Context())
 			if source == transport.ConnectionSourceTray {
 				s.logger.Debugw("Tray connection - skipping API key validation",
-					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
+					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, s.currentAdminAPIKey())),
 					zap.String("remote_addr", r.RemoteAddr),
 					zap.String("source", string(source)))
 				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
@@ -503,7 +528,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			// Empty API key is not allowed - this prevents accidental exposure
 			if cfg.APIKey == "" {
 				s.logger.Warnw("TCP connection rejected - API key not configured",
-					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
+					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 					zap.String("remote_addr", r.RemoteAddr))
 				s.writeError(w, r, http.StatusUnauthorized, "API key authentication required but not configured. Please set MCPPROXY_API_KEY or configure api_key in config file.")
 				return
@@ -549,7 +574,7 @@ func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Reque
 	}
 
 	s.logger.Warnw("TCP connection with missing API key",
-		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
@@ -560,19 +585,19 @@ func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Reque
 // the cookie do).
 func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, token string) {
 	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
-		s.handleAgentTokenAuth(w, r, next, token)
+		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
 		return
 	}
 	if token != "" && token == cfg.APIKey {
 		s.logger.Debugw("TCP connection with valid API key",
-			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 			zap.String("remote_addr", r.RemoteAddr))
 		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
 		next.ServeHTTP(w, r.WithContext(ctx))
 		return
 	}
 	s.logger.Warnw("TCP connection with invalid API key",
-		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
@@ -587,12 +612,12 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 	}
 
 	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
-		s.handleAgentTokenAuth(w, r, next, token)
+		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
 		return
 	}
 	if token != "" && token == cfg.APIKey {
 		s.logger.Debugw("TCP connection with valid API key",
-			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 			zap.String("remote_addr", r.RemoteAddr))
 		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -604,16 +629,22 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 	}
 
 	s.logger.Warnw("TCP connection with invalid API key",
-		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
 
 // handleAgentTokenAuth validates an agent token and sets the appropriate AuthContext.
-func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, next http.Handler, token string) {
+//
+// adminAPIKey is the caller's already-resolved cfg.APIKey (zcode review round
+// 1, PR #1350 follow-up): both call sites above already hold cfg, so passing
+// it through avoids a second, redundant s.controller.GetCurrentConfig() read
+// on every agent-token-authenticated request that currentAdminAPIKey() would
+// otherwise perform.
+func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, next http.Handler, adminAPIKey, token string) {
 	if s.tokenStore == nil || s.dataDir == "" {
 		s.logger.Warnw("Agent token presented but token store not configured",
-			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminAPIKey)),
 			zap.String("remote_addr", r.RemoteAddr))
 		s.writeError(w, r, http.StatusUnauthorized, "Agent tokens are not configured on this server")
 		return
@@ -629,7 +660,7 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	agentToken, err := s.tokenStore.ValidateAgentToken(token, hmacKey)
 	if err != nil {
 		s.logger.Warnw("Agent token validation failed",
-			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminAPIKey)),
 			zap.String("remote_addr", r.RemoteAddr),
 			zap.String("error", err.Error()))
 		s.writeError(w, r, http.StatusUnauthorized, fmt.Sprintf("Agent token invalid: %s", err.Error()))
@@ -665,7 +696,7 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	s.logger.Debugw("Agent token authenticated",
 		zap.String("agent_name", agentToken.Name),
 		zap.String("token_prefix", agentToken.TokenPrefix),
-		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminAPIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 
 	next.ServeHTTP(w, r.WithContext(ctx))
@@ -1148,15 +1179,24 @@ func (s *Server) httpLoggingMiddleware() func(http.Handler) http.Handler {
 			// subresource requests put it in the Referer too. Unredacted, this
 			// line wrote the admin credential to disk on every request. The
 			// renderers are internal/oauth's — one rule for every log sink.
+			//
+			// SEC-01 follow-up (PR #1350): the admin key has no vendor shape and
+			// is bare hex, so neither the name rule nor the value-shaped detector
+			// those renderers otherwise run can catch it as a raw PATH segment
+			// (`/api/v1/status/<key>`) or a Referer fragment with no `apikey=`
+			// wrapper. currentAdminAPIKey() gives each renderer the live secret so
+			// it is caught by EXACT VALUE wherever it lands, on top of the
+			// existing name/shape rules. One controller read per request line.
+			adminKey := s.currentAdminAPIKey()
 			s.httpLogger.Info("HTTP API Request",
 				zap.String("method", r.Method),
-				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
-				zap.String("query", oauth.LogSafeQueryString(r.URL.RawQuery)),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminKey)),
+				zap.String("query", oauth.LogSafeQueryString(r.URL.RawQuery, adminKey)),
 				zap.String("remote_addr", r.RemoteAddr),
 				zap.String("user_agent", r.UserAgent()),
 				zap.Int("status", ww.statusCode),
 				zap.Duration("duration", duration),
-				zap.String("referer", oauth.LogSafeRequestURL(r.Referer())),
+				zap.String("referer", oauth.LogSafeRequestURL(r.Referer(), adminKey)),
 				zap.Int64("content_length", r.ContentLength),
 			)
 		})

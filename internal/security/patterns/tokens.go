@@ -32,10 +32,40 @@ func GetTokenPatterns() []*Pattern {
 		cohereKeyPattern(),
 		deepseekKeyPattern(),
 		togetherAIKeyPattern(),
+		// mcpproxy's own agent tokens
+		agentTokenPattern(),
 		// Generic tokens
 		jwtTokenPattern(),
 		bearerTokenPattern(),
 	}
+}
+
+// mcpproxy agent token (internal/auth.GenerateToken / ValidateTokenFormat):
+// mcp_agt_ followed by exactly 64 hex characters (32 random bytes), 72 chars
+// total. SEC-01 follow-up (PR #1350): this is the ONLY bare-hex secret
+// mcpproxy issues that has its own vendor prefix — the admin API key does
+// not, which is why that one is fixed by exact-value match
+// (internal/oauth/logging.go's redactKnownSecrets) instead of a shape rule
+// here. The character class is case-insensitive (`[0-9a-fA-F]`) to match
+// ValidateTokenFormat exactly: it decodes the suffix with hex.DecodeString,
+// which accepts either case, even though GenerateToken only ever emits
+// lowercase — a token this codebase would validate as genuine must also be
+// one this pattern can mask.
+//
+// The fixed length ({64}, not an open-ended `[0-9a-fA-F]+`) is deliberate:
+// it stops the match at exactly one token's worth of hex, so a SECOND
+// concatenated hex value right after a genuine token (a longer, unrelated
+// blob glued to the suffix) is not swallowed into the same match and left
+// unmasked. It does NOT, and cannot, distinguish the prefix from an
+// unrelated ≥64-hex-char blob that happens to start there — that case still
+// matches, which only means MORE is masked, the fail-closed direction.
+func agentTokenPattern() *Pattern {
+	return NewPattern("mcp_agent_token").
+		WithRegex(`mcp_agt_[0-9a-fA-F]{64}`).
+		WithCategory(CategoryAPIToken).
+		WithSeverity(SeverityCritical).
+		WithDescription("mcpproxy agent token").
+		Build()
 }
 
 // GitHub Personal Access Token (classic and fine-grained)
