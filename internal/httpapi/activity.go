@@ -215,7 +215,7 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	for i, a := range activities {
 		contractActivities[i] = storageToContractActivity(a)
 		s.maskActivityPayloads(&contractActivities[i])
-		redactForeignIdentity(r.Context(), &contractActivities[i])
+		redactForeignIdentity(r.Context(), a.Arguments, &contractActivities[i])
 		if excludePayloads {
 			contractActivities[i].Arguments = nil
 			contractActivities[i].Response = ""
@@ -274,7 +274,7 @@ func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request)
 
 	record := storageToContractActivity(activity)
 	s.maskActivityPayloads(&record)
-	redactForeignIdentity(r.Context(), &record)
+	redactForeignIdentity(r.Context(), activity.Arguments, &record)
 
 	response := contracts.ActivityDetailResponse{
 		Activity: record,
@@ -331,14 +331,19 @@ func (s *Server) maskActivityPayloads(record *contracts.ActivityRecord) {
 	record.Metadata = s.sensitiveMasker.MaskArguments(record.Metadata)
 }
 
-// ActivityProjector returns the exact convert+mask composition core
-// GET /activity applies to a storage record before it reaches a caller
+// ActivityProjector returns the convert+mask composition core GET /activity
+// applies to a storage record before it reaches a caller
 // (Spec 107 T086, contracts/rest-endpoints.md §"user/activity"): the
 // server-edition GET /api/v1/user/activity door holds *storage.ActivityRecord
 // values and has no access to this package's unexported
 // storageToContractActivity/maskActivityPayloads, so this is the one exported
 // seam that lets it emit the same JSON shape and the same masking as the core
 // door for the same record.
+//
+// It does NOT apply redactForeignIdentity: the projector has no request
+// context, so auth_type/agent_name pass through. That is safe only because its
+// one consumer pre-filters to the caller's own records (filter.UserID); a new
+// consumer that serves other callers' rows must redact them itself.
 func (s *Server) ActivityProjector() func(*storage.ActivityRecord) contracts.ActivityRecord {
 	return func(record *storage.ActivityRecord) contracts.ActivityRecord {
 		contract := storageToContractActivity(record)
@@ -435,12 +440,16 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 // server's log would learn every other agent token's name — an inventory that
 // is otherwise admin-only (GET /api/v1/tokens). Its own rows keep their
 // identity so it can still filter on itself.
-func redactForeignIdentity(ctx context.Context, record *contracts.ActivityRecord) {
+//
+// "Own" is decided by the stored token prefix, not the name: token names are
+// unique per owner only, so another tenant's token can share the caller's name.
+func redactForeignIdentity(ctx context.Context, storedArgs map[string]interface{}, record *contracts.ActivityRecord) {
 	if !auth.IsScopedCaller(ctx) {
 		return
 	}
 	ac := auth.AuthContextFromContext(ctx)
-	if ac.Type == auth.AuthTypeAgent && record.AuthType == auth.AuthTypeAgent && record.AgentName == ac.AgentName {
+	if ac.Type == auth.AuthTypeAgent && ac.TokenPrefix != "" &&
+		authArgString(storedArgs, "_auth_token_prefix") == ac.TokenPrefix {
 		return
 	}
 	record.AuthType = ""
@@ -670,7 +679,7 @@ func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// JSON Lines format - one JSON object per line
 			contractActivity := storageToContractActivityForExport(activity, includeBodies)
-			redactForeignIdentity(r.Context(), &contractActivity)
+			redactForeignIdentity(r.Context(), activity.Arguments, &contractActivity)
 			jsonBytes, err := json.Marshal(contractActivity)
 			if err != nil {
 				s.logger.Errorw("Failed to marshal activity for export", "error", err, "id", activity.ID)

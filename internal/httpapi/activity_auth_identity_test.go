@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -97,9 +98,16 @@ func TestActivity_ScopedCallerSeesOnlyOwnIdentity(t *testing.T) {
 	admin := agentActivityRecord()
 	admin.ID = "activity-admin"
 	admin.Arguments = map[string]interface{}{"_auth_auth_type": "admin"}
+	// Token names are unique per OWNER, not globally: another tenant's token
+	// can share the caller's name. Only the token prefix identifies the caller.
+	namesake := agentActivityRecord()
+	namesake.ID = "activity-namesake"
+	namesake.Arguments["_auth_agent_name"] = "scoped-ci"
+	namesake.Arguments["_auth_token_prefix"] = "mcp_agt_0000"
 
-	ctrl := &mockActivityController{apiKey: "test-key", activities: []*storage.ActivityRecord{own, other, admin}}
+	ctrl := &mockActivityController{apiKey: "test-key", activities: []*storage.ActivityRecord{own, other, admin, namesake}}
 	srv, token := scopedAgentServer(t, ctrl, []string{"*"})
+	own.Arguments["_auth_token_prefix"] = auth.TokenPrefix(token)
 
 	identity := func(a map[string]interface{}) [2]interface{} { return [2]interface{}{a["auth_type"], a["agent_name"]} }
 
@@ -112,6 +120,7 @@ func TestActivity_ScopedCallerSeesOnlyOwnIdentity(t *testing.T) {
 	assert.Equal(t, [2]interface{}{"agent", "scoped-ci"}, got["activity-own"])
 	assert.Equal(t, [2]interface{}{nil, nil}, got["activity-other"], "another agent's name leaked to a scoped caller")
 	assert.Equal(t, [2]interface{}{nil, nil}, got["activity-admin"])
+	assert.Equal(t, [2]interface{}{nil, nil}, got["activity-namesake"], "a same-named token of another owner was treated as the caller")
 
 	detail := scopeDecodeData(t, scopeGet(t, srv, "/api/v1/activity/activity-other", token))
 	assert.Equal(t, [2]interface{}{nil, nil}, identity(detail["activity"].(map[string]interface{})))
