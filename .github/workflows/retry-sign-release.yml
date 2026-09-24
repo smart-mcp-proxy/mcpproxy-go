@@ -701,15 +701,16 @@ jobs:
   # for a release published here, because retry-sign-release.yml predates
   # their addition to release.yml.
   #
-  # `if: always() && (needs.release.result == 'success' || inputs.post_release_only)`
+  # `if: !cancelled() && (needs.release.result == 'success' || inputs.post_release_only)`
   # lets each job run either right after a successful retry-publish in this
   # same run, OR standalone with `post_release_only: true` against a tag that
-  # was already published by an earlier run (this run's own `release` job is
-  # then skipped, not failed, so `needs.release.result` alone would also
-  # resolve these — the explicit `|| inputs.post_release_only` documents the
-  # intent and stays correct if that job ever grows a real failure mode of
-  # its own). `always()` is required because a job whose `needs` entry was
-  # skipped is itself skipped by default.
+  # was already published by an earlier run. In that second case `release` is
+  # SKIPPED (not failed), so `needs.release.result == 'success'` alone would
+  # NOT resolve these — `|| inputs.post_release_only` is load-bearing, not
+  # just documentation. `!cancelled()` (rather than `always()`) is required
+  # because a job whose `needs` entry was skipped is itself skipped by
+  # default, while still refusing to run these publish/dispatch steps if the
+  # workflow run itself was cancelled.
   #
   # Every ref/ GITHUB_REF_NAME use from release.yml becomes ${{ inputs.tag }}
   # (this workflow is workflow_dispatch on a branch — github.ref_name here is
@@ -726,10 +727,18 @@ jobs:
   # ${{ inputs.tag }} instead of github.ref_name throughout.
   sparkle-appcast:
     needs: [release]
-    if: ${{ always() && (needs.release.result == 'success' || inputs.post_release_only) }}
+    if: ${{ !cancelled() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') }}
     runs-on: macos-15
     permissions:
       contents: write
+      # gh run download reads another run's artifacts via the Artifacts REST
+      # API, which needs actions: read even though this job only WRITES
+      # release assets — unlike release.yml's copy (actions/download-artifact
+      # pulling from the SAME run, which doesn't need it). Job-level
+      # `permissions:` replaces the workflow-level grant (contents, actions,
+      # id-token) rather than adding to it, so this must be listed explicitly
+      # or the download 403s.
+      actions: read
     steps:
       - name: Download Sparkle enclosures from original run
         env:
@@ -740,7 +749,7 @@ jobs:
           gh run download ${{ inputs.run_id }} \
             --repo ${{ github.repository }} \
             --dir enclosures \
-            --pattern 'sparkle-enclosure-*' || echo "No Sparkle enclosure artifacts found"
+            --pattern 'sparkle-enclosure-*'
 
       - name: Generate and publish the appcast
         id: appcast
@@ -900,7 +909,7 @@ jobs:
   # run, so release.yml/this workflow must call it directly as a job).
   retire-release-notice:
     needs: [release]
-    if: ${{ always() && (needs.release.result == 'success' || inputs.post_release_only) }}
+    if: ${{ !cancelled() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') }}
     permissions:
       contents: write
       pull-requests: write
@@ -913,7 +922,7 @@ jobs:
   # catch-up dispatch.
   deploy-docs:
     needs: [release]
-    if: ${{ always() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go' }}
+    if: ${{ !cancelled() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -951,7 +960,7 @@ jobs:
   # trigger-marketing-update job; continue-on-error for the same reason.
   trigger-marketing-update:
     needs: [release]
-    if: ${{ always() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go' }}
+    if: ${{ !cancelled() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -968,7 +977,7 @@ jobs:
   mcp-registry:
     name: Publish to MCP Registry
     needs: [release]
-    if: ${{ always() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') }}
+    if: ${{ !cancelled() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') }}
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
