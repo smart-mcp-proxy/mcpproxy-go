@@ -232,6 +232,91 @@ func TestRunSignalHandler_DeadlinesStartAtFirstSignal(t *testing.T) {
 	h.waitReturned(t)
 }
 
+// TestRunSignalHandler_BufferedSecondSignalWaitsForCallback reproduces a
+// review finding: the forcer goroutine used to be spawned BEFORE onSignal and
+// cancel ran, and Go gives no ordering guarantee between a freshly spawned
+// goroutine and the rest of the spawning goroutine's own code. If a second
+// signal was already sitting in the (buffered, capacity-1) signal channel by
+// the time onSignal/cancel completed, the forcer could dequeue it and call
+// exit first -- the process could die before Spec 024 activity logging ever
+// recorded the first signal or graceful shutdown ever started.
+func TestRunSignalHandler_BufferedSecondSignalWaitsForCallback(t *testing.T) {
+	release := make(chan struct{})
+	onSignalCalled := make(chan struct{})
+
+	h := &signalHandlerHarness{
+		sigChan:      make(chan os.Signal, 1),
+		graceWindow:  make(chan time.Time),
+		hardDeadline: make(chan time.Time),
+		cancelled:    make(chan struct{}),
+		exited:       make(chan int, 4),
+		returned:     make(chan struct{}),
+	}
+
+	deps := signalHandlerDeps{
+		sigChan: h.sigChan,
+		cancel: func() {
+			select {
+			case <-h.cancelled:
+			default:
+				close(h.cancelled)
+			}
+		},
+		onSignal: func(sig os.Signal) {
+			close(onSignalCalled)
+			<-release // held open until the test releases it
+		},
+		exit:   func(code int) { h.exited <- code },
+		logger: zap.NewNop(),
+		newTimer: func(dur time.Duration) <-chan time.Time {
+			h.timersArmed.Add(1)
+			switch dur {
+			case shutdownGraceWindow:
+				return h.graceWindow
+			case shutdownHardDeadline:
+				return h.hardDeadline
+			default:
+				t.Errorf("handler armed an unexpected timer: %s", dur)
+				return nil
+			}
+		},
+	}
+
+	go func() {
+		defer close(h.returned)
+		runSignalHandler(deps)
+	}()
+
+	// First signal.
+	h.sendSignal(t, syscall.SIGINT)
+
+	// Wait until onSignal has actually been entered (and is now blocked) so we
+	// know the handler is past the initial receive and has armed its timers.
+	select {
+	case <-onSignalCalled:
+	case <-time.After(signalTestGuard):
+		t.Fatal("onSignal was never invoked")
+	}
+
+	// A second signal is already buffered before onSignal/cancel completed --
+	// the exact race the finding describes.
+	h.sendSignal(t, syscall.SIGTERM)
+
+	// The process must NOT exit while onSignal/cancel have not finished.
+	select {
+	case code := <-h.exited:
+		t.Fatalf("process exited (code %d) before the shutdown callback (onSignal/cancel) completed", code)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+
+	if code := h.waitExit(t); code != ExitCodeGeneralError {
+		t.Fatalf("exit code after callback completed = %d, want %d", code, ExitCodeGeneralError)
+	}
+	h.waitReturned(t)
+}
+
 // blockingSyncer is a zapcore.WriteSyncer whose Write blocks for entries
 // containing blockOn, so a test can hold the handler inside a log call.
 type blockingSyncer struct {

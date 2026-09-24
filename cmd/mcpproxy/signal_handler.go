@@ -102,8 +102,23 @@ func runSignalHandler(d signalHandlerDeps) {
 	handlerDone := make(chan struct{})
 	defer close(handlerDone)
 
+	d.onSignal(sig) // Spec 024: Store signal for activity logging (must precede cancel)
+	// Start the graceful shutdown before logging, for the same reason the
+	// timers are armed before logging: a blocked sink must not delay it.
+	d.cancel()
+
 	// The forcer: the only goroutine that may end the process, and the only
 	// reader of sigChan from here on. It never logs.
+	//
+	// It is started only AFTER onSignal/cancel have returned. Go gives no
+	// ordering guarantee between a newly spawned goroutine and the rest of
+	// the spawning goroutine's own code, so starting it earlier let a second
+	// signal that was already buffered in sigChan race the forcer against
+	// onSignal/cancel - the process could exit before the first signal was
+	// ever recorded or graceful shutdown ever began. onSignal and cancel are
+	// both required to be fast and non-blocking (a store and a context
+	// cancellation), so this does not reopen the "logging must not delay the
+	// deadline" problem the timer-arming order above guards against.
 	go func() {
 		select {
 		case _, ok := <-d.sigChan:
@@ -116,11 +131,6 @@ func runSignalHandler(d signalHandlerDeps) {
 		case <-handlerDone:
 		}
 	}()
-
-	d.onSignal(sig) // Spec 024: Store signal for activity logging (must precede cancel)
-	// Start the graceful shutdown before logging, for the same reason the
-	// timers are armed before logging: a blocked sink must not delay it.
-	d.cancel()
 
 	// From here on this goroutine only reports. If the sink is wedged it stalls
 	// here, and the forcer above still ends the process on time.
