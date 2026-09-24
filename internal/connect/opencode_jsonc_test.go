@@ -272,37 +272,36 @@ func TestGuardJsoncComments_SkipsReadForNonJsoncPath(t *testing.T) {
 // the now-commented file to plain JSON — stripping the comments the guard
 // exists to protect. (Pre-existing; unrelated to PR #1340's actual fix.)
 //
-// The fix folds the guard into readOrCreateJSON's own read, so the comment
-// check and the parse now consume exactly ONE read of the file where the
-// vulnerable code consumed two (guard, then parse) — there is no second,
-// independent read left to race against.
+// PR #1352 folded the guard's read into preWriteState's own single pre-write
+// read (connectJSON itself no longer performs any read — it parses pre.raw,
+// the same bytes ConnectWithPrecondition already resolved), so these subtests
+// now drive the fix through ConnectWithPrecondition rather than calling
+// connectJSON directly with a stubbed `resolved` argument — connectJSON's
+// signature no longer takes one; it takes the shared preWriteResult.
 //
 // The first subtest is the actual regression detector: it counts reads and
-// requires 4 (shared guard+parse; PR #1340's refuseIfServersSectionRaced
-// pre-backup check; its atomicWriteFile preRename-hook check; then
-// verifyJSONEntry's legitimate post-write read) where the vulnerable
-// pre-#1340, pre-this-fix code needed 5 (a separate guard read, plus the same
-// four) — this is the only externally observable difference between the two
-// implementations, since a silent-strip bug produces byte-identical output to
-// a legitimate comment-free write. The second subtest does NOT by itself distinguish
-// fixed from vulnerable code — the vulnerable guard's own first read would
-// also see the comments and refuse at the same point — but it separately
-// documents that the shared read, when it does see comments, refuses rather
-// than silently stripping them.
+// requires 4 (preWriteState's shared guard+parse read; PR #1340's
+// refuseIfServersSectionRaced pre-backup check; its atomicWriteFile
+// preRename-hook check; then verifyJSONEntry's legitimate post-write read)
+// where the vulnerable pre-#1340, pre-this-fix code needed 5 (a separate
+// guard read, plus the same four) — this is the only externally observable
+// difference between the two implementations, since a silent-strip bug
+// produces byte-identical output to a legitimate comment-free write. The
+// second subtest does NOT by itself distinguish fixed from vulnerable code —
+// the vulnerable guard's own first read would also see the comments and
+// refuse at the same point — but it separately documents that the shared
+// read, when it does see comments, refuses rather than silently stripping
+// them.
 func TestConnectJSON_CommentGuardSharesOneReadWithParse(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Setenv("LOCALAPPDATA", "")
-	}
-	client := FindClient("opencode")
-	if client == nil {
-		t.Fatal("opencode client definition not found")
 	}
 	commentFree := []byte(`{"$schema":"https://opencode.ai/config.json"}`)
 	commented := []byte("{\n  // keep my comments\n  \"$schema\": \"https://opencode.ai/config.json\"\n}\n")
 
 	t.Run("shared guard+parse read is comment-free: writes normally with 4 total reads, not 5", func(t *testing.T) {
 		home := t.TempDir()
-		p := writeOpencodeFile(t, home, "opencode.jsonc", string(commentFree))
+		writeOpencodeFile(t, home, "opencode.jsonc", string(commentFree))
 		s := NewServiceWithHome("127.0.0.1:8080", "key", home)
 
 		calls := 0
@@ -310,10 +309,11 @@ func TestConnectJSON_CommentGuardSharesOneReadWithParse(t *testing.T) {
 			calls++
 			if calls == 1 {
 				// The one read that must back BOTH the comment guard and the
-				// parse. A vulnerable, two-independent-reads implementation
-				// would still be looking at this same comment-free snapshot
-				// on its first (guard) call too, then race ahead to a second,
-				// later call below for its parse.
+				// parse — preWriteState's own read. A vulnerable,
+				// two-independent-reads implementation would still be looking
+				// at this same comment-free snapshot on its first (guard)
+				// call too, then race ahead to a second, later call below for
+				// its parse.
 				return commentFree, nil
 			}
 			// PR #1340's refuseIfServersSectionRaced pre-backup and preRename
@@ -324,16 +324,16 @@ func TestConnectJSON_CommentGuardSharesOneReadWithParse(t *testing.T) {
 			return os.ReadFile(path)
 		})
 
-		if _, err := s.connectJSON(client, p, "mcpproxy", false, nil); err != nil {
-			t.Fatalf("connectJSON: unexpected error: %v", err)
+		if _, err := s.ConnectWithPrecondition("opencode", "mcpproxy", false, ""); err != nil {
+			t.Fatalf("ConnectWithPrecondition: unexpected error: %v", err)
 		}
-		// The fixed code reads once for the shared guard+parse step, twice more
-		// for PR #1340's refuseIfServersSectionRaced checks (pre-backup and the
-		// atomicWriteFile preRename hook), and once more for verifyJSONEntry's
-		// post-write check: 4 total. The vulnerable code needed a separate
-		// guard read on top of all of those: 5.
+		// The fixed code reads once for preWriteState's shared guard+parse
+		// step, twice more for PR #1340's refuseIfServersSectionRaced checks
+		// (pre-backup and the atomicWriteFile preRename hook), and once more
+		// for verifyJSONEntry's post-write check: 4 total. The vulnerable code
+		// needed a separate guard read on top of all of those: 5.
 		if calls != 4 {
-			t.Fatalf("connectJSON should need 4 reads (shared guard+parse, the two #1340 race checks, then verify), got %d — a separate guard read is exactly the TOCTOU window this closes", calls)
+			t.Fatalf("ConnectWithPrecondition should need 4 reads (shared guard+parse, the two #1340 race checks, then verify), got %d — a separate guard read is exactly the TOCTOU window this closes", calls)
 		}
 	})
 
@@ -351,15 +351,15 @@ func TestConnectJSON_CommentGuardSharesOneReadWithParse(t *testing.T) {
 			return commentFree, nil
 		})
 
-		_, err := s.connectJSON(client, p, "mcpproxy", false, nil)
+		_, err := s.ConnectWithPrecondition("opencode", "mcpproxy", false, "")
 		if err == nil {
-			t.Fatal("connectJSON must refuse when the shared read sees comments, not silently strip them")
+			t.Fatal("ConnectWithPrecondition must refuse when the shared read sees comments, not silently strip them")
 		}
 		if !strings.Contains(err.Error(), "comment") {
 			t.Fatalf("error should explain the comment refusal, got: %v", err)
 		}
 		if calls != 1 {
-			t.Fatalf("connectJSON must read cfgPath exactly once; got %d reads", calls)
+			t.Fatalf("ConnectWithPrecondition must read cfgPath exactly once before refusing; got %d reads", calls)
 		}
 		after, readErr := os.ReadFile(p)
 		if readErr != nil {
