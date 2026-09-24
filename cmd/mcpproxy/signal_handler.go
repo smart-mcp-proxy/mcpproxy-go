@@ -34,7 +34,10 @@ type signalHandlerDeps struct {
 	cancel context.CancelFunc
 	// onSignal records the first signal for Spec 024 activity logging. It MUST
 	// run before cancel(), because the ctx.Done() branch in runServer reads the
-	// stored value as soon as it wakes up.
+	// stored value as soon as it wakes up. It MUST also be fast and
+	// non-blocking (a value store, in production): runSignalHandler calls it
+	// before spawning the forcer goroutine, so anything it blocks on delays
+	// the point at which a second signal can force an exit.
 	onSignal func(os.Signal)
 	// exit terminates the process (os.Exit in production).
 	exit func(int)
