@@ -1833,6 +1833,17 @@ jobs:
               FAILED=1
             fi
           done
+          # A fresh feed is useless if its enclosure 404s — Sparkle then fails
+          # every update with "couldn't download the update" (v0.69.0).
+          for f in appcast-out/*.xml; do
+            URL=$(sed -n 's/.*enclosure url="\([^"]*\)".*/\1/p' "$f" | head -1)
+            if [ -z "$URL" ] || ! curl -fsIL -o /dev/null "$URL"; then
+              echo "::error::$(basename "$f") enclosure is not downloadable: ${URL:-<none>}"
+              FAILED=1
+            else
+              echo "✅ $(basename "$f") enclosure downloadable: ${URL}"
+            fi
+          done
           exit "$FAILED"
 
   # Open the PR that deletes .github/RELEASE_NOTICE.md once this release has
