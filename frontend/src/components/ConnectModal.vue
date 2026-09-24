@@ -680,9 +680,28 @@ async function confirmConnect(clientId: string) {
   clearPreview(clientId)
 }
 
+// After a successful write the stat-only listing still reports connected=false
+// (#706), so re-fetch the content-resolved onboarding state — otherwise rows
+// keep "Review & connect" and the footer keeps counting connected clients.
+// Only the rewritten client's on-demand resolution is stale; other clients'
+// files are untouched, so their verified endpoint lines survive the refetch.
+async function refreshAfterWrite(clientId: string) {
+  const kept = { ...resolved.value }
+  delete kept[clientId]
+  await fetchClients()
+  resolved.value = { ...kept, ...resolved.value }
+  await onboarding.fetchState()
+}
+
 // Returns the outcome so connectAll can accumulate per-client backup results
 // (ok=true with backupPath string = backup created; null = no prior file).
-async function connect(clientId: string, force = false): Promise<{ ok: boolean; backupPath: string | null; configPath: string }> {
+// verify=false lets connectAll defer the endpoint check until every write is
+// done: each connect's fetchClients() clears earlier resolutions.
+async function connect(
+  clientId: string,
+  force = false,
+  { verify = true }: { verify?: boolean } = {}
+): Promise<{ ok: boolean; backupPath: string | null; configPath: string }> {
   loading.clients[clientId] = true
   resultMessage.value = ''
   resultBackupPath.value = undefined
@@ -698,7 +717,11 @@ async function connect(clientId: string, force = false): Promise<{ ok: boolean; 
       // Empty/absent backup_path on success means no prior file existed.
       const backupPath = response.data.backup_path || null
       resultBackupPath.value = backupPath
-      await fetchClients()
+      await refreshAfterWrite(clientId)
+      // Confirm which endpoint the client now names. The config was just
+      // written as a direct result of this click, so the read stays tied to an
+      // explicit user action (Spec 075).
+      if (verify) void checkAccess(clientId)
       systemStore.addToast({
         type: 'success',
         title: 'Client Connected',
@@ -775,7 +798,7 @@ async function disconnect(clientId: string) {
       resultMessage.value = response.data.message || `Disconnected from ${clientId}`
       resultSuccess.value = true
       resultBackupPath.value = response.data.backup_path || null
-      await fetchClients()
+      await refreshAfterWrite(clientId)
       systemStore.addToast({
         type: 'info',
         title: 'Client Disconnected',
@@ -878,11 +901,12 @@ async function connectAll() {
   const targets = [...connectableClients.value]
   const collected: Array<{ id: string; name: string; backupPath: string | null }> = []
   for (const client of targets) {
-    const outcome = await connect(client.id)
+    const outcome = await connect(client.id, false, { verify: false })
     if (outcome.ok) {
       collected.push({ id: client.id, name: client.name, backupPath: outcome.backupPath })
     }
   }
+  await Promise.all(collected.map(c => checkAccess(c.id)))
   if (collected.length > 0) {
     bulkBackups.value = collected
     // The per-client list is authoritative for a bulk run; suppress the
