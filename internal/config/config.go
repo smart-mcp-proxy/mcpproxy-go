@@ -1856,13 +1856,17 @@ func DefaultConfig() *Config {
 	}
 }
 
-// generateAPIKey creates a cryptographically secure random API key
+// generateAPIKey creates a cryptographically secure random API key: 32 random
+// bytes (256 bits), hex-encoded to 64 characters.
+//
+// crypto/rand.Read is documented since Go 1.24 as never returning an error and
+// always filling b entirely; on a failure of the system source it terminates
+// the process (runtime fatal, not a recoverable panic). The former
+// time-based fallback branch here was therefore unreachable, and is gone —
+// nothing can observe a predictable key from this function.
 func generateAPIKey() string {
 	bytes := make([]byte, 32) // 32 bytes = 256 bits
-	if _, err := rand.Read(bytes); err != nil {
-		// Fallback to less secure method if crypto/rand fails
-		return fmt.Sprintf("mcpproxy_%d", time.Now().UnixNano())
-	}
+	_, _ = rand.Read(bytes)   // documented never to fail; see above
 	return hex.EncodeToString(bytes)
 }
 

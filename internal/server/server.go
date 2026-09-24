@@ -542,7 +542,9 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 
 		// Check if it matches the global API key — treat as admin
 		cfg := s.runtime.Config()
-		if cfg != nil && cfg.APIKey != "" && token == cfg.APIKey {
+		// Timing-safe compare; ConstantTimeEqual also rejects an empty key or
+		// token, subsuming the previous `cfg.APIKey != ""` guard.
+		if cfg != nil && auth.ConstantTimeEqual(token, cfg.APIKey) {
 			ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AdminContext(), auth.CredentialKindAPIKey))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
@@ -3184,7 +3186,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				token = strings.TrimPrefix(h, "Bearer ")
 			}
 		}
-		if token != cfg.APIKey {
+		if !auth.ConstantTimeEqual(token, cfg.APIKey) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
