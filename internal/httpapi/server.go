@@ -473,7 +473,7 @@ func (s *Server) Router() *chi.Mux {
 
 // currentAdminAPIKey returns the currently-configured admin API key, read
 // fresh from the controller on every call, or "" when config is unavailable
-// (the same testing scenario apiKeyAuthMiddleware already tolerates).
+// (nothing to redact then; apiKeyAuthMiddleware refuses such requests).
 //
 // SEC-01 gap fix (PR #1350, live-verification follow-up): every
 // oauth.LogSafeRequestPath / LogSafeQueryString / LogSafeRequestURL call site
@@ -488,9 +488,8 @@ func (s *Server) currentAdminAPIKey() string {
 	if s.controller == nil {
 		return ""
 	}
-	cfgIface := s.controller.GetCurrentConfig()
-	cfg, ok := cfgIface.(*config.Config)
-	if !ok || cfg == nil {
+	cfg := s.controller.GetCurrentConfig()
+	if cfg == nil {
 		return ""
 	}
 	return cfg.APIKey
