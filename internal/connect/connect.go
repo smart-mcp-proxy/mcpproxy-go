@@ -486,51 +486,59 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
-	// Resolve the pre-write state ONCE for the whole operation. The token check
-	// and the write must cover the SAME entry — re-resolving per step is what
-	// let a token hash one entry while the write replaced or deleted another
-	// (Spec 091 FR-005).
-	fileExists, existing, _, err := s.preWriteState(client, cfgPath, serverName)
+	// Resolve the pre-write state ONCE for the whole operation. The token
+	// check and the write must cover the SAME read — re-resolving per step is
+	// what let a token hash one entry while the write replaced or deleted
+	// another (Spec 091 FR-005), and it is also what let connectJSON/
+	// connectTOML each open the file again independently: if the file changed
+	// between that first read and their own second one, force=true could ride
+	// a token valid against the first read while the write silently committed
+	// whatever the second, unchecked read contained. pre is threaded into the
+	// write below so there is exactly one PRE-WRITE content read for the whole
+	// operation (verifyJSONEntry's post-write re-read, which confirms the
+	// write actually landed, is separate and unaffected).
+	//
+	// This closes the gap BETWEEN the two reads; it cannot close the much
+	// smaller window between this read and the eventual atomicWriteFile call a
+	// few steps below (the precondition check, the refusal guard and the
+	// backup step all run in between). No read-then-write to a plain file can
+	// close that residual window without OS-level locking (e.g. flock), which
+	// this package does not use — an external rewrite landing in that last
+	// instant is a pre-existing, general limitation of the whole write path,
+	// not something this fix introduces or claims to solve.
+	pre, err := s.preWriteState(client, cfgPath, serverName)
 	if err != nil {
 		return nil, s.asAccessError(client, cfgPath, err)
 	}
 
-	// Deliberately NOT refusing here on a malformed accessState: this resolution
-	// and the write's own read (inside connectJSON/connectTOML) are two
-	// independent reads of the file, so a check here alone would leave a TOCTOU
-	// window — the config could still be object-shaped now and mutated to a
-	// non-object section before the write's own read runs, bypassing an
-	// upstream-only guard. The write functions instead re-check this repeatedly,
-	// close to each I/O step that could widen the window (see
+	// Deliberately NOT refusing here on a malformed accessState: connectJSON/
+	// connectTOML no longer open the file again for their own content parse —
+	// they parse pre.raw, the SAME bytes this resolution already produced (see
+	// parseOrCreateJSON/parseOrCreateTOML) — but refuseIfServersSectionRaced
+	// still performs its own fresh reads later, close to each remaining I/O
+	// step that could let an external rewrite race the write (backupFile,
+	// atomicWriteFile's staging, and its preRename hook right before the
+	// rename). A check here alone would miss drift landing in any of those
+	// later windows, so the write functions re-check repeatedly instead; see
 	// refuseIfServersSectionRaced and its call sites in connectJSON/
-	// connectTOML) — shrinking, not eliminating, the drift window; the residual
-	// gap immediately before atomicWriteFile's own rename is documented there.
+	// connectTOML for where and why. The residual gap immediately before
+	// atomicWriteFile's own rename is documented there.
 	//
-	// KNOWN, PRE-EXISTING, OUT-OF-SCOPE LIMITATION (surfaced by cross-model
-	// review of this fix, not introduced by it — present since Spec 091
-	// shipped): the precondition TOKEN itself is only checked against THIS
-	// read, not against the write's own later, independent read. An entry that
-	// is still object-shaped on both reads but whose VALUE changed between them
-	// is not re-validated — with force=true the write clobbers content the
-	// user's token did not actually describe. Closing that requires threading
-	// one shared `data` read through preWriteState AND connectJSON/connectTOML
-	// (today they each call s.read independently), which is a larger,
-	// security-sensitive refactor of the FR-005 precondition mechanism itself
-	// and deserves its own dedicated PR + review cycle rather than being folded
-	// into this one — the same reasoning that scoped THIS fix to the
-	// non-object-section gap in the first place. Tracked separately.
-	//
-	// A second, narrower instance of the same two-independent-reads shape:
-	// guardJsoncComments (below, inside connectJSON) reads the file once to
-	// detect comments, then readOrCreateJSON reads it again; a file that
-	// gains comments in between is parsed leniently and rewritten as plain
-	// JSON, silently stripping them. Also pre-existing (the comment guard
-	// predates this fix) and also tracked separately rather than fixed here.
+	// Two limitations that cross-model review of PR #1340 flagged as
+	// pre-existing and explicitly deferred — the precondition TOKEN never
+	// being re-validated against the write's own later, independent content
+	// read, and guardJsoncComments reading the file once to detect comments
+	// while connectJSON's old readOrCreateJSON reads it again — are both
+	// closed by pre being threaded through from here: connectJSON/connectTOML
+	// and guardJsoncCommentsBytes now all operate on this single pre-write
+	// read, so there is exactly one PRE-WRITE content read for the whole
+	// operation and nothing downstream of this point re-reads the file for
+	// its own content decisions.
 
 	// Precondition check BEFORE any backup or write, so a refusal is completely
 	// inert (Spec 091 FR-005).
 	if preconditionToken != "" {
-		if stale := s.checkPrecondition(client, cfgPath, serverName, preconditionToken, fileExists, existing); stale != nil {
+		if stale := s.checkPrecondition(client, cfgPath, serverName, preconditionToken, pre.fileExists, pre.existing); stale != nil {
 			return stale, nil
 		}
 	}
@@ -546,9 +554,9 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 
 	var res *ConnectResult
 	if client.Format == "toml" {
-		res, err = s.connectTOML(client, cfgPath, serverName, force)
+		res, err = s.connectTOML(client, cfgPath, serverName, force, pre)
 	} else {
-		res, err = s.connectJSON(client, cfgPath, serverName, force, existing)
+		res, err = s.connectJSON(client, cfgPath, serverName, force, pre)
 	}
 	// A permission denial anywhere in the read/backup/write chain (the errors
 	// preserve their OS cause via %w) surfaces as a typed *AccessError with
@@ -640,12 +648,29 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 // comments: mcpproxy re-serializes plain JSON, which would silently strip them
 // (#922). Comment-free .jsonc (OpenCode's bootstrap stub) rewrites safely.
 // Absent or unreadable files pass — the normal read/write path handles those.
+//
+// It reads the file itself; used by disconnectJSON, which has no pre-resolved
+// read to share (Disconnect never goes through preWriteState). Preview and
+// connectJSON instead call guardJsoncCommentsBytes over bytes preWriteState
+// already read, so the precondition-guarded write path never opens the file
+// twice.
 func (s *Service) guardJsoncComments(cfgPath string) error {
 	if !strings.HasSuffix(cfgPath, ".jsonc") {
 		return nil
 	}
 	raw, err := s.read(cfgPath)
 	if err != nil {
+		return nil
+	}
+	return guardJsoncCommentsBytes(cfgPath, raw)
+}
+
+// guardJsoncCommentsBytes is the pure, read-free core of guardJsoncComments,
+// operating on bytes the caller already has. raw is nil for an absent or
+// unreadable file, which passes exactly as guardJsoncComments' own read
+// failure does — the normal read/write path handles those.
+func guardJsoncCommentsBytes(cfgPath string, raw []byte) error {
+	if !strings.HasSuffix(cfgPath, ".jsonc") || raw == nil {
 		return nil
 	}
 	if jsonHasComments(raw) {
@@ -722,20 +747,21 @@ func (s *Service) refuseIfServersSectionRaced(client *ClientDef, cfgPath string)
 	return fmt.Errorf("%s: %q was changed to a non-object value while MCPProxy was about to write it (expected %s); refusing to overwrite it — retry", cfgPath, client.ServerKey, containerWord)
 }
 
-// connectJSON writes the entry, adopting the entry `resolved` names when it
-// differs from serverName. The resolution is passed in rather than recomputed
-// so the write acts on exactly the entry the preview described and the
-// precondition token hashed (Spec 091 FR-005); nil means "resolve nothing" for
-// the tokenless callers that never previewed.
-func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, force bool, resolved *existingEntry) (*ConnectResult, error) {
-	if err := s.guardJsoncComments(cfgPath); err != nil {
+// connectJSON writes the entry, adopting the entry pre.existing names when it
+// differs from serverName. pre is the SAME pre-write read ConnectWithPrecondition
+// already resolved and checked the precondition token against — connectJSON
+// never opens the file again, so the write acts on exactly the bytes the token
+// validated (Spec 091 FR-005) instead of racing a second, independent read.
+func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, force bool, pre preWriteResult) (*ConnectResult, error) {
+	if err := guardJsoncCommentsBytes(cfgPath, pre.raw); err != nil {
 		return nil, err
 	}
-	// Read existing config or start fresh
-	data, perm, err := s.readOrCreateJSON(cfgPath)
+	// Parse the already-read config, or start fresh if it never existed.
+	data, perm, err := parseOrCreateJSON(cfgPath, pre.raw, pre.perm, pre.readErr)
 	if err != nil {
 		return nil, err
 	}
+	resolved := pre.existing
 
 	// Get or create the servers section. A key along the path (see
 	// serversMapPath — flat for most clients, nested for ZCode) that is
@@ -825,8 +851,10 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	// window down to a few local syscalls: atomicWriteFile itself stages the
 	// temp file (MkdirAll/CreateTemp/Write/Close/Chmod — also real I/O) before
 	// this runs, so a check called from here would still leave THAT staging
-	// gap open, per round 5.
-	if err := atomicWriteFile(cfgPath, encoded, perm, func() error {
+	// gap open, per round 5. The permission bits also come from currentPerm's
+	// fresh re-stat rather than the mode captured all the way back in
+	// parseOrCreateJSON, for the same reason (see currentPerm's doc comment).
+	if err := atomicWriteFile(cfgPath, encoded, currentPerm(cfgPath, perm), func() error {
 		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
@@ -934,8 +962,11 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 // ---------- TOML helpers (Codex) ----------
 
 // connectTOML adds or updates the mcpproxy entry in a TOML config file (Codex).
-func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, force bool) (*ConnectResult, error) {
-	data, perm, err := s.readOrCreateTOML(cfgPath)
+// pre is the SAME pre-write read ConnectWithPrecondition already resolved and
+// checked the precondition token against (see connectJSON's doc comment for
+// why this must not open the file again).
+func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, force bool, pre preWriteResult) (*ConnectResult, error) {
+	data, perm, err := parseOrCreateTOML(cfgPath, pre.raw, pre.perm, pre.readErr)
 	if err != nil {
 		return nil, err
 	}
@@ -997,8 +1028,10 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 
 	// Third check (round-4/round-5 findings) — see connectJSON's equivalent
 	// comment for why this must be atomicWriteFile's preRename hook rather
-	// than a call from here.
-	if err := atomicWriteFile(cfgPath, buf.Bytes(), perm, func() error {
+	// than a call from here, and why the permission bits come from
+	// currentPerm's fresh re-stat rather than the mode parseOrCreateTOML
+	// captured earlier.
+	if err := atomicWriteFile(cfgPath, buf.Bytes(), currentPerm(cfgPath, perm), func() error {
 		return s.refuseIfServersSectionRaced(client, cfgPath)
 	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
@@ -1102,24 +1135,22 @@ func (s *Service) disconnectTOML(client *ClientDef, cfgPath, serverName string) 
 
 // ---------- Internal helpers ----------
 
-// readOrCreateJSON reads a JSON config file, or returns an empty map with default permissions
-// if the file does not exist.
-func (s *Service) readOrCreateJSON(path string) (map[string]interface{}, os.FileMode, error) {
-	perm := os.FileMode(0o644)
-
-	raw, err := s.read(path)
-	if os.IsNotExist(err) {
+// parseOrCreateJSON turns already-read config bytes into a mutable map,
+// mirroring the old read-on-demand helper's semantics without touching the
+// filesystem: raw == nil with readErr == nil means the file does not exist
+// (empty map); a non-nil readErr means preWriteState's read failed for a
+// reason other than "absent" and is surfaced here, unchanged, instead of the
+// caller attempting its own second read. Parsing pre-read bytes twice (here
+// and, earlier, inside preWriteState's own classification) is not a TOCTOU —
+// the bytes cannot change between two parses of the same slice — so no
+// filesystem access happens in this function at all.
+func parseOrCreateJSON(path string, raw []byte, perm os.FileMode, readErr error) (map[string]interface{}, os.FileMode, error) {
+	if readErr != nil {
+		return nil, perm, fmt.Errorf("read %s: %w", path, readErr)
+	}
+	if raw == nil {
 		return make(map[string]interface{}), perm, nil
 	}
-	if err != nil {
-		return nil, perm, fmt.Errorf("read %s: %w", path, err)
-	}
-
-	info, _ := os.Stat(path)
-	if info != nil {
-		perm = info.Mode()
-	}
-
 	// unmarshalLenientJSON normalizes a top-level JSON `null` (which decodes
 	// successfully but would otherwise leave a nil map) back to a non-nil
 	// empty map on success, so no additional nil check is needed here.
@@ -1127,27 +1158,17 @@ func (s *Service) readOrCreateJSON(path string) (map[string]interface{}, os.File
 	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return nil, perm, fmt.Errorf("parse JSON in %s: %w", path, err)
 	}
-
 	return data, perm, nil
 }
 
-// readOrCreateTOML reads a TOML config file, or returns an empty map with default permissions.
-func (s *Service) readOrCreateTOML(path string) (map[string]interface{}, os.FileMode, error) {
-	perm := os.FileMode(0o644)
-
-	raw, err := s.read(path)
-	if os.IsNotExist(err) {
+// parseOrCreateTOML is parseOrCreateJSON's TOML counterpart.
+func parseOrCreateTOML(path string, raw []byte, perm os.FileMode, readErr error) (map[string]interface{}, os.FileMode, error) {
+	if readErr != nil {
+		return nil, perm, fmt.Errorf("read %s: %w", path, readErr)
+	}
+	if raw == nil {
 		return make(map[string]interface{}), perm, nil
 	}
-	if err != nil {
-		return nil, perm, fmt.Errorf("read %s: %w", path, err)
-	}
-
-	info, _ := os.Stat(path)
-	if info != nil {
-		perm = info.Mode()
-	}
-
 	var data map[string]interface{}
 	if _, err := toml.Decode(string(raw), &data); err != nil {
 		return nil, perm, fmt.Errorf("parse TOML in %s: %w", path, err)
@@ -1158,8 +1179,25 @@ func (s *Service) readOrCreateTOML(path string) (map[string]interface{}, os.File
 		// path's null-document case did.
 		data = make(map[string]interface{})
 	}
-
 	return data, perm, nil
+}
+
+// currentPerm re-stats cfgPath for its permission bits right before the write,
+// rather than relying solely on the mode preWriteState captured earlier. The
+// content (fallback) comes from that single earlier read to keep the write
+// free of a second independent read, but a mode captured that far back — before
+// the precondition check, the refusal guard and the backup step — leaves a
+// wide window in which a concurrent chmod (e.g. someone tightening the file to
+// 0600) would otherwise be silently undone by the rewrite. Re-stating just the
+// mode immediately before the write does not reopen the content TOCTOU (it
+// never touches file bytes) while keeping the applied mode as fresh as the
+// pre-refactor code kept it. Falls back to `fallback` when the file cannot be
+// stat'd right now (e.g. it no longer exists, or never did).
+func currentPerm(cfgPath string, fallback os.FileMode) os.FileMode {
+	if info, err := os.Stat(cfgPath); err == nil {
+		return info.Mode()
+	}
+	return fallback
 }
 
 // marshalJSONIndent encodes data as pretty-printed JSON with a trailing newline.
