@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -1257,6 +1258,20 @@ func TestConnectWithPrecondition_FileVanishedBetweenStatAndReadDefaultsPerm(t *t
 	info, statErr := os.Stat(cfgPath)
 	if statErr != nil {
 		t.Fatalf("stat the newly created config: %v", statErr)
+	}
+	if runtime.GOOS == "windows" {
+		// Windows has no Unix rwx permission bits: os.Chmod there only
+		// toggles the read-only DOS attribute, so a 0644 chmod reports back
+		// as 0666 (writable), not literally 0644 — asserting the exact Unix
+		// value would fail on every Windows run regardless of this bug. What
+		// this test actually needs to prove still holds cross-platform: the
+		// vanished file's stale, restrictive mode (0400, which Windows would
+		// surface as a READ-ONLY 0444) must not survive the self-heal, i.e.
+		// the created file must come back writable.
+		if info.Mode().Perm()&0o200 == 0 {
+			t.Fatalf("perm = %o, want a writable file — the stale read-only mode from the vanished file must not survive the self-heal", info.Mode().Perm())
+		}
+		return
 	}
 	if got := info.Mode().Perm(); got != 0o644 {
 		t.Fatalf("perm = %o, want the 0644 create default — the stale 0400 mode from the vanished file must not survive the self-heal", got)
