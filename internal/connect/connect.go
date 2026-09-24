@@ -655,9 +655,10 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 // preview.go — the last caller with nothing to write and so nothing to race
 // against — was switched to guardJsoncCommentsBytes(cfgPath, pre.raw) so its
 // read-only path also shares preWriteState's single read rather than opening
-// the file again. It is kept (rather than deleted) as the read-performing
-// entry point guardJsoncCommentsBytes's own tests exercise directly, and as a
-// documented trap for any future caller: do NOT call this from a write path.
+// the file again. It is kept (rather than deleted) because its own test
+// (TestGuardJsoncComments_SkipsReadForNonJsoncPath) exercises it directly,
+// and as a documented trap for any future caller: do NOT call this from a
+// write path.
 // The write paths check guardJsoncCommentsBytes against bytes they already
 // hold instead — connectJSON shares preWriteState's single pre-write read
 // (pre.raw; connectTOML never calls the guard at all, since a .toml path can
