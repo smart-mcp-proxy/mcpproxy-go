@@ -54,7 +54,8 @@ export interface SecurityScanSummary {
 }
 
 // Security scan finding (Spec 039)
-export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'rug_pull' | 'supply_chain' | 'malicious_code' | 'uncategorized'
+// Mirrors internal/security/scanner.Threat* plus detect.ThreatExfiltration.
+export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'exfiltration' | 'rug_pull' | 'supply_chain' | 'malicious_code' | 'uncategorized'
 export type ThreatLevel = 'dangerous' | 'warning' | 'info'
 
 // FindingSpan locates ONE check's match inside ONE raw (un-normalized) tool text
