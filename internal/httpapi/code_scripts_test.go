@@ -25,7 +25,7 @@ type codeScriptsController struct {
 	configPath string
 }
 
-func (c *codeScriptsController) GetCurrentConfig() interface{} {
+func (c *codeScriptsController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: c.apiKey}
 }
 

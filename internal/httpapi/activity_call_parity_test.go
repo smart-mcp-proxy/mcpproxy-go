@@ -45,7 +45,7 @@ type callParityController struct {
 	snap       *internalRuntime.UsageAggregate
 }
 
-func (m *callParityController) GetCurrentConfig() any {
+func (m *callParityController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: "test-key", Observability: config.DefaultObservabilityConfig()}
 }
 

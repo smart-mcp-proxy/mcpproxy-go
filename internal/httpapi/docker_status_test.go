@@ -27,7 +27,7 @@ type mockDockerStatusController struct {
 	isolationEnabled bool
 }
 
-func (m *mockDockerStatusController) GetCurrentConfig() any {
+func (m *mockDockerStatusController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 

@@ -58,6 +58,7 @@ func TestInfoEndpointAlwaysReportsUpdatePolicy(t *testing.T) {
 			server := NewServer(&policyController{policy: tt.policy}, logger, nil)
 
 			req := httptest.NewRequest("GET", "/api/v1/info", http.NoBody)
+			req.Header.Set("X-API-Key", mockControllerAPIKey)
 			w := httptest.NewRecorder()
 			server.ServeHTTP(w, req)
 			require.Equal(t, http.StatusOK, w.Code)

@@ -20,7 +20,7 @@ type mockImportController struct {
 	apiKey string
 }
 
-func (m *mockImportController) GetCurrentConfig() any {
+func (m *mockImportController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}

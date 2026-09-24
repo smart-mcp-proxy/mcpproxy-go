@@ -22,7 +22,7 @@ type mockFixController struct {
 	apiKey string
 }
 
-func (m *mockFixController) GetCurrentConfig() any {
+func (m *mockFixController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 

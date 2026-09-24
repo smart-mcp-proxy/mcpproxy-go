@@ -68,7 +68,7 @@ type mockRound9ConfigController struct {
 	applied  int
 }
 
-func (m *mockRound9ConfigController) GetCurrentConfig() any {
+func (m *mockRound9ConfigController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: "test-key"}
 }
 func (m *mockRound9ConfigController) GetConfig() (*config.Config, error) { return m.live, nil }
@@ -288,7 +288,7 @@ type mockRound9ImportController struct {
 	baseController
 }
 
-func (m *mockRound9ImportController) GetCurrentConfig() any {
+func (m *mockRound9ImportController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: "test-key"}
 }
 func (m *mockRound9ImportController) AddServer(_ context.Context, _ *config.ServerConfig) error {

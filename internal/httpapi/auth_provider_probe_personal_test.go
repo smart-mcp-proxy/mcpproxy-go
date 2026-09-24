@@ -39,7 +39,7 @@ type providerProbePersonalController struct {
 	cfg *config.Config
 }
 
-func (m *providerProbePersonalController) GetCurrentConfig() any { return m.cfg }
+func (m *providerProbePersonalController) GetCurrentConfig() *config.Config { return m.cfg }
 func (m *providerProbePersonalController) GetConfig() (*config.Config, error) {
 	return m.cfg, nil
 }

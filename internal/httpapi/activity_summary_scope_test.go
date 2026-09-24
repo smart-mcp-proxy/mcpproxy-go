@@ -25,7 +25,7 @@ type summaryScopeController struct {
 	activities []*storage.ActivityRecord
 }
 
-func (m *summaryScopeController) GetCurrentConfig() any {
+func (m *summaryScopeController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: "test-key"}
 }
 

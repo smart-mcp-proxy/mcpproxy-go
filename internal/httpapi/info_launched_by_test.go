@@ -40,6 +40,7 @@ func TestInfoEndpointReportsLaunchedBy(t *testing.T) {
 			server := NewServer(&MockServerController{}, logger, nil)
 
 			req := httptest.NewRequest("GET", "/api/v1/info", http.NoBody)
+			req.Header.Set("X-API-Key", mockControllerAPIKey)
 			w := httptest.NewRecorder()
 			server.ServeHTTP(w, req)
 
@@ -78,6 +79,7 @@ func TestInfoEndpointReportsPID(t *testing.T) {
 	server := NewServer(&MockServerController{}, logger, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/info", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 

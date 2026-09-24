@@ -35,7 +35,7 @@ type mockPatchConfigController struct {
 	validationErrs []config.ValidationError
 }
 
-func (m *mockPatchConfigController) GetCurrentConfig() any {
+func (m *mockPatchConfigController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 

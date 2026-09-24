@@ -84,6 +84,7 @@ func TestHandleAnnotationCoverage(t *testing.T) {
 	srv := NewServer(ctrl, logger, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/annotations/coverage", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	// Add API key bypass by setting request source to socket (trusted)
 	req.Header.Set("X-Request-Source", "socket")
 	w := httptest.NewRecorder()
@@ -140,6 +141,7 @@ func TestAnnotationCoverage_EmptyServers(t *testing.T) {
 	srv := NewServer(ctrl, logger, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/annotations/coverage", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("X-Request-Source", "socket")
 	w := httptest.NewRecorder()
 
@@ -195,6 +197,7 @@ func TestAnnotationCoverage_TitleOnlyNotCounted(t *testing.T) {
 	srv := NewServer(ctrl, logger, nil)
 
 	req := httptest.NewRequest("GET", "/api/v1/annotations/coverage", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("X-Request-Source", "socket")
 	w := httptest.NewRecorder()
 

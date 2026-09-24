@@ -132,7 +132,7 @@ type mockTokenController struct {
 	profiles []string
 }
 
-func (m *mockTokenController) GetCurrentConfig() interface{} {
+func (m *mockTokenController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}

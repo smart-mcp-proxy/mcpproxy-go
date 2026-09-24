@@ -11,6 +11,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,7 +71,7 @@ func (m *mockController) GetConfigPath() string                     { return "" 
 func (m *mockController) GetLogDir() string                         { return "" }
 func (m *mockController) TriggerOAuthLogin(serverName string) error { return nil }
 func (m *mockController) GetSecretResolver() interface{}            { return nil }
-func (m *mockController) GetCurrentConfig() interface{}             { return nil }
+func (m *mockController) GetCurrentConfig() *config.Config          { return nil }
 func (m *mockController) NotifySecretsChanged(ctx context.Context, operation, secretName string) error {
 	return nil
 }
@@ -109,7 +110,7 @@ func (m *mockController) RemoveRegistrySourceRef(_ string) (*config.RegistryEntr
 func (m *mockController) EditRegistrySourceRef(_, _, _, _ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
 	return nil, nil, nil
 }
-func (m *mockController) GetManagementService() interface{}                       { return nil }
+func (m *mockController) GetManagementService() management.Service                { return nil }
 func (m *mockController) GetRuntime() interface{}                                 { return nil }
 func (m *mockController) GetSessions(limit, offset int) (interface{}, int, error) { return nil, 0, nil }
 func (m *mockController) GetSessionByID(id string) (interface{}, error)           { return nil, nil }

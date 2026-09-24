@@ -24,7 +24,7 @@ type telemetryPayloadController struct {
 	apiKey string
 }
 
-func (m *telemetryPayloadController) GetCurrentConfig() any {
+func (m *telemetryPayloadController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 

@@ -50,7 +50,7 @@ type preflightController struct {
 	recordErr error
 }
 
-func (c *preflightController) GetCurrentConfig() interface{} {
+func (c *preflightController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: preflightTestAPIKey}
 }
 

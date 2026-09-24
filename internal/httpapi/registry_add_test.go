@@ -42,6 +42,7 @@ func TestAddFromRegistry_SlashServerIDUnescaped(t *testing.T) {
 
 	// microsoft/markitdown, percent-encoded as a single path segment.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/registries/github-mcp/servers/microsoft%2Fmarkitdown/add", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
