@@ -47,9 +47,16 @@ async function goto(page: Page, route: string, anchor: string) {
 
 test('servers list renders the fleet with KPI counters', async ({ page }) => {
   const errors = watchPageErrors(page)
-  await goto(page, '/servers', '[data-test="kpi-card-total"]')
+  // An empty fleet (no fixture registered) renders the first-run empty state
+  // INSTEAD of the KPI tiles — deliberately hidden until a server exists
+  // (#1049/#1216) — so anchor on whichever of the two the instance should show.
+  await goto(page, '/servers', '[data-test="kpi-card-total"], [data-test="servers-first-run-empty"]')
 
-  await expect(page.locator('[data-test="kpi-card-total"]')).toContainText(/\d/)
+  if (!SERVER && (await page.locator('[data-test="servers-first-run-empty"]').isVisible())) {
+    await expect(page.locator('[data-test="kpi-card-total"]')).toHaveCount(0)
+  } else {
+    await expect(page.locator('[data-test="kpi-card-total"]')).toContainText(/\d/)
+  }
   if (SERVER) {
     await expect(page.locator('[data-test="server-card-title"]', { hasText: SERVER }).first())
       .toBeVisible()
@@ -187,7 +194,15 @@ test('Activity and Usage report the same 24h numbers as the API', async ({ page,
   }
 
   // The Usage tile must show the SAME call count the Activity header does.
-  await goto(page, '/usage', '[data-test="usage-view"]')
+  // With no upstream configured, /usage shows the first-run CTA instead of the
+  // charts (#1049) — there is no Usage tile to compare, so stop at the API and
+  // Activity halves above.
+  await goto(page, '/usage', '[data-test="usage-view"], [data-test="dashboard-usage-first-run"]')
+  if (await page.locator('[data-test="dashboard-usage-first-run"]').isVisible()) {
+    expect(SERVER, `/usage shows the first-run CTA although fixture ${SERVER} is registered`).toBe('')
+    expect(errors, `page exceptions: ${errors.join(', ')}`).toHaveLength(0)
+    return
+  }
   await expect(
     page.locator('[data-test="usage-calls-tile"] .stat-value'),
     'Usage "Calls" disagrees with the call count Activity prints for the same window',
