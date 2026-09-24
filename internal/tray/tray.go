@@ -3,9 +3,6 @@
 package tray
 
 import (
-	"archive/tar"
-	"archive/zip"
-	"compress/gzip"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -1404,7 +1401,10 @@ func (a *App) downloadAndApplyUpdate(release *GitHubRelease, assetName, url stri
 		return err
 	}
 
-	archivePath := filepath.Join(workDir, "artifact")
+	// The archive keeps the published extension (and only that — never the
+	// asset name itself, which is server-supplied): ExtractBinary dispatches
+	// tar.gz vs zip off the path suffix.
+	archivePath := filepath.Join(workDir, "artifact"+archiveExt(assetName))
 	if err := downloadToFile(url, archivePath); err != nil {
 		return fmt.Errorf("download %s: %w", assetName, err)
 	}
@@ -1419,10 +1419,8 @@ func (a *App) downloadAndApplyUpdate(release *GitHubRelease, assetName, url stri
 		zap.String("sha256", wantDigest))
 
 	switch {
-	case strings.HasSuffix(assetName, assetZipExt):
-		return a.applyZipUpdate(archivePath)
-	case strings.HasSuffix(assetName, assetTarGzExt):
-		return a.applyTarGzUpdate(archivePath)
+	case archiveExt(assetName) != "":
+		return a.applyArchiveUpdate(archivePath)
 	default:
 		f, err := os.Open(archivePath) // #nosec G304 -- archivePath is inside a temp dir this process just created
 		if err != nil {
@@ -1433,72 +1431,75 @@ func (a *App) downloadAndApplyUpdate(release *GitHubRelease, assetName, url stri
 	}
 }
 
-// applyZipUpdate extracts and applies an update from a downloaded zip archive
-func (a *App) applyZipUpdate(archivePath string) error {
-	r, err := zip.OpenReader(archivePath)
-	if err != nil {
-		return err
+// archiveExt returns the archive extension assetName carries, or "" when it is
+// not an archive this path knows how to open.
+func archiveExt(assetName string) string {
+	switch {
+	case strings.HasSuffix(assetName, assetZipExt):
+		return assetZipExt
+	case strings.HasSuffix(assetName, assetTarGzExt):
+		return assetTarGzExt
+	default:
+		return ""
 	}
-	defer r.Close()
+}
+
+// trayBinaryName is the archive member this process installs over itself.
+//
+// The self-update runs inside mcpproxy-tray (cmd/mcpproxy-tray is the only
+// importer of this package) and hands update.Apply a TargetPath of
+// os.Executable(), so the member extracted has to be the TRAY binary. Release
+// archives ship the core binary and the tray binary side by side —
+// .github/workflows/release.yml stages mcpproxy plus mcpproxy-tray[.exe] — and
+// list the core first, so any "first entry" or suffix-based rule pulls out the
+// core and installs it over the tray, leaving the user with a tray executable
+// that is really a headless core. The core keeps updating itself through
+// `mcpproxy update`, which selects its own member the same way
+// (coreBinaryName in cmd/mcpproxy/update_cmd.go).
+func trayBinaryName() string {
+	name := "mcpproxy-tray"
+	if runtime.GOOS == osWindows {
+		name += ".exe"
+	}
+	return name
+}
+
+// applyArchiveUpdate extracts the tray binary out of the already-downloaded,
+// already-checksum-verified archive and swaps it over the running executable.
+//
+// Extraction matches the member on its exact base name and fails closed when it
+// is absent: an archive without the tray binary means the layout changed, and
+// installing some other member instead is worse than not updating.
+func (a *App) applyArchiveUpdate(archivePath string) error {
+	member := trayBinaryName()
+
+	stageDir, err := os.MkdirTemp(filepath.Dir(archivePath), "extract-*")
+	if err != nil {
+		return fmt.Errorf("create extraction directory: %w", err)
+	}
+	defer os.RemoveAll(stageDir)
+
+	stagedPath := filepath.Join(stageDir, member)
+	if err := updatecheck.ExtractBinary(archivePath, member, stagedPath); err != nil {
+		return fmt.Errorf("extract %s: %w", member, err)
+	}
+
+	staged, err := os.Open(stagedPath) // #nosec G304 -- stagedPath is inside a temp dir this process just created
+	if err != nil {
+		return fmt.Errorf("open extracted %s: %w", member, err)
+	}
+	defer staged.Close()
 
 	executablePath, err := os.Executable()
 	if err != nil {
 		return err
 	}
 
-	for _, f := range r.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
+	a.logger.Info("Installing tray binary from update archive",
+		zap.String("member", member),
+		zap.String("target", executablePath))
 
-		err = a.applyUpdate(rc, update.Options{TargetPath: executablePath})
-		rc.Close()
-		return err
-	}
-
-	return fmt.Errorf("no file found in zip archive to apply")
-}
-
-// applyTarGzUpdate extracts and applies an update from a downloaded tar.gz archive
-func (a *App) applyTarGzUpdate(archivePath string) error {
-	f, err := os.Open(archivePath) // #nosec G304 -- archivePath is inside a temp dir this process just created
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	gzr, err := gzip.NewReader(f)
-	if err != nil {
-		return err
-	}
-	defer gzr.Close()
-
-	tr := tar.NewReader(gzr)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-
-		// Look for the mcpproxy binary (could be mcpproxy or mcpproxy.exe)
-		if strings.HasSuffix(header.Name, "mcpproxy") || strings.HasSuffix(header.Name, "mcpproxy.exe") {
-			executablePath, err := os.Executable()
-			if err != nil {
-				return err
-			}
-
-			return a.applyUpdate(tr, update.Options{TargetPath: executablePath})
-		}
-	}
-
-	return fmt.Errorf("no mcpproxy binary found in tar.gz archive")
+	return a.applyUpdate(staged, update.Options{TargetPath: executablePath})
 }
 
 // openConfigDir opens the directory containing the configuration file

@@ -235,10 +235,24 @@ jobs:
           # it is not made here.
           go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
 
-          # Build tray binary for macOS
+          # Build tray binary for the platforms with GUI support, matching
+          # release.yml. Windows matters here even though the RC tray reaches
+          # users through the Inno installer (built further below, AFTER the
+          # archives): that installed tray self-updates by downloading this
+          # job's .zip and extracting the mcpproxy-tray.exe member by name, so
+          # a zip built without it leaves every Windows RC tray unable to
+          # update. As in release.yml, the archived tray is unsigned — SignPath
+          # signs installers, not archive members.
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             echo "Building mcpproxy-tray for macOS..."
             go build -ldflags "${LDFLAGS}" -o mcpproxy-tray ./cmd/mcpproxy-tray
+          elif [ "${{ matrix.goos }}" = "windows" ]; then
+            echo "Building mcpproxy-tray.exe for Windows..."
+            # -H windowsgui matches scripts/build-windows-installer.ps1: the
+            # tray must link as a GUI executable or it opens a console window
+            # on launch, and a self-update installs this copy over the
+            # installer's.
+            go build -ldflags "${LDFLAGS} -H windowsgui" -o mcpproxy-tray.exe ./cmd/mcpproxy-tray
           fi
 
           # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)
@@ -424,17 +438,39 @@ jobs:
           # Create archive with version info - DO NOT create "latest" archives for prereleases
           ARCHIVE_BASE="mcpproxy-${VERSION#v}-${{ matrix.goos }}-${{ matrix.goarch }}"
 
+          # The tray binary ships alongside the core, exactly as release.yml
+          # does it. The tray's self-update extracts the mcpproxy-tray member
+          # from this archive by name and fails closed when it is absent, so an
+          # RC archive without it leaves every prerelease tray unable to update
+          # (RC builds track the rc channel by construction — see
+          # App.includePrereleases in internal/tray/tray.go).
+          FILES_TO_ARCHIVE="${CLEAN_BINARY}"
+          if [ "${{ matrix.goos }}" = "windows" ] && [ -f "mcpproxy-tray.exe" ]; then
+            FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray.exe"
+            echo "Including mcpproxy-tray.exe in archive"
+          elif [ "${{ matrix.goos }}" = "darwin" ] && [ -f "mcpproxy-tray" ]; then
+            FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray"
+            echo "Including mcpproxy-tray in archive"
+          elif [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; then
+            # Same rule as release.yml: fail rather than ship a core-only
+            # archive that would strand every tray self-update. Linux has no
+            # tray and falls through untouched.
+            echo "::error::no tray binary to archive for ${{ matrix.goos }}; a core-only archive would strand every tray self-update"
+            exit 1
+          fi
+
           if [ "${{ matrix.archive_format }}" = "zip" ]; then
             # Create only versioned archive (no latest for prereleases)
             if [ "${{ matrix.goos }}" = "windows" ]; then
               # Use PowerShell Compress-Archive on Windows since zip command isn't available
-              powershell -Command "Compress-Archive -Path '${CLEAN_BINARY}' -DestinationPath '${ARCHIVE_BASE}.zip'"
+              PS_FILES=$(echo ${FILES_TO_ARCHIVE} | sed 's/ /,/g')
+              powershell -Command "Compress-Archive -Path ${PS_FILES} -DestinationPath '${ARCHIVE_BASE}.zip'"
             else
-              zip "${ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
+              zip "${ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
             fi
           else
             # Create only versioned archive (no latest for prereleases)
-            tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
+            tar -czf "${ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
           fi
 
       - name: Build Linux .deb and .rpm packages

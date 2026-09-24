@@ -89,9 +89,12 @@ func TestApp_SelfUpdate_VerifiesTheAssetItActuallySelected(t *testing.T) {
 	aliasName := fmt.Sprintf("mcpproxy-latest-%s-%s%s", runtime.GOOS, runtime.GOARCH, ext)
 	versionedName := fmt.Sprintf("mcpproxy-9.9.9-%s-%s%s", runtime.GOOS, runtime.GOARCH, ext)
 
-	archive := buildTarGz(t, "mcpproxy", []byte("pretend core binary"))
+	// The member is the TRAY binary: that is what this process installs over
+	// itself (see trayBinaryName). The name is the running platform's, not the
+	// asset's, because trayBinaryName() answers for the running process.
+	archive := buildTarGz(t, trayBinaryName(), []byte("pretend tray binary"))
 	if ext == assetZipExt {
-		archive = buildZip(t, "mcpproxy", []byte("pretend core binary"))
+		archive = buildZip(t, trayBinaryName(), []byte("pretend tray binary"))
 	}
 
 	mux := http.NewServeMux()
@@ -147,8 +150,11 @@ func TestApp_SelfUpdate_VerifiesTheAssetItActuallySelected(t *testing.T) {
 // exact asset name with a digest matching the downloaded bytes. Everything else
 // must fail closed.
 func TestApp_DownloadAndApplyUpdate_ChecksumGate(t *testing.T) {
-	tarGz := buildTarGz(t, "mcpproxy", []byte("pretend core binary"))
-	zipped := buildZip(t, "mcpproxy", []byte("pretend core binary"))
+	// Both fixtures carry the tray binary, the member the self-update path
+	// installs (trayBinaryName); this test is about the checksum gate, and an
+	// archive missing that member would fail for the wrong reason.
+	tarGz := buildTarGz(t, trayBinaryName(), []byte("pretend tray binary"))
+	zipped := buildZip(t, trayBinaryName(), []byte("pretend tray binary"))
 
 	tests := []struct {
 		name string
