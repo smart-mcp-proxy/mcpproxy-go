@@ -300,7 +300,7 @@ func TestConnectJSON_CommentGuardSharesOneReadWithParse(t *testing.T) {
 	commentFree := []byte(`{"$schema":"https://opencode.ai/config.json"}`)
 	commented := []byte("{\n  // keep my comments\n  \"$schema\": \"https://opencode.ai/config.json\"\n}\n")
 
-	t.Run("shared guard+parse read is comment-free: writes normally with 2 total reads, not 3", func(t *testing.T) {
+	t.Run("shared guard+parse read is comment-free: writes normally with 4 total reads, not 5", func(t *testing.T) {
 		home := t.TempDir()
 		p := writeOpencodeFile(t, home, "opencode.jsonc", string(commentFree))
 		s := NewServiceWithHome("127.0.0.1:8080", "key", home)

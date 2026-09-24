@@ -533,7 +533,10 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 	// and guardJsoncCommentsBytes now all operate on this single pre-write
 	// read, so there is exactly one PRE-WRITE content read for the whole
 	// operation and nothing downstream of this point re-reads the file for
-	// its own content decisions.
+	// its own content decisions. A third, disconnect-path instance of the same
+	// comment-guard double-read (Disconnect never goes through this function
+	// or pre) is closed separately in disconnectJSON, which shares its own
+	// single read between the guard and the parse.
 
 	// Precondition check BEFORE any backup or write, so a refusal is completely
 	// inert (Spec 091 FR-005).
