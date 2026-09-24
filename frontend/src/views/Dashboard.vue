@@ -157,7 +157,7 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
           </svg>
           <h3 class="font-semibold text-lg mt-2">Add your first server to see usage</h3>
-          <p class="text-sm opacity-60 max-w-md">
+          <p class="text-sm text-base-content/60 max-w-md">
             No upstream MCP servers are configured yet, so there is nothing to chart.
             Add one and this page will show call volume, token sinks, error rates and a timeline.
           </p>
