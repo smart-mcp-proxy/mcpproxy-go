@@ -1248,9 +1248,38 @@ func logSafeURLComponent(s string) string {
 	s = tokenPattern.ReplaceAllString(redactURLUserinfo(s), "${1}"+redactedMarker)
 	segments := strings.Split(s, "/")
 	for i, segment := range segments {
-		segments[i] = LogSafeQueryString(segment)
+		segments[i] = logSafePathSegment(segment)
 	}
 	return MaskDetectedSecrets(strings.Join(segments, "/"))
+}
+
+// logSafePathSegment applies the name rule to ONE path segment, treating
+// anything after a '?' inside it as a query of its own.
+//
+// The '?' split is not hypothetical tidying. r.URL.Path is what net/http hands
+// a handler and it arrives percent-DECODED, so a client that encodes its URL
+// suffix — `GET /mcp/%3Fapikey%3D<KEY>`, which ServeMux still matches against
+// the `/mcp/` subtree pattern — produces the path `/mcp/?apikey=<KEY>`.
+// Splitting on '/' alone left the segment `?apikey=<KEY>`, whose parameter name
+// reads as "?apikey" and so matches no name rule, and whose plain-hex value is
+// under the entropy detector's threshold: the live admin key reached the log
+// field in the clear. logSafeFragment already made exactly this allowance for a
+// fragment; a decoded path needs it for the same reason.
+//
+// Every '?'-delimited piece is redacted, not just the first: a second '?' is
+// otherwise swallowed into a parameter VALUE, where the name rule stops
+// looking. The cost stays bounded by the caller's input cap — the pieces
+// partition the segment, so the total work over a path is still linear in its
+// (capped) length.
+func logSafePathSegment(segment string) string {
+	if !strings.Contains(segment, "?") {
+		return LogSafeQueryString(segment)
+	}
+	pieces := strings.Split(segment, "?")
+	for i, piece := range pieces {
+		pieces[i] = LogSafeQueryString(piece)
+	}
+	return strings.Join(pieces, "?")
 }
 
 // logSafeFragment redacts a URL fragment. No URL renderer applies the name rule
