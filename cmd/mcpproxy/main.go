@@ -32,7 +32,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	bbolterrors "go.etcd.io/bbolt/errors"
@@ -612,35 +611,26 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	var receivedSignal atomic.Value
 	receivedSignal.Store("")
 
-	// Setup signal handling for graceful shutdown with force quit on second signal
+	// Setup signal handling for graceful shutdown with force quit on a further
+	// signal and a hard deadline so a wedged shutdown cannot make the daemon
+	// unkillable. See runSignalHandler in signal_handler.go.
+	//
+	// This starts BEFORE the log line below on purpose: signal.Notify is
+	// already registered, so from here until something reads sigChan the
+	// runtime is swallowing SIGINT/SIGTERM into a one-slot buffer. A log write
+	// can block (a full disk, a stalled pipe to the tray), and a daemon that
+	// cannot be killed while it is logging is the bug this handler exists to
+	// prevent.
+	go runSignalHandler(signalHandlerDeps{
+		sigChan: sigChan,
+		cancel:  cancel,
+		// Spec 024: Store signal for activity logging.
+		onSignal: func(sig os.Signal) { receivedSignal.Store(sig.String()) },
+		exit:     os.Exit,
+		logger:   logger,
+	})
 	logger.Info("Signal handler goroutine starting - waiting for SIGINT or SIGTERM")
 	_ = logger.Sync()
-	go func() {
-		logger.Info("Signal handler goroutine is running, waiting for signal on channel")
-		_ = logger.Sync()
-		sig := <-sigChan
-		receivedSignal.Store(sig.String()) // Spec 024: Store signal for activity logging
-		logger.Info("Received signal, shutting down", zap.String("signal", sig.String()))
-		_ = logger.Sync() // Flush logs immediately so we can see shutdown messages
-		logger.Info("Press Ctrl+C again within 10 seconds to force quit")
-		_ = logger.Sync() // Flush again
-		cancel()
-
-		// Start a timer for force quit
-		forceQuitTimer := time.NewTimer(10 * time.Second)
-		defer forceQuitTimer.Stop()
-
-		// Wait for second signal or timeout
-		select {
-		case sig2 := <-sigChan:
-			logger.Warn("Received second signal, forcing immediate exit", zap.String("signal", sig2.String()))
-			_ = logger.Sync()
-			os.Exit(ExitCodeGeneralError)
-		case <-forceQuitTimer.C:
-			// Normal shutdown timeout - continue with graceful shutdown
-			logger.Debug("Force quit timer expired, continuing with graceful shutdown")
-		}
-	}()
 
 	// Start the server
 	logger.Info("Starting mcpproxy server")
