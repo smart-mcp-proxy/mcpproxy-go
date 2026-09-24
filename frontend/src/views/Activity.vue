@@ -1338,6 +1338,8 @@ import {
   statusBucketTiles,
   statusPresentation,
   INTENT_LEGEND,
+  activityAgentNames,
+  matchesAuthFilter,
   OTHER_STATUS,
   SENSITIVE_LEGEND,
   type ActiveFilterChip,
@@ -1404,15 +1406,8 @@ const availableServers = computed(() => {
   return Array.from(servers).sort()
 })
 
-// Spec 028: Extract unique agent names from activity metadata
-const availableAgents = computed(() => {
-  const agents = new Set<string>()
-  activities.value.forEach(a => {
-    const name = a.metadata?._auth_agent_name
-    if (name) agents.add(name as string)
-  })
-  return Array.from(agents).sort()
-})
+// Spec 028: unique agent names from the rows' caller identity
+const availableAgents = computed(() => activityAgentNames(activities.value))
 
 // Available sessions with client name and session_id suffix (Spec 024)
 interface SessionOption {
@@ -1757,13 +1752,9 @@ const filteredActivities = computed(() => {
   if (filterSeverity.value && filterSensitiveData.value === 'true') {
     result = result.filter(a => a.max_severity === filterSeverity.value)
   }
-  // Spec 028: Auth type filter
-  if (filterAuthType.value) {
-    result = result.filter(a => a.metadata?._auth_auth_type === filterAuthType.value)
-  }
-  // Spec 028: Agent name filter
-  if (filterAgentName.value) {
-    result = result.filter(a => a.metadata?._auth_agent_name === filterAgentName.value)
+  // Spec 028: Auth type / agent name filters
+  if (filterAuthType.value || filterAgentName.value) {
+    result = result.filter(a => matchesAuthFilter(a, filterAuthType.value, filterAgentName.value))
   }
   if (filterStartDate.value) {
     const startTime = new Date(filterStartDate.value).getTime()
