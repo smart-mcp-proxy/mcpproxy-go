@@ -680,9 +680,35 @@ async function confirmConnect(clientId: string) {
   clearPreview(clientId)
 }
 
+// After a successful write the stat-only listing still reports connected=false
+// (#706), so re-fetch the content-resolved onboarding state — otherwise rows
+// keep "Review & connect" and the footer keeps counting connected clients.
+// Only the rewritten client's on-demand resolution is stale; other clients'
+// files are untouched, so their verified endpoint lines survive the refetch.
+async function refreshAfterWrite(clientId: string) {
+  const kept = { ...resolved.value }
+  delete kept[clientId]
+  await fetchClients()
+  // fetchClients() only clears `resolved` on success; on failure it leaves the
+  // pre-write override in place, which would resurrect the stale entry we
+  // just deleted from `kept`. Drop it unconditionally -- a caller that still
+  // wants a fresh resolution (e.g. connect()'s verify step) fetches it after
+  // this returns.
+  const merged = { ...kept, ...resolved.value }
+  delete merged[clientId]
+  resolved.value = merged
+  await onboarding.fetchState()
+}
+
 // Returns the outcome so connectAll can accumulate per-client backup results
 // (ok=true with backupPath string = backup created; null = no prior file).
-async function connect(clientId: string, force = false): Promise<{ ok: boolean; backupPath: string | null; configPath: string }> {
+// verify=false lets connectAll defer the endpoint check until every write is
+// done: each connect's fetchClients() clears earlier resolutions.
+async function connect(
+  clientId: string,
+  force = false,
+  { verify = true }: { verify?: boolean } = {}
+): Promise<{ ok: boolean; backupPath: string | null; configPath: string }> {
   loading.clients[clientId] = true
   resultMessage.value = ''
   resultBackupPath.value = undefined
@@ -698,7 +724,11 @@ async function connect(clientId: string, force = false): Promise<{ ok: boolean; 
       // Empty/absent backup_path on success means no prior file existed.
       const backupPath = response.data.backup_path || null
       resultBackupPath.value = backupPath
-      await fetchClients()
+      await refreshAfterWrite(clientId)
+      // Confirm which endpoint the client now names. The config was just
+      // written as a direct result of this click, so the read stays tied to an
+      // explicit user action (Spec 075).
+      if (verify) void checkAccess(clientId)
       systemStore.addToast({
         type: 'success',
         title: 'Client Connected',
@@ -775,7 +805,7 @@ async function disconnect(clientId: string) {
       resultMessage.value = response.data.message || `Disconnected from ${clientId}`
       resultSuccess.value = true
       resultBackupPath.value = response.data.backup_path || null
-      await fetchClients()
+      await refreshAfterWrite(clientId)
       systemStore.addToast({
         type: 'info',
         title: 'Client Disconnected',
@@ -878,7 +908,7 @@ async function connectAll() {
   const targets = [...connectableClients.value]
   const collected: Array<{ id: string; name: string; backupPath: string | null }> = []
   for (const client of targets) {
-    const outcome = await connect(client.id)
+    const outcome = await connect(client.id, false, { verify: false })
     if (outcome.ok) {
       collected.push({ id: client.id, name: client.name, backupPath: outcome.backupPath })
     }
@@ -889,6 +919,10 @@ async function connectAll() {
     // single-result line that would otherwise repeat only the last backup.
     resultBackupPath.value = undefined
   }
+  // Endpoint verification is best-effort polish on top of the summary above --
+  // don't let a slow or stalled check (these are content reads, no timeout on
+  // the API client) delay showing the backup results the user is waiting on.
+  await Promise.all(collected.map(c => checkAccess(c.id)))
 }
 
 // Per-row copy for the Connect All backup list.
