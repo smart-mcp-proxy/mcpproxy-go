@@ -689,7 +689,14 @@ async function refreshAfterWrite(clientId: string) {
   const kept = { ...resolved.value }
   delete kept[clientId]
   await fetchClients()
-  resolved.value = { ...kept, ...resolved.value }
+  // fetchClients() only clears `resolved` on success; on failure it leaves the
+  // pre-write override in place, which would resurrect the stale entry we
+  // just deleted from `kept`. Drop it unconditionally -- a caller that still
+  // wants a fresh resolution (e.g. connect()'s verify step) fetches it after
+  // this returns.
+  const merged = { ...kept, ...resolved.value }
+  delete merged[clientId]
+  resolved.value = merged
   await onboarding.fetchState()
 }
 
@@ -906,13 +913,16 @@ async function connectAll() {
       collected.push({ id: client.id, name: client.name, backupPath: outcome.backupPath })
     }
   }
-  await Promise.all(collected.map(c => checkAccess(c.id)))
   if (collected.length > 0) {
     bulkBackups.value = collected
     // The per-client list is authoritative for a bulk run; suppress the
     // single-result line that would otherwise repeat only the last backup.
     resultBackupPath.value = undefined
   }
+  // Endpoint verification is best-effort polish on top of the summary above --
+  // don't let a slow or stalled check (these are content reads, no timeout on
+  // the API client) delay showing the backup results the user is waiting on.
+  await Promise.all(collected.map(c => checkAccess(c.id)))
 }
 
 // Per-row copy for the Connect All backup list.
