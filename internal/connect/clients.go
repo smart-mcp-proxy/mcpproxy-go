@@ -220,27 +220,57 @@ func serversMapPath(clientID string) []string {
 	return nil
 }
 
-// getServersMap resolves a client's servers map from parsed config data,
-// following serversMapPath when the client needs one and falling back to the
-// flat client.ServerKey lookup otherwise.
-func getServersMap(client *ClientDef, data map[string]interface{}) (map[string]interface{}, bool) {
+// resolveServersMapState classifies a client's servers-map location within
+// parsed config data (following serversMapPath, or the flat client.ServerKey
+// lookup for every client that doesn't need one), distinguishing three
+// outcomes that getServersMap's plain (map, bool) collapses into two:
+//
+//   - found=true: the full path resolved to an object; serversMap is it.
+//   - found=false, malformed=false: some key along the path is simply
+//     ABSENT — a legitimate "nothing here yet, safe to create" case.
+//   - found=false, malformed=true: a key along the path is PRESENT but its
+//     value is not an object (a hand-edited string/number/array/bool, or —
+//     for a nested path like ZCode's mcp.servers — an intermediate level
+//     that isn't a table either). This must never be treated the same as
+//     "absent": collapsing the two let a non-object value be silently
+//     replaced by a fresh empty map on write, with drift detection never
+//     getting a chance to refuse (Spec 091 FR-005 gap, PR #1340).
+//
+// This is the single place that distinction is computed, so both flat-key
+// clients and any future nested-path client (see serversMapPath) get it for
+// free — callers that only need the old two-way "found or not" question can
+// still use getServersMap, which is defined in terms of this.
+func resolveServersMapState(client *ClientDef, data map[string]interface{}) (serversMap map[string]interface{}, found, malformed bool) {
 	path := serversMapPath(client.ID)
 	if path == nil {
-		m, ok := data[client.ServerKey].(map[string]interface{})
-		return m, ok
+		path = []string{client.ServerKey}
 	}
 	cur := data
 	for i, key := range path {
-		m, ok := cur[key].(map[string]interface{})
+		raw, present := cur[key]
+		if !present {
+			return nil, false, false
+		}
+		m, ok := raw.(map[string]interface{})
 		if !ok {
-			return nil, false
+			return nil, false, true
 		}
 		if i == len(path)-1 {
-			return m, true
+			return m, true, false
 		}
 		cur = m
 	}
-	return nil, false
+	return nil, false, false
+}
+
+// getServersMap resolves a client's servers map from parsed config data,
+// following serversMapPath when the client needs one and falling back to the
+// flat client.ServerKey lookup otherwise. Callers that need to distinguish
+// "absent" from "present but not an object" should use
+// resolveServersMapState instead.
+func getServersMap(client *ClientDef, data map[string]interface{}) (map[string]interface{}, bool) {
+	m, found, _ := resolveServersMapState(client, data)
+	return m, found
 }
 
 // setServersMap writes serversMap back into data at a client's servers

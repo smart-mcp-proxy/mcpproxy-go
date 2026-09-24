@@ -3,6 +3,7 @@ package connect
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -398,6 +399,565 @@ func TestConnectWithPrecondition_NonObjectEntryDriftRefuses(t *testing.T) {
 			t.Fatalf("an unchanged config must still write, got %+v", res)
 		}
 	})
+}
+
+// TestPreview_NonObjectServersSection_IsMalformed closes a DIFFERENT drift
+// class than TestPreview_PreconditionToken_NonObjectEntryDrift above: that one
+// covers the individual ENTRY (data["mcpServers"]["mcpproxy"]) holding a
+// non-object value. This one covers the SERVERS SECTION ITSELF
+// (data["mcpServers"], or data["mcp_servers"] for Codex/TOML) holding a
+// non-object value — a string, number, array or bool from a hand-edited
+// config.
+//
+// resolveExistingEntry used to type-assert data[client.ServerKey].(map[string
+// ]interface{}) and, on failure, report "no servers section" — indistinguishable
+// from the key being absent entirely. That collapsed every non-object section
+// value into the same "create" classification, so the precondition token (which
+// only hashes the RESOLVED ENTRY, never the section's own raw value/type) could
+// not detect the section's value changing between preview and write, and the
+// write silently replaced it with a fresh map. The fix treats "key present but
+// not an object" as malformed — a distinct, refusable state — rather than
+// falling through to "create".
+func TestPreview_NonObjectServersSection_IsMalformed(t *testing.T) {
+	t.Run("JSON client (claude-code)", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		writeFileT(t, cfgPath, `{"mcpServers":"old"}`)
+
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview should not hard-error on a non-object servers section: %v", err)
+		}
+		if preview.AccessState != accessMalformed {
+			t.Fatalf("expected access_state=%q for a non-object servers section, got %q", accessMalformed, preview.AccessState)
+		}
+	})
+
+	t.Run("TOML client (codex)", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("codex", home)
+		writeFileT(t, cfgPath, `mcp_servers = "old"`+"\n")
+
+		preview, err := svc.Preview("codex", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview should not hard-error on a non-object servers section: %v", err)
+		}
+		if preview.AccessState != accessMalformed {
+			t.Fatalf("expected access_state=%q for a non-object servers section, got %q", accessMalformed, preview.AccessState)
+		}
+	})
+
+	// ZCode (added by #1339, merged into main after this fix was written) is
+	// the one client with a NESTED servers path (mcp.servers, via
+	// serversMapPath) rather than a flat top-level key — proving the fix
+	// generalizes via resolveServersMapState, not just the flat case.
+	t.Run("JSON client with nested servers path (zcode), leaf non-object", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("zcode", home)
+		writeFileT(t, cfgPath, `{"mcp":{"servers":"old"}}`)
+
+		preview, err := svc.Preview("zcode", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview should not hard-error on a non-object servers section: %v", err)
+		}
+		if preview.AccessState != accessMalformed {
+			t.Fatalf("expected access_state=%q for a non-object servers section, got %q", accessMalformed, preview.AccessState)
+		}
+	})
+
+	t.Run("JSON client with nested servers path (zcode), intermediate non-object", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("zcode", home)
+		// The INTERMEDIATE level ("mcp") is non-object here, not the leaf
+		// ("servers") — resolveServersMapState must catch this too, since a
+		// hand-edited config could corrupt either level of a nested path.
+		writeFileT(t, cfgPath, `{"mcp":"old"}`)
+
+		preview, err := svc.Preview("zcode", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview should not hard-error on a non-object servers section: %v", err)
+		}
+		if preview.AccessState != accessMalformed {
+			t.Fatalf("expected access_state=%q for a non-object intermediate level, got %q", accessMalformed, preview.AccessState)
+		}
+	})
+}
+
+// TestConnect_ZCode_NonObjectServersSection_RefusesWithoutToken is the ZCode
+// counterpart to TestConnect_NonObjectServersSection_RefusesWithoutToken,
+// added once ZCode (#1339) actually existed in this codebase — the original
+// task asked for coverage on "at least one flat-key client and zcode, to
+// prove the fix isn't client-specific." Both the leaf and the intermediate
+// non-object cases must refuse the write, at either nesting level, without
+// creating a backup or touching the file.
+func TestConnect_ZCode_NonObjectServersSection_RefusesWithoutToken(t *testing.T) {
+	t.Run("leaf (mcp.servers) is non-object", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("zcode", home)
+		const original = `{"mcp":{"servers":42}}`
+		writeFileT(t, cfgPath, original)
+
+		res, err := svc.Connect("zcode", "mcpproxy", true)
+		if err == nil {
+			t.Fatalf("expected a refusal error, got res=%+v err=nil", res)
+		}
+		if res != nil {
+			t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+		}
+		if got := readConfigT(t, cfgPath); got != original {
+			t.Fatalf("config must be untouched after a refusal:\n got:  %s\n want: %s", got, original)
+		}
+		if n := backupCount(t, cfgPath); n != 0 {
+			t.Fatalf("a refused write must not create a backup, found %d", n)
+		}
+	})
+
+	t.Run("intermediate (mcp) is non-object", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("zcode", home)
+		const original = `{"mcp":["not","an","object"]}`
+		writeFileT(t, cfgPath, original)
+
+		res, err := svc.Connect("zcode", "mcpproxy", true)
+		if err == nil {
+			t.Fatalf("expected a refusal error, got res=%+v err=nil", res)
+		}
+		if res != nil {
+			t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+		}
+		if got := readConfigT(t, cfgPath); got != original {
+			t.Fatalf("config must be untouched after a refusal:\n got:  %s\n want: %s", got, original)
+		}
+		if n := backupCount(t, cfgPath); n != 0 {
+			t.Fatalf("a refused write must not create a backup, found %d", n)
+		}
+	})
+}
+
+// TestConnectWithPrecondition_NonObjectServersSection_RefusesDrift is the exact
+// repro from the cross-model review of PR #1339: write a config whose servers
+// section is a non-object value, preview it (which used to report "no existing
+// entry, this will create one" and mint a token blind to the section's value),
+// change the section's value externally, then submit connect with the stale
+// token. Before the fix this SUCCEEDED and silently destroyed the "new" value;
+// it must now refuse.
+func TestConnectWithPrecondition_NonObjectServersSection_RefusesDrift(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	writeFileT(t, cfgPath, `{"mcpServers":"old"}`)
+
+	preview, err := svc.Preview("claude-code", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if preview.EntryExists {
+		t.Fatal("a malformed section must not report an entry that would be overwritten")
+	}
+
+	const drifted = `{"mcpServers":"new"}`
+	writeFileT(t, cfgPath, drifted)
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, preview.PreconditionToken)
+	if err == nil {
+		t.Fatalf("expected a refusal error, got res=%+v err=nil", res)
+	}
+	if res != nil {
+		t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+	}
+	if !strings.Contains(err.Error(), "mcpServers") || !strings.Contains(err.Error(), "not a JSON object") {
+		t.Fatalf("expected the refusal to name the section and explain why, got: %v", err)
+	}
+	if got := readConfigT(t, cfgPath); got != drifted {
+		t.Fatalf("config must be untouched after a refusal:\n got:  %s\n want: %s", got, drifted)
+	}
+	if n := backupCount(t, cfgPath); n != 0 {
+		t.Fatalf("a refused write must not create a backup, found %d", n)
+	}
+}
+
+// TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheWriterRead
+// proves the guard is not a single upstream check that a concurrent external
+// edit could slip past (the TOCTOU a naive "check preWriteState, then write"
+// design would have): the file is OBJECT-shaped on the FIRST read (matching
+// what preWriteState/the precondition resolution sees) and is mutated to a
+// non-object section before the SECOND, independent read the writer itself
+// performs. The write must still refuse and must not touch the file — the
+// authoritative check has to live at the actual point of mutation, using
+// whatever was read there, not a value resolved earlier in the call.
+func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtTheWriterRead(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	const objectShaped = `{"mcpServers":{}}`
+	const racedNonObject = `{"mcpServers":"raced-in-between-reads"}`
+	writeFileT(t, cfgPath, objectShaped)
+
+	reads := 0
+	svc.setReadFile(func(path string) ([]byte, error) {
+		reads++
+		if reads == 1 {
+			// The read inside ConnectWithPrecondition's own preWriteState call:
+			// still object-shaped, so no upstream check (if one existed) would fire.
+			return []byte(objectShaped), nil
+		}
+		// Every subsequent read — including the writer's own — observes the file
+		// AFTER the simulated concurrent edit.
+		return []byte(racedNonObject), nil
+	})
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
+	// Exactly 2 reads for this client/path: preWriteState's (no jsonc guard for
+	// claude-code, no precondition token to additionally resolve) and
+	// connectJSON's own readOrCreateJSON. A count outside this range would mean
+	// the test's own premise — "read #1 sees the pre-race state, read #2+ sees
+	// the raced-in one" — no longer matches what actually ran.
+	if reads != 2 {
+		t.Fatalf("expected exactly 2 reads (preWriteState + the writer's own), got %d", reads)
+	}
+	if err == nil {
+		t.Fatalf("expected the writer's own read to catch the raced-in non-object section, got res=%+v err=nil", res)
+	}
+	if res != nil {
+		t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+	}
+	if !strings.Contains(err.Error(), "mcpServers") || !strings.Contains(err.Error(), "not a JSON object") {
+		t.Fatalf("expected the refusal to name the section and explain why, got: %v", err)
+	}
+	if got := readConfigT(t, cfgPath); got != objectShaped {
+		t.Fatalf("the ON-DISK file (never touched by the mocked reads) must be untouched after a refusal:\n got:  %s\n want: %s", got, objectShaped)
+	}
+	if n := backupCount(t, cfgPath); n != 0 {
+		t.Fatalf("a refused write must not create a backup, found %d", n)
+	}
+}
+
+// TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtThePreBackupCheck
+// closes the must-fix round-3 cross-model review found: connectJSON/
+// connectTOML's OWN read (the "writer's own read" the previous test proves is
+// authoritative) is STILL not adjacent to the actual write — backupFile
+// performs real file I/O in between, widening the window in which an
+// external process can replace the servers section with a non-object value
+// AFTER the writer already decided it was safe to proceed. Repro: both
+// preWriteState's read and connectJSON's readOrCreateJSON read see an
+// OBJECT-shaped section (so the earlier, top-of-function check passes
+// cleanly); only the pre-backup check's read observes the section having
+// been replaced with a non-object value in between. The write must still
+// refuse, before any backup is created.
+func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAtThePreBackupCheck(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	const objectShaped = `{"mcpServers":{}}`
+	const racedNonObject = `{"mcpServers":"raced-in-before-backup"}`
+	writeFileT(t, cfgPath, objectShaped)
+
+	reads := 0
+	svc.setReadFile(func(path string) ([]byte, error) {
+		reads++
+		if reads <= 2 {
+			// preWriteState's read (#1) and connectJSON's own readOrCreateJSON
+			// read (#2): both still object-shaped, so the top-of-function check
+			// passes and the function proceeds toward the pre-backup check.
+			return []byte(objectShaped), nil
+		}
+		// The THIRD read — refuseIfServersSectionRaced, immediately before
+		// backupFile — observes the file AFTER the simulated concurrent edit.
+		return []byte(racedNonObject), nil
+	})
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
+	if reads != 3 {
+		t.Fatalf("expected exactly 3 reads (preWriteState + the writer's own + the pre-backup check), got %d", reads)
+	}
+	if err == nil {
+		t.Fatalf("expected the pre-backup check to catch the raced-in non-object section, got res=%+v err=nil", res)
+	}
+	if res != nil {
+		t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+	}
+	if !strings.Contains(err.Error(), "mcpServers") {
+		t.Fatalf("expected the refusal to name the section, got: %v", err)
+	}
+	if got := readConfigT(t, cfgPath); got != objectShaped {
+		t.Fatalf("the ON-DISK file (never touched by the mocked reads) must be untouched after a refusal:\n got:  %s\n want: %s", got, objectShaped)
+	}
+	if n := backupCount(t, cfgPath); n != 0 {
+		t.Fatalf("a refused write must not create a backup — this check runs BEFORE backupFile, found %d", n)
+	}
+}
+
+// TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAfterBackup
+// closes the must-fix round-4 cross-model review found: backupFile performs
+// real Stat/Open/copy I/O — genuinely slow enough to race in practice — so a
+// change landing DURING that backup (i.e. AFTER the pre-backup check already
+// passed) was still able to slip through to atomicWriteFile undetected.
+// Repro: preWriteState's read, connectJSON's own read, AND the pre-backup
+// check's read all see an OBJECT-shaped section (so backupFile actually runs
+// and a backup file IS created — that's expected and consistent with how a
+// later atomicWriteFile failure already behaves in this codebase); only the
+// final check's read observes the section having been replaced with a
+// non-object value. The write must still refuse, and the on-disk config must
+// be untouched (the backup file's existence does not imply the config itself
+// was mutated).
+//
+// Round 5 found the round-4 fix's placement — a call made BEFORE invoking
+// atomicWriteFile — still left atomicWriteFile's own temp-file staging
+// (MkdirAll/CreateTemp/Write/Close/Chmod) as a real, uninstrumented I/O
+// window before the rename. The final check now runs as atomicWriteFile's
+// preRename hook instead — structurally after that staging, immediately
+// before os.Rename — which this test's black-box read-counting cannot
+// directly distinguish from the round-4 placement (none of the temp-file
+// staging steps touch the s.read seam this mock intercepts, so the read
+// COUNT is identical either way); the placement itself is verified by
+// reading atomicWriteFile's implementation (backup.go) and its call sites
+// here, not by this test alone. What this test DOES still prove, unchanged:
+// a value raced in after backupFile completes is caught before any bytes of
+// the actual config file are replaced.
+func TestConnectWithPrecondition_NonObjectServersSection_RaceIsClosedAfterBackup(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	const objectShaped = `{"mcpServers":{}}`
+	const racedNonObject = `{"mcpServers":"raced-in-during-backup-io"}`
+	writeFileT(t, cfgPath, objectShaped)
+
+	reads := 0
+	svc.setReadFile(func(path string) ([]byte, error) {
+		reads++
+		if reads <= 3 {
+			// preWriteState (#1), connectJSON's own read (#2), and the
+			// pre-backup check (#3): all still object-shaped, so backupFile
+			// actually runs.
+			return []byte(objectShaped), nil
+		}
+		// The FOURTH read — refuseIfServersSectionRaced, immediately before
+		// atomicWriteFile — observes the file AFTER the simulated edit landing
+		// during backupFile's own I/O.
+		return []byte(racedNonObject), nil
+	})
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
+	if reads != 4 {
+		t.Fatalf("expected exactly 4 reads (preWriteState + the writer's own + the pre-backup check + the post-backup check), got %d", reads)
+	}
+	if err == nil {
+		t.Fatalf("expected the post-backup check to catch the raced-in non-object section, got res=%+v err=nil", res)
+	}
+	if res != nil {
+		t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+	}
+	if !strings.Contains(err.Error(), "mcpServers") {
+		t.Fatalf("expected the refusal to name the section, got: %v", err)
+	}
+	if got := readConfigT(t, cfgPath); got != objectShaped {
+		t.Fatalf("the ON-DISK config file (never touched by the mocked reads) must be untouched after a refusal:\n got:  %s\n want: %s", got, objectShaped)
+	}
+	// backupFile runs BEFORE this refusal, so — unlike the pre-backup-check
+	// test above — a backup IS expected here; its existence must not be
+	// confused with the config itself having been mutated (asserted above).
+	if n := backupCount(t, cfgPath); n != 1 {
+		t.Fatalf("expected exactly 1 backup (created before the post-backup check refused), got %d", n)
+	}
+}
+
+// TestConnect_NonObjectServersSection_RefusesWithoutToken proves the guard does
+// not depend on the precondition-token flow: a tokenless Connect() call (the
+// Web UI / CLI's existing behavior, Spec 091 contracts §2) must also refuse
+// rather than silently discarding the section's value, for both JSON and TOML
+// clients.
+func TestConnect_NonObjectServersSection_RefusesWithoutToken(t *testing.T) {
+	t.Run("JSON client (vscode)", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("vscode", home)
+		const original = `{"servers":["not","an","object"]}`
+		writeFileT(t, cfgPath, original)
+
+		res, err := svc.Connect("vscode", "mcpproxy", true)
+		if err == nil {
+			t.Fatalf("expected a refusal error, got res=%+v err=nil", res)
+		}
+		if res != nil {
+			t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+		}
+		if got := readConfigT(t, cfgPath); got != original {
+			t.Fatalf("config must be untouched after a refusal:\n got:  %s\n want: %s", got, original)
+		}
+		if n := backupCount(t, cfgPath); n != 0 {
+			t.Fatalf("a refused write must not create a backup, found %d", n)
+		}
+	})
+
+	t.Run("TOML client (codex)", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("codex", home)
+		const original = "mcp_servers = 42\n"
+		writeFileT(t, cfgPath, original)
+
+		res, err := svc.Connect("codex", "mcpproxy", true)
+		if err == nil {
+			t.Fatalf("expected a refusal error, got res=%+v err=nil", res)
+		}
+		if res != nil {
+			t.Fatalf("expected a nil result alongside the refusal error, got %+v", res)
+		}
+		if got := readConfigT(t, cfgPath); got != original {
+			t.Fatalf("config must be untouched after a refusal:\n got:  %s\n want: %s", got, original)
+		}
+		if n := backupCount(t, cfgPath); n != 0 {
+			t.Fatalf("a refused write must not create a backup, found %d", n)
+		}
+	})
+}
+
+// TestConnect_NullTopLevelDocument_DoesNotPanic pins a crash the cross-model
+// review of this fix surfaced: a config file containing exactly the JSON
+// literal `null` (or a TOML document that otherwise decodes to a nil map)
+// decodes successfully with a NIL top-level map — encoding/json leaves the
+// unmarshal target untouched for a JSON null, it is not an error. Before the
+// fix, readOrCreateJSON/readOrCreateTOML returned that nil map unchanged, and
+// connectJSON/connectTOML's final `data[serversKey] = serversMap` assignment
+// panicked with "assignment to entry in nil map" — a DoS reachable through the
+// plain tokenless Connect() path with no precondition token involved at all.
+func TestConnect_NullTopLevelDocument_DoesNotPanic(t *testing.T) {
+	t.Run("JSON client (claude-code)", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		writeFileT(t, cfgPath, "null")
+
+		res, err := svc.Connect("claude-code", "mcpproxy", false)
+		if err != nil {
+			t.Fatalf("Connect must not error on a null top-level document, got: %v", err)
+		}
+		if !res.Success {
+			t.Fatalf("expected a null document to be treated as an empty config, got %+v", res)
+		}
+	})
+
+	t.Run("TOML client (codex)", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("codex", home)
+		// TOML has no top-level null literal; an empty file is the closest
+		// equivalent and already exercised by TestConnect_Codex_NewFile, but
+		// pin it here too as a defense-in-depth regression guard alongside the
+		// JSON case above.
+		writeFileT(t, cfgPath, "")
+
+		res, err := svc.Connect("codex", "mcpproxy", false)
+		if err != nil {
+			t.Fatalf("Connect must not error on an empty TOML document, got: %v", err)
+		}
+		if !res.Success {
+			t.Fatalf("expected an empty document to be treated as an empty config, got %+v", res)
+		}
+	})
+}
+
+// TestUndo_NullBackup_DoesNotPanic pins a SIBLING crash of
+// TestConnect_NullTopLevelDocument_DoesNotPanic that round-2 cross-model
+// review found: replayConnectWrite (internal/connect/undo.go) has its own
+// independent JSON parse, and a backup file containing exactly `null`
+// resets its pre-initialized `data` map back to nil the same way — but this
+// path panicked at `data[client.ServerKey] = serversMap` instead. Repro:
+// connect against a null-content config (which backs up the null bytes
+// verbatim), then Undo with the returned backup name.
+func TestUndo_NullBackup_DoesNotPanic(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	writeFileT(t, cfgPath, "null")
+
+	connectRes, err := svc.Connect("claude-code", "mcpproxy", false)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	undoRes, err := svc.Undo("claude-code", "mcpproxy", filepath.Base(connectRes.BackupPath))
+	if err != nil {
+		t.Fatalf("Undo must not error on a null-content backup: %v", err)
+	}
+	if !undoRes.Success {
+		t.Fatalf("expected Undo to succeed, got %+v", undoRes)
+	}
+}
+
+// TestGetStatus_NonObjectServersSection_IsMalformed closes the should-fix the
+// cross-model review flagged: GetStatus used to disagree with Preview/Connect
+// for the exact same config — findEntryJSONBytes/findEntryTOMLBytes collapsed
+// "servers key present but not an object" into the same parsedOK=true,
+// found=false outcome as a genuinely absent section, so the status API
+// reported a plain "not connected" for a config Preview/Connect now refuse to
+// touch. Both must report the same malformed classification.
+func TestGetStatus_NonObjectServersSection_IsMalformed(t *testing.T) {
+	t.Run("JSON client (claude-code)", func(t *testing.T) {
+		svc, home := testService(t)
+		writeFileT(t, ConfigPath("claude-code", home), `{"mcpServers":"old"}`)
+
+		status, err := svc.GetStatus("claude-code")
+		if err != nil {
+			t.Fatalf("GetStatus: %v", err)
+		}
+		if status.AccessState != accessMalformed {
+			t.Fatalf("expected access_state=%q, got %q (status=%+v)", accessMalformed, status.AccessState, status)
+		}
+		if status.Connected {
+			t.Fatalf("a malformed section must not report Connected=true, got %+v", status)
+		}
+	})
+
+	t.Run("TOML client (codex)", func(t *testing.T) {
+		svc, home := testService(t)
+		writeFileT(t, ConfigPath("codex", home), `mcp_servers = "old"`+"\n")
+
+		status, err := svc.GetStatus("codex")
+		if err != nil {
+			t.Fatalf("GetStatus: %v", err)
+		}
+		if status.AccessState != accessMalformed {
+			t.Fatalf("expected access_state=%q, got %q (status=%+v)", accessMalformed, status.AccessState, status)
+		}
+		if status.Connected {
+			t.Fatalf("a malformed section must not report Connected=true, got %+v", status)
+		}
+	})
+}
+
+// TestConnectWithPrecondition_GenuineIOErrorIsNotMaskedAsNonObjectSection
+// closes the should-fix the cross-model review flagged against an earlier
+// version of this fix: an upstream check that fires on the general
+// accessMalformed classification cannot distinguish "section present but
+// wrong type" from other malformed causes (a stat/read I/O error, e.g.
+// syscall.EIO), so a blanket refusal message there would hide the real cause.
+// The fix instead lets a genuine read error propagate through its own
+// existing path unchanged (connectJSON/connectTOML's readOrCreateJSON/TOML
+// error wrapping), while the NEW, section-specific check only ever fires
+// after a successful parse. Prove the injected I/O error's own message
+// survives, rather than being replaced by the generic "not an object" text.
+func TestConnectWithPrecondition_GenuineIOErrorIsNotMaskedAsNonObjectSection(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	writeFileT(t, cfgPath, `{"mcpServers":{}}`)
+
+	injected := errors.New("injected-io-failure: input/output error")
+	reads := 0
+	svc.setReadFile(func(path string) ([]byte, error) {
+		reads++
+		return nil, injected
+	})
+
+	_, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, "")
+	// preWriteState's read fails first (classified accessMalformed, not
+	// propagated as an error there by design), so the writer's own read is what
+	// actually surfaces this error — pinning that this test exercises
+	// readOrCreateJSON's wrapped-error path, not a check that short-circuits
+	// before ever reaching it.
+	if reads != 2 {
+		t.Fatalf("expected exactly 2 reads (preWriteState + the writer's own), got %d", reads)
+	}
+	if err == nil {
+		t.Fatal("expected an error for an unreadable config")
+	}
+	if !errors.Is(err, injected) {
+		t.Fatalf("expected the genuine I/O error to survive via %%w-wrapping, not be masked as a non-object section: %v", err)
+	}
+	if strings.Contains(err.Error(), "is not a JSON object") {
+		t.Fatalf("a genuine I/O error must not be reported as a non-object servers section: %v", err)
+	}
 }
 
 // The token binds a preview to the entry the write would produce, so the

@@ -183,7 +183,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	if info, statErr := os.Stat(cfgPath); statErr == nil {
 		perm = info.Mode()
 	}
-	if err := atomicWriteFile(cfgPath, backupRaw, perm); err != nil {
+	if err := atomicWriteFile(cfgPath, backupRaw, perm, nil); err != nil {
 		return nil, fmt.Errorf("restore from backup: %w", err)
 	}
 
@@ -227,6 +227,11 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 	}
 
 	if len(backupRaw) > 0 {
+		// unmarshalLenientJSON normalizes a top-level JSON `null` back to a
+		// non-nil map on success (a backup that is exactly "null" would
+		// otherwise reset the pre-initialized `data` above to nil and panic on
+		// the setServersMap write below), so no additional nil check is needed
+		// here.
 		if err := unmarshalLenientJSON(backupRaw, &data); err != nil {
 			return nil, fmt.Errorf("parse backup JSON: %w", err)
 		}
