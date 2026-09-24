@@ -242,11 +242,13 @@ func TestDisconnectOpencodeCommentedJsoncRefusedWithoutBackup(t *testing.T) {
 
 // TestGuardJsoncComments_SkipsReadForNonJsoncPath is a regression guard for a
 // defect a cross-model (ZCode) review caught in an earlier version of the
-// shared-read fix: guardJsoncComments (used only by the read-only preview
-// path) must check the ".jsonc" suffix BEFORE reading the file, exactly like
-// it did before this change — otherwise every Preview() call performs an
-// extra, result-discarded read for every non-.jsonc client (Claude Desktop,
-// Cursor, VS Code, ...), on top of preWriteState's own read.
+// shared-read fix: guardJsoncComments must check the ".jsonc" suffix BEFORE
+// reading the file, exactly like it did before this change. guardJsoncComments
+// itself has no production caller as of PR #1352 — preview.go now calls the
+// read-free guardJsoncCommentsBytes(cfgPath, pre.raw) instead, sharing
+// preWriteState's single read rather than opening the file again — but this
+// pins the same suffix-before-read ordering in the reading entry point in case
+// a future caller reaches for it.
 func TestGuardJsoncComments_SkipsReadForNonJsoncPath(t *testing.T) {
 	s := NewServiceWithHome("127.0.0.1:8080", "key", t.TempDir())
 	reads := 0

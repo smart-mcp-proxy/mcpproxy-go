@@ -651,16 +651,22 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 // (#922). Comment-free .jsonc (OpenCode's bootstrap stub) rewrites safely.
 // Absent or unreadable files pass — the normal read/write path handles those.
 //
-// It reads the file itself; used only by the read-only preview path
-// (preview.go), which has nothing to write and so nothing to race against.
-// The write paths must NOT call this — they check guardJsoncCommentsBytes
-// against bytes they already hold instead: connectJSON and connectTOML share
-// preWriteState's single pre-write read (pre.raw), and disconnectJSON checks
-// the same bytes its own single s.read call goes on to parse. A second,
-// independent read here would reopen the TOCTOU those closed: a file that
-// gains comments between this read and the later one would pass the guard on
-// stale bytes and then get silently rewritten as plain JSON, stripping the
-// comments the guard exists to protect.
+// It reads the file itself and has NO production callers as of PR #1352:
+// preview.go — the last caller with nothing to write and so nothing to race
+// against — was switched to guardJsoncCommentsBytes(cfgPath, pre.raw) so its
+// read-only path also shares preWriteState's single read rather than opening
+// the file again. It is kept (rather than deleted) as the read-performing
+// entry point guardJsoncCommentsBytes's own tests exercise directly, and as a
+// documented trap for any future caller: do NOT call this from a write path.
+// The write paths check guardJsoncCommentsBytes against bytes they already
+// hold instead — connectJSON shares preWriteState's single pre-write read
+// (pre.raw; connectTOML never calls the guard at all, since a .toml path can
+// never match the .jsonc suffix it checks), and disconnectJSON checks the
+// same bytes its own single s.read call goes on to parse. A second,
+// independent read from this function would reopen the TOCTOU those closed: a
+// file that gains comments between this read and the later one would pass the
+// guard on stale bytes and then get silently rewritten as plain JSON,
+// stripping the comments the guard exists to protect.
 func (s *Service) guardJsoncComments(cfgPath string) error {
 	if !strings.HasSuffix(cfgPath, ".jsonc") {
 		return nil
@@ -673,8 +679,9 @@ func (s *Service) guardJsoncComments(cfgPath string) error {
 }
 
 // guardJsoncCommentsBytes is the pure, read-free core of guardJsoncComments,
-// operating on bytes the caller already has — connectJSON/connectTOML's
-// shared pre-write read, or disconnectJSON's own single read — so the check
+// operating on bytes the caller already has — connectJSON's shared pre-write
+// read (pre.raw; connectTOML never calls this, a .toml path can't match the
+// .jsonc suffix), or disconnectJSON's own single read — so the check
 // and the parse/write that follows run against one snapshot of the file
 // instead of two independent reads that could race. raw is nil for an absent
 // or unreadable file, which passes exactly as guardJsoncComments' own read
