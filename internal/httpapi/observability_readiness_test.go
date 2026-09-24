@@ -50,9 +50,12 @@ func TestReadyz_StaysControllerBackedWhenObservabilityHasNoHealth(t *testing.T) 
 		assert.Equalf(t, http.StatusOK, r.Code, "liveness endpoint %s should be registered", path)
 	}
 
-	// And the metrics exporter is still served.
+	// And the metrics exporter is still served. SEC-07 put /metrics behind
+	// the admin API key, so authenticate as the mock controller's admin.
 	rm := httptest.NewRecorder()
-	srv.router.ServeHTTP(rm, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
+	metricsReq.Header.Set("X-API-Key", mockControllerAPIKey)
+	srv.router.ServeHTTP(rm, metricsReq)
 	assert.Equal(t, http.StatusOK, rm.Code)
 	assert.Contains(t, rm.Body.String(), "mcpproxy_uptime_seconds")
 }

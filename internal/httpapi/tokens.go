@@ -112,6 +112,22 @@ func (s *Server) requireAdminRead(w http.ResponseWriter, r *http.Request, messag
 	return true
 }
 
+// requireAdminReadMiddleware is requireAdminRead as chi middleware, for routes
+// that are whole-handler admin-only rather than admin-only in one branch
+// (SEC-07: /metrics). It keeps the identical semantics, including the
+// nil-AuthContext passthrough, so one mux still carries one definition of
+// "not admin".
+func (s *Server) requireAdminReadMiddleware(message string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !s.requireAdminRead(w, r, message) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // requireTokenStore checks that the token store is configured.
 // Returns true if the store is available, false if a 500 was written.
 func (s *Server) requireTokenStore(w http.ResponseWriter, r *http.Request) bool {

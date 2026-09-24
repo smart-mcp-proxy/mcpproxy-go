@@ -73,7 +73,7 @@ class APIService {
       this.apiKey = apiKeyFromURL
       // Store the new API key for future navigation/refreshes
       localStorage.setItem('mcpproxy-api-key', apiKeyFromURL)
-      console.log('API key from URL (updating storage):', this.apiKey.substring(0, 8) + '...')
+      // SEC-07: never log key material (not even a prefix) to the devtools console.
       // Clean the URL by removing the API key parameter for security
       urlParams.delete('apikey')
       const newURL = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '')
@@ -83,9 +83,6 @@ class APIService {
       const storedApiKey = localStorage.getItem('mcpproxy-api-key')
       if (storedApiKey) {
         this.apiKey = storedApiKey
-        console.log('API key from localStorage:', this.apiKey.substring(0, 8) + '...')
-      } else {
-        console.log('No API key found in URL or localStorage')
       }
     }
   }
@@ -118,7 +115,7 @@ class APIService {
     this.apiKey = key
     if (key) {
       localStorage.setItem('mcpproxy-api-key', key)
-      console.log('API key set and stored:', key.substring(0, 8) + '...')
+      // SEC-07: no key material in the console, not even a prefix.
     } else {
       localStorage.removeItem('mcpproxy-api-key')
       console.log('API key cleared')
@@ -202,11 +199,11 @@ class APIService {
       // Add API key header if available
       if (this.apiKey) {
         headers['X-API-Key'] = this.apiKey
-        console.log(`API request to ${endpoint} with API key: ${this.getAPIKeyPreview()}`)
       } else {
+        // SEC-07: log only that the request is unauthenticated. The previous
+        // lines echoed the key prefix, window.location.search (which can still
+        // carry ?apikey=) and the localStorage value on every single call.
         console.log(`API request to ${endpoint} without API key - initialized: ${this.initialized}`)
-        console.log('Current URL search params:', window.location.search)
-        console.log('LocalStorage API key:', localStorage.getItem('mcpproxy-api-key')?.substring(0, 8) + '...')
       }
 
       const response = await fetch(`${this.baseUrl}${endpoint}`, {
@@ -501,10 +498,11 @@ class APIService {
       ? `${this.baseUrl}/events?apikey=${encodeURIComponent(this.apiKey)}`
       : `${this.baseUrl}/events`
 
+    // SEC-07: the "redacted" URL used to be redacted WITH the key preview, so it
+    // leaked the first 8 characters anyway. Redact fully and drop the preview.
     console.log('Creating EventSource:', {
       hasApiKey: !!this.apiKey,
-      apiKeyPreview: this.getAPIKeyPreview(),
-      url: this.apiKey ? url.replace(this.apiKey, this.getAPIKeyPreview()) : url
+      url: this.apiKey ? url.replace(encodeURIComponent(this.apiKey), '[redacted]') : url
     })
 
     return new EventSource(url)

@@ -1515,6 +1515,8 @@ type ObservabilityConfig struct {
 // MetricsExporterConfig controls the Prometheus /metrics endpoint (MCP-32).
 type MetricsExporterConfig struct {
 	// Enabled exposes /metrics on the existing HTTP listener when true.
+	// The endpoint is admin-authenticated (SEC-07): scrapers must present the
+	// global API key, via X-API-Key or an Authorization: Bearer header.
 	Enabled bool `json:"enabled" mapstructure:"enabled"`
 }
 

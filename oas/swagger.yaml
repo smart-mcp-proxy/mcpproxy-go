@@ -690,8 +690,10 @@ components:
         by default — operators opt in for k8s/enterprise deployments.
       properties:
         enabled:
-          description: Enabled exposes /metrics on the existing HTTP listener when
-            true.
+          description: |-
+            Enabled exposes /metrics on the existing HTTP listener when true.
+            The endpoint is admin-authenticated (SEC-07): scrapers must present the
+            global API key, via X-API-Key or an Authorization: Bearer header.
           type: boolean
       type: object
     config.OAuthConfig:

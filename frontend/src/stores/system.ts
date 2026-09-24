@@ -170,10 +170,9 @@ export const useSystemStore = defineStore('system', () => {
     }
 
     console.log('Attempting to connect EventSource...')
-    console.log('API key status:', {
-      hasApiKey: api.hasAPIKey(),
-      apiKeyPreview: api.getAPIKeyPreview()
-    })
+    // SEC-07: log only whether a key is present. This used to include
+    // api.getAPIKeyPreview(), i.e. the first 8 characters of the admin key.
+    console.log('API key status:', { hasApiKey: api.hasAPIKey() })
 
     const es = api.createEventSource()
     eventSource.value = es
@@ -385,9 +384,13 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
-    es.onerror = (event) => {
+    es.onerror = () => {
       connected.value = false
-      console.error('EventSource error occurred:', event)
+      // SEC-07: do NOT log the error event. Its `target` is the EventSource,
+      // whose `url` carries the API key as a ?apikey= query parameter, so
+      // logging the event puts the WHOLE key in the devtools console. The
+      // event itself carries no diagnostic detail beyond readyState anyway.
+      console.error('EventSource error occurred; readyState:', es.readyState)
 
       // Check if this might be an authentication error
       if (es.readyState === EventSource.CLOSED) {
