@@ -10,7 +10,23 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
+
+// fakeFileInfo is a minimal os.FileInfo for tests that need to fake a stat
+// result — e.g. a file whose mode was observed a moment before it vanished —
+// without a real file backing it on disk.
+type fakeFileInfo struct {
+	name string
+	mode os.FileMode
+}
+
+func (f fakeFileInfo) Name() string       { return f.name }
+func (f fakeFileInfo) Size() int64        { return 0 }
+func (f fakeFileInfo) Mode() os.FileMode  { return f.mode }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return false }
+func (f fakeFileInfo) Sys() interface{}   { return nil }
 
 // The precondition token binds a rendered preview to the exact pre-write state
 // it described (Spec 091 FR-005). It must be:
@@ -1192,6 +1208,58 @@ func TestConnectWithPrecondition_FileVanishedBetweenStatAndReadSelfHeals(t *test
 	}
 	if !res.Success || res.Action != "created" {
 		t.Fatalf("expected a successful create, got %+v", res)
+	}
+}
+
+// TestConnectWithPrecondition_FileVanishedBetweenStatAndReadDefaultsPerm closes
+// a gap in the self-heal above: preWriteState captures result.perm from the
+// stat that DID succeed (info.Mode()) before the read discovers the file is
+// actually gone. If that stale perm survives the self-heal to accessAbsent, a
+// freshly created config inherits the mode of the file that used to be there
+// — e.g. a tightened 0400 — instead of the 0644 default a genuine create
+// should use. The self-heal must reset perm alongside fileExists/accessState.
+func TestConnectWithPrecondition_FileVanishedBetweenStatAndReadDefaultsPerm(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	// The file must be genuinely ABSENT on disk for the whole test: currentPerm
+	// (connect.go) re-stats cfgPath with the REAL os.Stat, bypassing the s.stat
+	// seam, right before the write. If the underlying file actually existed,
+	// that fresh real stat would see its real mode and mask the bug this test
+	// targets — so the stat seam below fakes a stale, restrictive 0400
+	// FileInfo (as if it observed the file a moment before deletion) while the
+	// filesystem itself never has a file at cfgPath at any point.
+	svc.setStat(func(path string) (os.FileInfo, error) {
+		if path == cfgPath {
+			return fakeFileInfo{name: filepath.Base(cfgPath), mode: 0o400}, nil
+		}
+		return os.Stat(path)
+	})
+	// Only the FIRST read of cfgPath simulates the absent file; the post-write
+	// verification read (verifyJSONEntry) must see the file this call itself
+	// just created.
+	vanished := false
+	svc.setReadFile(func(path string) ([]byte, error) {
+		if path == cfgPath && !vanished {
+			vanished = true
+			return nil, &fs.PathError{Op: "open", Path: path, Err: syscall.ENOENT}
+		}
+		return os.ReadFile(path)
+	})
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, "")
+	if err != nil {
+		t.Fatalf("a file that vanished between stat and read must self-heal as a create, got error: %v", err)
+	}
+	if !res.Success || res.Action != "created" {
+		t.Fatalf("expected a successful create, got %+v", res)
+	}
+
+	info, statErr := os.Stat(cfgPath)
+	if statErr != nil {
+		t.Fatalf("stat the newly created config: %v", statErr)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("perm = %o, want the 0644 create default — the stale 0400 mode from the vanished file must not survive the self-heal", got)
 	}
 }
 

@@ -223,8 +223,14 @@ func (s *Service) preWriteState(client *ClientDef, cfgPath, serverName string) (
 			// reported exactly like the file never having existed: a
 			// tokenless write starts fresh, and a caller holding a
 			// precondition token that assumed the file was there correctly
-			// sees the mismatch via fileExists.
+			// sees the mismatch via fileExists. perm must self-heal to the
+			// 0o644 create default alongside fileExists — otherwise the mode
+			// captured from the now-vanished file (e.g. a tightened 0400)
+			// would survive into a write that treats this as a fresh create,
+			// via currentPerm's fallback (connect.go) once the file is
+			// confirmed still absent at write time.
 			result.fileExists = false
+			result.perm = os.FileMode(0o644)
 			return result, nil
 		}
 		result.readErr = rerr
