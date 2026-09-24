@@ -743,6 +743,11 @@ Add the public domain(s) to `trusted_hosts` to allow them:
 - A request that carries an `Origin` header must likewise have a loopback or trusted
   origin host (MCP spec requirement); requests without `Origin` (non-browser clients,
   reverse proxies) are never rejected by the Origin check.
+- The same allowlist drives CORS on the REST API (`/api/v1/*`) and the `/events` SSE
+  stream: the request `Origin` is echoed back in `Access-Control-Allow-Origin` only when
+  it is loopback or trusted, and no CORS headers are sent otherwise. Earlier versions
+  sent `Access-Control-Allow-Origin: *` there unconditionally, so a separate web app that
+  calls the REST API cross-origin now needs its host in `trusted_hosts`.
 - Loopback hosts (`localhost`, `127.0.0.1`, `[::1]`) are always accepted; requests on
   non-loopback listeners are never subject to Host validation.
 - Environment override: `MCPPROXY_TRUSTED_HOSTS` (comma-separated list).
