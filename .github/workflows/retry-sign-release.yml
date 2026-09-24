@@ -21,6 +21,18 @@ on:
         description: 'Failed Release workflow run ID (from Actions URL)'
         required: true
         type: string
+      post_release_only:
+        description: >-
+          Skip signing/assembly/release/homebrew/linux-repos and run only the
+          post-release jobs (sparkle-appcast, retire-release-notice,
+          deploy-docs, trigger-marketing-update, mcp-registry) against the
+          already-published tag. Use this to catch up a release that was
+          published (e.g. by a previous run of this workflow) without the
+          jobs that release.yml normally runs after `release` — with no
+          re-signing or re-uploading of release assets.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -32,6 +44,7 @@ env:
 
 jobs:
   sign-windows:
+    if: ${{ !inputs.post_release_only }}
     runs-on: ubuntu-latest
     environment: production
     strategy:
@@ -103,6 +116,7 @@ jobs:
 
   release:
     needs: sign-windows
+    if: ${{ !inputs.post_release_only }}
     runs-on: ubuntu-latest
     environment: production
     outputs:
@@ -287,6 +301,31 @@ jobs:
           echo "Pending notarizations:"
           ls -la pending-notarizations/ || echo "No pending notarizations"
 
+      # A hand-written notice that must reach the release body verbatim.
+      # Mirrors release.yml's "Load hand-written release notice" step: the
+      # generated/fallback notes below are fine for a feature summary and
+      # wrong for anything a user has to ACT on (security advisory, migration
+      # step, breaking change), so those are authored in
+      # .github/RELEASE_NOTICE.md and prepended here too. No-op when the file
+      # is absent. The checkout above is pinned to ${{ inputs.tag }}, so this
+      # reads the notice as it existed at the released tag.
+      - name: Load hand-written release notice
+        id: notice
+        run: |
+          if [ -f .github/RELEASE_NOTICE.md ]; then
+            echo "Found .github/RELEASE_NOTICE.md - prepending to the release body"
+            {
+              echo "notice<<RELEASE_NOTICE_EOF"
+              cat .github/RELEASE_NOTICE.md
+              echo ""
+              echo "---"
+              echo "RELEASE_NOTICE_EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "No .github/RELEASE_NOTICE.md - nothing to prepend"
+            echo "notice=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate release notes
         id: notes
         env:
@@ -322,6 +361,8 @@ jobs:
           tag_name: ${{ inputs.tag }}
           files: release-files/*
           body: |
+            ${{ steps.notice.outputs.notice }}
+
             ${{ steps.notes.outputs.notes }}
 
             ---
@@ -385,6 +426,7 @@ jobs:
   # this workflow is triggered by workflow_dispatch on a branch, not a tag push).
   provenance:
     needs: [release]
+    if: ${{ !inputs.post_release_only }}
     permissions:
       actions: read
       id-token: write
@@ -399,7 +441,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     environment: production
-    if: github.repository == 'smart-mcp-proxy/mcpproxy-go' && !contains(inputs.tag, '-')
+    if: ${{ !inputs.post_release_only && github.repository == 'smart-mcp-proxy/mcpproxy-go' && !contains(inputs.tag, '-') }}
 
     steps:
       - name: Checkout tap repository
@@ -585,7 +627,7 @@ jobs:
   # Publish signed apt/yum repositories to Cloudflare R2 (mirrors release.yml)
   publish-linux-repos:
     needs: [release]
-    if: github.repository == 'smart-mcp-proxy/mcpproxy-go' && !contains(inputs.tag, '-')
+    if: ${{ !inputs.post_release_only && github.repository == 'smart-mcp-proxy/mcpproxy-go' && !contains(inputs.tag, '-') }}
     runs-on: ubuntu-latest
     environment: production
 
@@ -650,3 +692,306 @@ jobs:
         run: |
           TAG="${{ inputs.tag }}"
           contrib/linux-repos/smoke-test-fedora.sh "${TAG#v}"
+
+  # ---------------------------------------------------------------------
+  # Post-release jobs (parity with release.yml's sparkle-appcast,
+  # retire-release-notice, deploy-docs, trigger-marketing-update and
+  # mcp-registry jobs). release.yml runs these after its own `release` job
+  # publishes the GitHub release; this workflow's retry path never ran them
+  # for a release published here, because retry-sign-release.yml predates
+  # their addition to release.yml.
+  #
+  # `if: always() && (needs.release.result == 'success' || inputs.post_release_only)`
+  # lets each job run either right after a successful retry-publish in this
+  # same run, OR standalone with `post_release_only: true` against a tag that
+  # was already published by an earlier run (this run's own `release` job is
+  # then skipped, not failed, so `needs.release.result` alone would also
+  # resolve these — the explicit `|| inputs.post_release_only` documents the
+  # intent and stays correct if that job ever grows a real failure mode of
+  # its own). `always()` is required because a job whose `needs` entry was
+  # skipped is itself skipped by default.
+  #
+  # Every ref/ GITHUB_REF_NAME use from release.yml becomes ${{ inputs.tag }}
+  # (this workflow is workflow_dispatch on a branch — github.ref_name here is
+  # the branch, not the release tag) and artifacts that release.yml jobs pull
+  # from the SAME run's build job are instead pulled from the original
+  # release.yml run via `gh run download ${{ inputs.run_id }}`, since this
+  # workflow never runs that build job itself.
+
+  # Spec 092 FR-013 — the Sparkle update feed. See release.yml's sparkle-appcast
+  # job for the full design rationale (one feed per architecture, beta-feed
+  # refresh, live-freshness verification). This copy differs only in where the
+  # enclosures come from (the original release.yml run's artifacts, via
+  # `gh run download`, rather than this run's own build job) and in using
+  # ${{ inputs.tag }} instead of github.ref_name throughout.
+  sparkle-appcast:
+    needs: [release]
+    if: ${{ always() && (needs.release.result == 'success' || inputs.post_release_only) }}
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - name: Download Sparkle enclosures from original run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p enclosures
+          echo "Downloading sparkle-enclosure-* artifacts from run ${{ inputs.run_id }}..."
+          gh run download ${{ inputs.run_id }} \
+            --repo ${{ github.repository }} \
+            --dir enclosures \
+            --pattern 'sparkle-enclosure-*' || echo "No Sparkle enclosure artifacts found"
+
+      - name: Generate and publish the appcast
+        id: appcast
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job deliberately does not check the repo out (it only needs the
+          # enclosure artifacts), so `gh` has no git remote to infer the
+          # repository from — it does NOT read GITHUB_REPOSITORY. Without
+          # GH_REPO the final `gh release upload` fails with "could not
+          # determine what repo to use". Every other `gh release upload` in this
+          # workflow lives in a job that ran actions/checkout.
+          GH_REPO: ${{ github.repository }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          # Keep in step with Package.resolved (Sparkle 2.9.3).
+          SPARKLE_VERSION: "2.9.3"
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p appcast-out
+
+          if [ -z "${SPARKLE_ED_PRIVATE_KEY:-}" ]; then
+            echo "::notice::SPARKLE_ED_PRIVATE_KEY is not configured — no appcast generated."
+            exit 0
+          fi
+          if [ -z "$(find enclosures -name '*.app.zip' -print -quit 2>/dev/null)" ]; then
+            echo "::notice::No Sparkle enclosures were produced — no appcast generated."
+            exit 0
+          fi
+
+          echo "=== Fetching Sparkle ${SPARKLE_VERSION} tools ==="
+          curl -fsSL -o sparkle-tools.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+          mkdir -p sparkle-tools
+          tar xf sparkle-tools.tar.xz -C sparkle-tools
+          GENERATE_APPCAST=$(find sparkle-tools -name generate_appcast -type f -perm +111 | head -1)
+          if [ -z "${GENERATE_APPCAST}" ]; then
+            echo "❌ generate_appcast not found in the Sparkle ${SPARKLE_VERSION} tarball"
+            find sparkle-tools -maxdepth 3 -type d
+            exit 1
+          fi
+          echo "Using ${GENERATE_APPCAST}"
+
+          PREFIX="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/"
+
+          for ARCH in arm64 amd64; do
+            SRC=$(find enclosures -name "*-darwin-${ARCH}.app.zip" | head -1)
+            if [ -z "${SRC}" ]; then
+              echo "::warning::No ${ARCH} enclosure — skipping its feed."
+              continue
+            fi
+            WORK="appcast-work-${ARCH}"
+            rm -rf "${WORK}"
+            mkdir -p "${WORK}"
+            cp "${SRC}" "${WORK}/"
+
+            echo "=== Generating appcast-${ARCH}.xml from $(basename "${SRC}") ==="
+            # The key goes in on stdin so it never lands on disk or in `ps`.
+            echo "${SPARKLE_ED_PRIVATE_KEY}" | "${GENERATE_APPCAST}" \
+              --ed-key-file - \
+              --download-url-prefix "${PREFIX}" \
+              --link "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}" \
+              -o "appcast-out/appcast-${ARCH}.xml" \
+              "${WORK}"
+          done
+
+          if [ -z "$(ls -A appcast-out 2>/dev/null)" ]; then
+            echo "❌ generate_appcast produced no feeds"
+            exit 1
+          fi
+
+          echo "=== Generated feeds ==="
+          for f in appcast-out/*.xml; do
+            echo "--- ${f} ---"
+            cat "${f}"
+            # Fail loudly rather than publish a feed with no enclosure signature:
+            # an unsigned item is one Sparkle will refuse, silently, forever.
+            grep -q 'sparkle:edSignature' "${f}" || { echo "❌ ${f} has no EdDSA signature"; exit 1; }
+          done
+
+          # Channel policy: RC users update to the next RC OR the next stable,
+          # whichever is newer; stable users only ever see stables. A stable
+          # release therefore also refreshes the BETA feeds with its (untagged,
+          # visible-to-every-channel) item — otherwise RC users would sit on
+          # their last RC forever once the cycle ends. SemVer precedence in the
+          # tray orders X.Y.Z above X.Y.Z-rc.N, so the stable always wins.
+          for ARCH in arm64 amd64; do
+            if [ -f "appcast-out/appcast-${ARCH}.xml" ]; then
+              cp "appcast-out/appcast-${ARCH}.xml" "appcast-out/appcast-beta-${ARCH}.xml"
+            fi
+          done
+
+          gh release upload "${TAG}" appcast-out/*.xml --clobber
+          echo "generated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload appcast artifact for the website repo
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sparkle-appcast
+          path: appcast-out/*
+          if-no-files-found: ignore
+
+      # Tell mcpproxy.app to serve the freshly uploaded feeds — see release.yml's
+      # sparkle-appcast job for why this fails loudly instead of continue-on-error.
+      - name: Publish feeds to mcpproxy.app
+        if: steps.appcast.outputs.generated == 'true'
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697  # v4.0.1
+        with:
+          token: ${{ secrets.MARKETING_SITE_DISPATCH_TOKEN }}
+          repository: smart-mcp-proxy/mcpproxy.app-website
+          event-type: publish-appcast
+          client-payload: '{"version": "${{ inputs.tag }}", "channel": "stable"}'
+
+      # Second dispatch: the same stable release also refreshes the beta feeds
+      # (see the channel-policy comment above).
+      - name: Publish stable item to the beta feeds
+        if: steps.appcast.outputs.generated == 'true'
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697  # v4.0.1
+        with:
+          token: ${{ secrets.MARKETING_SITE_DISPATCH_TOKEN }}
+          repository: smart-mcp-proxy/mcpproxy.app-website
+          event-type: publish-appcast
+          client-payload: '{"version": "${{ inputs.tag }}", "channel": "beta"}'
+
+      # End-to-end freshness check — see release.yml's sparkle-appcast job for
+      # the full rationale (shared 15-min deadline, why this must fail loudly).
+      - name: Verify live feeds are fresh
+        if: steps.appcast.outputs.generated == 'true'
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          DEADLINE=$(( $(date +%s) + 15 * 60 ))
+          FAILED=0
+          for f in appcast-out/*.xml; do
+            NAME=$(basename "$f")
+            WANT=$(shasum -a 256 "$f" | cut -d' ' -f1)
+            OK=""
+            while :; do
+              GOT=$(curl -fsSL "https://mcpproxy.app/${NAME}" 2>/dev/null | shasum -a 256 | cut -d' ' -f1 || true)
+              if [ "$GOT" = "$WANT" ]; then OK=yes; break; fi
+              if [ "$(date +%s)" -ge "$DEADLINE" ]; then break; fi
+              sleep 15
+            done
+            if [ -n "$OK" ]; then
+              echo "✅ https://mcpproxy.app/${NAME} serves the ${TAG} feed"
+            else
+              echo "::error::https://mcpproxy.app/${NAME} still does not serve the ${TAG} feed after 15 minutes — Sparkle users will be offered a stale version"
+              FAILED=1
+            fi
+          done
+          exit "$FAILED"
+
+  # Opens the PR that deletes .github/RELEASE_NOTICE.md once this release has
+  # carried it. See retire-release-notice.yml and release.yml's own call to it
+  # for the full rationale (GITHUB_TOKEN-raised events never start a workflow
+  # run, so release.yml/this workflow must call it directly as a job).
+  retire-release-notice:
+    needs: [release]
+    if: ${{ always() && (needs.release.result == 'success' || inputs.post_release_only) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/retire-release-notice.yml
+    with:
+      tag: ${{ inputs.tag }}
+
+  # Deploy documentation to Cloudflare Pages. Mirrors release.yml's deploy-docs
+  # job; continue-on-error because docs failures must not block a release
+  # catch-up dispatch.
+  deploy-docs:
+    needs: [release]
+    if: ${{ always() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install dependencies
+        working-directory: website
+        run: npm ci
+
+      # DOCS_VERSION drives the navbar version badge (website/docusaurus.config.js).
+      - name: Build docs with version
+        working-directory: website
+        env:
+          DOCS_VERSION: ${{ inputs.tag }}
+        run: npm run build
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy website/build --project-name=mcpproxy-docs
+
+  # Trigger marketing site to update download links. Mirrors release.yml's
+  # trigger-marketing-update job; continue-on-error for the same reason.
+  trigger-marketing-update:
+    needs: [release]
+    if: ${{ always() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Trigger marketing site update
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697  # v4.0.1
+        with:
+          token: ${{ secrets.MARKETING_SITE_DISPATCH_TOKEN }}
+          repository: smart-mcp-proxy/mcpproxy.app-website
+          event-type: update-version
+          client-payload: '{"version": "${{ inputs.tag }}"}'
+
+  # Publish to the official MCP Registry. Mirrors release.yml's mcp-registry
+  # job; continue-on-error because a registry hiccup must not block a release.
+  mcp-registry:
+    name: Publish to MCP Registry
+    needs: [release]
+    if: ${{ always() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ inputs.tag }}
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Update version in server.json
+        run: |
+          jq --arg v "${{ steps.version.outputs.VERSION }}" '.version = $v' server.json > server.tmp && mv server.tmp server.json
+
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish
