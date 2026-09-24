@@ -488,9 +488,8 @@ func (s *Server) currentAdminAPIKey() string {
 	if s.controller == nil {
 		return ""
 	}
-	cfgIface := s.controller.GetCurrentConfig()
-	cfg, ok := cfgIface.(*config.Config)
-	if !ok || cfg == nil {
+	cfg := s.controller.GetCurrentConfig()
+	if cfg == nil {
 		return ""
 	}
 	return cfg.APIKey

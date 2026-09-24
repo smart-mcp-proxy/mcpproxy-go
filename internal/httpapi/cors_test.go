@@ -20,7 +20,7 @@ type corsController struct {
 	trustedHosts []string
 }
 
-func (m *corsController) GetCurrentConfig() any {
+func (m *corsController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 
