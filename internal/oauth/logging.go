@@ -452,39 +452,9 @@ func RedactURLQueryParamsWith(rawURL string, mask func(string) string) string {
 		}
 	}
 
-	// Edit RawQuery by hand rather than via url.Values.Encode(): Encode
-	// re-percent-encodes and reorders every parameter, which would mangle
-	// reference values like ${env:NAME} into an unrecognizable form and
-	// defeat the UI's keyring-chip detection. Here only the masked value
-	// changes; untouched parameters keep their exact original bytes.
 	if u.RawQuery != "" {
-		parts := strings.Split(u.RawQuery, "&")
-		queryChanged := false
-		for i, part := range parts {
-			eq := strings.IndexByte(part, '=')
-			if eq < 0 {
-				continue
-			}
-			key := part[:eq]
-			decKey, keyErr := url.QueryUnescape(key)
-			if keyErr != nil {
-				decKey = key
-			}
-			if !isSensitiveQueryParam(decKey) {
-				continue
-			}
-			decVal, valErr := url.QueryUnescape(part[eq+1:])
-			if valErr != nil {
-				decVal = part[eq+1:]
-			}
-			if isConfigReference(decVal) {
-				continue
-			}
-			parts[i] = key + "=" + url.QueryEscape(mask(decVal))
-			queryChanged = true
-		}
-		if queryChanged {
-			u.RawQuery = strings.Join(parts, "&")
+		if masked := redactRawQueryParams(u.RawQuery, mask); masked != u.RawQuery {
+			u.RawQuery = masked
 			changed = true
 		}
 	}
@@ -493,6 +463,60 @@ func RedactURLQueryParamsWith(rawURL string, mask func(string) string) string {
 		return rawURL
 	}
 	return u.String()
+}
+
+// redactRawQueryParams masks the values of sensitive parameters in a BARE query
+// string — no scheme, host or path, and no url.Parse anywhere in it.
+//
+// It is the one place the name rule is applied to a query, called both by
+// RedactURLQueryParamsWith (which hands it a parsed u.RawQuery) and by
+// LogSafeQueryString (which has only the raw bytes of an http.Request's
+// RawQuery). Keeping it parse-free is what makes the second caller FAIL-CLOSED:
+// a query is not required to be parseable as part of a URL — an HTAB is legal
+// in an HTTP header value and a literal '#' is legal in a request target — and
+// anything that fell back to a regex on those inputs published the credential.
+//
+// The query is edited by hand rather than through url.Values.Encode(): Encode
+// re-percent-encodes and reorders every parameter, which would mangle reference
+// values like ${env:NAME} into an unrecognizable form and defeat the UI's
+// keyring-chip detection. Here only a masked value's bytes change; every
+// untouched parameter keeps its exact original bytes and position.
+//
+// A component with no '=' has no name to judge and is left alone; the
+// value-shaped detector the callers run afterwards is what covers it.
+func redactRawQueryParams(rawQuery string, mask func(string) string) string {
+	if rawQuery == "" {
+		return rawQuery
+	}
+	parts := strings.Split(rawQuery, "&")
+	changed := false
+	for i, part := range parts {
+		eq := strings.IndexByte(part, '=')
+		if eq < 0 {
+			continue
+		}
+		key := part[:eq]
+		decKey, keyErr := url.QueryUnescape(key)
+		if keyErr != nil {
+			decKey = key
+		}
+		if !isSensitiveQueryParam(decKey) {
+			continue
+		}
+		decVal, valErr := url.QueryUnescape(part[eq+1:])
+		if valErr != nil {
+			decVal = part[eq+1:]
+		}
+		if isConfigReference(decVal) {
+			continue
+		}
+		parts[i] = key + "=" + url.QueryEscape(mask(decVal))
+		changed = true
+	}
+	if !changed {
+		return rawQuery
+	}
+	return strings.Join(parts, "&")
 }
 
 // configRefPattern matches a value that is ENTIRELY a single ${keyring:NAME} or
@@ -985,6 +1009,263 @@ func logSafeURL(rawURL string) string {
 // the same class of field is how the gap re-opens, so there is one.
 func LogSafeURL(rawURL string) string {
 	return AuditRedaction.URLValueDeep(rawURL)
+}
+
+// maxLogSafeRequestBytes bounds the work LogSafeRequestPath, LogSafeQueryString
+// and LogSafeRequestURL will do on a single UNTRUSTED input.
+//
+// SEC-01 second-lens review (PR #1350): internal/httpapi's httpLoggingMiddleware
+// runs these three renderers on r.URL.Path, r.URL.RawQuery and r.Referer() for
+// EVERY request, mounted at the chi router root before apiKeyAuthMiddleware —
+// so they run pre-auth, on every connection the listener accepts, logged AFTER
+// the response is written and so unbounded by http.Server's ReadTimeout /
+// WriteTimeout / ReadHeaderTimeout (none of which interrupt a goroutine already
+// running handler code). logSafeURLComponent splits its input on '/' and calls
+// the shared value-shaped detector (Detector.MaskText — every built-in regex
+// pattern plus a Shannon-entropy pass, allocating a fresh map per pattern per
+// call) once PER SEGMENT, so a request path built from many minimal segments
+// turns one request into hundreds of thousands of full detector passes, well
+// inside the pre-existing 1MB MaxHeaderBytes budget the request line shares
+// (internal/server/server.go) — an unauthenticated CPU/allocation amplification
+// this redaction fix itself introduced.
+//
+// A few KB is already generous for what an access log line needs to be useful,
+// so the fix bounds the INPUT rather than the algorithm: every entry point cuts
+// its argument to this length, on a rune boundary, before any redaction rule
+// runs — so the cost of rendering one log field cannot scale with what the
+// client sent.
+const maxLogSafeRequestBytes = 4096
+
+// capLogSafeRequestInput cuts s to maxLogSafeRequestBytes, marking the cut, so
+// every redaction rule downstream runs over a bounded string regardless of how
+// long the caller-supplied s is.
+func capLogSafeRequestInput(s string) string {
+	if len(s) <= maxLogSafeRequestBytes {
+		return s
+	}
+	return s[:safeTruncateBytes(s, maxLogSafeRequestBytes)] + capEllipsis
+}
+
+// minKnownSecretLen guards redactKnownSecrets against a pathologically short
+// needle. Every real caller passes a generated credential (the 64-hex admin
+// key, an mcp_agt_ token) that clears this by a wide margin; the floor exists
+// so a future caller that accidentally hands this a one- or two-character
+// value (an empty-string guard that slipped, a config default) cannot turn
+// exact-match redaction into "black out every path that happens to contain
+// this common substring".
+const minKnownSecretLen = 8
+
+// redactKnownSecrets replaces every exact, case-sensitive occurrence of a
+// caller-supplied secret with the audit marker, before any name- or
+// shape-based rule below runs.
+//
+// SEC-01 gap fix (PR #1350, live-verification follow-up): LogSafeRequestPath
+// masks a credential by NAME (`apikey=<value>`) or by VENDOR SHAPE
+// (`ghp_…`), but mcpproxy's own auto-generated admin API key
+// (config.generateAPIKey) is, in the ordinary case, bare 64-character hex
+// with no enclosing name and no vendor prefix, and hex's 4-bit-per-symbol
+// ceiling means even a perfectly random hex string's Shannon entropy (max
+// 4.0) never clears the value-shaped detector's 4.5 threshold — so NEITHER
+// existing rule can ever catch it, in any position, no matter how they are
+// tuned. A live instance reproduced the key landing verbatim in main.log as
+// a bare PATH SEGMENT.
+//
+// "In the ordinary case" because generateAPIKey's crypto/rand failure
+// fallback emits `mcpproxy_<nanos>` instead (a different, non-hex shape),
+// and an operator can override the key entirely via MCPPROXY_API_KEY or
+// config file with any string. Exact-match redaction does not care which
+// shape it is — that is precisely why it is the fix here rather than a rule
+// tied to "64 hex chars".
+//
+// The alternative — a shape rule for "a full path/query segment that is
+// exactly 64 hex chars" — was rejected: this same API logs SHA-256 tool
+// hashes and other 64-hex-char identifiers (activity/request ids) as
+// legitimate, diagnostically useful path segments, so a shape rule tight
+// enough to name the key's format is also tight enough to name theirs, and a
+// looser one is back to false positives on ordinary log lines. Exact-value
+// match has none of that ambiguity: it only ever matches the bytes of a
+// secret this process actually holds right now, so it has zero false
+// positives by construction, and it covers every SHAPE the secret might sit
+// in at once — path, query, referer, fragment — including ones nobody has
+// thought to write a rule for yet. Its cost, paid once at each of the three
+// entry points below rather than per rule, is that the caller must know and
+// pass the live secret; internal/httpapi's Server.currentAdminAPIKey reads it
+// fresh from the controller on every call, so a rotated key is covered
+// immediately and there is nothing to keep in sync.
+//
+// The admin key is the only secret plumbed this way. An mcp_agt_ agent
+// token IS vendor-shaped (see agentTokenPattern in
+// internal/security/patterns/tokens.go) and so is already covered by
+// MaskDetectedSecrets below without needing its live value threaded through
+// — see TestLogSafeRequestPath_AgentTokenCoveredByShapeRule.
+func redactKnownSecrets(s string, secrets []string) string {
+	for _, secret := range secrets {
+		if len(secret) < minKnownSecretLen {
+			continue
+		}
+		if strings.Contains(s, secret) {
+			s = strings.ReplaceAll(s, secret, redactedMarker)
+		}
+	}
+	return s
+}
+
+// LogSafeQueryString is LogSafeURL for a BARE query string — `r.URL.RawQuery`,
+// with no scheme, host or path in front of it.
+//
+// SEC-01: internal/httpapi's access logger writes `zap.String("query",
+// r.URL.RawQuery)` for every request the router sees, and `?apikey=` is an
+// accepted credential source, so the root admin key was landing at rest in
+// http.log.
+//
+// It runs the shared name rule (redactRawQueryParams) and then the same
+// value-shaped detector AuditRedaction applies to a whole URL, so a credential
+// under an unrecognised parameter name is still caught. What it deliberately
+// does NOT do is go through url.Parse (codex round 2): a request's query is not
+// required to be parseable as part of a URL — an HTAB is legal inside an HTTP
+// header value, and url.ParseRequestURI leaves a literal '#' in RawQuery — and
+// every parse-dependent path falls back to a regex with no `apikey` rule, which
+// is how the credential got published in the first place.
+//
+// knownSecrets, when given, are redacted by EXACT VALUE before the name and
+// value-shaped rules run — see redactKnownSecrets. Omit it (or pass "") for
+// the internal recursive uses in this file, which run on a string a caller
+// above has already put through this pass once.
+func LogSafeQueryString(rawQuery string, knownSecrets ...string) string {
+	if rawQuery == "" {
+		return rawQuery
+	}
+	rawQuery = redactKnownSecrets(rawQuery, knownSecrets)
+	rawQuery = capLogSafeRequestInput(rawQuery)
+	return AuditRedaction.finish(rawQuery, redactRawQueryParams(rawQuery, AuditRedaction.masker()))
+}
+
+// LogSafeRequestURL renders a URL that arrived from an UNTRUSTED client for a
+// log field - a Referer header, most of all. Unlike LogSafeURL it assumes
+// nothing: not that the URL parses, and not that the credential is in the query.
+//
+// SEC-01, codex rounds 1-4. Every assumption LogSafeURL makes was a way for the
+// admin key to reach http.log verbatim, because a client controls its Referer
+// completely and a 64-character hex key has no vendor shape for the value
+// detector to catch on its own:
+//
+//   - url.Parse rejects the URL (`http://host/%zz?apikey=<KEY>`, or an HTAB,
+//     which is legal inside a header value) and the redactor drops to the regex
+//     RedactURL, which has no `apikey` rule at all;
+//   - the credential sits in the FRAGMENT (`http://host/ui/#?apikey=<KEY>`, or
+//     hash routing `#/servers?apikey=<KEY>`), which no URL renderer applies the
+//     name rule to;
+//   - the credential sits in the PATH (`http://host/ui/apikey=<KEY>`), likewise;
+//   - the parameter NAME is percent-encoded (`api%6bey=<KEY>`), which the
+//     free-form scrubber cannot see because it never decodes.
+//
+// So the URL is taken apart by hand and every piece is redacted in its own
+// right, with no parse anywhere on the path: userinfo first, against the WHOLE
+// raw string, because in a malformed URL either delimiter can fall between the
+// password and its '@' (`https://user:<KEY>?x@`, `https://user:<KEY>#x@`) and
+// leave nothing for the userinfo rule to match; then the fragment, the query,
+// and what is left.
+//
+// The one thing this does NOT do, which LogSafeURL does, is decode a query
+// parameter whose VALUE is itself a URL (the RFC 8707 `resource` parameter).
+// That is a shape mcpproxy's own authorize URLs have and a browser Referer does
+// not, and buying it back would mean parsing - the one thing an untrusted URL
+// cannot be relied on to survive.
+//
+// knownSecrets, when given, are redacted by EXACT VALUE against the WHOLE raw
+// string before it is taken apart — see redactKnownSecrets. This is what
+// catches the admin key sitting in the path or fragment of a Referer with no
+// `apikey=` wrapper at all, which none of the piecewise rules above can.
+func LogSafeRequestURL(rawURL string, knownSecrets ...string) string {
+	if rawURL == "" {
+		return rawURL
+	}
+	rawURL = redactKnownSecrets(rawURL, knownSecrets)
+	rawURL = capLogSafeRequestInput(rawURL)
+	scrubbed := redactURLUserinfo(rawURL)
+	main, fragment, hasFragment := strings.Cut(scrubbed, "#")
+	base, rawQuery, hasQuery := strings.Cut(main, "?")
+
+	out := logSafeURLComponent(base)
+	if hasQuery {
+		out += "?" + LogSafeQueryString(rawQuery)
+	}
+	if hasFragment {
+		out += "#" + logSafeFragment(fragment)
+	}
+	return out
+}
+
+// LogSafeRequestPath renders a request PATH for a log field.
+//
+// SEC-01, codex round 6 finding 2. internal/httpapi logs `r.URL.Path` on the
+// access line and on every authentication decision, and a path is as
+// client-controlled as the query beside it, so it had the same shape of
+// exposure LogSafeRequestURL now closes for the Referer.
+//
+// Capped at entry (SEC-01 second-lens review, PR #1350): logSafeURLComponent
+// splits on '/' and runs the full value-shaped detector per segment, so an
+// uncapped path let a client turn one request into an unbounded number of
+// detector passes. See maxLogSafeRequestBytes.
+//
+// knownSecrets, when given, are redacted by EXACT VALUE before the path is
+// split into segments — see redactKnownSecrets. This is the fix for the
+// admin key surviving as a bare PATH SEGMENT: it has no `name=` wrapper for
+// the per-segment name rule to key on and, being plain hex, tops out at 4.0
+// bits/char of Shannon entropy — under the value-shaped detector's 4.5
+// threshold — so no shape-based rule below this call can ever catch it.
+// internal/httpapi.Server.currentAdminAPIKey is the one caller that passes
+// it, reading the live key fresh on every request.
+func LogSafeRequestPath(path string, knownSecrets ...string) string {
+	path = redactKnownSecrets(path, knownSecrets)
+	return logSafeURLComponent(capLogSafeRequestInput(path))
+}
+
+// logSafeURLComponent renders the part of a URL that is NOT a query string -
+// scheme, host and path, or the part of a fragment before its own '?'.
+//
+// The name rule runs per PATH SEGMENT, which is what makes
+// `…/ui/api%6bey=<KEY>` reachable by it at all: it matches on the DECODED,
+// normalised name, and only when that name is the whole of what precedes the
+// '='. Then the value-shaped detector runs over the result, for a credential
+// no name rule can see.
+//
+// ScrubUpstreamText is deliberately NOT used whole, though it is the standard
+// rule for free-form text (codex round 6 finding 3). Its secretPattern is
+// unanchored, so it rewrites `/monkey=banana` to `/monkey=***REDACTED***` -
+// acceptable for an error string nobody parses, a daily annoyance in the `path`
+// field of an access log, and redundant here because the per-segment name rule
+// covers the same ground with decoding and a real word boundary.
+//
+// Its other two rules do earn their place and are applied on their own (codex
+// round 7): a `user:pass@` in an embedded URL and a `Bearer <token>` - which a
+// decoded path really can carry, since r.URL.Path arrives percent-decoded - are
+// exactly the shapes no name rule and no value detector recognise.
+func logSafeURLComponent(s string) string {
+	if s == "" {
+		return s
+	}
+	s = tokenPattern.ReplaceAllString(redactURLUserinfo(s), "${1}"+redactedMarker)
+	segments := strings.Split(s, "/")
+	for i, segment := range segments {
+		segments[i] = LogSafeQueryString(segment)
+	}
+	return MaskDetectedSecrets(strings.Join(segments, "/"))
+}
+
+// logSafeFragment redacts a URL fragment. No URL renderer applies the name rule
+// there, but a fragment carries `k=v` pairs as readily as a query does — hash
+// routing puts a whole path and query after the '#' — so the same rule runs over
+// whatever follows its first '?', or over the whole fragment when it has none.
+func logSafeFragment(fragment string) string {
+	if fragment == "" {
+		return fragment
+	}
+	base, rawQuery, hasQuery := strings.Cut(fragment, "?")
+	if !hasQuery {
+		return logSafeURLComponent(fragment)
+	}
+	return logSafeURLComponent(base) + "?" + LogSafeQueryString(rawQuery)
 }
 
 // logSafeURLs is logSafeURL over a slice — the RFC 8414 candidate list is

@@ -670,7 +670,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `api_key` | string | Auto-generated | API key for REST API authentication. Required; if empty, one is auto-generated and enforced (logged on startup) |
+| `api_key` | string | Auto-generated | API key for REST API authentication. Required; if empty, one is auto-generated, enforced, and written back to this config file (printed to the terminal once on first run; never written to the log files) |
 | `trusted_hosts` | string[] | `[]` | Non-loopback `Host` header values accepted on loopback listeners (reverse-proxy deployments). See below |
 | `trusted_proxies` | string[] | `[]` (trust nobody) | CIDRs or IP addresses whose `X-Forwarded-For` / `X-Real-IP` / `X-Forwarded-Proto` / `X-Forwarded-Host` headers are honoured; any other peer's forwarded headers are ignored and `RemoteAddr` is used. Env `MCPPROXY_TRUSTED_PROXIES`. Hot-reloadable. Invalid entry: `trusted_proxies[N] "value" is not a valid CIDR or IP address` (boot, PATCH and apply). See [Reverse Proxy Deployment](operations/reverse-proxy.md#trusted_proxies-forwarded-headers) |
 | `read_only_mode` | boolean | `false` | Prevent all configuration modifications |
@@ -681,7 +681,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 **Security Notes:**
 - **API Key**: Set via `--api-key` flag, `MCPPROXY_API_KEY` environment variable, or config file
 - **Empty API Key**: Empty values are replaced with an auto-generated key; authentication is always enforced
-- **Auto-Generation**: If no API key is provided, one is generated and logged for easy access
+- **Auto-Generation**: If no API key is provided, one is generated, persisted to the config file, and printed once to the terminal (stderr). It is deliberately **not** written to the log files - to recover it later, read `api_key` from `~/.mcpproxy/mcp_config.json`
 - **Tray Integration**: Tray app automatically manages API keys for core communication
 
 ## Audit Log

@@ -1694,3 +1694,72 @@ func TestAllLLMPatternsExist(t *testing.T) {
 		})
 	}
 }
+
+// SEC-01 follow-up (PR #1350): agent tokens (internal/auth.GenerateToken)
+// carry the mcp_agt_ prefix followed by 64 lowercase hex chars — a vendor
+// shape exactly as distinctive as ghp_/gho_/glpat- above — but, unlike those,
+// had no pattern here at all, so MaskDetectedSecrets (internal/oauth) never
+// caught one sitting bare in a URL path/query/fragment the way it already
+// catches an opaque ghp_ token. The admin API key is NOT fixed this way
+// (see internal/oauth/logging.go's redactKnownSecrets doc): it has no prefix
+// to key on. An agent token does, so a shape rule is the right tool here and
+// carries none of the false-positive risk a bare-hex rule would.
+func TestAgentTokenPattern(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantMatch bool
+	}{
+		{
+			name:      "well-formed agent token",
+			input:     "mcp_agt_" + strings.Repeat("a1", 32),
+			wantMatch: true,
+		},
+		{
+			name:      "agent token embedded in a bare path segment",
+			input:     "/api/v1/status/mcp_agt_" + strings.Repeat("b2", 32),
+			wantMatch: true,
+		},
+		{
+			name:      "agent token under an opaque query value",
+			input:     "opaque=mcp_agt_" + strings.Repeat("c3", 32),
+			wantMatch: true,
+		},
+		{
+			// zcode review round 1 (PR #1350 follow-up): ValidateTokenFormat
+			// decodes the suffix with hex.DecodeString, which is
+			// case-insensitive, so a token this codebase validates as genuine
+			// must also be one this pattern masks.
+			name:      "well-formed agent token, uppercase hex",
+			input:     "mcp_agt_" + strings.Repeat("A1", 32),
+			wantMatch: true,
+		},
+		{
+			name:      "wrong prefix",
+			input:     "mcp_tok_" + strings.Repeat("a1", 32),
+			wantMatch: false,
+		},
+		{
+			name:      "prefix with too few hex chars",
+			input:     "mcp_agt_" + strings.Repeat("a1", 10),
+			wantMatch: false,
+		},
+	}
+
+	patterns := GetTokenPatterns()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, "mcp_agent_token")
+			if pattern == nil {
+				t.Fatalf("mcp_agent_token pattern not found")
+			}
+			matches := pattern.Match(tt.input)
+			if tt.wantMatch {
+				assert.NotEmpty(t, matches, "expected match for: %s", tt.input)
+			} else {
+				assert.Empty(t, matches, "expected no match for: %s", tt.input)
+			}
+		})
+	}
+}

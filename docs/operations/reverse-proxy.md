@@ -173,8 +173,10 @@ Exposing MCPProxy beyond localhost changes the threat model. Two endpoint famili
 authenticate differently:
 
 - **REST API (`/api/v1/...`)** — an API key is **always** required. Pass it as the
-  `X-API-Key` header (recommended) or the `?apikey=` query parameter. The key is
-  auto-generated and logged on first start if you don't set one.
+  `X-API-Key` header (recommended) or the `?apikey=` query parameter. If you don't
+  set one, the key is auto-generated on first start, printed once to the terminal
+  and written to your config file; it is never written to the log files, so read
+  `api_key` from `~/.mcpproxy/mcp_config.json` to recover it.
 - **MCP endpoint (`/mcp`)** — **unauthenticated by default** for client
   compatibility. When you expose MCPProxy through a reverse proxy, enable
   `require_mcp_auth` so `/mcp` also rejects unauthenticated requests:

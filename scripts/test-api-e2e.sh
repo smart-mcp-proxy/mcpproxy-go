@@ -129,15 +129,20 @@ log_skip() {
     TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
 }
 
-# Extract API key from server logs
-# Optional $1 overrides the log path (used by scripts/test-extract-api-key.sh).
-# -a forces grep to treat the log as text: the server log can contain NUL bytes
-# (and ANSI color codes), which otherwise make grep report "Binary file ... matches"
-# instead of the match, corrupting API_KEY. See MCP-2404.
+# Extract the API key from the CONFIG FILE the server was started with.
+# Optional $1 overrides the config path (used by scripts/test-extract-api-key.sh).
+#
+# SEC-01: the auto-generated key is deliberately no longer written to the server
+# log - it is a root credential and the log is a plaintext file at rest. The
+# config file is where mcpproxy persists it (the same source
+# scripts/dev-server-edition.sh reads), so that is what we read.
+#
+# The write-back happens during startup, so callers poll: an empty API_KEY here
+# means "not written yet", not "failed".
 extract_api_key() {
-    local log_file="${1:-/tmp/mcpproxy_e2e.log}"
-    if [ -f "$log_file" ]; then
-        API_KEY=$(grep -ao '"api_key": "[^"]*"' "$log_file" | sed 's/.*"api_key": "\([^"]*\)".*/\1/' | head -1)
+    local config_file="${1:-${CONFIG_FILE:-}}"
+    if [ -n "$config_file" ] && [ -f "$config_file" ]; then
+        API_KEY=$(jq -r '.api_key // empty' "$config_file" 2>/dev/null)
         if [ ! -z "$API_KEY" ]; then
             echo "Extracted API key: ${API_KEY:0:8}..."
         fi
@@ -1180,9 +1185,10 @@ AUDIT_API_KEY=""
 AUDIT_PID=""
 AUDIT_MCP_SESSION_ID=""
 
+# See extract_api_key: the key is read from the config file, not the log.
 extract_audit_api_key() {
-    if [ -f "$AUDIT_SERVER_LOG" ]; then
-        AUDIT_API_KEY=$(grep -ao '"api_key": "[^"]*"' "$AUDIT_SERVER_LOG" | sed 's/.*"api_key": "\([^"]*\)".*/\1/' | head -1)
+    if [ -f "$AUDIT_CONFIG_FILE" ]; then
+        AUDIT_API_KEY=$(jq -r '.api_key // empty' "$AUDIT_CONFIG_FILE" 2>/dev/null)
     fi
 }
 

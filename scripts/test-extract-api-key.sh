@@ -1,14 +1,15 @@
 #!/bin/bash
 #
-# Unit test for extract_api_key() in scripts/test-api-e2e.sh (MCP-2404).
+# Unit test for extract_api_key() in scripts/test-api-e2e.sh.
 #
-# The server log can contain NUL bytes and ANSI color codes. Without `grep -a`,
-# grep treats the log as binary and emits "Binary file ... matches" instead of
-# the match, so API_KEY becomes garbage and every authed curl is rejected.
+# SEC-01: the auto-generated API key is no longer written to the server log (it
+# is the root credential and the log is a plaintext file at rest), so the E2E
+# script reads it from the CONFIG FILE mcpproxy persists it to. This test pins
+# that contract, including the two states the polling loop has to tolerate:
+# a config file that does not exist yet, and one whose api_key is still empty.
 #
-# This test extracts the *real* extract_api_key() function from test-api-e2e.sh
-# (so it stays in lockstep with the code under test) and runs it against a
-# fixture log that mixes ANSI escapes, a NUL byte, and the api_key line.
+# It extracts the *real* extract_api_key() function from test-api-e2e.sh so it
+# stays in lockstep with the code under test.
 
 set -u
 
@@ -17,6 +18,11 @@ TARGET="$SCRIPT_DIR/test-api-e2e.sh"
 
 if [ ! -f "$TARGET" ]; then
     echo "FAIL: cannot find $TARGET"
+    exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+    echo "FAIL: jq is required by extract_api_key()"
     exit 1
 fi
 
@@ -29,31 +35,66 @@ if [ -z "$FUNC_SRC" ]; then
 fi
 eval "$FUNC_SRC"
 
+# Guard against a silent regression to log scraping: the function must not read
+# a log file any more.
+if echo "$FUNC_SRC" | grep -q 'log_file\|mcpproxy_e2e.log'; then
+    echo "FAIL: extract_api_key() still reads the server log; the key is no longer logged (SEC-01)"
+    exit 1
+fi
+
 EXPECTED_KEY="4197c426deadbeef0123456789abcdef"
-FIXTURE="$(mktemp -t mcpproxy_e2e_fixture.XXXXXX)"
-trap 'rm -f "$FIXTURE"' EXIT
+FIXTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mcpproxy_key_fixture.XXXXXX")"
+trap 'rm -rf "$FIXTURE_DIR"' EXIT
 
-# Build a fixture log that reproduces the real-world failure: ANSI color codes
-# plus an embedded NUL byte, then the api_key line.
+FAILED=0
+
+check() {
+    local label="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        echo "PASS: $label"
+    else
+        echo "FAIL: $label — expected '$expected' but got '$actual'"
+        FAILED=1
+    fi
+}
+
+# 1. A persisted config file carries the key.
+POPULATED="$FIXTURE_DIR/populated.json"
+cat > "$POPULATED" <<JSON
 {
-    printf '\033[0;34m2026-06-14T12:00:00\033[0m starting server\n'
-    printf 'some binary noise: \x00\x00 end\n'
-    printf '{"level":"info","api_key": "%s","listen":"127.0.0.1:8081"}\n' "$EXPECTED_KEY"
-} > "$FIXTURE"
-
-# Sanity check: the fixture really does contain a NUL byte (the trigger).
-if ! grep -qa $'\x00' "$FIXTURE"; then
-    echo "FAIL: fixture is missing the NUL byte that triggers the bug"
-    exit 1
-fi
-
+  "listen": "127.0.0.1:8081",
+  "api_key": "$EXPECTED_KEY",
+  "mcpServers": []
+}
+JSON
 API_KEY=""
-extract_api_key "$FIXTURE" > /dev/null
+extract_api_key "$POPULATED" > /dev/null
+check "reads api_key from the config file" "$EXPECTED_KEY" "$API_KEY"
 
-if [ "$API_KEY" = "$EXPECTED_KEY" ]; then
-    echo "PASS: extract_api_key() returned the key from a NUL/ANSI log ($EXPECTED_KEY)"
-    exit 0
-else
-    echo "FAIL: expected '$EXPECTED_KEY' but got '$API_KEY'"
-    exit 1
-fi
+# 2. The server has not written the key back yet — the polling loop must see an
+#    empty value rather than a parse error or the literal "null".
+EMPTY="$FIXTURE_DIR/empty.json"
+cat > "$EMPTY" <<'JSON'
+{
+  "listen": "127.0.0.1:8081",
+  "api_key": "",
+  "mcpServers": []
+}
+JSON
+API_KEY=""
+extract_api_key "$EMPTY" > /dev/null
+check "empty api_key yields an empty result" "" "$API_KEY"
+
+# 3. Config file missing entirely (first poll, before the server writes it).
+API_KEY=""
+extract_api_key "$FIXTURE_DIR/does-not-exist.json" > /dev/null
+check "missing config file yields an empty result" "" "$API_KEY"
+
+# 4. Half-written config (atomic replace not finished) must not abort the loop.
+PARTIAL="$FIXTURE_DIR/partial.json"
+printf '{ "listen": "127.0.0.1:8081", "api_k' > "$PARTIAL"
+API_KEY=""
+extract_api_key "$PARTIAL" > /dev/null
+check "truncated config file yields an empty result" "" "$API_KEY"
+
+exit "$FAILED"
