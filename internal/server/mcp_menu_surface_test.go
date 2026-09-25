@@ -185,6 +185,10 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 					assertUpstreamServersDelta(t, surface, preM, curM)
 				case name == "code_execution":
 					assertCodeExecutionLive(t, surface, preM, curM)
+				case name == "search_servers":
+					assertSearchServersDelta(t, surface, preM, curM)
+				case name == "list_registries":
+					assertListRegistriesDelta(t, surface, preM, curM)
 				default:
 					assert.Equal(t, preM, curM,
 						"surface %s: tool %q must be byte-identical to the pre-feature snapshot (SC-003)", surface, name)
@@ -333,6 +337,65 @@ func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[str
 	curDesc, _ := curM["description"].(string)
 	assert.True(t, strings.HasPrefix(curDesc, preDesc),
 		"surface %s: the redaction note is APPENDED — no pre-feature prose may be rewritten", surface)
+}
+
+// assertSearchServersDelta: Spec 109 FR-067 makes 'registry' OPTIONAL (was
+// required) and updates its description, plus the tool's own description,
+// to the "search every catalog source" wording. No parameter is added or
+// removed, and every parameter OTHER than 'registry' is byte-identical.
+func assertSearchServersDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
+	t.Helper()
+
+	preDesc, _ := preM["description"].(string)
+	curDesc, _ := curM["description"].(string)
+	assert.NotEqual(t, preDesc, curDesc,
+		"surface %s: search_servers.description must be regenerated with the FR-067 catalog wording", surface)
+
+	preProps := schemaProps(preM)
+	curProps := schemaProps(curM)
+	assert.ElementsMatch(t, keysOf(preProps), keysOf(curProps),
+		"surface %s: search_servers must keep the same parameter set — FR-067 changes registry's requiredness/description only", surface)
+
+	for name, preProp := range preProps {
+		if name == "registry" {
+			continue
+		}
+		assert.Equal(t, preProp, curProps[name],
+			"surface %s: search_servers.%s must be unchanged (only 'registry' may move, FR-067)", surface, name)
+	}
+
+	preRequired := requiredParams(preM)
+	curRequired := requiredParams(curM)
+	assert.Contains(t, preRequired, "registry",
+		"surface %s: precondition — pre-feature search_servers required 'registry'", surface)
+	assert.NotContains(t, curRequired, "registry",
+		"surface %s: 'registry' must become optional (FR-067)", surface)
+}
+
+// assertListRegistriesDelta: Spec 109 FR-067 changes ONLY list_registries'
+// description (pointing at search_servers' all-sources default and using
+// "catalog source" wording). The tool takes no parameters, so its schema
+// must otherwise be byte-identical.
+func assertListRegistriesDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
+	t.Helper()
+
+	assert.Equal(t, schemaWithout(preM, "description"), schemaWithout(curM, "description"),
+		"surface %s: only list_registries' description may move (FR-067)", surface)
+
+	preDesc, _ := preM["description"].(string)
+	curDesc, _ := curM["description"].(string)
+	assert.NotEqual(t, preDesc, curDesc,
+		"surface %s: list_registries.description must be regenerated with the FR-067 catalog wording", surface)
+}
+
+// keysOf returns m's top-level keys, order-independent (paired with
+// assert.ElementsMatch).
+func keysOf(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 // assertQuarantineSecurityDelta: quarantine_security may grow the two scan
