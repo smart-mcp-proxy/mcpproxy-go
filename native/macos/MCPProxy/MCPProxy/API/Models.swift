@@ -133,6 +133,16 @@ struct HealthStatus: Codable, Equatable {
     let summary: String
     let detail: String?
     let action: String?
+    /// The ONE status vocabulary rendered as text on every surface (Spec 109
+    /// FR-010/FR-011). `level` stays a severity signal for badge/tray coloring
+    /// only — no renderer may print it as text. Optional at decode time only
+    /// for tolerance against an older core; every current payload sets it.
+    let status: String?
+    /// True only when `status == "ready"`.
+    let usable: Bool?
+    /// Every applicable next step, in priority order (FR-012). `action`
+    /// always equals `actions.first`, or is nil/empty when `actions` is empty.
+    let actions: [String]?
 
     enum CodingKeys: String, CodingKey {
         case level
@@ -140,6 +150,9 @@ struct HealthStatus: Codable, Equatable {
         case summary
         case detail
         case action
+        case status
+        case usable
+        case actions
     }
 
     /// Parsed health level enum, falling back to `.unhealthy` for unknown values.
@@ -157,6 +170,48 @@ struct HealthStatus: Codable, Equatable {
         guard let action, !action.isEmpty else { return nil }
         return HealthAction(rawValue: action)
     }
+
+    /// Cross-surface label for `status` (contracts/health-vocabulary.md),
+    /// binding for the Web UI, the macOS window and tray, and the CLI table.
+    /// Falls back to the raw value for forward-compat with an unrecognized
+    /// status (never crashes).
+    var statusLabel: String {
+        guard let status, !status.isEmpty else { return summary }
+        return HealthStatus.statusLabels[status] ?? status
+    }
+
+    /// True only when `status == "ready"`; defaults to the pre-Spec-109
+    /// reading (healthy level, not disabled/quarantined) when the field is
+    /// absent (older core).
+    var isUsable: Bool {
+        if let usable { return usable }
+        return healthLevel == .healthy && adminStateEnum == .enabled
+    }
+
+    /// One label table for every `status` value (contracts/health-vocabulary.md).
+    static let statusLabels: [String: String] = [
+        "ready": "Online",
+        "connecting": "Connecting",
+        "sign_in_required": "Sign-in required",
+        "needs_review": "Needs review",
+        "needs_secret": "Secret required",
+        "needs_config": "Needs configuration",
+        "error": "Error",
+        "disabled": "Disabled",
+    ]
+
+    /// One label table for a primary button keyed on an `actions` entry
+    /// (contracts/health-vocabulary.md).
+    static let actionLabels: [String: String] = [
+        "login": "Sign in",
+        "set_secret": "Add secret",
+        "configure": "Fix config",
+        "edit_url": "Edit URL",
+        "approve": "Review",
+        "restart": "Restart",
+        "view_logs": "View logs",
+        "enable": "Enable",
+    ]
 }
 
 // MARK: - OAuth Status

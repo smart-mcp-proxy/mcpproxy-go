@@ -1015,7 +1015,9 @@ private struct AttentionRow: View {
         HStack {
             Image(systemName: server.health?.healthLevel.sfSymbolName ?? "questionmark.circle")
                 .foregroundStyle(server.statusColor)
-                .accessibilityLabel("Health: \(server.health?.level ?? "unknown")")
+                // FR-011: no surface may render `level` as text, including
+                // accessibility labels — use the one status label table.
+                .accessibilityLabel("Health: \(server.health?.statusLabel ?? "unknown")")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)

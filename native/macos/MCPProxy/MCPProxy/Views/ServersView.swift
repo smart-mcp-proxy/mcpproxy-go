@@ -664,7 +664,9 @@ struct ServerTableView: NSViewRepresentable {
             dot.layer?.cornerRadius = 5
             dot.layer?.backgroundColor = healthColor(for: server).cgColor
             dot.translatesAutoresizingMaskIntoConstraints = false
-            dot.setAccessibilityLabel("Health: \(server.health?.level ?? (server.connected ? "connected" : "disconnected"))")
+            // FR-011: no surface may render `level` as text, including
+            // accessibility labels — use the one status label table.
+            dot.setAccessibilityLabel("Health: \(server.health?.statusLabel ?? (server.connected ? "connected" : "disconnected"))")
             cell.addSubview(dot)
             NSLayoutConstraint.activate([
                 dot.widthAnchor.constraint(equalToConstant: 10),

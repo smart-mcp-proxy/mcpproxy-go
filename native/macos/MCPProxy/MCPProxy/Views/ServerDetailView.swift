@@ -170,7 +170,9 @@ struct ServerDetailView: View {
             Circle()
                 .fill(server.statusColor)
                 .frame(width: 12, height: 12)
-                .accessibilityLabel("Server health: \(server.health?.level ?? "unknown")")
+                // FR-011: no surface may render `level` as text, including
+                // accessibility labels — use the one status label table.
+                .accessibilityLabel("Server health: \(server.health?.statusLabel ?? "unknown")")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
@@ -768,15 +770,21 @@ struct ServerDetailView: View {
                     }
 
                     if let health = server.health {
+                        // Spec 109 FR-011: no surface may render `level` as text — the
+                        // Status row renders `status` through the one label table
+                        // (HealthStatus.statusLabel). `level` still exists as a
+                        // severity signal (badge/tray coloring) elsewhere, just not here.
                         configSection(title: "Health") {
-                            configRow(label: "Level", value: health.level)
+                            configRow(label: "Status", value: health.statusLabel)
                             configRow(label: "Admin State", value: health.adminState)
                             configRow(label: "Summary", value: health.summary)
                             if let detail = health.detail, !detail.isEmpty {
                                 configRow(label: "Detail", value: detail)
                             }
-                            if let action = health.action, !action.isEmpty {
-                                configRow(label: "Action", value: action)
+                            let actions = health.actions ?? []
+                            if !actions.isEmpty {
+                                let labels = actions.map { HealthStatus.actionLabels[$0] ?? $0 }
+                                configRow(label: "Suggested Action", value: labels.joined(separator: ", "))
                             }
                         }
                     }
