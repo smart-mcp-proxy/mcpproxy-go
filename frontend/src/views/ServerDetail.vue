@@ -1638,6 +1638,7 @@ import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
+import { refName } from '@/utils/secretRef'
 import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState } from '@/utils/health'
@@ -3572,17 +3573,13 @@ async function commitNewEnv() {
   if (ok) addingEnv.value = false
 }
 
-// Suggest a keyring secret name derived from the kv key. Keep it short,
-// lowercase, alphanumeric + hyphens — the same convention as the existing
-// Secrets view.
+// Suggest a keyring secret name derived from the kv key (FR-065): the shared
+// helper (also used by Paste/Manual/Catalog secret toggles) keeps the field
+// KIND (env vs header) in the name, so a header and an env var with the same
+// key never collide on one keyring entry — the bug this used to have before
+// it was switched to refName.
 function suggestSecretName(scope: 'header' | 'env', k: string): string {
-  const base = `${server.value?.name || 'server'}-${k}`
-  return base
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 64)
+  return refName(server.value?.name || 'server', scope, k)
 }
 
 function openConvertModal(scope: 'header' | 'env', k: string, rawValue: string) {

@@ -59,7 +59,7 @@
              hidden, never issued-and-403'd). -->
         <button
           v-if="authStore.principalKind !== 'tenant'"
-          @click="showAddServerModal = true"
+          @click="router.push('/add-server')"
           class="btn btn-primary"
           :aria-label="addServerLabel"
           data-test="header-add-server"
@@ -174,12 +174,6 @@
       </div>
     </div>
 
-    <!-- Add Server Modal -->
-    <AddServerModal
-      :show="showAddServerModal"
-      @close="showAddServerModal = false"
-      @added="handleServerAdded"
-    />
   </header>
 </template>
 
@@ -190,8 +184,6 @@ import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import { useAuthStore } from '@/stores/auth'
 import { useProfilesStore } from '@/stores/profiles'
-import AddServerModal from './AddServerModal.vue'
-import { serverDetailPath } from '@/utils/serverRoute'
 import ProfileSwitcher from './ProfileSwitcher.vue'
 import ModeSwitcher from './ModeSwitcher.vue'
 
@@ -213,7 +205,6 @@ onMounted(() => {
 const addServerLabel = computed(() => authStore.isTeamsEdition ? 'Add Personal Server' : 'Add Server')
 
 const searchQuery = ref('')
-const showAddServerModal = ref(false)
 const showEndpoints = ref(false)
 
 interface McpEndpoint {
@@ -279,16 +270,5 @@ async function copyEndpoint(ep: McpEndpoint) {
 function handleSearch() {
   const q = searchQuery.value.trim()
   router.push(q ? { path: '/tools', query: { q } } : { path: '/tools' })
-}
-
-function handleServerAdded(serverName?: string) {
-  // Refresh servers list after adding
-  serversStore.fetchServers()
-  // UX audit F07: a single add hands off to that server's detail view, where
-  // connect/scan/review/approve is already on screen. The bulk/import path
-  // emits no name and keeps the old refresh-in-place behaviour.
-  if (serverName) {
-    void router.push(serverDetailPath(serverName))
-  }
 }
 </script>
