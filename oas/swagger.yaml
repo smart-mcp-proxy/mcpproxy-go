@@ -1258,6 +1258,12 @@ components:
             EmptyOrPlaceholder is true when the value is empty or an obvious
             placeholder ("YOUR_API_KEY", "<TOKEN>", "changeme", "xxx", …) — the
             case FR-040's "needs secret" tag exists to flag.
+
+            Review round 4: without explicit `yaml` tags matching the `json` ones,
+            gopkg.in/yaml.v3's default field-name derivation (lowercased, no word
+            separators) diverged from the snake_case keys the REST DTO, swagger.yaml
+            and -o json all use — `mcpproxy upstream import -o yaml` rendered
+            `valuepresent`/`secretlike`/`emptyorplaceholder` instead.
           type: boolean
         name:
           description: Name is the env var or header name.
