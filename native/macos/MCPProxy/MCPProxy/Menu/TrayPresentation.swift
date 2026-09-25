@@ -265,6 +265,88 @@ enum TrayServerAction: String, Equatable {
     }
 }
 
+// MARK: - F14 · One primary action, wherever it's shown (Spec 109 FR-014)
+
+/// Where a primary action that does not run in place takes the user. Both
+/// the macOS Servers row and the tray server submenu resolve to the SAME
+/// destination for the same `actions[0]` value — only how they get there
+/// (a sheet vs. `.showServerDetail`) is AppKit/SwiftUI wiring, not a decision
+/// this pure type makes.
+enum TrayPrimaryDestination: Equatable {
+    /// The server's review location — the Tools tab, where the per-tool
+    /// approval banner and the quarantine review UI already live, until
+    /// 109-g's dedicated review sheet ships (matches the Web UI's interim
+    /// `/review/<name>` → `?tab=tools` redirect, 109-a T026a).
+    case review
+    /// A field to fill in: the secret value (`set_secret`) or the endpoint
+    /// (`edit_url`) — both resolved to the server's Config tab, the one
+    /// place either can be edited today (mirrors DashboardView.AttentionRow).
+    case config
+    /// The server's log viewer.
+    case logs
+}
+
+/// What clicking the primary item does: run the action in place, or open the
+/// screen that performs it. Never a one-click approve (FR-005) — `approve`
+/// only ever resolves to `.open(.review)`.
+enum TrayPrimaryKind: Equatable {
+    case execute(TrayServerAction)
+    case open(TrayPrimaryDestination)
+}
+
+/// The ONE primary item for a server's `health.actions[0]` (or the legacy
+/// singular `action`), shared verbatim by the Servers row and the tray
+/// submenu (FR-014). `label` always comes from `HealthStatus.actionLabels` —
+/// the same table the Web UI and CLI render — never a private per-surface
+/// wording (the old tray submenu said "Review quarantine…"; the shared table
+/// says "Review").
+struct TrayPrimaryItem: Equatable {
+    let label: String
+    let kind: TrayPrimaryKind
+}
+
+enum TrayPrimaryPresentation {
+    /// Resolves a raw `actions[0]` (or legacy `action`) STRING value. `nil`
+    /// for an empty or unrecognized action — no button, no menu item (the
+    /// normal `ready` case, FR-013). Every value `HealthStatus.actionLabels`
+    /// carries a label for is handled explicitly below, so a label with no
+    /// destination can only mean this table and this function have drifted —
+    /// caught by TrayPrimaryItemTests, not silently swallowed into `nil`.
+    static func primaryItem(for action: String?) -> TrayPrimaryItem? {
+        guard let action, !action.isEmpty else { return nil }
+        guard let label = HealthStatus.actionLabels[action] else { return nil }
+        if let executable = TrayServerAction.fromHealthAction(action) {
+            return TrayPrimaryItem(label: label, kind: .execute(executable))
+        }
+        switch action {
+        case "approve": return TrayPrimaryItem(label: label, kind: .open(.review))
+        case "set_secret": return TrayPrimaryItem(label: label, kind: .open(.config))
+        case "configure": return TrayPrimaryItem(label: label, kind: .open(.config))
+        case "edit_url": return TrayPrimaryItem(label: label, kind: .open(.config))
+        case "view_logs": return TrayPrimaryItem(label: label, kind: .open(.logs))
+        default: return nil
+        }
+    }
+
+    /// `server.health.action`, falling back to a synthesized `"approve"` for
+    /// a quarantined server whose core predates the health vocabulary (no
+    /// `health` object at all) — the same old-core tolerance
+    /// `HealthStatus.isUsable`/`actionsOrLegacyFallback` already give every
+    /// other consumer of this field, so a quarantined server never loses its
+    /// one path to review just because the payload is from an older core.
+    static func effectiveAction(for server: ServerStatus) -> String? {
+        if let action = server.health?.action, !action.isEmpty { return action }
+        if server.quarantined { return "approve" }
+        return nil
+    }
+
+    /// Convenience over a `ServerStatus` — the Servers row and the tray
+    /// submenu both call this one function (FR-014's "one pure function").
+    static func primaryItem(for server: ServerStatus) -> TrayPrimaryItem? {
+        primaryItem(for: effectiveAction(for: server))
+    }
+}
+
 enum TrayServerActionFailure {
     static func title(action: TrayServerAction, server: String) -> String {
         "Couldn’t \(action.verb) \(server)"

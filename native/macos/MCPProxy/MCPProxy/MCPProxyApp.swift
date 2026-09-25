@@ -1503,7 +1503,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // calm, actionable affordance (MCP-1822) — `menuStatusNSColor`
         // gives it the system accent tint instead of the red error dot +
         // red lock badge that previously framed sign-in as a hard failure.
-        let needsAuth = server.isOAuthLoginRequired
         let dotColor = server.menuStatusNSColor
 
         let iconSize = NSSize(width: 16, height: 16)
@@ -1532,29 +1531,41 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         sub.addItem(.separator())
 
-        // OAuth sign-in — calm, actionable affordance shown first when
-        // login is required (MCP-1822), not error framing.
-        if needsAuth {
-            let login = NSMenuItem(title: TrayServerAction.login.menuTitle,
-                                   action: #selector(loginServer(_:)), keyEquivalent: "")
-            login.target = self
-            login.representedObject = server.name
-            login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "sign in")
-            sub.addItem(login)
-            sub.addItem(.separator())
-        }
-
-        // F8(a): a quarantined server offered only Disable · Restart · View
-        // Logs — the one thing it needs is a review, and the menu had no path
-        // to it at all. Deep-links to Server Detail, which opens on Tools with
-        // the quarantine banner.
-        if server.quarantined {
-            let review = NSMenuItem(title: TrayServerAction.approve.menuTitle,
-                                    action: #selector(showServerDetailFromMenu(_:)), keyEquivalent: "")
-            review.target = self
-            review.representedObject = server.name
-            review.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "review quarantine")
-            sub.addItem(review)
+        // Spec 109 FR-014: the ONE primary action, from the same pure mapping
+        // and label table (`TrayPrimaryPresentation.primaryItem`,
+        // `HealthStatus.actionLabels`) the Servers row uses for the exact
+        // same `actions[0]` value — replaces the old ad hoc "needsAuth" /
+        // "quarantined" special cases, which showed Sign-in and Review but
+        // nothing at all for a missing secret, a bad config or a bad URL
+        // (FR-014's "never a missing item"). `login`/`restart`/`enable` run
+        // in place; every other value opens the screen that performs it —
+        // never a one-click approve (FR-005).
+        if let primary = TrayPrimaryPresentation.primaryItem(for: server) {
+            let item = NSMenuItem(title: primary.label, action: nil, keyEquivalent: "")
+            item.target = self
+            switch primary.kind {
+            case .execute(let action):
+                item.representedObject = server.name
+                switch action {
+                case .login: item.action = #selector(loginServer(_:))
+                case .restart: item.action = #selector(restartServer(_:))
+                case .enable: item.action = #selector(enableServer(_:))
+                case .disable, .approve: item.action = nil // never produced for this kind
+                }
+                item.image = NSImage(systemSymbolName: primaryExecuteSymbol(action), accessibilityDescription: primary.label)
+            case .open(let destination):
+                item.action = #selector(showServerDetailFromMenu(_:))
+                switch destination {
+                case .review:
+                    item.representedObject = server.name
+                case .config:
+                    item.representedObject = ServerDetailTarget(serverName: server.name, tab: .config)
+                case .logs:
+                    item.representedObject = ServerDetailTarget(serverName: server.name, tab: .logs)
+                }
+                item.image = NSImage(systemSymbolName: primaryOpenSymbol(destination), accessibilityDescription: primary.label)
+            }
+            sub.addItem(item)
             sub.addItem(.separator())
         }
 
@@ -1591,6 +1602,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         item.submenu = sub
         return item
+    }
+
+    /// SF Symbol for a primary item that RUNS in place (Spec 109 FR-014).
+    private func primaryExecuteSymbol(_ action: TrayServerAction) -> String {
+        switch action {
+        case .login: return "person.badge.key"
+        case .restart: return "arrow.clockwise"
+        case .enable: return "play.fill"
+        case .disable: return "stop.fill"
+        case .approve: return "checkmark.shield"
+        }
+    }
+
+    /// SF Symbol for a primary item that OPENS a screen (Spec 109 FR-014).
+    private func primaryOpenSymbol(_ destination: TrayPrimaryDestination) -> String {
+        switch destination {
+        case .review: return "checkmark.shield"
+        case .config: return "gearshape"
+        case .logs: return "doc.text"
+        }
     }
 
     // MARK: - Menu Actions
@@ -1774,14 +1805,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         perform(verb, on: server.name, id: server.id)
     }
 
-    /// Navigate to a server's detail page. The represented object is the
-    /// server NAME (what `.showServerDetail` matches on).
+    /// Navigate to a server's detail page. The represented object is either
+    /// the server NAME (opens the Tools tab — what `.showServerDetail`
+    /// defaults to for a bare String) or a `ServerDetailTarget` naming a
+    /// specific tab (Spec 109 FR-014: `set_secret`/`configure`/`edit_url` open
+    /// Config, `view_logs` opens Logs).
     @objc private func showServerDetailFromMenu(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
+        let payload = sender.representedObject
+        guard payload is String || payload is ServerDetailTarget else { return }
         showMainWindow()
         NotificationCenter.default.post(name: .switchToServers, object: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NotificationCenter.default.post(name: .showServerDetail, object: name)
+            NotificationCenter.default.post(name: .showServerDetail, object: payload)
         }
     }
 

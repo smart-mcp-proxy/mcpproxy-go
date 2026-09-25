@@ -98,8 +98,12 @@ final class TrayAuditMenuTests: XCTestCase {
         XCTAssertFalse(titles.contains("Protocol: streamable-http"))
     }
 
-    // MARK: - F8a · A path to the quarantine review
+    // MARK: - F8a / Spec 109 FR-014 · A path to the quarantine review
 
+    // Spec 109 FR-014 moved this row's wording onto the ONE cross-surface
+    // label table (`HealthStatus.actionLabels`), so it now reads "Review" —
+    // the same word the Servers row and the Web UI use for `actions[0] ==
+    // "approve"` — rather than the tray's own private "Review quarantine…".
     func testAQuarantinedServerOffersAReview() throws {
         let (controller, host) = makeController(servers: [
             Self.server(name: "everything", proto: "http", enabled: true, quarantined: true)
@@ -107,7 +111,7 @@ final class TrayAuditMenuTests: XCTestCase {
         controller.rebuildMenu()
 
         let items = try serverSubmenu(host, named: "everything").items
-        let review = try XCTUnwrap(items.first { $0.title.hasPrefix("Review quarantine") },
+        let review = try XCTUnwrap(items.first { $0.title == "Review" },
                                    "quarantined server offered only \(items.map(\.title))")
         XCTAssertNotNil(review.action, "a review row with no action is the F14 dead link again")
         XCTAssertTrue(review.target === controller)
@@ -120,7 +124,7 @@ final class TrayAuditMenuTests: XCTestCase {
         ])
         controller.rebuildMenu()
         let titles = try serverSubmenu(host, named: "github").items.map(\.title)
-        XCTAssertFalse(titles.contains { $0.hasPrefix("Review quarantine") })
+        XCTAssertFalse(titles.contains("Review"))
     }
 
     // MARK: - F4 · Attention rows do not mutate on a navigation click
