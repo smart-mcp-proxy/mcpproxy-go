@@ -1,0 +1,6 @@
+{
+  "name": "legacy",
+  "servers": ["github"],
+  "title": "Legacy",
+  "description": "Pre-v3 profile: sets none of the six policy fields"
+}

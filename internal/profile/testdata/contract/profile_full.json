@@ -1,0 +1,16 @@
+{
+  "name": "work-readonly",
+  "servers": ["github", "notion"],
+  "title": "Work · Read-only",
+  "description": "Read-only view of the work servers",
+  "max_tier": "read",
+  "unannotated": "deny",
+  "tools": {
+    "allow": ["notion:update_page", "github:get_secret_scanning_alert"],
+    "deny": ["github:*secret*"],
+    "classify": {"github:search_code": "read"}
+  },
+  "code_execution": false,
+  "management_tools": false,
+  "switchable_to": ["work-full"]
+}
