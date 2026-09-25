@@ -1252,4 +1252,16 @@ actor APIClient {
             return .failure(message: error.localizedDescription)
         }
     }
+
+    /// Search the catalog across every enabled source (Spec 109 FR-060) via
+    /// `GET /api/v1/catalog/search?q=&source=&tag=&limit=`. `source` narrows
+    /// to one catalog source id; omit for "every enabled source at once".
+    func searchCatalog(query: String = "", source: String? = nil, tag: String? = nil, limit: Int = 20) async throws -> CatalogSearchResponse {
+        var params: [String] = ["limit=\(limit)"]
+        if !query.isEmpty { params.append("q=\(query.uriComponentEncoded)") }
+        if let source, !source.isEmpty { params.append("source=\(source.uriComponentEncoded)") }
+        if let tag, !tag.isEmpty { params.append("tag=\(tag.uriComponentEncoded)") }
+        let path = "/api/v1/catalog/search?\(params.joined(separator: "&"))"
+        return try await fetchWrapped(path: path)
+    }
 }
