@@ -1251,6 +1251,31 @@ components:
         total:
           type: integer
       type: object
+    configimport.ImportedField:
+      properties:
+        empty_or_placeholder:
+          description: |-
+            EmptyOrPlaceholder is true when the value is empty or an obvious
+            placeholder ("YOUR_API_KEY", "<TOKEN>", "changeme", "xxx", …) — the
+            case FR-040's "needs secret" tag exists to flag.
+          type: boolean
+        name:
+          description: Name is the env var or header name.
+          type: string
+        secret_like:
+          description: |-
+            SecretLike is a name-based heuristic (research D13):
+            (?i)(token|secret|password|passwd|api[_-]?key|[_-]key$|auth|credential|
+            private[_-]?key). Delegates to oauth.IsSensitiveKeyName /
+            IsSensitiveHeaderName — the SAME heuristic the redaction and
+            reveal-secret-headers surfaces already use, so every door agrees on
+            what "looks like a secret" means.
+          type: boolean
+        value_present:
+          description: ValuePresent is true when the source config set a non-empty
+            value.
+          type: boolean
+      type: object
     configimport.SkippedServer:
       properties:
         name:
@@ -1271,7 +1296,18 @@ components:
           type: string
         config_path:
           type: string
+        display_path:
+          description: |-
+            DisplayPath is ConfigPath with the home directory shortened to "~"
+            (FR-037). Populated for every result whose ConfigPath is known.
+          type: string
         message:
+          type: string
+        reload_hint:
+          description: |-
+            ReloadHint is this client's instruction for making the write take
+            effect (FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Empty
+            for an unknown client.
           type: string
         server_name:
           type: string
@@ -3422,9 +3458,22 @@ components:
           uniqueItems: false
         command:
           type: string
+        env:
+          description: |-
+            Env / Headers classify each env var / header for the "needs secret"
+            tag without exposing the values.
+          items:
+            $ref: '#/components/schemas/configimport.ImportedField'
+          type: array
+          uniqueItems: false
         fields_skipped:
           items:
             type: string
+          type: array
+          uniqueItems: false
+        headers:
+          items:
+            $ref: '#/components/schemas/configimport.ImportedField'
           type: array
           uniqueItems: false
         name:
@@ -3435,6 +3484,18 @@ components:
           type: string
         source_format:
           type: string
+        summary:
+          description: |-
+            Summary is the wizard/ImportServers second line: command+args or
+            url (auth-type), already redacted.
+          type: string
+        tags:
+          description: 'Tags classifies Summary: local process|remote, needs secret,
+            oauth.'
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         url:
           type: string
         warnings:
