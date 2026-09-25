@@ -254,15 +254,25 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 // connect response the write itself already succeeded on, so it only logs.
 func (s *Server) recordClientConnected(clientID string) {
 	err := s.controller.UpdateOnboardingState(func(state *storage.OnboardingState) error {
-		if state.ClientConnectedAt == nil {
-			state.ClientConnectedAt = map[string]time.Time{}
-		}
-		state.ClientConnectedAt[clientID] = time.Now()
+		applyClientConnected(state, clientID, time.Now())
 		return nil
 	})
 	if err != nil && s.logger != nil {
 		s.logger.Warnf("onboarding: failed to record client_connected_at for %s: %v", clientID, err)
 	}
+}
+
+// applyClientConnected sets state.ClientConnectedAt[clientID] = now, creating
+// the map on first use. Shared by every writer of a connect-success timestamp
+// (the REST/tray path above, and the CLI's onboarding/mark relay in
+// onboarding.go, added in review round 6 to close the parity gap where
+// `mcpproxy connect` wrote a client config file directly without ever
+// recording it here) so they stay byte-for-byte identical.
+func applyClientConnected(state *storage.OnboardingState, clientID string, now time.Time) {
+	if state.ClientConnectedAt == nil {
+		state.ClientConnectedAt = map[string]time.Time{}
+	}
+	state.ClientConnectedAt[clientID] = now
 }
 
 // handleDisconnectClient godoc

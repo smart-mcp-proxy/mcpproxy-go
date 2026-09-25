@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -109,6 +110,19 @@ type OnboardingMarkRequest struct {
 
 	// MarkShown records the wizard's first display time if not already set.
 	MarkShown bool `json:"mark_shown,omitempty"`
+
+	// ConnectedClientID records a successful connect write for this client id
+	// (Spec 109-b FR-042, review round 6). The REST connect endpoint
+	// (POST /api/v1/connect/{client}) already records this itself on success;
+	// this field exists so `mcpproxy connect` — which writes the client's
+	// config file directly, without going through that endpoint, so the
+	// command still works when no daemon is running — can relay the same
+	// event to a daemon that IS running, keeping ClientConnectedAt in sync
+	// across both surfaces. Must be a known id from the fixed connect client
+	// registry (internal/connect.GetAllClients); any other value is rejected,
+	// matching the field's "bounded by the registry" invariant
+	// (data-model.md §7).
+	ConnectedClientID string `json:"connected_client_id,omitempty"`
 }
 
 // handleGetOnboardingState godoc
@@ -179,6 +193,14 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// ConnectedClientID is bounded to the fixed connect client registry
+	// (data-model.md §7's invariant on ClientConnectedAt's keys) — never
+	// accept an arbitrary caller-supplied id into that map.
+	if req.ConnectedClientID != "" && connect.FindClient(req.ConnectedClientID) == nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("unknown client id: %s", req.ConnectedClientID))
+		return
+	}
+
 	// externalConnectionEvidence (FR-002a) itself reads the connect service and
 	// the shared telemetry/activation BBolt bucket. It must run OUTSIDE the
 	// UpdateOnboardingState transaction below — evaluating it lazily from
@@ -212,6 +234,9 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 			state.Engaged = true
 			t := now
 			state.EngagedAt = &t
+		}
+		if req.ConnectedClientID != "" {
+			applyClientConnected(state, req.ConnectedClientID, now)
 		}
 		return nil
 	})

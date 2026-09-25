@@ -3565,6 +3565,20 @@ components:
             persisted without that server-verified evidence (edge case: "never
             guess completed_external without positive evidence").
           type: string
+        connected_client_id:
+          description: |-
+            ConnectedClientID records a successful connect write for this client id
+            (Spec 109-b FR-042, review round 6). The REST connect endpoint
+            (POST /api/v1/connect/{client}) already records this itself on success;
+            this field exists so `mcpproxy connect` — which writes the client's
+            config file directly, without going through that endpoint, so the
+            command still works when no daemon is running — can relay the same
+            event to a daemon that IS running, keeping ClientConnectedAt in sync
+            across both surfaces. Must be a known id from the fixed connect client
+            registry (internal/connect.GetAllClients); any other value is rejected,
+            matching the field's "bounded by the registry" invariant
+            (data-model.md §7).
+          type: string
         engaged:
           description: |-
             Engaged marks the wizard as engaged (completed or explicitly skipped).

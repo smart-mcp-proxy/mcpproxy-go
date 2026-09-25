@@ -91,7 +91,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 
 	// --all mode
 	if connectAll {
-		return connectAllClients(svc, formatter, format)
+		return connectAllClients(cfg, svc, formatter, format)
 	}
 
 	// Single client mode
@@ -103,6 +103,9 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	result, err := svc.Connect(clientID, connectServerName, connectForce)
 	if err != nil {
 		return err
+	}
+	if result.Success {
+		notifyClientConnected(cfg, result.Client)
 	}
 
 	return printConnectResult(result, formatter, format)
@@ -195,7 +198,7 @@ func printConnectStatus(svc *connect.Service, formatter clioutput.OutputFormatte
 	return nil
 }
 
-func connectAllClients(svc *connect.Service, formatter clioutput.OutputFormatter, format string) error {
+func connectAllClients(cfg *config.Config, svc *connect.Service, formatter clioutput.OutputFormatter, format string) error {
 	clients := connect.GetAllClients()
 	var results []*connect.ConnectResult
 	var errors []string
@@ -208,6 +211,9 @@ func connectAllClients(svc *connect.Service, formatter clioutput.OutputFormatter
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", c.Name, err))
 			continue
+		}
+		if result.Success {
+			notifyClientConnected(cfg, result.Client)
 		}
 		results = append(results, result)
 	}

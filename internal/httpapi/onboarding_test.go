@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -282,4 +283,49 @@ func TestMarkOnboarding_InWizardCompletionUnaffected(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	require.NotNil(t, ctrl.saved)
 	assert.Equal(t, storage.StepStatusCompleted, ctrl.saved.ConnectStepStatus)
+}
+
+// TestMarkOnboarding_ConnectedClientID covers the review-round-6 fix: the
+// CLI's `mcpproxy connect` writes a client's config file directly (so it
+// keeps working with no daemon running) and cannot reach
+// POST /api/v1/connect/{client}'s recordClientConnected. It instead relays
+// through this endpoint with connected_client_id, which must land in the
+// same ClientConnectedAt map the REST connect path writes.
+func TestMarkOnboarding_ConnectedClientID(t *testing.T) {
+	t.Run("known client id is recorded", func(t *testing.T) {
+		ctrl := &onboardingTestController{}
+		srv := newOnboardingTestServer(t, ctrl)
+
+		w := postOnboardingMark(t, srv, OnboardingMarkRequest{ConnectedClientID: "claude-code"})
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, ctrl.saved)
+		require.Contains(t, ctrl.saved.ClientConnectedAt, "claude-code")
+		assert.WithinDuration(t, time.Now(), ctrl.saved.ClientConnectedAt["claude-code"], 5*time.Second)
+	})
+
+	t.Run("unknown client id is rejected", func(t *testing.T) {
+		ctrl := &onboardingTestController{}
+		srv := newOnboardingTestServer(t, ctrl)
+
+		w := postOnboardingMark(t, srv, OnboardingMarkRequest{ConnectedClientID: "not-a-real-client"})
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Nil(t, ctrl.saved)
+	})
+
+	t.Run("combines with other fields in one write", func(t *testing.T) {
+		ctrl := &onboardingTestController{}
+		srv := newOnboardingTestServer(t, ctrl)
+
+		w := postOnboardingMark(t, srv, OnboardingMarkRequest{
+			ConnectedClientID: "cursor",
+			ConnectStepStatus: "completed",
+		})
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, ctrl.saved)
+		assert.Contains(t, ctrl.saved.ClientConnectedAt, "cursor")
+		assert.Equal(t, storage.StepStatusCompleted, ctrl.saved.ConnectStepStatus)
+	})
 }
