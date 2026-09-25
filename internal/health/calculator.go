@@ -513,11 +513,14 @@ func connectionErrorStatus(action string) (status string, usable bool, actions [
 
 // quarantinedOAuthLoginState reports whether a quarantined server also needs
 // OAuth sign-in (FR-010), and if so the level/summary/detail to report. It
-// mirrors the same OAuth-login signals the non-quarantined branches below use
-// — the parked "pending auth" state (#1013), an OAuth-related error while
-// connecting, and the call-time OAuth requirement (MCP-2084) — because a
+// mirrors all seven OAuth-login signals the non-quarantined branches below
+// use — the parked "pending auth" state (#1013), an OAuth-related error while
+// connecting, the call-time OAuth requirement (MCP-2084), an explicit
+// UserLoggedOut, and OAuthStatus of "expired"/"error"/"none"/"" — because a
 // quarantined server is still dialed under the scanner's inspection
-// exemption and can hit any of them.
+// exemption (or was OAuth-configured and never signed in at all) and can hit
+// any of them; these inputs are populated for quarantined servers the same
+// way they are for enabled ones.
 func quarantinedOAuthLoginState(input HealthCalculatorInput, state string) (needsLogin bool, level, summary, detail string) {
 	switch state {
 	case "pending auth", "pending_auth":
@@ -531,6 +534,28 @@ func quarantinedOAuthLoginState(input HealthCalculatorInput, state string) (need
 	}
 	if input.CallTimeOAuthRequired {
 		return true, LevelDegraded, "Sign-in required", "This server requires sign-in before its tools can be called."
+	}
+	// The signals above only fire while the connection state itself surfaces
+	// an OAuth problem (parked pending-auth, an OAuth-shaped error string, or
+	// a call-time 401). A quarantined server that is OAuth-configured but was
+	// simply never signed in, logged out, or let its token expire/error never
+	// reaches "error"/"pending auth" — the scanner's inspection-exempt dial
+	// still succeeds at the transport level — so it fell through to the
+	// generic "Quarantined for review" summary. Mirror the non-quarantined
+	// OAuth-state checks (section 5 below) so the same inputs produce the
+	// same sign-in verdict regardless of admin state.
+	if input.OAuthRequired {
+		if input.UserLoggedOut {
+			return true, LevelUnhealthy, "Logged out", ""
+		}
+		switch input.OAuthStatus {
+		case "expired":
+			return true, LevelUnhealthy, "Token expired", ""
+		case "error":
+			return true, LevelUnhealthy, "Authentication error", input.LastError
+		case "none", "":
+			return true, LevelUnhealthy, "Authentication required", ""
+		}
 	}
 	return false, "", "", ""
 }

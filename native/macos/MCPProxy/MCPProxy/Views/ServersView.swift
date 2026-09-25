@@ -155,6 +155,12 @@ struct ServersView: View {
                 apiClient: appState.apiClient,
                 fontScale: fontScale,
                 onDoubleClick: { server in
+                    // Reset to the default tab: `selectedServerInitialTab` is
+                    // otherwise sticky from whatever the last `.showServerDetail`
+                    // notification requested (e.g. "Add secret" -> .config), so a
+                    // later manual double-click on an unrelated server would
+                    // silently reopen on that same stale tab instead of Tools.
+                    selectedServerInitialTab = .tools
                     selectedServer = server
                 },
                 onServersChanged: {

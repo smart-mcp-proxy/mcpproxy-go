@@ -242,7 +242,6 @@ a prompt-injected agent could otherwise read another upstream's PAT via
           "level": "unhealthy",
           "admin_state": "enabled",
           "summary": "Token expired",
-          "detail": "OAuth access token has expired",
           "action": "login",
           "status": "sign_in_required",
           "usable": false,

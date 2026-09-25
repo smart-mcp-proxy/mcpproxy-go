@@ -97,6 +97,36 @@ final class DashboardRoutingTests: XCTestCase {
         }
     }
 
+    /// `testAttentionRowPerformActionHandlesEveryHealthAction` only checks that
+    /// each action name appears somewhere inside *a* `case ...:` label — it
+    /// never looks at what that case's body actually does. That leaves every
+    /// regression in the round-2 fix's actual job (routing each action to the
+    /// *right* tab) undetected: swapping `.viewLogs` to navigate to `.config`,
+    /// reverting a case to `default: break`, or having `navigateToServerDetail`
+    /// post a bare `String` instead of a `ServerDetailTarget` (which would make
+    /// ServersView's `.showServerDetail` observer silently default every route
+    /// to `.tools`, per its own fallback) would all still pass that test. This
+    /// asserts the tab argument each case actually passes, and that the
+    /// notification carries a typed target rather than degrading to a string.
+    func testAttentionRowPerformActionRoutesToTheCorrectTab() throws {
+        let source = try dashboardSource()
+        let body = try performActionBody(in: source)
+
+        let configCase = try caseBody(labelContaining: ".editURL", in: body)
+        XCTAssertTrue(configCase.contains("navigateToServerDetail(server, tab: .config)"),
+                      "setSecret/configure/editURL must open the Config tab via navigateToServerDetail(server, tab: .config)")
+
+        let logsCase = try caseBody(labelContaining: ".viewLogs", in: body)
+        XCTAssertTrue(logsCase.contains("navigateToServerDetail(server, tab: .logs)"),
+                      "viewLogs must open the Logs tab via navigateToServerDetail(server, tab: .logs), not .config")
+
+        let navigateBody = try functionBody(named: "navigateToServerDetail", in: source)
+        XCTAssertTrue(navigateBody.contains("ServerDetailTarget(serverName: server.name, tab: tab)"),
+                      "navigateToServerDetail must post a typed ServerDetailTarget carrying the requested tab")
+        XCTAssertFalse(navigateBody.contains("object: server.name"),
+                       "navigateToServerDetail must not post a bare server-name String — ServersView would then default the tab to .tools regardless of which action fired")
+    }
+
     // MARK: - Helpers
 
     /// Isolates the body of `performAction` (the last function in the file)
@@ -105,6 +135,33 @@ final class DashboardRoutingTests: XCTestCase {
     private func performActionBody(in source: String) throws -> String {
         guard let start = source.range(of: "private func performAction") else {
             XCTFail("could not find performAction in DashboardView.swift")
+            return ""
+        }
+        return String(source[start.lowerBound...])
+    }
+
+    /// Extracts the body of one `switch` case — from a label containing
+    /// `needle` up to (but not including) the next `case` label or the
+    /// switch's closing brace — so an assertion about what a specific case
+    /// *does* can't be satisfied by a sibling case that merely mentions the
+    /// same tab elsewhere.
+    private func caseBody(labelContaining needle: String, in source: String) throws -> String {
+        let pattern = "case[^:]*\\Q\(needle)\\E\\b[^:]*:([\\s\\S]*?)(?=\\n\\s*case |\\n\\s*\\})"
+        let regex = try NSRegularExpression(pattern: pattern)
+        let nsSource = source as NSString
+        guard let match = regex.firstMatch(in: source, range: NSRange(location: 0, length: nsSource.length)),
+              match.numberOfRanges > 1 else {
+            XCTFail("could not find a case label containing \(needle) in performAction")
+            return ""
+        }
+        return nsSource.substring(with: match.range(at: 1))
+    }
+
+    /// Isolates one private function's body by name, bounded by the next
+    /// top-level `private func`/`func` or the end of the file.
+    private func functionBody(named name: String, in source: String) throws -> String {
+        guard let start = source.range(of: "func \(name)(") else {
+            XCTFail("could not find func \(name) in DashboardView.swift")
             return ""
         }
         return String(source[start.lowerBound...])

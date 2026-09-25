@@ -72,13 +72,25 @@ describe('AdminServers STATUS column (Spec 109 FR-011)', () => {
     getConfigMock.mockReset()
   })
 
-  it('never renders the raw `level` word when status and summary are both absent', async () => {
+  it('renders the connected fallback, not the raw `level` word, when status and summary are both absent', async () => {
     const wrapper = await mountAdminServers()
     const row = wrapper.findAll('tbody tr').find(r => r.text().includes('skewed-core'))
     expect(row).toBeTruthy()
-    const badgeText = row!.text()
+
+    // Target the STATUS column specifically (Server, Protocol, Endpoint,
+    // Status, Sharing, Groups, Actions) so this can't pass on a stray
+    // "healthy"/"connected" appearing in an unrelated cell.
+    const statusCell = row!.findAll('td')[3]
+    const badge = statusCell.find('span.badge')
+    expect(badge.exists()).toBe(true)
+
+    // Positive assertion: `server.connected: true` with an empty
+    // status/summary must fall through to the literal 'connected' label
+    // (see statusLabel() in AdminServers.vue), not an empty string, which a
+    // purely negative "doesn't contain a banned word" check would miss.
+    expect(badge.text()).toBe('connected')
     for (const banned of ['healthy', 'degraded', 'unhealthy']) {
-      expect(badgeText.toLowerCase()).not.toContain(banned)
+      expect(badge.text().toLowerCase()).not.toContain(banned)
     }
   })
 })

@@ -694,9 +694,22 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 		// older core's payload that predates `health.actions`.
 		primaryAction := healthAction
 		if healthData != nil {
-			if rawActions, ok := healthData["actions"].([]interface{}); ok && len(rawActions) > 0 {
-				if first, ok := rawActions[0].(string); ok {
-					primaryAction = first
+			// The client (daemon) path decodes a JSON API response, where
+			// `actions` always comes back as []interface{}; the config-only
+			// (daemon-less) path builds this map directly from
+			// health.CalculateHealth(...).Actions, a native []string, with no
+			// JSON round-trip. Both shapes must be handled or ACTION silently
+			// falls back to the legacy `action` field in config mode.
+			switch rawActions := healthData["actions"].(type) {
+			case []interface{}:
+				if len(rawActions) > 0 {
+					if first, ok := rawActions[0].(string); ok {
+						primaryAction = first
+					}
+				}
+			case []string:
+				if len(rawActions) > 0 {
+					primaryAction = rawActions[0]
 				}
 			}
 		}

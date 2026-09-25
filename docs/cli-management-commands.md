@@ -76,7 +76,7 @@ renders a bare ✅ — even when it is otherwise `ready`/healthy. STATUS gets a
 `· N held` suffix (e.g. `Online · 2 pending held`) and the emoji downgrades
 one step to ⚠️, so a hold is never hidden behind an all-clear green. ACTION
 also fills in with `tools list --server=<name>` when no other action applies.
-See `mcpproxy tools --server=<name>` or `upstream logs` for the hold detail.
+See `mcpproxy tools list --server=<name>` or `upstream logs` for the hold detail.
 
 `-o json`'s `health` object always carries `status`, `usable` (true only when
 `status == "ready"`) and `actions` (every applicable next step, in priority
