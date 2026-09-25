@@ -1540,7 +1540,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // (FR-014's "never a missing item"). `login`/`restart`/`enable` run
         // in place; every other value opens the screen that performs it —
         // never a one-click approve (FR-005).
-        if let primary = TrayPrimaryPresentation.primaryItem(for: server) {
+        let primary = TrayPrimaryPresentation.primaryItem(for: server)
+        var primaryOpensReview = false
+        if let primary {
             let item = NSMenuItem(title: primary.label, action: nil, keyEquivalent: "")
             item.target = self
             switch primary.kind {
@@ -1558,6 +1560,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 switch destination {
                 case .review:
                     item.representedObject = server.name
+                    primaryOpensReview = true
                 case .config:
                     item.representedObject = ServerDetailTarget(serverName: server.name, tab: .config)
                 case .logs:
@@ -1566,6 +1569,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 item.image = NSImage(systemSymbolName: primaryOpenSymbol(destination), accessibilityDescription: primary.label)
             }
             sub.addItem(item)
+            sub.addItem(.separator())
+        }
+
+        // Review round 1 (109-e high finding): `actions[0]` alone drives the
+        // primary item above, so a server that is BOTH quarantined AND needs
+        // OAuth sign-in (FR-010: `actions = ["login", "approve"]`) shows only
+        // "Sign in" there — "approve" never surfaces. Gating this row
+        // independently on `server.quarantined`, the same way
+        // ServersView.swift's `contextMenuActions` does for the Servers-row
+        // context menu, restores the one thing a quarantined server needs
+        // (the old unconditional `if server.quarantined { show Review }`
+        // this replaced) without reintroducing a second primary button.
+        if server.quarantined && !primaryOpensReview {
+            let review = NSMenuItem(title: HealthStatus.actionLabels["approve"] ?? "Review",
+                                    action: #selector(showServerDetailFromMenu(_:)), keyEquivalent: "")
+            review.target = self
+            review.representedObject = server.name
+            review.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Review")
+            sub.addItem(review)
             sub.addItem(.separator())
         }
 

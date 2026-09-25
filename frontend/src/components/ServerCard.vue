@@ -15,17 +15,28 @@
              shield icon, never a text badge — the tooltip carries the label.
              Always the EFFECTIVE mode; an unrecognized configured value
              renders the fail-closed mode with a subtle marker and the raw
-             value in the tooltip instead of being hidden or rewritten. -->
+             value in the tooltip instead of being hidden or rewritten.
+
+             Review round 1 (109-e medium finding): the CSS `data-tip`
+             tooltip conveys nothing to a screen reader, and the SVG was
+             `aria-hidden` with no accessible name outside the invalid-value
+             edge case — every other card's trust mode was unannounced. The
+             wrapper now carries `role="img"` + `aria-label` unconditionally,
+             from the same `trustBadgeTitle` text the tooltip already shows
+             (it already includes the "not recognized" detail for the
+             invalid case), so the old invalid-only sr-only span is
+             redundant and removed. -->
         <div
           :class="['tooltip tooltip-left shrink-0', trustBadgeClass]"
           :data-tip="trustBadgeTitle"
           :data-trust-invalid="trustModeState.isInvalid ? 'true' : undefined"
+          role="img"
+          :aria-label="trustBadgeTitle"
           data-test="server-trust-mode"
         >
           <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 2L3.5 6.5V11c0 5.55 3.84 10.74 8.5 12 4.66-1.26 8.5-6.45 8.5-12V6.5L12 2zm0 2.18l6.5 3.35V11c0 4.52-3.15 8.76-6.5 9.93C8.65 19.76 5.5 15.52 5.5 11V7.53L12 4.18z"/>
           </svg>
-          <span v-if="trustModeState.isInvalid" class="sr-only">(unrecognized value)</span>
         </div>
 
         <!-- ⋯ menu: every secondary action lives here, never on the card face
@@ -49,6 +60,19 @@
             class="dropdown-content menu menu-sm z-10 bg-base-100 rounded-box shadow-lg border border-base-300 w-52 p-1"
             data-test="server-card-menu"
           >
+            <!-- Review round 1 (109-e high finding): gated directly on
+                 `server.quarantined`, independent of whichever action is
+                 primary (mirrors macOS ServersView.swift's
+                 contextMenuActions). A quarantined server that ALSO needs
+                 OAuth sign-in reports actions=[login, approve] (FR-010);
+                 the primary button surfaces only "Sign in", so this is the
+                 menu's only path to review when that happens. -->
+            <li v-if="server.quarantined">
+              <router-link
+                :to="serverDetailPath(server.name, 'tools')"
+                data-test="server-card-menu-review"
+              >Review</router-link>
+            </li>
             <li>
               <button type="button" @click="toggleEnabled" :disabled="loading" data-test="server-card-menu-toggle">
                 {{ server.enabled ? 'Disable' : 'Enable' }}
@@ -365,9 +389,15 @@ const primaryLabel = computed(() => healthActionLabel(primaryAction.value))
 
 // login/restart/enable run in place; every other action opens the screen
 // that performs it — never a one-click approve (FR-005/FR-014). The approve
-// action is labelled "Review" and links to `/review/<name>`, which resolves
-// through the interim redirect to `/servers/<name>?tab=tools` until the
-// dedicated review screen ships; it never approves from here.
+// action is labelled "Review" and links straight to the server's Tools tab
+// (Spec 109 FR-013's interim review surface, until the dedicated review
+// screen ships); it never approves from here.
+//
+// Review round 1 (109-e high finding): this used to link to `/review/<name>`
+// on the theory that a redirect to `?tab=tools` would land elsewhere
+// (109-a T026a). That redirect route does not exist on this branch (and
+// 109-a is not merged), so the link 404'd. Pointing straight at the Tools
+// tab needs no redirect to exist at all.
 const primaryKind = computed<'execute' | 'navigate' | ''>(() => {
   switch (primaryAction.value) {
     case 'login':
@@ -388,7 +418,7 @@ const primaryKind = computed<'execute' | 'navigate' | ''>(() => {
 const primaryHref = computed(() => {
   switch (primaryAction.value) {
     case 'approve':
-      return `/review/${encodeURIComponent(props.server.name)}`
+      return serverDetailPath(props.server.name, 'tools')
     case 'set_secret':
       return '/secrets'
     case 'configure':

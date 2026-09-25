@@ -118,6 +118,8 @@ describe('ServerCard — one security headline per card (#1065)', () => {
     const review = wrapper.find('[data-test="server-card-primary-action"]')
     expect(review.exists()).toBe(true)
     expect(review.text()).toContain('Review')
-    expect(review.attributes('href')).toContain('/review/')
+    // `/review/<name>` is not a registered route (109-e review round 1);
+    // it links straight to the Tools tab instead.
+    expect(review.attributes('href')).toContain('tab=tools')
   })
 })

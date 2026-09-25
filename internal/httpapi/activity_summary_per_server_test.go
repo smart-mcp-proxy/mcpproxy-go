@@ -83,9 +83,24 @@ func TestActivitySummaryPerServerExcludesNonCallOnlyServers(t *testing.T) {
 	summary := getSummary(t, srv)
 
 	// "everything" also has a security-scan-only-looking row in the fixture,
-	// but it has real calls too, so this checks the general invariant instead:
+	// but it has real calls too, so this also checks the general invariant:
 	// no PerServer entry may report zero calls.
 	for _, ps := range summary.PerServer {
 		assert.Greater(t, ps.Calls, 0, "%s: PerServer must not list a server with zero calls", ps.Name)
 	}
+
+	// "scan-only" has no call in the fixture at all — only a security scan —
+	// so it must not appear in PerServer. A regression that hoisted
+	// per-server accumulator creation out of the `if counted` gate
+	// (internal/httpapi/activity.go) would add it here with Calls == 0,
+	// which the loop above would also have already caught, but asserting its
+	// absence by name is what actually exercises this test's own stated
+	// invariant instead of restating the general one against servers that
+	// all happen to have real calls too.
+	names := make([]string, len(summary.PerServer))
+	for i, ps := range summary.PerServer {
+		names[i] = ps.Name
+	}
+	assert.NotContains(t, names, "scan-only",
+		"a server whose only activity is a security scan must never appear in PerServer")
 }

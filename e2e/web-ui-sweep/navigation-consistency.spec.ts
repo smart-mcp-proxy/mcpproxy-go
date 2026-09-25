@@ -42,9 +42,11 @@ test('server cards render at equal heights at 1440px (Spec 109 FR-013)', async (
   const count = await cards.count()
 
   // A fleet with fewer than two servers cannot exercise the invariant, but
-  // must not silently report a pass either — every environment that runs
-  // this sweep with SWEEP_SERVER_NAME set registers at least one server, and
-  // CI's fixture set (109-i) adds enough to compare.
+  // must not silently report a pass either. scripts/run-web-smoke.sh
+  // registers two fixture servers (review round 1, 109-e) specifically so
+  // this test runs under the release-qa-gate `web-ui-sweep` job from this PR
+  // onward; a hand run with no MCPPROXY_FIXTURE_PATH, or a leaner fixture
+  // set, still falls back to skipping rather than reporting a false pass.
   test.skip(count < 2, 'fewer than two server cards rendered; nothing to compare')
 
   const heights: number[] = []
@@ -61,6 +63,15 @@ test('server cards render at equal heights at 1440px (Spec 109 FR-013)', async (
 // The primary-action row reserves its height even for a `ready` server with
 // no button — the row that would otherwise be the only variable-height part
 // of an otherwise fixed grid.
+//
+// Review round 1 (109-e medium finding): the row's "Details" link is
+// unconditional — every card renders it whether or not the primary button
+// does — so a bounding-box `height > 0` check passes on the Details link
+// alone and would still pass with the `min-h-[2.25rem]` reservation this
+// test is named after deleted entirely. Reading the CSS `min-height` the
+// row's own stylesheet applies, instead of the box Playwright measured
+// after layout, tests the reservation itself rather than something else
+// that happens to fill the same space.
 test('the primary-action row keeps its height with no button (Spec 109 FR-013)', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await goto(page, '/servers', '[data-test="kpi-card-total"], [data-test="servers-first-run-empty"]')
@@ -70,8 +81,12 @@ test('the primary-action row keeps its height with no button (Spec 109 FR-013)',
   test.skip(count === 0, 'no server cards rendered')
 
   for (let i = 0; i < count; i++) {
-    const box = await rows.nth(i).boundingBox()
+    const row = rows.nth(i)
+    const box = await row.boundingBox()
     expect(box, `primary-action row ${i} has no layout box`).not.toBeNull()
     expect(box!.height).toBeGreaterThan(0)
+
+    const minHeightPx = await row.evaluate((el) => parseFloat(getComputedStyle(el).minHeight) || 0)
+    expect(minHeightPx, `primary-action row ${i} has no min-height CSS reservation — a "ready" card's Details link would still render without it`).toBeGreaterThan(0)
   }
 })

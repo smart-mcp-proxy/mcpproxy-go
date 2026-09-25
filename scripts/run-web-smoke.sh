@@ -144,10 +144,26 @@ if [[ -n "$FIXTURE_PATH" ]]; then
       ;;
   esac
   SWEEP_SERVER_NAME="sweep-stdio"
+  # Review round 1 (109-e medium finding): navigation-consistency.spec.ts's
+  # "equal card heights" test — 109-e's own headline FR-013/D15 test — skips
+  # itself below 2 server cards, and a single fixture server left it skipping
+  # in every run of this gate until 109-i's later, larger fixture set lands.
+  # A second entry running the SAME fixture binary under a different name
+  # costs nothing new to build and is enough to let that test actually run
+  # from this PR onward, rather than only from 109-i.
   SERVERS_JSON=$(cat <<JSON
 [
     {
       "name": "${SWEEP_SERVER_NAME}",
+      "command": "${FIXTURE_PATH}",
+      "args": ["--transport", "stdio"],
+      "protocol": "stdio",
+      "enabled": true,
+      "quarantined": false,
+      "isolation": { "enabled": false }
+    },
+    {
+      "name": "${SWEEP_SERVER_NAME}-2",
       "command": "${FIXTURE_PATH}",
       "args": ["--transport", "stdio"],
       "protocol": "stdio",

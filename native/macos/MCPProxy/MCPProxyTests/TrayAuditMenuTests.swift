@@ -127,6 +127,35 @@ final class TrayAuditMenuTests: XCTestCase {
         XCTAssertFalse(titles.contains("Review"))
     }
 
+    /// Review round 1 (109-e high finding): a server that is BOTH quarantined
+    /// AND needs OAuth sign-in reports `actions = ["login", "approve"]`
+    /// (FR-010, internal/health/calculator.go quarantinedOAuthLoginState) —
+    /// the primary item is "Sign in", from `actions[0]` alone, exactly like
+    /// `TrayPrimaryItemTests` verifies. But dropping "approve" that way must
+    /// not drop the row's ONLY path to review: the old unconditional
+    /// `if server.quarantined { show Review }` block this replaced would have
+    /// still shown a review row here, and this submenu must too.
+    func testAQuarantinedServerThatAlsoNeedsLoginOffersBothSignInAndReview() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "everything", proto: "http", enabled: true, quarantined: true,
+                        health: ("degraded", "Sign-in required", "login"))
+        ])
+        controller.rebuildMenu()
+
+        let items = try serverSubmenu(host, named: "everything").items
+        let titles = items.map(\.title)
+
+        let signIn = try XCTUnwrap(items.first { $0.title == "Sign in" },
+                                   "expected the primary Sign-in row: \(titles)")
+        XCTAssertNotNil(signIn.action)
+
+        let review = try XCTUnwrap(items.first { $0.title == "Review" },
+                                   "a quarantined+login server must still offer a review path (FR-010/FR-014 parity — the ⋯/context-menu surfaces still gate independently on `quarantined`): \(titles)")
+        XCTAssertNotNil(review.action, "a review row with no action is the F14 dead link again")
+        XCTAssertTrue(review.target === controller)
+        XCTAssertEqual(review.representedObject as? String, "everything")
+    }
+
     // MARK: - F4 · Attention rows do not mutate on a navigation click
 
     func testAnAttentionRowDoesNotFireItsActionOnClick() throws {
