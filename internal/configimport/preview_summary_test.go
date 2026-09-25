@@ -1,7 +1,10 @@
 package configimport
 
 import (
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestImportedServer_StdioSummary is T030: a stdio server's preview row gets
@@ -277,6 +280,52 @@ func TestSummarizeServer_NeverEmbedsRawSecretArg(t *testing.T) {
 	summary := result.Imported[0].Summary
 	if containsSubstring(summary, "sk-supersecretvalue1234567890") {
 		t.Errorf("Summary leaked the raw secret argv value: %q", summary)
+	}
+}
+
+// TestImportedField_YAMLTagsMatchJSONSnakeCase is review round 4's finding:
+// ImportedField carried only `json` tags, so `-o yaml` (internal/cli/output
+// YAMLFormatter calls yaml.Marshal directly on the Go value, not through a
+// JSON round-trip) fell back to yaml.v3's default field-name derivation —
+// lowercased with no word separators — instead of the snake_case keys the
+// REST DTO, swagger.yaml and -o json all use. A schema-sensitive YAML
+// consumer must see the same `value_present`/`secret_like`/
+// `empty_or_placeholder` keys as every other surface.
+func TestImportedField_YAMLTagsMatchJSONSnakeCase(t *testing.T) {
+	f := ImportedField{
+		Name:               "API_KEY",
+		ValuePresent:       true,
+		SecretLike:         true,
+		EmptyOrPlaceholder: false,
+	}
+	out, err := yaml.Marshal(f)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	got := string(out)
+	for _, key := range []string{"name:", "value_present:", "secret_like:", "empty_or_placeholder:"} {
+		if !strings.Contains(got, key) {
+			t.Errorf("YAML output missing snake_case key %q, got:\n%s", key, got)
+		}
+	}
+	for _, wrong := range []string{"valuepresent:", "secretlike:", "emptyorplaceholder:"} {
+		if strings.Contains(got, wrong) {
+			t.Errorf("YAML output must not use yaml.v3's default collapsed key %q, got:\n%s", wrong, got)
+		}
+	}
+}
+
+// TestIsPlaceholder_AngleBracketToken guards the doc comment on
+// ImportedField.EmptyOrPlaceholder (mirrored verbatim into oas/swagger.yaml),
+// which cites "<TOKEN>" as a recognized placeholder example. isPlaceholder
+// trims surrounding <>{}$ and lowercases, so "<TOKEN>" reduces to "token" —
+// which must be a placeholderTokens entry for the documented behavior to
+// actually hold.
+func TestIsPlaceholder_AngleBracketToken(t *testing.T) {
+	for _, v := range []string{"<TOKEN>", "{{TOKEN}}", "$TOKEN", "token"} {
+		if !isPlaceholder(v) {
+			t.Errorf("isPlaceholder(%q) = false, want true (documented as a recognized placeholder)", v)
+		}
 	}
 }
 

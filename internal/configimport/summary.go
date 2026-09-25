@@ -13,20 +13,26 @@ import (
 // (see ImportedServer.EnvFields/HeaderFields).
 type ImportedField struct {
 	// Name is the env var or header name.
-	Name string `json:"name"`
+	Name string `json:"name" yaml:"name"`
 	// ValuePresent is true when the source config set a non-empty value.
-	ValuePresent bool `json:"value_present"`
+	ValuePresent bool `json:"value_present" yaml:"value_present"`
 	// SecretLike is a name-based heuristic (research D13):
 	// (?i)(token|secret|password|passwd|api[_-]?key|[_-]key$|auth|credential|
 	// private[_-]?key). Delegates to oauth.IsSensitiveKeyName /
 	// IsSensitiveHeaderName — the SAME heuristic the redaction and
 	// reveal-secret-headers surfaces already use, so every door agrees on
 	// what "looks like a secret" means.
-	SecretLike bool `json:"secret_like"`
+	SecretLike bool `json:"secret_like" yaml:"secret_like"`
 	// EmptyOrPlaceholder is true when the value is empty or an obvious
 	// placeholder ("YOUR_API_KEY", "<TOKEN>", "changeme", "xxx", …) — the
 	// case FR-040's "needs secret" tag exists to flag.
-	EmptyOrPlaceholder bool `json:"empty_or_placeholder"`
+	//
+	// Review round 4: without explicit `yaml` tags matching the `json` ones,
+	// gopkg.in/yaml.v3's default field-name derivation (lowercased, no word
+	// separators) diverged from the snake_case keys the REST DTO, swagger.yaml
+	// and -o json all use — `mcpproxy upstream import -o yaml` rendered
+	// `valuepresent`/`secretlike`/`emptyorplaceholder` instead.
+	EmptyOrPlaceholder bool `json:"empty_or_placeholder" yaml:"empty_or_placeholder"`
 }
 
 // placeholderTokens lists common placeholder values (lower-cased, with
@@ -62,6 +68,11 @@ var placeholderTokens = map[string]bool{
 	"redacted":        true,
 	"<redacted>":      true,
 	"none":            true,
+	// Review round 4: the doc comment above (mirrored into oas/swagger.yaml)
+	// cites "<TOKEN>" as a recognized placeholder example, but isPlaceholder's
+	// <>{}$ trim reduces it to the bare word "token", which was missing from
+	// this map — so the documented example was never actually flagged.
+	"token": true,
 }
 
 // isPlaceholder reports whether value is empty or an obvious placeholder.

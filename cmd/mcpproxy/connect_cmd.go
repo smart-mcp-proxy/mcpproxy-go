@@ -261,7 +261,11 @@ func printConnectResult(result *connect.ConnectResult, formatter clioutput.Outpu
 		if result.Success {
 			fmt.Printf("%s\n", result.Message)
 			if result.BackupPath != "" {
-				fmt.Printf("Backup: %s\n", result.BackupPath)
+				// Review round 4: this used to print the raw, un-shortened
+				// BackupPath directly above the home-shortened "Config: ~/…"
+				// line below, mixing a full path and a "~"-shortened path in
+				// the same output block.
+				fmt.Printf("Backup: %s\n", connect.DisplayPath(result.BackupPath, ""))
 			}
 			// FR-037: Config shows the home-shortened display_path; the full
 			// path is still available via -o json's config_path.

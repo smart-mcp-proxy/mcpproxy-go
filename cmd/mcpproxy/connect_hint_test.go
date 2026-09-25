@@ -48,6 +48,47 @@ func TestPrintConnectResult_ShowsDisplayPathAndReloadHint(t *testing.T) {
 	}
 }
 
+// TestPrintConnectResult_ShortensBackupPath is review round 4's finding: the
+// table-format success block printed the raw, un-shortened BackupPath
+// directly above the home-shortened "Config: ~/…" line (connectResultDisplayPath),
+// mixing a full path and a "~"-shortened path in the same output block
+// (FR-037's compact-display goal is per-block, not just per-line).
+func TestPrintConnectResult_ShortensBackupPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	result := &connect.ConnectResult{
+		Success:     true,
+		Client:      "cursor",
+		ConfigPath:  filepath.Join(home, ".cursor", "mcp.json"),
+		DisplayPath: connect.DisplayPath(filepath.Join(home, ".cursor", "mcp.json"), home),
+		BackupPath:  filepath.Join(home, ".cursor", "mcp.json.bak.20260101"),
+		ServerName:  "mcpproxy",
+		Action:      "updated",
+		Message:     "Successfully connected mcpproxy to cursor",
+		ReloadHint:  "Reload the Cursor window (or restart Cursor) to load MCPProxy",
+	}
+
+	formatter, err := clioutput.NewFormatter("table")
+	if err != nil {
+		t.Fatalf("NewFormatter: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := printConnectResult(result, formatter, "table"); err != nil {
+			t.Errorf("printConnectResult: %v", err)
+		}
+	})
+
+	if strings.Contains(out, result.BackupPath) {
+		t.Errorf("output must not print the full, un-shortened backup path, got:\n%s", out)
+	}
+	wantBackup := "Backup: " + connect.DisplayPath(result.BackupPath, "")
+	if !strings.Contains(out, wantBackup) {
+		t.Errorf("output missing shortened Backup line %q, got:\n%s", wantBackup, out)
+	}
+}
+
 // TestPrintConnectResult_FailureHasNoNextLine asserts a failed result skips
 // the Config/Next lines entirely (they describe a write that didn't happen).
 func TestPrintConnectResult_FailureHasNoNextLine(t *testing.T) {
