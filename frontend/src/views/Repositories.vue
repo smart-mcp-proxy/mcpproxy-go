@@ -511,7 +511,7 @@
           </div>
 
           <div class="modal-action">
-            <button type="button" class="btn btn-ghost" data-test="registry-add-cancel" @click="closeAddRegistry">
+            <button type="button" class="btn btn-ghost" data-test="registry-add-cancel" :disabled="addingRegistry" @click="closeAddRegistry">
               Cancel
             </button>
             <button
@@ -544,7 +544,7 @@
         </div>
 
         <div class="modal-action">
-          <button type="button" class="btn btn-ghost" data-test="registry-delete-cancel" @click="closeDeleteRegistry">
+          <button type="button" class="btn btn-ghost" data-test="registry-delete-cancel" :disabled="deletingRegistry" @click="closeDeleteRegistry">
             Cancel
           </button>
           <button
@@ -629,14 +629,16 @@ const addingRegistry = ref(false)
 const isEditMode = computed(() => editRegistryId.value !== null)
 // Spec 109 FR-055: <dialog>.showModal()/close(), not the `open` attribute —
 // keeps the top layer, so nothing (sidebar, header) can ever paint over it.
-const { dialogEl: addRegistryDialogEl } = useDialogOpen(() => showAddRegistry.value, () => closeAddRegistry())
+// The native-close handler is deliberately NOT closeAddRegistry() — see the
+// comment on handleAddRegistryNativeClose for why (review round 2, finding 1).
+const { dialogEl: addRegistryDialogEl } = useDialogOpen(() => showAddRegistry.value, () => handleAddRegistryNativeClose())
 
 // Delete-custom-registry confirmation state (MCP-1073)
 const showDeleteRegistry = ref(false)
 const deleteRegistryTarget = ref<Registry | null>(null)
 const deleteRegistryError = ref<string | null>(null)
 const deletingRegistry = ref(false)
-const { dialogEl: deleteRegistryDialogEl } = useDialogOpen(() => showDeleteRegistry.value, () => closeDeleteRegistry())
+const { dialogEl: deleteRegistryDialogEl } = useDialogOpen(() => showDeleteRegistry.value, () => handleDeleteRegistryNativeClose())
 
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -967,6 +969,24 @@ function closeAddRegistry() {
   editRegistryId.value = null
 }
 
+// The Cancel button and the invisible backdrop-dismiss button both wire to
+// closeAddRegistry(), which intentionally no-ops while a submit is in
+// flight. A native close (Escape, or `<dialog>`'s own backdrop/cancel
+// handling) is different: the dialog has ALREADY closed in the DOM by the
+// time this fires, and nothing here can undo that. Reusing closeAddRegistry
+// there (review round 1) meant its addingRegistry guard silently skipped the
+// `showAddRegistry` flip too, leaving Vue believing the dialog was still
+// open while the DOM said otherwise — the button that would reopen it then
+// sets `showAddRegistry` to a value it already holds, the driving watch
+// never re-fires, and `showModal()` never runs again (round 1's exact bug,
+// reintroduced here — review round 2, finding 1). Always resync local state
+// on a native close; doAddRegistry()/doEditRegistry() already tolerate the
+// dialog having moved on by the time their request settles.
+function handleAddRegistryNativeClose() {
+  showAddRegistry.value = false
+  editRegistryId.value = null
+}
+
 // Map the backend's stable error codes to actionable messages. Shared across
 // add / edit / delete since all three surface the same code set.
 function registryErrorMessage(code: string | undefined, fallback: string | undefined, verb: string): string {
@@ -1064,6 +1084,13 @@ function openDeleteRegistry(registry: Registry) {
 
 function closeDeleteRegistry() {
   if (deletingRegistry.value) return
+  showDeleteRegistry.value = false
+  deleteRegistryTarget.value = null
+}
+
+// See handleAddRegistryNativeClose above — same reasoning, applied to the
+// delete-confirm dialog (review round 2, finding 1).
+function handleDeleteRegistryNativeClose() {
   showDeleteRegistry.value = false
   deleteRegistryTarget.value = null
 }

@@ -952,6 +952,12 @@ function close() {
   previewError.value = {}
   lastConnect.value = null
   undoPanelOpen.value = false
+  // Review round 2, finding 3: this also fires on a native Escape/backdrop
+  // dismiss (it's useDialogOpen's onClose), which can happen while the
+  // "Disconnect X?" confirm sub-panel is open. Without resetting it, the
+  // stale confirm panel reappears for a client the user may no longer
+  // intend to touch the next time the modal opens.
+  disconnectTarget.value = null
   emit('close')
 }
 

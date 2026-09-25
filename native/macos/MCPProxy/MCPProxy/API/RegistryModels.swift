@@ -225,11 +225,17 @@ struct SearchRegistryServersResponse: Codable {
 ///
 /// `serverName` is the name the backend actually assigned the new server —
 /// which can differ from the registry entry's own display name (falling back
-/// to the entry id when the entry's name is empty, or de-duplicating on a
-/// conflict). Review round 1: a caller that keys UI state on the catalog name
-/// instead (e.g. ServerBrowseView's "Added checkmark Open" flow) can end up
-/// looking up a server that does not exist under that name. The Web UI reads
-/// this same field (`result.server?.name`).
+/// to the entry id when the entry's name is empty). Review round 1: a caller
+/// that keys UI state on the catalog name instead (e.g. ServerBrowseView's
+/// "Added checkmark Open" flow) can end up looking up a server that does not
+/// exist under that name. The Web UI reads this same field
+/// (`result.server?.name`).
+///
+/// Note (review round 2, finding 7): a name COLLISION is not de-duplicated —
+/// AddServer (internal/server/server.go) hard-fails the add with a
+/// `duplicate_name` error (`code`/`message` on this same result, not a
+/// renamed `serverName`). Only the empty-name-falls-back-to-entry-ID case
+/// above is real.
 struct AddServerResult: Equatable {
     let success: Bool
     let message: String?
@@ -256,13 +262,22 @@ struct RegistryAddServerSuccessBody: Decodable {
 }
 
 /// Structured error body of a failed add-from-registry. Mirrors
-/// `contracts.RegistryAddError`.
+/// `contracts.RegistryAddError`, but the wire envelope
+/// (`writeRegistryAddError` in internal/httpapi/server.go) serializes the
+/// message under the JSON key `error`, not `message` — the same shape every
+/// other error envelope in this API uses. `message` decoded that field
+/// directly (review round 2, finding 6): `err?.message` was therefore always
+/// nil against the real backend, and a failed Add-from-Registry (e.g. a
+/// duplicate name) always fell through to the generic "HTTP 400: ..." text
+/// instead of the backend's actual reason (which the Web UI shows fine via
+/// `result.error`).
 struct RegistryAddServerErrorBody: Decodable {
     let code: String?
     let message: String?
     let missingInputs: [String]?
     enum CodingKeys: String, CodingKey {
-        case code, message
+        case code
+        case message = "error"
         case missingInputs = "missing_inputs"
     }
 }

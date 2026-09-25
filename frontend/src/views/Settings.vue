@@ -253,6 +253,11 @@ const activeTab = ref<string>('security')
 // URL in sync with every tab change, preserving other query params (e.g.
 // `?focus=` from focusField).
 watch(activeTab, (tab) => {
+  // Review round 2, finding 8: any tab change — a click, focusField, or the
+  // late-edition retry below succeeding — means the initial `?tab=` read no
+  // longer needs a retry (and, for a manual click, must not be overridden
+  // later by that retry).
+  tabParamPending = false
   if (route.query.tab === tab) return
   void router.replace({ query: { ...route.query, tab } })
 })
@@ -539,10 +544,35 @@ watch(defaultInstructions, () => {
   maybePrefillInstructions()
 })
 
-onMounted(async () => {
+// Spec 109 FR-016 (review round 2, finding 8): `hasServerEdition` depends on
+// systemStore.status, which App.vue populates asynchronously (SSE, its own
+// onMounted). On a fresh reload of /settings?tab=teams that status frame can
+// still be in flight when this component mounts, so the membership check
+// below silently drops `teams` and nothing ever retries once status arrives.
+// Re-run the same check once edition resolves, but only while the user
+// hasn't since picked a different tab themselves (`tabParamPending` is
+// cleared the moment either happens).
+let tabParamPending = typeof route.query.tab === 'string'
+function applyTabParamIfValid(): boolean {
   const tabParam = route.query.tab
   if (typeof tabParam === 'string' && tabs.value.some((t) => t.id === tabParam)) {
     activeTab.value = tabParam
+    return true
+  }
+  return false
+}
+
+onMounted(async () => {
+  if (applyTabParamIfValid()) tabParamPending = false
+  if (tabParamPending) {
+    const stopEditionRetry = watch(hasServerEdition, () => {
+      stopEditionRetry()
+      // The user may have picked a different tab in the meantime — that
+      // must win over a now-stale `?tab=` retry.
+      if (!tabParamPending) return
+      applyTabParamIfValid()
+      tabParamPending = false
+    })
   }
   loadDefaultInstructions()
   window.addEventListener('mcpproxy:config-saved', handleConfigSaved)

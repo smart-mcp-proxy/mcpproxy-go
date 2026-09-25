@@ -377,10 +377,13 @@ struct ServerBrowseView: View {
         let result = await client.addServerFromRegistry(registryID: reg, serverID: server.id)
         if result.success {
             // The backend can assign a different name than the catalog entry's
-            // own (empty name falls back to the entry id; a conflict gets
-            // de-duplicated) — key "Added checkmark Open" on what it actually
-            // assigned, or Open silently no-ops (review round 1; the Web UI's
-            // Repositories.vue already does `result.server?.name || server.name`).
+            // own (empty name falls back to the entry id) — key "Added
+            // checkmark Open" on what it actually assigned, or Open silently
+            // no-ops (review round 1; the Web UI's Repositories.vue already
+            // does `result.server?.name || server.name`). A name COLLISION is
+            // NOT de-duplicated — it hard-fails the add (see the `else`
+            // branch below), so `result.success` is false and this branch
+            // does not run (review round 2, finding 7).
             let assignedName = result.serverName ?? server.name
             addNote = "Added “\(server.name)”. New servers start quarantined — review under Servers."
             addedServers[server.id] = assignedName

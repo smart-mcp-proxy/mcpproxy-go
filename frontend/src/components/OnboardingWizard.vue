@@ -989,10 +989,11 @@ function goBack() {
 
 // Leaving the wizard for the registry: the wizard is a modal owned by the
 // Dashboard, so it has to close before the route changes or it would hang over
-// the registry page. The await is load-bearing — `dismiss()` awaits its
-// mark-skipped calls before it emits `close`, and routing away first unmounts
-// the Dashboard that owns the `wizardOpen` flag, so the emit could land with
-// nothing left to clear it and the wizard would spring back open on return.
+// the registry page. `dismiss()` emits `close` synchronously (its engagement
+// bookkeeping runs decoupled, in the background — see `dismiss`'s own
+// comment), so by the time this `await` resolves the Dashboard has already
+// flipped `wizardOpen` false. Routing away before that would unmount the
+// Dashboard first, and the wizard would spring back open on return.
 async function goToRegistry() {
   await dismiss()
   await router.push('/repositories')
@@ -1497,24 +1498,41 @@ async function onServerAdded() {
   })
 }
 
-async function dismiss() {
+// `dismiss` is the onClose handler useDialogOpen calls for a NATIVE close
+// (Escape, or the browser's own backdrop/cancel handling) as well as every
+// explicit "close the wizard" affordance. By the time a native close fires,
+// the <dialog> has already closed itself in the DOM; `props.show` is the
+// only thing keeping useDialogOpen's `isOpen()` true, and only the parent's
+// `@close` handler (via `emit('close')`) flips it. This used to await up to
+// three sequential engagement-bookkeeping calls BEFORE emitting close, so
+// `props.show` stayed true for that whole window — reopening the wizard from
+// the sidebar Setup entry during it was a no-op (setting an already-true ref
+// doesn't re-trigger the watch that calls `showModal()` again), same failure
+// class as round 1's H4 dialog-desync bug. Emit synchronously first; the
+// bookkeeping is best-effort and fully decoupled from the dialog's own
+// open/close state, so it runs in the background regardless (review round 2,
+// finding 2).
+function dismiss() {
+  emit('close')
+  void recordDismissalEngagement()
+}
+
+async function recordDismissalEngagement() {
   // Engagement is permanent: once the wizard has been opened and dismissed,
   // we don't auto-popup again. The sidebar Setup entry remains visible so
   // the user can return.
-  if (!onboarding.isEngaged) {
-    // Spec 046 — any step the user never advanced through counts as "skipped"
-    // so the funnel (engaged - completed - skipped) reconciles to engaged
-    // total. Per-step calls are no-ops if a status is already recorded.
-    const stepState = onboarding.state?.state
-    if (stepState && !stepState.connect_step_status) {
-      await onboarding.markConnectSkipped()
-    }
-    if (stepState && !stepState.server_step_status) {
-      await onboarding.markServerSkipped()
-    }
-    await onboarding.markEngaged()
+  if (onboarding.isEngaged) return
+  // Spec 046 — any step the user never advanced through counts as "skipped"
+  // so the funnel (engaged - completed - skipped) reconciles to engaged
+  // total. Per-step calls are no-ops if a status is already recorded.
+  const stepState = onboarding.state?.state
+  if (stepState && !stepState.connect_step_status) {
+    await onboarding.markConnectSkipped()
   }
-  emit('close')
+  if (stepState && !stepState.server_step_status) {
+    await onboarding.markServerSkipped()
+  }
+  await onboarding.markEngaged()
 }
 
 // NOTE: no onMounted open-fallback here. The `immediate` watcher above already
