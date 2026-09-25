@@ -588,6 +588,9 @@ export interface ServerTokenMetrics {
   saved_tokens: number
   saved_tokens_percentage: number
   per_server_tool_list_sizes: Record<string, number>
+  // Spec 109-k: true while average_query_result_size/saved_tokens are a
+  // synthetic simulation rather than derived from a real retrieve_tools call.
+  estimated: boolean
 }
 
 // Usage statistics aggregate — GET /api/v1/activity/usage (Spec 069).
@@ -636,6 +639,9 @@ export interface UsageAggregateResponse {
   token_source: string              // "bytes" — size-based proxy (FR-006)
   tokens_saved: number              // echoed from ServerTokenMetrics (FR-007)
   tokens_saved_percentage: number
+  // Spec 109-k: true while tokens_saved is a synthetic simulation (no real
+  // retrieve_tools call observed yet) rather than derived from real usage.
+  tokens_saved_estimated: boolean
   tools: UsageToolStat[]
   other?: UsageOtherBucket | null   // present only when list truncated to top-N
   timeline: UsageTimeBucket[]

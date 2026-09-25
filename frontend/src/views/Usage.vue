@@ -73,6 +73,12 @@
         </div>
         <div class="stat-value text-success" :title="tokensSavedExplainer">
           {{ formatNumber(data.tokens_saved) }}
+          <span
+            v-if="data.tokens_saved_estimated"
+            class="badge badge-ghost badge-sm align-middle ml-1"
+            data-test="usage-tokens-saved-estimate-badge"
+            title="No retrieve_tools call has been observed yet — this is a simulated estimate from the current tool catalog, not a measured average"
+          >estimate</span>
         </div>
         <div class="stat-desc">
           {{ data.tokens_saved_percentage.toFixed(1) }}% smaller tool context via BM25 discovery ·
