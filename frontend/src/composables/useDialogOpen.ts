@@ -19,8 +19,20 @@ import { onBeforeUnmount, ref, watch, type Ref } from 'vue'
  * `open` attribute directly — the previous behaviour — keeping every existing
  * unit test that renders these dialogs working unchanged. Real browsers all
  * support `<dialog>` natively.
+ *
+ * A real `showModal()`-opened dialog also closes itself natively — Escape,
+ * or a `<form method="dialog">` submit — without anything in Vue-land asking
+ * it to. Left unhandled, that desyncs the driving `isOpen()` source from the
+ * DOM: the dialog is closed but the source still reads `true`, so the next
+ * click that would reopen it sets the same value again, the `watch` below
+ * never fires, and `showModal()` never runs again — the dialog is bricked
+ * until a full reload (review round 1, H4 follow-up). `onClose` is the
+ * caller's hook to flip its own state back to closed when that happens; a
+ * `close` event the dialog fired *because we just called `close()`
+ * ourselves* is told apart by `isOpen()` already reading `false` by the time
+ * it fires, so it does not loop back into another call to `onClose`.
  */
-export function useDialogOpen(isOpen: () => boolean) {
+export function useDialogOpen(isOpen: () => boolean, onClose?: () => void) {
   const dialogEl: Ref<HTMLDialogElement | null> = ref(null)
 
   function sync(open: boolean) {
@@ -40,21 +52,34 @@ export function useDialogOpen(isOpen: () => boolean) {
     }
   }
 
+  function handleNativeClose() {
+    // isOpen() is still true only when nothing in Vue-land initiated this —
+    // a genuine native dismissal that Vue's state does not know about yet.
+    if (onClose && isOpen()) onClose()
+  }
+
   watch(isOpen, sync, { flush: 'post' })
 
   // Apply the initial state once the element has mounted (a plain immediate
-  // watcher would run before the template ref is bound).
+  // watcher would run before the template ref is bound), and (re)attach the
+  // native `close` listener to whichever element is currently bound.
   watch(
     dialogEl,
-    (el) => {
-      if (el) sync(isOpen())
+    (el, prevEl) => {
+      prevEl?.removeEventListener('close', handleNativeClose)
+      if (el) {
+        el.addEventListener('close', handleNativeClose)
+        sync(isOpen())
+      }
     },
     { flush: 'post' }
   )
 
   onBeforeUnmount(() => {
     const el = dialogEl.value
-    if (el?.open && typeof el.close === 'function') el.close()
+    if (!el) return
+    el.removeEventListener('close', handleNativeClose)
+    if (el.open && typeof el.close === 'function') el.close()
   })
 
   return { dialogEl }

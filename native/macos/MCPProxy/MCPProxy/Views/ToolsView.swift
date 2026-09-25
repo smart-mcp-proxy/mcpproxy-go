@@ -55,6 +55,11 @@ struct ToolsView: View {
         /// The canonical MCP identity — what an agent would actually call.
         var qualified: String { server.isEmpty ? name : "\(server):\(name)" }
         var id: String { qualified }
+
+        /// `tier`, defaulting to "unannotated" (review round 1): a `nil` tier
+        /// from an older core must still render a badge, same as the Web UI's
+        /// `tool.tier || 'unannotated'` — never no badge at all.
+        var displayTier: String { tier ?? "unannotated" }
     }
 
     var body: some View {
@@ -170,14 +175,12 @@ struct ToolsView: View {
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(Color.accentColor.opacity(0.15))
                     .clipShape(Capsule())
-                if let tier = row.tier {
-                    Text(ToolLabels.tierLabel(tier))
-                        .font(.scaled(.caption2, scale: fontScale))
-                        .padding(.horizontal, 5).padding(.vertical, 1)
-                        .background(tierColor(tier).opacity(0.15))
-                        .foregroundStyle(tierColor(tier))
-                        .clipShape(Capsule())
-                }
+                Text(ToolLabels.tierLabel(row.displayTier))
+                    .font(.scaled(.caption2, scale: fontScale))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(tierColor(row.displayTier).opacity(0.15))
+                    .foregroundStyle(tierColor(row.displayTier))
+                    .clipShape(Capsule())
                 Spacer()
                 if let score = row.score {
                     Text(String(format: "%.2f", score))

@@ -222,15 +222,37 @@ struct SearchRegistryServersResponse: Codable {
 /// Result of adding a server from a registry. Carries `missingInputs` when the
 /// backend rejects with `missing_required_input` so the UI can tell the user
 /// which env vars are needed (the full prompt flow is a follow-up).
+///
+/// `serverName` is the name the backend actually assigned the new server —
+/// which can differ from the registry entry's own display name (falling back
+/// to the entry id when the entry's name is empty, or de-duplicating on a
+/// conflict). Review round 1: a caller that keys UI state on the catalog name
+/// instead (e.g. ServerBrowseView's "Added checkmark Open" flow) can end up
+/// looking up a server that does not exist under that name. The Web UI reads
+/// this same field (`result.server?.name`).
 struct AddServerResult: Equatable {
     let success: Bool
     let message: String?
     let missingInputs: [String]?
+    let serverName: String?
 
-    static func ok() -> AddServerResult { AddServerResult(success: true, message: nil, missingInputs: nil) }
-    static func failure(message: String?, missingInputs: [String]? = nil) -> AddServerResult {
-        AddServerResult(success: false, message: message, missingInputs: missingInputs)
+    static func ok(serverName: String? = nil) -> AddServerResult {
+        AddServerResult(success: true, message: nil, missingInputs: nil, serverName: serverName)
     }
+    static func failure(message: String?, missingInputs: [String]? = nil) -> AddServerResult {
+        AddServerResult(success: false, message: message, missingInputs: missingInputs, serverName: nil)
+    }
+}
+
+/// The success body for `POST /registries/{id}/servers/{serverId}/add`:
+/// `{"success":true,"data":{"server":{"name":...}}}`. Only the field this
+/// caller needs is modeled.
+struct RegistryAddServerSuccessBody: Decodable {
+    struct DataPayload: Decodable {
+        struct ServerSummary: Decodable { let name: String? }
+        let server: ServerSummary?
+    }
+    let data: DataPayload?
 }
 
 /// Structured error body of a failed add-from-registry. Mirrors

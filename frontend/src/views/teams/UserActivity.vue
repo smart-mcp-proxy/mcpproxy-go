@@ -196,7 +196,7 @@ const totalCount = ref(0)
 const currentPage = ref(1)
 const pageSize = 25
 const selectedActivity = ref<Activity | null>(null)
-const { dialogEl: activityDialogEl } = useDialogOpen(() => selectedActivity.value !== null)
+const { dialogEl: activityDialogEl } = useDialogOpen(() => selectedActivity.value !== null, () => { selectedActivity.value = null })
 const serverNames = ref<string[]>([])
 
 const filters = reactive({

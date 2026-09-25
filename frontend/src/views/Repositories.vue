@@ -629,14 +629,14 @@ const addingRegistry = ref(false)
 const isEditMode = computed(() => editRegistryId.value !== null)
 // Spec 109 FR-055: <dialog>.showModal()/close(), not the `open` attribute —
 // keeps the top layer, so nothing (sidebar, header) can ever paint over it.
-const { dialogEl: addRegistryDialogEl } = useDialogOpen(() => showAddRegistry.value)
+const { dialogEl: addRegistryDialogEl } = useDialogOpen(() => showAddRegistry.value, () => closeAddRegistry())
 
 // Delete-custom-registry confirmation state (MCP-1073)
 const showDeleteRegistry = ref(false)
 const deleteRegistryTarget = ref<Registry | null>(null)
 const deleteRegistryError = ref<string | null>(null)
 const deletingRegistry = ref(false)
-const { dialogEl: deleteRegistryDialogEl } = useDialogOpen(() => showDeleteRegistry.value)
+const { dialogEl: deleteRegistryDialogEl } = useDialogOpen(() => showDeleteRegistry.value, () => closeDeleteRegistry())
 
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -708,7 +708,7 @@ function clearRegistries() {
 }
 
 const showPrompt = computed(() => promptServer.value !== null)
-const { dialogEl: promptDialogEl } = useDialogOpen(() => showPrompt.value)
+const { dialogEl: promptDialogEl } = useDialogOpen(() => showPrompt.value, () => closePrompt())
 
 // Add is blocked until every prompted input has a non-empty value.
 const promptComplete = computed(() =>

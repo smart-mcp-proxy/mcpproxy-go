@@ -456,7 +456,7 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
-const { dialogEl } = useDialogOpen(() => props.show)
+const { dialogEl } = useDialogOpen(() => props.show, () => close())
 const systemStore = useSystemStore()
 const onboarding = useOnboardingStore()
 

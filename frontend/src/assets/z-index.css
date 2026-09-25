@@ -2,7 +2,16 @@
  * Spec 109 FR-055 (navigation-map.md): one z-index scale, defined in one
  * place, so no sidebar/header element can ever paint over a modal (audit H4).
  *
- * sidebar < header < dropdown < modal < toast
+ * header < sidebar < dropdown < modal < toast
+ *
+ * Sidebar outranks header, not the other way around: `SidebarNav`'s
+ * `.drawer-side` is a `position: fixed` sibling of `.drawer-content` (which
+ * holds the sticky `TopHeader`), and below the `lg` drawer breakpoint it is
+ * a full-screen overlay that must paint OVER the header when it opens. A
+ * review round on this file's first version had `--z-header` above
+ * `--z-sidebar`, which put the sticky header back on top of the open mobile
+ * drawer — the same class of bug this scale exists to prevent, just on the
+ * other pair of elements.
  *
  * Modals themselves should render in the browser's top layer via
  * `<dialog>.showModal()` rather than relying on this scale (the top layer
@@ -11,8 +20,8 @@
  * sit above the header/sidebar but below a real modal.
  */
 :root {
-  --z-sidebar: 30;
-  --z-header: 40;
+  --z-header: 30;
+  --z-sidebar: 40;
   --z-dropdown: 50;
   --z-modal: 60;
   --z-toast: 70;

@@ -1,6 +1,7 @@
 package index
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,6 +49,14 @@ type ToolDocument struct {
 	Hash             string `json:"hash"`
 	Tags             string `json:"tags"`
 	SearchableText   string `json:"searchable_text"` // Combined searchable content
+	// AnnotationsJSON is the tool's MCP behavior-hint annotations
+	// (config.ToolAnnotations), marshaled once at index time. Stored but not
+	// indexed for search, same as Hash — it exists so a search hit's tier
+	// (Spec 109 FR-028) reflects the tool's real annotations instead of
+	// always reading TierUnannotated (review round 1: GET /index/search never
+	// stored annotations at all, so a search hit's tier could not agree with
+	// the same tool's tier on GET /servers/{id}/tools).
+	AnnotationsJSON string `json:"annotations_json,omitempty"`
 }
 
 // NewBleveIndex creates (or opens) the shared default Bleve index at
@@ -134,6 +143,13 @@ func createBleveIndex(indexPath string) (bleve.Index, error) {
 	hashField.Index = false // Don't index hash for search
 	toolMapping.AddFieldMappingsAt("hash", hashField)
 
+	// Annotations field: stored only, never searched (it is JSON, not prose).
+	annotationsField := bleve.NewTextFieldMapping()
+	annotationsField.Analyzer = keyword.Name
+	annotationsField.Store = true
+	annotationsField.Index = false
+	toolMapping.AddFieldMappingsAt("annotations_json", annotationsField)
+
 	// Tags field (standard analyzer)
 	tagsField := bleve.NewTextFieldMapping()
 	tagsField.Analyzer = standard.Name
@@ -195,6 +211,18 @@ func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
 		toolMeta.Description,
 		toolMeta.ParamsJSON)
 
+	var annotationsJSON string
+	if toolMeta.Annotations != nil {
+		if b, err := json.Marshal(toolMeta.Annotations); err == nil {
+			annotationsJSON = string(b)
+		}
+		// A marshal error here is unreachable for config.ToolAnnotations (plain
+		// strings/bools/pointers, no cyclic or unsupported types) — silently
+		// falling back to "no annotations stored" rather than failing the whole
+		// index write matches how the rest of this function tolerates partial
+		// metadata (e.g. an empty OutputSchemaJSON).
+	}
+
 	doc := &ToolDocument{
 		ToolName:         toolName,
 		FullToolName:     toolMeta.Name,
@@ -205,6 +233,7 @@ func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
 		Hash:             toolMeta.Hash,
 		Tags:             "", // Can be extended later
 		SearchableText:   searchableText,
+		AnnotationsJSON:  annotationsJSON,
 	}
 
 	return docID, doc
@@ -235,6 +264,17 @@ func readToolMetadata(docID string, fields map[string]interface{}) *config.ToolM
 		// name so a malformed hit still renders rather than vanishing.
 		canonical = CanonicalToolName(serverName, getStringField(fields, "full_tool_name"))
 	}
+	var annotations *config.ToolAnnotations
+	if raw := getStringField(fields, "annotations_json"); raw != "" {
+		var parsed config.ToolAnnotations
+		if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
+			annotations = &parsed
+		}
+		// A malformed stored value (should not happen; toolDocument only ever
+		// writes what json.Marshal produced) falls back to nil — TierUnannotated
+		// — rather than surfacing a decode error through every search result.
+	}
+
 	return &config.ToolMetadata{
 		Name:             canonical,
 		RawName:          strings.TrimPrefix(canonical, serverName+":"),
@@ -243,6 +283,7 @@ func readToolMetadata(docID string, fields map[string]interface{}) *config.ToolM
 		ParamsJSON:       getStringField(fields, "params_json"),
 		OutputSchemaJSON: getStringField(fields, "output_schema_json"),
 		Hash:             getStringField(fields, "hash"),
+		Annotations:      annotations,
 	}
 }
 
@@ -346,7 +387,7 @@ func newToolSearchRequest(q bquery.Query, from, size int) *bleve.SearchRequest {
 	searchReq := bleve.NewSearchRequest(q)
 	searchReq.From = from
 	searchReq.Size = size
-	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
+	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash", "annotations_json"}
 	searchReq.Highlight = bleve.NewHighlight()
 
 	// Deterministic tie-break: primary sort by score descending (bleve's
@@ -621,7 +662,7 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 	query := bleve.NewTermQuery(serverName)
 	query.SetField("server_name")
 
-	fields := []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
+	fields := []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash", "annotations_json"}
 
 	b.logger.Debug("Querying tools by server", zap.String("server", serverName))
 

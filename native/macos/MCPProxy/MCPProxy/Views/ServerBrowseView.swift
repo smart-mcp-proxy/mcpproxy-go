@@ -376,8 +376,14 @@ struct ServerBrowseView: View {
         addNote = nil
         let result = await client.addServerFromRegistry(registryID: reg, serverID: server.id)
         if result.success {
+            // The backend can assign a different name than the catalog entry's
+            // own (empty name falls back to the entry id; a conflict gets
+            // de-duplicated) — key "Added checkmark Open" on what it actually
+            // assigned, or Open silently no-ops (review round 1; the Web UI's
+            // Repositories.vue already does `result.server?.name || server.name`).
+            let assignedName = result.serverName ?? server.name
             addNote = "Added “\(server.name)”. New servers start quarantined — review under Servers."
-            addedServers[server.id] = server.name
+            addedServers[server.id] = assignedName
         } else if let missing = result.missingInputs, !missing.isEmpty {
             addNote = "“\(server.name)” needs input: \(missing.joined(separator: ", ")). Add it from the Web UI to supply those values."
         } else {

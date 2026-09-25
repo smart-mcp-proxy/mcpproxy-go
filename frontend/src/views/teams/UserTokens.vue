@@ -303,7 +303,7 @@ const createError = ref('')
 const newTokenSecret = ref<string | null>(null)
 const copied = ref(false)
 const showCreateModal = ref(false)
-const { dialogEl: createDialogEl } = useDialogOpen(() => showCreateModal.value)
+const { dialogEl: createDialogEl } = useDialogOpen(() => showCreateModal.value, () => closeCreateDialog())
 const availableServers = ref<AvailableServer[]>([])
 
 const createForm = ref({

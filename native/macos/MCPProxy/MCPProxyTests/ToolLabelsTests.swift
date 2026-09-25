@@ -55,4 +55,22 @@ final class ToolLabelsTests: XCTestCase {
         let tool = try JSONDecoder().decode(SearchTool.self, from: json)
         XCTAssertEqual(tool.tier, "read")
     }
+
+    // Review round 1 (low): ToolsView.toolRow used to render the tier badge
+    // only `if let tier = row.tier`, so a `nil` tier (an older core that does
+    // not send the field yet — an explicitly supported skew, tray and core
+    // update independently) rendered NO badge at all. The Web UI's equivalent
+    // (`tool.tier || 'unannotated'`) always renders one, defaulting to
+    // "Unannotated" — this is that same fallback made reachable from a real
+    // row instead of only from ToolLabels.tierLabel(nil) in isolation.
+    func testToolRowDisplayTierFallsBackToUnannotatedForAnOlderCore() {
+        let row = ToolsView.ToolRow(server: "fs", name: "read_file", description: "d", score: nil, tier: nil)
+        XCTAssertEqual(row.displayTier, "unannotated")
+        XCTAssertEqual(ToolLabels.tierLabel(row.displayTier), "Unannotated")
+    }
+
+    func testToolRowDisplayTierPassesThroughARealTier() {
+        let row = ToolsView.ToolRow(server: "fs", name: "delete_file", description: "d", score: nil, tier: "destructive")
+        XCTAssertEqual(row.displayTier, "destructive")
+    }
 }

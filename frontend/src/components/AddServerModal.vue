@@ -640,7 +640,7 @@ const emit = defineEmits<Emits>()
 const { dialogRef } = useModalA11y(() => props.show, () => handleClose())
 // Spec 109 FR-055: the <dialog> itself opens via showModal() (top layer),
 // separate from dialogRef above (the inner .modal-box, used for focus trap).
-const { dialogEl: nativeDialogEl } = useDialogOpen(() => props.show)
+const { dialogEl: nativeDialogEl } = useDialogOpen(() => props.show, () => handleClose())
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()

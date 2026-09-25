@@ -3,7 +3,10 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 // Spec 109 FR-055 / T007 / T019: one z-index scale, defined in one place
-// (navigation-map.md: sidebar < header < dropdown < modal < toast), and no
+// (navigation-map.md: header < sidebar < dropdown < modal < toast — the
+// sidebar must outrank the header so the mobile `drawer-side` overlay is
+// never painted over by the sticky header when it slides open; review
+// round 1 caught the scale shipping with sidebar and header swapped), and no
 // `<dialog class="modal">` still relies on the `:open` attribute binding (or
 // a `modal-open` class toggle) — every one of them now drives its open state
 // through `useDialogOpen` (`showModal()`/`close()`, top layer), which is what
@@ -35,14 +38,18 @@ describe('z-index scale (frontend/src/assets/z-index.css)', () => {
     }
   })
 
-  it('orders sidebar < header < dropdown < modal < toast', () => {
+  it('orders header < sidebar < dropdown < modal < toast', () => {
     const sidebar = tokenValue('sidebar')
     const header = tokenValue('header')
     const dropdown = tokenValue('dropdown')
     const modal = tokenValue('modal')
     const toast = tokenValue('toast')
-    expect(sidebar).toBeLessThan(header)
-    expect(header).toBeLessThan(dropdown)
+    // Sidebar must outrank header: `.drawer-side` (SidebarNav) is a fixed
+    // overlay sibling of the sticky TopHeader, and on <lg (the drawer
+    // breakpoint) opening it must paint over the header, not sit under it
+    // (review round 1 — the PR shipped this inverted).
+    expect(header).toBeLessThan(sidebar)
+    expect(sidebar).toBeLessThan(dropdown)
     expect(dropdown).toBeLessThan(modal)
     expect(modal).toBeLessThan(toast)
   })

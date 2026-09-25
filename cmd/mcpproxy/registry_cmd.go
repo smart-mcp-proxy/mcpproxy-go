@@ -478,8 +478,6 @@ inputs, supply them with --env KEY=VALUE.`,
 	return cmd
 }
 
-// registryAddErrorOutput maps a *cliclient.RegistryAddError to a structured CLI
-// error. For missing_required_input it names the exact --env keys to supply.
 // registryAddMessage formats the CLI's success confirmation after adding a
 // server from a registry (Spec 109 FR-063): "Added <name> to MCPProxy
 // (quarantined for review)" — the same wording the Web/macOS "Add to
@@ -492,6 +490,8 @@ func registryAddMessage(name string, quarantined bool) string {
 	return msg
 }
 
+// registryAddErrorOutput maps a *cliclient.RegistryAddError to a structured CLI
+// error. For missing_required_input it names the exact --env keys to supply.
 func registryAddErrorOutput(err error) error {
 	var addErr *cliclient.RegistryAddError
 	if !errors.As(err, &addErr) {

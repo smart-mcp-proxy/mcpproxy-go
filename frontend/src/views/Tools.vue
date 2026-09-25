@@ -792,8 +792,13 @@ const activeStatCard = computed<StatCard>(() => {
 
 function selectStatCard(card: StatCard) {
   // Toggle: re-clicking the active card resets to the unfiltered "total" view.
+  // Also clears filterApproval (review round 1): Total is the row's "reset"
+  // gesture (clearFilters clears both too), and leaving an approval filter
+  // in place after Total is clicked filtered the table with no visible way
+  // to tell from the stat row.
   if (card === 'total' || activeStatCard.value === card) {
     filterStatus.value = ''
+    filterApproval.value = ''
     return
   }
   filterStatus.value = card // 'enabled' | 'disabled'

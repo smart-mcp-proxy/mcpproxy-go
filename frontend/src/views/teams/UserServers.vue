@@ -226,13 +226,13 @@ const loading = ref(true)
 const error = ref('')
 const allServers = ref<UserServer[]>([])
 const showAddModal = ref(false)
-const { dialogEl: addModalDialogEl } = useDialogOpen(() => showAddModal.value)
+const { dialogEl: addModalDialogEl } = useDialogOpen(() => showAddModal.value, () => closeAddModal())
 const adding = ref(false)
 const addError = ref('')
 const togglingServer = ref('')
 const removingServer = ref('')
 const serverToRemove = ref('')
-const { dialogEl: removeDialogEl } = useDialogOpen(() => serverToRemove.value !== '')
+const { dialogEl: removeDialogEl } = useDialogOpen(() => serverToRemove.value !== '', () => { serverToRemove.value = '' })
 
 const newServer = reactive({
   name: '',
