@@ -109,6 +109,64 @@ func TestImportedServer_RemoteSummaryAndOAuthTag(t *testing.T) {
 	}
 }
 
+// TestImportedServer_NonSecretHeaderIsNotHeaderAuth is review round 5's
+// finding: a remote server whose only header is NOT credential-shaped (e.g.
+// "X-Client-Name") must not be tagged "header auth" — that requires an
+// actual SecretLike header, not merely len(Headers) > 0.
+func TestImportedServer_NonSecretHeaderIsNotHeaderAuth(t *testing.T) {
+	content := []byte(`{
+		"mcpServers": {
+			"remote": {
+				"httpUrl": "https://example.com/mcp",
+				"headers": {"X-Client-Name": "my-app"}
+			}
+		}
+	}`)
+
+	result, err := Import(content, &ImportOptions{FormatHint: FormatGemini})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(result.Imported) != 1 {
+		t.Fatalf("expected 1 imported server, got %d", len(result.Imported))
+	}
+	imported := result.Imported[0]
+
+	if !strings.Contains(imported.Summary, "(no auth)") {
+		t.Errorf("Summary = %q, want it to contain %q for a non-secret header", imported.Summary, "(no auth)")
+	}
+	if strings.Contains(imported.Summary, "header auth") {
+		t.Errorf("Summary = %q, must not claim header auth for a non-secret header", imported.Summary)
+	}
+}
+
+// TestImportedServer_SecretHeaderIsHeaderAuth verifies the positive case
+// still works: a credential-shaped header (e.g. Authorization) is tagged
+// "header auth".
+func TestImportedServer_SecretHeaderIsHeaderAuth(t *testing.T) {
+	content := []byte(`{
+		"mcpServers": {
+			"remote": {
+				"httpUrl": "https://example.com/mcp",
+				"headers": {"Authorization": "Bearer sometoken"}
+			}
+		}
+	}`)
+
+	result, err := Import(content, &ImportOptions{FormatHint: FormatGemini})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(result.Imported) != 1 {
+		t.Fatalf("expected 1 imported server, got %d", len(result.Imported))
+	}
+	imported := result.Imported[0]
+
+	if !strings.Contains(imported.Summary, "(header auth)") {
+		t.Errorf("Summary = %q, want it to contain %q for a secret-like header", imported.Summary, "(header auth)")
+	}
+}
+
 // TestImportedServer_AutoProtocolWithCommandIsStdio: review round 2 finding —
 // a hand-edited entry declaring `"type": "auto"` (a value Cursor/Claude-Code
 // parsers pass through verbatim when present) with a command is resolved to

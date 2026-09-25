@@ -120,7 +120,7 @@ type OnboardingMarkRequest struct {
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Success     200 {object} contracts.APIResponse "OnboardingStateResponse"
+// @Success     200 {object} contracts.APIResponse{data=OnboardingStateResponse} "OnboardingStateResponse"
 // @Failure     403 {object} contracts.ErrorResponse "Agent tokens cannot read onboarding state"
 // @Failure     503 {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/onboarding/state [get]
@@ -153,7 +153,7 @@ func (s *Server) handleGetOnboardingState(w http.ResponseWriter, r *http.Request
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
 // @Param       body body OnboardingMarkRequest true "Mark request"
-// @Success     200 {object} contracts.APIResponse "Updated OnboardingStateResponse"
+// @Success     200 {object} contracts.APIResponse{data=OnboardingStateResponse} "Updated OnboardingStateResponse"
 // @Failure     400 {object} contracts.ErrorResponse "Bad request"
 // @Failure     403 {object} contracts.ErrorResponse "Agent tokens cannot read onboarding state"
 // @Failure     503 {object} contracts.ErrorResponse "Service unavailable"

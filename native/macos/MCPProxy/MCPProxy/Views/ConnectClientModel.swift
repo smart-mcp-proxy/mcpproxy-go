@@ -676,16 +676,33 @@ final class ConnectClientModel: ObservableObject {
 
         beginRequest()
         var outcome: ActionState
+        var conflictDisplayPath: String?
+        var conflictReloadHint: String?
         do {
             let result = try await source.undoConnect(
                 clientId, serverName: entry, backupName: backupName)
             undoState = .unavailable
             outcome = .succeeded(result)
+        } catch let error as APIClientError {
+            // Review round 5 finding: a 409 here means the config drifted since
+            // the connect this undo is reversing — the core sends display_path/
+            // reload_hint on that conflict exactly as it does for connect()'s,
+            // and they must reach the model the same way (see connect()'s catch
+            // above) instead of being discarded by a generic catch-all.
+            switch error {
+            case .connectConflict(_, let message, let displayPath, let reloadHint):
+                // The connect stands, so the affordance stands: the user can retry.
+                outcome = .failed(message)
+                conflictDisplayPath = displayPath
+                conflictReloadHint = reloadHint
+            default:
+                outcome = .failed(Self.message(for: error))
+            }
         } catch {
             // The connect stands, so the affordance stands: the user can retry.
             outcome = .failed(Self.message(for: error))
         }
-        endRequest(with: outcome, for: clientId)
+        endRequest(with: outcome, for: clientId, displayPath: conflictDisplayPath, reloadHint: conflictReloadHint)
         if case .succeeded = outcome {
             await refreshAffectedClient(clientId)
         }

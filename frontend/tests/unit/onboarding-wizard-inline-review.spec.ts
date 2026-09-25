@@ -95,7 +95,7 @@ async function mountWizard() {
     },
   })
   await flushPromises()
-  return wrapper
+  return { wrapper, router }
 }
 
 describe('OnboardingWizard Servers step inline review (Spec 109-ux-navigation-consistency US7 AS4)', () => {
@@ -126,7 +126,7 @@ describe('OnboardingWizard Servers step inline review (Spec 109-ux-navigation-co
       },
     })
 
-    const wrapper = await mountWizard()
+    const { wrapper } = await mountWizard()
     await wrapper.find('[data-test="tab-servers"]').trigger('click')
     await flushPromises()
 
@@ -146,13 +146,71 @@ describe('OnboardingWizard Servers step inline review (Spec 109-ux-navigation-co
     expect(tab.text()).not.toContain('✓')
   })
 
+  it('review link closes the wizard before navigating to the server detail page (review round 5)', async () => {
+    // The Review link routes away like goToRegistry() does elsewhere in the
+    // wizard — dismiss() must run first, or the route change unmounts the
+    // Dashboard that owns wizardOpen and the wizard springs back open.
+    ;(api.getOnboardingState as any).mockResolvedValue(
+      onboardingState({ has_usable_server: false, usable_servers: [] })
+    )
+    ;(api.getServers as any).mockResolvedValue({
+      success: true,
+      data: {
+        servers: [
+          quarantinedServer('github', { url: 'https://api.githubcopilot.com/mcp/', protocol: 'http', command: undefined }),
+        ],
+      },
+    })
+
+    const { wrapper, router } = await mountWizard()
+    await wrapper.find('[data-test="tab-servers"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.find('[data-test="servers-review-link-github"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('close')).toBeTruthy()
+    expect(router.currentRoute.value.path).toBe('/servers/github')
+  })
+
+  it('review link ignores the in-app handler on a modifier/middle click, leaving the native href to open a new tab (review round 5)', async () => {
+    // router-link deliberately skips interception for cmd/ctrl/shift/alt and
+    // non-left-button clicks so the browser's native "open in new tab" still
+    // works; the plain <a> replacement must do the same rather than
+    // hijacking every click via .prevent.
+    ;(api.getOnboardingState as any).mockResolvedValue(
+      onboardingState({ has_usable_server: false, usable_servers: [] })
+    )
+    ;(api.getServers as any).mockResolvedValue({
+      success: true,
+      data: {
+        servers: [
+          quarantinedServer('github', { url: 'https://api.githubcopilot.com/mcp/', protocol: 'http', command: undefined }),
+        ],
+      },
+    })
+
+    const { wrapper, router } = await mountWizard()
+    await wrapper.find('[data-test="tab-servers"]').trigger('click')
+    await flushPromises()
+
+    const link = wrapper.find('[data-test="servers-review-link-github"]')
+    expect(link.attributes('href')).toBe('/servers/github')
+
+    await link.trigger('click', { ctrlKey: true })
+    await flushPromises()
+
+    expect(wrapper.emitted('close')).toBeFalsy()
+    expect(router.currentRoute.value.path).toBe('/')
+  })
+
   it('still shows the generic empty state when there is nothing imported at all', async () => {
     ;(api.getOnboardingState as any).mockResolvedValue(
       onboardingState({ has_usable_server: false, usable_servers: [] })
     )
     ;(api.getServers as any).mockResolvedValue({ success: true, data: { servers: [] } })
 
-    const wrapper = await mountWizard()
+    const { wrapper } = await mountWizard()
     await wrapper.find('[data-test="tab-servers"]').trigger('click')
     await flushPromises()
 
@@ -174,7 +232,7 @@ describe('OnboardingWizard Servers step inline review (Spec 109-ux-navigation-co
       },
     })
 
-    const wrapper = await mountWizard()
+    const { wrapper } = await mountWizard()
     await wrapper.find('[data-test="tab-servers"]').trigger('click')
     await flushPromises()
 

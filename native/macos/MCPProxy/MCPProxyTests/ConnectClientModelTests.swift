@@ -869,6 +869,39 @@ final class ConnectClientModelTests: XCTestCase {
         XCTAssertEqual(source.undoCalls.count, 1, "a used undo cannot be replayed")
     }
 
+    /// Review round 5 finding: a 409 from POST /connect/{client}/undo (config
+    /// drifted since the connect this undo is reversing) must surface the
+    /// core's display_path/reload_hint the same way connect()'s conflict does
+    /// — undo()'s catch used to be a generic catch-all that discarded both.
+    func testUndoConflictSurfacesDisplayPathAndReloadHint() async {
+        let source = FakeConnectSource()
+        source.connectResults = [.success(FakeConnectSource.result(action: "updated"))]
+        // "conflict" is the real wire action an undo 409 sends
+        // (internal/connect/undo.go's drift check) — undo()'s catch does not
+        // discriminate on action the way connect()'s does, so this is not
+        // load-bearing today, but the fixture should still say what the core
+        // actually sends.
+        source.undoResults = [.failure(APIClientError.connectConflict(
+            action: "conflict", message: "the config changed since the connect",
+            displayPath: "~/.claude.json",
+            reloadHint: "Run /mcp in Claude Code (or restart it) to load MCPProxy"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+        await model.connect()
+
+        await model.undo()
+
+        guard case .failed(let message) = model.action else {
+            return XCTFail("expected .failed, got \(model.action)")
+        }
+        XCTAssertEqual(message, "the config changed since the connect")
+        XCTAssertEqual(model.actionDisplayPath, "~/.claude.json")
+        XCTAssertEqual(model.actionReloadHint,
+                       "Run /mcp in Claude Code (or restart it) to load MCPProxy")
+        // The connect stands, so the affordance stands: the user can retry.
+        XCTAssertTrue(model.undoControlExists)
+    }
+
     /// FR-006: closing the form ends the undo's scope; the core keeps no
     /// cross-session undo state, so offering it after a reopen would lie.
     func testUndoDisappearsWhenTheFormCloses() async {

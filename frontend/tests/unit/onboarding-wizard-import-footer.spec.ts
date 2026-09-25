@@ -316,4 +316,19 @@ describe('OnboardingWizard import footer (Spec 109-ux-navigation-consistency FR-
     expect(wrapper.find('[data-test="toggle-docker-isolation"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="toggle-quarantine"]').exists()).toBe(false)
   })
+
+  it('the Settings summary link closes the wizard before navigating away (review round 5)', async () => {
+    // Same unmount-before-clear race as goToRegistry(): dismiss() must run
+    // before the route changes, or the wizard springs back open on return.
+    const { wrapper, router } = await openServersTab(['memory'])
+
+    const link = wrapper.find('[data-test="security-defaults-summary"] a')
+    expect(link.exists()).toBe(true)
+
+    await link.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('close')).toBeTruthy()
+    expect(router.currentRoute.value.path).toBe('/settings')
+  })
 })

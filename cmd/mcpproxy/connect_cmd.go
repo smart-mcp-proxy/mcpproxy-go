@@ -219,12 +219,7 @@ func connectAllClients(svc *connect.Service, formatter clioutput.OutputFormatter
 		headers := []string{"CLIENT", "ACTION", "MESSAGE", "CONFIG PATH", "NEXT"}
 		var rows [][]string
 		for _, r := range results {
-			client := connect.FindClient(r.Client)
-			name := r.Client
-			if client != nil {
-				name = client.Name
-			}
-			rows = append(rows, []string{name, r.Action, r.Message, connectResultDisplayPath(r), r.ReloadHint})
+			rows = append(rows, connectAllClientRow(r))
 		}
 		for _, e := range errors {
 			parts := strings.SplitN(e, ": ", 2)
@@ -254,6 +249,22 @@ func connectAllClients(svc *connect.Service, formatter clioutput.OutputFormatter
 	}
 	fmt.Println(out)
 	return nil
+}
+
+// connectAllClientRow builds one --all table-format row for a connect result.
+// Review round 5: CONFIG PATH/NEXT describe a write that happened, so a
+// failed result (e.g. action=already_exists without --force) must leave them
+// blank here too, matching printConnectResult's single-client behavior.
+func connectAllClientRow(r *connect.ConnectResult) []string {
+	client := connect.FindClient(r.Client)
+	name := r.Client
+	if client != nil {
+		name = client.Name
+	}
+	if !r.Success {
+		return []string{name, r.Action, r.Message, "", ""}
+	}
+	return []string{name, r.Action, r.Message, connectResultDisplayPath(r), r.ReloadHint}
 }
 
 func printConnectResult(result *connect.ConnectResult, formatter clioutput.OutputFormatter, format string) error {

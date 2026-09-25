@@ -117,6 +117,51 @@ func TestPrintConnectResult_FailureHasNoNextLine(t *testing.T) {
 	}
 }
 
+// TestConnectAllClientRow_FailureHasNoConfigOrNext is review round 5's
+// finding: connectAllClients (mcpproxy connect --all, table format) printed
+// CONFIG PATH/NEXT for every result including failed ones (e.g.
+// action=already_exists without --force), unlike printConnectResult's
+// single-client path which correctly blanks them on failure.
+func TestConnectAllClientRow_FailureHasNoConfigOrNext(t *testing.T) {
+	failed := &connect.ConnectResult{
+		Success:     false,
+		Client:      "cursor",
+		ConfigPath:  "/home/user/.cursor/mcp.json",
+		DisplayPath: "~/.cursor/mcp.json",
+		Action:      "already_exists",
+		Message:     "mcpproxy already registered in cursor (use --force to overwrite)",
+		ReloadHint:  "Reload the Cursor window (or restart Cursor) to load MCPProxy",
+	}
+
+	row := connectAllClientRow(failed)
+	if len(row) != 5 {
+		t.Fatalf("expected 5 columns, got %d: %v", len(row), row)
+	}
+	if row[3] != "" {
+		t.Errorf("CONFIG PATH must be blank for a failed result, got %q", row[3])
+	}
+	if row[4] != "" {
+		t.Errorf("NEXT must be blank for a failed result, got %q", row[4])
+	}
+
+	succeeded := &connect.ConnectResult{
+		Success:     true,
+		Client:      "cursor",
+		ConfigPath:  "/home/user/.cursor/mcp.json",
+		DisplayPath: "~/.cursor/mcp.json",
+		Action:      "created",
+		Message:     "Successfully connected mcpproxy to cursor",
+		ReloadHint:  "Reload the Cursor window (or restart Cursor) to load MCPProxy",
+	}
+	okRow := connectAllClientRow(succeeded)
+	if okRow[3] != "~/.cursor/mcp.json" {
+		t.Errorf("CONFIG PATH should be populated on success, got %q", okRow[3])
+	}
+	if okRow[4] != succeeded.ReloadHint {
+		t.Errorf("NEXT should be populated on success, got %q", okRow[4])
+	}
+}
+
 // TestPrintConnectStatus_ListShowsDisplayPath is T032's --list golden: the
 // CONFIG PATH column shows the home-shortened path.
 func TestPrintConnectStatus_ListShowsDisplayPath(t *testing.T) {

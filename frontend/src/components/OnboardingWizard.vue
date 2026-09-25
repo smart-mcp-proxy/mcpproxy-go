@@ -232,13 +232,14 @@
                   <span class="text-[11px] opacity-50 font-mono truncate block">{{ s.url || s.command || '' }}</span>
                 </span>
                 <span class="badge badge-warning badge-sm font-normal shrink-0">Quarantined</span>
-                <router-link
-                  :to="`/servers/${encodeURIComponent(s.name)}`"
+                <a
+                  :href="hrefFor(`/servers/${encodeURIComponent(s.name)}`)"
                   class="btn btn-primary btn-xs shrink-0"
                   :data-test="`servers-review-link-${s.name}`"
+                  @click="goToServerReview($event, s.name)"
                 >
                   Review
-                </router-link>
+                </a>
               </li>
             </ul>
             <p v-if="serverAddedJustNow" class="text-xs text-success px-4 pb-3 pt-1">
@@ -379,7 +380,7 @@
             data-test="security-defaults-summary"
           >
             Docker isolation is <strong>{{ dockerIsolationDefault ? 'on' : 'off' }}</strong><span v-if="dockerIsolationDefault && dockerStatus === false" class="text-warning"> (Docker not detected)</span> and new-server quarantine is <strong>{{ quarantineEnabled ? 'on' : 'off' }}</strong> by default —
-            <router-link to="/settings" class="link link-primary">change these in Settings →</router-link>
+            <a :href="hrefFor('/settings')" class="link link-primary" @click="goToSettings">change these in Settings →</a>
           </p>
 
           <!-- Only an alternative when there is something to import; the
@@ -500,7 +501,7 @@
               data-test="verify-no-usable-server"
             >
               Approve a server first —
-              <router-link to="/servers" class="link link-primary">review it on the Servers page</router-link>.
+              <a :href="hrefFor('/servers')" class="link link-primary" @click="goToServersList">review it on the Servers page</a>.
             </div>
             <ul v-else class="space-y-1.5" data-test="verify-sample-prompts">
               <li
@@ -1127,6 +1128,53 @@ function goBack() {
 async function goToRegistry() {
   await dismiss()
   await router.push('/repositories')
+}
+
+// Review round 5: the Review/Settings/Servers links below used a plain
+// router-link and navigated away without calling dismiss() first, unlike
+// goToRegistry() above — the same unmount-before-clear race applies to every
+// link that leaves the wizard, not just the registry one. They render as
+// real <a href> (not a <button>, unlike goToRegistry's) for two reasons a
+// second review round caught: router-link itself renders a real anchor, and
+// a plain `<a>` only intercepts the plain-left-click case correctly when it
+// also skips modifier/middle clicks the way router-link does — see
+// isPlainLeftClick below — so cmd/ctrl/shift-click and middle-click still
+// open the target in a new tab via the native href instead of being
+// hijacked into an in-app navigation.
+function isPlainLeftClick(event: MouseEvent): boolean {
+  return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
+}
+
+// The href itself must carry the router's real base (e.g. "/ui/") the way
+// router-link's does, or a middle-click/"open in new tab" on a dev server
+// with no base-stripping redirect 404s. router.resolve(...).href computes
+// exactly that. The template evaluates this on every render (unlike the
+// click handlers, which only run on a real click), so it must tolerate a
+// host with no router installed — some unit tests mount this component
+// without one — by falling back to the bare path.
+function hrefFor(path: string): string {
+  return router?.resolve(path)?.href ?? path
+}
+
+async function goToServerReview(event: MouseEvent, name: string) {
+  if (!isPlainLeftClick(event)) return
+  event.preventDefault()
+  await dismiss()
+  await router.push(`/servers/${encodeURIComponent(name)}`)
+}
+
+async function goToSettings(event: MouseEvent) {
+  if (!isPlainLeftClick(event)) return
+  event.preventDefault()
+  await dismiss()
+  await router.push('/settings')
+}
+
+async function goToServersList(event: MouseEvent) {
+  if (!isPlainLeftClick(event)) return
+  event.preventDefault()
+  await dismiss()
+  await router.push('/servers')
 }
 
 function startPolling() {

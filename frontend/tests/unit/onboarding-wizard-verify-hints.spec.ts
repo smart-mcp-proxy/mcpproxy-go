@@ -13,6 +13,7 @@ vi.mock('@/services/api', () => ({
   default: {
     getConnectStatus: vi.fn(),
     getOnboardingState: vi.fn(),
+    markOnboardingState: vi.fn(),
     getActivities: vi.fn(),
     getConfig: vi.fn(),
     getDockerStatus: vi.fn(),
@@ -74,7 +75,7 @@ async function mountOnVerify(clients: any[] = []) {
   await flushPromises()
   await wrapper.find('[data-test="tab-verify"]').trigger('click')
   await flushPromises()
-  return wrapper
+  return { wrapper, router }
 }
 
 describe('OnboardingWizard Verify step hints (Spec 109-b FR-042)', () => {
@@ -85,22 +86,39 @@ describe('OnboardingWizard Verify step hints (Spec 109-b FR-042)', () => {
     ;(api.getConfig as any).mockResolvedValue({ success: true, data: {} })
     ;(api.getDockerStatus as any).mockResolvedValue({ success: true, data: { available: false } })
     ;(api.getStatus as any).mockResolvedValue({ success: true, data: {} })
+    ;(api.markOnboardingState as any).mockResolvedValue(onboardingState())
   })
 
   it('shows "Approve a server first" with no usable server', async () => {
     ;(api.getOnboardingState as any).mockResolvedValue(onboardingState({ usable_servers: [] }))
-    const wrapper = await mountOnVerify()
+    const { wrapper } = await mountOnVerify()
 
     expect(wrapper.find('[data-test="verify-no-usable-server"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="verify-no-usable-server"]').text()).toContain('Approve a server first')
     expect(wrapper.find('[data-test="verify-sample-prompts"]').exists()).toBe(false)
   })
 
+  it('the "review it on the Servers page" link closes the wizard before navigating away (review round 5)', async () => {
+    // Same unmount-before-clear race as goToRegistry(): dismiss() must run
+    // before the route changes, or the wizard springs back open on return.
+    ;(api.getOnboardingState as any).mockResolvedValue(onboardingState({ usable_servers: [] }))
+    const { wrapper, router } = await mountOnVerify()
+
+    const link = wrapper.find('[data-test="verify-no-usable-server"] a')
+    expect(link.exists()).toBe(true)
+
+    await link.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('close')).toBeTruthy()
+    expect(router.currentRoute.value.path).toBe('/servers')
+  })
+
   it('generates prompts referencing a usable server once one exists', async () => {
     ;(api.getOnboardingState as any).mockResolvedValue(
       onboardingState({ has_usable_server: true, usable_servers: ['github'] })
     )
-    const wrapper = await mountOnVerify()
+    const { wrapper } = await mountOnVerify()
 
     expect(wrapper.find('[data-test="verify-no-usable-server"]').exists()).toBe(false)
     const prompts = wrapper.find('[data-test="verify-sample-prompts"]')
@@ -112,7 +130,7 @@ describe('OnboardingWizard Verify step hints (Spec 109-b FR-042)', () => {
     ;(api.getOnboardingState as any).mockResolvedValue(
       onboardingState({ has_usable_server: true, usable_servers: ['github'] })
     )
-    const wrapper = await mountOnVerify([
+    const { wrapper } = await mountOnVerify([
       {
         id: 'cursor',
         name: 'Cursor',
@@ -135,7 +153,7 @@ describe('OnboardingWizard Verify step hints (Spec 109-b FR-042)', () => {
     ;(api.getOnboardingState as any).mockResolvedValue(
       onboardingState({ has_usable_server: true, usable_servers: ['github'], connected_client_ids: [] })
     )
-    const wrapper = await mountOnVerify([
+    const { wrapper } = await mountOnVerify([
       {
         id: 'cursor',
         name: 'Cursor',

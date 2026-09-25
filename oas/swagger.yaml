@@ -3580,6 +3580,92 @@ components:
             preserves the existing value.
           type: string
       type: object
+    httpapi.OnboardingStateResponse:
+      properties:
+        configured_server_count:
+          description: |-
+            ConfiguredServerCount is the number of upstream MCP servers configured
+            in mcpproxy (counts both enabled and disabled).
+          type: integer
+        connected_client_count:
+          description: |-
+            ConnectedClientCount is the number of supported clients currently
+            pointing at mcpproxy.
+          type: integer
+        connected_client_ids:
+          description: |-
+            ConnectedClientIDs are the identifiers of supported clients currently
+            pointing at mcpproxy. Drawn exclusively from the fixed adapter table —
+            user-entered values never appear here.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        first_mcp_client_ever:
+          description: |-
+            FirstMCPClientEver is true once any MCP client has successfully completed
+            an `initialize` round-trip with this mcpproxy. Sourced from the Spec 044
+            activation bucket. Drives the Verify tab's "green check" state.
+          type: boolean
+        has_configured_server:
+          description: |-
+            HasConfiguredServer is true if at least one upstream MCP server is
+            configured (regardless of current connection health).
+          type: boolean
+        has_connected_client:
+          description: |-
+            HasConnectedClient is true if at least one supported AI client currently
+            has mcpproxy registered in its config.
+          type: boolean
+        has_usable_server:
+          description: |-
+            HasUsableServer is true once at least one enabled, non-quarantined
+            server is connected AND has at least one approved (non-disabled) tool.
+            This is the real "the wizard has something to try" signal:
+            HasConfiguredServer only means a server entry exists, even while every
+            one of them sits quarantined or has zero approved tools. The Servers
+            step and the Setup badge use this instead of HasConfiguredServer, which
+            is kept above for compatibility. Once 109-c's health vocabulary lands,
+            "connected" is replaced by health.usable (tasks.md T051); until then
+            this uses "connected" as the interim usability test.
+          type: boolean
+        incomplete_tab_count:
+          description: |-
+            IncompleteTabCount is the number of wizard tabs whose state is incomplete.
+            Drives the sidebar Setup entry's badge. Formula:
+              +1 if HasConnectedClient == false
+              +1 if HasUsableServer == false
+              +1 if FirstMCPClientEver == false
+          type: integer
+        mcp_clients_seen_ever:
+          description: |-
+            MCPClientsSeenEver is the capped list of recognized client names that
+            have ever called this mcpproxy. Names come from the MCP `initialize`
+            payload's `clientInfo.name` field, sanitized. Surfaces on the Verify tab
+            so the user can see whether their real IDE — not a test client — has
+            connected.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        should_show_wizard:
+          description: |-
+            ShouldShowWizard is the derived flag the frontend uses to decide
+            whether to auto-show. True when not engaged and IncompleteTabCount > 0
+            (Spec 046 v2 — semantics widened to also count the Verify tab).
+          type: boolean
+        state:
+          $ref: '#/components/schemas/storage.OnboardingState'
+        usable_servers:
+          description: |-
+            UsableServers lists the names behind HasUsableServer, for the Verify
+            step's suggested-prompt generator (FR-042): prompts are only built from
+            tools of servers in this list, never from a quarantined or toolless one.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
     httpapi.SetActiveProfileRequest:
       properties:
         active_profile:
@@ -3694,6 +3780,46 @@ components:
           type: boolean
         inherit_system_safe:
           type: boolean
+      type: object
+    storage.OnboardingState:
+      description: |-
+        State is the persisted wizard engagement record. Engaged is true once
+        the wizard was shown and the user completed or skipped it.
+      properties:
+        client_connected_at:
+          additionalProperties:
+            type: string
+          description: |-
+            ClientConnectedAt records, per client id from the fixed connect client
+            registry (internal/connect.GetAllClients — never user input), the last
+            time a connect write succeeded for that client (Spec 109-b FR-042).
+            Written by the connect success path through UpdateOnboardingState so a
+            concurrent onboarding/mark write can never drop it. Consumed by the
+            Verify step / presence layer to tell "connected, never seen" apart from
+            "connected seconds ago, hasn't reconnected yet".
+          type: object
+        connect_step_status:
+          description: |-
+            ConnectStepStatus is one of: "", "completed", "completed_external",
+            "skipped" (Spec 080 FR-001). "completed_external" records a dismissal
+            where the connect step was untouched but the install was already
+            connected outside the wizard (CLI, ConnectModal, manual config).
+          type: string
+        engaged:
+          description: |-
+            Engaged is true once the wizard was shown and the user completed or
+            skipped it. Once true, the wizard does not auto-show again, even if
+            state regresses (e.g. user disconnects all clients).
+          type: boolean
+        engaged_at:
+          description: EngagedAt is the timestamp of completion or explicit skip.
+          type: string
+        first_shown_at:
+          description: FirstShownAt is the timestamp of first wizard render.
+          type: string
+        server_step_status:
+          description: 'ServerStepStatus is one of: "", "completed", "skipped".'
+          type: string
       type: object
     telemetry.FeedbackContext:
       properties:
@@ -5083,7 +5209,18 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.APIResponse'
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: Updated OnboardingStateResponse
         "400":
           content:
@@ -5120,7 +5257,18 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.APIResponse'
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: OnboardingStateResponse
         "403":
           content:

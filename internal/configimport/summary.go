@@ -129,6 +129,17 @@ func needsSecretTag(fields ...[]ImportedField) bool {
 	return false
 }
 
+// anySecretLike reports whether any field in the group looks like a
+// credential (per its already-computed SecretLike classification).
+func anySecretLike(fields []ImportedField) bool {
+	for _, f := range fields {
+		if f.SecretLike {
+			return true
+		}
+	}
+	return false
+}
+
 // summarizeServer builds the FR-040 second-line summary and its tags
 // (local process|remote, needs secret, oauth) for an imported server.
 // Command/args/url are redacted through oauth.LiveRedaction before being
@@ -166,7 +177,12 @@ func summarizeServer(server *config.ServerConfig, envFields, headerFields []Impo
 		switch {
 		case server.OAuth != nil:
 			authType = "oauth"
-		case len(server.Headers) > 0:
+		case anySecretLike(headerFields):
+			// Review round 5: a header only counts as "auth" when it looks
+			// like a credential (headerFields already carries the correct
+			// per-header SecretLike classification via
+			// oauth.IsSensitiveHeaderName). A server with only non-secret
+			// headers (e.g. "X-Client-Name") is not "header auth".
 			authType = "header auth"
 		}
 		summary = strings.TrimSpace(oauth.LiveRedaction.URLValue(server.URL) + " (" + authType + ")")
