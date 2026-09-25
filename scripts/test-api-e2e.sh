@@ -48,9 +48,34 @@ echo "=============================="
 echo -e "${YELLOW}Using everything server for testing${NC}"
 echo ""
 
+# T011a: enumerate a process's descendants (recursively), by PID, so
+# cleanup() can reap exactly what THIS run started/spawned instead of
+# pattern-matching every "mcpproxy"/"launcher-server" process on the
+# machine. A blanket `pkill -f` would also kill the user's own tray-managed
+# core, or another worktree's parallel test run, whenever their command
+# line happens to match the same substring.
+descendant_pids() {
+    local parent="$1"
+    local children
+    children=$(pgrep -P "$parent" 2>/dev/null) || true
+    local pid
+    for pid in $children; do
+        echo "$pid"
+        descendant_pids "$pid"
+    done
+}
+
 # Cleanup function
 cleanup() {
     echo -e "\n${YELLOW}Cleaning up...${NC}"
+
+    # Snapshot descendants (e.g. the launcher-test fixture, spawned by
+    # mcpproxy itself) BEFORE we touch the parent — once mcpproxy exits,
+    # orphaned children are reparented and this parentage link is lost.
+    local orphan_candidates=""
+    if [ ! -z "$MCPPROXY_PID" ]; then
+        orphan_candidates=$(descendant_pids "$MCPPROXY_PID")
+    fi
 
     # Kill mcpproxy if running
     if [ ! -z "$MCPPROXY_PID" ]; then
@@ -76,11 +101,20 @@ cleanup() {
         fi
     fi
 
-    # Additional cleanup - find any remaining mcpproxy processes
-    pkill -f "mcpproxy.*serve" 2>/dev/null || true
-    # Reap the launcher-test fixture if our launcher-lifecycle test
-    # failed before the shutdown reap path could run.
-    pkill -f "launcher-server.*--port 39933" 2>/dev/null || true
+    # T011a: reap only the specific PIDs we saw as children of OUR
+    # mcpproxy process (e.g. the launcher-test fixture, if our
+    # launcher-lifecycle test failed before mcpproxy's own graceful
+    # shutdown reap path could run). Never a system-wide pattern match —
+    # that would also kill unrelated mcpproxy instances (the user's tray
+    # core, another worktree's E2E run, etc.). A PID we captured is only
+    # killed if it is still alive.
+    local pid
+    for pid in $orphan_candidates; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Reaping orphaned child process (PID: $pid)"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
     sleep 1
 
     # Clean up test data
