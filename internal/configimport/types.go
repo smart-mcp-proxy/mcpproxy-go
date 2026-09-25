@@ -18,6 +18,13 @@ const (
 	FormatCursor        ConfigFormat = "cursor"
 	FormatCodex         ConfigFormat = "codex"
 	FormatGemini        ConfigFormat = "gemini"
+
+	// FormatURL and FormatCommand are the Paste-source formats (Spec 109
+	// FR-064): a single http(s):// URL, or a single command line that isn't
+	// JSON/TOML. Detected by DetectFormat as a fallback once every existing
+	// config-file format has been ruled out.
+	FormatURL     ConfigFormat = "url"
+	FormatCommand ConfigFormat = "command"
 )
 
 // String returns human-readable format name for display
@@ -33,6 +40,10 @@ func (f ConfigFormat) String() string {
 		return "Codex CLI"
 	case FormatGemini:
 		return "Gemini CLI"
+	case FormatURL:
+		return "URL"
+	case FormatCommand:
+		return "Command Line"
 	default:
 		return "Unknown"
 	}
