@@ -116,6 +116,8 @@ type ServerController interface {
 	SubscribeEvents() chan internalRuntime.Event
 	// UnsubscribeEvents closes and removes the subscription channel.
 	UnsubscribeEvents(chan internalRuntime.Event)
+	// Attention returns the current needs-attention list (Spec 109 FR-001).
+	Attention() []contracts.AttentionItem
 
 	// Server management
 	GetAllServers() ([]map[string]interface{}, error)
@@ -973,6 +975,10 @@ func (s *Server) setupRoutes() {
 		// token could reshape the operator's view. Same gate as every other
 		// config-level write.
 		r.Put("/profiles/active", s.requireServerOp(auth.ServerOpConfigWrite, s.handleSetActiveProfile))
+
+		// Needs-attention list (Spec 109 FR-001): filtered per caller class,
+		// same rule as /servers (contracts/rest-api.md#attention).
+		r.Get("/attention", s.handleGetAttention)
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
@@ -4091,6 +4097,14 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		"status_channel_nil", statusCh == nil,
 		"events_channel_nil", eventsCh == nil)
 
+	// FR-006: attention.changed is suppressed for THIS subscriber when its
+	// narrowed id set is unchanged since the last frame it received — a
+	// scoped caller's own view is what matters, not the shared event's raw
+	// id set (two scoped subscribers with different scopes must each get
+	// their own suppression decision). nil (not an empty set) so the very
+	// first frame is never suppressed.
+	var lastAttentionIDs map[string]struct{}
+
 	// Create heartbeat ticker to keep connection alive
 	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
@@ -4194,8 +4208,26 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			rendered := s.renderEventPayloadForCaller(callerCtx, evt)
+
+			// FR-006: suppress attention.changed for this subscriber when its
+			// narrowed id set has not changed since the last frame it
+			// received (servers.changed carries no such suppression — every
+			// coalesced change is meaningful to show).
+			if evt.Type == internalRuntime.EventTypeAttentionChanged {
+				ids, _ := rendered["ids"].([]string)
+				current := make(map[string]struct{}, len(ids))
+				for _, id := range ids {
+					current[id] = struct{}{}
+				}
+				if lastAttentionIDs != nil && attentionIDSetsEqual(lastAttentionIDs, current) {
+					continue
+				}
+				lastAttentionIDs = current
+			}
+
 			eventPayload := map[string]interface{}{
-				"payload":   s.maskEventPayload(s.renderEventPayloadForCaller(callerCtx, evt)),
+				"payload":   s.maskEventPayload(rendered),
 				"timestamp": evt.Timestamp.Unix(),
 			}
 
@@ -4244,6 +4276,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 //     coalescing window, and only when reveal_secret_headers is on.
 func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRuntime.Event) map[string]interface{} {
 	payload := evt.Payload
+	if evt.Type == internalRuntime.EventTypeAttentionChanged {
+		return renderAttentionChangedForCaller(ctx, payload)
+	}
 	if evt.Type != internalRuntime.EventTypeServersChanged || len(payload) == 0 {
 		return payload
 	}

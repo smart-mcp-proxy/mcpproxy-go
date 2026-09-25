@@ -26,7 +26,9 @@ import (
 )
 
 // MockServerController implements ServerController for testing
-type MockServerController struct{}
+type MockServerController struct {
+	attentionItems []contracts.AttentionItem
+}
 
 // mockManagementService provides a test implementation of management service methods
 type mockManagementService struct{ management.Service }
@@ -128,6 +130,9 @@ func (m *MockServerController) SubscribeEvents() chan internalRuntime.Event {
 	return make(chan internalRuntime.Event, 16)
 }
 func (m *MockServerController) UnsubscribeEvents(chan internalRuntime.Event) {}
+func (m *MockServerController) Attention() []contracts.AttentionItem {
+	return m.attentionItems
+}
 
 func (m *MockServerController) GetAllServers() ([]map[string]interface{}, error) {
 	return []map[string]interface{}{

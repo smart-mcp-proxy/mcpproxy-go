@@ -237,6 +237,7 @@ func (m *baseController) StatusChannel() <-chan interface{}        { return nil 
 func (m *baseController) EventsChannel() <-chan runtime.Event      { return nil }
 func (m *baseController) SubscribeEvents() chan runtime.Event      { return nil }
 func (m *baseController) UnsubscribeEvents(chan runtime.Event)     {}
+func (m *baseController) Attention() []contracts.AttentionItem     { return nil }
 func (m *baseController) GetAllServers() ([]map[string]interface{}, error) {
 	return nil, nil
 }
