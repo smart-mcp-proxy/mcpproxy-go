@@ -120,15 +120,42 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			AdminState: StateDisabled,
 			Summary:    "Disabled",
 			Action:     ActionEnable,
+			Status:     StatusDisabled,
+			Usable:     false,
+			Actions:    []string{ActionEnable},
 		}
 	}
 
 	if input.Quarantined {
+		state := strings.ToLower(input.State)
+
+		// FR-010: a quarantined server that ALSO needs OAuth sign-in reports
+		// `login` (was `approve`) — the quarantined branch now checks the same
+		// OAuth-login-required inputs the later OAuth branches use, before it
+		// short-circuits on the admin state alone. Checked first because
+		// signing in is the operator's actual next step; approval alone would
+		// leave the server unable to connect.
+		if needsLogin, level, summary, detail := quarantinedOAuthLoginState(input, state); needsLogin {
+			return &contracts.HealthStatus{
+				Level:      level,
+				AdminState: StateQuarantined,
+				Summary:    summary,
+				Detail:     detail,
+				Action:     ActionLogin,
+				Status:     StatusSignInRequired,
+				Usable:     false,
+				Actions:    []string{ActionLogin, ActionApprove},
+			}
+		}
+
 		status := &contracts.HealthStatus{
 			Level:      LevelHealthy, // Quarantined is intentional, not broken
 			AdminState: StateQuarantined,
 			Summary:    "Quarantined for review",
 			Action:     ActionApprove,
+			Status:     StatusNeedsReview,
+			Usable:     false,
+			Actions:    []string{ActionApprove},
 		}
 		// ...but a quarantined server that cannot START is broken, and this
 		// early return used to discard that. Being disconnected is NOT the
@@ -148,10 +175,12 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		// still the operator's next step — so the review flow and the tray's
 		// quarantine handling keep working. Only the level and the summary
 		// stop claiming the server is fine.
-		if strings.EqualFold(input.State, "error") && input.LastError != "" {
+		if state == "error" && input.LastError != "" {
 			status.Level = LevelUnhealthy
 			status.Summary = "Quarantined — " + formatErrorSummary(input.LastError)
 			status.Detail = input.LastError
+			status.Status = StatusError
+			status.Actions = []string{ActionApprove, ActionViewLogs}
 		}
 		return status
 	}
@@ -164,6 +193,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    "Missing secret",
 			Detail:     input.MissingSecret,
 			Action:     ActionSetSecret,
+			Status:     StatusNeedsSecret,
+			Usable:     false,
+			Actions:    []string{ActionSetSecret},
 		}
 	}
 
@@ -175,6 +207,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    "OAuth configuration error",
 			Detail:     input.OAuthConfigErr,
 			Action:     ActionConfigure,
+			Status:     StatusNeedsConfig,
+			Usable:     false,
+			Actions:    []string{ActionConfigure},
 		}
 	}
 
@@ -204,6 +239,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    summary,
 			Detail:     detail,
 			Action:     ActionRestart,
+			Status:     StatusError,
+			Usable:     false,
+			Actions:    []string{ActionRestart, ActionViewLogs},
 		}
 	}
 
@@ -223,12 +261,16 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
 			level, action, summary = oauthAttentionState(input.LastError)
 		}
+		statusVal, usable, actions := connectionErrorStatus(action)
 		return &contracts.HealthStatus{
 			Level:      level,
 			AdminState: StateEnabled,
 			Summary:    summary,
 			Detail:     input.LastError,
 			Action:     action,
+			Status:     statusVal,
+			Usable:     usable,
+			Actions:    actions,
 		}
 	case "disconnected":
 		level := LevelUnhealthy
@@ -244,12 +286,16 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				level, action, summary = oauthAttentionState(input.LastError)
 			}
 		}
+		statusVal, usable, actions := connectionErrorStatus(action)
 		return &contracts.HealthStatus{
 			Level:      level,
 			AdminState: StateEnabled,
 			Summary:    summary,
 			Detail:     input.LastError,
 			Action:     action,
+			Status:     statusVal,
+			Usable:     usable,
+			Actions:    actions,
 		}
 	case "pending auth", "pending_auth":
 		// Parked awaiting user login (#1013): the client stopped redialing on
@@ -263,6 +309,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    summary,
 			Detail:     input.LastError,
 			Action:     action,
+			Status:     StatusSignInRequired,
+			Usable:     false,
+			Actions:    []string{ActionLogin},
 		}
 	case "connecting", "idle":
 		return &contracts.HealthStatus{
@@ -270,6 +319,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			AdminState: StateEnabled,
 			Summary:    "Connecting...",
 			Action:     ActionNone, // Will resolve on its own — not an attention item
+			Status:     StatusConnecting,
+			Usable:     false,
+			Actions:    []string{},
 		}
 	}
 
@@ -287,6 +339,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    "Sign-in required",
 			Detail:     "This server requires sign-in before its tools can be called.",
 			Action:     ActionLogin,
+			Status:     StatusSignInRequired,
+			Usable:     false,
+			Actions:    []string{ActionLogin},
 		}
 	}
 
@@ -299,6 +354,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				AdminState: StateEnabled,
 				Summary:    "Logged out",
 				Action:     ActionLogin,
+				Status:     StatusSignInRequired,
+				Usable:     false,
+				Actions:    []string{ActionLogin},
 			}
 		}
 
@@ -309,6 +367,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				AdminState: StateEnabled,
 				Summary:    "Token expired",
 				Action:     ActionLogin,
+				Status:     StatusSignInRequired,
+				Usable:     false,
+				Actions:    []string{ActionLogin},
 			}
 		}
 
@@ -320,6 +381,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				Summary:    "Authentication error",
 				Detail:     input.LastError,
 				Action:     ActionLogin,
+				Status:     StatusSignInRequired,
+				Usable:     false,
+				Actions:    []string{ActionLogin},
 			}
 		}
 
@@ -335,9 +399,15 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 						AdminState: StateEnabled,
 						Summary:    formatConnectedSummary(input.ToolCount),
 						Action:     ActionNone,
+						Status:     StatusReady,
+						Usable:     true,
+						Actions:    []string{},
 					}
 				}
-				// No refresh token - user needs to re-authenticate soon
+				// No refresh token - user needs to re-authenticate soon. Still
+				// `ready`/usable: the current token works, so this is a proactive
+				// "Sign in" nudge, never an attention item (which keys on status,
+				// not level) — the amber `level` is the badge/tray signal.
 				// M-002: Include exact expiration time in Detail field
 				return &contracts.HealthStatus{
 					Level:      LevelDegraded,
@@ -345,6 +415,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 					Summary:    formatExpiringTokenSummary(timeUntilExpiry),
 					Detail:     fmt.Sprintf("Token expires at %s", input.TokenExpiresAt.Format(time.RFC3339)),
 					Action:     ActionLogin,
+					Status:     StatusReady,
+					Usable:     true,
+					Actions:    []string{ActionLogin},
 				}
 			}
 		}
@@ -357,6 +430,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				AdminState: StateEnabled,
 				Summary:    "Authentication required",
 				Action:     ActionLogin,
+				Status:     StatusSignInRequired,
+				Usable:     false,
+				Actions:    []string{ActionLogin},
 			}
 		}
 	}
@@ -365,7 +441,10 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 	// Check if refresh is in a degraded or failed state
 	switch input.RefreshState {
 	case RefreshStateRetrying:
-		// Refresh failed but retrying - degraded status
+		// Refresh failed but retrying - degraded status. Still `ready`/usable:
+		// the connection is up on the current token, so this is not an
+		// attention item — only View logs is offered, as a diagnostic, not a
+		// blocking remedy.
 		detail := formatRefreshRetryDetail(input.RefreshRetryCount, input.RefreshNextAttempt, input.RefreshLastError)
 		return &contracts.HealthStatus{
 			Level:      LevelDegraded,
@@ -373,6 +452,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    "Token refresh pending",
 			Detail:     detail,
 			Action:     ActionViewLogs,
+			Status:     StatusReady,
+			Usable:     true,
+			Actions:    []string{ActionViewLogs},
 		}
 	case RefreshStateFailed:
 		// Refresh permanently failed - unhealthy status
@@ -386,6 +468,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    "Refresh token expired",
 			Detail:     detail,
 			Action:     ActionLogin,
+			Status:     StatusSignInRequired,
+			Usable:     false,
+			Actions:    []string{ActionLogin},
 		}
 	}
 
@@ -395,7 +480,50 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		AdminState: StateEnabled,
 		Summary:    formatConnectedSummary(input.ToolCount),
 		Action:     ActionNone,
+		Status:     StatusReady,
+		Usable:     true,
+		Actions:    []string{},
 	}
+}
+
+// connectionErrorStatus derives the `status`/`usable`/`actions` triple from
+// the final `action` a connection-state branch (error/disconnected) settled
+// on, after its EditURL/OAuth overrides. Deriving from the final action
+// (rather than re-testing the same conditions) keeps this in lockstep with
+// whichever override wins when more than one applies.
+func connectionErrorStatus(action string) (status string, usable bool, actions []string) {
+	switch action {
+	case ActionEditURL:
+		return StatusNeedsConfig, false, []string{ActionEditURL}
+	case ActionLogin:
+		return StatusSignInRequired, false, []string{ActionLogin}
+	default:
+		return StatusError, false, []string{ActionRestart, ActionViewLogs}
+	}
+}
+
+// quarantinedOAuthLoginState reports whether a quarantined server also needs
+// OAuth sign-in (FR-010), and if so the level/summary/detail to report. It
+// mirrors the same OAuth-login signals the non-quarantined branches below use
+// — the parked "pending auth" state (#1013), an OAuth-related error while
+// connecting, and the call-time OAuth requirement (MCP-2084) — because a
+// quarantined server is still dialed under the scanner's inspection
+// exemption and can hit any of them.
+func quarantinedOAuthLoginState(input HealthCalculatorInput, state string) (needsLogin bool, level, summary, detail string) {
+	switch state {
+	case "pending auth", "pending_auth":
+		level, _, summary = oauthAttentionState(input.LastError)
+		return true, level, summary, input.LastError
+	case "error":
+		if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
+			level, _, summary = oauthAttentionState(input.LastError)
+			return true, level, summary, input.LastError
+		}
+	}
+	if input.CallTimeOAuthRequired {
+		return true, LevelDegraded, "Sign-in required", "This server requires sign-in before its tools can be called."
+	}
+	return false, "", "", ""
 }
 
 // formatConnectedSummary formats the summary for a healthy connected server.
