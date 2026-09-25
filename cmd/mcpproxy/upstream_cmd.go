@@ -1714,6 +1714,8 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 		existingNames[i] = srv.Name
 	}
 	opts.ExistingServers = existingNames
+	// Never import the entry that points back at this instance's /mcp endpoint.
+	opts.SelfListenAddrs = []string{globalConfig.Listen}
 
 	// Run import
 	result, err := configimport.Import(content, opts)
@@ -1869,6 +1871,8 @@ func outputImportResultTable(result *configimport.ImportResult, dryRun bool, noQ
 				reason = "already exists in config"
 			case "filtered_out":
 				reason = "not in --server filter"
+			case configimport.SkipReasonSelfReference:
+				reason = "points at this mcpproxy instance"
 			}
 			fmt.Printf("  ⏭️  %s (%s)\n", s.Name, reason)
 		}

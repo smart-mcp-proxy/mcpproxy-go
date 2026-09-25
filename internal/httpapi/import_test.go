@@ -8,6 +8,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -394,5 +396,59 @@ func TestImportServersJSON_UnknownFormat(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("Expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// mockSelfImportController reports a listen address so the import endpoint can
+// recognize client entries that point back at this instance.
+type mockSelfImportController struct {
+	mockImportController
+	listen string
+}
+
+func (m *mockSelfImportController) GetListenAddress() string { return m.listen }
+
+// TestImportFromPath_SkipsSelfReference is the onboarding self-import bug: once
+// Connect has written an `mcpproxy` http entry pointing at this instance into
+// ~/.claude.json, the import preview (wizard Servers step, Add Server > Import)
+// must not list it as an importable server.
+func TestImportFromPath_SkipsSelfReference(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := &mockSelfImportController{
+		mockImportController: mockImportController{apiKey: "test-key"},
+		listen:               "127.0.0.1:18123",
+	}
+	server := NewServer(mock, logger, nil)
+
+	path := filepath.Join(t.TempDir(), ".claude.json")
+	content := `{"mcpServers":{
+		"mcpproxy":{"type":"http","url":"http://127.0.0.1:18123/mcp"},
+		"github":{"type":"http","url":"https://api.githubcopilot.com/mcp/"}
+	}}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(ImportFromPathRequest{Path: path, Format: "claude-code"})
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/path?preview=true", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var wrapped wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	resp := wrapped.Data
+
+	if len(resp.Imported) != 1 || resp.Imported[0].Name != "github" {
+		t.Fatalf("Expected only 'github' importable, got %+v", resp.Imported)
+	}
+	if len(resp.Skipped) != 1 || resp.Skipped[0].Name != "mcpproxy" || resp.Skipped[0].Reason != "self_reference" {
+		t.Errorf("Expected 'mcpproxy' skipped as self_reference, got %+v", resp.Skipped)
 	}
 }

@@ -362,6 +362,11 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 		Preview:        preview,
 		SkipQuarantine: skipQuarantine,
 		Now:            time.Now(),
+		// Skip entries that point back at this instance (e.g. the `mcpproxy`
+		// entry Connect wrote into ~/.claude.json) so no import surface — the
+		// onboarding wizard, Add Server > Import, or a direct REST call —
+		// offers mcpproxy as its own upstream.
+		SelfListenAddrs: []string{s.controller.GetListenAddress()},
 	}
 
 	// Parse format hint
