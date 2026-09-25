@@ -26,6 +26,10 @@ mcpproxy upstream list [flags]
 - `--output, -o` - Output format (table, json) [default: table]
 - `--log-level, -l` - Log level (trace, debug, info, warn, error) [default: warn]
 - `--config, -c` - Path to config file
+- `--status` - Filter by health status (repeatable; a comma-separated value is
+  equivalent to repeating the flag — several values select the union of their
+  statuses): `ready`, `connecting`, `sign_in_required`, `needs_review`,
+  `needs_secret`, `needs_config`, `error`, `disabled`
 
 **Examples:**
 ```bash
@@ -37,29 +41,40 @@ mcpproxy upstream list --output=json
 
 # With debug logging
 mcpproxy upstream list --log-level=debug
+
+# Only servers that need a sign-in or a review
+mcpproxy upstream list --status sign_in_required --status needs_review
+mcpproxy upstream list --status sign_in_required,needs_review
 ```
 
 **Output Fields:**
 - NAME - Server name
 - PROTOCOL - Transport protocol (stdio, http, sse, streamable-http)
 - TOOLS - Number of available tools
-- STATUS - Unified health status with emoji indicator and summary
-- ACTION - Suggested remediation command (if applicable)
+- STATUS - The one status label (Spec 109), e.g. "Online", "Sign-in required",
+  "Needs review" — never the free-text summary, which stays available in
+  `-o json` as `health.summary`
+- ACTION - Suggested remediation command, keyed on `health.actions[0]` (if applicable)
 
-**Status Indicators:**
-- ✅ Healthy - Server connected and working
-- ⚠️ Degraded - Server has warnings (e.g., token expiring soon)
-- ❌ Unhealthy - Server has errors or not functioning
-- ⏸️ Disabled - Server manually disabled by user
-- 🔒 Quarantined - Server pending security approval
+**Status Indicators (emoji) and the `status` values behind them:**
+- ✅ `ready` - Online — server connected and working
+- ⚠️ `sign_in_required` / `needs_review` / `needs_secret` / `needs_config` - amber states with a next action
+- ❌ `error` - Server has errors or not functioning
+- ⏸️ `disabled` - Server manually disabled by user
+- 🔒 quarantined (`needs_review` or `sign_in_required` while quarantined) - Server pending security approval
+
+`-o json`'s `health` object always carries `status`, `usable` (true only when
+`status == "ready"`) and `actions` (every applicable next step, in priority
+order) alongside the existing `level`/`admin_state`/`summary`/`detail`/`action`
+fields.
 
 **Example Output:**
 ```
 NAME                      PROTOCOL   TOOLS      STATUS                         ACTION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅    github-server           http       15         Connected (15 tools)           -
-❌    oauth-server            http       0          Token expired                  auth login --server=oauth-server
-⏸️    disabled-server         stdio      0          Disabled by user               upstream enable disabled-server
+✅    github-server           http       15         Online                         -
+❌    oauth-server            http       0          Sign-in required               auth login --server=oauth-server
+⏸️    disabled-server         stdio      0          Disabled                       upstream enable disabled-server
 ```
 
 ---

@@ -265,6 +265,10 @@ Examples:
 	upstreamAll        bool
 	upstreamForce      bool
 	upstreamServerName string
+	// upstreamListStatus is FR-015: --status <value> is repeatable, and a
+	// comma-separated value is equivalent to repeating the flag (StringArrayVar
+	// preserves each raw token, so we split on "," ourselves in the filter).
+	upstreamListStatus []string
 
 	// Add command flags
 	upstreamAddHeaders      []string
@@ -326,6 +330,9 @@ func init() {
 	// Define flags (note: output format handled by global --output/-o flag from root command)
 	upstreamListCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level (trace, debug, info, warn, error)")
 	upstreamListCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to MCP configuration file")
+	upstreamListCmd.Flags().StringArrayVar(&upstreamListStatus, "status", nil,
+		"Filter by health status (repeatable; a comma-separated value is equivalent to repeating the flag): "+
+			"ready, connecting, sign_in_required, needs_review, needs_secret, needs_config, error, disabled")
 
 	upstreamLogsCmd.Flags().IntVarP(&upstreamLogsTail, "tail", "n", 50, "Number of log lines to show")
 	upstreamLogsCmd.Flags().BoolVarP(&upstreamLogsFollow, "follow", "f", false, "Follow log output (requires daemon)")
@@ -451,6 +458,9 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 				"summary":     summary,
 				"detail":      healthStatus.Detail,
 				"action":      healthStatus.Action,
+				"status":      healthStatus.Status,
+				"usable":      healthStatus.Usable,
+				"actions":     healthStatus.Actions,
 			},
 		}
 
@@ -466,6 +476,11 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 }
 
 func outputServers(servers []map[string]interface{}) error {
+	// FR-015: --status <value> is repeatable, and a comma-separated value is
+	// equivalent to repeating the flag; several values select the UNION of
+	// their statuses. Applies to every output format (table, json, yaml).
+	servers = filterServersByStatus(servers, upstreamListStatus)
+
 	// Sort servers alphabetically by name for consistent output
 	sort.Slice(servers, func(i, j int) bool {
 		nameI := getStringField(servers[i], "name")
@@ -516,6 +531,51 @@ func validateTrustModeFlag(mode string) error {
 		mode, strings.Join(config.ValidTrustModes(), ", "))
 }
 
+// serverHealthStatus extracts a server row's `health.status` value (the
+// Spec 109 status vocabulary), or "" when absent (e.g. a payload from an
+// older core that predates FR-010).
+func serverHealthStatus(srv map[string]interface{}) string {
+	healthData, ok := srv["health"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	return getStringField(healthData, "status")
+}
+
+// filterServersByStatus is FR-015: `--status <value>` is repeatable, and a
+// comma-separated value is equivalent to repeating the flag — several values
+// select the UNION of their statuses. An empty filter (`--status` omitted)
+// returns every server unchanged. A server with no `health.status` (an older
+// core) never matches a filter, so an operator's `--status` never silently
+// hides it in a mixed-version fleet by exclusion; it just doesn't sort into
+// any bucket.
+func filterServersByStatus(servers []map[string]interface{}, rawFilters []string) []map[string]interface{} {
+	if len(rawFilters) == 0 {
+		return servers
+	}
+
+	wanted := make(map[string]bool)
+	for _, raw := range rawFilters {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v != "" {
+				wanted[v] = true
+			}
+		}
+	}
+	if len(wanted) == 0 {
+		return servers
+	}
+
+	filtered := make([]map[string]interface{}, 0, len(servers))
+	for _, srv := range servers {
+		if wanted[serverHealthStatus(srv)] {
+			filtered = append(filtered, srv)
+		}
+	}
+	return filtered
+}
+
 // serverHoldSummary reports whether any of a server's tools need human review
 // (count > 0 is the trigger — a record can be both blocked and pending, so the
 // number is not an exact tool total) plus a short label naming the breakdown.
@@ -564,6 +624,7 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 		healthLevel := "unknown"
 		healthAdminState := "enabled"
 		healthSummary := getStringField(srv, "status") // fallback to old status
+		healthStatusValue := ""
 		healthAction := ""
 		healthDetail := ""
 
@@ -571,8 +632,31 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 			healthLevel = getStringField(healthData, "level")
 			healthAdminState = getStringField(healthData, "admin_state")
 			healthSummary = getStringField(healthData, "summary")
+			healthStatusValue = getStringField(healthData, "status")
 			healthAction = getStringField(healthData, "action")
 			healthDetail = getStringField(healthData, "detail")
+		}
+
+		// FR-015: STATUS is the status label, not the free-text summary (a
+		// declared table-output change — the summary stays available in
+		// `-o json` as health.summary). Falls back to the free-text summary
+		// for an older core's payload that predates `health.status`.
+		healthStatusText := healthSummary
+		if healthStatusValue != "" {
+			healthStatusText = health.StatusLabel(healthStatusValue)
+		}
+
+		// FR-012: ACTION is keyed on actions[0], not the legacy `action` field,
+		// though today the two always agree (action == actions[0] is an
+		// invariant of the health calculator). Falls back to `action` for an
+		// older core's payload that predates `health.actions`.
+		primaryAction := healthAction
+		if healthData != nil {
+			if rawActions, ok := healthData["actions"].([]interface{}); ok && len(rawActions) > 0 {
+				if first, ok := rawActions[0].(string); ok {
+					primaryAction = first
+				}
+			}
 		}
 
 		// Status emoji based on health level and admin state
@@ -593,18 +677,18 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 			}
 		}
 
-		// Format action as CLI command hint
+		// Format action as CLI command hint (contracts/health-vocabulary.md#cli).
 		actionHint := "-"
-		switch healthAction {
-		case "login":
+		switch primaryAction {
+		case health.ActionLogin:
 			actionHint = fmt.Sprintf("auth login --server=%s", name)
-		case "restart":
+		case health.ActionRestart:
 			actionHint = fmt.Sprintf("upstream restart %s", name)
-		case "enable":
+		case health.ActionEnable:
 			actionHint = fmt.Sprintf("upstream enable %s", name)
-		case "approve":
+		case health.ActionApprove:
 			actionHint = "Approve in Web UI"
-		case "view_logs":
+		case health.ActionViewLogs:
 			actionHint = fmt.Sprintf("upstream logs %s", name)
 		case health.ActionSetSecret:
 			if healthDetail != "" {
@@ -612,7 +696,7 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 			} else {
 				actionHint = "Set secret in config"
 			}
-		case health.ActionConfigure:
+		case health.ActionConfigure, health.ActionEditURL:
 			actionHint = "Edit config"
 		}
 
@@ -621,7 +705,7 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 		// the hold in STATUS, downgrade the all-clear emoji, and point the
 		// operator at the view that carries the hold evidence.
 		if holds, holdLabel := serverHoldSummary(srv); holds > 0 {
-			healthSummary = fmt.Sprintf("%s · %s held", healthSummary, holdLabel)
+			healthStatusText = fmt.Sprintf("%s · %s held", healthStatusText, holdLabel)
 			if statusEmoji == "✅" {
 				statusEmoji = "⚠️ "
 			}
@@ -635,7 +719,7 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 			name,
 			protocol,
 			fmt.Sprintf("%d", toolCount),
-			healthSummary,
+			healthStatusText,
 			actionHint,
 		})
 	}
