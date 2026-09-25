@@ -397,7 +397,13 @@ func newProfileIndex(cfg *config.Config) *profileIndex {
 // caller that already paid for position(slug) elsewhere in the same
 // request.
 func (idx *profileIndex) PolicyAt(candidate int) *profile.CompiledPolicy {
-	if candidate < 0 || candidate >= len(idx.policies) {
+	// Mirrors profileAt's exact guard (idx.cfg == nil and the LIVE
+	// cfg.Profiles length, not just idx.policies' constructed length): a raw
+	// test fixture may mutate cfg.Profiles in place after construction
+	// (cfg.Profiles = nil to simulate a deleted profile), and a candidate in
+	// [live_len, constructed_len) must read as "no such profile" exactly
+	// like profileAt does, never a stale cached policy.
+	if candidate < 0 || idx.cfg == nil || candidate >= len(idx.cfg.Profiles) || candidate >= len(idx.policies) {
 		return nil
 	}
 	return idx.policies[candidate]

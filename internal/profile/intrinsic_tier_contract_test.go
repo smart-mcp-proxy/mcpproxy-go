@@ -74,31 +74,17 @@ func TestIntrinsicTier_OneTierMappingAcrossSpecs(t *testing.T) {
 	}
 }
 
-// tierAdapter mirrors IntrinsicTier's switch, exposed for the exhaustiveness
-// test below without changing IntrinsicTier's signature.
-func tierAdapter(ct contracts.Tier) Tier {
-	switch ct {
-	case contracts.TierRead:
-		return TierRead
-	case contracts.TierWrite:
-		return TierWrite
-	case contracts.TierDestructive:
-		return TierDestructive
-	case contracts.TierUnannotated:
-		return TierUnannotated
-	default:
-		return TierDestructive
-	}
-}
-
 // TestIntrinsicTier_OutOfRangeFailsClosed pins that an out-of-range
 // contracts.Tier value (e.g. contracts.TierUnknown, which only the Spec 109
 // review composer ever produces, or a hypothetical future value) maps to
 // TierDestructive, never propagated unmapped or defaulted to something
-// permissive (data-model.md §2 "default: fail closed").
+// permissive (data-model.md §2 "default: fail closed"). This exercises the
+// actual production adapter (tierFromContractsTier, which IntrinsicTier
+// itself calls) rather than a hand-copied mirror of its switch, so a
+// regression in the real mapping cannot pass silently.
 func TestIntrinsicTier_OutOfRangeFailsClosed(t *testing.T) {
-	require.Equal(t, TierDestructive, tierAdapter(contracts.TierUnknown))
-	require.Equal(t, TierDestructive, tierAdapter(contracts.Tier("bogus")))
+	require.Equal(t, TierDestructive, tierFromContractsTier(contracts.TierUnknown))
+	require.Equal(t, TierDestructive, tierFromContractsTier(contracts.Tier("bogus")))
 }
 
 // TestTierString_MatchesContractsSpelling pins Tier.String() to the

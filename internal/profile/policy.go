@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"sort"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -49,7 +50,14 @@ func IntrinsicTier(a *config.ToolAnnotations, found bool) Tier {
 	if !found {
 		return TierDestructive
 	}
-	switch contracts.AnnotationTier(a) {
+	return tierFromContractsTier(contracts.AnnotationTier(a))
+}
+
+// tierFromContractsTier is the exhaustive contracts.Tier -> Tier adapter
+// IntrinsicTier calls (factored out so T005a's out-of-range test exercises
+// the actual production mapping, not a hand-copied mirror of it).
+func tierFromContractsTier(ct contracts.Tier) Tier {
+	switch ct {
 	case contracts.TierRead:
 		return TierRead
 	case contracts.TierWrite:
@@ -78,6 +86,26 @@ func tierFromString(s string) Tier {
 		return TierDestructive
 	default:
 		return TierUnannotated
+	}
+}
+
+// validTierFromString is tierFromString plus a validity flag, used where an
+// invalid (non-empty, unrecognised) value must be dropped rather than
+// silently treated as TierUnannotated — e.g. a classify entry, where storing
+// a bogus tier would trivially pass the tier cap. config.ValidateProfiles
+// already rejects an invalid classify value at load time; this is Compile's
+// own defense-in-depth re-check for a caller that compiles a not-yet-
+// validated draft (e.g. a future profile-editor "Try it" preview).
+func validTierFromString(s string) (Tier, bool) {
+	switch s {
+	case config.ProfileTierRead:
+		return TierRead, true
+	case config.ProfileTierWrite:
+		return TierWrite, true
+	case config.ProfileTierDestructive:
+		return TierDestructive, true
+	default:
+		return TierUnannotated, false
 	}
 }
 
@@ -120,8 +148,18 @@ type CompiledPolicy struct {
 // fingerprintFields is the canonical, ordered projection of exactly the
 // FR-001 policy fields hashed into CompiledPolicy.Fingerprint.
 type fingerprintFields struct {
-	MaxTier         string            `json:"max_tier"`
-	Unannotated     string            `json:"unannotated"`
+	MaxTier     string `json:"max_tier"`
+	Unannotated string `json:"unannotated"`
+	// ToolsSet distinguishes an absent `tools` object from a present-but-
+	// empty one (`{}`): both compile to the same empty Allow/Deny/Classify
+	// below, but ProfileConfig.IsLegacy() treats "Tools != nil" as
+	// non-legacy regardless of its contents — carrying that same
+	// non-omitempty flag here keeps the fingerprint sensitive to exactly the
+	// same edit IsLegacy() (and therefore FR-011's hidden_by_profile
+	// presence) is sensitive to, so FR-027's "compare policy fingerprints
+	// between snapshots" edit-detection can never miss a legacy/non-legacy
+	// flip that carried no other change.
+	ToolsSet        bool              `json:"tools_set"`
 	Allow           []string          `json:"allow,omitempty"`
 	Deny            []string          `json:"deny,omitempty"`
 	Classify        map[string]string `json:"classify,omitempty"`
@@ -146,6 +184,7 @@ func fingerprintOf(pc *config.ProfileConfig) [32]byte {
 	f := fingerprintFields{
 		MaxTier:         pc.MaxTier,
 		Unannotated:     pc.Unannotated,
+		ToolsSet:        pc.Tools != nil,
 		CodeExecution:   pc.CodeExecution,
 		ManagementTools: pc.ManagementTools,
 	}
@@ -225,10 +264,18 @@ func Compile(pc *config.ProfileConfig) *CompiledPolicy {
 		if len(pc.Tools.Classify) > 0 {
 			cp.classify = make(map[string]Tier, len(pc.Tools.Classify))
 			for pat, tier := range pc.Tools.Classify {
-				if !keep(pat) {
+				// Classify keys are an EXACT identity, never a glob
+				// (config.ValidateProfiles rejects a '*' here at load time;
+				// re-checked here for a caller that compiles an unvalidated
+				// draft, e.g. the profile editor's "Try it" preview) — a
+				// wildcard key could never match Decide's exact map lookup,
+				// so it is dropped rather than compiled as dead weight.
+				if !keep(pat) || strings.ContainsRune(pat, '*') {
 					continue
 				}
-				cp.classify[pat] = tierFromString(tier)
+				if t, ok := validTierFromString(tier); ok {
+					cp.classify[pat] = t
+				}
 			}
 		}
 	}

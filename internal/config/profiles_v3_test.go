@@ -139,6 +139,12 @@ func TestValidateProfiles_V3Rules(t *testing.T) {
 		require.ErrorContains(t, err, `profiles[0]: invalid tool pattern "no-colon"`)
 	})
 
+	t.Run("classify key with a wildcard is fatal (classify is an exact identity, never a glob)", func(t *testing.T) {
+		cfg := &Config{Servers: []*ServerConfig{{Name: "a"}}, Profiles: []ProfileConfig{{Name: "prof", Servers: []string{"a"}, Tools: &ProfileToolRules{Classify: map[string]string{"a:search*": "read"}}}}}
+		_, err := ValidateProfiles(cfg)
+		require.ErrorContains(t, err, `profiles[0]: invalid tool pattern "a:search*"`)
+	})
+
 	t.Run("invalid classify tier is fatal", func(t *testing.T) {
 		cfg := &Config{Profiles: []ProfileConfig{{Name: "prof", Servers: []string{"a"}, Tools: &ProfileToolRules{Classify: map[string]string{"a:tool": "bogus"}}}}}
 		_, err := ValidateProfiles(cfg)

@@ -8,7 +8,7 @@
   "tools": {
     "allow": ["notion:update_page", "github:get_secret_scanning_alert"],
     "deny": ["github:*secret*"],
-    "classify": {"github:search_code": "read"}
+    "classify": {"github:search_code": "read", "github:list_issues": "write"}
   },
   "code_execution": false,
   "management_tools": false,

@@ -384,12 +384,18 @@ func (p *MCPProxyServer) suggestCanonicalToolID(ctx context.Context, serverName,
 // PR only needs to change what resolveExactToolIdentity resolves, never this
 // call site or any of its callers).
 //
-// found=false (the identity could not be resolved — unknown server/tool,
-// discovery not completed, or a stale connection generation) tells the
-// caller to fail closed: profile.IntrinsicTier(nil, false) is
-// TierDestructive regardless of the returned annotations, which are nil in
-// that case.
+// found=false (the current snapshot does not list this exact server:tool
+// name at all) tells the caller to fail closed: profile.IntrinsicTier(nil,
+// false) is TierDestructive regardless of the returned annotations, which
+// are nil in that case. found=true does not by itself certify that the
+// annotations are current for the LIVE connection generation (a
+// disconnected server can retain a previous connection's stamp) — dispatch
+// enforces currency separately via the epoch-pinned certified() check
+// (mcp.go); this seam only answers "what does the snapshot say", the same
+// answer every other dispatch-adjacent reader of toolIdentity gets.
+//
+// This delegates to lookupExactToolAnnotations (mcp.go) rather than
+// re-resolving: same identity, same seam, one implementation.
 func (p *MCPProxyServer) EffectiveAnnotations(serverName, toolName string) (annotations *config.ToolAnnotations, found bool) {
-	identity := p.resolveExactToolIdentity(serverName, toolName)
-	return identity.Annotations, identity.Found
+	return p.lookupExactToolAnnotations(serverName, toolName)
 }

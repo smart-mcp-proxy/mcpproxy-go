@@ -311,7 +311,14 @@ func ValidateProfiles(cfg *Config) (warnings []string, err error) {
 				}
 			}
 			for pat, tier := range p.Tools.Classify {
-				if !isValidToolPattern(pat) {
+				// Classify keys are an EXACT "server:tool" identity, never a
+				// glob (data-model.md §1 ProfileToolRules.Classify: "exact
+				// server:tool"; FR-005 applies a classification to specific
+				// tools, not a pattern of them) — Decide looks a classify
+				// entry up by exact map key, so a '*' here would silently
+				// never match anything rather than classifying every tool
+				// it looks like it should.
+				if !isValidToolPattern(pat) || indexByte(pat, '*') >= 0 {
 					return warnings, fmt.Errorf("profiles[%d]: invalid tool pattern %q", i, pat)
 				}
 				if _, ok := validProfileTiers[tier]; !ok {

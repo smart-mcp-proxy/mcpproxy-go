@@ -27,6 +27,9 @@ func TestGlobMatcher(t *testing.T) {
 		{"tool name containing double underscore (direct-surface alias shape)", "github:list__issues", "github:list__issues", true},
 		{"tool identity with an embedded colon (namespaced raw name)", "a:ns:erase", "a:ns:erase", true},
 		{"tool identity with an embedded colon, mismatch", "a:ns:erase", "a:ns:wipe", false},
+		{"literal dot is not a regex any-char wildcard", "github:v1.0-sync", "github:v1.0-sync", true},
+		{"literal dot near-miss: dot must match exactly, not any char", "github:v1.0-sync", "github:v1x0-sync", false},
+		{"literal hyphen", "github:v1.0-sync", "github:v1.0_sync", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

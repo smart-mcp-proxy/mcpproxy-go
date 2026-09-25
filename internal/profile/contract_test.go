@@ -64,7 +64,14 @@ func TestContractFixtures_Decode(t *testing.T) {
 		require.Len(t, rows, 3)
 		require.Equal(t, ReasonAboveTierCap, rows[1].Access.Reason)
 		require.Equal(t, ReasonNone, rows[0].Access.Reason)
-		require.True(t, rows[2].ClassificationStale)
+		// list_issues (row 0) is ANNOTATED (read) but profile_full.json also
+		// classifies it "write" (FR-005: a classify entry only applies to an
+		// unannotated tool) -> the real annotation wins and the entry is
+		// reported stale.
+		require.True(t, rows[0].ClassificationStale, "an annotated tool with a classify entry must report it stale (FR-005)")
+		// search_code (row 2) is UNANNOTATED and IS classified "read" by
+		// profile_full.json -> the classification is applied, not stale.
+		require.False(t, rows[2].ClassificationStale, "an applied classification on an unannotated tool must not be reported stale")
 	})
 
 	t.Run("client_rows.json decodes credential state and source enums", func(t *testing.T) {
@@ -213,6 +220,14 @@ func TestCompiledPolicy_Fingerprint(t *testing.T) {
 		p1.SwitchableTo = &sw1
 		p2.SwitchableTo = &sw2
 		require.Equal(t, Compile(p1).Fingerprint, Compile(p2).Fingerprint)
+	})
+
+	t.Run("changes when tools flips from absent to present-but-empty (IsLegacy sensitivity)", func(t *testing.T) {
+		withTools := &config.ProfileConfig{Name: "p", Servers: []string{"a"}, Tools: &config.ProfileToolRules{}}
+		withoutTools := &config.ProfileConfig{Name: "p", Servers: []string{"a"}}
+		require.True(t, withTools.IsLegacy() == false && withoutTools.IsLegacy() == true, "sanity: only Tools differs the two IsLegacy() results")
+		require.NotEqual(t, Compile(withoutTools).Fingerprint, Compile(withTools).Fingerprint,
+			"an absent tools object and an empty {} one are both enforcement-equivalent but IsLegacy() disagrees about them (FR-011 hidden_by_profile presence) — the fingerprint must track that flip too (FR-027)")
 	})
 
 	t.Run("never changes on name, title or servers", func(t *testing.T) {
