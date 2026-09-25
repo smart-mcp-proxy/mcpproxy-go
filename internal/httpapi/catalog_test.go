@@ -56,9 +56,21 @@ func withCatalogFixtureRegistry(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	// A second source whose entry shares delta-tool's exact install target
+	// (same command) but under a DIFFERENT source id — the regression fixture
+	// for the "registry-sourced match needs (source, target), not target
+	// alone" rule.
+	otherBody := `[{"id":"lookalike-tool","name":"Lookalike Tool","installCmd":"npx delta-server"}]`
+	otherSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(otherBody))
+	}))
+	t.Cleanup(otherSrv.Close)
+
 	t.Cleanup(registries.AllowPrivateRegistryFetchForTest())
 	t.Cleanup(registries.SetRegistriesForTest([]registries.RegistryEntry{
 		{ID: "official", Name: "Official", ServersURL: srv.URL},
+		{ID: "other", Name: "Other", ServersURL: otherSrv.URL},
 	}))
 }
 
@@ -110,6 +122,26 @@ func TestCatalogSearch_AddedScopedByCallerVisibility(t *testing.T) {
 	// No configured server field (name, url, command, secret) leaks — the
 	// catalog entries only ever carry the source's own public data.
 	assert.NotContains(t, agentRec.Body.String(), catalogDeltaSecretMarker)
+}
+
+// TestCatalogSearch_AddedRequiresMatchingSourceForRegistryAdd is the
+// regression for a bug caught while implementing this: a registry-sourced
+// configured server (source_registry_id set) must NOT cause a different
+// source's entry with the same install target to also read added:true —
+// only a server with NO source_registry_id (a manual add) matches by target
+// alone (contracts/rest-api.md#catalog "added").
+func TestCatalogSearch_AddedRequiresMatchingSourceForRegistryAdd(t *testing.T) {
+	withCatalogFixtureRegistry(t)
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: catalogFixtureServers(), withManagement: true}
+	srv, _ := scopedAgentServer(t, ctrl, []string{"gamma"})
+
+	rec := scopeGet(t, srv, "/api/v1/catalog/search?q=tool", scopeAdminAPIKey)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	results := catalogDecodeResults(t, rec)
+
+	assert.True(t, catalogAddedFor(results, "delta-tool"), "delta-tool (source=official) must match delta (source_registry_id=official)")
+	assert.False(t, catalogAddedFor(results, "lookalike-tool"),
+		"lookalike-tool (source=other) shares delta's install target but must NOT read added=true — delta was added from a different source")
 }
 
 func catalogDecodeResults(t *testing.T, rec *httptest.ResponseRecorder) []map[string]interface{} {

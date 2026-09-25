@@ -206,6 +206,7 @@ func main() {
 	rootCmd.AddCommand(newSandboxExecCommand())
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(GetRegistryCommand())
+	rootCmd.AddCommand(GetCatalogCommand())
 	rootCmd.AddCommand(toolsCmd)
 	rootCmd.AddCommand(callCmd)
 	rootCmd.AddCommand(codeCmd)

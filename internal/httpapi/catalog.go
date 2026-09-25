@@ -110,15 +110,19 @@ func (s *Server) catalogAddedPredicate(ctx context.Context) func(registries.Cata
 	servers := s.getVisibleServersForCatalog(ctx)
 
 	// byRegistryAndTarget indexes servers that declare which registry they
-	// came from; bySourcelessTarget indexes every visible server (including
-	// registry-sourced ones) by install target alone, since a manual add has
-	// no source_registry_id and must still match.
+	// came from — those must match on (source, target); byTargetOnly indexes
+	// only the manual adds (no source_registry_id), which match on target
+	// alone. A registry-sourced server is deliberately NOT also added to
+	// byTargetOnly: without this split it would falsely read added:true for
+	// every OTHER source whose entry happens to share the same install
+	// target (contracts/rest-api.md#catalog "added").
 	byRegistryAndTarget := make(map[string]bool, len(servers))
 	byTargetOnly := make(map[string]bool, len(servers))
 	for _, srv := range servers {
 		target := catalogInstallTargetForServer(srv)
-		byTargetOnly[target] = true
-		if srv.SourceRegistryID != "" {
+		if srv.SourceRegistryID == "" {
+			byTargetOnly[target] = true
+		} else {
 			byRegistryAndTarget[srv.SourceRegistryID+"\x00"+target] = true
 		}
 	}

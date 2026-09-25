@@ -153,7 +153,7 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 
 			hits := make([]CatalogHit, 0, len(entries))
 			for _, e := range entries {
-				hits = append(hits, buildCatalogHit(&reg, e))
+				hits = append(hits, BuildCatalogHit(&reg, e))
 			}
 			outcomes[i] = sourceOutcome{hits: hits}
 		}(i)
@@ -193,13 +193,14 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 	return all, sections, unavailable
 }
 
-// buildCatalogHit derives the catalog-only fields (Title, Publisher,
+// BuildCatalogHit derives the catalog-only fields (Title, Publisher,
 // Verified, Official, Popularity) from a registry entry. Verified currently
 // tracks Official — no registry in this spec supplies an independent
 // publisher-verification signal yet, so a trusted (built-in) source's
 // namespace is the only verification evidence available (data-model §9,
-// research D12).
-func buildCatalogHit(reg *RegistryEntry, entry ServerEntry) CatalogHit {
+// research D12). Exported so a single-entry lookup (CLI `catalog show`) can
+// build the same CatalogHit shape SearchAll uses internally.
+func BuildCatalogHit(reg *RegistryEntry, entry ServerEntry) CatalogHit {
 	official := reg.IsTrusted()
 	title := entry.Name
 	if title == "" {
