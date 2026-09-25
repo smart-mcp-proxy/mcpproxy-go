@@ -253,6 +253,14 @@ type Config struct {
 	// (Spec 057). Absent/empty is fully supported — /mcp is unchanged and configs
 	// without this key serialize byte-identically (SC-004).
 	Profiles []ProfileConfig `json:"profiles,omitempty" mapstructure:"profiles"`
+	// AnonymousProfile confines every caller whose request authenticates as
+	// credential kind "anonymous" (no credential, or an unrecognised
+	// non-agent token accepted by the require_mcp_auth:false back-compat
+	// branch) to the named profile (Spec 108 FR-008). Empty (default) means
+	// unconfined, legacy anonymous behaviour. A name that does not match any
+	// configured profile resolves anonymous callers to deny-all and is
+	// reported as a validation warning (data-model.md §1).
+	AnonymousProfile string `json:"anonymous_profile,omitempty" mapstructure:"anonymous-profile"`
 	// Deprecated: TopK is superseded by ToolsLimit and has no runtime effect. Kept for backward compatibility.
 	TopK              int      `json:"top_k,omitempty" mapstructure:"top-k"`
 	ToolsLimit        int      `json:"tools_limit" mapstructure:"tools-limit"`
@@ -2658,6 +2666,19 @@ func (c *Config) validateDetailedCore() []ValidationError {
 	// Spec 107 FR-014/FR-019: audit_log validated (never mutated) on every
 	// door - boot, PATCH and /config/apply.
 	errors = append(errors, validateAuditLog(c)...)
+
+	// Spec 108 FR-007: profiles validated on every WRITE door (REST
+	// config/validate, config/apply, PATCH; the MCP `profiles` tool and every
+	// editor route through REST) by the same ValidateProfiles the boot path
+	// uses, so a write surface can never persist a profile the boot path
+	// would then refuse to load. The boot path (Validate(), not this
+	// function) calls ValidateProfiles separately because it must also
+	// capture the returned warnings (c.profileWarnings) for its logger; here
+	// only the fatal error matters, so a fatal ValidateProfiles error is
+	// wrapped as one ValidationError.
+	if _, err := ValidateProfiles(c); err != nil {
+		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
+	}
 
 	return errors
 }
