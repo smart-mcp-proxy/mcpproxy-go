@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
 
 var (
@@ -274,6 +275,12 @@ Examples:
 	upstreamAddIfNotExists  bool
 	upstreamAddNoQuarantine bool
 	upstreamAddTrustMode    string
+	// upstreamAddSecretEnvs/Headers are the Spec 109 FR-065 secret flags:
+	// each value is written to the OS keyring under the FR-065 ref name
+	// (internal/secret.RefName) and the config gets ${keyring:<ref>} instead
+	// of the raw value.
+	upstreamAddSecretEnvs    []string
+	upstreamAddSecretHeaders []string
 
 	// Remove command flags
 	upstreamRemoveYes      bool
@@ -353,6 +360,8 @@ func init() {
 	upstreamAddCmd.Flags().BoolVar(&upstreamAddIfNotExists, "if-not-exists", false, "Don't error if server already exists")
 	upstreamAddCmd.Flags().BoolVar(&upstreamAddNoQuarantine, "no-quarantine", false, "Don't quarantine the new server (use with caution)")
 	upstreamAddCmd.Flags().StringVar(&upstreamAddTrustMode, "trust-mode", "", "Per-server trust tier governing admission AND tool-change approval: auto (approve without scanning), scan (auto-approve only when the offline TPA scan is green), manual (human reviews every change). Unset inherits the default (manual)")
+	upstreamAddCmd.Flags().StringArrayVar(&upstreamAddSecretEnvs, "secret-env", nil, "Environment variable to store in the OS keyring instead of the config, in KEY=value format (repeatable, FR-065)")
+	upstreamAddCmd.Flags().StringArrayVar(&upstreamAddSecretHeaders, "secret-header", nil, "HTTP header to store in the OS keyring instead of the config, in 'Name: value' format (repeatable, FR-065)")
 
 	// Remove command flags
 	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveYes, "yes", false, "Skip confirmation prompt")
@@ -1271,6 +1280,15 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("invalid env format: %s (expected 'KEY=value')", e)
 		}
 		env[parts[0]] = parts[1]
+	}
+
+	// FR-065: --secret-env/--secret-header write to the OS keyring instead
+	// of the config, under the shared per-kind ref name, and merge
+	// ${keyring:<ref>} into the same env/headers maps above.
+	if len(upstreamAddSecretEnvs) > 0 || len(upstreamAddSecretHeaders) > 0 {
+		if err := applySecretFlags(secret.NewResolver(), serverName, upstreamAddSecretEnvs, upstreamAddSecretHeaders, env, headers); err != nil {
+			return err
+		}
 	}
 
 	// GH #938: refuse a typo'd tier before anything is written, with the same
