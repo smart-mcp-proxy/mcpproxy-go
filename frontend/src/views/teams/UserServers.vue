@@ -203,6 +203,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { healthStatusLabel } from '@/utils/health'
 
 interface UserServer {
   name: string
@@ -217,6 +218,7 @@ interface UserServer {
   health?: {
     level: string
     summary: string
+    status?: string
   }
 }
 
@@ -260,7 +262,10 @@ function healthLabel(server: UserServer): string {
   if (!server.health) {
     return server.enabled ? (server.connected ? 'connected' : 'disconnected') : 'disabled'
   }
-  return server.health.level
+  // FR-011: no surface may render `level` as text — render `status` through
+  // the one label table, falling back to the free-text summary.
+  if (server.health.status) return healthStatusLabel(server.health.status)
+  return server.health.summary || server.health.level
 }
 
 function navigateToDetail(server: UserServer) {

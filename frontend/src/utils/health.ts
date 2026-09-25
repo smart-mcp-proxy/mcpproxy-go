@@ -4,6 +4,7 @@
  */
 
 import type { HealthStatus, Server } from '@/types'
+import { HEALTH_STATUS_LABELS, HEALTH_ACTION_LABELS, type HealthStatusValue } from '@/types/contracts'
 
 /**
  * Health level constants matching Go backend (internal/health/constants.go)
@@ -65,6 +66,49 @@ export function isHealthy(health: HealthStatus | undefined, legacyConnected: boo
  */
 export function isServerConnected(server: Server): boolean {
   return server.connected
+}
+
+/**
+ * Status vocabulary constants matching Go backend (internal/health/constants.go).
+ * The ONE vocabulary every surface renders as text (Spec 109 FR-010/FR-011).
+ * `HealthLevel` above stays a severity signal for badge/tray coloring only —
+ * no renderer may print it as text.
+ */
+export const HealthStatusValues = {
+  Ready: 'ready',
+  Connecting: 'connecting',
+  SignInRequired: 'sign_in_required',
+  NeedsReview: 'needs_review',
+  NeedsSecret: 'needs_secret',
+  NeedsConfig: 'needs_config',
+  Error: 'error',
+  Disabled: 'disabled',
+} as const
+
+/**
+ * Cross-surface label for a `health.status` value (contracts/health-vocabulary.md).
+ * Falls back to the raw value for forward-compat with a status this build
+ * does not yet know (never crashes on an unrecognized value).
+ *
+ * @param status - health.status
+ * @returns the label text (e.g. "Sign-in required")
+ */
+export function healthStatusLabel(status: string | undefined | null): string {
+  if (!status) return ''
+  return HEALTH_STATUS_LABELS[status as HealthStatusValue] ?? status
+}
+
+/**
+ * Cross-surface button label for a `health.actions[]` entry
+ * (contracts/health-vocabulary.md). Returns '' for HealthAction.None or an
+ * unrecognized value.
+ *
+ * @param action - one entry of health.actions (or health.action)
+ * @returns the button label text (e.g. "Sign in"), or '' when none
+ */
+export function healthActionLabel(action: string | undefined | null): string {
+  if (!action) return ''
+  return HEALTH_ACTION_LABELS[action] ?? ''
 }
 
 /**

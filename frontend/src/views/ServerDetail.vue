@@ -1245,14 +1245,17 @@
               </div>
             </div>
 
-            <!-- Health (calculated by backend; same shape consumed by macOS tray) -->
+            <!-- Health (calculated by backend; same shape consumed by macOS tray).
+                 Spec 109 FR-011: this row renders `status` through the one label
+                 table (healthStatusLabel) — never `level` as text. `level` still
+                 drives the badge COLOR only (a severity signal, not the text). -->
             <div v-if="server.health" class="card bg-base-100 shadow-sm">
               <div class="card-body py-4">
                 <h3 class="card-title text-base">Health</h3>
                 <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
-                  <dt class="text-base-content/60">Level</dt>
+                  <dt class="text-base-content/60">Status</dt>
                   <dd>
-                    <span :class="healthLevelBadgeClass(server.health.level)">{{ server.health.level }}</span>
+                    <span :class="healthLevelBadgeClass(server.health.level)">{{ healthStatusLabel(server.health.status) }}</span>
                   </dd>
                   <dt class="text-base-content/60">Admin State</dt>
                   <dd><span class="badge badge-ghost badge-sm">{{ server.health.admin_state }}</span></dd>
@@ -1262,9 +1265,15 @@
                     <dt class="text-base-content/60">Detail</dt>
                     <dd class="text-base-content/70 break-words whitespace-pre-wrap">{{ server.health.detail }}</dd>
                   </template>
-                  <template v-if="server.health.action">
+                  <template v-if="server.health.actions?.length">
                     <dt class="text-base-content/60">Suggested Action</dt>
-                    <dd><span class="badge badge-info badge-outline badge-sm">{{ server.health.action }}</span></dd>
+                    <dd class="flex flex-wrap gap-1">
+                      <span
+                        v-for="a in server.health.actions"
+                        :key="a"
+                        class="badge badge-info badge-outline badge-sm"
+                      >{{ healthActionLabel(a) }}</span>
+                    </dd>
                   </template>
                 </dl>
               </div>
@@ -1640,7 +1649,7 @@ import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus
 import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
 import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
-import { oauthSignInState } from '@/utils/health'
+import { oauthSignInState, healthStatusLabel, healthActionLabel } from '@/utils/health'
 import { describeIsolation } from '@/utils/isolationState'
 import { computeToolDiffSections } from '@/utils/toolDiff'
 import { groupFindingsByTool, type FlaggedToolGroup } from '@/utils/toolLocation'
@@ -1883,7 +1892,8 @@ const statusBadgeText = computed(() => {
   const health = server.value?.health
   if (health) {
     if (signInState.value && health.admin_state !== 'disabled') return 'Sign-in required'
-    return health.summary || health.level
+    // FR-011: no surface may render `level` as text.
+    return health.summary || healthStatusLabel(health.status)
   }
   if (signInState.value) return 'Sign-in required'
   if (server.value?.connected) return 'Connected'

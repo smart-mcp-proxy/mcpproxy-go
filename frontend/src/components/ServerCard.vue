@@ -427,7 +427,7 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDetailPath, serverDisplayName } from '@/utils/serverRoute'
-import { oauthSignInState } from '@/utils/health'
+import { oauthSignInState, healthStatusLabel } from '@/utils/health'
 import { deriveTrustModeState, TRUST_MODES } from '@/utils/trustMode'
 
 interface Props {
@@ -538,7 +538,9 @@ const statusText = computed(() => {
     // MCP-1821 — surface an actionable "Sign-in required" for OAuth login states,
     // including a quarantined-and-login-required server (quarantine + sign-in coexist).
     if (signInState.value && health.admin_state !== 'disabled') return 'Sign-in required'
-    return health.summary || health.level
+    // FR-011: no surface may render `level` as text — fall back to the one
+    // status label table, never the raw severity value.
+    return health.summary || healthStatusLabel(health.status)
   }
   // Fallback to legacy logic
   // MCP-1857 — surface the actionable "Sign-in required" for a diagnostic-only
