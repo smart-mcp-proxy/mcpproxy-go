@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -20,6 +21,16 @@ type usableServerTestController struct {
 
 	servers  []map[string]interface{}
 	approved map[string][]*storage.ToolApprovalRecord // serverName -> records
+
+	// bulkErr, when set, is what ListToolApprovals("") returns instead of the
+	// aggregate — modeling storage.BoltDB's real ForEach behavior, where one
+	// record anywhere that fails UnmarshalBinary aborts the WHOLE scan
+	// (review round 2, internal/httpapi/onboarding.go finding). A per-server
+	// ListToolApprovals(name) call still succeeds for any server whose own
+	// records are intact, since it never reaches the corrupt one; perServerErr
+	// models the one server whose own prefix scan also hits its corrupt record.
+	bulkErr      error
+	perServerErr map[string]error
 }
 
 func (m *usableServerTestController) GetAllServers() ([]map[string]interface{}, error) {
@@ -30,10 +41,17 @@ func (m *usableServerTestController) GetAllServers() ([]map[string]interface{}, 
 // contract: an empty serverName returns every record across every server,
 // not just the entry keyed by "" — computeUsableServers relies on the
 // aggregate form (one call, grouped in memory) rather than one call per
-// candidate server.
+// candidate server, except as a per-server fallback when the aggregate call
+// itself fails (bulkErr).
 func (m *usableServerTestController) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
 	if serverName != "" {
+		if err := m.perServerErr[serverName]; err != nil {
+			return nil, err
+		}
 		return m.approved[serverName], nil
+	}
+	if m.bulkErr != nil {
+		return nil, m.bulkErr
 	}
 	var all []*storage.ToolApprovalRecord
 	for _, records := range m.approved {
@@ -169,6 +187,35 @@ func TestHasUsableServer_TrueAfterApprove(t *testing.T) {
 	resp := getOnboardingState(t, srv)
 	assert.True(t, resp.HasUsableServer)
 	assert.Equal(t, []string{"github"}, resp.UsableServers)
+}
+
+// TestHasUsableServer_BulkScanErrorFallsBackPerServer is review round 2's
+// fault-isolation finding on computeUsableServers: switching to a single
+// ListToolApprovals("") call (round 1's perf fix) means bbolt's ForEach
+// aborting on ONE corrupt record anywhere now blanks usable_servers for every
+// server, where the old per-server calls only lost usable-status for the one
+// server whose own records were corrupt. computeUsableServers must fall back
+// to per-server calls when the aggregate call fails, so a healthy server's
+// usability still surfaces.
+func TestHasUsableServer_BulkScanErrorFallsBackPerServer(t *testing.T) {
+	ctrl := &usableServerTestController{
+		servers: []map[string]interface{}{
+			server("healthy", true, false, true),
+			server("corrupt", true, false, true),
+		},
+		approved: map[string][]*storage.ToolApprovalRecord{
+			"healthy": {approvalRecord("healthy", "list_issues", storage.ToolApprovalStatusApproved, false)},
+		},
+		bulkErr: errors.New("bbolt: unmarshal failed for key corrupt:x"),
+		perServerErr: map[string]error{
+			"corrupt": errors.New("bbolt: unmarshal failed for key corrupt:x"),
+		},
+	}
+	srv := newUsableServerTestServer(t, ctrl)
+
+	resp := getOnboardingState(t, srv)
+	assert.True(t, resp.HasUsableServer, "the healthy server's usability must survive a corrupt record elsewhere")
+	assert.Equal(t, []string{"healthy"}, resp.UsableServers)
 }
 
 // TestIncompleteTabCount_UsesHasUsableServer asserts FR-041: the Servers

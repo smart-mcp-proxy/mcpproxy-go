@@ -325,78 +325,18 @@
             <span class="text-sm">{{ selectionImportMessage }}</span>
           </div>
 
-          <!-- The security choice lives in the step body, not the sticky
-               footer: expanded (it must not hide) it is tall enough that a
-               footer would eat the modal and squeeze the import list back down
-               to the clipped single row this step started with. Here it simply
-               scrolls with the rest of the step. -->
-          <details class="group border border-base-300 rounded-lg overflow-hidden bg-base-200/40 mb-4" data-test="security-panel" open>
-            <summary class="cursor-pointer flex items-center gap-2 px-4 py-2.5 select-none hover:bg-base-200/70 transition-colors">
-              <span class="transition-transform inline-block group-open:rotate-90 opacity-60">▸</span>
-              <span class="text-sm font-medium">Runtime isolation and MCP server quarantine</span>
-              <span class="ml-auto inline-flex items-center gap-2">
-                <span class="badge badge-primary badge-sm font-semibold">Global settings</span>
-                <span class="text-xs opacity-70 hidden sm:inline">saved to your mcpproxy config</span>
-              </span>
-            </summary>
-            <div class="px-4 py-4 space-y-4 bg-base-100 border-t border-base-300">
-              <!-- Docker isolation -->
-              <label class="flex items-start gap-3 p-3 rounded-lg border border-base-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  class="checkbox checkbox-sm mt-0.5"
-                  :checked="dockerIsolationDefault"
-                  :disabled="securityBusy || dockerStatus === false"
-                  @change="onToggleDockerIsolation(($event.target as HTMLInputElement).checked)"
-                  data-test="toggle-docker-isolation"
-                />
-                <div class="flex-1 min-w-0">
-                  <div class="font-medium text-sm">Docker isolation</div>
-                  <p class="text-xs opacity-70 mt-1 leading-relaxed">
-                    Sandboxes every stdio server in a throwaway Docker container so a compromised server can't read or write your host files, env vars, or SSH keys. Recommended whenever you import servers from sources you don't fully control.
-                  </p>
-                  <p
-                    v-if="dockerStatus === false"
-                    class="text-xs text-warning mt-2"
-                    data-test="docker-install-hint"
-                  >
-                    Docker isn't running on this machine. Install
-                    <a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener" class="link">Docker Desktop</a>
-                    (or start the Docker daemon) then come back to enable this — stdio servers run unsandboxed otherwise.
-                  </p>
-                  <p class="text-[11px] mt-2">
-                    <a href="https://docs.mcpproxy.app/security/docker-isolation/" target="_blank" rel="noopener" class="link link-primary">Learn more about Docker isolation →</a>
-                  </p>
-                </div>
-              </label>
-
-              <!-- Quarantine new servers -->
-              <label class="flex items-start gap-3 p-3 rounded-lg border border-base-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  class="checkbox checkbox-sm mt-0.5"
-                  :checked="quarantineEnabled"
-                  :disabled="securityBusy"
-                  @change="onToggleQuarantine(($event.target as HTMLInputElement).checked)"
-                  data-test="toggle-quarantine"
-                />
-                <div class="flex-1 min-w-0">
-                  <div class="font-medium text-sm">Quarantine new servers</div>
-                  <p class="text-xs mt-1 leading-relaxed">
-                    <strong>Recommended.</strong> Holds every newly added server in a quarantine zone until you explicitly approve it. Defends against tool-poisoning attacks where a malicious server smuggles instructions into tool descriptions. <strong>Important:</strong> your AI agent itself can add upstream servers via mcpproxy's built-in MCP tools — your approval is the only safety net.
-                  </p>
-                  <p class="text-xs opacity-70 mt-1.5 leading-relaxed">
-                    Combine with security scanners (Trivy, Semgrep, MCP Scan) on the
-                    <router-link to="/servers" class="link link-primary">Servers</router-link>
-                    page for deeper supply-chain checks before approving.
-                  </p>
-                  <p class="text-[11px] mt-2">
-                    <a href="https://docs.mcpproxy.app/security/quarantine/" target="_blank" rel="noopener" class="link link-primary">Learn more about quarantine →</a>
-                  </p>
-                </div>
-              </label>
-            </div>
-          </details>
+          <!-- Spec 109-ux-navigation-consistency FR-043: the global Docker
+               isolation and quarantine defaults are not editable here — they
+               apply to every server on this instance, imported or not, and
+               belong in Settings. This step only decides whether THIS
+               import goes through quarantine, via the footer checkbox below. -->
+          <p
+            class="text-xs opacity-70 mb-4 leading-relaxed"
+            data-test="security-defaults-summary"
+          >
+            Docker isolation is <strong>{{ dockerIsolationDefault ? 'on' : 'off' }}</strong><span v-if="dockerIsolationDefault && dockerStatus === false" class="text-warning"> (Docker not detected)</span> and new-server quarantine is <strong>{{ quarantineEnabled ? 'on' : 'off' }}</strong> by default —
+            <router-link to="/settings" class="link link-primary">change these in Settings →</router-link>
+          </p>
 
           <!-- Only an alternative when there is something to import; the
                nothing-to-import branch above already offers manual add as a
@@ -616,36 +556,39 @@
               </span>
             </div>
           </div>
-          <!-- One primary, and it is the safe one. Two equally-weighted
+          <!-- Spec 109-ux-navigation-consistency FR-043: ONE primary action,
+               labelled with the count being imported, plus a per-import
+               quarantine checkbox (default on). Two equally-weighted
                primaries made the user guess which import was safer, with the
-               reviewed path rendered as the weaker of the pair. Importing
-               without review stays available, as a link — the cost of choosing
-               it should be a deliberate read, not a symmetric coin flip. -->
+               reviewed path rendered as the weaker of the pair — a single
+               action with an explicit, defaulted-safe checkbox removes that
+               guess. -->
           <div class="flex items-center gap-3">
             <!-- Every step offers a way out, this one included: the sweep and
                  the header ✕ both depend on it, and a step whose only exits are
                  "import" is a trap. -->
             <button class="btn btn-ghost btn-sm" @click="dismiss" data-test="close-wizard">Close</button>
+            <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+              <input
+                type="checkbox"
+                class="checkbox checkbox-sm"
+                :checked="quarantineOnImport"
+                :disabled="importBusyAny"
+                title="Unchecking skips quarantine — the servers connect and expose their tools immediately, with no review"
+                @change="onToggleQuarantineOnImport($event)"
+                data-test="footer-quarantine-checkbox"
+              />
+              <span>Quarantine imported servers for review</span>
+            </label>
             <button
-              class="btn btn-link btn-sm px-1 no-underline hover:underline text-base-content/70"
+              class="btn btn-primary btn-sm gap-1 min-w-[160px]"
               :disabled="selectedCount === 0 || importBusyAny"
-              title="Skips quarantine — the servers connect and expose their tools immediately, with no review"
-              @click="onBulkImport(false)"
-              data-test="bulk-import-active"
+              @click="onBulkImport(quarantineOnImport)"
+              data-test="bulk-import-primary"
             >
-              <span v-if="bulkImportBusy === 'active'" class="loading loading-spinner loading-xs"></span>
-              Import without review
-            </button>
-            <button
-              class="btn btn-primary btn-sm gap-1 min-w-[180px]"
-              :disabled="selectedCount === 0 || importBusyAny || !quarantineEnabled"
-              :title="!quarantineEnabled ? 'Re-enable Quarantine new servers above to use this option' : ''"
-              @click="onBulkImport(true)"
-              data-test="bulk-import-quarantine"
-            >
-              <span v-if="bulkImportBusy === 'quarantine'" class="loading loading-spinner loading-xs"></span>
-              <span v-else>🛡</span>
-              Import &amp; quarantine
+              <span v-if="bulkImportBusy" class="loading loading-spinner loading-xs"></span>
+              <span v-else-if="quarantineOnImport">🛡</span>
+              Import {{ selectedCount }} server{{ selectedCount === 1 ? '' : 's' }}
             </button>
           </div>
         </div>
@@ -834,10 +777,14 @@ const upstreamCallState = computed<'satisfied' | 'pending' | 'unknown'>(() => {
 
 // Selection: keyed by `${path}::${serverName}`. Default unchecked.
 const selection = ref<Set<string>>(new Set())
-const bulkImportBusy = ref<'' | 'quarantine' | 'active'>('')
-const importBusyAny = computed(() => bulkImportBusy.value !== '')
+const bulkImportBusy = ref(false)
+const importBusyAny = computed(() => bulkImportBusy.value)
 const selectionImportMessage = ref('')
 const selectionImportOk = ref(false)
+// Spec 109-ux-navigation-consistency FR-043: the footer's single per-import
+// quarantine checkbox. Default on (the safe choice); it is independent of
+// the global `quarantineEnabled` default shown read-only above.
+const quarantineOnImport = ref(true)
 
 const importSourcesWithServers = computed(() =>
   importSources.value.filter(s => s.serverCount > 0)
@@ -1308,7 +1255,7 @@ async function fetchImportSources() {
 
 async function onBulkImport(quarantine: boolean) {
   if (selection.value.size === 0) return
-  bulkImportBusy.value = quarantine ? 'quarantine' : 'active'
+  bulkImportBusy.value = true
   selectionImportMessage.value = ''
 
   // Group selected (path, name) pairs by source path. Build per-source
@@ -1392,7 +1339,7 @@ async function onBulkImport(quarantine: boolean) {
     selectionImportMessage.value = (err as Error).message
     selectionImportOk.value = false
   } finally {
-    bulkImportBusy.value = ''
+    bulkImportBusy.value = false
   }
 }
 
@@ -1431,15 +1378,27 @@ function onToggleRequireAuth(v: boolean) {
   void patchConfig({ require_mcp_auth: v })
 }
 
-function onToggleDockerIsolation(v: boolean) {
-  // Toggle the global docker_isolation default. Per-server overrides are
-  // unaffected. The Server tab's per-server form remains the source of
-  // truth for granular control.
-  void patchConfig({ docker_isolation: { enabled: v } })
-}
-
-function onToggleQuarantine(v: boolean) {
-  void patchConfig({ quarantine_enabled: v })
+// Spec 109-ux-navigation-consistency FR-043: this checkbox only decides
+// whether THIS import goes through quarantine — it never writes the global
+// `quarantine_enabled` default (that lives in Settings, summarized above).
+// Default on; unchecking it requires an explicit confirmation because it
+// widens the blast radius of a bad import to "connects immediately, no
+// review". Reverting the DOM checkbox on cancel is done imperatively: the
+// browser has already flipped its native `checked` state by the time
+// `change` fires, and this element isn't bound with v-model, so leaving the
+// ref untouched would not by itself repaint an already-changed checkbox.
+function onToggleQuarantineOnImport(event: Event) {
+  const target = event.target as HTMLInputElement
+  if (!target.checked) {
+    const ok = confirm(
+      'Skip quarantine for this import? The imported servers will connect and expose their tools immediately, with no review.'
+    )
+    if (!ok) {
+      target.checked = true
+      return
+    }
+  }
+  quarantineOnImport.value = target.checked
 }
 
 // Spec 078 US1: the row's Connect fetches the preview first and opens the

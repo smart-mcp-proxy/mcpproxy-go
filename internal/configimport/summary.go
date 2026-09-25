@@ -125,13 +125,20 @@ func needsSecretTag(fields ...[]ImportedField) bool {
 // data applies (issue #1148's "one rule set" principle) — so Summary never
 // carries a raw secret even when an argv value or URL query looks like one.
 func summarizeServer(server *config.ServerConfig, envFields, headerFields []ImportedField) (summary string, tags []string) {
-	// Mirror internal/config/config.go's own validation, which treats an
-	// explicit Protocol=="stdio" as authoritative regardless of a (possibly
-	// leftover) URL — a hand-edited entry that declares "type": "stdio" but
-	// still carries a url field runs as stdio, so the preview must tag it
-	// "local process" too rather than disagreeing with the runtime.
+	// Mirror internal/transport.DetermineTransportType, the runtime's actual
+	// transport selector: an explicit "stdio" is authoritative regardless of
+	// a (possibly leftover) URL — a hand-edited entry that declares
+	// "type": "stdio" but still carries a url field runs as stdio — and an
+	// empty OR "auto" protocol with a command also resolves to stdio
+	// (DetermineTransportType checks Command before URL and treats "auto"
+	// identically to ""), independent of whether a URL is also present.
+	// internal/config/config.go's own static validation is a different,
+	// narrower rule (Protocol=="stdio" || (Protocol=="" && Command!=""), no
+	// "auto" case, no URL condition either way) that governs config
+	// acceptance, not transport selection — DetermineTransportType is what
+	// this preview needs to agree with.
 	isStdio := server.Protocol == "stdio" ||
-		(server.Protocol == "" && server.Command != "" && server.URL == "")
+		((server.Protocol == "" || server.Protocol == "auto") && server.Command != "")
 
 	if isStdio {
 		parts := append([]string{server.Command}, oauth.LiveRedaction.Argv(server.Args)...)

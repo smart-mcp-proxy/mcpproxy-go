@@ -291,21 +291,7 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 // matching computeOnboardingState's existing tolerance of a GetAllServers
 // failure for HasConfiguredServer above.
 func (s *Server) computeUsableServers(servers []map[string]interface{}) []string {
-	// One ListToolApprovals("") call scans the approval bucket once (O(A) total
-	// decode work); ListToolApprovals(name) per candidate server would instead
-	// re-scan the WHOLE bucket per candidate (bbolt's ForEach + a Go-side prefix
-	// filter, not a bucket seek) — O(S×A) on an endpoint the wizard polls every
-	// 5s while open. Group by server name here instead.
-	allRecords, err := s.controller.ListToolApprovals("")
-	if err != nil {
-		return []string{}
-	}
-	hasUsableTool := make(map[string]bool, len(servers))
-	for _, rec := range allRecords {
-		if rec != nil && rec.Status == storage.ToolApprovalStatusApproved && !rec.Disabled {
-			hasUsableTool[rec.ServerName] = true
-		}
-	}
+	hasUsableTool := s.usableToolServerSet(servers)
 
 	usable := make([]string, 0, len(servers))
 	for _, srv := range servers {
@@ -324,6 +310,53 @@ func (s *Server) computeUsableServers(servers []map[string]interface{}) []string
 		}
 	}
 	return usable
+}
+
+// usableToolServerSet returns the set of server names with at least one
+// approved, non-disabled tool. It prefers one ListToolApprovals("") call,
+// which scans the approval bucket once (O(A) total decode work); a
+// ListToolApprovals(name) call per candidate server would instead re-scan the
+// WHOLE bucket per candidate (bbolt's ForEach + a Go-side prefix filter, not
+// a bucket seek) — O(S×A) on an endpoint the wizard polls every 5s while
+// open.
+//
+// bbolt's ForEach aborts the entire scan on the first record that fails to
+// decode (storage.BoltDB.ListToolApprovals), so a single corrupt record
+// anywhere would otherwise blank usable-status for every server, not just the
+// one whose own record is bad (review round 2 finding). On that error only,
+// fall back to the O(S×A) per-server form so a corrupt record is isolated to
+// its own server, matching the pre-optimization fault tolerance; any server
+// whose own ListToolApprovals(name) call also fails is simply left out of the
+// set, per this function's existing "fails closed" contract.
+func (s *Server) usableToolServerSet(servers []map[string]interface{}) map[string]bool {
+	hasUsableTool := make(map[string]bool, len(servers))
+
+	allRecords, err := s.controller.ListToolApprovals("")
+	if err == nil {
+		for _, rec := range allRecords {
+			if rec != nil && rec.Status == storage.ToolApprovalStatusApproved && !rec.Disabled {
+				hasUsableTool[rec.ServerName] = true
+			}
+		}
+		return hasUsableTool
+	}
+
+	for _, srv := range servers {
+		name, _ := srv["name"].(string)
+		if name == "" {
+			continue
+		}
+		records, recErr := s.controller.ListToolApprovals(name)
+		if recErr != nil {
+			continue
+		}
+		for _, rec := range records {
+			if rec != nil && rec.Status == storage.ToolApprovalStatusApproved && !rec.Disabled {
+				hasUsableTool[rec.ServerName] = true
+			}
+		}
+	}
+	return hasUsableTool
 }
 
 // validStepStatus returns true if v is an allowed step-status REQUEST value.
