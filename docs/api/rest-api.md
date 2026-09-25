@@ -226,7 +226,10 @@ a prompt-injected agent could otherwise read another upstream's PAT via
           "level": "healthy",
           "admin_state": "enabled",
           "summary": "Connected (15 tools)",
-          "action": ""
+          "action": "",
+          "status": "ready",
+          "usable": true,
+          "actions": []
         }
       },
       {
@@ -241,7 +244,10 @@ a prompt-injected agent could otherwise read another upstream's PAT via
           "admin_state": "enabled",
           "summary": "Token expired",
           "detail": "OAuth access token has expired",
-          "action": "login"
+          "action": "login",
+          "status": "sign_in_required",
+          "usable": false,
+          "actions": ["login"]
         }
       }
     ]
@@ -253,11 +259,14 @@ a prompt-injected agent could otherwise read another upstream's PAT via
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `level` | string | Health level: `healthy`, `degraded`, or `unhealthy` |
+| `level` | string | Severity signal for badge/tray coloring only: `healthy`, `degraded`, or `unhealthy`. **No surface may render this as text** (Spec 109 FR-011) — render `status` through the one label table instead |
 | `admin_state` | string | Admin state: `enabled`, `disabled`, or `quarantined` |
 | `summary` | string | Human-readable status message |
 | `detail` | string | Optional additional context about the status |
-| `action` | string | Suggested remediation: `login`, `restart`, `enable`, `approve`, `view_logs`, or empty |
+| `action` | string | Suggested remediation, always equal to `actions[0]` (or empty when `actions` is empty): `login`, `restart`, `enable`, `approve`, `view_logs`, `set_secret`, `configure`, `edit_url`, or empty |
+| `status` | string | (Spec 109 FR-010) The one status vocabulary every surface renders as text: `ready`, `connecting`, `sign_in_required`, `needs_review`, `needs_secret`, `needs_config`, `error`, `disabled` |
+| `usable` | boolean | (Spec 109 FR-010) True only when `status == "ready"` — whether the server can currently serve tool calls |
+| `actions` | string[] | (Spec 109 FR-012) Every applicable next step, in priority order: `login` > `set_secret` > `configure` > `edit_url` > `approve` > `restart` > `view_logs` > `enable` |
 
 #### PATCH /api/v1/servers/{name}
 
