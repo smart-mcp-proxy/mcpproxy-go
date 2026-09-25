@@ -335,6 +335,16 @@ func resolveActivityTime(value string, now time.Time) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid time '%s'", value)
 	}
+	// zcode round 1 (F4): an unbounded count lets `time.Duration(n) * 24 *
+	// time.Hour` overflow int64 silently (Go does not panic or error on
+	// signed overflow), wrapping to a negative duration and resolving to a
+	// bogus FUTURE timestamp instead of failing loudly. 100000 of the
+	// largest unit (days) is ~274 years — far more range than any real
+	// query needs and nowhere near the ~292-year int64-nanosecond ceiling.
+	const maxRelativeAmount = 100000
+	if n <= 0 || n > maxRelativeAmount {
+		return "", fmt.Errorf("invalid time '%s': the amount must be between 1 and %d", value, maxRelativeAmount)
+	}
 	var d time.Duration
 	switch m[2] {
 	case "m":
@@ -386,21 +396,34 @@ func splitActivityTool(server, tool string) (string, string) {
 // activityWatchInRange reports whether an event timestamp falls within the
 // optional [from, to] bounds (Spec 109-k FR-075 on `activity watch`). A
 // malformed or missing timestamp is never silently dropped.
-func activityWatchInRange(eventTimestamp string, from, to time.Time) bool {
+func activityWatchInRange(eventTime time.Time, from, to time.Time) bool {
 	if from.IsZero() && to.IsZero() {
 		return true
 	}
-	t, err := time.Parse(time.RFC3339, eventTimestamp)
-	if err != nil {
+	if eventTime.IsZero() {
+		// Unknown/unparseable event timestamp — never silently dropped.
 		return true
 	}
-	if !from.IsZero() && t.Before(from) {
+	if !from.IsZero() && eventTime.Before(from) {
 		return false
 	}
-	if !to.IsZero() && t.After(to) {
+	if !to.IsZero() && eventTime.After(to) {
 		return false
 	}
 	return true
+}
+
+// eventTimestampFromWrapper reads the SSE envelope's own "timestamp" field
+// (set by the server as Unix seconds, e.g. time.Now().Unix() — see
+// internal/httpapi/server.go), NOT a field inside the payload. Returns the
+// zero Time when absent or not a number (zcode round 1, F1: the wrapper
+// timestamp is a JSON number, not an RFC3339 string).
+func eventTimestampFromWrapper(wrapper map[string]interface{}) time.Time {
+	v, ok := wrapper["timestamp"].(float64)
+	if !ok || v <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(int64(v), 0).UTC()
 }
 
 // activityWatchShouldExit reports whether 'activity watch' should stop
@@ -1153,7 +1176,7 @@ func init() {
 	// Spec 109-k: view + --from/--to
 	activityWatchCmd.Flags().StringVar(&activityView, "view", "", "Filter by view: calls, system, all (default all); overridden by --type")
 	activityWatchCmd.Flags().StringVar(&activityFrom, "from", "", "Only print records at/after this time (RFC3339 or relative: -1h, -24h, -7d, -30d)")
-	activityWatchCmd.Flags().StringVar(&activityTo, "to", "", "Stop watching once this time has passed (RFC3339 or relative)")
+	activityWatchCmd.Flags().StringVar(&activityTo, "to", "", "Stop watching once this time has passed — must be an absolute RFC3339 timestamp still ahead of now (a relative shorthand like -30m always resolves to the past and is rejected)")
 
 	// Show command flags
 	activityShowCmd.Flags().BoolVar(&activityIncludeResponse, "include-response", false, "Show full response (may be large)")
@@ -1421,6 +1444,14 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 
 	// Spec 109-k: resolve --from/--to (RFC3339 or relative shorthand) once, up
 	// front, into the package-level bounds displayActivityEvent applies.
+	//
+	// zcode round 1 (F7): reset to zero when the flag is absent, not just set
+	// when present — these are package-level vars shared across cobra
+	// commands (and, in tests, across in-process RunE calls), so a stale
+	// value from an earlier invocation must not leak into one that passed no
+	// --from/--to at all.
+	activityWatchFromTime = time.Time{}
+	activityWatchToTime = time.Time{}
 	if activityFrom != "" {
 		resolved, resolveErr := resolveActivityTime(activityFrom, time.Now())
 		if resolveErr != nil {
@@ -1437,6 +1468,14 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 		}
 		if activityWatchToTime, err = time.Parse(time.RFC3339, resolved); err != nil {
 			return outputActivityError(err, "INVALID_FILTER")
+		}
+		// zcode round 1 (F5): a relative shorthand ("-30m") always resolves to
+		// the PAST, so "stop watching once --to has passed" would be true
+		// before the first frame ever arrives — a silent, immediate, empty
+		// exit despite the flag help advertising relative values. --to only
+		// means something for watch as a point still ahead of it.
+		if !activityWatchToTime.After(time.Now()) {
+			return outputActivityError(fmt.Errorf("--to must be in the future on 'activity watch' (got %s); a relative value like -30m always resolves to the past", activityTo), "INVALID_FILTER")
 		}
 	}
 
@@ -1518,6 +1557,16 @@ func watchWithReconnect(ctx context.Context, sseURL, apiKey string, outputFormat
 		if errors.Is(err, errWatchToPastCutoff) {
 			// Spec 109-k FR-075: --to has passed; this is a clean stop, not a
 			// connection failure that should trigger a reconnect.
+			return nil
+		}
+
+		// zcode round 1 (F6): the cutoff was previously checked only inside
+		// watchActivityStream, which requires a successful connection to run
+		// at all — a daemon that is unreachable (or drops every connection
+		// attempt) made watch reconnect forever at the backoff ceiling,
+		// ignoring an elapsed --to entirely. Check it here too, on every
+		// connection failure, so a daemon-down watch still exits on time.
+		if err != nil && activityWatchShouldExit(activityWatchToTime, time.Now()) {
 			return nil
 		}
 
@@ -1661,9 +1710,15 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 	}
 
 	// Spec 109-k FR-075: --from/--to bound which streamed records print.
+	//
+	// zcode round 1 (F1): the SSE wrapper's "timestamp" is a Unix integer
+	// (server.go emits time.Now().Unix()/evt.Timestamp.Unix()), not an
+	// RFC3339 string — reading it with getStringField always got "", which
+	// activityWatchInRange's original string-based signature treated as
+	// "malformed, pass through", making the whole filter a silent no-op
+	// against a real daemon. eventTimestampFromWrapper reads it as a number.
 	if !activityWatchFromTime.IsZero() || !activityWatchToTime.IsZero() {
-		ts := getStringField(wrapper, "timestamp")
-		if !activityWatchInRange(ts, activityWatchFromTime, activityWatchToTime) {
+		if !activityWatchInRange(eventTimestampFromWrapper(wrapper), activityWatchFromTime, activityWatchToTime) {
 			return
 		}
 	}

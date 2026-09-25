@@ -126,22 +126,49 @@ func TestActivityWatchInRange(t *testing.T) {
 
 	tests := []struct {
 		name string
-		ts   string
+		ts   time.Time
 		from time.Time
 		to   time.Time
 		want bool
 	}{
-		{name: "no bounds always in range", ts: "2020-01-01T00:00:00Z", want: true},
-		{name: "within range", ts: "2026-09-26T12:00:00Z", from: from, to: to, want: true},
-		{name: "before from", ts: "2026-09-26T09:00:00Z", from: from, to: to, want: false},
-		{name: "after to", ts: "2026-09-26T15:00:00Z", from: from, to: to, want: false},
-		{name: "malformed timestamp passes through", ts: "not-a-time", from: from, to: to, want: true},
+		{name: "no bounds always in range", ts: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), want: true},
+		{name: "within range", ts: time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC), from: from, to: to, want: true},
+		{name: "before from", ts: time.Date(2026, 9, 26, 9, 0, 0, 0, time.UTC), from: from, to: to, want: false},
+		{name: "after to", ts: time.Date(2026, 9, 26, 15, 0, 0, 0, time.UTC), from: from, to: to, want: false},
+		{name: "unknown (zero) timestamp passes through", ts: time.Time{}, from: from, to: to, want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, activityWatchInRange(tt.ts, tt.from, tt.to))
 		})
 	}
+}
+
+// TestEventTimestampFromWrapper pins the zcode round-1 fix (F1): the SSE
+// envelope's "timestamp" is a Unix-seconds JSON number
+// (internal/httpapi/server.go: time.Now().Unix()/evt.Timestamp.Unix()), never
+// an RFC3339 string. Reading it with the wrong shape used to make the
+// --from/--to filter a silent no-op against a real daemon.
+func TestEventTimestampFromWrapper(t *testing.T) {
+	got := eventTimestampFromWrapper(map[string]interface{}{"timestamp": float64(1_790_000_000)})
+	assert.Equal(t, time.Unix(1_790_000_000, 0).UTC(), got)
+
+	assert.True(t, eventTimestampFromWrapper(map[string]interface{}{}).IsZero(), "missing timestamp")
+	assert.True(t, eventTimestampFromWrapper(map[string]interface{}{"timestamp": "2026-01-01T00:00:00Z"}).IsZero(),
+		"a string timestamp (wrong shape) must not be misread as valid")
+	assert.True(t, eventTimestampFromWrapper(map[string]interface{}{"timestamp": float64(0)}).IsZero())
+}
+
+// TestResolveActivityTime_RejectsAbsurdRelativeAmount pins the zcode round-1
+// fix (F4): an unbounded relative amount could overflow the int64 duration
+// multiplication and resolve to a bogus (even future) timestamp instead of
+// failing loudly.
+func TestResolveActivityTime_RejectsAbsurdRelativeAmount(t *testing.T) {
+	_, err := resolveActivityTime("-999999999d", time.Now())
+	require.Error(t, err)
+
+	_, err = resolveActivityTime("-0h", time.Now())
+	require.Error(t, err, "zero is not a meaningful relative amount")
 }
 
 func TestActivityWatchShouldExit(t *testing.T) {
