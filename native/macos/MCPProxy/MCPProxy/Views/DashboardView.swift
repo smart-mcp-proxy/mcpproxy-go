@@ -1029,7 +1029,7 @@ private struct AttentionRow: View {
 
             Spacer()
 
-            if let action = server.health?.healthAction {
+            ForEach(server.attentionActions, id: \.self) { action in
                 Button(action.label) {
                     Task { await performAction(action, for: server) }
                 }
