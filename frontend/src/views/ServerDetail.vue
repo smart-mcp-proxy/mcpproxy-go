@@ -1942,33 +1942,34 @@ const healthLevelLabel = computed(() => {
     case 'Disabled':
       return 'Off'
   }
-  const level = server.value?.health?.level
-  switch (level) {
-    case 'healthy':
-      return 'Healthy'
-    case 'degraded':
-      return 'Degraded'
-    case 'unhealthy':
-      return 'Unhealthy'
-    default:
-      return server.value?.connected ? 'Healthy' : 'Unknown'
-  }
+  // Spec 109 FR-011: no surface may render `level` as text — render `status`
+  // through the one label table instead. `level` still drives the tile's
+  // color only, via healthLevelTone below. Without this, a "connecting"
+  // server (level=healthy/status=connecting/usable=false) rendered a green
+  // "Healthy" directly above the sub-line's "Connecting..." text.
+  const status = server.value?.health?.status
+  if (status) return healthStatusLabel(status)
+  return server.value?.connected ? 'Online' : 'Unknown'
 })
 
 // Never a success tone on an unhealthy server (audit F11). A disabled server is
 // not "green healthy" either — its health level is healthy only because being
-// off is intentional, so it reads neutral.
+// off is intentional, so it reads neutral. Keyed off `level` (the severity
+// signal), not the FR-011 status label text above, so an unrecognized/missing
+// status still gets a sensible color.
 const healthLevelTone = computed(() => {
   if (adminStateLabel.value === 'Disabled') return 'text-base-content/50'
-  switch (healthLevelLabel.value) {
-    case 'Healthy':
+  if (adminStateLabel.value === 'Quarantined') return 'text-base-content/50'
+  const level = server.value?.health?.level
+  switch (level) {
+    case 'healthy':
       return 'text-success'
-    case 'Degraded':
+    case 'degraded':
       return 'text-warning'
-    case 'Unhealthy':
+    case 'unhealthy':
       return 'text-error'
     default:
-      return 'text-base-content/50'
+      return server.value?.connected ? 'text-success' : 'text-base-content/50'
   }
 })
 

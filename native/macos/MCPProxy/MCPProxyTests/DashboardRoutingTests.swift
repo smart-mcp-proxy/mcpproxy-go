@@ -58,6 +58,22 @@ final class DashboardRoutingTests: XCTestCase {
                        "APIClient still exposes the unconfirmed disconnect")
     }
 
+    /// FR-014 (spec 109): the Web UI, CLI and macOS all bind a server's
+    /// primary action label through the ONE `HealthStatus.actionLabels`
+    /// table (e.g. "Review", "Add secret") — this PR wired that table into
+    /// the detail-view "Suggested Action" row but left the Dashboard's own
+    /// AttentionRow primary CTA reading the older, differently-worded
+    /// `HealthAction.label` enum ("Approve", "Set Secret"), so macOS button
+    /// text diverged from the other two surfaces for those actions.
+    func testAttentionRowButtonUsesTheSharedActionLabelTable() throws {
+        let source = try dashboardSource()
+
+        XCTAssertFalse(source.contains("Button(action.label)"),
+                       "AttentionRow must render actions[0] through HealthStatus.actionLabels (FR-014), not the private HealthAction.label enum")
+        XCTAssertTrue(source.contains("HealthStatus.actionLabels"),
+                      "AttentionRow must bind through the shared cross-surface action-label table")
+    }
+
     // MARK: - Helpers
 
     private func dashboardSource() throws -> String {

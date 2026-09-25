@@ -108,8 +108,12 @@ enum HealthAction: String, Codable, CaseIterable {
     case viewLogs = "view_logs"
     case setSecret = "set_secret"
     case configure
+    case editURL = "edit_url"
 
-    /// Human-readable button label.
+    /// Human-readable button label. Kept for the enum's own call sites
+    /// (decoding/matching); a renderer choosing the CROSS-SURFACE wording the
+    /// Web UI and CLI also show (FR-014) uses `HealthStatus.actionLabels`
+    /// instead — see AttentionRow in DashboardView.swift.
     var label: String {
         switch self {
         case .login:      return "Sign in"
@@ -119,6 +123,7 @@ enum HealthAction: String, Codable, CaseIterable {
         case .viewLogs:   return "View Logs"
         case .setSecret:  return "Set Secret"
         case .configure:  return "Configure"
+        case .editURL:    return "Edit URL"
         }
     }
 }
@@ -183,8 +188,16 @@ struct HealthStatus: Codable, Equatable {
     /// True only when `status == "ready"`; defaults to the pre-Spec-109
     /// reading (healthy level, not disabled/quarantined) when the field is
     /// absent (older core).
+    ///
+    /// A pre-Spec-109 core's "connecting"/"idle" branch
+    /// (internal/health/calculator.go) already reported that exact shape —
+    /// level=healthy, admin_state=enabled, this literal summary — for a
+    /// mid-connect server, indistinguishable from a fully connected one on
+    /// level+adminState alone. Without this check a newer tray talking to an
+    /// older core would call a server usable before it can serve tool calls.
     var isUsable: Bool {
         if let usable { return usable }
+        if summary == "Connecting..." { return false }
         return healthLevel == .healthy && adminStateEnum == .enabled
     }
 

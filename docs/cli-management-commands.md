@@ -56,12 +56,19 @@ mcpproxy upstream list --status sign_in_required,needs_review
   `-o json` as `health.summary`
 - ACTION - Suggested remediation command, keyed on `health.actions[0]` (if applicable)
 
-**Status Indicators (emoji) and the `status` values behind them:**
-- ✅ `ready` - Online — server connected and working
-- ⚠️ `sign_in_required` / `needs_review` / `needs_secret` / `needs_config` - amber states with a next action
-- ❌ `error` - Server has errors or not functioning
-- ⏸️ `disabled` - Server manually disabled by user
-- 🔒 quarantined (`needs_review` or `sign_in_required` while quarantined) - Server pending security approval
+**Status Indicators (emoji):** the emoji is keyed on `admin_state` first, then
+`level` (a severity signal) — independent of the `status` label shown in the
+STATUS column, so the same `status` value can render with different emoji
+depending on severity:
+- ⏸️ `disabled` admin state — server manually disabled by user, regardless of level
+- 🔒 `quarantined` admin state — server pending security approval, regardless
+  of level; this is the only emoji a `needs_review` status ever renders as
+- ✅ enabled, not quarantined, `level: healthy` — covers both `ready` and the
+  transient `connecting` status
+- ⚠️ enabled, not quarantined, `level: degraded` — e.g. a first-time
+  `sign_in_required` sign-in, or an OAuth token refresh still retrying
+- ❌ enabled, not quarantined, `level: unhealthy` — covers `error`,
+  `needs_secret`, `needs_config`, and a `sign_in_required` re-auth/expired-token case
 
 `-o json`'s `health` object always carries `status`, `usable` (true only when
 `status == "ready"`) and `actions` (every applicable next step, in priority
@@ -559,7 +566,7 @@ mcpproxy upstream add notion https://mcp.notion.com/sse
 
 # View quarantine status
 mcpproxy upstream list
-# 🔒 notion  http  0  Pending approval  Approve in Web UI
+# 🔒 notion  http  0  Needs review  Approve in Web UI
 
 # Approve in web UI or via API:
 curl -X POST "http://localhost:8080/api/v1/servers/notion/unquarantine" \

@@ -23,6 +23,11 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 		wantUsable bool
 		wantAction string
 		wantLevel  string // "" = not asserted
+		// wantActions asserts the FULL Actions slice (order included), not just
+		// Actions[0]/wantAction. Populated for every branch with more than one
+		// element, so silently dropping a trailing entry (e.g. ActionViewLogs)
+		// fails a test instead of passing on the unchanged Actions[0].
+		wantActions []string // nil = only Actions[0] is asserted (via wantAction)
 	}{
 		{
 			name:       "disabled",
@@ -63,10 +68,26 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 				State:       "error",
 				LastError:   "command not found: definitely-not-a-real-binary",
 			},
-			wantStatus: StatusError,
-			wantUsable: false,
-			wantAction: ActionApprove,
-			wantLevel:  LevelUnhealthy,
+			wantStatus:  StatusError,
+			wantUsable:  false,
+			wantAction:  ActionApprove,
+			wantLevel:   LevelUnhealthy,
+			wantActions: []string{ActionApprove, ActionViewLogs},
+		},
+		{
+			name: "quarantined and error state with an OAuth-related error (FR-010)",
+			input: HealthCalculatorInput{
+				Enabled:       true,
+				Quarantined:   true,
+				State:         "error",
+				OAuthRequired: true,
+				LastError:     "oauth authentication required: login available",
+			},
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantLevel:   LevelDegraded,
+			wantActions: []string{ActionLogin, ActionApprove},
 		},
 		{
 			name:       "quarantined otherwise",
@@ -98,9 +119,10 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 				RetryCount:   3,
 				LastError:    "handshake timeout",
 			},
-			wantStatus: StatusError,
-			wantUsable: false,
-			wantAction: ActionRestart,
+			wantStatus:  StatusError,
+			wantUsable:  false,
+			wantAction:  ActionRestart,
+			wantActions: []string{ActionRestart, ActionViewLogs},
 		},
 		{
 			name: "endpoint address error",
@@ -157,11 +179,21 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 			wantLevel:  LevelDegraded,
 		},
 		{
-			name:       "connection error (generic)",
-			input:      HealthCalculatorInput{Enabled: true, State: "error", LastError: "connection refused"},
-			wantStatus: StatusError,
-			wantUsable: false,
-			wantAction: ActionRestart,
+			name:        "connection error (generic)",
+			input:       HealthCalculatorInput{Enabled: true, State: "error", LastError: "connection refused"},
+			wantStatus:  StatusError,
+			wantUsable:  false,
+			wantAction:  ActionRestart,
+			wantActions: []string{ActionRestart, ActionViewLogs},
+		},
+		{
+			name:        "disconnected (generic)",
+			input:       HealthCalculatorInput{Enabled: true, State: "disconnected"},
+			wantStatus:  StatusError,
+			wantUsable:  false,
+			wantAction:  ActionRestart,
+			wantLevel:   LevelUnhealthy,
+			wantActions: []string{ActionRestart, ActionViewLogs},
 		},
 		{
 			name: "OAuth refresh retrying",
@@ -230,6 +262,11 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 				assert.Empty(t, result.Actions, "actions must be empty when action is none")
 			} else {
 				assert.Equal(t, tc.wantAction, result.Actions[0], "action must equal actions[0]")
+			}
+			if tc.wantActions != nil {
+				// Full-slice check: a spot-check of Actions[0] alone would not
+				// catch a trailing entry (e.g. ActionViewLogs) silently dropped.
+				assert.Equal(t, tc.wantActions, result.Actions, "actions (full slice)")
 			}
 			if tc.wantLevel != "" {
 				assert.Equal(t, tc.wantLevel, result.Level, "level must stay as documented")

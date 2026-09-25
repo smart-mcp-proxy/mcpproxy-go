@@ -165,6 +165,70 @@ func TestFilterServersByStatus(t *testing.T) {
 	})
 }
 
+// TestValidateStatusFlag pins the CLI-side validation: a typo'd or wrongly-
+// cased --status value previously matched nothing in filterServersByStatus
+// and silently returned an empty result set (exit 0), indistinguishable from
+// "no servers in that state" — mirrors validateTrustModeFlag (GH #938).
+func TestValidateStatusFlag(t *testing.T) {
+	for _, valid := range []string{
+		"", "ready", "connecting", "sign_in_required", "needs_review",
+		"needs_secret", "needs_config", "error", "disabled", "ready,needs_review",
+	} {
+		assert.NoError(t, validateStatusFlag([]string{valid}), "status %q must be accepted", valid)
+	}
+	assert.NoError(t, validateStatusFlag(nil), "no --status at all must be accepted")
+
+	for _, invalid := range []string{"signin_required", "READY", "bogus"} {
+		err := validateStatusFlag([]string{invalid})
+		require.Error(t, err, "status %q must be refused", invalid)
+		assert.Contains(t, err.Error(), "ready")
+	}
+
+	// A typo alongside a valid value in the same comma-separated/repeated
+	// filter must still be refused — one matching entry is not a pass.
+	err := validateStatusFlag([]string{"ready,bogus"})
+	require.Error(t, err, "a typo anywhere in the filter must be refused")
+}
+
+// TestUpstreamListStatusFlagRegistration exercises --status through actual
+// Cobra/pflag flag registration, instead of hand-building a []string and
+// calling filterServersByStatus directly. It pins that --status is a
+// StringArrayVar — each repeat is captured as one raw token, and
+// comma-splitting happens downstream (filterServersByStatus/validateStatusFlag)
+// — so a future switch to StringSliceVar (which comma-splits itself at the
+// pflag layer) would double-split silently with no test catching the change.
+func TestUpstreamListStatusFlagRegistration(t *testing.T) {
+	prev := upstreamListStatus
+	t.Cleanup(func() {
+		upstreamListStatus = prev
+		if f := upstreamListCmd.Flags().Lookup("status"); f != nil {
+			f.Changed = false
+		}
+	})
+	upstreamListStatus = nil
+
+	flags := upstreamListCmd.Flags()
+	flag := flags.Lookup("status")
+	require.NotNil(t, flag, "upstream list must expose --status")
+
+	require.NoError(t, flags.Set("status", "ready,needs_review"))
+	require.NoError(t, flags.Set("status", "error"))
+
+	// StringArrayVar keeps each repeat as one literal token — no comma-split
+	// happens at the pflag layer itself.
+	assert.Equal(t, []string{"ready,needs_review", "error"}, upstreamListStatus)
+
+	// The downstream comma-split still produces the expected union.
+	servers := []map[string]interface{}{
+		{"name": "a", "health": map[string]interface{}{"status": "ready"}},
+		{"name": "b", "health": map[string]interface{}{"status": "needs_review"}},
+		{"name": "c", "health": map[string]interface{}{"status": "error"}},
+		{"name": "d", "health": map[string]interface{}{"status": "disabled"}},
+	}
+	got := namesOf(filterServersByStatus(servers, upstreamListStatus))
+	assert.ElementsMatch(t, []string{"a", "b", "c"}, got)
+}
+
 func namesOf(servers []map[string]interface{}) []string {
 	names := make([]string, 0, len(servers))
 	for _, s := range servers {

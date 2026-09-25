@@ -17,6 +17,14 @@ import { createRouter, createWebHistory } from 'vue-router'
 // admin state wins over the level, and never renders in the success tone. The
 // admin-state caption stops claiming an automatic quarantine-on-add was "set by
 // you".
+//
+// Spec 109 FR-011 — "no surface may render `level` as text" — goes further:
+// even for an enabled server, the tile must print `health.status` through the
+// one label table (healthStatusLabel), not the raw level word. `level` keeps
+// driving the tile's color only. The concrete regression this closes: a
+// "connecting" server has level=healthy/status=connecting/usable=false
+// (internal/health/calculator.go), so printing the level literally read a
+// green "Healthy" directly above the sub-line's "Connecting..." text.
 
 type ServerOverrides = Record<string, unknown>
 
@@ -111,7 +119,7 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
     expect(tile.classes()).not.toContain('text-success')
   })
 
-  it('still reads "Healthy" for an enabled, healthy server', async () => {
+  it('reads the status label ("Online"), not the level word, for an enabled, healthy server', async () => {
     const wrapper = await mountDetail({
       ...base,
       health: {
@@ -119,14 +127,44 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
         admin_state: 'enabled',
         summary: 'Connected (2 tools)',
         action: 'none',
+        status: 'ready',
+        usable: true,
+        actions: [],
       },
     })
     const tile = wrapper.find('[data-test="server-health-level"]')
-    expect(tile.text()).toBe('Healthy')
+    // FR-011: `status` renders through the label table ("Online"), never the
+    // raw `level` word ("Healthy").
+    expect(tile.text()).toBe('Online')
     expect(tile.classes()).toContain('text-success')
   })
 
-  it('still reads "Degraded"/"Unhealthy" for an enabled server that is in trouble', async () => {
+  it('never reads "Healthy" for a connecting server (level=healthy, usable=false)', async () => {
+    // The concrete FR-011 regression: internal/health/calculator.go reports a
+    // mid-connect server as level=healthy/status=connecting/usable=false so the
+    // tile does not flash red, but that must never round-trip to the FORBIDDEN
+    // word "Healthy" sitting right above a "Connecting..." sub-line.
+    const wrapper = await mountDetail({
+      ...base,
+      connected: false,
+      connecting: true,
+      health: {
+        level: 'healthy',
+        admin_state: 'enabled',
+        summary: 'Connecting...',
+        action: '',
+        status: 'connecting',
+        usable: false,
+        actions: [],
+      },
+    })
+    const tile = wrapper.find('[data-test="server-health-level"]')
+    expect(tile.text()).not.toBe('Healthy')
+    expect(tile.text()).toBe('Connecting')
+    expect(wrapper.find('[data-test="server-health-summary"]').text()).toContain('Connecting...')
+  })
+
+  it('reads the status label ("Error"/"Sign-in required"), not "Unhealthy"/"Degraded", for an enabled server that is in trouble', async () => {
     const wrapper = await mountDetail({
       ...base,
       connected: false,
@@ -135,9 +173,15 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
         admin_state: 'enabled',
         summary: 'Connection failed',
         action: 'view_logs',
+        status: 'error',
+        usable: false,
+        actions: ['view_logs'],
       },
     })
-    expect(wrapper.find('[data-test="server-health-level"]').text()).toBe('Unhealthy')
+    const tile = wrapper.find('[data-test="server-health-level"]')
+    expect(tile.text()).not.toBe('Unhealthy')
+    expect(tile.text()).toBe('Error')
+    expect(tile.classes()).toContain('text-error')
 
     const degraded = await mountDetail({
       ...base,
@@ -146,9 +190,15 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
         admin_state: 'enabled',
         summary: 'Sign-in required soon',
         action: 'login',
+        status: 'sign_in_required',
+        usable: false,
+        actions: ['login'],
       },
     })
-    expect(degraded.find('[data-test="server-health-level"]').text()).toBe('Degraded')
+    const degradedTile = degraded.find('[data-test="server-health-level"]')
+    expect(degradedTile.text()).not.toBe('Degraded')
+    expect(degradedTile.text()).toBe('Sign-in required')
+    expect(degradedTile.classes()).toContain('text-warning')
   })
 
   it('does not claim an automatic quarantine-on-add was "set by you"', async () => {

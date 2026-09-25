@@ -384,6 +384,12 @@ func init() {
 }
 
 func runUpstreamList(_ *cobra.Command, _ []string) error {
+	// Refuse a typo'd/miscased --status up front rather than silently
+	// returning an empty table (GH #938-style validation for FR-015).
+	if err := validateStatusFlag(upstreamListStatus); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -529,6 +535,34 @@ func validateTrustModeFlag(mode string) error {
 	}
 	return fmt.Errorf("invalid --trust-mode %q: must be one of: %s (values are case-sensitive)",
 		mode, strings.Join(config.ValidTrustModes(), ", "))
+}
+
+// validateStatusFlag refuses an unrecognized --status value up front,
+// mirroring validateTrustModeFlag (GH #938): without it, a typo'd or
+// wrongly-cased value (e.g. `--status signin_required` or `--status READY`)
+// matched nothing in filterServersByStatus and silently returned an empty
+// result set (exit 0), indistinguishable from "no servers in that state".
+// Accepts the same comma-separated-equals-repeated-flag shape
+// filterServersByStatus does, and matching is case-sensitive because the
+// vocabulary itself is (contracts/health-vocabulary.md).
+func validateStatusFlag(rawFilters []string) error {
+	valid := make(map[string]bool, len(health.StatusOrder))
+	for _, s := range health.StatusOrder {
+		valid[s] = true
+	}
+	for _, raw := range rawFilters {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			if !valid[v] {
+				return fmt.Errorf("invalid --status %q: must be one of: %s (values are case-sensitive)",
+					v, strings.Join(health.StatusOrder, ", "))
+			}
+		}
+	}
+	return nil
 }
 
 // serverHealthStatus extracts a server row's `health.status` value (the

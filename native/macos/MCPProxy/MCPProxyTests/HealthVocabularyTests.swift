@@ -46,6 +46,21 @@ final class HealthVocabularyTests: XCTestCase {
         XCTAssertTrue(health.isUsable)
     }
 
+    func testOldCorePayloadConnectingIsNotUsable() throws {
+        // A pre-Spec-109 core's "connecting"/"idle" branch
+        // (internal/health/calculator.go) reported a mid-connect server as
+        // level=healthy/admin_state=enabled with this exact summary — the same
+        // shape a fully connected, usable server reports. A naive
+        // level+adminState fallback would call it usable when it cannot yet
+        // serve tool calls.
+        let json = """
+        {"level": "healthy", "admin_state": "enabled", "summary": "Connecting..."}
+        """
+        let health = try decode(json)
+        XCTAssertNil(health.usable)
+        XCTAssertFalse(health.isUsable, "a mid-connect server must not fall back to usable")
+    }
+
     // MARK: - Every derivation-table row (mirrors internal/health/status_test.go, T041)
 
     private struct Row {

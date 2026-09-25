@@ -1032,13 +1032,19 @@ private struct AttentionRow: View {
             Spacer()
 
             if let action = server.health?.healthAction {
-                Button(action.label) {
+                // FR-014: bind the primary CTA's wording through the ONE
+                // cross-surface action-label table (contracts/health-vocabulary.md)
+                // the Web UI and CLI also render — not the private
+                // HealthAction.label enum, which uses different words
+                // ("Approve" vs "Review", "Set Secret" vs "Add secret").
+                let label = HealthStatus.actionLabels[action.rawValue] ?? action.label
+                Button(label) {
                     Task { await performAction(action, for: server) }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .tint(actionColor(action))
-                .accessibilityLabel("\(action.label) \(server.name)")
+                .accessibilityLabel("\(label) \(server.name)")
             }
         }
         .padding(.horizontal, 16)
