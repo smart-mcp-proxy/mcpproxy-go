@@ -403,6 +403,36 @@ func (p *KeyringProvider) IsAvailable() bool {
 	}
 }
 
+// IsAvailableWithReason behaves like IsAvailable but also returns a short,
+// user-facing reason when unavailable ("" when available). Used by
+// GET /secrets/config (FR-065) so the Web/macOS/CLI secret toggle can explain
+// why it is disabled instead of just going dark.
+func (p *KeyringProvider) IsAvailableWithReason() (bool, string) {
+	if isHeadlessEnvironment() {
+		return false, headlessUnavailableReason()
+	}
+	if p.IsAvailable() {
+		return true, ""
+	}
+	return false, "the OS keychain did not respond to a probe request (it may be locked, missing, or waiting on a prompt)"
+}
+
+// headlessUnavailableReason names the specific headless condition
+// isHeadlessEnvironment detected, so the fast-path skip is not reported as an
+// opaque "unavailable".
+func headlessUnavailableReason() string {
+	if v := strings.ToLower(os.Getenv("CI")); v == "true" || v == "1" || v == "yes" {
+		return "no OS keyring in a CI environment"
+	}
+	switch runtime.GOOS {
+	case "linux":
+		return "no display session (Secret Service needs an X11 or Wayland session)"
+	case "darwin":
+		return "running as root (sudo) has no user keychain available"
+	}
+	return "OS keyring is unavailable in this environment"
+}
+
 // isHeadlessEnvironment returns true when we can confidently say no
 // interactive keyring is available. We only use this as a FAST path to
 // skip probing; returning false does not mean the keyring IS available.

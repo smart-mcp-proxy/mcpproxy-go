@@ -92,6 +92,25 @@ func (r *Resolver) ListAll(ctx context.Context) ([]Ref, error) {
 	return allRefs, nil
 }
 
+// KeyringAvailability reports whether the registered "keyring" provider is
+// usable and, when it isn't, a short user-facing reason (FR-065,
+// GET /secrets/config keyring_available / keyring_reason). Falls back to a
+// generic reason for a provider that doesn't implement the reasoned probe
+// (e.g. a test double registered in place of the real KeyringProvider).
+func (r *Resolver) KeyringAvailability() (bool, string) {
+	provider, exists := r.providers["keyring"]
+	if !exists {
+		return false, "no keyring provider registered"
+	}
+	if withReason, ok := provider.(interface{ IsAvailableWithReason() (bool, string) }); ok {
+		return withReason.IsAvailableWithReason()
+	}
+	if provider.IsAvailable() {
+		return true, ""
+	}
+	return false, "keyring unavailable"
+}
+
 // GetAvailableProviders returns a list of available providers
 func (r *Resolver) GetAvailableProviders() []string {
 	var available []string
