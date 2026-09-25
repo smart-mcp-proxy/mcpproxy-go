@@ -1536,6 +1536,45 @@ components:
           description: required https registry URL
           type: string
       type: object
+    contracts.AttentionFix:
+      properties:
+        label:
+          type: string
+        target:
+          type: string
+        verb:
+          type: string
+      type: object
+    contracts.AttentionItem:
+      properties:
+        detail:
+          type: string
+        fix:
+          $ref: '#/components/schemas/contracts.AttentionFix'
+        id:
+          description: kind:type:subject[:state]
+          type: string
+        kind:
+          type: string
+        rank:
+          type: integer
+        since:
+          type: string
+        subject:
+          $ref: '#/components/schemas/contracts.AttentionSubject'
+        summary:
+          type: string
+      type: object
+    contracts.AttentionSubject:
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          description: server|tool|client
+          type: string
+      type: object
     contracts.ConfigApplyResult:
       properties:
         applied_immediately:
@@ -3569,6 +3608,18 @@ components:
           - other
           type: string
       type: object
+    httpapi.attentionResponse:
+      properties:
+        count:
+          type: integer
+        generated_at:
+          type: string
+        items:
+          items:
+            $ref: '#/components/schemas/contracts.AttentionItem'
+          type: array
+          uniqueItems: false
+      type: object
     management.BulkOperationResult:
       properties:
         errors:
@@ -4235,6 +4286,25 @@ paths:
       summary: Get annotation coverage report
       tags:
       - annotations
+  /api/v1/attention:
+    get:
+      description: 'One list, one count, every surface (Web UI, macOS tray/Home, CLI)
+        reads from it. Filtered per caller: an administrator sees every item; a scoped
+        caller (agent token, or a non-admin server-edition OAuth user session) sees
+        only items whose server it may enumerate, and never a client item.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.attentionResponse'
+          description: The needs-attention list
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get the needs-attention list
+      tags:
+      - attention
   /api/v1/code/scripts:
     get:
       description: 'List the stored scripts available to the code_execution tool.

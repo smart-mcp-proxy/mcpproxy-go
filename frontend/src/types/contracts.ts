@@ -102,6 +102,56 @@ export interface HealthStatus {
   actions: HealthAction[];
 }
 
+// Needs-attention list (Spec 109 FR-001-007) - generated from
+// internal/contracts/attention.go. One list, one count, every surface (Web
+// UI, macOS tray/Home, CLI) reads from GET /api/v1/attention.
+export const AttentionKindSignInRequired = 'sign_in_required' as const;
+export const AttentionKindMissingSecret = 'missing_secret' as const;
+export const AttentionKindConfigError = 'config_error' as const;
+export const AttentionKindServerError = 'server_error' as const;
+export const AttentionKindServerReview = 'server_review' as const;
+export const AttentionKindToolReview = 'tool_review' as const;
+export const AttentionKindClientNeverSeen = 'client_never_seen' as const;
+
+export type AttentionKind =
+  | typeof AttentionKindSignInRequired
+  | typeof AttentionKindMissingSecret
+  | typeof AttentionKindConfigError
+  | typeof AttentionKindServerError
+  | typeof AttentionKindServerReview
+  | typeof AttentionKindToolReview
+  | typeof AttentionKindClientNeverSeen;
+
+export interface AttentionSubject {
+  type: 'server' | 'tool' | 'client';
+  id: string;
+  name: string;
+}
+
+export interface AttentionFix {
+  verb: string;
+  label: string;
+  target: string;
+}
+
+export interface AttentionItem {
+  /** Stable: kind:type:subject[:state]. */
+  id: string;
+  kind: AttentionKind;
+  rank: number;
+  subject: AttentionSubject;
+  summary: string;
+  detail?: string;
+  fix: AttentionFix;
+  since: string; // ISO date string
+}
+
+export interface AttentionResponse {
+  count: number;
+  generated_at: string; // ISO date string
+  items: AttentionItem[];
+}
+
 // Activity status vocabulary - generated from internal/storage/activity_models.go
 export const ActivityStatusSuccess = 'success' as const;
 export const ActivityStatusError = 'error' as const;
