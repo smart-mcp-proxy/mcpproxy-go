@@ -93,8 +93,14 @@ Examples:
 	traceTransport bool // Enable HTTP/SSE frame-by-frame tracing
 
 	// Global list filter flags (T019)
-	toolsStatusFilter   string // enabled | disabled | config-denied
-	toolsRiskFilter     string // read | write | destructive
+	toolsStatusFilter string // enabled | disabled | config-denied
+	// toolsTierFilter / toolsRiskFilter (Spec 109 FR-028, X11): --risk is kept
+	// as an alias of --tier for old scripts/muscle-memory; whichever is
+	// non-empty wins (tier preferred if both are set). Both filter on the
+	// backend-computed `tier` field (contracts.AnnotationTier) — never a
+	// locally-derived value.
+	toolsTierFilter     string // read | write | destructive | unannotated
+	toolsRiskFilter     string // alias of --tier
 	toolsApprovalFilter string // approved | pending | changed
 )
 
@@ -136,10 +142,16 @@ func groupByServer(targets []serverToolTarget) map[string][]string {
 
 // applyGlobalToolFilters applies client-side filters to the global tool list.
 // statusFilter: "enabled" | "disabled" | "config-denied" | ""
-// riskFilter:   "read" | "write" | "destructive" | ""
+// tierFilter:   "read" | "write" | "destructive" | "unannotated" | ""
 // approvalFilter: "approved" | "pending" | "changed" | ""
-func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, riskFilter, approvalFilter string) []map[string]interface{} {
-	if statusFilter == "" && riskFilter == "" && approvalFilter == "" {
+//
+// Spec 109 FR-028 / X11: tierFilter matches the backend-computed `tier` field
+// verbatim. It used to read `annotations.operation_type` — a field that does
+// not exist on an MCP tool's annotations (operation_type is an intent-
+// declaration concept) — so `--risk read` matched nothing over a fixture of
+// read-annotated tools. `tier` is what `GET /tools` actually sends.
+func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, tierFilter, approvalFilter string) []map[string]interface{} {
+	if statusFilter == "" && tierFilter == "" && approvalFilter == "" {
 		return tools
 	}
 
@@ -165,12 +177,9 @@ func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, riskFi
 			}
 		}
 
-		if riskFilter != "" {
-			opType := ""
-			if ann, ok := t["annotations"].(map[string]interface{}); ok {
-				opType, _ = ann["operation_type"].(string)
-			}
-			if !strings.EqualFold(opType, riskFilter) {
+		if tierFilter != "" {
+			tier := getStringField(t, "tier")
+			if !strings.EqualFold(tier, tierFilter) {
 				continue
 			}
 		}
@@ -185,6 +194,15 @@ func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, riskFi
 		out = append(out, t)
 	}
 	return out
+}
+
+// resolvedTierFilter returns the effective tier filter from --tier / --risk
+// (an alias of --tier, Spec 109 FR-028). --tier wins when both are set.
+func resolvedTierFilter() string {
+	if toolsTierFilter != "" {
+		return toolsTierFilter
+	}
+	return toolsRiskFilter
 }
 
 // GetToolsCommand returns the tools command for adding to the root command
@@ -219,7 +237,10 @@ func initToolsFlags() {
 
 	// Global-list filter flags (T019)
 	toolsListCmd.Flags().StringVar(&toolsStatusFilter, "status", "", "Filter by state: enabled, disabled, config-denied")
-	toolsListCmd.Flags().StringVar(&toolsRiskFilter, "risk", "", "Filter by risk: read, write, destructive")
+	// Spec 109 FR-028/X11: --tier is canonical; --risk is kept as an alias
+	// (risk stays the scan-score term elsewhere in the CLI).
+	toolsListCmd.Flags().StringVar(&toolsTierFilter, "tier", "", "Filter by tier: read, write, destructive, unannotated")
+	toolsListCmd.Flags().StringVar(&toolsRiskFilter, "risk", "", "Alias of --tier")
 	toolsListCmd.Flags().StringVar(&toolsApprovalFilter, "approval", "", "Filter by approval: approved, pending, changed")
 
 	// Note: -o/--output flag is inherited from root command via globalOutputFormat
@@ -306,7 +327,7 @@ func runToolsListGlobal(ctx context.Context, globalConfig *config.Config, logger
 	}
 
 	// Apply client-side filters
-	tools = applyGlobalToolFilters(tools, toolsStatusFilter, toolsRiskFilter, toolsApprovalFilter)
+	tools = applyGlobalToolFilters(tools, toolsStatusFilter, resolvedTierFilter(), toolsApprovalFilter)
 
 	return outputGlobalTools(tools)
 }
@@ -442,7 +463,7 @@ func serverToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 // of the two upstream-controlled columns, NAME and DESCRIPTION — is directly
 // testable.
 func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]string) {
-	headers = []string{"NAME", "SERVER", "STATE", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
+	headers = []string{"NAME", "SERVER", "STATE", "TIER", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
 	for _, t := range tools {
 		name := sanitizeName(getStringField(t, "name"))
 		srv := getStringField(t, "server_name")
@@ -454,6 +475,13 @@ func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 			state = "config-denied"
 		} else if disabled {
 			state = "disabled"
+		}
+
+		// Spec 109 FR-028/X11: rendered verbatim from the backend-computed
+		// `tier` field — never derived here.
+		tier := getStringField(t, "tier")
+		if tier == "" {
+			tier = "-"
 		}
 
 		approval := getStringField(t, "approval_status")
@@ -470,7 +498,7 @@ func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 
 		desc := sanitizeCell(getStringField(t, "description"), maxToolDescriptionCell)
 
-		rows = append(rows, []string{name, srv, state, approval, formatToolHold(t), usage, lastUsed, desc})
+		rows = append(rows, []string{name, srv, state, tier, approval, formatToolHold(t), usage, lastUsed, desc})
 	}
 	return headers, rows
 }

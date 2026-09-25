@@ -3,7 +3,7 @@
     <!-- Page Header -->
     <div class="flex justify-between items-center">
       <div>
-        <h1 class="text-3xl font-bold">Configuration</h1>
+        <h1 class="text-3xl font-bold">Settings</h1>
         <p class="text-base-content/70 mt-1">
           Manage mcpproxy settings. Changes save instantly; a badge marks fields that need a restart.
           <a
@@ -47,7 +47,8 @@
         :data-test="`settings-tab-${t.id}`"
         @click="activeTab = t.id"
       >
-        <span>{{ t.icon }}</span> {{ t.label }}
+        <component :is="t.icon" class="w-4 h-4 shrink-0" />
+        {{ t.label }}
       </button>
     </div>
 
@@ -174,8 +175,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { RouterLink, useRoute } from 'vue-router'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick, h, type FunctionalComponent } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
@@ -203,6 +204,7 @@ import api from '@/services/api'
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const route = useRoute()
+const router = useRouter()
 
 const securityFields = SECURITY_FIELDS
 const generalFields = GENERAL_FIELDS
@@ -247,6 +249,13 @@ const loading = ref(false)
 const loaded = ref(false)
 const loadError = ref('')
 const activeTab = ref<string>('security')
+// Spec 109 FR-016: read on mount from `?tab=` (onMounted below), then keep the
+// URL in sync with every tab change, preserving other query params (e.g.
+// `?focus=` from focusField).
+watch(activeTab, (tab) => {
+  if (route.query.tab === tab) return
+  void router.replace({ query: { ...route.query, tab } })
+})
 const showConnect = ref(false)
 const state = reactive<{ working: any; original: any }>({ working: {}, original: {} })
 // Bumped on every (re)hydration so each SettingsSection remounts with a fresh
@@ -256,12 +265,13 @@ const state = reactive<{ working: any; original: any }>({ working: {}, original:
 // never actually moved — writing a resolved default into a config that omitted
 // the key entirely.
 const formEpoch = ref(0)
-// Server-edition (multi-user) config lives under `server_edition` (MCP-1086).
-// Gate on the canonical key, falling back to the legacy `teams` key so a config
-// written before the rename still surfaces the Server Edition tab.
-const hasServerEdition = computed(
-  () => state.working && (state.working.server_edition != null || state.working.teams != null)
-)
+// Spec 109 FR-056: gated on the RUNTIME edition (`/status`'s `edition` field,
+// via the SSE-fed systemStore.status), not on whether the config happens to
+// carry a `server_edition` (or legacy `teams`) key. A personal-edition
+// instance can still have that key sitting in an imported/stale config, and
+// showing a whole tab of settings the running binary cannot act on is worse
+// than showing nothing.
+const hasServerEdition = computed(() => systemStore.status?.edition === 'server')
 
 // cross-section search: type to find any setting across all tabs
 const search = ref('')
@@ -300,14 +310,43 @@ const posture = computed(() => {
   ]
 })
 
+// Spec 109 FR-056: line icons from the app's own SVG icon set (same outline
+// style as SidebarNav's makeIcon), not emoji.
+const tabIconProps = {
+  fill: 'none',
+  stroke: 'currentColor',
+  'stroke-width': 1.6,
+  'stroke-linecap': 'round' as const,
+  'stroke-linejoin': 'round' as const,
+  viewBox: '0 0 24 24',
+}
+const makeTabIcon = (d: string): FunctionalComponent =>
+  (props) => h('svg', { ...tabIconProps, ...props }, [h('path', { d })])
+
+const IconLock = makeTabIcon(
+  'M12 11v3m-3-3a3 3 0 116 0m-9 3v6a1 1 0 001 1h10a1 1 0 001-1v-6a1 1 0 00-1-1H6a1 1 0 00-1 1z'
+)
+const IconGear = makeTabIcon(
+  'M10.3 3.6a1.5 1.5 0 013.4 0l.2 1.1a7 7 0 011.9.8l1-.6a1.5 1.5 0 012.1 2.1l-.6 1a7 7 0 01.8 1.9l1.1.2a1.5 1.5 0 010 3.4l-1.1.2a7 7 0 01-.8 1.9l.6 1a1.5 1.5 0 01-2.1 2.1l-1-.6a7 7 0 01-1.9.8l-.2 1.1a1.5 1.5 0 01-3.4 0l-.2-1.1a7 7 0 01-1.9-.8l-1 .6a1.5 1.5 0 01-2.1-2.1l.6-1a7 7 0 01-.8-1.9l-1.1-.2a1.5 1.5 0 010-3.4l1.1-.2a7 7 0 01.8-1.9l-.6-1a1.5 1.5 0 012.1-2.1l1 .6a7 7 0 011.9-.8l.2-1.1zM12 9a3 3 0 100 6 3 3 0 000-6z'
+)
+const IconWrench = makeTabIcon(
+  'M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3-3a1 1 0 000-1.4l-1.6-1.6a1 1 0 00-1.4 0l-1 1L15 3l-5 5-1.3-1.3a1 1 0 00-1.4 0l-3 3a1 1 0 000 1.4L6 13l-3 3a1 1 0 000 1.4l2.6 2.6a1 1 0 001.4 0l3-3a1 1 0 000-1.4L8.7 14l5-5 1.6 1.6z'
+)
+const IconUsers = makeTabIcon(
+  'M17 20v-2a4 4 0 00-3-3.87M9 20v-2a4 4 0 013-3.87m0-4.13a4 4 0 100-8 4 4 0 000 8zm8 4v-2a4 4 0 00-3-3.85m-1-4.15a4 4 0 010 7.75'
+)
+const IconBraces = makeTabIcon(
+  'M8 4c-2 0-3 1-3 3v3c0 1-1 2-2 2 1 0 2 1 2 2v3c0 2 1 3 3 3m8-16c2 0 3 1 3 3v3c0 1 1 2 2 2-1 0-2 1-2 2v3c0 2-1 3-3 3'
+)
+
 const tabs = computed(() => {
   const base = [
-    { id: 'security', label: 'Security & Access', icon: '🔒' },
-    { id: 'general', label: 'General', icon: '⚙️' },
-    { id: 'advanced', label: 'Advanced', icon: '🧰' },
-  ] as Array<{ id: string; label: string; icon: string }>
-  if (hasServerEdition.value) base.push({ id: 'teams', label: SERVER_EDITION_TAB_LABEL, icon: '👥' })
-  base.push({ id: 'raw', label: 'Raw JSON', icon: '{ }' })
+    { id: 'security', label: 'Security & Access', icon: IconLock },
+    { id: 'general', label: 'General', icon: IconGear },
+    { id: 'advanced', label: 'Advanced', icon: IconWrench },
+  ] as Array<{ id: string; label: string; icon: FunctionalComponent }>
+  if (hasServerEdition.value) base.push({ id: 'teams', label: SERVER_EDITION_TAB_LABEL, icon: IconUsers })
+  base.push({ id: 'raw', label: 'Raw JSON', icon: IconBraces })
   return base
 })
 
@@ -501,6 +540,10 @@ watch(defaultInstructions, () => {
 })
 
 onMounted(async () => {
+  const tabParam = route.query.tab
+  if (typeof tabParam === 'string' && tabs.value.some((t) => t.id === tabParam)) {
+    activeTab.value = tabParam
+  }
   loadDefaultInstructions()
   window.addEventListener('mcpproxy:config-saved', handleConfigSaved)
   await loadConfig()

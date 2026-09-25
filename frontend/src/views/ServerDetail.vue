@@ -1619,7 +1619,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
@@ -1660,6 +1660,7 @@ interface Props {
 
 const props = defineProps<Props>()
 const route = useRoute()
+const router = useRouter()
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
@@ -1709,6 +1710,15 @@ function mutateStoreServer(fn: (s: Server) => void) {
   if (s) fn(s)
 }
 const activeTab = ref<'tools' | 'logs' | 'config' | 'security'>('tools')
+// Spec 109 FR-016: every tab change (click, or a programmatic jump such as
+// the auto-approve flow landing on Security) is reflected in `?tab=`, keeping
+// every other query param, so the active tab survives a reload or a shared
+// link. The initial value is read from `?tab=` in onMounted below; this watch
+// only ever writes forward from there.
+watch(activeTab, (tab) => {
+  if (route.query.tab === tab) return
+  void router.replace({ query: { ...route.query, tab } })
+})
 const actionLoading = ref(false)
 
 // Tools

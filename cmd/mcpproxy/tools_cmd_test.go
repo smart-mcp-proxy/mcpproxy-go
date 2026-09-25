@@ -137,23 +137,15 @@ func TestApplyGlobalToolFilters_Status(t *testing.T) {
 }
 
 // TestApplyGlobalToolFilters_Risk verifies the risk filter matches annotations.
-func TestApplyGlobalToolFilters_Risk(t *testing.T) {
+// TestApplyGlobalToolFilters_Tier is the corrected form of the filter's
+// former "risk" test — see tools_tier_test.go for the X11 regression this
+// replaces (the field it used to read, annotations.operation_type, does not
+// exist on the real GET /tools payload; `tier` does).
+func TestApplyGlobalToolFilters_Tier(t *testing.T) {
 	tools := []map[string]interface{}{
-		{
-			"name":        "read_file",
-			"server_name": "srv",
-			"annotations": map[string]interface{}{"operation_type": "read"},
-		},
-		{
-			"name":        "write_file",
-			"server_name": "srv",
-			"annotations": map[string]interface{}{"operation_type": "write"},
-		},
-		{
-			"name":        "delete_repo",
-			"server_name": "srv",
-			"annotations": map[string]interface{}{"operation_type": "destructive"},
-		},
+		{"name": "read_file", "server_name": "srv", "tier": "read"},
+		{"name": "write_file", "server_name": "srv", "tier": "write"},
+		{"name": "delete_repo", "server_name": "srv", "tier": "destructive"},
 	}
 
 	got := applyGlobalToolFilters(tools, "", "read", "")

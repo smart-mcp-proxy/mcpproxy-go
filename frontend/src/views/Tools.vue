@@ -47,17 +47,19 @@
         <div class="stat-title">Disabled</div>
         <div class="stat-value text-2xl text-warning">{{ stats.disabled }}</div>
       </button>
-      <button
-        type="button"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', activeStatCard === 'pending' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+      <!-- Spec 109 FR-027: this card is a link to the review queue, not an
+           in-page filter toggle — "needs review" means something to act on
+           elsewhere, not another way to slice this table. -->
+      <router-link
+        to="/review"
+        class="stat text-left transition-colors hover:bg-base-200/60"
         data-test="stat-pending"
-        @click="selectStatCard('pending')"
       >
-        <div class="stat-title">Pending Approval</div>
+        <div class="stat-title">Needs review</div>
         <div class="stat-value text-2xl" :class="stats.pending_approval > 0 ? 'text-error' : ''">
           {{ stats.pending_approval }}
         </div>
-      </button>
+      </router-link>
     </div>
 
     <!-- Partial-error banner -->
@@ -118,16 +120,20 @@
             </select>
           </div>
 
-          <!-- Risk filter -->
+          <!-- Tier filter. Spec 109 FR-028/X11: "Tier" (not "Risk" — risk
+               stays the scan-score term), values from the server-computed
+               `tier` field, never derived locally. `?risk=` stays a query
+               alias for `?tier=` for old bookmarks/links. -->
           <div class="form-control min-w-[120px]">
             <label class="label py-1">
-              <span class="label-text text-xs">Risk</span>
+              <span class="label-text text-xs">Tier</span>
             </label>
-            <select v-model="filterRisk" class="select select-bordered select-sm" aria-label="Filter by risk" data-test="filter-risk">
+            <select v-model="filterTier" class="select select-bordered select-sm" aria-label="Filter by tier" data-test="filter-tier">
               <option value="">All</option>
               <option value="read">Read</option>
               <option value="write">Write</option>
               <option value="destructive">Destructive</option>
+              <option value="unannotated">Unannotated</option>
             </select>
           </div>
 
@@ -136,12 +142,14 @@
             <label class="label py-1">
               <span class="label-text text-xs">Approval</span>
             </label>
+            <!-- Spec 109 FR-027: one review-state vocabulary everywhere
+                 (Web/macOS/CLI/review payload) — no "awaiting" (it duplicated
+                 pending+changed with a different name). -->
             <select v-model="filterApproval" class="select select-bordered select-sm" aria-label="Filter by approval state" data-test="filter-approval">
               <option value="">All</option>
-              <option value="awaiting">Awaiting approval</option>
               <option value="approved">Approved</option>
-              <option value="pending">Pending</option>
-              <option value="changed">Changed</option>
+              <option value="pending">New, needs review</option>
+              <option value="changed">Changed, needs review</option>
             </select>
           </div>
 
@@ -157,7 +165,7 @@
           <span v-if="searchQuery" class="badge badge-sm badge-outline">Search: {{ searchQuery }}</span>
           <span v-if="filterServer" class="badge badge-sm badge-outline">Server: {{ filterServer }}</span>
           <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
-          <span v-if="filterRisk" class="badge badge-sm badge-outline">Risk: {{ filterRisk }}</span>
+          <span v-if="filterTier" class="badge badge-sm badge-outline">Tier: {{ filterTier }}</span>
           <span v-if="filterApproval" class="badge badge-sm badge-outline">Approval: {{ filterApproval }}</span>
         </div>
       </div>
@@ -319,8 +327,8 @@
                   Server {{ getSortIndicator('server_name') }}
                 </th>
                 <th>Description</th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('risk')">
-                  Risk {{ getSortIndicator('risk') }}
+                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('tier')">
+                  Tier {{ getSortIndicator('tier') }}
                 </th>
                 <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('approval_status')">
                   Approval {{ getSortIndicator('approval_status') }}
@@ -379,8 +387,8 @@
                   </div>
                 </td>
                 <td>
-                  <span class="badge badge-sm" :class="getRiskBadgeClass(tool)">
-                    {{ getRiskLabel(tool) }}
+                  <span class="badge badge-sm" :class="getTierBadgeClass(tool)">
+                    {{ getTierLabel(tool) }}
                   </span>
                 </td>
                 <td>
@@ -480,7 +488,7 @@
               <router-link :to="serverDetailPath(selectedTool.server_name)" class="link link-primary text-sm">
                 {{ selectedTool.server_name }}
               </router-link>
-              <span class="badge badge-sm" :class="getRiskBadgeClass(selectedTool)">{{ getRiskLabel(selectedTool) }}</span>
+              <span class="badge badge-sm" :class="getTierBadgeClass(selectedTool)">{{ getTierLabel(selectedTool) }}</span>
               <span v-if="selectedTool.config_denied" class="badge badge-sm badge-error">config-denied</span>
               <span v-else-if="selectedTool.disabled" class="badge badge-sm badge-warning">disabled</span>
               <span v-else class="badge badge-sm badge-success">enabled</span>
@@ -585,7 +593,7 @@ const selectedTool = ref<GlobalTool | null>(null)
 const searchQuery = ref('')
 const filterServer = ref('')
 const filterStatus = ref('')
-const filterRisk = ref('')
+const filterTier = ref('')
 const filterApproval = ref('')
 
 // Debounce search
@@ -596,7 +604,7 @@ watch(searchQuery, () => {
 })
 
 // ---- Sort ----
-type SortCol = 'name' | 'server_name' | 'risk' | 'approval_status' | 'enabled' | 'usage' | 'last_used'
+type SortCol = 'name' | 'server_name' | 'tier' | 'approval_status' | 'enabled' | 'usage' | 'last_used'
 const sortColumn = ref<SortCol>('name')
 const sortDirection = ref<'asc' | 'desc'>('asc')
 
@@ -767,18 +775,18 @@ const availableServers = computed(() => {
 })
 
 const hasActiveFilters = computed(() =>
-  !!searchQuery.value || !!filterServer.value || !!filterStatus.value || !!filterRisk.value || !!filterApproval.value
+  !!searchQuery.value || !!filterServer.value || !!filterStatus.value || !!filterTier.value || !!filterApproval.value
 )
 
 // Clickable stat cards (parity with Servers page): each card drives the
-// status/approval filter and toggles off when its active card is clicked again.
-type StatCard = 'total' | 'enabled' | 'disabled' | 'pending'
+// status filter and toggles off when its active card is clicked again. The
+// "Needs review" card (Spec 109 FR-027) is a plain link to /review, not one of
+// these — it never sets filterApproval.
+type StatCard = 'total' | 'enabled' | 'disabled'
 
 const activeStatCard = computed<StatCard>(() => {
-  if (filterApproval.value === 'awaiting' || filterApproval.value === 'pending') return 'pending'
   if (filterStatus.value === 'enabled') return 'enabled'
   if (filterStatus.value === 'disabled') return 'disabled'
-  if (!filterStatus.value && !filterApproval.value) return 'total'
   return 'total'
 })
 
@@ -786,34 +794,32 @@ function selectStatCard(card: StatCard) {
   // Toggle: re-clicking the active card resets to the unfiltered "total" view.
   if (card === 'total' || activeStatCard.value === card) {
     filterStatus.value = ''
-    filterApproval.value = ''
     return
   }
-  if (card === 'pending') {
-    filterStatus.value = ''
-    filterApproval.value = 'awaiting'
-  } else {
-    filterApproval.value = ''
-    filterStatus.value = card // 'enabled' | 'disabled'
-  }
+  filterStatus.value = card // 'enabled' | 'disabled'
 }
 
-// ---- Computed: risk derivation ----
-function getRisk(tool: GlobalTool): 'read' | 'write' | 'destructive' {
-  if (tool.annotations?.destructiveHint) return 'destructive'
-  if (tool.annotations?.readOnlyHint) return 'read'
-  return 'write'
+// ---- Tier (Spec 109 FR-028/X11): `tool.tier` comes from the backend
+// (contracts.AnnotationTier) — never computed here. An unannotated tool is
+// labelled "Unannotated", never silently shown as "write" (the X11 bug this
+// replaces: the old local getRisk() defaulted anything without hints to
+// "write").
+function getTier(tool: GlobalTool): string {
+  return tool.tier || 'unannotated'
 }
 
-function getRiskLabel(tool: GlobalTool): string {
-  return getRisk(tool)
+function getTierLabel(tool: GlobalTool): string {
+  const t = getTier(tool)
+  if (t === 'unannotated') return 'Unannotated'
+  return t.charAt(0).toUpperCase() + t.slice(1)
 }
 
-function getRiskBadgeClass(tool: GlobalTool): string {
-  const r = getRisk(tool)
-  if (r === 'destructive') return 'badge-error'
-  if (r === 'read') return 'badge-success'
-  return 'badge-warning'
+function getTierBadgeClass(tool: GlobalTool): string {
+  const t = getTier(tool)
+  if (t === 'destructive') return 'badge-error'
+  if (t === 'write') return 'badge-warning'
+  if (t === 'read') return 'badge-success'
+  return 'badge-ghost'
 }
 
 function getApprovalBadgeClass(status: string): string {
@@ -922,15 +928,11 @@ const searchScope = computed(() => {
     tools = tools.filter(t => t.config_denied)
   }
 
-  if (filterRisk.value) {
-    tools = tools.filter(t => getRisk(t) === filterRisk.value)
+  if (filterTier.value) {
+    tools = tools.filter(t => getTier(t) === filterTier.value)
   }
 
-  if (filterApproval.value === 'awaiting') {
-    // "Awaiting approval" mirrors the Pending Approval stat, which counts both
-    // brand-new (pending) and rug-pull (changed) tools.
-    tools = tools.filter(t => t.approval_status === 'pending' || t.approval_status === 'changed')
-  } else if (filterApproval.value) {
+  if (filterApproval.value) {
     tools = tools.filter(t => t.approval_status === filterApproval.value)
   }
 
@@ -979,8 +981,8 @@ const sortedTools = computed(() => {
         av = a.name; bv = b.name; break
       case 'server_name':
         av = a.server_name; bv = b.server_name; break
-      case 'risk':
-        av = getRisk(a); bv = getRisk(b); break
+      case 'tier':
+        av = getTier(a); bv = getTier(b); break
       case 'approval_status':
         av = a.approval_status || ''; bv = b.approval_status || ''; break
       case 'enabled': {
@@ -1054,7 +1056,7 @@ function clearFilters() {
   searchQuery.value = ''
   filterServer.value = ''
   filterStatus.value = ''
-  filterRisk.value = ''
+  filterTier.value = ''
   filterApproval.value = ''
   currentPage.value = 1
 }
@@ -1069,7 +1071,7 @@ function formatRelativeTime(ts: string): string {
 }
 
 // Reset page when filters/sort change
-watch([filterServer, filterStatus, filterRisk, filterApproval, sortColumn, sortDirection], () => {
+watch([filterServer, filterStatus, filterTier, filterApproval, sortColumn, sortDirection], () => {
   currentPage.value = 1
 })
 
@@ -1087,7 +1089,7 @@ const toolsHints = computed<Hint[]>(() => [
         title: 'Audit and cleanup',
         list: [
           'Search by tool name, description, or server',
-          'Filter by status, risk level, or approval state',
+          'Filter by status, tier, or approval state',
           'Sort any column to find stale or unused tools',
           'Select multiple tools for batch enable/disable, or batch approve/reject across servers',
         ],

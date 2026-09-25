@@ -15,14 +15,20 @@
       named here, once, so they are not hidden either — the Errors & latency
       chart below still charts them.
     -->
+    <!-- Spec 109 FR-074: this group is titled "Calls to unknown tools" — a
+         name that never completed a call is not a tool this proxy can vouch
+         for (F22, #1046), so it stays out of the ranking above, but the
+         calls made to it are still named and counted rather than vanishing
+         silently. -->
     <p
       v-if="unresolved.length > 0"
       data-test="usage-call-histogram-unresolved"
       class="text-xs opacity-50 mt-2"
       :title="unresolvedLabels"
     >
+      <span class="font-medium">Calls to unknown tools:</span>
       {{ unresolved.length }} name{{ unresolved.length === 1 ? '' : 's' }} never completed a call
-      and {{ unresolved.length === 1 ? 'is' : 'are' }} excluded here — see “Errors &amp; latency”.
+      and {{ unresolved.length === 1 ? 'is' : 'are' }} excluded from this ranking — see “Errors &amp; latency”.
     </p>
   </div>
 </template>
@@ -95,7 +101,9 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
     x: {
       beginAtZero: true,
       title: { display: true, text: 'Calls (cumulative)' },
-      ticks: { callback: (v) => formatNumber(Number(v)) },
+      // Spec 109 FR-074: a call count is never fractional — force integer
+      // ticks rather than letting chart.js round a small max into 0.5/1.5s.
+      ticks: { precision: 0, callback: (v) => formatNumber(Number(v)) },
     },
     y: { ticks: { autoSkip: false, font: { size: 11 } } },
   },
