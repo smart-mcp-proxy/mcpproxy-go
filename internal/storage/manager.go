@@ -2463,3 +2463,14 @@ func (m *Manager) SaveOnboardingState(state *OnboardingState) error {
 
 	return m.db.SaveOnboardingState(state)
 }
+
+// UpdateOnboardingState runs fn against the current onboarding state and
+// persists the result in one bbolt transaction (Spec 109-b, T035). Every
+// writer of the record must use this instead of a separate
+// Get/SaveOnboardingState pair — see BoltDB.UpdateOnboardingState.
+func (m *Manager) UpdateOnboardingState(fn func(*OnboardingState) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.UpdateOnboardingState(fn)
+}

@@ -46,6 +46,22 @@ func (m *onboardingTestController) SaveOnboardingState(st *storage.OnboardingSta
 	return nil
 }
 
+// UpdateOnboardingState is defined directly here (not inherited from
+// mockRoutingController/baseController) so it reads and writes through THIS
+// struct's own Get/SaveOnboardingState overrides above — an inherited
+// baseController.UpdateOnboardingState would call baseController's own
+// Get/SaveOnboardingState instead, silently ignoring m.state/m.saved.
+func (m *onboardingTestController) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	st, err := m.GetOnboardingState()
+	if err != nil {
+		return err
+	}
+	if err := fn(st); err != nil {
+		return err
+	}
+	return m.SaveOnboardingState(st)
+}
+
 func (m *onboardingTestController) GetActivationFirstMCPClient() (bool, []string) {
 	if m.activationPanicsLeft > 0 {
 		m.activationPanicsLeft--

@@ -62,9 +62,27 @@ type OnboardingStateResponse struct {
 	// IncompleteTabCount is the number of wizard tabs whose state is incomplete.
 	// Drives the sidebar Setup entry's badge. Formula:
 	//   +1 if HasConnectedClient == false
-	//   +1 if HasConfiguredServer == false
+	//   +1 if HasUsableServer == false
 	//   +1 if FirstMCPClientEver == false
 	IncompleteTabCount int `json:"incomplete_tab_count"`
+
+	// --- Spec 109-b additions (FR-041/FR-042) ---
+
+	// HasUsableServer is true once at least one enabled, non-quarantined
+	// server is connected AND has at least one approved (non-disabled) tool.
+	// This is the real "the wizard has something to try" signal:
+	// HasConfiguredServer only means a server entry exists, even while every
+	// one of them sits quarantined or has zero approved tools. The Servers
+	// step and the Setup badge use this instead of HasConfiguredServer, which
+	// is kept above for compatibility. Once 109-c's health vocabulary lands,
+	// "connected" is replaced by health.usable (tasks.md T051); until then
+	// this uses "connected" as the interim usability test.
+	HasUsableServer bool `json:"has_usable_server"`
+
+	// UsableServers lists the names behind HasUsableServer, for the Verify
+	// step's suggested-prompt generator (FR-042): prompts are only built from
+	// tools of servers in this list, never from a quarantined or toolless one.
+	UsableServers []string `json:"usable_servers"`
 }
 
 // OnboardingMarkRequest is the request body for /api/v1/onboarding/mark
@@ -161,34 +179,43 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	state, err := s.controller.GetOnboardingState()
-	if err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("read state: %v", err))
-		return
+	// externalConnectionEvidence (FR-002a) itself reads the connect service and
+	// the shared telemetry/activation BBolt bucket. It must run OUTSIDE the
+	// UpdateOnboardingState transaction below — evaluating it lazily from
+	// inside that closure would open a second (read) transaction against the
+	// SAME *bbolt.DB nested inside the ongoing write transaction, which bbolt
+	// does not support. Evaluated eagerly here only when the request could
+	// possibly need it (an untouched-step dismissal), matching
+	// nextConnectStepStatus's own laziness — this reproduces the exact
+	// evaluation the pre-109-b separate Get+Save pair performed, just moved a
+	// few lines earlier.
+	hasEvidence := false
+	if req.ConnectStepStatus == storage.StepStatusSkipped {
+		hasEvidence = s.externalConnectionEvidence()
 	}
-	if state == nil {
-		state = &storage.OnboardingState{}
-	}
+	evidenceFn := func() bool { return hasEvidence }
 
 	now := time.Now()
-	if req.MarkShown && state.FirstShownAt == nil {
-		t := now
-		state.FirstShownAt = &t
-	}
-	if req.ConnectStepStatus != "" {
-		state.ConnectStepStatus = nextConnectStepStatus(
-			state.ConnectStepStatus, req.ConnectStepStatus, s.externalConnectionEvidence)
-	}
-	if req.ServerStepStatus != "" {
-		state.ServerStepStatus = req.ServerStepStatus
-	}
-	if req.Engaged && !state.Engaged {
-		state.Engaged = true
-		t := now
-		state.EngagedAt = &t
-	}
-
-	if err := s.controller.SaveOnboardingState(state); err != nil {
+	err := s.controller.UpdateOnboardingState(func(state *storage.OnboardingState) error {
+		if req.MarkShown && state.FirstShownAt == nil {
+			t := now
+			state.FirstShownAt = &t
+		}
+		if req.ConnectStepStatus != "" {
+			state.ConnectStepStatus = nextConnectStepStatus(
+				state.ConnectStepStatus, req.ConnectStepStatus, evidenceFn)
+		}
+		if req.ServerStepStatus != "" {
+			state.ServerStepStatus = req.ServerStepStatus
+		}
+		if req.Engaged && !state.Engaged {
+			state.Engaged = true
+			t := now
+			state.EngagedAt = &t
+		}
+		return nil
+	})
+	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("save state: %v", err))
 		return
 	}
@@ -219,6 +246,8 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 		resp.ConfiguredServerCount = len(servers)
 		resp.HasConfiguredServer = len(servers) > 0
 	}
+	resp.UsableServers = s.computeUsableServers(servers)
+	resp.HasUsableServer = len(resp.UsableServers) > 0
 
 	state, err := s.controller.GetOnboardingState()
 	if err != nil {
@@ -235,11 +264,14 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 		resp.MCPClientsSeenEver = []string{}
 	}
 
-	// Badge formula: +1 per incomplete tab.
+	// Badge formula: +1 per incomplete tab. FR-041: the Servers step (and this
+	// badge) is driven by HasUsableServer, not HasConfiguredServer — a server
+	// entry that is still quarantined or has no approved tool is not yet
+	// something the user can actually use.
 	if !resp.HasConnectedClient {
 		resp.IncompleteTabCount++
 	}
-	if !resp.HasConfiguredServer {
+	if !resp.HasUsableServer {
 		resp.IncompleteTabCount++
 	}
 	if !resp.FirstMCPClientEver {
@@ -249,6 +281,40 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 	resp.ShouldShowWizard = !state.Engaged && resp.IncompleteTabCount > 0
 
 	return resp, nil
+}
+
+// computeUsableServers returns the names of servers that are enabled,
+// non-quarantined, connected, and have at least one approved (non-disabled)
+// tool (FR-041). servers is the GetAllServers() projection; a nil/failed
+// fetch yields no usable servers rather than erroring the whole onboarding
+// document — this predicate degrading to "not usable yet" is a safe default,
+// matching computeOnboardingState's existing tolerance of a GetAllServers
+// failure for HasConfiguredServer above.
+func (s *Server) computeUsableServers(servers []map[string]interface{}) []string {
+	usable := make([]string, 0, len(servers))
+	for _, srv := range servers {
+		name, _ := srv["name"].(string)
+		if name == "" {
+			continue
+		}
+		enabled, _ := srv["enabled"].(bool)
+		quarantined, _ := srv["quarantined"].(bool)
+		connected, _ := srv["connected"].(bool)
+		if !enabled || quarantined || !connected {
+			continue
+		}
+		records, err := s.controller.ListToolApprovals(name)
+		if err != nil {
+			continue
+		}
+		for _, rec := range records {
+			if rec != nil && rec.Status == storage.ToolApprovalStatusApproved && !rec.Disabled {
+				usable = append(usable, name)
+				break
+			}
+		}
+	}
+	return usable
 }
 
 // validStepStatus returns true if v is an allowed step-status REQUEST value.

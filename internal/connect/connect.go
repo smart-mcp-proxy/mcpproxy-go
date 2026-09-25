@@ -35,6 +35,14 @@ type ConnectResult struct {
 	ServerName string `json:"server_name"`
 	Action     string `json:"action"` // "created", "updated", "already_exists", "removed", "not_found"
 	Message    string `json:"message"`
+
+	// DisplayPath is ConfigPath with the home directory shortened to "~"
+	// (FR-037). Populated for every result whose ConfigPath is known.
+	DisplayPath string `json:"display_path,omitempty"`
+	// ReloadHint is this client's instruction for making the write take
+	// effect (FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Empty
+	// for an unknown client.
+	ReloadHint string `json:"reload_hint,omitempty"`
 }
 
 // ClientStatus describes the current state of a client's configuration
@@ -51,6 +59,13 @@ type ClientStatus struct {
 	Bridge     bool   `json:"bridge,omitempty"` // connects via a stdio bridge; connectable even without an existing config
 	Icon       string `json:"icon"`
 	ServerName string `json:"server_name,omitempty"` // name under which mcpproxy is registered
+
+	// DisplayPath is ConfigPath with the home directory shortened to "~"
+	// (FR-037). Cosmetic only; the full path stays in ConfigPath.
+	DisplayPath string `json:"display_path,omitempty"`
+	// ReloadHint is this client's instruction for making a newly-written
+	// config take effect (FR-037/FR-042). Empty for an unsupported client.
+	ReloadHint string `json:"reload_hint,omitempty"`
 
 	// AccessState classifies the per-client content access (Spec 075, additive).
 	// Empty/"unknown" in the content-read-free overall status; resolved to
@@ -342,12 +357,14 @@ func (s *Service) GetAllStatus() []ClientStatus {
 			ID:           c.ID,
 			Name:         c.Name,
 			ConfigPath:   cfgPath,
+			DisplayPath:  DisplayPath(cfgPath, s.homeDir),
 			CheckedPaths: s.checkedPaths(c.ID),
 			Supported:    c.Supported,
 			Reason:       c.Reason,
 			Note:         c.Note,
 			Bridge:       c.Bridge,
 			Icon:         c.Icon,
+			ReloadHint:   c.ReloadHint,
 			AccessState:  accessUnknown,
 			ProxyURL:     proxyURL,
 		}
@@ -384,12 +401,14 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		ID:           c.ID,
 		Name:         c.Name,
 		ConfigPath:   cfgPath,
+		DisplayPath:  DisplayPath(cfgPath, s.homeDir),
 		CheckedPaths: s.checkedPaths(c.ID),
 		Supported:    c.Supported,
 		Reason:       c.Reason,
 		Note:         c.Note,
 		Bridge:       c.Bridge,
 		Icon:         c.Icon,
+		ReloadHint:   c.ReloadHint,
 		AccessState:  accessUnknown,
 		ProxyURL:     s.baseURL(),
 	}
@@ -469,8 +488,20 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 //
 // An empty token means exactly today's behavior, so existing consumers are
 // unaffected (contracts §2).
-func (s *Service) ConnectWithPrecondition(clientID, serverName string, force bool, preconditionToken string) (*ConnectResult, error) {
+func (s *Service) ConnectWithPrecondition(clientID, serverName string, force bool, preconditionToken string) (res *ConnectResult, err error) {
 	client := FindClient(clientID)
+
+	// FR-037/FR-042: every ConnectResult this call produces — success,
+	// already_exists, precondition_failed, whatever branch below returns it —
+	// carries the client's display path and reload hint, so a caller never has
+	// to special-case which branch to trust for them.
+	defer func() {
+		if res != nil && client != nil {
+			res.DisplayPath = DisplayPath(res.ConfigPath, s.homeDir)
+			res.ReloadHint = client.ReloadHint
+		}
+	}()
+
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
 	}
@@ -555,7 +586,9 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 		return nil, err
 	}
 
-	var res *ConnectResult
+	// res/err are the function's named returns — deliberately NOT re-declared
+	// with `var` here, which would shadow them and leave the deferred
+	// DisplayPath/ReloadHint fill-in above looking at a permanently-nil res.
 	if client.Format == "toml" {
 		res, err = s.connectTOML(client, cfgPath, serverName, force, pre)
 	} else {
@@ -592,8 +625,20 @@ func connectRefusal(client *ClientDef, cfgPath string) error {
 }
 
 // Disconnect removes the MCPProxy entry from the specified client's configuration.
-func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error) {
+func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, err error) {
 	client := FindClient(clientID)
+
+	// FR-037/FR-042: fill DisplayPath/ReloadHint on whichever ConnectResult
+	// this call returns, including the OpenCode alternate-candidate branch
+	// below (which returns directly rather than falling through to the
+	// bottom `return`).
+	defer func() {
+		if res != nil && client != nil {
+			res.DisplayPath = DisplayPath(res.ConfigPath, s.homeDir)
+			res.ReloadHint = client.ReloadHint
+		}
+	}()
+
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
 	}
@@ -610,8 +655,6 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
 
-	var res *ConnectResult
-	var err error
 	if client.Format == "toml" {
 		res, err = s.disconnectTOML(client, cfgPath, serverName)
 	} else {

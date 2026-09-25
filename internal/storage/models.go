@@ -113,6 +113,15 @@ type OnboardingState struct {
 
 	// ServerStepStatus is one of: "", "completed", "skipped".
 	ServerStepStatus string `json:"server_step_status,omitempty"`
+
+	// ClientConnectedAt records, per client id from the fixed connect client
+	// registry (internal/connect.GetAllClients — never user input), the last
+	// time a connect write succeeded for that client (Spec 109-b FR-042).
+	// Written by the connect success path through UpdateOnboardingState so a
+	// concurrent onboarding/mark write can never drop it. Consumed by the
+	// Verify step / presence layer to tell "connected, never seen" apart from
+	// "connected seconds ago, hasn't reconnected yet".
+	ClientConnectedAt map[string]time.Time `json:"client_connected_at,omitempty"`
 }
 
 // Meta keys
