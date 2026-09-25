@@ -125,7 +125,13 @@ func needsSecretTag(fields ...[]ImportedField) bool {
 // data applies (issue #1148's "one rule set" principle) — so Summary never
 // carries a raw secret even when an argv value or URL query looks like one.
 func summarizeServer(server *config.ServerConfig, envFields, headerFields []ImportedField) (summary string, tags []string) {
-	isStdio := server.Command != "" && server.URL == ""
+	// Mirror internal/config/config.go's own validation, which treats an
+	// explicit Protocol=="stdio" as authoritative regardless of a (possibly
+	// leftover) URL — a hand-edited entry that declares "type": "stdio" but
+	// still carries a url field runs as stdio, so the preview must tag it
+	// "local process" too rather than disagreeing with the runtime.
+	isStdio := server.Protocol == "stdio" ||
+		(server.Protocol == "" && server.Command != "" && server.URL == "")
 
 	if isStdio {
 		parts := append([]string{server.Command}, oauth.LiveRedaction.Argv(server.Args)...)

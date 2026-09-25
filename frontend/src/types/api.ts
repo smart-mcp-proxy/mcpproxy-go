@@ -1086,6 +1086,11 @@ export interface ConnectResult {
 export interface ConnectPreview {
   client: string
   config_path: string
+  // Spec 109-b FR-037: config_path with the home directory shortened to "~",
+  // matching ClientStatus/ConnectResult — same cosmetic-only field, so the
+  // preview and the post-connect result render the same client's path
+  // identically.
+  display_path?: string
   format: 'json' | 'toml'
   server_key: string
   server_name: string

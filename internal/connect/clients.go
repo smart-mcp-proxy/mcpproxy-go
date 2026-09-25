@@ -264,6 +264,14 @@ func DisplayPath(path, homeDir string) string {
 		}
 	}
 	homeDir = strings.TrimRight(homeDir, string(filepath.Separator))
+	if homeDir == "" {
+		// homeDir was exactly the filesystem root (e.g. HOME=/ in a minimal
+		// container, or root's own home). TrimRight collapsed it to "", which
+		// would otherwise make every absolute path match the "under home"
+		// prefix below. There is no meaningful non-degenerate shortening for
+		// a root home, so leave the path as-is.
+		return path
+	}
 	if path == homeDir {
 		return "~"
 	}

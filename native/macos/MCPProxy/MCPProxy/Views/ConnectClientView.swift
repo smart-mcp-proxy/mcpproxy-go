@@ -70,6 +70,11 @@ enum ConnectClientAccessibility {
     /// Spec 109-b FR-037/FR-042: the client's reload hint shown after a
     /// successful connect/disconnect.
     static let reloadHint = "connect-client-reload-hint"
+    /// Spec 109-b FR-037: the shortened config path shown alongside a
+    /// successful connect/disconnect result, so the write is anchored to a
+    /// place, not just a message — matching the preview pane's "Config file"
+    /// row above.
+    static let resultConfigPath = "connect-client-result-config-path"
 
     /// Identifier of one client row.
     static func row(_ clientId: String) -> String { "connect-client-row-\(clientId)" }
@@ -79,7 +84,7 @@ enum ConnectClientAccessibility {
         list, preview, entryText, configPath, existingSummary, safetyNet,
         credentialNotice, refusal, connectBlocked, entryNameField, advancedDisclosure,
         connectButton, undoButton, disconnectButton, disconnectConfirm,
-        closeButton, status, waiting, transportNotice, reloadHint
+        closeButton, status, waiting, transportNotice, reloadHint, resultConfigPath
     ]
 }
 
@@ -308,7 +313,7 @@ struct ConnectClientView: View {
                 .accessibilityIdentifier(ConnectClientAccessibility.preview)
         case .resolved(let preview):
             VStack(alignment: .leading, spacing: 10) {
-                labelledRow("Config file", preview.configPath,
+                labelledRow("Config file", preview.effectiveDisplayPath,
                             identifier: ConnectClientAccessibility.configPath)
 
                 VStack(alignment: .leading, spacing: 4) {
@@ -419,6 +424,16 @@ struct ConnectClientView: View {
                     .font(.caption)
                     .foregroundStyle(.green)
                     .accessibilityIdentifier(ConnectClientAccessibility.status)
+                // Spec 109-b FR-037: anchor the result to the file it wrote,
+                // the same shortened path the preview pane showed above —
+                // `effectiveDisplayPath` was decoded and available since
+                // FR-037/FR-042 landed but never rendered here.
+                if let displayPath = result.effectiveDisplayPath, !displayPath.isEmpty {
+                    Text(displayPath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.resultConfigPath)
+                }
                 // Spec 109-b FR-037/FR-042: name the client's reload step so a
                 // successful write doesn't read as "done" when the client
                 // hasn't picked it up yet.

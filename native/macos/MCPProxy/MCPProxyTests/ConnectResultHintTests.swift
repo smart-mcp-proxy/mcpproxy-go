@@ -16,6 +16,10 @@ final class ConnectResultHintTests: XCTestCase {
         try JSONDecoder().decode(APIClient.ClientStatus.self, from: Data(json.utf8))
     }
 
+    private func decodePreview(_ json: String) throws -> ConnectPreviewModel {
+        try JSONDecoder().decode(ConnectPreviewModel.self, from: Data(json.utf8))
+    }
+
     // MARK: - ConnectResult
 
     func testConnectResultDecodesDisplayPathAndReloadHint() throws {
@@ -84,5 +88,36 @@ final class ConnectResultHintTests: XCTestCase {
         XCTAssertNil(status.displayPath)
         XCTAssertNil(status.reloadHint)
         XCTAssertEqual(status.effectiveDisplayPath, "/Users/x/.gemini/settings.json")
+    }
+
+    // MARK: - ConnectPreviewModel
+
+    /// The preview pane must render the same shortened path as the status
+    /// list and the post-connect result (FR-037) — not the raw, unshortened
+    /// `config_path` — so `effectiveDisplayPath` needs to actually decode and
+    /// resolve here too, not just on `ClientStatus`/`ConnectResult`.
+    func testConnectPreviewDecodesDisplayPath() throws {
+        let preview = try decodePreview("""
+        {"client":"cursor","config_path":"/Users/x/.cursor/mcp.json",
+         "display_path":"~/.cursor/mcp.json","server_name":"mcpproxy",
+         "entry_text":"{}","entry_exists":false,"contains_api_key":false,
+         "access_state":"accessible","precondition_token":"tok"}
+        """)
+
+        XCTAssertEqual(preview.displayPath, "~/.cursor/mcp.json")
+        XCTAssertEqual(preview.effectiveDisplayPath, "~/.cursor/mcp.json")
+    }
+
+    /// A core older than Spec 109-b's preview change sends no `display_path`;
+    /// the preview must still decode and fall back to the full path.
+    func testConnectPreviewToleratesACoreWithoutDisplayPath() throws {
+        let preview = try decodePreview("""
+        {"client":"cursor","config_path":"/Users/x/.cursor/mcp.json",
+         "server_name":"mcpproxy","entry_text":"{}","entry_exists":false,
+         "contains_api_key":false,"access_state":"accessible","precondition_token":"tok"}
+        """)
+
+        XCTAssertNil(preview.displayPath)
+        XCTAssertEqual(preview.effectiveDisplayPath, "/Users/x/.cursor/mcp.json")
     }
 }

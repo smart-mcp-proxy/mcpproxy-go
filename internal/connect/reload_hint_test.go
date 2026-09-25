@@ -69,6 +69,15 @@ func TestDisplayPath(t *testing.T) {
 			home: home,
 			want: "",
 		},
+		{
+			// homeDir "/" (root — e.g. HOME=/ in a minimal container, or a
+			// misconfigured environment) must not turn into an empty prefix
+			// after TrimRight, which would make every absolute path match.
+			name: "root home dir does not swallow every absolute path",
+			path: filepath.Join(string(filepath.Separator), "etc", "mcpproxy", "config.json"),
+			home: string(filepath.Separator),
+			want: filepath.Join(string(filepath.Separator), "etc", "mcpproxy", "config.json"),
+		},
 	}
 
 	for _, tc := range tests {
@@ -172,6 +181,29 @@ func TestConnectResultCarriesDisplayPathAndReloadHint(t *testing.T) {
 		t.Fatalf("Disconnect: %v", err)
 	}
 	assertHintAndPath(t, dres, home)
+}
+
+// TestPreviewCarriesDisplayPath asserts GET /connect/{client}/preview exposes
+// the same DisplayPath as ClientStatus/ConnectResult (FR-037), so the
+// pre-connect preview pane and the post-connect result render the same
+// client's config path identically instead of the preview alone showing the
+// raw, unshortened ConfigPath.
+func TestPreviewCarriesDisplayPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	svc := NewServiceWithHome("127.0.0.1:8080", "", home)
+
+	preview, err := svc.Preview("cursor", "")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	want := DisplayPath(preview.ConfigPath, home)
+	if preview.DisplayPath != want {
+		t.Errorf("DisplayPath = %q, want %q", preview.DisplayPath, want)
+	}
+	if preview.DisplayPath == preview.ConfigPath {
+		t.Errorf("DisplayPath %q should differ from the full ConfigPath %q under a fake home", preview.DisplayPath, preview.ConfigPath)
+	}
 }
 
 func assertHintAndPath(t *testing.T, res *ConnectResult, home string) {

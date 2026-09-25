@@ -37,6 +37,42 @@ func TestImportedServer_StdioSummary(t *testing.T) {
 	}
 }
 
+// TestImportedServer_ExplicitStdioProtocolWinsOverLeftoverURL asserts a
+// hand-edited entry that explicitly declares `"type": "stdio"` (protocol)
+// but also still carries a `url` field (e.g. left over from converting a
+// remote entry to a local one) is summarized as "local process", matching
+// how the runtime itself resolves protocol — internal/config/config.go's own
+// validation treats `Protocol == "stdio"` as authoritative regardless of
+// URL. The old Command!=""&&URL=="" heuristic disagreed with the runtime and
+// tagged this "remote".
+func TestImportedServer_ExplicitStdioProtocolWinsOverLeftoverURL(t *testing.T) {
+	content := []byte(`{
+		"mcpServers": {
+			"weird": {
+				"type": "stdio",
+				"command": "myserver",
+				"url": "http://leftover.example/mcp"
+			}
+		}
+	}`)
+
+	result, err := Import(content, &ImportOptions{FormatHint: FormatCursor})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(result.Imported) != 1 {
+		t.Fatalf("expected 1 imported server, got %d", len(result.Imported))
+	}
+	imported := result.Imported[0]
+
+	if !containsTag(imported.Tags, "local process") {
+		t.Errorf("Tags = %v, want to contain %q for an explicit stdio protocol", imported.Tags, "local process")
+	}
+	if containsTag(imported.Tags, "remote") {
+		t.Errorf("Tags = %v, must not contain %q when protocol is explicitly stdio", imported.Tags, "remote")
+	}
+}
+
 // TestImportedServer_RemoteSummaryAndOAuthTag asserts a remote (URL) server's
 // summary shows the auth type and gets the "remote" tag, plus "oauth" when
 // the server declares OAuth.
@@ -99,6 +135,35 @@ func TestDescribeFields_SecretLikeAndEmptyOrPlaceholder(t *testing.T) {
 	}
 	if byName["LOG_LEVEL"].EmptyOrPlaceholder {
 		t.Error("LOG_LEVEL has a real value, should not be flagged empty_or_placeholder")
+	}
+}
+
+// TestDescribeFields_HeaderUsesHeaderSpecificMatcher asserts the isHeader=true
+// path actually classifies through oauth.IsSensitiveHeaderName rather than
+// silently reusing the env-name matcher (IsSensitiveKeyName). "Cookie" is a
+// clean discriminator: it is header-sensitive (sensitiveHeaders) but its
+// uppercase form contains none of the env markers (TOKEN, SECRET, KEY,
+// PASSWORD, AUTH, …), so this fails if describeFields(..., isHeader=true)
+// were ever pointed at the wrong matcher.
+func TestDescribeFields_HeaderUsesHeaderSpecificMatcher(t *testing.T) {
+	headers := map[string]string{
+		"Cookie":       "",
+		"X-Request-Id": "abc-123",
+	}
+	fields := describeFields(headers, true)
+	byName := map[string]ImportedField{}
+	for _, f := range fields {
+		byName[f.Name] = f
+	}
+
+	if !byName["Cookie"].SecretLike {
+		t.Errorf("Cookie = %+v, want SecretLike=true via the header-specific matcher", byName["Cookie"])
+	}
+	if !byName["Cookie"].EmptyOrPlaceholder {
+		t.Errorf("Cookie = %+v, want EmptyOrPlaceholder=true for an empty value", byName["Cookie"])
+	}
+	if byName["X-Request-Id"].SecretLike {
+		t.Errorf("X-Request-Id = %+v, must not be classified as secret-like", byName["X-Request-Id"])
 	}
 }
 

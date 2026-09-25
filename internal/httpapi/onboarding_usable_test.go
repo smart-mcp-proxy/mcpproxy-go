@@ -26,8 +26,20 @@ func (m *usableServerTestController) GetAllServers() ([]map[string]interface{}, 
 	return m.servers, nil
 }
 
+// ListToolApprovals mirrors storage.BoltDB.ListToolApprovals's documented
+// contract: an empty serverName returns every record across every server,
+// not just the entry keyed by "" — computeUsableServers relies on the
+// aggregate form (one call, grouped in memory) rather than one call per
+// candidate server.
 func (m *usableServerTestController) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
-	return m.approved[serverName], nil
+	if serverName != "" {
+		return m.approved[serverName], nil
+	}
+	var all []*storage.ToolApprovalRecord
+	for _, records := range m.approved {
+		all = append(all, records...)
+	}
+	return all, nil
 }
 
 func newUsableServerTestServer(t *testing.T, ctrl *usableServerTestController) *Server {

@@ -1793,7 +1793,7 @@ func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[s
 	result := make([]map[string]interface{}, len(imported))
 	for i, s := range imported {
 		view := oauth.RedactedConfigView("", s.Server)
-		result[i] = map[string]interface{}{
+		m := map[string]interface{}{
 			"name":           s.Server.Name,
 			"protocol":       s.Server.Protocol,
 			"url":            viewOr(view, "url", s.Server.URL),
@@ -1809,9 +1809,19 @@ func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[s
 			// preview shows, already redacted by configimport.Import.
 			"summary": s.Summary,
 			"tags":    s.Tags,
-			"env":     s.EnvFields,
-			"headers": s.HeaderFields,
 		}
+		// Match the REST DTO's `omitempty` (internal/httpapi/import.go
+		// ImportedServerResponse.Env/Headers): a server with nothing to
+		// classify omits the key entirely instead of emitting `null`, so a
+		// schema-sensitive consumer of `-o json` sees the same shape on
+		// both surfaces for the same import.
+		if len(s.EnvFields) > 0 {
+			m["env"] = s.EnvFields
+		}
+		if len(s.HeaderFields) > 0 {
+			m["headers"] = s.HeaderFields
+		}
+		result[i] = m
 	}
 	return result
 }

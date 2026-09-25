@@ -40,26 +40,23 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
-import { useOnboardingStore, TELEMETRY_BANNER_STORAGE_KEY } from '@/stores/onboarding'
+import { useOnboardingStore } from '@/stores/onboarding'
 
 const onboarding = useOnboardingStore()
-const dismissed = ref(false)
-
-onMounted(() => {
-  dismissed.value = !!localStorage.getItem(TELEMETRY_BANNER_STORAGE_KEY)
-})
 
 // Spec 109-b FR-044: the notice must not render while the wizard is open —
 // it already offers its own one-line version in the Verify step (see
 // OnboardingWizard.vue), and showing both would say the same thing twice
-// while the wizard sits on top of everything else. Dismissal is one shared
-// localStorage key, so acting on either surface silences both for good.
-const visible = computed(() => !dismissed.value && !onboarding.wizardOpen)
+// while the wizard sits on top of everything else. Dismissal is the store's
+// shared `telemetryNoticeDismissed` ref (backed by one localStorage key), not
+// an independent per-component copy, so acting on either surface hides both
+// immediately even though this banner and the wizard stay mounted together
+// on Dashboard.vue and neither ever remounts.
+const visible = computed(() => !onboarding.telemetryNoticeDismissed && !onboarding.wizardOpen)
 
 function dismiss() {
-  dismissed.value = true
-  localStorage.setItem(TELEMETRY_BANNER_STORAGE_KEY, 'true')
+  onboarding.dismissTelemetryNotice()
 }
 </script>

@@ -691,10 +691,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onUnmounted, h, type FunctionalComponent } from 'vue'
+import { ref, reactive, computed, watch, onUnmounted, h, type FunctionalComponent } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
-import { useOnboardingStore, TELEMETRY_BANNER_STORAGE_KEY } from '@/stores/onboarding'
+import { useOnboardingStore } from '@/stores/onboarding'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import AddServerModal from '@/components/AddServerModal.vue'
@@ -776,15 +776,15 @@ const recentActivity = ref<ActivityRecord[]>([])
 const loadingActivity = ref(false)
 
 // Spec 109-b FR-044: the telemetry notice's one-line form for the wizard's
-// final step, sharing TelemetryBanner.vue's dismissal key so acting on
-// either surface silences both.
-const telemetryNoticeDismissed = ref(false)
-onMounted(() => {
-  telemetryNoticeDismissed.value = !!localStorage.getItem(TELEMETRY_BANNER_STORAGE_KEY)
-})
+// final step, sharing TelemetryBanner.vue's dismissal state (the store's
+// `telemetryNoticeDismissed` ref, backed by one localStorage key) so acting
+// on either surface silences both immediately — the banner and this wizard
+// are mounted together on Dashboard.vue for the whole session, so a
+// component-local copy read only at mount would miss the other surface's
+// dismissal until a full reload.
+const telemetryNoticeDismissed = computed(() => onboarding.telemetryNoticeDismissed)
 function dismissTelemetryNotice() {
-  telemetryNoticeDismissed.value = true
-  localStorage.setItem(TELEMETRY_BANNER_STORAGE_KEY, 'true')
+  onboarding.dismissTelemetryNotice()
 }
 
 // Verify tab — second milestone (UX audit F13). Lifetime flag from the

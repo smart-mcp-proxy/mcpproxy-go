@@ -291,6 +291,22 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 // matching computeOnboardingState's existing tolerance of a GetAllServers
 // failure for HasConfiguredServer above.
 func (s *Server) computeUsableServers(servers []map[string]interface{}) []string {
+	// One ListToolApprovals("") call scans the approval bucket once (O(A) total
+	// decode work); ListToolApprovals(name) per candidate server would instead
+	// re-scan the WHOLE bucket per candidate (bbolt's ForEach + a Go-side prefix
+	// filter, not a bucket seek) — O(S×A) on an endpoint the wizard polls every
+	// 5s while open. Group by server name here instead.
+	allRecords, err := s.controller.ListToolApprovals("")
+	if err != nil {
+		return []string{}
+	}
+	hasUsableTool := make(map[string]bool, len(servers))
+	for _, rec := range allRecords {
+		if rec != nil && rec.Status == storage.ToolApprovalStatusApproved && !rec.Disabled {
+			hasUsableTool[rec.ServerName] = true
+		}
+	}
+
 	usable := make([]string, 0, len(servers))
 	for _, srv := range servers {
 		name, _ := srv["name"].(string)
@@ -303,15 +319,8 @@ func (s *Server) computeUsableServers(servers []map[string]interface{}) []string
 		if !enabled || quarantined || !connected {
 			continue
 		}
-		records, err := s.controller.ListToolApprovals(name)
-		if err != nil {
-			continue
-		}
-		for _, rec := range records {
-			if rec != nil && rec.Status == storage.ToolApprovalStatusApproved && !rec.Disabled {
-				usable = append(usable, name)
-				break
-			}
+		if hasUsableTool[name] {
+			usable = append(usable, name)
 		}
 	}
 	return usable

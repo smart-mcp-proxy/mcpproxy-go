@@ -163,3 +163,87 @@ describe('OnboardingWizard Verify step telemetry one-liner (Spec 109-b FR-044)',
     expect(wrapper.find('[data-test="wizard-telemetry-notice"]').exists()).toBe(false)
   })
 })
+
+// Dashboard.vue mounts TelemetryBanner and OnboardingWizard together for the
+// whole session (the banner unconditionally, the wizard behind a `show`
+// prop, never v-if) — both stay mounted at once, so dismissal on one surface
+// must be visible to the other WITHOUT either one remounting.
+describe('Telemetry notice dismissal is shared across mounted surfaces (Spec 109-b FR-044)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    localStorage.clear()
+    vi.clearAllMocks()
+    ;(api.getActivities as any).mockResolvedValue({ success: true, data: { activities: [] } })
+    ;(api.getConfig as any).mockResolvedValue({ success: true, data: {} })
+    ;(api.getDockerStatus as any).mockResolvedValue({ success: true, data: { available: false } })
+    ;(api.getConnectStatus as any).mockResolvedValue({ success: true, data: [] })
+    ;(api.getCanonicalConfigPaths as any).mockResolvedValue({ success: true, data: { paths: [] } })
+    ;(api.getStatus as any).mockResolvedValue({ success: true, data: {} })
+    ;(api.getOnboardingState as any).mockResolvedValue({
+      success: true,
+      data: {
+        has_connected_client: true,
+        has_configured_server: true,
+        connected_client_count: 1,
+        connected_client_ids: ['cursor'],
+        configured_server_count: 1,
+        state: { engaged: false },
+        should_show_wizard: true,
+        first_mcp_client_ever: true,
+        mcp_clients_seen_ever: ['cursor'],
+        incomplete_tab_count: 0,
+        has_usable_server: true,
+        usable_servers: ['github'],
+      },
+    })
+  })
+
+  afterEach(() => {
+    localStorage.clear()
+  })
+
+  it('dismissing from the wizard hides the already-mounted banner once the wizard closes, with no remount', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+        { path: '/activity', name: 'activity', component: { template: '<div />' } },
+        { path: '/servers', name: 'servers', component: { template: '<div />' } },
+        { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
+      ],
+    })
+    router.push('/')
+    await router.isReady()
+
+    const store = useOnboardingStore()
+    const banner = mount(TelemetryBanner, { global: { plugins: [router] } })
+    const wizard = mount(OnboardingWizard, {
+      props: { show: true },
+      global: {
+        plugins: [router],
+        stubs: {
+          RouterLink: { template: '<a><slot /></a>' },
+          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
+        },
+      },
+    })
+    await flushPromises()
+    store.wizardOpen = true
+    await banner.vm.$nextTick()
+    expect(banner.find('[data-test="telemetry-banner"]').exists()).toBe(false)
+
+    await wizard.find('[data-test="tab-verify"]').trigger('click')
+    await flushPromises()
+    await wizard.find('[data-test="wizard-telemetry-notice-dismiss"]').trigger('click')
+    expect(wizard.find('[data-test="wizard-telemetry-notice"]').exists()).toBe(false)
+    expect(localStorage.getItem(TELEMETRY_BANNER_STORAGE_KEY)).toBe('true')
+
+    // Closing the wizard makes the banner eligible again on the wizardOpen
+    // condition alone — but it must still stay hidden because the dismissal
+    // above applies to it too, even though this exact `banner` instance was
+    // mounted before the dismiss ever happened.
+    store.wizardOpen = false
+    await banner.vm.$nextTick()
+    expect(banner.find('[data-test="telemetry-banner"]').exists()).toBe(false)
+  })
+})

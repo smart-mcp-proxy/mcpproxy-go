@@ -49,6 +49,21 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   // some earlier caller asked for.
   const wizardInitialTab = ref<WizardTab | null>(null)
 
+  // Shared, reactive dismissal state for the telemetry notice (Spec 109-b
+  // FR-044). TelemetryBanner.vue (post-wizard) and OnboardingWizard.vue's
+  // Verify-step one-liner both read this — a single store-level ref, not an
+  // independent local ref per component reading localStorage on its own
+  // mount — so dismissing on either surface hides the other immediately,
+  // even though both stay mounted at the same time on Dashboard.vue and
+  // never remount.
+  const telemetryNoticeDismissed = ref(!!localStorage.getItem(TELEMETRY_BANNER_STORAGE_KEY))
+
+  /** Dismiss the telemetry notice on both surfaces at once, permanently. */
+  function dismissTelemetryNotice(): void {
+    telemetryNoticeDismissed.value = true
+    localStorage.setItem(TELEMETRY_BANNER_STORAGE_KEY, 'true')
+  }
+
   // Computed
   const shouldShowWizard = computed(() => state.value?.should_show_wizard ?? false)
   const hasConnectedClient = computed(() => state.value?.has_connected_client ?? false)
@@ -201,6 +216,8 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     error,
     wizardOpen,
     wizardInitialTab,
+    telemetryNoticeDismissed,
+    dismissTelemetryNotice,
     shouldShowWizard,
     hasConnectedClient,
     hasConfiguredServer,
