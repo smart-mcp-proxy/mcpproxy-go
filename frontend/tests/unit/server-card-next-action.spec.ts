@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ServerCard from '@/components/ServerCard.vue'
@@ -343,5 +343,51 @@ describe('ServerCard — stats line links to Activity (Spec 109 FR-013)', () => 
       const stats = wrapper.find('[data-test="server-card-stats-line"]')
       expect(stats.attributes('href')).toBe('/activity?server=beta&from=-24h&status=error')
     })
+  })
+})
+
+// Review round 2 (109-e medium finding): `lastCallText`'s only reactive
+// dependency is `activityStats.last_call_at` — it read `Date.now()` but had
+// nothing that re-evaluates the computed on the passage of time alone, so an
+// idle server's "Xm ago" label froze at whatever it was on first render and
+// stayed wrong indefinitely while the tab stayed open.
+describe('ServerCard — last-call label keeps ticking (Spec 109 FR-013)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('updates "Xm ago" as time passes, without a prop or health change', () => {
+    const fixedNow = new Date('2026-01-01T12:00:00.000Z')
+    vi.setSystemTime(fixedNow)
+    const lastCallAt = new Date(fixedNow.getTime() - 5 * 60_000).toISOString() // 5m ago
+
+    const wrapper = mountCard(makeServer({ name: 'gamma' }))
+    wrapper.setProps({
+      activityStats: { name: 'gamma', calls: 1, errors: 0, last_call_at: lastCallAt },
+    })
+
+    return wrapper.vm.$nextTick().then(async () => {
+      expect(wrapper.find('[data-test="server-card-stats-line"]').text()).toContain('last call 5m ago')
+
+      // Advance the clock by 3 hours with no prop change at all — only the
+      // ticking clock inside the component should move the label.
+      vi.setSystemTime(new Date(fixedNow.getTime() + 3 * 60 * 60_000))
+      vi.advanceTimersByTime(60_000) // let the component's own interval fire
+      await wrapper.vm.$nextTick()
+
+      expect(wrapper.find('[data-test="server-card-stats-line"]').text()).toContain('last call 3h ago')
+    })
+  })
+
+  it('clears its interval on unmount (no leaked timer)', () => {
+    const wrapper = mountCard(makeServer({ name: 'delta' }))
+    const clearSpy = vi.spyOn(global, 'clearInterval')
+    wrapper.unmount()
+    expect(clearSpy).toHaveBeenCalled()
+    clearSpy.mockRestore()
   })
 })

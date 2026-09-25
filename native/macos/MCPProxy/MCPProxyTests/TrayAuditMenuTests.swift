@@ -156,6 +156,49 @@ final class TrayAuditMenuTests: XCTestCase {
         XCTAssertEqual(review.representedObject as? String, "everything")
     }
 
+    /// Review round 2 (109-e medium finding): `actions[0]` in
+    /// {enable, restart, view_logs} rendered the same command TWICE in this
+    /// submenu — once as the accent-tinted primary item, once as the
+    /// always-present tail row it was never suppressing. Each case here
+    /// asserts there is exactly ONE menu item for the command, not that the
+    /// primary exists (that's `TrayPrimaryItemTests`'s job).
+    func testDisabledServerWithEnablePrimaryShowsEnableOnlyOnce() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "demo", proto: "http", enabled: false,
+                        health: ("degraded", "Disabled", "enable"))
+        ])
+        controller.rebuildMenu()
+
+        let titles = try Self.disabledServerSubmenu(host, named: "demo").items.map(\.title)
+        XCTAssertEqual(titles.filter { $0 == "Enable" }.count, 1, "Enable shown twice: \(titles)")
+    }
+
+    func testRestartNeedingServerShowsRestartOnlyOnce() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "broken", proto: "http", enabled: true,
+                        health: ("unhealthy", "failed to connect", "restart"))
+        ])
+        controller.rebuildMenu()
+
+        let titles = try serverSubmenu(host, named: "broken").items.map(\.title)
+        XCTAssertEqual(titles.filter { $0 == "Restart" }.count, 1, "Restart shown twice: \(titles)")
+    }
+
+    func testTokenRefreshPendingServerShowsViewLogsOnlyOnce() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "stale-token", proto: "http", enabled: true,
+                        health: ("degraded", "Token refresh pending", "view_logs"))
+        ])
+        controller.rebuildMenu()
+
+        let items = try serverSubmenu(host, named: "stale-token").items
+        // The primary reads "View logs" (shared actionLabels wording); the
+        // static tail row reads "View Logs" — same command, different
+        // casing, so match case-insensitively to catch either spelling.
+        let logRows = items.filter { $0.title.caseInsensitiveCompare("View Logs") == .orderedSame }
+        XCTAssertEqual(logRows.count, 1, "View Logs shown twice: \(items.map(\.title))")
+    }
+
     // MARK: - F4 · Attention rows do not mutate on a navigation click
 
     func testAnAttentionRowDoesNotFireItsActionOnClick() throws {

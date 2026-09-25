@@ -222,7 +222,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import type { Server, ActivityPerServer } from '@/types'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
@@ -555,12 +555,28 @@ const securityBadgeColor = computed(() => {
 // view fetches and slices per server — never a per-card request.
 const errors24h = computed(() => props.activityStats?.errors ?? 0)
 
+// Review round 2 (109-e medium finding): `lastCallText` read `Date.now()`
+// directly, but its only reactive dependency was `activityStats.last_call_at`
+// — Vue's computed cache never re-evaluates on the passage of time alone, so
+// an idle server's "Xm ago" froze at whatever it read on first render and
+// stayed wrong for as long as the tab stayed open. `nowMs` is a ticking ref
+// the computed actually depends on, refreshed on an interval and torn down
+// with the component.
+const nowMs = ref(Date.now())
+let nowTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  nowTimer = setInterval(() => { nowMs.value = Date.now() }, 30_000)
+})
+onUnmounted(() => {
+  if (nowTimer !== undefined) clearInterval(nowTimer)
+})
+
 const lastCallText = computed(() => {
   const iso = props.activityStats?.last_call_at
   if (!iso) return 'never'
   const then = new Date(iso).getTime()
   if (Number.isNaN(then)) return 'never'
-  const diffMs = Date.now() - then
+  const diffMs = nowMs.value - then
   const minutes = Math.floor(diffMs / 60000)
   if (minutes < 1) return 'just now'
   if (minutes < 60) return `${minutes}m ago`

@@ -92,6 +92,20 @@ final class ServerRowActionTests: XCTestCase {
         XCTAssertFalse(ServerRowPresentation.contextMenuActions(for: server).contains(.openReview))
     }
 
+    /// Review round 2 (109-e medium finding): TrayAuditMenuTests pins this
+    /// exact fixture (FR-010's `actions = ["login", "approve"]`) on the tray
+    /// submenu only. The Servers-row context menu makes the identical
+    /// independent-gating decision (`.signIn` on `isOAuthLoginRequired`,
+    /// `.openReview` on `quarantined`, neither conditioned on the other) but
+    /// had no fixture of its own — a regression that coupled the two here
+    /// would have shipped with the whole suite green.
+    func testQuarantinedRowThatAlsoNeedsLoginOffersBothSignInAndReview() {
+        let server = Self.server(quarantined: true, health: ("degraded", "Sign-in required", "login"))
+        let actions = ServerRowPresentation.contextMenuActions(for: server)
+        XCTAssertTrue(actions.contains(.signIn), "the primary is Sign in, but Review must not be dropped")
+        XCTAssertTrue(actions.contains(.openReview), "a quarantined server always needs a path to review")
+    }
+
     // MARK: - Helpers
 
     private static func server(enabled: Bool = true,

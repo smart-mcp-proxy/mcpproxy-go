@@ -1595,32 +1595,40 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // `Disable`/`Enable` for everything else put two mental models —
         // transient process control vs. persistent admin state — on the same
         // `enabled` flag, and left submenus reading "Disabled … Start".
-        if server.enabled {
-            let disable = NSMenuItem(title: TrayServerAction.disable.menuTitle,
-                                     action: #selector(disableServer(_:)), keyEquivalent: "")
-            disable.target = self
-            disable.representedObject = server.name
-            sub.addItem(disable)
-        } else {
-            let enable = NSMenuItem(title: TrayServerAction.enable.menuTitle,
-                                    action: #selector(enableServer(_:)), keyEquivalent: "")
-            enable.target = self
-            enable.representedObject = server.name
-            sub.addItem(enable)
+        //
+        // Review round 2 (109-e medium finding): these three rows used to be
+        // unconditional, so whichever one the primary item above already
+        // performs (Enable/Restart/View logs) rendered TWICE in the same
+        // submenu. `TraySecondaryPresentation.items` drops the one the
+        // primary already covers.
+        let secondaryActions = TraySecondaryPresentation.items(for: server)
+        for secondary in secondaryActions {
+            switch secondary {
+            case .toggleEnabled(let enable):
+                let action: TrayServerAction = enable ? .enable : .disable
+                let item = NSMenuItem(title: action.menuTitle,
+                                      action: enable ? #selector(enableServer(_:)) : #selector(disableServer(_:)),
+                                      keyEquivalent: "")
+                item.target = self
+                item.representedObject = server.name
+                sub.addItem(item)
+            case .restart:
+                let item = NSMenuItem(title: TrayServerAction.restart.menuTitle,
+                                      action: #selector(restartServer(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = server.name
+                sub.addItem(item)
+            case .viewLogs:
+                continue // added below, after the separator
+            }
         }
-
-        let restart = NSMenuItem(title: TrayServerAction.restart.menuTitle,
-                                 action: #selector(restartServer(_:)), keyEquivalent: "")
-        restart.target = self
-        restart.representedObject = server.name
-        sub.addItem(restart)
-
         sub.addItem(.separator())
-
-        let logs = NSMenuItem(title: "View Logs", action: #selector(viewServerLogs(_:)), keyEquivalent: "")
-        logs.target = self
-        logs.representedObject = server.name
-        sub.addItem(logs)
+        if secondaryActions.contains(.viewLogs) {
+            let logs = NSMenuItem(title: "View Logs", action: #selector(viewServerLogs(_:)), keyEquivalent: "")
+            logs.target = self
+            logs.representedObject = server.name
+            sub.addItem(logs)
+        }
 
         item.submenu = sub
         return item

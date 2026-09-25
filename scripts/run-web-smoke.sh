@@ -151,6 +151,16 @@ if [[ -n "$FIXTURE_PATH" ]]; then
   # A second entry running the SAME fixture binary under a different name
   # costs nothing new to build and is enough to let that test actually run
   # from this PR onward, rather than only from 109-i.
+  #
+  # Review round 2 (109-e medium finding): two config-identical, healthy
+  # servers both land in the SAME `lg:grid-cols-3` row at 1440px, where CSS
+  # grid's `align-items:stretch` equalizes every card in a row regardless of
+  # content — so the test could never actually fail (a broken `min-height`
+  # rule or a state-dependent height regression would stay invisible). A 3rd
+  # and 4th entry push the fleet past one row (3 + 1) so row heights are no
+  # longer stretched together, and the 4th is quarantined so its card renders
+  # genuinely different content (a review action + quarantine note) instead
+  # of an identical copy of the first two.
   SERVERS_JSON=$(cat <<JSON
 [
     {
@@ -169,6 +179,24 @@ if [[ -n "$FIXTURE_PATH" ]]; then
       "protocol": "stdio",
       "enabled": true,
       "quarantined": false,
+      "isolation": { "enabled": false }
+    },
+    {
+      "name": "${SWEEP_SERVER_NAME}-3",
+      "command": "${FIXTURE_PATH}",
+      "args": ["--transport", "stdio"],
+      "protocol": "stdio",
+      "enabled": true,
+      "quarantined": false,
+      "isolation": { "enabled": false }
+    },
+    {
+      "name": "${SWEEP_SERVER_NAME}-4-quarantined",
+      "command": "${FIXTURE_PATH}",
+      "args": ["--transport", "stdio"],
+      "protocol": "stdio",
+      "enabled": true,
+      "quarantined": true,
       "isolation": { "enabled": false }
     }
   ]

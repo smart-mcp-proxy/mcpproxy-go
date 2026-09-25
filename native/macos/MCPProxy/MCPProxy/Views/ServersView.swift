@@ -976,27 +976,42 @@ struct ServerTableView: NSViewRepresentable {
                 stack.addArrangedSubview(primaryButton)
             }
 
+            // Review round 2 (109-e medium finding): these two icons used to
+            // be unconditional, so a disabled server (primary = Enable) or a
+            // restart-needing one (primary = Restart) showed the identical
+            // command twice in the same row — once as the accent-tinted
+            // primary button above, once as the plain icon below. Reusing
+            // `TraySecondaryPresentation` (the tray submenu's own dedup rule
+            // for the same `actions[0]` value) keeps both surfaces from
+            // drifting apart on which duplicate they suppress.
+            let secondaryActions = TraySecondaryPresentation.items(for: server)
+
             // Play/Stop toggle button
-            let toggleLabel = server.protocol == "stdio"
-                ? (server.enabled ? "Stop" : "Start")
-                : (server.enabled ? "Disable" : "Enable")
-            let toggleButton = makeIconButton(
-                symbolName: server.enabled ? "stop.fill" : "play.fill",
-                accessibilityLabel: toggleLabel,
-                action: #selector(toggleEnabledClicked(_:)),
-                tag: row
-            )
-            toggleButton.contentTintColor = server.enabled ? .systemGray : .systemGreen
-            stack.addArrangedSubview(toggleButton)
+            if let toggle = secondaryActions.first(where: { if case .toggleEnabled = $0 { return true }; return false }),
+               case .toggleEnabled(let enable) = toggle {
+                let toggleLabel = server.protocol == "stdio"
+                    ? (enable ? "Start" : "Stop")
+                    : (enable ? "Enable" : "Disable")
+                let toggleButton = makeIconButton(
+                    symbolName: enable ? "play.fill" : "stop.fill",
+                    accessibilityLabel: toggleLabel,
+                    action: #selector(toggleEnabledClicked(_:)),
+                    tag: row
+                )
+                toggleButton.contentTintColor = enable ? .systemGreen : .systemGray
+                stack.addArrangedSubview(toggleButton)
+            }
 
             // Restart button
-            let restartButton = makeIconButton(
-                symbolName: "arrow.clockwise",
-                accessibilityLabel: "Restart",
-                action: #selector(restartButtonClicked(_:)),
-                tag: row
-            )
-            stack.addArrangedSubview(restartButton)
+            if secondaryActions.contains(.restart) {
+                let restartButton = makeIconButton(
+                    symbolName: "arrow.clockwise",
+                    accessibilityLabel: "Restart",
+                    action: #selector(restartButtonClicked(_:)),
+                    tag: row
+                )
+                stack.addArrangedSubview(restartButton)
+            }
 
             // Info button (opens detail)
             let infoButton = makeIconButton(

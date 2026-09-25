@@ -347,6 +347,49 @@ enum TrayPrimaryPresentation {
     }
 }
 
+// MARK: - F14 (round 2) · The always-present tail, minus the primary's echo
+
+/// One of the tray submenu's/Servers-row's always-present secondary rows —
+/// Enable/Disable, Restart, View Logs — that stay regardless of whichever
+/// `actions[0]` value is primary.
+enum TraySecondaryAction: Equatable {
+    case toggleEnabled(enable: Bool)
+    case restart
+    case viewLogs
+}
+
+/// Review round 2 (109-e medium finding): the primary item added for
+/// FR-014 was laid ABOVE these three always-present rows without suppressing
+/// whichever one it duplicates, so a disabled server (primary = Enable) or a
+/// restart-needing one (primary = Restart) or a token-refresh-pending one
+/// (primary = View logs) showed the identical command twice in the same
+/// menu/row — once as the accent-tinted primary, once as the plain tail
+/// item. `items(for:)` is the ONE place both the tray submenu
+/// (`MCPProxyApp.buildServerMenuItem`) and the Servers row
+/// (`ServersView.makeActionsCell`) decide which of the three tail rows to
+/// actually render, so neither surface can reintroduce the duplicate by
+/// drifting from the other.
+enum TraySecondaryPresentation {
+    static func items(for server: ServerStatus) -> [TraySecondaryAction] {
+        let primaryKind = TrayPrimaryPresentation.primaryItem(for: server)?.kind
+        var items: [TraySecondaryAction] = []
+        if server.enabled {
+            // `disable` is never a primary action (TrayServerAction.fromHealthAction
+            // never produces it), so Disable can never be the primary's echo.
+            items.append(.toggleEnabled(enable: false))
+        } else if primaryKind != .execute(.enable) {
+            items.append(.toggleEnabled(enable: true))
+        }
+        if primaryKind != .execute(.restart) {
+            items.append(.restart)
+        }
+        if primaryKind != .open(.logs) {
+            items.append(.viewLogs)
+        }
+        return items
+    }
+}
+
 enum TrayServerActionFailure {
     static func title(action: TrayServerAction, server: String) -> String {
         "Couldn’t \(action.verb) \(server)"
