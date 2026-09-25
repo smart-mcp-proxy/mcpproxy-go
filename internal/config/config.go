@@ -2286,8 +2286,25 @@ func (v ValidationError) Error() string {
 // The boot path is deliberately NOT this function — see Validate(), which runs
 // validateDetailedCore() so that a pre-existing bad value on disk cannot brick
 // a load that has nothing to do with the offending server.
+//
+// Spec 108 FR-007: profiles are validated here (never inside
+// validateDetailedCore, which the boot path also runs) via the SAME
+// ValidateProfiles the boot path calls, so a write surface can never persist
+// a profile the boot path would then refuse to load. It stays out of
+// validateDetailedCore for two reasons: Validate() already calls
+// ValidateProfiles separately (to capture its warnings into
+// c.profileWarnings), so folding it into validateDetailedCore would run it
+// twice on every boot/reload; and wrapping its raw, exact-text error in a
+// ValidationError{Field:"profiles"} would prefix "profiles: " onto a message
+// that already starts with "profiles[%d]: ", changing the boot path's error
+// text for every existing Spec 057 profile validation failure, not only the
+// new v3 ones.
 func (c *Config) ValidateDetailed() []ValidationError {
-	return append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
+	errors := append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
+	if _, err := ValidateProfiles(c); err != nil {
+		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
+	}
+	return errors
 }
 
 // oauthRedirectURIErrors reports every per-server `oauth.redirect_uri` that the
@@ -2667,18 +2684,10 @@ func (c *Config) validateDetailedCore() []ValidationError {
 	// door - boot, PATCH and /config/apply.
 	errors = append(errors, validateAuditLog(c)...)
 
-	// Spec 108 FR-007: profiles validated on every WRITE door (REST
-	// config/validate, config/apply, PATCH; the MCP `profiles` tool and every
-	// editor route through REST) by the same ValidateProfiles the boot path
-	// uses, so a write surface can never persist a profile the boot path
-	// would then refuse to load. The boot path (Validate(), not this
-	// function) calls ValidateProfiles separately because it must also
-	// capture the returned warnings (c.profileWarnings) for its logger; here
-	// only the fatal error matters, so a fatal ValidateProfiles error is
-	// wrapped as one ValidationError.
-	if _, err := ValidateProfiles(c); err != nil {
-		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
-	}
+	// NOTE: profiles (Spec 108 FR-007) are deliberately NOT validated here —
+	// see ValidateDetailed's doc comment for why folding it into this
+	// function would run ValidateProfiles twice on every boot/reload and
+	// change the boot path's error text.
 
 	return errors
 }

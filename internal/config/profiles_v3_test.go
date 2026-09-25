@@ -225,6 +225,56 @@ func TestValidateProfiles_V3Rules(t *testing.T) {
 	})
 }
 
+// TestValidateProfiles_WiredIntoBothDoors pins FR-007's "one function used
+// by config load [and] REST" requirement precisely: ValidateProfiles runs on
+// BOTH the boot path (Config.Validate) and the write-surface gate
+// (Config.ValidateDetailed), each exactly once, and the boot path's error
+// text is the validator's RAW message — never re-wrapped as
+// "profiles: <msg>" by a ValidationError (which would also change every
+// pre-existing Spec 057 profile error's boot-time text, not only the new v3
+// ones).
+func TestValidateProfiles_WiredIntoBothDoors(t *testing.T) {
+	newInvalidCfg := func() *Config {
+		cfg := DefaultConfig()
+		cfg.Profiles = []ProfileConfig{{Name: "ALL-CAPS-INVALID"}}
+		return cfg
+	}
+
+	t.Run("boot path (Validate) returns the raw ValidateProfiles message, unwrapped", func(t *testing.T) {
+		cfg := newInvalidCfg()
+		_, wantErr := ValidateProfiles(cfg)
+		require.Error(t, wantErr)
+
+		err := newInvalidCfg().Validate()
+		require.Error(t, err)
+		require.Equal(t, wantErr.Error(), err.Error(), "Validate() must surface ValidateProfiles' exact text, not a ValidationError-wrapped copy")
+		require.NotContains(t, err.Error(), "profiles: profiles[", "must not double-prefix the field name onto the message")
+	})
+
+	t.Run("write-surface gate (ValidateDetailed) rejects the same config", func(t *testing.T) {
+		cfg := newInvalidCfg()
+		errs := cfg.ValidateDetailed()
+		var found *ValidationError
+		for i := range errs {
+			if errs[i].Field == "profiles" {
+				found = &errs[i]
+				break
+			}
+		}
+		require.NotNil(t, found, "ValidateDetailed must reject an invalid profile (FR-007: one function used by config load and REST)")
+	})
+
+	t.Run("a valid config passes both doors with no profiles error", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Profiles = []ProfileConfig{{Name: "work", Servers: nil}}
+		require.NoError(t, cfg.Validate())
+
+		for _, e := range DefaultConfig().ValidateDetailed() {
+			require.NotEqual(t, "profiles", e.Field)
+		}
+	})
+}
+
 // TestFieldSet_ProfileConfig is the FR-009 guard (T004): reflection over
 // ProfileConfig's JSON tags MUST equal exactly the FR-001 field set. It
 // fails on any added field (e.g. an owner/user/team/tenant field), keeping
