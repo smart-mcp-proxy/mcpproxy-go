@@ -1,0 +1,19 @@
+/*
+ * Spec 109 FR-055 (navigation-map.md): one z-index scale, defined in one
+ * place, so no sidebar/header element can ever paint over a modal (audit H4).
+ *
+ * sidebar < header < dropdown < modal < toast
+ *
+ * Modals themselves should render in the browser's top layer via
+ * `<dialog>.showModal()` rather than relying on this scale (the top layer
+ * always wins regardless of these values) — `--z-modal` exists for the rare
+ * non-<dialog> overlay (e.g. a full-screen click-catcher) that still needs to
+ * sit above the header/sidebar but below a real modal.
+ */
+:root {
+  --z-sidebar: 30;
+  --z-header: 40;
+  --z-dropdown: 50;
+  --z-modal: 60;
+  --z-toast: 70;
+}

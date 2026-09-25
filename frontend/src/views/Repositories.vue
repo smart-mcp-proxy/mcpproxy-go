@@ -329,14 +329,25 @@
                 </svg>
                 Source
               </button>
+              <!-- Spec 109 FR-063: "Add to MCPProxy", flipping to a
+                   persistent "Added ✓ · Open" once the add succeeds. -->
               <button
+                v-if="!addedServers[server.id]"
                 @click="addServer(server)"
                 class="btn btn-primary btn-sm"
                 :data-test="`registry-add-${server.id}`"
                 :disabled="addingServerId === server.id"
               >
                 <span v-if="addingServerId === server.id" class="loading loading-spinner loading-xs"></span>
-                <span v-else>Add to MCP</span>
+                <span v-else>Add to MCPProxy</span>
+              </button>
+              <button
+                v-else
+                @click="openAddedServer(server)"
+                class="btn btn-success btn-sm"
+                :data-test="`registry-added-${server.id}`"
+              >
+                Added ✓ · Open
               </button>
             </div>
           </div>
@@ -371,7 +382,7 @@
     </div>
 
     <!-- Required-Input Prompt (Spec 070 — blocks add until provided) -->
-    <dialog :open="showPrompt" class="modal" data-test="registry-required-input-dialog">
+    <dialog ref="promptDialogEl" class="modal" data-test="registry-required-input-dialog">
       <div class="modal-box">
         <h3 class="font-bold text-lg">Add "{{ promptServer?.name }}"</h3>
         <p class="text-sm text-base-content/70 mt-1">
@@ -412,7 +423,7 @@
               :disabled="!promptComplete || addingServerId !== null"
             >
               <span v-if="addingServerId !== null" class="loading loading-spinner loading-xs"></span>
-              <span v-else>Add to MCP</span>
+              <span v-else>Add to MCPProxy</span>
             </button>
           </div>
         </form>
@@ -423,7 +434,7 @@
     </dialog>
 
     <!-- Add / Edit Registry Source dialog (MCP-866 add, MCP-1073 edit) -->
-    <dialog :open="showAddRegistry" class="modal" data-test="registry-add-source-dialog">
+    <dialog ref="addRegistryDialogEl" class="modal" data-test="registry-add-source-dialog">
       <div class="modal-box">
         <h3 class="font-bold text-lg">{{ isEditMode ? 'Edit registry' : 'Add a registry' }}</h3>
         <p class="text-sm text-base-content/70 mt-1">
@@ -521,7 +532,7 @@
     </dialog>
 
     <!-- Delete custom registry confirmation (MCP-1073, destructive) -->
-    <dialog :open="showDeleteRegistry" class="modal" data-test="registry-delete-dialog">
+    <dialog ref="deleteRegistryDialogEl" class="modal" data-test="registry-delete-dialog">
       <div class="modal-box">
         <h3 class="font-bold text-lg">Remove "{{ deleteRegistryTarget?.name }}"?</h3>
         <p class="text-sm py-2 text-base-content/80">
@@ -570,11 +581,14 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Registry, RepositoryServer, RequiredInput } from '@/types'
 import { REGISTRY_PROVENANCE_CUSTOM } from '@/types'
+import { useDialogOpen } from '@/composables/useDialogOpen'
+import { serverDetailPath } from '@/utils/serverRoute'
 
 // State
 const registries = ref<Registry[]>([])
@@ -589,6 +603,12 @@ const loadingRegistries = ref(false)
 const loadingServers = ref(false)
 const error = ref<string | null>(null)
 const addingServerId = ref<string | null>(null)
+// Spec 109 FR-063: keyed by registry entry id -> the resulting server's name,
+// so the button can flip to "Added ✓ · Open" and stay that way for the rest
+// of this page visit (a fresh load/registry refresh clears it, matching the
+// entry possibly not being re-addable anyway).
+const addedServers = ref<Record<string, string>>({})
+const router = useRouter()
 const showSuccessToast = ref(false)
 const successMessage = ref('')
 
@@ -607,12 +627,16 @@ const addRegistryName = ref('')
 const addRegistryError = ref<string | null>(null)
 const addingRegistry = ref(false)
 const isEditMode = computed(() => editRegistryId.value !== null)
+// Spec 109 FR-055: <dialog>.showModal()/close(), not the `open` attribute —
+// keeps the top layer, so nothing (sidebar, header) can ever paint over it.
+const { dialogEl: addRegistryDialogEl } = useDialogOpen(() => showAddRegistry.value)
 
 // Delete-custom-registry confirmation state (MCP-1073)
 const showDeleteRegistry = ref(false)
 const deleteRegistryTarget = ref<Registry | null>(null)
 const deleteRegistryError = ref<string | null>(null)
 const deletingRegistry = ref(false)
+const { dialogEl: deleteRegistryDialogEl } = useDialogOpen(() => showDeleteRegistry.value)
 
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -684,6 +708,7 @@ function clearRegistries() {
 }
 
 const showPrompt = computed(() => promptServer.value !== null)
+const { dialogEl: promptDialogEl } = useDialogOpen(() => showPrompt.value)
 
 // Add is blocked until every prompted input has a non-empty value.
 const promptComplete = computed(() =>
@@ -702,7 +727,7 @@ const repositoriesHints = computed<Hint[]>(() => {
           list: [
             'Select a registry from the dropdown menu',
             'Search for servers by name or description',
-            'Click "Add to MCP" to install a server',
+            'Click "Add to MCPProxy" to install a server',
             'View source code and installation commands for each server'
           ]
         }
@@ -859,6 +884,7 @@ async function addServer(server: RepositoryServer, env?: Record<string, string>)
     if (result.success) {
       closePrompt()
       const name = result.server?.name || server.name
+      addedServers.value[server.id] = name
       showToast(`Added "${name}" — quarantined. Approve it on the Servers page to enable.`)
       return
     }
@@ -874,6 +900,13 @@ async function addServer(server: RepositoryServer, env?: Record<string, string>)
   } finally {
     addingServerId.value = null
   }
+}
+
+// Spec 109 FR-063: "Added ✓ · Open" opens the server it just added.
+function openAddedServer(server: RepositoryServer) {
+  const name = addedServers.value[server.id]
+  if (!name) return
+  router.push(serverDetailPath(name))
 }
 
 // Open the required-input prompt. Prefer the rich declarations carried on the

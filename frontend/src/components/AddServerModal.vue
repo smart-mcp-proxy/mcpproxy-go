@@ -1,5 +1,5 @@
 <template>
-  <dialog :open="show" class="modal" data-test="add-server-modal">
+  <dialog ref="nativeDialogEl" class="modal" data-test="add-server-modal">
     <!--
       UX audit F6: the box is a flex column with its own scroll region so the
       submit row stays pinned to the bottom instead of falling below the fold,
@@ -615,6 +615,7 @@ import { useSystemStore } from '@/stores/system'
 import api, { type CanonicalConfigPath } from '@/services/api'
 import TrustModeSelector from '@/components/TrustModeSelector.vue'
 import { useModalA11y } from '@/composables/useModalA11y'
+import { useDialogOpen } from '@/composables/useDialogOpen'
 import type { TrustMode } from '@/utils/trustMode'
 import type { ImportResponse, ImportedServer } from '@/types'
 
@@ -637,6 +638,9 @@ const emit = defineEmits<Emits>()
 // UX audit F6: Escape closes, focus enters the dialog on open and is trapped
 // inside it, and returns to the trigger on close.
 const { dialogRef } = useModalA11y(() => props.show, () => handleClose())
+// Spec 109 FR-055: the <dialog> itself opens via showModal() (top layer),
+// separate from dialogRef above (the inner .modal-box, used for focus trap).
+const { dialogEl: nativeDialogEl } = useDialogOpen(() => props.show)
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()

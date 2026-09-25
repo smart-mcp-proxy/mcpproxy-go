@@ -1,5 +1,5 @@
 <template>
-  <dialog :open="show" class="modal modal-bottom sm:modal-middle">
+  <dialog ref="dialogEl" class="modal modal-bottom sm:modal-middle">
     <div
       class="modal-box p-0 overflow-hidden flex flex-col"
       :style="modalSizing"
@@ -639,6 +639,7 @@ import { useOnboardingStore } from '@/stores/onboarding'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import AddServerModal from '@/components/AddServerModal.vue'
+import { useDialogOpen } from '@/composables/useDialogOpen'
 import type { ClientStatus, ActivityRecord, ConnectPreview } from '@/types'
 
 interface Props {
@@ -651,6 +652,7 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
+const { dialogEl } = useDialogOpen(() => props.show)
 
 const onboarding = useOnboardingStore()
 const systemStore = useSystemStore()
