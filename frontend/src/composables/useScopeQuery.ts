@@ -326,10 +326,13 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
   }
 
   function set(patch: Record<string, string | undefined>): void {
-    const query: Record<string, string | string[]> = {}
+    // zcode round 1 (F3): a valueless query param ("?foo", parsed by
+    // vue-router as null) was dropped by every set()/clear() call, however
+    // unrelated — unknown parameters must be "preserved untouched" (rule 6).
+    const query: Record<string, string | string[] | null> = {}
     for (const [k, v] of Object.entries(route.query)) {
-      if (v === undefined || v === null) continue
-      query[k] = v as string | string[]
+      if (v === undefined) continue
+      query[k] = v as string | string[] | null
     }
     for (const [k, v] of Object.entries(patch)) {
       if (v === undefined || v === '') delete query[k]
@@ -339,7 +342,11 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
   }
 
   function clear(names?: string[]): void {
-    const target = names ?? defsForPage(page).map(d => d.name)
+    // zcode round 1 (F3): clearing "every contract parameter the page
+    // supports" must still leave a hidden (unavailable) parameter untouched
+    // in the URL (rule 7) — profile/client/token before features.scope_filters
+    // lists them, e.g.
+    const target = names ?? defsForPage(page).filter(isAvailable).map(d => d.name)
     const patch: Record<string, string | undefined> = {}
     for (const n of target) patch[n] = undefined
     set(patch)

@@ -70,6 +70,20 @@ describe('useScopeQuery', () => {
       expect(router.currentRoute.value.query.weird).toBe('kept')
       expect(router.currentRoute.value.query.server).toBe('slack')
     })
+
+    // zcode round 1 (F3): a valueless param ("?bare", vue-router parses its
+    // value as null) used to be silently dropped by set()'s copy loop, for
+    // ANY set() call, not just one that touched it.
+    it('a valueless (null) unrelated param survives set()', async () => {
+      const { api, router } = await withScopeQuery('activity', { server: 'github' })
+      await router.push('/activity?server=github&bare')
+      expect(router.currentRoute.value.query.bare).toBeNull()
+
+      api.set({ status: 'error' })
+      await flushPromises()
+      expect(router.currentRoute.value.query.bare).toBeNull()
+      expect(router.currentRoute.value.query.status).toBe('error')
+    })
   })
 
   describe('router.replace via set()/clear()', () => {
@@ -186,6 +200,18 @@ describe('useScopeQuery', () => {
       expect(api.chips.value).toEqual([])
       // Kept untouched in the URL even while hidden.
       expect(api.state.profile).toBe('work')
+    })
+
+    // zcode round 1 (F3): clear() with no names used to target every
+    // registered param regardless of availability, so a "clear filters"
+    // button would have stripped a hidden ?profile= from the URL — rule 7
+    // says a page keeps an unsupported/hidden sticky param "untouched".
+    it('clear() with no names leaves a hidden param in the URL', async () => {
+      const { api, router } = await withScopeQuery('activity', { server: 'github', profile: 'work' })
+      api.clear()
+      await flushPromises()
+      expect(router.currentRoute.value.query.server).toBeUndefined()
+      expect(router.currentRoute.value.query.profile).toBe('work')
     })
 
     it('behave like any sticky parameter once the feature is available', async () => {

@@ -582,6 +582,21 @@ export interface TokenMetrics {
   was_truncated: boolean      // Whether response was truncated
 }
 
+// GET /api/v1/status (partial — only the fields the Web UI currently reads).
+// `features` (Spec 109-k / url-filter-contract.md FR-080a): which of
+// "profile"/"client"/"token" this build accepts as scope-filter query
+// parameters. Absent (or `scope_filters` absent/empty) means none yet — the
+// Spec 108 rows of useScopeQuery's parameter table stay hidden until this
+// lists them.
+export interface StatusResponse {
+  edition: string
+  running: boolean
+  routing_mode: string
+  default_instructions?: string
+  activation?: { first_real_tool_call_ever?: boolean }
+  features?: { scope_filters?: string[] }
+}
+
 export interface ServerTokenMetrics {
   total_server_tool_list_size: number
   average_query_result_size: number
