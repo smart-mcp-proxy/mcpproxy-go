@@ -965,6 +965,15 @@ export interface ImportSummary {
   failed: number
 }
 
+// Per-env/header classification for an imported server's preview row
+// (Spec 109-b FR-040). Never carries the actual value.
+export interface ImportedField {
+  name: string
+  value_present: boolean
+  secret_like: boolean
+  empty_or_placeholder: boolean
+}
+
 export interface ImportedServer {
   name: string
   protocol: string
@@ -975,6 +984,11 @@ export interface ImportedServer {
   original_name: string
   fields_skipped?: string[]
   warnings?: string[]
+  // Spec 109-b FR-040: wizard/ImportServers second line + classification.
+  summary: string
+  tags: string[]
+  env?: ImportedField[]
+  headers?: ImportedField[]
 }
 
 export interface SkippedServer {
@@ -1011,6 +1025,9 @@ export interface ClientStatus {
   id: string
   name: string
   config_path: string
+  // Spec 109-b FR-037: config_path with the home directory shortened to
+  // "~", for display; config_path itself stays the full path.
+  display_path?: string
   exists: boolean
   connected: boolean
   supported: boolean
@@ -1039,6 +1056,10 @@ export interface ClientStatus {
   // mcpproxy-shaped entry exists", and an entry merely NAMED mcpproxy counts —
   // so a row can be connected to a different instance entirely (audit F18).
   endpoint_match?: EndpointMatch
+  // Spec 109-b FR-037/FR-042: this client's instruction for making a
+  // freshly-written config take effect, e.g. "Restart Cursor to load
+  // MCPProxy". Empty for an unsupported client.
+  reload_hint?: string
 }
 
 // How a client's registered endpoint relates to this instance (audit F18).
@@ -1053,6 +1074,9 @@ export interface ConnectResult {
   action: string
   message: string
   error?: string
+  // Spec 109-b FR-037/FR-042 (populated on every branch, not only success).
+  display_path?: string
+  reload_hint?: string
 }
 
 // Spec 078 US1: the exact change a connect would make, returned WITHOUT writing
@@ -1080,6 +1104,8 @@ export interface OnboardingState {
   engaged_at?: string
   connect_step_status?: '' | 'completed' | 'skipped'
   server_step_status?: '' | 'completed' | 'skipped'
+  // Spec 109-b FR-042: client id -> last successful connect write time.
+  client_connected_at?: Record<string, string>
 }
 
 export interface OnboardingStateResponse {
@@ -1094,6 +1120,12 @@ export interface OnboardingStateResponse {
   first_mcp_client_ever: boolean
   mcp_clients_seen_ever: string[]
   incomplete_tab_count: number
+  // Spec 109-b FR-041/FR-042: the real "something to try" signal — has_configured_server
+  // only means a server ENTRY exists, even while every one sits quarantined or
+  // has no approved tool. The Servers step and the Setup badge use this
+  // instead. usable_servers feeds the Verify step's suggested prompts.
+  has_usable_server: boolean
+  usable_servers: string[]
 }
 
 export interface OnboardingMarkRequest {

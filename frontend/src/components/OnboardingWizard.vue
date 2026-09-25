@@ -273,19 +273,39 @@
                 <li
                   v-for="name in src.serverNames"
                   :key="name"
-                  class="flex items-center gap-3 pl-10 pr-3 py-2 relative hover:bg-base-200/40"
+                  class="flex items-start gap-3 pl-10 pr-3 py-2 relative hover:bg-base-200/40"
                 >
                   <!-- Vertical guide -->
                   <span class="absolute left-5 top-0 bottom-0 w-px bg-base-300" aria-hidden="true"></span>
-                  <label class="flex items-center gap-3 flex-1 min-w-0 cursor-pointer">
+                  <label class="flex items-start gap-3 flex-1 min-w-0 cursor-pointer">
                     <input
                       type="checkbox"
-                      class="checkbox checkbox-sm"
+                      class="checkbox checkbox-sm mt-0.5"
                       :checked="isSelected(src.path, name)"
                       :data-test="`server-checkbox-${src.format}-${name}`"
                       @change="toggleServer(src.path, name, ($event.target as HTMLInputElement).checked)"
                     />
-                    <span class="text-sm truncate">{{ name }}</span>
+                    <span class="min-w-0 flex-1">
+                      <span class="text-sm truncate block">{{ name }}</span>
+                      <!-- Spec 109-b FR-040: second line (command+args or
+                           url+auth-type) and its tags. -->
+                      <span
+                        v-if="importedRow(src, name)"
+                        class="text-[11px] opacity-50 font-mono truncate block"
+                        :data-test="`import-summary-${src.format}-${name}`"
+                      >
+                        {{ importedRow(src, name)!.summary }}
+                      </span>
+                      <span v-if="importedRow(src, name)?.tags?.length" class="flex flex-wrap gap-1 mt-1">
+                        <span
+                          v-for="tag in importedRow(src, name)!.tags"
+                          :key="tag"
+                          class="badge badge-ghost badge-xs font-normal"
+                          :class="{ 'badge-warning': tag === 'needs secret' }"
+                          :data-test="`import-tag-${src.format}-${name}-${tag.replaceAll(' ', '-')}`"
+                        >{{ tag }}</span>
+                      </span>
+                    </span>
                   </label>
                   <span
                     v-if="conflictTarget(src, name)"
@@ -466,27 +486,46 @@
             </div>
           </template>
 
+          <!-- Spec 109-b FR-042: each connected client's reload hint — most
+               clients only read their MCP config at startup, so a connect
+               that succeeded doesn't mean the client is using it yet. -->
+          <div v-if="connectedClientsWithHints.length > 0" class="mt-4 border-t border-base-300 pt-4" data-test="verify-reload-hints">
+            <div class="text-[11px] font-semibold uppercase tracking-wider opacity-50 mb-2">Reload your client to pick it up</div>
+            <ul class="space-y-1">
+              <li
+                v-for="c in connectedClientsWithHints"
+                :key="c.id"
+                class="text-sm"
+                :data-test="`reload-hint-${c.id}`"
+              >
+                <span class="font-medium">{{ c.name }}:</span> {{ c.reload_hint }}
+              </li>
+            </ul>
+          </div>
+
           <!-- Quick prompt suggestions. The first dispatches to an upstream
                server (the milestone above); the rest exercise a different
-               built-in mcpproxy tool each. -->
+               built-in mcpproxy tool each. Spec 109-b FR-042: prompts are
+               only generated from usable servers — with none, there is
+               nothing an agent could actually call yet. -->
           <div class="mt-4 border-t border-base-300 pt-4">
             <div class="text-[11px] font-semibold uppercase tracking-wider opacity-50 mb-2">Try one of these prompts</div>
-            <ul class="space-y-1.5" data-test="verify-sample-prompts">
-              <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
-                "Find a filesystem tool with mcpproxy, then call it to list my home directory."
-                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ retrieve_tools + call_tool_read</span>
-              </li>
-              <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
-                "Search for MCP filesystem tools."
-                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ retrieve_tools</span>
-              </li>
-              <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
-                "List my upstream MCP servers and their connection status."
-                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ upstream_servers</span>
-              </li>
-              <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
-                "Show me tools pending quarantine approval in mcpproxy."
-                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ quarantine_security</span>
+            <div
+              v-if="suggestedPrompts.length === 0"
+              class="bg-base-200 rounded-lg p-3 text-sm opacity-70 text-center"
+              data-test="verify-no-usable-server"
+            >
+              Approve a server first —
+              <router-link to="/servers" class="link link-primary">review it on the Servers page</router-link>.
+            </div>
+            <ul v-else class="space-y-1.5" data-test="verify-sample-prompts">
+              <li
+                v-for="(p, idx) in suggestedPrompts"
+                :key="idx"
+                class="bg-base-200 rounded-lg p-2.5 text-sm font-mono"
+              >
+                "{{ p.text }}"
+                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ {{ p.hint }}</span>
               </li>
             </ul>
           </div>
@@ -530,6 +569,26 @@
               </li>
             </ul>
           </div>
+
+          <!-- Spec 109-b FR-044: one-line telemetry notice for the wizard's
+               final step. TelemetryBanner.vue hides itself while the wizard
+               is open, so this is the only place it appears until the user
+               closes the wizard. -->
+          <p
+            v-if="!telemetryNoticeDismissed"
+            class="mt-4 border-t border-base-300 pt-3 text-[11px] opacity-60 flex items-center gap-2"
+            data-test="wizard-telemetry-notice"
+          >
+            <span class="flex-1">
+              MCPProxy sends anonymous usage statistics to help improve the product. No personal data is collected.
+              <a href="https://mcpproxy.app/telemetry" target="_blank" rel="noopener noreferrer" class="link link-hover underline">Learn more</a>
+            </span>
+            <button
+              class="btn btn-ghost btn-xs"
+              data-test="wizard-telemetry-notice-dismiss"
+              @click="dismissTelemetryNotice"
+            >Dismiss</button>
+          </p>
         </section>
       </div>
 
@@ -635,11 +694,11 @@
 import { ref, reactive, computed, watch, onMounted, onUnmounted, h, type FunctionalComponent } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
-import { useOnboardingStore } from '@/stores/onboarding'
+import { useOnboardingStore, TELEMETRY_BANNER_STORAGE_KEY } from '@/stores/onboarding'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import AddServerModal from '@/components/AddServerModal.vue'
-import type { ClientStatus, ActivityRecord, ConnectPreview } from '@/types'
+import type { ClientStatus, ActivityRecord, ConnectPreview, ImportedServer } from '@/types'
 
 interface Props {
   show: boolean
@@ -705,6 +764,9 @@ interface ImportSource {
   previewError: string
   serverCount: number
   serverNames: string[]
+  // Spec 109-b FR-040: the preview rows themselves (summary/tags/env), so the
+  // template can render the second line without a second fetch.
+  serverRows: ImportedServer[]
 }
 const importSources = ref<ImportSource[]>([])
 const loadingImportSources = ref(false)
@@ -712,6 +774,18 @@ const loadingImportSources = ref(false)
 // Verify tab — recent activity preview.
 const recentActivity = ref<ActivityRecord[]>([])
 const loadingActivity = ref(false)
+
+// Spec 109-b FR-044: the telemetry notice's one-line form for the wizard's
+// final step, sharing TelemetryBanner.vue's dismissal key so acting on
+// either surface silences both.
+const telemetryNoticeDismissed = ref(false)
+onMounted(() => {
+  telemetryNoticeDismissed.value = !!localStorage.getItem(TELEMETRY_BANNER_STORAGE_KEY)
+})
+function dismissTelemetryNotice() {
+  telemetryNoticeDismissed.value = true
+  localStorage.setItem(TELEMETRY_BANNER_STORAGE_KEY, 'true')
+}
 
 // Verify tab — second milestone (UX audit F13). Lifetime flag from the
 // Spec 044 activation bucket, read off `GET /api/v1/status`, which already
@@ -831,6 +905,11 @@ const conflictTargets = computed<Map<string, string>>(() => {
 function conflictTarget(src: ImportSource, name: string): string | undefined {
   return conflictTargets.value.get(selectionKey(src.path, name))
 }
+// Spec 109-b FR-040: look up a source's preview row by name for the second
+// line (summary/tags). O(n) over a per-client server list, which is small.
+function importedRow(src: ImportSource, name: string): ImportedServer | undefined {
+  return src.serverRows.find(r => r.name === name)
+}
 const conflictCount = computed(() => conflictTargets.value.size)
 
 let pollHandle: ReturnType<typeof setInterval> | null = null
@@ -847,7 +926,10 @@ const tabs = computed(() => [
     id: 'servers' as TabID,
     label: 'Servers',
     idx: 2,
-    complete: onboarding.hasConfiguredServer,
+    // Spec 109-b FR-041: complete only once a server is actually usable
+    // (enabled, not quarantined, connected, with an approved tool) — a
+    // server entry that still needs review does not finish this step.
+    complete: onboarding.hasUsableServer,
   },
   {
     id: 'verify' as TabID,
@@ -897,6 +979,32 @@ const moreClients = computed(() => {
 const serverCountLabel = computed(() => {
   const n = onboarding.state?.configured_server_count ?? 0
   return n === 1 ? '1 server' : `${n} servers`
+})
+
+// Spec 109-b FR-042: the Verify step shows each connected client's reload
+// hint — most clients only read their MCP config at startup, so a connect
+// that succeeded is not yet a client that has picked it up.
+const connectedClientsWithHints = computed(() =>
+  mergedClients.value.filter(c => c.connected && c.reload_hint)
+)
+
+// Spec 109-b FR-042: suggested prompts are generated only from usable
+// servers (enabled, not quarantined, connected, with an approved tool) —
+// never from one still waiting on review, which would send the user to try
+// a tool mcpproxy would refuse to call. Empty when there is nothing usable
+// yet; the template shows "Approve a server first" instead of the list.
+const suggestedPrompts = computed(() => {
+  const usable = onboarding.usableServers
+  if (usable.length === 0) return []
+  return [
+    {
+      text: `Find a tool on ${usable[0]} with mcpproxy, then call it.`,
+      hint: 'retrieve_tools + call_tool_read',
+    },
+    { text: 'Search for MCP tools.', hint: 'retrieve_tools' },
+    { text: 'List my upstream MCP servers and their connection status.', hint: 'upstream_servers' },
+    { text: 'Show me tools pending quarantine approval in mcpproxy.', hint: 'quarantine_security' },
+  ]
 })
 
 // Open lifecycle: refresh state, fetch clients + config, start polling.
@@ -969,7 +1077,7 @@ function pickInitialTab(requested: TabID | null): TabID {
   // predicates would have chosen.
   if (requested) return requested
   if (!onboarding.hasConnectedClient) return 'clients'
-  if (!onboarding.hasConfiguredServer) return 'servers'
+  if (!onboarding.hasUsableServer) return 'servers'
   if (!onboarding.firstMCPClientEver) return 'verify'
   return 'clients'
 }
@@ -1151,6 +1259,7 @@ async function fetchImportSources() {
         previewError: '',
         serverCount: 0,
         serverNames: [],
+        serverRows: [],
         importBusy: '',
         importMessage: '',
         importMessageOk: false,
@@ -1174,6 +1283,7 @@ async function fetchImportSources() {
               previewLoading: false,
               serverCount: imported.length,
               serverNames: imported.map(s => s.name),
+              serverRows: imported,
             }
           } else {
             importSources.value[idx] = {
@@ -1520,6 +1630,27 @@ async function dismiss() {
 // fallback started the fetches but never chose the tab, so a wizard opened
 // that way landed on Clients regardless of what the opener asked for.
 
+// Spec 109-b: same per-client glyph ConnectModal.vue uses (clientIcon there),
+// duplicated rather than imported so this file stays self-contained — falls
+// back to the server-supplied ClientStatus.icon id, then a generic wrench.
+function clientRowIcon(client: ClientStatus): string {
+  const iconMap: Record<string, string> = {
+    'claude-desktop': '✨',
+    'claude-code': '\u{1F4BB}',
+    'cursor': '\u{1F4DD}',
+    'vscode': '\u{1F4D0}',
+    'windsurf': '\u{1F3C4}',
+    'opencode': '⚡',
+    'gemini': '♊',
+    'codex': '⌘',
+    'zed': '⚡',
+    'cline': '\u{1F916}',
+    'continue': '➡️',
+    'zcode': '\u{1F9BE}',
+  }
+  return iconMap[client.id] || client.icon || '\u{1F527}'
+}
+
 // --- ClientRow component ------------------------------------------------
 // Inlined as a functional component to keep this file self-contained while
 // the row layout stays consistent across all three lists.
@@ -1552,8 +1683,17 @@ const ClientRow: FunctionalComponent<
     { class: 'flex items-center justify-between' },
     [
       h('div', { class: 'min-w-0 flex-1' }, [
-        h('div', { class: 'font-medium text-sm truncate' }, c.name),
-        h('div', { class: 'text-xs opacity-50 truncate', title: c.config_path }, c.config_path),
+        h('div', { class: 'font-medium text-sm truncate flex items-center gap-1.5' }, [
+          h('span', { 'aria-hidden': 'true', 'data-test': `client-icon-${c.id}` }, clientRowIcon(c)),
+          c.name,
+        ]),
+        // Spec 109-b FR-037: show the home-shortened path; the full path is
+        // still one hover away via the tooltip.
+        h(
+          'div',
+          { class: 'text-xs opacity-50 truncate', title: c.config_path, 'data-test': `client-path-${c.id}` },
+          c.display_path || c.config_path
+        ),
       ]),
       h('div', { class: 'shrink-0 ml-2' }, [
         !c.supported

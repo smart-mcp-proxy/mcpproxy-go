@@ -21,6 +21,14 @@ import { useAuthStore } from '@/stores/auth'
 /** Tabs the wizard renders, in order. */
 export type WizardTab = 'clients' | 'servers' | 'verify'
 
+/**
+ * Shared localStorage key for the telemetry notice's dismissal (Spec 109-b
+ * FR-044): TelemetryBanner.vue (post-wizard) and OnboardingWizard.vue's
+ * Verify-step one-liner both read/write it, so dismissing either silences
+ * both for good.
+ */
+export const TELEMETRY_BANNER_STORAGE_KEY = 'telemetry-banner-dismissed'
+
 export const useOnboardingStore = defineStore('onboarding', () => {
   // State fetched from backend
   const state = ref<OnboardingStateResponse | null>(null)
@@ -45,6 +53,12 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   const shouldShowWizard = computed(() => state.value?.should_show_wizard ?? false)
   const hasConnectedClient = computed(() => state.value?.has_connected_client ?? false)
   const hasConfiguredServer = computed(() => state.value?.has_configured_server ?? false)
+  // Spec 109-b FR-041: the real "something to try" signal. Prefer this over
+  // hasConfiguredServer for the Servers step and the Setup badge — a server
+  // entry that is still quarantined or has no approved tool is not usable
+  // yet, even though it counts toward hasConfiguredServer.
+  const hasUsableServer = computed(() => state.value?.has_usable_server ?? false)
+  const usableServers = computed<string[]>(() => state.value?.usable_servers ?? [])
   const isEngaged = computed(() => state.value?.state.engaged ?? false)
 
   // Spec 046 v2 — passive Verify tab + sidebar badge sources.
@@ -64,7 +78,7 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   const visibleSteps = computed<Array<'connect' | 'server'>>(() => {
     const steps: Array<'connect' | 'server'> = []
     if (!hasConnectedClient.value) steps.push('connect')
-    if (!hasConfiguredServer.value) steps.push('server')
+    if (!hasUsableServer.value) steps.push('server')
     return steps
   })
 
@@ -190,6 +204,8 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     shouldShowWizard,
     hasConnectedClient,
     hasConfiguredServer,
+    hasUsableServer,
+    usableServers,
     isEngaged,
     firstMCPClientEver,
     mcpClientsSeenEver,
