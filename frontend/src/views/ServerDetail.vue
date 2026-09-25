@@ -1649,7 +1649,7 @@ import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus
 import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
 import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
-import { oauthSignInState, healthStatusLabel, healthActionLabel } from '@/utils/health'
+import { oauthSignInState, healthStatusLabel, healthActionLabel, healthStatusText } from '@/utils/health'
 import { describeIsolation } from '@/utils/isolationState'
 import { computeToolDiffSections } from '@/utils/toolDiff'
 import { groupFindingsByTool, type FlaggedToolGroup } from '@/utils/toolLocation'
@@ -1892,8 +1892,11 @@ const statusBadgeText = computed(() => {
   const health = server.value?.health
   if (health) {
     if (signInState.value && health.admin_state !== 'disabled') return 'Sign-in required'
-    // FR-011: no surface may render `level` as text.
-    return health.summary || healthStatusLabel(health.status)
+    // FR-011: no surface may render `level` as text. Falls back to
+    // connected/disconnected (round-4 review finding) when a version-skew
+    // payload carries neither summary nor status, matching the teams tables'
+    // fallback and this file's own healthLevelLabel below.
+    return healthStatusText(health, server.value?.connected ?? false)
   }
   if (signInState.value) return 'Sign-in required'
   if (server.value?.connected) return 'Connected'

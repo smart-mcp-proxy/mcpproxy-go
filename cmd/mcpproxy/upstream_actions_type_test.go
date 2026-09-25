@@ -45,3 +45,37 @@ func TestUpstreamRowsReadActionsAsGoStringSlice(t *testing.T) {
 	assert.Equal(t, "auth login --server=config-mode-server", rows[0][5],
 		"ACTION must key on actions[0] (native []string in config mode), not fall back to the legacy action field")
 }
+
+// TestUpstreamRowsReadActionsAsJSONInterfaceSlice is the client-mode (daemon)
+// counterpart to TestUpstreamRowsReadActionsAsGoStringSlice above: a decoded
+// JSON API response always turns `actions` into `[]interface{}`, not
+// `[]string`. No fixture in this file or in upstream_list_status_test.go
+// exercised that shape with action != actions[0] (a round-4 review finding),
+// so a future regression in the `case []interface{}:` branch at
+// upstream_cmd.go's actions-extraction switch would go undetected as long as
+// every real CalculateHealth branch keeps action == actions[0]. This test
+// deliberately mismatches the two, the same way the []string test above
+// does, so the []interface{} branch is pinned too.
+func TestUpstreamRowsReadActionsAsJSONInterfaceSlice(t *testing.T) {
+	rows := upstreamServerRows([]map[string]interface{}{
+		{
+			"name":       "client-mode-server",
+			"protocol":   "stdio",
+			"tool_count": float64(0),
+			"health": map[string]interface{}{
+				"level":       "unhealthy",
+				"admin_state": "enabled",
+				"summary":     "Authentication required",
+				// Deliberately mismatched from actions[0], mirroring a
+				// decoded JSON payload where actions is []interface{}.
+				"action":  health.ActionRestart,
+				"status":  "sign_in_required",
+				"usable":  false,
+				"actions": []interface{}{health.ActionLogin, health.ActionApprove},
+			},
+		},
+	})
+	require.Len(t, rows, 1)
+	assert.Equal(t, "auth login --server=client-mode-server", rows[0][5],
+		"ACTION must key on actions[0] (JSON []interface{} in client mode), not fall back to the legacy action field")
+}

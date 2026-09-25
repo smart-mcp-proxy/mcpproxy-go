@@ -100,6 +100,22 @@ export function healthStatusLabel(status: string | undefined | null): string {
 }
 
 /**
+ * Resolves the status TEXT for a server carrying a `health` object: summary
+ * first, then the shared status label, then a connected/disconnected
+ * fallback for a version-skew payload that carries neither (round-4 review
+ * finding — AdminServers.vue/UserServers.vue already had this fallback,
+ * ServerCard.vue/ServerDetail.vue did not, which was an asymmetric guard
+ * against the same gap). Never falls back to `health.level` as text
+ * (FR-011).
+ *
+ * @param health - the server's health object (caller handles the no-health case)
+ * @param connected - the server's legacy `connected` field, for the last-resort fallback
+ */
+export function healthStatusText(health: HealthStatus, connected: boolean): string {
+  return health.summary || healthStatusLabel(health.status) || (connected ? 'Connected' : 'Disconnected')
+}
+
+/**
  * Cross-surface button label for a `health.actions[]` entry (Spec 109
  * FR-014, internal/health.ActionLabels). Returns '' for HealthAction.None or
  * an unrecognized value.

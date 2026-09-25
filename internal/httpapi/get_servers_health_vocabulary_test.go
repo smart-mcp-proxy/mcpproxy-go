@@ -101,4 +101,63 @@ func TestHandleGetServers_HealthCarriesStatusVocabulary(t *testing.T) {
 	// Legacy fields untouched by the REST enrichment chain.
 	assert.Equal(t, "enabled", got.AdminState)
 	assert.Equal(t, "Missing secret", got.Summary)
+	// Round-4 review finding: this test asserted every health field except
+	// Detail, the one field the REST enrichment chain actually CAN rewrite
+	// (oauth.RedactServerSecretFields scrubs it via ScrubUpstreamText,
+	// serverfields.go's "health.detail" entry). "GITHUB_TOKEN" here looks
+	// like a secret value but is not one by the current detector — pinning it
+	// unscrubbed means a future broadening of that detector that starts
+	// redacting it is caught here instead of silently changing behavior.
+	assert.Equal(t, "GITHUB_TOKEN", got.Detail)
+}
+
+// TestHandleGetServers_HealthCarriesMultiActionSlice is a round-4 review
+// finding: the wire-level REST test above and its MCP-side counterpart
+// (internal/server/upstream_servers_health_status_test.go) both only
+// exercised single-action states (needs_secret->[set_secret],
+// disabled->[enable]), even though FR-012's ordered multi-action lists
+// (e.g. quarantined+login->[login,approve]) are a real shape. A wire
+// serialization bug that silently truncated `actions` to one element would
+// pass every existing wire test. This proves the full ordered slice survives
+// the REST handler's JSON round-trip.
+func TestHandleGetServers_HealthCarriesMultiActionSlice(t *testing.T) {
+	computed := health.CalculateHealth(health.HealthCalculatorInput{
+		Enabled:               true,
+		Quarantined:           true,
+		CallTimeOAuthRequired: true,
+	}, nil)
+	require.Len(t, computed.Actions, 2, "test fixture must exercise a genuine multi-action state")
+
+	svc := &restHealthVocabService{server: &contracts.Server{
+		ID:       "quarantined-oauth",
+		Name:     "quarantined-oauth",
+		Protocol: "http",
+		Enabled:  true,
+		Health:   computed,
+	}}
+	srv := NewServer(&restHealthVocabController{svc: svc}, zap.NewNop().Sugar(), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", http.NoBody)
+	req.Header.Set("X-API-Key", restHealthVocabAPIKey)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Servers []struct {
+				Health contracts.HealthStatus `json:"health"`
+			} `json:"servers"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.True(t, resp.Success, "body: %s", w.Body.String())
+	require.Len(t, resp.Data.Servers, 1)
+
+	got := resp.Data.Servers[0].Health
+	assert.Equal(t, []string{health.ActionLogin, health.ActionApprove}, got.Actions,
+		"the full ordered actions slice must survive the REST handler's JSON round-trip")
+	assert.Equal(t, health.ActionLogin, got.Action)
 }

@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 )
 
 func TestProfileMenuTitle(t *testing.T) {
@@ -861,4 +862,38 @@ func TestHealthActionMenuItemSelection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetServerStatusDisplay_SummaryEmptyFallsBackToStatusLabel is a round-4
+// review finding: the Go cross-platform tray (cmd/mcpproxy-tray, distinct
+// from the native macOS Swift tray) was never updated for Spec 109's health
+// vocabulary. getServerStatusDisplay's `statusText = healthLevel` fallback
+// used the raw severity level ("healthy"/"degraded"/"unhealthy") as display
+// text whenever health.summary is empty — the same latent-fallback shape the
+// Web UI carried before it was fixed to use the shared status label table
+// (contracts.HEALTH_STATUS_LABELS / health.StatusLabel). No current
+// CalculateHealth branch actually leaves Summary empty, so this only guards
+// against future version-skew payloads, matching the Web UI's own guard.
+func TestGetServerStatusDisplay_SummaryEmptyFallsBackToStatusLabel(t *testing.T) {
+	mm := NewMenuManager(nil, nil, nil, zap.NewNop().Sugar())
+
+	server := map[string]interface{}{
+		"name": "test-server",
+		"health": map[string]interface{}{
+			"level":       "healthy",
+			"admin_state": "enabled",
+			"summary":     "", // deliberately empty (version-skew payload)
+			"status":      health.StatusReady,
+		},
+	}
+
+	// getServerStatusDisplay's status TEXT surfaces in the tooltip
+	// ("<name> - <statusText>"), not in displayText (icon + name only on
+	// non-Windows platforms).
+	_, tooltip, _ := mm.getServerStatusDisplay(server)
+
+	require.Contains(t, tooltip, health.StatusLabel(health.StatusReady),
+		"must fall back to the shared status label, not the raw severity level")
+	require.NotContains(t, tooltip, "- healthy",
+		"must never render the raw health.level as status text")
 }

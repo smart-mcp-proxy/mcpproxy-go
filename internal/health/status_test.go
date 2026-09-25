@@ -537,3 +537,55 @@ func TestConnectionErrorStatus(t *testing.T) {
 		})
 	}
 }
+
+// TestCalculateHealth_QuarantinedDisconnectedOAuthError is a round-4 review
+// finding: quarantinedOAuthLoginState mirrored the non-quarantined "error"
+// state's isOAuthRelatedError override but not "disconnected", even though
+// the non-quarantined switch applies the same override to both the "error"
+// and "disconnected" branches. A quarantined server whose OAuth-related
+// failure settles into state="disconnected" (this function's own doc comment
+// says that is the designed quarantined state) must still surface
+// sign-in-required instead of falling through to the generic "Quarantined
+// for review" response.
+func TestCalculateHealth_QuarantinedDisconnectedOAuthError(t *testing.T) {
+	result := CalculateHealth(HealthCalculatorInput{
+		Enabled:       true,
+		Quarantined:   true,
+		State:         "disconnected",
+		OAuthRequired: true,
+		// OAuthStatus is a stale "authenticated" (not yet updated to
+		// expired/error/none) — the generic OAuthStatus fallback below the
+		// state switch does NOT catch this case, so the state-based
+		// isOAuthRelatedError override is the only thing that can.
+		OAuthStatus: "authenticated",
+		LastError:   "oauth authentication required",
+	}, nil)
+
+	assert.Equal(t, StatusSignInRequired, result.Status, "must surface sign-in, not fall through to generic quarantine review")
+	assert.False(t, result.Usable)
+	assert.Equal(t, []string{ActionLogin, ActionApprove}, result.Actions)
+	assert.Equal(t, StateQuarantined, result.AdminState)
+}
+
+// TestCalculateHealth_QuarantinedConnectingSkipsOAuthLoginCTA is a round-4
+// review finding: the non-quarantined connection-state switch (section 4)
+// returns "Connecting..." for state connecting/idle before any OAuth check
+// runs — its own comment says "genuine connecting states always take
+// priority" — but quarantinedOAuthLoginState had no matching early-return, so
+// a quarantined server mid-dial with a stale OAuthRequired/OAuthStatus pair
+// rendered a login CTA instead of resolving the same way. A connecting or
+// idle quarantined server must not report sign-in-required.
+func TestCalculateHealth_QuarantinedConnectingSkipsOAuthLoginCTA(t *testing.T) {
+	for _, state := range []string{"connecting", "idle"} {
+		result := CalculateHealth(HealthCalculatorInput{
+			Enabled:       true,
+			Quarantined:   true,
+			State:         state,
+			OAuthRequired: true,
+			OAuthStatus:   "none",
+		}, nil)
+
+		assert.NotEqual(t, StatusSignInRequired, result.Status, "state %q must not pre-empt connecting with a login CTA", state)
+		assert.Equal(t, StatusNeedsReview, result.Status, "state %q falls back to generic quarantine review", state)
+	}
+}

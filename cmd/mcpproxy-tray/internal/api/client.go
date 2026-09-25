@@ -35,6 +35,17 @@ type HealthStatus struct {
 	Summary    string `json:"summary"`          // e.g., "Connected (5 tools)"
 	Detail     string `json:"detail,omitempty"` // Optional longer explanation
 	Action     string `json:"action,omitempty"` // "login", "restart", "enable", "approve", "set_secret", "configure", "view_logs", ""
+
+	// Status is the ONE status vocabulary rendered as text on every surface
+	// (Spec 109 FR-010/FR-011) — mirrors contracts.HealthStatus.Status.
+	// Unlike Level (severity/coloring only), this may be printed as text.
+	Status string `json:"status"`
+	// Usable reports whether the server can currently serve tool calls.
+	Usable bool `json:"usable"`
+	// Actions lists every applicable next step in priority order (FR-012).
+	// Always non-nil (empty slice, never null) on a current core; may be
+	// absent from an older core's payload.
+	Actions []string `json:"actions"`
 }
 
 // Server represents a server from the API

@@ -513,20 +513,38 @@ func connectionErrorStatus(action string) (status string, usable bool, actions [
 
 // quarantinedOAuthLoginState reports whether a quarantined server also needs
 // OAuth sign-in (FR-010), and if so the level/summary/detail to report. It
-// mirrors all seven OAuth-login signals the non-quarantined branches below
-// use — the parked "pending auth" state (#1013), an OAuth-related error while
-// connecting, the call-time OAuth requirement (MCP-2084), an explicit
-// UserLoggedOut, and OAuthStatus of "expired"/"error"/"none"/"" — because a
-// quarantined server is still dialed under the scanner's inspection
-// exemption (or was OAuth-configured and never signed in at all) and can hit
-// any of them; these inputs are populated for quarantined servers the same
-// way they are for enabled ones.
+// mirrors the OAuth-login signals the non-quarantined branches below use —
+// the parked "pending auth" state (#1013), an OAuth-related error while
+// connecting or disconnected, the call-time OAuth requirement (MCP-2084), an
+// explicit UserLoggedOut, and OAuthStatus of "expired"/"error"/"none"/"" —
+// because a quarantined server is still dialed under the scanner's
+// inspection exemption (or was OAuth-configured and never signed in at all)
+// and can hit any of them; these inputs are populated for quarantined
+// servers the same way they are for enabled ones. It also mirrors section
+// 4's "genuine connecting states always take priority" invariant: a
+// connecting/idle server never returns needsLogin, even with a stale OAuth
+// signal, so it is free to resolve on its own like the non-quarantined path.
 func quarantinedOAuthLoginState(input HealthCalculatorInput, state string) (needsLogin bool, level, summary, detail string) {
+	// Mirror section 4's "genuine connecting states always take priority"
+	// invariant (calculator.go, the CallTimeOAuthRequired comment): a
+	// quarantined server mid-dial resolves the connecting state on its own,
+	// so a stale OAuthRequired/OAuthStatus pair must not pre-empt it with a
+	// login CTA that may flap away moments later. Checked first, ahead of
+	// every OAuth-login signal below.
+	if state == "connecting" || state == "idle" {
+		return false, "", "", ""
+	}
 	switch state {
 	case "pending auth", "pending_auth":
 		level, _, summary = oauthAttentionState(input.LastError)
 		return true, level, summary, input.LastError
-	case "error":
+	case "error", "disconnected":
+		// Mirror the non-quarantined "error"/"disconnected" branches
+		// (calculator.go section 4), which apply the same isOAuthRelatedError
+		// override to both states. Checked here, ahead of the OAuthStatus
+		// fallback below, so a stale OAuthStatus (still "authenticated" while
+		// the connection has already failed with an OAuth-shaped error) does
+		// not mask the sign-in verdict.
 		if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
 			level, _, summary = oauthAttentionState(input.LastError)
 			return true, level, summary, input.LastError

@@ -113,6 +113,44 @@ describe('ServerCard status line renders `status`, never `level`, as text (FR-01
     )
     expect(wrapper.find('[data-test="server-status-chip"]').text()).toBe('Connected (14 tools)')
   })
+
+  // Round-4 review finding: a version-skew payload with BOTH summary and
+  // status empty/absent fell through to an empty chip here, while the teams
+  // tables (AdminServers.vue/UserServers.vue) already got a connected-based
+  // fallback in round 3. No known core payload triggers this today (every
+  // CalculateHealth branch sets a non-empty status), but the fallback should
+  // not be handled asymmetrically across surfaces.
+  it('falls back to connected/disconnected when both summary and status are empty', () => {
+    const connectedWrapper = mountCard(
+      makeServer({
+        connected: true,
+        health: {
+          level: 'healthy',
+          admin_state: 'enabled',
+          summary: '',
+          status: '',
+          usable: true,
+          actions: [],
+        } as unknown as HealthStatus,
+      })
+    )
+    expect(connectedWrapper.find('[data-test="server-status-chip"]').text()).toBe('Connected')
+
+    const disconnectedWrapper = mountCard(
+      makeServer({
+        connected: false,
+        health: {
+          level: 'unhealthy',
+          admin_state: 'enabled',
+          summary: '',
+          status: '',
+          usable: false,
+          actions: [],
+        } as unknown as HealthStatus,
+      })
+    )
+    expect(disconnectedWrapper.find('[data-test="server-status-chip"]').text()).toBe('Disconnected')
+  })
 })
 
 // SC-003: for every fixture with usable=false, no renderer output contains

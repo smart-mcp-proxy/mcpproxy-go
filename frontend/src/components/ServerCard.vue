@@ -427,7 +427,7 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDetailPath, serverDisplayName } from '@/utils/serverRoute'
-import { oauthSignInState, healthStatusLabel } from '@/utils/health'
+import { oauthSignInState, healthStatusText } from '@/utils/health'
 import { deriveTrustModeState, TRUST_MODES } from '@/utils/trustMode'
 
 interface Props {
@@ -540,7 +540,7 @@ const statusText = computed(() => {
     if (signInState.value && health.admin_state !== 'disabled') return 'Sign-in required'
     // FR-011: no surface may render `level` as text — fall back to the one
     // status label table, never the raw severity value.
-    return health.summary || healthStatusLabel(health.status)
+    return healthStatusText(health, props.server.connected)
   }
   // Fallback to legacy logic
   // MCP-1857 — surface the actionable "Sign-in required" for a diagnostic-only

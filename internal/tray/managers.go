@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 )
 
 const (
@@ -781,6 +782,7 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 		healthLevel, _ := healthData["level"].(string)
 		healthAdminState, _ := healthData["admin_state"].(string)
 		healthSummary, _ := healthData["summary"].(string)
+		healthStatus, _ := healthData["status"].(string)
 
 		// Determine status icon based on admin_state first, then health level
 		switch healthAdminState {
@@ -808,10 +810,19 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 			}
 		}
 
-		// Use health.summary for status text
-		if healthSummary != "" {
+		// Use health.summary for status text. No CalculateHealth branch leaves
+		// Summary empty today, but a version-skew payload (an older core
+		// talking to a newer tray, or vice versa) might, so fall back to the
+		// shared status-vocabulary label (Spec 109 FR-014) rather than the raw
+		// severity level — health.level is a badge/tray-coloring signal only
+		// and must never be printed as text, matching the Web UI's own guard
+		// (frontend/src/components/ServerCard.vue).
+		switch {
+		case healthSummary != "":
 			statusText = healthSummary
-		} else {
+		case healthStatus != "":
+			statusText = health.StatusLabel(healthStatus)
+		default:
 			statusText = healthLevel
 		}
 	} else {
