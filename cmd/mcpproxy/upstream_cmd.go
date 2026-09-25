@@ -1805,6 +1805,12 @@ func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[s
 			"original_name":  s.OriginalName,
 			"fields_skipped": s.FieldsSkipped,
 			"warnings":       s.Warnings,
+			// Spec 109-b FR-040: same second-line summary/tags the Web UI
+			// preview shows, already redacted by configimport.Import.
+			"summary": s.Summary,
+			"tags":    s.Tags,
+			"env":     s.EnvFields,
+			"headers": s.HeaderFields,
 		}
 	}
 	return result

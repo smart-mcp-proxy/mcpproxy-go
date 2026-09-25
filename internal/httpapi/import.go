@@ -44,6 +44,18 @@ type ImportedServerResponse struct {
 	OriginalName  string   `json:"original_name"`
 	FieldsSkipped []string `json:"fields_skipped,omitempty"`
 	Warnings      []string `json:"warnings,omitempty"`
+
+	// --- Spec 109-b additions (FR-040) ---
+
+	// Summary is the wizard/ImportServers second line: command+args or
+	// url (auth-type), already redacted.
+	Summary string `json:"summary"`
+	// Tags classifies Summary: local process|remote, needs secret, oauth.
+	Tags []string `json:"tags"`
+	// Env / Headers classify each env var / header for the "needs secret"
+	// tag without exposing the values.
+	Env     []configimport.ImportedField `json:"env,omitempty"`
+	Headers []configimport.ImportedField `json:"headers,omitempty"`
 }
 
 // CanonicalConfigPath represents a well-known config file path
@@ -449,6 +461,10 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 			OriginalName:  imported.OriginalName,
 			FieldsSkipped: imported.FieldsSkipped,
 			Warnings:      imported.Warnings,
+			Summary:       imported.Summary,
+			Tags:          imported.Tags,
+			Env:           imported.EnvFields,
+			Headers:       imported.HeaderFields,
 		}
 	}
 
