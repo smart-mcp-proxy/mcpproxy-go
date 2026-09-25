@@ -22,9 +22,10 @@ type selfTarget struct {
 	// hosts are the canonical URL hosts (lower-cased names, IPs in net.IP
 	// String form) that reach the listener.
 	hosts map[string]bool
-	// anyLoopback is set for an all-interfaces listener, which every loopback
-	// address (127.0.0.0/8, ::1) reaches.
-	anyLoopback bool
+	// anyLoopback4/anyLoopback6 are set for an all-interfaces listener, which
+	// every loopback address of its family (127.0.0.0/8, ::1) reaches.
+	anyLoopback4 bool
+	anyLoopback6 bool
 }
 
 // canonicalHost lower-cases a host name and rewrites an IP literal to its
@@ -67,12 +68,19 @@ func newSelfMatcher(listenAddrs []string) *selfMatcher {
 		switch {
 		case host == "" || (ip != nil && ip.IsUnspecified()):
 			// All interfaces: loopback, the wildcard itself, and every local
-			// interface address.
-			t.anyLoopback = true
-			add("localhost", "0.0.0.0", "::")
+			// interface address. A host-less or [::] bind is dual-stack, but an
+			// explicit 0.0.0.0 bind is IPv4-only in Go, so IPv6 hosts must not
+			// match it.
+			v4Only := ip != nil && ip.To4() != nil
+			t.anyLoopback4 = true
+			t.anyLoopback6 = !v4Only
+			add("localhost", "0.0.0.0")
+			if !v4Only {
+				add("::")
+			}
 			if addrs, err := net.InterfaceAddrs(); err == nil {
 				for _, a := range addrs {
-					if ipn, ok := a.(*net.IPNet); ok {
+					if ipn, ok := a.(*net.IPNet); ok && (!v4Only || ipn.IP.To4() != nil) {
 						add(ipn.IP.String())
 					}
 				}
@@ -115,12 +123,13 @@ func (m *selfMatcher) matchesURL(raw string) bool {
 	}
 	host := canonicalHost(u.Hostname())
 	ip := net.ParseIP(host)
-	isLoopback := ip != nil && ip.IsLoopback()
+	isLoopback4 := ip != nil && ip.IsLoopback() && ip.To4() != nil
+	isLoopback6 := ip != nil && ip.IsLoopback() && ip.To4() == nil
 	for _, t := range m.targets {
 		if t.port != port {
 			continue
 		}
-		if t.hosts[host] || (isLoopback && t.anyLoopback) {
+		if t.hosts[host] || (isLoopback4 && t.anyLoopback4) || (isLoopback6 && t.anyLoopback6) {
 			return true
 		}
 	}

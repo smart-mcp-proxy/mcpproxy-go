@@ -43,6 +43,12 @@ func TestPointsToSelf(t *testing.T) {
 		{"ipv6 loopback url, ipv4 loopback listen", []string{"127.0.0.1:8080"}, "http://[::1]:8080/mcp", false},
 		{"other ipv4 loopback, ipv4 loopback listen", []string{"127.0.0.1:8080"}, "http://127.0.0.2:8080/mcp", false},
 		{"ipv6 wildcard url, ipv4 loopback listen", []string{"127.0.0.1:8080"}, "http://[::]:8080/mcp", false},
+		// net.Listen("tcp", "0.0.0.0:…") is IPv4-only; only host-less and [::]
+		// binds are dual-stack.
+		{"ipv6 loopback url, explicit ipv4 wildcard listen", []string{"0.0.0.0:8080"}, "http://[::1]:8080/mcp", false},
+		{"ipv6 wildcard url, explicit ipv4 wildcard listen", []string{"0.0.0.0:8080"}, "http://[::]:8080/mcp", false},
+		{"ipv6 loopback url, host-less listen", []string{":8080"}, "http://[::1]:8080/mcp", true},
+		{"ipv4 loopback url, ipv6 wildcard listen", []string{"[::]:8080"}, "http://127.0.0.1:8080/mcp", true},
 		{"no listen address", nil, "http://127.0.0.1:8080/mcp", false},
 		{"not a url", []string{"127.0.0.1:8080"}, "-y", false},
 		{"non-http scheme", []string{"127.0.0.1:8080"}, "ftp://127.0.0.1:8080/mcp", false},
