@@ -182,6 +182,14 @@ actor APIClient {
         return try await fetchWrapped(path: "/api/v1/diagnostics")
     }
 
+    /// Fetch the needs-attention list from `GET /api/v1/attention`
+    /// (Spec 109 FR-001): the one list the Web UI Home page, the tray
+    /// "Needs Attention" group and Home section, and the CLI's
+    /// `attention`/`status`/`doctor` commands all read.
+    func attention() async throws -> AttentionResponse {
+        return try await fetchWrapped(path: "/api/v1/attention")
+    }
+
     // MARK: - Servers
 
     /// List all upstream servers from `GET /api/v1/servers`.

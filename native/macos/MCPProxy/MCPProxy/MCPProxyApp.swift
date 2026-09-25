@@ -523,7 +523,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // A fresh window gets its tab as initial state rather than a
         // notification: the `onReceive` observers only subscribe once the view
         // appears, so a notification posted now would be dropped on the floor.
-        let contentView = MainWindow(appState: appState, initialTab: tab ?? .dashboard)
+        let contentView = MainWindow(appState: appState, initialTab: tab ?? .home)
         let hostingView = NSHostingView(rootView: contentView)
 
         let window = NSWindow(
@@ -1076,7 +1076,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         } else if case .error = appState.coreState {
             statusColor = .systemRed
         } else if appState.coreState == .connected {
-            if appState.serversNeedingAttention.isEmpty {
+            if appState.attention.isEmpty {
                 statusColor = .systemGreen
             } else {
                 statusColor = .systemYellow
@@ -1129,56 +1129,53 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(row)
         }
 
-        // Needs Attention — only auth required, connection errors, quarantine
-        // (NOT disabled). One collapsed row: the count is the glanceable fact,
-        // the per-server detail is a hover away, and N servers no longer cost
-        // N rows of a menu that opens with a chart. Absent entirely when
-        // nothing needs attention.
-        let attentionServers = appState.serversNeedingAttention
-        if !attentionServers.isEmpty {
-            let parent = NSMenuItem(title: "Needs Attention (\(attentionServers.count))",
+        // Needs Attention (Spec 109 FR-001/FR-003): the ONE needs-attention
+        // list every surface reads, built from `appState.attention` rather
+        // than a tray-local predicate over `ServerStatus`. One collapsed row:
+        // the count is the glanceable fact, the per-item detail is a hover
+        // away. Absent entirely when nothing needs attention.
+        let attentionItems = appState.attention
+        if !attentionItems.isEmpty {
+            let parent = NSMenuItem(title: "Needs Attention (\(attentionItems.count))",
                                     action: nil, keyEquivalent: "")
             parent.image = NSImage(systemSymbolName: "exclamationmark.triangle",
                                    accessibilityDescription: "needs attention")
             let submenu = NSMenu(title: "Needs Attention")
 
-            for server in attentionServers {
-                let action = server.health?.action ?? ""
-                let summary = server.health?.summary ?? ""
-                let icon = actionIcon(for: action)
+            for attentionItem in attentionItems {
+                let verb = attentionItem.fix.verb
+                let icon = actionIcon(for: verb)
 
-                let fullTitle = "\(server.name) — \(summary.isEmpty ? actionDisplayName(for: action) : summary)"
+                let fullTitle = attentionItem.summary
                 // Same width discipline as the glance rows: an untruncated core
                 // error must not stretch the whole menu past the chart block.
                 // The full text stays in the tooltip.
                 let title = GlanceFormatting.tailTruncated(
                     fullTitle, limit: GlanceFormatting.reasonBudget)
 
-                // F4: these rows used to run `health.action` on click — a row
-                // reading "demo-filesystem — failed to connect" silently
-                // RESTARTED the server, and an `enable`-actioned row enabled
-                // one. Nothing in the label said so, nothing confirmed it and
-                // (F3) nothing reported failure. A row that reads as
-                // disclosure now navigates and nothing else; the action moves
-                // into a submenu under its own verb, matching the explicit
-                // verbs already used under `Servers ▸`.
+                // F4 / Spec 109 FR-005: a row reads as disclosure and nothing
+                // else. The tray runs only `login`, `restart` and `enable`
+                // itself (`TrayServerAction.fromHealthAction`); every other
+                // verb — including `review`, which is NEVER a one-click
+                // approve — opens the location that performs it (today, the
+                // server's detail view; `/review/<n>` and `/clients?focus=`
+                // get their own native screens in 109-g/109-h).
                 let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
                 item.toolTip = fullTitle
                 // Truncated on screen, spoken in full — tooltips are not read
                 // by VoiceOver (same FR-025 discipline as the glance rows).
                 item.setAccessibilityLabel(fullTitle)
-                item.image = NSImage(systemSymbolName: icon, accessibilityDescription: action)
+                item.image = NSImage(systemSymbolName: icon, accessibilityDescription: verb)
 
-                if let verb = TrayServerAction.fromHealthAction(action) {
-                    let rowMenu = NSMenu(title: server.name)
+                if let action = TrayServerAction.fromHealthAction(verb) {
+                    let rowMenu = NSMenu(title: attentionItem.subject.name)
 
-                    let act = NSMenuItem(title: verb.menuTitle,
+                    let act = NSMenuItem(title: action.menuTitle,
                                          action: #selector(performAttentionAction(_:)),
                                          keyEquivalent: "")
                     act.target = self
-                    act.representedObject = server
-                    act.image = NSImage(systemSymbolName: actionIcon(for: action),
-                                        accessibilityDescription: action)
+                    act.representedObject = attentionItem
+                    act.image = NSImage(systemSymbolName: icon, accessibilityDescription: verb)
                     rowMenu.addItem(act)
                     rowMenu.addItem(.separator())
 
@@ -1186,17 +1183,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                              action: #selector(showServerDetailFromMenu(_:)),
                                              keyEquivalent: "")
                     details.target = self
-                    details.representedObject = server.name
+                    details.representedObject = attentionItem.subject.name
                     rowMenu.addItem(details)
 
                     item.submenu = rowMenu
-                } else {
+                } else if attentionItem.subject.type == "server" {
                     // Nothing to run — quarantine review, a missing secret, a
                     // configuration problem. Straight to the detail view.
                     item.action = #selector(showServerDetailFromMenu(_:))
                     item.target = self
-                    item.representedObject = server.name
+                    item.representedObject = attentionItem.subject.name
                 }
+                // A client-subject item (109-h) has no native screen yet:
+                // shown for disclosure, not yet actionable from the tray.
                 submenu.addItem(item)
             }
             parent.submenu = submenu
@@ -1228,7 +1227,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // quarantined, interleaved and told apart only by dot colour —
             // made a submenu taller than the screen. Attention first, then the
             // servers that are working, then the disabled tail behind one row.
-            let attentionNames = Set(attentionServers.map(\.name))
+            let attentionNames = Set(attentionItems.filter { $0.subject.type == "server" }.map(\.subject.name))
             var grouped: [TrayServerGroup: [ServerStatus]] = [:]
             for server in appState.servers {
                 let group = TrayServerGrouping.group(
@@ -1769,9 +1768,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// (F4).
     @MainActor
     @objc private func performAttentionAction(_ sender: NSMenuItem) {
-        guard let server = sender.representedObject as? ServerStatus,
-              let verb = TrayServerAction.fromHealthAction(server.health?.action ?? "") else { return }
-        perform(verb, on: server.name, id: server.id)
+        guard let item = sender.representedObject as? AttentionItem,
+              let verb = TrayServerAction.fromHealthAction(item.fix.verb) else { return }
+        perform(verb, on: item.subject.name, id: item.subject.id)
     }
 
     /// Navigate to a server's detail page. The represented object is the
@@ -2055,26 +2054,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - Helpers
 
+    /// Icon for a health `action` or an `AttentionFix.verb` — the two
+    /// vocabularies overlap except `review` (attention-only, the Spec 109
+    /// analogue of health's `approve`) and `reload_hint` (109-h, client
+    /// presence).
     private func actionIcon(for action: String) -> String {
         switch action {
         case "login": return "person.badge.key"
         case "restart": return "arrow.clockwise"
         case "enable": return "power"
-        case "approve": return "checkmark.shield"
+        case "approve", "review": return "checkmark.shield"
+        case "set_secret": return "key"
+        case "configure", "edit_url": return "gearshape"
+        case "view_logs": return "doc.text.magnifyingglass"
+        case "reload_hint": return "arrow.triangle.2.circlepath"
         default: return "exclamationmark.circle"
-        }
-    }
-
-    private func actionDisplayName(for action: String) -> String {
-        switch action {
-        case "login": return "Sign in"
-        case "restart": return "Restart Needed"
-        case "enable": return "Disabled"
-        case "approve": return "Approval Needed"
-        case "set_secret": return "Secret Missing"
-        case "configure": return "Configuration Needed"
-        case "view_logs": return "Check Logs"
-        default: return "Action Needed"
         }
     }
 
@@ -2093,9 +2087,9 @@ extension Notification.Name {
     static let openWebUI = Notification.Name("MCPProxy.openWebUI")
     /// Posted by dashboard to switch sidebar to Activity Log view.
     static let switchToActivity = Notification.Name("MCPProxy.switchToActivity")
-    /// Posted by dashboard to switch sidebar to Servers view.
+    /// Posted by Home to switch sidebar to Servers view.
     static let switchToServers = Notification.Name("MCPProxy.switchToServers")
-    /// Posted by tray menu (and Dashboard's AttentionRow) to open the detail
+    /// Posted by tray menu (and Home's AttentionRow) to open the detail
     /// view for a specific server. object = server name String (opens the
     /// Tools tab) or a ServerDetailTarget (opens its named tab).
     static let showServerDetail = Notification.Name("MCPProxy.showServerDetail")

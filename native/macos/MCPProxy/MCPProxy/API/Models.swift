@@ -113,7 +113,9 @@ enum HealthAction: String, Codable, CaseIterable {
     /// Human-readable button label. Kept for the enum's own call sites
     /// (decoding/matching); a renderer choosing the CROSS-SURFACE wording the
     /// Web UI and CLI also show (FR-014) uses `HealthStatus.actionLabels`
-    /// instead — see AttentionRow in DashboardView.swift.
+    /// instead — see e.g. ServerDetailView's "Suggested Action" row. Home's
+    /// own AttentionRow (HomeView.swift) renders `AttentionFix.label`
+    /// directly, which the core already sends pre-worded (Spec 109).
     var label: String {
         switch self {
         case .login:      return "Sign in"
@@ -238,6 +240,133 @@ struct HealthStatus: Codable, Equatable {
         "view_logs": "View logs",
         "enable": "Enable",
     ]
+}
+
+// MARK: - Attention (Spec 109 FR-001)
+
+/// What an `AttentionItem` is about. Matches the Go `contracts.AttentionSubject`.
+struct AttentionSubject: Codable, Equatable {
+    let type: String // "server" | "tool" | "client"
+    let id: String
+    let name: String
+}
+
+/// The one action that resolves an `AttentionItem` (FR-005): a verb the
+/// caller may run directly, and a target screen/route. Matches the Go
+/// `contracts.AttentionFix`.
+struct AttentionFix: Codable, Equatable {
+    let verb: String
+    let label: String
+    let target: String
+}
+
+/// One row of the needs-attention list (contracts/rest-api.md#attention),
+/// identical across every surface (Web UI, macOS tray/Home, CLI). Matches
+/// the Go `contracts.AttentionItem`.
+struct AttentionItem: Codable, Equatable, Identifiable {
+    let id: String
+    let kind: String
+    let rank: Int
+    let subject: AttentionSubject
+    let summary: String
+    let detail: String?
+    let fix: AttentionFix
+    let since: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, rank, subject, summary, detail, fix, since
+    }
+
+    /// Convenience for tests/fixtures (the custom `init(from:)` below
+    /// suppresses the synthesised memberwise initialiser).
+    init(id: String, kind: String, rank: Int, subject: AttentionSubject, summary: String,
+         detail: String? = nil, fix: AttentionFix, since: Date) {
+        self.id = id
+        self.kind = kind
+        self.rank = rank
+        self.subject = subject
+        self.summary = summary
+        self.detail = detail
+        self.fix = fix
+        self.since = since
+    }
+
+    // Manual Codable: `since` is Go's RFC 3339 rendering, which the shared
+    // `JSONDecoder` in `fetchWrapped` cannot parse with its default
+    // `.deferredToDate` strategy (see `UsageBucket`, the precedent for this
+    // pattern — kept model-local rather than forcing a decoder-wide date
+    // strategy onto every other model).
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        kind = try container.decode(String.self, forKey: .kind)
+        rank = try container.decode(Int.self, forKey: .rank)
+        subject = try container.decode(AttentionSubject.self, forKey: .subject)
+        summary = try container.decode(String.self, forKey: .summary)
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
+        fix = try container.decode(AttentionFix.self, forKey: .fix)
+        let raw = try container.decode(String.self, forKey: .since)
+        guard let parsed = UsageBucket.parseRFC3339(raw) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .since, in: container,
+                debugDescription: "Not an RFC 3339 timestamp: \(raw)"
+            )
+        }
+        since = parsed
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(rank, forKey: .rank)
+        try container.encode(subject, forKey: .subject)
+        try container.encode(summary, forKey: .summary)
+        try container.encodeIfPresent(detail, forKey: .detail)
+        try container.encode(fix, forKey: .fix)
+        try container.encode(UsageBucket.rfc3339String(from: since), forKey: .since)
+    }
+}
+
+/// `GET /api/v1/attention` success `data` payload.
+struct AttentionResponse: Codable, Equatable {
+    let count: Int
+    let generatedAt: Date
+    let items: [AttentionItem]
+
+    enum CodingKeys: String, CodingKey {
+        case count
+        case generatedAt = "generated_at"
+        case items
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        count = try container.decode(Int.self, forKey: .count)
+        let raw = try container.decode(String.self, forKey: .generatedAt)
+        guard let parsed = UsageBucket.parseRFC3339(raw) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .generatedAt, in: container,
+                debugDescription: "Not an RFC 3339 timestamp: \(raw)"
+            )
+        }
+        generatedAt = parsed
+        items = try container.decode([AttentionItem].self, forKey: .items)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(count, forKey: .count)
+        try container.encode(UsageBucket.rfc3339String(from: generatedAt), forKey: .generatedAt)
+        try container.encode(items, forKey: .items)
+    }
+
+    /// Convenience for tests/fixtures.
+    init(count: Int, generatedAt: Date, items: [AttentionItem]) {
+        self.count = count
+        self.generatedAt = generatedAt
+        self.items = items
+    }
 }
 
 // MARK: - OAuth Status

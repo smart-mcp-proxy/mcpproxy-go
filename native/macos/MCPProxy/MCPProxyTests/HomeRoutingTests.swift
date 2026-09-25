@@ -83,7 +83,7 @@ final class HomeRoutingTests: XCTestCase {
     /// `view_logs`, `review`, `reload_hint`) must be handled explicitly, never
     /// fall into `default: break` silently.
     func testAttentionRowPerformFixHandlesEveryShippedVerb() throws {
-        let source = try homeSource()
+        let source = try homeAttentionActionSource()
         let body = try performFixBody(in: source)
 
         for verb in ["set_secret", "configure", "edit_url", "view_logs", "review", "reload_hint"] {
@@ -96,7 +96,7 @@ final class HomeRoutingTests: XCTestCase {
 
     /// Routes each verb to the tab FR-005 names — not merely somewhere.
     func testAttentionRowPerformFixRoutesToTheCorrectTab() throws {
-        let source = try homeSource()
+        let source = try homeAttentionActionSource()
         let body = try performFixBody(in: source)
 
         let configCase = try caseBody(labelContaining: "\"edit_url\"", in: body)
@@ -127,21 +127,22 @@ final class HomeRoutingTests: XCTestCase {
     /// HTTP; this pins it at the source level so a future edit cannot
     /// reintroduce the call without also breaking a readable assertion here.
     func testHomeViewNeverCallsApproveToolsOrUnquarantineServer() throws {
-        let source = try homeSource()
-        XCTAssertFalse(source.contains("approveTools("),
-                       "HomeView.swift must not call approveTools — review is a human decision on its own screen")
-        XCTAssertFalse(source.contains("unquarantineServer("),
-                       "HomeView.swift must not call unquarantineServer — review is a human decision on its own screen")
+        for (source, file) in [(try homeSource(), "HomeView.swift"), (try homeAttentionActionSource(), "HomeAttentionAction.swift")] {
+            XCTAssertFalse(source.contains("approveTools("),
+                           "\(file) must not call approveTools — review is a human decision on its own screen")
+            XCTAssertFalse(source.contains("unquarantineServer("),
+                           "\(file) must not call unquarantineServer — review is a human decision on its own screen")
+        }
     }
 
     // MARK: - Helpers
 
-    /// Isolates the body of `performFix` (AttentionRow's fix dispatcher) so
-    /// assertions about its switch cases can't accidentally match an
-    /// unrelated `case` elsewhere in HomeView.swift.
+    /// Isolates the body of `HomeAttentionAction.performFix` so assertions
+    /// about its switch cases can't accidentally match an unrelated `case`
+    /// elsewhere in the file.
     private func performFixBody(in source: String) throws -> String {
-        guard let start = source.range(of: "private func performFix") else {
-            XCTFail("could not find performFix in HomeView.swift")
+        guard let start = source.range(of: "static func performFix") else {
+            XCTFail("could not find performFix in HomeAttentionAction.swift")
             return ""
         }
         return String(source[start.lowerBound...])
@@ -181,6 +182,10 @@ final class HomeRoutingTests: XCTestCase {
 
     private func homeSource() throws -> String {
         try source(at: "MCPProxy/Views/HomeView.swift")
+    }
+
+    private func homeAttentionActionSource() throws -> String {
+        try source(at: "MCPProxy/State/HomeAttentionAction.swift")
     }
 
     private func apiClientSource() throws -> String {

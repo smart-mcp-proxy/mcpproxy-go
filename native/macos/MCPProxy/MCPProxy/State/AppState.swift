@@ -75,6 +75,13 @@ final class AppState: ObservableObject {
     @Published var totalServers: Int = 0
     @Published var totalTools: Int = 0
 
+    /// The one needs-attention list (Spec 109 FR-001), read verbatim from
+    /// `GET /api/v1/attention` and kept live over SSE `attention.changed`.
+    /// Every surface (Home section, tray "Needs Attention" group, sidebar
+    /// badge) reads this — none of them re-derives its own predicate
+    /// (`serversNeedingAttention` is retired; FR-003).
+    @Published var attention: [AttentionItem] = []
+
     // MARK: - Profiles (Profiles v2 T5)
     /// Configured profiles for the tray profile switcher.
     @Published var profiles: [ProfileSummary] = []
@@ -301,16 +308,6 @@ final class AppState: ObservableObject {
 
     // MARK: Computed properties
 
-    /// Servers that need user intervention — NOT including intentionally disabled servers.
-    /// Only: auth required (login), connection errors (restart), quarantine (approve).
-    var serversNeedingAttention: [ServerStatus] {
-        servers.filter { server in
-            guard let action = server.health?.action, !action.isEmpty else { return false }
-            // "enable" means disabled by user — intentional, not attention-worthy
-            return action != "enable"
-        }
-    }
-
     /// Spec 044 — servers that have an attached, classified diagnostic with
     /// warn/error severity. These drive the "Fix issues" menu group and the
     /// tray badge tint.
@@ -405,6 +402,19 @@ final class AppState: ObservableObject {
         if totalTools != newTools { totalTools = newTools }
         if quarantinedToolsCount != newQuarantined { quarantinedToolsCount = newQuarantined }
         if !serversLoaded { serversLoaded = true }
+    }
+
+    /// Replace the needs-attention list (Spec 109 FR-001). Only publishes
+    /// when the id set actually differs, so a debounced-but-unchanged
+    /// `attention.changed` refetch does not spuriously re-render every
+    /// subscriber (same rule as `updateServers`).
+    @MainActor
+    func updateAttention(_ items: [AttentionItem]) {
+        let newIDs = items.map(\.id)
+        let oldIDs = attention.map(\.id)
+        if newIDs != oldIDs || items != attention {
+            attention = items
+        }
     }
 
     /// Replace the recent activity list.

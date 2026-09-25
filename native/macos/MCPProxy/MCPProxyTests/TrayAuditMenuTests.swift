@@ -37,7 +37,33 @@ final class TrayAuditMenuTests: XCTestCase {
         controller.appState.coreState = .connected
         controller.appState.servers = servers
         controller.appState.profiles = profiles
+        // Spec 109 FR-001: the tray's "Needs Attention" group is built from
+        // `appState.attention` (fed from the core's GET /api/v1/attention /
+        // SSE attention.changed), not derived from `servers` in-process any
+        // more (the retired `serversNeedingAttention` predicate). This harness
+        // re-derives the same fixture-shaped items so the existing scenarios
+        // below keep exercising the menu-building code they were written for.
+        controller.appState.updateAttention(Self.attentionItems(from: servers))
         return (controller, host)
+    }
+
+    /// Mirrors the retired `AppState.serversNeedingAttention` predicate over
+    /// the `(level, summary, action)` fixtures this file already builds:
+    /// any server with a non-empty `health.action` other than "enable".
+    private static func attentionItems(from servers: [ServerStatus]) -> [AttentionItem] {
+        servers.compactMap { server in
+            guard let action = server.health?.action, !action.isEmpty, action != "enable" else { return nil }
+            let label = HealthStatus.actionLabels[action] ?? action
+            return AttentionItem(
+                id: "fixture:server:\(server.name)",
+                kind: "fixture",
+                rank: 10,
+                subject: AttentionSubject(type: "server", id: server.name, name: server.name),
+                summary: "\(server.name): \(server.health?.summary ?? action)",
+                fix: AttentionFix(verb: action, label: label, target: "/servers/\(server.name)"),
+                since: Date()
+            )
+        }
     }
 
     private func topLevelTitles(_ host: TestMenuHost) -> [String] {
