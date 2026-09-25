@@ -22,7 +22,7 @@ Profile gate evaluated after the Spec 105 server-scope gate and before upstream 
 
 ## `code_execution`
 
-Absent from `tools/list` and refused at call (`tool not found` uniform shape) when `code_execution: false`. Nested `call_tool` refusals are returned to the script as the same error text and recorded as children (`parent_id`).
+Absent from `tools/list` and refused at call (`tool not found` uniform shape) when the profile's effective code execution is off: `code_execution: false`, or unset under a `read`/`write` `max_tier` (FR-003a). Nested `call_tool` refusals are returned to the script as the same error text and recorded as children (`parent_id`).
 
 ## `set_profile` (semantics change only)
 
@@ -38,7 +38,7 @@ Input schema (argument names = REST field names):
 |---|---|---|
 | `operation` | enum `list, get, create, update, delete, rename, classify, assign, list_clients, effective_tools, explain` | all |
 | `name` | string | get, create, update, delete, rename, classify, effective_tools — for `create` the new profile's slug, for `update` the profile being replaced (= REST path `{name}` = body `name`; there is no second name argument, a rename is only `rename`) |
-| `servers`, `title`, `description`, `max_tier`, `unannotated`, `tools` (object `{allow, deny, classify}`), `code_execution` (bool; omitted = inherit), `management_tools` (bool; omitted = inherit), `switchable_to` (array; omitted = unset, `[]` = explicit none) | the `ProfileConfig` fields, same names, types and omission semantics as the REST body (data-model §1) | create, update (full replace; same validator) |
+| `servers`, `title`, `description`, `max_tier`, `unannotated`, `tools` (object `{allow, deny, classify}`), `code_execution` (bool; omitted = inherit, off under a `read`/`write` `max_tier` — FR-003a), `management_tools` (bool; omitted = inherit), `switchable_to` (array; omitted = unset, `[]` = explicit none) | the `ProfileConfig` fields, same names, types and omission semantics as the REST body (data-model §1) | create, update (full replace; same validator) |
 | `new_name` | string | rename |
 | `reassign_to` | string | delete |
 | `force` | bool | delete |

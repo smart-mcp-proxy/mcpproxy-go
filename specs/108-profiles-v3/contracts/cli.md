@@ -19,6 +19,8 @@ profile try <name> --query "..." [--limit N] [--set k=v ...]   # draft = saved p
 profile anonymous [<name> | --clear]                            # sets anonymous_profile
 ```
 
+`USED-BY` is filled for administrator credentials only (REST omits `used_by` for non-admin callers, FR-034) and prints `—` otherwise. `--code-execution inherit` clears the field: the global flag applies, except under a `read`/`write` `--max-tier`, where unset resolves **off** (FR-003a); `profile show` prints the effective value with its origin (`on (inherited)`, `off (default under max tier read)`).
+
 Enum values on the CLI are spelled exactly as in config/REST/MCP (`as_write`, `as_read`), so a value copied between surfaces works (FR-001: kebab-case is for flag **names** only); `as-write`/`as-read` are accepted as input aliases and output always uses the canonical spelling (codex round 3; an earlier revision made the kebab form canonical). `profile delete` in use without `--reassign-to/--force` exits 1 printing the `used_by` table.
 
 ## `mcpproxy client`

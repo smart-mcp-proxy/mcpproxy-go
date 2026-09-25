@@ -13,7 +13,7 @@ type ProfileConfig struct {
     MaxTier         string            `json:"max_tier,omitempty"`          // "" | read | write | destructive
     Unannotated     string            `json:"unannotated,omitempty"`       // "" | deny | as_write | as_read
     Tools           *ProfileToolRules `json:"tools,omitempty"`
-    CodeExecution   *bool             `json:"code_execution,omitempty"`    // nil = inherit global
+    CodeExecution   *bool             `json:"code_execution,omitempty"`    // nil = inherit global, except off under a read/write cap (FR-003a)
     ManagementTools *bool             `json:"management_tools,omitempty"`  // nil = legacy
     SwitchableTo    *[]string         `json:"switchable_to,omitempty"`     // nil = legacy/none (research D6); non-nil empty = explicit "none" (round-trips as [])
 }
@@ -27,9 +27,9 @@ type ProfileToolRules struct {
 
 `SwitchableTo` is a pointer because the config is saved with plain `json.Marshal` (`internal/config/config.go` `MarshalJSON`): with a `[]string` + `omitempty`, an explicitly empty `switchable_to: []` would be dropped on save and silently turn the profile legacy on the next load; `*[]string` pointing at an empty slice marshals as `[]` and survives (test T004). The same rule would apply to any future policy field whose empty value differs from unset.
 
-`IsLegacy()` = none of the six **policy** fields named in spec Definitions is set (`MaxTier`, `Unannotated`, `Tools`, `CodeExecution`, `ManagementTools`, `SwitchableTo`). `Title` and `Description` are display-only and deliberately excluded, so adding a title to a legacy profile keeps it legacy (no `hidden_by_profile`/`profile` fields appear in `retrieve_tools`, SC-003). The same predicate drives `hidden_by_profile` presence (FR-011) and `ProfileView.is_legacy`. `EffectiveUnannotated()` = explicit value, else `deny` if `MaxTier ∈ {read, write}`, else `as_read` (legacy/destructive).
+`IsLegacy()` = none of the six **policy** fields named in spec Definitions is set (`MaxTier`, `Unannotated`, `Tools`, `CodeExecution`, `ManagementTools`, `SwitchableTo`). `Title` and `Description` are display-only and deliberately excluded, so adding a title to a legacy profile keeps it legacy (no `hidden_by_profile`/`profile` fields appear in `retrieve_tools`, SC-003). The same predicate drives `hidden_by_profile` presence (FR-011) and `ProfileView.is_legacy`. `EffectiveUnannotated()` = explicit value, else `deny` if `MaxTier ∈ {read, write}`, else `as_read` (legacy/destructive). `EffectiveCodeExecution()` = explicit value, else `false` if `MaxTier ∈ {read, write}`, else `true` (legacy/destructive: the global flag decides) — the same fail-closed default (FR-003a, zcode review: the global `enable_code_execution` defaults to `true`, so plain inheritance would let a read-capped profile that leaves the field unset run scripts); the global flag is ANDed at the gate, so a profile never turns code execution on past it (FR-006). Both helpers are the only readers of the raw fields: enforcement, `tools/list` visibility, view-as, the explainer and FR-008a (iii) all use the effective values.
 
-Top-level `Config.AnonymousProfile string \`json:"anonymous_profile,omitempty"\``.
+Top-level `Config.AnonymousProfile string \`json:"anonymous_profile,omitempty"\``. Gated by FR-009a together with the policy fields: a non-empty value is fatal until `profile.PolicyEnforcementReady` flips in 108-d (the anonymous tier lands in 108-c, its non-admin management view in 108-d).
 
 Validation (`ValidateProfiles`, extended — one function, FR-007):
 
@@ -44,6 +44,7 @@ Validation (`ValidateProfiles`, extended — one function, FR-007):
 | `switchable_to` names unknown profile | warning | `profile %q switchable_to references unknown profile %q; ignored` |
 | `anonymous_profile` unknown | warning | `anonymous_profile %q does not exist; anonymous callers are denied all tools` |
 | any v3 policy field set while `profile.PolicyEnforcementReady` is false (FR-009a, builds between 108-a and 108-d) | fatal | `profiles[%d]: %s is not supported by this build (Profiles v3 enforcement incomplete)` |
+| non-empty `anonymous_profile` while `profile.PolicyEnforcementReady` is false (FR-009a) | fatal | `anonymous_profile is not supported by this build (Profiles v3 enforcement incomplete)` |
 
 ## 2. Compiled policy (per published config snapshot, `internal/profile/policy.go`)
 
@@ -57,7 +58,7 @@ type CompiledPolicy struct {
     Unannotated  string          // effective value
     allow, deny  []globMatcher   // anchored, '*' only
     classify     map[string]Tier
-    CodeExec     *bool
+    CodeExec     bool            // EffectiveCodeExecution() (FR-003a); the global gate is ANDed at the call
     Mgmt         *bool
     SwitchableTo map[string]struct{} // nil = legacy
     Fingerprint  [32]byte        // sha256 of canonical JSON of the policy fields
@@ -166,7 +167,7 @@ New `ActivityType`: `profile_change`, metadata: `{actor_kind, actor_name, surfac
 
 **AccessExplanation**: `subject{client|token|profile|anonymous}, tool, steps[{step, status (pass|fail|skip), detail}], verdict (allowed|blocked|hidden), first_failure, fixes[{step, action, target, label}]`. `fixes[]` is top-level (FR-035) because one failure can have several fixes, ordered by preference (e.g. for `tier_cap`: `allow_in_profile` → the profile editor focused on the tool, then `move_client` → the client's binding); it is empty when `verdict=allowed`. `action` enum: `allow_in_profile`, `classify_in_profile`, `add_server_to_profile`, `move_client`, `edit_token`, `enable_server`, `approve_tool`, `change_setting`, `reconnect_client`. Steps in enforcement order (identical to the refusal precedence in [contracts/refusals.md](contracts/refusals.md)): `credential, profile, server_in_scope, tool_rule, tier_cap, token_permission, global_gate, server_state, tool_approval`. `server_in_scope` covers profile servers ∩ token servers; `tier_cap` covers the unannotated policy.
 
-**ProfileView** (`GET /profiles` row): config fields + `effective_servers, tool_counts{read,write,destructive,unannotated_hidden}, used_by{clients[], tokens[], anonymous_profile: bool}, calls_24h, blocked_24h, is_legacy`.
+**ProfileView** (`GET /profiles` row): config fields + `effective_servers, tool_counts{read,write,destructive,unannotated_hidden}, used_by{clients[], tokens[], anonymous_profile: bool}, calls_24h, blocked_24h, is_legacy`. `used_by` is present for administrator callers only and **omitted** (not emptied) for every non-admin caller — it discloses other credentials' bindings, the FR-032 rule (FR-034, zcode review).
 
 ## 8. Events
 
