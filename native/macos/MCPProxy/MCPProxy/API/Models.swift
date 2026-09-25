@@ -1178,9 +1178,12 @@ struct ServerTool: Codable, Identifiable, Equatable {
     let serverName: String?
     let annotations: ToolAnnotation?
     let approvalStatus: String?
+    /// Spec 109 FR-028: server-computed (`contracts.AnnotationTier`) —
+    /// `read`|`write`|`destructive`|`unannotated`. Never derived locally.
+    let tier: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, description, annotations
+        case name, description, annotations, tier
         case serverName = "server_name"
         case approvalStatus = "approval_status"
     }
@@ -1278,9 +1281,12 @@ struct SearchTool: Codable {
     let description: String?
     let serverName: String?
     let annotations: ToolAnnotation?
+    /// Spec 109 FR-028: server-computed (`contracts.AnnotationTier`). Never
+    /// derived locally.
+    let tier: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, description, annotations
+        case name, description, annotations, tier
         case serverName = "server_name"
     }
 }
