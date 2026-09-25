@@ -32,16 +32,14 @@ func resolveAverageQueryResultSize(simulatedSize int, realAvgBytes int64, haveRe
 
 // realRetrieveToolsAvgRespBytes reads the real observed average retrieve_tools
 // response size from the runtime's usage aggregate (populated from actual
-// completed calls, internal/runtime/activity_service.go). ok is false before
-// any sized retrieve_tools call has completed.
+// completed calls via UsageAggregate.applyRetrieveToolsSizing — a dedicated
+// counter, NOT the per-tool rollup, which deliberately excludes retrieve_tools
+// as an internal built-in). ok is false before any sized, non-truncated
+// retrieve_tools call has completed.
 func (r *Runtime) realRetrieveToolsAvgRespBytes() (avgBytes int64, ok bool) {
 	snap := r.UsageSnapshot()
 	if snap == nil {
 		return 0, false
 	}
-	tu, exists := snap.Tools[toolKey("", "retrieve_tools")]
-	if !exists || tu == nil {
-		return 0, false
-	}
-	return tu.AvgRespBytes()
+	return snap.AvgRetrieveToolsRespBytes()
 }
