@@ -445,16 +445,47 @@ struct ConnectClientView: View {
                 }
             }
         case .conflict(let reason):
-            Label("\(reason) The preview has been refreshed — review it and try again.",
-                  systemImage: "arrow.triangle.2.circlepath")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .accessibilityIdentifier(ConnectClientAccessibility.status)
+            VStack(alignment: .leading, spacing: 2) {
+                Label("\(reason) The preview has been refreshed — review it and try again.",
+                      systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier(ConnectClientAccessibility.status)
+                conflictDisplayPathRow
+            }
         case .failed(let reason):
-            Label(reason, systemImage: "xmark.octagon.fill")
+            VStack(alignment: .leading, spacing: 2) {
+                Label(reason, systemImage: "xmark.octagon.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(ConnectClientAccessibility.status)
+                conflictDisplayPathRow
+                // Spec 109-b FR-037/FR-042 (review round 3 finding): the
+                // legacy `already_exists` failure means an entry is already
+                // there under this path — the reload hint tells the user
+                // that reloading/restarting the client is what would pick it
+                // up, the same information a successful connect shows above.
+                if let reloadHint = model.actionReloadHint, !reloadHint.isEmpty {
+                    Label(reloadHint, systemImage: "arrow.clockwise")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.reloadHint)
+                }
+            }
+        }
+    }
+
+    /// Shared with the `.conflict`/`.failed` branches above: the core fills
+    /// `display_path` on every ConnectResult branch, including a 409
+    /// conflict (review round 3 finding) — this used to be discarded before
+    /// reaching the model, so neither branch could ever show it.
+    @ViewBuilder
+    private var conflictDisplayPathRow: some View {
+        if let displayPath = model.actionDisplayPath, !displayPath.isEmpty {
+            Text(displayPath)
                 .font(.caption)
-                .foregroundStyle(.red)
-                .accessibilityIdentifier(ConnectClientAccessibility.status)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(ConnectClientAccessibility.resultConfigPath)
         }
     }
 

@@ -3,6 +3,7 @@ package connect
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -183,6 +184,38 @@ func TestConnectResultCarriesDisplayPathAndReloadHint(t *testing.T) {
 	assertHintAndPath(t, dres, home)
 }
 
+// TestDisconnectReloadHint_DescribesRemovalNotLoading is review round 3's
+// finding: every ClientDef.ReloadHint is worded for a fresh connect (e.g.
+// "Reload the Cursor window (or restart Cursor) to load MCPProxy"), and
+// Disconnect's deferred fill used to copy that text verbatim onto a
+// successful "removed" result — so a user who just disconnected Cursor read
+// an instruction to reload it "to load MCPProxy" right after the entry was
+// taken out. A successful disconnect's hint must describe applying the
+// removal, not loading something that is no longer configured.
+func TestDisconnectReloadHint_DescribesRemovalNotLoading(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	svc := NewServiceWithHome("127.0.0.1:8080", "", home)
+
+	if _, err := svc.Connect("cursor", "", false); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	res, err := svc.Disconnect("cursor", "")
+	if err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	if res.Action != "removed" {
+		t.Fatalf("expected action=removed, got %s", res.Action)
+	}
+	if res.ReloadHint == "" {
+		t.Fatal("ReloadHint must not be empty")
+	}
+	if strings.Contains(res.ReloadHint, "to load MCPProxy") {
+		t.Errorf("ReloadHint = %q, must not read as loading MCPProxy after it was just removed", res.ReloadHint)
+	}
+}
+
 // TestPreviewCarriesDisplayPath asserts GET /connect/{client}/preview exposes
 // the same DisplayPath as ClientStatus/ConnectResult (FR-037), so the
 // pre-connect preview pane and the post-connect result render the same
@@ -204,6 +237,93 @@ func TestPreviewCarriesDisplayPath(t *testing.T) {
 	if preview.DisplayPath == preview.ConfigPath {
 		t.Errorf("DisplayPath %q should differ from the full ConfigPath %q under a fake home", preview.DisplayPath, preview.ConfigPath)
 	}
+}
+
+// TestUndoCarriesDisplayPathAndReloadHint is review round 3's finding: unlike
+// Connect and Disconnect, Undo's five ConnectResult literals (the two
+// refusal branches — backup gone, config drifted — and the two outcome
+// branches — file deleted, backup restored) never set DisplayPath or
+// ReloadHint, contradicting ConnectResult.DisplayPath's own doc comment
+// ("Populated for every result whose ConfigPath is known"). A caller driving
+// a UI row off an undo result would see both fields empty on every branch.
+func TestUndoCarriesDisplayPathAndReloadHint(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	svc := NewServiceWithHome("127.0.0.1:8080", "", home)
+
+	// Branch: connect created the file (no prior backup) — undo deletes it.
+	created, err := svc.Connect("cursor", "", false)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if created.BackupPath != "" {
+		t.Fatalf("precondition: expected a fresh create with no backup, got backup=%q", created.BackupPath)
+	}
+	deleted, err := svc.Undo("cursor", "", "")
+	if err != nil {
+		t.Fatalf("Undo (delete branch): %v", err)
+	}
+	if deleted.Action != "deleted" {
+		t.Fatalf("expected action=deleted, got %s message=%s", deleted.Action, deleted.Message)
+	}
+	assertHintAndPath(t, deleted, home)
+
+	// Branch: undo refuses — the named backup does not exist ("not_found").
+	// FR-037 promises DisplayPath/ReloadHint on every branch whose ConfigPath
+	// is known, refusals included (mirroring Connect's already_exists/
+	// precondition_failed branches, both covered above).
+	notFound, err := svc.Undo("cursor", "", "mcp.json.bak.does-not-exist")
+	if err != nil {
+		t.Fatalf("Undo (not_found branch): %v", err)
+	}
+	if notFound.Action != "not_found" {
+		t.Fatalf("expected action=not_found, got %s message=%s", notFound.Action, notFound.Message)
+	}
+	assertHintAndPath(t, notFound, home)
+
+	// Recreate, then force-overwrite the same entry so THIS connect takes a
+	// real backup (backupFile only backs up a file that already exists).
+	if _, err := svc.Connect("cursor", "", false); err != nil {
+		t.Fatalf("Connect (recreate): %v", err)
+	}
+	updated, err := svc.Connect("cursor", "", true)
+	if err != nil {
+		t.Fatalf("Connect (force update): %v", err)
+	}
+	if updated.BackupPath == "" {
+		t.Fatal("precondition: expected the force-update to take a real backup")
+	}
+
+	// Branch: undo restores from that backup ("restored") — the happy path
+	// of the byte-for-byte revert.
+	restored, err := svc.Undo("cursor", "", filepath.Base(updated.BackupPath))
+	if err != nil {
+		t.Fatalf("Undo (restored branch): %v", err)
+	}
+	if restored.Action != "restored" {
+		t.Fatalf("expected action=restored, got %s message=%s", restored.Action, restored.Message)
+	}
+	assertHintAndPath(t, restored, home)
+
+	// Branch: undo refuses — the current file drifted since connect
+	// ("conflict"). Force-update again for a fresh backup, then hand-edit the
+	// live file so the drift check trips.
+	updated2, err := svc.Connect("cursor", "", true)
+	if err != nil {
+		t.Fatalf("Connect (force update 2): %v", err)
+	}
+	cfgPath := svc.configPath("cursor")
+	if err := os.WriteFile(cfgPath, []byte(`{"mcpServers":{}}`), 0o644); err != nil {
+		t.Fatalf("drift the live file: %v", err)
+	}
+	conflict, err := svc.Undo("cursor", "", filepath.Base(updated2.BackupPath))
+	if err != nil {
+		t.Fatalf("Undo (conflict branch): %v", err)
+	}
+	if conflict.Action != "conflict" {
+		t.Fatalf("expected action=conflict, got %s message=%s", conflict.Action, conflict.Message)
+	}
+	assertHintAndPath(t, conflict, home)
 }
 
 func assertHintAndPath(t *testing.T, res *ConnectResult, home string) {

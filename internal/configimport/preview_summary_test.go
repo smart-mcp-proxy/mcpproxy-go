@@ -141,6 +141,41 @@ func TestImportedServer_AutoProtocolWithCommandIsStdio(t *testing.T) {
 	}
 }
 
+// TestImportedServer_NeitherCommandNorURLIsStdio is review round 3's
+// isStdio finding: a hand-edited entry declaring `"type": "auto"` (or an
+// empty protocol) with NEITHER a command NOR a url still resolves to stdio
+// under the runtime's own transport selector,
+// internal/transport.DetermineTransportType, whose final fallback ("default
+// to stdio") fires whenever neither Command nor URL is set. The preview's
+// isStdio heuristic disagreed here — it required Command!="" for the
+// ""/"auto" branch — tagging this "remote" instead of "local process" even
+// though the entry can't connect as either.
+func TestImportedServer_NeitherCommandNorURLIsStdio(t *testing.T) {
+	content := []byte(`{
+		"mcpServers": {
+			"weird": {
+				"type": "auto"
+			}
+		}
+	}`)
+
+	result, err := Import(content, &ImportOptions{FormatHint: FormatCursor})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(result.Imported) != 1 {
+		t.Fatalf("expected 1 imported server, got %d", len(result.Imported))
+	}
+	imported := result.Imported[0]
+
+	if !containsTag(imported.Tags, "local process") {
+		t.Errorf("Tags = %v, want to contain %q for protocol \"auto\" with neither command nor url, matching DetermineTransportType's stdio default", imported.Tags, "local process")
+	}
+	if containsTag(imported.Tags, "remote") {
+		t.Errorf("Tags = %v, must not contain %q for protocol \"auto\" with neither command nor url", imported.Tags, "remote")
+	}
+}
+
 // TestDescribeFields_SecretLikeAndEmptyOrPlaceholder is T030's per-env/header
 // classification: a secret-shaped name with an empty or placeholder value is
 // flagged on both axes; an ordinary populated value is flagged on neither.

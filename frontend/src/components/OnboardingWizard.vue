@@ -984,6 +984,17 @@ async function onOpened() {
   // in THIS wizard session) — a reopened wizard starts without undo state.
   for (const k of Object.keys(undoPreviews)) delete undoPreviews[k]
   for (const k of Object.keys(undoOpen)) delete undoOpen[k]
+  // Review round 3 finding: the Servers step's import selection is
+  // session-scoped too. The wizard is mounted once by Dashboard.vue and only
+  // toggled via `show` (never unmounted), so without this reset an
+  // unchecked-and-confirmed "skip quarantine" choice from one session would
+  // silently carry over — unconfirmed — into the next reopen, and a stale
+  // selection/result message from before would flash before the new
+  // previews load.
+  selection.value = new Set()
+  selectionImportMessage.value = ''
+  selectionImportOk.value = false
+  quarantineOnImport.value = true
   // The requested tab applies immediately so the wizard never paints the
   // wrong step while the fetches below are in flight.
   if (requested) activeTab.value = requested
@@ -1310,6 +1321,11 @@ async function onBulkImport(quarantine: boolean) {
     }
     selectionImportOk.value = errors.length === 0
     if (errors.length === 0) {
+      // Captured BEFORE clearing selection below: conflictCount is a
+      // computed derived from `selection`, so reading it after the clear
+      // (review round 3 finding) always evaluates to 0 and the toast never
+      // reports a rename count even when the footer just showed one.
+      const renamedCount = conflictCount.value
       const dest = quarantine ? 'into quarantine' : 'as active'
       let msg = `✓ Imported ${totalImported} server${totalImported === 1 ? '' : 's'} ${dest}`
       if (totalSkipped > 0) msg += ` · ${totalSkipped} skipped (already configured)`
@@ -1324,7 +1340,7 @@ async function onBulkImport(quarantine: boolean) {
       systemStore.addToast({
         type: 'success',
         title: 'Import complete',
-        message: `${totalImported} server${totalImported === 1 ? '' : 's'}${conflictCount.value > 0 ? ` (${conflictCount.value} renamed)` : ''}`,
+        message: `${totalImported} server${totalImported === 1 ? '' : 's'}${renamedCount > 0 ? ` (${renamedCount} renamed)` : ''}`,
       })
     } else {
       selectionImportMessage.value = `Some imports failed: ${errors.join(' · ')}`

@@ -13,7 +13,14 @@ enum APIClientError: Error, LocalizedError {
     /// `precondition_failed` (the previewed state drifted — re-preview) versus
     /// `already_exists` (the legacy conflict). Callers must be able to tell them
     /// apart without string matching (contracts §2, research D9).
-    case connectConflict(action: String, message: String)
+    ///
+    /// `displayPath`/`reloadHint` (review round 3 finding): the core fills
+    /// both on every ConnectResult branch, conflicts included (FR-037/
+    /// FR-042's "populated for every result whose ConfigPath is known"), but
+    /// `connectConflict(from:)` used to keep only `action`/`message` and drop
+    /// them — so no conflict/failure UI state could ever show the path or
+    /// reload hint the success path already renders.
+    case connectConflict(action: String, message: String, displayPath: String? = nil, reloadHint: String? = nil)
     /// An administrative write was attempted while the app is not talking to the
     /// core over its private local socket. Never sent, by design.
     case socketRequired
@@ -30,7 +37,7 @@ enum APIClientError: Error, LocalizedError {
             return "No data in response"
         case .invalidURL(let url):
             return "Invalid URL: \(url)"
-        case .connectConflict(_, let message):
+        case .connectConflict(_, let message, _, _):
             return message
         case .socketRequired:
             return "This action requires MCPProxy's private local socket; "
@@ -593,7 +600,9 @@ actor APIClient {
         let errorText = (try? decoder.decode(APIErrorResponse.self, from: data))?.error
         return .connectConflict(
             action: result?.action ?? "conflict",
-            message: result?.message ?? errorText ?? "The client configuration changed."
+            message: result?.message ?? errorText ?? "The client configuration changed.",
+            displayPath: result?.displayPath,
+            reloadHint: result?.reloadHint
         )
     }
 

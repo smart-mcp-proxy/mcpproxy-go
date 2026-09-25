@@ -282,6 +282,21 @@ func DisplayPath(path, homeDir string) string {
 	return path
 }
 
+// disconnectReloadHint adapts a client's connect-oriented ReloadHint text
+// (every entry in clientRegistry is worded "...to load MCPProxy") for a
+// disconnect/undo outcome, where the entry was just removed rather than
+// added — "reload ... to load MCPProxy" right after removing it reads as
+// though the removal did not happen (review round 3 finding). The reload
+// ACTION (restart/reload the client) is unchanged; only the reason is
+// reworded.
+func disconnectReloadHint(connectHint string) string {
+	const suffix = "to load MCPProxy"
+	if trimmed, ok := strings.CutSuffix(connectHint, suffix); ok {
+		return trimmed + "for this change to take effect"
+	}
+	return connectHint
+}
+
 // serversMapPath returns the sequence of nested JSON/TOML keys leading to a
 // client's servers map, for the one client whose ServerKey is not a literal
 // top-level key. Returns nil for every other client, telling

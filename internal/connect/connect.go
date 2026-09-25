@@ -632,10 +632,15 @@ func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, e
 	// this call returns, including the OpenCode alternate-candidate branch
 	// below (which returns directly rather than falling through to the
 	// bottom `return`).
+	//
+	// Review round 3 finding: every ClientDef.ReloadHint is worded for a
+	// fresh connect ("...to load MCPProxy"). Disconnect just removed the
+	// entry, so that wording is copied through disconnectReloadHint, which
+	// rephrases it for removal instead of loading.
 	defer func() {
 		if res != nil && client != nil {
 			res.DisplayPath = DisplayPath(res.ConfigPath, s.homeDir)
-			res.ReloadHint = client.ReloadHint
+			res.ReloadHint = disconnectReloadHint(client.ReloadHint)
 		}
 	}()
 

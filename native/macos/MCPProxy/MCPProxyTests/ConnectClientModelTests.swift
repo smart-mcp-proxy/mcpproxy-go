@@ -334,7 +334,9 @@ final class ConnectClientModelTests: XCTestCase {
     func testAPreconditionFailureConflictsAndRePreviewsExactlyOnce() async {
         let source = FakeConnectSource()
         source.connectResults = [.failure(APIClientError.connectConflict(
-            action: "precondition_failed", message: "the config changed since the preview"))]
+            action: "precondition_failed", message: "the config changed since the preview",
+            displayPath: "~/.claude.json",
+            reloadHint: "Run /mcp in Claude Code (or restart it) to load MCPProxy"))]
         let model = makeModel(source)
         await model.select("claude-code")
         XCTAssertEqual(source.previewCalls.count, 1)
@@ -347,6 +349,12 @@ final class ConnectClientModelTests: XCTestCase {
         XCTAssertEqual(reason, "the config changed since the preview")
         XCTAssertEqual(source.connectCalls.count, 1, "the write must not be retried")
         XCTAssertEqual(source.previewCalls.count, 2, "exactly one automatic re-preview")
+        // Review round 3 finding: connectConflict(from:) used to discard the
+        // core's display_path/reload_hint (filled on every ConnectResult
+        // branch, conflicts included) before it ever reached the model.
+        XCTAssertEqual(model.actionDisplayPath, "~/.claude.json")
+        XCTAssertEqual(model.actionReloadHint,
+                       "Run /mcp in Claude Code (or restart it) to load MCPProxy")
     }
 
     /// The legacy 409 cannot occur in this flow (a replace always sends force),
@@ -354,7 +362,9 @@ final class ConnectClientModelTests: XCTestCase {
     func testALegacyAlreadyExistsConflictIsAFailureNotARePreview() async {
         let source = FakeConnectSource()
         source.connectResults = [.failure(APIClientError.connectConflict(
-            action: "already_exists", message: "entry already exists"))]
+            action: "already_exists", message: "entry already exists",
+            displayPath: "~/.cursor/mcp.json",
+            reloadHint: "Reload the Cursor window (or restart Cursor) to load MCPProxy"))]
         let model = makeModel(source)
         await model.select("claude-code")
 
@@ -365,6 +375,37 @@ final class ConnectClientModelTests: XCTestCase {
         }
         XCTAssertEqual(message, "entry already exists")
         XCTAssertEqual(source.previewCalls.count, 1, "must not re-preview and loop")
+        // Review round 3 finding: the legacy already_exists failure means an
+        // entry is already there under this path — the path/reload hint must
+        // reach the model the same way the precondition_failed conflict's do.
+        XCTAssertEqual(model.actionDisplayPath, "~/.cursor/mcp.json")
+        XCTAssertEqual(model.actionReloadHint,
+                       "Reload the Cursor window (or restart Cursor) to load MCPProxy")
+    }
+
+    /// A generic failure (not a `connectConflict`) must not carry over a
+    /// stale path/hint from an earlier action — beginRequest() resets both.
+    func testAGenericFailureCarriesNoStaleDisplayPathOrReloadHint() async {
+        let source = FakeConnectSource()
+        source.connectResults = [
+            .failure(APIClientError.connectConflict(
+                action: "already_exists", message: "entry already exists",
+                displayPath: "~/.cursor/mcp.json", reloadHint: "Reload Cursor")),
+            .failure(APIClientError.httpError(statusCode: 500, message: "internal error")),
+        ]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        await model.connect()
+        XCTAssertNotNil(model.actionDisplayPath, "precondition: the first failure set a path")
+
+        await model.connect()
+
+        guard case .failed = model.action else {
+            return XCTFail("expected .failed, got \(model.action)")
+        }
+        XCTAssertNil(model.actionDisplayPath, "a generic failure must not keep the prior action's path")
+        XCTAssertNil(model.actionReloadHint, "a generic failure must not keep the prior action's hint")
     }
 
     func testAFailedConnectKeepsTheCoreMessage() async {
@@ -608,6 +649,54 @@ final class ConnectClientModelTests: XCTestCase {
 
         XCTAssertEqual(model.rows.first?.stateLabel, "Connected as \"my-proxy\"")
         XCTAssertEqual(model.rows.first?.connected, true)
+    }
+
+    /// Review round 3 finding: `ClientStatus.reloadHint` is decoded and
+    /// unit-tested (APIClientTests) but nothing in the row builder ever reads
+    /// it — the same "decoded but never rendered" defect class round 1 found
+    /// and fixed on ConnectPreview/ConnectResult. A connected row must surface
+    /// its reload hint, exactly like the Web UI wizard's Verify step already
+    /// does for every connected client (Spec 109-b FR-037/FR-042): most
+    /// clients only read their config at startup, so a connect that succeeded
+    /// is not yet a client that has picked it up.
+    func testAConnectedRowSurfacesItsReloadHint() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "cursor", name: "Cursor", exists: true)
+        ])]
+        source.detailResults = [.success(FakeConnectSource.client(
+            id: "cursor", name: "Cursor", exists: true, connected: true,
+            accessState: .accessible, serverName: "mcpproxy",
+            reloadHint: "Reload the Cursor window (or restart Cursor) to load MCPProxy"))]
+        let model = makeModel(source)
+        await model.loadList()
+
+        await model.select("cursor")
+
+        XCTAssertEqual(model.rows.first?.note,
+                       "Reload the Cursor window (or restart Cursor) to load MCPProxy")
+        XCTAssertEqual(model.rows.first?.noteIsWarning, false)
+    }
+
+    /// A real caveat (e.g. a bridge requirement) still outranks the reload
+    /// hint — the same priority `testACoreNoteOutranksTheLookedForHint` pins
+    /// for the not-connected case.
+    func testACoreNoteOutranksTheReloadHintToo() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "claude-desktop", exists: true)
+        ])]
+        source.detailResults = [.success(FakeConnectSource.client(
+            id: "claude-desktop", exists: true, connected: true,
+            note: "Requires the bundled stdio bridge",
+            reloadHint: "Restart Claude Desktop to load MCPProxy"))]
+        let model = makeModel(source)
+        await model.loadList()
+
+        await model.select("claude-desktop")
+
+        XCTAssertEqual(model.rows.first?.note, "Requires the bundled stdio bridge")
+        XCTAssertEqual(model.rows.first?.noteIsWarning, true)
     }
 
     /// FR-009: the two unreadable access states get their defined labels, and

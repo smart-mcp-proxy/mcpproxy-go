@@ -131,14 +131,20 @@ func summarizeServer(server *config.ServerConfig, envFields, headerFields []Impo
 	// "type": "stdio" but still carries a url field runs as stdio — and an
 	// empty OR "auto" protocol with a command also resolves to stdio
 	// (DetermineTransportType checks Command before URL and treats "auto"
-	// identically to ""), independent of whether a URL is also present.
+	// identically to ""), independent of whether a URL is also present. When
+	// an empty/"auto" protocol has NEITHER a command NOR a url,
+	// DetermineTransportType falls through both auto-detect checks to its
+	// final "default to stdio" branch — so that combination is stdio too,
+	// not remote (review round 3 finding: a hand-edited `{"type":"auto"}`
+	// entry with no command/url was tagged "remote" although it cannot
+	// connect as either).
 	// internal/config/config.go's own static validation is a different,
 	// narrower rule (Protocol=="stdio" || (Protocol=="" && Command!=""), no
 	// "auto" case, no URL condition either way) that governs config
 	// acceptance, not transport selection — DetermineTransportType is what
 	// this preview needs to agree with.
 	isStdio := server.Protocol == "stdio" ||
-		((server.Protocol == "" || server.Protocol == "auto") && server.Command != "")
+		((server.Protocol == "" || server.Protocol == "auto") && (server.Command != "" || server.URL == ""))
 
 	if isStdio {
 		parts := append([]string{server.Command}, oauth.LiveRedaction.Argv(server.Args)...)

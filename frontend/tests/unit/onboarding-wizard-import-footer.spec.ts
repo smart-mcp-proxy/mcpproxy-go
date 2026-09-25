@@ -175,6 +175,27 @@ describe('OnboardingWizard import footer (Spec 109-ux-navigation-consistency FR-
     expect((wrapper.find('[data-test="footer-quarantine-checkbox"]').element as HTMLInputElement).checked).toBe(true)
   })
 
+  // Review round 3 finding: the test above only checks the DOM `checked`
+  // state after cancel — it never imports afterward. onToggleQuarantineOnImport
+  // reverts `target.checked` on cancel but returns before touching the
+  // `quarantineOnImport` ref; a regression that set the ref BEFORE the
+  // confirm() call (and only reverted the DOM on cancel) would leave that
+  // test green while still sending skip_quarantine: true.
+  it('never sends skip_quarantine after the uncheck is cancelled', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { wrapper } = await openServersTab(['memory'])
+    await selectFirstServer(wrapper)
+
+    await wrapper.find('[data-test="footer-quarantine-checkbox"]').setValue(false)
+
+    await wrapper.find('[data-test="bulk-import-primary"]').trigger('click')
+    await flushPromises()
+
+    expect(api.importServersFromPath).toHaveBeenCalledWith(
+      expect.objectContaining({ skip_quarantine: false })
+    )
+  })
+
   it('unchecks the quarantine checkbox once the confirmation is accepted', async () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { wrapper } = await openServersTab(['memory'])
@@ -221,6 +242,48 @@ describe('OnboardingWizard import footer (Spec 109-ux-navigation-consistency FR-
 
     expect(api.importServersFromPath).toHaveBeenCalledWith(
       expect.objectContaining({ skip_quarantine: true })
+    )
+  })
+
+  // Review round 3 finding: onOpened() (Spec 078 US1-3) resets previews,
+  // backups and undo state on every reopen but left quarantineOnImport,
+  // selection and selectionImportMessage untouched. The wizard is mounted
+  // once by Dashboard.vue and only toggled via `show` (never unmounted), so
+  // an unchecked-and-confirmed "skip quarantine" choice from one session used
+  // to carry over — unconfirmed — into the next reopen of the same tab.
+  it('resets the quarantine checkbox and selection on reopen, without asking again', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { wrapper } = await openServersTab(['memory'])
+    await selectFirstServer(wrapper)
+    await wrapper.find('[data-test="footer-quarantine-checkbox"]').setValue(false)
+    expect((wrapper.find('[data-test="footer-quarantine-checkbox"]').element as HTMLInputElement).checked).toBe(false)
+
+    // Close the wizard, then reopen it — the component stays mounted the
+    // whole time, exactly like Dashboard.vue's `:show="wizardOpen"` binding.
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    await wrapper.find('[data-test="tab-servers"]').trigger('click')
+    await flushPromises()
+
+    const checkbox = wrapper.find('[data-test="footer-quarantine-checkbox"]')
+    expect(checkbox.exists()).toBe(true)
+    expect((checkbox.element as HTMLInputElement).checked).toBe(true)
+
+    // The reset must not itself prompt — only an explicit uncheck should.
+    confirmSpy.mockClear()
+    expect(confirmSpy).not.toHaveBeenCalled()
+
+    // Selection is cleared too: the primary import action is disabled again.
+    expect(wrapper.find('[data-test="bulk-import-primary"]').attributes('disabled')).toBeDefined()
+
+    // And importing now sends skip_quarantine: false — the stale unchecked
+    // choice from before the reopen must never reach the API silently.
+    await selectFirstServer(wrapper)
+    await wrapper.find('[data-test="bulk-import-primary"]').trigger('click')
+    await flushPromises()
+    expect(api.importServersFromPath).toHaveBeenCalledWith(
+      expect.objectContaining({ skip_quarantine: false })
     )
   })
 
