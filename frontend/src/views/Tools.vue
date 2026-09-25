@@ -784,7 +784,12 @@ const hasActiveFilters = computed(() =>
 // these — it never sets filterApproval.
 type StatCard = 'total' | 'enabled' | 'disabled'
 
-const activeStatCard = computed<StatCard>(() => {
+// Review round 4: Total must only read as active when the table is truly
+// unfiltered. An approval-only filter (filterStatus empty) still narrows the
+// table, so none of Total/Enabled/Disabled correctly describes it — return
+// null rather than defaulting to 'total'.
+const activeStatCard = computed<StatCard | null>(() => {
+  if (filterApproval.value) return null
   if (filterStatus.value === 'enabled') return 'enabled'
   if (filterStatus.value === 'disabled') return 'disabled'
   return 'total'
