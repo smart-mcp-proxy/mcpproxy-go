@@ -201,6 +201,50 @@
           <div v-if="loadingImportSources" class="flex justify-center py-4">
             <span class="loading loading-spinner loading-md"></span>
           </div>
+          <!-- Spec 109-ux-navigation-consistency US7 Acceptance Scenario 4:
+               nothing left to import, but the step isn't done — everything
+               imported so far is still quarantined. The generic "Nothing to
+               import" dead end below is wrong here: there IS something to do,
+               it's reviewing what was already brought in. -->
+          <div
+            v-else-if="importSourcesWithServers.length === 0 && !onboarding.hasUsableServer && quarantinedServersAwaitingReview.length > 0"
+            class="border border-base-300 rounded-lg mb-5"
+            data-test="servers-inline-review"
+          >
+            <div class="px-4 pt-4 pb-2 text-sm">
+              <span class="font-semibold">Approve a server to finish this step.</span>
+              <span class="opacity-70">
+                {{ quarantinedServersAwaitingReview.length }}
+                imported server{{ quarantinedServersAwaitingReview.length === 1 ? '' : 's' }}
+                {{ quarantinedServersAwaitingReview.length === 1 ? 'is' : 'are' }} waiting in quarantine —
+                review its tools before it can run.
+              </span>
+            </div>
+            <ul class="divide-y divide-base-300">
+              <li
+                v-for="s in quarantinedServersAwaitingReview"
+                :key="s.name"
+                class="flex items-center justify-between gap-3 px-4 py-2"
+                :data-test="`servers-review-row-${s.name}`"
+              >
+                <span class="min-w-0 flex-1">
+                  <span class="text-sm font-medium truncate block">{{ s.name }}</span>
+                  <span class="text-[11px] opacity-50 font-mono truncate block">{{ s.url || s.command || '' }}</span>
+                </span>
+                <span class="badge badge-warning badge-sm font-normal shrink-0">Quarantined</span>
+                <router-link
+                  :to="`/servers/${encodeURIComponent(s.name)}`"
+                  class="btn btn-primary btn-xs shrink-0"
+                  :data-test="`servers-review-link-${s.name}`"
+                >
+                  Review
+                </router-link>
+              </li>
+            </ul>
+            <p v-if="serverAddedJustNow" class="text-xs text-success px-4 pb-3 pt-1">
+              ✓ Server added — it's currently in quarantine. Review it on the Servers page after this wizard.
+            </p>
+          </div>
           <!-- Nothing to import. Step 2 is otherwise entirely about picking
                servers out of an existing MCP setup, which leaves a user who has
                none — the exact user this wizard matters most to — staring at a
@@ -790,6 +834,22 @@ const importSourcesWithServers = computed(() =>
   importSources.value.filter(s => s.serverCount > 0)
 )
 
+// Spec 109-ux-navigation-consistency US7 Acceptance Scenario 4: when there is
+// nothing left to import (every client config server is already on this
+// instance) but has_usable_server is still false because everything imported
+// sits in quarantine, the step must not fall through to the generic
+// "Nothing to import" dead end — that copy ("Start from the registry
+// instead, or add a server yourself") is actively wrong when servers already
+// exist and only need a review. This is a scoped stand-in for the full
+// cross-surface review screen (Spec 109-ux-navigation-consistency User
+// Story 2 / T093), which lands in a later PR and will replace it; until
+// then this list only surfaces the servers and links to the existing,
+// fully-featured Approve flow on the Servers page rather than
+// reimplementing its scan-gate/force-approve confirmation here.
+const quarantinedServersAwaitingReview = computed(() =>
+  serversStore.quarantinedServers
+)
+
 function selectionKey(path: string, name: string) {
   return `${path}::${name}`
 }
@@ -1006,6 +1066,13 @@ async function onOpened() {
     fetchImportSources(),
     fetchRecentActivity(),
     fetchActivation(),
+    // Spec 109-ux-navigation-consistency US7 Acceptance Scenario 4: the
+    // Servers step's inline review list (below) reads serversStore directly,
+    // so it needs a fresh fetch on every open rather than relying on some
+    // other already-mounted view (Servers.vue, Dashboard.vue) having
+    // populated the shared store first — the wizard can be the first thing
+    // to touch it, e.g. right after a fresh-instance import.
+    serversStore.fetchServers(),
   ])
   // Superseded (or closed) while we were loading — leave the wizard alone.
   if (seq !== openSeq || !props.show) return
