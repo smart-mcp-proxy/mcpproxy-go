@@ -338,6 +338,13 @@ actor APIClient {
         /// Every config location the core's existence check consults, highest
         /// precedence first (e.g. OpenCode's opencode.jsonc then opencode.json).
         let checkedPaths: [String]?
+        /// `config_path` with the home directory shortened to "~" (Spec 109-b
+        /// FR-037), for display; nil for a core that predates this field.
+        let displayPath: String?
+        /// This client's instruction for making a freshly-written config take
+        /// effect (Spec 109-b FR-037/FR-042), e.g. "Restart Cursor to load
+        /// MCPProxy". Nil for an unsupported client or an older core.
+        let reloadHint: String?
 
         enum CodingKeys: String, CodingKey {
             case clientId = "id"
@@ -348,11 +355,17 @@ actor APIClient {
             case accessState = "access_state"
             case remediation
             case checkedPaths = "checked_paths"
+            case displayPath = "display_path"
+            case reloadHint = "reload_hint"
         }
 
         /// Name to render; a core newer than the app may report a client this
         /// build never heard of, which still renders by name (FR-009).
         var displayName: String { name.isEmpty ? clientId : name }
+
+        /// The path to show in the UI: the home-shortened form when the core
+        /// sent one, falling back to the full path for an older core.
+        var effectiveDisplayPath: String { displayPath ?? configPath }
 
         /// SF Symbol for the row. The core's `icon` is a registry slug, so an
         /// unknown one — the newer-core case — resolves to the generic symbol
@@ -386,13 +399,62 @@ actor APIClient {
         let serverName: String?
         let action: String?
         let message: String?
+        /// `config_path` with the home directory shortened to "~" (Spec 109-b
+        /// FR-037). Populated on every branch, not only success; nil for a
+        /// core that predates this field.
+        let displayPath: String?
+        /// This client's instruction for making the write take effect (Spec
+        /// 109-b FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Nil
+        /// for an unsupported client or a core that predates this field.
+        let reloadHint: String?
 
         enum CodingKeys: String, CodingKey {
             case success, client, action, message
             case configPath = "config_path"
             case backupPath = "backup_path"
             case serverName = "server_name"
+            case displayPath = "display_path"
+            case reloadHint = "reload_hint"
         }
+
+        init(
+            success: Bool,
+            client: String? = nil,
+            configPath: String? = nil,
+            backupPath: String? = nil,
+            serverName: String? = nil,
+            action: String? = nil,
+            message: String? = nil,
+            displayPath: String? = nil,
+            reloadHint: String? = nil
+        ) {
+            self.success = success
+            self.client = client
+            self.configPath = configPath
+            self.backupPath = backupPath
+            self.serverName = serverName
+            self.action = action
+            self.message = message
+            self.displayPath = displayPath
+            self.reloadHint = reloadHint
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            success = try container.decodeIfPresent(Bool.self, forKey: .success) ?? false
+            client = try container.decodeIfPresent(String.self, forKey: .client)
+            configPath = try container.decodeIfPresent(String.self, forKey: .configPath)
+            backupPath = try container.decodeIfPresent(String.self, forKey: .backupPath)
+            serverName = try container.decodeIfPresent(String.self, forKey: .serverName)
+            action = try container.decodeIfPresent(String.self, forKey: .action)
+            message = try container.decodeIfPresent(String.self, forKey: .message)
+            displayPath = try container.decodeIfPresent(String.self, forKey: .displayPath)
+            reloadHint = try container.decodeIfPresent(String.self, forKey: .reloadHint)
+        }
+
+        /// The path to show in the UI: the home-shortened form when the core
+        /// sent one, falling back to the full path for an older core.
+        var effectiveDisplayPath: String? { displayPath ?? configPath }
     }
 
     /// Response wrapper for the client list endpoint.

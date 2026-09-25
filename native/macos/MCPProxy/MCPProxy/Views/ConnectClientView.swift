@@ -67,6 +67,9 @@ enum ConnectClientAccessibility {
     static let status = "connect-client-status"
     static let waiting = "connect-client-waiting"
     static let transportNotice = "connect-client-transport-notice"
+    /// Spec 109-b FR-037/FR-042: the client's reload hint shown after a
+    /// successful connect/disconnect.
+    static let reloadHint = "connect-client-reload-hint"
 
     /// Identifier of one client row.
     static func row(_ clientId: String) -> String { "connect-client-row-\(clientId)" }
@@ -76,7 +79,7 @@ enum ConnectClientAccessibility {
         list, preview, entryText, configPath, existingSummary, safetyNet,
         credentialNotice, refusal, connectBlocked, entryNameField, advancedDisclosure,
         connectButton, undoButton, disconnectButton, disconnectConfirm,
-        closeButton, status, waiting, transportNotice
+        closeButton, status, waiting, transportNotice, reloadHint
     ]
 }
 
@@ -411,10 +414,21 @@ struct ConnectClientView: View {
         case .idle, .inFlight:
             EmptyView()
         case .succeeded(let result):
-            Label(result.message ?? "Connected.", systemImage: "checkmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.green)
-                .accessibilityIdentifier(ConnectClientAccessibility.status)
+            VStack(alignment: .leading, spacing: 2) {
+                Label(result.message ?? "Connected.", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                    .accessibilityIdentifier(ConnectClientAccessibility.status)
+                // Spec 109-b FR-037/FR-042: name the client's reload step so a
+                // successful write doesn't read as "done" when the client
+                // hasn't picked it up yet.
+                if let reloadHint = result.reloadHint, !reloadHint.isEmpty {
+                    Label(reloadHint, systemImage: "arrow.clockwise")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.reloadHint)
+                }
+            }
         case .conflict(let reason):
             Label("\(reason) The preview has been refreshed — review it and try again.",
                   systemImage: "arrow.triangle.2.circlepath")
