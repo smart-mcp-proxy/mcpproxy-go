@@ -41,12 +41,65 @@ export type HealthAction =
   | typeof HealthActionConfigure
   | typeof HealthActionEditURL;
 
+// Health status vocabulary (Spec 109 FR-010–012). The ONE vocabulary every
+// surface (Web UI, macOS, tray, CLI) renders as text — HealthLevel stays a
+// severity signal for badge/tray coloring only; no renderer may print it as
+// text.
+export const HealthStatusReady = 'ready' as const;
+export const HealthStatusConnecting = 'connecting' as const;
+export const HealthStatusSignInRequired = 'sign_in_required' as const;
+export const HealthStatusNeedsReview = 'needs_review' as const;
+export const HealthStatusNeedsSecret = 'needs_secret' as const;
+export const HealthStatusNeedsConfig = 'needs_config' as const;
+export const HealthStatusError = 'error' as const;
+export const HealthStatusDisabled = 'disabled' as const;
+export type HealthStatusValue =
+  | typeof HealthStatusReady
+  | typeof HealthStatusConnecting
+  | typeof HealthStatusSignInRequired
+  | typeof HealthStatusNeedsReview
+  | typeof HealthStatusNeedsSecret
+  | typeof HealthStatusNeedsConfig
+  | typeof HealthStatusError
+  | typeof HealthStatusDisabled;
+
+// Label tables — binding for the Web UI, macOS window/tray and CLI table
+// (contracts/health-vocabulary.md). Generated from internal/health/constants.go
+// (StatusLabels / ActionLabels).
+export const HEALTH_STATUS_LABELS: Record<HealthStatusValue, string> = {
+  [HealthStatusReady]: 'Online',
+  [HealthStatusConnecting]: 'Connecting',
+  [HealthStatusSignInRequired]: 'Sign-in required',
+  [HealthStatusNeedsReview]: 'Needs review',
+  [HealthStatusNeedsSecret]: 'Secret required',
+  [HealthStatusNeedsConfig]: 'Needs configuration',
+  [HealthStatusError]: 'Error',
+  [HealthStatusDisabled]: 'Disabled',
+};
+
+export const HEALTH_ACTION_LABELS: Record<string, string> = {
+  [HealthActionLogin]: 'Sign in',
+  [HealthActionSetSecret]: 'Add secret',
+  [HealthActionConfigure]: 'Fix config',
+  [HealthActionEditURL]: 'Edit URL',
+  [HealthActionApprove]: 'Review',
+  [HealthActionRestart]: 'Restart',
+  [HealthActionViewLogs]: 'View logs',
+  [HealthActionEnable]: 'Enable',
+};
+
 export interface HealthStatus {
   level: HealthLevel;
   admin_state: AdminState;
   summary: string;
   detail?: string;
   action?: HealthAction;
+  /** The ONE status vocabulary rendered as text on every surface (FR-010/FR-011). */
+  status: HealthStatusValue;
+  /** True only when status === 'ready'. */
+  usable: boolean;
+  /** Every applicable next step, in priority order (FR-012). Action always equals actions[0] (or action is '' when empty). */
+  actions: HealthAction[];
 }
 
 // Activity status vocabulary - generated from internal/storage/activity_models.go
