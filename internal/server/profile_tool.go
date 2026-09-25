@@ -15,6 +15,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // buildSetProfileTool constructs the set_profile MCP tool definition (Profiles
@@ -323,6 +324,14 @@ type profileIndex struct {
 	// other admitted-read path, at this one call site).
 	declaredOccurrences []map[string][]int
 
+	// policies holds profile p's compiled Spec 108 policy (internal/profile.
+	// CompiledPolicy), one per cfg.Profiles entry, compiled once per
+	// snapshot alongside every other profileIndex field and taken with it as
+	// one immutable pair (Spec 105 D17 pattern; data-model.md §2). Compile
+	// is cheap for a legacy profile (no allow/deny/classify to compile),
+	// which is the "fast path" a legacy snapshot takes through this cache.
+	policies []*profile.CompiledPolicy
+
 	// lookupHook, when set, observes every slug the index resolves. It is the
 	// seam the traversal-counter tests use to prove the gate and set_profile
 	// touch at most the requested slug and the pin; nil in production.
@@ -365,6 +374,7 @@ func newProfileIndex(cfg *config.Config) *profileIndex {
 	idx.members = make([]uint64, len(cfg.Profiles)*idx.words)
 	idx.nonEmpty = make([]bool, len(cfg.Profiles))
 	idx.declaredOccurrences = make([]map[string][]int, len(cfg.Profiles))
+	idx.policies = make([]*profile.CompiledPolicy, len(cfg.Profiles))
 	for p := range cfg.Profiles {
 		set := idx.membersOf(p)
 		occ := make(map[string][]int, len(cfg.Profiles[p].Servers))
@@ -376,8 +386,27 @@ func newProfileIndex(cfg *config.Config) *profileIndex {
 			}
 		}
 		idx.declaredOccurrences[p] = occ
+		idx.policies[p] = profile.Compile(&cfg.Profiles[p])
 	}
 	return idx
+}
+
+// PolicyAt returns the compiled Spec 108 policy for the profile at an
+// ALREADY resolved position (candidate < 0, or out of range for a mutated
+// fixture: no such profile) — the int-keyed counterpart to PolicyFor, for a
+// caller that already paid for position(slug) elsewhere in the same
+// request.
+func (idx *profileIndex) PolicyAt(candidate int) *profile.CompiledPolicy {
+	if candidate < 0 || candidate >= len(idx.policies) {
+		return nil
+	}
+	return idx.policies[candidate]
+}
+
+// PolicyFor returns the compiled Spec 108 policy for the named profile, or
+// nil when the snapshot has no such profile.
+func (idx *profileIndex) PolicyFor(slug string) *profile.CompiledPolicy {
+	return idx.PolicyAt(idx.position(slug))
 }
 
 // membersOf returns profile p's reach bitset, or the all-zero placeholder
