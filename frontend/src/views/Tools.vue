@@ -442,7 +442,16 @@
                   <span v-else class="badge badge-sm badge-success">enabled</span>
                 </td>
                 <td class="text-sm text-right">
-                  {{ tool.usage || 0 }}
+                  <router-link
+                    v-if="tool.usage && toolCallsLink(tool)"
+                    :to="toolCallsLink(tool)!"
+                    class="link"
+                    data-test="tool-calls-link"
+                    @click.stop
+                  >
+                    {{ tool.usage }}
+                  </router-link>
+                  <span v-else>{{ tool.usage || 0 }}</span>
                 </td>
                 <td class="text-sm text-base-content/60">
                   <span v-if="tool.last_used">{{ formatRelativeTime(tool.last_used) }}</span>
@@ -561,6 +570,7 @@ import { serverDetailPath } from '@/utils/serverRoute'
 import { formatDate } from '@/utils/datetime'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useScopeQuery } from '@/composables/useScopeQuery'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { GlobalTool, GlobalToolsStats } from '@/types/api'
@@ -579,6 +589,18 @@ const quarantinedServerCount = computed(() => serversStore.serverCount.quarantin
 // Undefined when the view is mounted without a router — several unit suites do
 // exactly that, and a query prefill is not worth making them install one.
 const route = useRoute() as ReturnType<typeof useRoute> | undefined
+// Spec 109-k: the row "Calls" link (url-filter-contract.md link map). Guarded
+// the same way as `route` above — several unit suites mount this view with no
+// router installed, and useScopeQuery() itself calls useRoute()/useRouter().
+const scopeQuery = route ? useScopeQuery('tools') : undefined
+
+/** `/activity?view=calls&tool=<server:tool>` for a tool row's "Calls" link
+ * (url-filter-contract.md link map: "Tools row" -> "Calls"). Null when no
+ * router is installed (unit-test harnesses that mount Tools.vue standalone). */
+function toolCallsLink(tool: GlobalTool) {
+  if (!scopeQuery) return null
+  return scopeQuery.linkTo('activity', { view: 'calls', tool: `${tool.server_name}:${tool.name}` })
+}
 
 // ---- State ----
 const allTools = ref<GlobalTool[]>([])
