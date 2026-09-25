@@ -1,323 +1,156 @@
 <template>
-  <div class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow">
-    <div class="card-body">
-      <!-- Header -->
-      <div class="flex justify-between items-start mb-4">
-        <div class="flex-1 min-w-0 mr-2">
-          <h3 class="card-title text-lg truncate" :title="server.name" data-test="server-card-title">{{ displayName }}</h3>
-          <p class="text-sm text-base-content/70 truncate">
-            {{ server.protocol }} • {{ server.url || server.command || 'No endpoint' }}
-          </p>
-        </div>
+  <div class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow server-card" data-test="server-card">
+    <div class="card-body p-4 flex flex-col">
+      <!-- Title row: name, transport chip, trust-mode shield, ⋯ menu (Spec 109 FR-013 D15) -->
+      <div class="flex items-center gap-1.5 mb-2">
+        <h3
+          class="card-title text-base truncate flex-1 min-w-0"
+          :title="server.name"
+          data-test="server-card-title"
+        >{{ displayName }}</h3>
 
-        <div class="flex items-center gap-1.5 shrink-0">
-          <!-- Trust mode at a glance (spec 088 FR-007). Always the EFFECTIVE
-               mode; an unrecognized configured value renders the fail-closed
-               mode with a subtle marker and the raw value in the tooltip
-               (US1 scenario 4) instead of being hidden or rewritten. -->
-          <div
-            :class="['badge badge-sm badge-outline shrink-0', trustBadgeClass]"
-            :title="trustBadgeTitle"
-            :data-trust-invalid="trustModeState.isInvalid ? 'true' : undefined"
-            data-test="server-trust-mode"
-          >
-            {{ trustBadgeLabel }}<span v-if="trustModeState.isInvalid" class="ml-0.5 opacity-70" aria-hidden="true">*</span>
-          </div>
+        <span class="badge badge-sm badge-ghost shrink-0" data-test="server-card-protocol">{{ server.protocol }}</span>
 
-          <!-- Status indicator using unified health status -->
-          <!-- M-004: Add tooltip showing health.detail if present -->
-          <div
-            :class="[
-              'badge badge-sm shrink-0',
-              statusBadgeClass,
-              statusTooltip ? 'tooltip tooltip-left' : ''
-            ]"
-            :data-tip="statusTooltip"
-            data-test="server-status-chip"
-          >
-            {{ statusText }}
-          </div>
-        </div>
-      </div>
-
-      <!-- Stats -->
-      <div class="grid grid-cols-2 gap-4 mb-4">
-        <div class="stat bg-base-200 rounded-lg p-3">
-          <div class="stat-title text-xs">Tools</div>
-          <div class="stat-value text-lg">{{ server.tool_count }}</div>
-          <div v-if="blockedToolCount > 0" class="stat-desc text-xs text-error flex items-center gap-1">
-            <svg class="w-3 h-3 inline-block shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-            {{ blockedToolCount }} disabled
-          </div>
-          <div v-if="quarantineToolCount > 0" class="stat-desc text-xs text-warning flex items-center gap-1">
-            <svg class="w-3 h-3 inline-block shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-            {{ quarantineToolCount }} pending approval
-          </div>
-          <div v-if="blockedToolCount === 0 && quarantineToolCount === 0 && server.tool_list_token_size" class="stat-desc text-xs">
-            {{ server.tool_list_token_size.toLocaleString() }} tokens
-          </div>
-        </div>
-        <div class="stat bg-base-200 rounded-lg p-3">
-          <div class="stat-title text-xs">Status</div>
-          <div class="stat-value text-lg">
-            <div class="flex items-center space-x-1">
-              <!-- UX audit F30: the toggle carried no accessible name, so a
-                   screen reader announced five identical unlabelled checkboxes
-                   on /servers. -->
-              <input
-                type="checkbox"
-                :checked="server.enabled"
-                @change="toggleEnabled"
-                class="toggle toggle-sm"
-                :disabled="loading"
-                :aria-label="`${server.enabled ? 'Disable' : 'Enable'} server ${server.name}`"
-              />
-              <span class="text-sm">{{ server.enabled ? 'Enabled' : 'Disabled' }}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Security scan badge (Spec 039)
-           Wrapped in a DaisyUI tooltip that explains the state and carries a
-           disclaimer that the risk score is an experimental heuristic. -->
-      <!-- #1065: hidden while the server is quarantined. A scan verdict is
-           about CONTENT; quarantine is about REVIEW STATE. Stacked as siblings
-           they read as contradictory claims about the same server ("Clean"
-           directly above "needs security review"). While quarantined the
-           verdict is folded into the banner below as a subordinate clause, so
-           the card carries exactly one security headline -- the subordination
-           ServerDetail's spec-088 banner already does. -->
-      <div v-if="server.security_scan && !server.quarantined" class="flex items-center gap-2 mb-4">
+        <!-- Trust mode at a glance (spec 088 FR-007 / Spec 109 FR-013): a
+             shield icon, never a text badge — the tooltip carries the label.
+             Always the EFFECTIVE mode; an unrecognized configured value
+             renders the fail-closed mode with a subtle marker and the raw
+             value in the tooltip instead of being hidden or rewritten. -->
         <div
-          class="flex items-center gap-1.5 text-sm tooltip tooltip-right tooltip-bottom max-w-xs"
-          :data-tip="securityBadgeTooltip"
+          :class="['tooltip tooltip-left shrink-0', trustBadgeClass]"
+          :data-tip="trustBadgeTitle"
+          :data-trust-invalid="trustModeState.isInvalid ? 'true' : undefined"
+          data-test="server-trust-mode"
         >
-          <!-- Shield icon -->
-          <svg
-            class="w-4 h-4 shrink-0"
-            :class="securityBadgeColor"
-            fill="currentColor"
-            viewBox="0 0 24 24"
-          >
+          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 2L3.5 6.5V11c0 5.55 3.84 10.74 8.5 12 4.66-1.26 8.5-6.45 8.5-12V6.5L12 2zm0 2.18l6.5 3.35V11c0 4.52-3.15 8.76-6.5 9.93C8.65 19.76 5.5 15.52 5.5 11V7.53L12 4.18z"/>
-            <path v-if="securityScanStatus === 'clean' && !hasHeldTools" d="M10 15.5l-3.5-3.5 1.41-1.41L10 12.67l5.59-5.59L17 8.5l-7 7z"/>
-            <path v-else-if="securityScanStatus === 'dangerous'" d="M12 8v4m0 4h.01" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>
           </svg>
-          <span
-            v-if="securityScanStatus === 'scanning'"
-            class="flex items-center gap-1 text-xs text-base-content/60"
-          >
-            <span class="loading loading-spinner loading-xs"></span>
-            Scanning...
-          </span>
-          <span
-            v-else
-            class="text-xs"
-            :class="securityBadgeColor"
-            data-test="security-scan-badge"
-          >
-            {{ securityBadgeText }}
-          </span>
+          <span v-if="trustModeState.isInvalid" class="sr-only">(unrecognized value)</span>
         </div>
-      </div>
 
-      <!-- Error message - suppressed when health.action conveys the issue (FR-018, FR-019)
-           Audit F12: the card shows the plain-language summary; the raw wrapped
-           Go error chain lives behind a disclosure so it is available for a bug
-           report without shouting over the card it sits on. -->
-      <div v-if="shouldShowError" class="alert alert-error alert-sm mb-4 items-start" data-test="server-card-error">
-        <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-        <div class="min-w-0 flex-1">
-          <div class="text-xs font-medium" data-test="server-card-error-summary">{{ errorSummary }}</div>
-          <details class="mt-1">
-            <summary
-              class="text-[11px] opacity-80 cursor-pointer select-none"
-              data-test="server-card-error-toggle"
-            >Technical details</summary>
-            <p
-              class="text-[11px] font-mono mt-1 [overflow-wrap:anywhere] opacity-90"
-              data-test="server-card-error-detail"
-            >{{ server.last_error }}</p>
-          </details>
-        </div>
-      </div>
-
-      <!-- Server-level quarantine warning. Server is held back entirely until
-           the user approves it. Audit F7: the card states a required action
-           ("needs security review") so it must also afford it — Review opens the
-           server's Security tab, where the spec-088 banner carries the verdict
-           and the approve/scan actions. -->
-      <div v-if="server.quarantined" class="alert alert-warning alert-sm mb-4 items-start" data-test="server-card-quarantine">
-        <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
-        </svg>
-        <div class="min-w-0 flex-1">
-          <div class="text-xs">Quarantined — needs security review</div>
-          <div
-            v-if="quarantineScanNote"
-            class="text-[11px] opacity-80 mt-0.5"
-            data-test="server-card-quarantine-scan-note"
-          >{{ quarantineScanNote }}</div>
-        </div>
-        <router-link
-          :to="serverDetailPath(server.name, 'security')"
-          class="btn btn-xs btn-warning"
-          data-test="server-card-quarantine-review"
-        >
-          Review
-        </router-link>
-      </div>
-
-      <!-- Tool-level quarantine warning (Spec 032). Independent of server
-           quarantine: when a server is trusted at the server level but ships
-           tools with descriptions/schemas that have not yet been approved
-           (or that changed since last approval — rug-pull guard), they are
-           silently blocked from agent use. Surface this on the list so users
-           don't have to open Details to discover it. -->
-      <div v-else-if="quarantineToolCount > 0" class="alert alert-warning alert-sm mb-4">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
-        </svg>
-        <span class="text-xs flex-1">{{ toolQuarantineSummary }}</span>
-        <router-link
-          :to="serverDetailPath(server.name, 'tools')"
-          class="btn btn-xs btn-warning"
-        >
-          Review
-        </router-link>
-      </div>
-
-      <!-- Actions - uses unified health.action when available -->
-      <div class="card-actions justify-end space-x-2">
-        <!-- Primary action button based on health.action -->
-        <button
-          v-if="healthAction === 'approve'"
-          @click="handleApproveClick"
-          :disabled="loading"
-          class="btn btn-sm btn-warning"
-        >
-          <span v-if="loading" class="loading loading-spinner loading-xs"></span>
-          Approve
-        </button>
-
-        <!-- Audit F7: while a server is quarantined, Review outranks Enable —
-             enabling a server that is still held back does nothing the user can
-             see, so it drops to a secondary outline button. -->
-        <button
-          v-if="healthAction === 'enable'"
-          @click="enableServer"
-          :disabled="loading"
-          :class="['btn btn-sm', server.quarantined ? 'btn-outline' : 'btn-primary']"
-          data-test="server-card-enable"
-        >
-          <span v-if="loading" class="loading loading-spinner loading-xs"></span>
-          Enable
-        </button>
-
-        <button
-          v-if="healthAction === 'login'"
-          @click="triggerOAuth"
-          :disabled="loading"
-          class="btn btn-sm btn-primary"
-        >
-          <span v-if="loading" class="loading loading-spinner loading-xs"></span>
-          Login
-        </button>
-
-        <button
-          v-if="healthAction === 'restart'"
-          @click="restart"
-          :disabled="loading"
-          class="btn btn-sm btn-primary"
-        >
-          <span v-if="loading" class="loading loading-spinner loading-xs"></span>
-          Restart
-        </button>
-
-        <router-link
-          v-if="healthAction === 'view_logs'"
-          :to="serverDetailPath(server.name, 'logs')"
-          class="btn btn-sm btn-primary"
-        >
-          View Logs
-        </router-link>
-
-        <router-link
-          v-if="healthAction === 'set_secret'"
-          to="/secrets"
-          class="btn btn-sm btn-primary"
-        >
-          Set Secret
-        </router-link>
-
-        <router-link
-          v-if="healthAction === 'configure'"
-          :to="serverDetailPath(server.name, 'config')"
-          class="btn btn-sm btn-primary"
-        >
-          Configure
-        </router-link>
-
-        <!-- Audit F11: a name that does not resolve is not a restartable
-             outage. Send the user to the field that is actually wrong. -->
-        <router-link
-          v-if="healthAction === 'edit_url'"
-          :to="editEndpointPath"
-          class="btn btn-sm btn-primary"
-          data-test="server-card-edit-url"
-        >
-          Edit URL
-        </router-link>
-
-        <!-- Logout button (only when connected with OAuth) -->
-        <button
-          v-if="canLogout"
-          @click="triggerLogout"
-          :disabled="loading"
-          class="btn btn-sm btn-outline btn-warning"
-        >
-          <span v-if="loading" class="loading loading-spinner loading-xs"></span>
-          Logout
-        </button>
-
-        <template v-if="hasEnabledScanners()">
-          <div
-            v-if="!server.enabled"
-            class="tooltip tooltip-top"
-            :data-tip="scanDisabledReason"
+        <!-- ⋯ menu: every secondary action lives here, never on the card face
+             (Spec 109 FR-013). Delete asks for confirmation and is reachable
+             only from this menu. -->
+        <div class="dropdown dropdown-end shrink-0">
+          <button
+            tabindex="0"
+            type="button"
+            class="btn btn-ghost btn-xs px-1.5"
+            aria-label="More actions"
+            aria-haspopup="true"
+            data-test="server-card-menu-trigger"
           >
-            <button
-              class="btn btn-sm btn-outline"
-              disabled
-              :title="scanDisabledReason"
-              :aria-label="`Scan — ${scanDisabledReason}`"
-              data-test="server-card-scan-disabled"
-            >
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-              </svg>
-              Scan
-            </button>
-          </div>
-          <router-link
-            v-else
-            :to="serverDetailPath(server.name, 'security')"
-            class="btn btn-sm btn-outline"
-            title="Security Scan"
-          >
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>
             </svg>
-            Scan
-          </router-link>
-        </template>
+          </button>
+          <ul
+            tabindex="0"
+            class="dropdown-content menu menu-sm z-10 bg-base-100 rounded-box shadow-lg border border-base-300 w-52 p-1"
+            data-test="server-card-menu"
+          >
+            <li>
+              <button type="button" @click="toggleEnabled" :disabled="loading" data-test="server-card-menu-toggle">
+                {{ server.enabled ? 'Disable' : 'Enable' }}
+              </button>
+            </li>
+            <li v-if="hasEnabledScanners()">
+              <router-link
+                v-if="server.enabled"
+                :to="serverDetailPath(server.name, 'security')"
+                data-test="server-card-menu-scan"
+              >Scan</router-link>
+              <span
+                v-else
+                class="disabled opacity-50 tooltip tooltip-right"
+                :data-tip="scanDisabledReason"
+                :title="scanDisabledReason"
+                data-test="server-card-scan-disabled"
+              >Scan</span>
+            </li>
+            <li>
+              <button type="button" @click="restart" :disabled="loading" data-test="server-card-menu-restart">Restart</button>
+            </li>
+            <li>
+              <router-link :to="serverDetailPath(server.name, 'logs')" data-test="server-card-menu-logs">Logs</router-link>
+            </li>
+            <li>
+              <router-link :to="serverDetailPath(server.name, 'config')" data-test="server-card-menu-edit">Edit</router-link>
+            </li>
+            <li>
+              <router-link
+                :to="serverDetailPath(server.name, 'config')"
+                data-test="server-card-menu-trust"
+              >Trust mode: {{ trustBadgeLabel }}</router-link>
+            </li>
+            <li v-if="canLogout">
+              <button type="button" @click="triggerLogout" :disabled="loading" data-test="server-card-menu-logout">Logout</button>
+            </li>
+            <li>
+              <button
+                type="button"
+                class="text-error"
+                @click="showDeleteConfirmation = true"
+                :disabled="loading"
+                data-test="server-card-menu-delete"
+              >Delete</button>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Status line: ONE line, label + detail, ellipsis with tooltip
+           (Spec 109 FR-013/FR-011 — never health.level as text). Folds what
+           used to be a separate full-width error alert / quarantine banner
+           into this single line; the raw technical chain and the review
+           narrative both move to the tooltip and to the detail page. -->
+      <div
+        class="text-sm mb-2 truncate tooltip tooltip-bottom max-w-full"
+        :data-tip="statusTooltip || undefined"
+        data-test="server-card-status-line"
+      >
+        <span :class="['badge badge-sm', statusBadgeClass]" data-test="server-status-chip">{{ statusText }}</span>
+        <span v-if="statusDetail" class="text-base-content/60 ml-1"> — {{ statusDetail }}</span>
+      </div>
+
+      <!-- Stats line: tools · scan verdict · last call · errors (24h), the
+           last two linking to Activity (Spec 109 FR-013). Always rendered so
+           every card reserves the same height. -->
+      <router-link
+        :to="activityLink"
+        class="text-xs text-base-content/70 hover:text-base-content mb-2 flex flex-wrap items-center gap-x-1.5 link link-hover"
+        data-test="server-card-stats-line"
+      >
+        <span data-test="server-card-tool-count">{{ server.tool_count }} tools</span>
+        <span v-if="securityLine" data-test="server-card-security-line">· <span :class="server.quarantined ? 'text-warning' : securityBadgeColor" :data-test="server.quarantined ? 'server-card-quarantine-scan-note' : 'security-scan-badge'">{{ securityLine }}</span></span>
+        <span v-if="!server.quarantined && toolQuarantineSummary" class="text-warning" data-test="server-card-tool-quarantine-note">· {{ toolQuarantineSummary }}</span>
+        <span>· last call {{ lastCallText }}</span>
+        <span :class="errors24h > 0 ? 'text-error' : ''">· {{ errors24h }} error{{ errors24h === 1 ? '' : 's' }} (24h)</span>
+      </router-link>
+
+      <!-- Primary action row: reserves its height even when empty
+           (Spec 109 FR-013 — at most ONE primary button, actions[0], none
+           for the normal `ready` case). -->
+      <div class="card-actions justify-end items-center mt-auto pt-1 min-h-[2.25rem]" data-test="server-card-primary-row">
+        <button
+          v-if="primaryAction && primaryKind === 'execute'"
+          type="button"
+          @click="runPrimaryAction"
+          :disabled="loading"
+          class="btn btn-sm btn-primary"
+          data-test="server-card-primary-action"
+        >
+          <span v-if="loading" class="loading loading-spinner loading-xs"></span>
+          {{ primaryLabel }}
+        </button>
+        <router-link
+          v-else-if="primaryAction && primaryKind === 'navigate'"
+          :to="primaryHref"
+          class="btn btn-sm btn-primary"
+          data-test="server-card-primary-action"
+        >
+          {{ primaryLabel }}
+        </router-link>
 
         <router-link
           :to="serverDetailPath(server.name)"
@@ -326,69 +159,12 @@
         >
           Details
         </router-link>
-
-        <button
-          @click="showDeleteConfirmation = true"
-          :disabled="loading"
-          class="btn btn-sm btn-error"
-        >
-          Delete
-        </button>
       </div>
     </div>
 
-    <!-- Approve Confirmation Modal (F-04: security scanner gated) -->
-    <div v-if="showApproveConfirmation" class="modal modal-open">
-      <div class="modal-box">
-        <h3 class="font-bold text-lg mb-4">
-          {{ approveDialogMode === 'no_scan' ? 'No Security Scan Run' : 'Dangerous Findings Detected' }}
-        </h3>
-        <p v-if="approveDialogMode === 'critical'" class="mb-4">
-          <strong>{{ server.name }}</strong> has
-          <span class="text-error font-semibold">{{ dangerousFindingCount }} dangerous finding{{ dangerousFindingCount === 1 ? '' : 's' }}</span>
-          in its most recent security scan. Approving this server will allow it to run despite these warnings.
-        </p>
-        <p v-else class="mb-4">
-          No security scan has been run for <strong>{{ server.name }}</strong>. We strongly recommend running a scan first.
-        </p>
-        <p class="text-sm text-base-content/70 mb-6">
-          <!-- UX audit F09: "the scanner gate" was never defined anywhere in
-               the UI, while the same screen carried findings claiming to be
-               informational. Name what force approval actually does. Shared by
-               BOTH dialog modes, so it must not mention findings — the no_scan
-               mode has none, and force skips that refusal ("no scan results
-               found") just as it skips the hard-tier one. -->
-          The security scanner is an experimental heuristic. Force-approving skips the scan-based approval gate and unquarantines this server; it is irreversible from this dialog.
-        </p>
-        <div class="modal-action">
-          <button
-            @click="showApproveConfirmation = false"
-            :disabled="loading"
-            class="btn btn-outline"
-          >
-            Cancel
-          </button>
-          <router-link
-            v-if="approveDialogMode === 'no_scan'"
-            :to="serverDetailPath(server.name, 'security')"
-            class="btn btn-primary"
-            @click="showApproveConfirmation = false"
-          >
-            Scan First
-          </router-link>
-          <button
-            @click="confirmForceApprove"
-            :disabled="loading"
-            class="btn btn-error"
-          >
-            <span v-if="loading" class="loading loading-spinner loading-xs"></span>
-            Force Approve
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Delete Confirmation Modal -->
+    <!-- Delete Confirmation Modal — the only place Delete is reachable from
+         (Spec 109 FR-013: "Delete only in ⋯ with a confirmation naming the
+         server"). -->
     <div v-if="showDeleteConfirmation" class="modal modal-open">
       <div class="modal-box">
         <h3 class="font-bold text-lg mb-4">Delete Server</h3>
@@ -410,6 +186,7 @@
             @click="confirmDelete"
             :disabled="loading"
             class="btn btn-error"
+            data-test="server-card-delete-confirm"
           >
             <span v-if="loading" class="loading loading-spinner loading-xs"></span>
             Delete Server
@@ -422,16 +199,20 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import type { Server } from '@/types'
+import type { Server, ActivityPerServer } from '@/types'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDetailPath, serverDisplayName } from '@/utils/serverRoute'
-import { oauthSignInState, healthStatusText } from '@/utils/health'
+import { oauthSignInState, healthStatusText, healthActionLabel } from '@/utils/health'
 import { deriveTrustModeState, TRUST_MODES } from '@/utils/trustMode'
 
 interface Props {
   server: Server
+  // One server's slice of the ONE `GET /activity/summary?period=24h` response
+  // the parent view fetches per page load (Spec 109 FR-013) — undefined for a
+  // server with no call in the period.
+  activityStats?: ActivityPerServer
 }
 
 const props = defineProps<Props>()
@@ -445,17 +226,14 @@ const systemStore = useSystemStore()
 const { hasEnabledScanners } = useSecurityScannerStatus()
 const loading = ref(false)
 const showDeleteConfirmation = ref(false)
-const showApproveConfirmation = ref(false)
-const approveDialogMode = ref<'no_scan' | 'critical'>('no_scan')
 
 const isHttpProtocol = computed(() => {
   return props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
 })
 
 // MCP-1821 — OAuth sign-in state (null when no sign-in is required). When set,
-// the status chip reads a calm amber "Sign-in required" instead of red
-// "Disconnected"/"Unhealthy", matching the ServerDetail Sign-in CTA. The
-// existing health.action==='login' Login button (below) drives the action.
+// the status line reads a calm amber "Sign-in required" instead of red
+// "Disconnected"/"Unhealthy", matching the ServerDetail Sign-in CTA.
 const signInState = computed(() => oauthSignInState(props.server))
 
 // Trust-mode badge (spec 088 FR-007 / FR-001). Display only — the mode is
@@ -471,14 +249,14 @@ const trustBadgeLabel = computed(() => trustModeMeta.value.label)
 // Auto is the least-safe mode (unscanned tool changes) and reads amber; scan
 // reads informational; manual — the secure default — stays neutral.
 const trustBadgeClass = computed(() => {
-  if (trustModeState.value.isInvalid) return 'badge-warning'
+  if (trustModeState.value.isInvalid) return 'text-warning'
   switch (trustModeState.value.effective) {
     case 'auto':
-      return 'badge-warning'
+      return 'text-warning'
     case 'scan':
-      return 'badge-info'
+      return 'text-info'
     default:
-      return 'badge-ghost'
+      return 'text-base-content/50'
   }
 })
 
@@ -493,39 +271,29 @@ const trustBadgeTitle = computed(() => {
   return `${prefix} — ${meta.description}`
 })
 
-// Unified health status computed properties
+// Status chip color (unchanged from the pre-109-e badge coloring).
 const statusBadgeClass = computed(() => {
   const health = props.server.health
   if (health) {
-    // Use admin_state for disabled/quarantined, otherwise use health level
     switch (health.admin_state) {
       case 'disabled':
-        return 'badge-neutral' // gray
+        return 'badge-neutral'
       case 'quarantined':
         // MCP-1821 — a quarantined server can ALSO be login-required; the
         // actionable amber "Sign-in required" chip takes precedence over the
         // purple quarantine chip so the user sees the next action.
         if (signInState.value) return 'badge-warning'
-        return 'badge-secondary' // purple-ish
+        return 'badge-secondary'
       default:
-        // MCP-1821 — sign-in required reads amber, not red.
         if (signInState.value) return 'badge-warning'
-        // Use health level
         switch (health.level) {
-          case 'healthy':
-            return 'badge-success'
-          case 'degraded':
-            return 'badge-warning'
-          case 'unhealthy':
-            return 'badge-error'
-          default:
-            return 'badge-ghost'
+          case 'healthy': return 'badge-success'
+          case 'degraded': return 'badge-warning'
+          case 'unhealthy': return 'badge-error'
+          default: return 'badge-ghost'
         }
     }
   }
-  // Fallback to legacy logic
-  // MCP-1857 — a diagnostic-only OAuth login state (no health object) still
-  // reads calm amber, not red, mirroring the in-health branch above.
   if (signInState.value) return 'badge-warning'
   if (props.server.connected) return 'badge-success'
   if (props.server.connecting) return 'badge-warning'
@@ -535,41 +303,122 @@ const statusBadgeClass = computed(() => {
 const statusText = computed(() => {
   const health = props.server.health
   if (health) {
-    // MCP-1821 — surface an actionable "Sign-in required" for OAuth login states,
-    // including a quarantined-and-login-required server (quarantine + sign-in coexist).
+    // MCP-1821 — surface an actionable "Sign-in required" for OAuth login
+    // states, including a quarantined-and-login-required server.
     if (signInState.value && health.admin_state !== 'disabled') return 'Sign-in required'
     // FR-011: no surface may render `level` as text — fall back to the one
     // status label table, never the raw severity value.
     return healthStatusText(health, props.server.connected)
   }
-  // Fallback to legacy logic
-  // MCP-1857 — surface the actionable "Sign-in required" for a diagnostic-only
-  // OAuth login state even when the record carries no health object.
   if (signInState.value) return 'Sign-in required'
   if (props.server.connected) return 'Connected'
   if (props.server.connecting) return 'Connecting'
   return 'Disconnected'
 })
 
-// M-004: Tooltip showing health.detail if present (for additional context)
+// Audit F12's plain-language half, now the status line's DETAIL segment
+// rather than a full-width error block. health.summary is already the
+// mapped phrase ("Host not found") while the server is administratively
+// enabled; for a disabled/quarantined server the calculator's summary
+// describes the admin state instead, which the status TEXT above already
+// says — so the detail falls through to the structured diagnostic, then to
+// the raw chain's last segment (the root cause), never the whole chain.
+const statusDetail = computed(() => {
+  const health = props.server.health
+  if (health?.summary && health.admin_state === 'enabled' && health.summary !== statusText.value) {
+    return health.summary
+  }
+  const diagnosticMessage = props.server.diagnostic?.user_message
+  if (diagnosticMessage) return diagnosticMessage
+  const raw = props.server.last_error ?? ''
+  if (!raw) return ''
+  const segments = raw.split(': ')
+  return segments[segments.length - 1] || raw
+})
+
+// The full technical detail lives in the tooltip — never printed on the card
+// face (audit F12: no full-width raw-error dump).
 const statusTooltip = computed(() => {
   const health = props.server.health
-  if (health?.detail) {
-    return health.detail
+  if (health?.detail) return health.detail
+  return props.server.last_error ?? ''
+})
+
+// ONE primary action, from the SAME actions[0] value and label table every
+// other surface reads (Spec 109 FR-013/FR-014, utils/health.ts
+// healthActionLabel — internal/health.ActionLabels on the Go side). `actions`
+// can carry a proactive nudge even on a `ready`/usable server (e.g. a
+// token expiring soon), so this does not gate on `status`.
+const primaryAction = computed<string>(() => {
+  const health = props.server.health
+  if (health) {
+    if (health.actions && health.actions.length > 0) return health.actions[0]
+    if (health.action) return health.action
+    return ''
   }
+  // Old-core / diagnostic-only fallback: no health object at all.
+  if (signInState.value) return 'login'
   return ''
 })
 
-// Suggested action from health status
-const healthAction = computed(() => {
-  return props.server.health?.action || ''
+const primaryLabel = computed(() => healthActionLabel(primaryAction.value))
+
+// login/restart/enable run in place; every other action opens the screen
+// that performs it — never a one-click approve (FR-005/FR-014). The approve
+// action is labelled "Review" and links to `/review/<name>`, which resolves
+// through the interim redirect to `/servers/<name>?tab=tools` until the
+// dedicated review screen ships; it never approves from here.
+const primaryKind = computed<'execute' | 'navigate' | ''>(() => {
+  switch (primaryAction.value) {
+    case 'login':
+    case 'restart':
+    case 'enable':
+      return 'execute'
+    case 'approve':
+    case 'set_secret':
+    case 'configure':
+    case 'edit_url':
+    case 'view_logs':
+      return 'navigate'
+    default:
+      return ''
+  }
 })
 
-// Audit F11: the Edit URL action lands on the Configuration tab with the
-// endpoint field focused, so the remedy and the control are one click apart.
-const editEndpointPath = computed(
-  () => `${serverDetailPath(props.server.name, 'config')}&focus=endpoint`
-)
+const primaryHref = computed(() => {
+  switch (primaryAction.value) {
+    case 'approve':
+      return `/review/${encodeURIComponent(props.server.name)}`
+    case 'set_secret':
+      return '/secrets'
+    case 'configure':
+      return serverDetailPath(props.server.name, 'config')
+    case 'edit_url':
+      // Audit F11: a name that does not resolve is an address problem, not a
+      // restartable outage — land on the endpoint field itself.
+      return `${serverDetailPath(props.server.name, 'config')}&focus=endpoint`
+    case 'view_logs':
+      return serverDetailPath(props.server.name, 'logs')
+    default:
+      return serverDetailPath(props.server.name)
+  }
+})
+
+async function runPrimaryAction() {
+  switch (primaryAction.value) {
+    case 'login':
+      await triggerOAuth()
+      break
+    case 'restart':
+      await restart()
+      break
+    case 'enable':
+      await enableServer()
+      break
+    default:
+      break
+  }
+}
 
 // Audit F7: a disabled control must say why it is disabled.
 const scanDisabledReason = computed(() =>
@@ -578,43 +427,15 @@ const scanDisabledReason = computed(() =>
     : 'Enable the server first — a scan inspects a running server'
 )
 
-// Audit F12: the plain-language half of the error.
-//
-// health.summary is the mapped phrase ("Host not found") — but ONLY while the
-// server is administratively enabled. For a disabled or quarantined server the
-// calculator short-circuits and summary describes the admin state instead
-// ("Quarantined for review"), which says nothing about why the connection
-// failed and would merely restate the banner directly below. Fall through to
-// the structured diagnostic, then to the raw chain's last segment — the root
-// cause — rather than to the whole wrapped chain.
-const errorSummary = computed(() => {
-  const health = props.server.health
-  if (health?.summary && health.admin_state === 'enabled') return health.summary
-  const diagnosticMessage = props.server.diagnostic?.user_message
-  if (diagnosticMessage) return diagnosticMessage
-  if (health?.summary && !health.admin_state) return health.summary
-  const raw = props.server.last_error ?? ''
-  const segments = raw.split(': ')
-  return segments[segments.length - 1] || raw
-})
-
-// Tool-level quarantine count (pending + changed)
+// Tool-level quarantine count (pending + changed) — folded into the stats
+// line as plain text (Spec 109 FR-013): reaching the review is the primary
+// action's job, not a second button on the card.
 const quarantineToolCount = computed(() => {
   const q = props.server.quarantine
   if (!q) return 0
   return (q.pending_count ?? 0) + (q.changed_count ?? 0)
 })
 
-const blockedToolCount = computed(() => {
-  const q = props.server.quarantine
-  if (!q) return 0
-  return q.blocked_count ?? 0
-})
-
-// Human-readable summary for the tool-quarantine banner. Differentiates
-// fully-quarantined (every tool needs approval) from partially-quarantined,
-// and surfaces "changed" tools separately because they indicate a rug-pull
-// rather than a first-time review.
 const toolQuarantineSummary = computed(() => {
   const q = props.server.quarantine
   if (!q) return ''
@@ -622,51 +443,22 @@ const toolQuarantineSummary = computed(() => {
   const changed = q.changed_count ?? 0
   const total = pending + changed
   if (total === 0) return ''
-  const toolCount = props.server.tool_count ?? 0
   const noun = (n: number) => (n === 1 ? 'tool' : 'tools')
   if (changed > 0 && pending > 0) {
-    return `${pending} ${noun(pending)} pending, ${changed} changed — approval needed`
+    return `${pending} pending, ${changed} changed`
   }
   if (changed > 0) {
-    return `${changed} ${noun(changed)} changed since approval — re-review needed`
+    return `${changed} changed ${noun(changed)} — re-review needed`
   }
-  if (toolCount > 0 && pending === toolCount) {
-    return `All ${pending} ${noun(pending)} pending security approval`
-  }
-  if (toolCount > 0) {
-    return `${pending} of ${toolCount} ${noun(toolCount)} pending security approval`
-  }
-  return `${pending} ${noun(pending)} pending security approval`
+  return `${pending} ${noun(pending)} pending approval`
 })
 
-// Security scan badge (Spec 039)
-const securityScanStatus = computed(() => {
-  return props.server.security_scan?.status || 'not_scanned'
-})
-
-// GH #938: a "Clean" verdict from the last FULL-SERVER scan sat as a green
-// shield directly above "1 tool changed since approval — re-review needed",
-// while the tool-level gate was holding that tool with a dangerous verdict.
-// The two gates are independent, and the reassuring one must never out-shout
-// the warning one. Whenever tools are held, the clean badge is downgraded to a
-// warning tone and says so. A harder verdict (warnings/dangerous/failed) is
-// left untouched — it already out-ranks the hold.
+// Security scan verdict (Spec 039), folded into the stats line.
 const hasHeldTools = computed(() => quarantineToolCount.value > 0)
-
-const securityBadgeColor = computed(() => {
-  if (securityScanStatus.value === 'clean' && hasHeldTools.value) return 'text-warning'
-  switch (securityScanStatus.value) {
-    case 'clean': return 'text-success'
-    case 'warnings': return 'text-warning'
-    case 'dangerous': return 'text-error'
-    case 'failed': return 'text-error'
-    default: return 'text-base-content/40'
-  }
-})
 
 const securityBadgeText = computed(() => {
   const scan = props.server.security_scan
-  if (!scan) return 'Not scanned'
+  if (!scan) return ''
   if (scan.status === 'clean' && hasHeldTools.value) {
     const n = quarantineToolCount.value
     return `Clean scan · ${n} tool${n !== 1 ? 's' : ''} held`
@@ -678,62 +470,25 @@ const securityBadgeText = computed(() => {
       return `${count} warning${count !== 1 ? 's' : ''}`
     }
     case 'dangerous': return 'Dangerous'
-    case 'failed': return 'Scan Failed'
-    case 'not_scanned': return 'Not scanned'
-    case 'scanning': return 'Scanning...'
-    default: return scan.status
+    case 'failed': return 'Scan failed'
+    case 'not_scanned': return ''
+    case 'scanning': return 'Scanning…'
+    default: return ''
   }
 })
 
-// Hover explanation for the security badge. Every state carries the
-// experimental-heuristic disclaimer so users don't over-trust the label.
-const securityBadgeTooltip = computed(() => {
-  const scan = props.server.security_scan
-  if (!scan) return ''
-  const disclaimer =
-    'Experimental heuristic — verify findings manually; results may not be precise.'
-  if (scan.status === 'clean' && hasHeldTools.value) {
-    const n = quarantineToolCount.value
-    return `The last full-server scan was clean, but ${n} tool${n !== 1 ? 's are' : ' is'} currently held by the tool-level approval gate — review the hold evidence below before trusting this badge. ${disclaimer}`
-  }
-  switch (scan.status) {
-    case 'clean':
-      return `Clean: no findings above the warning threshold in the most recent scan. ${disclaimer}`
-    case 'warnings': {
-      const count = scan.finding_counts?.warning ?? 0
-      return `${count} warning${count !== 1 ? 's' : ''} found — review the Security tab for details. ${disclaimer}`
-    }
-    case 'dangerous': {
-      const dangerous = scan.finding_counts?.dangerous ?? 0
-      return `${dangerous} dangerous finding${dangerous !== 1 ? 's' : ''} detected. Review before approving. ${disclaimer}`
-    }
-    case 'failed':
-      return `The last scan failed to produce a verdict. Re-run from the Security tab. ${disclaimer}`
-    case 'not_scanned':
-      return 'This server has not been scanned yet.'
-    case 'scanning':
-      return 'Security scan in progress…'
-    default:
-      return disclaimer
-  }
-})
-
-// #1065: the subordinate half of the quarantine banner. Same reasoning as the
-// #938 held-tools downgrade above, one level up -- a reassuring statement must
-// never sit as a peer of a warning one. While quarantined the standalone badge
-// is suppressed and its verdict is restated here as a clause of the quarantine
-// headline: the verdict informs the review, it does not settle it. Returns ''
-// when there is nothing worth saying, keeping the banner a one-liner.
+// Issue #1065: a clean CONTENT verdict and a REVIEW-STATE requirement are
+// both true at once and must never read as contradictory peers ("Clean"
+// beside "needs review"). While the server is quarantined the verdict is
+// always subordinated to the review ask, never shown standalone.
 const quarantineScanNote = computed(() => {
   const scan = props.server.security_scan
   const status = scan?.status
   if (!scan || !status || status === 'not_scanned') return ''
   switch (status) {
     case 'scanning':
-      return 'Security scan in progress…'
+      return 'Scanning… — still needs review'
     case 'failed':
-      // A failed scan is an INCOMPLETE scan, never a threat verdict -- mirrors
-      // the scan-failed precaution branch in utils/quarantineBanner.ts.
       return 'Last scan could not complete — still needs review'
     case 'clean':
       return 'Last scan: clean — still needs review'
@@ -748,69 +503,72 @@ const quarantineScanNote = computed(() => {
   }
 })
 
-// Determine if error message should be shown (FR-018, FR-019)
-// Suppress verbose last_error when health.action already conveys the issue
-const shouldShowError = computed(() => {
-  // No error to show
-  if (!props.server.last_error) return false
+const securityLine = computed(() => (props.server.quarantined ? quarantineScanNote.value : securityBadgeText.value))
 
-  // Actions where the button is sufficient - error is redundant (T043-T046)
-  const actionsSuppressingError = ['login', 'set_secret', 'configure']
-  if (actionsSuppressingError.includes(healthAction.value)) {
-    return false
+// GH #938: a clean FULL-SERVER scan verdict must not read as "all clear" when
+// tools are still held — the color, not just the wording, has to demote.
+const securityBadgeColor = computed(() => {
+  if (securityBadgeText.value === '') return ''
+  const scan = props.server.security_scan
+  if (scan?.status === 'clean' && hasHeldTools.value) return 'text-warning'
+  switch (scan?.status) {
+    case 'clean': return 'text-success'
+    case 'warnings': return 'text-warning'
+    case 'dangerous': return 'text-error'
+    case 'failed': return 'text-error'
+    default: return 'text-base-content/60'
   }
+})
 
-  // Show error for other cases (restart, view_logs, or no action)
-  return true
+// Activity stats line (Spec 109 FR-013): last call time + 24h errors, both
+// from the ONE per-page-load `GET /activity/summary` response the parent
+// view fetches and slices per server — never a per-card request.
+const errors24h = computed(() => props.activityStats?.errors ?? 0)
+
+const lastCallText = computed(() => {
+  const iso = props.activityStats?.last_call_at
+  if (!iso) return 'never'
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return 'never'
+  const diffMs = Date.now() - then
+  const minutes = Math.floor(diffMs / 60000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
+})
+
+// Links to Activity scoped to this server, last 24h, and to errors only when
+// there are any — the same query-param contract 109-k teaches Activity to
+// read (url-filter-contract.md).
+const activityLink = computed(() => {
+  const base = `/activity?server=${encodeURIComponent(props.server.name)}&from=-24h`
+  return errors24h.value > 0 ? `${base}&status=error` : base
 })
 
 const canLogout = computed(() => {
-  // Don't show Logout button if server is disabled
   if (!props.server.enabled) return false
-
-  // Don't show Logout if user already explicitly logged out
   if (props.server.user_logged_out) return false
-
   if (!isHttpProtocol.value) return false
 
   const hasToken = props.server.authenticated === true
   if (!hasToken) return false
-
-  // Show Logout when:
-  // 1. Connected with valid token (normal case)
-  // 2. Has error but token is still valid (user may want to clear token to re-authenticate)
-  //
-  // Don't show Logout when:
-  // - Disconnected without error and token expired (show Login instead)
-  // - Server is connecting (wait for connection to complete)
-
   if (props.server.connecting) return false
-
-  // If connected, always show Logout (user can log out of working connection)
   if (props.server.connected) return true
 
-  // If not connected but has error, check if it's an OAuth authentication error
-  // If OAuth auth is required, show Login instead of Logout
   if (props.server.last_error) {
-    // Don't show Logout if oauth_status says token is expired
-    // In that case, Login is more appropriate
     if (props.server.oauth_status === 'expired') return false
-
-    // Don't show Logout if the error indicates OAuth authentication is required
-    // This means the stored token isn't valid, so Login is more appropriate
     const isOAuthRequired = props.server.last_error.includes('OAuth authentication required') ||
       props.server.last_error.includes('authorization') ||
       props.server.last_error.includes('401') ||
       props.server.last_error.includes('invalid_token')
     if (isOAuthRequired) return false
-
     return true
   }
 
-  // Not connected, no error, has token - mcpproxy is likely trying to reconnect
-  // Show Logout only if token is still valid (authenticated status)
   if (props.server.oauth_status === 'authenticated') return true
-
   return false
 })
 
@@ -923,70 +681,6 @@ async function triggerLogout() {
   }
 }
 
-// Counts baseline DANGEROUS findings from the scan summary if available. Used to
-// gate the Approve button behind an extra confirmation (F-04). Spec 077 FR-021:
-// the gate blocks on baseline dangerous (hard-tier) findings only, matching the
-// tier-driven server verdict — not on `critical` severity, which a non-blocking
-// soft finding could also carry.
-const dangerousFindingCount = computed(() => {
-  const scan = props.server.security_scan as any
-  if (!scan) return 0
-  // finding_counts.dangerous is populated from the latest report summary.
-  const fc = scan.finding_counts as Record<string, number> | undefined
-  if (fc && typeof fc.dangerous === 'number') return fc.dangerous
-  return 0
-})
-
-// True when a scan has actually been run (has a last_scan_at timestamp).
-const hasCompletedScan = computed(() => {
-  const scan = props.server.security_scan
-  if (!scan) return false
-  return !!scan.last_scan_at
-})
-
-// Primary approve click handler. Chooses the right flow based on scan state:
-//   1. No scan run yet → open "Scan first / Force approve" dialog
-//   2. Scan run with critical findings → open "Force approve?" dialog
-//   3. Clean scan → call securityApproveServer directly
-function handleApproveClick() {
-  if (!hasCompletedScan.value) {
-    approveDialogMode.value = 'no_scan'
-    showApproveConfirmation.value = true
-    return
-  }
-  if (dangerousFindingCount.value > 0) {
-    approveDialogMode.value = 'critical'
-    showApproveConfirmation.value = true
-    return
-  }
-  void doSecurityApprove(false)
-}
-
-async function doSecurityApprove(force: boolean) {
-  loading.value = true
-  try {
-    await serversStore.securityApproveServer(props.server.name, force)
-    systemStore.addToast({
-      type: 'success',
-      title: 'Server Approved',
-      message: `${props.server.name} has been approved and unquarantined`,
-    })
-    showApproveConfirmation.value = false
-  } catch (error) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Approve Failed',
-      message: error instanceof Error ? error.message : 'Unknown error',
-    })
-  } finally {
-    loading.value = false
-  }
-}
-
-function confirmForceApprove() {
-  void doSecurityApprove(true)
-}
-
 async function confirmDelete() {
   loading.value = true
   try {
@@ -1008,3 +702,17 @@ async function confirmDelete() {
   }
 }
 </script>
+
+<style scoped>
+/* Spec 109 FR-013 / T068: every card in the grid has the same height,
+   whatever state it is in. The primary-action row already reserves its
+   height empty; this floors the card body itself so a short one-line status
+   (e.g. a healthy "ready" server) does not sit shorter than a card carrying
+   a status detail + tool-quarantine note. */
+.server-card {
+  min-height: 232px;
+}
+.server-card :deep(.card-body) {
+  height: 100%;
+}
+</style>
