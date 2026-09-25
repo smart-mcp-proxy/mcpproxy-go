@@ -284,6 +284,25 @@
           // that stays `warnings` but changes the count must still re-render.
           server.security_scan?.status,
           server.security_scan?.finding_counts?.warning,
+          // Spec 109 FR-013: the card's status line and its ONE primary
+          // button are now driven entirely by `health` — mergeServers()
+          // above replaces `existingServer.health` with a fresh object
+          // reference on every poll (Object.assign), so without these keys
+          // a health change carrying none of the OTHER memoized fields
+          // (e.g. actions gaining a token-expiring login nudge on an
+          // otherwise unchanged connected/enabled/quarantined server) would
+          // leave the primary button stale. Picking the scalar fields, not
+          // `server.health` itself, is what makes the comparison meaningful
+          // despite the new object reference each poll.
+          server.health?.status,
+          server.health?.summary,
+          server.health?.detail,
+          server.health?.admin_state,
+          server.health?.level,
+          // `action` always equals `actions[0]` (or '' when actions is
+          // empty) per contracts.ts — the plain scalar equivalent of
+          // actions[0], without an optional array-index chain.
+          server.health?.action,
           // Spec 109 FR-013: the card's stats line reads this per-server slice
           // of the one activity summary fetch.
           perServerActivity[server.name]?.calls,
