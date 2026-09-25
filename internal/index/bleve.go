@@ -84,6 +84,7 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 		}
 	} else {
 		logger.Info("Opened existing Bleve index", zap.String("path", indexPath))
+		warnIfMappingPredatesAnnotations(index, indexPath, logger)
 	}
 
 	return &BleveIndex{
@@ -93,6 +94,47 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 	}, nil
 }
 
+// warnIfMappingPredatesAnnotations logs an actionable warning when an
+// already-existing index was created before the annotations_json field
+// mapping below (Spec 109 FR-028 tier-badge support) existed.
+//
+// bleve.Open never re-applies createBleveIndex's mapping to an index that
+// already exists on disk — the mapping is baked in at creation time, and
+// vendored bleve v2.6.1 exposes no SetMapping or other migration path
+// (confirmed by reading mapping.IndexMapping's method set). An index that
+// predates this field keeps its old mapping forever, with bleve's
+// dynamic-field defaults (IndexDynamic=true) still enabled for it: the very
+// first write that carries annotations_json (the differential-update
+// backfill in runtime/lifecycle.go) then gets indexed as free-text,
+// including into the field-less `_all` composite field that
+// buildToolSearchQuery's clause 5 (the bare MatchQuery) searches — silently
+// making annotation JSON term-searchable and shifting BM25 corpus stats for
+// every query on an upgraded (not freshly installed) deployment (review
+// round 6, finding 1: high).
+//
+// There is no safe in-place fix short of rebuilding the index, so this only
+// makes the situation observable. An operator who sees the warning can
+// delete indexPath and restart: the empty index makes every server's tools
+// look newly discovered, so the normal discovery path
+// (applyDifferentialToolUpdate) reindexes everything under the current,
+// correct mapping.
+func warnIfMappingPredatesAnnotations(idx bleve.Index, indexPath string, logger *zap.Logger) {
+	fm := idx.Mapping().FieldMappingForPath("annotations_json")
+	if fm.Type != "" {
+		// Explicitly mapped (Type is only set by NewTextFieldMapping and
+		// friends, never by the zero-value fallback FieldMappingForPath
+		// returns for a path with no static mapping) — this index already
+		// has the current mapping.
+		return
+	}
+	logger.Warn("Bleve index predates the annotations_json field mapping; "+
+		"annotation JSON may be indexed as free text and skew tool-search "+
+		"ranking (see internal/index/bleve.go:warnIfMappingPredatesAnnotations). "+
+		"Delete this index directory and restart mcpproxy to rebuild it "+
+		"with the current mapping.",
+		zap.String("path", indexPath))
+}
+
 // createBleveIndex creates a new Bleve index with proper mapping
 func createBleveIndex(indexPath string) (bleve.Index, error) {
 	// Create index mapping
@@ -100,6 +142,15 @@ func createBleveIndex(indexPath string) (bleve.Index, error) {
 
 	// Create document mapping for tools
 	toolMapping := bleve.NewDocumentMapping()
+	// Disable dynamic field mapping: every field this index ever writes is
+	// declared explicitly below. Without this, adding a new ToolDocument
+	// field in the future (as annotations_json itself was added, review
+	// round 6 finding 1) would silently fall back to bleve's dynamic-field
+	// defaults — full-text-indexed and included in `_all` — on any FRESH
+	// index too, not just ones migrating forward. This does not, and cannot,
+	// retroactively fix an already-open index created before this line
+	// existed; see warnIfMappingPredatesAnnotations above.
+	toolMapping.Dynamic = false
 
 	// Tool name field (both keyword and standard analyzers for different search types)
 	toolNameFieldKeyword := bleve.NewTextFieldMapping()
@@ -135,6 +186,22 @@ func createBleveIndex(indexPath string) (bleve.Index, error) {
 	paramsField.Store = true
 	paramsField.Index = true
 	toolMapping.AddFieldMappingsAt("params_json", paramsField)
+
+	// Output schema JSON field: stored only, never searched (it is JSON, not
+	// prose) — same shape as hash and annotations_json below. Previously had
+	// no explicit mapping at all and relied entirely on bleve's dynamic-field
+	// defaults to be stored for retrieval, which also meant it was
+	// full-text-indexed and folded into `_all` on every index, the same class
+	// of bug fixed for annotations_json by this mapping (review round 6,
+	// finding 1). Made explicit here, and required now that toolMapping.Dynamic
+	// is false above — Dynamic=false without this would stop
+	// GetToolsByServer/SearchTools from ever retrieving output_schema_json
+	// again, since Store also came from the dynamic fallback.
+	outputSchemaField := bleve.NewTextFieldMapping()
+	outputSchemaField.Analyzer = keyword.Name
+	outputSchemaField.Store = true
+	outputSchemaField.Index = false
+	toolMapping.AddFieldMappingsAt("output_schema_json", outputSchemaField)
 
 	// Hash field (keyword analyzer)
 	hashField := bleve.NewTextFieldMapping()

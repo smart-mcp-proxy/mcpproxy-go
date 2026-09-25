@@ -102,6 +102,15 @@ if [ "$ready" -ne 1 ]; then
 fi
 echo -e "${GREEN}Decoy running (pid=$DECOY_PID).${NC}"
 
+# Review round 6 (finding 5): snapshot PIDs matching the launcher-server
+# fixture's port BEFORE running test-api-e2e.sh. Without this baseline, the
+# T011a proof below fails on ANY matching process — including one leaked by
+# an earlier crashed/kill -9'd run (SIGKILL bypasses that run's own cleanup
+# trap) or a parallel worktree's own concurrent E2E run — even when THIS
+# run's cleanup behaved perfectly, and keeps failing until someone manually
+# reaps the stale process.
+baseline_launcher_pids="$(pgrep -f 'launcher-server.*--port 39933' 2>/dev/null | sort)"
+
 echo -e "${YELLOW}Running scripts/test-api-e2e.sh (its own cleanup trap must not touch the decoy)...${NC}"
 ./scripts/test-api-e2e.sh
 e2e_exit=$?
@@ -123,9 +132,20 @@ fi
 # design, see its Step 5) is actually gone once the run's cleanup trap has
 # fired, regardless of whether mcpproxy's own graceful shutdown or the
 # T011a orphan-reap fallback is what reaped it.
-if pgrep -f 'launcher-server.*--port 39933' > /dev/null 2>&1; then
-    echo -e "${RED}FAIL: a launcher-server fixture process from the E2E run is still alive after cleanup.${NC}" >&2
+#
+# Diffed against the baseline snapshot above (review round 6, finding 5): a
+# PID present both before and after this run is a pre-existing stray, not
+# something this run's cleanup failed to reap, and must not fail the proof —
+# only a PID that is NEW since the baseline counts as this run's own orphan.
+after_launcher_pids="$(pgrep -f 'launcher-server.*--port 39933' 2>/dev/null | sort)"
+new_launcher_pids="$(comm -13 <(printf '%s\n' "$baseline_launcher_pids") <(printf '%s\n' "$after_launcher_pids") | sed '/^$/d')"
+
+if [ -n "$new_launcher_pids" ]; then
+    echo -e "${RED}FAIL: a NEW launcher-server fixture process from this E2E run is still alive after cleanup (pid(s): $(echo "$new_launcher_pids" | tr '\n' ' ')).${NC}" >&2
     overall_pass=0
+elif [ -n "$baseline_launcher_pids" ]; then
+    echo -e "${YELLOW}WARN: a launcher-server fixture process matching this pattern (pid(s): $(echo "$baseline_launcher_pids" | tr '\n' ' ')) already existed BEFORE this run — a pre-existing stray from an earlier run, not counted against this run's cleanup. Consider reaping it manually.${NC}"
+    echo -e "${GREEN}PASS: this run did not leak a NEW launcher-server fixture process.${NC}"
 else
     echo -e "${GREEN}PASS: the E2E run's own launcher-server fixture process was reaped.${NC}"
 fi

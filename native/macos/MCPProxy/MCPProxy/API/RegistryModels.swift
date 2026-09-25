@@ -197,6 +197,21 @@ struct RepositoryServer: Codable, Identifiable, Equatable {
         if let url, !url.isEmpty { return "remote" }
         return "stdio"
     }
+
+    /// Cross-registry identity key ("registry::id"), matching the format
+    /// `ServerBrowseView.search()`'s own de-dupe `seen` set uses. Catalog
+    /// entry ids are not unique across registries (MCP-866): two colliding
+    /// cards from different registries both surviving that registry-qualified
+    /// dedupe must not collapse onto a single bare-id key everywhere else the
+    /// browse view needs to remember "this exact card" — e.g. `addedServers`,
+    /// which tracks the "Add to MCPProxy" -> "Added ✓ · Open" transition per
+    /// card (Spec 109 FR-063). Keying that dict by bare `server.id` alone
+    /// flipped an unrelated, un-added card from a different registry to
+    /// "Added ✓ · Open" too, and routed its Open tap to the wrong server
+    /// (review round 6, finding 2).
+    var addedKey: String {
+        "\(registry ?? "")::\(id)"
+    }
 }
 
 /// Per-registry "unavailable" marker (e.g. key required). Mirrors
