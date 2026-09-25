@@ -148,4 +148,8 @@
   - (low) `connect_cmd.go` / `ConnectClientView.swift` in the "later merge keeps both" list, pinned by `connect_profile_flags_test.go` + 109's goldens. plan, T041, T042, Dependencies.
   - (low) Pointer lists `activity watch` for `--from/--to`.
   - (propagated) `agent` gated except on `/activity` + `/export`; admin-key header on every recipe `curl`; `tool` URL value split into `server` + bare `tool` by Spec 109's `toRest()`.
+- zcode (GLM-5.3) cross-spec review round 2 (2026-09-26): 3 high findings on Spec 108, all applied (research D32):
+  - (high) FR-008a guard on `DELETE /profiles/{name}` (incl. `reassign_to`) and `POST /clients/upgrade-admin-key-holders` (`apply` + profile, whole request; preview `guard`), plus `POST /profiles`, rename and MCP `create`/`update`/`delete`/`rename`/`classify`. rest-api, refusals, cli, mcp-tools, T067, T068, T070, T070a (route coverage), T074, T080, T086, quickstart 108-f.
+  - (high) FR-008a API refusal is `BindingGuardDelta` over whole candidate states, which covers narrowing/deleting/unlisting a member of P's `switchable_to` and classification changes. spec FR-008a/US2-7/US4-3, data-model §7, enforcement-matrix delta cases, T033a, T040, T072, plan.
+  - (high) FR-009a override mechanism: `const` + `EnablePolicyForTest(tb)` gated by `testing.Testing()`, no env/config/flag/build tag; T004a AST + `go build` probe + built-binary exit-4 check; T055a deletes it. spec FR-009a, data-model §1, T002, T004a, T009, T055a, plan, quickstart 108-b/108-c.
 - Spec commit omits the Claude co-author trailer per the repository constitution and the maintainer's standing rule for this repo.

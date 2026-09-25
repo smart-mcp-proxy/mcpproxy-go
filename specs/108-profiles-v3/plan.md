@@ -79,7 +79,7 @@ internal/server/cache_authz.go               # PolicyFingerprint + ToolTierGener
 internal/server/session_store.go             # TokenName/ClientID/Profile per session; SessionsForToken
 internal/server/profile_notify.go            # NEW binding/profile change → list_changed to owning mcp-go server
 internal/auth/agent_token.go, context.go     # Kind, ClientID, ProfileMode, pending secret; `mcp_cli_` prefix; per-auth invariant check (fail closed); AuthContext fields
-internal/runtime/binding_guard.go            # NEW BindingBypassable/BindingGuardActive (FR-008a), shared by API refusals, resolver, warnings, doctor
+internal/runtime/binding_guard.go            # NEW BindingBypassable/BindingGuardActive/BindingGuardDelta (FR-008a), shared by API refusals (always the delta over the candidate state), resolver, warnings, doctor
 internal/storage/activity_models.go, manager.go, agent_tokens*.go   # fields + filters + client-credential mint/revoke tx + staged rotation (pending-hash index, finalize) + reconciler
 internal/runtime/activity_service.go         # stamp profile/source/client/token/block_reason
 internal/runtime/profiles_service.go         # NEW one service: CRUD, rename/delete w/ reassignment, classify, try, effective tools
@@ -160,6 +160,8 @@ The token store transaction updates pin/mode; `clients_service` emits `client.bi
 | Pinned token reads hidden tools over REST discovery | FR-015a: `GET /index/search`, `GET /tools`, `GET /servers/{id}/tools` (+ export, diff) apply the caller's own profile (T046c) |
 | Rollback past 108-c with optional auth | documented downgrade precondition `require_mcp_auth: true` (SC-010, T124/T125); the rollback test pins `401` with auth on |
 | Discovery hides a tool that execution still runs (partial rollout) | FR-009a gate until 108-d (T004a) |
+| The FR-009a test-only override is reachable from a shipped binary (env var, config read, build tag) | the override is `EnablePolicyForTest(tb)` only, gated by `testing.Testing()`; `PolicyEnforcementReady` is a `const`; T004a AST check + `go build` probe + built-binary exit-4 check; 108-d deletes the override (T055a) |
+| A binding-mutating route is added without the FR-008a guard, or a write narrows a member of a binding's `switchable_to` | refusal is `BindingGuardDelta` over the whole candidate state (not per-route conditions); T070a route-coverage test fails on any unguarded, non-exempt mutating route; T086 extends it to MCP `profiles` ops |
 | `anonymous_profile` accepted by a build that does not confine anonymous callers (108-a/108-b: no resolver tier; 108-c: no non-admin management view) | FR-009a gates `anonymous_profile` with the policy fields until 108-d (T004a); the shipped FR-008a guard then offers only `require_mcp_auth` |
 | Existing config routes create a bypassable binding between 108-c and 108-f | the FR-008a pre-apply check on the existing `PATCH /config` and `POST /config/apply` lands in 108-c (T040, tested by T033a); the new routes carry their own guard tests (108-f T070, 108-h T086) |
 | Parallel work with Spec 109 on shared files | ownership split (spec.md): 108 never edits `useScopeQuery.ts`, the link map, `ScopeFilter`, the Clients page shell or the sidebar/header layout; it mounts components and registers routes; cross-spec edges in the merge order |
