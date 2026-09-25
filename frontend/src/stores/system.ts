@@ -236,6 +236,19 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
+    // Listen for attention.changed events (Spec 109 FR-001/FR-006). The
+    // rendered payload is already narrowed to {count, ids} per caller — the
+    // attention store refetches GET /attention for the full item shape
+    // (summaries, fixes) rather than reconstructing it from ids here.
+    es.addEventListener('attention.changed', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        window.dispatchEvent(new CustomEvent('mcpproxy:attention-changed', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE attention.changed event:', error)
+      }
+    })
+
     // Listen for config.reloaded events
     es.addEventListener('config.reloaded', (event) => {
       try {
