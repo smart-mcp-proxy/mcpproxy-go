@@ -1033,7 +1033,7 @@ private struct AttentionRow: View {
 
             if let action = server.health?.healthAction {
                 // FR-014: bind the primary CTA's wording through the ONE
-                // cross-surface action-label table (contracts/health-vocabulary.md)
+                // cross-surface action-label table (HealthStatus.actionLabels)
                 // the Web UI and CLI also render — not the private
                 // HealthAction.label enum, which uses different words
                 // ("Approve" vs "Review", "Set Secret" vs "Add secret").
@@ -1061,22 +1061,47 @@ private struct AttentionRow: View {
     }
 
     private func performAction(_ action: HealthAction, for server: ServerStatus) async {
-        guard let client = appState.apiClient else { return }
-        do {
-            switch action {
-            case .login:
-                try await client.loginServer(server.id)
-            case .restart:
-                try await client.restartServer(server.id)
-            case .enable:
-                try await client.enableServer(server.id)
-            case .approve:
-                try await client.approveTools(server.id)
-            default:
-                break
+        switch action {
+        case .login, .restart, .enable, .approve:
+            guard let client = appState.apiClient else { return }
+            do {
+                switch action {
+                case .login:
+                    try await client.loginServer(server.id)
+                case .restart:
+                    try await client.restartServer(server.id)
+                case .enable:
+                    try await client.enableServer(server.id)
+                case .approve:
+                    try await client.approveTools(server.id)
+                default:
+                    break
+                }
+            } catch {
+                // Action errors are visible via server health refresh
             }
-        } catch {
-            // Action errors are visible via server health refresh
+        case .setSecret, .configure, .editURL:
+            // None of these complete via a single API call — they need a
+            // form (the secret value, the new URL, isolation fields). Take
+            // the user to the server's Config tab instead of no-op'ing.
+            navigateToServerDetail(server, tab: .config)
+        case .viewLogs:
+            navigateToServerDetail(server, tab: .logs)
+        }
+    }
+
+    /// Reuses the same "switch sidebar, then select the server" route the
+    /// dashboard's other links already use (see the Import/Add Server
+    /// buttons above) so a `.showServerDetail` observer set up once in
+    /// ServersView handles every doorway into server detail.
+    @MainActor
+    private func navigateToServerDetail(_ server: ServerStatus, tab: ServerDetailTab) {
+        NotificationCenter.default.post(name: .switchToServers, object: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NotificationCenter.default.post(
+                name: .showServerDetail,
+                object: ServerDetailTarget(serverName: server.name, tab: tab)
+            )
         }
     }
 }

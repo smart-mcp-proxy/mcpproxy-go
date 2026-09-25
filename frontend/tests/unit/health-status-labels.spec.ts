@@ -53,7 +53,7 @@ beforeEach(() => {
   setActivePinia(createPinia())
 })
 
-describe('healthStatusLabel / healthActionLabel (contracts/health-vocabulary.md label table)', () => {
+describe('healthStatusLabel / healthActionLabel (Spec 109 FR-014 label table)', () => {
   it('covers every status value from contracts.ts', () => {
     for (const status of Object.keys(HEALTH_STATUS_LABELS) as HealthStatusValue[]) {
       expect(healthStatusLabel(status)).toBe(HEALTH_STATUS_LABELS[status])

@@ -491,6 +491,15 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 // on, after its EditURL/OAuth overrides. Deriving from the final action
 // (rather than re-testing the same conditions) keeps this in lockstep with
 // whichever override wins when more than one applies.
+//
+// The default case is deliberately a safe fallback, not a silent acceptance
+// of an unrecognized value: both call sites only ever pass ActionRestart
+// (their own starting value), ActionEditURL, or ActionLogin, so today
+// `default` means exactly "the generic restart-and-view-logs case" — pinned
+// by TestConnectionErrorStatus below. It intentionally does not panic on an
+// unexpected action, because this function runs on every health render for
+// every server; failing loudly here would turn one bad caller into an outage
+// for every server's health tile rather than one wrong-but-visible row.
 func connectionErrorStatus(action string) (status string, usable bool, actions []string) {
 	switch action {
 	case ActionEditURL:

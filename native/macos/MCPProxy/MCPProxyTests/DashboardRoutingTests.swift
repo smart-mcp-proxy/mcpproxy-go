@@ -74,7 +74,41 @@ final class DashboardRoutingTests: XCTestCase {
                       "AttentionRow must bind through the shared cross-surface action-label table")
     }
 
+    /// Round 1 added `HealthAction.editURL` and made AttentionRow render its
+    /// button, but `performAction`'s switch had no `.editURL` case (nor
+    /// `.setSecret`/`.configure`/`.viewLogs`, which pre-date that diff) and
+    /// fell into `default: break` — clicking the new, prominent "Edit URL"
+    /// CTA did nothing, silently. None of those four actions completes via a
+    /// single core API call, so each must instead navigate the user to the
+    /// server's own detail view (Config for edit_url/set_secret/configure,
+    /// Logs for view_logs) rather than no-op.
+    func testAttentionRowPerformActionHandlesEveryHealthAction() throws {
+        let source = try dashboardSource()
+        let body = try performActionBody(in: source)
+
+        for action in ["editURL", "setSecret", "configure", "viewLogs"] {
+            // Matches `.\(action)` inside any `case ... :` label — including
+            // a combined label like `case .setSecret, .configure, .editURL:`
+            // — so the assertion isn't defeated by how the cases are grouped.
+            let pattern = #"case[^:]*\.\#(action)\b[^:]*:"#
+            let matches = body.range(of: pattern, options: .regularExpression)
+            XCTAssertNotNil(matches,
+                            "performAction must handle HealthAction.\(action) explicitly, not fall into default: break")
+        }
+    }
+
     // MARK: - Helpers
+
+    /// Isolates the body of `performAction` (the last function in the file)
+    /// so assertions about its switch cases can't accidentally match an
+    /// unrelated `case .foo` elsewhere in DashboardView.swift.
+    private func performActionBody(in source: String) throws -> String {
+        guard let start = source.range(of: "private func performAction") else {
+            XCTFail("could not find performAction in DashboardView.swift")
+            return ""
+        }
+        return String(source[start.lowerBound...])
+    }
 
     private func dashboardSource() throws -> String {
         try source(at: "MCPProxy/Views/DashboardView.swift")

@@ -4,7 +4,7 @@ import XCTest
 /// T044 (Spec 109 FR-010–012, FR-014 labels): decode the new
 /// `status`/`usable`/`actions` fields, verify the row/tray label and color
 /// for each status, and guard against `level` leaking as rendered text
-/// (contracts/health-vocabulary.md, SC-003).
+/// (Spec 109 SC-003).
 final class HealthVocabularyTests: XCTestCase {
 
     private func decode(_ jsonString: String) throws -> HealthStatus {
@@ -59,6 +59,40 @@ final class HealthVocabularyTests: XCTestCase {
         let health = try decode(json)
         XCTAssertNil(health.usable)
         XCTAssertFalse(health.isUsable, "a mid-connect server must not fall back to usable")
+    }
+
+    /// Review finding (Spec 109 round 2): ServerDetailView's "Suggested
+    /// Action" row gated on `health.actions` alone, so an old-core payload
+    /// with only the legacy singular `action` field (no `actions`) dropped
+    /// the row entirely — a regression from before this PR, and inconsistent
+    /// with `isUsable`'s own old-core tolerance just above.
+    func testActionsOrLegacyFallbackUsesLegacyActionWhenActionsIsAbsent() throws {
+        let json = """
+        {"level": "unhealthy", "admin_state": "enabled", "summary": "Missing secret", "action": "set_secret"}
+        """
+        let health = try decode(json)
+        XCTAssertNil(health.actions)
+        XCTAssertEqual(health.actionsOrLegacyFallback, ["set_secret"])
+    }
+
+    func testActionsOrLegacyFallbackPrefersActionsWhenPresent() throws {
+        let json = """
+        {
+            "level": "unhealthy", "admin_state": "enabled", "summary": "Missing secret",
+            "action": "set_secret", "status": "needs_secret", "usable": false,
+            "actions": ["set_secret"]
+        }
+        """
+        let health = try decode(json)
+        XCTAssertEqual(health.actionsOrLegacyFallback, ["set_secret"])
+    }
+
+    func testActionsOrLegacyFallbackIsEmptyWhenNeitherIsPresent() throws {
+        let json = """
+        {"level": "healthy", "admin_state": "enabled", "summary": "Connected"}
+        """
+        let health = try decode(json)
+        XCTAssertEqual(health.actionsOrLegacyFallback, [])
     }
 
     // MARK: - Every derivation-table row (mirrors internal/health/status_test.go, T041)

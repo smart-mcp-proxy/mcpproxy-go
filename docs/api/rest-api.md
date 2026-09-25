@@ -226,7 +226,6 @@ a prompt-injected agent could otherwise read another upstream's PAT via
           "level": "healthy",
           "admin_state": "enabled",
           "summary": "Connected (15 tools)",
-          "action": "",
           "status": "ready",
           "usable": true,
           "actions": []

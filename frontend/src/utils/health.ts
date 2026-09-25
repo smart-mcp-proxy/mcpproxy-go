@@ -86,7 +86,8 @@ export const HealthStatusValues = {
 } as const
 
 /**
- * Cross-surface label for a `health.status` value (contracts/health-vocabulary.md).
+ * Cross-surface label for a `health.status` value (Spec 109 FR-014,
+ * internal/health.StatusLabels).
  * Falls back to the raw value for forward-compat with a status this build
  * does not yet know (never crashes on an unrecognized value).
  *
@@ -99,9 +100,9 @@ export function healthStatusLabel(status: string | undefined | null): string {
 }
 
 /**
- * Cross-surface button label for a `health.actions[]` entry
- * (contracts/health-vocabulary.md). Returns '' for HealthAction.None or an
- * unrecognized value.
+ * Cross-surface button label for a `health.actions[]` entry (Spec 109
+ * FR-014, internal/health.ActionLabels). Returns '' for HealthAction.None or
+ * an unrecognized value.
  *
  * @param action - one entry of health.actions (or health.action)
  * @returns the button label text (e.g. "Sign in"), or '' when none

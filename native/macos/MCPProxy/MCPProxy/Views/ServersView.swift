@@ -18,6 +18,7 @@ struct ServersView: View {
     @State private var isLoading = false
     @State private var loadTask: Task<Void, Never>?
     @State private var selectedServer: ServerStatus?
+    @State private var selectedServerInitialTab: ServerDetailTab = .tools
     @State private var showAddServer = false
     @State private var addServerInitialTab: AddServerTab = .manual
 
@@ -27,6 +28,7 @@ struct ServersView: View {
                 ServerDetailView(
                     server: server,
                     appState: appState,
+                    initialTab: selectedServerInitialTab,
                     onDismiss: { selectedServer = nil }
                 )
             } else {
@@ -176,10 +178,21 @@ struct ServersView: View {
             showAddServer = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .showServerDetail)) { notification in
-            guard let serverName = notification.object as? String else { return }
+            let serverName: String
+            let tab: ServerDetailTab
+            if let target = notification.object as? ServerDetailTarget {
+                serverName = target.serverName
+                tab = target.tab
+            } else if let name = notification.object as? String {
+                serverName = name
+                tab = .tools
+            } else {
+                return
+            }
             // Find the server by name in the current list or appState
             if let server = servers.first(where: { $0.name == serverName })
                 ?? appState.servers.first(where: { $0.name == serverName }) {
+                selectedServerInitialTab = tab
                 selectedServer = server
             }
         }
@@ -475,6 +488,15 @@ struct ServerTableView: NSViewRepresentable {
 
         // MARK: - Right-Click Context Menu
 
+        // This menu is deliberately NOT bound to HealthStatus.actionLabels
+        // (Spec 109 FR-014's one-table mandate for the single primary
+        // suggested-action CTA — the Dashboard button, the Web UI action
+        // label, the CLI ACTION hint). It lists every applicable command as
+        // its own imperative verb phrase ("Approve All Tools", "View Logs"),
+        // several of which (Restart, View Details, Delete Server) have no
+        // HealthAction counterpart at all, so there is no single table this
+        // menu could read from. "Approve All Tools" is also gated on
+        // `pendingApprovalCount`, a quarantine signal, not `health.action`.
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
             guard let tableView else { return }
@@ -712,6 +734,13 @@ struct ServerTableView: NSViewRepresentable {
             return cell
         }
 
+        // This column's visible text intentionally reads `health.summary`
+        // (free text — e.g. "Connected (5 tools)"), richer than the shared
+        // status label table, while the status dot's accessibility label
+        // (makeStatusDotCell above) reads the shared table (FR-011: no
+        // surface may render `level` itself, sighted or not). `summary` is
+        // never `level` — it is a sentence CalculateHealth composes — so this
+        // is a sighted-vs-VoiceOver wording choice, not an FR-011 violation.
         private func makeStateCell(server: ServerStatus, tableView: NSTableView) -> NSView {
             let cellId = NSUserInterfaceItemIdentifier("StateCell")
             let cell = reuseOrCreate(tableView: tableView, identifier: cellId)

@@ -303,10 +303,13 @@ function statusBadge(server: AdminServer): string {
 function statusLabel(server: AdminServer): string {
   if (server.quarantined) return 'quarantined'
   if (!server.enabled) return 'disabled'
-  // FR-011: no surface may render `level` as text.
+  // FR-011: no surface may render `level` as text — including as a fallback.
+  // A payload lacking both `status` and `summary` (e.g. version skew against
+  // an older/newer core) must not fall through to the raw `level` word.
   if (server.health) {
     if (server.health.status) return healthStatusLabel(server.health.status)
-    return server.health.summary || server.health.level
+    if (server.health.summary) return server.health.summary
+    return server.connected ? 'connected' : 'disconnected'
   }
   return server.connected ? 'connected' : 'disconnected'
 }

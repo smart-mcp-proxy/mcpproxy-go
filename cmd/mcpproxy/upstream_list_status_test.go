@@ -229,6 +229,28 @@ func TestUpstreamListStatusFlagRegistration(t *testing.T) {
 	assert.ElementsMatch(t, []string{"a", "b", "c"}, got)
 }
 
+// TestRunUpstreamListRejectsInvalidStatusBeforeContactingDaemon exercises
+// runUpstreamList itself (not just validateStatusFlag in isolation) with an
+// invalid --status value. Every other test here calls validateStatusFlag or
+// filterServersByStatus directly, so a refactor that moved/dropped the
+// validateStatusFlag call at the top of runUpstreamList — reintroducing the
+// GH #938-style silent-empty-result bug this PR fixed — would keep the whole
+// suite green. This test fails in that case: without the early validation,
+// runUpstreamList would instead try to reach a daemon (none is running in
+// this test process) and return a connection error with no mention of the
+// bad status value.
+func TestRunUpstreamListRejectsInvalidStatusBeforeContactingDaemon(t *testing.T) {
+	prevStatus := upstreamListStatus
+	t.Cleanup(func() { upstreamListStatus = prevStatus })
+	upstreamListStatus = []string{"bogus-status"}
+
+	err := runUpstreamList(upstreamListCmd, nil)
+	require.Error(t, err, "an invalid --status value must be refused, not silently produce an empty table")
+	assert.Contains(t, err.Error(), "bogus-status")
+	assert.NotContains(t, err.Error(), "connection refused",
+		"validation must short-circuit before runUpstreamList ever tries to reach the daemon")
+}
+
 func namesOf(servers []map[string]interface{}) []string {
 	names := make([]string, 0, len(servers))
 	for _, s := range servers {

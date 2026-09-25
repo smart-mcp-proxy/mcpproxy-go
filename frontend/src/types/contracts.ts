@@ -64,7 +64,7 @@ export type HealthStatusValue =
   | typeof HealthStatusDisabled;
 
 // Label tables — binding for the Web UI, macOS window/tray and CLI table
-// (contracts/health-vocabulary.md). Generated from internal/health/constants.go
+// (Spec 109 FR-014). Generated from internal/health/constants.go
 // (StatusLabels / ActionLabels).
 export const HEALTH_STATUS_LABELS: Record<HealthStatusValue, string> = {
   [HealthStatusReady]: 'Online',

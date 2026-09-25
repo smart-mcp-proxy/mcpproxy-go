@@ -52,7 +52,7 @@ const (
 )
 
 // ActionPriority is the fixed cross-surface priority order for entries in
-// HealthStatus.Actions (contracts/health-vocabulary.md, FR-012). Every branch
+// HealthStatus.Actions (Spec 109 FR-012). Every branch
 // of CalculateHealth already emits its Actions slice in this order; it is
 // exported so other code (tests, generators) can assert on it without
 // duplicating the literal order.
@@ -61,7 +61,7 @@ var ActionPriority = []string{
 	ActionApprove, ActionRestart, ActionViewLogs, ActionEnable,
 }
 
-// StatusOrder lists every Status* value in the order contracts/health-vocabulary.md
+// StatusOrder lists every Status* value in the priority order Spec 109
 // documents them. Used to iterate StatusLabels deterministically (e.g. code gen).
 var StatusOrder = []string{
 	StatusReady, StatusConnecting, StatusSignInRequired, StatusNeedsReview,
@@ -69,7 +69,7 @@ var StatusOrder = []string{
 }
 
 // StatusLabels is the one label table for `status`, binding for the Web UI,
-// the macOS window and tray, and the CLI table (contracts/health-vocabulary.md).
+// the macOS window and tray, and the CLI table (Spec 109 FR-014).
 var StatusLabels = map[string]string{
 	StatusReady:          "Online",
 	StatusConnecting:     "Connecting",
@@ -82,7 +82,7 @@ var StatusLabels = map[string]string{
 }
 
 // ActionLabels is the one label table for a primary button keyed on
-// Actions[0] (contracts/health-vocabulary.md).
+// Actions[0] (Spec 109 FR-014).
 var ActionLabels = map[string]string{
 	ActionLogin:     "Sign in",
 	ActionSetSecret: "Add secret",

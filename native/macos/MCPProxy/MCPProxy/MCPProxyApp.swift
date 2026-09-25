@@ -2095,7 +2095,9 @@ extension Notification.Name {
     static let switchToActivity = Notification.Name("MCPProxy.switchToActivity")
     /// Posted by dashboard to switch sidebar to Servers view.
     static let switchToServers = Notification.Name("MCPProxy.switchToServers")
-    /// Posted by tray menu to open the detail view for a specific server (object = server name string).
+    /// Posted by tray menu (and Dashboard's AttentionRow) to open the detail
+    /// view for a specific server. object = server name String (opens the
+    /// Tools tab) or a ServerDetailTarget (opens its named tab).
     static let showServerDetail = Notification.Name("MCPProxy.showServerDetail")
     /// Posted by `showMainWindow(tab:)` to select a sidebar section in an
     /// already-open main window (object = SidebarItem raw value string).

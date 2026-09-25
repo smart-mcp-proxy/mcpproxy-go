@@ -1254,8 +1254,8 @@
                 <h3 class="card-title text-base">Health</h3>
                 <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
                   <dt class="text-base-content/60">Status</dt>
-                  <dd>
-                    <span :class="healthLevelBadgeClass(server.health.level)">{{ healthStatusLabel(server.health.status) }}</span>
+                  <dd data-test="server-config-health-status">
+                    <span :class="healthLevelBadgeClass(server.health.level)">{{ configHealthStatusLabel(server.health) }}</span>
                   </dd>
                   <dt class="text-base-content/60">Admin State</dt>
                   <dd><span class="badge badge-ghost badge-sm">{{ server.health.admin_state }}</span></dd>
@@ -1265,11 +1265,11 @@
                     <dt class="text-base-content/60">Detail</dt>
                     <dd class="text-base-content/70 break-words whitespace-pre-wrap">{{ server.health.detail }}</dd>
                   </template>
-                  <template v-if="server.health.actions?.length">
+                  <template v-if="configHealthActions(server.health).length">
                     <dt class="text-base-content/60">Suggested Action</dt>
-                    <dd class="flex flex-wrap gap-1">
+                    <dd class="flex flex-wrap gap-1" data-test="server-config-health-actions">
                       <span
-                        v-for="a in server.health.actions"
+                        v-for="a in configHealthActions(server.health)"
                         :key="a"
                         class="badge badge-info badge-outline badge-sm"
                       >{{ healthActionLabel(a) }}</span>
@@ -1643,7 +1643,7 @@ import ToolDescription from '@/components/ToolDescription.vue'
 import FindingChip from '@/components/FindingChip.vue'
 import FlaggedToolsPanel from '@/components/FlaggedToolsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
+import type { Server, Tool, ToolApproval, SecurityScanReport, HealthStatus } from '@/types'
 import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
@@ -3672,6 +3672,27 @@ function healthLevelBadgeClass(level: string): string {
     default:
       return 'badge badge-ghost badge-sm'
   }
+}
+
+// configHealthStatusLabel is the Config tab's Health card Status field
+// (Spec 109 FR-011 review finding): `healthStatusLabel(status)` alone renders
+// blank when `status` is absent — an old-core payload that only sends the
+// legacy singular `action`/`level`/`summary` fields (no `status`). Falling
+// back to `summary` mirrors the macOS equivalent (HealthStatus.statusLabel in
+// API/Models.swift), which already supports that old-core shape.
+function configHealthStatusLabel(health: HealthStatus): string {
+  if (health.status) return healthStatusLabel(health.status)
+  return health.summary || ''
+}
+
+// configHealthActions is the Config tab's "Suggested Action" row (Spec 109
+// FR-011 review finding): gating and iterating on `health.actions` alone
+// drops the row entirely for an old-core payload that only sends the legacy
+// singular `action` field (`actions` absent) — a regression from pre-109-c
+// behavior, where the row rendered from `action`.
+function configHealthActions(health: HealthStatus): string[] {
+  if (health.actions?.length) return health.actions
+  return health.action ? [health.action] : []
 }
 
 function stopScanPolling() {

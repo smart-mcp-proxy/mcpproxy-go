@@ -263,9 +263,12 @@ function healthLabel(server: UserServer): string {
     return server.enabled ? (server.connected ? 'connected' : 'disconnected') : 'disabled'
   }
   // FR-011: no surface may render `level` as text — render `status` through
-  // the one label table, falling back to the free-text summary.
+  // the one label table, falling back to the free-text summary, and never to
+  // `level` itself (a payload lacking both, e.g. version skew against an
+  // older/newer core, must not surface the banned raw level word).
   if (server.health.status) return healthStatusLabel(server.health.status)
-  return server.health.summary || server.health.level
+  if (server.health.summary) return server.health.summary
+  return server.connected ? 'connected' : 'disconnected'
 }
 
 function navigateToDetail(server: UserServer) {

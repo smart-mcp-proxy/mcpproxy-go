@@ -533,7 +533,7 @@ func validateTrustModeFlag(mode string) error {
 	if config.IsValidTrustMode(mode) {
 		return nil
 	}
-	return fmt.Errorf("invalid --trust-mode %q: must be one of: %s (values are case-sensitive)",
+	return newFlagValidationError("invalid --trust-mode %q: must be one of: %s (values are case-sensitive)",
 		mode, strings.Join(config.ValidTrustModes(), ", "))
 }
 
@@ -544,7 +544,7 @@ func validateTrustModeFlag(mode string) error {
 // result set (exit 0), indistinguishable from "no servers in that state".
 // Accepts the same comma-separated-equals-repeated-flag shape
 // filterServersByStatus does, and matching is case-sensitive because the
-// vocabulary itself is (contracts/health-vocabulary.md).
+// vocabulary itself is (internal/health.StatusOrder, Spec 109 FR-015).
 func validateStatusFlag(rawFilters []string) error {
 	valid := make(map[string]bool, len(health.StatusOrder))
 	for _, s := range health.StatusOrder {
@@ -554,10 +554,18 @@ func validateStatusFlag(rawFilters []string) error {
 		for _, v := range strings.Split(raw, ",") {
 			v = strings.TrimSpace(v)
 			if v == "" {
+				// Deliberately accepted, not a gap: an empty segment (from
+				// `--status ""`, a trailing/leading comma, or `--status=$VAR`
+				// with an unset $VAR) contributes nothing to the filter, so
+				// filterServersByStatus falls back to its own "no filter"
+				// default — the same result as omitting --status entirely.
+				// This mirrors --trust-mode's "" = inherit-default contract
+				// (config.IsValidTrustMode); it does not silently narrow the
+				// result set the way an unrecognized status would.
 				continue
 			}
 			if !valid[v] {
-				return fmt.Errorf("invalid --status %q: must be one of: %s (values are case-sensitive)",
+				return newFlagValidationError("invalid --status %q: must be one of: %s (values are case-sensitive)",
 					v, strings.Join(health.StatusOrder, ", "))
 			}
 		}
@@ -711,7 +719,7 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 			}
 		}
 
-		// Format action as CLI command hint (contracts/health-vocabulary.md#cli).
+		// Format action as CLI command hint (Spec 109 FR-014, internal/health.ActionLabels).
 		actionHint := "-"
 		switch primaryAction {
 		case health.ActionLogin:

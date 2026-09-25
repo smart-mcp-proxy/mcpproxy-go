@@ -160,6 +160,19 @@ struct HealthStatus: Codable, Equatable {
         case actions
     }
 
+    /// Every actionable next step, falling back to the legacy singular
+    /// `action` when `actions` is absent — an old-core payload that only
+    /// sends `level`/`admin_state`/`summary`/`action` (mirrors `isUsable`'s
+    /// own old-core tolerance below). Without this fallback, a renderer that
+    /// gates on `actions` alone (e.g. ServerDetailView's "Suggested Action"
+    /// row) silently drops for that payload shape — a regression from
+    /// before Spec 109.
+    var actionsOrLegacyFallback: [String] {
+        if let actions, !actions.isEmpty { return actions }
+        if let action, !action.isEmpty { return [action] }
+        return []
+    }
+
     /// Parsed health level enum, falling back to `.unhealthy` for unknown values.
     var healthLevel: HealthLevel {
         HealthLevel(rawValue: level) ?? .unhealthy
@@ -176,7 +189,7 @@ struct HealthStatus: Codable, Equatable {
         return HealthAction(rawValue: action)
     }
 
-    /// Cross-surface label for `status` (contracts/health-vocabulary.md),
+    /// Cross-surface label for `status` (Spec 109 FR-014),
     /// binding for the Web UI, the macOS window and tray, and the CLI table.
     /// Falls back to the raw value for forward-compat with an unrecognized
     /// status (never crashes).
@@ -201,7 +214,7 @@ struct HealthStatus: Codable, Equatable {
         return healthLevel == .healthy && adminStateEnum == .enabled
     }
 
-    /// One label table for every `status` value (contracts/health-vocabulary.md).
+    /// One label table for every `status` value (Spec 109 FR-014).
     static let statusLabels: [String: String] = [
         "ready": "Online",
         "connecting": "Connecting",
@@ -214,7 +227,7 @@ struct HealthStatus: Codable, Equatable {
     ]
 
     /// One label table for a primary button keyed on an `actions` entry
-    /// (contracts/health-vocabulary.md).
+    /// (Spec 109 FR-014).
     static let actionLabels: [String: String] = [
         "login": "Sign in",
         "set_secret": "Add secret",

@@ -9,7 +9,7 @@ import (
 )
 
 // TestCalculateHealth_StatusVocabulary is T041: one row per CalculateHealth
-// branch (contracts/health-vocabulary.md's derivation table), asserting the
+// branch (Spec 109 FR-010-012's derivation table), asserting the
 // new `status`/`usable`/`actions` triple and the `action == actions[0]`
 // invariant (or "" when actions is empty). `level` values are asserted where
 // the contract requires them unchanged for compatibility.
@@ -30,12 +30,13 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 		wantActions []string // nil = only Actions[0] is asserted (via wantAction)
 	}{
 		{
-			name:       "disabled",
-			input:      HealthCalculatorInput{Enabled: false},
-			wantStatus: StatusDisabled,
-			wantUsable: false,
-			wantAction: ActionEnable,
-			wantLevel:  LevelHealthy,
+			name:        "disabled",
+			input:       HealthCalculatorInput{Enabled: false},
+			wantStatus:  StatusDisabled,
+			wantUsable:  false,
+			wantAction:  ActionEnable,
+			wantLevel:   LevelHealthy,
+			wantActions: []string{ActionEnable},
 		},
 		{
 			name: "quarantined and OAuth login required (pending auth)",
@@ -45,9 +46,10 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 				OAuthRequired: true,
 				State:         "pending auth",
 			},
-			wantStatus: StatusSignInRequired,
-			wantUsable: false,
-			wantAction: ActionLogin,
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantActions: []string{ActionLogin, ActionApprove},
 		},
 		{
 			name: "quarantined and OAuth login required (call-time)",
@@ -56,9 +58,10 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 				Quarantined:           true,
 				CallTimeOAuthRequired: true,
 			},
-			wantStatus: StatusSignInRequired,
-			wantUsable: false,
-			wantAction: ActionLogin,
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantActions: []string{ActionLogin, ActionApprove},
 		},
 		{
 			name: "quarantined transport fault",
@@ -90,26 +93,29 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 			wantActions: []string{ActionLogin, ActionApprove},
 		},
 		{
-			name:       "quarantined otherwise",
-			input:      HealthCalculatorInput{Enabled: true, Quarantined: true},
-			wantStatus: StatusNeedsReview,
-			wantUsable: false,
-			wantAction: ActionApprove,
-			wantLevel:  LevelHealthy,
+			name:        "quarantined otherwise",
+			input:       HealthCalculatorInput{Enabled: true, Quarantined: true},
+			wantStatus:  StatusNeedsReview,
+			wantUsable:  false,
+			wantAction:  ActionApprove,
+			wantLevel:   LevelHealthy,
+			wantActions: []string{ActionApprove},
 		},
 		{
-			name:       "missing secret",
-			input:      HealthCalculatorInput{Enabled: true, MissingSecret: "GITHUB_TOKEN"},
-			wantStatus: StatusNeedsSecret,
-			wantUsable: false,
-			wantAction: ActionSetSecret,
+			name:        "missing secret",
+			input:       HealthCalculatorInput{Enabled: true, MissingSecret: "GITHUB_TOKEN"},
+			wantStatus:  StatusNeedsSecret,
+			wantUsable:  false,
+			wantAction:  ActionSetSecret,
+			wantActions: []string{ActionSetSecret},
 		},
 		{
-			name:       "OAuth config error",
-			input:      HealthCalculatorInput{Enabled: true, OAuthConfigErr: "requires 'resource' parameter"},
-			wantStatus: StatusNeedsConfig,
-			wantUsable: false,
-			wantAction: ActionConfigure,
+			name:        "OAuth config error",
+			input:       HealthCalculatorInput{Enabled: true, OAuthConfigErr: "requires 'resource' parameter"},
+			wantStatus:  StatusNeedsConfig,
+			wantUsable:  false,
+			wantAction:  ActionConfigure,
+			wantActions: []string{ActionConfigure},
 		},
 		{
 			name: "RetryStopped (GH #1145)",
@@ -132,9 +138,10 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 				HasEndpointURL: true,
 				LastError:      "no such host",
 			},
-			wantStatus: StatusNeedsConfig,
-			wantUsable: false,
-			wantAction: ActionEditURL,
+			wantStatus:  StatusNeedsConfig,
+			wantUsable:  false,
+			wantAction:  ActionEditURL,
+			wantActions: []string{ActionEditURL},
 		},
 		{
 			name: "OAuth login required / re-auth (error state)",
@@ -144,39 +151,44 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 				OAuthRequired: true,
 				LastError:     "oauth authentication required: login available",
 			},
-			wantStatus: StatusSignInRequired,
-			wantUsable: false,
-			wantAction: ActionLogin,
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantActions: []string{ActionLogin},
 		},
 		{
-			name:       "connecting",
-			input:      HealthCalculatorInput{Enabled: true, State: "connecting"},
-			wantStatus: StatusConnecting,
-			wantUsable: false,
-			wantAction: ActionNone,
-			wantLevel:  LevelHealthy,
+			name:        "connecting",
+			input:       HealthCalculatorInput{Enabled: true, State: "connecting"},
+			wantStatus:  StatusConnecting,
+			wantUsable:  false,
+			wantAction:  ActionNone,
+			wantLevel:   LevelHealthy,
+			wantActions: []string{},
 		},
 		{
-			name:       "idle",
-			input:      HealthCalculatorInput{Enabled: true, State: "idle"},
-			wantStatus: StatusConnecting,
-			wantUsable: false,
-			wantAction: ActionNone,
+			name:        "idle",
+			input:       HealthCalculatorInput{Enabled: true, State: "idle"},
+			wantStatus:  StatusConnecting,
+			wantUsable:  false,
+			wantAction:  ActionNone,
+			wantActions: []string{},
 		},
 		{
-			name:       "pending auth (#1013)",
-			input:      HealthCalculatorInput{Enabled: true, State: "pending auth"},
-			wantStatus: StatusSignInRequired,
-			wantUsable: false,
-			wantAction: ActionLogin,
+			name:        "pending auth (#1013)",
+			input:       HealthCalculatorInput{Enabled: true, State: "pending auth"},
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantActions: []string{ActionLogin},
 		},
 		{
-			name:       "call-time OAuth required (MCP-2084)",
-			input:      HealthCalculatorInput{Enabled: true, CallTimeOAuthRequired: true},
-			wantStatus: StatusSignInRequired,
-			wantUsable: false,
-			wantAction: ActionLogin,
-			wantLevel:  LevelDegraded,
+			name:        "call-time OAuth required (MCP-2084)",
+			input:       HealthCalculatorInput{Enabled: true, CallTimeOAuthRequired: true},
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantLevel:   LevelDegraded,
+			wantActions: []string{ActionLogin},
 		},
 		{
 			name:        "connection error (generic)",
@@ -196,15 +208,104 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 			wantActions: []string{ActionRestart, ActionViewLogs},
 		},
 		{
+			// Mirrors the "endpoint address error" row above (same
+			// isEndpointAddressError gate), but reached through the
+			// "disconnected" case rather than "error" — the two share the
+			// gate but were only exercised together via ActionInvariant,
+			// which never asserts Status/Usable/the full Actions slice.
+			name: "disconnected with endpoint address error",
+			input: HealthCalculatorInput{
+				Enabled:        true,
+				State:          "disconnected",
+				HasEndpointURL: true,
+				LastError:      "no such host",
+			},
+			wantStatus:  StatusNeedsConfig,
+			wantUsable:  false,
+			wantAction:  ActionEditURL,
+			wantLevel:   LevelUnhealthy,
+			wantActions: []string{ActionEditURL},
+		},
+		{
+			// Mirrors "OAuth login required / re-auth (error state)" above,
+			// but through the "disconnected" case's own isOAuthRelatedError
+			// gate.
+			name: "disconnected with an OAuth-related error",
+			input: HealthCalculatorInput{
+				Enabled:       true,
+				State:         "disconnected",
+				OAuthRequired: true,
+				LastError:     "oauth authentication required: login available",
+			},
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantLevel:   LevelDegraded,
+			wantActions: []string{ActionLogin},
+		},
+		{
+			name: "OAuth user explicitly logged out",
+			input: HealthCalculatorInput{
+				Enabled:       true,
+				OAuthRequired: true,
+				UserLoggedOut: true,
+			},
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantLevel:   LevelUnhealthy,
+			wantActions: []string{ActionLogin},
+		},
+		{
+			name: "OAuth token expired (OAuthStatus)",
+			input: HealthCalculatorInput{
+				Enabled:       true,
+				OAuthRequired: true,
+				OAuthStatus:   "expired",
+			},
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantLevel:   LevelUnhealthy,
+			wantActions: []string{ActionLogin},
+		},
+		{
+			name: "OAuth error, not expired (OAuthStatus)",
+			input: HealthCalculatorInput{
+				Enabled:       true,
+				OAuthRequired: true,
+				OAuthStatus:   "error",
+			},
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantLevel:   LevelUnhealthy,
+			wantActions: []string{ActionLogin},
+		},
+		{
+			name: "OAuth not yet authenticated (OAuthStatus none)",
+			input: HealthCalculatorInput{
+				Enabled:       true,
+				OAuthRequired: true,
+				OAuthStatus:   "none",
+			},
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantLevel:   LevelUnhealthy,
+			wantActions: []string{ActionLogin},
+		},
+		{
 			name: "OAuth refresh retrying",
 			input: HealthCalculatorInput{
 				Enabled:      true,
 				RefreshState: RefreshStateRetrying,
 			},
-			wantStatus: StatusReady,
-			wantUsable: true,
-			wantAction: ActionViewLogs,
-			wantLevel:  LevelDegraded,
+			wantStatus:  StatusReady,
+			wantUsable:  true,
+			wantAction:  ActionViewLogs,
+			wantLevel:   LevelDegraded,
+			wantActions: []string{ActionViewLogs},
 		},
 		{
 			name: "OAuth refresh failed",
@@ -212,9 +313,10 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 				Enabled:      true,
 				RefreshState: RefreshStateFailed,
 			},
-			wantStatus: StatusSignInRequired,
-			wantUsable: false,
-			wantAction: ActionLogin,
+			wantStatus:  StatusSignInRequired,
+			wantUsable:  false,
+			wantAction:  ActionLogin,
+			wantActions: []string{ActionLogin},
 		},
 		{
 			name: "OAuth token expiring soon, has refresh token",
@@ -224,10 +326,11 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 				HasRefreshToken: true,
 				TokenExpiresAt:  &soon,
 			},
-			wantStatus: StatusReady,
-			wantUsable: true,
-			wantAction: ActionNone,
-			wantLevel:  LevelHealthy,
+			wantStatus:  StatusReady,
+			wantUsable:  true,
+			wantAction:  ActionNone,
+			wantLevel:   LevelHealthy,
+			wantActions: []string{},
 		},
 		{
 			name: "OAuth token expiring soon, no refresh token — proactive nudge stays ready",
@@ -236,18 +339,20 @@ func TestCalculateHealth_StatusVocabulary(t *testing.T) {
 				OAuthRequired:  true,
 				TokenExpiresAt: &soon,
 			},
-			wantStatus: StatusReady,
-			wantUsable: true,
-			wantAction: ActionLogin,
-			wantLevel:  LevelDegraded,
+			wantStatus:  StatusReady,
+			wantUsable:  true,
+			wantAction:  ActionLogin,
+			wantLevel:   LevelDegraded,
+			wantActions: []string{ActionLogin},
 		},
 		{
-			name:       "connected, healthy",
-			input:      HealthCalculatorInput{Enabled: true, ToolCount: 5},
-			wantStatus: StatusReady,
-			wantUsable: true,
-			wantAction: ActionNone,
-			wantLevel:  LevelHealthy,
+			name:        "connected, healthy",
+			input:       HealthCalculatorInput{Enabled: true, ToolCount: 5},
+			wantStatus:  StatusReady,
+			wantUsable:  true,
+			wantAction:  ActionNone,
+			wantLevel:   LevelHealthy,
+			wantActions: []string{},
 		},
 	}
 
@@ -332,7 +437,7 @@ func TestCalculateHealth_ActionInvariant(t *testing.T) {
 
 // TestStatusLabel_CoversEveryStatus and TestActionLabel_CoversEveryAction
 // guard the label tables in constants.go against a status/action value with
-// no cross-surface label (contracts/health-vocabulary.md's label table).
+// no cross-surface label (Spec 109 FR-014's label table).
 func TestStatusLabel_CoversEveryStatus(t *testing.T) {
 	for _, s := range StatusOrder {
 		label := StatusLabel(s)
@@ -346,4 +451,36 @@ func TestActionLabel_CoversEveryAction(t *testing.T) {
 		assert.NotEmpty(t, ActionLabel(a), "action %q has no label", a)
 	}
 	assert.Empty(t, ActionLabel(ActionNone))
+}
+
+// TestConnectionErrorStatus pins connectionErrorStatus's three branches,
+// including its `default` case — the only branch without its own switch
+// label. Both real call sites in CalculateHealth only ever pass
+// ActionRestart, ActionEditURL, or ActionLogin, so `default` today means
+// exactly "ActionRestart, or anything else". This test exists so a change to
+// what falls into `default` (e.g. a new override the "error"/"disconnected"
+// branches start emitting) is a visible, deliberate diff here rather than a
+// silent remap discovered later.
+func TestConnectionErrorStatus(t *testing.T) {
+	cases := []struct {
+		action      string
+		wantStatus  string
+		wantUsable  bool
+		wantActions []string
+	}{
+		{ActionEditURL, StatusNeedsConfig, false, []string{ActionEditURL}},
+		{ActionLogin, StatusSignInRequired, false, []string{ActionLogin}},
+		{ActionRestart, StatusError, false, []string{ActionRestart, ActionViewLogs}},
+		// The default branch's fallback, for any action neither call site
+		// today produces.
+		{"unexpected-action", StatusError, false, []string{ActionRestart, ActionViewLogs}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			status, usable, actions := connectionErrorStatus(tc.action)
+			assert.Equal(t, tc.wantStatus, status)
+			assert.Equal(t, tc.wantUsable, usable)
+			assert.Equal(t, tc.wantActions, actions)
+		})
+	}
 }
