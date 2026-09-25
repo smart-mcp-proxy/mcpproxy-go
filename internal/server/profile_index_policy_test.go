@@ -13,7 +13,7 @@ import (
 // pattern, data-model.md §2): profileIndex compiles and caches one
 // CompiledPolicy per profile, taken with its snapshot as one immutable pair.
 func TestProfileIndex_CompiledPolicy(t *testing.T) {
-	defer config.SetPolicyEnforcementReadyForTest(true)()
+	config.EnablePolicyForTest(t)
 
 	cfg := &config.Config{
 		Servers:  []*config.ServerConfig{{Name: "github"}, {Name: "notion"}, {Name: "filesystem"}},

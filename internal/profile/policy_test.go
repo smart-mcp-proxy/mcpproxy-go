@@ -196,3 +196,31 @@ func TestCompiledPolicy_EffectiveUnannotatedDefaults(t *testing.T) {
 		require.Equal(t, TierRead, tier)
 	})
 }
+
+// TestCompile_EffectiveCodeExecutionDefaults pins FR-003a (data-model.md
+// §1/§2): Compile stores config.ProfileConfig.EffectiveCodeExecution()'s
+// result, not the raw *bool, so an unset field fails closed under a
+// read/write cap and defers to the global gate (true) under
+// destructive/legacy.
+func TestCompile_EffectiveCodeExecutionDefaults(t *testing.T) {
+	falseVal, trueVal := false, true
+
+	cases := []struct {
+		name string
+		pc   config.ProfileConfig
+		want bool
+	}{
+		{"unset under read cap fails closed", config.ProfileConfig{Name: "p", Servers: []string{"a"}, MaxTier: "read"}, false},
+		{"unset under write cap fails closed", config.ProfileConfig{Name: "p", Servers: []string{"a"}, MaxTier: "write"}, false},
+		{"unset under destructive cap defers to the global gate", config.ProfileConfig{Name: "p", Servers: []string{"a"}, MaxTier: "destructive"}, true},
+		{"unset legacy defers to the global gate", config.ProfileConfig{Name: "p", Servers: []string{"a"}}, true},
+		{"explicit true under read cap wins", config.ProfileConfig{Name: "p", Servers: []string{"a"}, MaxTier: "read", CodeExecution: &trueVal}, true},
+		{"explicit false under destructive cap wins", config.ProfileConfig{Name: "p", Servers: []string{"a"}, MaxTier: "destructive", CodeExecution: &falseVal}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cp := Compile(&tc.pc)
+			require.Equal(t, tc.want, cp.CodeExecution)
+		})
+	}
+}

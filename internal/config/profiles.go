@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"sync/atomic"
+	"testing"
 )
 
 // ProfileConfig is a named, stateless view over a subset of the configured
@@ -88,6 +90,23 @@ func (p ProfileConfig) EffectiveUnannotated() string {
 	return ProfileUnannotatedAsRead
 }
 
+// EffectiveCodeExecution returns this profile's effective code_execution
+// permission (FR-003a, data-model.md §1): the explicit value if set, else
+// false when MaxTier is "read" or "write" (fail closed — a capped profile
+// that leaves the field unset must not still be able to run scripts), else
+// true (legacy/destructive: the global enable_code_execution gate decides).
+// The global gate is ANDed at the call site (FR-006); this method never
+// widens past it, only narrows.
+func (p ProfileConfig) EffectiveCodeExecution() bool {
+	if p.CodeExecution != nil {
+		return *p.CodeExecution
+	}
+	if p.MaxTier == ProfileTierRead || p.MaxTier == ProfileTierWrite {
+		return false
+	}
+	return true
+}
+
 // Profile tier and unannotated-policy wire values (FR-001). Kept here,
 // alongside ProfileConfig, rather than in internal/profile: internal/profile
 // imports internal/config (for ToolAnnotations), so internal/config cannot
@@ -105,32 +124,53 @@ const (
 	ProfileUnannotatedAsRead  = "as_read"
 )
 
-// PolicyEnforcementReady is the FR-009a rollout gate: no build may admit a
-// v3 policy field it cannot yet enforce on every dispatch path. It is false
-// from PR 108-a and flips to true in PR 108-d, in the same commit that lands
-// the last execution gate — so a release built from any commit between
-// 108-a and 108-d rejects every v3 policy field at load time and behaves
-// exactly like a pre-108 build for profiles (discovery can never hide a tool
-// that execution would still run).
+// policyEnforcementReadyBase is the FR-009a rollout gate's compile-time
+// value: false from PR 108-a and flips to true in PR 108-d, in the same
+// commit that lands the last execution gate — so a release built from any
+// commit between 108-a and 108-d rejects every v3 policy field at load time
+// and behaves exactly like a pre-108 build for profiles (discovery can never
+// hide a tool that execution would still run). It is an unexported const —
+// never a package variable — so no import can open the gate by assigning to
+// it; the only way to open it outside 108-d is EnablePolicyForTest below.
+const policyEnforcementReadyBase = false
+
+// policyEnforcementTestOverride is the FR-009a test-only override's flag
+// (zcode review: "the override cannot ship" — it must be unreachable from
+// any non-test call site). It is flipped only by EnablePolicyForTest, whose
+// own testing.Testing() guard is what keeps it out of production, not the
+// atomic type.
+var policyEnforcementTestOverride atomic.Bool
+
+// PolicyEnforcementReady reports whether the FR-009a rollout gate is open:
+// no build may admit a v3 policy field it cannot yet enforce on every
+// dispatch path.
 //
 // The spec's prose calls this "profile.PolicyEnforcementReady" (FR-009a,
-// data-model.md §1); it lives in package config, not package profile,
-// because ValidateProfiles (which enforces the gate) runs at config load —
-// before internal/profile even compiles a policy — and internal/profile
-// already imports internal/config for ToolAnnotations, so a reference the
-// other way round would cycle. internal/profile and every other consumer
-// reads config.PolicyEnforcementReady directly.
-var PolicyEnforcementReady = false
+// data-model.md §1); the gate itself lives here, in package config, not
+// package profile, because ValidateProfiles (which enforces it) runs at
+// config load — before internal/profile even compiles a policy — and
+// internal/profile already imports internal/config for ToolAnnotations, so
+// a reference the other way round would cycle. internal/profile and every
+// other consumer calls config.PolicyEnforcementReady() directly.
+func PolicyEnforcementReady() bool {
+	return policyEnforcementReadyBase || (policyEnforcementTestOverride.Load() && testing.Testing())
+}
 
-// SetPolicyEnforcementReadyForTest overrides PolicyEnforcementReady for the
-// caller's test (the 108-a/108-b "test-only override" the spec and tasks.md
-// call for, FR-009a) and returns a restore func the caller MUST defer. It
-// takes no *testing.T so any package's tests — not only internal/config's —
-// can use it without internal/config importing the testing package.
-func SetPolicyEnforcementReadyForTest(ready bool) (restore func()) {
-	prev := PolicyEnforcementReady
-	PolicyEnforcementReady = ready
-	return func() { PolicyEnforcementReady = prev }
+// EnablePolicyForTest opens the FR-009a gate for the duration of the
+// caller's test only (the 108-a/108-b "test-only override" the spec and
+// tasks.md call for). It panics when called outside a test binary
+// (testing.Testing() false) — no env var, config field, flag or build tag
+// can open the gate — and registers a tb.Cleanup that closes it again when
+// the test ends, so callers need no defer/restore bookkeeping of their own.
+// It takes testing.TB (not *testing.T) so any package's tests — not only
+// internal/config's — can use it.
+func EnablePolicyForTest(tb testing.TB) {
+	if !testing.Testing() {
+		panic("config: EnablePolicyForTest called outside a test binary")
+	}
+	tb.Helper()
+	policyEnforcementTestOverride.Store(true)
+	tb.Cleanup(func() { policyEnforcementTestOverride.Store(false) })
 }
 
 // profileSlugPattern is the allowed profile-name form (FR-007): lowercase
@@ -226,6 +266,14 @@ func indexByte(s string, b byte) int {
 // FR-007). A nil/empty Profiles slice is fully valid (returns no warnings, no
 // error) — preserving zero-config behaviour (SC-004).
 func ValidateProfiles(cfg *Config) (warnings []string, err error) {
+	// FR-009a rollout gate, anonymous_profile row (data-model.md §1): a
+	// non-empty anonymous_profile is fatal while the gate is closed,
+	// regardless of whether it names a known or unknown profile, and
+	// regardless of whether cfg has any profiles at all — checked first so
+	// it applies even on the cfg==nil/no-profiles early return below.
+	if cfg != nil && cfg.AnonymousProfile != "" && !PolicyEnforcementReady() {
+		return nil, fmt.Errorf("anonymous_profile is not supported by this build (Profiles v3 enforcement incomplete)")
+	}
 	if cfg == nil || len(cfg.Profiles) == 0 {
 		return validateAnonymousProfile(cfg, nil), nil
 	}
@@ -264,7 +312,7 @@ func ValidateProfiles(cfg *Config) (warnings []string, err error) {
 		// before the field-level fatal rules below so a build stuck on
 		// 108-a/b/c never even reaches value validation for a field it
 		// cannot enforce.
-		if !PolicyEnforcementReady {
+		if !PolicyEnforcementReady() {
 			if field, set := firstSetPolicyField(p); set {
 				return warnings, fmt.Errorf("profiles[%d]: %s is not supported by this build (Profiles v3 enforcement incomplete)", i, field)
 			}

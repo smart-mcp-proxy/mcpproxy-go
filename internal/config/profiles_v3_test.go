@@ -114,12 +114,40 @@ func TestProfileConfig_EffectiveUnannotated(t *testing.T) {
 	require.Equal(t, "as_write", (ProfileConfig{MaxTier: "read", Unannotated: "as_write"}).EffectiveUnannotated(), "explicit value always wins")
 }
 
+// TestProfileConfig_EffectiveCodeExecution pins FR-003a's default matrix
+// (data-model.md §1): unset (nil) fails closed to false under a read/write
+// cap and defaults to true (the global enable_code_execution gate decides)
+// under destructive/legacy; an explicit value always wins regardless of
+// max_tier.
+func TestProfileConfig_EffectiveCodeExecution(t *testing.T) {
+	trueVal, falseVal := true, false
+
+	cases := []struct {
+		name string
+		p    ProfileConfig
+		want bool
+	}{
+		{"unset under read cap fails closed", ProfileConfig{MaxTier: "read"}, false},
+		{"unset under write cap fails closed", ProfileConfig{MaxTier: "write"}, false},
+		{"unset under destructive cap defers to the global gate", ProfileConfig{MaxTier: "destructive"}, true},
+		{"unset legacy (no max_tier) defers to the global gate", ProfileConfig{}, true},
+		{"explicit true under read cap wins", ProfileConfig{MaxTier: "read", CodeExecution: &trueVal}, true},
+		{"explicit false under destructive cap wins", ProfileConfig{MaxTier: "destructive", CodeExecution: &falseVal}, false},
+		{"explicit false legacy wins", ProfileConfig{CodeExecution: &falseVal}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, tc.p.EffectiveCodeExecution())
+		})
+	}
+}
+
 // TestValidateProfiles_V3Rules pins every fatal/warning message row of
-// data-model.md §1 exactly, with PolicyEnforcementReady overridden true
-// (the 108-a/108-b test-only override, FR-009a; see
+// data-model.md §1 exactly, with the FR-009a gate opened via
+// EnablePolicyForTest (the 108-a/108-b test-only override; see
 // profiles_rollout_gate_test.go for the gate itself).
 func TestValidateProfiles_V3Rules(t *testing.T) {
-	defer SetPolicyEnforcementReadyForTest(true)()
+	EnablePolicyForTest(t)
 
 	t.Run("invalid max_tier is fatal", func(t *testing.T) {
 		cfg := &Config{Profiles: []ProfileConfig{{Name: "prof", Servers: []string{"a"}, MaxTier: "bogus"}}}

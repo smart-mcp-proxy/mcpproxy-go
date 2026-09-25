@@ -129,7 +129,12 @@ type CompiledPolicy struct {
 	allow, deny []*globMatcher
 	classify    map[string]Tier
 
-	CodeExecution   *bool
+	// CodeExecution is config.ProfileConfig.EffectiveCodeExecution()
+	// (FR-003a): unset (nil) fails closed to false under a read/write cap
+	// and defaults to true (global gate decides) under destructive/legacy;
+	// an explicit value always wins. The global enable_code_execution gate
+	// is ANDed at the call site — this field never widens past it.
+	CodeExecution   bool
 	ManagementTools *bool
 	// SwitchableTo is nil for "legacy/none" (FR-022); a non-nil, possibly
 	// empty, set means "the profiles this one may set_profile into".
@@ -212,9 +217,11 @@ func fingerprintOf(pc *config.ProfileConfig) [32]byte {
 // Compile builds the request-ready CompiledPolicy for one profile (data-model
 // §2). It is deliberately cheap for a legacy profile (pc.IsLegacy(): Tools is
 // nil, so the allow/deny/classify loops below do zero work and Cap/
-// SwitchableTo/CodeExecution/ManagementTools stay at their zero values) —
-// the "fast path" a legacy snapshot takes through the profileIndex that
-// caches this per snapshot (internal/server/profile_tool.go).
+// SwitchableTo/ManagementTools stay at their zero values; CodeExecution
+// still resolves through EffectiveCodeExecution(), which is `true` — global
+// gate decides — for a legacy/uncapped profile, FR-003a) — the "fast path" a
+// legacy snapshot takes through the profileIndex that caches this per
+// snapshot (internal/server/profile_tool.go).
 //
 // Rule/classify entries naming a server outside pc.Servers were already
 // warned-and-ignored at validation time (config.ValidateProfiles, FR-004/
@@ -227,7 +234,7 @@ func Compile(pc *config.ProfileConfig) *CompiledPolicy {
 		Servers:         make(map[string]struct{}, len(pc.Servers)),
 		Cap:             tierFromString(pc.MaxTier),
 		Unannotated:     pc.EffectiveUnannotated(),
-		CodeExecution:   pc.CodeExecution,
+		CodeExecution:   pc.EffectiveCodeExecution(),
 		ManagementTools: pc.ManagementTools,
 		Fingerprint:     fingerprintOf(pc),
 	}
