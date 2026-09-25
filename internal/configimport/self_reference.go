@@ -46,6 +46,12 @@ func canonicalHost(host string) string {
 // reachable via ::1 or 127.0.0.2, so a server there is another process and must
 // stay importable. A wildcard URL host (0.0.0.0, ::) is what Connect writes for
 // a wildcard listen, and dialing it reaches the loopback listener of its family.
+//
+// "localhost" is deliberately treated as reaching any loopback listener even
+// though it may resolve to the other family first: the docs tell users to write
+// http://localhost:8080/mcp by hand, dialers fall back across families when the
+// first refuses, and the only false positive needs a second server on the same
+// port in the other loopback family.
 func newSelfMatcher(listenAddrs []string) *selfMatcher {
 	m := &selfMatcher{}
 	for _, addr := range listenAddrs {
