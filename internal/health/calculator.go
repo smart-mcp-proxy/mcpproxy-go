@@ -549,6 +549,20 @@ func quarantinedOAuthLoginState(input HealthCalculatorInput, state string) (need
 			level, _, summary = oauthAttentionState(input.LastError)
 			return true, level, summary, input.LastError
 		}
+		// A genuine, non-OAuth-shaped transport fault (e.g. "dial tcp: ...
+		// no route to host") must outrank a stale OAuthStatus below, exactly
+		// like the non-quarantined "error"/"disconnected" branches, which
+		// always return before OAuthStatus is ever consulted — a connection
+		// error takes priority over any OAuth signal. Without this, a
+		// quarantined server whose dial fails for a reason unrelated to
+		// OAuth (a dead host, a missing binary) fell through to the
+		// OAuthStatus checks and reported sign-in-required off a token
+		// status that has nothing to do with the actual fault, instead of
+		// the transport-fault branch CalculateHealth's own admin-state
+		// section (`state == "error" && LastError != ""`) reports.
+		if input.LastError != "" {
+			return false, "", "", ""
+		}
 	}
 	if input.CallTimeOAuthRequired {
 		return true, LevelDegraded, "Sign-in required", "This server requires sign-in before its tools can be called."

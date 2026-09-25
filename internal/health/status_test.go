@@ -567,6 +567,40 @@ func TestCalculateHealth_QuarantinedDisconnectedOAuthError(t *testing.T) {
 	assert.Equal(t, StateQuarantined, result.AdminState)
 }
 
+// TestCalculateHealth_QuarantinedTransportFaultOutranksStaleOAuthStatus is a
+// round-5 review finding: quarantinedOAuthLoginState's "error"/"disconnected"
+// case only overrides with a login verdict when
+// `OAuthRequired && isOAuthRelatedError(LastError)`; when that is false it
+// falls through past the switch to the generic OAuthRequired/OAuthStatus
+// check below, which reports needsLogin=true off a stale OAuthStatus
+// ("expired"/"error"/"none") even though the actual LastError is a genuine,
+// unrelated transport fault (e.g. "dial tcp: ... no route to host"). The
+// non-quarantined twin of the identical input (section 4's "error"/
+// "disconnected" branches) always returns before any OAuthStatus is
+// consulted, so the two paths disagree for the same underlying fault: this
+// one must resolve to the transport-fault branch (CalculateHealth's own
+// `state == "error" && LastError != ""` fallback), not sign-in-required.
+func TestCalculateHealth_QuarantinedTransportFaultOutranksStaleOAuthStatus(t *testing.T) {
+	result := CalculateHealth(HealthCalculatorInput{
+		Enabled:       true,
+		Quarantined:   true,
+		State:         "error",
+		OAuthRequired: true,
+		// Stale — the server was signed in before, but the token status has
+		// not been refreshed since this genuinely unrelated dial failure.
+		OAuthStatus: "expired",
+		LastError:   "dial tcp: no route to host",
+	}, nil)
+
+	assert.NotEqual(t, StatusSignInRequired, result.Status,
+		"a genuine transport fault must not be masked by a stale OAuthStatus")
+	assert.Equal(t, StatusError, result.Status)
+	assert.Equal(t, LevelUnhealthy, result.Level)
+	assert.Equal(t, StateQuarantined, result.AdminState, "still quarantined")
+	assert.Contains(t, result.Detail, "no route to host")
+	assert.Equal(t, []string{ActionApprove, ActionViewLogs}, result.Actions)
+}
+
 // TestCalculateHealth_QuarantinedConnectingSkipsOAuthLoginCTA is a round-4
 // review finding: the non-quarantined connection-state switch (section 4)
 // returns "Connecting..." for state connecting/idle before any OAuth check

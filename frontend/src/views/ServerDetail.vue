@@ -1952,6 +1952,14 @@ const healthLevelLabel = computed(() => {
   // "Healthy" directly above the sub-line's "Connecting..." text.
   const status = server.value?.health?.status
   if (status) return healthStatusLabel(status)
+  // Version-skew fallback (old core, no `status` field): mirror
+  // statusBadgeText's and ServerCard's own fallback order — sign-in state
+  // wins over a raw `connected` reading. Without this, an OAuth-expired but
+  // still-connected server (summary="Token expired", action="login",
+  // level="unhealthy") rendered "Online" here directly above the sub-line's
+  // "Sign-in required" text, one of SC-003's forbidden words for a
+  // usable=false server.
+  if (signInState.value) return 'Sign-in required'
   return server.value?.connected ? 'Online' : 'Unknown'
 })
 

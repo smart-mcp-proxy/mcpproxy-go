@@ -524,6 +524,9 @@ func (c *Client) GetServers() ([]Server, error) {
 				Summary:    getString(healthMap, "summary"),
 				Detail:     getString(healthMap, "detail"),
 				Action:     getString(healthMap, "action"),
+				Status:     getString(healthMap, "status"),
+				Usable:     getBool(healthMap, "usable"),
+				Actions:    getStringSlice(healthMap, "actions"),
 			}
 			if c.logger != nil && server.Health.Level != "" {
 				c.logger.Debugw("Health extracted",
@@ -1114,6 +1117,20 @@ func getFloat64(m map[string]interface{}, key string) float64 {
 		return v
 	}
 	return 0.0
+}
+
+func getStringSlice(m map[string]interface{}, key string) []string {
+	raw, ok := m[key].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func keys(m map[string]interface{}) []string {

@@ -1062,7 +1062,7 @@ private struct AttentionRow: View {
 
     private func performAction(_ action: HealthAction, for server: ServerStatus) async {
         switch action {
-        case .login, .restart, .enable, .approve:
+        case .login, .restart, .enable:
             guard let client = appState.apiClient else { return }
             do {
                 switch action {
@@ -1072,8 +1072,6 @@ private struct AttentionRow: View {
                     try await client.restartServer(server.id)
                 case .enable:
                     try await client.enableServer(server.id)
-                case .approve:
-                    try await client.approveTools(server.id)
                 default:
                     break
                 }
@@ -1085,6 +1083,15 @@ private struct AttentionRow: View {
             // form (the secret value, the new URL, isolation fields). Take
             // the user to the server's Config tab instead of no-op'ing.
             navigateToServerDetail(server, tab: .config)
+        case .approve:
+            // FR-014/FR-005: "approve" is never a one-click action — it must
+            // open the review location so the user sees what is being
+            // approved before it happens, matching the identically-labeled
+            // ("Review") button on the Web UI and the tray. The Tools tab
+            // already hosts that review UI (quarantine banner + per-tool
+            // approve rows), so navigate there instead of performing the
+            // approval directly through the API client.
+            navigateToServerDetail(server, tab: .tools)
         case .viewLogs:
             navigateToServerDetail(server, tab: .logs)
         }

@@ -127,6 +127,25 @@ final class DashboardRoutingTests: XCTestCase {
                        "navigateToServerDetail must not post a bare server-name String — ServersView would then default the tab to .tools regardless of which action fired")
     }
 
+    /// Round 4 relabeled the AttentionRow's `.approve` button "Review" (via
+    /// `HealthStatus.actionLabels`) but left `performAction` routing it into
+    /// the direct-API-call branch, which called `client.approveTools(_:)`
+    /// with no confirmation screen — the exact one-click approve FR-014/FR-005
+    /// forbid, and a regression from this same PR's own sibling fix for
+    /// setSecret/configure/editURL. `.approve` must navigate to the server's
+    /// review location (the Tools tab) instead of performing the approval
+    /// directly.
+    func testAttentionRowApproveNavigatesInsteadOfOneClickApprove() throws {
+        let source = try dashboardSource()
+        let body = try performActionBody(in: source)
+
+        let approveCase = try caseBody(labelContaining: ".approve", in: body)
+        XCTAssertFalse(approveCase.contains("approveTools"),
+                       "`.approve` must not call client.approveTools(_:) directly — that is a one-click approve")
+        XCTAssertTrue(approveCase.contains("navigateToServerDetail(server, tab: .tools)"),
+                      "`.approve` must open the server's Tools tab (the review location) instead")
+    }
+
     // MARK: - Helpers
 
     /// Isolates the body of `performAction` (the last function in the file)

@@ -201,6 +201,37 @@ describe('ServerDetail — Health tile answers "can my client use it?" (F10)', (
     expect(degradedTile.classes()).toContain('text-warning')
   })
 
+  it('does not read "Online" for an old-core, OAuth-required, still-connected server (round-5 review finding)', async () => {
+    // Version-skew regression: an old core sends `level`/`admin_state`/
+    // `summary`/`action` but no `status` field. For a still-connected,
+    // OAuth-configured server whose token expired (summary="Token expired",
+    // action="login", level="unhealthy", admin_state="enabled"),
+    // healthLevelLabel's fallback chain fell straight to
+    // `connected ? 'Online' : 'Unknown'` without checking sign-in state
+    // first — rendering "Online" in the tile directly above the sub-line's
+    // "Sign-in required" text. SC-003 forbids "healthy"/"online"/"connected"
+    // for a usable=false server; every sibling surface (ServerCard.vue,
+    // AdminServers.vue, UserServers.vue, and this file's own
+    // statusBadgeText) checks signInState before falling back to connected.
+    const wrapper = await mountDetail({
+      ...base,
+      connected: true,
+      health: {
+        level: 'unhealthy',
+        admin_state: 'enabled',
+        summary: 'Token expired',
+        action: 'login',
+        // no `status`, no `usable`, no `actions` — the pre-109-c shape.
+      },
+    })
+    const tile = wrapper.find('[data-test="server-health-level"]')
+    expect(tile.text()).not.toBe('Online')
+    expect(tile.text()).toBe('Sign-in required')
+    expect(wrapper.find('[data-test="server-health-summary"]').text()).toContain(
+      'Sign-in required'
+    )
+  })
+
   it('does not claim an automatic quarantine-on-add was "set by you"', async () => {
     const wrapper = await mountDetail({
       ...base,
