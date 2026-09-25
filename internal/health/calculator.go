@@ -148,6 +148,19 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		// still the operator's next step — so the review flow and the tray's
 		// quarantine handling keep working. Only the level and the summary
 		// stop claiming the server is fine.
+		//
+		// An OAuth server awaiting sign-in is the same story: it cannot connect
+		// until the user signs in, so it is an attention item, not healthy. It
+		// reads like the enabled-server OAuth branches below (amber first
+		// sign-in, red re-auth). The login markers are specific enough to use
+		// without OAuthRequired, which is false for autodetected OAuth.
+		if quarantinedAwaitingSignIn(input) {
+			level, _, summary := oauthAttentionState(input.LastError)
+			status.Level = level
+			status.Summary = "Quarantined — " + summary
+			status.Detail = input.LastError
+			return status
+		}
 		if strings.EqualFold(input.State, "error") && input.LastError != "" {
 			status.Level = LevelUnhealthy
 			status.Summary = "Quarantined — " + formatErrorSummary(input.LastError)
@@ -568,6 +581,27 @@ func isOAuthRelatedError(err string) bool {
 		}
 	}
 	return false
+}
+
+// quarantinedAwaitingSignIn reports whether a quarantined server is waiting on
+// an OAuth sign-in: parked in Pending Auth, or its last error is OAuth-related
+// and either a first-time login-required error or (for configured OAuth) any
+// OAuth error outside the "error" state. In the "error" state a non-login OAuth
+// match is left to the transport-fault branch, because mcp-go wraps transport
+// failures in "authentication strategies failed" and the fault summary names
+// the real cause.
+func quarantinedAwaitingSignIn(input HealthCalculatorInput) bool {
+	state := strings.ToLower(input.State)
+	if state == "pending auth" || state == "pending_auth" {
+		return true
+	}
+	if !isOAuthRelatedError(input.LastError) {
+		return false
+	}
+	if isOAuthLoginRequiredError(input.LastError) {
+		return true
+	}
+	return input.OAuthRequired && state != "error"
 }
 
 // oauthAttentionState maps an OAuth-related error into the health level, action,
