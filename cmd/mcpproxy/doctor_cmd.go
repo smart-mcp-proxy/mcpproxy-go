@@ -13,6 +13,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 )
 
@@ -128,6 +129,15 @@ func runDoctorClientMode(ctx context.Context, client *cliclient.Client, logger *
 		return fmt.Errorf("failed to get diagnostics from daemon: %w", err)
 	}
 
+	// Spec 109 FR-004: doctor's first section is the one needs-attention list
+	// every surface reads (FR-001). Non-fatal: an older or unreachable
+	// endpoint just omits the section rather than failing the whole command.
+	attention, attErr := client.GetAttention(ctx)
+	if attErr != nil {
+		logger.Debug("Failed to get attention list from daemon", zap.Error(attErr))
+		attention = nil
+	}
+
 	// Collect quarantine stats from servers
 	quarantineStats := collectQuarantineStats(ctx, client, logger)
 
@@ -156,9 +166,26 @@ func runDoctorClientMode(ctx context.Context, client *cliclient.Client, logger *
 	if doctorServerFilter != "" {
 		diag = filterDiagnosticsByServer(diag, doctorServerFilter)
 		quarantineStats = filterQuarantineStatsByServer(quarantineStats, doctorServerFilter)
+		attention = filterAttentionByServer(attention, doctorServerFilter)
 	}
 
-	return outputDiagnostics(diag, info, quarantineStats, envHint)
+	return outputDiagnostics(diag, info, quarantineStats, envHint, attention)
+}
+
+// filterAttentionByServer narrows an attention response to the items whose
+// subject is the requested server. A single-server doctor run is not
+// interested in another server's attention items, or in client items at all.
+func filterAttentionByServer(resp *cliclient.AttentionResponse, serverName string) *cliclient.AttentionResponse {
+	if resp == nil {
+		return nil
+	}
+	items := make([]contracts.AttentionItem, 0, len(resp.Items))
+	for _, it := range resp.Items {
+		if it.Subject.Type == "server" && it.Subject.ID == serverName {
+			items = append(items, it)
+		}
+	}
+	return &cliclient.AttentionResponse{Count: len(items), GeneratedAt: resp.GeneratedAt, Items: items}
 }
 
 // filterDiagnosticsByServer returns a shallow copy of the diagnostics
@@ -271,7 +298,27 @@ func collectQuarantineStats(ctx context.Context, client *cliclient.Client, logge
 	return stats
 }
 
-func outputDiagnostics(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats, envHint string) error {
+// printDoctorAttentionSection prints doctor's first section (FR-004): the
+// same needs-attention list FR-001 computes, rendered identically to
+// `mcpproxy attention`'s table rows. nil (endpoint unreachable, e.g. an
+// older daemon) prints nothing — the diagnostics sections below still run.
+func printDoctorAttentionSection(attention *cliclient.AttentionResponse) {
+	if attention == nil {
+		return
+	}
+	fmt.Printf("📋 Needs attention (%d)\n", attention.Count)
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	if attention.Count == 0 {
+		fmt.Println("All clear")
+	} else {
+		for _, item := range attention.Items {
+			fmt.Printf("  [%s] %s (%s)\n", item.Kind, item.Summary, item.Fix.Label)
+		}
+	}
+	fmt.Println()
+}
+
+func outputDiagnostics(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats, envHint string, attention *cliclient.AttentionResponse) error {
 	switch doctorOutput {
 	case "json":
 		// Combine diagnostics with info for JSON output
@@ -286,6 +333,9 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		}
 		if envHint != "" {
 			combined["environment_warnings"] = []string{envHint}
+		}
+		if attention != nil {
+			combined["attention"] = attention
 		}
 		output, err := json.MarshalIndent(combined, "", "  ")
 		if err != nil {
@@ -336,6 +386,10 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		}
 		fmt.Println()
 
+		// Spec 109 FR-004: doctor's first section, from the same GET
+		// /attention every other surface reads (FR-001/FR-003).
+		printDoctorAttentionSection(attention)
+
 		if totalIssues == 0 {
 			fmt.Println("✅ All systems operational! No issues detected.")
 			fmt.Println()
@@ -359,12 +413,10 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 			return nil
 		}
 
-		// Show issue summary
-		issueWord := "issue"
-		if totalIssues > 1 {
-			issueWord = "issues"
-		}
-		fmt.Printf("⚠️  Found %d %s that need attention\n", totalIssues, issueWord)
+		// Show issue summary. FR-004: "need attention" refers only to the
+		// FR-001 attention count above; the diagnostics count below is a
+		// different, separately named number.
+		fmt.Printf("Diagnostics: %d findings\n", totalIssues)
 		fmt.Println()
 
 		// 1. Upstream Connection Errors
