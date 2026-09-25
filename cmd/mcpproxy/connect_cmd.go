@@ -166,7 +166,12 @@ func printConnectStatus(svc *connect.Service, formatter clioutput.OutputFormatte
 				}
 			}
 
-			cfgPath := s.ConfigPath
+			// FR-037: the table's CONFIG PATH column shows the home-shortened
+			// display_path; the full path is still available via -o json.
+			cfgPath := s.DisplayPath
+			if cfgPath == "" {
+				cfgPath = s.ConfigPath
+			}
 			if len(cfgPath) > 50 {
 				cfgPath = "..." + cfgPath[len(cfgPath)-47:]
 			}
@@ -208,7 +213,10 @@ func connectAllClients(svc *connect.Service, formatter clioutput.OutputFormatter
 	}
 
 	if format == "table" {
-		headers := []string{"CLIENT", "ACTION", "MESSAGE"}
+		// FR-037/FR-042: --all lists many clients at once, so the same
+		// "Config:"/"Next:" information the single-client path prints as
+		// prose becomes two more columns here instead of N repeated blocks.
+		headers := []string{"CLIENT", "ACTION", "MESSAGE", "CONFIG PATH", "NEXT"}
 		var rows [][]string
 		for _, r := range results {
 			client := connect.FindClient(r.Client)
@@ -216,7 +224,7 @@ func connectAllClients(svc *connect.Service, formatter clioutput.OutputFormatter
 			if client != nil {
 				name = client.Name
 			}
-			rows = append(rows, []string{name, r.Action, r.Message})
+			rows = append(rows, []string{name, r.Action, r.Message, connectResultDisplayPath(r), r.ReloadHint})
 		}
 		for _, e := range errors {
 			parts := strings.SplitN(e, ": ", 2)
@@ -226,7 +234,7 @@ func connectAllClients(svc *connect.Service, formatter clioutput.OutputFormatter
 				clientName = parts[0]
 				msg = parts[1]
 			}
-			rows = append(rows, []string{clientName, "error", msg})
+			rows = append(rows, []string{clientName, "error", msg, "", ""})
 		}
 		out, err := formatter.FormatTable(headers, rows)
 		if err != nil {
@@ -255,7 +263,14 @@ func printConnectResult(result *connect.ConnectResult, formatter clioutput.Outpu
 			if result.BackupPath != "" {
 				fmt.Printf("Backup: %s\n", result.BackupPath)
 			}
-			fmt.Printf("Config: %s\n", result.ConfigPath)
+			// FR-037: Config shows the home-shortened display_path; the full
+			// path is still available via -o json's config_path.
+			fmt.Printf("Config: %s\n", connectResultDisplayPath(result))
+			// FR-042: name the client's reload step so a successful write
+			// doesn't read as "done" when the client hasn't picked it up yet.
+			if result.ReloadHint != "" {
+				fmt.Printf("Next: %s\n", result.ReloadHint)
+			}
 		} else {
 			fmt.Printf("Failed: %s\n", result.Message)
 		}
@@ -273,4 +288,15 @@ func printConnectResult(result *connect.ConnectResult, formatter clioutput.Outpu
 
 func loadConnectConfig() (*config.Config, error) {
 	return loadCLIConfig(configFile)
+}
+
+// connectResultDisplayPath returns the home-shortened path for a table-format
+// connect/disconnect result, falling back to the full ConfigPath for a result
+// from a Service build that predates DisplayPath (defensive; the field is
+// always populated by the current connect.Service).
+func connectResultDisplayPath(result *connect.ConnectResult) string {
+	if result.DisplayPath != "" {
+		return result.DisplayPath
+	}
+	return result.ConfigPath
 }
