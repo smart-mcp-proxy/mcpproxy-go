@@ -178,6 +178,35 @@ func TestToCatalogResult_HTTPInstall(t *testing.T) {
 	}
 }
 
+// TestToCatalogResult_SecretLikeOverridesFalsifiedFlag pins T099/FR-065: a
+// registry that explicitly sets isSecret:false on a secret-shaped name (or
+// omits it) still serves secret_like:true — the D13 name rule is OR'd in,
+// never overridden by the registry's own (possibly wrong) flag.
+func TestToCatalogResult_SecretLikeOverridesFalsifiedFlag(t *testing.T) {
+	hit := CatalogHit{
+		Source: "official",
+		Entry: ServerEntry{ID: "x", RequiredInputs: []RequiredInput{
+			{Name: "GITHUB_TOKEN", Secret: false}, // falsified: registry says not secret
+			{Name: "GITHUB_TOKEN_OMITTED"},        // omitted: Go zero value is false
+			{Name: "PORT", Secret: true},          // explicit true passes through
+		}},
+	}
+	result := ToCatalogResult(hit, false)
+	byName := map[string]bool{}
+	for _, in := range result.RequiredInputs {
+		byName[in.Name] = in.SecretLike
+	}
+	if !byName["GITHUB_TOKEN"] {
+		t.Error("expected GITHUB_TOKEN secret_like=true despite Secret:false (name rule overrides)")
+	}
+	if !byName["GITHUB_TOKEN_OMITTED"] {
+		t.Error("expected GITHUB_TOKEN_OMITTED secret_like=true (name rule)")
+	}
+	if !byName["PORT"] {
+		t.Error("expected PORT secret_like=true (explicit registry flag passes through)")
+	}
+}
+
 // TestToCatalogResult_StdioInstall pins command/args splitting for a local
 // install target.
 func TestToCatalogResult_StdioInstall(t *testing.T) {

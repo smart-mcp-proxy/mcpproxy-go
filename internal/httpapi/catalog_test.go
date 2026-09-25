@@ -7,7 +7,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 )
@@ -166,4 +168,32 @@ func catalogAddedFor(results []map[string]interface{}, id string) bool {
 		}
 	}
 	return false
+}
+
+// TestCatalogSearch_AddedScopedForNonAdminUserContext pins that the FR-007
+// scoping is not agent-token-specific: a non-admin AuthTypeUser session
+// (server edition's OAuth user identity, e.g. a tenant) is scoped by the same
+// visibleServers/CanEnumerateServer predicate an agent token goes through,
+// driven directly at the handler (like TestRequireAdminRead_DeniesNonAdminUserContext)
+// since apiKeyAuthMiddleware itself only ever installs admin/agent contexts.
+func TestCatalogSearch_AddedScopedForNonAdminUserContext(t *testing.T) {
+	withCatalogFixtureRegistry(t)
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: catalogFixtureServers(), withManagement: true}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	userCtx := &auth.AuthContext{
+		Type:           auth.AuthTypeUser,
+		UserID:         "alice",
+		AllowedServers: []string{"gamma"},
+		CredentialKind: auth.CredentialKindCookie,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/catalog/search?q=tool", http.NoBody)
+	req = req.WithContext(auth.WithAuthContext(req.Context(), userCtx))
+	rec := httptest.NewRecorder()
+	srv.handleCatalogSearch(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	results := catalogDecodeResults(t, rec)
+	assert.True(t, catalogAddedFor(results, "gamma-tool"), "user session scoped to gamma: expected gamma-tool added=true")
+	assert.False(t, catalogAddedFor(results, "delta-tool"), "user session scoped to gamma: expected delta-tool added=false (out of scope)")
 }
