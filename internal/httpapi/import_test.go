@@ -403,26 +403,57 @@ func TestImportServersJSON_UnknownFormat(t *testing.T) {
 // recognize client entries that point back at this instance.
 type mockSelfImportController struct {
 	mockImportController
-	listen string
+	listen    string // bound (display) address
+	cfgListen string // configured listen
 }
 
 func (m *mockSelfImportController) GetListenAddress() string { return m.listen }
+
+func (m *mockSelfImportController) GetCurrentConfig() *config.Config {
+	return &config.Config{APIKey: m.apiKey, Listen: m.cfgListen}
+}
 
 // TestImportFromPath_SkipsSelfReference is the onboarding self-import bug: once
 // Connect has written an `mcpproxy` http entry pointing at this instance into
 // ~/.claude.json, the import preview (wizard Servers step, Add Server > Import)
 // must not list it as an importable server.
 func TestImportFromPath_SkipsSelfReference(t *testing.T) {
+	cases := []struct {
+		name, bound, cfgListen, selfURL string
+	}{
+		{"bound address", "127.0.0.1:18123", "", "http://127.0.0.1:18123/mcp"},
+		// GetListenAddress normalizes a wildcard bind to 127.0.0.1:<port>;
+		// Connect writes the raw wildcard host.
+		{"wildcard listen", "127.0.0.1:18123", "0.0.0.0:18123", "http://0.0.0.0:18123/mcp"},
+		// Not bound yet (or stdio mode): the configured listen still applies.
+		{"configured listen only", "", "127.0.0.1:18123", "http://127.0.0.1:18123/mcp/all"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := previewImportWithSelf(t, tc.bound, tc.cfgListen, tc.selfURL)
+			if len(resp.Imported) != 1 || resp.Imported[0].Name != "github" {
+				t.Fatalf("Expected only 'github' importable, got %+v", resp.Imported)
+			}
+			if len(resp.Skipped) != 1 || resp.Skipped[0].Name != "mcpproxy" || resp.Skipped[0].Reason != "self_reference" {
+				t.Errorf("Expected 'mcpproxy' skipped as self_reference, got %+v", resp.Skipped)
+			}
+		})
+	}
+}
+
+func previewImportWithSelf(t *testing.T, bound, cfgListen, selfURL string) ImportResponse {
+	t.Helper()
 	logger := zap.NewNop().Sugar()
 	mock := &mockSelfImportController{
 		mockImportController: mockImportController{apiKey: "test-key"},
-		listen:               "127.0.0.1:18123",
+		listen:               bound,
+		cfgListen:            cfgListen,
 	}
 	server := NewServer(mock, logger, nil)
 
 	path := filepath.Join(t.TempDir(), ".claude.json")
 	content := `{"mcpServers":{
-		"mcpproxy":{"type":"http","url":"http://127.0.0.1:18123/mcp"},
+		"mcpproxy":{"type":"http","url":"` + selfURL + `"},
 		"github":{"type":"http","url":"https://api.githubcopilot.com/mcp/"}
 	}}`
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -443,12 +474,5 @@ func TestImportFromPath_SkipsSelfReference(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
 		t.Fatalf("Failed to unmarshal response: %v", err)
 	}
-	resp := wrapped.Data
-
-	if len(resp.Imported) != 1 || resp.Imported[0].Name != "github" {
-		t.Fatalf("Expected only 'github' importable, got %+v", resp.Imported)
-	}
-	if len(resp.Skipped) != 1 || resp.Skipped[0].Name != "mcpproxy" || resp.Skipped[0].Reason != "self_reference" {
-		t.Errorf("Expected 'mcpproxy' skipped as self_reference, got %+v", resp.Skipped)
-	}
+	return wrapped.Data
 }

@@ -2260,6 +2260,7 @@ watch(
   (next, prev) => {
     if (next === prev) return
     serverTools.value = []
+    toolsLoadedKey = ''
     toolsError.value = null
     selectedToolSchema.value = null
     toolApprovals.value = []
@@ -2473,13 +2474,21 @@ function toolsStateKey(s: Partial<ToolsStateFields> | null | undefined): string 
   if (!s) return ''
   return [s.quarantined, s.connected, s.enabled, s.tool_count].join('|')
 }
-// Key of the server state the current tool list was requested under.
+// Key of the server state the displayed tool list was requested under. It only
+// advances when a response is committed, so a failed refetch leaves it behind
+// and the next servers.changed event for the same state retries.
 let toolsLoadedKey = ''
+// Overlapping tool fetches for the same server (approval, reconnect events, the
+// connected/enabled watch) can resolve out of order; only a response newer than
+// the last committed one may replace the list.
+let toolsIssueSeq = 0
+let toolsAppliedSeq = 0
 
 async function _loadToolsWithGen(gen: number, silent = false) {
   if (!server.value) return
 
-  toolsLoadedKey = toolsStateKey(server.value)
+  const mySeq = ++toolsIssueSeq
+  const myKey = toolsStateKey(server.value)
   if (!silent) {
     toolsLoading.value = true
     toolsError.value = null
@@ -2487,15 +2496,17 @@ async function _loadToolsWithGen(gen: number, silent = false) {
 
   try {
     const response = await api.getServerTools(server.value.name)
-    if (gen !== loadGeneration) return
+    if (gen !== loadGeneration || mySeq < toolsAppliedSeq) return
     if (response.success && response.data) {
       serverTools.value = response.data.tools || []
       toolsError.value = null
+      toolsAppliedSeq = mySeq
+      toolsLoadedKey = myKey
     } else if (!silent) {
       toolsError.value = response.error || 'Failed to load tools'
     }
   } catch (err) {
-    if (gen !== loadGeneration || silent) return
+    if (gen !== loadGeneration || silent || mySeq < toolsAppliedSeq) return
     toolsError.value = err instanceof Error ? err.message : 'Failed to load tools'
   } finally {
     if (gen === loadGeneration && !silent) toolsLoading.value = false

@@ -204,3 +204,48 @@ describe('ServerDetail — tool list on servers.changed', () => {
     expect(toolsTabLabel(wrapper)).toBe('Tools (2)')
   })
 })
+
+describe('ServerDetail — background tool refetch bookkeeping', () => {
+  it('retries on the next event after a failed background refetch', async () => {
+    const { wrapper, api } = await mountDetail()
+    serverPayload = { ...serverPayload, quarantined: false, tool_count: 2 }
+    const changed = { payload: { servers: [{ ...serverPayload }] } }
+
+    // First refetch fails transiently: the list must not be marked current.
+    api.getServerTools.mockImplementationOnce(() => Promise.resolve({ success: false, error: '502' }))
+    await emitServersChanged(changed)
+    expect(toolsTabLabel(wrapper)).toBe('Tools (0)')
+
+    // The same server state arrives again (e.g. another server changed).
+    inventoryTools = TWO_TOOLS
+    const before = api.getServerTools.mock.calls.length
+    await emitServersChanged(changed)
+
+    expect(api.getServerTools.mock.calls.length).toBe(before + 1)
+    expect(toolsTabLabel(wrapper)).toBe('Tools (2)')
+  })
+
+  it('never lets an older overlapping response overwrite a newer one', async () => {
+    const { wrapper, api } = await mountDetail()
+
+    // Request A (older state) is held; request B (newer state) resolves first.
+    let releaseA!: () => void
+    api.getServerTools.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseA = () => resolve({ success: true, data: { tools: [] } })
+        })
+    )
+    serverPayload = { ...serverPayload, quarantined: false, tool_count: 0 }
+    await emitServersChanged({ payload: { servers: [{ ...serverPayload }] } })
+
+    serverPayload = { ...serverPayload, tool_count: 2 }
+    inventoryTools = TWO_TOOLS
+    await emitServersChanged({ payload: { servers: [{ ...serverPayload }] } })
+    expect(toolsTabLabel(wrapper)).toBe('Tools (2)')
+
+    releaseA()
+    await settle()
+    expect(toolsTabLabel(wrapper)).toBe('Tools (2)')
+  })
+})

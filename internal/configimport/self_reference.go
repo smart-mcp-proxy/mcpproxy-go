@@ -19,16 +19,32 @@ type selfMatcher struct {
 
 type selfTarget struct {
 	port string
-	// hosts are the exact (lower-cased) host names/IPs that reach the listener.
+	// hosts are the canonical URL hosts (lower-cased names, IPs in net.IP
+	// String form) that reach the listener.
 	hosts map[string]bool
-	// loopback is true when the listener accepts loopback connections, so any
-	// loopback alias (localhost, 127.x, ::1) reaches it.
-	loopback bool
+	// anyLoopback is set for an all-interfaces listener, which every loopback
+	// address (127.0.0.0/8, ::1) reaches.
+	anyLoopback bool
+}
+
+// canonicalHost lower-cases a host name and rewrites an IP literal to its
+// canonical form so "0:0:0:0:0:0:0:1" and "::1" compare equal.
+func canonicalHost(host string) string {
+	host = strings.ToLower(host)
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return host
 }
 
 // newSelfMatcher builds a matcher from listen addresses such as
 // "127.0.0.1:8080", ":8080", "0.0.0.0:8080" or "[::]:8080". Empty or
 // unparsable entries are ignored; with none left the matcher matches nothing.
+//
+// Hosts are matched per address family: a socket bound to 127.0.0.1 is not
+// reachable via ::1 or 127.0.0.2, so a server there is another process and must
+// stay importable. A wildcard URL host (0.0.0.0, ::) is what Connect writes for
+// a wildcard listen, and dialing it reaches the loopback listener of its family.
 func newSelfMatcher(listenAddrs []string) *selfMatcher {
 	m := &selfMatcher{}
 	for _, addr := range listenAddrs {
@@ -41,23 +57,35 @@ func newSelfMatcher(listenAddrs []string) *selfMatcher {
 			continue
 		}
 		t := selfTarget{port: port, hosts: map[string]bool{}}
-		host = strings.ToLower(host)
+		host = canonicalHost(host)
 		ip := net.ParseIP(host)
+		add := func(hs ...string) {
+			for _, h := range hs {
+				t.hosts[h] = true
+			}
+		}
 		switch {
 		case host == "" || (ip != nil && ip.IsUnspecified()):
-			// All interfaces: loopback plus every local interface address.
-			t.loopback = true
+			// All interfaces: loopback, the wildcard itself, and every local
+			// interface address.
+			t.anyLoopback = true
+			add("localhost", "0.0.0.0", "::")
 			if addrs, err := net.InterfaceAddrs(); err == nil {
 				for _, a := range addrs {
 					if ipn, ok := a.(*net.IPNet); ok {
-						t.hosts[ipn.IP.String()] = true
+						add(ipn.IP.String())
 					}
 				}
 			}
-		case host == "localhost" || (ip != nil && ip.IsLoopback()):
-			t.loopback = true
+		case host == "localhost":
+			// Resolves to 127.0.0.1 and/or ::1 depending on the host.
+			add("localhost", "127.0.0.1", "::1", "0.0.0.0", "::")
+		case ip != nil && ip.IsLoopback() && ip.To4() != nil:
+			add(host, "localhost", "0.0.0.0")
+		case ip != nil && ip.IsLoopback():
+			add(host, "localhost", "::")
 		default:
-			t.hosts[host] = true
+			add(host)
 		}
 		m.targets = append(m.targets, t)
 	}
@@ -85,17 +113,14 @@ func (m *selfMatcher) matchesURL(raw string) bool {
 			port = "443"
 		}
 	}
-	host := strings.ToLower(u.Hostname())
+	host := canonicalHost(u.Hostname())
 	ip := net.ParseIP(host)
-	isLoopback := host == "localhost" || (ip != nil && ip.IsLoopback())
-	if ip != nil {
-		host = ip.String() // canonical form so "::1" variants compare equal
-	}
+	isLoopback := ip != nil && ip.IsLoopback()
 	for _, t := range m.targets {
 		if t.port != port {
 			continue
 		}
-		if (isLoopback && t.loopback) || t.hosts[host] {
+		if t.hosts[host] || (isLoopback && t.anyLoopback) {
 			return true
 		}
 	}

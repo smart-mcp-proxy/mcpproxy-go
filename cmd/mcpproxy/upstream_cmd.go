@@ -1715,7 +1715,7 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 	}
 	opts.ExistingServers = existingNames
 	// Never import the entry that points back at this instance's /mcp endpoint.
-	opts.SelfListenAddrs = []string{globalConfig.Listen}
+	opts.SelfListenAddrs = importSelfListenAddrs(globalConfig)
 
 	// Run import
 	result, err := configimport.Import(content, opts)
@@ -1737,6 +1737,29 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 	}
 
 	return outputImportResultTable(result, upstreamImportDryRun, upstreamImportNoQuarantine, globalConfig)
+}
+
+// importSelfListenAddrs returns the addresses the local mcpproxy answers on,
+// for the import self-reference filter. The configured listen can differ from
+// the running daemon's (`serve --listen` is a process-only override, and the
+// file may have been edited since start), and Connect writes the LIVE address
+// into client configs — so ask the daemon too when one is reachable.
+func importSelfListenAddrs(cfg *config.Config) []string {
+	addrs := []string{cfg.Listen}
+	client, ok := newDaemonClient(cfg, nil)
+	if !ok {
+		return addrs
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	status, err := client.GetStatus(ctx)
+	if err != nil {
+		return addrs
+	}
+	if live, ok := status["listen_addr"].(string); ok && live != "" {
+		addrs = append(addrs, live)
+	}
+	return addrs
 }
 
 // parseImportFormat converts a format string to ConfigFormat
