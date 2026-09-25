@@ -447,8 +447,25 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 
 		// Override summary for config-only mode to indicate daemon status
 		summary := healthStatus.Summary
+		statusValue := healthStatus.Status
 		if healthStatus.AdminState == health.StateEnabled {
 			summary = "Daemon not running"
+			// Round-6 review finding: the synthetic State: "disconnected"
+			// input above always makes CalculateHealth set Status =
+			// StatusError too (a disconnected server with no LastError still
+			// resolves through connectionErrorStatus(ActionRestart) ==
+			// StatusError). upstreamServerRows's STATUS column renders
+			// health.StatusLabel(health.status) INSTEAD OF the free-text
+			// summary whenever health.status is non-empty (Spec 109 FR-015),
+			// so leaving it as "error" silently reverted the STATUS column
+			// from "Daemon not running" back to the generic "Error" for
+			// every enabled server. This daemon-less path cannot know the
+			// server's real connection status at all — clear it so
+			// upstreamServerRows falls back to the summary, matching
+			// pre-Spec-109 behavior. (`--status` filtering on an empty
+			// health.status already excludes these rows by design; see
+			// filterServersByStatus's own doc comment.)
+			statusValue = ""
 		}
 
 		servers[i] = map[string]interface{}{
@@ -464,7 +481,7 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 				"summary":     summary,
 				"detail":      healthStatus.Detail,
 				"action":      healthStatus.Action,
-				"status":      healthStatus.Status,
+				"status":      statusValue,
 				"usable":      healthStatus.Usable,
 				"actions":     healthStatus.Actions,
 			},

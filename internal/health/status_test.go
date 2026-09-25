@@ -623,3 +623,71 @@ func TestCalculateHealth_QuarantinedConnectingSkipsOAuthLoginCTA(t *testing.T) {
 		assert.Equal(t, StatusNeedsReview, result.Status, "state %q falls back to generic quarantine review", state)
 	}
 }
+
+// TestCalculateHealth_QuarantinedDisconnectedTransportFaultUpgrades is a
+// round-6 review finding: the quarantined transport-fault upgrade (the
+// "...but a quarantined server that cannot START is broken" block right after
+// the default `status` is built) only checked `state == "error"`, never
+// `state == "disconnected"`, even though this package's own round-4
+// regression test (TestCalculateHealth_QuarantinedDisconnectedOAuthError)
+// proves "disconnected" can carry a genuine LastError for a quarantined
+// server. A quarantined, OAuth-configured server whose inspection-exempt dial
+// fails for a non-OAuth reason and settles into state="disconnected" must
+// upgrade to unhealthy/error exactly like its state="error" twin, not stay
+// "Quarantined for review" and hand the user a still-dead server on approval.
+func TestCalculateHealth_QuarantinedDisconnectedTransportFaultUpgrades(t *testing.T) {
+	result := CalculateHealth(HealthCalculatorInput{
+		Enabled:       true,
+		Quarantined:   true,
+		State:         "disconnected",
+		OAuthRequired: true,
+		// Stale — the token status has not been refreshed since this
+		// genuinely unrelated dial failure, and the failure text itself is
+		// not OAuth-shaped.
+		OAuthStatus: "expired",
+		LastError:   "dial tcp: no route to host",
+	}, nil)
+
+	assert.NotEqual(t, StatusSignInRequired, result.Status,
+		"a genuine transport fault must not be masked by a stale OAuthStatus")
+	assert.NotEqual(t, StatusNeedsReview, result.Status,
+		"a quarantined server that cannot start is not a plain pending-review")
+	assert.Equal(t, StatusError, result.Status)
+	assert.Equal(t, LevelUnhealthy, result.Level)
+	assert.Equal(t, StateQuarantined, result.AdminState, "still quarantined")
+	assert.Contains(t, result.Detail, "no route to host")
+	assert.Equal(t, []string{ActionApprove, ActionViewLogs}, result.Actions)
+}
+
+// TestCalculateHealth_QuarantinedConnectionStateNeverConsultsStaleOAuthStatusWhenErrorTextEmpty
+// is a round-6 review finding: quarantinedOAuthLoginState's "error"/
+// "disconnected" case only outranked a stale OAuthStatus
+// (TestCalculateHealth_QuarantinedTransportFaultOutranksStaleOAuthStatus, round
+// 5) when `input.LastError != ""`. When LastError is empty, the function fell
+// through past the switch to the generic OAuthRequired/OAuthStatus check and
+// returned a login verdict — diverging from the non-quarantined twin (section
+// 4's "error"/"disconnected" branches), which never consults OAuthStatus at
+// all while in those connection states, empty LastError or not. Being in
+// state="error"/"disconnected" is what answers the question; a stale,
+// unrelated OAuthStatus must never override it, regardless of whether there
+// happens to be error text to show.
+func TestCalculateHealth_QuarantinedConnectionStateNeverConsultsStaleOAuthStatusWhenErrorTextEmpty(t *testing.T) {
+	for _, state := range []string{"error", "disconnected"} {
+		result := CalculateHealth(HealthCalculatorInput{
+			Enabled:       true,
+			Quarantined:   true,
+			State:         state,
+			OAuthRequired: true,
+			OAuthStatus:   "expired",
+			// Deliberately empty: no error text to show, unlike the round-5
+			// fixture above.
+			LastError: "",
+		}, nil)
+
+		assert.NotEqual(t, StatusSignInRequired, result.Status,
+			"state %q: a stale OAuthStatus must not surface a login CTA with no actual connection-error text", state)
+		assert.Equal(t, StatusNeedsReview, result.Status,
+			"state %q: falls back to the generic quarantine review, matching the disconnected-is-designed contract", state)
+		assert.Equal(t, LevelHealthy, result.Level, "state %q", state)
+	}
+}

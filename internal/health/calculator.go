@@ -171,11 +171,23 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		// function answered healthy/approve. Approving it hands the user a
 		// second failure.
 		//
+		// Round-6 review finding: this upgrade originally checked
+		// `state == "error"` only, even though this function's own doc comment
+		// (above) says "disconnected" is the DESIGNED state a quarantined
+		// server settles into — and the round-4 regression test
+		// (TestCalculateHealth_QuarantinedDisconnectedOAuthError) already
+		// proves "disconnected" can carry a genuine LastError. A quarantined,
+		// OAuth-configured server whose inspection-exempt dial fails for a
+		// non-OAuth reason (e.g. "dial tcp: no route to host") and settles
+		// into state="disconnected" must upgrade exactly like its "error"
+		// twin, not stay "Quarantined for review" and hand the user a
+		// still-dead server on approval.
+		//
 		// The admin contract is unchanged — still quarantined, and approval is
 		// still the operator's next step — so the review flow and the tray's
 		// quarantine handling keep working. Only the level and the summary
 		// stop claiming the server is fine.
-		if state == "error" && input.LastError != "" {
+		if (state == "error" || state == "disconnected") && input.LastError != "" {
 			status.Level = LevelUnhealthy
 			status.Summary = "Quarantined — " + formatErrorSummary(input.LastError)
 			status.Detail = input.LastError
@@ -559,10 +571,21 @@ func quarantinedOAuthLoginState(input HealthCalculatorInput, state string) (need
 		// OAuthStatus checks and reported sign-in-required off a token
 		// status that has nothing to do with the actual fault, instead of
 		// the transport-fault branch CalculateHealth's own admin-state
-		// section (`state == "error" && LastError != ""`) reports.
-		if input.LastError != "" {
-			return false, "", "", ""
-		}
+		// section (`(state == "error" || state == "disconnected") &&
+		// LastError != ""`) reports.
+		//
+		// Round-6 review finding: the round-5 fix above only closed this gap
+		// when LastError is non-empty. The non-quarantined "error"/
+		// "disconnected" branches (section 4) never consult OAuthStatus at
+		// all while in those states, even with an empty LastError — being in
+		// a connection-error state is itself the answer, full stop. Return
+		// unconditionally so a quarantined server with a stale OAuthStatus
+		// (e.g. "expired") and no LastError text does not fall through to the
+		// generic OAuthStatus checks below and report a misleading
+		// sign-in-required; it falls through to the (still healthy, absent an
+		// actual LastError) "Quarantined for review" default instead, mirroring
+		// the non-quarantined twin's refusal to consult OAuthStatus here.
+		return false, "", "", ""
 	}
 	if input.CallTimeOAuthRequired {
 		return true, LevelDegraded, "Sign-in required", "This server requires sign-in before its tools can be called."

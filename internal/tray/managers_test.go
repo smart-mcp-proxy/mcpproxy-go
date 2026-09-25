@@ -897,3 +897,41 @@ func TestGetServerStatusDisplay_SummaryEmptyFallsBackToStatusLabel(t *testing.T)
 	require.NotContains(t, tooltip, "- healthy",
 		"must never render the raw health.level as status text")
 }
+
+// TestGetServerStatusDisplay_SummaryAndStatusEmptyFallsBackToConnected is a
+// round-6 review finding: the previous test above only covers the case where
+// `status` is present to fall back to. When BOTH `summary` and `status` are
+// empty (a version-skew payload with neither populated), getServerStatusDisplay
+// fell all the way through to `statusText = healthLevel` — printing the raw
+// severity word ("degraded") as status text, directly contradicting this
+// function's own comment ("health.level ... must never be printed as text,
+// matching the Web UI's own guard") and diverging from the Web UI's actual
+// guard (frontend/src/utils/health.ts healthStatusText), which falls back to
+// `connected ? 'Connected' : 'Disconnected'`, never `level`.
+func TestGetServerStatusDisplay_SummaryAndStatusEmptyFallsBackToConnected(t *testing.T) {
+	mm := NewMenuManager(nil, nil, nil, zap.NewNop().Sugar())
+
+	server := map[string]interface{}{
+		"name":      "test-server",
+		"connected": true,
+		"health": map[string]interface{}{
+			"level":       "degraded",
+			"admin_state": "enabled",
+			"summary":     "", // deliberately empty (version-skew payload)
+			"status":      "", // deliberately empty too
+		},
+	}
+
+	_, tooltip, _ := mm.getServerStatusDisplay(server)
+
+	require.Contains(t, tooltip, "Connected",
+		"must fall back to the connected/disconnected text, matching the Web UI's guard")
+	require.NotContains(t, tooltip, "degraded",
+		"must never render the raw health.level as status text")
+
+	server["connected"] = false
+	_, tooltip, _ = mm.getServerStatusDisplay(server)
+	require.Contains(t, tooltip, "Disconnected")
+	require.NotContains(t, tooltip, "degraded",
+		"must never render the raw health.level as status text")
+}

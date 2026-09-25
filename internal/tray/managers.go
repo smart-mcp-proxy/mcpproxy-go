@@ -775,6 +775,8 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	var statusText string
 	var iconPath string
 
+	connected, _ := server["connected"].(bool)
+
 	// Extract unified health status from server data
 	healthData, hasHealth := server["health"].(map[string]interface{})
 	if hasHealth {
@@ -816,19 +818,23 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 		// shared status-vocabulary label (Spec 109 FR-014) rather than the raw
 		// severity level — health.level is a badge/tray-coloring signal only
 		// and must never be printed as text, matching the Web UI's own guard
-		// (frontend/src/components/ServerCard.vue).
+		// (frontend/src/utils/health.ts healthStatusText). If a payload
+		// somehow leaves BOTH summary and status empty too, fall back one
+		// step further to connected/disconnected text, exactly like that
+		// same Web UI guard — never to the raw level.
 		switch {
 		case healthSummary != "":
 			statusText = healthSummary
 		case healthStatus != "":
 			statusText = health.StatusLabel(healthStatus)
+		case connected:
+			statusText = "Connected"
 		default:
-			statusText = healthLevel
+			statusText = "Disconnected"
 		}
 	} else {
 		// Fallback to legacy logic if health field not present
 		enabled, _ := server["enabled"].(bool)
-		connected, _ := server["connected"].(bool)
 		quarantined, _ := server["quarantined"].(bool)
 		toolCount, _ := server["tool_count"].(int)
 		statusValue, _ := server["status"].(string)
