@@ -206,6 +206,47 @@ func TestValidateProfiles_V3Rules(t *testing.T) {
 		require.ErrorContains(t, err, "profiles[0]: description too long")
 	})
 
+	t.Run("title length is counted in runes, not UTF-8 bytes", func(t *testing.T) {
+		// 45 Cyrillic characters = 90 UTF-8 bytes, well under the 80-*character*
+		// limit (FR-001). A byte-counting check would reject this.
+		runes := make([]rune, 45)
+		for i := range runes {
+			runes[i] = 'Б'
+		}
+		title := string(runes)
+		require.Len(t, []rune(title), 45)
+		require.Greater(t, len(title), 80, "fixture must be >80 BYTES to actually exercise the byte-vs-rune distinction")
+
+		cfg := &Config{Profiles: []ProfileConfig{{Name: "prof", Servers: []string{"a"}, Title: title}}}
+		_, err := ValidateProfiles(cfg)
+		require.NoError(t, err, "a 45-rune title must not be rejected as too long even though it is 90 bytes")
+	})
+
+	t.Run("title over 80 runes is fatal even in a single-byte-per-rune script", func(t *testing.T) {
+		runes := make([]rune, 81)
+		for i := range runes {
+			runes[i] = 'x'
+		}
+		cfg := &Config{Profiles: []ProfileConfig{{Name: "prof", Servers: []string{"a"}, Title: string(runes)}}}
+		_, err := ValidateProfiles(cfg)
+		require.ErrorContains(t, err, "profiles[0]: title too long (81 chars, max 80)")
+	})
+
+	t.Run("description length is counted in runes, not UTF-8 bytes", func(t *testing.T) {
+		// 300 Cyrillic characters = 600 UTF-8 bytes, well under the 500-*character*
+		// limit (FR-001).
+		runes := make([]rune, 300)
+		for i := range runes {
+			runes[i] = 'Б'
+		}
+		description := string(runes)
+		require.Greater(t, len(description), 500, "fixture must be >500 BYTES to actually exercise the byte-vs-rune distinction")
+
+		cfg := &Config{Profiles: []ProfileConfig{{Name: "prof", Servers: []string{"a"}, Description: description}}}
+		_, err := ValidateProfiles(cfg)
+		require.NoError(t, err, "a 300-rune description must not be rejected as too long even though it is 600 bytes")
+	})
+
 	t.Run("rule naming server outside profile is a warning, entry saved", func(t *testing.T) {
 		cfg := &Config{
 			Servers:  []*ServerConfig{{Name: "a"}, {Name: "b"}},
@@ -303,7 +344,11 @@ func TestValidateProfiles_WiredIntoBothDoors(t *testing.T) {
 		cfg.Profiles = []ProfileConfig{{Name: "work", Servers: nil}}
 		require.NoError(t, cfg.Validate())
 
-		for _, e := range DefaultConfig().ValidateDetailed() {
+		// Must assert on cfg itself (the config carrying the profile under
+		// test), not a fresh DefaultConfig() with an empty Profiles slice —
+		// that would pass vacuously regardless of what ValidateDetailed does
+		// with a non-empty Profiles slice.
+		for _, e := range cfg.ValidateDetailed() {
 			require.NotEqual(t, "profiles", e.Field)
 		}
 	})

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 )
 
 // ProfileConfig is a named, stateless view over a subset of the configured
@@ -330,12 +331,14 @@ func ValidateProfiles(cfg *Config) (warnings []string, err error) {
 				return warnings, fmt.Errorf("profiles[%d]: invalid unannotated %q: must be one of deny, as_write, as_read", i, p.Unannotated)
 			}
 		}
-		// Fatal: title / description length (FR-001 limits).
-		if len(p.Title) > 80 {
-			return warnings, fmt.Errorf("profiles[%d]: title too long (%d chars, max 80)", i, len(p.Title))
+		// Fatal: title / description length (FR-001 limits). Counted in
+		// runes, not bytes: a multi-byte character (e.g. Cyrillic, CJK,
+		// emoji) must count once against the limit, not once per UTF-8 byte.
+		if n := utf8.RuneCountInString(p.Title); n > 80 {
+			return warnings, fmt.Errorf("profiles[%d]: title too long (%d chars, max 80)", i, n)
 		}
-		if len(p.Description) > 500 {
-			return warnings, fmt.Errorf("profiles[%d]: description too long (%d chars, max 500)", i, len(p.Description))
+		if n := utf8.RuneCountInString(p.Description); n > 500 {
+			return warnings, fmt.Errorf("profiles[%d]: description too long (%d chars, max 500)", i, n)
 		}
 		// Fatal: switchable_to self-reference.
 		if p.SwitchableTo != nil {

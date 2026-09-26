@@ -141,17 +141,27 @@ func TestCompiledPolicy_Fingerprint(t *testing.T) {
 		return &config.ProfileConfig{
 			Name: "p", Servers: []string{"a", "b"}, MaxTier: "read",
 			Tools: &config.ProfileToolRules{
-				Allow:    []string{"a:one", "a:two"},
-				Deny:     []string{"a:three"},
+				Allow: []string{"a:one", "a:two"},
+				// Two elements, not one: a single-element Deny list has no
+				// non-trivial reorder, so it could never actually exercise
+				// Deny-order stability no matter what the subtest asserts.
+				Deny:     []string{"a:three", "a:four"},
 				Classify: map[string]string{"a:x": "read", "a:y": "write"},
 			},
 		}
 	}
 
-	t.Run("stable across allow/deny slice order", func(t *testing.T) {
+	t.Run("stable across allow slice order", func(t *testing.T) {
 		p1 := base()
 		p2 := base()
 		p2.Tools.Allow = []string{"a:two", "a:one"} // reordered
+		require.Equal(t, Compile(p1).Fingerprint, Compile(p2).Fingerprint)
+	})
+
+	t.Run("stable across deny slice order", func(t *testing.T) {
+		p1 := base()
+		p2 := base()
+		p2.Tools.Deny = []string{"a:four", "a:three"} // reordered
 		require.Equal(t, Compile(p1).Fingerprint, Compile(p2).Fingerprint)
 	})
 
