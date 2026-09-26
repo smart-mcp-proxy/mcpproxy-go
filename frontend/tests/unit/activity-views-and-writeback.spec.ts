@@ -31,7 +31,10 @@ function quarantineApproval(n: number) {
     id: `qc-${n}`,
     type: 'tool_quarantine_change',
     status: 'approved',
-    timestamp: `2026-09-20T09:0${n}:00Z`,
+    // A real baseline batch is emitted within milliseconds of the others —
+    // seconds apart within the same minute, well inside the fold's 5-minute
+    // window, and zero-padded (a bare `09:0${n}` breaks for n >= 10).
+    timestamp: `2026-09-20T09:00:${String(n).padStart(2, '0')}Z`,
     server_name: 'filesystem',
     tool_name: `tool_${n}`,
     metadata: { action: 'approved', tool_name: `tool_${n}` },
@@ -111,10 +114,24 @@ describe('Activity views (Spec 109-k, FR-070)', () => {
 
   it('clicking a tab writes `view` to the URL and drops any ?type= override, without a page reload', async () => {
     const { wrapper, router } = await mountActivityAt('/activity?view=calls&type=quarantine_change')
+    // Precondition: the explicit `type=quarantine_change` override is really
+    // in force before the click (0 rows: BATCH_ACTIVITIES has none of that
+    // exact type, only tool_quarantine_change).
+    expect(rows(wrapper)).toHaveLength(0)
+
     await wrapper.find('[data-test="activity-view-tab-system"]').trigger('click')
     await flushPromises()
+
     expect(router.currentRoute.value.query.view).toBe('system')
     expect(router.currentRoute.value.query.type).toBeUndefined()
+    // Verified zcode review finding: `effectiveTypes` only read `activeView`
+    // inside the untaken branch of a ternary while an override was active,
+    // so Vue never tracked it as a dependency — the tab visually activated
+    // but the table (and the refetch) silently kept showing the OLD
+    // filter's rows. This must now actually be "System events": the folded
+    // quarantine batch, not the empty `type=quarantine_change` result.
+    expect(rows(wrapper)).toHaveLength(1)
+    expect(wrapper.find('[data-test="activity-quarantine-batch-summary"]').exists()).toBe(true)
   })
 
   it('switching back to "Tool calls" clears `view` from the URL (the canonical default)', async () => {
@@ -158,5 +175,98 @@ describe('Activity filter chips write back to the URL (FR-080)', () => {
     expect(router.currentRoute.value.query.status).toBeUndefined()
     // Clearing filters is not the same as leaving the tab.
     expect(router.currentRoute.value.query.view).toBe('calls')
+  })
+})
+
+// Verified zcode review finding: Activity.vue read every URL parameter
+// exactly once, in setup — a second deep link to the SAME route (Vue Router
+// reuses the component; there is no remount) never re-applied. Concretely:
+// SessionsPanel's own "View Activity" button, clicked from Activity's own
+// Sessions tab, did nothing on the very first click; a second Tools-row
+// "Calls" link clicked while Activity was already open kept showing the
+// FIRST link's filter.
+describe('Activity re-applies a second deep link without remounting (FR-080 / SC-009)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('a second session link updates which session is filtered, not just the URL', async () => {
+    const { wrapper, router } = await mountActivityAt('/activity?view=calls&session=ws-aaaaa')
+    await flushPromises()
+    expect(wrapper.find('[data-test="activity-filter-chip-session"]').text()).toContain('aaaaa')
+
+    // Same-route navigation, exactly what SessionsPanel's "View Activity" or
+    // a second Tools-row "Calls" link does while Activity is already open.
+    await router.push('/activity?view=calls&session=ws-bbbbb')
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="activity-filter-chip-session"]').text()).toContain('bbbbb')
+    expect(wrapper.find('[data-test="activity-filter-chip-session"]').text()).not.toContain('aaaaa')
+  })
+
+  it('a second tool link replaces the first tool filter (not additive, not stuck on the first one)', async () => {
+    const { wrapper, router } = await mountActivityAt('/activity?view=calls&tool=read_0')
+    await flushPromises()
+    expect(rows(wrapper)).toHaveLength(1)
+
+    await router.push('/activity?view=calls')
+    await flushPromises()
+
+    // The second link carries no `tool` at all — the stale filter from the
+    // first one must not still be in force.
+    expect(router.currentRoute.value.query.tool).toBeUndefined()
+    expect(wrapper.find('[data-test="activity-filter-chip-tool"]').exists()).toBe(false)
+  })
+})
+
+// Verified zcode review finding: the Usage/Home chart-bar links (T119) carry
+// `from`/`to`, but Activity.vue never read them at all — a Timeline-bucket
+// click landed on the fully unfiltered Tool-calls list, silently dropping
+// its whole time bound.
+describe('Activity applies an incoming from/to deep link (FR-082 link map)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    // The filter panel's open/closed state persists to localStorage (and
+    // jsdom's localStorage is shared across tests in this file) — reset it
+    // so each test's own "open the panel" click starts from the same state.
+    window.localStorage.clear()
+  })
+
+  it('reads ?from=&to= into the date pickers and sends them to the REST request', async () => {
+    const { wrapper } = await mountActivityAt(
+      '/activity?view=calls&from=2026-09-20T09%3A00%3A00.000Z&to=2026-09-20T09%3A05%3A00.000Z'
+    )
+    await flushPromises()
+    await wrapper.find('[data-test="activity-filters-toggle"]').trigger('click')
+    await flushPromises()
+
+    const api = (await import('@/services/api')).default
+    const lastCall = (api.getActivities as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0]
+    expect(lastCall.start_time).toBe('2026-09-20T09:00:00.000Z')
+    expect(lastCall.end_time).toBe('2026-09-20T09:05:00.000Z')
+
+    // The native datetime-local inputs actually show something (not blank —
+    // an absolute "...Z" ISO string is not a valid value for that input type
+    // on its own).
+    const fromInput = wrapper.find('#activity-filter-from')
+    const toInput = wrapper.find('#activity-filter-to')
+    expect((fromInput.element as HTMLInputElement).value).not.toBe('')
+    expect((toInput.element as HTMLInputElement).value).not.toBe('')
+  })
+
+  it('resolves a relative ?from= (e.g. -24h, the CallHistogram link\'s shape) the same way the composable does', async () => {
+    const { wrapper } = await mountActivityAt('/activity?view=calls&tool=read_0&from=-24h')
+    await flushPromises()
+    await wrapper.find('[data-test="activity-filters-toggle"]').trigger('click')
+    await flushPromises()
+    const fromInput = wrapper.find('#activity-filter-from')
+    expect((fromInput.element as HTMLInputElement).value).not.toBe('')
+
+    const api = (await import('@/services/api')).default
+    const lastCall = (api.getActivities as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0]
+    expect(lastCall.start_time).toBeTruthy()
+    expect(lastCall.tool).toBe('read_0')
   })
 })

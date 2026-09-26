@@ -20,11 +20,27 @@
 import Foundation
 
 enum ActivityQuarantineFolding {
+    /// A batch stands for one server ACTION — two same-server, same-status
+    /// quarantine actions far apart in time are two real actions, not one.
+    /// Every record in a real baseline batch shares essentially one
+    /// timestamp, so 5 minutes comfortably covers it without risking a fold
+    /// across two genuinely separate events that happen to land adjacent in
+    /// the sorted list (macOS has no run-expansion UI, unlike the Web table,
+    /// so a wrong fold here is not recoverable by expanding it back open).
+    private static let foldWindow: TimeInterval = 5 * 60
+
     /// Folds consecutive `tool_quarantine_change` records that agree on
-    /// server and status (the two fields the summary line reports) into one
-    /// synthetic entry. Pure and order-preserving — everything else in
-    /// `entries` passes through untouched.
+    /// server and status (the two fields the summary line reports) and land
+    /// within `foldWindow` of the run's own first record into one synthetic
+    /// entry. Pure and order-preserving — everything else in `entries`
+    /// passes through untouched.
     static func fold(_ entries: [ActivityEntry]) -> [ActivityEntry] {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let formatterNoFraction = ISO8601DateFormatter()
+        formatterNoFraction.formatOptions = [.withInternetDateTime]
+        func parse(_ s: String) -> Date? { formatter.date(from: s) ?? formatterNoFraction.date(from: s) }
+
         var result: [ActivityEntry] = []
         var index = 0
         while index < entries.count {
@@ -35,11 +51,13 @@ enum ActivityQuarantineFolding {
                 continue
             }
 
+            let leadTime = parse(entry.timestamp)
             var end = index + 1
             while end < entries.count,
                   entries[end].type == "tool_quarantine_change",
                   entries[end].serverName == entry.serverName,
-                  entries[end].status == entry.status {
+                  entries[end].status == entry.status,
+                  withinFoldWindow(parse(entries[end].timestamp), leadTime) {
                 end += 1
             }
 
@@ -48,6 +66,14 @@ enum ActivityQuarantineFolding {
             index = end
         }
         return result
+    }
+
+    /// No timestamp to compare (either record failed to parse) is never the
+    /// reason to block a fold — the server/status agreement above already
+    /// did the real work; the timestamp check only narrows a bound case.
+    private static func withinFoldWindow(_ a: Date?, _ b: Date?) -> Bool {
+        guard let a, let b else { return true }
+        return abs(a.timeIntervalSince(b)) <= foldWindow
     }
 
     /// "filesystem: 14 tools approved" — the lead record's identity (id,

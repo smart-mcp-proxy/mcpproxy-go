@@ -806,6 +806,30 @@ const intentReasonOf = (a: ActivityRunFields): string =>
   String((a.metadata?.intent as ActivityIntent | undefined)?.reason ?? '')
 
 /**
+ * A batch type's identity deliberately ignores `tool_name` (see
+ * BATCH_FOLD_TYPES above) — everything else about a run being "the same
+ * event repeated" still applies EXCEPT time never bounds it, since normal
+ * runs never need one (two identical calls an hour apart are still the same
+ * repeated call). A batch is different: it stands for one server ACTION, and
+ * two same-server, same-status quarantine actions far apart in time are two
+ * real actions, not one — this is what keeps a rare later action from
+ * silently folding under an earlier one just because nothing of a different
+ * type happened to land between them in the sorted list. Five minutes
+ * comfortably covers a real baseline batch (all its records share
+ * essentially one timestamp) without bounding the ordinary, unbounded fold
+ * every other type still gets.
+ */
+const BATCH_FOLD_WINDOW_MS = 5 * 60 * 1000
+
+const withinBatchFoldWindow = (a?: string, b?: string): boolean => {
+  if (!a || !b) return true // no timestamp to compare against — never the reason to block a fold
+  const ta = Date.parse(a)
+  const tb = Date.parse(b)
+  if (Number.isNaN(ta) || Number.isNaN(tb)) return true
+  return Math.abs(ta - tb) <= BATCH_FOLD_WINDOW_MS
+}
+
+/**
  * Fold consecutive identical rows into runs. Pure and order-preserving: run i
  * holds the rows that were at that position in the input, so the caller can
  * paginate runs and still render the underlying rows in order.
@@ -826,7 +850,10 @@ export const groupActivityRuns = <T extends ActivityRunFields>(
     const identity = enabled ? runIdentity(row) : null
     const current = runs.length > 0 ? runs[runs.length - 1] : undefined
 
-    if (current && identity !== null && identity === currentKey) {
+    const batchWindowOk = !current || !BATCH_FOLD_TYPES.has(row.type ?? '') ||
+      withinBatchFoldWindow(row.timestamp, current.lead.timestamp)
+
+    if (current && identity !== null && identity === currentKey && batchWindowOk) {
       current.rows.push(row)
       current.count++
       if (!current.reasonsVary && intentReasonOf(row) !== intentReasonOf(current.lead)) {

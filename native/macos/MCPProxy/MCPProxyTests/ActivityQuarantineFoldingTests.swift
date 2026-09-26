@@ -90,4 +90,30 @@ final class ActivityQuarantineFoldingTests: XCTestCase {
     func testEmptyInputFoldsToEmptyOutput() {
         XCTAssertEqual(ActivityQuarantineFolding.fold([]).count, 0)
     }
+
+    // Verified zcode review finding: server+status agreement with no time
+    // bound could fold two genuinely separate actions together whenever
+    // nothing of a different type happened to land between them. macOS has
+    // no run-expansion UI (unlike the Web table), so a wrong fold here is
+    // not recoverable.
+    func testDoesNotFoldTwoBatchesMoreThanFiveMinutesApart() {
+        let entries = [
+            quarantineEntry(id: "a", server: "filesystem", tool: "x", timestamp: "2026-08-21T10:00:00Z"),
+            quarantineEntry(id: "b", server: "filesystem", tool: "y", timestamp: "2026-08-21T10:01:00Z"),
+            quarantineEntry(id: "c", server: "filesystem", tool: "z", timestamp: "2026-08-21T10:30:00Z"),
+        ]
+        let folded = ActivityQuarantineFolding.fold(entries)
+        XCTAssertEqual(folded.count, 2)
+        XCTAssertEqual(folded[0].toolName, "filesystem: 2 tools approved")
+        XCTAssertEqual(folded[1].id, "c")
+        XCTAssertEqual(folded[1].toolName, "z")
+    }
+
+    func testFoldsWithinTheFiveMinuteWindowDespiteAGapBetweenRecords() {
+        let entries = [
+            quarantineEntry(id: "a", server: "filesystem", tool: "x", timestamp: "2026-08-21T10:00:00Z"),
+            quarantineEntry(id: "b", server: "filesystem", tool: "y", timestamp: "2026-08-21T10:04:00Z"),
+        ]
+        XCTAssertEqual(ActivityQuarantineFolding.fold(entries).count, 1)
+    }
 }

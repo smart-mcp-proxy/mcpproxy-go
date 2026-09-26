@@ -1346,7 +1346,7 @@ import { useAuthStore } from '@/stores/auth'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse, MCPSession } from '@/types/api'
 import { buildSessionLabels } from '@/utils/sessionLabel'
-import { splitScopeTool, useScopeQuery } from '@/composables/useScopeQuery'
+import { splitScopeTool, useScopeQuery, resolveScopeTime } from '@/composables/useScopeQuery'
 import SessionsPanel from '@/components/activity/SessionsPanel.vue'
 import { DATE_TIME_FORMAT_HINT, formatDateTime, formatTime } from '@/utils/datetime'
 import {
@@ -1429,8 +1429,13 @@ const activeView = computed<ActivityViewId>(() => {
  * keeping a bare `/activity` the canonical "Tool calls" URL. Switching views
  * also drops any explicit `type` override left from the multi-select picker
  * below (contract "view" row: an explicit `type` overrides `view`, so
- * leaving a stale one behind would make the tab a no-op). */
+ * leaving a stale one behind would make the tab a no-op) — `selectedTypes`
+ * is cleared directly here too, not only in the URL: the reactive
+ * `route.query` watch above will clear it a tick later regardless, but doing
+ * it synchronously means `effectiveTypes` (and the table it drives) is
+ * correct on the very same render as the click. */
 function setView(id: ActivityViewId): void {
+  selectedTypes.value = []
   scopeQuery.set({ view: id === 'calls' ? undefined : id, type: undefined })
 }
 
@@ -1463,28 +1468,58 @@ const filterEndDate = ref('')
 // query param (so sub-calls beyond the 200 loaded rows are included).
 const filterParentId = ref('')
 
+/** An absolute ISO instant -> the local wall-clock string a `datetime-local`
+ * input accepts ("YYYY-MM-DDTHH:mm"). `resolveScopeTime()` already turns a
+ * relative shorthand ("-24h") into an absolute instant; a native date input
+ * cannot render either form directly (a trailing "Z" or a shorthand string
+ * is simply invalid and the control renders blank), so a Usage/Home deep
+ * link's `from`/`to` needs this conversion to actually show — and filter —
+ * anything. */
+function isoToDateTimeLocal(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** The inverse, for the REST request: a `datetime-local` value has no
+ * timezone of its own, so the browser's `Date` constructor parses it as
+ * LOCAL wall-clock time — exactly what the input showed — and `toISOString`
+ * converts that to the absolute instant the backend's `start_time`/
+ * `end_time` (RFC 3339) expect. */
+function dateTimeLocalToISO(value: string): string | undefined {
+  if (!value) return undefined
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString()
+}
+
 // Spec 109-k (activity-scope-filters): hydrate the filters above from the URL
-// on load — `view`/`type`/`server`/`tool`/`status`/`auth_type`/`session`
+// — `view`/`type`/`server`/`tool`/`status`/`auth_type`/`session`/`from`/`to`
 // (url-filter-contract.md "Parameters"). Deep links (the Tools row "Calls"
-// link, Home usage-strip links, Server card links, ...) used to reach this
-// page with a query string the table never read, so the log always rendered
-// fully unfiltered no matter what the URL said. Called synchronously during
-// setup — BEFORE the REST-refetch watch a few hundred lines down is
-// registered and before onMounted's first loadActivities() — so the initial
-// fetch is already scoped and the watch never sees its own first write as a
-// change (composable rule 1: "read on mount, before its first fetch").
+// link, the Usage chart-bar links, Server card links, a Sessions-view "View
+// Activity" button, ...) used to reach this page with a query string the
+// table never read at all, so the log always rendered fully unfiltered no
+// matter what the URL said.
+//
+// Symmetric by design — every field here is set from its query param when
+// present and CLEARED when absent, not just "set if present": this page has
+// no remount between two deep links to it (Vue Router reuses the component
+// for a same-route navigation), so a "View Activity" button clicked from
+// inside the Sessions view, or a second Tools-row "Calls" link clicked while
+// Activity is already open, used to leave the PREVIOUS filter state in
+// force — the table narrowed to the last real filter it had ever seen, not
+// the one the current URL names (a verified live-QA-style finding). The
+// write-back watch below is exactly the inverse of this function and the two
+// converge rather than loop: re-applying the query re-sets refs to the
+// values they already have as soon as a round trip settles, which triggers
+// nothing further.
 function applyRouteFilters(): void {
   const q = route.query
   const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
-  const sessionParam = str(q.session)
-  if (sessionParam) filterSession.value = sessionParam
-
-  const statusParam = str(q.status)
-  if (statusParam) filterStatus.value = statusParam
-
-  const authTypeParam = str(q.auth_type)
-  if (authTypeParam) filterAuthType.value = authTypeParam
+  filterSession.value = str(q.session)
+  filterStatus.value = str(q.status)
+  filterAuthType.value = str(q.auth_type)
 
   // `tool` splits per the contract's rule 8: a "server:tool" value carries
   // its own server; an explicit `server` that disagrees is a contradiction.
@@ -1496,28 +1531,38 @@ function applyRouteFilters(): void {
   const toolParam = str(q.tool)
   if (toolParam) {
     const split = splitScopeTool(toolParam, serverParam || undefined)
-    if (split.conflict) {
-      if (serverParam) filterServer.value = serverParam
-    } else {
-      if (split.server) filterServer.value = split.server
-      if (split.tool) filterTool.value = split.tool
-    }
-  } else if (serverParam) {
+    filterServer.value = split.conflict ? serverParam : (split.server ?? '')
+    filterTool.value = split.conflict ? '' : (split.tool ?? '')
+  } else {
     filterServer.value = serverParam
+    filterTool.value = ''
   }
 
   // An explicit `type` always overrides `view`'s calls/system/all mapping
   // (url-filter-contract.md "view" row). `selectedTypes` holds ONLY this
-  // explicit override now — the view's own types are `effectiveTypes` below,
-  // computed from `activeView` reactively rather than copied in here once at
-  // setup, so switching tabs (which never touches `type`) is not a no-op.
+  // explicit override — the view's own types are `effectiveTypes` below,
+  // computed from `activeView` reactively rather than copied in here, so
+  // switching tabs (which never touches `type`) is not a no-op.
   const typeParam = str(q.type)
-  if (typeParam) {
-    selectedTypes.value = typeParam.split(',').map(t => t.trim()).filter(Boolean)
-  }
+  selectedTypes.value = typeParam ? typeParam.split(',').map(t => t.trim()).filter(Boolean) : []
+
+  const fromParam = str(q.from)
+  filterStartDate.value = fromParam ? isoToDateTimeLocal(resolveScopeTime(fromParam)) : ''
+  const toParam = str(q.to)
+  filterEndDate.value = toParam ? isoToDateTimeLocal(resolveScopeTime(toParam)) : ''
 }
 
 applyRouteFilters()
+
+// A second deep link while Activity is already open (SessionsPanel's "View
+// Activity", a Tools-row "Calls" link clicked from the same tab, an Activity
+// row's client/profile/token chip in a future spec, ...) is a route-query
+// change, not a remount — without this watch the controls only ever reflect
+// whichever link opened the page FIRST. Registered after applyRouteFilters()
+// already ran once during setup (immediately above), so the initial values
+// it just set never trigger this watch — only a later, genuine URL change
+// does.
+watch(() => route.query, () => applyRouteFilters(), { deep: true })
 
 // Activity types configuration. Derived from the single label map in
 // utils/activity so the filter dropdown cannot drift from the Type column
@@ -1532,10 +1577,20 @@ const activityTypes = Object.keys(ACTIVITY_TYPE_LABELS).map(value => ({
  * when present, else whatever the active view implies (`[]` for
  * `all`/`sessions` — no type filter at all). This is what the table and the
  * REST request both use, so a tab switch narrows the real fetch too, not
- * just the 200 rows already loaded. */
-const effectiveTypes = computed<string[]>(() =>
-  selectedTypes.value.length > 0 ? selectedTypes.value : (activityViewTypes(activeView.value) ?? [])
-)
+ * just the 200 rows already loaded.
+ *
+ * `viewTypes` is computed UNCONDITIONALLY, before the override check —
+ * reading `activeView.value` only inside a ternary's untaken branch (i.e.
+ * `selectedTypes.value.length > 0 ? selectedTypes.value : activityViewTypes
+ * (activeView.value)`) never touches it while an override is active, so Vue
+ * never tracks `activeView` as a dependency of this computed at all in that
+ * state — a verified bug: switching tabs while `type=` is set in the URL
+ * silently kept showing (and re-fetching) the OLD tab's rows, because this
+ * computed had nothing telling it to re-run. */
+const effectiveTypes = computed<string[]>(() => {
+  const viewTypes = activityViewTypes(activeView.value) ?? []
+  return selectedTypes.value.length > 0 ? selectedTypes.value : viewTypes
+})
 
 // Pagination
 const currentPage = ref(1)
@@ -2130,6 +2185,12 @@ const loadActivities = async () => {
         // "Other / internal" is the client-side residual (OTHER_STATUS) —
         // never sent to REST, same rule as the composable's toRest().
         status: filterStatus.value && filterStatus.value !== OTHER_STATUS ? filterStatus.value : undefined,
+        // Contract "from"/"to" row: Activity sends these to REST too (a
+        // Usage Timeline-bar click's whole point is narrowing the actual
+        // request, not just the local 200-row window the date pickers used
+        // to only filter client-side).
+        start_time: dateTimeLocalToISO(filterStartDate.value),
+        end_time: dateTimeLocalToISO(filterEndDate.value),
       }),
       api.getActivitySummary('24h')
     ])
@@ -2339,6 +2400,8 @@ const exportActivities = (format: 'json' | 'csv') => {
       : undefined,
     // Exporting from the sub-call view exports that run's sub-calls.
     parent_id: filterParentId.value || undefined,
+    start_time: dateTimeLocalToISO(filterStartDate.value),
+    end_time: dateTimeLocalToISO(filterEndDate.value),
   })
   window.open(url, '_blank')
 }
@@ -2480,15 +2543,15 @@ watch([effectiveTypes, filterServer, filterTool, filterStatus, filterSensitiveDa
   expandedRuns.value = new Set()
 }, { deep: true })
 
-// Spec 109-k: `type`/`server`/`tool`/`status` are sent to REST on this page
-// (loadActivities() above) — refetch whenever one changes, whether it was set
-// by applyRouteFilters() from a URL nav, a filter control, or a view-tab
-// switch (effectiveTypes), so the loaded 200-row window never disagrees with
-// what the request asked for. Registered after applyRouteFilters() already
-// ran during setup (top of this file), so the initial values it wrote never
-// trigger this watch — only a later, genuine change does; the first fetch is
-// onMounted's explicit call below.
-watch([effectiveTypes, filterServer, filterTool, filterStatus], () => {
+// Spec 109-k: `type`/`server`/`tool`/`status`/`from`/`to` are sent to REST on
+// this page (loadActivities() above) — refetch whenever one changes, whether
+// it was set by applyRouteFilters() from a URL nav, a filter control, or a
+// view-tab switch (effectiveTypes), so the loaded 200-row window never
+// disagrees with what the request asked for. Registered after
+// applyRouteFilters() already ran during setup (top of this file), so the
+// initial values it wrote never trigger this watch — only a later, genuine
+// change does; the first fetch is onMounted's explicit call below.
+watch([effectiveTypes, filterServer, filterTool, filterStatus, filterStartDate, filterEndDate], () => {
   void loadActivities()
 }, { deep: true })
 
