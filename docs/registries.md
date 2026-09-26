@@ -219,6 +219,40 @@ Because every add surface (MCP, REST, CLI) funnels through the same keystone, a
 packages-only server is added as stdio and a remotes-only server as http
 identically across all surfaces.
 
+## Catalog popularity signal
+
+The catalog's `Popular` landing section (and the popularity tiebreak in
+search ranking) is backed by two real, source-native signals — no synthetic
+scoring:
+
+- **GitHub stars** for any hit whose `source_code_url` resolves to a
+  `github.com/<owner>/<repo>` URL (the official registry and reference
+  sources both carry one for almost every entry). Fetched from
+  `GET https://api.github.com/repos/{owner}/{repo}`, cached (with ETag
+  revalidation) for 24h, capped at 4 concurrent requests and a rolling
+  budget of 50 requests/hour without a token or 4,000/hour with one.
+- **Docker Hub pull counts** (`pull_count` from the `docker-mcp-catalog`
+  registry's listing) map to `Installs`. Docker's own `star_count` is never
+  used — it lives on a different scale from GitHub stars (single digits vs.
+  tens of thousands) and the two are never summed or converted into one
+  another.
+
+Popularity fetching never blocks a search beyond a short bounded wait
+(800ms by default): a cold miss is queued for a background fetch and simply
+shows no stars on the current page, arriving on the next one. GitHub is
+never listed in a search's `unavailable[]` — it is not a catalog source.
+
+**`MCPPROXY_GITHUB_TOKEN`** (not the generic `GITHUB_TOKEN`, which is
+deliberately never read) raises the GitHub rate-limit budget from 50 to
+4,000 requests/hour. Set it if your catalog has many distinct repositories
+and stars are taking a while to fill in.
+
+**`MCPPROXY_CATALOG_POPULARITY=false`** (or `0`/`off`) disables all outbound
+GitHub requests — useful for air-gapped or offline setups. Docker's
+source-native install counts are unaffected either way, since they come from
+the registry listing the Docker source already fetches, not from a separate
+popularity call.
+
 ## Adding a discovered server
 
 See [registry-add.md](features/registry-add.md). New servers are quarantined by

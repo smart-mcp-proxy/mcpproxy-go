@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -13,6 +14,23 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 )
+
+// installMemoryPopularityProviderOnce guards installMemoryPopularityProvider
+// so a CLI process that ends up calling it more than once (e.g. 'catalog
+// show' after an in-process 'catalog search' fallback) installs a single
+// provider rather than leaking one per call.
+var installMemoryPopularityProviderOnce sync.Once
+
+// installMemoryPopularityProvider installs a memory-only (no bbolt store)
+// popularity provider for the CLI's in-process paths (Spec 110 FR-010): the
+// in-process 'catalog search' fallback (no daemon running) and 'catalog
+// show'. The core daemon (internal/runtime) installs its own bbolt-backed
+// provider instead — this one is never wired there.
+func installMemoryPopularityProvider() {
+	installMemoryPopularityProviderOnce.Do(func() {
+		registries.SetPopularityProvider(registries.NewGitHubStarsProvider(registries.PopularityOptions{}))
+	})
+}
 
 // printCatalogDeprecationNotice prints the FR-066 deprecation note to
 // stderr: 'registry search'/'registry add' remain as aliases (scripts must
@@ -124,6 +142,7 @@ func newCatalogShowCmd() *cobra.Command {
 			ctx, cancel := registryContext()
 			defer cancel()
 			registries.SetRegistriesFromConfig(cfg)
+			installMemoryPopularityProvider()
 			reg := registries.FindRegistry(source)
 			if reg == nil {
 				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeServerNotFound, fmt.Sprintf("catalog source %q not found", source)).
@@ -237,6 +256,7 @@ func catalogSearch(ctx context.Context, cfg *config.Config, q, source, tag strin
 	// returns — which is also what makes it independently testable against a
 	// fixture list (registries.SetRegistriesForTest).
 	registries.SetRegistriesFromConfig(cfg)
+	installMemoryPopularityProvider()
 	return catalogSearchInProcess(ctx, cfg, q, source, tag, limit)
 }
 

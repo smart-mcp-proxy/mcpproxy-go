@@ -225,12 +225,15 @@ func NewGitHubStarsProvider(opts PopularityOptions) *githubStarsProvider {
 	return p
 }
 
-// Close stops all background fetch workers. Safe to call multiple times.
-func (p *githubStarsProvider) Close() {
+// Close stops all background fetch workers and returns immediately if
+// already closed. It satisfies io.Closer so callers (internal/runtime) can
+// hold the provider as an io.Closer without naming this unexported type.
+func (p *githubStarsProvider) Close() error {
 	p.closeOnce.Do(func() {
 		p.cancel()
 		p.wg.Wait()
 	})
+	return nil
 }
 
 func (p *githubStarsProvider) startWorkers() {

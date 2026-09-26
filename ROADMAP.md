@@ -1035,4 +1035,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `in-flight` | 94/113 (83%) |
 | [106-security-residual-fixes](./specs/106-security-residual-fixes/) | `shipped` | 18/19 (95%) |
 | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `shipped` | 126/126 (100%) |
-| [110-catalog-popularity](./specs/110-catalog-popularity/) | `drafted` | 0/23 (0%) |
+| [110-catalog-popularity](./specs/110-catalog-popularity/) | `in-flight` | 19/23 (83%) |
