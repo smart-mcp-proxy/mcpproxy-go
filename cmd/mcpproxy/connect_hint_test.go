@@ -56,6 +56,7 @@ func TestPrintConnectResult_ShowsDisplayPathAndReloadHint(t *testing.T) {
 func TestPrintConnectResult_ShortensBackupPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir() reads USERPROFILE on Windows, not HOME
 
 	result := &connect.ConnectResult{
 		Success:     true,
