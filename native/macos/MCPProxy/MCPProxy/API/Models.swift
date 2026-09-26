@@ -903,6 +903,9 @@ struct StatusResponse: Codable {
     /// default never drifts from `resolveInstructions("")`. Optional — a core
     /// older than the field simply omits it.
     let defaultInstructions: String?
+    /// Spec 109-k FR-080a: availability signals. Omitted by a core that
+    /// supports none of them (109-k itself ships the list empty).
+    let features: StatusFeatures?
 
     enum CodingKeys: String, CodingKey {
         case running
@@ -912,6 +915,22 @@ struct StatusResponse: Codable {
         case upstreamStats = "upstream_stats"
         case timestamp
         case defaultInstructions = "default_instructions"
+        case features
+    }
+
+    /// Whether the core accepts the Spec 108 `profile`/`client`/`token`
+    /// scope filters — until it does, the UI hides them and never sends them.
+    var scopeFiltersAvailable: Bool {
+        !(features?.scopeFilters ?? []).isEmpty
+    }
+}
+
+/// `GET /api/v1/status` → `features`.
+struct StatusFeatures: Codable, Equatable {
+    let scopeFilters: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case scopeFilters = "scope_filters"
     }
 }
 
