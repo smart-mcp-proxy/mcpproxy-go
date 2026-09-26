@@ -287,14 +287,25 @@ const (
 var activityCallTypes = []string{"tool_call", "internal_tool_call"}
 
 // activitySystemTypes are every other known activity type — the "system"
-// view. Kept in sync with ActivityFilter.Validate's validTypes list minus
-// activityCallTypes.
-var activitySystemTypes = []string{
-	"policy_decision", "quarantine_change", "server_change",
-	"system_start", "system_stop", "config_change",
-	string(storage.ActivityTypePreflight),
-	string(storage.ActivityTypePromptGet),
-}
+// view. Derived from storage.ValidActivityTypes (minus activityCallTypes) at
+// init, rather than hand-copied, so it can never silently drift the way it
+// once did: a hand-maintained literal here was missing
+// tool_quarantine_change, security_scan and credential_broker (live QA,
+// 109-k-activity-scope-filters) despite this comment's claim to cover "every
+// other known activity type".
+var activitySystemTypes = func() []string {
+	isCallType := make(map[string]bool, len(activityCallTypes))
+	for _, typ := range activityCallTypes {
+		isCallType[typ] = true
+	}
+	var systemTypes []string
+	for _, typ := range storage.ValidActivityTypes {
+		if !isCallType[typ] {
+			systemTypes = append(systemTypes, typ)
+		}
+	}
+	return systemTypes
+}()
 
 // activityViewTypeFilter resolves a --view value to the `type` filter value
 // to send (comma-joined, or "" for no filter / "all"). Returns an error for

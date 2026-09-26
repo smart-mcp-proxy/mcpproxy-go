@@ -1300,6 +1300,7 @@ import { useAuthStore } from '@/stores/auth'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse, MCPSession } from '@/types/api'
 import { buildSessionLabels } from '@/utils/sessionLabel'
+import { splitScopeTool } from '@/composables/useScopeQuery'
 import { DATE_TIME_FORMAT_HINT, formatDateTime, formatTime } from '@/utils/datetime'
 import {
   buildWorkSessionIndex,
@@ -1312,6 +1313,7 @@ import {
 import {
   ACTIVITY_TYPE_LABELS,
   activeFilterChips,
+  activityViewTypes,
   compactSummaryParts,
   formatPreflightSummary,
   formatRunDuration,
@@ -1365,6 +1367,10 @@ const autoRefresh = ref(true)
 // Filters
 const selectedTypes = ref<string[]>([])
 const filterServer = ref('')
+// Spec 109-k: `tool` (url-filter-contract.md "Parameters"). Bare tool name —
+// a "server:tool" URL value is split by applyRouteFilters() below, same rule
+// as the composable's splitScopeTool().
+const filterTool = ref('')
 const filterSession = ref('')
 const filterStatus = ref('')
 const filterSensitiveData = ref('') // Spec 026: '' | 'true' | 'false'
@@ -1377,6 +1383,62 @@ const filterEndDate = ref('')
 // client-side (so the visible list narrows immediately) and as a server-side
 // query param (so sub-calls beyond the 200 loaded rows are included).
 const filterParentId = ref('')
+
+// Spec 109-k (activity-scope-filters): hydrate the filters above from the URL
+// on load — `view`/`type`/`server`/`tool`/`status`/`auth_type`/`session`
+// (url-filter-contract.md "Parameters"). Deep links (the Tools row "Calls"
+// link, Home usage-strip links, Server card links, ...) used to reach this
+// page with a query string the table never read, so the log always rendered
+// fully unfiltered no matter what the URL said. Called synchronously during
+// setup — BEFORE the REST-refetch watch a few hundred lines down is
+// registered and before onMounted's first loadActivities() — so the initial
+// fetch is already scoped and the watch never sees its own first write as a
+// change (composable rule 1: "read on mount, before its first fetch").
+function applyRouteFilters(): void {
+  const q = route.query
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+
+  const sessionParam = str(q.session)
+  if (sessionParam) filterSession.value = sessionParam
+
+  const statusParam = str(q.status)
+  if (statusParam) filterStatus.value = statusParam
+
+  const authTypeParam = str(q.auth_type)
+  if (authTypeParam) filterAuthType.value = authTypeParam
+
+  // `tool` splits per the contract's rule 8: a "server:tool" value carries
+  // its own server; an explicit `server` that disagrees is a contradiction.
+  // This page has no conflict empty-state yet (unlike the composable's
+  // Tools/Usage callers), so on conflict prefer the explicit `server` and
+  // drop the mismatched tool rather than silently applying a combination the
+  // URL never actually asked for.
+  const serverParam = str(q.server)
+  const toolParam = str(q.tool)
+  if (toolParam) {
+    const split = splitScopeTool(toolParam, serverParam || undefined)
+    if (split.conflict) {
+      if (serverParam) filterServer.value = serverParam
+    } else {
+      if (split.server) filterServer.value = split.server
+      if (split.tool) filterTool.value = split.tool
+    }
+  } else if (serverParam) {
+    filterServer.value = serverParam
+  }
+
+  // An explicit `type` always overrides `view`'s calls/system/all mapping
+  // (url-filter-contract.md "view" row).
+  const typeParam = str(q.type)
+  if (typeParam) {
+    selectedTypes.value = typeParam.split(',').map(t => t.trim()).filter(Boolean)
+  } else {
+    const viewTypes = activityViewTypes(str(q.view))
+    if (viewTypes) selectedTypes.value = viewTypes
+  }
+}
+
+applyRouteFilters()
 
 // Activity types configuration. Derived from the single label map in
 // utils/activity so the filter dropdown cannot drift from the Type column
@@ -1579,7 +1641,7 @@ const getSessionLabel = (sessionId: string): string => {
 }
 
 const hasActiveFilters = computed(() => {
-  return selectedTypes.value.length > 0 || filterServer.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value || filterParentId.value
+  return selectedTypes.value.length > 0 || filterServer.value || filterTool.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value || filterParentId.value
 })
 
 // --- compact header ---------------------------------------------------------
@@ -1658,6 +1720,7 @@ const activeChips = computed(() =>
     types: selectedTypes.value,
     parentId: filterParentId.value,
     server: filterServer.value,
+    tool: filterTool.value,
     status: filterStatus.value,
     authType: filterAuthType.value,
     agentName: filterAgentName.value,
@@ -1684,6 +1747,9 @@ const clearChip = (chip: ActiveFilterChip) => {
       break
     case 'server':
       filterServer.value = ''
+      break
+    case 'tool':
+      filterTool.value = ''
       break
     case 'status':
       filterStatus.value = ''
@@ -1727,6 +1793,9 @@ const filteredActivities = computed(() => {
   }
   if (filterServer.value) {
     result = result.filter(a => a.server_name === filterServer.value)
+  }
+  if (filterTool.value) {
+    result = result.filter(a => a.tool_name === filterTool.value)
   }
   // Session filter — a WORK session (Spec 082), falling back to the transport
   // session for rows written before it. Accepts either id, so a deep link from
@@ -1939,7 +2008,20 @@ const loadActivities = async () => {
 
   try {
     const [activitiesResponse, summaryResponse] = await Promise.all([
-      api.getActivities({ limit: 200, parent_id: filterParentId.value || undefined }),
+      api.getActivities({
+        limit: 200,
+        parent_id: filterParentId.value || undefined,
+        // Spec 109-k: url-filter-contract.md sends these to REST on Activity
+        // (unlike Tools/Servers, where the same names stay client-side) — a
+        // URL nav or a filter control must narrow the actual request, not
+        // just the local 200-row window.
+        type: selectedTypes.value.length > 0 ? selectedTypes.value.join(',') : undefined,
+        server: filterServer.value || undefined,
+        tool: filterTool.value || undefined,
+        // "Other / internal" is the client-side residual (OTHER_STATUS) —
+        // never sent to REST, same rule as the composable's toRest().
+        status: filterStatus.value && filterStatus.value !== OTHER_STATUS ? filterStatus.value : undefined,
+      }),
       api.getActivitySummary('24h')
     ])
 
@@ -1963,6 +2045,7 @@ const loadActivities = async () => {
 const clearFilters = () => {
   selectedTypes.value = []
   filterServer.value = ''
+  filterTool.value = ''
   filterSession.value = ''
   filterStatus.value = ''
   filterSensitiveData.value = ''
@@ -2124,6 +2207,7 @@ const exportActivities = (format: 'json' | 'csv') => {
     // Spec 024: Pass comma-separated types for multi-type filter
     type: selectedTypes.value.length > 0 ? selectedTypes.value.join(',') : undefined,
     server: filterServer.value || undefined,
+    tool: filterTool.value || undefined,
     // "Other / internal" is a client-side residual, not a stored status: the
     // export endpoint matches `status` exactly against the closed vocabulary,
     // so passing it would hand back an empty file. Export unfiltered by status
@@ -2270,9 +2354,20 @@ const getAdditionalMetadata = (activity: ActivityRecord): Record<string, unknown
 // Reset page when filters change. Expanded runs go with it: run keys are the
 // lead row's id, and after a refilter the row that led a run may not be in the
 // list at all — a stale key would silently expand the wrong run.
-watch([selectedTypes, filterServer, filterStatus, filterSensitiveData, filterSeverity, filterAuthType, filterAgentName, filterSession, filterStartDate, filterEndDate, sortColumn, sortDirection, groupRepeats], () => {
+watch([selectedTypes, filterServer, filterTool, filterStatus, filterSensitiveData, filterSeverity, filterAuthType, filterAgentName, filterSession, filterStartDate, filterEndDate, sortColumn, sortDirection, groupRepeats], () => {
   currentPage.value = 1
   expandedRuns.value = new Set()
+}, { deep: true })
+
+// Spec 109-k: `type`/`server`/`tool`/`status` are sent to REST on this page
+// (loadActivities() above) — refetch whenever one changes, whether it was set
+// by applyRouteFilters() from a URL nav or by a filter control, so the loaded
+// 200-row window never disagrees with what the request asked for. Registered
+// after applyRouteFilters() already ran during setup (top of this file), so
+// the initial values it wrote never trigger this watch — only a later,
+// genuine change does; the first fetch is onMounted's explicit call below.
+watch([selectedTypes, filterServer, filterTool, filterStatus], () => {
+  void loadActivities()
 }, { deep: true })
 
 // Whatever else moved, the page must exist. Folding on, a wider page size, a
@@ -2305,12 +2400,9 @@ watch(activities, refreshSessionsIfUnknown)
 
 // Lifecycle
 onMounted(() => {
-  // Check for session filter from URL query params (linked from Dashboard/Sessions pages)
-  const sessionParam = route.query.session as string | undefined
-  if (sessionParam) {
-    filterSession.value = sessionParam
-  }
-
+  // Filters (incl. `session`, linked from Dashboard/Sessions pages) are
+  // already hydrated from the URL by applyRouteFilters() during setup, above
+  // (rule 1: read before the first fetch) — this is that first fetch.
   loadActivities()
   loadSessions()
 

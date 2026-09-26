@@ -36,6 +36,31 @@ export const ACTIVITY_TYPE_LABELS: Record<string, string> = {
 
 const typeLabels = ACTIVITY_TYPE_LABELS
 
+// Spec 109-k (activity-scope-filters): the activity types the `view=calls`
+// Activity filter selects (url-filter-contract.md `view` -> REST `type`
+// mapping). Kept as one list both `activityViewTypes` below and any caller
+// that needs the raw pair can share, rather than two hand-copied literals
+// drifting apart the way the CLI's `activitySystemTypes` once did.
+export const ACTIVITY_CALL_TYPES = ['tool_call', 'internal_tool_call']
+
+/**
+ * Resolves a Web `view` query value (url-filter-contract.md `view` row) to
+ * the `type` filter it applies: `calls` is the two call types, `system` is
+ * every OTHER known type — derived from ACTIVITY_TYPE_LABELS so it can never
+ * drift the way the CLI's hand-maintained `activitySystemTypes` list did
+ * (missing `tool_quarantine_change`/`security_scan`/`credential_broker`).
+ * `all`, `sessions` (Activity.vue does not special-case the Sessions view)
+ * and anything else apply no type filter — `undefined`, so the caller can
+ * tell "no override" from "override to zero types".
+ */
+export function activityViewTypes(view: string): string[] | undefined {
+  if (view === 'calls') return [...ACTIVITY_CALL_TYPES]
+  if (view === 'system') {
+    return Object.keys(ACTIVITY_TYPE_LABELS).filter(t => !ACTIVITY_CALL_TYPES.includes(t))
+  }
+  return undefined
+}
+
 // Activity type icons. Same keys as ACTIVITY_TYPE_LABELS; each distinct, so a
 // glyph identifies the type on its own.
 const typeIcons: Record<string, string> = {
@@ -846,6 +871,7 @@ export interface ActivityFilterState {
   types?: string[]
   parentId?: string
   server?: string
+  tool?: string
   status?: string
   authType?: string
   agentName?: string
@@ -864,6 +890,7 @@ export interface ActiveFilterChip {
     | 'type'
     | 'parent'
     | 'server'
+    | 'tool'
     | 'status'
     | 'auth'
     | 'agent'
@@ -910,6 +937,9 @@ export const activeFilterChips = (state: ActivityFilterState): ActiveFilterChip[
   }
   if (state.server) {
     chips.push({ kind: 'server', key: 'server', label: `Server: ${state.server}` })
+  }
+  if (state.tool) {
+    chips.push({ kind: 'tool', key: 'tool', label: `Tool: ${state.tool}` })
   }
   if (state.status) {
     chips.push({

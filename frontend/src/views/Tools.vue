@@ -1141,23 +1141,50 @@ const toolsHints = computed<Hint[]>(() => [
 onMounted(() => {
   // Tools is the canonical search surface (audit F20): the header box and the
   // retired /search route both arrive here with ?q=, so the query has to
-  // prefill the filter rather than being silently dropped.
+  // prefill the filter rather than being silently dropped. Spec 109-k: the
+  // rest of the contract's Tools-page parameters (`server`, `tier`/`risk`,
+  // `status`, `approval` — url-filter-contract.md "Parameters", all
+  // client-side here per the contract) are read the same way, so a deep link
+  // (Home/Server-card links, a Clients row "Tools it sees", ...) actually
+  // narrows the page instead of landing on the unfiltered table.
   applyQueryParam()
   loadTools()
 })
 
-// A second search from the header while Tools is already open is a route query
-// change, not a remount — without this watch the box would appear to do nothing.
+// A second search/filter from elsewhere while Tools is already open is a
+// route query change, not a remount — without this watch the controls would
+// appear to do nothing (this is exactly the gap the audit found: a URL nav
+// after the initial mount had no effect either).
 watch(
-  () => route?.query.q,
-  () => applyQueryParam()
+  () => route?.query,
+  () => applyQueryParam(),
+  { deep: true }
 )
 
 function applyQueryParam() {
-  const q = route?.query.q
-  if (typeof q === 'string' && q !== searchQuery.value) {
-    searchQuery.value = q
+  const q = route?.query
+  if (!q) return
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+
+  const query = str(q.q)
+  if (query && query !== searchQuery.value) {
+    searchQuery.value = query
     currentPage.value = 1
   }
+
+  const server = str(q.server)
+  if (server) filterServer.value = server
+
+  const status = str(q.status)
+  if (status) filterStatus.value = status
+
+  const approval = str(q.approval)
+  if (approval) filterApproval.value = approval
+
+  // `?risk=` stays a query alias for `?tier=` for old bookmarks/links
+  // (url-filter-contract.md rule 6); an explicit `tier` wins if somehow both
+  // are present.
+  const tier = str(q.tier) || str(q.risk)
+  if (tier) filterTier.value = tier
 }
 </script>

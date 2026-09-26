@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // =============================================================================
@@ -22,7 +24,7 @@ func TestActivityViewTypeFilter(t *testing.T) {
 		{view: "", want: ""},
 		{view: "all", want: ""},
 		{view: "calls", want: "tool_call,internal_tool_call"},
-		{view: "system", want: "policy_decision,quarantine_change,server_change,system_start,system_stop,config_change,preflight,prompt_get"},
+		{view: "system", want: "policy_decision,quarantine_change,server_change,system_start,system_stop,config_change,tool_quarantine_change,security_scan,credential_broker,preflight,prompt_get"},
 		{view: "bogus", wantErr: true},
 	}
 
@@ -36,6 +38,37 @@ func TestActivityViewTypeFilter(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
+	}
+}
+
+// TestActivitySystemTypes_MatchesStorageValidTypesMinusCalls is a live-QA
+// regression (109-k-activity-scope-filters): activitySystemTypes used to be a
+// hand-maintained literal that drifted from storage.ValidActivityTypes as new
+// activity types were added, silently dropping `mp activity list --view
+// system` rows (tool_quarantine_change, security_scan, credential_broker were
+// all missing) despite the doc comment claiming it covered "every other known
+// activity type". Assert it by construction against the canonical list
+// instead of pinning another hand-copied literal that can drift the same way.
+func TestActivitySystemTypes_MatchesStorageValidTypesMinusCalls(t *testing.T) {
+	calls := make(map[string]bool, len(activityCallTypes))
+	for _, typ := range activityCallTypes {
+		calls[typ] = true
+	}
+
+	var wantSystem []string
+	for _, typ := range storage.ValidActivityTypes {
+		if !calls[typ] {
+			wantSystem = append(wantSystem, typ)
+		}
+	}
+
+	assert.ElementsMatch(t, wantSystem, activitySystemTypes,
+		"activitySystemTypes must be exactly storage.ValidActivityTypes minus activityCallTypes")
+
+	// Pin the specific three the live QA found missing, so a future revert to
+	// a hand-copied literal fails loudly on these names, not just on count.
+	for _, typ := range []string{"tool_quarantine_change", "security_scan", "credential_broker"} {
+		assert.Contains(t, activitySystemTypes, typ)
 	}
 }
 

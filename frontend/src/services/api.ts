@@ -1016,6 +1016,7 @@ class APIService {
     format: 'json' | 'csv'
     type?: string
     server?: string
+    tool?: string
     status?: string
     /** Export only the sub-calls of one code_execution run. */
     parent_id?: string
