@@ -387,6 +387,34 @@ func TestIsPlaceholder_AngleBracketToken(t *testing.T) {
 	}
 }
 
+// TestIsPlaceholder_BareShellEnvVar covers a bare shell-style env-var
+// indirection like "${GITHUB_TOKEN}" (no colon) -- a pattern Claude Code
+// itself expands from the parent shell before writing its own config.
+// mcpproxy's own secret resolver (secret.secretRefRegex) requires a
+// "type:name" form and will never resolve a bare "${VAR}", so unless
+// isPlaceholder flags it, the import preview shows the row as fully
+// configured and the literal string is copied verbatim into the child
+// process's environment (stdio spawner), failing auth silently on first use.
+func TestIsPlaceholder_BareShellEnvVar(t *testing.T) {
+	for _, v := range []string{"${GITHUB_TOKEN}", "${API_KEY}", " ${MY_SECRET} "} {
+		if !isPlaceholder(v) {
+			t.Errorf("isPlaceholder(%q) = false, want true (bare shell env-var indirection, unresolvable by mcpproxy)", v)
+		}
+	}
+}
+
+// TestIsPlaceholder_ValidSecretRefNotFlagged guards against the bare-env-var
+// fix over-flagging mcpproxy's own "type:name" secret reference syntax
+// (e.g. "${env:GITHUB_TOKEN}" or "${keychain:github-token}"), which IS
+// resolved at runtime and must not be tagged as needing a secret.
+func TestIsPlaceholder_ValidSecretRefNotFlagged(t *testing.T) {
+	for _, v := range []string{"${env:GITHUB_TOKEN}", "${keychain:github-token}"} {
+		if isPlaceholder(v) {
+			t.Errorf("isPlaceholder(%q) = true, want false (valid type:name secret reference)", v)
+		}
+	}
+}
+
 func containsTag(tags []string, want string) bool {
 	for _, t := range tags {
 		if t == want {

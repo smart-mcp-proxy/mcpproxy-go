@@ -1,12 +1,23 @@
 package configimport
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
+
+// bareShellEnvVarRegex matches a bare shell-style env-var indirection like
+// "${GITHUB_TOKEN}" -- no colon inside the braces. A pattern like this is
+// exactly what some source clients (e.g. Claude Code) expand from the
+// parent shell before writing their own config, but mcpproxy's own secret
+// resolver (secret.secretRefRegex) requires a "type:name" form and will
+// never resolve it: left unflagged, the import preview shows the row as
+// fully configured and the stdio spawner copies the literal, unresolved
+// string into the child process's environment.
+var bareShellEnvVarRegex = regexp.MustCompile(`^\$\{[^:}]+\}$`)
 
 // ImportedField is one env var or header on an imported server preview row,
 // classified for the FR-040 "second line" without exposing the value itself
@@ -77,7 +88,11 @@ var placeholderTokens = map[string]bool{
 
 // isPlaceholder reports whether value is empty or an obvious placeholder.
 func isPlaceholder(value string) bool {
-	v := strings.ToLower(strings.TrimSpace(value))
+	trimmed := strings.TrimSpace(value)
+	if bareShellEnvVarRegex.MatchString(trimmed) {
+		return true
+	}
+	v := strings.ToLower(trimmed)
 	v = strings.Trim(v, "<>{}$")
 	return placeholderTokens[v]
 }

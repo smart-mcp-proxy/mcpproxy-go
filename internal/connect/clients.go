@@ -272,14 +272,53 @@ func DisplayPath(path, homeDir string) string {
 		// a root home, so leave the path as-is.
 		return path
 	}
-	if path == homeDir {
-		return "~"
-	}
-	prefix := homeDir + string(filepath.Separator)
-	if strings.HasPrefix(path, prefix) {
-		return "~" + string(filepath.Separator) + strings.TrimPrefix(path, prefix)
+	if matched, rest := homePrefixMatch(path, homeDir, caseInsensitiveHomeMatch()); matched {
+		if rest == "" {
+			return "~"
+		}
+		return "~" + string(filepath.Separator) + rest
 	}
 	return path
+}
+
+// caseInsensitiveHomeMatch reports whether DisplayPath's home-prefix
+// comparison should ignore case. Windows filesystem paths are
+// case-insensitive, and the home directory (os.UserHomeDir -> %USERPROFILE%)
+// and per-client config roots (%APPDATA%/%LOCALAPPDATA%, read directly via
+// os.Getenv in ConfigPath above) are independent env vars that can
+// legitimately differ in casing — e.g. after a profile migration or with
+// roaming profiles. An exact byte comparison then fails to recognize a path
+// that IS under home, leaving the raw, un-shortened path displayed, which is
+// exactly the inconsistency DisplayPath exists to remove. A package
+// variable (rather than an inline runtime.GOOS check) so tests can exercise
+// the Windows behavior on any host platform.
+var caseInsensitiveHomeMatch = func() bool {
+	return runtime.GOOS == "windows"
+}
+
+// homePrefixMatch reports whether path equals home or lives directly under
+// it, optionally ignoring case, and returns the remainder path segment
+// (using path's own original casing, since that reflects what is actually
+// on disk) when it does.
+func homePrefixMatch(path, home string, caseInsensitive bool) (matched bool, rest string) {
+	equal := path == home
+	if caseInsensitive {
+		equal = strings.EqualFold(path, home)
+	}
+	if equal {
+		return true, ""
+	}
+	prefix := home + string(filepath.Separator)
+	if caseInsensitive {
+		if len(path) >= len(prefix) && strings.EqualFold(path[:len(prefix)], prefix) {
+			return true, path[len(prefix):]
+		}
+		return false, ""
+	}
+	if strings.HasPrefix(path, prefix) {
+		return true, strings.TrimPrefix(path, prefix)
+	}
+	return false, ""
 }
 
 // disconnectReloadHint adapts a client's connect-oriented ReloadHint text

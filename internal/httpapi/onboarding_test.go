@@ -329,3 +329,32 @@ func TestMarkOnboarding_ConnectedClientID(t *testing.T) {
 		assert.Equal(t, storage.StepStatusCompleted, ctrl.saved.ConnectStepStatus)
 	})
 }
+
+// TestMarkOnboarding_ChunkedBodyIsDecoded reproduces a chunked-encoding POST
+// (Transfer-Encoding: chunked), where Go reports Request.ContentLength as -1
+// because the length is unknown up front. Gating the decode on
+// r.ContentLength > 0 (rather than using decodeOptionalJSONBody, connect.go's
+// helper for exactly this case) silently skips the body and returns 200 OK
+// with a no-op write: the dismissed wizard reappears on reload and a
+// CLI-relayed connected_client_id is dropped.
+func TestMarkOnboarding_ChunkedBodyIsDecoded(t *testing.T) {
+	ctrl := &onboardingTestController{}
+	srv := newOnboardingTestServer(t, ctrl)
+
+	body := OnboardingMarkRequest{ConnectedClientID: "cursor", ServerStepStatus: "completed"}
+	data, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/onboarding/mark", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	// Simulate what net/http reports for a chunked request: length unknown.
+	req.ContentLength = -1
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, ctrl.saved, "chunked body must still be decoded and applied")
+	assert.Contains(t, ctrl.saved.ClientConnectedAt, "cursor")
+	assert.Equal(t, storage.StepStatusCompleted, ctrl.saved.ServerStepStatus)
+}

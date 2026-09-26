@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -180,12 +179,14 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// decodeOptionalJSONBody (connect.go), not a raw r.ContentLength > 0 gate:
+	// a chunked-encoding request reports ContentLength == -1, and gating on
+	// ">0" alone silently skips the decode, discarding engaged/step-status
+	// updates and the connected_client_id relay with a false 200 OK.
 	var req OnboardingMarkRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-			return
-		}
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+		return
 	}
 
 	if !validStepStatus(req.ConnectStepStatus) || !validStepStatus(req.ServerStepStatus) {

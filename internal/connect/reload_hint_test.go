@@ -91,6 +91,48 @@ func TestDisplayPath(t *testing.T) {
 	}
 }
 
+// TestDisplayPath_WindowsCaseInsensitiveHomeMatch guards a Windows-only trap:
+// filesystem paths there are case-insensitive, and the home prefix
+// (os.UserHomeDir -> %USERPROFILE%) and per-client config roots (%APPDATA%/
+// %LOCALAPPDATA%) are independent env vars that can legitimately differ in
+// casing (profile migration, roaming profiles). An exact byte comparison
+// then fails to recognize a path that IS under home, leaving the full raw
+// path displayed instead of the "~"-shortened form DisplayPath exists to
+// produce. caseInsensitiveHomeMatch is overridden here (rather than gated on
+// runtime.GOOS) so the behavior is exercised on every CI platform, not just
+// Windows runners.
+func TestDisplayPath_WindowsCaseInsensitiveHomeMatch(t *testing.T) {
+	orig := caseInsensitiveHomeMatch
+	caseInsensitiveHomeMatch = func() bool { return true }
+	t.Cleanup(func() { caseInsensitiveHomeMatch = orig })
+
+	sep := string(filepath.Separator)
+	home := sep + filepath.Join("Users", "Alice")
+	path := sep + filepath.Join("users", "alice", ".cursor", "mcp.json")
+	want := "~" + sep + filepath.Join(".cursor", "mcp.json")
+	if got := DisplayPath(path, home); got != want {
+		t.Errorf("DisplayPath(%q, %q) = %q, want %q (case-insensitive home match)", path, home, got, want)
+	}
+
+	// A differently-cased path equal to home itself must still collapse to "~".
+	differentlyCasedHome := sep + filepath.Join("USERS", "ALICE")
+	if got := DisplayPath(differentlyCasedHome, home); got != "~" {
+		t.Errorf("DisplayPath(%q, %q) = %q, want \"~\"", differentlyCasedHome, home, got)
+	}
+}
+
+// TestDisplayPath_CaseSensitiveByDefault asserts that off Windows (the
+// default caseInsensitiveHomeMatch), a differently-cased path is NOT treated
+// as living under home -- the case-insensitive match above must not regress
+// exact-match behavior on POSIX filesystems.
+func TestDisplayPath_CaseSensitiveByDefault(t *testing.T) {
+	home := string(filepath.Separator) + filepath.Join("Users", "alice")
+	path := string(filepath.Separator) + filepath.Join("Users", "ALICE", ".cursor", "mcp.json")
+	if got := DisplayPath(path, home); got != path {
+		t.Errorf("DisplayPath(%q, %q) = %q, want unchanged %q (case-sensitive by default)", path, home, got, path)
+	}
+}
+
 // TestDisplayPath_DefaultsToOSUserHomeDir asserts the empty-homeDir path
 // resolves through os.UserHomeDir (which on Windows reads %USERPROFILE%),
 // matching ConfigPath's own convention.
