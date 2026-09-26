@@ -1031,7 +1031,7 @@ private struct AttentionRow: View {
 
             Spacer()
 
-            if let action = server.health?.healthAction {
+            ForEach(server.attentionActions, id: \.self) { action in
                 // FR-014: bind the primary CTA's wording through the ONE
                 // cross-surface action-label table (HealthStatus.actionLabels)
                 // the Web UI and CLI also render — not the private

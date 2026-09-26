@@ -1256,7 +1256,7 @@ components:
         name:
           type: string
         reason:
-          description: '"already_exists", "filtered_out", "invalid_name"'
+          description: '"already_exists", "filtered_out", "invalid_name", "self_reference"'
           type: string
       type: object
     connect.ConnectResult:

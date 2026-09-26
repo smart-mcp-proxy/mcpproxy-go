@@ -1169,7 +1169,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 item.setAccessibilityLabel(fullTitle)
                 item.image = NSImage(systemSymbolName: icon, accessibilityDescription: action)
 
-                if let verb = TrayServerAction.fromHealthAction(action) {
+                if let verb = TrayServerAction.forAttention(server) {
                     let rowMenu = NSMenu(title: server.name)
 
                     let act = NSMenuItem(title: verb.menuTitle,
@@ -1177,12 +1177,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                          keyEquivalent: "")
                     act.target = self
                     act.representedObject = server
-                    act.image = NSImage(systemSymbolName: actionIcon(for: action),
-                                        accessibilityDescription: action)
+                    act.image = NSImage(systemSymbolName: actionIcon(for: verb == .login ? "login" : action),
+                                        accessibilityDescription: verb.menuTitle)
                     rowMenu.addItem(act)
                     rowMenu.addItem(.separator())
 
-                    let details = NSMenuItem(title: "Open Server Details",
+                    // A quarantined server that also needs sign-in keeps its
+                    // review path under its own name: Server Detail is where
+                    // the quarantine banner lives.
+                    let detailsTitle = server.quarantined
+                        ? TrayServerAction.approve.menuTitle
+                        : "Open Server Details"
+                    let details = NSMenuItem(title: detailsTitle,
                                              action: #selector(showServerDetailFromMenu(_:)),
                                              keyEquivalent: "")
                     details.target = self
@@ -1503,7 +1509,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // calm, actionable affordance (MCP-1822) — `menuStatusNSColor`
         // gives it the system accent tint instead of the red error dot +
         // red lock badge that previously framed sign-in as a hard failure.
-        let needsAuth = server.isOAuthLoginRequired
         let dotColor = server.menuStatusNSColor
 
         let iconSize = NSSize(width: 16, height: 16)
@@ -1532,9 +1537,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         sub.addItem(.separator())
 
+        let leading = TrayServerAction.leadingMenuActions(for: server)
+
         // OAuth sign-in — calm, actionable affordance shown first when
-        // login is required (MCP-1822), not error framing.
-        if needsAuth {
+        // login is required (MCP-1822), not error framing. Offered beside
+        // Review quarantine, never instead of it.
+        if leading.contains(.login) {
             let login = NSMenuItem(title: TrayServerAction.login.menuTitle,
                                    action: #selector(loginServer(_:)), keyEquivalent: "")
             login.target = self
@@ -1548,7 +1556,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Logs — the one thing it needs is a review, and the menu had no path
         // to it at all. Deep-links to Server Detail, which opens on Tools with
         // the quarantine banner.
-        if server.quarantined {
+        if leading.contains(.approve) {
             let review = NSMenuItem(title: TrayServerAction.approve.menuTitle,
                                     action: #selector(showServerDetailFromMenu(_:)), keyEquivalent: "")
             review.target = self
@@ -1770,7 +1778,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @MainActor
     @objc private func performAttentionAction(_ sender: NSMenuItem) {
         guard let server = sender.representedObject as? ServerStatus,
-              let verb = TrayServerAction.fromHealthAction(server.health?.action ?? "") else { return }
+              let verb = TrayServerAction.forAttention(server) else { return }
         perform(verb, on: server.name, id: server.id)
     }
 
