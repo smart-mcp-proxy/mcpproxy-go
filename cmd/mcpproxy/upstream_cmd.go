@@ -913,8 +913,23 @@ func outputError(err error, code string) error {
 	return err
 }
 
+// loadUpstreamConfig resolves the config path for every `upstream` subcommand.
+// Only `upstream list`/`upstream logs` register their own local --config flag
+// (bound to upstreamConfigPath); every other upstream subcommand (add,
+// remove, enable, disable, restart, patch, inspect, import, ...) has no local
+// --config flag, so a user's --config=<path> is parsed against the ROOT
+// persistent flag and lands in the package-level configFile variable instead.
+// Falling back to configFile when upstreamConfigPath is unset means those
+// subcommands honor the flag the user actually passed rather than silently
+// defaulting to ~/.mcpproxy/mcp_config.json (found via live QA: this caused
+// `upstream add --config=<scratch>` to write into the real production
+// config). upstreamConfigPath still wins when a command sets it explicitly.
 func loadUpstreamConfig() (*config.Config, error) {
-	return loadCLIConfig(upstreamConfigPath)
+	explicitPath := upstreamConfigPath
+	if explicitPath == "" {
+		explicitPath = configFile
+	}
+	return loadCLIConfig(explicitPath)
 }
 
 func createUpstreamLogger(level string) (*zap.Logger, error) {

@@ -314,6 +314,52 @@ func TestLoadUpstreamConfig(t *testing.T) {
 	})
 }
 
+// TestLoadUpstreamConfig_FallsBackToGlobalConfigFlag pins a real bug found
+// during live QA: `upstream add` (and every other upstream subcommand except
+// `list`/`logs`, which register their own local --config flag bound to
+// upstreamConfigPath) has no local --config flag of its own, so a user's
+// `--config=<path>` is parsed against the ROOT persistent flag and lands in
+// the package-level `configFile` variable, never in `upstreamConfigPath`.
+// loadUpstreamConfig previously read upstreamConfigPath ONLY, silently
+// ignoring the value the user actually passed and falling through to the
+// default `~/.mcpproxy/mcp_config.json` — on a real machine this meant
+// `upstream add --config=<scratch>` wrote test servers into the operator's
+// real production config. loadUpstreamConfig must fall back to the global
+// configFile when upstreamConfigPath was never set for this command.
+func TestLoadUpstreamConfig_FallsBackToGlobalConfigFlag(t *testing.T) {
+	oldConfigPath := upstreamConfigPath
+	oldConfigFile := configFile
+	defer func() {
+		upstreamConfigPath = oldConfigPath
+		configFile = oldConfigFile
+	}()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "scratch_config.json")
+	configJSON := `{
+		"listen": "127.0.0.1:19999",
+		"data_dir": "` + tmpDir + `",
+		"mcpServers": []
+	}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+
+	// Simulate `mcpproxy upstream add ... --config=<scratch>`: only the root
+	// persistent flag var is populated, exactly as cobra would bind it for a
+	// subcommand with no local --config flag of its own.
+	upstreamConfigPath = ""
+	configFile = configPath
+
+	cfg, err := loadUpstreamConfig()
+	if err != nil {
+		t.Fatalf("loadUpstreamConfig() with only the global --config set: %v", err)
+	}
+	if cfg.Listen != "127.0.0.1:19999" {
+		t.Errorf("expected loadUpstreamConfig to honor the global --config flag path %q, got listen=%q (likely fell back to the default config)", configPath, cfg.Listen)
+	}
+}
+
 func TestCreateUpstreamLogger(t *testing.T) {
 	tests := []struct {
 		name     string

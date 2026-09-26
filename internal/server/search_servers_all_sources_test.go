@@ -103,6 +103,57 @@ func TestSearchServers_RegistryOptional_UnavailableSourceReported(t *testing.T) 
 	require.Len(t, unavailable, 1)
 }
 
+// TestSearchServers_RegistryOptional_SecretLikeMatchesCatalogResult pins
+// FR-067/FR-065 cross-surface parity: MCP search_servers with 'registry'
+// omitted must compute required_inputs[].secret via the same
+// registries.ToCatalogResult OR-with-name-heuristic REST/CLI's
+// /catalog/search already applies (secretlike.LooksSecret(name)), not the
+// raw ServerEntry.RequiredInputs[].Secret field a registry entry declares.
+// A registry that reports secret:false for a name that still looks
+// secret-shaped (e.g. "Authorization") must still surface secret:true here,
+// exactly as GET /catalog/search and `mcpproxy catalog search` do.
+func TestSearchServers_RegistryOptional_SecretLikeMatchesCatalogResult(t *testing.T) {
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"one","name":"Alpha Tool","description":"d1","required_inputs":[{"name":"Authorization","secret":false}]}]`))
+	}))
+	t.Cleanup(fixture.Close)
+
+	t.Cleanup(registries.AllowPrivateRegistryFetchForTest())
+	t.Cleanup(registries.SetRegistriesForTest([]registries.RegistryEntry{
+		{ID: "fast", Name: "Fast", ServersURL: fixture.URL},
+	}))
+
+	proxy := createTestMCPProxyServer(t)
+
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name:      "search_servers",
+		Arguments: map[string]interface{}{"search": "Alpha"},
+	}}
+	result, err := proxy.handleSearchServers(context.Background(), req)
+	require.NoError(t, err)
+	require.False(t, result.IsError, "unexpected tool error: %+v", result.Content)
+
+	text := toolResultText(t, result)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(text), &payload))
+
+	servers, ok := payload["servers"].([]interface{})
+	require.True(t, ok, "expected a servers array, got %#v", payload)
+	require.Len(t, servers, 1)
+	entry, ok := servers[0].(map[string]interface{})
+	require.True(t, ok)
+
+	requiredInputs, ok := entry["required_inputs"].([]interface{})
+	require.True(t, ok, "expected required_inputs in the entry, got %#v", entry)
+	require.Len(t, requiredInputs, 1)
+	input, ok := requiredInputs[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "Authorization", input["name"])
+	assert.Equal(t, true, input["secret"],
+		"expected secret:true via the D13 name heuristic (FR-065), matching REST/CLI's ToCatalogResult, despite the registry declaring secret:false")
+}
+
 // TestSearchServers_RegistrySpecified_UnchangedBehavior pins that passing
 // 'registry' still uses the single-source path unchanged (FR-067's ONLY
 // requirement is making it optional).

@@ -34,6 +34,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secretlike"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -1685,6 +1686,33 @@ type mcpCatalogServerEntry struct {
 	Source     string                 `json:"source"`
 }
 
+// catalogServerEntryWithSecretLike returns a copy of entry whose
+// RequiredInputs[].Secret has been OR'd with the D13 name heuristic
+// (secretlike.LooksSecret), exactly as registries.ToCatalogResult computes
+// RequiredInputs[].secret_like for REST's GET /catalog/search and the CLI's
+// `catalog search` (FR-065: a registry that omits or falsifies its own
+// isSecret flag still defaults the field to Secret). Without this, embedding
+// entry.RequiredInputs raw (as mcpCatalogServerEntry did) leaves MCP's
+// search_servers (registry omitted) reporting whatever the registry itself
+// claims, silently diverging from every other surface.
+func catalogServerEntryWithSecretLike(entry registries.ServerEntry) registries.ServerEntry {
+	detected := registries.DetectRequiredInputs(&entry)
+	if len(detected) == 0 {
+		entry.RequiredInputs = nil
+		return entry
+	}
+	inputs := make([]registries.RequiredInput, len(detected))
+	for i, in := range detected {
+		inputs[i] = registries.RequiredInput{
+			Name:        in.Name,
+			Description: in.Description,
+			Secret:      in.Secret || secretlike.LooksSecret(in.Name),
+		}
+	}
+	entry.RequiredInputs = inputs
+	return entry
+}
+
 // handleSearchServersAllSources implements search_servers with 'registry'
 // omitted (Spec 109 FR-060/067): fans out across every enabled catalog
 // source via registries.SearchAll and returns the merged, ranked list in
@@ -1699,7 +1727,7 @@ func (p *MCPProxyServer) handleSearchServersAllSources(ctx context.Context, sess
 	servers := make([]mcpCatalogServerEntry, 0, len(hits))
 	for _, h := range hits {
 		servers = append(servers, mcpCatalogServerEntry{
-			ServerEntry: h.Entry,
+			ServerEntry: catalogServerEntryWithSecretLike(h.Entry),
 			Title:       h.Title,
 			Publisher:   h.Publisher,
 			Verified:    h.Verified,
