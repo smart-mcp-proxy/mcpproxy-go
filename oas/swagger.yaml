@@ -3406,12 +3406,45 @@ components:
       type: object
     httpapi.ImportRequest:
       properties:
+        allow_paste_fallback:
+          description: |-
+            AllowPasteFallback opts into detecting a bare URL or a single command
+            line (FR-064) when Format/format detection would otherwise fail — see
+            configimport.ImportOptions.AllowPasteFallback for why this must stay
+            opt-in (review round 4 F-E). Only the interactive Paste tab sets this;
+            every other caller of this endpoint (the general "Import config"
+            panel, or a direct API call) leaves it false and gets a clear
+            "unable to detect configuration format" error for a plain one-liner
+            instead of it being silently guessed at and, on apply, added as a
+            real server with no confirmation step.
+          type: boolean
         content:
           description: Raw JSON or TOML content
           type: string
+        env_override:
+          additionalProperties:
+            type: string
+          description: |-
+            EnvOverride/HeaderOverride (Spec 109 FR-064/065, PR review round 4
+            F-A/F-D fix): the Paste tab's per-field Value/Secret edits — a plain
+            value the user typed, or a keyring ref path if they chose Secret —
+            keyed by field name. Applied to the matching imported server's
+            Env/Headers ONLY when preview=false, directly on the server this
+            request's own raw Content parses to server-side. This is what lets
+            the apply call carry the user's edited env/header values without
+            ever round-tripping the redacted preview: url/command/args on apply
+            always come from re-parsing Content here, never from a client-held
+            preview response, so a credential embedded in a URL query param or
+            argv flag (which the preview necessarily redacted for display) is
+            never overwritten with the masked placeholder.
+          type: object
         format:
           description: Optional format hint
           type: string
+        header_override:
+          additionalProperties:
+            type: string
+          type: object
         server_names:
           description: 'Optional: import only these servers'
           items:

@@ -1061,6 +1061,17 @@ class APIService {
     format?: string
     server_names?: string[]
     preview?: boolean
+    // Paste tab env/header edits (Value or Secret-ref), applied server-side
+    // to the server this same request's `content` parses to — only takes
+    // effect when preview is false. See PasteServer.vue's handleAdd.
+    env_override?: Record<string, string>
+    header_override?: Record<string, string>
+    // Opt into detecting a bare URL or single command line (FR-064) when
+    // JSON/TOML detection fails. Only the Paste tab sets this — every other
+    // caller (the general "Import config" panel, canonical-path import)
+    // must keep getting a clear detection error for a plain one-liner
+    // instead of it being silently guessed at (review round 4 F-E).
+    allow_paste_fallback?: boolean
   }): Promise<APIResponse<ImportResponse>> {
     const url = `/api/v1/servers/import/json${params.preview ? '?preview=true' : ''}`
     return this.request<ImportResponse>(url, {
@@ -1068,7 +1079,10 @@ class APIService {
       body: JSON.stringify({
         content: params.content,
         format: params.format,
-        server_names: params.server_names
+        server_names: params.server_names,
+        env_override: params.env_override,
+        header_override: params.header_override,
+        allow_paste_fallback: params.allow_paste_fallback
       })
     })
   }

@@ -60,7 +60,7 @@ describe('PasteServer', () => {
     await new Promise((r) => setTimeout(r, 450))
     await flushPromises()
 
-    expect(api.importServersFromJSON).toHaveBeenCalledWith({ content: 'https://api.example.com/mcp', preview: true })
+    expect(api.importServersFromJSON).toHaveBeenCalledWith({ content: 'https://api.example.com/mcp', preview: true, allow_paste_fallback: true })
     expect(api.callTool).not.toHaveBeenCalled()
     expect(wrapper.find('[data-test="paste-format"]').text()).toBe('Remote URL')
     expect(wrapper.find('[data-test="paste-tag-remote"]').exists()).toBe(true)
@@ -114,7 +114,6 @@ describe('PasteServer', () => {
     })
     vi.mocked(api.getSecretRefs).mockResolvedValue({ success: true, data: { refs: [] } })
     vi.mocked(api.setSecret).mockResolvedValue({ success: true, data: { message: '', name: '', type: '', reference: '' } })
-    vi.mocked(api.callTool).mockResolvedValue({ success: true, data: {} })
 
     const wrapper = await mountPaste()
     await wrapper.find('[data-test="paste-textarea"]').setValue('uvx mcp-server-github')
@@ -123,13 +122,53 @@ describe('PasteServer', () => {
 
     expect(wrapper.find('[data-test="secret-toggle-env-GITHUB_TOKEN"]').exists()).toBe(true)
     await wrapper.find('[data-test="secret-toggle-value-input"]').setValue('sk-live-abc123')
+
+    // The apply call (preview:false) resolves separately from the earlier
+    // preview call, matched below by its `preview` flag.
+    vi.mocked(api.importServersFromJSON).mockImplementation(async (params) => {
+      if (params.preview) {
+        return {
+          success: true,
+          data: {
+            format: 'command',
+            format_name: 'Command Line',
+            summary: { total: 1, imported: 1, skipped: 0, failed: 0 },
+            imported: [{
+              name: 'github', protocol: 'stdio', command: 'uvx', args: ['mcp-server-github'],
+              source_format: 'command', original_name: 'github',
+              summary: 'uvx mcp-server-github', tags: ['local process', 'needs secret'],
+              env: [{ name: 'GITHUB_TOKEN', value_present: true, secret_like: true, empty_or_placeholder: false }],
+            }],
+            skipped: [], failed: [], warnings: [],
+          },
+        }
+      }
+      return {
+        success: true,
+        data: {
+          format: 'command', format_name: 'Command Line',
+          summary: { total: 1, imported: 1, skipped: 0, failed: 0 },
+          imported: [{ name: 'github', protocol: 'stdio', source_format: 'command', original_name: 'github' }],
+          skipped: [], failed: [], warnings: [],
+        },
+      }
+    })
+
     await wrapper.find('[data-test="paste-add-button"]').trigger('click')
     await flushPromises()
 
     expect(api.setSecret).toHaveBeenCalledWith('github-env-github-token', 'sk-live-abc123')
-    expect(api.callTool).toHaveBeenCalledWith(
-      'upstream_servers',
-      expect.objectContaining({ env_json: JSON.stringify({ GITHUB_TOKEN: '${keyring:github-env-github-token}' }) })
+    // Add must re-parse the ORIGINAL raw content server-side (never send the
+    // preview's own — potentially redacted — url/command/args back), and
+    // carry the resolved secret across via env_override, not env_json built
+    // from the preview.
+    expect(api.importServersFromJSON).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: 'uvx mcp-server-github',
+        preview: false,
+        server_names: ['github'],
+        env_override: { GITHUB_TOKEN: '${keyring:github-env-github-token}' },
+      })
     )
   })
 
@@ -158,7 +197,6 @@ describe('PasteServer', () => {
     vi.mocked(api.getSecretRefs).mockResolvedValue({ success: true, data: { refs: [] } })
     vi.mocked(api.setSecret).mockResolvedValue({ success: true, data: { message: '', name: '', type: '', reference: '' } })
     vi.mocked(api.deleteSecret).mockResolvedValue({ success: true, data: { message: '' } })
-    vi.mocked(api.callTool).mockResolvedValue({ success: false, error: 'a server named "github" already exists' })
 
     const wrapper = await mountPaste()
     await wrapper.find('[data-test="paste-textarea"]').setValue('uvx mcp-server-github')
@@ -166,11 +204,82 @@ describe('PasteServer', () => {
     await flushPromises()
 
     await wrapper.find('[data-test="secret-toggle-value-input"]').setValue('sk-live-abc123')
+
+    // The apply (preview:false) call fails with a duplicate-name error.
+    vi.mocked(api.importServersFromJSON).mockImplementation(async (params) => {
+      if (params.preview) {
+        return {
+          success: true,
+          data: {
+            format: 'command', format_name: 'Command Line',
+            summary: { total: 1, imported: 1, skipped: 0, failed: 0 },
+            imported: [{
+              name: 'github', protocol: 'stdio', command: 'uvx', args: ['mcp-server-github'],
+              source_format: 'command', original_name: 'github',
+              summary: 'uvx mcp-server-github', tags: ['local process', 'needs secret'],
+              env: [{ name: 'GITHUB_TOKEN', value_present: true, secret_like: true, empty_or_placeholder: false }],
+            }],
+            skipped: [], failed: [], warnings: [],
+          },
+        }
+      }
+      return { success: false, error: 'a server named "github" already exists' }
+    })
+
     await wrapper.find('[data-test="paste-add-button"]').trigger('click')
     await flushPromises()
 
     expect(api.setSecret).toHaveBeenCalledWith('github-env-github-token', 'sk-live-abc123')
     expect(wrapper.find('[data-test="paste-add-error"]').text()).toContain('already exists')
     expect(api.deleteSecret).toHaveBeenCalledWith('github-env-github-token')
+  })
+
+  // Review round 4 (F-A): a credential embedded directly in a URL query
+  // param is masked in the preview (`api_key=••••23 (16 chars)`) for
+  // display. Add must never bake that masked string into the real server —
+  // it must re-post the ORIGINAL raw pasted text so the backend re-parses
+  // the true, unredacted URL server-side.
+  it('re-parses the original raw text on Add instead of using the redacted preview URL', async () => {
+    const rawUrl = 'https://api.example.com/mcp?api_key=ghp_verysecrettoken1234'
+    const redactedUrl = 'https://api.example.com/mcp?api_key=••••34 (20 chars)'
+    vi.mocked(api.importServersFromJSON).mockImplementation(async (params) => {
+      if (params.preview) {
+        return {
+          success: true,
+          data: {
+            format: 'url',
+            format_name: 'URL',
+            summary: { total: 1, imported: 1, skipped: 0, failed: 0 },
+            imported: [{ name: 'api', protocol: 'http', url: redactedUrl, source_format: 'url', original_name: 'api', summary: redactedUrl, tags: ['remote'] }],
+            skipped: [], failed: [], warnings: [],
+          },
+        }
+      }
+      return {
+        success: true,
+        data: {
+          format: 'url', format_name: 'URL',
+          summary: { total: 1, imported: 1, skipped: 0, failed: 0 },
+          imported: [{ name: 'api', protocol: 'http', source_format: 'url', original_name: 'api' }],
+          skipped: [], failed: [], warnings: [],
+        },
+      }
+    })
+
+    const wrapper = await mountPaste()
+    await wrapper.find('[data-test="paste-textarea"]').setValue(rawUrl)
+    await new Promise((r) => setTimeout(r, 450))
+    await flushPromises()
+
+    // The preview correctly shows the masked value (nothing regressed there).
+    expect(wrapper.find('[data-test="paste-summary"]').text()).toBe(redactedUrl)
+
+    await wrapper.find('[data-test="paste-add-button"]').trigger('click')
+    await flushPromises()
+
+    const applyCall = vi.mocked(api.importServersFromJSON).mock.calls.find(([p]) => p.preview === false)
+    expect(applyCall).toBeDefined()
+    expect(applyCall![0].content).toBe(rawUrl)
+    expect(applyCall![0].content).not.toContain('••••')
   })
 })

@@ -2,10 +2,12 @@ import XCTest
 @testable import MCPProxy
 
 /// Pure-function seam for the Paste tab (Spec 109 FR-064/065): turning an
-/// import preview into the toggle list (`buildFields`) and turning the
-/// resolved fields into the `POST /api/v1/servers` body (`makeServerConfig`).
-/// Unit-testable without a running app or API client, mirroring
-/// `ManualServerForm`'s `makeServerConfig` seam.
+/// import preview into the toggle list (`buildFields`). Add itself now goes
+/// through `APIClient.applyImportContent`, which re-parses the raw pasted
+/// text server-side (review round 4 F-A/F-D fix) rather than reconstructing
+/// a `POST /api/v1/servers` body from the preview client-side, so there is
+/// no more pure `makeServerConfig` seam to test here — see
+/// `PasteServerApplyTests` for the apply-call assembly.
 final class PasteServerFieldsTests: XCTestCase {
 
     // MARK: - buildFields
@@ -48,47 +50,5 @@ final class PasteServerFieldsTests: XCTestCase {
         // Same NAME, different kind — must not collapse to one row.
         XCTAssertEqual(fields.count, 2)
         XCTAssertEqual(Set(fields.map(\.id)).count, 2)
-    }
-
-    // MARK: - makeServerConfig
-
-    func testMakeServerConfigForStdioIncludesCommandArgsAndEnv() {
-        let preview = ImportPreviewServer(
-            name: "fs", protocol: "stdio", url: nil, command: "npx", args: ["-y", "server-filesystem"],
-            summary: nil, tags: nil, env: nil, headers: nil
-        )
-        let resolved = ResolvedSecretFields(env: ["GITHUB_TOKEN": "${keyring:fs-env-github-token}"], headers: [:], writtenRefs: ["fs-env-github-token"])
-        let config = PasteServerView.makeServerConfig(preview: preview, resolved: resolved)
-        XCTAssertEqual(config["name"] as? String, "fs")
-        XCTAssertEqual(config["protocol"] as? String, "stdio")
-        XCTAssertEqual(config["command"] as? String, "npx")
-        XCTAssertEqual(config["args"] as? [String], ["-y", "server-filesystem"])
-        XCTAssertEqual((config["env"] as? [String: String])?["GITHUB_TOKEN"], "${keyring:fs-env-github-token}")
-        XCTAssertNil(config["url"])
-        XCTAssertNil(config["headers"])
-    }
-
-    func testMakeServerConfigForURLIncludesHeadersNotEnv() {
-        let preview = ImportPreviewServer(
-            name: "remote", protocol: "http", url: "https://api.example.com/mcp", command: nil, args: nil,
-            summary: nil, tags: nil, env: nil, headers: nil
-        )
-        let resolved = ResolvedSecretFields(env: [:], headers: ["Authorization": "${keyring:remote-header-authorization}"], writtenRefs: ["remote-header-authorization"])
-        let config = PasteServerView.makeServerConfig(preview: preview, resolved: resolved)
-        XCTAssertEqual(config["url"] as? String, "https://api.example.com/mcp")
-        XCTAssertEqual((config["headers"] as? [String: String])?["Authorization"], "${keyring:remote-header-authorization}")
-        XCTAssertNil(config["command"])
-        XCTAssertNil(config["env"])
-    }
-
-    func testMakeServerConfigOmitsEmptyEnvAndHeaders() {
-        let preview = ImportPreviewServer(
-            name: "plain", protocol: "stdio", url: nil, command: "true", args: nil,
-            summary: nil, tags: nil, env: nil, headers: nil
-        )
-        let resolved = ResolvedSecretFields(env: [:], headers: [:], writtenRefs: [])
-        let config = PasteServerView.makeServerConfig(preview: preview, resolved: resolved)
-        XCTAssertNil(config["env"])
-        XCTAssertNil(config["headers"])
     }
 }

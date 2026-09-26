@@ -177,6 +177,17 @@ type ImportOptions struct {
 	// By default, all imported servers are quarantined for security review.
 	SkipQuarantine bool
 
+	// AllowPasteFallback opts into DetectFormat's URL/single-command-line
+	// guess (FR-064) when FormatHint is empty; otherwise Import uses
+	// DetectFormatStrict (TOML/JSON only), returning ErrUnknownFormat for a
+	// plain one-liner instead of guessing at it. Only the interactive Paste
+	// tab sets this — it is the one surface that previews the guess for a
+	// human to confirm before Add ever mutates anything (review round 4
+	// F-E). Every other import surface (CLI `upstream import`, a direct
+	// REST import call, the general "Import config" panel) leaves this
+	// false and keeps the pre-FR-064 behavior.
+	AllowPasteFallback bool
+
 	// Now is the timestamp to use for Created field (default: time.Now())
 	Now time.Time
 }

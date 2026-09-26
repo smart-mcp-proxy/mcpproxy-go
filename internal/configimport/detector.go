@@ -16,6 +16,12 @@ var ErrUnknownFormat = fmt.Errorf("unable to detect configuration format: suppor
 // It tries TOML first (for Codex), then JSON (for all other formats), then
 // falls back to the Paste-source formats (FR-064): a single http(s):// URL,
 // or a single command line.
+//
+// This fallback must stay opt-in at the Import() call site (see
+// ImportOptions.AllowPasteFallback / DetectFormatStrict) — DetectFormat
+// itself keeps trying it unconditionally so its own tests, and the
+// interactive Paste tab (the one surface that previews the guess for a
+// human to confirm before Add ever mutates anything) can call it directly.
 func DetectFormat(content []byte) (*DetectionResult, error) {
 	// Try TOML first (Codex uses TOML)
 	if result := tryDetectTOML(content); result != nil {
@@ -35,6 +41,31 @@ func DetectFormat(content []byte) (*DetectionResult, error) {
 		return result, nil
 	}
 
+	return nil, ErrUnknownFormat
+}
+
+// DetectFormatStrict identifies the configuration format from content,
+// trying only TOML and JSON — it never guesses the Paste-tab URL/single-line
+// -command fallback DetectFormat does (review round 4 F-E). Import() uses
+// this by default and only switches to the full DetectFormat when the
+// caller sets ImportOptions.AllowPasteFallback.
+//
+// Without this split, every import surface — the CLI's `upstream import
+// <file>`, a direct REST import call, or the general "Import config" panel —
+// shared the exact same guess the interactive Paste tab relies on, but
+// without that tab's preview-before-Add step: a plain one-line file that is
+// neither JSON nor TOML (a typo, or simply the wrong file) used to return a
+// clear "unable to detect configuration format" error; with the fallback
+// unconditionally wired in, it was instead silently guessed as a stdio
+// command line and — on a non-preview call — added as a real, running
+// (quarantined) server with no confirmation step at all.
+func DetectFormatStrict(content []byte) (*DetectionResult, error) {
+	if result := tryDetectTOML(content); result != nil {
+		return result, nil
+	}
+	if result := tryDetectJSON(content); result != nil {
+		return result, nil
+	}
 	return nil, ErrUnknownFormat
 }
 

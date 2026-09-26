@@ -2,6 +2,7 @@ package registries
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -143,6 +144,45 @@ func TestSearchAll_EmptyQueryReturnsSections(t *testing.T) {
 	}
 }
 
+// TestSearchAll_PopularSectionNotLimitedByPageSize pins review round 4 F-F:
+// sections must be built from the FULL ranked list, before truncation to
+// `limit` — building them AFTER truncation meant Popular could never reach
+// its own 12-entry cap (catalogSectionCap) at the documented default `limit`
+// of 10, silently excluding a real hit that simply didn't survive the
+// earlier truncation.
+func TestSearchAll_PopularSectionNotLimitedByPageSize(t *testing.T) {
+	// Two sources, each returning `limit` (10) entries of their own — every
+	// per-source SearchServers call is independently bounded by `limit`
+	// (search.go), so a single source can never itself produce more than
+	// `limit` hits. The merged total (up to 20) exceeding `limit=10` is what
+	// reproduces F-F: only the post-merge truncation-before-sectioning bug
+	// can now discard a hit sections should have kept.
+	entriesFor := func(prefix string) string {
+		var entries []string
+		for i := 0; i < 10; i++ {
+			entries = append(entries, fmt.Sprintf(`{"id":"%s%02d","name":"Server %s%02d"}`, prefix, i, prefix, i))
+		}
+		return "[" + strings.Join(entries, ",") + "]"
+	}
+	src1 := jsonServer(t, entriesFor("a"))
+	src2 := jsonServer(t, entriesFor("b"))
+	withTestRegistries(t, []RegistryEntry{
+		{ID: "src1", Name: "Src1", ServersURL: src1.URL},
+		{ID: "src2", Name: "Src2", ServersURL: src2.URL},
+	})
+
+	hits, sections, _ := SearchAll(context.Background(), "", "", 10, SearchOptions{})
+	if len(hits) != 10 {
+		t.Fatalf("expected the flat list truncated to limit=10, got %d", len(hits))
+	}
+	if sections == nil {
+		t.Fatal("expected sections to be populated for an empty query")
+	}
+	if len(sections.Popular) != 12 {
+		t.Errorf("expected Popular capped at catalogSectionCap=12 (not limit=10), got %d", len(sections.Popular))
+	}
+}
+
 // TestSearchAll_NonEmptyQueryHasNoSections pins that sections stay nil (→ REST
 // null) once a query narrows the results.
 func TestSearchAll_NonEmptyQueryHasNoSections(t *testing.T) {
@@ -227,5 +267,34 @@ func TestToCatalogResult_StdioInstall(t *testing.T) {
 	}
 	if !result.Added {
 		t.Error("expected Added to be passed through as true")
+	}
+}
+
+// TestToCatalogResult_HybridPrefersInstallCmdOverConnectURL pins review
+// round 4 F-B: officialServerToEntry documents "package wins for stdio; keep
+// the remote as a fallback" for a hybrid entry (both packages[] and
+// remotes[] present) — ConnectURL is populated there ONLY as a fallback.
+// toCatalogInstall must report stdio/InstallCmd for such an entry, never
+// http/ConnectURL, or the reported transport is wrong and the "added" join
+// (CatalogInstallTarget) never matches the actually-configured (stdio)
+// server.
+func TestToCatalogResult_HybridPrefersInstallCmdOverConnectURL(t *testing.T) {
+	hit := CatalogHit{
+		Source: "official",
+		Entry: ServerEntry{
+			ID:         "io.github.github/github-mcp-server",
+			InstallCmd: "docker run -i --rm ghcr.io/github/github-mcp-server",
+			ConnectURL: "https://api.githubcopilot.com/mcp/",
+		},
+	}
+	result := ToCatalogResult(hit, false)
+	if result.Transport != "stdio" {
+		t.Errorf("expected transport stdio for a hybrid entry, got %s", result.Transport)
+	}
+	if result.Install.Command != "docker" {
+		t.Errorf("expected command 'docker', got %q", result.Install.Command)
+	}
+	if result.Install.URL != "" {
+		t.Errorf("expected no URL on a hybrid entry's install, got %q", result.Install.URL)
 	}
 }

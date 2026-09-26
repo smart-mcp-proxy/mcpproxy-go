@@ -193,13 +193,21 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 	sort.SliceStable(all, func(i, j int) bool { return Rank(all[i], all[j], q) })
 	sort.SliceStable(unavailable, func(i, j int) bool { return unavailable[i].Source < unavailable[j].Source })
 
-	if len(all) > limit {
-		all = all[:limit]
-	}
-
+	// Sections are built from the FULL ranked list, before truncation to
+	// `limit` — review round 4 F-F: limit defaults to 10 while
+	// catalogSectionCap is 12, so building sections AFTER truncating to
+	// `limit` meant Popular could never reach its own cap at the documented
+	// default, and any genuinely popular hit ranked just outside the top
+	// `limit` (e.g. a non-official source that lost the official-first
+	// sort) was silently excluded from Popular regardless of how popular it
+	// actually was.
 	var sections *CatalogSections
 	if strings.TrimSpace(q) == "" {
 		sections = buildSections(all)
+	}
+
+	if len(all) > limit {
+		all = all[:limit]
 	}
 
 	return all, sections, unavailable
@@ -385,21 +393,32 @@ func ToCatalogResult(h CatalogHit, added bool) CatalogResult {
 }
 
 // toCatalogInstall derives the transport + install target from a
-// ServerEntry: a URL (or ConnectURL) is remote/http; otherwise InstallCmd is
-// split into command + args for a local/stdio install (data-model §9).
+// ServerEntry: InstallCmd is split into command + args for a local/stdio
+// install (data-model §9); a URL is used only when there is no InstallCmd.
+//
+// This must match official.go's officialServerToEntry precedence for a
+// hybrid entry (both a package AND a remote): "package wins for stdio; keep
+// the remote as a fallback" — ConnectURL is populated there specifically as
+// a fallback, never as the primary transport, so InstallCmd is checked
+// FIRST here. Getting this backwards (checking URL/ConnectURL before
+// InstallCmd) both misreports the transport for every such hybrid entry and
+// breaks the "added" join: CatalogInstallTarget would key off the URL while
+// the actually-configured server (added via InstallCmd, stdio) is keyed by
+// command+args, so a subsequent search never marks it added (review round 4
+// F-B).
 func toCatalogInstall(entry ServerEntry) (CatalogInstall, string) {
+	if entry.InstallCmd != "" {
+		parts, err := shellwords.Split(entry.InstallCmd)
+		if err == nil && len(parts) > 0 {
+			return CatalogInstall{Command: parts[0], Args: parts[1:]}, "stdio"
+		}
+	}
 	url := entry.URL
 	if url == "" {
 		url = entry.ConnectURL
 	}
 	if url != "" {
 		return CatalogInstall{URL: url}, "http"
-	}
-	if entry.InstallCmd != "" {
-		parts, err := shellwords.Split(entry.InstallCmd)
-		if err == nil && len(parts) > 0 {
-			return CatalogInstall{Command: parts[0], Args: parts[1:]}, "stdio"
-		}
 	}
 	return CatalogInstall{}, "stdio"
 }

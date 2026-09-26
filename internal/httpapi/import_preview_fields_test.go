@@ -17,7 +17,7 @@ func TestImportPreview_URLFormat(t *testing.T) {
 	mock := &mockImportController{apiKey: "test-key"}
 	server := NewServer(mock, logger, nil)
 
-	body, _ := json.Marshal(ImportRequest{Content: "https://api.githubcopilot.com/mcp/"})
+	body, _ := json.Marshal(ImportRequest{Content: "https://api.githubcopilot.com/mcp/", AllowPasteFallback: true})
 	req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "test-key")
@@ -53,7 +53,7 @@ func TestImportPreview_CommandFormat(t *testing.T) {
 	mock := &mockImportController{apiKey: "test-key"}
 	server := NewServer(mock, logger, nil)
 
-	body, _ := json.Marshal(ImportRequest{Content: "npx -y @modelcontextprotocol/server-filesystem /tmp"})
+	body, _ := json.Marshal(ImportRequest{Content: "npx -y @modelcontextprotocol/server-filesystem /tmp", AllowPasteFallback: true})
 	req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "test-key")

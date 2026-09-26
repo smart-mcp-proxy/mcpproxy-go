@@ -77,6 +77,11 @@ const content = ref('')
 const loading = ref(false)
 const error = ref<string | null>(null)
 const preview = ref<ImportedServer | null>(null)
+// The exact raw text that produced the current `preview` — captured
+// separately from `content` (which keeps changing as the user types) so
+// Add always re-parses the same input the preview was computed from, even
+// if a debounced re-preview for newer text hasn't landed yet.
+const previewRawContent = ref('')
 const format = ref('')
 const values = reactive<Record<string, string>>({})
 const modes = reactive<Record<string, 'value' | 'secret'>>({})
@@ -114,7 +119,7 @@ async function runPreview() {
   loading.value = true
   error.value = null
   try {
-    const resp = await api.importServersFromJSON({ content: raw, preview: true })
+    const resp = await api.importServersFromJSON({ content: raw, preview: true, allow_paste_fallback: true })
     if (!resp.success || !resp.data || resp.data.imported.length === 0) {
       error.value = resp.error || 'Could not detect a server from this input'
       preview.value = null
@@ -122,6 +127,7 @@ async function runPreview() {
     }
     format.value = resp.data.format
     preview.value = resp.data.imported[0]
+    previewRawContent.value = raw
     for (const key of Object.keys(values)) delete values[key]
     for (const key of Object.keys(modes)) delete modes[key]
     for (const f of preview.value.env || []) modes[`env:${f.name}`] = f.secret_like ? 'secret' : 'value'
@@ -164,22 +170,36 @@ async function handleAdd() {
     const resolved = await resolveSecretFields(p.name, fields)
     writtenRefs = resolved.writtenRefs
 
-    const serverData: Record<string, unknown> = {
-      operation: 'add',
-      name: p.name,
-      protocol: p.protocol,
-      enabled: true,
-    }
-    if (p.url) {
-      serverData.url = p.url
-      if (Object.keys(resolved.headers).length > 0) serverData.headers_json = JSON.stringify(resolved.headers)
-    } else if (p.command) {
-      serverData.command = p.command
-      if (p.args && p.args.length > 0) serverData.args_json = JSON.stringify(p.args)
-      if (Object.keys(resolved.env).length > 0) serverData.env_json = JSON.stringify(resolved.env)
+    // Apply (preview=false) against the ORIGINAL raw content, never against
+    // `p.url`/`p.command`/`p.args` — those are the preview's redacted
+    // values (a credential embedded directly in a URL query param or an
+    // argv flag renders as `••••23 (16 chars)`), and baking that masked
+    // placeholder into the real server config would leave it permanently
+    // unable to connect with no way to recover the original secret. The
+    // backend re-parses this same content server-side and adds the server
+    // with the true, unredacted values; env_override/header_override carry
+    // the user's SecretToggle edits (plain value or a keyring ref) across,
+    // since those never appeared in the preview at all.
+    // Deliberately no `format` hint here: detection is a pure function of
+    // content, so re-detecting the identical previewRawContent reproduces
+    // the exact same format preview already showed. (format.value from a
+    // JSON/TOML preview can be e.g. "claude_desktop", which parseFormat
+    // does not accept as a hint string — passing it back as a hint would
+    // 400 the apply for those inputs. Re-detection avoids that mismatch
+    // entirely.)
+    const resp = await api.importServersFromJSON({
+      content: previewRawContent.value,
+      preview: false,
+      server_names: [p.name],
+      env_override: Object.keys(resolved.env).length > 0 ? resolved.env : undefined,
+      header_override: Object.keys(resolved.headers).length > 0 ? resolved.headers : undefined,
+      allow_paste_fallback: true,
+    })
+    if (!resp.success || !resp.data || resp.data.imported.length === 0) {
+      throw new Error(resp.error || 'Failed to add server')
     }
 
-    await serversStore.addServer(serverData)
+    await serversStore.fetchServers()
     emit('added', p.name)
     void router.push(serverDetailPath(p.name))
   } catch (e) {

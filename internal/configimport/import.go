@@ -22,7 +22,11 @@ func Import(content []byte, opts *ImportOptions) (*ImportResult, error) {
 	if opts.FormatHint != "" && opts.FormatHint != FormatUnknown {
 		format = opts.FormatHint
 	} else {
-		detection, err := DetectFormat(content)
+		detect := DetectFormatStrict
+		if opts.AllowPasteFallback {
+			detect = DetectFormat
+		}
+		detection, err := detect(content)
 		if err != nil {
 			return nil, err
 		}

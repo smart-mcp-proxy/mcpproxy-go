@@ -49,12 +49,21 @@ export async function resolveSecretFields(serverName: string, fields: SecretFiel
   // One taken-name check up front (GET /secrets/refs), then tracked locally
   // as this call writes its own refs, so two fields in the same call that
   // would otherwise compute the same name get -2, not a silent collision.
+  //
+  // Review round 4 (F-C, Web variant): a transient failure of THIS call
+  // used to fall through with `taken` silently empty, computing an
+  // un-suffixed ref name that could collide with — and overwrite — a
+  // genuinely pre-existing keyring entry for an already-configured, in-use
+  // server; a later failure elsewhere in this add would then roll back and
+  // DELETE that pre-existing entry, destroying a live credential. Since we
+  // cannot safely guess which names are taken, abort instead.
   const refsResp = await api.getSecretRefs()
+  if (!refsResp.success || !refsResp.data) {
+    throw new Error(refsResp.error || 'Failed to check existing secret names before writing a new one')
+  }
   const taken = new Set<string>()
-  if (refsResp.success && refsResp.data) {
-    for (const r of refsResp.data.refs) {
-      if (r.type === 'keyring') taken.add(r.name)
-    }
+  for (const r of refsResp.data.refs) {
+    if (r.type === 'keyring') taken.add(r.name)
   }
 
   try {

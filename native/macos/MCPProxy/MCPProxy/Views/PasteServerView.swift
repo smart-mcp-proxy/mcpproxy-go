@@ -23,6 +23,11 @@ struct PasteServerView: View {
     @State private var addError: String?
     @State private var adding = false
     @State private var previewTask: Task<Void, Never>?
+    // The exact raw text that produced `preview` — captured separately from
+    // `content` (which keeps changing as the user types) so Add always
+    // re-parses the same input the preview was computed from, even if a
+    // debounced re-preview for newer text hasn't landed yet.
+    @State private var previewRawContent = ""
 
     private var apiClient: APIClient? { appState.apiClient }
 
@@ -160,6 +165,7 @@ struct PasteServerView: View {
             }
             format = resp.format
             preview = first
+            previewRawContent = raw
             fields = Self.buildFields(from: first)
         } catch {
             errorMessage = error.localizedDescription
@@ -195,8 +201,18 @@ struct PasteServerView: View {
             let resolved = try await SecretFieldResolver.resolve(client: client, serverName: preview.name, fields: fields)
             writtenRefs = resolved.writtenRefs
 
-            let config = Self.makeServerConfig(preview: preview, resolved: resolved)
-            try await client.addServer(config)
+            // Apply against the ORIGINAL raw content, never against
+            // `preview.url`/`.command`/`.args` — see `applyImportContent`'s
+            // doc comment for why (F-A/F-D, review round 4).
+            let applied = try await client.applyImportContent(
+                previewRawContent,
+                serverName: preview.name,
+                envOverride: resolved.env,
+                headerOverride: resolved.headers
+            )
+            guard !applied.imported.isEmpty else {
+                throw APIClientError.httpError(statusCode: 400, message: "Failed to add server")
+            }
             onAdded(preview.name)
         } catch {
             if !writtenRefs.isEmpty {
@@ -205,27 +221,5 @@ struct PasteServerView: View {
             addError = error.localizedDescription
         }
         adding = false
-    }
-
-    /// Pure: builds the `POST /api/v1/servers` body from the detected preview
-    /// and the resolved secret fields — the plain REST endpoint (native
-    /// `env`/`headers`/`args` keys), same one `ManualServerForm` posts to.
-    /// Extracted for unit testing without a running app or API client.
-    static func makeServerConfig(preview: ImportPreviewServer, resolved: ResolvedSecretFields) -> [String: Any] {
-        var config: [String: Any] = [
-            "name": preview.name,
-            "protocol": preview.protocol,
-            "enabled": true,
-        ]
-        if let url = preview.url, !url.isEmpty {
-            config["url"] = url
-            if !resolved.headers.isEmpty { config["headers"] = resolved.headers }
-        }
-        if let command = preview.command, !command.isEmpty {
-            config["command"] = command
-            if let args = preview.args, !args.isEmpty { config["args"] = args }
-            if !resolved.env.isEmpty { config["env"] = resolved.env }
-        }
-        return config
     }
 }
