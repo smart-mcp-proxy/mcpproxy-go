@@ -370,3 +370,32 @@ func (p *MCPProxyServer) suggestCanonicalToolID(ctx context.Context, serverName,
 	}
 	return "", false
 }
+
+// EffectiveAnnotations returns the (server, tool) pair's effective
+// annotations for Spec 108 profile-policy enforcement (T013): the ONE
+// annotation source for CompiledPolicy.Decide (via profile.IntrinsicTier),
+// SearchToolsAdmitted's predicate, "view as" and the access explainer — the
+// index itself stores no annotation field and gains none (FR-011, no
+// index-schema change, no reindex). It is a thin wrapper over
+// resolveExactToolIdentity, the SAME identity seam every dispatch path
+// already uses (Spec 105 FR-009), so discovery and execution classify a
+// tool from one source and can never disagree; it is also the documented
+// hook for per-server annotation_overrides once open PR #1323 lands (that
+// PR only needs to change what resolveExactToolIdentity resolves, never this
+// call site or any of its callers).
+//
+// found=false (the current snapshot does not list this exact server:tool
+// name at all) tells the caller to fail closed: profile.IntrinsicTier(nil,
+// false) is TierDestructive regardless of the returned annotations, which
+// are nil in that case. found=true does not by itself certify that the
+// annotations are current for the LIVE connection generation (a
+// disconnected server can retain a previous connection's stamp) — dispatch
+// enforces currency separately via the epoch-pinned certified() check
+// (mcp.go); this seam only answers "what does the snapshot say", the same
+// answer every other dispatch-adjacent reader of toolIdentity gets.
+//
+// This delegates to lookupExactToolAnnotations (mcp.go) rather than
+// re-resolving: same identity, same seam, one implementation.
+func (p *MCPProxyServer) EffectiveAnnotations(serverName, toolName string) (annotations *config.ToolAnnotations, found bool) {
+	return p.lookupExactToolAnnotations(serverName, toolName)
+}
