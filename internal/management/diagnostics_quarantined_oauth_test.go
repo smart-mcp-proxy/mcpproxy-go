@@ -136,4 +136,43 @@ func TestDoctor_QuarantinedServerAwaitingSignIn(t *testing.T) {
 		assert.NotContains(t, diag.OAuthRequired[0].Message, "quarantined",
 			"no quarantine hint for a server that is not quarantined")
 	})
+
+	// A sign-in diagnostic code (read independently of health.Action inside
+	// oauthSignInState) can in principle coexist with a health.Action the
+	// switch above also buckets: the diagnostic code and health.Action are
+	// only kept in sync today by convention across three files (the health
+	// calculator, the diagnostic classifier and this function), not by any
+	// check at this boundary. Each such server must land in OAuthRequired
+	// ONLY - the switch branch must not ALSO count it, or TotalIssues
+	// double-counts one underlying problem.
+	t.Run("health action bucket does not double-count a sign-in server", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			action string
+			detail string
+		}{
+			{"restart", "restart", "connection refused"},
+			{"configure", "configure", `missing required parameter: "resource"`},
+			{"set_secret", "set_secret", "MY_API_KEY"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				srv := quarantinedAwaitingSignIn(diagnostics.OAuthRefresh403, "degraded")
+				srv["quarantined"] = false
+				srv["health"] = &contracts.HealthStatus{
+					Level:      "degraded",
+					AdminState: "enabled",
+					Action:     tc.action,
+					Detail:     tc.detail,
+				}
+				diag := run(t, srv)
+				require.Len(t, diag.OAuthRequired, 1, tc.name)
+				assert.Equal(t, "expired", diag.OAuthRequired[0].State, tc.name)
+				assert.Empty(t, diag.UpstreamErrors, "%s: sign-in already explains it, not also an upstream error", tc.name)
+				assert.Empty(t, diag.OAuthIssues, "%s: sign-in already explains it, not also an OAuth config issue", tc.name)
+				assert.Empty(t, diag.MissingSecrets, "%s: sign-in already explains it, not also a missing secret", tc.name)
+				assert.Equal(t, 1, diag.TotalIssues, "%s", tc.name)
+			})
+		}
+	})
 }

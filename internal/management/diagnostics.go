@@ -159,9 +159,23 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		healthDetail = redactErr(healthDetail)
 		lastError = redactErr(lastError)
 
+		// Sign-in is read beside health.action, not from it: a quarantined
+		// server awaiting sign-in says "approve", which matched no bucket below
+		// and left the server out of the report entirely. Review stays a
+		// parallel step in the message rather than being dropped. Computed
+		// before the switch, and every branch below is gated on !needsSignIn:
+		// the diagnostic code oauthSignInState reads is independent of
+		// health.Action, so a server whose Action is restart/configure/
+		// set_secret can still carry a sign-in code. Nothing enforces the two
+		// staying mutually exclusive except convention across the health
+		// calculator, the diagnostic classifier and this function - without
+		// this gate such a server would land in OAuthRequired AND its
+		// Action-bucket, double-counting one problem in TotalIssues.
+		signInState, needsSignIn := oauthSignInState(srvRaw, healthAction)
+
 		// Aggregate based on Health.Action
-		switch healthAction {
-		case health.ActionRestart:
+		switch {
+		case healthAction == health.ActionRestart && !needsSignIn:
 			errorTime := time.Now()
 			if errorTimeStr := getStringFromMap(srvRaw, "error_time"); errorTimeStr != "" {
 				if parsed, err := time.Parse(time.RFC3339, errorTimeStr); err == nil {
@@ -174,7 +188,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 				Timestamp:    errorTime,
 			})
 
-		case health.ActionConfigure:
+		case healthAction == health.ActionConfigure && !needsSignIn:
 			// Extract parameter name from error
 			// The parameter NAME is read off the pre-scrub string: it is an
 			// OAuth parameter identifier ('resource', 'audience'), never a
@@ -193,7 +207,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 				DocumentationURL: "https://www.rfc-editor.org/rfc/rfc8707.html",
 			})
 
-		case health.ActionSetSecret:
+		case healthAction == health.ActionSetSecret && !needsSignIn:
 			// Group by secret name for cross-cutting view
 			secretName := healthDetail
 			if secretName != "" {
@@ -201,11 +215,6 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 			}
 		}
 
-		// Sign-in is read beside health.action, not from it: a quarantined
-		// server awaiting sign-in says "approve", which matched no bucket above
-		// and left the server out of the report entirely. Review stays a
-		// parallel step in the message rather than being dropped.
-		signInState, needsSignIn := oauthSignInState(srvRaw, healthAction)
 		if needsSignIn {
 			message := fmt.Sprintf("Run: mcpproxy auth login --server=%s", serverName)
 			quarantined, _ := srvRaw["quarantined"].(bool)
