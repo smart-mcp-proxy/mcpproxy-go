@@ -20,10 +20,15 @@ const RouterLinkStub = {
 const LOGIN_ERROR =
   "OAuth authentication required for server 'github' - login available via Web UI or 'mcpproxy auth login --server=github'"
 
-// The shape GET /api/v1/servers returns for a remote OAuth server imported with
-// quarantine on (e.g. GitHub MCP at api.githubcopilot.com): health.action is
-// 'approve' because the quarantine branch wins, yet the server cannot connect
-// until the user signs in.
+// The shape GET /api/v1/servers returns for a remote OAuth server imported
+// with quarantine on (e.g. GitHub MCP at api.githubcopilot.com): quarantined
+// AND needing OAuth sign-in. internal/health.quarantinedOAuthLoginState
+// (calculator.go, PR #1366 + this branch's own round of fixes) resolves this
+// to actions=[login, approve] — login is the ONE primary action
+// (Spec 109 FR-013/FR-014, actions[0]), with Review still reachable
+// independently from the ⋯ menu (gated on `server.quarantined`, mirroring
+// macOS ServersView.swift's contextMenuActions) since the primary button
+// alone can't surface both.
 function quarantinedOAuthServer(overrides: Partial<Server> = {}): Server {
   return {
     name: 'github',
@@ -44,8 +49,10 @@ function quarantinedOAuthServer(overrides: Partial<Server> = {}): Server {
       level: 'degraded',
       admin_state: 'quarantined',
       summary: 'Quarantined — Sign-in required',
+      status: 'sign_in_required',
       detail: LOGIN_ERROR,
-      action: 'approve',
+      action: 'login',
+      actions: ['login', 'approve'],
     },
     ...overrides,
   } as Server
@@ -65,62 +72,80 @@ beforeEach(() => {
 })
 
 describe('ServerCard — quarantined server that needs OAuth sign-in', () => {
-  it('offers Login alongside Approve even though health.action is "approve"', () => {
+  it('shows Sign in as the ONE primary action, with Review still reachable from the ⋯ menu', () => {
     const card = mountCard(quarantinedOAuthServer())
 
-    const login = card.find('[data-test="server-card-login"]')
-    expect(login.exists()).toBe(true)
-    expect(login.text()).toContain('Login')
-    expect(card.find('[data-test="server-card-approve"]').exists()).toBe(true)
+    const primary = card.find('[data-test="server-card-primary-action"]')
+    expect(primary.exists()).toBe(true)
+    expect(primary.text()).toBe('Sign in')
+    // actions=[login, approve]: login wins the ONE primary slot (FR-013/
+    // FR-014), but quarantined still needs a path to Review — gated
+    // independently on `server.quarantined` in the ⋯ menu, not on whichever
+    // action is primary (109-e round 1 high finding).
+    expect(card.find('[data-test="server-card-menu-review"]').exists()).toBe(true)
     expect(card.find('[data-test="server-status-chip"]').text()).toBe('Sign-in required')
   })
 
-  it('Login triggers the OAuth flow for the server', async () => {
+  it('the primary action triggers the OAuth flow for the server', async () => {
     const card = mountCard(quarantinedOAuthServer())
     const store = useServersStore()
     const spy = vi.spyOn(store, 'triggerOAuthLogin').mockResolvedValue(undefined as never)
 
-    await card.find('[data-test="server-card-login"]').trigger('click')
+    await card.find('[data-test="server-card-primary-action"]').trigger('click')
     await flushPromises()
 
     expect(spy).toHaveBeenCalledWith('github')
   })
 
-  it('drops the red error alert — the Login button already conveys the sign-in', () => {
-    const card = mountCard(quarantinedOAuthServer())
-    expect(card.find('[data-test="server-card-error"]').exists()).toBe(false)
-  })
-
-  it('offers no Login for a quarantined server that does not need sign-in', () => {
+  it('offers Review, not Sign in, for a quarantined server that does not need sign-in', () => {
     const card = mountCard(
       quarantinedOAuthServer({
         last_error: undefined,
         diagnostic: undefined,
-        health: { level: 'healthy', admin_state: 'quarantined', summary: 'Quarantined for review', action: 'approve' },
+        health: {
+          level: 'healthy',
+          admin_state: 'quarantined',
+          summary: 'Quarantined for review',
+          status: 'needs_review',
+          action: 'approve',
+          actions: ['approve'],
+        },
       } as Partial<Server>)
     )
-    expect(card.find('[data-test="server-card-login"]').exists()).toBe(false)
-    expect(card.find('[data-test="server-card-approve"]').exists()).toBe(true)
+    const primary = card.find('[data-test="server-card-primary-action"]')
+    expect(primary.text()).toBe('Review')
+    expect(primary.text()).not.toBe('Sign in')
+    expect(card.find('[data-test="server-card-menu-review"]').exists()).toBe(true)
   })
 
-  it('offers Enable, not Login, for a disabled server with a stale sign-in diagnostic', () => {
+  it('offers Enable, not Sign in, for a disabled server with a stale sign-in diagnostic', () => {
     const card = mountCard(
       quarantinedOAuthServer({
         quarantined: false,
         enabled: false,
-        health: { level: 'healthy', admin_state: 'disabled', summary: 'Disabled', action: 'enable' },
+        health: {
+          level: 'healthy',
+          admin_state: 'disabled',
+          summary: 'Disabled',
+          status: 'disabled',
+          action: 'enable',
+          actions: ['enable'],
+        },
       } as Partial<Server>)
     )
-    expect(card.find('[data-test="server-card-login"]').exists()).toBe(false)
-    expect(card.find('[data-test="server-card-enable"]').exists()).toBe(true)
+    const primary = card.find('[data-test="server-card-primary-action"]')
+    expect(primary.text()).toBe('Enable')
   })
 
-  it('drops Login for a just-disabled server whose stale health.action is still "login" (disableServer optimistic-update race)', () => {
+  it('shows Enable, not Sign in, for a just-disabled server whose stale health.action is still "login" (disableServer optimistic-update race)', () => {
     // disableServer() (stores/servers.ts) optimistically flips top-level
     // `enabled` to false immediately, but the `health` object (admin_state
     // still 'enabled', action still 'login') is only replaced once the
-    // SSE-triggered refresh lands. During that window showLogin must not
-    // render the stale Login CTA for a server the user just disabled.
+    // SSE-triggered refresh lands. During that window the primary action
+    // must not render the stale Sign-in CTA for a server the user just
+    // disabled — `primaryAction`'s own race guard forces 'enable' whenever
+    // `enabled` (which updates immediately) says false but the stale action
+    // still says 'login'.
     const card = mountCard(
       quarantinedOAuthServer({
         quarantined: false,
@@ -129,11 +154,14 @@ describe('ServerCard — quarantined server that needs OAuth sign-in', () => {
           level: 'degraded',
           admin_state: 'enabled',
           summary: 'Sign-in required',
+          status: 'sign_in_required',
           detail: LOGIN_ERROR,
           action: 'login',
+          actions: ['login'],
         },
       } as Partial<Server>)
     )
-    expect(card.find('[data-test="server-card-login"]').exists()).toBe(false)
+    const primary = card.find('[data-test="server-card-primary-action"]')
+    expect(primary.text()).toBe('Enable')
   })
 })

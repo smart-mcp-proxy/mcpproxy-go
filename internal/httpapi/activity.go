@@ -812,6 +812,7 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	var callCount, callErrorCount int
 	serverCounts := make(map[string]int)
 	toolCounts := make(map[string]int)
+	perServer := make(map[string]*perServerAccumulator)
 
 	// The stream holds a read transaction open until the channel is drained or
 	// closed, so this loop must always run to completion.
@@ -822,8 +823,12 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 		// different questions, and the Activity Log used to print the first
 		// under the second's label while the Usage tab printed the second —
 		// same instance, same window, different numbers (F1, #1046). One shared
-		// definition, in storage, settles it for both surfaces.
-		if counted, isError := storage.CountsAsCall(a); counted {
+		// definition, in storage, settles it for both surfaces. Hoisted out of
+		// the `if` (rather than shadowed inside it) so the per-server tally
+		// below can reuse the exact same counted/isError verdict (Spec 109
+		// FR-013) instead of recomputing it.
+		counted, isError := storage.CountsAsCall(a)
+		if counted {
 			callCount++
 			if isError {
 				callErrorCount++
@@ -868,6 +873,24 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 
 		if a.ServerName != "" {
 			serverCounts[a.ServerName]++
+
+			// Spec 109 FR-013: per-server calls/errors/last-call-time, for the
+			// server card stats line — the SAME call/error definition as the
+			// CallCount/CallErrorCount totals above, just split by server.
+			if counted {
+				agg := perServer[a.ServerName]
+				if agg == nil {
+					agg = &perServerAccumulator{}
+					perServer[a.ServerName] = agg
+				}
+				agg.calls++
+				if isError {
+					agg.errors++
+				}
+				if agg.lastCallAt.IsZero() || a.Timestamp.After(agg.lastCallAt) {
+					agg.lastCallAt = a.Timestamp
+				}
+			}
 		}
 
 		if a.ServerName != "" && a.ToolName != "" {
@@ -878,6 +901,7 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 
 	// Build top servers list (top 5)
 	topServers := buildTopServers(serverCounts, 5)
+	perServerList := buildPerServerSummary(perServer)
 
 	// Build top tools list (top 5)
 	topTools := buildTopTools(toolCounts, 5)
@@ -894,11 +918,49 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 		CallErrorCount: callErrorCount,
 		TopServers:     topServers,
 		TopTools:       topTools,
+		PerServer:      perServerList,
 		StartTime:      startTime.Format(time.RFC3339),
 		EndTime:        endTime.Format(time.RFC3339),
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// perServerAccumulator is the running per-server tally for
+// contracts.ActivityPerServer, built in the same StreamActivities pass as the
+// summary totals (Spec 109 FR-013).
+type perServerAccumulator struct {
+	calls      int
+	errors     int
+	lastCallAt time.Time
+}
+
+// buildPerServerSummary converts the per-server accumulator map into the
+// sorted (by name, for a stable response) contracts.ActivityPerServer list.
+// Unlike buildTopServers this is NOT capped — every server with at least one
+// call in the period is included, since the server card needs its own stats
+// regardless of how busy other servers were.
+func buildPerServerSummary(agg map[string]*perServerAccumulator) []contracts.ActivityPerServer {
+	if len(agg) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(agg))
+	for name := range agg {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	result := make([]contracts.ActivityPerServer, 0, len(names))
+	for _, name := range names {
+		a := agg[name]
+		result = append(result, contracts.ActivityPerServer{
+			Name:       name,
+			Calls:      a.calls,
+			Errors:     a.errors,
+			LastCallAt: a.lastCallAt.Format(time.RFC3339),
+		})
+	}
+	return result
 }
 
 // buildTopServers returns top N servers by activity count.

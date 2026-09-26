@@ -101,6 +101,15 @@ func parityRecords(ts time.Time) []*storage.ActivityRecord {
 		{Type: storage.ActivityTypeToolQuarantineChange, ServerName: "everything", ToolName: "echo", Status: "tool_auto_approved", Timestamp: ts},
 		{Type: storage.ActivityTypeToolQuarantineChange, ServerName: "memory", ToolName: "read_graph", Status: "tool_auto_approved", Timestamp: ts},
 		{Type: storage.ActivityTypeSecurityScan, ServerName: "everything", ToolName: "echo", Status: storage.ActivityStatusSuccess, Timestamp: ts},
+		// Review round 1 (109-e medium finding): a server whose ONLY row in
+		// the window is a non-call event — never a ToolCall/InternalToolCall/
+		// PolicyDecision, so storage.CountsAsCall is always false for it
+		// (activity_summary_per_server_test.go's
+		// TestActivitySummaryPerServerExcludesNonCallOnlyServers needs a real
+		// example of this to be a genuine regression test rather than a
+		// restatement of the general "no zero-call PerServer entry"
+		// invariant against servers that all have real calls anyway).
+		{Type: storage.ActivityTypeSecurityScan, ServerName: "scan-only", ToolName: "echo", Status: storage.ActivityStatusSuccess, Timestamp: ts},
 	}
 }
 

@@ -1537,31 +1537,62 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         sub.addItem(.separator())
 
-        let leading = TrayServerAction.leadingMenuActions(for: server)
-
-        // OAuth sign-in — calm, actionable affordance shown first when
-        // login is required (MCP-1822), not error framing. Offered beside
-        // Review quarantine, never instead of it.
-        if leading.contains(.login) {
-            let login = NSMenuItem(title: TrayServerAction.login.menuTitle,
-                                   action: #selector(loginServer(_:)), keyEquivalent: "")
-            login.target = self
-            login.representedObject = server.name
-            login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "sign in")
-            sub.addItem(login)
+        // Spec 109 FR-014: the ONE primary action, from the same pure mapping
+        // and label table (`TrayPrimaryPresentation.primaryItem`,
+        // `HealthStatus.actionLabels`) the Servers row uses for the exact
+        // same `actions[0]` value — replaces the old ad hoc "needsAuth" /
+        // "quarantined" special cases, which showed Sign-in and Review but
+        // nothing at all for a missing secret, a bad config or a bad URL
+        // (FR-014's "never a missing item"). `login`/`restart`/`enable` run
+        // in place; every other value opens the screen that performs it —
+        // never a one-click approve (FR-005).
+        let primary = TrayPrimaryPresentation.primaryItem(for: server)
+        var primaryOpensReview = false
+        if let primary {
+            let item = NSMenuItem(title: primary.label, action: nil, keyEquivalent: "")
+            item.target = self
+            switch primary.kind {
+            case .execute(let action):
+                item.representedObject = server.name
+                switch action {
+                case .login: item.action = #selector(loginServer(_:))
+                case .restart: item.action = #selector(restartServer(_:))
+                case .enable: item.action = #selector(enableServer(_:))
+                case .disable, .approve: item.action = nil // never produced for this kind
+                }
+                item.image = NSImage(systemSymbolName: primaryExecuteSymbol(action), accessibilityDescription: primary.label)
+            case .open(let destination):
+                item.action = #selector(showServerDetailFromMenu(_:))
+                switch destination {
+                case .review:
+                    item.representedObject = server.name
+                    primaryOpensReview = true
+                case .config:
+                    item.representedObject = ServerDetailTarget(serverName: server.name, tab: .config)
+                case .logs:
+                    item.representedObject = ServerDetailTarget(serverName: server.name, tab: .logs)
+                }
+                item.image = NSImage(systemSymbolName: primaryOpenSymbol(destination), accessibilityDescription: primary.label)
+            }
+            sub.addItem(item)
             sub.addItem(.separator())
         }
 
-        // F8(a): a quarantined server offered only Disable · Restart · View
-        // Logs — the one thing it needs is a review, and the menu had no path
-        // to it at all. Deep-links to Server Detail, which opens on Tools with
-        // the quarantine banner.
-        if leading.contains(.approve) {
-            let review = NSMenuItem(title: TrayServerAction.approve.menuTitle,
+        // Review round 1 (109-e high finding): `actions[0]` alone drives the
+        // primary item above, so a server that is BOTH quarantined AND needs
+        // OAuth sign-in (FR-010: `actions = ["login", "approve"]`) shows only
+        // "Sign in" there — "approve" never surfaces. Gating this row
+        // independently on `server.quarantined`, the same way
+        // ServersView.swift's `contextMenuActions` does for the Servers-row
+        // context menu, restores the one thing a quarantined server needs
+        // (the old unconditional `if server.quarantined { show Review }`
+        // this replaced) without reintroducing a second primary button.
+        if server.quarantined && !primaryOpensReview {
+            let review = NSMenuItem(title: HealthStatus.actionLabels["approve"] ?? "Review",
                                     action: #selector(showServerDetailFromMenu(_:)), keyEquivalent: "")
             review.target = self
             review.representedObject = server.name
-            review.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "review quarantine")
+            review.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Review")
             sub.addItem(review)
             sub.addItem(.separator())
         }
@@ -1570,35 +1601,63 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // `Disable`/`Enable` for everything else put two mental models —
         // transient process control vs. persistent admin state — on the same
         // `enabled` flag, and left submenus reading "Disabled … Start".
-        if server.enabled {
-            let disable = NSMenuItem(title: TrayServerAction.disable.menuTitle,
-                                     action: #selector(disableServer(_:)), keyEquivalent: "")
-            disable.target = self
-            disable.representedObject = server.name
-            sub.addItem(disable)
-        } else {
-            let enable = NSMenuItem(title: TrayServerAction.enable.menuTitle,
-                                    action: #selector(enableServer(_:)), keyEquivalent: "")
-            enable.target = self
-            enable.representedObject = server.name
-            sub.addItem(enable)
+        //
+        // Review round 2 (109-e medium finding): these three rows used to be
+        // unconditional, so whichever one the primary item above already
+        // performs (Enable/Restart/View logs) rendered TWICE in the same
+        // submenu. `TraySecondaryPresentation.items` drops the one the
+        // primary already covers.
+        let secondaryActions = TraySecondaryPresentation.items(for: server)
+        for secondary in secondaryActions {
+            switch secondary {
+            case .toggleEnabled(let enable):
+                let action: TrayServerAction = enable ? .enable : .disable
+                let item = NSMenuItem(title: action.menuTitle,
+                                      action: enable ? #selector(enableServer(_:)) : #selector(disableServer(_:)),
+                                      keyEquivalent: "")
+                item.target = self
+                item.representedObject = server.name
+                sub.addItem(item)
+            case .restart:
+                let item = NSMenuItem(title: TrayServerAction.restart.menuTitle,
+                                      action: #selector(restartServer(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = server.name
+                sub.addItem(item)
+            case .viewLogs:
+                continue // added below, after the separator
+            }
         }
-
-        let restart = NSMenuItem(title: TrayServerAction.restart.menuTitle,
-                                 action: #selector(restartServer(_:)), keyEquivalent: "")
-        restart.target = self
-        restart.representedObject = server.name
-        sub.addItem(restart)
-
         sub.addItem(.separator())
-
-        let logs = NSMenuItem(title: "View Logs", action: #selector(viewServerLogs(_:)), keyEquivalent: "")
-        logs.target = self
-        logs.representedObject = server.name
-        sub.addItem(logs)
+        if secondaryActions.contains(.viewLogs) {
+            let logs = NSMenuItem(title: "View Logs", action: #selector(viewServerLogs(_:)), keyEquivalent: "")
+            logs.target = self
+            logs.representedObject = server.name
+            sub.addItem(logs)
+        }
 
         item.submenu = sub
         return item
+    }
+
+    /// SF Symbol for a primary item that RUNS in place (Spec 109 FR-014).
+    private func primaryExecuteSymbol(_ action: TrayServerAction) -> String {
+        switch action {
+        case .login: return "person.badge.key"
+        case .restart: return "arrow.clockwise"
+        case .enable: return "play.fill"
+        case .disable: return "stop.fill"
+        case .approve: return "checkmark.shield"
+        }
+    }
+
+    /// SF Symbol for a primary item that OPENS a screen (Spec 109 FR-014).
+    private func primaryOpenSymbol(_ destination: TrayPrimaryDestination) -> String {
+        switch destination {
+        case .review: return "checkmark.shield"
+        case .config: return "gearshape"
+        case .logs: return "doc.text"
+        }
     }
 
     // MARK: - Menu Actions
@@ -1782,14 +1841,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         perform(verb, on: server.name, id: server.id)
     }
 
-    /// Navigate to a server's detail page. The represented object is the
-    /// server NAME (what `.showServerDetail` matches on).
+    /// Navigate to a server's detail page. The represented object is either
+    /// the server NAME (opens the Tools tab — what `.showServerDetail`
+    /// defaults to for a bare String) or a `ServerDetailTarget` naming a
+    /// specific tab (Spec 109 FR-014: `set_secret`/`configure`/`edit_url` open
+    /// Config, `view_logs` opens Logs).
     @objc private func showServerDetailFromMenu(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
+        let payload = sender.representedObject
+        guard payload is String || payload is ServerDetailTarget else { return }
         showMainWindow()
         NotificationCenter.default.post(name: .switchToServers, object: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NotificationCenter.default.post(name: .showServerDetail, object: name)
+            NotificationCenter.default.post(name: .showServerDetail, object: payload)
         }
     }
 

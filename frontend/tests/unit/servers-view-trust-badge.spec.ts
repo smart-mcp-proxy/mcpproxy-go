@@ -5,12 +5,17 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { TRUST_MODES } from '@/utils/trustMode'
 
 // Spec 088 US1 / FR-007 (T012): the servers list must show each server's trust
-// mode at a glance. The list renders ServerCard tiles, so the compact badge
-// lives next to the existing server-level status chip. The badge label comes
-// from utils/trustMode.ts TRUST_MODES and always reflects the EFFECTIVE mode
+// mode at a glance. The list renders ServerCard tiles, so the badge lives next
+// to the existing server-level status chip. The mode comes from
+// utils/trustMode.ts TRUST_MODES and always reflects the EFFECTIVE mode
 // (fail-closed to manual); an unrecognized raw value is shown as effective +
 // a subtle marker rather than being hidden or silently rewritten
 // (US1 scenario 4 / FR-001).
+//
+// Spec 109 FR-013 (109-e) redefined the rendering: "Trust mode is a shield
+// icon with a tooltip" — no visible text label on the card face any more, so
+// the assertions below read the TOOLTIP (`title`/`data-tip`) instead of the
+// element's text, which is now icon-only.
 
 vi.mock('@/services/api', () => {
   const ok = (data: unknown = {}) => Promise.resolve({ success: true, data })
@@ -79,45 +84,44 @@ describe('Servers list — trust-mode badge (spec 088 FR-007)', () => {
   })
 
   it.each(TRUST_MODES.map((m) => [m.mode, m.label] as const))(
-    'shows the compact TRUST_MODES label for trust_mode=%s',
+    'names the mode in the tooltip for trust_mode=%s',
     async (mode, label) => {
       const wrapper = await mountServers([makeServer('srv', mode)])
       const badge = wrapper.find('[data-test="server-trust-mode"]')
       expect(badge.exists()).toBe(true)
-      expect(badge.text()).toContain(label)
+      expect(badge.attributes('data-tip')).toContain(label)
     }
   )
 
   it('shows the effective default (Manual) when trust_mode is unset, with no invalid marker', async () => {
     const wrapper = await mountServers([makeServer('unset')])
     const badge = wrapper.find('[data-test="server-trust-mode"]')
-    expect(badge.text()).toContain('Manual')
+    expect(badge.attributes('data-tip')).toContain('Manual')
     expect(badge.attributes('data-trust-invalid')).toBeUndefined()
   })
 
   it('shows the effective mode plus a marker (raw value in the tooltip) for an unrecognized value', async () => {
     const wrapper = await mountServers([makeServer('hand-edited', 'bogus')])
     const badge = wrapper.find('[data-test="server-trust-mode"]')
-    // Effective mode is shown, never the raw value as if it were a mode.
-    expect(badge.text()).toContain('Manual')
-    expect(badge.text()).not.toContain('bogus')
+    // Effective mode is named, and the raw value appears too — but only in
+    // the tooltip explaining WHY it fell back, never as if it were a mode.
+    expect(badge.attributes('data-tip')).toContain('Manual')
     // Subtle marker distinguishes it from an explicitly-configured manual.
     expect(badge.attributes('data-trust-invalid')).toBe('true')
-    expect(badge.attributes('title')).toContain('bogus')
+    expect(badge.attributes('data-tip')).toContain('bogus')
   })
 
   it('mis-cased values fail closed like any other unrecognized value', async () => {
     const wrapper = await mountServers([makeServer('miscased', 'Scan')])
     const badge = wrapper.find('[data-test="server-trust-mode"]')
-    expect(badge.text()).toContain('Manual')
+    expect(badge.attributes('data-tip')).toContain('Manual')
     expect(badge.attributes('data-trust-invalid')).toBe('true')
   })
 
-  it('styles the badge like the neighbouring server-level chips', async () => {
+  it('renders as a shield icon, sitting alongside the status line', async () => {
     const wrapper = await mountServers([makeServer('styled', 'scan')])
     const badge = wrapper.find('[data-test="server-trust-mode"]')
-    expect(badge.classes()).toContain('badge')
-    expect(badge.classes()).toContain('badge-sm')
+    expect(badge.find('svg').exists()).toBe(true)
     // Sits alongside the existing status chip, not replacing it.
     expect(wrapper.find('[data-test="server-status-chip"]').exists()).toBe(true)
   })
@@ -125,7 +129,7 @@ describe('Servers list — trust-mode badge (spec 088 FR-007)', () => {
   it('explains the mode in the tooltip for a valid mode', async () => {
     const wrapper = await mountServers([makeServer('tip', 'auto')])
     const badge = wrapper.find('[data-test="server-trust-mode"]')
-    expect(badge.attributes('title')).toContain('Trust mode')
-    expect(badge.attributes('title')).toContain('Auto')
+    expect(badge.attributes('data-tip')).toContain('Trust mode')
+    expect(badge.attributes('data-tip')).toContain('Auto')
   })
 })

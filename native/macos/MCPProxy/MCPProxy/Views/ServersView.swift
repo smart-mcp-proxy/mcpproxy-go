@@ -204,6 +204,10 @@ struct ServersView: View {
                     selectedServerInitialTab = .tools
                     selectedServer = server
                 },
+                onOpenDetail: { server, tab in
+                    selectedServerInitialTab = tab
+                    selectedServer = server
+                },
                 onServersChanged: {
                     triggerLoad()
                 }
@@ -300,6 +304,51 @@ enum ServerColumn: String, CaseIterable {
     }
 }
 
+// MARK: - Row presentation (Spec 109 FR-013/FR-014)
+
+/// One row's context-menu action, as DATA — built once per
+/// `menuNeedsUpdate` and rendered into NSMenuItems by the coordinator below.
+/// Kept separate from AppKit so `ServerRowActionTests` can assert on the
+/// DECISION (which items, in what order) without a live NSMenu, and so a
+/// reintroduced one-click approve/unquarantine call is a compile error, not
+/// a runtime regression: there is no case here that means "approve directly"
+/// — `.openReview` only ever navigates (Spec 109 FR-005/FR-014).
+enum ServerRowMenuAction: Equatable {
+    case toggleEnabled(enable: Bool)
+    case restart
+    case signIn
+    case openReview
+    case viewDetails
+    case viewLogs
+    case delete
+}
+
+enum ServerRowPresentation {
+    /// The row's ONE primary action (Spec 109 FR-013/FR-014) — the SAME
+    /// decision `TrayPrimaryPresentation` makes for the tray submenu, for
+    /// the identical `actions[0]` value. `nil` for the normal `ready` case.
+    static func primaryAction(for server: ServerStatus) -> TrayPrimaryItem? {
+        TrayPrimaryPresentation.primaryItem(for: server)
+    }
+
+    /// The ordered context-menu action list for one server. A quarantined
+    /// (or tool-quarantined) server's review action OPENS the review
+    /// location — it never calls approveTools/unquarantine directly.
+    static func contextMenuActions(for server: ServerStatus) -> [ServerRowMenuAction] {
+        var items: [ServerRowMenuAction] = [.toggleEnabled(enable: !server.enabled), .restart]
+        if server.isOAuthLoginRequired {
+            items.append(.signIn)
+        }
+        if server.quarantined || server.pendingApprovalCount > 0 {
+            items.append(.openReview)
+        }
+        items.append(.viewDetails)
+        items.append(.viewLogs)
+        items.append(.delete)
+        return items
+    }
+}
+
 // MARK: - AppKit NSTableView wrapper
 
 struct ServerTableView: NSViewRepresentable {
@@ -307,6 +356,10 @@ struct ServerTableView: NSViewRepresentable {
     let apiClient: APIClient?
     var fontScale: CGFloat = 1.0
     var onDoubleClick: ((ServerStatus) -> Void)?
+    /// Opens Server Detail on a SPECIFIC tab (Spec 109 FR-014's `approve` →
+    /// Tools/review, `configure`/`edit_url`/`set_secret` → Config, `view_logs`
+    /// → Logs) — `onDoubleClick` always opens Tools, this can open any tab.
+    var onOpenDetail: ((ServerStatus, ServerDetailTab) -> Void)?
     var onServersChanged: (() -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -368,6 +421,7 @@ struct ServerTableView: NSViewRepresentable {
         context.coordinator.apiClient = apiClient
         context.coordinator.fontScale = fontScale
         context.coordinator.onDoubleClick = onDoubleClick
+        context.coordinator.onOpenDetail = onOpenDetail
         context.coordinator.onServersChanged = onServersChanged
         context.coordinator.tableView?.reloadData()
     }
@@ -383,6 +437,7 @@ struct ServerTableView: NSViewRepresentable {
         var apiClient: APIClient?
         var fontScale: CGFloat = 1.0
         var onDoubleClick: ((ServerStatus) -> Void)?
+        var onOpenDetail: ((ServerStatus, ServerDetailTab) -> Void)?
         var onServersChanged: (() -> Void)?
         weak var tableView: NSTableView?
 
@@ -454,6 +509,56 @@ struct ServerTableView: NSViewRepresentable {
             onDoubleClick?(sorted[row])
         }
 
+        // Spec 109 FR-013/FR-014: dispatches the row's ONE primary action —
+        // `login`/`restart`/`enable` run in place; every other value opens
+        // the screen that performs it (never a one-click approve, FR-005).
+        @objc func primaryActionClicked(_ sender: NSButton) {
+            let row = sender.tag
+            let sorted = sortedServers
+            guard row >= 0, row < sorted.count else { return }
+            let server = sorted[row]
+            guard let primary = ServerRowPresentation.primaryAction(for: server) else { return }
+            switch primary.kind {
+            case .execute(let action):
+                Task {
+                    switch action {
+                    case .login: try? await apiClient?.loginServer(server.id)
+                    case .restart: try? await apiClient?.restartServer(server.id)
+                    case .enable: try? await apiClient?.enableServer(server.id)
+                    case .disable, .approve: break // never produced for this kind
+                    }
+                    await MainActor.run { onServersChanged?() }
+                }
+            case .open(let destination):
+                let tab: ServerDetailTab
+                switch destination {
+                case .review: tab = .tools
+                case .config: tab = .config
+                case .logs: tab = .logs
+                }
+                onOpenDetail?(server, tab)
+            }
+        }
+
+        private func primaryActionSymbol(_ kind: TrayPrimaryKind) -> String {
+            switch kind {
+            case .execute(let action):
+                switch action {
+                case .login: return "person.badge.key"
+                case .restart: return "arrow.clockwise"
+                case .enable: return "play.fill"
+                case .disable: return "stop.fill"
+                case .approve: return "checkmark.shield"
+                }
+            case .open(let destination):
+                switch destination {
+                case .review: return "checkmark.shield"
+                case .config: return "gearshape"
+                case .logs: return "doc.text"
+                }
+            }
+        }
+
         @objc func toggleEnabledClicked(_ sender: NSButton) {
             let row = sender.tag
             let sorted = sortedServers
@@ -508,15 +613,19 @@ struct ServerTableView: NSViewRepresentable {
 
         // MARK: - Right-Click Context Menu
 
-        // This menu is deliberately NOT bound to HealthStatus.actionLabels
-        // (Spec 109 FR-014's one-table mandate for the single primary
-        // suggested-action CTA — the Dashboard button, the Web UI action
-        // label, the CLI ACTION hint). It lists every applicable command as
-        // its own imperative verb phrase ("Approve All Tools", "View Logs"),
-        // several of which (Restart, View Details, Delete Server) have no
-        // HealthAction counterpart at all, so there is no single table this
-        // menu could read from. "Approve All Tools" is also gated on
-        // `pendingApprovalCount`, a quarantine signal, not `health.action`.
+        // Built from `ServerRowPresentation.contextMenuActions` (Spec 109
+        // FR-013/FR-014): a quarantined server's review action OPENS the
+        // review location (`.openReview`) rather than calling
+        // `apiClient.approveTools` — there is no menu-action case that means
+        // "approve directly", so that one-click path cannot be reintroduced
+        // here without adding a new case and a new call site (T069/T078's
+        // pin). This menu still lists every applicable command as its own
+        // imperative verb phrase rather than reading `HealthStatus.
+        // actionLabels` — several commands (Restart, View Details, Delete)
+        // have no HealthAction counterpart, so there is no single table this
+        // whole menu could read from; the ONE-table mandate applies to the
+        // single PRIMARY action (`makePrimaryActionButton` below and the tray
+        // submenu), not to this exhaustive secondary menu.
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
             guard let tableView else { return }
@@ -525,69 +634,58 @@ struct ServerTableView: NSViewRepresentable {
             guard row >= 0, row < sorted.count else { return }
             let server = sorted[row]
 
-            // Enable/Disable (stdio servers use Stop/Start terminology)
-            if server.enabled {
-                let disableLabel = server.protocol == "stdio" ? "Stop" : "Disable"
-                let disable = NSMenuItem(title: disableLabel, action: #selector(ctxDisableServer(_:)), keyEquivalent: "")
-                disable.target = self
-                disable.representedObject = server
-                menu.addItem(disable)
-            } else {
-                let enableLabel = server.protocol == "stdio" ? "Start" : "Enable"
-                let enable = NSMenuItem(title: enableLabel, action: #selector(ctxEnableServer(_:)), keyEquivalent: "")
-                enable.target = self
-                enable.representedObject = server
-                menu.addItem(enable)
+            for action in ServerRowPresentation.contextMenuActions(for: server) {
+                switch action {
+                case .toggleEnabled(let enable):
+                    let label = enable
+                        ? (server.protocol == "stdio" ? "Start" : "Enable")
+                        : (server.protocol == "stdio" ? "Stop" : "Disable")
+                    let item = NSMenuItem(
+                        title: label,
+                        action: enable ? #selector(ctxEnableServer(_:)) : #selector(ctxDisableServer(_:)),
+                        keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = server
+                    menu.addItem(item)
+                case .restart:
+                    let item = NSMenuItem(title: "Restart", action: #selector(ctxRestartServer(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = server
+                    menu.addItem(item)
+                case .signIn:
+                    menu.addItem(.separator())
+                    let item = NSMenuItem(title: "Sign in", action: #selector(ctxLoginServer(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = server
+                    item.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "sign in")
+                    menu.addItem(item)
+                case .openReview:
+                    menu.addItem(.separator())
+                    let item = NSMenuItem(title: "Review", action: #selector(ctxOpenReview(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = server
+                    item.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "review")
+                    menu.addItem(item)
+                case .viewDetails:
+                    menu.addItem(.separator())
+                    let item = NSMenuItem(title: "View Details", action: #selector(ctxViewDetails(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = server
+                    menu.addItem(item)
+                case .viewLogs:
+                    let item = NSMenuItem(title: "View Logs", action: #selector(ctxViewLogs(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = server
+                    menu.addItem(item)
+                case .delete:
+                    menu.addItem(.separator())
+                    let item = NSMenuItem(title: "Delete Server", action: #selector(ctxDeleteServer(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = server
+                    item.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "delete")
+                    menu.addItem(item)
+                }
             }
-
-            // Restart
-            let restart = NSMenuItem(title: "Restart", action: #selector(ctxRestartServer(_:)), keyEquivalent: "")
-            restart.target = self
-            restart.representedObject = server
-            menu.addItem(restart)
-
-            // Sign in (if auth needed) — calm, actionable affordance (MCP-1819/T3)
-            if server.isOAuthLoginRequired {
-                menu.addItem(.separator())
-                let login = NSMenuItem(title: "Sign in", action: #selector(ctxLoginServer(_:)), keyEquivalent: "")
-                login.target = self
-                login.representedObject = server
-                login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "sign in")
-                menu.addItem(login)
-            }
-
-            // Approve Tools (if quarantined)
-            if server.pendingApprovalCount > 0 {
-                menu.addItem(.separator())
-                let approve = NSMenuItem(title: "Approve All Tools", action: #selector(ctxApproveTools(_:)), keyEquivalent: "")
-                approve.target = self
-                approve.representedObject = server
-                approve.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "approve")
-                menu.addItem(approve)
-            }
-
-            menu.addItem(.separator())
-
-            // View Details
-            let details = NSMenuItem(title: "View Details", action: #selector(ctxViewDetails(_:)), keyEquivalent: "")
-            details.target = self
-            details.representedObject = server
-            menu.addItem(details)
-
-            // View Logs
-            let logs = NSMenuItem(title: "View Logs", action: #selector(ctxViewLogs(_:)), keyEquivalent: "")
-            logs.target = self
-            logs.representedObject = server
-            menu.addItem(logs)
-
-            menu.addItem(.separator())
-
-            // Delete
-            let delete = NSMenuItem(title: "Delete Server", action: #selector(ctxDeleteServer(_:)), keyEquivalent: "")
-            delete.target = self
-            delete.representedObject = server
-            delete.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "delete")
-            menu.addItem(delete)
         }
 
         @objc private func ctxEnableServer(_ sender: NSMenuItem) {
@@ -619,12 +717,13 @@ struct ServerTableView: NSViewRepresentable {
             Task { try? await apiClient?.loginServer(server.id) }
         }
 
-        @objc private func ctxApproveTools(_ sender: NSMenuItem) {
+        // Spec 109 FR-005/FR-014: opens the review location — the Tools tab,
+        // where the per-tool approval banner already lives — rather than
+        // calling `apiClient.approveTools` directly. This is the only
+        // handler `.openReview` can dispatch to.
+        @objc private func ctxOpenReview(_ sender: NSMenuItem) {
             guard let server = sender.representedObject as? ServerStatus else { return }
-            Task {
-                try? await apiClient?.approveTools(server.id)
-                await MainActor.run { onServersChanged?() }
-            }
+            onOpenDetail?(server, .tools)
         }
 
         @objc private func ctxViewDetails(_ sender: NSMenuItem) {
@@ -875,27 +974,58 @@ struct ServerTableView: NSViewRepresentable {
             stack.alignment = .centerY
             stack.translatesAutoresizingMaskIntoConstraints = false
 
+            // Spec 109 FR-013/FR-014: the row's ONE primary action, from the
+            // same pure mapping and label table the tray submenu uses for
+            // the identical `actions[0]` value. Leads the stack, tinted to
+            // stand out from the always-present icons that follow.
+            if let primary = ServerRowPresentation.primaryAction(for: server) {
+                let primaryButton = makeIconButton(
+                    symbolName: primaryActionSymbol(primary.kind),
+                    accessibilityLabel: primary.label,
+                    action: #selector(primaryActionClicked(_:)),
+                    tag: row
+                )
+                primaryButton.contentTintColor = .controlAccentColor
+                primaryButton.toolTip = primary.label
+                stack.addArrangedSubview(primaryButton)
+            }
+
+            // Review round 2 (109-e medium finding): these two icons used to
+            // be unconditional, so a disabled server (primary = Enable) or a
+            // restart-needing one (primary = Restart) showed the identical
+            // command twice in the same row — once as the accent-tinted
+            // primary button above, once as the plain icon below. Reusing
+            // `TraySecondaryPresentation` (the tray submenu's own dedup rule
+            // for the same `actions[0]` value) keeps both surfaces from
+            // drifting apart on which duplicate they suppress.
+            let secondaryActions = TraySecondaryPresentation.items(for: server)
+
             // Play/Stop toggle button
-            let toggleLabel = server.protocol == "stdio"
-                ? (server.enabled ? "Stop" : "Start")
-                : (server.enabled ? "Disable" : "Enable")
-            let toggleButton = makeIconButton(
-                symbolName: server.enabled ? "stop.fill" : "play.fill",
-                accessibilityLabel: toggleLabel,
-                action: #selector(toggleEnabledClicked(_:)),
-                tag: row
-            )
-            toggleButton.contentTintColor = server.enabled ? .systemGray : .systemGreen
-            stack.addArrangedSubview(toggleButton)
+            if let toggle = secondaryActions.first(where: { if case .toggleEnabled = $0 { return true }; return false }),
+               case .toggleEnabled(let enable) = toggle {
+                let toggleLabel = server.protocol == "stdio"
+                    ? (enable ? "Start" : "Stop")
+                    : (enable ? "Enable" : "Disable")
+                let toggleButton = makeIconButton(
+                    symbolName: enable ? "play.fill" : "stop.fill",
+                    accessibilityLabel: toggleLabel,
+                    action: #selector(toggleEnabledClicked(_:)),
+                    tag: row
+                )
+                toggleButton.contentTintColor = enable ? .systemGreen : .systemGray
+                stack.addArrangedSubview(toggleButton)
+            }
 
             // Restart button
-            let restartButton = makeIconButton(
-                symbolName: "arrow.clockwise",
-                accessibilityLabel: "Restart",
-                action: #selector(restartButtonClicked(_:)),
-                tag: row
-            )
-            stack.addArrangedSubview(restartButton)
+            if secondaryActions.contains(.restart) {
+                let restartButton = makeIconButton(
+                    symbolName: "arrow.clockwise",
+                    accessibilityLabel: "Restart",
+                    action: #selector(restartButtonClicked(_:)),
+                    tag: row
+                )
+                stack.addArrangedSubview(restartButton)
+            }
 
             // Info button (opens detail)
             let infoButton = makeIconButton(

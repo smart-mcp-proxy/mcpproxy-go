@@ -1379,6 +1379,23 @@ components:
         total:
           type: integer
       type: object
+    contracts.ActivityPerServer:
+      properties:
+        calls:
+          description: Calls counted per storage.CountsAsCall
+          type: integer
+        errors:
+          description: Of those calls, how many failed
+          type: integer
+        last_call_at:
+          description: |-
+            LastCallAt is RFC3339, or "" if the server had no call in the period
+            (PerServer only lists servers that did, so this is always set).
+          type: string
+        name:
+          description: Server name
+          type: string
+      type: object
     contracts.ActivityRecord:
       properties:
         agent_name:
@@ -1515,6 +1532,19 @@ components:
             than the denominator printed beside them — 15+4+0+0 under a \"42\"\n(audit
             finding F2, #1046). The residual now has a name and a tile."
           type: integer
+        per_server:
+          description: |-
+            PerServer covers EVERY server with at least one call in the period
+            (unlike TopServers, which is capped at 5 and carries no error counts).
+            Spec 109 FR-013: the server-card stats line and the macOS Servers rows
+            read this — one `GET /activity/summary` response per page load — rather
+            than issuing a per-server activity query each. Computed in the same
+            counting pass as the totals above, from the same CountsAsCall/
+            IsManagementBuiltin definitions TopServers already uses.
+          items:
+            $ref: '#/components/schemas/contracts.ActivityPerServer'
+          type: array
+          uniqueItems: false
         period:
           description: Time period (1h, 24h, 7d, 30d)
           type: string

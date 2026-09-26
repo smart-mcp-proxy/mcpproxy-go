@@ -908,6 +908,16 @@ export interface ActivityTopTool {
   count: number
 }
 
+// Spec 109 FR-013: every server with a call in the period (unlike
+// top_servers, which is capped at 5 and carries no error counts). Used by the
+// server card's 24h stats line and the macOS Servers rows.
+export interface ActivityPerServer {
+  name: string
+  calls: number
+  errors: number
+  last_call_at: string
+}
+
 export interface ActivitySummaryResponse {
   period: string
   total_count: number
@@ -931,6 +941,7 @@ export interface ActivitySummaryResponse {
   call_error_count: number
   top_servers?: ActivityTopServer[]
   top_tools?: ActivityTopTool[]
+  per_server?: ActivityPerServer[]
   start_time: string
   end_time: string
 }

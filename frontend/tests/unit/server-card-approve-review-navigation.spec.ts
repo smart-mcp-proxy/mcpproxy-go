@@ -55,19 +55,26 @@ beforeEach(() => {
 // FR-005)"): the card's primary action for a quarantined server must open the
 // review screen, not call the approve API directly — matching the macOS
 // implementation (DashboardView.performAction .approve case).
+//
+// Spec 109-e rewrote ServerCard to a single primary action bound to
+// `health.actions[0]`/`health.action` (data-test="server-card-primary-action"),
+// replacing the per-action buttons (`server-card-approve` etc.) this test
+// originally targeted. The Review link now opens the Tools tab directly
+// (round 1, 109-e high finding: a `/review/<name>` redirect this used to rely
+// on never existed on this branch), not the Security tab.
 describe('ServerCard — approve action opens Review, never approves directly (FR-005)', () => {
   it('renders the primary action as "Review", not "Approve"', () => {
     const card = mountCard(makeQuarantinedServer())
-    const action = card.find('[data-test="server-card-approve"]')
+    const action = card.find('[data-test="server-card-primary-action"]')
     expect(action.exists()).toBe(true)
     expect(action.text()).toBe('Review')
     expect(action.text()).not.toContain('Approve')
   })
 
-  it('links to the server Security tab instead of triggering approval', () => {
+  it('links to the server Tools tab instead of triggering approval', () => {
     const card = mountCard(makeQuarantinedServer())
-    const action = card.find('[data-test="server-card-approve"]')
-    expect(action.attributes('href')).toContain('tab=security')
+    const action = card.find('[data-test="server-card-primary-action"]')
+    expect(action.attributes('href')).toContain('tab=tools')
   })
 
   it('never calls securityApproveServer on click, even with a clean completed scan', async () => {
@@ -84,7 +91,7 @@ describe('ServerCard — approve action opens Review, never approves directly (F
     const store = useServersStore()
     const spy = vi.spyOn(store, 'securityApproveServer')
 
-    await card.find('[data-test="server-card-approve"]').trigger('click')
+    await card.find('[data-test="server-card-primary-action"]').trigger('click')
 
     expect(spy).not.toHaveBeenCalled()
   })
