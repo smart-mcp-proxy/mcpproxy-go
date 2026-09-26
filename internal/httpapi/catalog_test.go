@@ -197,3 +197,74 @@ func TestCatalogSearch_AddedScopedForNonAdminUserContext(t *testing.T) {
 	assert.True(t, catalogAddedFor(results, "gamma-tool"), "user session scoped to gamma: expected gamma-tool added=true")
 	assert.False(t, catalogAddedFor(results, "delta-tool"), "user session scoped to gamma: expected delta-tool added=false (out of scope)")
 }
+
+// TestCatalogSearch_EmptyQueryReturnsEmptyResults pins contracts/rest-api.md#catalog:
+// "Empty q → results: [], sections: {...}". Before this fix, Results was set
+// unconditionally to the ranked hit list even when Sections was populated.
+func TestCatalogSearch_EmptyQueryReturnsEmptyResults(t *testing.T) {
+	withCatalogFixtureRegistry(t)
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: catalogFixtureServers(), withManagement: true}
+	srv, _ := scopedAgentServer(t, ctrl, []string{"gamma"})
+
+	rec := scopeGet(t, srv, "/api/v1/catalog/search", scopeAdminAPIKey)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	data := scopeDecodeData(t, rec)
+
+	results, ok := data["results"].([]interface{})
+	require.True(t, ok, "expected results to be an array, got %#v", data["results"])
+	assert.Empty(t, results, "contracts/rest-api.md#catalog: empty q must return results: []")
+
+	sections, ok := data["sections"].(map[string]interface{})
+	require.True(t, ok, "expected sections to be populated for an empty q")
+	popular, ok := sections["popular"].([]interface{})
+	require.True(t, ok)
+	assert.NotEmpty(t, popular, "expected the fixture's entries in sections.popular")
+}
+
+// TestCatalogSearch_SourceFilterAppliesBeforeTruncation is the regression for
+// a bug where `source=` was applied AFTER registries.SearchAll had already
+// truncated the ranked, merged list to `limit`: an official source ranks
+// ahead of everything else, so with limit=1 it fills the only truncated
+// slot, and a `source=other&limit=1` query would silently come back empty
+// even though "other" has a real matching entry (just ranked below the
+// truncation point pre-filter).
+func TestCatalogSearch_SourceFilterAppliesBeforeTruncation(t *testing.T) {
+	officialBody := `[{"id":"official-tool","name":"Official Tool"}]`
+	officialSrc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(officialBody))
+	}))
+	t.Cleanup(officialSrc.Close)
+
+	otherBody := `[{"id":"other-tool","name":"Other Tool"}]`
+	otherSrc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(otherBody))
+	}))
+	t.Cleanup(otherSrc.Close)
+
+	t.Cleanup(registries.AllowPrivateRegistryFetchForTest())
+	t.Cleanup(registries.SetRegistriesForTest([]registries.RegistryEntry{
+		{ID: "official", Name: "Official", ServersURL: officialSrc.URL, Provenance: "official"},
+		{ID: "other", Name: "Other", ServersURL: otherSrc.URL},
+	}))
+
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: nil, withManagement: true}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	// Sanity check: with no source filter and limit=1, the official (ranked
+	// first) entry fills the only slot — "other-tool" is truncated away.
+	rec := scopeGet(t, srv, "/api/v1/catalog/search?q=tool&limit=1", scopeAdminAPIKey)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	unfiltered := catalogDecodeResults(t, rec)
+	require.Len(t, unfiltered, 1)
+	assert.Equal(t, "official-tool", unfiltered[0]["id"])
+
+	// Narrowing to source=other must still find other-tool, not come back
+	// empty just because it didn't survive the pre-filter truncation.
+	rec = scopeGet(t, srv, "/api/v1/catalog/search?q=tool&source=other&limit=1", scopeAdminAPIKey)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	filtered := catalogDecodeResults(t, rec)
+	require.Len(t, filtered, 1, "expected other-tool to survive source filtering despite limit=1")
+	assert.Equal(t, "other-tool", filtered[0]["id"])
+}

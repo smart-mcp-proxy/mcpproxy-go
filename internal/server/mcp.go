@@ -1667,20 +1667,46 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
+// mcpCatalogServerEntry is the search_servers (registry omitted) per-item
+// shape (contracts/mcp-tools.md): the embedded ServerEntry keeps the exact
+// JSON shape (url, installCmd, registry, required_inputs[].secret) a
+// single-registry search already returns — encoding/json promotes an
+// anonymous embedded struct's fields to the top level — and the catalog
+// fields below are ADDED alongside it, in FR-060 order, mirroring
+// registries.CatalogResult minus the REST-only "added" field (MCP callers
+// don't carry the same per-caller visibility scope).
+type mcpCatalogServerEntry struct {
+	registries.ServerEntry
+	Title      string                 `json:"title"`
+	Publisher  string                 `json:"publisher,omitempty"`
+	Verified   bool                   `json:"verified"`
+	Official   bool                   `json:"official"`
+	Popularity *registries.Popularity `json:"popularity,omitempty"`
+	Source     string                 `json:"source"`
+}
+
 // handleSearchServersAllSources implements search_servers with 'registry'
 // omitted (Spec 109 FR-060/067): fans out across every enabled catalog
-// source via registries.SearchAll and returns the merged, ranked
-// ServerEntry list — the SAME JSON shape (url, installCmd, registry,
-// required_inputs[].secret) a single-registry search already returns, in
+// source via registries.SearchAll and returns the merged, ranked list in
 // FR-060 rank order, with no "added" field (contracts/rest-api.md#catalog:
 // that field is REST-only, since it depends on caller scope MCP callers
-// don't carry the same way).
+// don't carry the same way). Each item gains title/publisher/verified/
+// official/popularity/source (contracts/mcp-tools.md) so an MCP caller gets
+// the same catalog-ranking evidence a REST/CLI caller already does.
 func (p *MCPProxyServer) handleSearchServersAllSources(ctx context.Context, sessionID, requestID string, startTime time.Time, args map[string]interface{}, search, tag string, limit int) (*mcp.CallToolResult, error) {
 	hits, _, unavailable := registries.SearchAll(ctx, search, tag, limit, registries.SearchOptions{})
 
-	servers := make([]registries.ServerEntry, 0, len(hits))
+	servers := make([]mcpCatalogServerEntry, 0, len(hits))
 	for _, h := range hits {
-		servers = append(servers, h.Entry)
+		servers = append(servers, mcpCatalogServerEntry{
+			ServerEntry: h.Entry,
+			Title:       h.Title,
+			Publisher:   h.Publisher,
+			Verified:    h.Verified,
+			Official:    h.Official,
+			Popularity:  h.Popularity,
+			Source:      h.Source,
+		})
 	}
 
 	response := map[string]interface{}{

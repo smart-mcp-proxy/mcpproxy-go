@@ -50,16 +50,11 @@ func (s *Server) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	hits, sections, unavailable := registries.SearchAll(r.Context(), q, tag, limit, registries.SearchOptions{})
-	if source != "" {
-		hits = filterCatalogHitsBySource(hits, source)
-		if sections != nil {
-			sections = &registries.CatalogSections{
-				Official: filterCatalogHitsBySource(sections.Official, source),
-				Popular:  filterCatalogHitsBySource(sections.Popular, source),
-			}
-		}
-	}
+	// Source is applied inside SearchAll, BEFORE ranking/truncation to
+	// limit — filtering after truncation could silently drop a narrower
+	// source's real matches that simply lost out to an official/verified
+	// source for one of the truncated top-`limit` slots.
+	hits, sections, unavailable := registries.SearchAll(r.Context(), q, tag, limit, registries.SearchOptions{Source: source})
 
 	added := s.catalogAddedPredicate(r.Context())
 
@@ -72,6 +67,11 @@ func (s *Server) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
 		resp.Unavailable = []registries.SourceError{}
 	}
 	if sections != nil {
+		// contracts/rest-api.md#catalog: "Empty q → results: [],
+		// sections: {...}" — an empty q always yields sections (see
+		// registries.SearchAll), so results must be emptied here rather
+		// than carrying the same ranked list sections is already showing.
+		resp.Results = []registries.CatalogResult{}
 		resp.Sections = &catalogSections{
 			Official: toCatalogResults(sections.Official, added),
 			Popular:  toCatalogResults(sections.Popular, added),
@@ -79,16 +79,6 @@ func (s *Server) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, resp)
-}
-
-func filterCatalogHitsBySource(hits []registries.CatalogHit, source string) []registries.CatalogHit {
-	out := make([]registries.CatalogHit, 0, len(hits))
-	for _, h := range hits {
-		if h.Source == source {
-			out = append(out, h)
-		}
-	}
-	return out
 }
 
 func toCatalogResults(hits []registries.CatalogHit, added func(registries.CatalogHit) bool) []registries.CatalogResult {

@@ -118,7 +118,7 @@ import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import type { CatalogResult, CatalogSections } from '@/types'
 import SecretToggle from '@/components/SecretToggle.vue'
-import { resolveSecretFields } from '@/composables/useSecretFields'
+import { resolveSecretFields, rollbackSecrets } from '@/composables/useSecretFields'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { serverDetailPath } from '@/utils/serverRoute'
 
@@ -217,6 +217,11 @@ async function confirmAdd() {
   if (!pendingResult.value) return
   confirming.value = true
   addError.value = null
+  // Tracked outside the try so the catch block (a keyring-write failure
+  // inside resolveSecretFields) doesn't attempt a second rollback of refs
+  // that resolveSecretFields already rolled back itself; it's only
+  // populated once resolveSecretFields has returned successfully.
+  let writtenRefs: string[] = []
   try {
     const result = pendingResult.value
     const fields = (result.required_inputs || []).map((i) => ({
@@ -226,8 +231,17 @@ async function confirmAdd() {
       mode: pendingModes[i.name] || 'value',
     }))
     const resolved = await resolveSecretFields(result.title || result.id, fields)
-    await addResult(result, `${result.source}-${result.id}`, resolved.env)
-    closeSecretsDialog()
+    writtenRefs = resolved.writtenRefs
+    const added = await addResult(result, `${result.source}-${result.id}`, resolved.env)
+    if (added) {
+      closeSecretsDialog()
+    } else if (writtenRefs.length > 0) {
+      // The secret write succeeded but the add-server call failed (e.g. a
+      // duplicate name) — the secret this attempt just wrote must not be
+      // orphaned in the keyring, and a retry must be able to reuse its ref
+      // name rather than computing a new -2-suffixed one.
+      await rollbackSecrets(writtenRefs)
+    }
   } catch (e) {
     addError.value = e instanceof Error ? e.message : 'Failed to add server'
   } finally {
@@ -235,16 +249,22 @@ async function confirmAdd() {
   }
 }
 
-async function addResult(result: CatalogResult, key: string, env: Record<string, string>) {
+// addResult returns whether the add succeeded. api.ts's request() always
+// resolves {success:false} rather than throwing, so addResult reports
+// failure via its own return value (and addError) instead of throwing —
+// callers MUST check the return value rather than assuming a resolved
+// promise means success.
+async function addResult(result: CatalogResult, key: string, env: Record<string, string>): Promise<boolean> {
   addingKey.value = key
   try {
     const res = await api.addServerFromRegistry(result.source, result.id, { env })
     if (res.success && res.server?.name) {
       addedNames[key] = res.server.name
       emit('added', res.server.name)
-    } else {
-      addError.value = res.error || 'Failed to add server'
+      return true
     }
+    addError.value = res.error || 'Failed to add server'
+    return false
   } finally {
     addingKey.value = null
   }

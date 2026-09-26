@@ -246,16 +246,12 @@ func catalogSearch(ctx context.Context, cfg *config.Config, q, source, tag strin
 // whatever registries.ListRegistries() currently returns rather than loading
 // it itself — see catalogSearch, its only production caller.
 func catalogSearchInProcess(ctx context.Context, cfg *config.Config, q, source, tag string, limit int) (*cliclient.CatalogSearchResponse, error) {
-	hits, sections, unavailable := registries.SearchAll(ctx, q, tag, limit, registries.SearchOptions{})
-	if source != "" {
-		hits = filterCatalogHitsBySourceCLI(hits, source)
-		if sections != nil {
-			sections = &registries.CatalogSections{
-				Official: filterCatalogHitsBySourceCLI(sections.Official, source),
-				Popular:  filterCatalogHitsBySourceCLI(sections.Popular, source),
-			}
-		}
-	}
+	// Source is applied inside SearchAll, BEFORE ranking/truncation to
+	// limit — filtering after truncation could silently drop a narrower
+	// source's real matches that simply lost out to an official/verified
+	// source for one of the truncated top-`limit` slots (same fix as
+	// httpapi.handleCatalogSearch).
+	hits, sections, unavailable := registries.SearchAll(ctx, q, tag, limit, registries.SearchOptions{Source: source})
 
 	added := catalogAddedFromConfig(cfg)
 	resp := &cliclient.CatalogSearchResponse{Query: q, Unavailable: unavailable}
@@ -275,16 +271,6 @@ func catalogSearchInProcess(ctx context.Context, cfg *config.Config, q, source, 
 		}
 	}
 	return resp, nil
-}
-
-func filterCatalogHitsBySourceCLI(hits []registries.CatalogHit, source string) []registries.CatalogHit {
-	out := make([]registries.CatalogHit, 0, len(hits))
-	for _, h := range hits {
-		if h.Source == source {
-			out = append(out, h)
-		}
-	}
-	return out
 }
 
 // catalogAddedFromConfig returns a predicate reporting whether a catalog hit

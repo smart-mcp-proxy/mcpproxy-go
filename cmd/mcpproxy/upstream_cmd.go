@@ -1282,20 +1282,40 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 		env[parts[0]] = parts[1]
 	}
 
-	// FR-065: --secret-env/--secret-header write to the OS keyring instead
-	// of the config, under the shared per-kind ref name, and merge
-	// ${keyring:<ref>} into the same env/headers maps above.
-	if len(upstreamAddSecretEnvs) > 0 || len(upstreamAddSecretHeaders) > 0 {
-		if err := applySecretFlags(secret.NewResolver(), serverName, upstreamAddSecretEnvs, upstreamAddSecretHeaders, env, headers); err != nil {
-			return err
-		}
-	}
-
 	// GH #938: refuse a typo'd tier before anything is written, with the same
-	// vocabulary the REST layer reports in its 400.
+	// vocabulary the REST layer reports in its 400. Checked BEFORE the
+	// secret-write block below: applySecretFlags writes to the OS keyring,
+	// so validating trust-mode first means a typo'd tier can never orphan a
+	// secret that was written only to have the whole add aborted moments
+	// later (review round 1).
 	if err := validateTrustModeFlag(upstreamAddTrustMode); err != nil {
 		return err
 	}
+
+	// FR-065: --secret-env/--secret-header write to the OS keyring instead
+	// of the config, under the shared per-kind ref name, and merge
+	// ${keyring:<ref>} into the same env/headers maps above.
+	resolver := secret.NewResolver()
+	var writtenSecretRefs []string
+	if len(upstreamAddSecretEnvs) > 0 || len(upstreamAddSecretHeaders) > 0 {
+		var err error
+		writtenSecretRefs, err = applySecretFlags(resolver, serverName, upstreamAddSecretEnvs, upstreamAddSecretHeaders, env, headers)
+		if err != nil {
+			return err
+		}
+	}
+	// Every return path below this point that does NOT end with the server
+	// actually being added (a daemon/config-mode failure, or a
+	// --if-not-exists skip telling the user "skipped" while the secret WAS
+	// stored) must not leave an orphaned keyring entry behind — added is set
+	// true only once runUpstreamAddDaemonMode/runUpstreamAddConfigMode
+	// confirms a genuine add (review round 1).
+	added := false
+	defer func() {
+		if !added {
+			rollbackKeyringRefs(resolver, writtenSecretRefs)
+		}
+	}()
 
 	// Build the request
 	req := &cliclient.AddServerRequest{
@@ -1337,11 +1357,15 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 
 	// Check if daemon is running
 	if client, ok := newDaemonClient(globalConfig, nil); ok {
-		return runUpstreamAddDaemonMode(ctx, client, req)
+		wasAdded, addErr := runUpstreamAddDaemonMode(ctx, client, req)
+		added = wasAdded
+		return addErr
 	}
 
 	// Direct config file mode
-	return runUpstreamAddConfigMode(req, globalConfig)
+	wasAdded, addErr := runUpstreamAddConfigMode(req, globalConfig)
+	added = wasAdded
+	return addErr
 }
 
 // outputSkipNotice prints a human skip notice (for --if-not-exists /
@@ -1364,17 +1388,23 @@ func outputSkipNotice(notice string, payload map[string]interface{}) error {
 	return nil
 }
 
-func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req *cliclient.AddServerRequest) error {
+// runUpstreamAddDaemonMode returns (added, err): added is true only when the
+// daemon actually created the server. A --if-not-exists skip (nil error,
+// added=false) is deliberately distinguished from a genuine add so the
+// caller (runUpstreamAdd) knows whether to roll back any --secret-env/
+// --secret-header values it already wrote to the keyring for this request
+// (review round 1: a skip must not leave the secret orphaned).
+func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req *cliclient.AddServerRequest) (bool, error) {
 	result, err := client.AddServer(ctx, req)
 	if err != nil {
 		// Check if it's "already exists" error and --if-not-exists is set
 		if upstreamAddIfNotExists && strings.Contains(err.Error(), "already exists") {
-			return outputSkipNotice(
+			return false, outputSkipNotice(
 				fmt.Sprintf("Server '%s' already exists (skipped)", req.Name),
 				map[string]interface{}{"name": req.Name, "skipped": true},
 			)
 		}
-		return outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()).
+		return false, outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()).
 			WithGuidance("Check the server name and configuration"), output.ErrCodeOperationFailed)
 	}
 
@@ -1391,20 +1421,21 @@ func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
-func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *config.Config) error {
+// runUpstreamAddConfigMode returns (added, err) — see runUpstreamAddDaemonMode.
+func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *config.Config) (bool, error) {
 	// Check if server already exists
 	for _, srv := range globalConfig.Servers {
 		if srv.Name == req.Name {
 			if upstreamAddIfNotExists {
-				return outputSkipNotice(
+				return false, outputSkipNotice(
 					fmt.Sprintf("Server '%s' already exists (skipped)", req.Name),
 					map[string]interface{}{"name": req.Name, "skipped": true},
 				)
 			}
-			return fmt.Errorf("server '%s' already exists", req.Name)
+			return false, fmt.Errorf("server '%s' already exists", req.Name)
 		}
 	}
 
@@ -1443,7 +1474,7 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 	// Save config
 	configPath := config.GetConfigPath(globalConfig.DataDir)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+		return false, fmt.Errorf("failed to save config: %w", err)
 	}
 
 	// Output success
@@ -1452,7 +1483,7 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 		fmt.Println("   ⚠️  New servers are quarantined by default. Start the daemon and approve in the web UI.")
 	}
 
-	return nil
+	return true, nil
 }
 
 // runUpstreamRemove handles the 'upstream remove' command
@@ -1644,11 +1675,13 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 
 	// Check if daemon is running
 	if client, ok := newDaemonClient(globalConfig, nil); ok {
-		return runUpstreamAddDaemonMode(ctx, client, req)
+		_, err := runUpstreamAddDaemonMode(ctx, client, req)
+		return err
 	}
 
 	// Direct config file mode
-	return runUpstreamAddConfigMode(req, globalConfig)
+	_, err = runUpstreamAddConfigMode(req, globalConfig)
+	return err
 }
 
 // validateServerName validates server name format (alphanumeric, hyphens, underscores, 1-64 chars)

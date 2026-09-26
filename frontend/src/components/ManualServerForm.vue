@@ -92,7 +92,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import SecretToggle from '@/components/SecretToggle.vue'
-import { resolveSecretFields } from '@/composables/useSecretFields'
+import { resolveSecretFields, rollbackSecrets } from '@/composables/useSecretFields'
 import { useServersStore } from '@/stores/servers'
 import { serverDetailPath } from '@/utils/serverRoute'
 
@@ -128,12 +128,17 @@ function parseArgs(): string[] {
 async function handleSubmit() {
   error.value = null
   submitting.value = true
+  // Populated only once resolveSecretFields has returned successfully, so
+  // the catch block below never double-rolls-back refs that
+  // resolveSecretFields already rolled back itself on a write failure.
+  let writtenRefs: string[] = []
   try {
     const fields = [
       ...envRows.filter((r) => r.name.trim()).map((r) => ({ kind: 'env' as const, name: r.name.trim(), value: r.value, mode: r.mode })),
       ...headerRows.filter((r) => r.name.trim()).map((r) => ({ kind: 'header' as const, name: r.name.trim(), value: r.value, mode: r.mode })),
     ]
     const resolved = await resolveSecretFields(name.value, fields)
+    writtenRefs = resolved.writtenRefs
 
     const serverData: Record<string, unknown> = {
       operation: 'add',
@@ -155,6 +160,10 @@ async function handleSubmit() {
     emit('added', name.value)
     void router.push(serverDetailPath(name.value))
   } catch (e) {
+    // The secret write (if any) succeeded but something after it failed —
+    // don't leave an orphaned keyring entry behind, and let a retry reuse
+    // the same ref name instead of computing a new -2-suffixed one.
+    if (writtenRefs.length > 0) await rollbackSecrets(writtenRefs)
     error.value = e instanceof Error ? e.message : 'Failed to add server'
   } finally {
     submitting.value = false

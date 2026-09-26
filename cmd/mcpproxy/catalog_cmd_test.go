@@ -141,6 +141,39 @@ func TestCatalogSearchInProcess_BrowseSections(t *testing.T) {
 	}
 }
 
+// TestCatalogSearchInProcess_SourceFilterAppliesBeforeTruncation is the CLI
+// counterpart of the REST regression: with limit=1, an official source's
+// single entry fills the only truncated slot ahead of a lower-ranked
+// "other" source's entry. Narrowing to source=other must still surface it
+// rather than coming back empty just because it lost the pre-filter
+// truncation race.
+func TestCatalogSearchInProcess_SourceFilterAppliesBeforeTruncation(t *testing.T) {
+	officialSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"official-tool","name":"Official Tool"}]`))
+	}))
+	t.Cleanup(officialSrv.Close)
+	otherSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"other-tool","name":"Other Tool"}]`))
+	}))
+	t.Cleanup(otherSrv.Close)
+	t.Cleanup(registries.AllowPrivateRegistryFetchForTest())
+	t.Cleanup(registries.SetRegistriesForTest([]registries.RegistryEntry{
+		{ID: "official", Name: "Official", ServersURL: officialSrv.URL, Provenance: "official"},
+		{ID: "other", Name: "Other", ServersURL: otherSrv.URL},
+	}))
+	cfg := &config.Config{}
+
+	resp, err := catalogSearchInProcess(context.Background(), cfg, "tool", "other", "", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].ID != "other-tool" {
+		t.Fatalf("expected other-tool to survive source filtering despite limit=1, got: %+v", resp.Results)
+	}
+}
+
 // TestCatalogShow is the T100 "show" golden.
 func TestCatalogShow(t *testing.T) {
 	withCatalogCLIFixture(t, `[{"id":"gh","name":"GitHub Tool","description":"desc","url":"https://x.example.com/mcp"}]`)

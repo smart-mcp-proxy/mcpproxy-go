@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -12,6 +13,13 @@ import (
 type fakeKeyringProvider struct {
 	available bool
 	store     map[string]string
+	deleted   []string // names passed to Delete, in call order (rollback pinning)
+
+	// failStoreOnNthCall, when > 0, makes the Nth call to Store (1-indexed)
+	// fail without writing, so tests can pin the internal rollback of
+	// everything stored by the calls before it.
+	failStoreOnNthCall int
+	storeCalls         int
 }
 
 func newFakeKeyringProvider(available bool) *fakeKeyringProvider {
@@ -23,10 +31,15 @@ func (f *fakeKeyringProvider) Resolve(_ context.Context, ref secret.Ref) (string
 	return f.store[ref.Name], nil
 }
 func (f *fakeKeyringProvider) Store(_ context.Context, ref secret.Ref, value string) error {
+	f.storeCalls++
+	if f.failStoreOnNthCall > 0 && f.storeCalls == f.failStoreOnNthCall {
+		return fmt.Errorf("simulated keyring failure on call %d", f.storeCalls)
+	}
 	f.store[ref.Name] = value
 	return nil
 }
 func (f *fakeKeyringProvider) Delete(_ context.Context, ref secret.Ref) error {
+	f.deleted = append(f.deleted, ref.Name)
 	delete(f.store, ref.Name)
 	return nil
 }
@@ -54,13 +67,16 @@ func TestApplySecretFlags_WritesKeyringRefsIntoEnvAndHeaders(t *testing.T) {
 
 	env := map[string]string{}
 	headers := map[string]string{}
-	err := applySecretFlags(resolver, "github",
+	writtenRefs, err := applySecretFlags(resolver, "github",
 		[]string{"GITHUB_TOKEN=sk-live-abc123"},
 		[]string{"Authorization: Bearer xyz"},
 		env, headers,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(writtenRefs) != 2 {
+		t.Errorf("expected 2 written refs, got %+v", writtenRefs)
 	}
 
 	envRef, ok := env["GITHUB_TOKEN"]
@@ -89,7 +105,7 @@ func TestApplySecretFlags_EnvHeaderSameNameCollision(t *testing.T) {
 
 	env := map[string]string{}
 	headers := map[string]string{}
-	err := applySecretFlags(resolver, "github",
+	_, err := applySecretFlags(resolver, "github",
 		[]string{"API_KEY=env-value"},
 		[]string{"API_KEY: header-value"},
 		env, headers,
@@ -120,7 +136,7 @@ func TestApplySecretFlags_TakenNameGetsSuffix(t *testing.T) {
 	resolver := newTestSecretResolver(fake)
 
 	env := map[string]string{}
-	if err := applySecretFlags(resolver, "github", []string{"API_KEY=new-value"}, nil, env, map[string]string{}); err != nil {
+	if _, err := applySecretFlags(resolver, "github", []string{"API_KEY=new-value"}, nil, env, map[string]string{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -142,7 +158,7 @@ func TestApplySecretFlags_KeyringUnavailableRefuses(t *testing.T) {
 	resolver := newTestSecretResolver(fake)
 
 	env := map[string]string{}
-	err := applySecretFlags(resolver, "github", []string{"API_KEY=value"}, nil, env, map[string]string{})
+	_, err := applySecretFlags(resolver, "github", []string{"API_KEY=value"}, nil, env, map[string]string{})
 	if err == nil {
 		t.Fatal("expected an error when the keyring is unavailable")
 	}
@@ -160,7 +176,7 @@ func TestApplySecretFlags_NoFlagsIsNoOp(t *testing.T) {
 	fake := newFakeKeyringProvider(false) // unavailable — must not matter
 	resolver := newTestSecretResolver(fake)
 
-	if err := applySecretFlags(resolver, "github", nil, nil, map[string]string{}, map[string]string{}); err != nil {
+	if _, err := applySecretFlags(resolver, "github", nil, nil, map[string]string{}, map[string]string{}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -170,10 +186,38 @@ func TestApplySecretFlags_InvalidFormat(t *testing.T) {
 	fake := newFakeKeyringProvider(true)
 	resolver := newTestSecretResolver(fake)
 
-	if err := applySecretFlags(resolver, "github", []string{"NOEQUALS"}, nil, map[string]string{}, map[string]string{}); err == nil {
+	if _, err := applySecretFlags(resolver, "github", []string{"NOEQUALS"}, nil, map[string]string{}, map[string]string{}); err == nil {
 		t.Error("expected an error for a --secret-env value with no '='")
 	}
-	if err := applySecretFlags(resolver, "github", nil, []string{"NoColonHere"}, map[string]string{}, map[string]string{}); err == nil {
+	if _, err := applySecretFlags(resolver, "github", nil, []string{"NoColonHere"}, map[string]string{}, map[string]string{}); err == nil {
 		t.Error("expected an error for a --secret-header value with no ':'")
+	}
+}
+
+// TestApplySecretFlags_SecondStoreFailureRollsBackFirst pins the review
+// round 1 finding: if the second of two --secret-env/--secret-header flags
+// fails to store, the first flag's already-stored secret must not be left
+// orphaned in the keyring.
+func TestApplySecretFlags_SecondStoreFailureRollsBackFirst(t *testing.T) {
+	fake := newFakeKeyringProvider(true)
+	fake.failStoreOnNthCall = 2
+	resolver := newTestSecretResolver(fake)
+
+	env := map[string]string{}
+	writtenRefs, err := applySecretFlags(resolver, "github",
+		[]string{"FIRST_TOKEN=first-value", "SECOND_TOKEN=second-value"},
+		nil, env, map[string]string{},
+	)
+	if err == nil {
+		t.Fatal("expected an error when the second Store call fails")
+	}
+	if len(writtenRefs) != 0 {
+		t.Errorf("expected no refs returned on failure (everything rolled back), got %+v", writtenRefs)
+	}
+	if len(fake.store) != 0 {
+		t.Errorf("expected the first flag's secret to be rolled back, got %+v", fake.store)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != "github-env-first-token" {
+		t.Errorf("expected exactly one rollback delete for the first ref, got %+v", fake.deleted)
 	}
 }

@@ -10,6 +10,7 @@ vi.mock('@/services/api', () => ({
     addServerFromRegistry: vi.fn(),
     getSecretRefs: vi.fn(),
     setSecret: vi.fn(),
+    deleteSecret: vi.fn(),
   },
 }))
 import api from '@/services/api'
@@ -109,5 +110,52 @@ describe('CatalogSearch', () => {
     await new Promise((r) => setTimeout(r, 300))
     await flushPromises()
     expect(wrapper.find('[data-test="catalog-unavailable-notice"]').text()).toContain('smithery')
+  })
+
+  // Review round 1: confirmAdd() unconditionally closed the secrets dialog
+  // after addResult(), even when the POST /registries/.../add call failed —
+  // addResult() never throws (api.ts always resolves {success:false}), so
+  // the failure fell straight through to closeSecretsDialog(), which wiped
+  // the error it had just set one line earlier and silently orphaned the
+  // keyring entry the dialog had just written.
+  it('keeps the secrets dialog open, shows the error, and rolls back the just-written secret when the add fails after a successful secret write', async () => {
+    vi.mocked(api.catalogSearch).mockResolvedValue({
+      success: true,
+      data: {
+        query: '',
+        results: [],
+        sections: {
+          official: [githubResult({ required_inputs: [{ name: 'GITHUB_TOKEN', secret_like: true }] })],
+          popular: [],
+        },
+        unavailable: [],
+      },
+    })
+    vi.mocked(api.getSecretRefs).mockResolvedValue({ success: true, data: { refs: [] } })
+    vi.mocked(api.setSecret).mockResolvedValue({ success: true, data: { name: 'github-env-github-token', type: 'keyring' } })
+    vi.mocked(api.deleteSecret).mockResolvedValue({ success: true, data: { name: 'github-env-github-token', type: 'keyring' } })
+    vi.mocked(api.addServerFromRegistry).mockResolvedValue({ success: false, error: 'a server named "github" already exists' })
+
+    const wrapper = await mountCatalog()
+    await wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]').trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.find('[data-test="catalog-secrets-dialog"]')
+    expect(dialog.exists()).toBe(true)
+
+    await wrapper.find('[data-test="secret-toggle-value-input"]').setValue('ghp_xxx')
+    await wrapper.find('[data-test="catalog-secrets-confirm"]').trigger('click')
+    await flushPromises()
+
+    // The write happened (Secret mode is the default for a secret_like input).
+    expect(api.setSecret).toHaveBeenCalledWith('github-env-github-token', 'ghp_xxx')
+
+    // The dialog must stay open with the error visible, not silently close.
+    expect(wrapper.find('[data-test="catalog-secrets-dialog"]').attributes('open')).toBeDefined()
+    expect(wrapper.find('[data-test="catalog-add-error"]').text()).toContain('already exists')
+
+    // The secret this failed attempt wrote must be rolled back so a retry
+    // doesn't orphan a keyring entry or get a -2-suffixed name.
+    expect(api.deleteSecret).toHaveBeenCalledWith('github-env-github-token')
   })
 })

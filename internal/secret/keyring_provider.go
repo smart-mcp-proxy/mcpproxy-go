@@ -406,10 +406,24 @@ func (p *KeyringProvider) IsAvailable() bool {
 // IsAvailableWithReason behaves like IsAvailable but also returns a short,
 // user-facing reason when unavailable ("" when available). Used by
 // GET /secrets/config (FR-065) so the Web/macOS/CLI secret toggle can explain
-// why it is disabled instead of just going dark.
+// why it is disabled instead of just going dark, and by the CLI's
+// applySecretFlags pre-check before --secret-env/--secret-header.
+//
+// Both of those callers care about WRITE availability, not just whether a
+// read-only probe succeeds: Store() has its own hard gate on macOS (it
+// refuses unconditionally unless the caller opted in via
+// MCPPROXY_KEYRING_WRITE / SetWritesEnabled — see writesEnabled()), because
+// keyring.Set can pop a destructive system modal there. A plain probe-based
+// answer would tell a headless `mcpproxy serve` or the CLI's own in-process
+// resolver "available", and the very next Store() call would then fail with
+// ErrKeyringUnavailable. So this checks the macOS write gate first and only
+// falls through to the read-only probe once writes are actually permitted.
 func (p *KeyringProvider) IsAvailableWithReason() (bool, string) {
 	if isHeadlessEnvironment() {
 		return false, headlessUnavailableReason()
+	}
+	if runtime.GOOS == "darwin" && !p.writesEnabled() {
+		return false, "OS keychain writes require opting in on macOS outside the tray app (set MCPPROXY_KEYRING_WRITE=1, or use the tray, which opts in automatically)"
 	}
 	if p.IsAvailable() {
 		return true, ""

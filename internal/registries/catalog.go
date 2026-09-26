@@ -97,6 +97,14 @@ type SourceError struct {
 // only tests set another value (T109a, SC-011).
 type SearchOptions struct {
 	SourceTimeout time.Duration
+
+	// Source narrows results to one catalog source id (GET
+	// /catalog/search?source=). Applied BEFORE ranking/truncation to
+	// `limit`, not after: an official/verified source's hits sort first by
+	// design, so a post-hoc filter on an already-truncated top-`limit` list
+	// could silently drop a narrower source's real matches that simply
+	// didn't survive the pre-filter truncation.
+	Source string
 }
 
 const (
@@ -178,6 +186,10 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 		}
 	}
 
+	if opts.Source != "" {
+		all = filterHitsBySource(all, opts.Source)
+	}
+
 	sort.SliceStable(all, func(i, j int) bool { return Rank(all[i], all[j], q) })
 	sort.SliceStable(unavailable, func(i, j int) bool { return unavailable[i].Source < unavailable[j].Source })
 
@@ -191,6 +203,18 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 	}
 
 	return all, sections, unavailable
+}
+
+// filterHitsBySource keeps only the hits from one catalog source, applied
+// before ranking/truncation (see SearchOptions.Source).
+func filterHitsBySource(hits []CatalogHit, source string) []CatalogHit {
+	out := make([]CatalogHit, 0, len(hits))
+	for _, h := range hits {
+		if h.Source == source {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // BuildCatalogHit derives the catalog-only fields (Title, Publisher,

@@ -10,6 +10,7 @@ vi.mock('@/services/api', () => ({
     getConfigSecrets: vi.fn(),
     getSecretRefs: vi.fn(),
     setSecret: vi.fn(),
+    deleteSecret: vi.fn(),
     callTool: vi.fn(),
   },
 }))
@@ -130,5 +131,46 @@ describe('PasteServer', () => {
       'upstream_servers',
       expect.objectContaining({ env_json: JSON.stringify({ GITHUB_TOKEN: '${keyring:github-env-github-token}' }) })
     )
+  })
+
+  // Review round 1: resolveSecretFields's returned writtenRefs were computed
+  // but never passed to rollbackSecrets by this surface, so a secret write
+  // that succeeded right before the add-server call itself failed (e.g. a
+  // duplicate name) left an orphaned keyring entry behind.
+  it('rolls back the just-written secret when the add-server call fails after a successful secret write', async () => {
+    vi.mocked(api.importServersFromJSON).mockResolvedValue({
+      success: true,
+      data: {
+        format: 'command',
+        format_name: 'Command Line',
+        summary: { total: 1, imported: 1, skipped: 0, failed: 0 },
+        imported: [{
+          name: 'github', protocol: 'stdio', command: 'uvx', args: ['mcp-server-github'],
+          source_format: 'command', original_name: 'github',
+          summary: 'uvx mcp-server-github', tags: ['local process', 'needs secret'],
+          env: [{ name: 'GITHUB_TOKEN', value_present: true, secret_like: true, empty_or_placeholder: false }],
+        }],
+        skipped: [],
+        failed: [],
+        warnings: [],
+      },
+    })
+    vi.mocked(api.getSecretRefs).mockResolvedValue({ success: true, data: { refs: [] } })
+    vi.mocked(api.setSecret).mockResolvedValue({ success: true, data: { message: '', name: '', type: '', reference: '' } })
+    vi.mocked(api.deleteSecret).mockResolvedValue({ success: true, data: { message: '' } })
+    vi.mocked(api.callTool).mockResolvedValue({ success: false, error: 'a server named "github" already exists' })
+
+    const wrapper = await mountPaste()
+    await wrapper.find('[data-test="paste-textarea"]').setValue('uvx mcp-server-github')
+    await new Promise((r) => setTimeout(r, 450))
+    await flushPromises()
+
+    await wrapper.find('[data-test="secret-toggle-value-input"]').setValue('sk-live-abc123')
+    await wrapper.find('[data-test="paste-add-button"]').trigger('click')
+    await flushPromises()
+
+    expect(api.setSecret).toHaveBeenCalledWith('github-env-github-token', 'sk-live-abc123')
+    expect(wrapper.find('[data-test="paste-add-error"]').text()).toContain('already exists')
+    expect(api.deleteSecret).toHaveBeenCalledWith('github-env-github-token')
   })
 })

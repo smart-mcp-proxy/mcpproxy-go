@@ -63,6 +63,16 @@ func TestSearchServers_RegistryOptional_SearchesAllSources(t *testing.T) {
 	if _, hasRegistryArg := payload["registry"]; hasRegistryArg {
 		t.Errorf("expected no 'registry' field echoed back when omitted, got %#v", payload["registry"])
 	}
+
+	// contracts/mcp-tools.md: omitting 'registry' must gain the same
+	// catalog-ranking evidence REST/CLI callers already get — title,
+	// publisher, verified, official, popularity, source — not just the bare
+	// registries.ServerEntry.
+	assert.Equal(t, "Alpha Tool", entry["title"], "expected the catalog title field")
+	assert.Equal(t, "fast", entry["source"], "expected the catalog source field")
+	assert.Contains(t, entry, "verified", "expected the catalog verified field")
+	assert.Contains(t, entry, "official", "expected the catalog official field")
+	assert.Contains(t, entry, "publisher", "expected the catalog publisher field")
 }
 
 // TestSearchServers_RegistryOptional_UnavailableSourceReported pins that a
