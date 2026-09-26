@@ -362,6 +362,11 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 		Preview:        preview,
 		SkipQuarantine: skipQuarantine,
 		Now:            time.Now(),
+		// Skip entries that point back at this instance (e.g. the `mcpproxy`
+		// entry Connect wrote into ~/.claude.json) so no import surface — the
+		// onboarding wizard, Add Server > Import, or a direct REST call —
+		// offers mcpproxy as its own upstream.
+		SelfListenAddrs: s.selfListenAddrs(),
 	}
 
 	// Parse format hint
@@ -465,6 +470,19 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 	}
 
 	return response, nil
+}
+
+// selfListenAddrs returns the addresses this instance answers on, for the
+// import self-reference filter. The bound address is authoritative for the
+// port, but GetListenAddress normalizes a wildcard bind to a display address
+// (127.0.0.1:<port>), so the configured listen is added too: with 0.0.0.0 it
+// makes URLs on the machine's LAN addresses recognizable as self.
+func (s *Server) selfListenAddrs() []string {
+	addrs := []string{s.controller.GetListenAddress()}
+	if cfg := s.controller.GetCurrentConfig(); cfg != nil && cfg.Listen != "" {
+		addrs = append(addrs, cfg.Listen)
+	}
+	return addrs
 }
 
 // parseFormat converts a format string to ConfigFormat

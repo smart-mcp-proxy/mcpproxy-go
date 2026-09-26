@@ -557,7 +557,7 @@ Example (Claude Desktop):
             <div class="collapse-content">
               <div v-for="server in previewResult.skipped" :key="server.name" class="py-2 border-b border-base-300 last:border-0">
                 <div class="font-medium">{{ server.name }}</div>
-                <div class="text-sm text-warning">{{ server.reason }}</div>
+                <div class="text-sm text-warning">{{ skipReasonLabel(server.reason) }}</div>
               </div>
             </div>
           </div>
@@ -616,6 +616,7 @@ import api, { type CanonicalConfigPath } from '@/services/api'
 import TrustModeSelector from '@/components/TrustModeSelector.vue'
 import { useModalA11y } from '@/composables/useModalA11y'
 import type { TrustMode } from '@/utils/trustMode'
+import { skipReasonLabel } from '@/utils/importSkipReason'
 import type { ImportResponse, ImportedServer } from '@/types'
 
 interface Props {
