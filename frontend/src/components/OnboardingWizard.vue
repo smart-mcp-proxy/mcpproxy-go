@@ -1,5 +1,5 @@
 <template>
-  <dialog :open="show" class="modal modal-bottom sm:modal-middle">
+  <dialog ref="dialogEl" class="modal modal-bottom sm:modal-middle">
     <div
       class="modal-box p-0 overflow-hidden flex flex-col"
       :style="modalSizing"
@@ -639,6 +639,8 @@ import { useOnboardingStore } from '@/stores/onboarding'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import AddServerModal from '@/components/AddServerModal.vue'
+import { useDialogOpen } from '@/composables/useDialogOpen'
+import { skipReasonLabel } from '@/utils/importSkipReason'
 import type { ClientStatus, ActivityRecord, ConnectPreview } from '@/types'
 
 interface Props {
@@ -651,6 +653,7 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
+const { dialogEl } = useDialogOpen(() => props.show, () => dismiss())
 
 const onboarding = useOnboardingStore()
 const systemStore = useSystemStore()
@@ -987,10 +990,11 @@ function goBack() {
 
 // Leaving the wizard for the registry: the wizard is a modal owned by the
 // Dashboard, so it has to close before the route changes or it would hang over
-// the registry page. The await is load-bearing — `dismiss()` awaits its
-// mark-skipped calls before it emits `close`, and routing away first unmounts
-// the Dashboard that owns the `wizardOpen` flag, so the emit could land with
-// nothing left to clear it and the wizard would spring back open on return.
+// the registry page. `dismiss()` emits `close` synchronously (its engagement
+// bookkeeping runs decoupled, in the background — see `dismiss`'s own
+// comment), so by the time this `await` resolves the Dashboard has already
+// flipped `wizardOpen` false. Routing away before that would unmount the
+// Dashboard first, and the wizard would spring back open on return.
 async function goToRegistry() {
   await dismiss()
   await router.push('/repositories')
@@ -1228,6 +1232,10 @@ async function onBulkImport(quarantine: boolean) {
   let totalImported = 0
   let totalSkipped = 0
   let totalFailed = 0
+  // Tallied by human label (skipReasonLabel), not raw reason string, so
+  // e.g. a self-referencing entry doesn't get lumped into "already
+  // configured" — nothing was previously configured about it.
+  const skippedByLabel = new Map<string, number>()
   const errors: string[] = []
   try {
     const results = await Promise.all(
@@ -1247,6 +1255,10 @@ async function onBulkImport(quarantine: boolean) {
         totalImported += r.data.summary?.imported ?? 0
         totalSkipped += r.data.summary?.skipped ?? 0
         totalFailed += r.data.summary?.failed ?? 0
+        for (const skipped of r.data.skipped ?? []) {
+          const label = skipReasonLabel(skipped.reason)
+          skippedByLabel.set(label, (skippedByLabel.get(label) ?? 0) + 1)
+        }
       } else {
         errors.push(`${job.src.name}: ${r.error ?? 'unknown error'}`)
       }
@@ -1255,7 +1267,14 @@ async function onBulkImport(quarantine: boolean) {
     if (errors.length === 0) {
       const dest = quarantine ? 'into quarantine' : 'as active'
       let msg = `✓ Imported ${totalImported} server${totalImported === 1 ? '' : 's'} ${dest}`
-      if (totalSkipped > 0) msg += ` · ${totalSkipped} skipped (already configured)`
+      if (skippedByLabel.size > 0) {
+        msg += Array.from(skippedByLabel.entries())
+          .map(([label, count]) => ` · ${count} skipped (${label})`)
+          .join('')
+      } else if (totalSkipped > 0) {
+        // Reasons weren't returned (older core) — fall back to the count alone.
+        msg += ` · ${totalSkipped} skipped`
+      }
       if (totalFailed > 0) msg += ` · ${totalFailed} failed`
       if (quarantine && totalImported > 0) msg += '. Approve from the Servers page.'
       selectionImportMessage.value = msg
@@ -1495,24 +1514,41 @@ async function onServerAdded() {
   })
 }
 
-async function dismiss() {
+// `dismiss` is the onClose handler useDialogOpen calls for a NATIVE close
+// (Escape, or the browser's own backdrop/cancel handling) as well as every
+// explicit "close the wizard" affordance. By the time a native close fires,
+// the <dialog> has already closed itself in the DOM; `props.show` is the
+// only thing keeping useDialogOpen's `isOpen()` true, and only the parent's
+// `@close` handler (via `emit('close')`) flips it. This used to await up to
+// three sequential engagement-bookkeeping calls BEFORE emitting close, so
+// `props.show` stayed true for that whole window — reopening the wizard from
+// the sidebar Setup entry during it was a no-op (setting an already-true ref
+// doesn't re-trigger the watch that calls `showModal()` again), same failure
+// class as round 1's H4 dialog-desync bug. Emit synchronously first; the
+// bookkeeping is best-effort and fully decoupled from the dialog's own
+// open/close state, so it runs in the background regardless (review round 2,
+// finding 2).
+function dismiss() {
+  emit('close')
+  void recordDismissalEngagement()
+}
+
+async function recordDismissalEngagement() {
   // Engagement is permanent: once the wizard has been opened and dismissed,
   // we don't auto-popup again. The sidebar Setup entry remains visible so
   // the user can return.
-  if (!onboarding.isEngaged) {
-    // Spec 046 — any step the user never advanced through counts as "skipped"
-    // so the funnel (engaged - completed - skipped) reconciles to engaged
-    // total. Per-step calls are no-ops if a status is already recorded.
-    const stepState = onboarding.state?.state
-    if (stepState && !stepState.connect_step_status) {
-      await onboarding.markConnectSkipped()
-    }
-    if (stepState && !stepState.server_step_status) {
-      await onboarding.markServerSkipped()
-    }
-    await onboarding.markEngaged()
+  if (onboarding.isEngaged) return
+  // Spec 046 — any step the user never advanced through counts as "skipped"
+  // so the funnel (engaged - completed - skipped) reconciles to engaged
+  // total. Per-step calls are no-ops if a status is already recorded.
+  const stepState = onboarding.state?.state
+  if (stepState && !stepState.connect_step_status) {
+    await onboarding.markConnectSkipped()
   }
-  emit('close')
+  if (stepState && !stepState.server_step_status) {
+    await onboarding.markServerSkipped()
+  }
+  await onboarding.markEngaged()
 }
 
 // NOTE: no onMounted open-fallback here. The `immediate` watcher above already

@@ -159,7 +159,7 @@
     </div>
 
     <!-- Create Token Dialog -->
-    <dialog class="modal" :class="{ 'modal-open': showCreateModal }">
+    <dialog ref="createDialogEl" class="modal">
       <div class="modal-box">
         <h3 class="font-bold text-lg mb-4">Create Agent Token</h3>
 
@@ -278,6 +278,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useDialogOpen } from '@/composables/useDialogOpen'
 
 interface TokenInfo {
   name: string
@@ -302,6 +303,7 @@ const createError = ref('')
 const newTokenSecret = ref<string | null>(null)
 const copied = ref(false)
 const showCreateModal = ref(false)
+const { dialogEl: createDialogEl } = useDialogOpen(() => showCreateModal.value, () => closeCreateDialog())
 const availableServers = ref<AvailableServer[]>([])
 
 const createForm = ref({

@@ -252,7 +252,7 @@ jobs:
           go tool cover -html=coverage-logs.out -o coverage-logs.html
 
       - name: Upload coverage reports
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
         with:
           file: ./coverage.out
           flags: e2e-tests
@@ -516,9 +516,9 @@ jobs:
   # trap (see scripts/test-api-e2e-cleanup-check.sh): pins that cleanup()
   # only ever stops processes THIS run started, never a blanket pkill that
   # would also take down a tray-managed core or a parallel worktree's E2E
-  # run. main-push only (like stress-tests above): it runs the full suite
-  # twice (complete + abort modes), too slow to gate every PR, but this way a
-  # future regression back to the blanket pkill is still caught automatically
+  # run. main-push only (like stress-tests above): it runs the full E2E
+  # suite as a subprocess, too slow to gate every PR, but this way a future
+  # regression back to the blanket pkill is still caught automatically
   # instead of depending on someone remembering to run it by hand.
   e2e-cleanup-check:
     name: E2E Cleanup Process-Hygiene Check

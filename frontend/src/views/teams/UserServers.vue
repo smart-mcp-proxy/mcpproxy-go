@@ -140,7 +140,7 @@
     </div>
 
     <!-- Add Server Modal -->
-    <dialog class="modal" :class="{ 'modal-open': showAddModal }">
+    <dialog ref="addModalDialogEl" class="modal">
       <div class="modal-box">
         <h3 class="font-bold text-lg mb-4">Add Personal Server</h3>
         <form @submit.prevent="addServer">
@@ -183,7 +183,7 @@
     </dialog>
 
     <!-- Remove Confirmation Modal -->
-    <dialog class="modal" :class="{ 'modal-open': !!serverToRemove }">
+    <dialog ref="removeDialogEl" class="modal">
       <div class="modal-box">
         <h3 class="font-bold text-lg">Remove Server</h3>
         <p class="py-4">Are you sure you want to remove <strong>{{ serverToRemove }}</strong>? This action cannot be undone.</p>
@@ -202,6 +202,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed } from 'vue'
+import { useDialogOpen } from '@/composables/useDialogOpen'
 import { useRouter } from 'vue-router'
 
 interface UserServer {
@@ -225,11 +226,13 @@ const loading = ref(true)
 const error = ref('')
 const allServers = ref<UserServer[]>([])
 const showAddModal = ref(false)
+const { dialogEl: addModalDialogEl } = useDialogOpen(() => showAddModal.value, () => closeAddModal())
 const adding = ref(false)
 const addError = ref('')
 const togglingServer = ref('')
 const removingServer = ref('')
 const serverToRemove = ref('')
+const { dialogEl: removeDialogEl } = useDialogOpen(() => serverToRemove.value !== '', () => { serverToRemove.value = '' })
 
 const newServer = reactive({
   name: '',

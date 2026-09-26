@@ -1,5 +1,5 @@
 <template>
-  <div class="drawer-side z-40">
+  <div class="drawer-side z-[var(--z-sidebar)]">
     <label for="sidebar-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
     <aside
       class="bg-base-100 h-screen flex flex-col border-r border-base-300 fixed transition-[width] duration-200 ease-out"
@@ -352,11 +352,11 @@
                 to="/settings"
                 :class="{ 'active': isActiveRoute('/settings') }"
                 class="rounded-lg text-base-content/70"
-                :title="collapsed ? 'Configuration' : ''"
-                :aria-label="collapsed ? 'Configuration' : undefined"
+                :title="collapsed ? 'Settings' : ''"
+                :aria-label="collapsed ? 'Settings' : undefined"
               >
                 <IconSettings class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed" class="text-[13px]">Configuration</span>
+                <span v-show="!collapsed" class="text-[13px]">Settings</span>
               </router-link>
             </li>
           </ul>
@@ -704,7 +704,7 @@ const teamsAdminMenu = [
   { name: 'Activity (All)', path: '/activity' },
   { name: 'Users', path: '/admin/users' },
   { name: 'Sessions', path: '/sessions' },
-  { name: 'Configuration', path: '/settings' },
+  { name: 'Settings', path: '/settings' },
 ]
 
 const userInitials = computed(() => {

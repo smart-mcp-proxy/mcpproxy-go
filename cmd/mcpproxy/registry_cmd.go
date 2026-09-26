@@ -468,11 +468,7 @@ inputs, supply them with --env KEY=VALUE.`,
 				return nil
 			}
 
-			fmt.Printf("✅ Added '%s'", result.Name)
-			if result.Quarantined {
-				fmt.Printf(" (quarantined — approve with: mcpproxy upstream approve %s)", result.Name)
-			}
-			fmt.Println()
+			fmt.Println(registryAddMessage(result.Name, result.Quarantined))
 			return nil
 		},
 	}
@@ -480,6 +476,18 @@ inputs, supply them with --env KEY=VALUE.`,
 	cmd.Flags().StringArrayVar(&registryAddEnv, "env", nil, "Set an environment variable (KEY=VALUE); repeatable")
 	cmd.Flags().BoolVar(&registryAddEnabled, "enabled", true, "Whether the added server is enabled")
 	return cmd
+}
+
+// registryAddMessage formats the CLI's success confirmation after adding a
+// server from a registry (Spec 109 FR-063): "Added <name> to MCPProxy
+// (quarantined for review)" — the same wording the Web/macOS "Add to
+// MCPProxy" action uses after a successful add.
+func registryAddMessage(name string, quarantined bool) string {
+	msg := fmt.Sprintf("✅ Added %s to MCPProxy", name)
+	if quarantined {
+		msg += fmt.Sprintf(" (quarantined for review — approve with: mcpproxy upstream approve %s)", name)
+	}
+	return msg
 }
 
 // registryAddErrorOutput maps a *cliclient.RegistryAddError to a structured CLI
