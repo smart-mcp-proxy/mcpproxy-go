@@ -50,6 +50,17 @@ import { onBeforeUnmount, ref, watch, type Ref } from 'vue'
  * unconditionally, and routed back through the same `close()` the `keydown`
  * listener already calls: if that decides to close, it flips `isOpen()`,
  * and the `watch` below performs the actual (permitted) `el.close()`.
+ *
+ * Most call sites do NOT pair `useModalA11y` with this composable — they
+ * have no document-level `keydown` listener at all, so nothing would ever
+ * call `close()` on Escape (review round 8, finding 2: Escape was a dead key
+ * on every one of those dialogs, silently, because the native `cancel` this
+ * function unconditionally cancels was the only thing that ever saw the
+ * keypress). `handleCancel` below is therefore also the fallback path: it
+ * calls `onClose` itself, guarded on `isOpen()` still being `true` so it is a
+ * no-op — not a double call — on a dialog where `useModalA11y`'s `keydown`
+ * listener already closed it (that listener always runs first: `keydown` is
+ * synchronous, `cancel` is a browser-queued task per the HTML spec).
  */
 export function useDialogOpen(isOpen: () => boolean, onClose?: () => void) {
   const dialogEl: Ref<HTMLDialogElement | null> = ref(null)
@@ -78,12 +89,29 @@ export function useDialogOpen(isOpen: () => boolean, onClose?: () => void) {
   }
 
   function handleCancel(event: Event) {
-    // Always block the browser's own Escape-triggered close. `useModalA11y`
-    // already owns Escape (it must, to run the Tab trap / focus-stack logic
-    // too) and calls the caller's `close()` on it; letting the platform also
-    // act on the same keypress double-handles it and, for a dialog whose
-    // `close()` is currently a no-op, closes it anyway (see comment above).
+    // Always block the browser's own Escape-triggered close, so the actual
+    // `el.close()` only ever happens via the `watch(isOpen, sync)` below,
+    // once state says it is permitted. `useModalA11y`, when this dialog is
+    // paired with it, already owns Escape too (it must, to run the Tab trap
+    // / focus-stack logic) and calls the caller's `close()` from its own
+    // document-level `keydown` capture listener; letting the platform also
+    // act on the same keypress would double-handle it and, for a dialog
+    // whose `close()` is currently a no-op, close it anyway.
     event.preventDefault()
+
+    // Escape's native `cancel` is a browser-queued task (per the HTML
+    // spec), so it always runs after a synchronous `keydown` listener such
+    // as `useModalA11y`'s — by the time we get here, a paired dialog's
+    // `close()` has already run and `isOpen()` already reads false (or the
+    // dialog is intentionally not dismissable and stays true either way).
+    // For the dialogs that use `useDialogOpen` alone, with no `keydown`
+    // listener anywhere, nothing else will ever call `close()` on Escape:
+    // `isOpen()` is still true here, and this is the only chance to act on
+    // it, so this calls it directly (review round 8, finding 2 — Escape was
+    // a dead key on every one of those dialogs). Guarding on `isOpen()`
+    // mirrors `handleNativeClose` below and keeps this a no-op, not a
+    // double-call, for the paired dialogs.
+    if (onClose && isOpen()) onClose()
   }
 
   watch(isOpen, sync, { flush: 'post' })

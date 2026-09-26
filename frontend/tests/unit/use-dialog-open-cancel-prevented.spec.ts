@@ -105,4 +105,33 @@ describe('useDialogOpen cancel prevention (Spec 109 PR-a review round 7, finding
 
     expect(el.open).toBe(false)
   })
+
+  it('closes on Escape with no separate keydown listener at all (review round 8, finding 2)', async () => {
+    // Every test above pairs useDialogOpen with a keydown-like effect that
+    // flips `show` itself (mirroring useModalA11y's document keydown
+    // listener, which is what actually closes the ~3 dialogs that pair both
+    // composables). Most of this PR's dialogs (ConnectModal,
+    // OnboardingWizard, Repositories.vue's three dialogs, teams/UserActivity,
+    // UserServers, UserTokens) use useDialogOpen alone, with no keydown
+    // listener anywhere to call close() — so unless the native `cancel`
+    // event itself can trigger the close, Escape is a dead key on them. This
+    // dispatches ONLY the native `cancel` event, the same one a real browser
+    // fires on Escape, and nothing else, so it cannot pass by accident the
+    // way flipping `show.value` directly would.
+    const { show, Modal } = harness(() => {
+      show.value = false
+    })
+    const wrapper = mount(Modal, { attachTo: document.body })
+    show.value = true
+    await flushPromises()
+    const el = wrapper.element as HTMLDialogElement
+    expect(el.open).toBe(true)
+
+    el.dispatchEvent(new Event('cancel', { cancelable: true }))
+    await flushPromises()
+
+    expect(show.value).toBe(false)
+    expect(el.open).toBe(false)
+    wrapper.unmount()
+  })
 })

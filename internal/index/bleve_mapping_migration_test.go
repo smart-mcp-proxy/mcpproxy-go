@@ -1,7 +1,9 @@
 package index
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/blevesearch/bleve/v2"
@@ -136,6 +138,68 @@ func TestNewBleveIndexAt_AutoRebuildsPreAnnotationsMapping(t *testing.T) {
 	res, err := bi.index.Search(bleve.NewSearchRequest(bleve.NewMatchQuery("should not become searchable via _all")))
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), res.Total, "annotations_json must not be free-text searchable after the rebuild")
+}
+
+// TestRebuildIfMappingPredatesAnnotations_ConstructionFailureKeepsStaleIndexUsable
+// is a regression test for review round 8, finding 1 (high): the migration
+// used to be destructive-before-construct (Close -> os.RemoveAll ->
+// createBleveIndex), so any failure building the replacement (disk full,
+// permission error) left the daemon with no index at all and no way to
+// recover without operator intervention, turning a previously-degraded-but-
+// working deployment into a hard outage on every restart. The fix builds the
+// replacement at a temporary sibling path FIRST; if that fails, the original
+// (stale-mapping but fully functional) index must be left untouched and
+// still usable rather than destroyed.
+//
+// This forces createBleveIndex to fail deterministically by pre-creating a
+// plain file at the temporary path the rebuild uses, so bleve's underlying
+// mkdir fails with ENOTDIR — the same failure shape as a real disk error,
+// without depending on actually exhausting disk space.
+func TestRebuildIfMappingPredatesAnnotations_ConstructionFailureKeepsStaleIndexUsable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+
+	parent := t.TempDir()
+	indexPath := filepath.Join(parent, "index.bleve")
+
+	oldIdx, err := bleve.New(indexPath, preAnnotationsMapping())
+	require.NoError(t, err)
+	require.NoError(t, oldIdx.Close())
+
+	// Block the rebuild's temporary construction path by making its parent
+	// directory read-only, so createBleveIndex(tmpPath)'s mkdir fails before
+	// anything touches indexPath (mirrors a real permission/disk error
+	// without depending on actually exhausting disk space). Restored before
+	// t.TempDir()'s own cleanup runs, since that needs write access too.
+	require.NoError(t, os.Chmod(parent, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+
+	reopened, err := bleve.Open(indexPath)
+	require.NoError(t, err)
+
+	idx, err := rebuildIfMappingPredatesAnnotations(reopened, indexPath, logger)
+	require.NoError(t, err, "a failed rebuild attempt must not fail index startup")
+	require.NotNil(t, idx)
+	defer idx.Close()
+
+	// The original index directory must still exist and still be the
+	// pre-annotations one that was there before the failed rebuild attempt
+	// (proving it was never removed).
+	_, statErr := os.Stat(indexPath)
+	require.NoError(t, statErr, "the original index directory must survive a failed rebuild attempt")
+
+	fm := idx.Mapping().FieldMappingForPath("annotations_json")
+	assert.Empty(t, fm.Type, "on a failed rebuild the returned index is still the stale-mapping one, not a fabricated fresh one")
+
+	errs := logs.FilterMessageSnippet("Failed to build replacement Bleve index")
+	assert.Equal(t, 1, errs.Len(), "the construction failure must be logged, since it is silently swallowed to keep startup unblocked")
 }
 
 // TestNewBleveIndexAt_NoWarningOnCurrentMapping guards against a false

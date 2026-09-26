@@ -118,14 +118,25 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 //
 // Round 6 only logged a warning and left the fix to an operator manually
 // deleting indexPath (review round 7, finding 2: the underlying gap was still
-// open on any upgrade nobody noticed the log line for). This does that same
-// recovery automatically instead: close the stale index, remove its
-// directory, and create a fresh one with the current mapping. That is safe
-// because index.bleve is a derived search cache, not a source of truth — an
-// empty index makes every server's tools look newly discovered, and the
-// normal discovery path (applyDifferentialToolUpdate) unconditionally
-// reindexes everything as each server (re)connects during startup, the same
-// way it already backfills a brand-new install.
+// open on any upgrade nobody noticed the log line for). Round 7 then made
+// this self-healing, but did so destructive-before-construct (Close ->
+// os.RemoveAll(indexPath) -> createBleveIndex(indexPath)): any failure after
+// the wipe (disk full, a permission error on a leftover file) propagated all
+// the way through index.NewManager -> runtime.New and failed daemon startup
+// on every retry, taking a previously-degraded-but-working deployment (stale
+// mapping, but an openable, functional index) down to a hard outage that
+// needed an operator to intervene (review round 8, finding 1: high).
+//
+// This builds the replacement at a temporary sibling path FIRST and only
+// touches the existing index once that succeeds. index.bleve is a derived
+// search cache, not a source of truth, so once the swap does happen an empty
+// index is fine — the normal discovery path
+// (applyDifferentialToolUpdate) unconditionally reindexes everything as each
+// server (re)connects during startup, the same way it already backfills a
+// brand-new install. But if construction fails, the original index must
+// still be there and still work: this logs the error and returns the
+// original (stale-mapping) index unchanged, the same degraded-but-running
+// outcome round 6 had, rather than failing startup.
 // Manager.RebuildIndex (internal/index/manager.go) is a separate, currently
 // unwired no-op stub for an operator-triggered full rebuild and is not used
 // here — this path only ever runs once, at index-open time, against a
@@ -146,20 +157,50 @@ func rebuildIfMappingPredatesAnnotations(idx bleve.Index, indexPath string, logg
 		"current mapping (see internal/index/bleve.go:rebuildIfMappingPredatesAnnotations).",
 		zap.String("path", indexPath))
 
+	// Construct the replacement before destroying anything. tmpPath is a
+	// sibling of indexPath, never indexPath itself, so a failure here never
+	// touches the original index.
+	tmpPath := indexPath + ".rebuild-tmp"
+	_ = os.RemoveAll(tmpPath) // best-effort: clear any leftover from a previous failed attempt
+
+	fresh, err := createBleveIndex(tmpPath)
+	if err != nil {
+		logger.Error("Failed to build replacement Bleve index with the current mapping; "+
+			"continuing with the stale-mapping index instead of failing startup "+
+			"(annotation JSON may still be indexed as free text until this is retried)",
+			zap.Error(err), zap.String("path", indexPath))
+		_ = os.RemoveAll(tmpPath)
+		return idx, nil
+	}
+	if closeErr := fresh.Close(); closeErr != nil {
+		_ = os.RemoveAll(tmpPath)
+		logger.Error("Failed to close freshly built replacement Bleve index; "+
+			"continuing with the stale-mapping index instead of failing startup",
+			zap.Error(closeErr), zap.String("path", indexPath))
+		return idx, nil
+	}
+
+	// From here on the replacement exists on disk and is known-good, so it
+	// is safe to retire the original.
 	if err := idx.Close(); err != nil {
+		_ = os.RemoveAll(tmpPath)
 		return nil, fmt.Errorf("failed to close stale-mapping Bleve index for rebuild: %w", err)
 	}
 	if err := os.RemoveAll(indexPath); err != nil {
 		return nil, fmt.Errorf("failed to remove stale-mapping Bleve index at %s: %w", indexPath, err)
 	}
-	fresh, err := createBleveIndex(indexPath)
+	if err := os.Rename(tmpPath, indexPath); err != nil {
+		return nil, fmt.Errorf("failed to move rebuilt Bleve index into place at %s: %w", indexPath, err)
+	}
+
+	reopened, err := bleve.Open(indexPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to recreate Bleve index after mapping migration: %w", err)
+		return nil, fmt.Errorf("failed to reopen rebuilt Bleve index at %s: %w", indexPath, err)
 	}
 
 	logger.Info("Rebuilt Bleve index with the current field mapping; "+
 		"tools will reappear as each server reconnects", zap.String("path", indexPath))
-	return fresh, nil
+	return reopened, nil
 }
 
 // createBleveIndex creates a new Bleve index with proper mapping

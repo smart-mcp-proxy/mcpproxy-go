@@ -332,13 +332,13 @@
               <!-- Spec 109 FR-063: "Add to MCPProxy", flipping to a
                    persistent "Added ✓ · Open" once the add succeeds. -->
               <button
-                v-if="!addedServers[server.id]"
+                v-if="!addedServers[addedKey(server)]"
                 @click="addServer(server)"
                 class="btn btn-primary btn-sm"
                 :data-test="`registry-add-${server.id}`"
-                :disabled="addingServerId === server.id"
+                :disabled="addingServerId === addedKey(server)"
               >
-                <span v-if="addingServerId === server.id" class="loading loading-spinner loading-xs"></span>
+                <span v-if="addingServerId === addedKey(server)" class="loading loading-spinner loading-xs"></span>
                 <span v-else>Add to MCPProxy</span>
               </button>
               <button
@@ -603,11 +603,25 @@ const loadingRegistries = ref(false)
 const loadingServers = ref(false)
 const error = ref<string | null>(null)
 const addingServerId = ref<string | null>(null)
-// Spec 109 FR-063: keyed by registry entry id -> the resulting server's name,
-// so the button can flip to "Added ✓ · Open" and stay that way for the rest
-// of this page visit (a fresh load/registry refresh clears it, matching the
-// entry possibly not being re-addable anyway).
+// Spec 109 FR-063: keyed by a registry-qualified key (see addedKey below) ->
+// the resulting server's name, so the button can flip to "Added ✓ · Open"
+// and stay that way for the rest of this page visit (a fresh load/registry
+// refresh clears it, matching the entry possibly not being re-addable
+// anyway).
 const addedServers = ref<Record<string, string>>({})
+
+// Catalog entry ids collide across registries (MCP-866): searchServers'
+// own dedupe (`${s.registry || id}::${s.id}`, below) already accounts for
+// this to keep two same-id entries from different registries as separate
+// cards. addedServers/addingServerId must key on the same registry-qualified
+// identity, or adding one card flips every OTHER card sharing its bare id to
+// "Added ✓ · Open" too (and shows its spinner while the add is in flight),
+// with "Open" then navigating to whichever server actually got added — this
+// is the same bug the macOS half of this PR (ServerBrowseView.swift's
+// `addedKey`) already fixed on that side (review round 8, finding 4).
+function addedKey(server: RepositoryServer): string {
+  return `${server.registry || ''}::${server.id}`
+}
 const router = useRouter()
 const showSuccessToast = ref(false)
 const successMessage = ref('')
@@ -877,7 +891,7 @@ async function addServer(server: RepositoryServer, env?: Record<string, string>)
     return
   }
 
-  addingServerId.value = server.id
+  addingServerId.value = addedKey(server)
   error.value = null
 
   try {
@@ -886,7 +900,7 @@ async function addServer(server: RepositoryServer, env?: Record<string, string>)
     if (result.success) {
       closePrompt()
       const name = result.server?.name || server.name
-      addedServers.value[server.id] = name
+      addedServers.value[addedKey(server)] = name
       showToast(`Added "${name}" — quarantined. Approve it on the Servers page to enable.`)
       return
     }
@@ -906,7 +920,7 @@ async function addServer(server: RepositoryServer, env?: Record<string, string>)
 
 // Spec 109 FR-063: "Added ✓ · Open" opens the server it just added.
 function openAddedServer(server: RepositoryServer) {
-  const name = addedServers.value[server.id]
+  const name = addedServers.value[addedKey(server)]
   if (!name) return
   router.push(serverDetailPath(name))
 }

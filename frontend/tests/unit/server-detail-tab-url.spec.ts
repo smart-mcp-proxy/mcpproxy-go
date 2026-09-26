@@ -30,7 +30,7 @@ vi.mock('@/services/api', () => {
   })
   return {
     default: {
-      getServers: vi.fn(() => ok({ servers: [server('alpha')] })),
+      getServers: vi.fn(() => ok({ servers: [server('alpha'), server('beta')] })),
       getToolApprovals: vi.fn(() => ok({ tools: [], count: 0 })),
       getServerTools: vi.fn(() => ok({ tools: [] })),
       getSecurityOverview: vi.fn(() => ok({ scanners_enabled: 0, docker_available: true })),
@@ -104,6 +104,45 @@ describe('ServerDetail tab <-> ?tab= (Spec 109 FR-016)', () => {
 
     expect(router.currentRoute.value.query.tab).toBe('logs')
     expect(router.currentRoute.value.query.focus).toBe('endpoint')
+  })
+
+  // Review round 8, finding 3: <router-view :key="systemStore.authEpoch"> in
+  // App.vue means navigating from one /servers/:serverName to another does
+  // NOT remount ServerDetail (same route record, same component instance) —
+  // onMounted never runs again. The existing props.serverName watch already
+  // resets tool/log/scan state for exactly that reason, but never re-read
+  // `?tab=`, so a stale tab (e.g. Security, left over from the previous
+  // server) kept showing for the new server even though its URL carries no
+  // `?tab=` at all.
+  it('re-reads ?tab= on an in-place serverName change, resetting to the default when absent', async () => {
+    const { wrapper, router } = await mountServerDetail('/servers/alpha?tab=security')
+
+    const securityTab = wrapper.find('[data-test="security-tab"]')
+    expect(securityTab.classes()).toContain('tab-active')
+
+    // Simulate the SPA navigation App.vue's <router-view> performs without a
+    // remount: the route changes, and the parent hands the component a new
+    // serverName prop, but the ServerDetail instance itself is never
+    // recreated (no unmount/mount here either).
+    await router.push('/servers/beta')
+    await wrapper.setProps({ serverName: 'beta' })
+    await flushPromises()
+    await flushPromises()
+
+    const toolsTab = wrapper.find('[data-test="security-tab"]')
+    expect(toolsTab.classes()).not.toContain('tab-active')
+    expect(wrapper.find('.tab.tab-active').text()).toContain('Tools')
+  })
+
+  it('re-reads ?tab= on an in-place serverName change, honoring the new URL', async () => {
+    const { wrapper, router } = await mountServerDetail('/servers/alpha?tab=tools')
+
+    await router.push('/servers/beta?tab=logs')
+    await wrapper.setProps({ serverName: 'beta' })
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('.tab.tab-active').text()).toContain('Logs')
   })
 })
 

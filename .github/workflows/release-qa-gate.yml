@@ -136,7 +136,11 @@ jobs:
     name: Suite — API E2E
     needs: build-candidate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15m covered the API E2E suite alone; the cleanup-trap safety check
+    # below runs that same suite again as a subprocess (by design — it is
+    # proving the trap against a real invocation), so this budget doubled
+    # accordingly (review round 8, finding 5).
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -177,6 +181,23 @@ jobs:
           ./dist-bin/release-gate run-suite \
             --name suite/api-e2e --report-dir "${GATE_REPORT_DIR}" \
             -- bash scripts/test-api-e2e.sh
+
+      # Review round 8, finding 5: proves the E2E cleanup trap (the fix this
+      # PR ships) actually holds against a real invocation, not just a code
+      # read — starts a decoy `mcpproxy serve` on its own port/data dir, runs
+      # the full E2E script above's cleanup trap via test-api-e2e.sh, and
+      # asserts the decoy is still alive afterward. Needs the same built
+      # ./mcpproxy this job already staged, so it runs here rather than
+      # nowhere: before this, neither this script nor the hermetic
+      # descendant-pids.test.sh (see unit-tests.yml) was wired into any CI
+      # workflow, so a regression reintroducing the blanket
+      # `pkill -f "mcpproxy.*serve"` this PR removes would pass CI
+      # undetected.
+      - name: Run E2E cleanup-trap safety check
+        run: |
+          ./dist-bin/release-gate run-suite \
+            --name suite/api-e2e-cleanup-check --report-dir "${GATE_REPORT_DIR}" \
+            -- bash scripts/test-api-e2e-cleanup-check.sh
 
       - name: Upload report fragment
         if: always()
