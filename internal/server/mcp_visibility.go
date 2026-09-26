@@ -321,7 +321,17 @@ func (p *MCPProxyServer) scopedIndexedToolCount(discoverable func(serverName str
 // stricter than indexedToolVisible (the SEARCH gate, which stays permissive
 // for pending/changed tools per FR-006 byte-identity): usage ranking is not
 // search, and a still-under-review tool should not be recommended by name.
-func (p *MCPProxyServer) usageStatEligible(authCtx *auth.AuthContext, profileScope *profile.ProfileScope, serverName, toolName string) bool {
+//
+// policy is the Spec 108 compiled policy for the caller's effective profile
+// (nil when none is in effect, or the profile is legacy), consulted exactly
+// like indexedToolVisible/toolVisibleToSession's own policy gate (FR-011): a
+// usage record's tool is fleet-wide (IncrementToolUsage keys only on tool
+// name, so ANY earlier caller's calls create it, not necessarily this one's),
+// so without this gate a caller whose profile policy excludes the tool could
+// still see it NAMED in usage_summary.top_tools — a stronger disclosure than
+// tools[] (which already omits it) or hidden_by_profile (which already
+// counts it as hidden) ever intends.
+func (p *MCPProxyServer) usageStatEligible(authCtx *auth.AuthContext, profileScope *profile.ProfileScope, policy *profile.CompiledPolicy, serverName, toolName string) bool {
 	if !p.serverInScope(authCtx, profileScope, serverName) {
 		return false
 	}
@@ -331,7 +341,17 @@ func (p *MCPProxyServer) usageStatEligible(authCtx *auth.AuthContext, profileSco
 	if !p.isExactToolCallable(serverName, toolName) {
 		return false
 	}
-	return p.describeGateReason(serverName, toolName) == ""
+	if p.describeGateReason(serverName, toolName) != "" {
+		return false
+	}
+	if policy != nil {
+		annotations, found := p.EffectiveAnnotations(serverName, toolName)
+		intrinsic := profile.IntrinsicTier(annotations, found)
+		if admitted, _, _ := policy.Decide(serverName, toolName, intrinsic); !admitted {
+			return false
+		}
+	}
+	return true
 }
 
 // toolIndexed reports whether the tool is present in the shared search index

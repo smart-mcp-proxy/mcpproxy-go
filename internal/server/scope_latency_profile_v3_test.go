@@ -68,6 +68,16 @@ func TestRetrieveTools_ScopeLatency_ProfileV3VsLegacy(t *testing.T) {
 		{Name: "legacy-samescope", Servers: servers},
 	}
 	require.NoError(t, proxy.index.BatchIndexTools(tools))
+	// zcode review F3: retrieve_tools resolves searchIndex via
+	// index.ForProfile(profileName) — a lazily-created, initially EMPTY
+	// per-profile store that is populated only by RebuildProfileFromShared.
+	// BatchIndexTools above only reaches the SHARED default index, so
+	// without this the per-profile search below scans zero hits for BOTH
+	// contexts: the policy path's actual per-hit cost (EffectiveAnnotations
+	// + CompiledPolicy.Decide) is never paid, and the asserted p95 gap is
+	// measuring two no-op searches against each other.
+	require.NoError(t, proxy.index.RebuildProfileFromShared("v3-cap-read", servers))
+	require.NoError(t, proxy.index.RebuildProfileFromShared("legacy-samescope", servers))
 
 	const query = "get data"
 	const limit = 10
@@ -85,6 +95,26 @@ func TestRetrieveTools_ScopeLatency_ProfileV3VsLegacy(t *testing.T) {
 
 	legacyCtx := profile.WithProfileScope(context.Background(), proxy.profileScopeForSlug("legacy-samescope"))
 	v3Ctx := profile.WithProfileScope(context.Background(), proxy.profileScopeForSlug("v3-cap-read"))
+
+	// Fixture sanity (zcode review F3): the per-profile PHYSICAL INDEX each
+	// context searches must actually hold real, matching documents, or the
+	// p95 gap asserted below is measuring two no-op scans against each
+	// other rather than the policy path's real per-hit cost. Checked via a
+	// direct index search — NOT retrieve_tools' own JSON `total` — because
+	// this synthetic corpus's servers are indexed but never connected to a
+	// live upstream, so retrieve_tools' unrelated callability gate (no
+	// server is "callable" without a real connection) empties tools[]
+	// downstream of the scan this test cares about, for both profiles
+	// alike; that gate is orthogonal to whether SearchToolsAdmitted itself
+	// paid the EffectiveAnnotations+CompiledPolicy.Decide cost per hit.
+	for _, slug := range []string{"legacy-samescope", "v3-cap-read"} {
+		pIdx, err := proxy.index.ForProfile(slug)
+		require.NoError(t, err)
+		hits, err := pIdx.Search(query, limit)
+		require.NoError(t, err)
+		require.NotEmptyf(t, hits,
+			"%s: per-profile index must hold real matching documents, not an empty ForProfile index never populated by RebuildProfileFromShared", slug)
+	}
 
 	legacyDurations := measure(legacyCtx)
 	v3Durations := measure(v3Ctx)

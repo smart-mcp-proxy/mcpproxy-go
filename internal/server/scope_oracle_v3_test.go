@@ -98,7 +98,19 @@ func TestScopeOracleV3_HiddenByProfileIdenticalAcrossFixtures(t *testing.T) {
 
 	pinned := pinnedProfileCtx("cap-read-a")
 
-	for _, query := range []string{"read_thing", "write_thing", "destroy_thing", "erase", "ns_erase"} {
+	// The two sentinel-matching queries are the actual scope-leak probe
+	// (zcode review F2): the five original queries share no token at all
+	// with either hidden server's tool name/description, so a regression
+	// that let a hidden server's tool reach the pinned caller's response
+	// could pass every assertion below completely unnoticed — the oracle
+	// was only ever comparing two empty result sets to each other. These two
+	// queries are chosen to hit deterministically (proven by the admin
+	// control subtest) and must return NOTHING for the pinned caller.
+	queries := []string{
+		"read_thing", "write_thing", "destroy_thing", "erase", "ns_erase",
+		"SENTINEL_scopeOracleV3B_71a2_tool", "SENTINEL_scopeOracleV3AB_39fe_tool",
+	}
+	for _, query := range queries {
 		t.Run(query, func(t *testing.T) {
 			narrowResp := callRetrieveToolsV3(t, narrow.proxy, pinned, query, 10)
 			fullResp := callRetrieveToolsV3(t, full.proxy, pinned, query, 10)

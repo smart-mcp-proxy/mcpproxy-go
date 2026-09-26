@@ -2336,7 +2336,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 				if !ok {
 					return false
 				}
-				return p.usageStatEligible(authCtx, profileScope, serverName, rawToolName)
+				return p.usageStatEligible(authCtx, profileScope, policy, serverName, rawToolName)
 			}, 10)
 		} else {
 			stats, statsErr = p.storage.GetToolStats(10)
