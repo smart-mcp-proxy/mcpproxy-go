@@ -188,9 +188,9 @@ describe('useScopeQuery', () => {
       expect(api.toRest()).toEqual({ window: 'all' })
     })
 
-    it('an unsupported range is not sent on Usage', async () => {
+    it('an unsupported range maps to window=all on Usage (T113: never silently omitted, which would fall back to the backend\'s 24h default)', async () => {
       const { api } = await withScopeQuery('usage', { from: '-3d' })
-      expect(api.toRest()).toEqual({})
+      expect(api.toRest()).toEqual({ window: 'all' })
     })
 
     it('from/to map to start_time/end_time on Activity, resolving relative shorthand', async () => {
@@ -290,12 +290,12 @@ describe('pure helpers', () => {
     expect(resolveScopeTime('2025-01-01T00:00:00Z')).toBe('2025-01-01T00:00:00Z')
   })
 
-  it('usageWindowFor maps the three presets and rejects everything else', () => {
+  it('usageWindowFor maps the three presets and falls back to "all" for anything else (T113: never a silent backend-default 24h)', () => {
     expect(usageWindowFor(undefined, undefined)).toBe('all')
     expect(usageWindowFor('-24h', undefined)).toBe('24h')
     expect(usageWindowFor('-7d', undefined)).toBe('7d')
-    expect(usageWindowFor('-3d', undefined)).toBeUndefined()
-    expect(usageWindowFor('-24h', '2025-01-01T00:00:00Z')).toBeUndefined()
+    expect(usageWindowFor('-3d', undefined)).toBe('all')
+    expect(usageWindowFor('-24h', '2025-01-01T00:00:00Z')).toBe('all')
   })
 
   it('splitScopeTool splits server:tool and keeps an agreeing server', () => {

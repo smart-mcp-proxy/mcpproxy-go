@@ -15,6 +15,22 @@
         </button>
       </div>
 
+      <!-- url-filter-contract.md `from`/`to` row, rule 5: a deep-linked range
+           that is not one of the three Usage presets (24h/7d/all) is shown
+           to the request as `window=all` (T113 — never silently omitted,
+           which would ask the backend for its 24h default under a URL that
+           promised something else) but rendered here as a disabled chip so
+           the operator sees it was not actually honoured, rather than
+           quietly getting "all" with no explanation. -->
+      <span
+        v-if="usageRangeNotApplied"
+        class="badge badge-ghost badge-sm gap-1"
+        data-test="usage-range-not-applied-chip"
+        title="This time range is not one of the three Usage presets (24h, 7d, all) — showing all time instead"
+      >
+        not applied on Usage (24h, 7d or all)
+      </span>
+
       <!--
         F30 (#1046): both selects carry their purpose only in their option
         text, so a screen reader announces "combo box" with no idea what it
@@ -188,7 +204,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
-import { useScopeQuery, splitScopeTool } from '@/composables/useScopeQuery'
+import { useScopeQuery, splitScopeTool, usageWindowFor } from '@/composables/useScopeQuery'
 import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, UsageToolStat } from '@/types'
 import { formatNumber, partitionUsageTools, usageHeadline } from '@/utils/usageFormat'
 import CallHistogram from '@/components/usage/CallHistogram.vue'
@@ -226,14 +242,40 @@ const scopeQuery = route ? useScopeQuery('usage') : undefined
 // either, they only ever arrive as an incoming filter.
 const filterServer = ref('')
 const filterTool = ref('')
+// T113: the raw `from`/`to` values, kept only to drive the "not applied on
+// Usage" chip below — the actual request always goes through
+// `usageWindowFor`, never these directly.
+const rawFrom = ref('')
+const rawTo = ref('')
 function applyScopeQueryParams(): void {
   if (!route) return
   const server = route.query.server
   if (typeof server === 'string') filterServer.value = server
   const tool = route.query.tool
   if (typeof tool === 'string') filterTool.value = tool
+  // url-filter-contract.md `from`/`to` row ("Usage: window"): a deep link
+  // (a server card's "last 24h" stats line, a future Clients-row link, a
+  // shared URL) carries `from`/`to`, not `window` — without this the window
+  // picker ignored it entirely and Usage always opened on the default 24h
+  // no matter what the URL said.
+  const from = route.query.from
+  rawFrom.value = typeof from === 'string' ? from : ''
+  const to = route.query.to
+  rawTo.value = typeof to === 'string' ? to : ''
+  if (rawFrom.value || rawTo.value) {
+    window.value = usageWindowFor(rawFrom.value || undefined, rawTo.value || undefined) as UsageWindow
+  }
 }
 applyScopeQueryParams()
+
+/** Rule 5: a `from`/`to` present in the URL that is not one of the three
+ * named presets still issues `window=all` (T113), but the operator should
+ * see that the exact range they linked to was not actually honoured. */
+const usageRangeNotApplied = computed(() => {
+  if (!rawFrom.value && !rawTo.value) return false
+  if (rawTo.value) return true // an explicit end time is never one of the three presets
+  return rawFrom.value !== '-24h' && rawFrom.value !== '-7d'
+})
 
 const windowLabel = computed(() => {
   switch (window.value) {

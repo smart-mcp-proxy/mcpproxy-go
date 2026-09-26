@@ -158,15 +158,25 @@ export function resolveScopeTime(value: string, now: Date = new Date()): string 
   return new Date(now.getTime() - ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
 }
 
-/** Maps a `from` (no `to`) value to a Usage `window` value, or undefined if
- * the range cannot be expressed as one of the three Usage presets
- * (url-filter-contract.md `from`/`to` row, "Usage: window"). */
-export function usageWindowFor(from: string | undefined, to: string | undefined): string | undefined {
-  if (to) return undefined // an explicit end time is never one of the three presets
+/** Maps a `from` (no `to`) value to a Usage `window` value.
+ * url-filter-contract.md `from`/`to` row ("Usage: window") and T113: a range
+ * that cannot be expressed as one of the three presets (`24h`, `7d`, `all`)
+ * still maps to `all` here — GET /activity/usage accepts only
+ * `window=24h|7d|all` and defaults to 24h when the parameter is omitted
+ * entirely, so returning `undefined` and letting the caller drop the
+ * parameter would silently ask the backend for last-24h data under a URL
+ * that says `from=-3d`. `all` is the honest answer: it is what actually gets
+ * requested. The page still renders the disabled "not applied on Usage"
+ * chip for a `from` that reached here (rule 5) by comparing the raw value
+ * against the two named presets itself — that decision does not belong in
+ * this REST-mapping function. macOS `ScopeFilter.usageWindow(from:to:)`
+ * takes the same nil-then-`?? "all"`-at-the-call-site shape. */
+export function usageWindowFor(from: string | undefined, to: string | undefined): string {
+  if (to) return 'all' // an explicit end time is never one of the three presets
   if (!from) return 'all'
   if (from === '-24h') return '24h'
   if (from === '-7d') return '7d'
-  return undefined // e.g. -3d: not applied on Usage (disabled chip, rule 5)
+  return 'all' // e.g. -3d: not one of the three presets, but never silently omitted either
 }
 
 /** Splits a `tool` URL value per the contract's --tool/`tool` rule (rule 8): a

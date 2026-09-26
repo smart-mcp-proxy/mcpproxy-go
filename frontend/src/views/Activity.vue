@@ -2586,8 +2586,16 @@ watch(
       status: filterStatus.value || undefined,
       auth_type: filterAuthType.value || undefined,
       session: filterSession.value || undefined,
-      from: filterStartDate.value || undefined,
-      to: filterEndDate.value || undefined,
+      // `filterStartDate`/`filterEndDate` are the RAW `datetime-local` control
+      // value ("YYYY-MM-DDTHH:mm", no seconds, no timezone) — writing it to
+      // the URL verbatim put a naive local-clock string in `from`/`to`,
+      // violating the contract's "RFC 3339 or relative" (a URL shared across
+      // timezones, or just re-parsed by a stricter client, would silently
+      // read a different instant). `dateTimeLocalToISO` is the same
+      // conversion loadActivities() already applies before sending
+      // start_time/end_time to REST, so the URL and the request agree.
+      from: dateTimeLocalToISO(filterStartDate.value),
+      to: dateTimeLocalToISO(filterEndDate.value),
     })
   }
 )
