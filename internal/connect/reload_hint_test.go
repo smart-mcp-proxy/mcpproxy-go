@@ -121,11 +121,19 @@ func TestDisplayPath_WindowsCaseInsensitiveHomeMatch(t *testing.T) {
 	}
 }
 
-// TestDisplayPath_CaseSensitiveByDefault asserts that off Windows (the
-// default caseInsensitiveHomeMatch), a differently-cased path is NOT treated
-// as living under home -- the case-insensitive match above must not regress
-// exact-match behavior on POSIX filesystems.
+// TestDisplayPath_CaseSensitiveByDefault asserts that off Windows, a
+// differently-cased path is NOT treated as living under home -- the
+// case-insensitive match above must not regress exact-match behavior on
+// POSIX filesystems. caseInsensitiveHomeMatch is overridden (rather than
+// relying on the host's runtime.GOOS) so this exercises the non-Windows
+// branch even when the test itself runs on a Windows CI runner, where the
+// real default is caseInsensitiveHomeMatch() == true and would otherwise
+// make this assertion fail on that platform.
 func TestDisplayPath_CaseSensitiveByDefault(t *testing.T) {
+	orig := caseInsensitiveHomeMatch
+	caseInsensitiveHomeMatch = func() bool { return false }
+	t.Cleanup(func() { caseInsensitiveHomeMatch = orig })
+
 	home := string(filepath.Separator) + filepath.Join("Users", "alice")
 	path := string(filepath.Separator) + filepath.Join("Users", "ALICE", ".cursor", "mcp.json")
 	if got := DisplayPath(path, home); got != path {
