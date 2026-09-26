@@ -310,9 +310,20 @@ function statusLabel(server: AdminServer): string {
   if (server.health) {
     const text = healthStatusTextOrEmpty(server.health)
     if (text) return text
-  } else if (server.quarantined) {
+  }
+  // Round (this PR) review finding: these two checks used to be an `else if`
+  // chained onto `if (server.health)` above, so they only ran when
+  // `server.health` was absent entirely. A server that HAS a health object
+  // but whose summary/status are both empty (an old-core / version-skew
+  // payload) fell straight through to the bare connected/disconnected
+  // fallback below, skipping quarantined -> 'Needs review' and
+  // disabled -> 'Disabled'. Both checks must run unconditionally, exactly
+  // like statusBadge() above and UserServers.vue's healthLabel(), which
+  // re-checks `enabled` in its own final fallback regardless of `health`.
+  if (server.quarantined) {
     return healthStatusLabel('needs_review')
-  } else if (!server.enabled) {
+  }
+  if (!server.enabled) {
     return healthStatusLabel('disabled')
   }
   return server.connected ? 'connected' : 'disconnected'

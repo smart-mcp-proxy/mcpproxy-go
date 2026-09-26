@@ -39,6 +39,47 @@ struct ServersView: View {
             AddServerView(appState: appState, isPresented: $showAddServer, initialTab: addServerInitialTab)
                 .id(addServerInitialTab)
         }
+        // Review finding (this round): these two `.onReceive` handlers used to
+        // live on `serverListView`'s own VStack, a computed property this
+        // body's `else` branch only includes while `selectedServer == nil`.
+        // Opening a server's detail view (e.g. via DashboardView's
+        // AttentionRow -> navigateToServerDetail, which posts
+        // `.switchToServers` then `.showServerDetail` 0.3s later) swaps
+        // `serverListView` out of the tree and detaches that observer, so a
+        // second `.showServerDetail` notification arriving while a detail
+        // view is already open (a near-simultaneous click on a different
+        // server, or simply navigating to a second server without first
+        // dismissing the first) is silently dropped — nothing is listening.
+        // Attached here, to `body`'s own VStack, both stay live regardless of
+        // which branch is currently shown, so a later notification can always
+        // switch straight to a different server's detail.
+        .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { notification in
+            if let tab = notification.object as? AddServerTab {
+                addServerInitialTab = tab
+            } else {
+                addServerInitialTab = .manual
+            }
+            showAddServer = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showServerDetail)) { notification in
+            let serverName: String
+            let tab: ServerDetailTab
+            if let target = notification.object as? ServerDetailTarget {
+                serverName = target.serverName
+                tab = target.tab
+            } else if let name = notification.object as? String {
+                serverName = name
+                tab = .tools
+            } else {
+                return
+            }
+            // Find the server by name in the current list or appState
+            if let server = servers.first(where: { $0.name == serverName })
+                ?? appState.servers.first(where: { $0.name == serverName }) {
+                selectedServerInitialTab = tab
+                selectedServer = server
+            }
+        }
     }
 
     @ViewBuilder
@@ -174,33 +215,6 @@ struct ServersView: View {
         }
         .onChange(of: appState.serversVersion) { _ in
             triggerLoad()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { notification in
-            if let tab = notification.object as? AddServerTab {
-                addServerInitialTab = tab
-            } else {
-                addServerInitialTab = .manual
-            }
-            showAddServer = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .showServerDetail)) { notification in
-            let serverName: String
-            let tab: ServerDetailTab
-            if let target = notification.object as? ServerDetailTarget {
-                serverName = target.serverName
-                tab = target.tab
-            } else if let name = notification.object as? String {
-                serverName = name
-                tab = .tools
-            } else {
-                return
-            }
-            // Find the server by name in the current list or appState
-            if let server = servers.first(where: { $0.name == serverName })
-                ?? appState.servers.first(where: { $0.name == serverName }) {
-                selectedServerInitialTab = tab
-                selectedServer = server
-            }
         }
     }
 
