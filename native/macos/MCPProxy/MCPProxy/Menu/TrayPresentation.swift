@@ -263,6 +263,29 @@ enum TrayServerAction: String, Equatable {
         default: return nil
         }
     }
+
+    /// The verb a Needs Attention row dispatches for `server`.
+    ///
+    /// Sign-in is read from `isOAuthLoginRequired`, not `health.action`: a
+    /// quarantined server awaiting OAuth sign-in reports `action == "approve"`
+    /// (quarantine outranks everything in the core's health calculator), and
+    /// `approve` is never dispatched — so keying on the action alone left that
+    /// row with nothing to run.
+    static func forAttention(_ server: ServerStatus) -> TrayServerAction? {
+        if server.isOAuthLoginRequired { return .login }
+        return fromHealthAction(server.health?.action ?? "")
+    }
+
+    /// The actions that lead a server's submenu, in menu order. Sign in and
+    /// Review quarantine are independent: a quarantined server awaiting
+    /// sign-in gets both, because signing in is what lets the scanner see its
+    /// tools and approval is still the operator's call.
+    static func leadingMenuActions(for server: ServerStatus) -> [TrayServerAction] {
+        var actions: [TrayServerAction] = []
+        if server.isOAuthLoginRequired { actions.append(.login) }
+        if server.quarantined { actions.append(.approve) }
+        return actions
+    }
 }
 
 enum TrayServerActionFailure {
