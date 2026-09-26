@@ -154,7 +154,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
-import { healthStatusLabel } from '@/utils/health'
+import { healthStatusLabel, healthStatusTextOrEmpty } from '@/utils/health'
 
 interface AdminServer {
   name: string
@@ -301,15 +301,19 @@ function statusBadge(server: AdminServer): string {
 }
 
 function statusLabel(server: AdminServer): string {
-  if (server.quarantined) return 'quarantined'
-  if (!server.enabled) return 'disabled'
-  // FR-011: no surface may render `level` as text — including as a fallback.
-  // A payload lacking both `status` and `summary` (e.g. version skew against
-  // an older/newer core) must not fall through to the raw `level` word.
+  // One helper, one order (Spec 109): resolve through the same
+  // `healthStatusTextOrEmpty()` ServerCard/ServerDetail use — summary first,
+  // then the shared status label. Never render `level` as text (FR-011).
+  // This table's own connected/disconnected/admin-state fallback wording
+  // (lowercase, unlike the card's capitalized "Connected"/"Disconnected")
+  // stays a local convention, not part of the shared precedence.
   if (server.health) {
-    if (server.health.status) return healthStatusLabel(server.health.status)
-    if (server.health.summary) return server.health.summary
-    return server.connected ? 'connected' : 'disconnected'
+    const text = healthStatusTextOrEmpty(server.health)
+    if (text) return text
+  } else if (server.quarantined) {
+    return healthStatusLabel('needs_review')
+  } else if (!server.enabled) {
+    return healthStatusLabel('disabled')
   }
   return server.connected ? 'connected' : 'disconnected'
 }
