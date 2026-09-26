@@ -562,6 +562,41 @@ function applyTabParamIfValid(): boolean {
   return false
 }
 
+// Round-9 fix: both the `?tab=` handling above and the `?focus=` deep link
+// below were applied only in onMounted. The header's ModeSwitcher renders on
+// every page, including /settings, with a RouterLink to
+// `/settings?focus=routing_mode`; clicking it while already on /settings is a
+// query-only navigation to the same route component, which Vue Router (and
+// App.vue's <router-view>, keyed on the auth epoch rather than the route)
+// reuses rather than remounts — onMounted never reruns, so the click did
+// nothing visible. Same class of bug this same PR fixed for ServerDetail.vue
+// (round-8 finding) via a route-query watcher; extend it here.
+watch(
+  () => [route.query.tab, route.query.focus] as const,
+  ([tab, focus], prev) => {
+    const [prevTab, prevFocus] = prev ?? [undefined, undefined]
+    if (typeof tab === 'string' && tab !== prevTab) {
+      tabParamPending = false
+      applyTabParamIfValid()
+    }
+    if (typeof focus === 'string' && focus) {
+      // zcode review: comparing only `focus !== prevFocus` left a repeat
+      // click of the SAME ModeSwitcher link a dead click once the user had
+      // manually switched to a different tab in between. ModeSwitcher's
+      // RouterLink is a bare `/settings?focus=routing_mode` with no `tab`,
+      // so following it always replaces the whole query — `tab` reverting
+      // from a real string to undefined is exactly that pattern, distinct
+      // from watch(activeTab)'s own `{ ...route.query, tab }` writeback
+      // below, which never unsets `tab`. Re-run focusField whenever either
+      // the field changed or a bare focus link like that was just followed
+      // again, even onto the same field.
+      const focusChanged = focus !== prevFocus
+      const droppedTabViaBareFocusLink = typeof tab !== 'string' && typeof prevTab === 'string'
+      if (focusChanged || droppedTabViaBareFocusLink) void focusField(focus)
+    }
+  }
+)
+
 onMounted(async () => {
   if (applyTabParamIfValid()) tabParamPending = false
   if (tabParamPending) {

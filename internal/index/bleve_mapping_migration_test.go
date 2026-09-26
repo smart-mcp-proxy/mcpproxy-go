@@ -202,6 +202,87 @@ func TestRebuildIfMappingPredatesAnnotations_ConstructionFailureKeepsStaleIndexU
 	assert.Equal(t, 1, errs.Len(), "the construction failure must be logged, since it is silently swallowed to keep startup unblocked")
 }
 
+// TestRebuildIfMappingPredatesAnnotations_FinalizeSurvivesUnremovableOriginal
+// is a regression test for review round 9, finding 1 (medium): round 8 fixed
+// destructive-before-construct (build the replacement before touching
+// anything), but the finalize step still retired the original with
+// os.RemoveAll(indexPath). A partial failure of that RemoveAll — one
+// permission-impaired or locked leftover file inside the index directory —
+// can delete most-but-not-all of the original and still return an error. On
+// the next startup bleve.Open(indexPath) fails on the mangled remnant,
+// newBleveIndexAt falls through to createBleveIndex(indexPath), and if
+// index_meta.json happens to survive whatever was left behind, vendored
+// bleve's index_meta.Save (O_CREATE|O_EXCL) makes bleve.New return
+// ErrorIndexPathExists ("cannot create new index, path already exists") —
+// daemon startup then fails on every retry until an operator manually clears
+// the directory: the same outage class round 8 fixed, reachable through a
+// narrower (partial-delete) door instead of the wider
+// (any-construction-failure) door round 8 closed.
+//
+// The fix renames the original aside (os.Rename) instead of deleting its
+// contents: a rename only needs write access to indexPath's PARENT, never to
+// anything inside indexPath itself, so a permission-impaired file nested
+// inside the index directory can no longer block the swap.
+//
+// This reproduces the exact failure shape confirmed against the real
+// os.RemoveAll implementation: stripping the write bit from bleve's internal
+// "store" subdirectory makes a plain os.RemoveAll(indexPath) return
+// "permission denied" after already deleting some but not all of the
+// directory's contents (verified directly: index_meta.json is removed,
+// store/root.bolt is not, and indexPath itself survives, mangled). The test
+// asserts the rebuild still fully succeeds despite that.
+func TestRebuildIfMappingPredatesAnnotations_FinalizeSurvivesUnremovableOriginal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+
+	parent := t.TempDir()
+	indexPath := filepath.Join(parent, "index.bleve")
+
+	oldIdx, err := bleve.New(indexPath, preAnnotationsMapping())
+	require.NoError(t, err)
+	require.NoError(t, oldIdx.Close())
+
+	// bleve's scorch backend lays out a "store" subdirectory holding its
+	// bolt file. Stripping its write bit means nothing inside it can be
+	// unlinked — the shape of "one permission-impaired leftover file" the
+	// finding describes — without touching indexPath's own permissions (a
+	// rename of indexPath needs write on `parent`, not on indexPath itself,
+	// so this alone must not be enough to block the fixed code path).
+	storeDir := filepath.Join(indexPath, "store")
+	_, statErr := os.Stat(storeDir)
+	require.NoError(t, statErr, "test assumption: bleve's scorch backend lays out indexPath/store")
+	require.NoError(t, os.Chmod(storeDir, 0o555))
+	// On success the fix renames indexPath aside to indexPath+".rebuild-old"
+	// before best-effort-removing it, so the chmod'd "store" subdirectory
+	// ends up there, not at its original path; t.TempDir()'s own cleanup
+	// needs write access to whichever location it lands at.
+	t.Cleanup(func() {
+		_ = os.Chmod(storeDir, 0o755)
+		_ = os.Chmod(filepath.Join(indexPath+".rebuild-old", "store"), 0o755)
+	})
+
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core)
+
+	reopened, err := bleve.Open(indexPath)
+	require.NoError(t, err)
+
+	idx, err := rebuildIfMappingPredatesAnnotations(reopened, indexPath, logger)
+	require.NoError(t, err, "the rebuild must succeed even though a file inside the original index directory cannot be removed")
+	require.NotNil(t, idx)
+	defer idx.Close()
+
+	fm := idx.Mapping().FieldMappingForPath("annotations_json")
+	assert.NotEmpty(t, fm.Type, "the swap must have completed: the returned index carries the current mapping")
+
+	rebuilds := logs.FilterMessageSnippet("Rebuilt Bleve index with the current field mapping")
+	assert.Equal(t, 1, rebuilds.Len())
+}
+
 // TestNewBleveIndexAt_NoWarningOnCurrentMapping guards against a false
 // positive: an index created (or previously opened) by the CURRENT code must
 // never trigger the migration warning.
