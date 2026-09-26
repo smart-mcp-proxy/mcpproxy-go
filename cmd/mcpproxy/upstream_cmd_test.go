@@ -338,7 +338,7 @@ func TestLoadUpstreamConfig_FallsBackToGlobalConfigFlag(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "scratch_config.json")
 	configJSON := `{
 		"listen": "127.0.0.1:19999",
-		"data_dir": "` + tmpDir + `",
+		"data_dir": "` + jsonEscapePath(tmpDir) + `",
 		"mcpServers": []
 	}`
 	if err := os.WriteFile(configPath, []byte(configJSON), 0644); err != nil {
