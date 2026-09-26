@@ -788,10 +788,23 @@ type StatCard = 'total' | 'enabled' | 'disabled'
 // unfiltered. An approval-only filter (filterStatus empty) still narrows the
 // table, so none of Total/Enabled/Disabled correctly describes it — return
 // null rather than defaulting to 'total'.
+//
+// Round-9 fix: that filterApproval guard must only suppress TOTAL, not
+// Enabled/Disabled. It used to run before the filterStatus checks, so it
+// always won whenever an approval filter was set — activeStatCard() was
+// null no matter what filterStatus held. That made selectStatCard's toggle
+// condition (`activeStatCard.value === card`) permanently false for
+// 'enabled'/'disabled': clicking the Enabled/Disabled stat card while an
+// approval filter is active still applied filterStatus (so the table did
+// filter), but the card never rendered as active and a second click ran the
+// same no-op branch again instead of toggling off. filterStatus === 'enabled'
+// / 'disabled' fully describes the row regardless of any additional approval
+// filter, so those checks must run first; only fall through to the
+// filterApproval-only null when filterStatus is empty.
 const activeStatCard = computed<StatCard | null>(() => {
-  if (filterApproval.value) return null
   if (filterStatus.value === 'enabled') return 'enabled'
   if (filterStatus.value === 'disabled') return 'disabled'
+  if (filterApproval.value) return null
   return 'total'
 })
 
