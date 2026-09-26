@@ -86,7 +86,9 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
   },
   scales: {
     x: { stacked: true, ticks: { maxRotation: 0, autoSkip: true, font: { size: 10 } } },
-    y: { stacked: true, beginAtZero: true, ticks: { callback: (v) => formatNumber(Number(v)) } },
+    // Spec 109 FR-074: a call count is never fractional — force integer
+    // ticks rather than letting chart.js round a small max into 0.5/1.5s.
+    y: { stacked: true, beginAtZero: true, ticks: { precision: 0, callback: (v) => formatNumber(Number(v)) } },
   },
 }))
 </script>

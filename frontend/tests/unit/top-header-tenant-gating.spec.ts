@@ -1,7 +1,32 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { shallowMount } from '@vue/test-utils'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { shallowMount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
+
+// Spec 109 FR-057: ProfileSwitcher now also requires profilesStore.hasProfiles
+// (fetched by TopHeader on mount), so a real profile must be mocked here for
+// the "still renders for an admin principal" case below to hold.
+vi.mock('@/services/api', () => {
+  const ok = (data: unknown = {}) => Promise.resolve({ success: true, data })
+  const base: Record<string, unknown> = {
+    getProfiles: vi.fn(() => ok({ profiles: [{ name: 'work', servers: ['alpha'], tool_count: 3 }] })),
+    getActiveProfile: vi.fn(() => ok({ active_profile: '' })),
+    // authStore.principalKind calls this SYNCHRONOUSLY and branches on
+    // truthiness — the Proxy fallback below returns a (truthy) Promise for
+    // any undeclared method, which would silently reclassify every tenant
+    // test here as 'api_key'.
+    hasAPIKey: vi.fn(() => false),
+  }
+  return {
+    default: new Proxy(base, {
+      get(target: Record<string, unknown>, prop: string) {
+        if (prop in target) return target[prop]
+        target[prop] = vi.fn(() => ok())
+        return target[prop]
+      },
+    }),
+  }
+})
 
 // Spec 107 PR-C cross-review round 2, chunk 4 (P1): ModeSwitcher was
 // unconditionally rendered in TopHeader for every principal kind, including
@@ -39,12 +64,14 @@ async function mountTopHeaderAs(role: 'user' | 'admin') {
     last_login_at: '',
   }
 
-  return shallowMount(TopHeader, {
+  const wrapper = shallowMount(TopHeader, {
     global: {
       plugins: [router],
       stubs: { RouterLink: true },
     },
   })
+  await flushPromises()
+  return wrapper
 }
 
 describe('TopHeader tenant gating (Spec 107 FR-041, cross-review round 2 P1)', () => {

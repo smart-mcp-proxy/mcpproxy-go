@@ -1619,7 +1619,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
@@ -1660,6 +1660,7 @@ interface Props {
 
 const props = defineProps<Props>()
 const route = useRoute()
+const router = useRouter()
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
@@ -1709,6 +1710,30 @@ function mutateStoreServer(fn: (s: Server) => void) {
   if (s) fn(s)
 }
 const activeTab = ref<'tools' | 'logs' | 'config' | 'security'>('tools')
+// Spec 109 FR-016: every tab change (click, or a programmatic jump such as
+// the auto-approve flow landing on Security) is reflected in `?tab=`, keeping
+// every other query param, so the active tab survives a reload or a shared
+// link. The initial value is read from `?tab=` in onMounted below; this watch
+// only ever writes forward from there.
+watch(activeTab, (tab) => {
+  if (route.query.tab === tab) return
+  void router.replace({ query: { ...route.query, tab } })
+})
+// Sets activeTab from `?tab=` (or resets it to the default when absent),
+// shared by onMounted and the props.serverName watch below. App.vue's
+// <router-view> is keyed on the auth epoch, not the route, so navigating
+// from one /servers/:serverName to another reuses this same component
+// instance — onMounted never runs again, so a stale tab left over from the
+// PREVIOUS server (e.g. Security) would otherwise keep showing for the new
+// one even though its URL carries no `?tab=` at all (review round 8,
+// finding 3).
+function readTabFromQuery() {
+  const tabParam = route.query.tab as string
+  activeTab.value =
+    tabParam && ['tools', 'logs', 'config', 'security'].includes(tabParam)
+      ? (tabParam as typeof activeTab.value)
+      : 'tools'
+}
 const actionLoading = ref(false)
 
 // Tools
@@ -2276,6 +2301,12 @@ watch(
     scanFilesLoaded.value = false
     // Per-server UI state must not leak onto the next server's page.
     trustModeRestartRequired.value = false
+    // Re-read (or reset) the tab for the new server's URL — see
+    // readTabFromQuery's own comment for why onMounted alone is not enough.
+    readTabFromQuery()
+    if (activeTab.value === 'security') {
+      loadScannerNames()
+    }
     void loadServerDetails().then(() => {
       // Same reasons as onMounted: banner (US3) + hold-evidence report links
       // (US2) need the latest report's job id on every tab — onMounted does
@@ -4086,10 +4117,7 @@ watch(logTail, () => {
 // Load data on mount
 onMounted(() => {
   // Read tab from query parameter (e.g., ?tab=security)
-  const tabParam = route.query.tab as string
-  if (tabParam && ['tools', 'logs', 'config', 'security'].includes(tabParam)) {
-    activeTab.value = tabParam as typeof activeTab.value
-  }
+  readTabFromQuery()
   loadServerDetails().then(() => {
     // Audit F11: honor ?focus=endpoint once the server payload is in, so the
     // Edit URL action lands on a focused, pre-filled field.

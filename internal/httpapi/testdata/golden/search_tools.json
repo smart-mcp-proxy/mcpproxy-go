@@ -9,6 +9,7 @@
           "description": "A simple echo tool for testing",
           "name": "echo_tool",
           "server_name": "test-server",
+          "tier": "unannotated",
           "usage": 10
         }
       }
