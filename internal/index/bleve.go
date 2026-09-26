@@ -769,12 +769,17 @@ const (
 // caller whose page filled up before scanning every match still gets an
 // accurate count.
 //
-// Identical to SearchToolsScoped in every other respect (same query
-// construction incl. the underscore-segment enhancement, same score-then-id
-// sort, same exhaustive From/Size paging with no result cap) — a predicate
-// that only ever returns Admit/RejectScope (never RejectPolicy) makes this
-// method equal SearchToolsScoped(query, limit, func(s string) bool { admit
-// still sees the server only }) exactly (T016a).
+// Identical to SearchToolsScoped in query construction (incl. the
+// underscore-segment enhancement) and score-then-id sort. It differs in ONE
+// respect, precisely because of the counting requirement above:
+// SearchToolsScoped returns as soon as its page fills, while this method
+// keeps paging to the end of the exhaustive match set regardless (zcode
+// review round 1 — an early return there silently undercounted
+// hiddenByPolicy for any RejectPolicy hit ranked below the cut). A predicate
+// that only ever returns Admit/RejectScope (never RejectPolicy) still makes
+// this method's RESULT SET equal SearchToolsScoped(query, limit, func(s
+// string) bool { admit still sees the server only })'s exactly (T016a) —
+// the extra scanning costs work, never a different admitted page.
 func (b *BleveIndex) SearchToolsAdmitted(queryStr string, limit int, admit func(Hit) Admission) (results []*config.SearchResult, hiddenByPolicy int, err error) {
 	if queryStr == "" {
 		return nil, 0, fmt.Errorf("search query cannot be empty")
