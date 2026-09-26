@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
@@ -196,6 +197,14 @@ func (m *Manager) countAgentTokensForOwnerLocked(tx *bbolt.Tx, userID string) (i
 func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacKey []byte) error {
 	if token.Name == "" {
 		return fmt.Errorf("agent token name cannot be empty")
+	}
+	// FR-021: the "client-" name prefix is reserved for kind=client
+	// credentials, minted only through MintClientCredential. A regular
+	// token created through this door must never claim it — a grandfathered
+	// pre-108 token that already holds such a name is untouched (this guard
+	// only refuses NEW creates).
+	if token.Kind != auth.KindClient && strings.HasPrefix(token.Name, "client-") {
+		return fmt.Errorf("token names starting with \"client-\" are reserved for client credentials")
 	}
 
 	hash := auth.HashToken(rawToken, hmacKey)

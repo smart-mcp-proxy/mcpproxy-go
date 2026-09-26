@@ -487,8 +487,11 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check if this is an agent token
-		if strings.HasPrefix(token, auth.TokenPrefixStr) {
+		// Check if this is an agent token OR a Spec 108-c client credential
+		// (mcp_cli_): both authenticate on MCP through the same validator
+		// (storage.ValidateAgentToken), which enforces the FR-021 fail-closed
+		// invariants for whichever kind the prefix claims.
+		if strings.HasPrefix(token, auth.TokenPrefixStr) || strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
 			cfg := s.runtime.Config()
 			if cfg == nil {
 				// Fail closed. Forwarding here would hand the request on with NO

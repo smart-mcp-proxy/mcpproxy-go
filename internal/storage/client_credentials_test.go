@@ -1,14 +1,39 @@
 package storage
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 )
+
+// createGrandfatheredRegularToken writes tok directly to the agent_tokens
+// bucket, bypassing CreateAgentToken's FR-021 "client-" name guard — the
+// only way to construct the pre-108 scenario the guard exists to prevent
+// going forward (a REGULAR token that already holds a client-<id> name).
+func createGrandfatheredRegularToken(t *testing.T, mgr *Manager, tok auth.AgentToken, rawToken string) {
+	t.Helper()
+	hash := auth.HashToken(rawToken, testHMACKey)
+	tok.TokenHash = hash
+	tok.TokenPrefix = auth.TokenPrefix(rawToken)
+	if tok.CreatedAt.IsZero() {
+		tok.CreatedAt = time.Now().UTC()
+	}
+	data, err := json.Marshal(tok)
+	require.NoError(t, err)
+	require.NoError(t, mgr.db.db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(AgentTokensBucket))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(hash), data)
+	}))
+}
 
 // TestMintClientCredential_Basics pins the FR-021 shape and invariants of a
 // freshly minted client credential (T028).
@@ -75,7 +100,7 @@ func TestMintClientCredential_ConflictWithRegularToken(t *testing.T) {
 	defer cleanup()
 
 	legacy, rawLegacy := makeTestToken("client-cursor")
-	require.NoError(t, mgr.CreateAgentToken(legacy, rawLegacy, testHMACKey))
+	createGrandfatheredRegularToken(t, mgr, legacy, rawLegacy)
 
 	raw, _ := auth.GenerateClientToken()
 	_, err := mgr.MintClientCredential("cursor", raw, testHMACKey, auth.ProfileModeLocked, "work-readonly", time.Now().Add(24*time.Hour))
@@ -192,11 +217,68 @@ func TestForgetClientCredential(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestRegularTokenCannotUseClientPrefixName pins "regular token with
-// client- prefix refused" (T028): CreateAgentToken must not silently allow a
-// regular token to squat the client namespace it did not previously reject.
-// (Documents existing behaviour; the FR-021 400 on the REST surface is
-// enforced at the httpapi layer, not here.)
+// TestCreateAgentToken_RejectsClientPrefixForRegularToken pins FR-021:
+// "regular tokens MUST NOT be created with the client- prefix" (T028) — a
+// grandfathered pre-108 token that already holds such a name is untouched
+// (MintClientCredential's own conflict check, tested above); this guards the
+// NEW-create door.
+func TestCreateAgentToken_RejectsClientPrefixForRegularToken(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	tok, raw := makeTestToken("client-cursor")
+	err := mgr.CreateAgentToken(tok, raw, testHMACKey)
+	require.Error(t, err)
+
+	// A genuine kind=client record is unaffected by this guard (it goes
+	// through MintClientCredential, not CreateAgentToken, but the guard
+	// itself must not misfire on a Kind=client value).
+	tok2, raw2 := makeTestToken("client-cursor")
+	tok2.Kind = auth.KindClient
+	tok2.ClientID = "cursor"
+	tok2.ProfileMode = auth.ProfileModeSwitchable
+	tok2.AllowedServers = []string{"*"}
+	tok2.Permissions = []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}
+	require.NoError(t, mgr.CreateAgentToken(tok2, raw2, testHMACKey))
+}
+
+// TestValidateAgentToken_MalformedClientRecord pins the storage half of
+// T027a: a hand-written malformed kind=client bbolt record is refused on
+// every authentication with the exact FR-021 text, never a downgrade to a
+// regular wildcard agent token.
+func TestValidateAgentToken_MalformedClientRecord(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	raw, err := auth.GenerateClientToken()
+	require.NoError(t, err)
+
+	// kind=client without client_id.
+	malformed := auth.AgentToken{
+		Name:           "client-cursor",
+		Kind:           auth.KindClient,
+		ProfileMode:    auth.ProfileModeSwitchable,
+		AllowedServers: []string{"*"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	}
+	hash := auth.HashToken(raw, testHMACKey)
+	malformed.TokenHash = hash
+	malformed.TokenPrefix = auth.TokenPrefix(raw)
+	data, err := json.Marshal(malformed)
+	require.NoError(t, err)
+	require.NoError(t, mgr.db.db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(AgentTokensBucket))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(hash), data)
+	}))
+
+	_, err = mgr.ValidateAgentToken(raw, testHMACKey)
+	require.Error(t, err)
+	assert.Equal(t, "malformed credential record", err.Error())
+}
+
 func TestValidateAgentToken_RejectsUnrecognisedPrefix(t *testing.T) {
 	mgr, cleanup := setupTestStorageForAgentTokens(t)
 	defer cleanup()
