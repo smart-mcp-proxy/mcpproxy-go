@@ -1720,6 +1720,21 @@ watch(activeTab, (tab) => {
   if (route.query.tab === tab) return
   void router.replace({ query: { ...route.query, tab } })
 })
+// Sets activeTab from `?tab=` (or resets it to the default when absent),
+// shared by onMounted and the props.serverName watch below. App.vue's
+// <router-view> is keyed on the auth epoch, not the route, so navigating
+// from one /servers/:serverName to another reuses this same component
+// instance — onMounted never runs again, so a stale tab left over from the
+// PREVIOUS server (e.g. Security) would otherwise keep showing for the new
+// one even though its URL carries no `?tab=` at all (review round 8,
+// finding 3).
+function readTabFromQuery() {
+  const tabParam = route.query.tab as string
+  activeTab.value =
+    tabParam && ['tools', 'logs', 'config', 'security'].includes(tabParam)
+      ? (tabParam as typeof activeTab.value)
+      : 'tools'
+}
 const actionLoading = ref(false)
 
 // Tools
@@ -2271,6 +2286,7 @@ watch(
   (next, prev) => {
     if (next === prev) return
     serverTools.value = []
+    toolsLoadedKey = ''
     toolsError.value = null
     selectedToolSchema.value = null
     toolApprovals.value = []
@@ -2286,6 +2302,12 @@ watch(
     scanFilesLoaded.value = false
     // Per-server UI state must not leak onto the next server's page.
     trustModeRestartRequired.value = false
+    // Re-read (or reset) the tab for the new server's URL — see
+    // readTabFromQuery's own comment for why onMounted alone is not enough.
+    readTabFromQuery()
+    if (activeTab.value === 'security') {
+      loadScannerNames()
+    }
     void loadServerDetails().then(() => {
       // Same reasons as onMounted: banner (US3) + hold-evidence report links
       // (US2) need the latest report's job id on every tab — onMounted does
@@ -2469,25 +2491,57 @@ function loadTools() {
   return _loadToolsWithGen(loadGeneration)
 }
 
-async function _loadToolsWithGen(gen: number) {
+// Background refetch for live updates (approval, servers.changed): no loading
+// spinner, and a failure keeps the list on screen instead of replacing it with
+// an error — the next event or a manual Refresh re-converges.
+function refreshToolsSilently() {
+  return _loadToolsWithGen(loadGeneration, true)
+}
+
+// The server fields the tool list depends on. A quarantined stdio server is
+// already connected with its tools withheld, so approval changes `quarantined`
+// and `tool_count` but neither of the flags the connected/enabled watch keys on.
+type ToolsStateFields = Pick<Server, 'quarantined' | 'connected' | 'enabled' | 'tool_count'>
+function toolsStateKey(s: Partial<ToolsStateFields> | null | undefined): string {
+  if (!s) return ''
+  return [s.quarantined, s.connected, s.enabled, s.tool_count].join('|')
+}
+// Key of the server state the displayed tool list was requested under. It only
+// advances when a response is committed, so a failed refetch leaves it behind
+// and the next servers.changed event for the same state retries.
+let toolsLoadedKey = ''
+// Overlapping tool fetches for the same server (approval, reconnect events, the
+// connected/enabled watch) can resolve out of order; only a response newer than
+// the last committed one may replace the list.
+let toolsIssueSeq = 0
+let toolsAppliedSeq = 0
+
+async function _loadToolsWithGen(gen: number, silent = false) {
   if (!server.value) return
 
-  toolsLoading.value = true
-  toolsError.value = null
+  const mySeq = ++toolsIssueSeq
+  const myKey = toolsStateKey(server.value)
+  if (!silent) {
+    toolsLoading.value = true
+    toolsError.value = null
+  }
 
   try {
     const response = await api.getServerTools(server.value.name)
-    if (gen !== loadGeneration) return
+    if (gen !== loadGeneration || mySeq < toolsAppliedSeq) return
     if (response.success && response.data) {
       serverTools.value = response.data.tools || []
-    } else {
+      toolsError.value = null
+      toolsAppliedSeq = mySeq
+      toolsLoadedKey = myKey
+    } else if (!silent) {
       toolsError.value = response.error || 'Failed to load tools'
     }
   } catch (err) {
-    if (gen !== loadGeneration) return
+    if (gen !== loadGeneration || silent || mySeq < toolsAppliedSeq) return
     toolsError.value = err instanceof Error ? err.message : 'Failed to load tools'
   } finally {
-    if (gen === loadGeneration) toolsLoading.value = false
+    if (gen === loadGeneration && !silent) toolsLoading.value = false
   }
 }
 
@@ -3001,6 +3055,7 @@ async function quarantineServer() {
     // Update local server reference
     await serversStore.fetchServers()
     // server is a computed from the store — no manual reassignment needed.
+    await Promise.all([refreshToolsSilently(), loadToolApprovals()])
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -3026,6 +3081,7 @@ async function unquarantineServer() {
     // Update local server reference
     await serversStore.fetchServers()
     // server is a computed from the store — no manual reassignment needed.
+    await Promise.all([refreshToolsSilently(), loadToolApprovals()])
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -3193,6 +3249,9 @@ async function doSecurityApprove(force: boolean) {
     showApproveConfirmation.value = false
     await serversStore.fetchServers()
     // server is a computed from the store — no manual reassignment needed.
+    // Approval releases the withheld tools, but the server was usually already
+    // connected, so the connected/enabled watch does not fire: refetch here.
+    await Promise.all([refreshToolsSilently(), loadToolApprovals()])
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -3911,14 +3970,51 @@ async function refreshAfterScanSettled() {
 }
 
 /**
- * Server state changed (typically a CLI/MCP tool approval). The servers store
- * registers its own listener for this event and refreshes the projection
- * itself — either from the event payload or with a silent refetch — so the
- * only thing missing here is this server's approval list.
+ * Whether a servers.changed event may have changed this server's tool list.
+ * The event's `server`/`reason` fields cannot scope it: the core coalesces
+ * bursts and keeps only the LAST marker, so a change to this server can arrive
+ * tagged with another server's name. The embedded server list is
+ * authoritative, so compare this server's entry against the state the current
+ * tool list was requested under. A notify-only event (older core, or a
+ * ListServers failure) carries no list — refetch defensively.
  */
-async function refreshAfterServersChanged() {
+function serversChangedTouchesTools(detail: unknown): boolean {
+  const servers = (detail as { payload?: { servers?: unknown } } | null | undefined)?.payload?.servers
+  if (!Array.isArray(servers)) return true
+  const entry = servers.find(
+    (s): s is Partial<ToolsStateFields> & { name: string } =>
+      !!s && typeof s === 'object' && (s as { name?: unknown }).name === props.serverName
+  )
+  if (!entry) return false
+  // `tool_count` on the wire is a sticky, supervisor-re-stuck value: it is
+  // only zeroed while quarantined and otherwise survives a disconnect/
+  // reconnect cycle unchanged even though the reconnect clears the actual
+  // StateView tool list (MCP-2083). So a state transition that empties the
+  // real list (e.g. approving a quarantined server) and one that later
+  // repopulates it via background discovery can carry the IDENTICAL key,
+  // and the second, real change would be wrongly deduped away, leaving the
+  // Tools tab stuck on "No tools available" forever (the S3 symptom).
+  // Self-heal that case: whenever the server is active and we're currently
+  // showing zero tools, don't trust the key — always retry. This costs at
+  // most one extra refetch per empty state and closes the permanent-stall
+  // window regardless of which event/reason produced it.
+  if (serverTools.value.length === 0 && entry.connected && entry.enabled && !entry.quarantined) {
+    return true
+  }
+  return toolsStateKey(entry) !== toolsLoadedKey
+}
+
+/**
+ * Server state changed (a CLI/MCP tool approval, a server approval, tools
+ * released after reconnect). The servers store registers its own listener for
+ * this event and refreshes the projection itself — either from the event
+ * payload or with a silent refetch — so what is missing here is this server's
+ * approval list and, when the event touches it, its tool list.
+ */
+async function refreshAfterServersChanged(detail: unknown) {
   if (!server.value) return
-  await loadToolApprovals()
+  const refetchTools = serversChangedTouchesTools(detail)
+  await Promise.all([loadToolApprovals(), refetchTools ? refreshToolsSilently() : Promise.resolve()])
 }
 
 function handleScanSettledEvent(event: Event) {
@@ -3930,8 +4026,8 @@ function handleScanSettledEvent(event: Event) {
   void refreshAfterScanSettled()
 }
 
-function handleServersChangedEvent() {
-  void refreshAfterServersChanged()
+function handleServersChangedEvent(event: Event) {
+  void refreshAfterServersChanged((event as CustomEvent).detail)
 }
 
 
@@ -4018,10 +4114,7 @@ watch(logTail, () => {
 // Load data on mount
 onMounted(() => {
   // Read tab from query parameter (e.g., ?tab=security)
-  const tabParam = route.query.tab as string
-  if (tabParam && ['tools', 'logs', 'config', 'security'].includes(tabParam)) {
-    activeTab.value = tabParam as typeof activeTab.value
-  }
+  readTabFromQuery()
   loadServerDetails().then(() => {
     // Audit F11: honor ?focus=endpoint once the server payload is in, so the
     // Edit URL action lands on a focused, pre-filled field.

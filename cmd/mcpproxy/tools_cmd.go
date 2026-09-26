@@ -254,6 +254,40 @@ func resolvedTierFilter() string {
 	return toolsRiskFilter
 }
 
+// validTierFilterValues lists the tier strings --tier/--risk accepts,
+// mirrored from contracts.Tier — excluding contracts.TierUnknown, which
+// AnnotationTier never returns (see internal/contracts/tier.go's own doc
+// comment) and so can never legitimately appear in a --tier/--risk match.
+var validTierFilterValues = []string{
+	string(contracts.TierRead),
+	string(contracts.TierWrite),
+	string(contracts.TierDestructive),
+	string(contracts.TierUnannotated),
+}
+
+// validateTierFilter rejects an unrecognized --tier/--risk value up front.
+// Without this, applyGlobalToolFilters/filterToolMetadataByTier's
+// strings.EqualFold match against every known tier simply fails on a typo
+// like `--tier destrutive`, silently returning an empty table and exiting 0
+// — a CI or audit script grepping for e.g. destructive tools reads that as
+// "the host has none", a false all-clear on exactly the safety-relevant
+// query this flag exists to answer (review round 8, finding 6).
+// flagName is only used to name the offending flag in the error, since
+// resolvedTierFilter merges --tier and --risk into one string that no
+// longer remembers which flag the caller actually set.
+func validateTierFilter(flagName, value string) error {
+	if value == "" {
+		return nil
+	}
+	for _, v := range validTierFilterValues {
+		if strings.EqualFold(value, v) {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid --%s %q: must be one of: %s (or empty for no filter)",
+		flagName, value, strings.Join(validTierFilterValues, ", "))
+}
+
 // GetToolsCommand returns the tools command for adding to the root command
 func GetToolsCommand() *cobra.Command {
 	return toolsCmd
@@ -311,6 +345,13 @@ func initToolsFlags() {
 }
 
 func runToolsList(_ *cobra.Command, _ []string) error {
+	if err := validateTierFilter("tier", toolsTierFilter); err != nil {
+		return err
+	}
+	if err := validateTierFilter("risk", toolsRiskFilter); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

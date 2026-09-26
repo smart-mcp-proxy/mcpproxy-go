@@ -202,6 +202,7 @@
           @click="handleApproveClick"
           :disabled="loading"
           class="btn btn-sm btn-warning"
+          data-test="server-card-approve"
         >
           <span v-if="loading" class="loading loading-spinner loading-xs"></span>
           Approve
@@ -221,11 +222,16 @@
           Enable
         </button>
 
+        <!-- Login shows whenever the server needs an OAuth sign-in, not only
+             when health.action is 'login': a quarantined server's action is
+             'approve', yet it still cannot connect until the user signs in
+             (ServerDetail's SignInPanel offers Log in in the same state). -->
         <button
-          v-if="healthAction === 'login'"
+          v-if="showLogin"
           @click="triggerOAuth"
           :disabled="loading"
           class="btn btn-sm btn-primary"
+          data-test="server-card-login"
         >
           <span v-if="loading" class="loading loading-spinner loading-xs"></span>
           Login
@@ -454,9 +460,20 @@ const isHttpProtocol = computed(() => {
 
 // MCP-1821 — OAuth sign-in state (null when no sign-in is required). When set,
 // the status chip reads a calm amber "Sign-in required" instead of red
-// "Disconnected"/"Unhealthy", matching the ServerDetail Sign-in CTA. The
-// existing health.action==='login' Login button (below) drives the action.
+// "Disconnected"/"Unhealthy", matching the ServerDetail Sign-in CTA, and the
+// Login button (below) drives the action.
 const signInState = computed(() => oauthSignInState(props.server))
+
+// Login renders for any sign-in state, including a quarantined server whose
+// health.action is 'approve' — Approve and Login then show side by side. A
+// disabled server is excluded FIRST: its health/diagnostic can be frozen
+// from before it was disabled (disableServer's optimistic update flips
+// `enabled` immediately but only the later SSE refresh clears health), and
+// Enable is the next step regardless of what health.action still says.
+const showLogin = computed(() => {
+  if (!props.server.enabled || props.server.health?.admin_state === 'disabled') return false
+  return signInState.value !== null
+})
 
 // Trust-mode badge (spec 088 FR-007 / FR-001). Display only — the mode is
 // changed from the server detail Configuration tab.
@@ -757,6 +774,8 @@ const shouldShowError = computed(() => {
   if (actionsSuppressingError.includes(healthAction.value)) {
     return false
   }
+  // The Login button conveys a pending sign-in, whatever health.action says.
+  if (showLogin.value) return false
 
   // Show error for other cases (restart, view_logs, or no action)
   return true

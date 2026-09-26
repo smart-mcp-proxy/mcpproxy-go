@@ -81,6 +81,31 @@ func TestResolvedTierFilter_RiskIsAnAliasOfTier(t *testing.T) {
 	assert.Equal(t, "destructive", resolvedTierFilter(), "--tier wins when both are set")
 }
 
+// TestValidateTierFilter_RejectsUnknownValue is a regression test for review
+// round 8, finding 6: before this, --tier/--risk accepted ANY string with no
+// validation, so a typo like `--tier destrutive` silently matched nothing
+// (strings.EqualFold against every known tier fails) and the command still
+// exited 0 with an empty table — a CI or audit script grepping for e.g.
+// destructive tools would read that as "the host has none" instead of "the
+// flag was misspelled". A known-good value must still be accepted
+// case-insensitively, matching applyGlobalToolFilters' own EqualFold match.
+func TestValidateTierFilter_RejectsUnknownValue(t *testing.T) {
+	for _, tc := range []string{"read", "write", "destructive", "unannotated", "READ", "Destructive"} {
+		assert.NoError(t, validateTierFilter("tier", tc), "valid value %q must be accepted", tc)
+	}
+
+	assert.NoError(t, validateTierFilter("tier", ""), "empty (no filter) must be accepted")
+
+	err := validateTierFilter("tier", "destrutive")
+	require.Error(t, err, "a typo must be rejected, not silently matched against nothing")
+	assert.Contains(t, err.Error(), "destrutive")
+	assert.Contains(t, err.Error(), "--tier")
+
+	err = validateTierFilter("risk", "bogus")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--risk", "the error must name the flag the caller actually used")
+}
+
 // TestOutputGlobalTools_TierColumn proves the TIER column exists and renders
 // the backend-computed value verbatim.
 func TestOutputGlobalTools_TierColumn(t *testing.T) {

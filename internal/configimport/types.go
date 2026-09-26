@@ -142,7 +142,7 @@ type ImportSummary struct {
 // SkippedServer represents a server that was skipped during import.
 type SkippedServer struct {
 	Name   string `json:"name"`
-	Reason string `json:"reason"` // "already_exists", "filtered_out", "invalid_name"
+	Reason string `json:"reason"` // "already_exists", "filtered_out", "invalid_name", "self_reference"
 }
 
 // FailedServer represents a server that failed to import.
@@ -165,6 +165,13 @@ type ImportOptions struct {
 
 	// ExistingServers is used to check for duplicates
 	ExistingServers []string
+
+	// SelfListenAddrs are this mcpproxy instance's listen addresses (e.g.
+	// "127.0.0.1:8080"). Source entries whose URL (or stdio-bridge arg)
+	// addresses one of this instance's /mcp endpoints are skipped with reason
+	// SkipReasonSelfReference instead of being offered for import. Empty
+	// disables the check.
+	SelfListenAddrs []string
 
 	// SkipQuarantine if true, imported servers are not quarantined.
 	// By default, all imported servers are quarantined for security review.
