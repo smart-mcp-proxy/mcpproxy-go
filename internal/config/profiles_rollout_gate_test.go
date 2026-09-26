@@ -107,6 +107,9 @@ func TestEnablePolicyForTest_PanicsOutsideATestBinary(t *testing.T) {
 		t.Skip("skipping go build subprocess probe in -short mode")
 	}
 	bin := filepath.Join(t.TempDir(), "overrideprobe")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	build := exec.Command("go", "build", "-o", bin, "./testdata/overrideprobe")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build overrideprobe: %v\n%s", err, out)
@@ -139,6 +142,9 @@ func TestServeRejectsV3PolicyFieldsAtStartup(t *testing.T) {
 	}
 
 	bin := filepath.Join(t.TempDir(), "mcpproxy-gateprobe")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	build := exec.Command("go", "build", "-o", bin, "github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./cmd/mcpproxy: %v\n%s", err, out)
