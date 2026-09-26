@@ -146,6 +146,25 @@
       <button class="btn btn-sm" @click="reload">Retry</button>
     </div>
 
+    <!-- Contradictory server/tool (rule 8, zcode F1): no REST request can
+         express both, so none is issued — never the unfiltered aggregate. -->
+    <div
+      v-else-if="filterConflict"
+      class="card bg-base-200 border border-warning/40"
+      data-test="usage-conflict-empty-state"
+    >
+      <div class="card-body items-center text-center py-12">
+        <h3 class="font-semibold text-lg mt-2">Server and tool don't match</h3>
+        <p class="text-sm text-base-content/60 max-w-md">
+          <code>server={{ filterServer }}</code> and <code>tool={{ filterTool }}</code>
+          name different servers, so no request can satisfy both. Remove one to continue.
+        </p>
+        <button class="btn btn-sm btn-primary mt-2" data-test="usage-conflict-clear" @click="clearScopeConflict">
+          Clear filter
+        </button>
+      </div>
+    </div>
+
     <!-- Empty / low-data state (FR-009) -->
     <div
       v-else-if="data && isEmpty"
@@ -321,6 +340,26 @@ const freshnessLabel = computed(() => {
 // window the user already moved off. Only the newest request may write state.
 let reloadSeq = 0
 
+/** Rule 8: `server`/`tool` disagree on the server — no REST request can
+ * express both. The page must issue no request and show the conflict empty
+ * state instead of silently falling back to the unfiltered aggregate
+ * (zcode review round 1, F1). */
+const filterConflict = computed(
+  () => splitScopeTool(filterTool.value || undefined, filterServer.value || undefined).conflict === true
+)
+
+function clearScopeConflict(): void {
+  filterServer.value = ''
+  filterTool.value = ''
+  if (router) {
+    const query = { ...route?.query }
+    delete query.server
+    delete query.tool
+    router.replace({ query })
+  }
+  reload()
+}
+
 async function reload() {
   // Spec 107 FR-041 / cross-review round 2, chunk 4 P1: GET /activity/usage
   // is an admin-only core door (named must-refuse, rest-endpoints.md §8).
@@ -329,6 +368,15 @@ async function reload() {
   // refresh, regardless of entry point (mount, interval, window/filter
   // change) — guard the fetch itself rather than each caller.
   if (authStore.principalKind === 'tenant') return
+  // Rule 8 (zcode F1): a conflicting server/tool pair issues no request at
+  // all — never the window's unfiltered aggregate, which would silently
+  // mislead the operator into thinking the URL's filters were honoured.
+  if (filterConflict.value) {
+    data.value = null
+    error.value = null
+    loading.value = false
+    return
+  }
   const seq = ++reloadSeq
   loading.value = true
   error.value = null
@@ -338,12 +386,8 @@ async function reload() {
       window: window.value,
       status: status.value || undefined,
       sort: sort.value,
-      // A conflicting server/tool (rule 8) has no REST request that could
-      // satisfy both — rather than silently keeping one, drop both and
-      // return the window's unfiltered aggregate rather than inventing a
-      // request under filters the URL did not actually agree on.
-      server: split.conflict ? undefined : split.server,
-      tool: split.conflict ? undefined : split.tool,
+      server: split.server,
+      tool: split.tool,
     })
     if (seq !== reloadSeq) return
     if (resp.success && resp.data) {

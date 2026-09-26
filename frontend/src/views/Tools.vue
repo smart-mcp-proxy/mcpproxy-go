@@ -1211,19 +1211,19 @@ function applyQueryParam() {
     currentPage.value = 1
   }
 
-  const server = str(q.server)
-  if (server) filterServer.value = server
-
-  const status = str(q.status)
-  if (status) filterStatus.value = status
-
-  const approval = str(q.approval)
-  if (approval) filterApproval.value = approval
+  // Symmetric by design (zcode review round 1, F3, matching Activity.vue's
+  // applyRouteFilters): set from the query param when present AND cleared
+  // when absent. Vue Router reuses this component across a same-route
+  // navigation (no remount), so a "set only if present" read left a stale
+  // filter in force after a later URL dropped the param — and the write-back
+  // watch below then resurrected it into a URL that had just been cleared.
+  filterServer.value = str(q.server)
+  filterStatus.value = str(q.status)
+  filterApproval.value = str(q.approval)
 
   // `?risk=` stays a query alias for `?tier=` for old bookmarks/links
   // (url-filter-contract.md rule 6); an explicit `tier` wins if somehow both
   // are present.
-  const tier = str(q.tier) || str(q.risk)
-  if (tier) filterTier.value = tier
+  filterTier.value = str(q.tier) || str(q.risk)
 }
 </script>

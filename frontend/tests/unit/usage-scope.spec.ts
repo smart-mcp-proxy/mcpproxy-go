@@ -105,3 +105,30 @@ describe('Usage — window hydration from the URL contract (Spec 109-k T113)', (
     )
   })
 })
+
+// zcode review round 1, F1: a contradictory `?server=`/`?tool=` pair (rule 8
+// of url-filter-contract.md) has no REST request that can express both — the
+// page must issue no request and show the conflict empty state, never fall
+// back to the window's unfiltered aggregate.
+describe('Usage — contradictory server/tool (Spec 109-k rule 8, zcode F1)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('a disagreeing server/tool pair issues no request and shows the conflict empty state', async () => {
+    const { wrapper } = await mountUsageAt('/usage?server=notes&tool=github:search')
+    expect(getActivityUsageMock).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="usage-conflict-empty-state"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="usage-empty-state"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="usage-charts"]').exists()).toBe(false)
+  })
+
+  it('an agreeing server/tool pair (same server) still issues the scoped request', async () => {
+    const { wrapper } = await mountUsageAt('/usage?server=filesystem&tool=filesystem:read')
+    expect(getActivityUsageMock).toHaveBeenCalledWith(
+      expect.objectContaining({ server: 'filesystem', tool: 'read' })
+    )
+    expect(wrapper.find('[data-test="usage-conflict-empty-state"]').exists()).toBe(false)
+  })
+})

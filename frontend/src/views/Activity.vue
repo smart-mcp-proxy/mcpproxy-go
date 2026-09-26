@@ -54,6 +54,27 @@
 
     <SessionsPanel v-if="activeView === 'sessions'" :sessions="sessionsRaw" />
 
+    <!-- Rule 5 (zcode review round 1, F4): from/to/server/tool/status/type/
+         auth_type are "not applicable here" in Sessions — shown as disabled
+         chips rather than silently vanishing (the strip below is v-show
+         hidden for this view). -->
+    <div
+      v-if="activeView === 'sessions' && sessionsDisabledChips.length > 0"
+      data-test="activity-sessions-disabled-filters"
+      class="flex flex-wrap items-center gap-2"
+    >
+      <span class="text-xs text-base-content/50">Not applicable to Sessions:</span>
+      <span
+        v-for="chip in sessionsDisabledChips"
+        :key="chip.key"
+        :data-test="`activity-sessions-disabled-chip-${chip.kind}`"
+        class="badge badge-sm badge-ghost opacity-60"
+        title="This filter does not apply to the Sessions view"
+      >
+        {{ chip.label }}
+      </span>
+    </div>
+
     <!--
       Compact header strip (default view). Five stat cards plus a nine-control
       filter grid pushed the first activity row below the fold; the default is
@@ -479,8 +500,18 @@
           Showing {{ displayRows.length }} of {{ sortedActivities.length }} activity records
         </p>
 
+        <!-- Contradictory server/tool (rule 8, zcode review round 1, F2): no
+             REST request can express both, so none is issued. -->
+        <div v-if="scopeConflict" class="alert alert-warning" data-test="activity-scope-conflict">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>Server and tool filters don't match — <code>server={{ filterServer }}</code> and <code>tool={{ filterTool }}</code> name different servers. Remove one to continue.</span>
+          <button class="btn btn-sm btn-ghost" data-test="activity-scope-conflict-clear" @click="clearFilters">Clear filters</button>
+        </div>
+
         <!-- Loading State -->
-        <div v-if="loading && activities.length === 0" class="flex justify-center py-12">
+        <div v-else-if="loading && activities.length === 0" class="flex justify-center py-12">
           <span class="loading loading-spinner loading-lg"></span>
         </div>
 
@@ -1435,8 +1466,18 @@ const activeView = computed<ActivityViewId>(() => {
  * it synchronously means `effectiveTypes` (and the table it drives) is
  * correct on the very same render as the click. */
 function setView(id: ActivityViewId): void {
-  selectedTypes.value = []
-  scopeQuery.set({ view: id === 'calls' ? undefined : id, type: undefined })
+  // Rule 5 / contract "view" row (zcode review round 1, F4): `type` is
+  // ignored (not cleared) in `sessions` — it stays in the URL and renders as
+  // a disabled "not applicable here" chip there, since `sessions` has no
+  // `type` mapping to override in the first place. Only calls/system/all
+  // clear it, where an explicit override left behind really would make the
+  // tab a no-op.
+  const patch: Record<string, string | undefined> = { view: id === 'calls' ? undefined : id }
+  if (id !== 'sessions') {
+    selectedTypes.value = []
+    patch.type = undefined
+  }
+  scopeQuery.set(patch)
 }
 
 // State
@@ -1455,6 +1496,12 @@ const filterServer = ref('')
 // a "server:tool" URL value is split by applyRouteFilters() below, same rule
 // as the composable's splitScopeTool().
 const filterTool = ref('')
+// Rule 8 (zcode review round 1, F2): the URL's `server`/`tool` disagree on
+// the server — no REST request can express both. Set by applyRouteFilters()
+// below; gates loadActivities() (no request at all) and the table's empty
+// state (a distinct "conflicting filters" message, not a silent partial
+// request under a URL that named both).
+const scopeConflict = ref(false)
 const filterSession = ref('')
 const filterStatus = ref('')
 const filterSensitiveData = ref('') // Spec 026: '' | 'true' | 'false'
@@ -1463,6 +1510,16 @@ const filterAuthType = ref('') // Spec 028: '' | 'admin' | 'agent'
 const filterAgentName = ref('') // Spec 028: filter by agent token name
 const filterStartDate = ref('')
 const filterEndDate = ref('')
+// zcode review round 1, F5: the raw `from`/`to` URL value (e.g. "-24h") and
+// what the datetime-local inputs were just hydrated to from it — lets the
+// write-back watch below tell "the user actually edited the date picker"
+// from "some unrelated filter changed", so a sticky rolling window survives
+// a status/server/etc. change instead of freezing into the instant it
+// happened to resolve to at that moment.
+const rawFromParam = ref('')
+const rawToParam = ref('')
+let lastHydratedStartDate = ''
+let lastHydratedEndDate = ''
 // Sub-call view: the request_id of a code_execution parent. Applied BOTH
 // client-side (so the visible list narrows immediately) and as a server-side
 // query param (so sub-calls beyond the 200 loaded rows are included).
@@ -1522,18 +1579,20 @@ function applyRouteFilters(): void {
   filterAuthType.value = str(q.auth_type)
 
   // `tool` splits per the contract's rule 8: a "server:tool" value carries
-  // its own server; an explicit `server` that disagrees is a contradiction.
-  // This page has no conflict empty-state yet (unlike the composable's
-  // Tools/Usage callers), so on conflict prefer the explicit `server` and
-  // drop the mismatched tool rather than silently applying a combination the
-  // URL never actually asked for.
+  // its own server; an explicit `server` that disagrees is a contradiction —
+  // no REST request can express both, so `scopeConflict` gates loadActivities()
+  // (no request at all) and the table shows the conflict empty state instead
+  // of silently keeping `server` and dropping the mismatched `tool` (zcode
+  // review round 1, F2).
   const serverParam = str(q.server)
   const toolParam = str(q.tool)
   if (toolParam) {
     const split = splitScopeTool(toolParam, serverParam || undefined)
+    scopeConflict.value = split.conflict === true
     filterServer.value = split.conflict ? serverParam : (split.server ?? '')
-    filterTool.value = split.conflict ? '' : (split.tool ?? '')
+    filterTool.value = split.conflict ? toolParam : (split.tool ?? '')
   } else {
+    scopeConflict.value = false
     filterServer.value = serverParam
     filterTool.value = ''
   }
@@ -1547,9 +1606,13 @@ function applyRouteFilters(): void {
   selectedTypes.value = typeParam ? typeParam.split(',').map(t => t.trim()).filter(Boolean) : []
 
   const fromParam = str(q.from)
+  rawFromParam.value = fromParam
   filterStartDate.value = fromParam ? isoToDateTimeLocal(resolveScopeTime(fromParam)) : ''
+  lastHydratedStartDate = filterStartDate.value
   const toParam = str(q.to)
+  rawToParam.value = toParam
   filterEndDate.value = toParam ? isoToDateTimeLocal(resolveScopeTime(toParam)) : ''
+  lastHydratedEndDate = filterEndDate.value
 }
 
 applyRouteFilters()
@@ -1705,6 +1768,44 @@ const refreshSessionsIfUnknown = () => {
   })
   if (hasUnknown) void loadSessions()
 }
+
+/** Rule "sessions" row (Spec 108 FR-031 / url-filter-contract.md): profile,
+ * client and token ARE sent to `GET /sessions`, but only once
+ * `features.scope_filters` lists them — `scopeQuery.chips` already applies
+ * that availability gate (a chip for a hidden param never appears), so
+ * reading the values off it here means this can never send one the backend
+ * has not advertised. macOS's `ScopeFilter.restRequest` does the identical
+ * thing for the same endpoint (`ScopeFilterTests.
+ * testSessionsViewCarriesScopeFiltersOnceAvailable`) — Web had no equivalent
+ * at all (zcode review round 1, F8). */
+const sessionsScopeParams = computed(() => {
+  const chips = scopeQuery.chips.value
+  const get = (name: string) => chips.find(c => c.name === name)?.value
+  return { profile: get('profile'), client: get('client'), token: get('token') }
+})
+
+/** The Sessions VIEW's own request: when it is active and at least one
+ * scope filter is both available and set, `GET /sessions` is narrowed by it
+ * — never the general on-mount `loadSessions()` fetch above, which feeds
+ * session-name resolution for every OTHER view too and must stay unscoped. */
+async function loadScopedSessionsForView(): Promise<void> {
+  if (activeView.value !== 'sessions') return
+  const { profile, client, token } = sessionsScopeParams.value
+  if (!profile && !client && !token) return
+  if (authStore.principalKind === 'tenant') return
+  try {
+    const response = await api.getSessions(100, undefined, { profile, client, token })
+    sessionsRaw.value = response.data?.sessions ?? []
+  } catch {
+    // Non-fatal — the unscoped fetch already in sessionsRaw degrades gracefully.
+  }
+}
+
+watch(
+  () => [activeView.value, sessionsScopeParams.value.profile, sessionsScopeParams.value.client, sessionsScopeParams.value.token] as const,
+  () => { void loadScopedSessionsForView() },
+  { immediate: true }
+)
 
 // Transport session -> work session, learned from the sessions API and from any
 // sibling row that does carry one. A row with no work session of its own is
@@ -1920,6 +2021,28 @@ const clearChip = (chip: ActiveFilterChip) => {
       break
   }
 }
+
+/** Rule 5 / contract "sessions" row (zcode review round 1, F4): from/to,
+ * server, tool, status, type and auth_type are all "not applicable here" in
+ * Sessions — GET /sessions has no mapping for any of them — so any of these
+ * still active from a deep link or a prior tab render as disabled chips
+ * rather than vanishing with no explanation. */
+const sessionsDisabledChips = computed<ActiveFilterChip[]>(() => {
+  if (activeView.value !== 'sessions') return []
+  const chips: ActiveFilterChip[] = []
+  if (filterStartDate.value) chips.push({ kind: 'start', key: 'start', label: `From: ${filterStartDate.value}` })
+  if (filterEndDate.value) chips.push({ kind: 'end', key: 'end', label: `To: ${filterEndDate.value}` })
+  if (filterServer.value) chips.push({ kind: 'server', key: 'server', label: `Server: ${filterServer.value}` })
+  if (filterTool.value) chips.push({ kind: 'tool', key: 'tool', label: `Tool: ${filterTool.value}` })
+  if (filterStatus.value) chips.push({ kind: 'status', key: 'status', label: `Status: ${filterStatus.value}` })
+  if (selectedTypes.value.length > 0) {
+    chips.push({ kind: 'type', key: 'type', label: `Type: ${selectedTypes.value.map(formatType).join(', ')}` })
+  }
+  if (filterAuthType.value) {
+    chips.push({ kind: 'auth', key: 'auth', label: `Auth: ${filterAuthType.value === 'admin' ? 'Admin' : 'Agent'}` })
+  }
+  return chips
+})
 
 const filteredActivities = computed(() => {
   let result = activities.value
@@ -2142,6 +2265,17 @@ const loadActivities = async () => {
   // network assertion is actually checking: a page never fires an unfiltered
   // (or, here, simply unnecessary) fetch behind a view it is not showing.
   if (activeView.value === 'sessions') return
+
+  // Rule 8 (zcode review round 1, F2): a contradictory server/tool pair has
+  // no REST request that could express both — issue none at all, rather
+  // than silently keeping `server` and requesting under a URL that named
+  // both filters.
+  if (scopeConflict.value) {
+    activities.value = []
+    loading.value = false
+    error.value = null
+    return
+  }
 
   loading.value = true
   error.value = null
@@ -2594,8 +2728,21 @@ watch(
       // read a different instant). `dateTimeLocalToISO` is the same
       // conversion loadActivities() already applies before sending
       // start_time/end_time to REST, so the URL and the request agree.
-      from: dateTimeLocalToISO(filterStartDate.value),
-      to: dateTimeLocalToISO(filterEndDate.value),
+      //
+      // F5 (zcode review round 1): this watch fires for ANY tracked filter,
+      // not just a date-picker edit — a status/server/etc. change used to
+      // freeze a sticky relative `from=-24h` into whatever absolute instant
+      // it happened to resolve to at that moment, so a URL bookmarked
+      // afterward stopped rolling. Only write the resolved absolute instant
+      // when the picker's value has actually changed since the last URL
+      // hydration; otherwise keep re-asserting the original raw value
+      // (relative or absolute) the URL already carried.
+      from: filterStartDate.value === lastHydratedStartDate && rawFromParam.value
+        ? rawFromParam.value
+        : dateTimeLocalToISO(filterStartDate.value),
+      to: filterEndDate.value === lastHydratedEndDate && rawToParam.value
+        ? rawToParam.value
+        : dateTimeLocalToISO(filterEndDate.value),
     })
   }
 )

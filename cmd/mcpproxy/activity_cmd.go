@@ -1437,7 +1437,30 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 }
 
 // runActivityWatch implements the activity watch command
+// validateActivityWatchView rejects an invalid --view up front, exactly the
+// same rule 'activity list'/'export' already apply via activityViewTypeFilter
+// (an explicit --type overrides --view, so a simultaneously-bogus --view is
+// never actually used and must not block the command). Spec 109-k / zcode
+// review round 1, F6: 'activity watch' validated nothing at all — a typo
+// (`--view call`) silently streamed every event unfiltered instead of
+// erroring like its siblings do for the identical input. A standalone
+// function (rather than inlined in runActivityWatch) so a test can call it
+// without also starting the SSE connection.
+func validateActivityWatchView() error {
+	if activityType != "" {
+		return nil
+	}
+	_, err := activityViewTypeFilter(activityView)
+	return err
+}
+
 func runActivityWatch(cmd *cobra.Command, _ []string) error {
+	// Checked before the daemon connection so an invalid --view fails the
+	// same way regardless of whether a daemon is reachable.
+	if err := validateActivityWatchView(); err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+
 	// Setup logger
 	cmdLogLevel, _ := cmd.Flags().GetString("log-level")
 	cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")

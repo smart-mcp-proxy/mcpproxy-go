@@ -147,6 +147,27 @@ describe('Activity views (Spec 109-k, FR-070)', () => {
     expect(wrapper.find('[data-test="sessions-table"], [data-test="sessions-empty"]').exists()).toBe(true)
     expect(api.getActivities as ReturnType<typeof vi.fn>).not.toHaveBeenCalled()
   })
+
+  // zcode review round 1, F4: from/to/server/tool/status/type/auth_type are
+  // "not applicable here" in Sessions (rule 5) — they must render as disabled
+  // chips, not vanish with zero chips shown.
+  it('Sessions renders disabled "not applicable" chips for server/from/status left from a deep link', async () => {
+    const { wrapper } = await mountActivityAt('/activity?view=sessions&server=filesystem&from=-24h&status=error')
+    const strip = wrapper.find('[data-test="activity-sessions-disabled-filters"]')
+    expect(strip.exists()).toBe(true)
+    expect(wrapper.find('[data-test="activity-sessions-disabled-chip-server"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="activity-sessions-disabled-chip-start"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="activity-sessions-disabled-chip-status"]').exists()).toBe(true)
+  })
+
+  it('switching into Sessions keeps an explicit `type` in the URL (ignored, not cleared) and shows it as a disabled chip', async () => {
+    const { wrapper, router } = await mountActivityAt('/activity?type=quarantine_change')
+    await wrapper.find('[data-test="activity-view-tab-sessions"]').trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query.type).toBe('quarantine_change')
+    expect(wrapper.find('[data-test="activity-sessions-disabled-chip-type"]').exists()).toBe(true)
+  })
 })
 
 describe('Activity filter chips write back to the URL (FR-080)', () => {
@@ -268,6 +289,43 @@ describe('Activity applies an incoming from/to deep link (FR-082 link map)', () 
     const lastCall = (api.getActivities as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0]
     expect(lastCall.start_time).toBeTruthy()
     expect(lastCall.tool).toBe('read_0')
+  })
+
+  // zcode review round 1, F5: the write-back watch used to fire for ANY
+  // tracked filter change and always wrote the RESOLVED absolute instant,
+  // freezing a sticky relative `from=-24h` the moment an unrelated filter
+  // (e.g. status) changed — a URL bookmarked afterward stopped rolling.
+  it('a sticky relative ?from=-24h survives an unrelated filter change untouched', async () => {
+    const { wrapper, router } = await mountActivityAt('/activity?view=calls&from=-24h')
+    await flushPromises()
+    expect(router.currentRoute.value.query.from).toBe('-24h')
+
+    await wrapper.find('[data-test="activity-filters-toggle"]').trigger('click')
+    await flushPromises()
+
+    // Changing an unrelated filter (status) must not rewrite `from` into a
+    // frozen absolute instant.
+    const statusSelect = wrapper.find('select[aria-label="Filter by status"]')
+    await statusSelect.setValue('error')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query.from).toBe('-24h')
+  })
+
+  it('actually editing the date picker DOES write the resolved absolute instant', async () => {
+    const { wrapper, router } = await mountActivityAt('/activity?view=calls&from=-24h')
+    await flushPromises()
+    await wrapper.find('[data-test="activity-filters-toggle"]').trigger('click')
+    await flushPromises()
+
+    const fromInput = wrapper.find('#activity-filter-from')
+    await fromInput.setValue('2026-01-01T00:00')
+    await flushPromises()
+
+    const fromQuery = router.currentRoute.value.query.from as string
+    expect(fromQuery).not.toBe('-24h')
+    // An absolute RFC3339 instant, not the relative shorthand still in force.
+    expect(new Date(fromQuery).getTime()).toBe(new Date('2026-01-01T00:00').getTime())
   })
 })
 

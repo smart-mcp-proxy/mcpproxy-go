@@ -646,6 +646,27 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(stats.tokenMetrics?.savedTokensPercentage), 95.83, accuracy: 0.01)
         XCTAssertEqual(stats.tokenMetrics?.perServerToolListSizes?["github"], 80000)
         XCTAssertEqual(stats.tokenMetrics?.perServerToolListSizes?["gitlab"], 40000)
+        // zcode review round 1, F7: `estimated` absent from an older core's
+        // response must default to false, not fail to decode.
+        XCTAssertEqual(stats.tokenMetrics?.estimated, false)
+    }
+
+    // zcode review round 1, F7: FR-073/T120 names macOS as one of the three
+    // surfaces (Web, CLI, macOS) that must show the token-savings estimate —
+    // contracts.ServerTokenMetrics.Estimated had no Swift counterpart at all.
+    func testDecodeTokenMetricsEstimatedTrue() throws {
+        let json = """
+        {
+            "total_server_tool_list_size": 120000,
+            "average_query_result_size": 5000,
+            "saved_tokens": 115000,
+            "saved_tokens_percentage": 95.83,
+            "per_server_tool_list_sizes": {},
+            "estimated": true
+        }
+        """
+        let metrics = try decode(TokenMetrics.self, from: json)
+        XCTAssertTrue(metrics.estimated)
     }
 
     func testDecodeUpstreamStatsMinimal() throws {

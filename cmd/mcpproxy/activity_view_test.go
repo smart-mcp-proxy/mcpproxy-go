@@ -270,6 +270,52 @@ func TestActivityWatchCmd_ViewFromToFlags(t *testing.T) {
 	}
 }
 
+// TestValidateActivityWatchView_InvalidViewErrorsLikeList is a zcode review
+// round 1 regression (F6): `activity watch --view <invalid>` used to stream
+// every event unfiltered with no warning at all — displayActivityEvent
+// silently swallowed activityViewTypeFilter's error instead of erroring,
+// unlike 'activity list'/'activity export', which both exit 1 with "invalid
+// view" for the identical flag value. runActivityWatch now calls this guard
+// before ever attempting a daemon connection; tested directly (rather than via
+// runActivityWatch) so the test needs no reachable daemon and cannot hang on
+// one that happens to be running.
+func TestValidateActivityWatchView_InvalidViewErrorsLikeList(t *testing.T) {
+	prevView, prevType := activityView, activityType
+	t.Cleanup(func() { activityView, activityType = prevView, prevType })
+
+	activityType = ""
+	activityView = "call" // typo of "calls" — exactly the finding's repro
+
+	err := validateActivityWatchView()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid view 'call'")
+
+	// The identical value on 'activity list' errors the same way (asserted
+	// directly by TestActivityViewTypeFilter's "bogus" case above) — pinning
+	// the same message here keeps the two commands from silently drifting
+	// apart on what "invalid" means.
+	_, listErr := activityViewTypeFilter(activityView)
+	require.Error(t, listErr)
+	assert.Contains(t, listErr.Error(), "invalid view 'call'")
+}
+
+// TestValidateActivityWatchView_ExplicitTypeBypassesViewValidation mirrors
+// list/export: an explicit --type overrides --view (url-filter-contract.md),
+// so a simultaneously-bogus --view must not block watch from starting when
+// --type is what will actually be used to filter.
+func TestValidateActivityWatchView_ExplicitTypeBypassesViewValidation(t *testing.T) {
+	prevView, prevType := activityView, activityType
+	t.Cleanup(func() { activityView, activityType = prevView, prevType })
+
+	activityView = "bogus"
+	activityType = "tool_call"
+	if _, err := activityViewTypeFilter(activityView); err == nil {
+		t.Fatal("test setup: activityView must itself be invalid for this case to be meaningful")
+	}
+
+	assert.NoError(t, validateActivityWatchView())
+}
+
 // TestActivitySummaryCmd_FromToFlags asserts --from/--to exist on
 // 'activity summary' (Spec 109-k T121, FR-075); summary has no --view.
 func TestActivitySummaryCmd_FromToFlags(t *testing.T) {

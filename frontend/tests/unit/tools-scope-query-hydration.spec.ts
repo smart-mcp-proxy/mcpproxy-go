@@ -115,4 +115,30 @@ describe('Tools page — URL query hydration (Spec 109-k live-QA regression)', (
     expect(rows).toHaveLength(1)
     expect(rows[0].text()).toContain('create_issue')
   })
+
+  // zcode review round 1, F3: applyQueryParam only ever SET a filter when its
+  // param was present, never cleared it when the param was absent. Vue Router
+  // reuses this component across a same-route navigation (no remount), so a
+  // later nav to the bare route left the stale filter narrowing the table
+  // under a clean URL — and the write-back watch then resurrected the
+  // "cleared" param back into the URL as soon as any other filter changed.
+  it('navigating from /tools?server= to /tools (same route, no remount) clears the server filter', async () => {
+    const wrapper = await mountToolsAt('/tools?server=filesystem')
+    expect(toolRows(wrapper)).toHaveLength(2)
+
+    const router = wrapper.vm.$.appContext.config.globalProperties.$router
+    await router.push('/tools')
+    await flushPromises()
+
+    expect(toolRows(wrapper)).toHaveLength(4)
+    const select = wrapper.find('[data-test="filter-server"]')
+    expect((select.element as HTMLSelectElement).value).toBe('')
+
+    // Picking a tier afterward must not resurrect `server` into the URL.
+    const tierSelect = wrapper.find('[data-test="filter-tier"]')
+    await tierSelect.setValue('write')
+    await flushPromises()
+    expect(router.currentRoute.value.query.server).toBeUndefined()
+    expect(router.currentRoute.value.query.tier).toBe('write')
+  })
 })

@@ -587,6 +587,15 @@ struct TokenMetrics: Codable, Equatable {
     let savedTokens: Int
     let savedTokensPercentage: Double
     let perServerToolListSizes: [String: Int]?
+    /// Mirrors `contracts.ServerTokenMetrics.Estimated` (Spec 109-k, FR-073/T120):
+    /// true while `averageQueryResultSize` is a synthetic simulation (no real
+    /// `retrieve_tools` call has completed yet in this runtime), false once a
+    /// real one has. Web (Usage/Home) and the CLI (`mcpproxy status`) both
+    /// render an "estimate" label while this is true — macOS had no field to
+    /// read it from at all until now (zcode review round 1, F7). Absent from
+    /// an older core's response, so it defaults to `false` (never claims
+    /// "estimate" on a build too old to say so) rather than failing to decode.
+    let estimated: Bool
 
     enum CodingKeys: String, CodingKey {
         case totalServerToolListSize = "total_server_tool_list_size"
@@ -594,6 +603,33 @@ struct TokenMetrics: Codable, Equatable {
         case savedTokens = "saved_tokens"
         case savedTokensPercentage = "saved_tokens_percentage"
         case perServerToolListSizes = "per_server_tool_list_sizes"
+        case estimated
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        totalServerToolListSize = try container.decode(Int.self, forKey: .totalServerToolListSize)
+        averageQueryResultSize = try container.decode(Int.self, forKey: .averageQueryResultSize)
+        savedTokens = try container.decode(Int.self, forKey: .savedTokens)
+        savedTokensPercentage = try container.decode(Double.self, forKey: .savedTokensPercentage)
+        perServerToolListSizes = try container.decodeIfPresent([String: Int].self, forKey: .perServerToolListSizes)
+        estimated = try container.decodeIfPresent(Bool.self, forKey: .estimated) ?? false
+    }
+
+    init(
+        totalServerToolListSize: Int,
+        averageQueryResultSize: Int,
+        savedTokens: Int,
+        savedTokensPercentage: Double,
+        perServerToolListSizes: [String: Int]?,
+        estimated: Bool = false
+    ) {
+        self.totalServerToolListSize = totalServerToolListSize
+        self.averageQueryResultSize = averageQueryResultSize
+        self.savedTokens = savedTokens
+        self.savedTokensPercentage = savedTokensPercentage
+        self.perServerToolListSizes = perServerToolListSizes
+        self.estimated = estimated
     }
 }
 

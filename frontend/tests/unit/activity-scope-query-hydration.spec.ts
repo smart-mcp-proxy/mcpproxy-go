@@ -247,4 +247,23 @@ describe('Activity Log — URL query hydration (Spec 109-k live-QA regression)',
       expect.objectContaining({ tool: 'read', server: undefined })
     )
   })
+
+  // zcode review round 1, F2: a `server` that disagrees with `tool`'s server
+  // prefix (rule 8) has no REST request that could satisfy both — the page
+  // must issue no request and show the conflict state, never silently keep
+  // `server` and request under a URL that named both filters.
+  it('?server=notes&tool=github:search (disagreeing server) issues no request and shows the conflict banner', async () => {
+    const { wrapper, api } = await mountActivityAt('/activity?server=notes&tool=github:search')
+    expect(api.getActivities).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="activity-scope-conflict"]').exists()).toBe(true)
+    expect(rows(wrapper)).toHaveLength(0)
+  })
+
+  it('?server=filesystem&tool=filesystem:read (agreeing server) is not a conflict', async () => {
+    const { wrapper, api } = await mountActivityAt('/activity?server=filesystem&tool=filesystem:read')
+    expect(wrapper.find('[data-test="activity-scope-conflict"]').exists()).toBe(false)
+    expect(api.getActivities).toHaveBeenCalledWith(
+      expect.objectContaining({ server: 'filesystem', tool: 'read' })
+    )
+  })
 })
