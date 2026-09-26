@@ -180,18 +180,32 @@
             </li>
           </ul>
 
-          <!-- Dashboard (solo top row, no section label) -->
+          <!-- Home (solo top row, no section label). Spec 109 FR-003/FR-051:
+               renamed from "Dashboard"; the badge is the same FR-001
+               needs-attention count every other surface reads. -->
           <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li>
               <router-link
                 to="/"
                 :class="{ 'active': isActiveRoute('/') }"
                 class="rounded-lg font-medium"
-                :title="collapsed ? 'Dashboard' : ''"
-                :aria-label="collapsed ? 'Dashboard' : undefined"
+                :title="collapsed ? 'Home' : ''"
+                :aria-label="collapsed ? 'Home' : undefined"
               >
-                <IconDashboard class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed">Dashboard</span>
+                <span class="relative inline-flex">
+                  <IconDashboard class="w-5 h-5 shrink-0" />
+                  <span
+                    v-if="attentionStore.count > 0 && collapsed"
+                    class="badge badge-warning badge-xs absolute -top-1 -right-1"
+                    data-test="sidebar-home-badge-collapsed"
+                  ></span>
+                </span>
+                <span v-show="!collapsed" class="flex-1">Home</span>
+                <span
+                  v-if="attentionStore.count > 0 && !collapsed"
+                  class="badge badge-warning badge-sm"
+                  data-test="sidebar-home-badge"
+                >{{ attentionStore.count }}</span>
               </router-link>
             </li>
           </ul>
@@ -481,6 +495,7 @@ import { useSystemStore } from '@/stores/system'
 import { formatDateTime } from '@/utils/datetime'
 import { useAuthStore } from '@/stores/auth'
 import { useOnboardingStore } from '@/stores/onboarding'
+import { useAttentionStore } from '@/stores/attention'
 import api from '@/services/api'
 
 const route = useRoute()
@@ -488,6 +503,7 @@ const router = useRouter()
 const systemStore = useSystemStore()
 const authStore = useAuthStore()
 const onboardingStore = useOnboardingStore()
+const attentionStore = useAttentionStore()
 
 // Spec 046 v2: badge count drives the sidebar Setup entry's pulse + count.
 // Refetched on mount; the wizard itself drives subsequent updates while open.
@@ -542,12 +558,19 @@ function loadBadgeCounts() {
 onMounted(() => {
   // Pull initial state so the badge is correct on first render.
   loadBadgeCounts()
+  // Spec 109 FR-001/FR-003: the sidebar is global (outside the Home view),
+  // so it fetches its own copy rather than depending on Home having mounted
+  // first — the badge must be correct on every page, not only "/".
+  attentionStore.fetchAttention()
 })
 
 // #1065: the sidebar sits outside <router-view>, so App.vue's authEpoch key
 // cannot remount it. Without this, badge counts that failed while auth was
 // broken keep their stale values until a full page reload.
-watch(() => systemStore.authEpoch, loadBadgeCounts)
+watch(() => systemStore.authEpoch, () => {
+  loadBadgeCounts()
+  attentionStore.fetchAttention()
+})
 
 const collapsed = computed(() => systemStore.sidebarCollapsed)
 
@@ -717,13 +740,14 @@ const userInitials = computed(() => {
   return name.substring(0, 2).toUpperCase()
 })
 
-// Dashboard panels are deep-linkable routes that all render the Dashboard, so
-// the "Dashboard" entry stays highlighted on each of them.
-const DASHBOARD_PATHS = ['/', '/usage', '/overview']
+// /overview redirects to / (Spec 109 FR-051), so both paths keep the "Home"
+// entry highlighted — the redirect target is what the route ends up on, but
+// this stays correct even mid-navigation.
+const HOME_PATHS = ['/', '/overview']
 
 function isActiveRoute(path: string): boolean {
   if (path === '/') {
-    return DASHBOARD_PATHS.includes(route.path)
+    return HOME_PATHS.includes(route.path)
   }
   return route.path.startsWith(path)
 }

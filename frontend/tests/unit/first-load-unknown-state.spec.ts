@@ -42,6 +42,7 @@ vi.mock('@/services/api', () => {
     getOnboardingState: onboardingSpy,
     getServers: serversSpy,
     getActivityUsage: usageSpy,
+    getAttention: ok({ count: 0, items: [] }),
     createEventSource: vi.fn(() => fakeEventSource),
     hasAPIKey: vi.fn(() => false),
     getAPIKeyPreview: vi.fn(() => 'none'),
@@ -68,7 +69,7 @@ vi.mock('@/composables/useSecurityScannerStatus', () => ({
 }))
 
 import SidebarNav from '@/components/SidebarNav.vue'
-import Dashboard from '@/views/Dashboard.vue'
+import Home from '@/views/Home.vue'
 import { useSystemStore } from '@/stores/system'
 
 class FakeEventSource {
@@ -82,8 +83,7 @@ function makeRouter() {
   return createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/', name: 'dashboard', component: { template: '<div />' }, meta: { dashboardView: 'usage' } },
-      { path: '/overview', name: 'dashboard-overview', component: { template: '<div />' }, meta: { dashboardView: 'overview' } },
+      { path: '/', name: 'home', component: { template: '<div />' } },
       { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
     ],
   })
@@ -113,11 +113,11 @@ async function collapsedTitle(wrapper: Awaited<ReturnType<typeof mountSidebar>>)
   return wrapper.find('[data-test="sidebar-setup"]').attributes('title')
 }
 
-async function mountOverview() {
+async function mountHome() {
   const router = makeRouter()
-  router.push('/overview')
+  router.push('/')
   await router.isReady()
-  const wrapper = shallowMount(Dashboard, {
+  const wrapper = shallowMount(Home, {
     global: { plugins: [createPinia(), router], stubs },
   })
   await flushPromises()
@@ -185,11 +185,11 @@ describe('overview tiles do not assert counts or a run state they have not fetch
 
   it('shows a dash, not "0 connected", while the server list is unknown', async () => {
     serversSpy.mockResolvedValue({ success: false, error: 'Invalid or missing API key' })
-    const wrapper = await mountOverview()
+    const wrapper = await mountHome()
 
     // Asserted on the panel's own text as well as the tiles, so this stays a
     // real failure rather than a missing-selector one.
-    const panel = wrapper.find('[data-test="dashboard-overview-panel"]').text()
+    const panel = wrapper.find('[data-test="home-topology"]').text()
     expect(panel).not.toMatch(/0\s*connected/)
     expect(panel).not.toMatch(/0\s*tools available/)
 
@@ -207,7 +207,7 @@ describe('overview tiles do not assert counts or a run state they have not fetch
         ],
       },
     })
-    const wrapper = await mountOverview()
+    const wrapper = await mountHome()
 
     expect(wrapper.find('[data-test="overview-connected-count"]').text()).toBe('2')
     expect(wrapper.find('[data-test="overview-tool-count"]').text()).toBe('7')
@@ -216,16 +216,16 @@ describe('overview tiles do not assert counts or a run state they have not fetch
   it('says nothing about the proxy run state until a status has arrived', async () => {
     // `isRunning` falls back to false when `status` is null, which labelled a
     // demonstrably running proxy "stopped" in error red behind the modal.
-    const wrapper = await mountOverview()
+    const wrapper = await mountHome()
     const system = useSystemStore()
     expect(system.status).toBeNull()
 
     expect(wrapper.find('[data-test="overview-proxy-state"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="dashboard-overview-panel"]').text()).not.toContain('stopped')
+    expect(wrapper.find('[data-test="home-topology"]').text()).not.toContain('stopped')
   })
 
   it('reports the run state once a status has arrived', async () => {
-    const wrapper = await mountOverview()
+    const wrapper = await mountHome()
     const system = useSystemStore()
 
     system.status = { running: true } as never

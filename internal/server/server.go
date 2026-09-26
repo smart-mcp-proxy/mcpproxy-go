@@ -656,6 +656,15 @@ func (s *Server) UnsubscribeEvents(ch chan runtime.Event) {
 	s.runtime.UnsubscribeEvents(ch)
 }
 
+// Attention returns the current needs-attention list (Spec 109 FR-001), the
+// same snapshot the runtime's debounced subscriber maintains.
+func (s *Server) Attention() []contracts.AttentionItem {
+	if s.runtime == nil {
+		return nil
+	}
+	return s.runtime.Attention()
+}
+
 // GetManagementService returns the management service instance from runtime.
 // Returns nil if service hasn't been set yet.
 func (s *Server) GetManagementService() management.Service {

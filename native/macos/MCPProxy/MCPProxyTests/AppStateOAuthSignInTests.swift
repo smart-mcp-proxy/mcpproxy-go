@@ -123,13 +123,29 @@ final class AppStateOAuthSignInTests: XCTestCase {
         )
     }
 
-    // MARK: - serversNeedingAttention (calm Sign in path)
+    // MARK: - attention (calm Sign in path, Spec 109 FR-001)
 
+    /// `AppState.attention` no longer derives from `servers` locally (the
+    /// retired `serversNeedingAttention` predicate) — it is populated from
+    /// `GET /api/v1/attention` / SSE `attention.changed`, the same seam
+    /// `updateAttention` exercises here.
+    @MainActor
     func testLoginRequiredServerStillNeedsAttention() throws {
         let state = AppState()
         state.servers = [try loginRequiredServer()]
+        state.updateAttention([
+            AttentionItem(
+                id: "sign_in_required:server:github",
+                kind: "sign_in_required",
+                rank: 10,
+                subject: AttentionSubject(type: "server", id: "github", name: "github"),
+                summary: "github: sign in required",
+                fix: AttentionFix(verb: "login", label: "Sign in", target: "/servers/github"),
+                since: Date()
+            ),
+        ])
         XCTAssertEqual(
-            state.serversNeedingAttention.map(\.name), ["github"],
+            state.attention.map(\.subject.name), ["github"],
             "A sign-in-required server must remain in the calm 'Needs Attention' group"
         )
     }

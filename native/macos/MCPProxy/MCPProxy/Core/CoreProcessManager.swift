@@ -1702,6 +1702,12 @@ actor CoreProcessManager {
                 )
             }
 
+        case "attention.changed":
+            // Spec 109 FR-001/FR-006: the wire payload is narrowed to
+            // `{count, ids}` per subscriber — refetch the full item shape
+            // (summaries, fixes) rather than reconstructing it from ids.
+            await refreshAttention()
+
         case "config.reloaded":
             // Configuration reloaded; refresh everything once.
             // A re-init loop re-emits config.reloaded each cycle even when the
@@ -1910,6 +1916,7 @@ actor CoreProcessManager {
         await refreshTokenMetrics()
         await refreshSecurityStatus()
         await refreshProfiles()
+        await refreshAttention()
         // Bump activityVersion so ActivityView reloads. Still needed after the
         // glance's SSE work: the bus emits `activity.tool_call.completed` and
         // `activity.internal_tool_call.completed` (internal/runtime/events.go),
@@ -1971,6 +1978,19 @@ actor CoreProcessManager {
             await appState.updateServers(servers)
         } catch {
             // Non-fatal; we'll retry on the next refresh
+        }
+    }
+
+    /// Fetch the needs-attention list from `GET /api/v1/attention` and update
+    /// appState (Spec 109 FR-001). Driven on connect, on the periodic
+    /// refresh, and on `attention.changed` SSE events.
+    func refreshAttention() async {
+        guard let apiClient else { return }
+        do {
+            let response = try await apiClient.attention()
+            await MainActor.run { appState.updateAttention(response.items) }
+        } catch {
+            // Non-fatal; we'll retry on the next refresh or SSE event.
         }
     }
 

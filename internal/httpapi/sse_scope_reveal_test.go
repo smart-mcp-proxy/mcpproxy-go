@@ -585,6 +585,7 @@ func TestSSE_EveryRuntimeEventTypeIsClassified(t *testing.T) {
 	// delivered unchanged because there is nothing in it to scope.
 	noServerIdentity := map[string]string{
 		"servers.changed":          "rendered per subscriber, never dropped: coalesced last-write-wins",
+		"attention.changed":        "rendered per subscriber, never dropped: structured items narrowed by canSeeServer (Spec 109 FR-006)",
 		"config.reloaded":          "admin config document — dropped for a scoped caller",
 		"config.saved":             "admin config document — dropped for a scoped caller",
 		"secrets.changed":          "admin config document — dropped for a scoped caller",

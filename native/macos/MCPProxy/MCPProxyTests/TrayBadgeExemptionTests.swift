@@ -59,6 +59,24 @@ final class TrayBadgeExemptionTests: XCTestCase {
         try! JSONDecoder().decode(ServerStatus.self, from: json.data(using: .utf8)!)
     }
 
+    /// A synthetic `server_review` item, standing in for what the core's
+    /// `GET /api/v1/attention` (Spec 109 FR-001) would send for a quarantined
+    /// server. `AppState.attention` no longer derives from `servers` locally
+    /// (the retired `serversNeedingAttention` predicate) — a test asserting on
+    /// it must populate it explicitly via `updateAttention`, the same seam the
+    /// SSE `attention.changed` handler uses in production.
+    private static func serverReviewItem(for name: String) -> AttentionItem {
+        AttentionItem(
+            id: "server_review:server:\(name)",
+            kind: "server_review",
+            rank: 50,
+            subject: AttentionSubject(type: "server", id: name, name: name),
+            summary: "\(name): waiting for review",
+            fix: AttentionFix(verb: "review", label: "Review", target: "/review/\(name)"),
+            since: Date()
+        )
+    }
+
     // MARK: - The bug
 
     /// The reported symptom: a red menu-bar dot that nothing the user did could
@@ -110,8 +128,9 @@ final class TrayBadgeExemptionTests: XCTestCase {
     func testQuarantineStillAsksForAttentionJustNotInRed() {
         let state = AppState()
         state.servers = [Self.quarantinedServer(name: "everything")]
+        state.updateAttention([Self.serverReviewItem(for: "everything")])
 
-        XCTAssertEqual(state.serversNeedingAttention.count, 1,
+        XCTAssertEqual(state.attention.count, 1,
                        "the user still has to approve it — the menu must say so")
         XCTAssertNil(state.worstDiagnosticSeverity,
                      "but the menu bar must not scream about it")
@@ -157,10 +176,11 @@ final class TrayBadgeExemptionTests: XCTestCase {
         """)
         let state = AppState()
         state.servers = [broken]
+        state.updateAttention([Self.serverReviewItem(for: "demo")])
 
         XCTAssertNil(state.worstDiagnosticSeverity,
                      "a server awaiting review must not raise a red badge, even when broken")
-        XCTAssertEqual(state.serversNeedingAttention.count, 1,
+        XCTAssertEqual(state.attention.count, 1,
                        "but it must still be listed — the user has to act on it")
         XCTAssertEqual(broken.health?.action, "approve",
                        "and the action offered is review, not restart")

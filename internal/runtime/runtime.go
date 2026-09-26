@@ -189,6 +189,11 @@ type Runtime struct {
 	// lifecycle storm into one settled event per server per scan.
 	scanNotify *scanNotifyDebouncer
 
+	// Spec 109 FR-001: the one needs-attention list every surface reads.
+	// Recomputes (debounced) on servers.changed and on a threshold timer for
+	// time-based items (FR-002).
+	attention *attentionSubscriber
+
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
 
@@ -433,12 +438,30 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// signals of a reconnect storm without noticeably delaying the result.
 	rt.scanNotify = newScanNotifyDebouncer(rt, 750*time.Millisecond)
 
+	// Spec 109 FR-001: one needs-attention list computed from the same
+	// servers.changed rows the coalescer above builds. 200ms trails the
+	// coalescer's own 50ms window so a burst settles into one recompute.
+	rt.attention = newAttentionSubscriber(rt, 200*time.Millisecond)
+	rt.attention.start(appCtx)
+
 	// Spec 093 FR-012/FR-013: origin-independent shed seam. Installed here (not
 	// in the MCP dispatch layer) so code_execution and activity replay are
 	// covered by construction.
 	rt.installRejectionObserver()
 
 	return rt, nil
+}
+
+// Attention returns the current needs-attention list (Spec 109 FR-001): one
+// function, served verbatim by GET /api/v1/attention (filtered per caller by
+// internal/httpapi), the CLI `attention`/`status`/`doctor` commands, and the
+// same snapshot the SSE attention.changed event is derived from. Safe to call
+// concurrently with the background recompute (atomic snapshot read).
+func (r *Runtime) Attention() []contracts.AttentionItem {
+	if r.attention == nil {
+		return nil
+	}
+	return r.attention.Items()
 }
 
 // Config returns the underlying configuration pointer.

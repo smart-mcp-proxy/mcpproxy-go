@@ -1,15 +1,15 @@
-// DashboardView.swift
+// HomeView.swift
 // MCPProxy
 //
-// Dashboard overview matching the web UI layout:
-// Stats cards, servers needing attention, token savings,
-// token distribution, recent sessions, recent tool calls.
+// Home (Spec 109 FR-051, renamed from Dashboard): the needs-attention list
+// first, then the hub overview, token savings, token distribution, recent
+// sessions and recent tool calls.
 
 import SwiftUI
 
 // MARK: - Connect Clients Control
 
-/// The dashboard's way into the native Connect Client form (FR-012).
+/// Home's way into the native Connect Client form (FR-012).
 ///
 /// The dashboard used to own a sheet that connected a client *directly* — no
 /// preview, no backup disclosure. That sheet is gone: this control only opens
@@ -23,9 +23,9 @@ enum DashboardConnectControl {
     }
 }
 
-// MARK: - Dashboard View
+// MARK: - Home View
 
-struct DashboardView: View {
+struct HomeView: View {
     @ObservedObject var appState: AppState
     @Environment(\.fontScale) var fontScale
     @State private var mcpSessions: [APIClient.MCPSession] = []
@@ -38,13 +38,14 @@ struct DashboardView: View {
                     errorBanner(coreError)
                 }
 
-                // Hub visualization
-                hubSection
-
-                // Servers needing attention
-                if !appState.serversNeedingAttention.isEmpty {
+                // Spec 109 FR-001/FR-003/FR-051: the ONE needs-attention list
+                // every surface reads, FIRST — before the hub overview.
+                if !appState.attention.isEmpty {
                     attentionSection
                 }
+
+                // Hub visualization
+                hubSection
 
                 // Token savings
                 tokenSavingsSection
@@ -61,6 +62,23 @@ struct DashboardView: View {
             .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Review finding: `reload_hint` ("How to restart") had no native
+        // client screen and no interim feedback — clicking it did nothing.
+        // 109-h adds the real `/clients?focus=<id>` screen; until then this
+        // surfaces the item's own restart guidance so the button is never a
+        // dead click.
+        .alert(
+            "How to restart",
+            isPresented: Binding(
+                get: { appState.pendingReloadHint != nil },
+                set: { if !$0 { appState.pendingReloadHint = nil } }
+            ),
+            presenting: appState.pendingReloadHint
+        ) { _ in
+            Button("OK", role: .cancel) { appState.pendingReloadHint = nil }
+        } message: { item in
+            Text(item.detail ?? item.summary)
+        }
         .task {
             do {
                 mcpSessions = try await appState.apiClient?.sessions(limit: 20) ?? []
@@ -354,18 +372,18 @@ struct DashboardView: View {
         .padding(.vertical, 8)
     }
 
-    // MARK: - Servers Needing Attention
+    // MARK: - Needs Attention (Spec 109 FR-001)
 
     @ViewBuilder
     private var attentionSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Servers Needing Attention", systemImage: "exclamationmark.triangle.fill")
+            Label("Needs Attention (\(appState.attention.count))", systemImage: "exclamationmark.triangle.fill")
                 .font(.scaled(.headline, scale: fontScale))
                 .foregroundStyle(.orange)
 
             VStack(spacing: 1) {
-                ForEach(appState.serversNeedingAttention) { server in
-                    AttentionRow(server: server, appState: appState)
+                ForEach(appState.attention) { item in
+                    AttentionRow(item: item, appState: appState)
                 }
             }
             .background(Color(nsColor: .controlBackgroundColor))
@@ -1022,23 +1040,28 @@ private struct ToolCallIntentBadge: View {
 
 // MARK: - Attention Row
 
+/// One row of Home's needs-attention list (Spec 109 FR-001/FR-005). The row
+/// itself reads as disclosure only — `login`/`restart`/`enable` run in place
+/// (`TrayServerAction.fromHealthAction`, the same three verbs the tray
+/// executes); every other verb, including `review`, navigates to the location
+/// that performs it and NEVER calls `approveTools`/`unquarantineServer`
+/// directly — a quarantine or tool review is a human decision on its own
+/// screen, not a list-row click (pinned by `HomeReviewActionTests`).
 private struct AttentionRow: View {
-    let server: ServerStatus
+    let item: AttentionItem
     let appState: AppState
     @Environment(\.fontScale) var fontScale
 
     var body: some View {
         HStack {
-            Image(systemName: server.health?.healthLevel.sfSymbolName ?? "questionmark.circle")
-                .foregroundStyle(server.statusColor)
-                // FR-011: no surface may render `level` as text, including
-                // accessibility labels — use the one status label table.
-                .accessibilityLabel("Health: \(server.health?.statusLabel ?? "unknown")")
+            Image(systemName: iconName)
+                .foregroundStyle(iconColor)
+                .accessibilityLabel("Needs attention: \(item.kind)")
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(server.name)
+                Text(item.summary)
                     .font(.scaled(.subheadline, scale: fontScale).weight(.medium))
-                if let detail = server.health?.summary {
+                if let detail = item.detail {
                     Text(detail)
                         .font(.scaled(.caption, scale: fontScale))
                         .foregroundStyle(.secondary)
@@ -1047,84 +1070,43 @@ private struct AttentionRow: View {
 
             Spacer()
 
-            ForEach(server.attentionActions, id: \.self) { action in
-                // FR-014: bind the primary CTA's wording through the ONE
-                // cross-surface action-label table (HealthStatus.actionLabels)
-                // the Web UI and CLI also render — not the private
-                // HealthAction.label enum, which uses different words
-                // ("Approve" vs "Review", "Set Secret" vs "Add secret").
-                let label = HealthStatus.actionLabels[action.rawValue] ?? action.label
-                Button(label) {
-                    Task { await performAction(action, for: server) }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .tint(actionColor(action))
-                .accessibilityLabel("\(label) \(server.name)")
+            Button(item.fix.label) {
+                Task { await HomeAttentionAction.performFix(item, appState: appState) }
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .tint(fixColor)
+            .accessibilityLabel("\(item.fix.label) \(item.subject.name)")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
     }
 
-    private func actionColor(_ action: HealthAction) -> Color {
-        switch action {
-        case .login: return .blue
-        case .restart: return .orange
-        case .approve: return .green
+    private var iconName: String {
+        switch item.kind {
+        case "sign_in_required": return "person.badge.key"
+        case "server_review", "tool_review": return "checkmark.shield"
+        case "server_error": return "exclamationmark.triangle"
+        case "missing_secret": return "key"
+        case "config_error": return "gearshape"
+        case "client_never_seen": return "laptopcomputer.slash"
+        default: return "questionmark.circle"
+        }
+    }
+
+    private var iconColor: Color {
+        switch item.kind {
+        case "server_error": return .red
+        default: return .orange
+        }
+    }
+
+    private var fixColor: Color {
+        switch item.fix.verb {
+        case "login": return .blue
+        case "restart": return .orange
+        case "review": return .green
         default: return .accentColor
-        }
-    }
-
-    private func performAction(_ action: HealthAction, for server: ServerStatus) async {
-        switch action {
-        case .login, .restart, .enable:
-            guard let client = appState.apiClient else { return }
-            do {
-                switch action {
-                case .login:
-                    try await client.loginServer(server.id)
-                case .restart:
-                    try await client.restartServer(server.id)
-                case .enable:
-                    try await client.enableServer(server.id)
-                default:
-                    break
-                }
-            } catch {
-                // Action errors are visible via server health refresh
-            }
-        case .setSecret, .configure, .editURL:
-            // None of these complete via a single API call — they need a
-            // form (the secret value, the new URL, isolation fields). Take
-            // the user to the server's Config tab instead of no-op'ing.
-            navigateToServerDetail(server, tab: .config)
-        case .approve:
-            // FR-014/FR-005: "approve" is never a one-click action — it must
-            // open the review location so the user sees what is being
-            // approved before it happens, matching the identically-labeled
-            // ("Review") button on the Web UI and the tray. The Tools tab
-            // already hosts that review UI (quarantine banner + per-tool
-            // approve rows), so navigate there instead of performing the
-            // approval directly through the API client.
-            navigateToServerDetail(server, tab: .tools)
-        case .viewLogs:
-            navigateToServerDetail(server, tab: .logs)
-        }
-    }
-
-    /// Reuses the same "switch sidebar, then select the server" route the
-    /// dashboard's other links already use (see the Import/Add Server
-    /// buttons above) so a `.showServerDetail` observer set up once in
-    /// ServersView handles every doorway into server detail.
-    @MainActor
-    private func navigateToServerDetail(_ server: ServerStatus, tab: ServerDetailTab) {
-        NotificationCenter.default.post(name: .switchToServers, object: nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            NotificationCenter.default.post(
-                name: .showServerDetail,
-                object: ServerDetailTarget(serverName: server.name, tab: tab)
-            )
         }
     }
 }

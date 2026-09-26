@@ -6,209 +6,20 @@
     <!-- Upgrade nudge (Spec 079): dismissible per-version update banner -->
     <UpdateBanner />
 
-    <!-- "What needs me": servers in a bad state and tools awaiting approval.
-         These live above the panel switcher rather than inside a panel — they
-         are the one thing on this page the user is expected to act on, and
-         burying them under a tab means the landing page can look calm while a
-         server is down or an unreviewed tool is waiting. Each renders only
-         when it has something to say, so a healthy install sees neither. -->
-    <!-- Servers Needing Attention Banner (using unified health status) -->
-    <!-- UX audit F14: below `sm` the alert stacks instead of sharing its row
-         with "View All Servers", and `min-w-0` lets the text shrink, so at 390px
-         "Host not found" wraps as words rather than one character per line. -->
-    <div
-      v-if="serversNeedingAttention.length > 0"
-      class="alert alert-vertical sm:alert-horizontal alert-warning"
-    >
-      <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
-      </svg>
-      <div class="flex-1 min-w-0">
-        <h3 class="font-bold">{{ serversNeedingAttention.length }} server{{ serversNeedingAttention.length !== 1 ? 's' : '' }} need{{ serversNeedingAttention.length === 1 ? 's' : '' }} attention</h3>
-        <div class="text-sm space-y-1 mt-1">
-          <div v-for="server in serversNeedingAttention.slice(0, 3)" :key="server.name" class="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
-            <span :class="server.health?.level === 'unhealthy' ? 'text-error' : 'text-warning'" aria-hidden="true">●</span>
-            <router-link :to="serverDetailPath(server.name)" class="font-medium link link-hover break-words">{{ server.name }}</router-link>
-            <!-- No opacity: the failure reason is the point of the banner, and a
-                 faded foreground on a filled alert is what F9 measured at 2.x:1. -->
-            <span class="break-words">{{ server.health?.summary }}</span>
-            <button
-              v-if="server.health?.action === 'login'"
-              @click="triggerServerAction(server.name, 'oauth_login')"
-              class="btn btn-xs btn-primary"
-            >
-              Login
-            </button>
-            <button
-              v-if="server.health?.action === 'restart'"
-              @click="triggerServerAction(server.name, 'restart')"
-              class="btn btn-xs btn-primary"
-            >
-              Restart
-            </button>
-            <button
-              v-if="server.health?.action === 'enable'"
-              @click="triggerServerAction(server.name, 'enable')"
-              class="btn btn-xs btn-primary"
-            >
-              Enable
-            </button>
-            <router-link
-              v-if="server.health?.action === 'set_secret'"
-              to="/secrets"
-              class="btn btn-xs btn-primary"
-            >
-              Set Secret
-            </router-link>
-            <router-link
-              v-if="server.health?.action === 'configure'"
-              :to="serverDetailPath(server.name, 'config')"
-              class="btn btn-xs btn-primary"
-            >
-              Configure
-            </router-link>
-            <!-- Audit F11: DNS / malformed-URL failures are address problems.
-                 Restart redials the same broken address; Edit URL does not. -->
-            <router-link
-              v-if="server.health?.action === 'edit_url'"
-              :to="`${serverDetailPath(server.name, 'config')}&focus=endpoint`"
-              class="btn btn-xs btn-primary"
-              data-test="attention-edit-url"
-            >
-              Edit URL
-            </router-link>
-          </div>
-          <div v-if="serversNeedingAttention.length > 3" class="text-xs opacity-60">
-            ... and {{ serversNeedingAttention.length - 3 }} more
-          </div>
-        </div>
-      </div>
-      <!-- `whitespace-nowrap` + `shrink-0`: at 390px the label was wrapping onto
-           three clipped lines inside the alert grid (UX audit F14/F36). -->
-      <router-link to="/servers" class="btn btn-sm shrink-0 whitespace-nowrap">
-        View All Servers
-      </router-link>
-    </div>
+    <!-- Spec 109 FR-051/FR-001/FR-003: the ONE needs-attention list, replacing
+         the two bespoke Dashboard.vue banners (servers needing attention,
+         tools pending approval) that duplicated FR-001's logic locally. -->
+    <AttentionList data-test="home-attention-list" />
 
-    <!-- Tools Pending Quarantine Approval Banner -->
-    <div
-      v-if="totalPendingTools > 0"
-      class="alert alert-warning"
-    >
-      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-      </svg>
-      <div class="flex-1">
-        <h3 class="font-bold">{{ totalPendingTools }} tool{{ totalPendingTools !== 1 ? 's' : '' }} pending approval across {{ serversWithPendingTools.length }} server{{ serversWithPendingTools.length !== 1 ? 's' : '' }}</h3>
-        <div class="text-sm space-y-1 mt-1">
-          <div v-for="entry in serversWithPendingTools.slice(0, 5)" :key="entry.serverName" class="flex items-center gap-2">
-            <span class="text-warning">&#9679;</span>
-            <router-link :to="serverDetailPath(entry.serverName)" class="font-medium link link-hover">{{ entry.serverName }}</router-link>
-            <span class="opacity-70">{{ entry.count }} tool{{ entry.count !== 1 ? 's' : '' }} pending</span>
-          </div>
-          <div v-if="serversWithPendingTools.length > 5" class="text-xs opacity-60">
-            ... and {{ serversWithPendingTools.length - 5 }} more server{{ serversWithPendingTools.length - 5 !== 1 ? 's' : '' }}
-          </div>
-        </div>
-      </div>
-      <router-link to="/servers" class="btn btn-sm">
-        Review Tools
-      </router-link>
-    </div>
+    <!-- Usage summary strip: normally sits below the topology, but moves
+         above it when the attention list is empty (FR-051) so an otherwise-
+         calm landing page still opens on something live. -->
+    <UsageSummaryStrip v-if="attentionStore.loaded && attentionStore.count === 0" data-test="home-usage-strip-top" />
 
-    <!-- Usage ↔ Overview switcher (Spec 069 T016). Usage is the default panel
-         (analytics-as-landing-page); each tab maps to a deep-linkable route
-         (/usage, /overview) so the panel survives a reload or a shared link. -->
-    <div role="tablist" class="tabs tabs-boxed w-fit" data-test="dashboard-view-switcher">
-      <a
-        role="tab"
-        class="tab"
-        :class="activeView === 'usage' ? 'tab-active' : ''"
-        data-test="dashboard-tab-usage"
-        @click="selectUsage"
-      >Usage</a>
-      <a
-        role="tab"
-        class="tab"
-        :class="activeView === 'overview' ? 'tab-active' : ''"
-        data-test="dashboard-tab-overview"
-        @click="selectOverview"
-      >Overview</a>
-    </div>
-
-    <!-- Usage view: the panel wrapper is always in the DOM (kept hidden with
-         v-show so switching back is instant and the Overview subtree is never
-         torn down, SC-006). The heavy chart bundle + the usage fetch inside
-         UsageView are mounted only once the panel has been active
-         (usageEverActive) AND the server list has arrived, and stay code-split
-         behind Suspense, so the Dashboard shell still paints immediately
-         (SC-004). -->
-    <div v-show="activeView === 'usage'" data-test="dashboard-usage-panel">
-      <!-- First run: no upstream servers configured, so the analytics panel
-           would only ever show "no data". Point the new user at the one action
-           that makes the dashboard useful instead. -->
-      <div
-        v-if="showFirstRunCta"
-        class="card bg-base-200 border border-base-300"
-        data-test="dashboard-usage-first-run"
-      >
-        <div class="card-body items-center text-center py-12">
-          <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-          </svg>
-          <h3 class="font-semibold text-lg mt-2">Add your first server to see usage</h3>
-          <p class="text-sm text-base-content/60 max-w-md">
-            No upstream MCP servers are configured yet, so there is nothing to chart.
-            Add one and this page will show call volume, token sinks, error rates and a timeline.
-          </p>
-          <div class="flex flex-wrap gap-2 justify-center mt-2">
-            <!-- Spec 107 cross-review round 3, chunk 4 P2: this opens the
-                 generic AddServerModal, whose submit path is the core
-                 POST /api/v1/tools/call dispatch door — a mandatory
-                 tenant-session refusal. Hidden for a tenant, matching the
-                 TopHeader fix (FR-041: hidden, not issued-and-403'd); a
-                 tenant's working equivalent is /my/servers. -->
-            <button
-              v-if="authStore.principalKind !== 'tenant'"
-              class="btn btn-primary btn-sm"
-              data-test="dashboard-first-run-add-server"
-              @click="showAddServer = true"
-            >
-              Add your first server
-            </button>
-            <router-link to="/repositories" class="btn btn-sm btn-ghost">Browse Registry</router-link>
-            <button
-              class="btn btn-sm btn-ghost"
-              data-test="dashboard-first-run-overview"
-              @click="selectOverview"
-            >
-              Go to Overview
-            </button>
-          </div>
-        </div>
-      </div>
-      <!-- Hold the charts back until the server list has arrived: mounting
-           UsageView first would fire a usage aggregate request and flash the
-           "no usage data yet" card on a fresh install, only to be replaced by
-           the CTA above a moment later. Both requests are issued together in
-           onMounted, so this costs no extra round-trip. -->
-      <div
-        v-else-if="!serversFetchSettled && !serversStore.loaded"
-        class="flex justify-center py-16"
-        data-test="dashboard-usage-pending"
-      >
-        <span class="loading loading-spinner loading-lg"></span>
-      </div>
-      <Suspense v-else-if="usageEverActive">
-        <UsageView />
-        <template #fallback>
-          <div class="flex justify-center py-16"><span class="loading loading-spinner loading-lg"></span></div>
-        </template>
-      </Suspense>
-    </div>
-
-    <!-- Overview: v-show (not v-if) so its state survives a switch to Usage and back (SC-006). -->
-    <div v-show="activeView === 'overview'" class="space-y-6" data-test="dashboard-overview-panel">
+    <!-- Topology (moved from Dashboard.vue's Overview panel). Always shown —
+         Home no longer switches between an Overview and a Usage panel;
+         /usage is its own page (Usage.vue), and /overview redirects to /. -->
+    <div class="space-y-6" data-test="home-topology">
     <!-- Hub Visualization -->
     <div class="grid grid-cols-1 lg:grid-cols-[280px_1fr_280px] gap-0 min-h-[520px] relative">
 
@@ -465,7 +276,7 @@
           <router-link to="/security" class="btn btn-ghost btn-sm w-full gap-1">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-            </svg>
+              </svg>
             Security Scan
             <span v-if="securityScannerLoaded && securityTotalScans === 0" class="badge badge-ghost badge-xs ml-1">Run first scan</span>
             <span v-else-if="securityTotalFindings > 0" class="badge badge-warning badge-xs ml-1">{{ securityTotalFindings }} issue{{ securityTotalFindings === 1 ? '' : 's' }}</span>
@@ -543,7 +354,9 @@
     <!-- Hints Panel (Bottom of Page) -->
     <CollapsibleHintsPanel :hints="dashboardHints" />
     </div>
-    <!-- /Overview panel -->
+    <!-- /Topology -->
+
+    <UsageSummaryStrip v-if="attentionStore.loaded && attentionStore.count > 0" data-test="home-usage-strip-bottom" />
 
     <!-- Modals -->
     <ConnectModal :show="showConnectModal" @close="showConnectModal = false" />
@@ -554,11 +367,12 @@
 
 <script setup lang="ts">
 import { serverDetailPath } from '@/utils/serverRoute'
-import { computed, nextTick, ref, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, nextTick, ref, watch, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useAuthStore } from '@/stores/auth'
+import { useAttentionStore } from '@/stores/attention'
 import { useSecurityScannerStatus, refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import api from '@/services/api'
 import logoSvg from '@/assets/logo.svg'
@@ -569,87 +383,21 @@ import TokenPieChart from '@/components/TokenPieChart.vue'
 import ConnectModal from '@/components/ConnectModal.vue'
 import AddServerModal from '@/components/AddServerModal.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
+import AttentionList from '@/components/AttentionList.vue'
+import UsageSummaryStrip from '@/components/UsageSummaryStrip.vue'
 import { useOnboardingStore } from '@/stores/onboarding'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { ClientStatus } from '@/types'
 import { liveClientsFromSessions } from '@/utils/sessionLabel'
 import { formatRelativeTime } from '@/utils/activity'
 
-// Usage view is code-split so chart.js + the usage fetch stay out of the
-// Dashboard's first-paint critical path (Spec 069 SC-004).
-const UsageView = defineAsyncComponent(() => import('@/views/Usage.vue'))
-
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const onboardingStore = useOnboardingStore()
 const authStore = useAuthStore()
+const attentionStore = useAttentionStore()
 
-// Usage ↔ Overview switcher state (Spec 069 T016). `usageEverActive` gates the
-// first mount; `activeView` then toggles via v-show so both panels keep state.
-//
-// The active panel comes from the route (`meta.dashboardView`): `/` and
-// `/usage` land on the analytics panel, `/overview` on the hub overview.
-// Clicking a tab rewrites the URL (replace, so the switcher does not pile up
-// history entries) — the routes share this component, so switching never
-// remounts the Dashboard and both panels keep their state.
-type DashboardView = 'overview' | 'usage'
-
-const route = useRoute()
 const router = useRouter()
-
-function routeView(): DashboardView {
-  return (route.meta?.dashboardView as DashboardView | undefined) === 'overview' ? 'overview' : 'usage'
-}
-
-const activeView = ref<DashboardView>(routeView())
-const usageEverActive = ref(activeView.value === 'usage')
-
-// The panel a navigation is currently heading for. `route` only reflects a
-// *confirmed* navigation, so comparing against it alone loses a fast second tab
-// click: it would still see the pre-navigation route, decide it has nothing to
-// do, and then be overwritten when the first navigation lands. Tracking the
-// in-flight target makes the newest click win — the router cancels the
-// superseded navigation for us.
-//
-// `navSeq` identifies which navigation owns the marker. Comparing the panel
-// value alone is not enough: two navigations to the same panel (Overview →
-// Usage → Overview) share a value, so the older one's settlement would clear a
-// marker still owned by the newer one, and the next click would again compare
-// against the stale current route and be swallowed.
-let pendingView: DashboardView | null = null
-let navSeq = 0
-
-function selectView(view: DashboardView) {
-  if (view === 'usage') {
-    usageEverActive.value = true
-  }
-  activeView.value = view
-  // `/` is also a usage route — don't rewrite it to `/usage` needlessly.
-  if ((pendingView ?? routeView()) === view) {
-    return
-  }
-  const seq = ++navSeq
-  pendingView = view
-  const targetRoute = view === 'usage' ? 'usage' : 'dashboard-overview'
-  void router.replace({ name: targetRoute }).finally(() => {
-    // Only the newest navigation clears the marker; a superseded one must not.
-    if (seq === navSeq) {
-      pendingView = null
-    }
-  })
-}
-const selectUsage = () => selectView('usage')
-const selectOverview = () => selectView('overview')
-
-// Keep the panel in sync when the route changes underneath us (sidebar link,
-// browser back/forward, a pasted deep link).
-watch(() => route.meta?.dashboardView, () => {
-  const view = routeView()
-  if (view === 'usage') {
-    usageEverActive.value = true
-  }
-  activeView.value = view
-})
 
 // Modal state
 const showConnectModal = ref(false)
@@ -676,21 +424,6 @@ const availableClientNames = computed(() => {
     .filter(name => !live.has(name))
 })
 
-function clientIcon(client: ClientStatus): string {
-  const iconMap: Record<string, string> = {
-    'claude-desktop': '\u2728',
-    'claude-code': '\u{1F4BB}',
-    'cursor': '\u{1F4DD}',
-    'vscode': '\u{1F4D0}',
-    'windsurf': '\u{1F3C4}',
-    'zed': '\u26A1',
-    'cline': '\u{1F916}',
-    'continue': '\u27A1\uFE0F',
-    'zcode': '\u{1F9BE}',
-  }
-  return iconMap[client.id] || client.icon || '\u{1F527}'
-}
-
 const loadClientStatuses = async () => {
   // Spec 107 FR-041 / T088: /connect is admin-only (client-config content
   // read across the whole fleet host) — a tenant principal never has a
@@ -703,27 +436,6 @@ const loadClientStatuses = async () => {
     }
   } catch {
     // Connect endpoint may not exist yet - graceful degradation
-  }
-}
-
-// --- Activity count ---
-const activityCount = ref(0)
-
-const loadActivitySummary = async () => {
-  // Spec 107 FR-041 / T088: /activity* is an admin-only core door (fleet-
-  // wide history) named in contracts/rest-endpoints.md §8's must-refuse
-  // list — a tenant principal's dashboard has no activity-count chip to
-  // fill in, and this call would just draw the fixed 403 every 30s
-  // (cross-review round 1, P1: this was the one loader on this page missing
-  // the guard its four siblings already carry).
-  if (authStore.principalKind === 'tenant') return
-  try {
-    const response = await api.getActivitySummary('24h')
-    if (response.success && response.data) {
-      activityCount.value = response.data.total_count || 0
-    }
-  } catch {
-    // Silently fail
   }
 }
 
@@ -852,25 +564,6 @@ const loadTokenSavings = async () => {
   }
 }
 
-// --- First run (no servers configured) ---
-// Two different questions, deliberately answered by two different flags:
-//
-// `serversFetchSettled` — has our own initial request finished, successfully or
-// not? Together with `loaded` it gates the chart mount below, so a failed fetch
-// falls through to the usage panel rather than spinning forever, and an
-// authoritative list arriving by SSE first clears the spinner immediately.
-//
-// `serversStore.loaded` — has a server list ever arrived successfully? Only
-// that justifies telling the user they have no servers. It cannot be inferred
-// from `loading.error`: that field is shared, other components (App.vue) and
-// silent background refreshes write it concurrently, and a success never clears
-// it — so an unrelated failure would suppress the CTA, and a later successful
-// refresh could never bring it back.
-const serversFetchSettled = ref(false)
-const showFirstRunCta = computed(
-  () => serversStore.loaded && serversStore.serverCount.total === 0
-)
-
 // --- Token savings: the headline claim, and the panel that derives it --------
 //
 // F23 (#1046). The figure is a STRUCTURAL estimate over the current tool
@@ -904,94 +597,6 @@ const openTokenSavingsDetails = () => {
 // hides the actual fault behind an administrative word. Ask the question
 // directly instead: switched off, and not already spoken for by quarantine.
 const disabledCount = computed(() => serversStore.serverCount.disabled)
-
-// --- Servers needing attention ---
-// Only show servers that have actionable problems, not transient states like "Connecting..."
-const serversNeedingAttention = computed(() => {
-  return serversStore.servers.filter(server => {
-    if (!server.health) return false
-    if (server.health.admin_state === 'disabled' || server.health.admin_state === 'quarantined') return false
-    // Only unhealthy servers with an actionable remedy need attention
-    // Degraded is for transient states (connecting) — not worth alerting
-    if (server.health.level === 'unhealthy') return true
-    // Degraded only if there's a specific action the user should take
-    if (server.health.level === 'degraded' && server.health.action) return true
-    return false
-  })
-})
-
-// --- Quarantine pending tools ---
-interface PendingToolEntry {
-  serverName: string
-  count: number
-}
-const pendingToolsByServer = ref<PendingToolEntry[]>([])
-
-const serversWithPendingTools = computed(() =>
-  pendingToolsByServer.value.filter(entry => entry.count > 0)
-)
-
-const totalPendingTools = computed(() =>
-  serversWithPendingTools.value.reduce((sum, entry) => sum + entry.count, 0)
-)
-
-const loadPendingTools = async () => {
-  try {
-    const enabledServers = serversStore.servers.filter(s => s.enabled)
-    const results: PendingToolEntry[] = []
-
-    const promises = enabledServers.map(async (server) => {
-      try {
-        const response = await api.getToolApprovals(server.name)
-        if (response.success && response.data?.tools) {
-          const pendingCount = response.data.tools.filter(
-            (t: any) => t.status === 'pending' || t.status === 'changed'
-          ).length
-          if (pendingCount > 0) {
-            results.push({ serverName: server.name, count: pendingCount })
-          }
-        }
-      } catch {
-        // Silently ignore per-server failures
-      }
-    })
-
-    await Promise.all(promises)
-    results.sort((a, b) => b.count - a.count)
-    pendingToolsByServer.value = results
-  } catch {
-    // Silently fail
-  }
-}
-
-// --- Server actions ---
-const triggerServerAction = async (serverName: string, action: string) => {
-  try {
-    switch (action) {
-      case 'oauth_login':
-        await serversStore.triggerOAuthLogin(serverName)
-        systemStore.addToast({ type: 'success', title: 'OAuth Login', message: `OAuth login initiated for ${serverName}` })
-        break
-      case 'restart':
-        await serversStore.restartServer(serverName)
-        systemStore.addToast({ type: 'success', title: 'Server Restarted', message: `${serverName} is restarting` })
-        break
-      case 'enable':
-        await serversStore.enableServer(serverName)
-        systemStore.addToast({ type: 'success', title: 'Server Enabled', message: `${serverName} has been enabled` })
-        break
-      default:
-        console.warn(`Unknown action: ${action}`)
-    }
-    setTimeout(() => serversStore.fetchServers(), 1000)
-  } catch (error) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Action Failed',
-      message: error instanceof Error ? error.message : 'Unknown error',
-    })
-  }
-}
 
 // --- Add Server handler ---
 const handleServerAdded = (serverName?: string) => {
@@ -1119,9 +724,9 @@ const dashboardHints = computed<Hint[]>(() => {
 onMounted(() => {
   loadClientStatuses()
   loadTokenSavings()
-  loadActivitySummary()
   loadSessions()
   loadSecurityStatus()
+  attentionStore.fetchAttention()
   // Populate security scanner totals for the Security Scan chip (F-12).
   // Spec 107 FR-041 / cross-review round 2, chunk 4 P1: /security/overview
   // is an admin-only core door (named must-refuse, rest-endpoints.md §8) —
@@ -1131,28 +736,20 @@ onMounted(() => {
   if (authStore.principalKind !== 'tenant') {
     void refreshSecurityScannerStatus()
   }
-  serversStore.fetchServers().then(() => {
-    serversFetchSettled.value = true
-    loadPendingTools()
-  })
+  serversStore.fetchServers()
 
   // Auto-refresh every 30 seconds
   refreshInterval = setInterval(() => {
     loadClientStatuses()
     loadTokenSavings()
-    loadActivitySummary()
     loadSessions()
     loadSecurityStatus()
     if (authStore.principalKind !== 'tenant') {
       void refreshSecurityScannerStatus()
     }
-    loadPendingTools()
   }, 30000)
 
   systemStore.connectEventSource()
-  // NOTE: no second fetchServers() here — it duplicated the request issued
-  // above and, being unsequenced against it, made the first-run gate depend on
-  // which of the two responses landed last.
 
   // Adaptive onboarding wizard (Spec 046): auto-show on first Web UI load
   // when the user has not yet engaged with the wizard and at least one

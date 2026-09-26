@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory, type NavigationGuard } from 'vue-router'
-import Dashboard from '@/views/Dashboard.vue'
+import Home from '@/views/Home.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -13,39 +13,31 @@ const router = createRouter({
     },
     // Existing routes (admin/personal)
     //
-    // The landing page (`/`) opens the Dashboard on its Overview (hub) panel.
-    // Spec 109 FR-051 / research D3 reverses #1044's Usage-first landing: new
-    // users kept landing on empty charts (audit N8). This is the 109-a interim
-    // step only — Home (needs-attention + topology + a usage strip) replaces
-    // this route in 109-d. `/usage` and `/overview` render the same Dashboard
-    // component so each panel is deep-linkable and survives a reload;
-    // `meta.dashboardView` is what the component reads to pick the active panel.
+    // Spec 109 FR-051: `/` renders Home — the needs-attention list, the
+    // topology (formerly Dashboard.vue's "Overview" panel) and a usage
+    // summary strip. `/usage` is the full Usage page in its own right
+    // (Usage.vue, no longer wrapped by Dashboard's panel switcher).
+    // `/overview` redirects to `/` — Home replaces the standalone Overview
+    // panel. `Dashboard.vue` is retired.
     {
       path: '/',
-      name: 'dashboard',
-      component: Dashboard,
+      name: 'home',
+      component: Home,
       meta: {
-        title: 'Dashboard',
-        dashboardView: 'overview',
+        title: 'Home',
       },
     },
     {
       path: '/usage',
       name: 'usage',
-      component: Dashboard,
+      component: () => import('@/views/Usage.vue'),
       meta: {
         title: 'Usage Analytics',
-        dashboardView: 'usage',
       },
     },
     {
       path: '/overview',
-      name: 'dashboard-overview',
-      component: Dashboard,
-      meta: {
-        title: 'Overview',
-        dashboardView: 'overview',
-      },
+      redirect: { name: 'home' },
     },
     {
       path: '/servers',
@@ -252,7 +244,7 @@ export const authGuard: NavigationGuard = async (to) => {
   if (!authStore.isTeamsEdition) {
     // Don't show server routes in personal edition
     if (to.path === '/login' || to.path.startsWith('/my/') || to.path.startsWith('/admin/')) {
-      return { name: 'dashboard' }
+      return { name: 'home' }
     }
     // Update title for personal edition
     const title = to.meta.title as string
@@ -265,7 +257,7 @@ export const authGuard: NavigationGuard = async (to) => {
   // Public routes (login) - redirect to dashboard if already authenticated
   if (to.meta.public) {
     if (authStore.isAuthenticated) {
-      return { name: 'dashboard' }
+      return { name: 'home' }
     }
     return
   }
@@ -277,7 +269,7 @@ export const authGuard: NavigationGuard = async (to) => {
 
   // Admin-only routes
   if (to.meta.requiresAdmin && !authStore.isAdmin) {
-    return { name: 'dashboard' }
+    return { name: 'home' }
   }
 
   // Update title

@@ -4,7 +4,9 @@
 import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case dashboard = "Dashboard"
+    // Spec 109 FR-051/T064: renamed from "Dashboard" — the needs-attention
+    // list is now this section's first thing, not a banner buried in it.
+    case home = "Home"
     case servers = "Servers"
     // F16: BM25 tool discovery is the product's headline feature and had no
     // native home — a tray-first user could not answer "which of my 942 tools
@@ -22,7 +24,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .dashboard: return "rectangle.3.group"
+        case .home: return "rectangle.3.group"
         case .servers: return "server.rack"
         case .tools: return "wrench.and.screwdriver"
         case .registries: return "books.vertical"
@@ -42,7 +44,7 @@ struct MainWindow: View {
     /// on a specific section (tray "Open Activity…" → Activity). Once the
     /// window exists, later switches arrive as `.switchToSidebarTab`
     /// notifications instead — state is only readable at creation time.
-    init(appState: AppState, initialTab: SidebarItem = .dashboard) {
+    init(appState: AppState, initialTab: SidebarItem = .home) {
         self.appState = appState
         _selectedItem = State(initialValue: initialTab)
     }
@@ -75,9 +77,9 @@ struct MainWindow: View {
 
                 // Regular content
                 Group {
-                    switch selectedItem ?? .dashboard {
-                    case .dashboard:
-                        DashboardView(appState: appState)
+                    switch selectedItem ?? .home {
+                    case .home:
+                        HomeView(appState: appState)
                     case .servers:
                         ServersView(appState: appState)
                     case .tools:

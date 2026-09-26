@@ -37,7 +37,66 @@ final class TrayAuditMenuTests: XCTestCase {
         controller.appState.coreState = .connected
         controller.appState.servers = servers
         controller.appState.profiles = profiles
+        // Spec 109 FR-001: the tray's "Needs Attention" group is built from
+        // `appState.attention` (fed from the core's GET /api/v1/attention /
+        // SSE attention.changed), not derived from `servers` in-process any
+        // more (the retired `serversNeedingAttention` predicate). This harness
+        // re-derives the same fixture-shaped items so the existing scenarios
+        // below keep exercising the menu-building code they were written for.
+        controller.appState.updateAttention(Self.attentionItems(from: servers))
         return (controller, host)
+    }
+
+    /// Mirrors the retired `AppState.serversNeedingAttention` predicate over
+    /// the `(level, summary, action)` fixtures this file already builds — and,
+    /// since the real needs-attention list is built server-side
+    /// (`internal/runtime/attention.go`'s `computeServerItems`), mirrors that
+    /// function's own shape too: sign-in is its own item (keyed off
+    /// `ServerStatus.isOAuthLoginRequired`, the same signal the rest of the
+    /// tray/Web UI use — NOT the bare `health.action` string, since quarantine
+    /// outranks sign-in there), and quarantine review is ALWAYS its own
+    /// separate item, appended unconditionally whenever `quarantined` is set,
+    /// never folded into whatever other action is also true. A quarantined
+    /// server awaiting sign-in therefore produces TWO items here, exactly as
+    /// the real backend does — never one row carrying both verbs.
+    private static func attentionItems(from servers: [ServerStatus]) -> [AttentionItem] {
+        servers.flatMap { server -> [AttentionItem] in
+            var items: [AttentionItem] = []
+            if server.isOAuthLoginRequired {
+                items.append(AttentionItem(
+                    id: "fixture:server:\(server.name):login",
+                    kind: "fixture-login",
+                    rank: 9,
+                    subject: AttentionSubject(type: "server", id: server.name, name: server.name),
+                    summary: "\(server.name): sign in required",
+                    fix: AttentionFix(verb: "login", label: "Sign in", target: "/servers/\(server.name)"),
+                    since: Date()
+                ))
+            } else if let action = server.health?.action, !action.isEmpty, action != "enable", action != "approve" {
+                let label = HealthStatus.actionLabels[action] ?? action
+                items.append(AttentionItem(
+                    id: "fixture:server:\(server.name)",
+                    kind: "fixture",
+                    rank: 10,
+                    subject: AttentionSubject(type: "server", id: server.name, name: server.name),
+                    summary: "\(server.name): \(server.health?.summary ?? action)",
+                    fix: AttentionFix(verb: action, label: label, target: "/servers/\(server.name)"),
+                    since: Date()
+                ))
+            }
+            if server.quarantined {
+                items.append(AttentionItem(
+                    id: "fixture:server:\(server.name):review",
+                    kind: "fixture-review",
+                    rank: 11,
+                    subject: AttentionSubject(type: "server", id: server.name, name: server.name),
+                    summary: "\(server.name): waiting for review",
+                    fix: AttentionFix(verb: "review", label: "Review", target: "/review/\(server.name)"),
+                    since: Date()
+                ))
+            }
+            return items
+        }
     }
 
     private func topLevelTitles(_ host: TestMenuHost) -> [String] {
@@ -209,14 +268,19 @@ final class TrayAuditMenuTests: XCTestCase {
         return try! JSONDecoder().decode(ServerStatus.self, from: json)
     }
 
-    /// The combined state: `forAttention` must still pick `.login` (sign-in
-    /// outranks the row's own dispatch even though quarantine outranks it in
-    /// `health.action`), and the row's second item must still read "Review
-    /// quarantine…" — the `detailsTitle` conditional at
-    /// `MCPProxyApp.rebuildMenu()` — not the generic "Open Server Details"
-    /// that a plain sign-in row gets. Neither `testAnAttentionRowDoesNotFireItsActionOnClick`
-    /// (plain sign-in, not quarantined) nor `testARowWithNoActionNavigatesDirectly`
-    /// (plain quarantine, no sign-in) exercises both facts on one server.
+    /// The combined state: Spec 109's one-list design (`internal/runtime/
+    /// attention.go`'s `computeServerItems`) makes sign-in and quarantine
+    /// review two SEPARATE attention items, never one row carrying both verbs
+    /// — quarantine is appended unconditionally whenever `Quarantined` is set,
+    /// regardless of what other item the server's status also produced. So a
+    /// quarantined server awaiting sign-in gets a runnable "Sign in" row (with
+    /// its own submenu) AND a plain, non-runnable review row that navigates
+    /// straight to the server's detail view (`review` is never a one-click
+    /// approve — `MCPProxyApp.rebuildMenu()`'s `TrayServerAction
+    /// .fromHealthAction` deliberately has no case for it). Neither
+    /// `testAnAttentionRowDoesNotFireItsActionOnClick` (plain sign-in, not
+    /// quarantined) nor `testARowWithNoActionNavigatesDirectly` (plain
+    /// quarantine, no sign-in) exercises both facts on one server.
     func testNeedsAttentionRowOffersSignInAndReviewWhenBothApply() throws {
         let (controller, host) = makeController(servers: [
             Self.quarantinedAwaitingSignIn(name: "github")
@@ -224,19 +288,22 @@ final class TrayAuditMenuTests: XCTestCase {
         controller.rebuildMenu()
 
         let attention = try submenu(host, startingWith: "Needs Attention")
-        let row = try XCTUnwrap(attention.items.first)
-        let rowMenu = try XCTUnwrap(row.submenu,
-                                   "a server with a runnable attention action needs its own row menu")
+        XCTAssertEqual(attention.items.count, 2,
+                       "a quarantined server awaiting sign-in is TWO separate attention items, never one " +
+                       "row combining both verbs: \(attention.items.map(\.title))")
 
+        let signInRow = try XCTUnwrap(attention.items.first { $0.submenu != nil },
+                                     "the sign-in item is the one runnable action, so it owns a row submenu")
+        let rowMenu = try XCTUnwrap(signInRow.submenu)
         XCTAssertEqual(rowMenu.items.first?.title, "Sign in",
-                       "quarantine outranks sign-in in health.action, but forAttention must still pick .login")
+                       "quarantine outranks sign-in in health.action, but the sign-in item's own fix.verb must still be login")
         XCTAssertTrue(rowMenu.items.first?.target === controller)
+        XCTAssertTrue(rowMenu.items.map(\.title).contains("Open Server Details"))
 
-        let review = try XCTUnwrap(rowMenu.items.first { $0.title.hasPrefix("Review quarantine") },
-                                   "a quarantined server awaiting sign-in must keep its review path: \(rowMenu.items.map(\.title))")
-        XCTAssertEqual(review.representedObject as? String, "github")
-        XCTAssertFalse(rowMenu.items.contains { $0.title == "Open Server Details" },
-                       "quarantined rows name the review action, never the generic details row")
+        let reviewRow = try XCTUnwrap(attention.items.first { $0.submenu == nil },
+                                      "review is never a one-click approve, so its row navigates directly with no submenu")
+        XCTAssertNotNil(reviewRow.action, "a review row with no action is the F14 dead link again")
+        XCTAssertEqual(reviewRow.representedObject as? String, "github")
     }
 
     // MARK: - F15 · A Servers submenu that fits

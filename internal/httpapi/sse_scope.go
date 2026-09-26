@@ -187,9 +187,10 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 // also means a producer that starts omitting a field — the exact regression
 // shape above — cannot silently reopen the door.
 //
-// servers.changed is deliberately absent: it is the coalesced, state-carrying
-// event that eventVisibleToCaller never drops and
-// renderEventPayloadForCaller narrows instead.
+// servers.changed and attention.changed are deliberately absent: both are
+// rendered per subscriber by renderEventPayloadForCaller (FR-006) instead of
+// being dropped by this function — see eventVisibleToCaller's early return
+// for the two of them.
 //
 // TestSSE_IdentityBearingEventTypesCoverEveryNamingProducer pins this set
 // against the fixtures that exercise each type end-to-end, and
@@ -248,7 +249,7 @@ func eventVisibleToCaller(ctx context.Context, evt internalRuntime.Event) bool {
 	if !auth.IsScopedCaller(ctx) {
 		return true
 	}
-	if evt.Type == internalRuntime.EventTypeServersChanged {
+	if evt.Type == internalRuntime.EventTypeServersChanged || evt.Type == internalRuntime.EventTypeAttentionChanged {
 		return true
 	}
 	if _, adminOnly := adminConfigEventTypes[evt.Type]; adminOnly {

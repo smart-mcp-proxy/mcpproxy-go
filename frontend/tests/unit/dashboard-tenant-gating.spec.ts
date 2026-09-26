@@ -4,26 +4,18 @@ import { shallowMount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
 
-// Spec 107 PR-C cross-review round 2, chunk 4 (P1): the tenant dashboard's
-// default landing panel is Usage (analytics), which calls
-// GET /api/v1/activity/usage on mount and every 30s — core `/activity*` is
-// on the FR-045 must-refuse list for a tenant session (rest-endpoints.md
-// §"core reads": "/activity*" — outside the allowlist), so every tenant page
-// load and refresh interval drew a spurious 403 there, exactly the pattern
-// round 1 fixed for `loadActivitySummary`. `refreshSecurityScannerStatus()`
-// (Dashboard.vue's onMounted, hitting GET /api/v1/security/overview, also
-// must-refuse) had the same gap: it is called unconditionally, unlike its
-// four sibling loaders which all carry `principalKind === 'tenant'` guards.
+// Spec 107 PR-C cross-review round 2, chunk 4 (P1): `refreshSecurityScannerStatus()`
+// (Home.vue's onMounted, hitting GET /api/v1/security/overview, a must-refuse
+// core door for a tenant session) is called unconditionally, unlike its
+// sibling loaders which all carry `principalKind === 'tenant'` guards.
 //
-// Both must be silent for a tenant principal — no call at all, not a
-// call-then-403 — matching FR-041's "hidden rather than issued-and-403'd".
+// Must be silent for a tenant principal — no call at all, not a call-then-403
+// — matching FR-041's "hidden rather than issued-and-403'd".
+//
+// Spec 109 FR-051: this test used to also cover Dashboard.vue's Usage panel
+// (GET /api/v1/activity/usage), which is now its own page (Usage.vue,
+// mounted at /usage, no longer part of Home) — that coverage moved with it.
 
-const usageSpy = vi.hoisted(() =>
-  vi.fn().mockResolvedValue({
-    success: true,
-    data: { window: '24h', tokens_saved: 0, tokens_saved_percentage: 0, tools: [], timeline: [] },
-  })
-)
 const refreshSecuritySpy = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
 
 vi.mock('@/services/api', () => {
@@ -37,7 +29,7 @@ vi.mock('@/services/api', () => {
     close() {},
   }
   const base: Record<string, unknown> = {
-    getActivityUsage: usageSpy,
+    getAttention: ok({ count: 0, items: [] }),
     getServers: ok({ servers: [{ name: 'srv-a', enabled: true, connected: true, tool_count: 1 }] }),
     createEventSource: vi.fn(() => fakeEventSource),
     hasAPIKey: vi.fn(() => false),
@@ -64,8 +56,7 @@ vi.mock('@/composables/useSecurityScannerStatus', () => ({
   }),
 }))
 
-import Dashboard from '@/views/Dashboard.vue'
-import UsageView from '@/views/Usage.vue'
+import Home from '@/views/Home.vue'
 import { useAuthStore } from '@/stores/auth'
 
 class FakeEventSource {
@@ -79,13 +70,13 @@ function makeRouter() {
   return createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/', name: 'dashboard', component: Dashboard, meta: { dashboardView: 'usage' } },
+      { path: '/', name: 'home', component: Home },
       { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
     ],
   })
 }
 
-async function mountDashboardAsTenant() {
+async function mountHomeAsTenant() {
   const router = makeRouter()
   router.push('/')
   await router.isReady()
@@ -102,55 +93,44 @@ async function mountDashboardAsTenant() {
     last_login_at: '',
   }
 
-  return shallowMount(Dashboard, {
+  return shallowMount(Home, {
     global: {
       plugins: [router],
       stubs: {
         RouterLink: { template: '<a><slot /></a>' },
-        Suspense: false,
-        UsageView,
       },
     },
   })
 }
 
-describe('Dashboard tenant gating (Spec 107 FR-041, cross-review round 2 P1)', () => {
+describe('Home tenant gating (Spec 107 FR-041, cross-review round 2 P1)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    usageSpy.mockClear()
     refreshSecuritySpy.mockClear()
     ;(globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource
   })
 
-  it('never calls GET /api/v1/activity/usage (Usage panel) for a tenant principal', async () => {
-    await mountDashboardAsTenant()
-    await flushPromises()
-
-    expect(usageSpy).not.toHaveBeenCalled()
-  })
-
   it('never calls refreshSecurityScannerStatus for a tenant principal', async () => {
-    await mountDashboardAsTenant()
+    await mountHomeAsTenant()
     await flushPromises()
 
     expect(refreshSecuritySpy).not.toHaveBeenCalled()
   })
 
-  // Spec 107 PR-C cross-review round 3, chunk 4 (P2): the Overview panel's
-  // Connect Clients / Import from client configs / Recent Sessions actions
-  // and both "Add Server" buttons all reach core admin-only doors
-  // (/connect*, POST /api/v1/tools/call via AddServerModal, /sessions) that
-  // the tenant-session allowlist refuses with 403 — an enabled control that
+  // Spec 107 PR-C cross-review round 3, chunk 4 (P2): the topology's Connect
+  // Clients / Import from client configs / Recent Sessions actions and the
+  // "Add Server" button all reach core admin-only doors (/connect*,
+  // POST /api/v1/tools/call via AddServerModal, /sessions) that the
+  // tenant-session allowlist refuses with 403 — an enabled control that
   // always fails to act, contradicting FR-041's "hidden, not
   // issued-and-403'd". They must be absent from the DOM for a tenant
   // principal, not merely non-functional.
   it('hides the admin-only action buttons and links for a tenant principal', async () => {
-    const wrapper = await mountDashboardAsTenant()
+    const wrapper = await mountHomeAsTenant()
     await flushPromises()
 
     expect(wrapper.find('[data-test="dashboard-admin-left-actions"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="dashboard-recent-sessions-link"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="dashboard-right-add-server"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="dashboard-first-run-add-server"]').exists()).toBe(false)
   })
 })

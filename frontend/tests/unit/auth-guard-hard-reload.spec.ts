@@ -44,7 +44,7 @@ function makeRouter(): Router {
     history: createMemoryHistory(),
     routes: [
       { path: '/login', name: 'login', component: stub, meta: { title: 'Sign In', public: true } },
-      { path: '/', name: 'dashboard', component: stub, meta: { title: 'Dashboard' } },
+      { path: '/', name: 'home', component: stub, meta: { title: 'Home' } },
       { path: '/servers', name: 'servers', component: stub, meta: { title: 'Servers' } },
       { path: '/activity', name: 'activity', component: stub, meta: { title: 'Activity Log' } },
       { path: '/my/tokens', name: 'user-tokens', component: stub, meta: { title: 'Agent Tokens', requiresAuth: true } },
@@ -197,7 +197,7 @@ describe('router guard: hard-reload deep link under the server edition', () => {
     rig.settle()
     await Promise.all([mount, nav])
 
-    expect(router.currentRoute.value.name).toBe('dashboard')
+    expect(router.currentRoute.value.name).toBe('home')
   })
 
   it('signed-out hard load of a deep route goes to /login', async () => {

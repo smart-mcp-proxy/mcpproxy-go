@@ -86,6 +86,52 @@
              looked like agent scoping while only setting a UI default. -->
         <ProfileSwitcher v-if="authStore.principalKind !== 'tenant' && profilesStore.hasProfiles" />
 
+        <!-- Needs-attention pill (Spec 109 FR-001/FR-003): hidden at 0, the
+             same FR-001 list/count every surface reads. Popover shows the
+             first 5 items; "See all" opens Home, where the full list lives. -->
+        <div v-if="attentionStore.count > 0" class="relative" data-test="header-attention-pill">
+          <button
+            @click="showAttentionPopover = !showAttentionPopover"
+            class="flex items-center space-x-2 px-3 py-2 bg-warning/10 text-warning rounded-lg cursor-pointer hover:bg-warning/20 transition-colors"
+            data-test="header-attention-pill-button"
+            :aria-label="`${attentionStore.count} items need attention`"
+          >
+            <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+            <span class="font-bold">{{ attentionStore.count }}</span>
+            <span class="text-xs hidden lg:inline">needs attention</span>
+          </button>
+          <div
+            v-if="showAttentionPopover"
+            class="absolute right-0 top-full mt-2 p-3 shadow-lg bg-base-100 rounded-box w-80 border border-base-300 z-50"
+            data-test="header-attention-popover"
+          >
+            <div class="space-y-1">
+              <router-link
+                v-for="item in attentionStore.items.slice(0, 5)"
+                :key="item.id"
+                :to="item.fix.target"
+                class="block px-2 py-1.5 rounded hover:bg-base-200 text-sm truncate"
+                :data-test="`header-attention-item-${item.id}`"
+                @click="showAttentionPopover = false"
+              >
+                {{ item.summary }}
+              </router-link>
+            </div>
+            <router-link
+              to="/"
+              class="btn btn-xs btn-ghost w-full mt-2"
+              data-test="header-attention-see-all"
+              @click="showAttentionPopover = false"
+            >
+              See all
+            </router-link>
+          </div>
+          <!-- Click-outside overlay -->
+          <div v-if="showAttentionPopover" class="fixed inset-0 z-40" @click="showAttentionPopover = false" />
+        </div>
+
         <!-- Servers -->
         <div class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm">
           <div
@@ -189,6 +235,7 @@ import { useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import { useAuthStore } from '@/stores/auth'
+import { useAttentionStore } from '@/stores/attention'
 import { useProfilesStore } from '@/stores/profiles'
 import AddServerModal from './AddServerModal.vue'
 import { serverDetailPath } from '@/utils/serverRoute'
@@ -199,7 +246,10 @@ const router = useRouter()
 const systemStore = useSystemStore()
 const serversStore = useServersStore()
 const authStore = useAuthStore()
+const attentionStore = useAttentionStore()
 const profilesStore = useProfilesStore()
+
+const showAttentionPopover = ref(false)
 
 // Spec 109 FR-057: ProfileSwitcher only renders once profilesStore.hasProfiles
 // is true, but that store is populated by a fetch ProfileSwitcher itself used
@@ -207,6 +257,9 @@ const profilesStore = useProfilesStore()
 // never mounts to fetch it. The header fetches once up front instead, so
 // hasProfiles reflects reality before the v-if below ever evaluates it.
 onMounted(() => {
+  // Spec 109 FR-001/FR-003: the header is global, so it fetches its own copy
+  // rather than depending on Home having mounted first.
+  attentionStore.fetchAttention()
   void profilesStore.fetchProfiles()
 })
 

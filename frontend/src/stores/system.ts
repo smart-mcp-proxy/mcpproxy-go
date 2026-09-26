@@ -180,6 +180,19 @@ export const useSystemStore = defineStore('system', () => {
     es.onopen = () => {
       connected.value = true
       console.log('EventSource connected successfully')
+
+      // Review finding: FR-002's threshold-crossing attention events
+      // (server_error, client_never_seen, …) fire only once, at the moment
+      // the threshold is crossed. A drop that spans that moment loses the
+      // frame forever, and the header pill / sidebar badge / Home list stay
+      // wrong until an unrelated change happens to fire a fresh event. Every
+      // (re)connect — the initial one and every retry after `onerror` — is
+      // exactly the point a missed event could have been lost, so resync by
+      // re-dispatching the same window event the live `attention.changed`
+      // handler below dispatches; the attention store's own handler ignores
+      // the detail and just refetches (silent), so an extra one on first
+      // connect is harmless.
+      window.dispatchEvent(new CustomEvent('mcpproxy:attention-changed'))
     }
 
     es.onmessage = (event) => {
@@ -233,6 +246,19 @@ export const useSystemStore = defineStore('system', () => {
         window.dispatchEvent(new CustomEvent('mcpproxy:servers-changed', { detail: data }))
       } catch (error) {
         console.error('Failed to parse SSE servers.changed event:', error)
+      }
+    })
+
+    // Listen for attention.changed events (Spec 109 FR-001/FR-006). The
+    // rendered payload is already narrowed to {count, ids} per caller — the
+    // attention store refetches GET /attention for the full item shape
+    // (summaries, fixes) rather than reconstructing it from ids here.
+    es.addEventListener('attention.changed', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        window.dispatchEvent(new CustomEvent('mcpproxy:attention-changed', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE attention.changed event:', error)
       }
     })
 
