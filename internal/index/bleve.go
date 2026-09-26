@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/keyword"
@@ -81,12 +82,10 @@ func NewBleveIndex(dataDir string, logger *zap.Logger) (*BleveIndex, error) {
 // every caller sees the same field-mapping behavior regardless of which
 // mcpproxy version first created the index.
 func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) {
-	// A rebuild directory only survives an interrupted migration; the live
-	// index at indexPath is authoritative either way.
-	if err := os.RemoveAll(indexPath + rebuildDirSuffix); err != nil {
-		logger.Warn("Failed to remove leftover Bleve rebuild directory",
-			zap.String("path", indexPath+rebuildDirSuffix), zap.Error(err))
-	}
+	// Rebuild and retired directories only survive an interrupted or
+	// partially cleaned-up migration; the live index at indexPath is
+	// authoritative either way.
+	removeRebuildLeftovers(indexPath, logger)
 
 	// Try to open existing index
 	index, err := bleve.Open(indexPath)
@@ -103,7 +102,7 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 			// always has index_meta.json, so this never touches one.
 			logger.Warn("Bleve index directory has no index metadata; recreating it empty",
 				zap.String("path", indexPath))
-			if clearErr := removeIndexEntries(indexPath); clearErr != nil {
+			if clearErr := retireIndexEntries(indexPath); clearErr != nil {
 				return nil, clearErr
 			}
 		}
@@ -132,10 +131,15 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 		logger.Warn("Bleve index mapping is stale; migrating to the current mapping",
 			zap.String("path", indexPath), zap.String("reason", reason))
 		if err := b.RebuildIndex(); err != nil {
-			if b.index != nil {
-				_ = b.index.Close()
+			if b.index == nil {
+				return nil, fmt.Errorf("failed to migrate Bleve index at %s: %w", indexPath, err)
 			}
-			return nil, fmt.Errorf("failed to migrate Bleve index at %s: %w", indexPath, err)
+			// The index is a derived search cache: serving the stale-mapping
+			// index (failure before the swap) or an empty one the discovery
+			// path re-populates (failure after it) beats failing startup.
+			// The next open retries the migration.
+			logger.Error("Bleve index migration failed; continuing with the current index",
+				zap.String("path", indexPath), zap.Error(err))
 		}
 	}
 
@@ -168,6 +172,25 @@ var bleveMappingInternalKey = []byte("_mapping")
 // rebuildDirSuffix names the sibling directory a rebuild populates before it
 // is swapped into place.
 const rebuildDirSuffix = ".rebuild"
+
+// retiredEntryPrefix prefixes the names a replaced index's entries are renamed
+// to, inside the index directory, before they are deleted. Bleve only reads
+// index_meta.json and store/, so a retired entry that could not be deleted is
+// inert; the dot prefix also keeps it out of ExistingProfileDirs.
+const retiredEntryPrefix = ".retired-"
+
+// removeRebuildLeftovers best-effort removes the rebuild directory and retired
+// entries a previous migration left behind.
+func removeRebuildLeftovers(indexPath string, logger *zap.Logger) {
+	leftovers, _ := filepath.Glob(filepath.Join(indexPath, retiredEntryPrefix+"*"))
+	leftovers = append(leftovers, indexPath+rebuildDirSuffix)
+	for _, p := range leftovers {
+		if err := os.RemoveAll(p); err != nil {
+			logger.Warn("Failed to remove leftover Bleve rebuild directory",
+				zap.String("path", p), zap.Error(err))
+		}
+	}
+}
 
 // indexStaleReason reports why idx must be rebuilt before use, or "" when it
 // already has the current mapping and schema version.
@@ -290,7 +313,7 @@ func (b *BleveIndex) recoverEmpty(tmpPath string, cause error) error {
 	_ = os.RemoveAll(tmpPath)
 	b.logger.Error("Bleve index rebuild failed after the old index was closed; recreating it empty",
 		zap.String("path", b.path), zap.Error(cause))
-	if err := removeIndexEntries(b.path); err != nil {
+	if err := retireIndexEntries(b.path); err != nil {
 		return fmt.Errorf("%w (recovery failed: %w)", cause, err)
 	}
 	idx, err := createBleveIndex(b.path)
@@ -384,15 +407,13 @@ func (b *BleveIndex) populateIndexAt(path string, docs []storedDocument) error {
 const indexMetaFile = "index_meta.json"
 
 // swapIndexDir replaces the closed index at dst with the complete index at src.
-// index_meta.json is removed first and moved in last, so a crash at any point
-// leaves dst either the old index, or no openable index (which
-// newBleveIndexAt recreates empty) — never a mix of old metadata and new
-// store. The discovery path re-populates an empty index as servers connect.
+// retireIndexEntries takes index_meta.json out first and it is moved in last,
+// so a crash at any point leaves dst either the old index, or no openable
+// index (which newBleveIndexAt recreates empty) — never a mix of old metadata
+// and new store. The discovery path re-populates an empty index as servers
+// connect.
 func swapIndexDir(src, dst string) error {
-	if err := os.Remove(filepath.Join(dst, indexMetaFile)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove old index metadata: %w", err)
-	}
-	if err := removeIndexEntries(dst); err != nil {
+	if err := retireIndexEntries(dst); err != nil {
 		return err
 	}
 	entries, err := os.ReadDir(src)
@@ -413,21 +434,50 @@ func swapIndexDir(src, dst string) error {
 	return nil
 }
 
-// removeIndexEntries deletes bleve's own entries in an index directory. The
-// shared index directory also holds the per-profile indexes under
+// retireIndexEntries empties an index directory of bleve's own entries by
+// renaming each to a retiredEntryPrefix name in the same directory,
+// index_meta.json first, and then best-effort deleting them. A same-directory
+// rename needs write access to dir only (moving a directory to another parent
+// would also need write access to it, to update its ".." entry), so a file
+// inside store/ that cannot be deleted (a permission-impaired or locked
+// leftover) can neither fail this nor leave a half-deleted index behind with
+// its metadata intact; whatever the delete leaves is retried on the next open
+// (removeRebuildLeftovers).
+//
+// The shared index directory also holds the per-profile indexes under
 // profilesDirName (see Manager), which are separate indexes and are kept.
-func removeIndexEntries(dir string) error {
+func retireIndexEntries(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("failed to read index directory: %w", err)
 	}
+	prefix := fmt.Sprintf("%s%d-", retiredEntryPrefix, time.Now().UnixNano())
+	var retired []string
+	move := func(name string) error {
+		to := filepath.Join(dir, prefix+name)
+		if err := os.Rename(filepath.Join(dir, name), to); err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to move aside index entry %q: %w", name, err)
+		}
+		retired = append(retired, to)
+		return nil
+	}
+	if err := move(indexMetaFile); err != nil {
+		return err
+	}
 	for _, e := range entries {
-		if e.Name() == profilesDirName {
+		name := e.Name()
+		if name == profilesDirName || name == indexMetaFile || strings.HasPrefix(name, retiredEntryPrefix) {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
-			return fmt.Errorf("failed to remove index entry %q: %w", e.Name(), err)
+		if err := move(name); err != nil {
+			return err
 		}
+	}
+	for _, p := range retired {
+		_ = os.RemoveAll(p)
 	}
 	return nil
 }

@@ -3,6 +3,7 @@ package index
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/blevesearch/bleve/v2"
@@ -528,4 +529,109 @@ func TestRebuildIndex_SwapFailureLeavesUsableEmptyIndex(t *testing.T) {
 	require.NoError(t, bi.IndexTool(migrationFixtureTools()[0]))
 	assert.NoDirExists(t, indexPath+rebuildDirSuffix)
 	require.NoError(t, bi.Close())
+}
+
+func skipIfPermissionsUnenforced(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+}
+
+// Ported from PR 1378 review round 8, finding 1: a migration that fails
+// before the old index is closed (here: the rebuild directory cannot be
+// created) must keep serving the stale-mapping index, not fail startup.
+func TestNewBleveIndexAt_MigrationFailureKeepsStaleIndexServing(t *testing.T) {
+	skipIfPermissionsUnenforced(t)
+	parent := t.TempDir()
+	indexPath := filepath.Join(parent, "index.bleve")
+	writeLegacyIndex(t, indexPath, migrationFixtureTools())
+
+	require.NoError(t, os.Chmod(parent, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+
+	core, logs := observer.New(zap.WarnLevel)
+	bi, err := newBleveIndexAt(indexPath, zap.New(core))
+	require.NoError(t, err, "a failed migration must not fail index startup")
+	defer bi.Close()
+
+	assert.Equal(t, 1, logs.FilterMessageSnippet("Bleve index migration failed").Len(),
+		"the swallowed failure must be logged")
+	count, err := bi.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), count, "the stale index keeps serving every document")
+	results, err := bi.SearchTools("repository", 10)
+	require.NoError(t, err)
+	assert.NotEmpty(t, results)
+	reason, err := indexStaleReason(bi.index)
+	require.NoError(t, err)
+	assert.NotEmpty(t, reason, "the stale index is returned as-is and is migrated on a later open")
+}
+
+// Ported from PR 1378 review round 9, finding 1: a file inside the old index's
+// store that cannot be deleted (write bit stripped from store/) must not strand
+// the swap. Old entries are renamed aside, which needs write access to the
+// index directory only.
+func TestNewBleveIndexAt_MigrationSurvivesUnremovableStore(t *testing.T) {
+	skipIfPermissionsUnenforced(t)
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+	writeLegacyIndex(t, indexPath, migrationFixtureTools())
+
+	storeDir := filepath.Join(indexPath, "store")
+	require.DirExists(t, storeDir, "test assumption: scorch lays out indexPath/store")
+	require.NoError(t, os.Chmod(storeDir, 0o555))
+	t.Cleanup(func() {
+		_ = os.Chmod(storeDir, 0o755)
+		chmodRetiredStores(indexPath)
+	})
+
+	bi, err := newBleveIndexAt(indexPath, zap.NewNop())
+	require.NoError(t, err)
+	assertCurrentMapping(t, bi.index)
+	count, err := bi.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), count)
+	require.NoError(t, bi.Close())
+
+	// The undeletable retired copy must not break the next open either.
+	bi, err = newBleveIndexAt(indexPath, zap.NewNop())
+	require.NoError(t, err)
+	defer bi.Close()
+	assertCurrentMapping(t, bi.index)
+}
+
+// The interrupted-swap recovery must also route around an undeletable store:
+// otherwise a directory without index_meta.json and with an unremovable store
+// fails every startup.
+func TestNewBleveIndexAt_InterruptedSwapRecoverySurvivesUnremovableStore(t *testing.T) {
+	skipIfPermissionsUnenforced(t)
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+	bi, err := newBleveIndexAt(indexPath, zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, bi.Close())
+	require.NoError(t, os.Remove(filepath.Join(indexPath, indexMetaFile)))
+
+	storeDir := filepath.Join(indexPath, "store")
+	require.NoError(t, os.Chmod(storeDir, 0o555))
+	t.Cleanup(func() {
+		_ = os.Chmod(storeDir, 0o755)
+		chmodRetiredStores(indexPath)
+	})
+
+	bi, err = newBleveIndexAt(indexPath, zap.NewNop())
+	require.NoError(t, err)
+	defer bi.Close()
+	assertCurrentMapping(t, bi.index)
+}
+
+// chmodRetiredStores restores write access to stores renamed aside by
+// retireIndexEntries so t.TempDir's cleanup can delete them.
+func chmodRetiredStores(indexPath string) {
+	stores, _ := filepath.Glob(filepath.Join(indexPath, retiredEntryPrefix+"*store"))
+	for _, d := range stores {
+		_ = os.Chmod(d, 0o755)
+	}
 }
