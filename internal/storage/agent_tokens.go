@@ -659,6 +659,16 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 			return ErrAgentTokenNotFound
 		}
 
+		// A kind=client record must never go through the generic, name-based
+		// regenerate path: it mints an mcp_agt_ secret and leaves
+		// Kind/ClientID/ProfileMode as-is, which bricks the credential
+		// forever (see ErrClientCredentialRegenerateRefused). Checked before
+		// the Revoked branch below since this is a structural kind mismatch,
+		// not a revocation state.
+		if token.Kind == auth.KindClient {
+			return ErrClientCredentialRegenerateRefused
+		}
+
 		// A revoked token is BURNED, and rotation must not resurrect it.
 		//
 		// This used to set Revoked = false, which quietly made regenerate an

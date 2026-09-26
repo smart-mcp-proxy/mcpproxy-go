@@ -97,6 +97,8 @@ func TestValidateTokenInvariants(t *testing.T) {
 			ProfilePin:     "work-readonly",
 			AllowedServers: []string{"*"},
 			Permissions:    []string{PermRead, PermWrite, PermDestructive},
+			CreatedAt:      now,
+			ExpiresAt:      now.Add(24 * time.Hour),
 		}
 	}
 
@@ -116,6 +118,11 @@ func TestValidateTokenInvariants(t *testing.T) {
 		{"allowed_servers not wildcard-only", KindClient, func(tok *AgentToken) { tok.AllowedServers = []string{"github"} }},
 		{"missing a permission tier", KindClient, func(tok *AgentToken) { tok.Permissions = []string{PermRead} }},
 		{"mcp_agt_ secret whose record is kind=client", KindAgent, func(tok *AgentToken) {}},
+		{"zero-value expiry (F3)", KindClient, func(tok *AgentToken) { tok.ExpiresAt = time.Time{} }},
+		{"expiry already past at CreatedAt (F3)", KindClient, func(tok *AgentToken) { tok.ExpiresAt = tok.CreatedAt.Add(-time.Hour) }},
+		{"expiry exceeds the 365-day cap (F3)", KindClient, func(tok *AgentToken) {
+			tok.ExpiresAt = tok.CreatedAt.Add(10 * 365 * 24 * time.Hour)
+		}},
 		{"client_id set on a kind=agent record", KindAgent, func(tok *AgentToken) {
 			tok.Kind = KindAgent
 			tok.ClientID = "cursor"

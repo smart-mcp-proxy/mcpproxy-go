@@ -92,6 +92,104 @@ func TestMintClientCredential_ReplacesRevokedOrExpired(t *testing.T) {
 	assert.Equal(t, "work-full", validated.ProfilePin)
 }
 
+// TestMintClientCredential_RejectsExpiryOutOfBounds is finding F3 (zcode
+// review round 1): FR-021 requires "expiry ≤ 365 days (default 365)" as a
+// client-credential invariant, but neither MintClientCredential nor
+// ValidateTokenInvariants enforced any bound. This pins the exact trigger
+// from the finding: an expiry ten years out, a zero-value expiry and an
+// already-past expiry must all be refused at mint time, and nothing must be
+// written to storage for any of them.
+func TestMintClientCredential_RejectsExpiryOutOfBounds(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	cases := []struct {
+		name      string
+		expiresAt time.Time
+	}{
+		{"ten years out", time.Now().Add(10 * 365 * 24 * time.Hour)},
+		{"zero value", time.Time{}},
+		{"already past", time.Now().Add(-time.Hour)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := auth.GenerateClientToken()
+			require.NoError(t, err)
+			tok, err := mgr.MintClientCredential("cursor", raw, testHMACKey, auth.ProfileModeSwitchable, "", tc.expiresAt)
+			require.Error(t, err, "expiry outside FR-021's bound must be refused at mint time")
+			assert.Nil(t, tok)
+
+			// Nothing must have been written: the name must still be free
+			// for a correctly bounded mint.
+			stillFree, err := mgr.GetAgentTokenByName("client-cursor")
+			require.NoError(t, err)
+			assert.Nil(t, stillFree, "a refused mint must not write a record")
+		})
+	}
+
+	// Positive control: exactly 365 days is the documented default and must
+	// succeed.
+	raw, err := auth.GenerateClientToken()
+	require.NoError(t, err)
+	tok, err := mgr.MintClientCredential("cursor", raw, testHMACKey, auth.ProfileModeSwitchable, "", time.Now().Add(auth.MaxTokenExpiry))
+	require.NoError(t, err)
+	require.NotNil(t, tok)
+}
+
+// TestRegenerateAgentToken_RefusesClientCredential is finding F1 (zcode
+// review round 1): the generic, name-based POST /api/v1/tokens/{name}/regenerate
+// path (RegenerateAgentToken, the ownerless entry point the REST handler
+// calls) resolves a "client-<id>" name with no Kind filter and, before this
+// fix, would overwrite TokenHash/TokenPrefix with a freshly generated
+// mcp_agt_ secret while leaving Kind="client" untouched. The record then
+// fails ValidateTokenInvariants on every future authentication
+// (claimedKind=agent vs record kind=client), permanently bricking the
+// client credential — and MintClientCredential also refuses to replace a
+// non-revoked, non-expired record (ErrClientCredentialActive), so there is
+// no self-heal.
+//
+// Oracle discipline: regenerate must be refused, the stored record must be
+// byte-identical to before the call (not just "still Kind=client" but the
+// exact same hash/prefix), and the ORIGINAL secret must keep authenticating
+// afterward.
+func TestRegenerateAgentToken_RefusesClientCredential(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	raw, err := auth.GenerateClientToken()
+	require.NoError(t, err)
+	minted, err := mgr.MintClientCredential("cursor", raw, testHMACKey, auth.ProfileModeSwitchable, "", time.Now().Add(24*time.Hour))
+	require.NoError(t, err)
+
+	before, err := mgr.GetAgentTokenByName("client-cursor")
+	require.NoError(t, err)
+	require.NotNil(t, before)
+
+	newRaw, err := auth.GenerateToken()
+	require.NoError(t, err)
+	regenerated, err := mgr.RegenerateAgentToken("client-cursor", newRaw, testHMACKey)
+	require.Error(t, err, "regenerate must refuse a kind=client record")
+	assert.ErrorIs(t, err, ErrClientCredentialRegenerateRefused)
+	assert.Nil(t, regenerated)
+
+	after, err := mgr.GetAgentTokenByName("client-cursor")
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	assert.Equal(t, before.TokenHash, after.TokenHash, "a refused regenerate must not rotate the hash")
+	assert.Equal(t, auth.KindClient, after.Kind)
+	assert.Equal(t, minted.TokenHash, after.TokenHash)
+
+	// The original client secret must still authenticate.
+	validated, err := mgr.ValidateAgentToken(raw, testHMACKey)
+	require.NoError(t, err, "the original client credential must still work after a refused regenerate")
+	assert.Equal(t, "client-cursor", validated.Name)
+
+	// The rejected mcp_agt_ secret must never have been wired up.
+	_, err = mgr.ValidateAgentToken(newRaw, testHMACKey)
+	require.Error(t, err)
+}
+
 // TestMintClientCredential_ConflictWithRegularToken pins FR-021: a
 // grandfathered kind=agent token already named client-<id> is never touched
 // and the mint returns the conflict error.

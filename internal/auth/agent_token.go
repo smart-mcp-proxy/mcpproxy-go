@@ -355,6 +355,19 @@ func ValidateTokenInvariants(t *AgentToken, claimedKind string) error {
 		if t.ProfileMode == ProfileModeLocked && t.ProfilePin == "" {
 			return errMalformedCredential
 		}
+		// FR-021: "expiry ≤ 365 days (default 365)" is a required
+		// client-credential invariant, checked on every authentication (not
+		// only at mint time) so a record that somehow reaches storage with
+		// no expiry, a past expiry, or an expiry more than 365 days past
+		// its own CreatedAt can never authenticate indefinitely. A regular
+		// (kind=agent) token is untouched: zero ExpiresAt keeps its
+		// existing "never expires" meaning there.
+		if t.ExpiresAt.IsZero() || !t.ExpiresAt.After(t.CreatedAt) {
+			return errMalformedCredential
+		}
+		if t.ExpiresAt.Sub(t.CreatedAt) > MaxTokenExpiry {
+			return errMalformedCredential
+		}
 		return nil
 	}
 	// kind == KindAgent (legacy pinned or unpinned token): none of the

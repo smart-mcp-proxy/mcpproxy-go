@@ -39,6 +39,20 @@ var (
 	// when no rotation is staged. Callers treat this as an idempotent no-op
 	// success (a second finalize is a 200 no-op), not a hard error.
 	ErrClientCredentialNotRotating = errors.New("client credential has no rotation in progress")
+
+	// ErrClientCredentialRegenerateRefused is returned by
+	// RegenerateAgentTokenForOwner when the resolved record is a kind=client
+	// credential. The generic regenerate path mints a fresh mcp_agt_ secret
+	// and leaves Kind/ClientID/ProfileMode untouched, which would permanently
+	// brick the credential: ValidateTokenInvariants requires the presented
+	// secret's prefix to match the stored record's kind on every subsequent
+	// authentication, so the new mcp_agt_ secret would fail closed forever
+	// while the record stays non-revoked (MintClientCredential also refuses
+	// to replace an active record with ErrClientCredentialActive). Client
+	// credentials rotate only through StageClientCredentialRotation /
+	// FinalizeClientCredentialRotation, never through the generic name-based
+	// regenerate used by admin token management.
+	ErrClientCredentialRegenerateRefused = errors.New("client credential cannot be regenerated via this endpoint; use client-credential rotation instead")
 )
 
 // findClientTokenRecordLocked resolves the token record currently named
@@ -88,6 +102,22 @@ func (m *Manager) MintClientCredential(clientID, rawToken string, hmacKey []byte
 
 	hash := auth.HashToken(rawToken, hmacKey)
 	now := time.Now().UTC()
+
+	// FR-021: "expiry ≤ 365 days (default 365)" is enforced at mint time
+	// too, not only by the fail-closed ValidateTokenInvariants check that
+	// runs on every later authentication. Rejecting an out-of-bounds
+	// expiresAt HERE means a caller gets an actionable error immediately,
+	// rather than minting a record that would then fail closed
+	// ("malformed credential record") on its very first authentication —
+	// and, because MintClientCredential refuses to replace an ACTIVE
+	// record (ErrClientCredentialActive), such a record could never be
+	// re-minted over either.
+	if !expiresAt.After(now) {
+		return nil, fmt.Errorf("client credential expiry must be in the future")
+	}
+	if expiresAt.Sub(now) > auth.MaxTokenExpiry {
+		return nil, fmt.Errorf("client credential expiry cannot exceed 365 days")
+	}
 
 	token := auth.AgentToken{
 		Name:           auth.ClientTokenName(clientID),
