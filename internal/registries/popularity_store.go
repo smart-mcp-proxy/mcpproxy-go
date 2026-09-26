@@ -35,6 +35,30 @@ func newPopularityStore(db *bbolt.DB) (*popularityStore, error) {
 	return &popularityStore{db: db}, nil
 }
 
+// all returns every decodable persisted entry. The provider loads the whole
+// bucket once at construction so the FR-008 key cap applies to what is on
+// disk, not just to what a lazy lookup happened to pull into memory — with
+// lazy loading, a restart reset the in-memory count to zero and the bucket
+// could grow past the cap forever.
+func (s *popularityStore) all() map[string]*starsEntry {
+	out := make(map[string]*starsEntry)
+	_ = s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(popularityBucketName))
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, v []byte) error {
+			var entry starsEntry
+			if err := json.Unmarshal(v, &entry); err != nil {
+				return nil //nolint:nilerr // a corrupt record is skipped, never fatal
+			}
+			out[string(k)] = &entry
+			return nil
+		})
+	})
+	return out
+}
+
 // get returns the persisted entry for key, or ok=false if there is none (or
 // it fails to decode — treated the same as absent rather than as an error,
 // since a corrupt single record must never break the whole cache).

@@ -219,6 +219,14 @@ func NewGitHubStarsProvider(opts PopularityOptions) *githubStarsProvider {
 		baseCtx:  baseCtx,
 		cancel:   cancel,
 	}
+	if store != nil {
+		p.entries = store.all()
+		p.mu.Lock()
+		for len(p.entries) > githubMaxCacheKeys {
+			p.evictIfNeededLocked()
+		}
+		p.mu.Unlock()
+	}
 	if !p.disabled {
 		p.startWorkers()
 	}

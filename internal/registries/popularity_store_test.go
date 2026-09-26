@@ -1,6 +1,7 @@
 package registries
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -124,4 +125,49 @@ func TestGitHubStarsProvider_CapEviction(t *testing.T) {
 
 func keyForIndex(i int) string {
 	return "owner/repo-" + string(rune('a'+(i%26))) + string(rune('a'+((i/26)%26))) + string(rune('a'+((i/676)%26)))
+}
+
+// TestGitHubStarsProvider_CapHoldsAcrossRestart pins that the FR-008 key cap
+// bounds the bbolt bucket, not just the in-memory map: a bucket already over
+// the cap (written by an earlier process) is trimmed to the cap, oldest
+// FetchedAt first, when the next provider opens it. With lazy loading the
+// in-memory count restarted at zero and the bucket grew without bound.
+func TestGitHubStarsProvider_CapHoldsAcrossRestart(t *testing.T) {
+	db := openTempPopularityDB(t)
+	if _, err := newPopularityStore(db); err != nil {
+		t.Fatalf("newPopularityStore: %v", err)
+	}
+	const over = 3
+	base := time.Now().Add(-time.Hour)
+	if err := db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(popularityBucketName))
+		for i := 0; i < githubMaxCacheKeys+over; i++ {
+			v, err := json.Marshal(&starsEntry{Stars: 1, Status: 200, FetchedAt: base.Add(time.Duration(i) * time.Second)})
+			if err != nil {
+				return err
+			}
+			if err := b.Put([]byte(keyForIndex(i)), v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	t.Setenv("MCPPROXY_CATALOG_POPULARITY", "false")
+	provider := NewGitHubStarsProvider(PopularityOptions{DB: db})
+	defer provider.Close()
+
+	if got := len(provider.store.all()); got != githubMaxCacheKeys {
+		t.Fatalf("bucket holds %d keys after reopen, want the cap %d", got, githubMaxCacheKeys)
+	}
+	for i := 0; i < over; i++ {
+		if _, state := provider.Lookup(keyForIndex(i)); state != LookupAbsent {
+			t.Errorf("oldest key %d should have been evicted, got state %d", i, state)
+		}
+	}
+	if _, state := provider.Lookup(keyForIndex(githubMaxCacheKeys + over - 1)); state != LookupFresh {
+		t.Errorf("newest key should survive, got state %d", state)
+	}
 }

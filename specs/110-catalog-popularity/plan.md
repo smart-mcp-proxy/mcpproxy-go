@@ -61,7 +61,7 @@ type starsEntry struct {
 }
 ```
 
-bbolt bucket `catalog_popularity`: key = `o/r` (lower-case), value = JSON `starsEntry`. Entries are loaded into memory lazily on the first `Lookup` miss. Writes go through synchronously after each fetch (they are rare, ≤50/h). A new key over the cap evicts the oldest `FetchedAt`.
+bbolt bucket `catalog_popularity`: key = `o/r` (lower-case), value = JSON `starsEntry`. The whole bucket is loaded into memory when the provider is constructed, trimmed to the cap if needed, so the cap bounds the disk, not only the memory. Lazy loading was dropped in review: after a restart the in-memory count started at zero and the bucket grew without limit. Writes go through synchronously after each fetch (they are rare, ≤50/h). A new key over the cap evicts the oldest `FetchedAt`.
 
 ## Flow
 
