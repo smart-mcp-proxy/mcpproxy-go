@@ -445,5 +445,55 @@ func TestUsageAggregate_RetrieveToolsSizing(t *testing.T) {
 		avg, ok := clone.AvgRetrieveToolsRespBytes()
 		require.True(t, ok)
 		assert.EqualValues(t, 4000, avg)
+		assert.True(t, clone.HasObservedRetrieveToolsCall())
+	})
+}
+
+// TestUsageAggregate_HasObservedRetrieveToolsCall pins the fix for the review
+// finding that a deployment whose retrieve_tools responses routinely exceed
+// tool_response_limit left RetrieveToolsSizedCalls (and so
+// AvgRetrieveToolsRespBytes's ok) at zero forever, even though real calls had
+// plainly completed — contradicting contracts.ServerTokenMetrics.Estimated's
+// documented "false once at least one real retrieve_tools call has ...
+// completed". HasObservedRetrieveToolsCall answers that question
+// independently of whether any call was sized.
+func TestUsageAggregate_HasObservedRetrieveToolsCall(t *testing.T) {
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	retrieveTools := func(status string, respBytes int, truncated bool) *storage.ActivityRecord {
+		return &storage.ActivityRecord{
+			Type:              storage.ActivityTypeInternalToolCall,
+			ToolName:          "retrieve_tools",
+			Status:            status,
+			ResponseBytes:     respBytes,
+			ResponseTruncated: truncated,
+			Timestamp:         base,
+		}
+	}
+
+	t.Run("no calls yet", func(t *testing.T) {
+		agg := newUsageAggregate()
+		assert.False(t, agg.HasObservedRetrieveToolsCall())
+	})
+
+	t.Run("a failed call does not count as observed", func(t *testing.T) {
+		agg := newUsageAggregate()
+		agg.Apply(retrieveTools("error", 3000, false))
+		assert.False(t, agg.HasObservedRetrieveToolsCall())
+	})
+
+	t.Run("every observed call truncated: still observed, though not sized", func(t *testing.T) {
+		agg := newUsageAggregate()
+		agg.Apply(retrieveTools("success", 1_000_000, true))
+		assert.True(t, agg.HasObservedRetrieveToolsCall(), "a real call completed even though it was truncated")
+		_, sizedOK := agg.AvgRetrieveToolsRespBytes()
+		assert.False(t, sizedOK, "a truncated call still must not seed the real SIZE average")
+	})
+
+	t.Run("a non-truncated call is both observed and sized", func(t *testing.T) {
+		agg := newUsageAggregate()
+		agg.Apply(retrieveTools("success", 4000, false))
+		assert.True(t, agg.HasObservedRetrieveToolsCall())
+		_, sizedOK := agg.AvgRetrieveToolsRespBytes()
+		assert.True(t, sizedOK)
 	})
 }

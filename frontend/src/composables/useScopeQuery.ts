@@ -45,6 +45,11 @@ export interface ScopeRestContext {
   state: Readonly<Record<string, string | undefined>>
   /** Resolves a relative or absolute time string to an absolute RFC3339 one. */
   resolveTime: (value: string) => string
+  /** Rule 8 ("Contradictory parameters"): a hook calls this instead of
+   * silently keeping one value and dropping the other when two active
+   * parameters can never both be satisfied by one REST request. toRest()
+   * then returns null as a whole — no request is issued. */
+  signalConflict: () => void
 }
 
 export interface ScopeParamDef {
@@ -88,6 +93,11 @@ export interface ScopeChip {
   label: string
   value: string
   remove: () => void
+  /** Rule 8: this chip's value contradicts another active chip (today, only
+   * `server` vs. `tool`'s server prefix) — the page shows the conflict empty
+   * state instead of a request, and both chips are marked so either one's
+   * removal is understood to resolve it. */
+  conflicting?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -159,15 +169,24 @@ export function usageWindowFor(from: string | undefined, to: string | undefined)
   return undefined // e.g. -3d: not applied on Usage (disabled chip, rule 5)
 }
 
-/** Splits a `tool` URL value per the contract's --tool/`tool` rule: a
- * "server:tool" value becomes {server, tool}; a disagreeing explicit
- * `server` is kept as-is (never widened); a bare tool has no server. */
-export function splitScopeTool(tool: string | undefined, explicitServer: string | undefined): { server?: string; tool?: string } {
+/** Splits a `tool` URL value per the contract's --tool/`tool` rule (rule 8): a
+ * "server:tool" value becomes {server, tool}; a bare tool has no server. An
+ * explicit `server` that DISAGREES with the tool's server prefix is a
+ * contradiction — their intersection is empty and REST has one `server`
+ * parameter, so no request can express both — so `conflict: true` is
+ * returned instead of silently keeping one value and dropping the other. */
+export function splitScopeTool(
+  tool: string | undefined,
+  explicitServer: string | undefined,
+): { server?: string; tool?: string; conflict?: boolean } {
   if (!tool) return { server: explicitServer || undefined }
   const idx = tool.indexOf(':')
   if (idx === -1) return { server: explicitServer || undefined, tool }
   const toolServer = tool.slice(0, idx)
   const toolName = tool.slice(idx + 1)
+  if (explicitServer && explicitServer !== toolServer) {
+    return { conflict: true }
+  }
   return { server: explicitServer || toolServer, tool: toolName }
 }
 
@@ -197,7 +216,11 @@ function registerDefaultScopeParams(): void {
     name: 'tool',
     pages: ['activity', 'usage'],
     toRest: (value, ctx) => {
-      const { server, tool } = splitScopeTool(value, ctx.state.server)
+      const { server, tool, conflict } = splitScopeTool(value, ctx.state.server)
+      if (conflict) {
+        ctx.signalConflict()
+        return undefined
+      }
       const out: Record<string, string> = {}
       if (server) out.server = server
       if (tool) out.tool = tool
@@ -298,7 +321,11 @@ export interface UseScopeQueryResult {
   state: Record<string, string | undefined>
   set: (patch: Record<string, string | undefined>) => void
   clear: (names?: string[]) => void
-  toRest: () => Record<string, string>
+  /** Rule 8: null when the active parameters are contradictory (today, an
+   * explicit `server` that disagrees with `tool`'s server prefix) — the
+   * caller must issue no request and render the conflict empty state instead
+   * (chips carry `conflicting: true` for the pair). */
+  toRest: () => Record<string, string> | null
   linkTo: (page: PageId, patch?: Record<string, string>) => RouteLocationRaw
   chips: ComputedRef<ScopeChip[]>
 }
@@ -352,12 +379,20 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
     set(patch)
   }
 
-  function toRest(): Record<string, string> {
+  function toRest(): Record<string, string> | null {
     const out: Record<string, string> = {}
     const snapshot: Record<string, string | undefined> = {}
     for (const def of defsForPage(page)) snapshot[def.name] = state[def.name]
 
-    const ctx: ScopeRestContext = { page, state: snapshot, resolveTime: v => resolveScopeTime(v) }
+    let conflicted = false
+    const ctx: ScopeRestContext = {
+      page,
+      state: snapshot,
+      resolveTime: v => resolveScopeTime(v),
+      signalConflict: () => {
+        conflicted = true
+      },
+    }
 
     for (const def of defsForPage(page)) {
       const value = snapshot[def.name]
@@ -374,6 +409,11 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
       }
       out[def.rest ?? def.name] = value
     }
+
+    // Rule 8 ("Contradictory parameters"): no REST query could express both
+    // active values, so no request is issued at all — never a partial one
+    // built from whichever fields didn't conflict.
+    if (conflicted) return null
 
     // Usage `window` (url-filter-contract.md `from`/`to` row): computed from
     // BOTH values together, including when neither is present (window=all) —
@@ -404,6 +444,12 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
 
   const chips = computed<ScopeChip[]>(() => {
     const out: ScopeChip[] = []
+    // Rule 8: mark the `server`/`tool` pair as conflicting so a caller can
+    // highlight both chips in the conflict empty state — removing either one
+    // resolves it.
+    const toolValue = state.tool
+    const hasConflict = !!toolValue && splitScopeTool(toolValue, state.server).conflict === true
+
     for (const def of defsForPage(page)) {
       if (!isAvailable(def)) continue
       const value = state[def.name]
@@ -413,6 +459,7 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
         label: def.label ?? def.name,
         value,
         remove: () => clear([def.name]),
+        conflicting: hasConflict && (def.name === 'server' || def.name === 'tool') ? true : undefined,
       })
     }
     return out

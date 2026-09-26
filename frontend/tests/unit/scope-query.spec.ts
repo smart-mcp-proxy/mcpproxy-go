@@ -129,9 +129,28 @@ describe('useScopeQuery', () => {
       expect(api.toRest()).toEqual({ server: 'github', tool: 'create_issue' })
     })
 
-    it('a disagreeing explicit server is kept as-is (never widened)', async () => {
+    it('a disagreeing explicit server is a conflict: toRest() is null, no request', async () => {
       const { api } = await withScopeQuery('activity', { tool: 'github:create_issue', server: 'notes' })
-      expect(api.toRest()).toEqual({ server: 'notes', tool: 'create_issue' })
+      expect(api.toRest()).toBeNull()
+    })
+
+    it('an agreeing explicit server is kept (no conflict)', async () => {
+      const { api } = await withScopeQuery('activity', { tool: 'github:create_issue', server: 'github' })
+      expect(api.toRest()).toEqual({ server: 'github', tool: 'create_issue' })
+    })
+
+    it('a conflicting server/tool pair marks both chips conflicting', async () => {
+      const { api } = await withScopeQuery('activity', { tool: 'github:create_issue', server: 'notes' })
+      const byName = Object.fromEntries(api.chips.value.map(c => [c.name, c]))
+      expect(byName.server?.conflicting).toBe(true)
+      expect(byName.tool?.conflicting).toBe(true)
+    })
+
+    it('an agreeing server/tool pair does not mark chips conflicting', async () => {
+      const { api } = await withScopeQuery('activity', { tool: 'github:create_issue', server: 'github' })
+      const byName = Object.fromEntries(api.chips.value.map(c => [c.name, c]))
+      expect(byName.server?.conflicting).toBeUndefined()
+      expect(byName.tool?.conflicting).toBeUndefined()
     })
 
     it('a bare tool value (no colon) is sent as the bare tool', async () => {
@@ -279,10 +298,16 @@ describe('pure helpers', () => {
     expect(usageWindowFor('-24h', '2025-01-01T00:00:00Z')).toBeUndefined()
   })
 
-  it('splitScopeTool splits server:tool and keeps a disagreeing server', () => {
+  it('splitScopeTool splits server:tool and keeps an agreeing server', () => {
     expect(splitScopeTool('github:create_issue', undefined)).toEqual({ server: 'github', tool: 'create_issue' })
-    expect(splitScopeTool('github:create_issue', 'notes')).toEqual({ server: 'notes', tool: 'create_issue' })
+    expect(splitScopeTool('github:create_issue', 'github')).toEqual({ server: 'github', tool: 'create_issue' })
     expect(splitScopeTool('search', undefined)).toEqual({ server: undefined, tool: 'search' })
+  })
+
+  // Rule 8 ("Contradictory parameters"): a `server` that disagrees with the
+  // `tool` prefix is a contradiction, not a value to silently keep.
+  it('splitScopeTool flags a disagreeing server as a conflict', () => {
+    expect(splitScopeTool('github:create_issue', 'notes')).toEqual({ conflict: true })
   })
 
   it('sessionRestParam routes by the ws- prefix', () => {

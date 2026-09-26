@@ -379,18 +379,24 @@ func activityPeriodFromRelative(from string) (string, error) {
 // splitActivityTool implements the url-filter-contract.md --tool rule: a
 // "server:tool" value splits into server + bare tool name (the REST
 // server/tool filters compare bare names, so sending "server:tool" verbatim
-// would match nothing). An explicit --server is kept even when it disagrees
-// with the prefix (never silently widened).
-func splitActivityTool(server, tool string) (string, string) {
-	if idx := strings.Index(tool, ":"); idx >= 0 {
-		toolServer := tool[:idx]
-		toolName := tool[idx+1:]
-		if server == "" {
-			server = toolServer
-		}
-		return server, toolName
+// would match nothing). An explicit --server that disagrees with the --tool
+// prefix is a contradiction — their intersection is empty and REST has one
+// "server" parameter, so no request could express both — so rule 8 requires
+// exiting 1 with a conflict error before any request, rather than silently
+// keeping one value and dropping the other.
+func splitActivityTool(server, tool string) (string, string, error) {
+	idx := strings.Index(tool, ":")
+	if idx < 0 {
+		return server, tool, nil
 	}
-	return server, tool
+	toolServer, toolName := tool[:idx], tool[idx+1:]
+	if server == "" {
+		return toolServer, toolName, nil
+	}
+	if server != toolServer {
+		return "", "", fmt.Errorf("--server %s conflicts with the server in --tool %s", server, tool)
+	}
+	return server, toolName, nil
 }
 
 // activityWatchInRange reports whether an event timestamp falls within the
@@ -1269,7 +1275,10 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		}
 		endTime = resolved
 	}
-	server, tool := splitActivityTool(activityServer, activityTool)
+	server, tool, err := splitActivityTool(activityServer, activityTool)
+	if err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
 
 	// Build filter
 	filter := &ActivityFilter{
@@ -1647,12 +1656,6 @@ var errWatchToPastCutoff = errors.New("activity watch: --to cutoff reached")
 
 // displayActivityEvent formats and displays an SSE activity event
 func displayActivityEvent(eventType, eventData, outputFormat string) {
-	if outputFormat == "json" {
-		// NDJSON output
-		fmt.Println(eventData)
-		return
-	}
-
 	// Parse event data - SSE wraps the actual payload in {"payload": ..., "timestamp": ...}
 	var wrapper map[string]interface{}
 	if err := json.Unmarshal([]byte(eventData), &wrapper); err != nil {
@@ -1721,6 +1724,15 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 		if !activityWatchInRange(eventTimestampFromWrapper(wrapper), activityWatchFromTime, activityWatchToTime) {
 			return
 		}
+	}
+
+	if outputFormat == "json" {
+		// NDJSON output — emitted only after the --server/--type/--view/
+		// --from/--to filters above have run, so `activity watch -o json`
+		// honors the same filter surface as the human-readable table output
+		// instead of silently streaming every event unfiltered.
+		fmt.Println(eventData)
+		return
 	}
 
 	// Skip successful call_tool_* internal tool calls to avoid duplicates
@@ -2214,7 +2226,10 @@ func activityExportQueryParams() (url.Values, error) {
 		q.Set("type", typeFilter)
 	}
 
-	server, tool := splitActivityTool(activityServer, activityTool)
+	server, tool, err := splitActivityTool(activityServer, activityTool)
+	if err != nil {
+		return nil, err
+	}
 	if server != "" {
 		q.Set("server", server)
 	}

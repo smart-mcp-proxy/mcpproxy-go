@@ -34,12 +34,31 @@ func resolveAverageQueryResultSize(simulatedSize int, realAvgBytes int64, haveRe
 // response size from the runtime's usage aggregate (populated from actual
 // completed calls via UsageAggregate.applyRetrieveToolsSizing — a dedicated
 // counter, NOT the per-tool rollup, which deliberately excludes retrieve_tools
-// as an internal built-in). ok is false before any sized, non-truncated
-// retrieve_tools call has completed.
+// as an internal built-in). ok is false before any retrieve_tools call has
+// completed at all.
+//
+// A sized, non-truncated call gives an exact real average. When every
+// observed call so far was truncated (a deployment whose responses routinely
+// exceed tool_response_limit — the corrected review finding), there is no
+// exact delivered size to average: the logged ResponseBytes on those records
+// is the pre-truncation size, larger than what the agent received
+// (truncatedBuiltinOverstatesDelivery). But contracts.ServerTokenMetrics.
+// Estimated documents "false once at least one real retrieve_tools call has
+// ... completed" — real calls plainly have — so falling back to the
+// synthetic per-topK simulation forever would contradict that promise. The
+// agent's response is cut to tool_response_limit characters
+// (internal/server/content_forward.go), which is the best available
+// conservative stand-in for the size actually delivered in that case.
 func (r *Runtime) realRetrieveToolsAvgRespBytes() (avgBytes int64, ok bool) {
 	snap := r.UsageSnapshot()
 	if snap == nil {
 		return 0, false
 	}
-	return snap.AvgRetrieveToolsRespBytes()
+	if avg, ok := snap.AvgRetrieveToolsRespBytes(); ok {
+		return avg, true
+	}
+	if snap.HasObservedRetrieveToolsCall() && r.cfg != nil && r.cfg.ToolResponseLimit > 0 {
+		return int64(r.cfg.ToolResponseLimit), true
+	}
+	return 0, false
 }

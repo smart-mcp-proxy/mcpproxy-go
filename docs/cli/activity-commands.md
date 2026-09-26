@@ -74,7 +74,10 @@ mcpproxy activity list [flags]
 A `--tool` value of the form `server:tool` (e.g. `github:create_issue`) is
 split into `--server github --tool create_issue` — the REST filters compare
 bare tool names, so sending `server:tool` verbatim would match nothing. An
-explicit `--server` that disagrees with the prefix is kept as given.
+explicit `--server` that disagrees with the prefix is a contradiction: the
+command exits `1` with `--server <a> conflicts with the server in --tool
+<b>:<t>` before making any request, rather than silently keeping one value
+and dropping the other.
 
 ### Examples
 

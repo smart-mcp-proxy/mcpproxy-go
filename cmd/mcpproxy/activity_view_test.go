@@ -108,16 +108,29 @@ func TestSplitActivityTool(t *testing.T) {
 	}{
 		{name: "bare tool unchanged", server: "", tool: "search", wantServer: "", wantTool: "search"},
 		{name: "server:tool splits", server: "", tool: "github:create_issue", wantServer: "github", wantTool: "create_issue"},
-		{name: "explicit server kept when it disagrees", server: "notes", tool: "github:create_issue", wantServer: "notes", wantTool: "create_issue"},
 		{name: "explicit server kept when it agrees", server: "github", tool: "github:create_issue", wantServer: "github", wantTool: "create_issue"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotServer, gotTool := splitActivityTool(tt.server, tt.tool)
+			gotServer, gotTool, err := splitActivityTool(tt.server, tt.tool)
+			require.NoError(t, err)
 			assert.Equal(t, tt.wantServer, gotServer)
 			assert.Equal(t, tt.wantTool, gotTool)
 		})
 	}
+}
+
+// TestSplitActivityTool_ConflictingServer pins url-filter-contract.md rule 8:
+// an explicit --server that disagrees with the --tool "server:tool" prefix is
+// a contradiction (their intersection is empty) — CLI must exit 1 with a
+// conflict error before any request, never silently keep one value and drop
+// the other.
+func TestSplitActivityTool_ConflictingServer(t *testing.T) {
+	server, tool, err := splitActivityTool("notes", "github:create_issue")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--server notes conflicts with the server in --tool github:create_issue")
+	assert.Empty(t, server)
+	assert.Empty(t, tool)
 }
 
 func TestActivityWatchInRange(t *testing.T) {
@@ -222,8 +235,27 @@ func TestActivityExportCmd_ViewFromToFlags(t *testing.T) {
 // (url-filter-contract.md) reaches the actual REST query when a caller sets
 // Tool to a "server:tool" value directly on the filter (covers callers that
 // bypass the CLI flag-splitting helper, e.g. --tool passed with no --server).
+// TestActivityExportQueryParams_ConflictingServerTool asserts the export
+// command surfaces the same --server/--tool conflict error (rule 8) as
+// 'activity list', and does so before building any request URL.
+func TestActivityExportQueryParams_ConflictingServerTool(t *testing.T) {
+	prevServer, prevTool, prevFormat := activityServer, activityTool, activityExportFormat
+	t.Cleanup(func() {
+		activityServer, activityTool, activityExportFormat = prevServer, prevTool, prevFormat
+	})
+
+	activityExportFormat = "json"
+	activityServer = "notes"
+	activityTool = "github:create_issue"
+
+	_, err := activityExportQueryParams()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--server notes conflicts with the server in --tool github:create_issue")
+}
+
 func TestActivityFilter_ToQueryParams_ToolSplit(t *testing.T) {
-	server, tool := splitActivityTool("", "github:create_issue")
+	server, tool, err := splitActivityTool("", "github:create_issue")
+	require.NoError(t, err)
 	filter := &ActivityFilter{Server: server, Tool: tool}
 	q := filter.ToQueryParams()
 	assert.Equal(t, "github", q.Get("server"))
