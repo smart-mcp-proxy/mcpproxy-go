@@ -38,6 +38,18 @@ type StatusInfo struct {
 	LaunchedBy        string                   `json:"launched_by,omitempty"` // Spec 092 FR-001a; empty = user-launched/unknown or older daemon
 	Update            *StatusUpdateInfo        `json:"update,omitempty"`
 	ServerEditionInfo *ServerEditionStatusInfo `json:"server_edition,omitempty"`
+	// TokenSavings is nil when the daemon could not be reached, the caller is
+	// not an administrator (agent token), or the tokenizer is unavailable —
+	// the "Token savings:" summary line (Spec 109-k, contracts/cli.md) is then
+	// omitted rather than printed as zero.
+	TokenSavings *StatusTokenSavings `json:"token_savings,omitempty"`
+}
+
+// StatusTokenSavings mirrors the fields of contracts.ServerTokenMetrics that
+// `mcpproxy status` renders (Spec 109-k).
+type StatusTokenSavings struct {
+	SavedTokens int  `json:"saved_tokens"`
+	Estimated   bool `json:"estimated"`
 }
 
 // StatusUpdateInfo mirrors the `update` object of GET /api/v1/info
@@ -270,6 +282,14 @@ func collectStatusFromDaemon(cfg *config.Config, client *cliclient.Client, socke
 		info.Update = extractStatusUpdate(infoData)
 	}
 
+	// Spec 109-k: token savings summary line. Best-effort — a scoped (agent
+	// token) caller gets 403 from the admin-only endpoint, and a daemon
+	// without a tokenizer configured returns an error; either way the line is
+	// simply omitted rather than failing the whole command.
+	if tokenData, tokenErr := client.GetTokenStats(ctx); tokenErr == nil {
+		info.TokenSavings = extractStatusTokenSavings(tokenData)
+	}
+
 	// Construct Web UI URL if not provided by daemon
 	if info.WebUIURL == "" {
 		info.WebUIURL = statusBuildWebUIURL(info.ListenAddr, cfg.APIKey)
@@ -279,6 +299,18 @@ func collectStatusFromDaemon(cfg *config.Config, client *cliclient.Client, socke
 	info.Endpoints = statusBuildEndpoints(info.ListenAddr)
 
 	return info, nil
+}
+
+// extractStatusTokenSavings reads the fields 'status' renders from a
+// GET /api/v1/stats/tokens response (contracts.ServerTokenMetrics, Spec 109-k).
+func extractStatusTokenSavings(data map[string]interface{}) *StatusTokenSavings {
+	if data == nil {
+		return nil
+	}
+	return &StatusTokenSavings{
+		SavedTokens: getIntField(data, "saved_tokens"),
+		Estimated:   getBoolField(data, "estimated"),
+	}
 }
 
 func collectStatusFromConfig(cfg *config.Config, socketPath, configPath string) *StatusInfo {
@@ -574,6 +606,17 @@ func printStatusTable(info *StatusInfo) {
 
 	if info.Servers != nil {
 		fmt.Printf("  %-12s %d connected, %d quarantined\n", "Servers:", info.Servers.Connected, info.Servers.Quarantined)
+	}
+
+	// Spec 109-k, contracts/cli.md: directly after Servers:, suffixed
+	// " (estimate)" while the tokenizer has not seen a real retrieve_tools
+	// call yet (contracts.ServerTokenMetrics.Estimated).
+	if info.TokenSavings != nil {
+		suffix := ""
+		if info.TokenSavings.Estimated {
+			suffix = " (estimate)"
+		}
+		fmt.Printf("  %-12s ~%d tokens/request%s\n", "Token savings:", info.TokenSavings.SavedTokens, suffix)
 	}
 
 	if info.SocketPath != "" {

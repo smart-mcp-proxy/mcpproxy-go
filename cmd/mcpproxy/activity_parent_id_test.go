@@ -74,10 +74,13 @@ func TestActivityExportQueryParams_ParentID(t *testing.T) {
 	activityExportFormat = "json"
 
 	activityParentID = ""
-	assert.False(t, activityExportQueryParams().Has("parent_id"), "empty parent id should be omitted")
+	q, err := activityExportQueryParams()
+	assert.NoError(t, err)
+	assert.False(t, q.Has("parent_id"), "empty parent id should be omitted")
 
 	activityParentID = "req-parent-123"
-	q := activityExportQueryParams()
+	q, err = activityExportQueryParams()
+	assert.NoError(t, err)
 	assert.Equal(t, "req-parent-123", q.Get("parent_id"))
 	assert.Equal(t, "json", q.Get("format"))
 }

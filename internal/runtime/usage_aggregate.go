@@ -157,6 +157,32 @@ type UsageAggregate struct {
 	Tools     map[string]*ToolUsage `json:"tools"`
 	Buckets   map[int64]*TimeBucket `json:"buckets"` // key = bucket start unix seconds
 	UpdatedAt time.Time             `json:"updated_at"`
+	// RetrieveToolsRespBytesSum/RetrieveToolsSizedCalls (Spec 109-k, the
+	// ServerTokenMetrics.Estimated flip): retrieve_tools calls are internal
+	// built-ins and deliberately excluded from the per-tool rollup above
+	// (applyToolRollup's default case — admitting them would invent a tool row
+	// no upstream owns), so CalculateTokenSavings has nowhere to read a REAL
+	// observed retrieve_tools response size from. This dedicated, non-per-tool
+	// counter is that source: a zero value (no sized call yet) is exactly the
+	// "no real data" state the estimate flag needs. A persisted snapshot from
+	// before this field existed loads it as zero, which is correct (no
+	// AdmissionVersion bump needed — it does not change what Tools/Buckets
+	// admit, only adds a value alongside them).
+	RetrieveToolsRespBytesSum int64 `json:"retrieve_tools_resp_bytes_sum,omitempty"`
+	RetrieveToolsSizedCalls   int64 `json:"retrieve_tools_sized_calls,omitempty"`
+	// RetrieveToolsObservedCalls counts every successful retrieve_tools call,
+	// truncated or not — unlike RetrieveToolsSizedCalls, which only counts the
+	// non-truncated ones whose ResponseBytes can be trusted as a real
+	// (undistorted) delivered size. A deployment whose retrieve_tools
+	// responses routinely exceed tool_response_limit would otherwise leave
+	// RetrieveToolsSizedCalls at zero forever, contradicting
+	// contracts.ServerTokenMetrics.Estimated's documented promise ("false
+	// once at least one real retrieve_tools call has ... completed") even
+	// though real calls plainly have. This counter is what lets the Estimated
+	// flip answer that question correctly while AvgRetrieveToolsRespBytes
+	// keeps answering a different one (the real average SIZE, which truncated
+	// calls cannot honestly contribute to — see truncatedBuiltinOverstatesDelivery).
+	RetrieveToolsObservedCalls int64 `json:"retrieve_tools_observed_calls,omitempty"`
 	// AdmissionVersion stamps which population rule built this aggregate. A
 	// persisted snapshot whose stamp differs from usageAdmissionVersion was
 	// counted under a different rule and cannot be patched incrementally —
@@ -229,10 +255,53 @@ func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 	}
 
 	a.applyToolRollup(rec)
+	a.applyRetrieveToolsSizing(rec)
 
 	if counted, isError := storage.CountsAsCall(rec); counted {
 		a.countInTimeBucket(rec, isError)
 	}
+}
+
+// applyRetrieveToolsSizing folds a successful retrieve_tools call's response
+// size into the dedicated (not per-tool) counter CalculateTokenSavings reads
+// (Spec 109-k). Mirrors the timeline's own truncatedBuiltinOverstatesDelivery
+// exclusion below: retrieve_tools' logged ResponseBytes is the FULL
+// pre-truncation size, larger than what the agent actually received when the
+// response was cut, so a truncated record must not skew the average toward a
+// size nobody was ever billed for.
+func (a *UsageAggregate) applyRetrieveToolsSizing(rec *storage.ActivityRecord) {
+	if rec.Type != storage.ActivityTypeInternalToolCall || rec.ToolName != "retrieve_tools" {
+		return
+	}
+	if rec.Status != storage.ActivityStatusSuccess {
+		return
+	}
+	// Counted regardless of truncation/size — this is "a real retrieve_tools
+	// call completed", the question HasObservedRetrieveToolsCall answers.
+	a.RetrieveToolsObservedCalls++
+
+	if rec.ResponseBytes <= 0 || truncatedBuiltinOverstatesDelivery(rec) {
+		return
+	}
+	a.RetrieveToolsRespBytesSum += int64(rec.ResponseBytes)
+	a.RetrieveToolsSizedCalls++
+}
+
+// HasObservedRetrieveToolsCall reports whether at least one successful
+// retrieve_tools call has completed, truncated or not. See
+// RetrieveToolsObservedCalls for why this is a different question from
+// AvgRetrieveToolsRespBytes's ok.
+func (a *UsageAggregate) HasObservedRetrieveToolsCall() bool {
+	return a.RetrieveToolsObservedCalls > 0
+}
+
+// AvgRetrieveToolsRespBytes returns the average real retrieve_tools response
+// size over sized, non-truncated calls. ok is false before any such call.
+func (a *UsageAggregate) AvgRetrieveToolsRespBytes() (avg int64, ok bool) {
+	if a.RetrieveToolsSizedCalls == 0 {
+		return 0, false
+	}
+	return a.RetrieveToolsRespBytesSum / a.RetrieveToolsSizedCalls, true
 }
 
 // applyToolRollup folds a record into the per-(server,tool) rollup — the
@@ -372,10 +441,13 @@ func (a *UsageAggregate) Timeline() []TimeBucket {
 // clone returns a deep copy safe to publish to readers.
 func (a *UsageAggregate) clone() *UsageAggregate {
 	c := &UsageAggregate{
-		Tools:            make(map[string]*ToolUsage, len(a.Tools)),
-		Buckets:          make(map[int64]*TimeBucket, len(a.Buckets)),
-		UpdatedAt:        a.UpdatedAt,
-		AdmissionVersion: a.AdmissionVersion,
+		Tools:                      make(map[string]*ToolUsage, len(a.Tools)),
+		Buckets:                    make(map[int64]*TimeBucket, len(a.Buckets)),
+		UpdatedAt:                  a.UpdatedAt,
+		AdmissionVersion:           a.AdmissionVersion,
+		RetrieveToolsRespBytesSum:  a.RetrieveToolsRespBytesSum,
+		RetrieveToolsSizedCalls:    a.RetrieveToolsSizedCalls,
+		RetrieveToolsObservedCalls: a.RetrieveToolsObservedCalls,
 	}
 	for k, tu := range a.Tools {
 		c.Tools[k] = tu.clone()

@@ -442,7 +442,16 @@
                   <span v-else class="badge badge-sm badge-success">enabled</span>
                 </td>
                 <td class="text-sm text-right">
-                  {{ tool.usage || 0 }}
+                  <router-link
+                    v-if="tool.usage && toolCallsLink(tool)"
+                    :to="toolCallsLink(tool)!"
+                    class="link"
+                    data-test="tool-calls-link"
+                    @click.stop
+                  >
+                    {{ tool.usage }}
+                  </router-link>
+                  <span v-else>{{ tool.usage || 0 }}</span>
                 </td>
                 <td class="text-sm text-base-content/60">
                   <span v-if="tool.last_used">{{ formatRelativeTime(tool.last_used) }}</span>
@@ -561,6 +570,7 @@ import { serverDetailPath } from '@/utils/serverRoute'
 import { formatDate } from '@/utils/datetime'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useScopeQuery } from '@/composables/useScopeQuery'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { GlobalTool, GlobalToolsStats } from '@/types/api'
@@ -579,6 +589,18 @@ const quarantinedServerCount = computed(() => serversStore.serverCount.quarantin
 // Undefined when the view is mounted without a router — several unit suites do
 // exactly that, and a query prefill is not worth making them install one.
 const route = useRoute() as ReturnType<typeof useRoute> | undefined
+// Spec 109-k: the row "Calls" link (url-filter-contract.md link map). Guarded
+// the same way as `route` above — several unit suites mount this view with no
+// router installed, and useScopeQuery() itself calls useRoute()/useRouter().
+const scopeQuery = route ? useScopeQuery('tools') : undefined
+
+/** `/activity?view=calls&tool=<server:tool>` for a tool row's "Calls" link
+ * (url-filter-contract.md link map: "Tools row" -> "Calls"). Null when no
+ * router is installed (unit-test harnesses that mount Tools.vue standalone). */
+function toolCallsLink(tool: GlobalTool) {
+  if (!scopeQuery) return null
+  return scopeQuery.linkTo('activity', { view: 'calls', tool: `${tool.server_name}:${tool.name}` })
+}
 
 // ---- State ----
 const allTools = ref<GlobalTool[]>([])
@@ -788,7 +810,6 @@ type StatCard = 'total' | 'enabled' | 'disabled'
 // unfiltered. An approval-only filter (filterStatus empty) still narrows the
 // table, so none of Total/Enabled/Disabled correctly describes it — return
 // null rather than defaulting to 'total'.
-//
 // Round-9 fix: that filterApproval guard must only suppress TOTAL, not
 // Enabled/Disabled. It used to run before the filterStatus checks, so it
 // always won whenever an approval filter was set — activeStatCard() was
@@ -1098,6 +1119,33 @@ watch([filterServer, filterStatus, filterTier, filterApproval, sortColumn, sortD
   currentPage.value = 1
 })
 
+// Live QA fix (Spec 109-k, FR-080 "router.replace on change"): the controls
+// above only ever READ the URL (applyQueryParam()) — clearing a filter, or
+// picking a new one, updated the table but left the address bar showing the
+// stale query, so a copied/bookmarked URL silently reapplied it on reload
+// (SC-009's URL round-trip). searchQuery gets its own watcher just below,
+// rather than joining this one: it changes on every keystroke, and the two
+// need to stay independent of each other's timing.
+watch([filterServer, filterStatus, filterTier, filterApproval], () => {
+  if (!scopeQuery) return
+  scopeQuery.set({
+    server: filterServer.value || undefined,
+    status: filterStatus.value || undefined,
+    tier: filterTier.value || undefined,
+    // `risk` is only ever a read-side alias (url-filter-contract.md rule 6);
+    // once resolved into `filterTier` the canonical `tier` param is what gets
+    // written back, so a stale `?risk=` left over from an old link does not
+    // linger next to it.
+    risk: undefined,
+    approval: filterApproval.value || undefined,
+  })
+})
+
+watch(searchQuery, value => {
+  if (!scopeQuery) return
+  scopeQuery.set({ q: value || undefined })
+})
+
 // Also reset when pageSize changes
 watch(pageSize, () => { currentPage.value = 1 })
 
@@ -1132,23 +1180,50 @@ const toolsHints = computed<Hint[]>(() => [
 onMounted(() => {
   // Tools is the canonical search surface (audit F20): the header box and the
   // retired /search route both arrive here with ?q=, so the query has to
-  // prefill the filter rather than being silently dropped.
+  // prefill the filter rather than being silently dropped. Spec 109-k: the
+  // rest of the contract's Tools-page parameters (`server`, `tier`/`risk`,
+  // `status`, `approval` — url-filter-contract.md "Parameters", all
+  // client-side here per the contract) are read the same way, so a deep link
+  // (Home/Server-card links, a Clients row "Tools it sees", ...) actually
+  // narrows the page instead of landing on the unfiltered table.
   applyQueryParam()
   loadTools()
 })
 
-// A second search from the header while Tools is already open is a route query
-// change, not a remount — without this watch the box would appear to do nothing.
+// A second search/filter from elsewhere while Tools is already open is a
+// route query change, not a remount — without this watch the controls would
+// appear to do nothing (this is exactly the gap the audit found: a URL nav
+// after the initial mount had no effect either).
 watch(
-  () => route?.query.q,
-  () => applyQueryParam()
+  () => route?.query,
+  () => applyQueryParam(),
+  { deep: true }
 )
 
 function applyQueryParam() {
-  const q = route?.query.q
-  if (typeof q === 'string' && q !== searchQuery.value) {
-    searchQuery.value = q
+  const q = route?.query
+  if (!q) return
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+
+  const query = str(q.q)
+  if (query && query !== searchQuery.value) {
+    searchQuery.value = query
     currentPage.value = 1
   }
+
+  // Symmetric by design (zcode review round 1, F3, matching Activity.vue's
+  // applyRouteFilters): set from the query param when present AND cleared
+  // when absent. Vue Router reuses this component across a same-route
+  // navigation (no remount), so a "set only if present" read left a stale
+  // filter in force after a later URL dropped the param — and the write-back
+  // watch below then resurrected it into a URL that had just been cleared.
+  filterServer.value = str(q.server)
+  filterStatus.value = str(q.status)
+  filterApproval.value = str(q.approval)
+
+  // `?risk=` stays a query alias for `?tier=` for old bookmarks/links
+  // (url-filter-contract.md rule 6); an explicit `tier` wins if somehow both
+  // are present.
+  filterTier.value = str(q.tier) || str(q.risk)
 }
 </script>

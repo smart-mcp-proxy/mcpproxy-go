@@ -11,7 +11,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -47,6 +49,21 @@ var (
 	activitySeverity      string // Spec 026: Filter by severity level (critical, high, medium, low)
 	activityAgent         string // Spec 028: Filter by agent token name
 	activityAuthType      string // Spec 028: Filter by auth type (admin, agent)
+
+	// Spec 109-k (activity-scope-filters, url-filter-contract.md): the `view`
+	// segmented filter and the `--from`/`--to` aliases of `--start-time`/
+	// `--end-time` (accepting the same relative shorthand as the Web
+	// composable: "-1h", "-24h", "-7d", "-30d"). This PR is the sole owner of
+	// --from/--to on activity list|watch|summary|export.
+	activityView string
+	activityFrom string
+	activityTo   string
+
+	// activityWatchFromTime/activityWatchToTime are the resolved (absolute)
+	// bounds `activity watch` applies to each streamed event, set once from
+	// --from/--to at startup (Spec 109-k FR-075). Zero means unbounded.
+	activityWatchFromTime time.Time
+	activityWatchToTime   time.Time
 
 	// Show command flags
 	activityIncludeResponse bool
@@ -86,12 +103,13 @@ type ActivityFilter struct {
 func (f *ActivityFilter) Validate() error {
 	// Validate type(s) - supports comma-separated values (Spec 024)
 	if f.Type != "" {
-		validTypes := []string{
-			"tool_call", "policy_decision", "quarantine_change", "server_change",
-			"system_start", "system_stop", "internal_tool_call", "config_change", // Spec 024: new types
-			string(storage.ActivityTypePreflight), // Spec 098: required-tools preflight
-			string(storage.ActivityTypePromptGet), // Finding F10: prompts/get activity
-		}
+		// Sourced from storage.ValidActivityTypes rather than hand-copied: a
+		// second hardcoded list here had the exact same drift
+		// activitySystemTypes was fixed for (live QA,
+		// 109-k-activity-scope-filters) — missing tool_quarantine_change,
+		// security_scan and credential_broker — which made `--view system`
+		// compute a type filter this Validate() then rejected outright.
+		validTypes := storage.ValidActivityTypes
 		// Split by comma for multi-type support
 		types := strings.Split(f.Type, ",")
 		for _, t := range types {
@@ -253,6 +271,187 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 		q.Set("auth_type", f.AuthType)
 	}
 	return q
+}
+
+// Spec 109-k (activity-scope-filters): the `view` segmented filter
+// (url-filter-contract.md `view` → REST `type` mapping). "calls" is tool
+// activity, "system" is every other known activity type, "all" (the CLI
+// default) sends no type filter. An explicit --type overrides --view, exactly
+// like the Web composable's `type` overriding `view`.
+const (
+	activityViewCalls  = "calls"
+	activityViewSystem = "system"
+	activityViewAll    = "all"
+)
+
+// activityCallTypes are the activity types the "calls" view selects.
+var activityCallTypes = []string{"tool_call", "internal_tool_call"}
+
+// activitySystemTypes are every other known activity type — the "system"
+// view. Derived from storage.ValidActivityTypes (minus activityCallTypes) at
+// init, rather than hand-copied, so it can never silently drift the way it
+// once did: a hand-maintained literal here was missing
+// tool_quarantine_change, security_scan and credential_broker (live QA,
+// 109-k-activity-scope-filters) despite this comment's claim to cover "every
+// other known activity type".
+var activitySystemTypes = func() []string {
+	isCallType := make(map[string]bool, len(activityCallTypes))
+	for _, typ := range activityCallTypes {
+		isCallType[typ] = true
+	}
+	var systemTypes []string
+	for _, typ := range storage.ValidActivityTypes {
+		if !isCallType[typ] {
+			systemTypes = append(systemTypes, typ)
+		}
+	}
+	return systemTypes
+}()
+
+// activityViewTypeFilter resolves a --view value to the `type` filter value
+// to send (comma-joined, or "" for no filter / "all"). Returns an error for
+// an unknown view.
+func activityViewTypeFilter(view string) (string, error) {
+	switch view {
+	case "", activityViewAll:
+		return "", nil
+	case activityViewCalls:
+		return strings.Join(activityCallTypes, ","), nil
+	case activityViewSystem:
+		return strings.Join(activitySystemTypes, ","), nil
+	default:
+		return "", fmt.Errorf("invalid view '%s': must be one of calls, system, all", view)
+	}
+}
+
+// activityRelativeTimePattern matches a relative time shorthand such as
+// "-24h", "-7d", "-30m" (url-filter-contract.md `from`/`to`).
+var activityRelativeTimePattern = regexp.MustCompile(`^-([0-9]+)(m|h|d)$`)
+
+// resolveActivityTime resolves a --from/--to value to an absolute RFC3339
+// timestamp: an already-absolute RFC3339 value passes through unchanged, a
+// relative shorthand ("-24h", "-7d", ...) is resolved against now. Spec
+// 109-k FR-075.
+func resolveActivityTime(value string, now time.Time) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if _, err := time.Parse(time.RFC3339, value); err == nil {
+		return value, nil
+	}
+	m := activityRelativeTimePattern.FindStringSubmatch(value)
+	if m == nil {
+		return "", fmt.Errorf("invalid time '%s': must be RFC3339 or a relative shorthand like -24h, -7d", value)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return "", fmt.Errorf("invalid time '%s'", value)
+	}
+	// zcode round 1 (F4): an unbounded count lets `time.Duration(n) * 24 *
+	// time.Hour` overflow int64 silently (Go does not panic or error on
+	// signed overflow), wrapping to a negative duration and resolving to a
+	// bogus FUTURE timestamp instead of failing loudly. 100000 of the
+	// largest unit (days) is ~274 years — far more range than any real
+	// query needs and nowhere near the ~292-year int64-nanosecond ceiling.
+	const maxRelativeAmount = 100000
+	if n <= 0 || n > maxRelativeAmount {
+		return "", fmt.Errorf("invalid time '%s': the amount must be between 1 and %d", value, maxRelativeAmount)
+	}
+	var d time.Duration
+	switch m[2] {
+	case "m":
+		d = time.Duration(n) * time.Minute
+	case "h":
+		d = time.Duration(n) * time.Hour
+	case "d":
+		d = time.Duration(n) * 24 * time.Hour
+	}
+	return now.Add(-d).UTC().Format(time.RFC3339), nil
+}
+
+// activityPeriodFromRelative maps a --from relative shorthand to an
+// 'activity summary' `--period` value (FR-075): the summary REST endpoint
+// only accepts the fixed windows 1h/24h/7d/30d, so an arbitrary --from range
+// is rejected rather than silently rounded or ignored.
+func activityPeriodFromRelative(from string) (string, error) {
+	switch from {
+	case "-1h":
+		return "1h", nil
+	case "-24h":
+		return "24h", nil
+	case "-7d":
+		return "7d", nil
+	case "-30d":
+		return "30d", nil
+	default:
+		return "", fmt.Errorf("--from on 'activity summary' accepts only -1h, -24h, -7d or -30d (aliases of --period); got '%s'", from)
+	}
+}
+
+// splitActivityTool implements the url-filter-contract.md --tool rule: a
+// "server:tool" value splits into server + bare tool name (the REST
+// server/tool filters compare bare names, so sending "server:tool" verbatim
+// would match nothing). An explicit --server that disagrees with the --tool
+// prefix is a contradiction — their intersection is empty and REST has one
+// "server" parameter, so no request could express both — so rule 8 requires
+// exiting 1 with a conflict error before any request, rather than silently
+// keeping one value and dropping the other.
+func splitActivityTool(server, tool string) (string, string, error) {
+	idx := strings.Index(tool, ":")
+	if idx < 0 {
+		return server, tool, nil
+	}
+	toolServer, toolName := tool[:idx], tool[idx+1:]
+	if server == "" {
+		return toolServer, toolName, nil
+	}
+	if server != toolServer {
+		return "", "", fmt.Errorf("--server %s conflicts with the server in --tool %s", server, tool)
+	}
+	return server, toolName, nil
+}
+
+// activityWatchInRange reports whether an event timestamp falls within the
+// optional [from, to] bounds (Spec 109-k FR-075 on `activity watch`). A
+// malformed or missing timestamp is never silently dropped.
+func activityWatchInRange(eventTime time.Time, from, to time.Time) bool {
+	if from.IsZero() && to.IsZero() {
+		return true
+	}
+	if eventTime.IsZero() {
+		// Unknown/unparseable event timestamp — never silently dropped.
+		return true
+	}
+	if !from.IsZero() && eventTime.Before(from) {
+		return false
+	}
+	if !to.IsZero() && eventTime.After(to) {
+		return false
+	}
+	return true
+}
+
+// eventTimestampFromWrapper reads the SSE envelope's own "timestamp" field
+// (set by the server as Unix seconds, e.g. time.Now().Unix() — see
+// internal/httpapi/server.go), NOT a field inside the payload. Returns the
+// zero Time when absent or not a number (zcode round 1, F1: the wrapper
+// timestamp is a JSON number, not an RFC3339 string).
+func eventTimestampFromWrapper(wrapper map[string]interface{}) time.Time {
+	v, ok := wrapper["timestamp"].(float64)
+	if !ok || v <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(int64(v), 0).UTC()
+}
+
+// activityWatchShouldExit reports whether 'activity watch' should stop
+// because --to has passed: once now is after the --to cutoff, no future
+// record could still be in range (Spec 109-k FR-075).
+func activityWatchShouldExit(to, now time.Time) bool {
+	if to.IsZero() {
+		return false
+	}
+	return now.After(to)
 }
 
 // formatRelativeTime formats a timestamp as relative time for recent events
@@ -984,10 +1183,18 @@ func init() {
 	// Spec 028: Agent token identity filters
 	activityListCmd.Flags().StringVar(&activityAgent, "agent", "", "Filter by agent token name")
 	activityListCmd.Flags().StringVar(&activityAuthType, "auth-type", "", "Filter by auth type: admin, agent")
+	// Spec 109-k: view + --from/--to aliases (url-filter-contract.md)
+	activityListCmd.Flags().StringVar(&activityView, "view", "", "Filter by view: calls, system, all (default all); overridden by --type")
+	activityListCmd.Flags().StringVar(&activityFrom, "from", "", "Filter records after this time (RFC3339 or relative: -1h, -24h, -7d, -30d); alias of --start-time")
+	activityListCmd.Flags().StringVar(&activityTo, "to", "", "Filter records before this time (RFC3339 or relative); alias of --end-time")
 
 	// Watch command flags
 	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight")
 	activityWatchCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
+	// Spec 109-k: view + --from/--to
+	activityWatchCmd.Flags().StringVar(&activityView, "view", "", "Filter by view: calls, system, all (default all); overridden by --type")
+	activityWatchCmd.Flags().StringVar(&activityFrom, "from", "", "Only print records at/after this time (RFC3339 or relative: -1h, -24h, -7d, -30d)")
+	activityWatchCmd.Flags().StringVar(&activityTo, "to", "", "Stop watching once this time has passed — must be an absolute RFC3339 timestamp still ahead of now (a relative shorthand like -30m always resolves to the past and is rejected)")
 
 	// Show command flags
 	activityShowCmd.Flags().BoolVar(&activityIncludeResponse, "include-response", false, "Show full response (may be large)")
@@ -996,6 +1203,9 @@ func init() {
 	// Summary command flags
 	activitySummaryCmd.Flags().StringVarP(&activityPeriod, "period", "p", "24h", "Time period: 1h, 24h, 7d, 30d")
 	activitySummaryCmd.Flags().StringVar(&activityGroupBy, "by", "", "Group by: server, tool, status")
+	// Spec 109-k FR-075: --from is an alias of --period (accepts only -1h/-24h/-7d/-30d); no --view on summary.
+	activitySummaryCmd.Flags().StringVar(&activityFrom, "from", "", "Alias of --period, as a relative shorthand: -1h, -24h, -7d, -30d")
+	activitySummaryCmd.Flags().StringVar(&activityTo, "to", "", "Not supported on 'activity summary' (present for contract symmetry; always rejected)")
 
 	// Export command flags
 	activityExportCmd.Flags().StringVar(&activityExportOutput, "output", "", "Output file path (stdout if not specified)")
@@ -1010,6 +1220,10 @@ func init() {
 	activityExportCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter after this time (RFC3339)")
 	activityExportCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter before this time (RFC3339)")
 	activityExportCmd.Flags().StringVar(&activityParentID, "parent-id", "", "Export only child tool calls of a code_execution activity (value = the parent record request_id)")
+	// Spec 109-k: view + --from/--to (url-filter-contract.md)
+	activityExportCmd.Flags().StringVar(&activityView, "view", "", "Filter by view: calls, system, all (default all); overridden by --type")
+	activityExportCmd.Flags().StringVar(&activityFrom, "from", "", "Filter records after this time (RFC3339 or relative: -1h, -24h, -7d, -30d); alias of --start-time")
+	activityExportCmd.Flags().StringVar(&activityTo, "to", "", "Filter records before this time (RFC3339 or relative); alias of --end-time")
 }
 
 // getActivityClient creates an HTTP client for the daemon
@@ -1047,15 +1261,46 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		sensitiveDataPtr = &sensitiveDataVal
 	}
 
+	// Spec 109-k: --view (overridden by an explicit --type), and --from/--to
+	// as aliases of --start-time/--end-time (url-filter-contract.md).
+	typeFilter := activityType
+	if typeFilter == "" {
+		viewType, err := activityViewTypeFilter(activityView)
+		if err != nil {
+			return outputActivityError(err, "INVALID_FILTER")
+		}
+		typeFilter = viewType
+	}
+	startTime := activityStartTime
+	if activityFrom != "" {
+		resolved, err := resolveActivityTime(activityFrom, time.Now())
+		if err != nil {
+			return outputActivityError(err, "INVALID_FILTER")
+		}
+		startTime = resolved
+	}
+	endTime := activityEndTime
+	if activityTo != "" {
+		resolved, err := resolveActivityTime(activityTo, time.Now())
+		if err != nil {
+			return outputActivityError(err, "INVALID_FILTER")
+		}
+		endTime = resolved
+	}
+	server, tool, err := splitActivityTool(activityServer, activityTool)
+	if err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+
 	// Build filter
 	filter := &ActivityFilter{
-		Type:          activityType,
-		Server:        activityServer,
-		Tool:          activityTool,
+		Type:          typeFilter,
+		Server:        server,
+		Tool:          tool,
 		Status:        activityStatus,
 		SessionID:     activitySessionID,
-		StartTime:     activityStartTime,
-		EndTime:       activityEndTime,
+		StartTime:     startTime,
+		EndTime:       endTime,
 		Limit:         activityLimit,
 		Offset:        activityOffset,
 		IntentType:    activityIntentType,
@@ -1192,7 +1437,30 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 }
 
 // runActivityWatch implements the activity watch command
+// validateActivityWatchView rejects an invalid --view up front, exactly the
+// same rule 'activity list'/'export' already apply via activityViewTypeFilter
+// (an explicit --type overrides --view, so a simultaneously-bogus --view is
+// never actually used and must not block the command). Spec 109-k / zcode
+// review round 1, F6: 'activity watch' validated nothing at all — a typo
+// (`--view call`) silently streamed every event unfiltered instead of
+// erroring like its siblings do for the identical input. A standalone
+// function (rather than inlined in runActivityWatch) so a test can call it
+// without also starting the SSE connection.
+func validateActivityWatchView() error {
+	if activityType != "" {
+		return nil
+	}
+	_, err := activityViewTypeFilter(activityView)
+	return err
+}
+
 func runActivityWatch(cmd *cobra.Command, _ []string) error {
+	// Checked before the daemon connection so an invalid --view fails the
+	// same way regardless of whether a daemon is reachable.
+	if err := validateActivityWatchView(); err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+
 	// Setup logger
 	cmdLogLevel, _ := cmd.Flags().GetString("log-level")
 	cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
@@ -1216,6 +1484,43 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 	sseURL, apiKey, transport, ok := activityWatchTarget(cfg, logger.Sugar())
 	if !ok {
 		return outputActivityError(fmt.Errorf("mcpproxy daemon is not reachable. Start with: mcpproxy serve"), "CONNECTION_ERROR")
+	}
+
+	// Spec 109-k: resolve --from/--to (RFC3339 or relative shorthand) once, up
+	// front, into the package-level bounds displayActivityEvent applies.
+	//
+	// zcode round 1 (F7): reset to zero when the flag is absent, not just set
+	// when present — these are package-level vars shared across cobra
+	// commands (and, in tests, across in-process RunE calls), so a stale
+	// value from an earlier invocation must not leak into one that passed no
+	// --from/--to at all.
+	activityWatchFromTime = time.Time{}
+	activityWatchToTime = time.Time{}
+	if activityFrom != "" {
+		resolved, resolveErr := resolveActivityTime(activityFrom, time.Now())
+		if resolveErr != nil {
+			return outputActivityError(resolveErr, "INVALID_FILTER")
+		}
+		if activityWatchFromTime, err = time.Parse(time.RFC3339, resolved); err != nil {
+			return outputActivityError(err, "INVALID_FILTER")
+		}
+	}
+	if activityTo != "" {
+		resolved, resolveErr := resolveActivityTime(activityTo, time.Now())
+		if resolveErr != nil {
+			return outputActivityError(resolveErr, "INVALID_FILTER")
+		}
+		if activityWatchToTime, err = time.Parse(time.RFC3339, resolved); err != nil {
+			return outputActivityError(err, "INVALID_FILTER")
+		}
+		// zcode round 1 (F5): a relative shorthand ("-30m") always resolves to
+		// the PAST, so "stop watching once --to has passed" would be true
+		// before the first frame ever arrives — a silent, immediate, empty
+		// exit despite the flag help advertising relative values. --to only
+		// means something for watch as a point still ahead of it.
+		if !activityWatchToTime.After(time.Now()) {
+			return outputActivityError(fmt.Errorf("--to must be in the future on 'activity watch' (got %s); a relative value like -30m always resolves to the past", activityTo), "INVALID_FILTER")
+		}
 	}
 
 	// Setup context with signal handling
@@ -1293,6 +1598,22 @@ func watchWithReconnect(ctx context.Context, sseURL, apiKey string, outputFormat
 		default:
 		}
 
+		if errors.Is(err, errWatchToPastCutoff) {
+			// Spec 109-k FR-075: --to has passed; this is a clean stop, not a
+			// connection failure that should trigger a reconnect.
+			return nil
+		}
+
+		// zcode round 1 (F6): the cutoff was previously checked only inside
+		// watchActivityStream, which requires a successful connection to run
+		// at all — a daemon that is unreachable (or drops every connection
+		// attempt) made watch reconnect forever at the backoff ceiling,
+		// ignoring an elapsed --to entirely. Check it here too, on every
+		// connection failure, so a daemon-down watch still exits on time.
+		if err != nil && activityWatchShouldExit(activityWatchToTime, time.Now()) {
+			return nil
+		}
+
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Connection lost: %v. Reconnecting in %v...\n", err, backoff)
 			time.Sleep(backoff)
@@ -1332,6 +1653,12 @@ func watchActivityStream(ctx context.Context, sseURL, apiKey string, outputForma
 	var eventType, eventData string
 
 	for scanner.Scan() {
+		// Spec 109-k FR-075: once --to has passed, no further record could be
+		// in range — stop watching instead of reconnecting forever.
+		if activityWatchShouldExit(activityWatchToTime, time.Now()) {
+			return errWatchToPastCutoff
+		}
+
 		line := scanner.Text()
 
 		switch {
@@ -1350,17 +1677,20 @@ func watchActivityStream(ctx context.Context, sseURL, apiKey string, outputForma
 		}
 	}
 
+	if activityWatchShouldExit(activityWatchToTime, time.Now()) {
+		return errWatchToPastCutoff
+	}
+
 	return scanner.Err()
 }
 
+// errWatchToPastCutoff signals that 'activity watch' stopped because --to has
+// passed (Spec 109-k FR-075) — a clean exit, not a connection failure, so
+// watchWithReconnect must not retry it.
+var errWatchToPastCutoff = errors.New("activity watch: --to cutoff reached")
+
 // displayActivityEvent formats and displays an SSE activity event
 func displayActivityEvent(eventType, eventData, outputFormat string) {
-	if outputFormat == "json" {
-		// NDJSON output
-		fmt.Println(eventData)
-		return
-	}
-
 	// Parse event data - SSE wraps the actual payload in {"payload": ..., "timestamp": ...}
 	var wrapper map[string]interface{}
 	if err := json.Unmarshal([]byte(eventData), &wrapper); err != nil {
@@ -1400,6 +1730,44 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 		if eventCategory != activityType {
 			return
 		}
+	} else if activityView != "" {
+		// Spec 109-k: --view is overridden by an explicit --type (checked above).
+		viewTypes, err := activityViewTypeFilter(activityView)
+		if err == nil && viewTypes != "" {
+			matched := false
+			for _, vt := range strings.Split(viewTypes, ",") {
+				if eventCategory == vt {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return
+			}
+		}
+	}
+
+	// Spec 109-k FR-075: --from/--to bound which streamed records print.
+	//
+	// zcode round 1 (F1): the SSE wrapper's "timestamp" is a Unix integer
+	// (server.go emits time.Now().Unix()/evt.Timestamp.Unix()), not an
+	// RFC3339 string — reading it with getStringField always got "", which
+	// activityWatchInRange's original string-based signature treated as
+	// "malformed, pass through", making the whole filter a silent no-op
+	// against a real daemon. eventTimestampFromWrapper reads it as a number.
+	if !activityWatchFromTime.IsZero() || !activityWatchToTime.IsZero() {
+		if !activityWatchInRange(eventTimestampFromWrapper(wrapper), activityWatchFromTime, activityWatchToTime) {
+			return
+		}
+	}
+
+	if outputFormat == "json" {
+		// NDJSON output — emitted only after the --server/--type/--view/
+		// --from/--to filters above have run, so `activity watch -o json`
+		// honors the same filter surface as the human-readable table output
+		// instead of silently streaming every event unfiltered.
+		fmt.Println(eventData)
+		return
 	}
 
 	// Skip successful call_tool_* internal tool calls to avoid duplicates
@@ -1743,6 +2111,19 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = logger.Sync() }()
 
+	// Spec 109-k FR-075: --from is an alias of --period, accepting only the
+	// relative shorthand -1h/-24h/-7d/-30d; --to is not supported here.
+	if cmd.Flags().Changed("to") {
+		return outputActivityError(errors.New("--to is not supported on 'activity summary'; use --period or --from"), "INVALID_PERIOD")
+	}
+	if cmd.Flags().Changed("from") {
+		period, err := activityPeriodFromRelative(activityFrom)
+		if err != nil {
+			return outputActivityError(err, "INVALID_PERIOD")
+		}
+		activityPeriod = period
+	}
+
 	// Validate period
 	validPeriods := []string{"1h", "24h", "7d", "30d"}
 	valid := false
@@ -1863,17 +2244,32 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 // activityExportQueryParams builds the export query string from the export
 // flags. Export does NOT go through ActivityFilter.ToQueryParams, so every
 // filter flag has to be wired here as well or it is a silent no-op.
-func activityExportQueryParams() url.Values {
+func activityExportQueryParams() (url.Values, error) {
 	q := url.Values{}
 	q.Set("format", activityExportFormat)
-	if activityType != "" {
-		q.Set("type", activityType)
+
+	// Spec 109-k: --view (overridden by an explicit --type).
+	typeFilter := activityType
+	if typeFilter == "" {
+		viewType, err := activityViewTypeFilter(activityView)
+		if err != nil {
+			return nil, err
+		}
+		typeFilter = viewType
 	}
-	if activityServer != "" {
-		q.Set("server", activityServer)
+	if typeFilter != "" {
+		q.Set("type", typeFilter)
 	}
-	if activityTool != "" {
-		q.Set("tool", activityTool)
+
+	server, tool, err := splitActivityTool(activityServer, activityTool)
+	if err != nil {
+		return nil, err
+	}
+	if server != "" {
+		q.Set("server", server)
+	}
+	if tool != "" {
+		q.Set("tool", tool)
 	}
 	if activityStatus != "" {
 		q.Set("status", activityStatus)
@@ -1881,12 +2277,31 @@ func activityExportQueryParams() url.Values {
 	if activitySessionID != "" {
 		q.Set(sessionQueryParam(activitySessionID), activitySessionID)
 	}
-	if activityStartTime != "" {
-		q.Set("start_time", activityStartTime)
+
+	// Spec 109-k: --from/--to are aliases of --start-time/--end-time.
+	startTime := activityStartTime
+	if activityFrom != "" {
+		resolved, err := resolveActivityTime(activityFrom, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		startTime = resolved
 	}
-	if activityEndTime != "" {
-		q.Set("end_time", activityEndTime)
+	if startTime != "" {
+		q.Set("start_time", startTime)
 	}
+	endTime := activityEndTime
+	if activityTo != "" {
+		resolved, err := resolveActivityTime(activityTo, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		endTime = resolved
+	}
+	if endTime != "" {
+		q.Set("end_time", endTime)
+	}
+
 	// Activity transparency: export the sub-calls of one code_execution.
 	if activityParentID != "" {
 		q.Set("parent_id", activityParentID)
@@ -1894,7 +2309,7 @@ func activityExportQueryParams() url.Values {
 	if activityIncludeBodies {
 		q.Set("include_bodies", "true")
 	}
-	return q
+	return q, nil
 }
 
 // runActivityExport implements the activity export command
@@ -1930,7 +2345,11 @@ func runActivityExport(cmd *cobra.Command, _ []string) error {
 	transport, baseURL := activityTransport(endpoint, logger.Sugar())
 	exportURL := baseURL + "/api/v1/activity/export"
 
-	exportURL += "?" + activityExportQueryParams().Encode()
+	exportParams, err := activityExportQueryParams()
+	if err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+	exportURL += "?" + exportParams.Encode()
 
 	// Create HTTP request
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)

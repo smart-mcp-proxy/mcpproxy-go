@@ -174,6 +174,10 @@ onMounted(async () => {
 
     // Fetch routing mode info
     systemStore.fetchRouting()
+
+    // Spec 109-k FR-080a: which scope filters (profile/client/token) this
+    // build accepts, so useScopeQuery's Spec 108 rows un-hide once it does.
+    systemStore.fetchScopeFilterFeatures()
   }
 })
 

@@ -32,6 +32,24 @@ ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend)
 
 const props = defineProps<{ buckets: UsageTimeBucket[]; window: UsageWindow }>()
 
+// Spec 109-k, T119: link map "Usage chart bar (tool x bucket)" -> the calls
+// behind the bar. A bucket carries only its own `start`; `end` is the next
+// bucket's start (or, for the last one, the same span extrapolated forward —
+// a single-bucket window falls back to "now").
+const emit = defineEmits<{ (e: 'select-bucket', range: { start: string; end: string }): void }>()
+
+function bucketRange(index: number): { start: string; end: string } {
+  const start = props.buckets[index].start
+  const next = props.buckets[index + 1]
+  if (next) return { start, end: next.start }
+  const prev = props.buckets[index - 1]
+  if (prev) {
+    const gapMs = new Date(start).getTime() - new Date(prev.start).getTime()
+    return { start, end: new Date(new Date(start).getTime() + gapMs).toISOString() }
+  }
+  return { start, end: new Date().toISOString() }
+}
+
 const windowLabel = computed(() => {
   switch (props.window) {
     case '24h': return 'Last 24 hours'
@@ -73,6 +91,14 @@ const chartData = computed(() => ({
 const chartOptions = computed<ChartOptions<'bar'>>(() => ({
   responsive: true,
   maintainAspectRatio: false,
+  onClick: (_event, elements) => {
+    const el = elements[0]
+    if (el && props.buckets[el.index]) emit('select-bucket', bucketRange(el.index))
+  },
+  onHover: (event, elements) => {
+    const target = event.native?.target as HTMLElement | undefined
+    if (target) target.style.cursor = elements.length > 0 ? 'pointer' : 'default'
+  },
   plugins: {
     legend: { display: true, position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
     tooltip: {

@@ -15,6 +15,22 @@
         </button>
       </div>
 
+      <!-- url-filter-contract.md `from`/`to` row, rule 5: a deep-linked range
+           that is not one of the three Usage presets (24h/7d/all) is shown
+           to the request as `window=all` (T113 — never silently omitted,
+           which would ask the backend for its 24h default under a URL that
+           promised something else) but rendered here as a disabled chip so
+           the operator sees it was not actually honoured, rather than
+           quietly getting "all" with no explanation. -->
+      <span
+        v-if="usageRangeNotApplied"
+        class="badge badge-ghost badge-sm gap-1"
+        data-test="usage-range-not-applied-chip"
+        title="This time range is not one of the three Usage presets (24h, 7d, all) — showing all time instead"
+      >
+        not applied on Usage (24h, 7d or all)
+      </span>
+
       <!--
         F30 (#1046): both selects carry their purpose only in their option
         text, so a screen reader announces "combo box" with no idea what it
@@ -73,6 +89,12 @@
         </div>
         <div class="stat-value text-success" :title="tokensSavedExplainer">
           {{ formatNumber(data.tokens_saved) }}
+          <span
+            v-if="data.tokens_saved_estimated"
+            class="badge badge-ghost badge-sm align-middle ml-1"
+            data-test="usage-tokens-saved-estimate-badge"
+            title="No retrieve_tools call has been observed yet — this is a simulated estimate from the current tool catalog, not a measured average"
+          >estimate</span>
         </div>
         <div class="stat-desc">
           {{ data.tokens_saved_percentage.toFixed(1) }}% smaller tool context via BM25 discovery ·
@@ -124,6 +146,25 @@
       <button class="btn btn-sm" @click="reload">Retry</button>
     </div>
 
+    <!-- Contradictory server/tool (rule 8, zcode F1): no REST request can
+         express both, so none is issued — never the unfiltered aggregate. -->
+    <div
+      v-else-if="filterConflict"
+      class="card bg-base-200 border border-warning/40"
+      data-test="usage-conflict-empty-state"
+    >
+      <div class="card-body items-center text-center py-12">
+        <h3 class="font-semibold text-lg mt-2">Server and tool don't match</h3>
+        <p class="text-sm text-base-content/60 max-w-md">
+          <code>server={{ filterServer }}</code> and <code>tool={{ filterTool }}</code>
+          name different servers, so no request can satisfy both. Remove one to continue.
+        </p>
+        <button class="btn btn-sm btn-primary mt-2" data-test="usage-conflict-clear" @click="clearScopeConflict">
+          Clear filter
+        </button>
+      </div>
+    </div>
+
     <!-- Empty / low-data state (FR-009) -->
     <div
       v-else-if="data && isEmpty"
@@ -149,7 +190,7 @@
     <div v-else-if="data" class="grid grid-cols-1 lg:grid-cols-2 gap-6" data-test="usage-charts">
       <div class="card bg-base-100 shadow">
         <div class="card-body p-4">
-          <CallHistogram :tools="data.tools" />
+          <CallHistogram :tools="data.tools" @select-tool="onSelectTool" />
         </div>
       </div>
       <div class="card bg-base-100 shadow">
@@ -164,7 +205,7 @@
       </div>
       <div class="card bg-base-100 shadow">
         <div class="card-body p-4">
-          <Timeline :buckets="data.timeline" :window="window" />
+          <Timeline :buckets="data.timeline" :window="window" @select-bucket="onSelectBucket" />
         </div>
       </div>
 
@@ -179,9 +220,11 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
-import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
+import { useScopeQuery, splitScopeTool, usageWindowFor } from '@/composables/useScopeQuery'
+import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, UsageToolStat } from '@/types'
 import { formatNumber, partitionUsageTools, usageHeadline } from '@/utils/usageFormat'
 import CallHistogram from '@/components/usage/CallHistogram.vue'
 import ResponseSizeRanking from '@/components/usage/ResponseSizeRanking.vue'
@@ -204,6 +247,54 @@ const error = ref<string | null>(null)
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 const authStore = useAuthStore()
+// Undefined when the view is mounted without a router installed — several
+// unit suites do exactly that (Tools.vue and Servers.vue guard the same way),
+// and useScopeQuery() itself calls useRoute()/useRouter().
+const route = useRoute() as ReturnType<typeof useRoute> | undefined
+const router = useRouter() as ReturnType<typeof useRouter> | undefined
+const scopeQuery = route ? useScopeQuery('usage') : undefined
+
+// Spec 109-k (activity-scope-filters), T119: Usage had no `server`/`tool`
+// deep-link support at all — a link built with `?server=<n>` (a server
+// card's stats line, a future Clients-row link) landed on the unfiltered
+// aggregate. Read once on mount: this page has no picker of its own for
+// either, they only ever arrive as an incoming filter.
+const filterServer = ref('')
+const filterTool = ref('')
+// T113: the raw `from`/`to` values, kept only to drive the "not applied on
+// Usage" chip below — the actual request always goes through
+// `usageWindowFor`, never these directly.
+const rawFrom = ref('')
+const rawTo = ref('')
+function applyScopeQueryParams(): void {
+  if (!route) return
+  const server = route.query.server
+  if (typeof server === 'string') filterServer.value = server
+  const tool = route.query.tool
+  if (typeof tool === 'string') filterTool.value = tool
+  // url-filter-contract.md `from`/`to` row ("Usage: window"): a deep link
+  // (a server card's "last 24h" stats line, a future Clients-row link, a
+  // shared URL) carries `from`/`to`, not `window` — without this the window
+  // picker ignored it entirely and Usage always opened on the default 24h
+  // no matter what the URL said.
+  const from = route.query.from
+  rawFrom.value = typeof from === 'string' ? from : ''
+  const to = route.query.to
+  rawTo.value = typeof to === 'string' ? to : ''
+  if (rawFrom.value || rawTo.value) {
+    window.value = usageWindowFor(rawFrom.value || undefined, rawTo.value || undefined) as UsageWindow
+  }
+}
+applyScopeQueryParams()
+
+/** Rule 5: a `from`/`to` present in the URL that is not one of the three
+ * named presets still issues `window=all` (T113), but the operator should
+ * see that the exact range they linked to was not actually honoured. */
+const usageRangeNotApplied = computed(() => {
+  if (!rawFrom.value && !rawTo.value) return false
+  if (rawTo.value) return true // an explicit end time is never one of the three presets
+  return rawFrom.value !== '-24h' && rawFrom.value !== '-7d'
+})
 
 const windowLabel = computed(() => {
   switch (window.value) {
@@ -249,6 +340,26 @@ const freshnessLabel = computed(() => {
 // window the user already moved off. Only the newest request may write state.
 let reloadSeq = 0
 
+/** Rule 8: `server`/`tool` disagree on the server — no REST request can
+ * express both. The page must issue no request and show the conflict empty
+ * state instead of silently falling back to the unfiltered aggregate
+ * (zcode review round 1, F1). */
+const filterConflict = computed(
+  () => splitScopeTool(filterTool.value || undefined, filterServer.value || undefined).conflict === true
+)
+
+function clearScopeConflict(): void {
+  filterServer.value = ''
+  filterTool.value = ''
+  if (router) {
+    const query = { ...route?.query }
+    delete query.server
+    delete query.tool
+    router.replace({ query })
+  }
+  reload()
+}
+
 async function reload() {
   // Spec 107 FR-041 / cross-review round 2, chunk 4 P1: GET /activity/usage
   // is an admin-only core door (named must-refuse, rest-endpoints.md §8).
@@ -257,14 +368,26 @@ async function reload() {
   // refresh, regardless of entry point (mount, interval, window/filter
   // change) — guard the fetch itself rather than each caller.
   if (authStore.principalKind === 'tenant') return
+  // Rule 8 (zcode F1): a conflicting server/tool pair issues no request at
+  // all — never the window's unfiltered aggregate, which would silently
+  // mislead the operator into thinking the URL's filters were honoured.
+  if (filterConflict.value) {
+    data.value = null
+    error.value = null
+    loading.value = false
+    return
+  }
   const seq = ++reloadSeq
   loading.value = true
   error.value = null
   try {
+    const split = splitScopeTool(filterTool.value || undefined, filterServer.value || undefined)
     const resp = await api.getActivityUsage({
       window: window.value,
       status: status.value || undefined,
       sort: sort.value,
+      server: split.server,
+      tool: split.tool,
     })
     if (seq !== reloadSeq) return
     if (resp.success && resp.data) {
@@ -292,6 +415,33 @@ function resetFilters() {
   window.value = 'all'
   status.value = ''
   reload()
+}
+
+/** The active window as the `from`/`to` the link map's targets carry
+ * (url-filter-contract.md `view` -> REST: "the calls behind the bar"). */
+function windowToRange(w: UsageWindow): { from?: string; to?: string } {
+  if (w === '24h') return { from: '-24h' }
+  if (w === '7d') return { from: '-7d' }
+  return {}
+}
+
+/** Link map "Usage chart bar (tool x bucket)": a CallHistogram bar is one
+ * tool, over the whole active window. */
+function onSelectTool(tool: UsageToolStat): void {
+  if (!router || !scopeQuery) return
+  const patch: Record<string, string> = { view: 'calls', tool: `${tool.server}:${tool.tool}` }
+  const range = windowToRange(window.value)
+  if (range.from) patch.from = range.from
+  if (status.value) patch.status = status.value
+  router.push(scopeQuery.linkTo('activity', patch))
+}
+
+/** Same link map row: a Timeline bar is one time bucket, across every tool. */
+function onSelectBucket(range: { start: string; end: string }): void {
+  if (!router || !scopeQuery) return
+  const patch: Record<string, string> = { view: 'calls', from: range.start, to: range.end }
+  if (status.value) patch.status = status.value
+  router.push(scopeQuery.linkTo('activity', patch))
 }
 
 onMounted(() => {

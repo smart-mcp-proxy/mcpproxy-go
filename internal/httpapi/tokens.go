@@ -269,6 +269,12 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 	if !s.requireTokenStore(w, r) {
 		return
 	}
+	// Spec 109-k FR-080a: GET /tokens gates profile/token until Spec 108
+	// wires `?profile=`/`?token=` (url-filter-contract.md `profile`/`token`
+	// rows).
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 
 	tokens, err := s.tokenStore.ListAgentTokens()
 	if err != nil {

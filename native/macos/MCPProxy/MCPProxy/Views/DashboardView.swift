@@ -390,6 +390,22 @@ struct DashboardView: View {
                                 .font(.scaled(.subheadline, scale: fontScale))
                                 .foregroundStyle(.green)
                             Spacer()
+                            // FR-073/T120 (zcode review round 1, F7): Web
+                            // (Usage/Home) and the CLI (`mcpproxy status`)
+                            // both show an "estimate" label while no real
+                            // retrieve_tools call has completed yet — macOS
+                            // showed the same simulated figure with no such
+                            // indication at all.
+                            if stats.estimated {
+                                Text("estimate")
+                                    .font(.scaled(.caption2, scale: fontScale))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.secondary.opacity(0.15))
+                                    .clipShape(Capsule())
+                                    .help("No retrieve_tools call has been observed yet — this is a simulated estimate from the current tool catalog, not a measured average")
+                            }
                         }
                         Text(formatTokenCount(stats.savedTokens))
                             .font(.scaled(.title, scale: fontScale))

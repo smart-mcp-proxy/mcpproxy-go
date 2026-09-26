@@ -36,6 +36,31 @@ export const ACTIVITY_TYPE_LABELS: Record<string, string> = {
 
 const typeLabels = ACTIVITY_TYPE_LABELS
 
+// Spec 109-k (activity-scope-filters): the activity types the `view=calls`
+// Activity filter selects (url-filter-contract.md `view` -> REST `type`
+// mapping). Kept as one list both `activityViewTypes` below and any caller
+// that needs the raw pair can share, rather than two hand-copied literals
+// drifting apart the way the CLI's `activitySystemTypes` once did.
+export const ACTIVITY_CALL_TYPES = ['tool_call', 'internal_tool_call']
+
+/**
+ * Resolves a Web `view` query value (url-filter-contract.md `view` row) to
+ * the `type` filter it applies: `calls` is the two call types, `system` is
+ * every OTHER known type — derived from ACTIVITY_TYPE_LABELS so it can never
+ * drift the way the CLI's hand-maintained `activitySystemTypes` list did
+ * (missing `tool_quarantine_change`/`security_scan`/`credential_broker`).
+ * `all`, `sessions` (Activity.vue does not special-case the Sessions view)
+ * and anything else apply no type filter — `undefined`, so the caller can
+ * tell "no override" from "override to zero types".
+ */
+export function activityViewTypes(view: string): string[] | undefined {
+  if (view === 'calls') return [...ACTIVITY_CALL_TYPES]
+  if (view === 'system') {
+    return Object.keys(ACTIVITY_TYPE_LABELS).filter(t => !ACTIVITY_CALL_TYPES.includes(t))
+  }
+  return undefined
+}
+
 // Activity type icons. Same keys as ACTIVITY_TYPE_LABELS; each distinct, so a
 // glyph identifies the type on its own.
 const typeIcons: Record<string, string> = {
@@ -701,6 +726,18 @@ export interface ActivityRun<T extends ActivityRunFields> {
 }
 
 /**
+ * Types whose consecutive rows are folded WITHOUT agreeing on `tool_name` or
+ * the Details text (Spec 109-k, acceptance scenario 6). A tool-level
+ * quarantine change is emitted once per tool in a server's baseline — 14
+ * tools approved on connect is 14 records that agree on everything EXCEPT
+ * which tool, so the ordinary rule (below) never folds them and "System
+ * events" showed 14 near-identical rows instead of one. The collapsed line
+ * reports the batch instead of one member's tool name (quarantineBatchSummary,
+ * used by the Details column for `run.count > 1`).
+ */
+const BATCH_FOLD_TYPES = new Set(['tool_quarantine_change'])
+
+/**
  * The identity a run is keyed on: EVERYTHING THE COLLAPSED LINE PRINTS, plus
  * the code_execution parent link. That rule is what makes the compression safe
  * — a field the lead row displays on behalf of eleven others has to be one all
@@ -711,14 +748,20 @@ export interface ActivityRun<T extends ActivityRunFields> {
  * on exactly the logs that need it most. The run reports the variation instead
  * (see reasonsVary), so the lead's reason never silently stands for the rest.
  */
-const runIdentity = (a: ActivityRunFields): string =>
+const runIdentity = (a: ActivityRunFields): string => {
+  // A batch type's collapsed line reports a COUNT, not any one member's tool
+  // name or details text — those two fields are deliberately left out of its
+  // identity, the same exception the intent reason gets above, and for the
+  // same reason: keying on them would stop the fold working on exactly the
+  // rows that need it most.
+  const batch = BATCH_FOLD_TYPES.has(a.type ?? '')
   // JSON.stringify rather than a delimiter join: server names, tool names and
   // the details text are free-form, so any separator character could appear
   // inside a field and let two different rows agree on one joined string.
-  JSON.stringify([
+  return JSON.stringify([
     a.type ?? '',
     a.server_name ?? '',
-    a.tool_name ?? '',
+    batch ? '' : (a.tool_name ?? ''),
     a.status ?? '',
     a.parent_id ?? '',
     // The Intent column prints this word on the lead row's authority.
@@ -733,14 +776,58 @@ const runIdentity = (a: ActivityRunFields): string =>
     a.detection_types?.length ?? 0,
     // A preflight or config change says everything in metadata.action / verdict;
     // two of them are only "the same row twice" if that text matches too.
-    activityDetailsText(a as Parameters<typeof activityDetailsText>[0]),
+    batch ? '' : activityDetailsText(a as Parameters<typeof activityDetailsText>[0]),
   ])
+}
+
+/**
+ * Details column text for a folded `tool_quarantine_change` run
+ * (Spec 109-k, acceptance scenario 6): "filesystem: 14 tools approved"
+ * instead of one member's tool name standing in for a batch that never
+ * agreed on it (see BATCH_FOLD_TYPES). `status` is the action word the
+ * backend already stamps on the record (`ActivityService.
+ * handleToolQuarantineChange` sets `Status = action` — "approved",
+ * "pending", "changed", ...); a record with no action falls back to the
+ * type's own label so the count is never printed with nothing after it.
+ */
+export const quarantineBatchSummary = (
+  activity: { server_name?: string; status?: string } | null | undefined,
+  count: number
+): string => {
+  const server = activity?.server_name ? `${activity.server_name}: ` : ''
+  const verb = activity?.status || 'changed'
+  return `${server}${count} tools ${verb}`
+}
 
 const intentOperationOf = (a: ActivityRunFields): string =>
   String((a.metadata?.intent as ActivityIntent | undefined)?.operation_type ?? '')
 
 const intentReasonOf = (a: ActivityRunFields): string =>
   String((a.metadata?.intent as ActivityIntent | undefined)?.reason ?? '')
+
+/**
+ * A batch type's identity deliberately ignores `tool_name` (see
+ * BATCH_FOLD_TYPES above) — everything else about a run being "the same
+ * event repeated" still applies EXCEPT time never bounds it, since normal
+ * runs never need one (two identical calls an hour apart are still the same
+ * repeated call). A batch is different: it stands for one server ACTION, and
+ * two same-server, same-status quarantine actions far apart in time are two
+ * real actions, not one — this is what keeps a rare later action from
+ * silently folding under an earlier one just because nothing of a different
+ * type happened to land between them in the sorted list. Five minutes
+ * comfortably covers a real baseline batch (all its records share
+ * essentially one timestamp) without bounding the ordinary, unbounded fold
+ * every other type still gets.
+ */
+const BATCH_FOLD_WINDOW_MS = 5 * 60 * 1000
+
+const withinBatchFoldWindow = (a?: string, b?: string): boolean => {
+  if (!a || !b) return true // no timestamp to compare against — never the reason to block a fold
+  const ta = Date.parse(a)
+  const tb = Date.parse(b)
+  if (Number.isNaN(ta) || Number.isNaN(tb)) return true
+  return Math.abs(ta - tb) <= BATCH_FOLD_WINDOW_MS
+}
 
 /**
  * Fold consecutive identical rows into runs. Pure and order-preserving: run i
@@ -763,7 +850,10 @@ export const groupActivityRuns = <T extends ActivityRunFields>(
     const identity = enabled ? runIdentity(row) : null
     const current = runs.length > 0 ? runs[runs.length - 1] : undefined
 
-    if (current && identity !== null && identity === currentKey) {
+    const batchWindowOk = !current || !BATCH_FOLD_TYPES.has(row.type ?? '') ||
+      withinBatchFoldWindow(row.timestamp, current.lead.timestamp)
+
+    if (current && identity !== null && identity === currentKey && batchWindowOk) {
       current.rows.push(row)
       current.count++
       if (!current.reasonsVary && intentReasonOf(row) !== intentReasonOf(current.lead)) {
@@ -846,6 +936,7 @@ export interface ActivityFilterState {
   types?: string[]
   parentId?: string
   server?: string
+  tool?: string
   status?: string
   authType?: string
   agentName?: string
@@ -864,6 +955,7 @@ export interface ActiveFilterChip {
     | 'type'
     | 'parent'
     | 'server'
+    | 'tool'
     | 'status'
     | 'auth'
     | 'agent'
@@ -910,6 +1002,9 @@ export const activeFilterChips = (state: ActivityFilterState): ActiveFilterChip[
   }
   if (state.server) {
     chips.push({ kind: 'server', key: 'server', label: `Server: ${state.server}` })
+  }
+  if (state.tool) {
+    chips.push({ kind: 'tool', key: 'tool', label: `Tool: ${state.tool}` })
   }
   if (state.status) {
     chips.push({

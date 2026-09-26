@@ -1938,8 +1938,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     ///
     /// F10: the row's session id (representedObject) used to be thrown away,
     /// so a click on one client's run opened the whole unfiltered log. The id
-    /// now rides along on `.activityFilter` and seeds ActivityView's session
-    /// filter, which is what makes a glance row parent↔child navigable.
+    /// now rides along on `.activityFilter` as a `ScopeFilter` (Spec 109-k)
+    /// and seeds ActivityView's session filter, which is what makes a glance row parent↔child navigable.
     @objc private func openActivityForSession(_ sender: NSMenuItem) {
         let sessionId = sender.representedObject as? String
         // Published BEFORE the window is built, so a view created by this very
@@ -1947,12 +1947,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // a race: too early and nothing is subscribed, too late and the user
         // has already read an unfiltered log.
         if let sessionId, !sessionId.isEmpty {
-            appState.pendingActivitySessionFilter = sessionId
+            appState.handOffScopeFilter(.forSession(sessionId))
         }
         showMainWindow(tab: Self.glanceActivityDestination)
         guard let sessionId, !sessionId.isEmpty else { return }
         // Covers the already-open window, whose observers are live now.
-        NotificationCenter.default.post(name: .activityFilter, object: sessionId)
+        NotificationCenter.default.post(name: .activityFilter, object: ScopeFilter.forSession(sessionId))
     }
 
     /// Where a glance row click lands. A constant so tests can pin the
@@ -2111,7 +2111,7 @@ extension Notification.Name {
     /// already-open main window (object = SidebarItem raw value string).
     static let switchToSidebarTab = Notification.Name("MCPProxy.switchToSidebarTab")
     /// Posted by a tray glance row to scope the Activity Log to the session it
-    /// came from (object = MCP session id string). F10 — a glance row that
+    /// came from (object = `ScopeFilter`, Spec 109-k). F10 — a glance row that
     /// opened the whole unfiltered log was the one place the "parent↔child
     /// navigable" rule was not honoured.
     static let activityFilter = Notification.Name("MCPProxy.activityFilter")

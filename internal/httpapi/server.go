@@ -1443,6 +1443,15 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	response["launch_source"] = string(telemetry.DetectLaunchSourceOnce())
 	response["autostart_enabled"] = telemetry.AutostartReaderForDataDir(autostartDataDir).Read()
 
+	// Spec 109-k FR-080a: advertise which scope filters (profile/client/token)
+	// this build accepts, so a build accepts a parameter exactly when it
+	// advertises it. Omitted while the list is empty (Spec 108-e fills it).
+	if features := scopeFiltersFeatureValue(); len(features) > 0 {
+		response["features"] = map[string]interface{}{
+			"scope_filters": features,
+		}
+	}
+
 	s.writeSuccess(w, response)
 }
 
@@ -1795,9 +1804,15 @@ func getSocketPath() string {
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.GetServersResponse "Server list with statistics"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (profile/client/token, Spec 109-k FR-080a)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers [get]
 func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: GET /servers parses no query string today (`status`,
+	// `q` are client-side) — profile/client/token gated like everywhere else.
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
 		// Use new management service path
@@ -3797,9 +3812,16 @@ const globalToolsUsageWindow = 30 * 24 * time.Hour
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.GlobalToolsResponse "All tools across all servers"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (profile/client/token, Spec 109-k FR-080a)"
 // @Failure 500 {object} contracts.ErrorResponse "Could not enumerate servers"
 // @Router /api/v1/tools [get]
 func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: GET /tools parses no query string today (`server`,
+	// `tool`, `status` etc. are client-side per url-filter-contract.md) —
+	// profile/client/token are gated exactly like everywhere else.
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	allServers, err := s.controller.GetAllServers()
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to enumerate servers")
@@ -6369,6 +6391,11 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.requireAdminRead(w, r, sessionsDenialMessage) {
+		return
+	}
+
+	// Spec 109-k FR-080a: /sessions ignores `agent` today — gated like `token`.
+	if !rejectUnsupportedScopeFilters(w, r) {
 		return
 	}
 
