@@ -36,14 +36,26 @@ const (
 // This mirrors the implementation in internal/upstream/core so both code paths
 // can converge on one function.
 func Shellescape(s string) string {
+	return shellescapeFor(s, runtime.GOOS == osWindows)
+}
+
+// shellescapeFor is Shellescape parameterized by which quoting dialect to
+// use, rather than assuming GOOS decides it. GOOS is the wrong signal when
+// the shell that will actually interpret the string is Git Bash / MSYS on
+// Windows: cmd.exe-style quoting leaves backslashes unescaped, and bash then
+// consumes every backslash in a Windows path (C:\ProgramData\... becomes
+// C:ProgramDataQalatCyber... before the child ever sees it). Callers pick
+// the dialect by asking "is the target shell cmd.exe-like", not "am I on
+// Windows".
+func shellescapeFor(s string, windowsStyle bool) string {
 	if s == "" {
-		if runtime.GOOS == osWindows {
+		if windowsStyle {
 			return `""`
 		}
 		return "''"
 	}
 
-	if runtime.GOOS == osWindows {
+	if windowsStyle {
 		// Windows cmd.exe special characters.
 		if !strings.ContainsAny(s, " \t\n\r\"&|<>()^%") {
 			return s
@@ -98,10 +110,33 @@ func resolveLoginShell() string {
 func WrapWithUserShell(logger *zap.Logger, command string, args []string) (shell string, shellArgs []string) {
 	shell = resolveLoginShell()
 
+	// The escaping dialect must match the shell that will actually parse
+	// commandString, not the host OS. $SHELL=Git-Bash on Windows is the
+	// common case this diverges from GOOS: the string is fed to bash -c,
+	// so it needs POSIX single-quoting, not cmd.exe quoting. This mirrors
+	// the same isBash check used below to pick -l -c vs /c.
+	isBash := isBashLikeShell(shell)
+	windowsStyle := runtime.GOOS == osWindows && !isBash
+
+	// Git Bash / MSYS on Windows cannot exec a backslash-style Windows path
+	// (C:\ProgramData\...) even when it is correctly single-quoted: MSYS's
+	// own exec layer only resolves POSIX-style paths, so it falls through to
+	// bash's PATH lookup, which reports "command not found" using its own
+	// mangled rendering of the argv word (backslashes silently dropped). A
+	// forward-slash path (C:/ProgramData/...) is accepted by both Windows'
+	// CreateProcess and MSYS's exec layer, so convert before quoting when
+	// we're about to run a bash-like shell on Windows.
+	toBashPath := func(s string) string {
+		if runtime.GOOS == osWindows && isBash {
+			return strings.ReplaceAll(s, `\`, "/")
+		}
+		return s
+	}
+
 	parts := make([]string, 0, len(args)+1)
-	parts = append(parts, Shellescape(command))
+	parts = append(parts, shellescapeFor(toBashPath(command), windowsStyle))
 	for _, a := range args {
-		parts = append(parts, Shellescape(a))
+		parts = append(parts, shellescapeFor(toBashPath(a), windowsStyle))
 	}
 	commandString := strings.Join(parts, " ")
 
@@ -127,8 +162,7 @@ func WrapWithUserShell(logger *zap.Logger, command string, args []string) (shell
 			zap.String("shell", shell))
 	}
 
-	isBash := isBashLikeShell(shell)
-	if runtime.GOOS == osWindows && !isBash {
+	if windowsStyle {
 		// Windows cmd.exe: /c to execute a command string.
 		return shell, []string{"/c", commandString}
 	}

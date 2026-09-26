@@ -275,7 +275,14 @@ func TestSetupDockerIsolationShellWrapsWhenDaemonEnvMissingNonDarwin(t *testing.
 		"non-Darwin with no DOCKER_HOST in env must keep the login-shell wrap to inherit rc-file DOCKER_*")
 	require.NotEmpty(t, shellArgs)
 	cmdStr := shellArgs[len(shellArgs)-1]
-	assert.Contains(t, cmdStr, fakeDocker,
+	// When the resolved login shell is bash-like on Windows (Git Bash/MSYS),
+	// WrapWithUserShell rewrites backslashes to forward slashes before
+	// quoting: MSYS's exec layer cannot run a backslash-style Windows path
+	// even when it is correctly single-quoted (it falls through to bash's
+	// PATH lookup and reports "command not found"). Compare against both
+	// separator styles so this assertion holds regardless of which shell
+	// dialect resolved on the test host.
+	assert.Contains(t, strings.ReplaceAll(cmdStr, "/", string(filepath.Separator)), fakeDocker,
 		"shell fallback should still use the resolved absolute path, got: %s", cmdStr)
 	assert.False(t, strings.HasPrefix(cmdStr, "docker run"),
 		"shell fallback must not degrade to bare 'docker' when an absolute path resolved, got: %s", cmdStr)
