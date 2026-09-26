@@ -94,6 +94,21 @@ type ImportedServer struct {
 
 	// Warnings from parsing and mapping
 	Warnings []string
+
+	// --- Spec 109-b additions (FR-040) ---
+
+	// Summary is the wizard/ImportServers second line: "command args…" for a
+	// stdio server or "url (auth-type)" for an HTTP/SSE one. Already redacted
+	// (oauth.LiveRedaction) — safe to display or log as-is.
+	Summary string `json:"summary"`
+	// Tags classifies Summary: any of "local process", "remote",
+	// "needs secret", "oauth".
+	Tags []string `json:"tags"`
+	// EnvFields / HeaderFields classify each of Server.Env/Server.Headers
+	// for the "needs secret" tag without exposing the values (nil when the
+	// server has none).
+	EnvFields    []ImportedField `json:"env,omitempty"`
+	HeaderFields []ImportedField `json:"headers,omitempty"`
 }
 
 // ImportResult contains the complete result of an import operation.

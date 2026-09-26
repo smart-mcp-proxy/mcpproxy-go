@@ -27,47 +27,71 @@ const (
 )
 
 // ConnectResult describes the outcome of a connect or disconnect operation.
+// Struct fields below carry matching `yaml` tags alongside their `json`
+// ones: gopkg.in/yaml.v3 ignores json tags entirely and falls back to
+// lowercased, separator-free field names for any field without its own
+// yaml tag, which would make `mcpproxy connect ... -o yaml` disagree with
+// the documented snake_case keys `-o json` and swagger.yaml both use (the
+// same reasoning as output.StructuredError's yaml tags).
 type ConnectResult struct {
-	Success    bool   `json:"success"`
-	Client     string `json:"client"`
-	ConfigPath string `json:"config_path"`
-	BackupPath string `json:"backup_path,omitempty"`
-	ServerName string `json:"server_name"`
-	Action     string `json:"action"` // "created", "updated", "already_exists", "removed", "not_found"
-	Message    string `json:"message"`
+	Success    bool   `json:"success" yaml:"success"`
+	Client     string `json:"client" yaml:"client"`
+	ConfigPath string `json:"config_path" yaml:"config_path"`
+	BackupPath string `json:"backup_path,omitempty" yaml:"backup_path,omitempty"`
+	ServerName string `json:"server_name" yaml:"server_name"`
+	Action     string `json:"action" yaml:"action"` // "created", "updated", "already_exists", "removed", "not_found"
+	Message    string `json:"message" yaml:"message"`
+
+	// DisplayPath is ConfigPath with the home directory shortened to "~"
+	// (FR-037). Populated for every result whose ConfigPath is known.
+	DisplayPath string `json:"display_path,omitempty" yaml:"display_path,omitempty"`
+	// ReloadHint is this client's instruction for making the write take
+	// effect (FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Empty
+	// for an unknown client.
+	ReloadHint string `json:"reload_hint,omitempty" yaml:"reload_hint,omitempty"`
 }
 
 // ClientStatus describes the current state of a client's configuration
 // with respect to an MCPProxy entry.
+// See ConnectResult's comment above: fields here also carry matching `yaml`
+// tags so `mcpproxy connect --list`/`--all -o yaml` doesn't fall back to
+// yaml.v3's collapsed default keys.
 type ClientStatus struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	ConfigPath string `json:"config_path"`
-	Exists     bool   `json:"exists"`           // config file exists on disk
-	Connected  bool   `json:"connected"`        // mcpproxy entry present in config
-	Supported  bool   `json:"supported"`        // client can be connected (directly or via a bridge)
-	Reason     string `json:"reason,omitempty"` // why not supported
-	Note       string `json:"note,omitempty"`   // caveat for supported clients (e.g. bridge requirement)
-	Bridge     bool   `json:"bridge,omitempty"` // connects via a stdio bridge; connectable even without an existing config
-	Icon       string `json:"icon"`
-	ServerName string `json:"server_name,omitempty"` // name under which mcpproxy is registered
+	ID         string `json:"id" yaml:"id"`
+	Name       string `json:"name" yaml:"name"`
+	ConfigPath string `json:"config_path" yaml:"config_path"`
+	Exists     bool   `json:"exists" yaml:"exists"`                     // config file exists on disk
+	Connected  bool   `json:"connected" yaml:"connected"`               // mcpproxy entry present in config
+	Supported  bool   `json:"supported" yaml:"supported"`               // client can be connected (directly or via a bridge)
+	Reason     string `json:"reason,omitempty" yaml:"reason,omitempty"` // why not supported
+	Note       string `json:"note,omitempty" yaml:"note,omitempty"`     // caveat for supported clients (e.g. bridge requirement)
+	Bridge     bool   `json:"bridge,omitempty" yaml:"bridge,omitempty"` // connects via a stdio bridge; connectable even without an existing config
+	Icon       string `json:"icon" yaml:"icon"`
+	ServerName string `json:"server_name,omitempty" yaml:"server_name,omitempty"` // name under which mcpproxy is registered
+
+	// DisplayPath is ConfigPath with the home directory shortened to "~"
+	// (FR-037). Cosmetic only; the full path stays in ConfigPath.
+	DisplayPath string `json:"display_path,omitempty" yaml:"display_path,omitempty"`
+	// ReloadHint is this client's instruction for making a newly-written
+	// config take effect (FR-037/FR-042). Empty for an unsupported client.
+	ReloadHint string `json:"reload_hint,omitempty" yaml:"reload_hint,omitempty"`
 
 	// AccessState classifies the per-client content access (Spec 075, additive).
 	// Empty/"unknown" in the content-read-free overall status; resolved to
 	// "accessible"/"absent"/"malformed" (and "denied" in US2) by on-demand reads.
-	AccessState string `json:"access_state"`
+	AccessState string `json:"access_state" yaml:"access_state"`
 	// CheckedPaths lists every config location the existence check consults,
 	// highest precedence first. For most clients this is just ConfigPath; for
 	// OpenCode it names both opencode.jsonc and opencode.json (#922), so a
 	// "no config found" UI can say exactly which files were looked for.
-	CheckedPaths []string `json:"checked_paths,omitempty"`
+	CheckedPaths []string `json:"checked_paths,omitempty" yaml:"checked_paths,omitempty"`
 	// Remediation carries actionable fix text, populated only when access is denied.
-	Remediation string `json:"remediation,omitempty"`
+	Remediation string `json:"remediation,omitempty" yaml:"remediation,omitempty"`
 
 	// ProxyURL is THIS instance's MCP endpoint — the address a client would be
 	// pointed at by a connect. Derived from config only (no file read), so it is
 	// populated by both the stat-only listing and the on-demand read.
-	ProxyURL string `json:"proxy_url,omitempty"`
+	ProxyURL string `json:"proxy_url,omitempty" yaml:"proxy_url,omitempty"`
 	// RegisteredURL is the endpoint the client's existing entry actually points
 	// at, projected through exactly the same sanitizer as a Spec 091 preview's
 	// entry summary: scheme, host and path only — query (the ?apikey= carrier),
@@ -78,7 +102,7 @@ type ClientStatus struct {
 	// identical so the two surfaces cannot disagree about what an entry says.
 	// Empty when nothing was read or the entry carries no URL-shaped value.
 	// Resolved only by GetStatus.
-	RegisteredURL string `json:"registered_url,omitempty"`
+	RegisteredURL string `json:"registered_url,omitempty" yaml:"registered_url,omitempty"`
 	// EndpointMatch says how RegisteredURL relates to ProxyURL. It exists
 	// because Connected only ever meant "an mcpproxy-shaped entry is present":
 	// an entry merely *named* mcpproxy counts, even when it points at another
@@ -87,7 +111,7 @@ type ClientStatus struct {
 	//   "other"   — the entry points somewhere else (a different instance)
 	//   "unknown" — the entry has no comparable endpoint (e.g. a stdio command)
 	// Empty when Connected is false or nothing was read.
-	EndpointMatch string `json:"endpoint_match,omitempty"`
+	EndpointMatch string `json:"endpoint_match,omitempty" yaml:"endpoint_match,omitempty"`
 }
 
 // EndpointMatch values for ClientStatus.EndpointMatch.
@@ -342,12 +366,14 @@ func (s *Service) GetAllStatus() []ClientStatus {
 			ID:           c.ID,
 			Name:         c.Name,
 			ConfigPath:   cfgPath,
+			DisplayPath:  DisplayPath(cfgPath, s.homeDir),
 			CheckedPaths: s.checkedPaths(c.ID),
 			Supported:    c.Supported,
 			Reason:       c.Reason,
 			Note:         c.Note,
 			Bridge:       c.Bridge,
 			Icon:         c.Icon,
+			ReloadHint:   c.ReloadHint,
 			AccessState:  accessUnknown,
 			ProxyURL:     proxyURL,
 		}
@@ -384,12 +410,14 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		ID:           c.ID,
 		Name:         c.Name,
 		ConfigPath:   cfgPath,
+		DisplayPath:  DisplayPath(cfgPath, s.homeDir),
 		CheckedPaths: s.checkedPaths(c.ID),
 		Supported:    c.Supported,
 		Reason:       c.Reason,
 		Note:         c.Note,
 		Bridge:       c.Bridge,
 		Icon:         c.Icon,
+		ReloadHint:   c.ReloadHint,
 		AccessState:  accessUnknown,
 		ProxyURL:     s.baseURL(),
 	}
@@ -469,8 +497,20 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 //
 // An empty token means exactly today's behavior, so existing consumers are
 // unaffected (contracts §2).
-func (s *Service) ConnectWithPrecondition(clientID, serverName string, force bool, preconditionToken string) (*ConnectResult, error) {
+func (s *Service) ConnectWithPrecondition(clientID, serverName string, force bool, preconditionToken string) (res *ConnectResult, err error) {
 	client := FindClient(clientID)
+
+	// FR-037/FR-042: every ConnectResult this call produces — success,
+	// already_exists, precondition_failed, whatever branch below returns it —
+	// carries the client's display path and reload hint, so a caller never has
+	// to special-case which branch to trust for them.
+	defer func() {
+		if res != nil && client != nil {
+			res.DisplayPath = DisplayPath(res.ConfigPath, s.homeDir)
+			res.ReloadHint = client.ReloadHint
+		}
+	}()
+
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
 	}
@@ -555,7 +595,9 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 		return nil, err
 	}
 
-	var res *ConnectResult
+	// res/err are the function's named returns — deliberately NOT re-declared
+	// with `var` here, which would shadow them and leave the deferred
+	// DisplayPath/ReloadHint fill-in above looking at a permanently-nil res.
 	if client.Format == "toml" {
 		res, err = s.connectTOML(client, cfgPath, serverName, force, pre)
 	} else {
@@ -592,8 +634,25 @@ func connectRefusal(client *ClientDef, cfgPath string) error {
 }
 
 // Disconnect removes the MCPProxy entry from the specified client's configuration.
-func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error) {
+func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, err error) {
 	client := FindClient(clientID)
+
+	// FR-037/FR-042: fill DisplayPath/ReloadHint on whichever ConnectResult
+	// this call returns, including the OpenCode alternate-candidate branch
+	// below (which returns directly rather than falling through to the
+	// bottom `return`).
+	//
+	// Review round 3 finding: every ClientDef.ReloadHint is worded for a
+	// fresh connect ("...to load MCPProxy"). Disconnect just removed the
+	// entry, so that wording is copied through disconnectReloadHint, which
+	// rephrases it for removal instead of loading.
+	defer func() {
+		if res != nil && client != nil {
+			res.DisplayPath = DisplayPath(res.ConfigPath, s.homeDir)
+			res.ReloadHint = disconnectReloadHint(client.ReloadHint)
+		}
+	}()
+
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
 	}
@@ -610,8 +669,6 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
 
-	var res *ConnectResult
-	var err error
 	if client.Format == "toml" {
 		res, err = s.disconnectTOML(client, cfgPath, serverName)
 	} else {

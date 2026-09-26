@@ -3845,3 +3845,14 @@ func (r *Runtime) SaveOnboardingState(state *storage.OnboardingState) error {
 	}
 	return r.storageManager.SaveOnboardingState(state)
 }
+
+// UpdateOnboardingState runs fn against the current onboarding state and
+// persists it atomically (Spec 109-b, T035): every writer (the mark handler,
+// the connect success path, the `initialize` hook) goes through this so
+// concurrent writes never drop each other's fields.
+func (r *Runtime) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	if r.storageManager == nil {
+		return fmt.Errorf("storage not available")
+	}
+	return r.storageManager.UpdateOnboardingState(fn)
+}

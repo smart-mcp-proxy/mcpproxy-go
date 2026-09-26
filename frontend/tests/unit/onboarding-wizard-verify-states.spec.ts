@@ -45,6 +45,12 @@ function onboardingState() {
       first_mcp_client_ever: true,
       mcp_clients_seen_ever: ['claude-code'],
       incomplete_tab_count: 0,
+      // Spec 109-b FR-042: these tests are about the two Verify milestones,
+      // not about the usable-server gate, so give it a usable server —
+      // otherwise the sample-prompts list this file asserts on would be
+      // replaced by the "Approve a server first" message.
+      has_usable_server: true,
+      usable_servers: ['filesystem'],
     },
   }
 }

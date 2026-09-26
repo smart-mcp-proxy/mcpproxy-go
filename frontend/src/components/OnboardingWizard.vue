@@ -201,6 +201,51 @@
           <div v-if="loadingImportSources" class="flex justify-center py-4">
             <span class="loading loading-spinner loading-md"></span>
           </div>
+          <!-- Spec 109-ux-navigation-consistency US7 Acceptance Scenario 4:
+               nothing left to import, but the step isn't done — everything
+               imported so far is still quarantined. The generic "Nothing to
+               import" dead end below is wrong here: there IS something to do,
+               it's reviewing what was already brought in. -->
+          <div
+            v-else-if="importSourcesWithServers.length === 0 && !onboarding.hasUsableServer && quarantinedServersAwaitingReview.length > 0"
+            class="border border-base-300 rounded-lg mb-5"
+            data-test="servers-inline-review"
+          >
+            <div class="px-4 pt-4 pb-2 text-sm">
+              <span class="font-semibold">Approve a server to finish this step.</span>
+              <span class="opacity-70">
+                {{ quarantinedServersAwaitingReview.length }}
+                imported server{{ quarantinedServersAwaitingReview.length === 1 ? '' : 's' }}
+                {{ quarantinedServersAwaitingReview.length === 1 ? 'is' : 'are' }} waiting in quarantine —
+                review its tools before it can run.
+              </span>
+            </div>
+            <ul class="divide-y divide-base-300">
+              <li
+                v-for="s in quarantinedServersAwaitingReview"
+                :key="s.name"
+                class="flex items-center justify-between gap-3 px-4 py-2"
+                :data-test="`servers-review-row-${s.name}`"
+              >
+                <span class="min-w-0 flex-1">
+                  <span class="text-sm font-medium truncate block">{{ s.name }}</span>
+                  <span class="text-[11px] opacity-50 font-mono truncate block">{{ s.url || s.command || '' }}</span>
+                </span>
+                <span class="badge badge-warning badge-sm font-normal shrink-0">Quarantined</span>
+                <a
+                  :href="hrefFor(`/servers/${encodeURIComponent(s.name)}`)"
+                  class="btn btn-primary btn-xs shrink-0"
+                  :data-test="`servers-review-link-${s.name}`"
+                  @click="goToServerReview($event, s.name)"
+                >
+                  Review
+                </a>
+              </li>
+            </ul>
+            <p v-if="serverAddedJustNow" class="text-xs text-success px-4 pb-3 pt-1">
+              ✓ Server added — it's currently in quarantine. Review it on the Servers page after this wizard.
+            </p>
+          </div>
           <!-- Nothing to import. Step 2 is otherwise entirely about picking
                servers out of an existing MCP setup, which leaves a user who has
                none — the exact user this wizard matters most to — staring at a
@@ -273,19 +318,39 @@
                 <li
                   v-for="name in src.serverNames"
                   :key="name"
-                  class="flex items-center gap-3 pl-10 pr-3 py-2 relative hover:bg-base-200/40"
+                  class="flex items-start gap-3 pl-10 pr-3 py-2 relative hover:bg-base-200/40"
                 >
                   <!-- Vertical guide -->
                   <span class="absolute left-5 top-0 bottom-0 w-px bg-base-300" aria-hidden="true"></span>
-                  <label class="flex items-center gap-3 flex-1 min-w-0 cursor-pointer">
+                  <label class="flex items-start gap-3 flex-1 min-w-0 cursor-pointer">
                     <input
                       type="checkbox"
-                      class="checkbox checkbox-sm"
+                      class="checkbox checkbox-sm mt-0.5"
                       :checked="isSelected(src.path, name)"
                       :data-test="`server-checkbox-${src.format}-${name}`"
                       @change="toggleServer(src.path, name, ($event.target as HTMLInputElement).checked)"
                     />
-                    <span class="text-sm truncate">{{ name }}</span>
+                    <span class="min-w-0 flex-1">
+                      <span class="text-sm truncate block">{{ name }}</span>
+                      <!-- Spec 109-b FR-040: second line (command+args or
+                           url+auth-type) and its tags. -->
+                      <span
+                        v-if="importedRow(src, name)"
+                        class="text-[11px] opacity-50 font-mono truncate block"
+                        :data-test="`import-summary-${src.format}-${name}`"
+                      >
+                        {{ importedRow(src, name)!.summary }}
+                      </span>
+                      <span v-if="importedRow(src, name)?.tags?.length" class="flex flex-wrap gap-1 mt-1">
+                        <span
+                          v-for="tag in importedRow(src, name)!.tags"
+                          :key="tag"
+                          class="badge badge-ghost badge-xs font-normal"
+                          :class="{ 'badge-warning': tag === 'needs secret' }"
+                          :data-test="`import-tag-${src.format}-${name}-${tag.replaceAll(' ', '-')}`"
+                        >{{ tag }}</span>
+                      </span>
+                    </span>
                   </label>
                   <span
                     v-if="conflictTarget(src, name)"
@@ -305,78 +370,18 @@
             <span class="text-sm">{{ selectionImportMessage }}</span>
           </div>
 
-          <!-- The security choice lives in the step body, not the sticky
-               footer: expanded (it must not hide) it is tall enough that a
-               footer would eat the modal and squeeze the import list back down
-               to the clipped single row this step started with. Here it simply
-               scrolls with the rest of the step. -->
-          <details class="group border border-base-300 rounded-lg overflow-hidden bg-base-200/40 mb-4" data-test="security-panel" open>
-            <summary class="cursor-pointer flex items-center gap-2 px-4 py-2.5 select-none hover:bg-base-200/70 transition-colors">
-              <span class="transition-transform inline-block group-open:rotate-90 opacity-60">▸</span>
-              <span class="text-sm font-medium">Runtime isolation and MCP server quarantine</span>
-              <span class="ml-auto inline-flex items-center gap-2">
-                <span class="badge badge-primary badge-sm font-semibold">Global settings</span>
-                <span class="text-xs opacity-70 hidden sm:inline">saved to your mcpproxy config</span>
-              </span>
-            </summary>
-            <div class="px-4 py-4 space-y-4 bg-base-100 border-t border-base-300">
-              <!-- Docker isolation -->
-              <label class="flex items-start gap-3 p-3 rounded-lg border border-base-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  class="checkbox checkbox-sm mt-0.5"
-                  :checked="dockerIsolationDefault"
-                  :disabled="securityBusy || dockerStatus === false"
-                  @change="onToggleDockerIsolation(($event.target as HTMLInputElement).checked)"
-                  data-test="toggle-docker-isolation"
-                />
-                <div class="flex-1 min-w-0">
-                  <div class="font-medium text-sm">Docker isolation</div>
-                  <p class="text-xs opacity-70 mt-1 leading-relaxed">
-                    Sandboxes every stdio server in a throwaway Docker container so a compromised server can't read or write your host files, env vars, or SSH keys. Recommended whenever you import servers from sources you don't fully control.
-                  </p>
-                  <p
-                    v-if="dockerStatus === false"
-                    class="text-xs text-warning mt-2"
-                    data-test="docker-install-hint"
-                  >
-                    Docker isn't running on this machine. Install
-                    <a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener" class="link">Docker Desktop</a>
-                    (or start the Docker daemon) then come back to enable this — stdio servers run unsandboxed otherwise.
-                  </p>
-                  <p class="text-[11px] mt-2">
-                    <a href="https://docs.mcpproxy.app/security/docker-isolation/" target="_blank" rel="noopener" class="link link-primary">Learn more about Docker isolation →</a>
-                  </p>
-                </div>
-              </label>
-
-              <!-- Quarantine new servers -->
-              <label class="flex items-start gap-3 p-3 rounded-lg border border-base-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  class="checkbox checkbox-sm mt-0.5"
-                  :checked="quarantineEnabled"
-                  :disabled="securityBusy"
-                  @change="onToggleQuarantine(($event.target as HTMLInputElement).checked)"
-                  data-test="toggle-quarantine"
-                />
-                <div class="flex-1 min-w-0">
-                  <div class="font-medium text-sm">Quarantine new servers</div>
-                  <p class="text-xs mt-1 leading-relaxed">
-                    <strong>Recommended.</strong> Holds every newly added server in a quarantine zone until you explicitly approve it. Defends against tool-poisoning attacks where a malicious server smuggles instructions into tool descriptions. <strong>Important:</strong> your AI agent itself can add upstream servers via mcpproxy's built-in MCP tools — your approval is the only safety net.
-                  </p>
-                  <p class="text-xs opacity-70 mt-1.5 leading-relaxed">
-                    Combine with security scanners (Trivy, Semgrep, MCP Scan) on the
-                    <router-link to="/servers" class="link link-primary">Servers</router-link>
-                    page for deeper supply-chain checks before approving.
-                  </p>
-                  <p class="text-[11px] mt-2">
-                    <a href="https://docs.mcpproxy.app/security/quarantine/" target="_blank" rel="noopener" class="link link-primary">Learn more about quarantine →</a>
-                  </p>
-                </div>
-              </label>
-            </div>
-          </details>
+          <!-- Spec 109-ux-navigation-consistency FR-043: the global Docker
+               isolation and quarantine defaults are not editable here — they
+               apply to every server on this instance, imported or not, and
+               belong in Settings. This step only decides whether THIS
+               import goes through quarantine, via the footer checkbox below. -->
+          <p
+            class="text-xs opacity-70 mb-4 leading-relaxed"
+            data-test="security-defaults-summary"
+          >
+            Docker isolation is <strong>{{ dockerIsolationDefault ? 'on' : 'off' }}</strong><span v-if="dockerIsolationDefault && dockerStatus === false" class="text-warning"> (Docker not detected)</span> and new-server quarantine is <strong>{{ quarantineEnabled ? 'on' : 'off' }}</strong> by default —
+            <a :href="hrefFor('/settings')" class="link link-primary" @click="goToSettings">change these in Settings →</a>
+          </p>
 
           <!-- Only an alternative when there is something to import; the
                nothing-to-import branch above already offers manual add as a
@@ -466,27 +471,46 @@
             </div>
           </template>
 
+          <!-- Spec 109-b FR-042: each connected client's reload hint — most
+               clients only read their MCP config at startup, so a connect
+               that succeeded doesn't mean the client is using it yet. -->
+          <div v-if="connectedClientsWithHints.length > 0" class="mt-4 border-t border-base-300 pt-4" data-test="verify-reload-hints">
+            <div class="text-[11px] font-semibold uppercase tracking-wider opacity-50 mb-2">Reload your client to pick it up</div>
+            <ul class="space-y-1">
+              <li
+                v-for="c in connectedClientsWithHints"
+                :key="c.id"
+                class="text-sm"
+                :data-test="`reload-hint-${c.id}`"
+              >
+                <span class="font-medium">{{ c.name }}:</span> {{ c.reload_hint }}
+              </li>
+            </ul>
+          </div>
+
           <!-- Quick prompt suggestions. The first dispatches to an upstream
                server (the milestone above); the rest exercise a different
-               built-in mcpproxy tool each. -->
+               built-in mcpproxy tool each. Spec 109-b FR-042: prompts are
+               only generated from usable servers — with none, there is
+               nothing an agent could actually call yet. -->
           <div class="mt-4 border-t border-base-300 pt-4">
             <div class="text-[11px] font-semibold uppercase tracking-wider opacity-50 mb-2">Try one of these prompts</div>
-            <ul class="space-y-1.5" data-test="verify-sample-prompts">
-              <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
-                "Find a filesystem tool with mcpproxy, then call it to list my home directory."
-                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ retrieve_tools + call_tool_read</span>
-              </li>
-              <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
-                "Search for MCP filesystem tools."
-                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ retrieve_tools</span>
-              </li>
-              <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
-                "List my upstream MCP servers and their connection status."
-                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ upstream_servers</span>
-              </li>
-              <li class="bg-base-200 rounded-lg p-2.5 text-sm font-mono">
-                "Show me tools pending quarantine approval in mcpproxy."
-                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ quarantine_security</span>
+            <div
+              v-if="suggestedPrompts.length === 0"
+              class="bg-base-200 rounded-lg p-3 text-sm opacity-70 text-center"
+              data-test="verify-no-usable-server"
+            >
+              Approve a server first —
+              <a :href="hrefFor('/servers')" class="link link-primary" @click="goToServersList">review it on the Servers page</a>.
+            </div>
+            <ul v-else class="space-y-1.5" data-test="verify-sample-prompts">
+              <li
+                v-for="(p, idx) in suggestedPrompts"
+                :key="idx"
+                class="bg-base-200 rounded-lg p-2.5 text-sm font-mono"
+              >
+                "{{ p.text }}"
+                <span class="text-[11px] opacity-50 ml-2 not-italic font-sans">→ {{ p.hint }}</span>
               </li>
             </ul>
           </div>
@@ -530,6 +554,26 @@
               </li>
             </ul>
           </div>
+
+          <!-- Spec 109-b FR-044: one-line telemetry notice for the wizard's
+               final step. TelemetryBanner.vue hides itself while the wizard
+               is open, so this is the only place it appears until the user
+               closes the wizard. -->
+          <p
+            v-if="!telemetryNoticeDismissed"
+            class="mt-4 border-t border-base-300 pt-3 text-[11px] opacity-60 flex items-center gap-2"
+            data-test="wizard-telemetry-notice"
+          >
+            <span class="flex-1">
+              MCPProxy sends anonymous usage statistics to help improve the product. No personal data is collected.
+              <a href="https://mcpproxy.app/telemetry" target="_blank" rel="noopener noreferrer" class="link link-hover underline">Learn more</a>
+            </span>
+            <button
+              class="btn btn-ghost btn-xs"
+              data-test="wizard-telemetry-notice-dismiss"
+              @click="dismissTelemetryNotice"
+            >Dismiss</button>
+          </p>
         </section>
       </div>
 
@@ -557,36 +601,39 @@
               </span>
             </div>
           </div>
-          <!-- One primary, and it is the safe one. Two equally-weighted
+          <!-- Spec 109-ux-navigation-consistency FR-043: ONE primary action,
+               labelled with the count being imported, plus a per-import
+               quarantine checkbox (default on). Two equally-weighted
                primaries made the user guess which import was safer, with the
-               reviewed path rendered as the weaker of the pair. Importing
-               without review stays available, as a link — the cost of choosing
-               it should be a deliberate read, not a symmetric coin flip. -->
+               reviewed path rendered as the weaker of the pair — a single
+               action with an explicit, defaulted-safe checkbox removes that
+               guess. -->
           <div class="flex items-center gap-3">
             <!-- Every step offers a way out, this one included: the sweep and
                  the header ✕ both depend on it, and a step whose only exits are
                  "import" is a trap. -->
             <button class="btn btn-ghost btn-sm" @click="dismiss" data-test="close-wizard">Close</button>
+            <label class="flex items-center gap-2 text-xs cursor-pointer select-none">
+              <input
+                type="checkbox"
+                class="checkbox checkbox-sm"
+                :checked="quarantineOnImport"
+                :disabled="importBusyAny"
+                title="Unchecking skips quarantine — the servers connect and expose their tools immediately, with no review"
+                @change="onToggleQuarantineOnImport($event)"
+                data-test="footer-quarantine-checkbox"
+              />
+              <span>Quarantine imported servers for review</span>
+            </label>
             <button
-              class="btn btn-link btn-sm px-1 no-underline hover:underline text-base-content/70"
+              class="btn btn-primary btn-sm gap-1 min-w-[160px]"
               :disabled="selectedCount === 0 || importBusyAny"
-              title="Skips quarantine — the servers connect and expose their tools immediately, with no review"
-              @click="onBulkImport(false)"
-              data-test="bulk-import-active"
+              @click="onBulkImport(quarantineOnImport)"
+              data-test="bulk-import-primary"
             >
-              <span v-if="bulkImportBusy === 'active'" class="loading loading-spinner loading-xs"></span>
-              Import without review
-            </button>
-            <button
-              class="btn btn-primary btn-sm gap-1 min-w-[180px]"
-              :disabled="selectedCount === 0 || importBusyAny || !quarantineEnabled"
-              :title="!quarantineEnabled ? 'Re-enable Quarantine new servers above to use this option' : ''"
-              @click="onBulkImport(true)"
-              data-test="bulk-import-quarantine"
-            >
-              <span v-if="bulkImportBusy === 'quarantine'" class="loading loading-spinner loading-xs"></span>
-              <span v-else>🛡</span>
-              Import &amp; quarantine
+              <span v-if="bulkImportBusy" class="loading loading-spinner loading-xs"></span>
+              <span v-else-if="quarantineOnImport">🛡</span>
+              Import {{ selectedCount }} server{{ selectedCount === 1 ? '' : 's' }}
             </button>
           </div>
         </div>
@@ -632,7 +679,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onUnmounted, h, type FunctionalComponent } from 'vue'
+import { ref, reactive, computed, watch, onUnmounted, h, type FunctionalComponent } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import { useOnboardingStore } from '@/stores/onboarding'
@@ -641,7 +688,7 @@ import { useServersStore } from '@/stores/servers'
 import AddServerModal from '@/components/AddServerModal.vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { skipReasonLabel } from '@/utils/importSkipReason'
-import type { ClientStatus, ActivityRecord, ConnectPreview } from '@/types'
+import type { ClientStatus, ActivityRecord, ConnectPreview, ImportedServer } from '@/types'
 
 interface Props {
   show: boolean
@@ -708,6 +755,9 @@ interface ImportSource {
   previewError: string
   serverCount: number
   serverNames: string[]
+  // Spec 109-b FR-040: the preview rows themselves (summary/tags/env), so the
+  // template can render the second line without a second fetch.
+  serverRows: ImportedServer[]
 }
 const importSources = ref<ImportSource[]>([])
 const loadingImportSources = ref(false)
@@ -715,6 +765,18 @@ const loadingImportSources = ref(false)
 // Verify tab — recent activity preview.
 const recentActivity = ref<ActivityRecord[]>([])
 const loadingActivity = ref(false)
+
+// Spec 109-b FR-044: the telemetry notice's one-line form for the wizard's
+// final step, sharing TelemetryBanner.vue's dismissal state (the store's
+// `telemetryNoticeDismissed` ref, backed by one localStorage key) so acting
+// on either surface silences both immediately — the banner and this wizard
+// are mounted together on Dashboard.vue for the whole session, so a
+// component-local copy read only at mount would miss the other surface's
+// dismissal until a full reload.
+const telemetryNoticeDismissed = computed(() => onboarding.telemetryNoticeDismissed)
+function dismissTelemetryNotice() {
+  onboarding.dismissTelemetryNotice()
+}
 
 // Verify tab — second milestone (UX audit F13). Lifetime flag from the
 // Spec 044 activation bucket, read off `GET /api/v1/status`, which already
@@ -763,13 +825,33 @@ const upstreamCallState = computed<'satisfied' | 'pending' | 'unknown'>(() => {
 
 // Selection: keyed by `${path}::${serverName}`. Default unchecked.
 const selection = ref<Set<string>>(new Set())
-const bulkImportBusy = ref<'' | 'quarantine' | 'active'>('')
-const importBusyAny = computed(() => bulkImportBusy.value !== '')
+const bulkImportBusy = ref(false)
+const importBusyAny = computed(() => bulkImportBusy.value)
 const selectionImportMessage = ref('')
 const selectionImportOk = ref(false)
+// Spec 109-ux-navigation-consistency FR-043: the footer's single per-import
+// quarantine checkbox. Default on (the safe choice); it is independent of
+// the global `quarantineEnabled` default shown read-only above.
+const quarantineOnImport = ref(true)
 
 const importSourcesWithServers = computed(() =>
   importSources.value.filter(s => s.serverCount > 0)
+)
+
+// Spec 109-ux-navigation-consistency US7 Acceptance Scenario 4: when there is
+// nothing left to import (every client config server is already on this
+// instance) but has_usable_server is still false because everything imported
+// sits in quarantine, the step must not fall through to the generic
+// "Nothing to import" dead end — that copy ("Start from the registry
+// instead, or add a server yourself") is actively wrong when servers already
+// exist and only need a review. This is a scoped stand-in for the full
+// cross-surface review screen (Spec 109-ux-navigation-consistency User
+// Story 2 / T093), which lands in a later PR and will replace it; until
+// then this list only surfaces the servers and links to the existing,
+// fully-featured Approve flow on the Servers page rather than
+// reimplementing its scan-gate/force-approve confirmation here.
+const quarantinedServersAwaitingReview = computed(() =>
+  serversStore.quarantinedServers
 )
 
 function selectionKey(path: string, name: string) {
@@ -834,6 +916,11 @@ const conflictTargets = computed<Map<string, string>>(() => {
 function conflictTarget(src: ImportSource, name: string): string | undefined {
   return conflictTargets.value.get(selectionKey(src.path, name))
 }
+// Spec 109-b FR-040: look up a source's preview row by name for the second
+// line (summary/tags). O(n) over a per-client server list, which is small.
+function importedRow(src: ImportSource, name: string): ImportedServer | undefined {
+  return src.serverRows.find(r => r.name === name)
+}
 const conflictCount = computed(() => conflictTargets.value.size)
 
 let pollHandle: ReturnType<typeof setInterval> | null = null
@@ -850,7 +937,10 @@ const tabs = computed(() => [
     id: 'servers' as TabID,
     label: 'Servers',
     idx: 2,
-    complete: onboarding.hasConfiguredServer,
+    // Spec 109-b FR-041: complete only once a server is actually usable
+    // (enabled, not quarantined, connected, with an approved tool) — a
+    // server entry that still needs review does not finish this step.
+    complete: onboarding.hasUsableServer,
   },
   {
     id: 'verify' as TabID,
@@ -902,6 +992,32 @@ const serverCountLabel = computed(() => {
   return n === 1 ? '1 server' : `${n} servers`
 })
 
+// Spec 109-b FR-042: the Verify step shows each connected client's reload
+// hint — most clients only read their MCP config at startup, so a connect
+// that succeeded is not yet a client that has picked it up.
+const connectedClientsWithHints = computed(() =>
+  mergedClients.value.filter(c => c.connected && c.reload_hint)
+)
+
+// Spec 109-b FR-042: suggested prompts are generated only from usable
+// servers (enabled, not quarantined, connected, with an approved tool) —
+// never from one still waiting on review, which would send the user to try
+// a tool mcpproxy would refuse to call. Empty when there is nothing usable
+// yet; the template shows "Approve a server first" instead of the list.
+const suggestedPrompts = computed(() => {
+  const usable = onboarding.usableServers
+  if (usable.length === 0) return []
+  return [
+    {
+      text: `Find a tool on ${usable[0]} with mcpproxy, then call it.`,
+      hint: 'retrieve_tools + call_tool_read',
+    },
+    { text: 'Search for MCP tools.', hint: 'retrieve_tools' },
+    { text: 'List my upstream MCP servers and their connection status.', hint: 'upstream_servers' },
+    { text: 'Show me tools pending quarantine approval in mcpproxy.', hint: 'quarantine_security' },
+  ]
+})
+
 // Open lifecycle: refresh state, fetch clients + config, start polling.
 //
 // The caller's tab request is read FIRST, before any await. Two reasons: a
@@ -932,6 +1048,17 @@ async function onOpened() {
   // in THIS wizard session) — a reopened wizard starts without undo state.
   for (const k of Object.keys(undoPreviews)) delete undoPreviews[k]
   for (const k of Object.keys(undoOpen)) delete undoOpen[k]
+  // Review round 3 finding: the Servers step's import selection is
+  // session-scoped too. The wizard is mounted once by Dashboard.vue and only
+  // toggled via `show` (never unmounted), so without this reset an
+  // unchecked-and-confirmed "skip quarantine" choice from one session would
+  // silently carry over — unconfirmed — into the next reopen, and a stale
+  // selection/result message from before would flash before the new
+  // previews load.
+  selection.value = new Set()
+  selectionImportMessage.value = ''
+  selectionImportOk.value = false
+  quarantineOnImport.value = true
   // The requested tab applies immediately so the wizard never paints the
   // wrong step while the fetches below are in flight.
   if (requested) activeTab.value = requested
@@ -943,6 +1070,13 @@ async function onOpened() {
     fetchImportSources(),
     fetchRecentActivity(),
     fetchActivation(),
+    // Spec 109-ux-navigation-consistency US7 Acceptance Scenario 4: the
+    // Servers step's inline review list (below) reads serversStore directly,
+    // so it needs a fresh fetch on every open rather than relying on some
+    // other already-mounted view (Servers.vue, Dashboard.vue) having
+    // populated the shared store first — the wizard can be the first thing
+    // to touch it, e.g. right after a fresh-instance import.
+    serversStore.fetchServers(),
   ])
   // Superseded (or closed) while we were loading — leave the wizard alone.
   if (seq !== openSeq || !props.show) return
@@ -972,7 +1106,7 @@ function pickInitialTab(requested: TabID | null): TabID {
   // predicates would have chosen.
   if (requested) return requested
   if (!onboarding.hasConnectedClient) return 'clients'
-  if (!onboarding.hasConfiguredServer) return 'servers'
+  if (!onboarding.hasUsableServer) return 'servers'
   if (!onboarding.firstMCPClientEver) return 'verify'
   return 'clients'
 }
@@ -998,6 +1132,53 @@ function goBack() {
 async function goToRegistry() {
   await dismiss()
   await router.push('/repositories')
+}
+
+// Review round 5: the Review/Settings/Servers links below used a plain
+// router-link and navigated away without calling dismiss() first, unlike
+// goToRegistry() above — the same unmount-before-clear race applies to every
+// link that leaves the wizard, not just the registry one. They render as
+// real <a href> (not a <button>, unlike goToRegistry's) for two reasons a
+// second review round caught: router-link itself renders a real anchor, and
+// a plain `<a>` only intercepts the plain-left-click case correctly when it
+// also skips modifier/middle clicks the way router-link does — see
+// isPlainLeftClick below — so cmd/ctrl/shift-click and middle-click still
+// open the target in a new tab via the native href instead of being
+// hijacked into an in-app navigation.
+function isPlainLeftClick(event: MouseEvent): boolean {
+  return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
+}
+
+// The href itself must carry the router's real base (e.g. "/ui/") the way
+// router-link's does, or a middle-click/"open in new tab" on a dev server
+// with no base-stripping redirect 404s. router.resolve(...).href computes
+// exactly that. The template evaluates this on every render (unlike the
+// click handlers, which only run on a real click), so it must tolerate a
+// host with no router installed — some unit tests mount this component
+// without one — by falling back to the bare path.
+function hrefFor(path: string): string {
+  return router?.resolve(path)?.href ?? path
+}
+
+async function goToServerReview(event: MouseEvent, name: string) {
+  if (!isPlainLeftClick(event)) return
+  event.preventDefault()
+  await dismiss()
+  await router.push(`/servers/${encodeURIComponent(name)}`)
+}
+
+async function goToSettings(event: MouseEvent) {
+  if (!isPlainLeftClick(event)) return
+  event.preventDefault()
+  await dismiss()
+  await router.push('/settings')
+}
+
+async function goToServersList(event: MouseEvent) {
+  if (!isPlainLeftClick(event)) return
+  event.preventDefault()
+  await dismiss()
+  await router.push('/servers')
 }
 
 function startPolling() {
@@ -1155,6 +1336,7 @@ async function fetchImportSources() {
         previewError: '',
         serverCount: 0,
         serverNames: [],
+        serverRows: [],
         importBusy: '',
         importMessage: '',
         importMessageOk: false,
@@ -1178,6 +1360,7 @@ async function fetchImportSources() {
               previewLoading: false,
               serverCount: imported.length,
               serverNames: imported.map(s => s.name),
+              serverRows: imported,
             }
           } else {
             importSources.value[idx] = {
@@ -1202,7 +1385,7 @@ async function fetchImportSources() {
 
 async function onBulkImport(quarantine: boolean) {
   if (selection.value.size === 0) return
-  bulkImportBusy.value = quarantine ? 'quarantine' : 'active'
+  bulkImportBusy.value = true
   selectionImportMessage.value = ''
 
   // Group selected (path, name) pairs by source path. Build per-source
@@ -1265,6 +1448,11 @@ async function onBulkImport(quarantine: boolean) {
     }
     selectionImportOk.value = errors.length === 0
     if (errors.length === 0) {
+      // Captured BEFORE clearing selection below: conflictCount is a
+      // computed derived from `selection`, so reading it after the clear
+      // (review round 3 finding) always evaluates to 0 and the toast never
+      // reports a rename count even when the footer just showed one.
+      const renamedCount = conflictCount.value
       const dest = quarantine ? 'into quarantine' : 'as active'
       let msg = `✓ Imported ${totalImported} server${totalImported === 1 ? '' : 's'} ${dest}`
       if (skippedByLabel.size > 0) {
@@ -1286,7 +1474,7 @@ async function onBulkImport(quarantine: boolean) {
       systemStore.addToast({
         type: 'success',
         title: 'Import complete',
-        message: `${totalImported} server${totalImported === 1 ? '' : 's'}${conflictCount.value > 0 ? ` (${conflictCount.value} renamed)` : ''}`,
+        message: `${totalImported} server${totalImported === 1 ? '' : 's'}${renamedCount > 0 ? ` (${renamedCount} renamed)` : ''}`,
       })
     } else {
       selectionImportMessage.value = `Some imports failed: ${errors.join(' · ')}`
@@ -1301,7 +1489,7 @@ async function onBulkImport(quarantine: boolean) {
     selectionImportMessage.value = (err as Error).message
     selectionImportOk.value = false
   } finally {
-    bulkImportBusy.value = ''
+    bulkImportBusy.value = false
   }
 }
 
@@ -1340,15 +1528,27 @@ function onToggleRequireAuth(v: boolean) {
   void patchConfig({ require_mcp_auth: v })
 }
 
-function onToggleDockerIsolation(v: boolean) {
-  // Toggle the global docker_isolation default. Per-server overrides are
-  // unaffected. The Server tab's per-server form remains the source of
-  // truth for granular control.
-  void patchConfig({ docker_isolation: { enabled: v } })
-}
-
-function onToggleQuarantine(v: boolean) {
-  void patchConfig({ quarantine_enabled: v })
+// Spec 109-ux-navigation-consistency FR-043: this checkbox only decides
+// whether THIS import goes through quarantine — it never writes the global
+// `quarantine_enabled` default (that lives in Settings, summarized above).
+// Default on; unchecking it requires an explicit confirmation because it
+// widens the blast radius of a bad import to "connects immediately, no
+// review". Reverting the DOM checkbox on cancel is done imperatively: the
+// browser has already flipped its native `checked` state by the time
+// `change` fires, and this element isn't bound with v-model, so leaving the
+// ref untouched would not by itself repaint an already-changed checkbox.
+function onToggleQuarantineOnImport(event: Event) {
+  const target = event.target as HTMLInputElement
+  if (!target.checked) {
+    const ok = confirm(
+      'Skip quarantine for this import? The imported servers will connect and expose their tools immediately, with no review.'
+    )
+    if (!ok) {
+      target.checked = true
+      return
+    }
+  }
+  quarantineOnImport.value = target.checked
 }
 
 // Spec 078 US1: the row's Connect fetches the preview first and opens the
@@ -1556,6 +1756,27 @@ async function recordDismissalEngagement() {
 // fallback started the fetches but never chose the tab, so a wizard opened
 // that way landed on Clients regardless of what the opener asked for.
 
+// Spec 109-b: same per-client glyph ConnectModal.vue uses (clientIcon there),
+// duplicated rather than imported so this file stays self-contained — falls
+// back to the server-supplied ClientStatus.icon id, then a generic wrench.
+function clientRowIcon(client: ClientStatus): string {
+  const iconMap: Record<string, string> = {
+    'claude-desktop': '✨',
+    'claude-code': '\u{1F4BB}',
+    'cursor': '\u{1F4DD}',
+    'vscode': '\u{1F4D0}',
+    'windsurf': '\u{1F3C4}',
+    'opencode': '⚡',
+    'gemini': '♊',
+    'codex': '⌘',
+    'zed': '⚡',
+    'cline': '\u{1F916}',
+    'continue': '➡️',
+    'zcode': '\u{1F9BE}',
+  }
+  return iconMap[client.id] || client.icon || '\u{1F527}'
+}
+
 // --- ClientRow component ------------------------------------------------
 // Inlined as a functional component to keep this file self-contained while
 // the row layout stays consistent across all three lists.
@@ -1588,8 +1809,17 @@ const ClientRow: FunctionalComponent<
     { class: 'flex items-center justify-between' },
     [
       h('div', { class: 'min-w-0 flex-1' }, [
-        h('div', { class: 'font-medium text-sm truncate' }, c.name),
-        h('div', { class: 'text-xs opacity-50 truncate', title: c.config_path }, c.config_path),
+        h('div', { class: 'font-medium text-sm truncate flex items-center gap-1.5' }, [
+          h('span', { 'aria-hidden': 'true', 'data-test': `client-icon-${c.id}` }, clientRowIcon(c)),
+          c.name,
+        ]),
+        // Spec 109-b FR-037: show the home-shortened path; the full path is
+        // still one hover away via the tooltip.
+        h(
+          'div',
+          { class: 'text-xs opacity-50 truncate', title: c.config_path, 'data-test': `client-path-${c.id}` },
+          c.display_path || c.config_path
+        ),
       ]),
       h('div', { class: 'shrink-0 ml-2' }, [
         !c.supported

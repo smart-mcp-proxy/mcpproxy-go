@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,6 +45,22 @@ func (m *onboardingTestController) SaveOnboardingState(st *storage.OnboardingSta
 	m.saved = st
 	m.state = st
 	return nil
+}
+
+// UpdateOnboardingState is defined directly here (not inherited from
+// mockRoutingController/baseController) so it reads and writes through THIS
+// struct's own Get/SaveOnboardingState overrides above — an inherited
+// baseController.UpdateOnboardingState would call baseController's own
+// Get/SaveOnboardingState instead, silently ignoring m.state/m.saved.
+func (m *onboardingTestController) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	st, err := m.GetOnboardingState()
+	if err != nil {
+		return err
+	}
+	if err := fn(st); err != nil {
+		return err
+	}
+	return m.SaveOnboardingState(st)
 }
 
 func (m *onboardingTestController) GetActivationFirstMCPClient() (bool, []string) {
@@ -266,4 +283,78 @@ func TestMarkOnboarding_InWizardCompletionUnaffected(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	require.NotNil(t, ctrl.saved)
 	assert.Equal(t, storage.StepStatusCompleted, ctrl.saved.ConnectStepStatus)
+}
+
+// TestMarkOnboarding_ConnectedClientID covers the review-round-6 fix: the
+// CLI's `mcpproxy connect` writes a client's config file directly (so it
+// keeps working with no daemon running) and cannot reach
+// POST /api/v1/connect/{client}'s recordClientConnected. It instead relays
+// through this endpoint with connected_client_id, which must land in the
+// same ClientConnectedAt map the REST connect path writes.
+func TestMarkOnboarding_ConnectedClientID(t *testing.T) {
+	t.Run("known client id is recorded", func(t *testing.T) {
+		ctrl := &onboardingTestController{}
+		srv := newOnboardingTestServer(t, ctrl)
+
+		w := postOnboardingMark(t, srv, OnboardingMarkRequest{ConnectedClientID: "claude-code"})
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, ctrl.saved)
+		require.Contains(t, ctrl.saved.ClientConnectedAt, "claude-code")
+		assert.WithinDuration(t, time.Now(), ctrl.saved.ClientConnectedAt["claude-code"], 5*time.Second)
+	})
+
+	t.Run("unknown client id is rejected", func(t *testing.T) {
+		ctrl := &onboardingTestController{}
+		srv := newOnboardingTestServer(t, ctrl)
+
+		w := postOnboardingMark(t, srv, OnboardingMarkRequest{ConnectedClientID: "not-a-real-client"})
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Nil(t, ctrl.saved)
+	})
+
+	t.Run("combines with other fields in one write", func(t *testing.T) {
+		ctrl := &onboardingTestController{}
+		srv := newOnboardingTestServer(t, ctrl)
+
+		w := postOnboardingMark(t, srv, OnboardingMarkRequest{
+			ConnectedClientID: "cursor",
+			ConnectStepStatus: "completed",
+		})
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, ctrl.saved)
+		assert.Contains(t, ctrl.saved.ClientConnectedAt, "cursor")
+		assert.Equal(t, storage.StepStatusCompleted, ctrl.saved.ConnectStepStatus)
+	})
+}
+
+// TestMarkOnboarding_ChunkedBodyIsDecoded reproduces a chunked-encoding POST
+// (Transfer-Encoding: chunked), where Go reports Request.ContentLength as -1
+// because the length is unknown up front. Gating the decode on
+// r.ContentLength > 0 (rather than using decodeOptionalJSONBody, connect.go's
+// helper for exactly this case) silently skips the body and returns 200 OK
+// with a no-op write: the dismissed wizard reappears on reload and a
+// CLI-relayed connected_client_id is dropped.
+func TestMarkOnboarding_ChunkedBodyIsDecoded(t *testing.T) {
+	ctrl := &onboardingTestController{}
+	srv := newOnboardingTestServer(t, ctrl)
+
+	body := OnboardingMarkRequest{ConnectedClientID: "cursor", ServerStepStatus: "completed"}
+	data, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/onboarding/mark", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	// Simulate what net/http reports for a chunked request: length unknown.
+	req.ContentLength = -1
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, ctrl.saved, "chunked body must still be decoded and applied")
+	assert.Contains(t, ctrl.saved.ClientConnectedAt, "cursor")
+	assert.Equal(t, storage.StepStatusCompleted, ctrl.saved.ServerStepStatus)
 }

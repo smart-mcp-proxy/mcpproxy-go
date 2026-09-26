@@ -69,6 +69,16 @@ struct FirstRunDialog: View {
             .toggleStyle(.checkbox)
             .accessibilityIdentifier("firstrun-launch-at-login")
 
+            // Spec 109-b FR-044: the telemetry notice must appear in-flow
+            // somewhere in first-run/onboarding, not only after the fact in
+            // Settings — this is the macOS app's first-run surface, the
+            // direct counterpart of the Web UI wizard's own one-liner.
+            Text("MCPProxy sends anonymous usage statistics to help improve the product. No personal data is collected — you can turn this off anytime in Settings.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("firstrun-telemetry-notice")
+
             HStack {
                 Spacer()
                 Button("Continue") {
@@ -114,7 +124,7 @@ func presentFirstRunDialogIfNeeded() {
     let host = NSHostingController(
         rootView: FirstRunDialogBinding(choice: choice)
     )
-    host.view.frame = NSRect(x: 0, y: 0, width: 460, height: 260)
+    host.view.frame = NSRect(x: 0, y: 0, width: 460, height: 300)
 
     let window = NSWindow(contentViewController: host)
     window.title = "Welcome to MCPProxy"

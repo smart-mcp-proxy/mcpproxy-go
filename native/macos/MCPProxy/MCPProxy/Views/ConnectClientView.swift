@@ -67,6 +67,14 @@ enum ConnectClientAccessibility {
     static let status = "connect-client-status"
     static let waiting = "connect-client-waiting"
     static let transportNotice = "connect-client-transport-notice"
+    /// Spec 109-b FR-037/FR-042: the client's reload hint shown after a
+    /// successful connect/disconnect.
+    static let reloadHint = "connect-client-reload-hint"
+    /// Spec 109-b FR-037: the shortened config path shown alongside a
+    /// successful connect/disconnect result, so the write is anchored to a
+    /// place, not just a message — matching the preview pane's "Config file"
+    /// row above.
+    static let resultConfigPath = "connect-client-result-config-path"
 
     /// Identifier of one client row.
     static func row(_ clientId: String) -> String { "connect-client-row-\(clientId)" }
@@ -76,7 +84,7 @@ enum ConnectClientAccessibility {
         list, preview, entryText, configPath, existingSummary, safetyNet,
         credentialNotice, refusal, connectBlocked, entryNameField, advancedDisclosure,
         connectButton, undoButton, disconnectButton, disconnectConfirm,
-        closeButton, status, waiting, transportNotice
+        closeButton, status, waiting, transportNotice, reloadHint, resultConfigPath
     ]
 }
 
@@ -305,7 +313,7 @@ struct ConnectClientView: View {
                 .accessibilityIdentifier(ConnectClientAccessibility.preview)
         case .resolved(let preview):
             VStack(alignment: .leading, spacing: 10) {
-                labelledRow("Config file", preview.configPath,
+                labelledRow("Config file", preview.effectiveDisplayPath,
                             identifier: ConnectClientAccessibility.configPath)
 
                 VStack(alignment: .leading, spacing: 4) {
@@ -411,21 +419,73 @@ struct ConnectClientView: View {
         case .idle, .inFlight:
             EmptyView()
         case .succeeded(let result):
-            Label(result.message ?? "Connected.", systemImage: "checkmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.green)
-                .accessibilityIdentifier(ConnectClientAccessibility.status)
+            VStack(alignment: .leading, spacing: 2) {
+                Label(result.message ?? "Connected.", systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                    .accessibilityIdentifier(ConnectClientAccessibility.status)
+                // Spec 109-b FR-037: anchor the result to the file it wrote,
+                // the same shortened path the preview pane showed above —
+                // `effectiveDisplayPath` was decoded and available since
+                // FR-037/FR-042 landed but never rendered here.
+                if let displayPath = result.effectiveDisplayPath, !displayPath.isEmpty {
+                    Text(displayPath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.resultConfigPath)
+                }
+                // Spec 109-b FR-037/FR-042: name the client's reload step so a
+                // successful write doesn't read as "done" when the client
+                // hasn't picked it up yet.
+                if let reloadHint = result.reloadHint, !reloadHint.isEmpty {
+                    Label(reloadHint, systemImage: "arrow.clockwise")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.reloadHint)
+                }
+            }
         case .conflict(let reason):
-            Label("\(reason) The preview has been refreshed — review it and try again.",
-                  systemImage: "arrow.triangle.2.circlepath")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .accessibilityIdentifier(ConnectClientAccessibility.status)
+            VStack(alignment: .leading, spacing: 2) {
+                Label("\(reason) The preview has been refreshed — review it and try again.",
+                      systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier(ConnectClientAccessibility.status)
+                conflictDisplayPathRow
+            }
         case .failed(let reason):
-            Label(reason, systemImage: "xmark.octagon.fill")
+            VStack(alignment: .leading, spacing: 2) {
+                Label(reason, systemImage: "xmark.octagon.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier(ConnectClientAccessibility.status)
+                conflictDisplayPathRow
+                // Spec 109-b FR-037/FR-042 (review round 3 finding): the
+                // legacy `already_exists` failure means an entry is already
+                // there under this path — the reload hint tells the user
+                // that reloading/restarting the client is what would pick it
+                // up, the same information a successful connect shows above.
+                if let reloadHint = model.actionReloadHint, !reloadHint.isEmpty {
+                    Label(reloadHint, systemImage: "arrow.clockwise")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.reloadHint)
+                }
+            }
+        }
+    }
+
+    /// Shared with the `.conflict`/`.failed` branches above: the core fills
+    /// `display_path` on every ConnectResult branch, including a 409
+    /// conflict (review round 3 finding) — this used to be discarded before
+    /// reaching the model, so neither branch could ever show it.
+    @ViewBuilder
+    private var conflictDisplayPathRow: some View {
+        if let displayPath = model.actionDisplayPath, !displayPath.isEmpty {
+            Text(displayPath)
                 .font(.caption)
-                .foregroundStyle(.red)
-                .accessibilityIdentifier(ConnectClientAccessibility.status)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier(ConnectClientAccessibility.resultConfigPath)
         }
     }
 

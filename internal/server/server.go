@@ -4200,6 +4200,12 @@ func (s *Server) SaveOnboardingState(state *storage.OnboardingState) error {
 	return s.runtime.SaveOnboardingState(state)
 }
 
+// UpdateOnboardingState runs fn against the current onboarding state and
+// persists it atomically (Spec 109-b).
+func (s *Server) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	return s.runtime.UpdateOnboardingState(fn)
+}
+
 // GetActivationFirstMCPClient returns Spec 044's FirstMCPClientEver flag and
 // the capped list of recognized client names. Used by the v2 onboarding wizard
 // (Spec 046 v2) to drive the Verify tab. Nil-safe: when telemetry isn't wired

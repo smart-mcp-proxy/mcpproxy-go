@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // ClientDef describes a known MCP client and its configuration file format.
@@ -24,6 +25,26 @@ type ClientDef struct {
 	Note      string // Optional caveat shown for supported clients (e.g. bridge requirement)
 	Bridge    bool   // Connects via a stdio bridge; Connect can create the config when absent
 	Icon      string // Icon identifier for frontend use
+
+	// ClientInfoNames lists the aliases this client is known to send as its MCP
+	// `initialize` request's `clientInfo.name` (Spec 109-b). Used to match a
+	// live session/activation record back to this client id (e.g. presence's
+	// "connected but never seen" detection). Best-effort: recorded from public
+	// client documentation and observed behavior, NOT verified here against a
+	// live `initialize` from every client (this environment has no way to spin
+	// up Cursor/Windsurf/etc. and inspect their handshake) — a wrong or missing
+	// alias only means a client is misclassified as "never seen" one release
+	// longer, never a security issue, so this is a reasonable place to make an
+	// informed assumption rather than block (see source comments below).
+	ClientInfoNames []string
+	// ReloadHint is the per-client, human-readable instruction for making a
+	// freshly-written config take effect (FR-037/FR-042): most of these
+	// clients only read their MCP config at startup or on an explicit
+	// reload command, so a `connect` that succeeds is not yet a client that
+	// has picked up the new server. Best-effort wording (not verified against
+	// a live client in this environment); see the per-client comment for its
+	// source.
+	ReloadHint string
 }
 
 // allClients defines all known MCP client applications.
@@ -35,6 +56,9 @@ var allClients = []ClientDef{
 		ServerKey: "mcpServers",
 		Supported: true,
 		Icon:      "claude-code",
+		// clientInfo.name observed from Claude Code's own MCP client.
+		ClientInfoNames: []string{"claude-code"},
+		ReloadHint:      "Run /mcp in Claude Code (or restart it) to load MCPProxy",
 	},
 	{
 		ID:        "claude-desktop",
@@ -45,54 +69,70 @@ var allClients = []ClientDef{
 		Note:      "Connects via an mcp-remote stdio bridge (npx -y mcp-remote). Requires Node.js.",
 		Bridge:    true,
 		Icon:      "claude-desktop",
+		// "claude-ai" is Anthropic's published clientInfo.name for the Claude
+		// Desktop app's MCP client.
+		ClientInfoNames: []string{"claude-ai", "Claude"},
+		ReloadHint:      "Restart Claude Desktop to load MCPProxy",
 	},
 	{
-		ID:        "cursor",
-		Name:      "Cursor",
-		Format:    "json",
-		ServerKey: "mcpServers",
-		Supported: true,
-		Icon:      "cursor",
+		ID:              "cursor",
+		Name:            "Cursor",
+		Format:          "json",
+		ServerKey:       "mcpServers",
+		Supported:       true,
+		Icon:            "cursor",
+		ClientInfoNames: []string{"cursor", "cursor-vscode"},
+		ReloadHint:      "Reload the Cursor window (or restart Cursor) to load MCPProxy",
 	},
 	{
-		ID:        "windsurf",
-		Name:      "Windsurf",
-		Format:    "json",
-		ServerKey: "mcpServers",
-		Supported: true,
-		Icon:      "windsurf",
+		ID:              "windsurf",
+		Name:            "Windsurf",
+		Format:          "json",
+		ServerKey:       "mcpServers",
+		Supported:       true,
+		Icon:            "windsurf",
+		ClientInfoNames: []string{"windsurf"},
+		ReloadHint:      "Reload the Windsurf window (or restart Windsurf) to load MCPProxy",
 	},
 	{
-		ID:        "vscode",
-		Name:      "VS Code",
-		Format:    "json",
-		ServerKey: "servers",
-		Supported: true,
-		Icon:      "vscode",
+		ID:              "vscode",
+		Name:            "VS Code",
+		Format:          "json",
+		ServerKey:       "servers",
+		Supported:       true,
+		Icon:            "vscode",
+		ClientInfoNames: []string{"Visual Studio Code", "visual-studio-code", "vscode"},
+		ReloadHint:      "Run \"MCP: List Servers\" → Restart (or reload the window) in VS Code to load MCPProxy",
 	},
 	{
-		ID:        "codex",
-		Name:      "Codex CLI",
-		Format:    "toml",
-		ServerKey: "mcp_servers",
-		Supported: true,
-		Icon:      "codex",
+		ID:              "codex",
+		Name:            "Codex CLI",
+		Format:          "toml",
+		ServerKey:       "mcp_servers",
+		Supported:       true,
+		Icon:            "codex",
+		ClientInfoNames: []string{"codex", "codex-cli"},
+		ReloadHint:      "Restart Codex CLI to load MCPProxy",
 	},
 	{
-		ID:        "gemini",
-		Name:      "Gemini CLI",
-		Format:    "json",
-		ServerKey: "mcpServers",
-		Supported: true,
-		Icon:      "gemini",
+		ID:              "gemini",
+		Name:            "Gemini CLI",
+		Format:          "json",
+		ServerKey:       "mcpServers",
+		Supported:       true,
+		Icon:            "gemini",
+		ClientInfoNames: []string{"gemini-cli", "gemini"},
+		ReloadHint:      "Restart Gemini CLI to load MCPProxy",
 	},
 	{
-		ID:        "opencode",
-		Name:      "OpenCode",
-		Format:    "json",
-		ServerKey: "mcp",
-		Supported: true,
-		Icon:      "opencode",
+		ID:              "opencode",
+		Name:            "OpenCode",
+		Format:          "json",
+		ServerKey:       "mcp",
+		Supported:       true,
+		Icon:            "opencode",
+		ClientInfoNames: []string{"opencode"},
+		ReloadHint:      "Restart OpenCode to load MCPProxy",
 	},
 	{
 		ID:     "zcode",
@@ -110,8 +150,10 @@ var allClients = []ClientDef{
 		// live in .agents/mcp.json would see them silently stop loading in
 		// ZCode once mcpproxy connects. Nothing is deleted or corrupted, but
 		// it's worth surfacing before the user clicks Connect.
-		Note: "If your MCP servers are defined in ~/.agents/mcp.json, they will stop loading in ZCode while this entry is present in ~/.zcode/cli/config.json.",
-		Icon: "zcode",
+		Note:            "If your MCP servers are defined in ~/.agents/mcp.json, they will stop loading in ZCode while this entry is present in ~/.zcode/cli/config.json.",
+		Icon:            "zcode",
+		ClientInfoNames: []string{"zcode"},
+		ReloadHint:      "Restart ZCode to load MCPProxy",
 	},
 }
 
@@ -201,6 +243,97 @@ func ConfigPath(clientID, homeDir string) string {
 	default:
 		return ""
 	}
+}
+
+// DisplayPath returns path with a leading match of homeDir (or, when homeDir
+// is empty, os.UserHomeDir() — %USERPROFILE% on Windows, since that is what
+// os.UserHomeDir resolves through there) replaced by "~", for compact display
+// in tables and UI rows (FR-037). The full path remains available via
+// ConfigPath/config_path; this is cosmetic only and never changes what is
+// written to disk. Returns path unchanged when it does not live under the
+// home directory, or when the home directory cannot be resolved.
+func DisplayPath(path, homeDir string) string {
+	if path == "" {
+		return path
+	}
+	if homeDir == "" {
+		var err error
+		homeDir, err = os.UserHomeDir()
+		if err != nil || homeDir == "" {
+			return path
+		}
+	}
+	homeDir = strings.TrimRight(homeDir, string(filepath.Separator))
+	if homeDir == "" {
+		// homeDir was exactly the filesystem root (e.g. HOME=/ in a minimal
+		// container, or root's own home). TrimRight collapsed it to "", which
+		// would otherwise make every absolute path match the "under home"
+		// prefix below. There is no meaningful non-degenerate shortening for
+		// a root home, so leave the path as-is.
+		return path
+	}
+	if matched, rest := homePrefixMatch(path, homeDir, caseInsensitiveHomeMatch()); matched {
+		if rest == "" {
+			return "~"
+		}
+		return "~" + string(filepath.Separator) + rest
+	}
+	return path
+}
+
+// caseInsensitiveHomeMatch reports whether DisplayPath's home-prefix
+// comparison should ignore case. Windows filesystem paths are
+// case-insensitive, and the home directory (os.UserHomeDir -> %USERPROFILE%)
+// and per-client config roots (%APPDATA%/%LOCALAPPDATA%, read directly via
+// os.Getenv in ConfigPath above) are independent env vars that can
+// legitimately differ in casing — e.g. after a profile migration or with
+// roaming profiles. An exact byte comparison then fails to recognize a path
+// that IS under home, leaving the raw, un-shortened path displayed, which is
+// exactly the inconsistency DisplayPath exists to remove. A package
+// variable (rather than an inline runtime.GOOS check) so tests can exercise
+// the Windows behavior on any host platform.
+var caseInsensitiveHomeMatch = func() bool {
+	return runtime.GOOS == "windows"
+}
+
+// homePrefixMatch reports whether path equals home or lives directly under
+// it, optionally ignoring case, and returns the remainder path segment
+// (using path's own original casing, since that reflects what is actually
+// on disk) when it does.
+func homePrefixMatch(path, home string, caseInsensitive bool) (matched bool, rest string) {
+	equal := path == home
+	if caseInsensitive {
+		equal = strings.EqualFold(path, home)
+	}
+	if equal {
+		return true, ""
+	}
+	prefix := home + string(filepath.Separator)
+	if caseInsensitive {
+		if len(path) >= len(prefix) && strings.EqualFold(path[:len(prefix)], prefix) {
+			return true, path[len(prefix):]
+		}
+		return false, ""
+	}
+	if strings.HasPrefix(path, prefix) {
+		return true, strings.TrimPrefix(path, prefix)
+	}
+	return false, ""
+}
+
+// disconnectReloadHint adapts a client's connect-oriented ReloadHint text
+// (every entry in clientRegistry is worded "...to load MCPProxy") for a
+// disconnect/undo outcome, where the entry was just removed rather than
+// added — "reload ... to load MCPProxy" right after removing it reads as
+// though the removal did not happen (review round 3 finding). The reload
+// ACTION (restart/reload the client) is unchanged; only the reason is
+// reworded.
+func disconnectReloadHint(connectHint string) string {
+	const suffix = "to load MCPProxy"
+	if trimmed, ok := strings.CutSuffix(connectHint, suffix); ok {
+		return trimmed + "for this change to take effect"
+	}
+	return connectHint
 }
 
 // serversMapPath returns the sequence of nested JSON/TOML keys leading to a

@@ -377,8 +377,18 @@ func (m *baseController) GetOnboardingState() (*storage.OnboardingState, error) 
 	return &storage.OnboardingState{}, nil
 }
 func (m *baseController) SaveOnboardingState(_ *storage.OnboardingState) error { return nil }
-func (m *baseController) GetActivationFirstMCPClient() (bool, []string)        { return false, nil }
-func (m *baseController) RecordUpdateFailure(_ string) (bool, error)           { return false, nil }
+func (m *baseController) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	st, err := m.GetOnboardingState()
+	if err != nil {
+		return err
+	}
+	if err := fn(st); err != nil {
+		return err
+	}
+	return m.SaveOnboardingState(st)
+}
+func (m *baseController) GetActivationFirstMCPClient() (bool, []string) { return false, nil }
+func (m *baseController) RecordUpdateFailure(_ string) (bool, error)    { return false, nil }
 func (m *baseController) DefaultInstructions() string {
 	return "test built-in default: use retrieve_tools to discover tools"
 }
