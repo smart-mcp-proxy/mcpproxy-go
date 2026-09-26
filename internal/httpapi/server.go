@@ -4107,6 +4107,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	initialLiveStats := filterUpstreamStatsServers(callerCtx, s.controller.GetUpstreamStats())
 	initialStatus := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
+		"edition":        editionValue,
 		"listen_addr":    s.controller.GetListenAddress(),
 		"upstream_stats": initialLiveStats,
 		"status":         withLiveUpstreamStats(callerCtx, s.controller.GetStatus(), initialLiveStats),
@@ -4163,6 +4164,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			eventLiveStats := filterUpstreamStatsServers(callerCtx, s.controller.GetUpstreamStats())
 			response := map[string]interface{}{
 				"running":        s.controller.IsRunning(),
+				"edition":        editionValue,
 				"listen_addr":    s.controller.GetListenAddress(),
 				"upstream_stats": eventLiveStats,
 				"status":         withLiveUpstreamStats(callerCtx, status, eventLiveStats),

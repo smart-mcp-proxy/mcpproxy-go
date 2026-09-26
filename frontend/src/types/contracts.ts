@@ -320,6 +320,18 @@ export interface IsolationDefaults {
   working_dir?: string;
 }
 
+export const TierRead = 'read' as const;
+export const TierWrite = 'write' as const;
+export const TierDestructive = 'destructive' as const;
+export const TierUnannotated = 'unannotated' as const;
+export const TierUnknown = 'unknown' as const;
+export type Tier =
+  | typeof TierRead
+  | typeof TierWrite
+  | typeof TierDestructive
+  | typeof TierUnannotated
+  | typeof TierUnknown;
+
 export interface Tool {
   name: string;
   server_name: string;
@@ -333,6 +345,9 @@ export interface Tool {
   // Tool-level quarantine status surfaced by the same approval record.
   // Optional because non-quarantined tools simply omit the field.
   approval_status?: string;
+  // Computed by contracts.AnnotationTier (Spec 109 FR-028) — never derive
+  // this from annotations on the frontend (X11).
+  tier?: Tier;
   // Why the trust_mode: scan gate held this tool for review (spec 086
   // FR-018). held_signals names the matched deterministic check ids, e.g.
   // "tpa.TPA-2026-0001.hidden_instruction". All three are absent unless the

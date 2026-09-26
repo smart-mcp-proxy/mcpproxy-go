@@ -36,10 +36,30 @@ struct ToolsView: View {
         let name: String
         let description: String
         let score: Double?
+        /// Spec 109 FR-028: server-computed tier (`read`|`write`|`destructive`
+        /// |`unannotated`), never derived locally. `nil` for an older core
+        /// that does not yet send it.
+        let tier: String?
+
+        // Explicit initializer (rather than relying on the synthesized
+        // memberwise one) so every existing call site that predates `tier`
+        // keeps compiling unchanged.
+        init(server: String, name: String, description: String, score: Double?, tier: String? = nil) {
+            self.server = server
+            self.name = name
+            self.description = description
+            self.score = score
+            self.tier = tier
+        }
 
         /// The canonical MCP identity — what an agent would actually call.
         var qualified: String { server.isEmpty ? name : "\(server):\(name)" }
         var id: String { qualified }
+
+        /// `tier`, defaulting to "unannotated" (review round 1): a `nil` tier
+        /// from an older core must still render a badge, same as the Web UI's
+        /// `tool.tier || 'unannotated'` — never no badge at all.
+        var displayTier: String { tier ?? "unannotated" }
     }
 
     var body: some View {
@@ -155,6 +175,12 @@ struct ToolsView: View {
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(Color.accentColor.opacity(0.15))
                     .clipShape(Capsule())
+                Text(ToolLabels.tierLabel(row.displayTier))
+                    .font(.scaled(.caption2, scale: fontScale))
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(tierColor(row.displayTier).opacity(0.15))
+                    .foregroundStyle(tierColor(row.displayTier))
+                    .clipShape(Capsule())
                 Spacer()
                 if let score = row.score {
                     Text(String(format: "%.2f", score))
@@ -173,6 +199,15 @@ struct ToolsView: View {
         .padding(.vertical, 3)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(row.qualified). \(row.description)")
+    }
+
+    private func tierColor(_ tier: String) -> Color {
+        switch tier {
+        case "destructive": return .red
+        case "write": return .orange
+        case "read": return .green
+        default: return .secondary
+        }
     }
 
     private func openServer(_ server: String) {
@@ -202,12 +237,12 @@ struct ToolsView: View {
             if term.isEmpty {
                 fetched = try await client.allTools().map {
                     ToolRow(server: $0.serverName ?? "", name: $0.name,
-                            description: $0.description ?? "", score: nil)
+                            description: $0.description ?? "", score: nil, tier: $0.tier)
                 }
             } else {
                 fetched = try await client.searchTools(query: term).map {
                     ToolRow(server: $0.tool.serverName ?? "", name: $0.tool.name,
-                            description: $0.tool.description ?? "", score: $0.score)
+                            description: $0.tool.description ?? "", score: $0.score, tier: $0.tool.tier)
                 }
             }
             guard generation == loadGeneration else { return }
