@@ -366,6 +366,11 @@ func applyCachedStars(hit *CatalogHit) {
 	}
 	stars, state := provider.Lookup(key)
 	if state != LookupFresh && state != LookupStale {
+		// No displayable stars now. The hit may still carry stars from an
+		// earlier apply (BuildCatalogHit saw them Stale, then the refresh
+		// during Resolve's wait came back 404/451), so fall back to the
+		// source-native value instead of leaving the old count in place.
+		resetToSourceNativeStars(hit)
 		return
 	}
 	if hit.Popularity == nil {
@@ -373,6 +378,23 @@ func applyCachedStars(hit *CatalogHit) {
 	}
 	s := stars
 	hit.Popularity.Stars = &s
+}
+
+// resetToSourceNativeStars drops provider-supplied stars from hit, keeping
+// only what the source itself reported (entry.Popularity).
+func resetToSourceNativeStars(hit *CatalogHit) {
+	if hit.Popularity == nil {
+		return
+	}
+	var native *int
+	if hit.Entry.Popularity != nil && hit.Entry.Popularity.Stars != nil {
+		v := *hit.Entry.Popularity.Stars
+		native = &v
+	}
+	hit.Popularity.Stars = native
+	if hit.Popularity.Stars == nil && hit.Popularity.Installs == nil {
+		hit.Popularity = nil
+	}
 }
 
 // derivePublisher extracts a display publisher from an official-protocol

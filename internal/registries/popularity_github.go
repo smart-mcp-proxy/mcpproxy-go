@@ -3,6 +3,8 @@ package registries
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -34,6 +36,11 @@ const (
 	githubRateLimitAuth   = 4000 // FR-009(c): requests/hour with a token
 
 	githubLowRemainingThreshold = 5 // FR-009(d)
+)
+
+var (
+	errGitHubBodyTooLarge = errors.New("github repo response exceeds the body cap")
+	errGitHubNoStargazers = errors.New("github repo response has no stargazers_count")
 )
 
 // githubAPIBaseOverride lets SetGitHubAPIBaseForTest point new providers at
@@ -160,6 +167,11 @@ type githubStarsProvider struct {
 	wg      sync.WaitGroup
 
 	closeOnce sync.Once
+	// closed is set by Close. A closed provider may still be the installed
+	// process-wide one (a search racing shutdown, or a test process that
+	// outlives a runtime), so Resolve must stop admitting keys that no
+	// worker will ever drain.
+	closed atomic.Bool
 }
 
 var _ PopularityProvider = (*githubStarsProvider)(nil)
@@ -238,8 +250,17 @@ func NewGitHubStarsProvider(opts PopularityOptions) *githubStarsProvider {
 // hold the provider as an io.Closer without naming this unexported type.
 func (p *githubStarsProvider) Close() error {
 	p.closeOnce.Do(func() {
+		p.closed.Store(true)
 		p.cancel()
 		p.wg.Wait()
+		// Wake anyone still waiting on a key the stopped workers never took.
+		p.mu.Lock()
+		pending := p.queued
+		p.queued = make(map[string]chan struct{})
+		p.mu.Unlock()
+		for _, ch := range pending {
+			close(ch)
+		}
 	})
 	return nil
 }
@@ -322,7 +343,7 @@ func (p *githubStarsProvider) classify(e *starsEntry) (int, LookupState) {
 
 // Resolve implements PopularityProvider.
 func (p *githubStarsProvider) Resolve(ctx context.Context, keys []string, wait time.Duration) {
-	if p.disabled || len(keys) == 0 {
+	if p.disabled || p.closed.Load() || len(keys) == 0 {
 		return
 	}
 
@@ -415,6 +436,13 @@ func (p *githubStarsProvider) pauseUntil(until time.Time) {
 func (p *githubStarsProvider) fetchAndStore(key string) {
 	defer p.complete(key)
 
+	// After Close, a worker can still pick a buffered key (select chooses
+	// randomly among ready cases). Drop it before it spends budget or writes
+	// a shutdown-induced "transport error" entry to the store.
+	if p.baseCtx.Err() != nil {
+		return
+	}
+
 	now := p.now()
 	if p.pausedNow(now) {
 		return // breaker engaged: retried on a later Resolve call
@@ -498,11 +526,22 @@ func (p *githubStarsProvider) doRequest(ctx context.Context, owner, repo string,
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		var payload struct {
-			StargazersCount int `json:"stargazers_count"`
+		// A 200 that is oversized, not JSON, or lacks stargazers_count (a
+		// captive portal, a proxy error page, a truncated body) is a failed
+		// fetch, not an answer: FR-008 keeps the last-known stars and ETag.
+		if int64(len(body)) > githubMaxBodyBytes {
+			return 0, 0, "", headers, errGitHubBodyTooLarge
 		}
-		_ = json.Unmarshal(body, &payload)
-		return resp.StatusCode, payload.StargazersCount, resp.Header.Get("ETag"), headers, nil
+		var payload struct {
+			StargazersCount *int `json:"stargazers_count"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return 0, 0, "", headers, fmt.Errorf("decode github repo response: %w", err)
+		}
+		if payload.StargazersCount == nil || *payload.StargazersCount < 0 {
+			return 0, 0, "", headers, errGitHubNoStargazers
+		}
+		return resp.StatusCode, *payload.StargazersCount, resp.Header.Get("ETag"), headers, nil
 	case http.StatusNotModified:
 		s := 0
 		if prev != nil {
@@ -523,6 +562,12 @@ func (p *githubStarsProvider) doRequest(ctx context.Context, owner, repo string,
 // a definitive 404/451 clears the stars) and, on an actual HTTP response
 // (fetchErr == nil), updates the breaker from its rate-limit headers.
 func (p *githubStarsProvider) applyResult(key string, prev *starsEntry, status, stars int, etag string, headers rateLimitHeaders, fetchErr error) {
+	// A request cut short by Close is not evidence about the repo; recording
+	// it would mark the key as an error (skipped for 1h) after a restart.
+	if fetchErr != nil && p.baseCtx.Err() != nil {
+		return
+	}
+
 	now := p.now()
 	entry := &starsEntry{FetchedAt: now, Status: status}
 
