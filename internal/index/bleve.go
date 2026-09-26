@@ -1,7 +1,9 @@
 package index
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/keyword"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/standard"
+	"github.com/blevesearch/bleve/v2/mapping"
 	bquery "github.com/blevesearch/bleve/v2/search/query"
 	"go.uber.org/zap"
 
@@ -32,6 +35,7 @@ const (
 // BleveIndex wraps Bleve index operations
 type BleveIndex struct {
 	index  bleve.Index
+	path   string // on-disk index directory, for RebuildIndex
 	logger *zap.Logger
 	// searchPageSize bounds a single search page during paginated full scans.
 	// Defaults to defaultSearchPageSize; overridable in tests.
@@ -69,13 +73,37 @@ func NewBleveIndex(dataDir string, logger *zap.Logger) (*BleveIndex, error) {
 // it does not yet exist. The parent directory is created as needed so callers
 // may nest a per-profile index under the shared index dir
 // (<dataDir>/index.bleve/<slug>/) without pre-creating it.
+//
+// An existing index whose persisted mapping or schema version is not the
+// current one (see indexStaleReason) is migrated before it is returned, so
+// every caller sees the same field-mapping behavior regardless of which
+// mcpproxy version first created the index.
 func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) {
+	// A rebuild directory only survives an interrupted migration; the live
+	// index at indexPath is authoritative either way.
+	if err := os.RemoveAll(indexPath + rebuildDirSuffix); err != nil {
+		logger.Warn("Failed to remove leftover Bleve rebuild directory",
+			zap.String("path", indexPath+rebuildDirSuffix), zap.Error(err))
+	}
+
 	// Try to open existing index
 	index, err := bleve.Open(indexPath)
 	if err != nil {
 		// If index doesn't exist, create a new one
 		if mkErr := os.MkdirAll(filepath.Dir(indexPath), 0o755); mkErr != nil {
 			return nil, fmt.Errorf("failed to create index parent dir: %w", mkErr)
+		}
+		if errors.Is(err, bleve.ErrorIndexMetaMissing) {
+			// The directory exists but holds no openable index: a migration
+			// swap was interrupted after the old index_meta.json was removed
+			// (swapIndexDir removes it first and restores it last). Clear the
+			// leftovers so bleve.New can create the store again. A live index
+			// always has index_meta.json, so this never touches one.
+			logger.Warn("Bleve index directory has no index metadata; recreating it empty",
+				zap.String("path", indexPath))
+			if clearErr := removeIndexEntries(indexPath); clearErr != nil {
+				return nil, clearErr
+			}
 		}
 		logger.Info("Creating new Bleve index", zap.String("path", indexPath))
 		index, err = createBleveIndex(indexPath)
@@ -84,186 +112,306 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 		}
 	} else {
 		logger.Info("Opened existing Bleve index", zap.String("path", indexPath))
-		index, err = rebuildIfMappingPredatesAnnotations(index, indexPath, logger)
-		if err != nil {
-			return nil, err
-		}
 	}
 
-	return &BleveIndex{
+	b := &BleveIndex{
 		index:          index,
+		path:           indexPath,
 		logger:         logger,
 		searchPageSize: defaultSearchPageSize,
-	}, nil
+	}
+
+	reason, err := indexStaleReason(index)
+	if err != nil {
+		_ = index.Close()
+		return nil, err
+	}
+	if reason != "" {
+		logger.Warn("Bleve index mapping is stale; migrating to the current mapping",
+			zap.String("path", indexPath), zap.String("reason", reason))
+		if err := b.RebuildIndex(); err != nil {
+			if b.index != nil {
+				_ = b.index.Close()
+			}
+			return nil, fmt.Errorf("failed to migrate Bleve index at %s: %w", indexPath, err)
+		}
+	}
+
+	return b, nil
 }
 
-// rebuildIfMappingPredatesAnnotations replaces an already-open index whose
-// on-disk mapping was created before the annotations_json field mapping below
-// (Spec 109 FR-028 tier-badge support) existed, with a fresh index that has
-// the current mapping.
+// indexSchemaVersion versions how ToolDocument is DERIVED from tool metadata
+// (e.g. what goes into searchable_text), which the persisted mapping cannot
+// reveal. Bump it when toolDocument or documentFromStoredFields changes in a
+// way that alters an indexed field; every index is then rebuilt once on open.
+// Mapping changes need no bump: they are detected by comparing the persisted
+// mapping itself (indexStaleReason).
+//
+// Version history:
+//
+//	(absent) indexes created before versioning existed (dynamic mapping on;
+//	         annotations_json and output_schema_json unmapped and full-text
+//	         indexed into _all)
+//	"2"      explicit mapping for every field, Dynamic=false
+const indexSchemaVersion = "2"
+
+// indexSchemaVersionKey stores indexSchemaVersion in the index's internal
+// key-value space, next to bleve's own persisted mapping.
+var indexSchemaVersionKey = []byte("mcpproxy_index_schema_version")
+
+// bleveMappingInternalKey is where bleve.New persists the index mapping
+// (bleve/v2/util.MappingInternalKey); bleve.Open loads the mapping from it.
+var bleveMappingInternalKey = []byte("_mapping")
+
+// rebuildDirSuffix names the sibling directory a rebuild populates before it
+// is swapped into place.
+const rebuildDirSuffix = ".rebuild"
+
+// indexStaleReason reports why idx must be rebuilt before use, or "" when it
+// already has the current mapping and schema version.
 //
 // bleve.Open never re-applies createBleveIndex's mapping to an index that
-// already exists on disk — the mapping is baked in at creation time, and
-// vendored bleve v2.6.1 exposes no SetMapping or other migration path
-// (confirmed by reading mapping.IndexMapping's method set). An index that
-// predates this field keeps its old mapping forever, with bleve's
-// dynamic-field defaults (IndexDynamic=true) still enabled for it: the very
-// first write that carries annotations_json (the differential-update
-// backfill in runtime/lifecycle.go) then gets indexed as free-text,
-// including into the field-less `_all` composite field that
-// buildToolSearchQuery's clause 5 (the bare MatchQuery) searches — silently
-// making annotation JSON term-searchable and shifting BM25 corpus stats for
-// every query on an upgraded (not freshly installed) deployment (review
-// round 6, finding 1: high).
-//
-// Round 6 only logged a warning and left the fix to an operator manually
-// deleting indexPath (review round 7, finding 2: the underlying gap was still
-// open on any upgrade nobody noticed the log line for). Round 7 then made
-// this self-healing, but did so destructive-before-construct (Close ->
-// os.RemoveAll(indexPath) -> createBleveIndex(indexPath)): any failure after
-// the wipe (disk full, a permission error on a leftover file) propagated all
-// the way through index.NewManager -> runtime.New and failed daemon startup
-// on every retry, taking a previously-degraded-but-working deployment (stale
-// mapping, but an openable, functional index) down to a hard outage that
-// needed an operator to intervene (review round 8, finding 1: high).
-//
-// This builds the replacement at a temporary sibling path FIRST and only
-// touches the existing index once that succeeds. index.bleve is a derived
-// search cache, not a source of truth, so once the swap does happen an empty
-// index is fine — the normal discovery path
-// (applyDifferentialToolUpdate) unconditionally reindexes everything as each
-// server (re)connects during startup, the same way it already backfills a
-// brand-new install. But if construction fails, the original index must
-// still be there and still work: this logs the error and returns the
-// original (stale-mapping) index unchanged, the same degraded-but-running
-// outcome round 6 had, rather than failing startup.
-// Manager.RebuildIndex (internal/index/manager.go) is a separate, currently
-// unwired no-op stub for an operator-triggered full rebuild and is not used
-// here — this path only ever runs once, at index-open time, against a
-// mapping that is provably stale.
-//
-// The finalize step retires the original by renaming it aside
-// (os.Rename(indexPath, indexPath+".rebuild-old")) rather than deleting it
-// with os.RemoveAll. A partial RemoveAll failure — one permission-impaired
-// or locked leftover file inside the index directory — can delete most-but-
-// not-all of the original and still return an error; on the next startup
-// bleve.Open(indexPath) then fails on the mangled remnant, falls through to
-// createBleveIndex(indexPath), and if index_meta.json survived the partial
-// delete, vendored bleve's O_CREATE|O_EXCL index_meta.Save makes bleve.New
-// return ErrorIndexPathExists — the same operator-intervention outage round
-// 8 fixed, reachable through a narrower door (review round 9, finding 1).
-// os.Rename is a single directory-entry move: it needs write access to
-// indexPath's PARENT, never to anything inside indexPath itself, so it
-// cannot fail this way. If the second rename (moving the replacement into
-// place) fails, the aside copy is renamed back so the original stays
-// available rather than leaving indexPath empty.
-func rebuildIfMappingPredatesAnnotations(idx bleve.Index, indexPath string, logger *zap.Logger) (bleve.Index, error) {
-	fm := idx.Mapping().FieldMappingForPath("annotations_json")
-	if fm.Type != "" {
-		// Explicitly mapped (Type is only set by NewTextFieldMapping and
-		// friends, never by the zero-value fallback FieldMappingForPath
-		// returns for a path with no static mapping) — this index already
-		// has the current mapping.
-		return idx, nil
-	}
-
-	logger.Warn("Bleve index predates the annotations_json field mapping; "+
-		"annotation JSON may have been indexed as free text and skewed "+
-		"tool-search ranking. Rebuilding the index automatically with the "+
-		"current mapping (see internal/index/bleve.go:rebuildIfMappingPredatesAnnotations).",
-		zap.String("path", indexPath))
-
-	// Construct the replacement before destroying anything. tmpPath is a
-	// sibling of indexPath, never indexPath itself, so a failure here never
-	// touches the original index.
-	tmpPath := indexPath + ".rebuild-tmp"
-	_ = os.RemoveAll(tmpPath) // best-effort: clear any leftover from a previous failed attempt
-
-	fresh, err := createBleveIndex(tmpPath)
+// already exists on disk: the mapping is persisted at creation time and
+// bleve v2 has no way to change it afterwards. An index created before a field
+// mapping existed therefore keeps the old behavior forever — for indexes
+// created before annotations_json/output_schema_json were mapped explicitly,
+// bleve's dynamic defaults full-text index both into the `_all` field that
+// SearchTools' field-less MatchQuery searches, so identical corpora ranked
+// differently depending only on when the index was created. Comparing the
+// persisted mapping byte-for-byte with the current one catches that and every
+// future mapping change without anyone having to remember a version bump.
+func indexStaleReason(idx bleve.Index) (string, error) {
+	want, err := currentMappingJSON()
 	if err != nil {
-		logger.Error("Failed to build replacement Bleve index with the current mapping; "+
-			"continuing with the stale-mapping index instead of failing startup "+
-			"(annotation JSON may still be indexed as free text until this is retried)",
-			zap.Error(err), zap.String("path", indexPath))
-		_ = os.RemoveAll(tmpPath)
-		return idx, nil
+		return "", err
 	}
-	if closeErr := fresh.Close(); closeErr != nil {
-		_ = os.RemoveAll(tmpPath)
-		logger.Error("Failed to close freshly built replacement Bleve index; "+
-			"continuing with the stale-mapping index instead of failing startup",
-			zap.Error(closeErr), zap.String("path", indexPath))
-		return idx, nil
-	}
-
-	// From here on the replacement exists on disk and is known-good, so it
-	// is safe to retire the original.
-	if err := idx.Close(); err != nil {
-		_ = os.RemoveAll(tmpPath)
-		return nil, fmt.Errorf("failed to close stale-mapping Bleve index for rebuild: %w", err)
-	}
-
-	// Move the original aside instead of deleting it: os.Rename either
-	// succeeds atomically or leaves indexPath completely untouched, so a
-	// file inside it that RemoveAll could not delete (permission-impaired,
-	// locked) can no longer corrupt it into a half-removed, unopenable-and-
-	// uncreatable state (see the function doc comment, round 9 finding 1).
-	oldPath := indexPath + ".rebuild-old"
-	_ = os.RemoveAll(oldPath) // best-effort: clear any leftover from a previous failed attempt
-	if err := os.Rename(indexPath, oldPath); err != nil {
-		_ = os.RemoveAll(tmpPath)
-		return nil, fmt.Errorf("failed to move aside stale-mapping Bleve index at %s: %w", indexPath, err)
-	}
-	if err := os.Rename(tmpPath, indexPath); err != nil {
-		// indexPath is now empty (just moved to oldPath): restore the
-		// original so a functional, if stale-mapping, index is still there
-		// rather than leaving nothing at all.
-		if restoreErr := os.Rename(oldPath, indexPath); restoreErr != nil {
-			return nil, fmt.Errorf("failed to move rebuilt Bleve index into place at %s (%w), and failed to restore the original from %s: %w",
-				indexPath, err, oldPath, restoreErr)
-		}
-		return nil, fmt.Errorf("failed to move rebuilt Bleve index into place at %s: %w", indexPath, err)
-	}
-
-	reopened, err := bleve.Open(indexPath)
+	got, err := idx.GetInternal(bleveMappingInternalKey)
 	if err != nil {
-		// The just-built, cleanly-closed replacement failed to reopen (rare —
-		// e.g. a transient I/O error in the gap between the two calls).
-		// Restore the original rather than leaving indexPath occupied by an
-		// unopenable index_meta.json: otherwise a later restart whose
-		// bleve.Open(indexPath) also fails falls through to
-		// createBleveIndex(indexPath), which hits the same O_CREATE|O_EXCL
-		// ErrorIndexPathExists this fix exists to prevent (zcode round-9
-		// review, finding 1 — the identical outage shape round 8 fixed,
-		// reachable through this narrower door too).
-		failedPath := indexPath + ".failed-reopen"
-		_ = os.RemoveAll(failedPath)
-		if renameErr := os.Rename(indexPath, failedPath); renameErr != nil {
-			return nil, fmt.Errorf("failed to reopen rebuilt Bleve index at %s (%w), and failed to move it aside to restore the original: %w",
-				indexPath, err, renameErr)
-		}
-		if restoreErr := os.Rename(oldPath, indexPath); restoreErr != nil {
-			return nil, fmt.Errorf("failed to reopen rebuilt Bleve index at %s (%w), and failed to restore the original from %s: %w",
-				indexPath, err, oldPath, restoreErr)
-		}
-		_ = os.RemoveAll(failedPath) // best-effort: drop the unopenable replacement
-		return nil, fmt.Errorf("failed to reopen rebuilt Bleve index at %s: %w", indexPath, err)
+		return "", fmt.Errorf("failed to read persisted Bleve index mapping: %w", err)
 	}
-
-	// Best-effort cleanup of the retired original. It is never opened or
-	// referenced by any other code path, so a failure here (the same class
-	// of permission-impaired leftover this fix exists to route around) is
-	// harmless and must not fail startup.
-	_ = os.RemoveAll(oldPath)
-
-	logger.Info("Rebuilt Bleve index with the current field mapping; "+
-		"tools will reappear as each server reconnects", zap.String("path", indexPath))
-	return reopened, nil
+	if !bytes.Equal(got, want) {
+		return "persisted field mapping differs from the current mapping", nil
+	}
+	ver, err := idx.GetInternal(indexSchemaVersionKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to read Bleve index schema version: %w", err)
+	}
+	if string(ver) != indexSchemaVersion {
+		return fmt.Sprintf("schema version %q, want %q", ver, indexSchemaVersion), nil
+	}
+	return "", nil
 }
 
-// createBleveIndex creates a new Bleve index with proper mapping
+// currentMappingJSON is the mapping createBleveIndex persists, serialized the
+// way bleve.New serializes it (encoding/json; map keys sorted, so stable).
+func currentMappingJSON() ([]byte, error) {
+	b, err := json.Marshal(currentIndexMapping())
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize Bleve index mapping: %w", err)
+	}
+	return b, nil
+}
+
+// RebuildIndex re-creates the index with the current mapping and re-indexes
+// every document it holds.
+//
+// The source is the index's own stored fields, not BBolt storage: every
+// ToolDocument field except searchable_text is stored (and searchable_text is
+// derived from stored fields), whereas storage keeps no annotations or index
+// hash. Copying the stored fields also keeps full_tool_name byte-for-byte —
+// round-tripping through config.ToolMetadata would rewrite it to the
+// canonical id and move scores (see toolDocument).
+//
+// The new index is built completely in a sibling directory and only then
+// swapped in (swapIndexDir), so a failure before the swap leaves the current
+// index untouched and open. The caller must hold exclusive access
+// (Manager.RebuildIndex takes its write lock).
+func (b *BleveIndex) RebuildIndex() error {
+	docs, err := b.readAllStoredDocuments()
+	if err != nil {
+		return err
+	}
+	b.logger.Info("Rebuilding Bleve index", zap.String("path", b.path), zap.Int("documents", len(docs)))
+
+	tmpPath := b.path + rebuildDirSuffix
+	if err := os.RemoveAll(tmpPath); err != nil {
+		return fmt.Errorf("failed to clear rebuild directory: %w", err)
+	}
+	if err := b.populateIndexAt(tmpPath, docs); err != nil {
+		_ = os.RemoveAll(tmpPath)
+		return err
+	}
+
+	// Point of no return: the old index is closed and replaced.
+	if err := b.index.Close(); err != nil {
+		_ = os.RemoveAll(tmpPath)
+		return fmt.Errorf("failed to close Bleve index for rebuild: %w", err)
+	}
+	b.index = nil
+	if err := swapIndexDir(tmpPath, b.path); err != nil {
+		return err
+	}
+	idx, err := bleve.Open(b.path)
+	if err != nil {
+		return fmt.Errorf("failed to open rebuilt Bleve index: %w", err)
+	}
+	b.index = idx
+
+	b.logger.Info("Migrated Bleve index to the current mapping",
+		zap.String("path", b.path), zap.Int("documents", len(docs)),
+		zap.String("schema_version", indexSchemaVersion))
+	return nil
+}
+
+// storedDocument is one document read back for a rebuild.
+type storedDocument struct {
+	id  string
+	doc *ToolDocument
+}
+
+// readAllStoredDocuments pages through every document with all stored fields.
+// Sorting by _id keeps From-based pagination stable.
+func (b *BleveIndex) readAllStoredDocuments() ([]storedDocument, error) {
+	var docs []storedDocument
+	for from := 0; ; from += b.searchPageSize {
+		req := bleve.NewSearchRequestOptions(bleve.NewMatchAllQuery(), b.searchPageSize, from, false)
+		req.Fields = []string{"*"}
+		req.SortBy([]string{"_id"})
+		res, err := b.index.Search(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read Bleve index documents for rebuild: %w", err)
+		}
+		for _, hit := range res.Hits {
+			docs = append(docs, storedDocument{id: hit.ID, doc: documentFromStoredFields(hit.Fields)})
+		}
+		if len(res.Hits) < b.searchPageSize {
+			return docs, nil
+		}
+	}
+}
+
+// documentFromStoredFields rebuilds a ToolDocument from its stored fields.
+// searchable_text is not stored; it is re-derived exactly as toolDocument
+// derives it, from the stored tool_name and full_tool_name.
+func documentFromStoredFields(fields map[string]interface{}) *ToolDocument {
+	doc := &ToolDocument{
+		ToolName:         getStringField(fields, "tool_name"),
+		FullToolName:     getStringField(fields, "full_tool_name"),
+		ServerName:       getStringField(fields, "server_name"),
+		Description:      getStringField(fields, "description"),
+		ParamsJSON:       getStringField(fields, "params_json"),
+		OutputSchemaJSON: getStringField(fields, "output_schema_json"),
+		Hash:             getStringField(fields, "hash"),
+		Tags:             getStringField(fields, "tags"),
+		AnnotationsJSON:  getStringField(fields, "annotations_json"),
+	}
+	doc.SearchableText = searchableText(doc.ToolName, doc.FullToolName, doc.Description, doc.ParamsJSON)
+	return doc
+}
+
+// populateIndexAt creates a current-mapping index at path holding docs, and
+// stamps the schema version only after every document is written, so an
+// interrupted rebuild never looks complete.
+func (b *BleveIndex) populateIndexAt(path string, docs []storedDocument) error {
+	idx, err := bleve.New(path, currentIndexMapping())
+	if err != nil {
+		return fmt.Errorf("failed to create rebuild index: %w", err)
+	}
+	for start := 0; start < len(docs); start += b.searchPageSize {
+		end := min(start+b.searchPageSize, len(docs))
+		batch := idx.NewBatch()
+		for _, d := range docs[start:end] {
+			if err := batch.Index(d.id, d.doc); err != nil {
+				_ = idx.Close()
+				return fmt.Errorf("failed to re-index document %q: %w", d.id, err)
+			}
+		}
+		if err := idx.Batch(batch); err != nil {
+			_ = idx.Close()
+			return fmt.Errorf("failed to write rebuild batch: %w", err)
+		}
+	}
+	if err := idx.SetInternal(indexSchemaVersionKey, []byte(indexSchemaVersion)); err != nil {
+		_ = idx.Close()
+		return fmt.Errorf("failed to stamp rebuild index schema version: %w", err)
+	}
+	if err := idx.Close(); err != nil {
+		return fmt.Errorf("failed to close rebuild index: %w", err)
+	}
+	return nil
+}
+
+// indexMetaFile is the file bleve.Open reads first; without it a directory is
+// not an openable index.
+const indexMetaFile = "index_meta.json"
+
+// swapIndexDir replaces the closed index at dst with the complete index at src.
+// index_meta.json is removed first and moved in last, so a crash at any point
+// leaves dst either the old index, or no openable index (which
+// newBleveIndexAt recreates empty) — never a mix of old metadata and new
+// store. The discovery path re-populates an empty index as servers connect.
+func swapIndexDir(src, dst string) error {
+	if err := os.Remove(filepath.Join(dst, indexMetaFile)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove old index metadata: %w", err)
+	}
+	if err := removeIndexEntries(dst); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return fmt.Errorf("failed to read rebuild directory: %w", err)
+	}
+	for _, e := range entries {
+		if e.Name() == indexMetaFile {
+			continue
+		}
+		if err := os.Rename(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return fmt.Errorf("failed to move rebuilt index entry %q: %w", e.Name(), err)
+		}
+	}
+	if err := os.Rename(filepath.Join(src, indexMetaFile), filepath.Join(dst, indexMetaFile)); err != nil {
+		return fmt.Errorf("failed to move rebuilt index metadata: %w", err)
+	}
+	return os.RemoveAll(src)
+}
+
+// removeIndexEntries deletes bleve's own entries in an index directory. The
+// shared index directory also holds the per-profile indexes under
+// profilesDirName (see Manager), which are separate indexes and are kept.
+func removeIndexEntries(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("failed to read index directory: %w", err)
+	}
+	for _, e := range entries {
+		if e.Name() == profilesDirName {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return fmt.Errorf("failed to remove index entry %q: %w", e.Name(), err)
+		}
+	}
+	return nil
+}
+
+// createBleveIndex creates a new, empty Bleve index with the current mapping
+// and schema version.
 func createBleveIndex(indexPath string) (bleve.Index, error) {
-	// Create index mapping
+	idx, err := bleve.New(indexPath, currentIndexMapping())
+	if err != nil {
+		return nil, err
+	}
+	if err := idx.SetInternal(indexSchemaVersionKey, []byte(indexSchemaVersion)); err != nil {
+		_ = idx.Close()
+		return nil, fmt.Errorf("failed to stamp index schema version: %w", err)
+	}
+	return idx, nil
+}
+
+// currentIndexMapping is the field mapping every index is created or migrated
+// to. Any change here is detected on the next open of an existing index and
+// migrates it (indexStaleReason), so there is no version to bump.
+func currentIndexMapping() *mapping.IndexMappingImpl {
 	indexMapping := bleve.NewIndexMapping()
 
 	// Create document mapping for tools
@@ -273,9 +421,8 @@ func createBleveIndex(indexPath string) (bleve.Index, error) {
 	// field in the future (as annotations_json itself was added, review
 	// round 6 finding 1) would silently fall back to bleve's dynamic-field
 	// defaults — full-text-indexed and included in `_all` — on any FRESH
-	// index too, not just ones migrating forward. This does not, and cannot,
-	// retroactively fix an already-open index created before this line
-	// existed; see warnIfMappingPredatesAnnotations above.
+	// index too, not just ones migrating forward. Existing indexes created
+	// before this line are migrated on open (indexStaleReason).
 	toolMapping.Dynamic = false
 
 	// Tool name field (both keyword and standard analyzers for different search types)
@@ -361,8 +508,7 @@ func createBleveIndex(indexPath string) (bleve.Index, error) {
 	indexMapping.AddDocumentMapping("tool", toolMapping)
 	indexMapping.DefaultMapping = toolMapping
 
-	// Create the index
-	return bleve.New(indexPath, indexMapping)
+	return indexMapping
 }
 
 // Close closes the index
@@ -397,13 +543,6 @@ func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
 	toolName := config.RawToolName(toolMeta)
 	docID := toolDocID(toolMeta.ServerName, toolName)
 
-	// Create combined searchable text for better full-text search
-	searchableText := fmt.Sprintf("%s %s %s %s",
-		toolName,
-		toolMeta.Name,
-		toolMeta.Description,
-		toolMeta.ParamsJSON)
-
 	var annotationsJSON string
 	if toolMeta.Annotations != nil {
 		if b, err := json.Marshal(toolMeta.Annotations); err == nil {
@@ -425,11 +564,19 @@ func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
 		OutputSchemaJSON: toolMeta.OutputSchemaJSON,
 		Hash:             toolMeta.Hash,
 		Tags:             "", // Can be extended later
-		SearchableText:   searchableText,
+		SearchableText:   searchableText(toolName, toolMeta.Name, toolMeta.Description, toolMeta.ParamsJSON),
 		AnnotationsJSON:  annotationsJSON,
 	}
 
 	return docID, doc
+}
+
+// searchableText is the combined full-text field. It is the one derived field
+// that is not stored, so documentFromStoredFields re-derives it through this
+// same function during a rebuild; changing it requires an indexSchemaVersion
+// bump.
+func searchableText(toolName, fullToolName, description, paramsJSON string) string {
+	return fmt.Sprintf("%s %s %s %s", toolName, fullToolName, description, paramsJSON)
 }
 
 // toolDocID is the single place the "<server>:<raw name>" docID is spelled, so
@@ -832,21 +979,6 @@ func (b *BleveIndex) BatchIndex(tools []*config.ToolMetadata) error {
 
 	b.logger.Debug("Batch indexing tools", zap.Int("count", len(tools)))
 	return b.index.Batch(batch)
-}
-
-// RebuildIndex rebuilds the entire index
-func (b *BleveIndex) RebuildIndex() error {
-	// Get index stats before rebuild
-	count, _ := b.index.DocCount()
-	b.logger.Info("Rebuilding index", zap.Uint64("current_docs", count))
-
-	// For now, we'll just log the operation
-	// In a full implementation, this would:
-	// 1. Create a new index
-	// 2. Re-index all tools from storage
-	// 3. Atomically swap indices
-
-	return nil
 }
 
 // GetToolsByServer retrieves all tools from a specific server

@@ -3,7 +3,6 @@ package index
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/blevesearch/bleve/v2"
@@ -14,11 +13,16 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // preAnnotationsMapping replicates createBleveIndex's mapping as it existed
 // before the annotations_json field was added (Spec 109 PR-a), so tests can
-// simulate opening an index created by an older mcpproxy version.
+// simulate opening an index created by an older mcpproxy version. It keeps
+// bleve's default dynamic mapping, so both annotations_json and
+// output_schema_json fall back to the dynamic defaults (full-text indexed,
+// included in `_all`) exactly as they did on released indexes.
 func preAnnotationsMapping() *mapping.IndexMappingImpl {
 	indexMapping := bleve.NewIndexMapping()
 	toolMapping := bleve.NewDocumentMapping()
@@ -59,7 +63,8 @@ func preAnnotationsMapping() *mapping.IndexMappingImpl {
 	hashField.Index = false
 	toolMapping.AddFieldMappingsAt("hash", hashField)
 
-	// Deliberately no annotations_json field mapping: this is the point.
+	// Deliberately no annotations_json / output_schema_json mapping: this is
+	// the point.
 
 	tagsField := bleve.NewTextFieldMapping()
 	tagsField.Analyzer = standard.Name
@@ -79,240 +84,397 @@ func preAnnotationsMapping() *mapping.IndexMappingImpl {
 	return indexMapping
 }
 
-// TestNewBleveIndexAt_WarnsOnPreAnnotationsMapping is a regression test for
-// review round 6, finding 1 (high): opening an index created before the
-// annotations_json field mapping existed must surface a warning, since
-// bleve.Open never migrates the mapping and the resulting dynamic-field
-// leakage into full-text search is otherwise silent.
-func TestNewBleveIndexAt_WarnsOnPreAnnotationsMapping(t *testing.T) {
-	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+// Tokens that appear ONLY inside annotations_json / output_schema_json of the
+// migration fixtures, so a field-less match on them can only come from those
+// two fields leaking into `_all`.
+const (
+	annotationsOnlyToken  = "zebracorn"
+	outputSchemaOnlyToken = "quokkafield"
+)
 
-	oldIdx, err := bleve.New(indexPath, preAnnotationsMapping())
-	require.NoError(t, err)
-	require.NoError(t, oldIdx.Close())
-
-	core, logs := observer.New(zap.WarnLevel)
-	logger := zap.New(core)
-
-	bi, err := newBleveIndexAt(indexPath, logger)
-	require.NoError(t, err)
-	defer bi.Close()
-
-	warnings := logs.FilterMessageSnippet("predates the annotations_json field mapping")
-	assert.Equal(t, 1, warnings.Len(), "opening a pre-annotations index must log exactly one actionable warning")
+func migrationFixtureTools() []*config.ToolMetadata {
+	destructive := true
+	readOnly := true
+	return []*config.ToolMetadata{
+		{
+			Name:             "delete_repo",
+			ServerName:       "github",
+			Description:      "Delete a repository permanently",
+			ParamsJSON:       `{"type":"object","properties":{"repo":{"type":"string"}}}`,
+			OutputSchemaJSON: `{"type":"object","properties":{"` + outputSchemaOnlyToken + `":{"type":"string"}}}`,
+			Hash:             "hash-delete",
+			Annotations: &config.ToolAnnotations{
+				Title:           "Delete " + annotationsOnlyToken,
+				DestructiveHint: &destructive,
+			},
+		},
+		{
+			Name:        "list_repos",
+			ServerName:  "github",
+			Description: "List repositories for a user",
+			ParamsJSON:  `{"type":"object","properties":{"user":{"type":"string"}}}`,
+			Hash:        "hash-list",
+			Annotations: &config.ToolAnnotations{ReadOnlyHint: &readOnly},
+		},
+		{
+			Name:        "read_file",
+			ServerName:  "fs",
+			Description: "Read a file from disk and list its repository metadata",
+			ParamsJSON:  `{"type":"object","properties":{"path":{"type":"string"}}}`,
+			Hash:        "hash-read",
+		},
+	}
 }
 
-// TestNewBleveIndexAt_AutoRebuildsPreAnnotationsMapping is a regression test
-// for review round 7, finding 2 (medium): round 6 only warned and left an
-// in-place-upgraded index with the old mapping (and its dynamic-field
-// leakage) in place forever unless an operator noticed the log line and
-// deleted the directory by hand. Opening a pre-annotations index must now
-// self-heal: end up with the current mapping with no manual step, and log
-// that the automatic rebuild happened.
-func TestNewBleveIndexAt_AutoRebuildsPreAnnotationsMapping(t *testing.T) {
-	indexPath := filepath.Join(t.TempDir(), "index.bleve")
-
-	oldIdx, err := bleve.New(indexPath, preAnnotationsMapping())
+// writeLegacyIndex creates an index at indexPath with the pre-annotations
+// mapping and writes tools exactly as toolDocument would, simulating an index
+// populated by an older mcpproxy version (no schema-version stamp either).
+func writeLegacyIndex(t *testing.T, indexPath string, tools []*config.ToolMetadata) {
+	t.Helper()
+	idx, err := bleve.New(indexPath, preAnnotationsMapping())
 	require.NoError(t, err)
-	require.NoError(t, oldIdx.Close())
+	for _, tool := range tools {
+		docID, doc := toolDocument(tool)
+		require.NoError(t, idx.Index(docID, doc))
+	}
+	require.NoError(t, idx.Close())
+}
+
+func fieldlessMatchTotal(t *testing.T, idx bleve.Index, text string) uint64 {
+	t.Helper()
+	res, err := idx.Search(bleve.NewSearchRequest(bleve.NewMatchQuery(text)))
+	require.NoError(t, err)
+	return res.Total
+}
+
+// assertCurrentMapping asserts idx carries exactly the mapping createBleveIndex
+// writes today and the current schema-version stamp.
+func assertCurrentMapping(t *testing.T, idx bleve.Index) {
+	t.Helper()
+	want, err := currentMappingJSON()
+	require.NoError(t, err)
+	got, err := idx.GetInternal(bleveMappingInternalKey)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(want), string(got), "persisted mapping must equal the current mapping")
+	ver, err := idx.GetInternal(indexSchemaVersionKey)
+	require.NoError(t, err)
+	assert.Equal(t, indexSchemaVersion, string(ver), "index must carry the current schema-version stamp")
+}
+
+// (a) An index created with the legacy mapping is rebuilt on open to the
+// current mapping, keeping every document and every stored field.
+func TestNewBleveIndexAt_MigratesLegacyMapping(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+	tools := migrationFixtureTools()
+	writeLegacyIndex(t, indexPath, tools)
 
 	core, logs := observer.New(zap.InfoLevel)
-	logger := zap.New(core)
-
-	bi, err := newBleveIndexAt(indexPath, logger)
+	bi, err := newBleveIndexAt(indexPath, zap.New(core))
 	require.NoError(t, err)
-	defer bi.Close()
 
-	fm := bi.index.Mapping().FieldMappingForPath("annotations_json")
-	assert.NotEmpty(t, fm.Type, "the index must carry the CURRENT mapping after opening a pre-annotations index, with no operator step")
+	assertCurrentMapping(t, bi.index)
+	assert.Equal(t, 1, logs.FilterMessageSnippet("Migrated Bleve index to the current mapping").Len(),
+		"the migration must be observable in the log")
 
-	rebuilds := logs.FilterMessageSnippet("Rebuilt Bleve index with the current field mapping")
-	assert.Equal(t, 1, rebuilds.Len(), "the automatic rebuild must be observable in the log")
-
-	// The rebuilt index must behave like any other current-mapping index:
-	// annotations_json is stored-only and must not leak into `_all`.
-	require.NoError(t, bi.index.Index("doc1", map[string]interface{}{
-		"tool_name":        "delete_everything",
-		"annotations_json": "should not become searchable via _all",
-	}))
-	res, err := bi.index.Search(bleve.NewSearchRequest(bleve.NewMatchQuery("should not become searchable via _all")))
+	count, err := bi.GetDocumentCount()
 	require.NoError(t, err)
-	assert.Equal(t, uint64(0), res.Total, "annotations_json must not be free-text searchable after the rebuild")
-}
+	assert.Equal(t, uint64(len(tools)), count, "migration must keep every document")
 
-// TestRebuildIfMappingPredatesAnnotations_ConstructionFailureKeepsStaleIndexUsable
-// is a regression test for review round 8, finding 1 (high): the migration
-// used to be destructive-before-construct (Close -> os.RemoveAll ->
-// createBleveIndex), so any failure building the replacement (disk full,
-// permission error) left the daemon with no index at all and no way to
-// recover without operator intervention, turning a previously-degraded-but-
-// working deployment into a hard outage on every restart. The fix builds the
-// replacement at a temporary sibling path FIRST; if that fails, the original
-// (stale-mapping but fully functional) index must be left untouched and
-// still usable rather than destroyed.
-//
-// This forces createBleveIndex to fail deterministically by pre-creating a
-// plain file at the temporary path the rebuild uses, so bleve's underlying
-// mkdir fails with ENOTDIR — the same failure shape as a real disk error,
-// without depending on actually exhausting disk space.
-func TestRebuildIfMappingPredatesAnnotations_ConstructionFailureKeepsStaleIndexUsable(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: directory permissions are not enforced")
+	got, err := bi.GetToolsByServer("github")
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	byName := map[string]*config.ToolMetadata{}
+	for _, tm := range got {
+		byName[tm.Name] = tm
 	}
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX permission bits are not enforced on Windows")
-	}
+	del := byName["github:delete_repo"]
+	require.NotNil(t, del)
+	assert.Equal(t, tools[0].Description, del.Description)
+	assert.Equal(t, tools[0].ParamsJSON, del.ParamsJSON)
+	assert.Equal(t, tools[0].OutputSchemaJSON, del.OutputSchemaJSON)
+	assert.Equal(t, tools[0].Hash, del.Hash)
+	require.NotNil(t, del.Annotations)
+	assert.Equal(t, tools[0].Annotations.Title, del.Annotations.Title)
+	require.NotNil(t, del.Annotations.DestructiveHint)
+	assert.True(t, *del.Annotations.DestructiveHint)
 
-	parent := t.TempDir()
-	indexPath := filepath.Join(parent, "index.bleve")
-
-	oldIdx, err := bleve.New(indexPath, preAnnotationsMapping())
-	require.NoError(t, err)
-	require.NoError(t, oldIdx.Close())
-
-	// Block the rebuild's temporary construction path by making its parent
-	// directory read-only, so createBleveIndex(tmpPath)'s mkdir fails before
-	// anything touches indexPath (mirrors a real permission/disk error
-	// without depending on actually exhausting disk space). Restored before
-	// t.TempDir()'s own cleanup runs, since that needs write access too.
-	require.NoError(t, os.Chmod(parent, 0o555))
-	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
-
-	core, logs := observer.New(zap.WarnLevel)
-	logger := zap.New(core)
-
-	reopened, err := bleve.Open(indexPath)
-	require.NoError(t, err)
-
-	idx, err := rebuildIfMappingPredatesAnnotations(reopened, indexPath, logger)
-	require.NoError(t, err, "a failed rebuild attempt must not fail index startup")
-	require.NotNil(t, idx)
-	defer idx.Close()
-
-	// The original index directory must still exist and still be the
-	// pre-annotations one that was there before the failed rebuild attempt
-	// (proving it was never removed).
-	_, statErr := os.Stat(indexPath)
-	require.NoError(t, statErr, "the original index directory must survive a failed rebuild attempt")
-
-	fm := idx.Mapping().FieldMappingForPath("annotations_json")
-	assert.Empty(t, fm.Type, "on a failed rebuild the returned index is still the stale-mapping one, not a fabricated fresh one")
-
-	errs := logs.FilterMessageSnippet("Failed to build replacement Bleve index")
-	assert.Equal(t, 1, errs.Len(), "the construction failure must be logged, since it is silently swallowed to keep startup unblocked")
-}
-
-// TestRebuildIfMappingPredatesAnnotations_FinalizeSurvivesUnremovableOriginal
-// is a regression test for review round 9, finding 1 (medium): round 8 fixed
-// destructive-before-construct (build the replacement before touching
-// anything), but the finalize step still retired the original with
-// os.RemoveAll(indexPath). A partial failure of that RemoveAll — one
-// permission-impaired or locked leftover file inside the index directory —
-// can delete most-but-not-all of the original and still return an error. On
-// the next startup bleve.Open(indexPath) fails on the mangled remnant,
-// newBleveIndexAt falls through to createBleveIndex(indexPath), and if
-// index_meta.json happens to survive whatever was left behind, vendored
-// bleve's index_meta.Save (O_CREATE|O_EXCL) makes bleve.New return
-// ErrorIndexPathExists ("cannot create new index, path already exists") —
-// daemon startup then fails on every retry until an operator manually clears
-// the directory: the same outage class round 8 fixed, reachable through a
-// narrower (partial-delete) door instead of the wider
-// (any-construction-failure) door round 8 closed.
-//
-// The fix renames the original aside (os.Rename) instead of deleting its
-// contents: a rename only needs write access to indexPath's PARENT, never to
-// anything inside indexPath itself, so a permission-impaired file nested
-// inside the index directory can no longer block the swap.
-//
-// This reproduces the exact failure shape confirmed against the real
-// os.RemoveAll implementation: stripping the write bit from bleve's internal
-// "store" subdirectory makes a plain os.RemoveAll(indexPath) return
-// "permission denied" after already deleting some but not all of the
-// directory's contents (verified directly: index_meta.json is removed,
-// store/root.bolt is not, and indexPath itself survives, mangled). The test
-// asserts the rebuild still fully succeeds despite that.
-func TestRebuildIfMappingPredatesAnnotations_FinalizeSurvivesUnremovableOriginal(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: directory permissions are not enforced")
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX permission bits are not enforced on Windows")
-	}
-
-	parent := t.TempDir()
-	indexPath := filepath.Join(parent, "index.bleve")
-
-	oldIdx, err := bleve.New(indexPath, preAnnotationsMapping())
-	require.NoError(t, err)
-	require.NoError(t, oldIdx.Close())
-
-	// bleve's scorch backend lays out a "store" subdirectory holding its
-	// bolt file. Stripping its write bit means nothing inside it can be
-	// unlinked — the shape of "one permission-impaired leftover file" the
-	// finding describes — without touching indexPath's own permissions (a
-	// rename of indexPath needs write on `parent`, not on indexPath itself,
-	// so this alone must not be enough to block the fixed code path).
-	storeDir := filepath.Join(indexPath, "store")
-	_, statErr := os.Stat(storeDir)
-	require.NoError(t, statErr, "test assumption: bleve's scorch backend lays out indexPath/store")
-	require.NoError(t, os.Chmod(storeDir, 0o555))
-	// On success the fix renames indexPath aside to indexPath+".rebuild-old"
-	// before best-effort-removing it, so the chmod'd "store" subdirectory
-	// ends up there, not at its original path; t.TempDir()'s own cleanup
-	// needs write access to whichever location it lands at.
-	t.Cleanup(func() {
-		_ = os.Chmod(storeDir, 0o755)
-		_ = os.Chmod(filepath.Join(indexPath+".rebuild-old", "store"), 0o755)
-	})
-
-	core, logs := observer.New(zap.InfoLevel)
-	logger := zap.New(core)
-
-	reopened, err := bleve.Open(indexPath)
-	require.NoError(t, err)
-
-	idx, err := rebuildIfMappingPredatesAnnotations(reopened, indexPath, logger)
-	require.NoError(t, err, "the rebuild must succeed even though a file inside the original index directory cannot be removed")
-	require.NotNil(t, idx)
-	defer idx.Close()
-
-	fm := idx.Mapping().FieldMappingForPath("annotations_json")
-	assert.NotEmpty(t, fm.Type, "the swap must have completed: the returned index carries the current mapping")
-
-	rebuilds := logs.FilterMessageSnippet("Rebuilt Bleve index with the current field mapping")
-	assert.Equal(t, 1, rebuilds.Len())
-}
-
-// TestNewBleveIndexAt_NoWarningOnCurrentMapping guards against a false
-// positive: an index created (or previously opened) by the CURRENT code must
-// never trigger the migration warning.
-func TestNewBleveIndexAt_NoWarningOnCurrentMapping(t *testing.T) {
-	indexPath := filepath.Join(t.TempDir(), "index.bleve")
-
-	core, logs := observer.New(zap.WarnLevel)
-	logger := zap.New(core)
-
-	// First open creates the index with the current mapping.
-	bi, err := newBleveIndexAt(indexPath, logger)
-	require.NoError(t, err)
+	// Reopening the migrated index is the steady-state restart path and must
+	// not migrate again.
 	require.NoError(t, bi.Close())
-
-	// Re-opening it (the common restart path) must not warn either.
-	bi2, err := newBleveIndexAt(indexPath, logger)
+	core2, logs2 := observer.New(zap.InfoLevel)
+	bi2, err := newBleveIndexAt(indexPath, zap.New(core2))
 	require.NoError(t, err)
 	defer bi2.Close()
+	assert.Equal(t, 0, logs2.FilterMessageSnippet("Migrated Bleve index").Len(),
+		"a current index must not be rebuilt on every open")
+}
 
-	warnings := logs.FilterMessageSnippet("predates the annotations_json field mapping")
-	assert.Equal(t, 0, warnings.Len(), "a current-mapping index must never trigger the migration warning")
+// (a) The point of the migration: a migrated index ranks identically to an
+// index freshly created from the same tools, so search results no longer
+// depend on when the index was first created.
+func TestNewBleveIndexAt_MigratedScoresMatchFreshIndex(t *testing.T) {
+	tools := migrationFixtureTools()
+
+	legacyPath := filepath.Join(t.TempDir(), "index.bleve")
+	writeLegacyIndex(t, legacyPath, tools)
+	migrated, err := newBleveIndexAt(legacyPath, zap.NewNop())
+	require.NoError(t, err)
+	defer migrated.Close()
+
+	fresh, err := newBleveIndexAt(filepath.Join(t.TempDir(), "index.bleve"), zap.NewNop())
+	require.NoError(t, err)
+	defer fresh.Close()
+	require.NoError(t, fresh.BatchIndex(tools))
+
+	for _, q := range []string{"repository", "delete repository", "list", "read_file", "string"} {
+		want, err := fresh.SearchTools(q, 10)
+		require.NoError(t, err)
+		got, err := migrated.SearchTools(q, 10)
+		require.NoError(t, err)
+		require.Len(t, got, len(want), "query %q: hit count", q)
+		for i := range want {
+			assert.Equal(t, want[i].Tool.Name, got[i].Tool.Name, "query %q: rank %d", q, i)
+			assert.InDelta(t, want[i].Score, got[i].Score, 1e-9, "query %q: score of %s", q, want[i].Tool.Name)
+		}
+	}
+}
+
+// (b) annotations_json is never matchable by a field-less query, whether the
+// index was created fresh, migrated from the legacy mapping on open, or
+// rebuilt at runtime via RebuildIndex.
+func TestAnnotationsJSON_NeverFieldlessMatchable(t *testing.T) {
+	tools := migrationFixtureTools()
+
+	// Precondition: on the legacy mapping the token IS matchable — otherwise
+	// the assertions below would pass vacuously.
+	legacyPath := filepath.Join(t.TempDir(), "index.bleve")
+	writeLegacyIndex(t, legacyPath, tools)
+	raw, err := bleve.Open(legacyPath)
+	require.NoError(t, err)
+	require.NotZero(t, fieldlessMatchTotal(t, raw, annotationsOnlyToken),
+		"fixture must reproduce the legacy leak of annotations_json into _all")
+	require.NoError(t, raw.Close())
+
+	migrated, err := newBleveIndexAt(legacyPath, zap.NewNop())
+	require.NoError(t, err)
+	defer migrated.Close()
+
+	fresh, err := newBleveIndexAt(filepath.Join(t.TempDir(), "index.bleve"), zap.NewNop())
+	require.NoError(t, err)
+	defer fresh.Close()
+	require.NoError(t, fresh.BatchIndex(tools))
+
+	rebuilt, err := newBleveIndexAt(filepath.Join(t.TempDir(), "index.bleve"), zap.NewNop())
+	require.NoError(t, err)
+	defer rebuilt.Close()
+	require.NoError(t, rebuilt.BatchIndex(tools))
+	require.NoError(t, rebuilt.RebuildIndex())
+
+	for name, bi := range map[string]*BleveIndex{"fresh": fresh, "migrated": migrated, "rebuilt": rebuilt} {
+		t.Run(name, func(t *testing.T) {
+			assert.Zero(t, fieldlessMatchTotal(t, bi.index, annotationsOnlyToken),
+				"annotations_json must not reach _all")
+			results, err := bi.SearchTools(annotationsOnlyToken, 10)
+			require.NoError(t, err)
+			assert.Empty(t, results, "SearchTools must not match on annotation JSON")
+
+			// Still stored and read back, just not searchable.
+			hits, err := bi.SearchTools("delete_repo", 10)
+			require.NoError(t, err)
+			require.NotEmpty(t, hits)
+			require.NotNil(t, hits[0].Tool.Annotations)
+			assert.Equal(t, "Delete "+annotationsOnlyToken, hits[0].Tool.Annotations.Title)
+		})
+	}
+}
+
+// (c) output_schema_json has an explicit stored-only mapping and is kept
+// byte-for-byte on fresh and migrated indexes alike (it used to depend on the
+// dynamic-mapping fallback everywhere, which Dynamic=false would have
+// silently dropped).
+func TestOutputSchemaJSON_StoredOnFreshAndMigratedIndexes(t *testing.T) {
+	tools := migrationFixtureTools()
+
+	legacyPath := filepath.Join(t.TempDir(), "index.bleve")
+	writeLegacyIndex(t, legacyPath, tools)
+	migrated, err := newBleveIndexAt(legacyPath, zap.NewNop())
+	require.NoError(t, err)
+	defer migrated.Close()
+
+	fresh, err := newBleveIndexAt(filepath.Join(t.TempDir(), "index.bleve"), zap.NewNop())
+	require.NoError(t, err)
+	defer fresh.Close()
+	require.NoError(t, fresh.BatchIndex(tools))
+
+	for name, bi := range map[string]*BleveIndex{"fresh": fresh, "migrated": migrated} {
+		t.Run(name, func(t *testing.T) {
+			fm := bi.index.Mapping().FieldMappingForPath("output_schema_json")
+			assert.Equal(t, "text", fm.Type, "output_schema_json must be explicitly mapped")
+			assert.True(t, fm.Store, "output_schema_json must be stored")
+			assert.False(t, fm.Index, "output_schema_json is JSON, not prose: stored only")
+
+			byServer, err := bi.GetToolsByServer("github")
+			require.NoError(t, err)
+			var found bool
+			for _, tm := range byServer {
+				if tm.Name == "github:delete_repo" {
+					found = true
+					assert.Equal(t, tools[0].OutputSchemaJSON, tm.OutputSchemaJSON)
+				}
+			}
+			assert.True(t, found)
+
+			hits, err := bi.SearchTools("delete_repo", 10)
+			require.NoError(t, err)
+			require.NotEmpty(t, hits)
+			assert.Equal(t, tools[0].OutputSchemaJSON, hits[0].Tool.OutputSchemaJSON,
+				"a search hit must carry the output schema")
+
+			assert.Zero(t, fieldlessMatchTotal(t, bi.index, outputSchemaOnlyToken),
+				"output_schema_json must behave the same on every index: not in _all")
+		})
+	}
+}
+
+// A current mapping with a missing/older schema-version stamp (a change to how
+// documents are derived, not to the mapping) must also trigger a rebuild.
+func TestNewBleveIndexAt_StaleSchemaVersionTriggersRebuild(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+	bi, err := newBleveIndexAt(indexPath, zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, bi.BatchIndex(migrationFixtureTools()))
+	require.NoError(t, bi.index.SetInternal(indexSchemaVersionKey, []byte("0")))
+	require.NoError(t, bi.Close())
+
+	core, logs := observer.New(zap.InfoLevel)
+	bi, err = newBleveIndexAt(indexPath, zap.New(core))
+	require.NoError(t, err)
+	defer bi.Close()
+
+	assert.Equal(t, 1, logs.FilterMessageSnippet("Migrated Bleve index to the current mapping").Len())
+	assertCurrentMapping(t, bi.index)
+	count, err := bi.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), count)
+}
+
+// The shared index directory also holds the per-profile indexes
+// (index.bleve/profiles/<slug>/). Migrating the shared index must not touch
+// them.
+func TestNewManager_MigrationPreservesProfileIndexes(t *testing.T) {
+	dataDir := t.TempDir()
+	sharedPath := filepath.Join(dataDir, "index.bleve")
+	writeLegacyIndex(t, sharedPath, migrationFixtureTools())
+
+	profilePath := filepath.Join(sharedPath, profilesDirName, "dev")
+	pi, err := newBleveIndexAt(profilePath, zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, pi.BatchIndex(migrationFixtureTools()[:1]))
+	require.NoError(t, pi.Close())
+
+	m, err := NewManager(dataDir, zap.NewNop())
+	require.NoError(t, err)
+	defer m.Close()
+
+	assertCurrentMapping(t, m.bleveIndex.index)
+	pm, err := m.ForProfile("dev")
+	require.NoError(t, err)
+	count, err := pm.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), count, "the profile index must survive the shared index's migration")
+}
+
+// A crash midway through the directory swap leaves the index directory without
+// index_meta.json (that file is removed first and restored last). The next open
+// must recover with a fresh, empty, current index instead of failing startup,
+// and must not touch the nested profiles directory.
+func TestNewBleveIndexAt_RecoversFromInterruptedSwap(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+	bi, err := newBleveIndexAt(indexPath, zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, bi.BatchIndex(migrationFixtureTools()))
+	require.NoError(t, bi.Close())
+	require.NoError(t, os.MkdirAll(filepath.Join(indexPath, profilesDirName, "dev"), 0o755))
+	require.NoError(t, os.Remove(filepath.Join(indexPath, "index_meta.json")))
+
+	bi, err = newBleveIndexAt(indexPath, zap.NewNop())
+	require.NoError(t, err)
+	defer bi.Close()
+
+	assertCurrentMapping(t, bi.index)
+	assert.DirExists(t, filepath.Join(indexPath, profilesDirName, "dev"))
+}
+
+// A leftover rebuild directory from an interrupted migration is removed on the
+// next open.
+func TestNewBleveIndexAt_RemovesStaleRebuildDir(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+	require.NoError(t, os.MkdirAll(indexPath+rebuildDirSuffix, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(indexPath+rebuildDirSuffix, "junk"), []byte("x"), 0o600))
+
+	bi, err := newBleveIndexAt(indexPath, zap.NewNop())
+	require.NoError(t, err)
+	defer bi.Close()
+
+	assert.NoDirExists(t, indexPath+rebuildDirSuffix)
+}
+
+// RebuildIndex (previously a logging no-op) re-creates a live index with the
+// current mapping and keeps every document, via the Manager surface too.
+func TestManager_RebuildIndexKeepsDocuments(t *testing.T) {
+	dataDir := t.TempDir()
+	m, err := NewManager(dataDir, zap.NewNop())
+	require.NoError(t, err)
+	defer m.Close()
+	require.NoError(t, m.BatchIndexTools(migrationFixtureTools()))
+
+	before, err := m.SearchTools("repository", 10)
+	require.NoError(t, err)
+	require.NotEmpty(t, before)
+
+	require.NoError(t, m.RebuildIndex())
+
+	assertCurrentMapping(t, m.bleveIndex.index)
+	count, err := m.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), count)
+	after, err := m.SearchTools("repository", 10)
+	require.NoError(t, err)
+	require.Len(t, after, len(before))
+	for i := range before {
+		assert.Equal(t, before[i].Tool.Name, after[i].Tool.Name)
+		assert.InDelta(t, before[i].Score, after[i].Score, 1e-9)
+	}
+
+	// Writes keep working against the swapped-in index.
+	require.NoError(t, m.IndexTool(&config.ToolMetadata{Name: "new_tool", ServerName: "fs", Description: "brand new"}))
+	count, err = m.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(4), count)
+	assert.NoDirExists(t, filepath.Join(dataDir, "index.bleve"+rebuildDirSuffix))
+}
+
+// Rebuild pages through the source index; coverage must not be bounded by a
+// single search page.
+func TestRebuildIndex_PaginatesPastOnePage(t *testing.T) {
+	bi, err := newBleveIndexAt(filepath.Join(t.TempDir(), "index.bleve"), zap.NewNop())
+	require.NoError(t, err)
+	defer bi.Close()
+	bi.searchPageSize = 2
+	require.NoError(t, bi.BatchIndex(migrationFixtureTools()))
+
+	require.NoError(t, bi.RebuildIndex())
+
+	count, err := bi.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), count)
 }
 
 // TestCreateBleveIndex_DynamicMappingDisabled locks in the defense-in-depth
-// half of the round-6 finding-1 fix: a freshly created index must not fall
-// back to bleve's dynamic-field defaults for an unmapped field, so adding a
-// future ToolDocument field without also updating createBleveIndex fails
-// loudly (the field is simply not indexed/stored) instead of silently
-// leaking into full-text search and `_all`, the way annotations_json did on
-// indexes created before this PR.
+// half of the fix: a freshly created index must not fall back to bleve's
+// dynamic-field defaults for an unmapped field, so a future ToolDocument field
+// added without a mapping is simply not indexed instead of silently leaking
+// into `_all`.
 func TestCreateBleveIndex_DynamicMappingDisabled(t *testing.T) {
 	indexPath := filepath.Join(t.TempDir(), "index.bleve")
 
@@ -325,7 +487,16 @@ func TestCreateBleveIndex_DynamicMappingDisabled(t *testing.T) {
 		"totally_novel": "should not become searchable via _all",
 	}))
 
-	res, err := idx.Search(bleve.NewSearchRequest(bleve.NewMatchQuery("should not become searchable via _all")))
-	require.NoError(t, err)
-	assert.Equal(t, uint64(0), res.Total, "an unmapped field must not be dynamically indexed once Dynamic=false")
+	assert.Zero(t, fieldlessMatchTotal(t, idx, "should not become searchable via _all"),
+		"an unmapped field must not be dynamically indexed once Dynamic=false")
+}
+
+// Every field ToolDocument writes must be explicitly mapped: with
+// Dynamic=false an unmapped field is silently neither indexed nor stored.
+func TestCurrentIndexMapping_CoversEveryToolDocumentField(t *testing.T) {
+	im := currentIndexMapping()
+	for _, f := range []string{"tool_name", "full_tool_name", "server_name", "description", "params_json",
+		"output_schema_json", "hash", "tags", "searchable_text", "annotations_json"} {
+		assert.NotEmpty(t, im.FieldMappingForPath(f).Type, "field %q has no explicit mapping", f)
+	}
 }
