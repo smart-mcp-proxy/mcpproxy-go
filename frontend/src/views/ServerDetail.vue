@@ -3958,6 +3958,21 @@ function serversChangedTouchesTools(detail: unknown): boolean {
       !!s && typeof s === 'object' && (s as { name?: unknown }).name === props.serverName
   )
   if (!entry) return false
+  // `tool_count` on the wire is a sticky, supervisor-re-stuck value: it is
+  // only zeroed while quarantined and otherwise survives a disconnect/
+  // reconnect cycle unchanged even though the reconnect clears the actual
+  // StateView tool list (MCP-2083). So a state transition that empties the
+  // real list (e.g. approving a quarantined server) and one that later
+  // repopulates it via background discovery can carry the IDENTICAL key,
+  // and the second, real change would be wrongly deduped away, leaving the
+  // Tools tab stuck on "No tools available" forever (the S3 symptom).
+  // Self-heal that case: whenever the server is active and we're currently
+  // showing zero tools, don't trust the key — always retry. This costs at
+  // most one extra refetch per empty state and closes the permanent-stall
+  // window regardless of which event/reason produced it.
+  if (serverTools.value.length === 0 && entry.connected && entry.enabled && !entry.quarantined) {
+    return true
+  }
   return toolsStateKey(entry) !== toolsLoadedKey
 }
 
