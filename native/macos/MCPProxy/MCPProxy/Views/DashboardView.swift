@@ -1031,7 +1031,9 @@ private struct AttentionRow: View {
         HStack {
             Image(systemName: server.health?.healthLevel.sfSymbolName ?? "questionmark.circle")
                 .foregroundStyle(server.statusColor)
-                .accessibilityLabel("Health: \(server.health?.level ?? "unknown")")
+                // FR-011: no surface may render `level` as text, including
+                // accessibility labels — use the one status label table.
+                .accessibilityLabel("Health: \(server.health?.statusLabel ?? "unknown")")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
@@ -1046,13 +1048,19 @@ private struct AttentionRow: View {
             Spacer()
 
             ForEach(server.attentionActions, id: \.self) { action in
-                Button(action.label) {
+                // FR-014: bind the primary CTA's wording through the ONE
+                // cross-surface action-label table (HealthStatus.actionLabels)
+                // the Web UI and CLI also render — not the private
+                // HealthAction.label enum, which uses different words
+                // ("Approve" vs "Review", "Set Secret" vs "Add secret").
+                let label = HealthStatus.actionLabels[action.rawValue] ?? action.label
+                Button(label) {
                     Task { await performAction(action, for: server) }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .tint(actionColor(action))
-                .accessibilityLabel("\(action.label) \(server.name)")
+                .accessibilityLabel("\(label) \(server.name)")
             }
         }
         .padding(.horizontal, 16)
@@ -1069,22 +1077,54 @@ private struct AttentionRow: View {
     }
 
     private func performAction(_ action: HealthAction, for server: ServerStatus) async {
-        guard let client = appState.apiClient else { return }
-        do {
-            switch action {
-            case .login:
-                try await client.loginServer(server.id)
-            case .restart:
-                try await client.restartServer(server.id)
-            case .enable:
-                try await client.enableServer(server.id)
-            case .approve:
-                try await client.approveTools(server.id)
-            default:
-                break
+        switch action {
+        case .login, .restart, .enable:
+            guard let client = appState.apiClient else { return }
+            do {
+                switch action {
+                case .login:
+                    try await client.loginServer(server.id)
+                case .restart:
+                    try await client.restartServer(server.id)
+                case .enable:
+                    try await client.enableServer(server.id)
+                default:
+                    break
+                }
+            } catch {
+                // Action errors are visible via server health refresh
             }
-        } catch {
-            // Action errors are visible via server health refresh
+        case .setSecret, .configure, .editURL:
+            // None of these complete via a single API call — they need a
+            // form (the secret value, the new URL, isolation fields). Take
+            // the user to the server's Config tab instead of no-op'ing.
+            navigateToServerDetail(server, tab: .config)
+        case .approve:
+            // FR-014/FR-005: "approve" is never a one-click action — it must
+            // open the review location so the user sees what is being
+            // approved before it happens, matching the identically-labeled
+            // ("Review") button on the Web UI and the tray. The Tools tab
+            // already hosts that review UI (quarantine banner + per-tool
+            // approve rows), so navigate there instead of performing the
+            // approval directly through the API client.
+            navigateToServerDetail(server, tab: .tools)
+        case .viewLogs:
+            navigateToServerDetail(server, tab: .logs)
+        }
+    }
+
+    /// Reuses the same "switch sidebar, then select the server" route the
+    /// dashboard's other links already use (see the Import/Add Server
+    /// buttons above) so a `.showServerDetail` observer set up once in
+    /// ServersView handles every doorway into server detail.
+    @MainActor
+    private func navigateToServerDetail(_ server: ServerStatus, tab: ServerDetailTab) {
+        NotificationCenter.default.post(name: .switchToServers, object: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NotificationCenter.default.post(
+                name: .showServerDetail,
+                object: ServerDetailTarget(serverName: server.name, tab: tab)
+            )
         }
     }
 }

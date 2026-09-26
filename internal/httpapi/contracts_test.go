@@ -63,6 +63,26 @@ func (m *mockManagementService) RestartServer(ctx context.Context, name string) 
 	return nil
 }
 
+// RestartAll/EnableAll/DisableAll: without an explicit override here the call
+// falls through to the embedded nil management.Service and panics. chi's
+// Recoverer turns that into a bare 500 so TestMutatingServerRoutes_AdminAllowed
+// (which only asserts != 401 and the gate message's absence) never caught it —
+// but on windows/amd64 the recovered hardware fault corrupts the Go heap under
+// Go 1.26 (golang/go#81238), crashing an unrelated package's tests later in
+// the same run. Same nil-tolerance fix as handleAddFromRegistry's cfg==nil
+// guard: make the mock never panic in the first place.
+func (m *mockManagementService) RestartAll(ctx context.Context) (*management.BulkOperationResult, error) {
+	return &management.BulkOperationResult{Total: 1, Successful: 1, Errors: map[string]string{}}, nil
+}
+
+func (m *mockManagementService) EnableAll(ctx context.Context) (*management.BulkOperationResult, error) {
+	return &management.BulkOperationResult{Total: 1, Successful: 1, Errors: map[string]string{}}, nil
+}
+
+func (m *mockManagementService) DisableAll(ctx context.Context) (*management.BulkOperationResult, error) {
+	return &management.BulkOperationResult{Total: 1, Successful: 1, Errors: map[string]string{}}, nil
+}
+
 func (m *mockManagementService) GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error) {
 	return []map[string]interface{}{
 		{

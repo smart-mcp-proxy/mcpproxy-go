@@ -1245,14 +1245,17 @@
               </div>
             </div>
 
-            <!-- Health (calculated by backend; same shape consumed by macOS tray) -->
+            <!-- Health (calculated by backend; same shape consumed by macOS tray).
+                 Spec 109 FR-011: this row renders `status` through the one label
+                 table (healthStatusLabel) — never `level` as text. `level` still
+                 drives the badge COLOR only (a severity signal, not the text). -->
             <div v-if="server.health" class="card bg-base-100 shadow-sm">
               <div class="card-body py-4">
                 <h3 class="card-title text-base">Health</h3>
                 <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
-                  <dt class="text-base-content/60">Level</dt>
-                  <dd>
-                    <span :class="healthLevelBadgeClass(server.health.level)">{{ server.health.level }}</span>
+                  <dt class="text-base-content/60">Status</dt>
+                  <dd data-test="server-config-health-status">
+                    <span :class="healthLevelBadgeClass(server.health.level)">{{ configHealthStatusLabel(server.health) }}</span>
                   </dd>
                   <dt class="text-base-content/60">Admin State</dt>
                   <dd><span class="badge badge-ghost badge-sm">{{ server.health.admin_state }}</span></dd>
@@ -1262,9 +1265,15 @@
                     <dt class="text-base-content/60">Detail</dt>
                     <dd class="text-base-content/70 break-words whitespace-pre-wrap">{{ server.health.detail }}</dd>
                   </template>
-                  <template v-if="server.health.action">
+                  <template v-if="configHealthActions(server.health).length">
                     <dt class="text-base-content/60">Suggested Action</dt>
-                    <dd><span class="badge badge-info badge-outline badge-sm">{{ server.health.action }}</span></dd>
+                    <dd class="flex flex-wrap gap-1" data-test="server-config-health-actions">
+                      <span
+                        v-for="a in configHealthActions(server.health)"
+                        :key="a"
+                        class="badge badge-info badge-outline badge-sm"
+                      >{{ healthActionLabel(a) }}</span>
+                    </dd>
                   </template>
                 </dl>
               </div>
@@ -1634,14 +1643,14 @@ import ToolDescription from '@/components/ToolDescription.vue'
 import FindingChip from '@/components/FindingChip.vue'
 import FlaggedToolsPanel from '@/components/FlaggedToolsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
+import type { Server, Tool, ToolApproval, SecurityScanReport, HealthStatus } from '@/types'
 import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
 import { refName } from '@/utils/secretRef'
 import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
-import { oauthSignInState } from '@/utils/health'
+import { oauthSignInState, healthStatusLabel, healthActionLabel, healthStatusText } from '@/utils/health'
 import { describeIsolation } from '@/utils/isolationState'
 import { computeToolDiffSections } from '@/utils/toolDiff'
 import { groupFindingsByTool, type FlaggedToolGroup } from '@/utils/toolLocation'
@@ -1909,7 +1918,11 @@ const statusBadgeText = computed(() => {
   const health = server.value?.health
   if (health) {
     if (signInState.value && health.admin_state !== 'disabled') return 'Sign-in required'
-    return health.summary || health.level
+    // FR-011: no surface may render `level` as text. Falls back to
+    // connected/disconnected (round-4 review finding) when a version-skew
+    // payload carries neither summary nor status, matching the teams tables'
+    // fallback and this file's own healthLevelLabel below.
+    return healthStatusText(health, server.value?.connected ?? false)
   }
   if (signInState.value) return 'Sign-in required'
   if (server.value?.connected) return 'Connected'
@@ -1958,33 +1971,42 @@ const healthLevelLabel = computed(() => {
     case 'Disabled':
       return 'Off'
   }
-  const level = server.value?.health?.level
-  switch (level) {
-    case 'healthy':
-      return 'Healthy'
-    case 'degraded':
-      return 'Degraded'
-    case 'unhealthy':
-      return 'Unhealthy'
-    default:
-      return server.value?.connected ? 'Healthy' : 'Unknown'
-  }
+  // Spec 109 FR-011: no surface may render `level` as text — render `status`
+  // through the one label table instead. `level` still drives the tile's
+  // color only, via healthLevelTone below. Without this, a "connecting"
+  // server (level=healthy/status=connecting/usable=false) rendered a green
+  // "Healthy" directly above the sub-line's "Connecting..." text.
+  const status = server.value?.health?.status
+  if (status) return healthStatusLabel(status)
+  // Version-skew fallback (old core, no `status` field): mirror
+  // statusBadgeText's and ServerCard's own fallback order — sign-in state
+  // wins over a raw `connected` reading. Without this, an OAuth-expired but
+  // still-connected server (summary="Token expired", action="login",
+  // level="unhealthy") rendered "Online" here directly above the sub-line's
+  // "Sign-in required" text, one of SC-003's forbidden words for a
+  // usable=false server.
+  if (signInState.value) return 'Sign-in required'
+  return server.value?.connected ? 'Online' : 'Unknown'
 })
 
 // Never a success tone on an unhealthy server (audit F11). A disabled server is
 // not "green healthy" either — its health level is healthy only because being
-// off is intentional, so it reads neutral.
+// off is intentional, so it reads neutral. Keyed off `level` (the severity
+// signal), not the FR-011 status label text above, so an unrecognized/missing
+// status still gets a sensible color.
 const healthLevelTone = computed(() => {
   if (adminStateLabel.value === 'Disabled') return 'text-base-content/50'
-  switch (healthLevelLabel.value) {
-    case 'Healthy':
+  if (adminStateLabel.value === 'Quarantined') return 'text-base-content/50'
+  const level = server.value?.health?.level
+  switch (level) {
+    case 'healthy':
       return 'text-success'
-    case 'Degraded':
+    case 'degraded':
       return 'text-warning'
-    case 'Unhealthy':
+    case 'unhealthy':
       return 'text-error'
     default:
-      return 'text-base-content/50'
+      return server.value?.connected ? 'text-success' : 'text-base-content/50'
   }
 })
 
@@ -3727,6 +3749,27 @@ function healthLevelBadgeClass(level: string): string {
     default:
       return 'badge badge-ghost badge-sm'
   }
+}
+
+// configHealthStatusLabel is the Config tab's Health card Status field
+// (Spec 109 FR-011 review finding): `healthStatusLabel(status)` alone renders
+// blank when `status` is absent — an old-core payload that only sends the
+// legacy singular `action`/`level`/`summary` fields (no `status`). Falling
+// back to `summary` mirrors the macOS equivalent (HealthStatus.statusLabel in
+// API/Models.swift), which already supports that old-core shape.
+function configHealthStatusLabel(health: HealthStatus): string {
+  if (health.status) return healthStatusLabel(health.status)
+  return health.summary || ''
+}
+
+// configHealthActions is the Config tab's "Suggested Action" row (Spec 109
+// FR-011 review finding): gating and iterating on `health.actions` alone
+// drops the row entirely for an old-core payload that only sends the legacy
+// singular `action` field (`actions` absent) — a regression from pre-109-c
+// behavior, where the row rendered from `action`.
+function configHealthActions(health: HealthStatus): string[] {
+  if (health.actions?.length) return health.actions
+  return health.action ? [health.action] : []
 }
 
 function stopScanPolling() {

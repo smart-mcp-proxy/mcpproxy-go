@@ -266,6 +266,10 @@ Examples:
 	upstreamAll        bool
 	upstreamForce      bool
 	upstreamServerName string
+	// upstreamListStatus is FR-015: --status <value> is repeatable, and a
+	// comma-separated value is equivalent to repeating the flag (StringArrayVar
+	// preserves each raw token, so we split on "," ourselves in the filter).
+	upstreamListStatus []string
 
 	// Add command flags
 	upstreamAddHeaders      []string
@@ -333,6 +337,9 @@ func init() {
 	// Define flags (note: output format handled by global --output/-o flag from root command)
 	upstreamListCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level (trace, debug, info, warn, error)")
 	upstreamListCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to MCP configuration file")
+	upstreamListCmd.Flags().StringArrayVar(&upstreamListStatus, "status", nil,
+		"Filter by health status (repeatable; a comma-separated value is equivalent to repeating the flag): "+
+			"ready, connecting, sign_in_required, needs_review, needs_secret, needs_config, error, disabled")
 
 	upstreamLogsCmd.Flags().IntVarP(&upstreamLogsTail, "tail", "n", 50, "Number of log lines to show")
 	upstreamLogsCmd.Flags().BoolVarP(&upstreamLogsFollow, "follow", "f", false, "Follow log output (requires daemon)")
@@ -386,6 +393,12 @@ func init() {
 }
 
 func runUpstreamList(_ *cobra.Command, _ []string) error {
+	// Refuse a typo'd/miscased --status up front rather than silently
+	// returning an empty table (GH #938-style validation for FR-015).
+	if err := validateStatusFlag(upstreamListStatus); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -427,6 +440,27 @@ func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, _ 
 }
 
 func runUpstreamListFromConfig(globalConfig *config.Config) error {
+	// Review finding (this round): the daemon-less path can only classify
+	// health.status for a disabled or quarantined server (StateDisabled /
+	// StatusNeedsReview short-circuit CalculateHealth before it ever looks at
+	// the synthetic "disconnected" connection state below); every other
+	// server's status is cleared to "" a few lines down so the STATUS column
+	// keeps the informative "Daemon not running" summary instead of a bogus
+	// "Error" (round-6 finding, see upstream_list_daemonless_test.go). But
+	// filterServersByStatus matches health.status exactly, so `--status
+	// ready|connecting|sign_in_required|needs_secret|needs_config|error`
+	// silently returns an empty (headers-only, exit 0) table for every
+	// enabled server when the daemon is down — indistinguishable from "no
+	// servers in that state", exactly the GH #938 failure mode
+	// validateStatusFlag's doc comment says it exists to prevent. Warn on
+	// stderr instead of fabricating a status this path cannot know; stdout
+	// output (including -o json/yaml) is untouched.
+	if statusFilterNeedsDaemon(upstreamListStatus) {
+		fmt.Fprintln(os.Stderr, "Notice: no mcpproxy daemon running — only 'disabled' and 'needs_review' statuses "+
+			"can be determined from the config file alone, so --status may return no rows for other values "+
+			"even though matching servers exist. Run 'mcpproxy serve' for accurate status.")
+	}
+
 	// Convert config servers to output format
 	servers := make([]map[string]interface{}, len(globalConfig.Servers))
 	for i, srv := range globalConfig.Servers {
@@ -443,8 +477,25 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 
 		// Override summary for config-only mode to indicate daemon status
 		summary := healthStatus.Summary
+		statusValue := healthStatus.Status
 		if healthStatus.AdminState == health.StateEnabled {
 			summary = "Daemon not running"
+			// Round-6 review finding: the synthetic State: "disconnected"
+			// input above always makes CalculateHealth set Status =
+			// StatusError too (a disconnected server with no LastError still
+			// resolves through connectionErrorStatus(ActionRestart) ==
+			// StatusError). upstreamServerRows's STATUS column renders
+			// health.StatusLabel(health.status) INSTEAD OF the free-text
+			// summary whenever health.status is non-empty (Spec 109 FR-015),
+			// so leaving it as "error" silently reverted the STATUS column
+			// from "Daemon not running" back to the generic "Error" for
+			// every enabled server. This daemon-less path cannot know the
+			// server's real connection status at all — clear it so
+			// upstreamServerRows falls back to the summary, matching
+			// pre-Spec-109 behavior. (`--status` filtering on an empty
+			// health.status already excludes these rows by design; see
+			// filterServersByStatus's own doc comment.)
+			statusValue = ""
 		}
 
 		servers[i] = map[string]interface{}{
@@ -460,6 +511,9 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 				"summary":     summary,
 				"detail":      healthStatus.Detail,
 				"action":      healthStatus.Action,
+				"status":      statusValue,
+				"usable":      healthStatus.Usable,
+				"actions":     healthStatus.Actions,
 			},
 		}
 
@@ -475,6 +529,11 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 }
 
 func outputServers(servers []map[string]interface{}) error {
+	// FR-015: --status <value> is repeatable, and a comma-separated value is
+	// equivalent to repeating the flag; several values select the UNION of
+	// their statuses. Applies to every output format (table, json, yaml).
+	servers = filterServersByStatus(servers, upstreamListStatus)
+
 	// Sort servers alphabetically by name for consistent output
 	sort.Slice(servers, func(i, j int) bool {
 		nameI := getStringField(servers[i], "name")
@@ -521,8 +580,115 @@ func validateTrustModeFlag(mode string) error {
 	if config.IsValidTrustMode(mode) {
 		return nil
 	}
-	return fmt.Errorf("invalid --trust-mode %q: must be one of: %s (values are case-sensitive)",
+	return newFlagValidationError("invalid --trust-mode %q: must be one of: %s (values are case-sensitive)",
 		mode, strings.Join(config.ValidTrustModes(), ", "))
+}
+
+// validateStatusFlag refuses an unrecognized --status value up front,
+// mirroring validateTrustModeFlag (GH #938): without it, a typo'd or
+// wrongly-cased value (e.g. `--status signin_required` or `--status READY`)
+// matched nothing in filterServersByStatus and silently returned an empty
+// result set (exit 0), indistinguishable from "no servers in that state".
+// Accepts the same comma-separated-equals-repeated-flag shape
+// filterServersByStatus does, and matching is case-sensitive because the
+// vocabulary itself is (internal/health.StatusOrder, Spec 109 FR-015).
+func validateStatusFlag(rawFilters []string) error {
+	valid := make(map[string]bool, len(health.StatusOrder))
+	for _, s := range health.StatusOrder {
+		valid[s] = true
+	}
+	for _, raw := range rawFilters {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				// Deliberately accepted, not a gap: an empty segment (from
+				// `--status ""`, a trailing/leading comma, or `--status=$VAR`
+				// with an unset $VAR) contributes nothing to the filter, so
+				// filterServersByStatus falls back to its own "no filter"
+				// default — the same result as omitting --status entirely.
+				// This mirrors --trust-mode's "" = inherit-default contract
+				// (config.IsValidTrustMode); it does not silently narrow the
+				// result set the way an unrecognized status would.
+				continue
+			}
+			if !valid[v] {
+				return newFlagValidationError("invalid --status %q: must be one of: %s (values are case-sensitive)",
+					v, strings.Join(health.StatusOrder, ", "))
+			}
+		}
+	}
+	return nil
+}
+
+// statusFilterNeedsDaemon reports whether a --status filter contains any
+// value the daemon-less config-only path (runUpstreamListFromConfig) cannot
+// resolve on its own. Only "disabled" and health.StatusNeedsReview short-
+// circuit CalculateHealth before the synthetic "disconnected" state comes
+// into play, so those two are safe without a daemon; every other value in the
+// vocabulary depends on a live connection state runUpstreamListFromConfig
+// deliberately clears to "" (see its own comment).
+func statusFilterNeedsDaemon(rawFilters []string) bool {
+	resolvableWithoutDaemon := map[string]bool{
+		health.StatusDisabled:    true,
+		health.StatusNeedsReview: true,
+	}
+	for _, raw := range rawFilters {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			if !resolvableWithoutDaemon[v] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// serverHealthStatus extracts a server row's `health.status` value (the
+// Spec 109 status vocabulary), or "" when absent (e.g. a payload from an
+// older core that predates FR-010).
+func serverHealthStatus(srv map[string]interface{}) string {
+	healthData, ok := srv["health"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	return getStringField(healthData, "status")
+}
+
+// filterServersByStatus is FR-015: `--status <value>` is repeatable, and a
+// comma-separated value is equivalent to repeating the flag — several values
+// select the UNION of their statuses. An empty filter (`--status` omitted)
+// returns every server unchanged. A server with no `health.status` (an older
+// core) never matches a filter, so an operator's `--status` never silently
+// hides it in a mixed-version fleet by exclusion; it just doesn't sort into
+// any bucket.
+func filterServersByStatus(servers []map[string]interface{}, rawFilters []string) []map[string]interface{} {
+	if len(rawFilters) == 0 {
+		return servers
+	}
+
+	wanted := make(map[string]bool)
+	for _, raw := range rawFilters {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v != "" {
+				wanted[v] = true
+			}
+		}
+	}
+	if len(wanted) == 0 {
+		return servers
+	}
+
+	filtered := make([]map[string]interface{}, 0, len(servers))
+	for _, srv := range servers {
+		if wanted[serverHealthStatus(srv)] {
+			filtered = append(filtered, srv)
+		}
+	}
+	return filtered
 }
 
 // serverHoldSummary reports whether any of a server's tools need human review
@@ -573,6 +739,7 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 		healthLevel := "unknown"
 		healthAdminState := "enabled"
 		healthSummary := getStringField(srv, "status") // fallback to old status
+		healthStatusValue := ""
 		healthAction := ""
 		healthDetail := ""
 
@@ -580,8 +747,44 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 			healthLevel = getStringField(healthData, "level")
 			healthAdminState = getStringField(healthData, "admin_state")
 			healthSummary = getStringField(healthData, "summary")
+			healthStatusValue = getStringField(healthData, "status")
 			healthAction = getStringField(healthData, "action")
 			healthDetail = getStringField(healthData, "detail")
+		}
+
+		// FR-015: STATUS is the status label, not the free-text summary (a
+		// declared table-output change — the summary stays available in
+		// `-o json` as health.summary). Falls back to the free-text summary
+		// for an older core's payload that predates `health.status`.
+		healthStatusText := healthSummary
+		if healthStatusValue != "" {
+			healthStatusText = health.StatusLabel(healthStatusValue)
+		}
+
+		// FR-012: ACTION is keyed on actions[0], not the legacy `action` field,
+		// though today the two always agree (action == actions[0] is an
+		// invariant of the health calculator). Falls back to `action` for an
+		// older core's payload that predates `health.actions`.
+		primaryAction := healthAction
+		if healthData != nil {
+			// The client (daemon) path decodes a JSON API response, where
+			// `actions` always comes back as []interface{}; the config-only
+			// (daemon-less) path builds this map directly from
+			// health.CalculateHealth(...).Actions, a native []string, with no
+			// JSON round-trip. Both shapes must be handled or ACTION silently
+			// falls back to the legacy `action` field in config mode.
+			switch rawActions := healthData["actions"].(type) {
+			case []interface{}:
+				if len(rawActions) > 0 {
+					if first, ok := rawActions[0].(string); ok {
+						primaryAction = first
+					}
+				}
+			case []string:
+				if len(rawActions) > 0 {
+					primaryAction = rawActions[0]
+				}
+			}
 		}
 
 		// Status emoji based on health level and admin state
@@ -602,18 +805,18 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 			}
 		}
 
-		// Format action as CLI command hint
+		// Format action as CLI command hint (Spec 109 FR-014, internal/health.ActionLabels).
 		actionHint := "-"
-		switch healthAction {
-		case "login":
+		switch primaryAction {
+		case health.ActionLogin:
 			actionHint = fmt.Sprintf("auth login --server=%s", name)
-		case "restart":
+		case health.ActionRestart:
 			actionHint = fmt.Sprintf("upstream restart %s", name)
-		case "enable":
+		case health.ActionEnable:
 			actionHint = fmt.Sprintf("upstream enable %s", name)
-		case "approve":
+		case health.ActionApprove:
 			actionHint = "Approve in Web UI"
-		case "view_logs":
+		case health.ActionViewLogs:
 			actionHint = fmt.Sprintf("upstream logs %s", name)
 		case health.ActionSetSecret:
 			if healthDetail != "" {
@@ -621,7 +824,7 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 			} else {
 				actionHint = "Set secret in config"
 			}
-		case health.ActionConfigure:
+		case health.ActionConfigure, health.ActionEditURL:
 			actionHint = "Edit config"
 		}
 
@@ -630,7 +833,7 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 		// the hold in STATUS, downgrade the all-clear emoji, and point the
 		// operator at the view that carries the hold evidence.
 		if holds, holdLabel := serverHoldSummary(srv); holds > 0 {
-			healthSummary = fmt.Sprintf("%s · %s held", healthSummary, holdLabel)
+			healthStatusText = fmt.Sprintf("%s · %s held", healthStatusText, holdLabel)
 			if statusEmoji == "✅" {
 				statusEmoji = "⚠️ "
 			}
@@ -644,7 +847,7 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 			name,
 			protocol,
 			fmt.Sprintf("%d", toolCount),
-			healthSummary,
+			healthStatusText,
 			actionHint,
 		})
 	}

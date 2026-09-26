@@ -154,6 +154,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
+import { healthStatusLabel, healthStatusTextOrEmpty } from '@/utils/health'
 
 interface AdminServer {
   name: string
@@ -168,6 +169,7 @@ interface AdminServer {
     level: string
     admin_state: string
     summary: string
+    status?: string
   }
 }
 
@@ -299,9 +301,31 @@ function statusBadge(server: AdminServer): string {
 }
 
 function statusLabel(server: AdminServer): string {
-  if (server.quarantined) return 'quarantined'
-  if (!server.enabled) return 'disabled'
-  if (server.health) return server.health.level
+  // One helper, one order (Spec 109): resolve through the same
+  // `healthStatusTextOrEmpty()` ServerCard/ServerDetail use — summary first,
+  // then the shared status label. Never render `level` as text (FR-011).
+  // This table's own connected/disconnected/admin-state fallback wording
+  // (lowercase, unlike the card's capitalized "Connected"/"Disconnected")
+  // stays a local convention, not part of the shared precedence.
+  if (server.health) {
+    const text = healthStatusTextOrEmpty(server.health)
+    if (text) return text
+  }
+  // Round (this PR) review finding: these two checks used to be an `else if`
+  // chained onto `if (server.health)` above, so they only ran when
+  // `server.health` was absent entirely. A server that HAS a health object
+  // but whose summary/status are both empty (an old-core / version-skew
+  // payload) fell straight through to the bare connected/disconnected
+  // fallback below, skipping quarantined -> 'Needs review' and
+  // disabled -> 'Disabled'. Both checks must run unconditionally, exactly
+  // like statusBadge() above and UserServers.vue's healthLabel(), which
+  // re-checks `enabled` in its own final fallback regardless of `health`.
+  if (server.quarantined) {
+    return healthStatusLabel('needs_review')
+  }
+  if (!server.enabled) {
+    return healthStatusLabel('disabled')
+  }
   return server.connected ? 'connected' : 'disconnected'
 }
 

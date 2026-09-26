@@ -204,6 +204,7 @@
 import { ref, reactive, onMounted, computed } from 'vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { useRouter } from 'vue-router'
+import { healthStatusTextOrEmpty } from '@/utils/health'
 
 interface UserServer {
   name: string
@@ -211,13 +212,18 @@ interface UserServer {
   command?: string
   protocol: string
   enabled: boolean
-  connected: boolean
+  // Optional, not required: GET /api/v1/user/servers never actually sends
+  // this field today (see the comment on healthLabel/healthBadgeClass
+  // below) — `required: boolean` here would be a type lie about the real
+  // response shape.
+  connected?: boolean
   owner_type: 'personal' | 'shared'
   user_enabled?: boolean | null
   tool_count?: number
   health?: {
     level: string
     summary: string
+    status?: string
   }
 }
 
@@ -247,6 +253,20 @@ const servers = computed(() => ({
   shared: allServers.value.filter(s => s.owner_type === 'shared'),
 }))
 
+// Round-6 review finding: GET /api/v1/user/servers (internal/serveredition/
+// api/user_handlers.go ServerResponse) embeds only *config.ServerConfig plus
+// Ownership/UserEnabled — it never sends `connected` or `health` today, so
+// the `!server.health` branch below is the ONLY one this endpoint's real
+// payload can reach; every enabled server therefore renders 'disconnected'
+// regardless of actual state. That is a pre-existing gap (wiring live
+// per-user connection/health status into the server-edition multi-user door
+// needs its own runtime-status provider plumbed through UserHandlers — out of
+// scope for this fix) tracked separately from this review round. The
+// `server.health` branch is kept, forward-compatible, for whenever that
+// wiring lands; frontend/tests/unit/user-servers-status-fallback.spec.ts
+// pins its FR-011 label-fallback behavior, and
+// user-servers-real-payload-shape.spec.ts pins today's actual (degraded)
+// behavior so a future fix here is a deliberate, visible diff.
 function healthBadgeClass(server: UserServer): string {
   if (!server.health) {
     return server.enabled ? (server.connected ? 'badge-success' : 'badge-warning') : 'badge-ghost'
@@ -260,10 +280,17 @@ function healthBadgeClass(server: UserServer): string {
 }
 
 function healthLabel(server: UserServer): string {
-  if (!server.health) {
-    return server.enabled ? (server.connected ? 'connected' : 'disconnected') : 'disabled'
+  // One helper, one order (Spec 109): resolve through the same
+  // `healthStatusTextOrEmpty()` ServerCard/ServerDetail use — summary first,
+  // then the shared status label. Never render `level` as text (FR-011).
+  // This table's own connected/disconnected/disabled fallback wording
+  // (lowercase, unlike the card's capitalized "Connected"/"Disconnected")
+  // stays a local convention, not part of the shared precedence.
+  if (server.health) {
+    const text = healthStatusTextOrEmpty(server.health)
+    if (text) return text
   }
-  return server.health.level
+  return server.enabled ? (server.connected ? 'connected' : 'disconnected') : 'disabled'
 }
 
 function navigateToDetail(server: UserServer) {
