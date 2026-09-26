@@ -250,7 +250,7 @@ func TestRunImport_ConflictRenameSanitizableName(t *testing.T) {
 			const want = "Figma_Desktop_claude_desktop"
 			rename := map[string]string{tt.renameBy: want}
 
-			resp, err := server.runImport(req, []byte(content), "claude-desktop", nil, true, rename)
+			resp, err := server.runImport(req, []byte(content), "claude-desktop", nil, true, rename, nil, false)
 			if err != nil {
 				t.Fatalf("runImport returned error: %v", err)
 			}
@@ -396,6 +396,44 @@ func TestImportServersJSON_UnknownFormat(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("Expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestImportServersJSON_PasteFallbackRequiresOptIn pins review round 4 F-E: a
+// plain one-line, non-JSON/TOML body must return an error by default (same
+// "unable to detect configuration format" behavior as before FR-064) — the
+// Paste tab's URL/command-line guess only kicks in when the request
+// explicitly sets allow_paste_fallback.
+func TestImportServersJSON_PasteFallbackRequiresOptIn(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := &mockImportController{apiKey: "test-key"}
+	server := NewServer(mock, logger, nil)
+
+	doRequest := func(reqBody ImportRequest) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		rr := httptest.NewRecorder()
+		server.router.ServeHTTP(rr, req)
+		return rr
+	}
+
+	rr := doRequest(ImportRequest{Content: "hello world"})
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("without allow_paste_fallback: expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	rr = doRequest(ImportRequest{Content: "hello world", AllowPasteFallback: true})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("with allow_paste_fallback: expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.Data.Format != "command" {
+		t.Errorf("Format = %q, want %q", resp.Data.Format, "command")
 	}
 }
 
