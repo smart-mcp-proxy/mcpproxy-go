@@ -36,24 +36,36 @@ final class TrayPrimaryItemTests: XCTestCase {
         XCTAssertEqual(item.kind, .open(.review))
         // FR-005: never a one-click approve.
         XCTAssertNotEqual(item.kind, .execute(.approve))
+        XCTAssertNil(item.focusField)
     }
 
     func testSetSecretOpensConfig() {
         let item = try! XCTUnwrap(TrayPrimaryPresentation.primaryItem(for: "set_secret"))
         XCTAssertEqual(item.label, "Add secret")
         XCTAssertEqual(item.kind, .open(.config))
+        // set_secret has no single field to name — the secret form isn't a
+        // Config-tab control (FR-014, review round 3 F-FR014-focus).
+        XCTAssertNil(item.focusField)
     }
 
     func testConfigureOpensConfig() {
         let item = try! XCTUnwrap(TrayPrimaryPresentation.primaryItem(for: "configure"))
         XCTAssertEqual(item.label, "Fix config")
         XCTAssertEqual(item.kind, .open(.config))
+        // `configure`'s underlying causes are heterogeneous, with no single
+        // field to focus — matches the Web UI, which also focuses nothing
+        // for `configure` (only `edit_url` gets `&focus=endpoint`).
+        XCTAssertNil(item.focusField)
     }
 
-    func testEditURLOpensConfig() {
+    func testEditURLOpensConfigWithTheURLFieldFocused() {
         let item = try! XCTUnwrap(TrayPrimaryPresentation.primaryItem(for: "edit_url"))
         XCTAssertEqual(item.label, "Edit URL")
         XCTAssertEqual(item.kind, .open(.config))
+        // FR-014 (review round 3, F-FR014-focus): "the Configuration tab with
+        // the field focused" — `edit_url` is the one action with a concrete
+        // field to name.
+        XCTAssertEqual(item.focusField, .endpoint)
     }
 
     func testViewLogsOpensLogs() {

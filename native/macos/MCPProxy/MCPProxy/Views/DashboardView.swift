@@ -1094,11 +1094,16 @@ private struct AttentionRow: View {
             } catch {
                 // Action errors are visible via server health refresh
             }
-        case .setSecret, .configure, .editURL:
+        case .setSecret, .configure:
             // None of these complete via a single API call — they need a
-            // form (the secret value, the new URL, isolation fields). Take
-            // the user to the server's Config tab instead of no-op'ing.
+            // form (the secret value, isolation fields). Take the user to
+            // the server's Config tab instead of no-op'ing.
             navigateToServerDetail(server, tab: .config)
+        case .editURL:
+            // FR-014's "with the field focused" (review round 3,
+            // F-FR014-focus) — mirrors `TrayPrimaryPresentation.primaryItem`
+            // and the Web UI's `&focus=endpoint`.
+            navigateToServerDetail(server, tab: .config, focusField: .endpoint)
         case .approve:
             // FR-014/FR-005: "approve" is never a one-click action — it must
             // open the review location so the user sees what is being
@@ -1118,12 +1123,13 @@ private struct AttentionRow: View {
     /// buttons above) so a `.showServerDetail` observer set up once in
     /// ServersView handles every doorway into server detail.
     @MainActor
-    private func navigateToServerDetail(_ server: ServerStatus, tab: ServerDetailTab) {
+    private func navigateToServerDetail(_ server: ServerStatus, tab: ServerDetailTab,
+                                         focusField: TrayConfigFocusField? = nil) {
         NotificationCenter.default.post(name: .switchToServers, object: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             NotificationCenter.default.post(
                 name: .showServerDetail,
-                object: ServerDetailTarget(serverName: server.name, tab: tab)
+                object: ServerDetailTarget(serverName: server.name, tab: tab, focusField: focusField)
             )
         }
     }

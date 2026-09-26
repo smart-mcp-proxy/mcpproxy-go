@@ -1568,7 +1568,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     item.representedObject = server.name
                     primaryOpensReview = true
                 case .config:
-                    item.representedObject = ServerDetailTarget(serverName: server.name, tab: .config)
+                    // FR-014 (review round 3, F-FR014-focus): `primary.focusField`
+                    // is non-nil only for `edit_url` — every other `.config`
+                    // destination (`set_secret`, `configure`) opens with no
+                    // field focused, same as before.
+                    item.representedObject = ServerDetailTarget(serverName: server.name, tab: .config,
+                                                                 focusField: primary.focusField)
                 case .logs:
                     item.representedObject = ServerDetailTarget(serverName: server.name, tab: .logs)
                 }

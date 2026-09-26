@@ -35,25 +35,49 @@ final class ServerRowDispatchTests: XCTestCase {
         override var clickedRow: Int { fakeClickedRow }
     }
 
+    /// Review round 3 (F4.2): `apiClient` used to be left `nil`, so a handler
+    /// rewired to call `apiClient?.approveTools(id)` / `apiClient?.
+    /// unquarantineServer(id)` directly would have that call silently no-op
+    /// on the nil optional — every assertion here would still pass. Wiring a
+    /// REAL `APIClient` backed by `GlanceStubURLProtocol` means such a call
+    /// fires a real (intercepted) HTTP request, which `requestedURLs` below
+    /// can actually observe and fail on.
     private func makeCoordinator(servers: [ServerStatus]) -> (ServerTableView.Coordinator, FakeClickTableView) {
+        GlanceStubURLProtocol.reset()
         let coordinator = ServerTableView.Coordinator()
         coordinator.servers = servers
+        coordinator.apiClient = GlanceStubURLProtocol.makeClient()
         let tableView = FakeClickTableView()
         coordinator.tableView = tableView
         return (coordinator, tableView)
+    }
+
+    /// A future regression that fires `apiClient?.approveTools`/
+    /// `unquarantineServer` from inside a `Task {}` needs the run loop to turn
+    /// once before `GlanceStubURLProtocol.requestedURLs` observes it —
+    /// asserting immediately after a synchronous dispatch would let that
+    /// Task's request land AFTER the assertion and pass vacuously.
+    private func assertNoApproveOrUnquarantineRequestFired() async {
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertTrue(
+            GlanceStubURLProtocol.requestedURLs.allSatisfy { url in
+                !url.contains("/tools/approve") && !url.contains("/unquarantine")
+            },
+            "unexpected approve/unquarantine request(s): \(GlanceStubURLProtocol.requestedURLs)"
+        )
     }
 
     // MARK: - Context menu (`ctxOpenReview`)
 
     /// The row's REAL right-click menu for a quarantined server, dispatched
     /// through the REAL `ctxOpenReview` handler `menuNeedsUpdate` wires it to.
-    func testQuarantinedRowContextMenuReviewClickOpensToolsTabNeverApproves() throws {
+    func testQuarantinedRowContextMenuReviewClickOpensToolsTabNeverApproves() async throws {
         let server = Self.server(quarantined: true, health: ("healthy", "Quarantined for review", "approve"))
         let (coordinator, tableView) = makeCoordinator(servers: [server])
         tableView.fakeClickedRow = 0
 
         var opened: (ServerStatus, ServerDetailTab)?
-        coordinator.onOpenDetail = { opened = ($0, $1) }
+        coordinator.onOpenDetail = { server, tab, _ in opened = (server, tab) }
 
         let menu = NSMenu()
         coordinator.menuNeedsUpdate(menu)
@@ -66,6 +90,7 @@ final class ServerRowDispatchTests: XCTestCase {
         XCTAssertTrue(sent, "the Review row did not dispatch")
         XCTAssertEqual(opened?.0.name, server.name)
         XCTAssertEqual(opened?.1, .tools, "review must open the Tools tab, never approve directly")
+        await assertNoApproveOrUnquarantineRequestFired()
     }
 
     /// FR-010: a server that is BOTH quarantined AND needs sign-in offers
@@ -88,12 +113,12 @@ final class ServerRowDispatchTests: XCTestCase {
 
     /// The row's REAL primary-button handler for a quarantined server (primary
     /// = Review) must open the Tools tab, never call approve/unquarantine.
-    func testQuarantinedRowPrimaryButtonClickOpensToolsTabNeverApproves() {
+    func testQuarantinedRowPrimaryButtonClickOpensToolsTabNeverApproves() async {
         let server = Self.server(quarantined: true, health: ("healthy", "Quarantined for review", "approve"))
         let (coordinator, _) = makeCoordinator(servers: [server])
 
         var opened: (ServerStatus, ServerDetailTab)?
-        coordinator.onOpenDetail = { opened = ($0, $1) }
+        coordinator.onOpenDetail = { server, tab, _ in opened = (server, tab) }
 
         let button = NSButton()
         button.tag = 0
@@ -101,6 +126,7 @@ final class ServerRowDispatchTests: XCTestCase {
 
         XCTAssertEqual(opened?.0.name, server.name)
         XCTAssertEqual(opened?.1, .tools, "the primary button must open Tools, never approve directly")
+        await assertNoApproveOrUnquarantineRequestFired()
     }
 
     /// The row's REAL primary-button handler for an in-place action (login)
@@ -110,7 +136,7 @@ final class ServerRowDispatchTests: XCTestCase {
         let (coordinator, _) = makeCoordinator(servers: [server])
 
         var openedCount = 0
-        coordinator.onOpenDetail = { _, _ in openedCount += 1 }
+        coordinator.onOpenDetail = { _, _, _ in openedCount += 1 }
 
         let button = NSButton()
         button.tag = 0

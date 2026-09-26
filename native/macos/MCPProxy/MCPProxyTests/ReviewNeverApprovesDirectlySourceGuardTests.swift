@@ -25,7 +25,17 @@ import XCTest
 
 final class ReviewNeverApprovesDirectlySourceGuardTests: XCTestCase {
 
-    private static let forbidden = ["approveTools(", "unquarantine("]
+    // Review round 3 (F4.1): the real APIClient methods are
+    // `approveSpecificTools(_:tools:)` and `unquarantineServer(_:)`
+    // (API/APIClient.swift) — neither contains the OLD, narrower substrings
+    // ("approveTools(", "unquarantine(") that used to be the only ones
+    // checked here, so a rewiring to either real method would have passed
+    // silently. Both the old and the real spellings are checked so a future
+    // rename can't quietly narrow this guard back down.
+    private static let forbidden = [
+        "approveTools(", "unquarantine(",
+        "approveSpecificTools(", "unquarantineServer(",
+    ]
 
     func testShowServerDetailFromMenuNeverCallsApproveDirectly() throws {
         let body = try functionBody(named: "showServerDetailFromMenu", in: try mcpProxyAppSource())

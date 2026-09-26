@@ -31,6 +31,15 @@ enum ServerDetailTab: String, CaseIterable {
 struct ServerDetailTarget {
     let serverName: String
     let tab: ServerDetailTab
+    /// FR-014's "with the field focused" for `edit_url` — nil for every other
+    /// action (review round 3, F-FR014-focus). See `TrayConfigFocusField`.
+    let focusField: TrayConfigFocusField?
+
+    init(serverName: String, tab: ServerDetailTab, focusField: TrayConfigFocusField? = nil) {
+        self.serverName = serverName
+        self.tab = tab
+        self.focusField = focusField
+    }
 }
 
 // MARK: - Isolation Override (GH #1142)
@@ -90,10 +99,17 @@ struct ServerDetailView: View {
     @State private var isApproving = false
     @State private var actionMessage: String?
 
+    /// FR-014's "with the field focused" for `edit_url` (review round 3,
+    /// F-FR014-focus) — consumed once by `applyPendingFocusIfNeeded()` so a
+    /// later tab switch or re-render doesn't keep re-stealing focus.
+    @State private var pendingFocusField: TrayConfigFocusField?
+    @FocusState private var focusedConfigField: TrayConfigFocusField?
+
     init(
         server: ServerStatus,
         appState: AppState,
         initialTab: ServerDetailTab = .tools,
+        initialFocusField: TrayConfigFocusField? = nil,
         onDismiss: @escaping () -> Void
     ) {
         self.initialServer = server
@@ -101,6 +117,7 @@ struct ServerDetailView: View {
         self.onDismiss = onDismiss
         self._server = State(initialValue: server)
         self._selectedTab = State(initialValue: initialTab)
+        self._pendingFocusField = State(initialValue: initialFocusField)
     }
 
     // Edit mode state for Config tab
@@ -164,6 +181,7 @@ struct ServerDetailView: View {
             case .config: configTab
             }
         }
+        .onAppear { applyPendingFocusIfNeeded() }
         .sheet(item: $convertSheet) { ctx in
             convertToSecretSheet(ctx)
         }
@@ -632,7 +650,8 @@ struct ServerDetailView: View {
                     if server.protocol == "http" || server.protocol == "sse" || server.protocol == "streamable-http" {
                         configSection(title: "Connection") {
                             if isEditing {
-                                configEditRow(label: "URL", text: $editURL, placeholder: "https://api.example.com/mcp")
+                                configEditRow(label: "URL", text: $editURL, placeholder: "https://api.example.com/mcp",
+                                              focusValue: .endpoint)
                             } else {
                                 configRow(label: "URL", value: server.url ?? "N/A")
                             }
@@ -844,7 +863,13 @@ struct ServerDetailView: View {
     }
 
     @ViewBuilder
-    private func configEditRow(label: String, text: Binding<String>, placeholder: String, multiline: Bool = false) -> some View {
+    private func configEditRow(
+        label: String,
+        text: Binding<String>,
+        placeholder: String,
+        multiline: Bool = false,
+        focusValue: TrayConfigFocusField? = nil
+    ) -> some View {
         HStack(alignment: .top) {
             Text(label)
                 .font(.scaled(.subheadline, scale: fontScale))
@@ -855,6 +880,14 @@ struct ServerDetailView: View {
                     .font(.scaledMonospaced(.subheadline, scale: fontScale))
                     .frame(height: 60)
                     .border(Color(nsColor: .separatorColor), width: 1)
+            } else if let focusValue {
+                // FR-014 (review round 3, F-FR014-focus): only the URL row
+                // passes a non-nil `focusValue` today, so this branch is the
+                // one place `focusedConfigField` actually binds to a control.
+                TextField(placeholder, text: text)
+                    .font(.scaledMonospaced(.subheadline, scale: fontScale))
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focusedConfigField, equals: focusValue)
             } else {
                 TextField(placeholder, text: text)
                     .font(.scaledMonospaced(.subheadline, scale: fontScale))
@@ -1182,6 +1215,26 @@ struct ServerDetailView: View {
         editIsolationWorkingDir = iso?.workingDir ?? ""
         editError = nil
         isEditing = true
+    }
+
+    /// FR-014's "with the field focused" (review round 3, F-FR014-focus):
+    /// `edit_url`'s primary action lands here on `.config` carrying
+    /// `focusField == .endpoint` — enter edit mode (mirrors the Web UI's
+    /// `startEditUrl()`) and focus the URL field once it exists. Consumes
+    /// `pendingFocusField` so a later re-render (e.g. `refreshServer()`)
+    /// cannot re-steal focus away from whatever the user is doing next.
+    private func applyPendingFocusIfNeeded() {
+        guard let field = pendingFocusField else { return }
+        guard selectedTab == .config else { return }
+        pendingFocusField = nil
+        if !isEditing { startEditing() }
+        // The URL TextField materialises only once `isEditing` re-renders the
+        // Config tab body — asyncAfter this run-loop turn (same pattern the
+        // Web UI's `nextTick(() => urlInputRef.value?.focus())` uses) lets
+        // that happen before `focusedConfigField` is set.
+        DispatchQueue.main.async {
+            focusedConfigField = field
+        }
     }
 
     private func saveEdits() async {

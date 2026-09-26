@@ -19,6 +19,11 @@ struct ServersView: View {
     @State private var loadTask: Task<Void, Never>?
     @State private var selectedServer: ServerStatus?
     @State private var selectedServerInitialTab: ServerDetailTab = .tools
+    /// FR-014's "with the field focused" for `edit_url` (review round 3,
+    /// F-FR014-focus) — threaded alongside `selectedServerInitialTab` from
+    /// whichever surface (row button, `.showServerDetail` notification)
+    /// opened this server.
+    @State private var selectedServerInitialFocusField: TrayConfigFocusField?
     @State private var showAddServer = false
     @State private var addServerInitialTab: AddServerTab = .manual
 
@@ -29,6 +34,7 @@ struct ServersView: View {
                     server: server,
                     appState: appState,
                     initialTab: selectedServerInitialTab,
+                    initialFocusField: selectedServerInitialFocusField,
                     onDismiss: { selectedServer = nil }
                 )
             } else {
@@ -64,12 +70,15 @@ struct ServersView: View {
         .onReceive(NotificationCenter.default.publisher(for: .showServerDetail)) { notification in
             let serverName: String
             let tab: ServerDetailTab
+            let focusField: TrayConfigFocusField?
             if let target = notification.object as? ServerDetailTarget {
                 serverName = target.serverName
                 tab = target.tab
+                focusField = target.focusField
             } else if let name = notification.object as? String {
                 serverName = name
                 tab = .tools
+                focusField = nil
             } else {
                 return
             }
@@ -77,6 +86,7 @@ struct ServersView: View {
             if let server = servers.first(where: { $0.name == serverName })
                 ?? appState.servers.first(where: { $0.name == serverName }) {
                 selectedServerInitialTab = tab
+                selectedServerInitialFocusField = focusField
                 selectedServer = server
             }
         }
@@ -202,10 +212,12 @@ struct ServersView: View {
                     // later manual double-click on an unrelated server would
                     // silently reopen on that same stale tab instead of Tools.
                     selectedServerInitialTab = .tools
+                    selectedServerInitialFocusField = nil
                     selectedServer = server
                 },
-                onOpenDetail: { server, tab in
+                onOpenDetail: { server, tab, focusField in
                     selectedServerInitialTab = tab
+                    selectedServerInitialFocusField = focusField
                     selectedServer = server
                 },
                 onServersChanged: {
@@ -359,7 +371,9 @@ struct ServerTableView: NSViewRepresentable {
     /// Opens Server Detail on a SPECIFIC tab (Spec 109 FR-014's `approve` →
     /// Tools/review, `configure`/`edit_url`/`set_secret` → Config, `view_logs`
     /// → Logs) — `onDoubleClick` always opens Tools, this can open any tab.
-    var onOpenDetail: ((ServerStatus, ServerDetailTab) -> Void)?
+    /// The third parameter is FR-014's "with the field focused" for
+    /// `edit_url` (review round 3, F-FR014-focus) — nil for every other tab.
+    var onOpenDetail: ((ServerStatus, ServerDetailTab, TrayConfigFocusField?) -> Void)?
     var onServersChanged: (() -> Void)?
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -437,7 +451,7 @@ struct ServerTableView: NSViewRepresentable {
         var apiClient: APIClient?
         var fontScale: CGFloat = 1.0
         var onDoubleClick: ((ServerStatus) -> Void)?
-        var onOpenDetail: ((ServerStatus, ServerDetailTab) -> Void)?
+        var onOpenDetail: ((ServerStatus, ServerDetailTab, TrayConfigFocusField?) -> Void)?
         var onServersChanged: (() -> Void)?
         weak var tableView: NSTableView?
 
@@ -536,7 +550,10 @@ struct ServerTableView: NSViewRepresentable {
                 case .config: tab = .config
                 case .logs: tab = .logs
                 }
-                onOpenDetail?(server, tab)
+                // FR-014 (review round 3, F-FR014-focus): `primary.focusField`
+                // is non-nil only for `edit_url`, so this is a no-op for
+                // every other destination.
+                onOpenDetail?(server, tab, primary.focusField)
             }
         }
 
@@ -723,7 +740,7 @@ struct ServerTableView: NSViewRepresentable {
         // handler `.openReview` can dispatch to.
         @objc private func ctxOpenReview(_ sender: NSMenuItem) {
             guard let server = sender.representedObject as? ServerStatus else { return }
-            onOpenDetail?(server, .tools)
+            onOpenDetail?(server, .tools, nil)
         }
 
         @objc private func ctxViewDetails(_ sender: NSMenuItem) {

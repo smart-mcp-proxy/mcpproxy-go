@@ -317,6 +317,19 @@ enum TrayPrimaryKind: Equatable {
     case open(TrayPrimaryDestination)
 }
 
+/// A field to draw focus to once a `.open(.config)` destination has opened —
+/// FR-014's "with the field focused" (review round 3, F-FR014-focus). Only
+/// `edit_url` names one: the URL field is the one concrete remedy for a bad
+/// endpoint, the same field the Web UI's `ServerCard.primaryHref` sends
+/// `&focus=endpoint` for (`ServerDetail.vue`'s `applyEndpointFocus`).
+/// `configure`'s underlying causes are heterogeneous (a hash mismatch, a
+/// denied tool, a missing annotation, …) with no single field to name — the
+/// Web UI itself does not focus anything for `configure` either, so this
+/// stays `nil` for it rather than guessing a field that would often be wrong.
+enum TrayConfigFocusField: Equatable {
+    case endpoint
+}
+
 /// The ONE primary item for a server's `health.actions[0]` (or the legacy
 /// singular `action`), shared verbatim by the Servers row and the tray
 /// submenu (FR-014). `label` always comes from `HealthStatus.actionLabels` —
@@ -326,6 +339,11 @@ enum TrayPrimaryKind: Equatable {
 struct TrayPrimaryItem: Equatable {
     let label: String
     let kind: TrayPrimaryKind
+    /// Non-nil only for `edit_url` (see `TrayConfigFocusField`). Both
+    /// `ServersView.primaryActionClicked` and `MCPProxyApp`'s tray submenu
+    /// forward this into `ServerDetailTarget.focusField` so `ServerDetailView`
+    /// can focus the matching control once Config opens.
+    let focusField: TrayConfigFocusField?
 }
 
 enum TrayPrimaryPresentation {
@@ -339,14 +357,14 @@ enum TrayPrimaryPresentation {
         guard let action, !action.isEmpty else { return nil }
         guard let label = HealthStatus.actionLabels[action] else { return nil }
         if let executable = TrayServerAction.fromHealthAction(action) {
-            return TrayPrimaryItem(label: label, kind: .execute(executable))
+            return TrayPrimaryItem(label: label, kind: .execute(executable), focusField: nil)
         }
         switch action {
-        case "approve": return TrayPrimaryItem(label: label, kind: .open(.review))
-        case "set_secret": return TrayPrimaryItem(label: label, kind: .open(.config))
-        case "configure": return TrayPrimaryItem(label: label, kind: .open(.config))
-        case "edit_url": return TrayPrimaryItem(label: label, kind: .open(.config))
-        case "view_logs": return TrayPrimaryItem(label: label, kind: .open(.logs))
+        case "approve": return TrayPrimaryItem(label: label, kind: .open(.review), focusField: nil)
+        case "set_secret": return TrayPrimaryItem(label: label, kind: .open(.config), focusField: nil)
+        case "configure": return TrayPrimaryItem(label: label, kind: .open(.config), focusField: nil)
+        case "edit_url": return TrayPrimaryItem(label: label, kind: .open(.config), focusField: .endpoint)
+        case "view_logs": return TrayPrimaryItem(label: label, kind: .open(.logs), focusField: nil)
         default: return nil
         }
     }

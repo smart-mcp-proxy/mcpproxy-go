@@ -112,17 +112,29 @@ final class DashboardRoutingTests: XCTestCase {
         let source = try dashboardSource()
         let body = try performActionBody(in: source)
 
-        let configCase = try caseBody(labelContaining: ".editURL", in: body)
+        // FR-014 (review round 3, F-FR014-focus): `edit_url` is the one
+        // action with a concrete field to focus once Config opens — it now
+        // gets its own case, split out of the old combined
+        // `.setSecret, .configure, .editURL` label, so it can pass
+        // `focusField: .endpoint` without the other two also claiming a
+        // field they have none for.
+        let configCase = try caseBody(labelContaining: ".setSecret", in: body)
         XCTAssertTrue(configCase.contains("navigateToServerDetail(server, tab: .config)"),
-                      "setSecret/configure/editURL must open the Config tab via navigateToServerDetail(server, tab: .config)")
+                      "setSecret/configure must open the Config tab via navigateToServerDetail(server, tab: .config)")
+        XCTAssertFalse(configCase.contains("focusField"),
+                       "setSecret/configure have no single field to focus — must not pass focusField")
+
+        let editURLCase = try caseBody(labelContaining: ".editURL", in: body)
+        XCTAssertTrue(editURLCase.contains("navigateToServerDetail(server, tab: .config, focusField: .endpoint)"),
+                      "editURL must open the Config tab with the URL field focused (FR-014)")
 
         let logsCase = try caseBody(labelContaining: ".viewLogs", in: body)
         XCTAssertTrue(logsCase.contains("navigateToServerDetail(server, tab: .logs)"),
                       "viewLogs must open the Logs tab via navigateToServerDetail(server, tab: .logs), not .config")
 
         let navigateBody = try functionBody(named: "navigateToServerDetail", in: source)
-        XCTAssertTrue(navigateBody.contains("ServerDetailTarget(serverName: server.name, tab: tab)"),
-                      "navigateToServerDetail must post a typed ServerDetailTarget carrying the requested tab")
+        XCTAssertTrue(navigateBody.contains("ServerDetailTarget(serverName: server.name, tab: tab, focusField: focusField)"),
+                      "navigateToServerDetail must post a typed ServerDetailTarget carrying the requested tab and focus field")
         XCTAssertFalse(navigateBody.contains("object: server.name"),
                        "navigateToServerDetail must not post a bare server-name String — ServersView would then default the tab to .tools regardless of which action fired")
     }
