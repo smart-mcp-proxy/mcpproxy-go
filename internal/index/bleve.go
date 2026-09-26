@@ -84,7 +84,10 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 		}
 	} else {
 		logger.Info("Opened existing Bleve index", zap.String("path", indexPath))
-		warnIfMappingPredatesAnnotations(index, indexPath, logger)
+		index, err = rebuildIfMappingPredatesAnnotations(index, indexPath, logger)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &BleveIndex{
@@ -94,9 +97,10 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 	}, nil
 }
 
-// warnIfMappingPredatesAnnotations logs an actionable warning when an
-// already-existing index was created before the annotations_json field
-// mapping below (Spec 109 FR-028 tier-badge support) existed.
+// rebuildIfMappingPredatesAnnotations replaces an already-open index whose
+// on-disk mapping was created before the annotations_json field mapping below
+// (Spec 109 FR-028 tier-badge support) existed, with a fresh index that has
+// the current mapping.
 //
 // bleve.Open never re-applies createBleveIndex's mapping to an index that
 // already exists on disk — the mapping is baked in at creation time, and
@@ -112,27 +116,50 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 // every query on an upgraded (not freshly installed) deployment (review
 // round 6, finding 1: high).
 //
-// There is no safe in-place fix short of rebuilding the index, so this only
-// makes the situation observable. An operator who sees the warning can
-// delete indexPath and restart: the empty index makes every server's tools
-// look newly discovered, so the normal discovery path
-// (applyDifferentialToolUpdate) reindexes everything under the current,
-// correct mapping.
-func warnIfMappingPredatesAnnotations(idx bleve.Index, indexPath string, logger *zap.Logger) {
+// Round 6 only logged a warning and left the fix to an operator manually
+// deleting indexPath (review round 7, finding 2: the underlying gap was still
+// open on any upgrade nobody noticed the log line for). This does that same
+// recovery automatically instead: close the stale index, remove its
+// directory, and create a fresh one with the current mapping. That is safe
+// because index.bleve is a derived search cache, not a source of truth — an
+// empty index makes every server's tools look newly discovered, and the
+// normal discovery path (applyDifferentialToolUpdate) unconditionally
+// reindexes everything as each server (re)connects during startup, the same
+// way it already backfills a brand-new install.
+// Manager.RebuildIndex (internal/index/manager.go) is a separate, currently
+// unwired no-op stub for an operator-triggered full rebuild and is not used
+// here — this path only ever runs once, at index-open time, against a
+// mapping that is provably stale.
+func rebuildIfMappingPredatesAnnotations(idx bleve.Index, indexPath string, logger *zap.Logger) (bleve.Index, error) {
 	fm := idx.Mapping().FieldMappingForPath("annotations_json")
 	if fm.Type != "" {
 		// Explicitly mapped (Type is only set by NewTextFieldMapping and
 		// friends, never by the zero-value fallback FieldMappingForPath
 		// returns for a path with no static mapping) — this index already
 		// has the current mapping.
-		return
+		return idx, nil
 	}
+
 	logger.Warn("Bleve index predates the annotations_json field mapping; "+
-		"annotation JSON may be indexed as free text and skew tool-search "+
-		"ranking (see internal/index/bleve.go:warnIfMappingPredatesAnnotations). "+
-		"Delete this index directory and restart mcpproxy to rebuild it "+
-		"with the current mapping.",
+		"annotation JSON may have been indexed as free text and skewed "+
+		"tool-search ranking. Rebuilding the index automatically with the "+
+		"current mapping (see internal/index/bleve.go:rebuildIfMappingPredatesAnnotations).",
 		zap.String("path", indexPath))
+
+	if err := idx.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close stale-mapping Bleve index for rebuild: %w", err)
+	}
+	if err := os.RemoveAll(indexPath); err != nil {
+		return nil, fmt.Errorf("failed to remove stale-mapping Bleve index at %s: %w", indexPath, err)
+	}
+	fresh, err := createBleveIndex(indexPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to recreate Bleve index after mapping migration: %w", err)
+	}
+
+	logger.Info("Rebuilt Bleve index with the current field mapping; "+
+		"tools will reappear as each server reconnects", zap.String("path", indexPath))
+	return fresh, nil
 }
 
 // createBleveIndex creates a new Bleve index with proper mapping

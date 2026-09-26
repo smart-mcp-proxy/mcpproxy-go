@@ -100,6 +100,44 @@ func TestNewBleveIndexAt_WarnsOnPreAnnotationsMapping(t *testing.T) {
 	assert.Equal(t, 1, warnings.Len(), "opening a pre-annotations index must log exactly one actionable warning")
 }
 
+// TestNewBleveIndexAt_AutoRebuildsPreAnnotationsMapping is a regression test
+// for review round 7, finding 2 (medium): round 6 only warned and left an
+// in-place-upgraded index with the old mapping (and its dynamic-field
+// leakage) in place forever unless an operator noticed the log line and
+// deleted the directory by hand. Opening a pre-annotations index must now
+// self-heal: end up with the current mapping with no manual step, and log
+// that the automatic rebuild happened.
+func TestNewBleveIndexAt_AutoRebuildsPreAnnotationsMapping(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+
+	oldIdx, err := bleve.New(indexPath, preAnnotationsMapping())
+	require.NoError(t, err)
+	require.NoError(t, oldIdx.Close())
+
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core)
+
+	bi, err := newBleveIndexAt(indexPath, logger)
+	require.NoError(t, err)
+	defer bi.Close()
+
+	fm := bi.index.Mapping().FieldMappingForPath("annotations_json")
+	assert.NotEmpty(t, fm.Type, "the index must carry the CURRENT mapping after opening a pre-annotations index, with no operator step")
+
+	rebuilds := logs.FilterMessageSnippet("Rebuilt Bleve index with the current field mapping")
+	assert.Equal(t, 1, rebuilds.Len(), "the automatic rebuild must be observable in the log")
+
+	// The rebuilt index must behave like any other current-mapping index:
+	// annotations_json is stored-only and must not leak into `_all`.
+	require.NoError(t, bi.index.Index("doc1", map[string]interface{}{
+		"tool_name":        "delete_everything",
+		"annotations_json": "should not become searchable via _all",
+	}))
+	res, err := bi.index.Search(bleve.NewSearchRequest(bleve.NewMatchQuery("should not become searchable via _all")))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), res.Total, "annotations_json must not be free-text searchable after the rebuild")
+}
+
 // TestNewBleveIndexAt_NoWarningOnCurrentMapping guards against a false
 // positive: an index created (or previously opened) by the CURRENT code must
 // never trigger the migration warning.
