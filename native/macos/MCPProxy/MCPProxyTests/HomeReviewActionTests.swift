@@ -72,6 +72,36 @@ final class HomeReviewActionTests: XCTestCase {
         assertNoApprovalRequestWasIssued()
     }
 
+    /// Review finding: `reload_hint` (the `client_never_seen` fix, "How to
+    /// restart") was a true no-op (`case "reload_hint": break`) — Home still
+    /// renders the button, but clicking it gave no navigation, no alert, no
+    /// feedback at all. `109-h` will give it a real client screen; until
+    /// then it must at least surface the item's own restart guidance instead
+    /// of silently doing nothing, matching the "never a dead link" rule the
+    /// `review` verb already follows via its interim navigation.
+    func testReloadHintSurfacesRestartGuidanceInsteadOfDoingNothing() async {
+        let appState = AppState()
+        appState.apiClient = HomeReviewActionStubURLProtocol.makeClient()
+        let item = AttentionItem(
+            id: "client_never_seen:client:codex",
+            kind: "client_never_seen",
+            rank: 70,
+            subject: AttentionSubject(type: "client", id: "codex", name: "Codex CLI"),
+            summary: "Codex CLI: connected, never seen",
+            detail: "Restart Codex CLI to load MCPProxy",
+            fix: AttentionFix(verb: "reload_hint", label: "How to restart", target: "/clients?focus=codex"),
+            since: Date()
+        )
+
+        XCTAssertNil(appState.pendingReloadHint)
+        await HomeAttentionAction.performFix(item, appState: appState)
+
+        XCTAssertEqual(appState.pendingReloadHint?.id, item.id,
+                       "reload_hint must surface the item so Home can alert the restart guidance, not no-op")
+        XCTAssertTrue(HomeReviewActionStubURLProtocol.requests.isEmpty,
+                      "reload_hint must issue no request — it is a hint, not an action")
+    }
+
     /// The stronger claim the two tests above rest on: the review action
     /// issues NO request to the core at all — it is pure navigation. Checked
     /// as its own assertion so a future change that adds an unrelated GET

@@ -47,8 +47,12 @@ enum HomeAttentionAction {
             // server's existing per-tool review, never a one-click approve.
             navigateToServerDetail(item.subject.name, tab: .tools)
         case "reload_hint":
-            // 109-h: the client's reload hint has no native screen yet.
-            break
+            // 109-h: the client's `/clients?focus=<id>` screen doesn't exist
+            // yet. Never a dead link (contracts/rest-api.md#attention): until
+            // that screen ships, surface the item's own restart guidance
+            // (`detail`) as an alert instead of doing nothing. HomeView
+            // observes `pendingReloadHint` and presents it.
+            appState.pendingReloadHint = item
         default:
             break
         }

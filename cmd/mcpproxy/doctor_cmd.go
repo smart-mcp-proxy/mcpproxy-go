@@ -390,7 +390,13 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		// /attention every other surface reads (FR-001/FR-003).
 		printDoctorAttentionSection(attention)
 
-		if totalIssues == 0 {
+		// Fix review finding: the "all clear" verdict must also require the
+		// FR-001 attention list (a separate counter from `total_issues`) to
+		// be empty, or a quarantined server / tool awaiting review with no
+		// other diagnostics findings prints two contradicting verdicts back
+		// to back — exactly what FR-004 exists to prevent.
+		attentionClear := attention == nil || attention.Count == 0
+		if totalIssues == 0 && attentionClear {
 			fmt.Println("✅ All systems operational! No issues detected.")
 			fmt.Println()
 

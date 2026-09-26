@@ -82,6 +82,12 @@ final class AppState: ObservableObject {
     /// (`serversNeedingAttention` is retired; FR-003).
     @Published var attention: [AttentionItem] = []
 
+    /// The `reload_hint` fix (`client_never_seen`, "How to restart") has no
+    /// native client screen yet (109-h adds `/clients?focus=<id>`). Setting
+    /// this instead of no-op'ing lets Home surface the item's own restart
+    /// guidance as an alert — never a dead click — until that screen ships.
+    @Published var pendingReloadHint: AttentionItem?
+
     // MARK: - Profiles (Profiles v2 T5)
     /// Configured profiles for the tray profile switcher.
     @Published var profiles: [ProfileSummary] = []

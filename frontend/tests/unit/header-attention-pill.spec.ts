@@ -92,4 +92,23 @@ describe('header needs-attention pill (Spec 109 FR-003/FR-051)', () => {
     expect(rows).toHaveLength(5)
     expect(wrapper.find('[data-test="header-attention-see-all"]').exists()).toBe(true)
   })
+
+  // Review finding: T057's coverage never exercised the SSE
+  // `attention.changed` live-update path. This drives the actual production
+  // path — the shared attention store's own window listener — so a
+  // regression that stops the pill refetching on a live change would fail
+  // here instead of staying green.
+  it('updates the pill count when mcpproxy:attention-changed fires', async () => {
+    attentionSpy.mockResolvedValue({ success: true, data: { count: 0, items: [] } })
+    const wrapper = await mountHeader()
+    expect(wrapper.find('[data-test="header-attention-pill"]').exists()).toBe(false)
+
+    attentionSpy.mockResolvedValue({ success: true, data: { count: 3, items: [item('a'), item('b'), item('c')] } })
+    window.dispatchEvent(new CustomEvent('mcpproxy:attention-changed'))
+    await flushPromises()
+
+    const pill = wrapper.find('[data-test="header-attention-pill"]')
+    expect(pill.exists()).toBe(true)
+    expect(pill.text()).toContain('3')
+  })
 })

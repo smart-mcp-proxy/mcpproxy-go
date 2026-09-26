@@ -180,6 +180,19 @@ export const useSystemStore = defineStore('system', () => {
     es.onopen = () => {
       connected.value = true
       console.log('EventSource connected successfully')
+
+      // Review finding: FR-002's threshold-crossing attention events
+      // (server_error, client_never_seen, …) fire only once, at the moment
+      // the threshold is crossed. A drop that spans that moment loses the
+      // frame forever, and the header pill / sidebar badge / Home list stay
+      // wrong until an unrelated change happens to fire a fresh event. Every
+      // (re)connect — the initial one and every retry after `onerror` — is
+      // exactly the point a missed event could have been lost, so resync by
+      // re-dispatching the same window event the live `attention.changed`
+      // handler below dispatches; the attention store's own handler ignores
+      // the detail and just refetches (silent), so an extra one on first
+      // connect is harmless.
+      window.dispatchEvent(new CustomEvent('mcpproxy:attention-changed'))
     }
 
     es.onmessage = (event) => {

@@ -214,4 +214,108 @@ func TestAttentionClientNeverSeenThreshold(t *testing.T) {
 	assert.Empty(t, Compute(seen), "a session since the connect write clears the item")
 }
 
+// TestAttentionFixTargetsPercentEncodeSlashInName covers a review finding:
+// official-registry server names contain '/' (e.g. "io.github.owner/repo",
+// MCP-1112/#598 — same bug class already fixed in
+// frontend/src/utils/serverRoute.ts). Every fix.target built here embeds the
+// raw name via fmt.Sprintf; an unescaped '/' splits the path and callers
+// that treat fix.target as a URL (Web UI router-link, tray) 404 on the
+// catch-all route instead of opening the exact fix screen (FR-005).
+func TestAttentionFixTargetsPercentEncodeSlashInName(t *testing.T) {
+	name := "io.github.owner/repo"
+	now := time.Now()
+	stale := now.Add(-90 * time.Second)
+
+	cases := []struct {
+		label  string
+		input  AttentionInput
+		target string
+	}{
+		{
+			label: "sign_in_required",
+			input: AttentionInput{Now: now, Servers: []AttentionServer{
+				attnServer(name, func(s *AttentionServer) {
+					s.Health.Status = health.StatusSignInRequired
+					s.StateSince = stale
+				}),
+			}},
+			target: "/servers/io.github.owner%2Frepo",
+		},
+		{
+			label: "needs_secret",
+			input: AttentionInput{Now: now, Servers: []AttentionServer{
+				attnServer(name, func(s *AttentionServer) {
+					s.Health.Status = health.StatusNeedsSecret
+					s.StateSince = stale
+				}),
+			}},
+			target: "/servers/io.github.owner%2Frepo?tab=config&focus=env",
+		},
+		{
+			label: "needs_config",
+			input: AttentionInput{Now: now, Servers: []AttentionServer{
+				attnServer(name, func(s *AttentionServer) {
+					s.Health.Status = health.StatusNeedsConfig
+					s.Health.Actions = []string{health.ActionConfigure}
+					s.StateSince = stale
+				}),
+			}},
+			target: "/servers/io.github.owner%2Frepo?tab=config",
+		},
+		{
+			label: "server_review",
+			input: AttentionInput{Now: now, Servers: []AttentionServer{
+				attnServer(name, func(s *AttentionServer) {
+					s.Quarantined = true
+					s.StateSince = stale
+				}),
+			}},
+			target: "/review/io.github.owner%2Frepo",
+		},
+		{
+			label: "server_error",
+			input: AttentionInput{Now: now, Servers: []AttentionServer{
+				attnServer(name, func(s *AttentionServer) {
+					s.Health.Status = health.StatusError
+					s.StateSince = stale
+				}),
+			}},
+			target: "/servers/io.github.owner%2Frepo",
+		},
+		{
+			label: "tool_review_changed",
+			input: AttentionInput{Now: now, Servers: []AttentionServer{
+				attnServer(name, func(s *AttentionServer) {
+					s.Changed = 1
+				}),
+			}},
+			target: "/review/io.github.owner%2Frepo?change=changed",
+		},
+		{
+			label: "tool_review_pending",
+			input: AttentionInput{Now: now, Servers: []AttentionServer{
+				attnServer(name, func(s *AttentionServer) {
+					s.Pending = 1
+				}),
+			}},
+			target: "/review/io.github.owner%2Frepo?change=pending",
+		},
+		{
+			label: "client_never_seen",
+			input: AttentionInput{Now: now, Clients: []AttentionClient{
+				{ID: name, DisplayName: name, ConnectedAt: timePtr(now.Add(-6 * time.Minute))},
+			}},
+			target: "/clients?focus=io.github.owner%2Frepo",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			items := Compute(tc.input)
+			require.NotEmpty(t, items, tc.label)
+			assert.Equal(t, tc.target, items[0].Fix.Target, tc.label)
+		})
+	}
+}
+
 func timePtr(t time.Time) *time.Time { return &t }

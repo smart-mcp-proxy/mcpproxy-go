@@ -62,6 +62,23 @@ struct HomeView: View {
             .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Review finding: `reload_hint` ("How to restart") had no native
+        // client screen and no interim feedback — clicking it did nothing.
+        // 109-h adds the real `/clients?focus=<id>` screen; until then this
+        // surfaces the item's own restart guidance so the button is never a
+        // dead click.
+        .alert(
+            "How to restart",
+            isPresented: Binding(
+                get: { appState.pendingReloadHint != nil },
+                set: { if !$0 { appState.pendingReloadHint = nil } }
+            ),
+            presenting: appState.pendingReloadHint
+        ) { _ in
+            Button("OK", role: .cancel) { appState.pendingReloadHint = nil }
+        } message: { item in
+            Text(item.detail ?? item.summary)
+        }
         .task {
             do {
                 mcpSessions = try await appState.apiClient?.sessions(limit: 20) ?? []

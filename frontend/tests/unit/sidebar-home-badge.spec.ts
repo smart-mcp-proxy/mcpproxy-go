@@ -92,4 +92,48 @@ describe('sidebar Home entry and badge (Spec 109 FR-003/FR-051)', () => {
     expect(badge.exists()).toBe(true)
     expect(badge.text()).toBe('4')
   })
+
+  // Review finding: T057's coverage never exercised the SSE
+  // `attention.changed` live-update path. This drives the actual production
+  // path — the shared attention store's own window listener — so a
+  // regression that stops the badge refetching on a live change would fail
+  // here instead of staying green.
+  it('updates the badge when mcpproxy:attention-changed fires', async () => {
+    attentionSpy.mockResolvedValue({ success: true, data: { count: 0, items: [] } })
+    const wrapper = await mountSidebar()
+    expect(wrapper.find('[data-test="sidebar-home-badge"]').exists()).toBe(false)
+
+    attentionSpy.mockResolvedValue({
+      success: true,
+      data: {
+        count: 2,
+        items: [
+          {
+            id: 'sign_in_required:server:s0',
+            kind: 'sign_in_required',
+            rank: 10,
+            subject: { type: 'server', id: 's0', name: 's0' },
+            summary: 's0: sign in required',
+            fix: { verb: 'login', label: 'Sign in', target: '/servers/s0' },
+            since: '2026-09-25T06:00:00Z',
+          },
+          {
+            id: 'sign_in_required:server:s1',
+            kind: 'sign_in_required',
+            rank: 10,
+            subject: { type: 'server', id: 's1', name: 's1' },
+            summary: 's1: sign in required',
+            fix: { verb: 'login', label: 'Sign in', target: '/servers/s1' },
+            since: '2026-09-25T06:00:00Z',
+          },
+        ],
+      },
+    })
+    window.dispatchEvent(new CustomEvent('mcpproxy:attention-changed'))
+    await flushPromises()
+
+    const badge = wrapper.find('[data-test="sidebar-home-badge"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.text()).toBe('2')
+  })
 })

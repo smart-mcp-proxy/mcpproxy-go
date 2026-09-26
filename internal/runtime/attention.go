@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
 	"time"
 
@@ -104,6 +105,15 @@ func computeServerItems(s AttentionServer, now time.Time, serverErrorThreshold t
 	var out []contracts.AttentionItem
 	status := s.Health.Status
 	subject := contracts.AttentionSubject{Type: "server", ID: s.Name, Name: s.Name}
+	// MCP-1112 (#598): official-registry server names contain '/' (e.g.
+	// "io.github.owner/repo"). Every fix.target below is a single path
+	// segment plus an optional query string, so the name MUST be
+	// percent-encoded — otherwise the '/' splits the path and callers that
+	// treat fix.target as a URL (Web UI router-link, tray) fall through to
+	// the catch-all 404 instead of opening the exact fix screen (FR-005).
+	// Same fix already applied on the frontend in
+	// frontend/src/utils/serverRoute.ts.
+	encodedName := url.PathEscape(s.Name)
 
 	switch status {
 	case health.StatusSignInRequired:
@@ -117,7 +127,7 @@ func computeServerItems(s AttentionServer, now time.Time, serverErrorThreshold t
 			Fix: contracts.AttentionFix{
 				Verb:   AttentionFixLogin,
 				Label:  "Sign in",
-				Target: fmt.Sprintf("/servers/%s", s.Name),
+				Target: fmt.Sprintf("/servers/%s", encodedName),
 			},
 			Since: s.StateSince,
 		})
@@ -132,7 +142,7 @@ func computeServerItems(s AttentionServer, now time.Time, serverErrorThreshold t
 			Fix: contracts.AttentionFix{
 				Verb:   AttentionFixSetSecret,
 				Label:  "Add secret",
-				Target: fmt.Sprintf("/servers/%s?tab=config&focus=env", s.Name),
+				Target: fmt.Sprintf("/servers/%s?tab=config&focus=env", encodedName),
 			},
 			Since: s.StateSince,
 		})
@@ -151,7 +161,7 @@ func computeServerItems(s AttentionServer, now time.Time, serverErrorThreshold t
 			Fix: contracts.AttentionFix{
 				Verb:   verb,
 				Label:  "Fix config",
-				Target: fmt.Sprintf("/servers/%s?tab=config", s.Name),
+				Target: fmt.Sprintf("/servers/%s?tab=config", encodedName),
 			},
 			Since: s.StateSince,
 		})
@@ -172,7 +182,7 @@ func computeServerItems(s AttentionServer, now time.Time, serverErrorThreshold t
 			Fix: contracts.AttentionFix{
 				Verb:   AttentionFixReview,
 				Label:  "Review",
-				Target: fmt.Sprintf("/review/%s", s.Name),
+				Target: fmt.Sprintf("/review/%s", encodedName),
 			},
 			Since: s.StateSince,
 		})
@@ -194,7 +204,7 @@ func computeServerItems(s AttentionServer, now time.Time, serverErrorThreshold t
 			Fix: contracts.AttentionFix{
 				Verb:   AttentionFixRestart,
 				Label:  "Restart",
-				Target: fmt.Sprintf("/servers/%s", s.Name),
+				Target: fmt.Sprintf("/servers/%s", encodedName),
 			},
 			Since: s.StateSince,
 		})
@@ -210,7 +220,7 @@ func computeServerItems(s AttentionServer, now time.Time, serverErrorThreshold t
 			Fix: contracts.AttentionFix{
 				Verb:   AttentionFixReview,
 				Label:  "Review",
-				Target: fmt.Sprintf("/review/%s?change=changed", s.Name),
+				Target: fmt.Sprintf("/review/%s?change=changed", encodedName),
 			},
 			Since: s.StateSince,
 		})
@@ -225,7 +235,7 @@ func computeServerItems(s AttentionServer, now time.Time, serverErrorThreshold t
 			Fix: contracts.AttentionFix{
 				Verb:   AttentionFixReview,
 				Label:  "Review",
-				Target: fmt.Sprintf("/review/%s?change=pending", s.Name),
+				Target: fmt.Sprintf("/review/%s?change=pending", encodedName),
 			},
 			Since: s.StateSince,
 		})
@@ -259,7 +269,7 @@ func computeClientNeverSeen(c AttentionClient, now time.Time, clientNeverSeenThr
 		Fix: contracts.AttentionFix{
 			Verb:   AttentionFixReloadHint,
 			Label:  "How to restart",
-			Target: fmt.Sprintf("/clients?focus=%s", c.ID),
+			Target: fmt.Sprintf("/clients?focus=%s", url.QueryEscape(c.ID)),
 		},
 		Since: *c.ConnectedAt,
 	}, true
