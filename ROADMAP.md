@@ -910,7 +910,7 @@ graph LR
 | Registries — easier search + add-server | Done | P1 | 21/24 (88%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | Deferred-schema serialization for the direct tools/list surface (spec 102) | Done | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) | #1063 |
-| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | Done | P1 | 94/113 (83%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
+| Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | Done | P1 | 111/113 (98%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
 | Spec 107 server edition SSO front door hardened for real IdPs | Done | P2 | 126/126 (100%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
 
@@ -1032,7 +1032,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
-| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `in-flight` | 94/113 (83%) |
+| [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `shipped` | 111/113 (98%) |
 | [106-security-residual-fixes](./specs/106-security-residual-fixes/) | `shipped` | 18/19 (95%) |
 | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `shipped` | 126/126 (100%) |
 | [108-profiles-v3](./specs/108-profiles-v3/) | `drafted` | 0/153 (0%) |
