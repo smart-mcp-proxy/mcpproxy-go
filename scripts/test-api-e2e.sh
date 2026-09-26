@@ -13,6 +13,10 @@ NC='\033[0m' # No Color
 
 # Configuration
 MCPPROXY_BINARY="./mcpproxy"
+# The audit_log sub-test's own binary (see the "Testing audit_log sink"
+# section far below); declared here too so the stale-process self-heal near
+# the top of the script can recognize a leftover audit core from a prior run.
+AUDIT_BINARY="./mcpproxy-server"
 CONFIG_TEMPLATE="./test/e2e-config.template.json"
 CONFIG_FILE="./test/e2e-config.json"
 LISTEN_PORT="${LISTEN_PORT:-8081}"
@@ -36,6 +40,13 @@ fi
 API_BASE="${BASE_URL}/api/v1"
 TEST_DATA_DIR="./test-data"
 MCPPROXY_PID=""
+# The audit_log sub-test's own core; declared here so cleanup() can stop it if
+# the script exits before that sub-test's own shutdown path runs.
+AUDIT_PID=""
+# argv signature of the spec-046 launcher-test fixture (see the template).
+LAUNCHER_PATTERN='launcher-server.*--port 39933'
+# Physical cwd of this run; the launcher fixture inherits it from our core.
+SCRIPT_CWD="$(pwd -P)"
 TEST_RESULTS_FILE="/tmp/mcpproxy_e2e_results.json"
 API_KEY=""
 
@@ -81,6 +92,80 @@ snapshot_orphans_with_comm() {
 # body twice (an INT/TERM handler exits explicitly after calling cleanup,
 # which would otherwise also re-fire the EXIT trap).
 CLEANUP_DONE=0
+
+# proc_cwd PID: the process's current working directory (Linux /proc, else lsof).
+proc_cwd() {
+    if [ -e "/proc/$1/cwd" ]; then
+        readlink "/proc/$1/cwd" 2>/dev/null
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'
+    fi
+}
+
+# proc_id PID: start time + executable — with the PID, a stable identity, so a
+# PID the OS reuses for an unrelated process does not match.
+proc_id() {
+    ps -o lstart= -o comm= -p "$1" 2>/dev/null | tr ' ' '_'
+}
+
+# own_launcher_pids: launcher-test fixture processes belonging to this run —
+# descendants of our core, or (if the core died before reaping it) an orphan
+# still running in this run's working directory. A fixture spawned by another
+# checkout's core has neither property. The cwd test relies on the fixture
+# inheriting our core's cwd: the template's launcher-test entry sets no
+# working_dir (connection_launcher.go only sets cmd.Dir when it is non-empty).
+# Inside cleanup() the core is already stopped, so only the cwd branch fires.
+own_launcher_pids() {
+    local ours pid
+    ours=" $(descendant_pids "$MCPPROXY_PID" | tr '\n' ' ') "
+    for pid in $(pgrep -f "$LAUNCHER_PATTERN" 2>/dev/null); do
+        case "$ours" in
+            *" $pid "*) echo "$pid" ;;
+            *)
+                # Review round (finding 2): the cwd fallback below only has
+                # grounds to claim a launcher-test fixture as OURS when this
+                # run actually started its own core (MCPPROXY_PID set) —
+                # that core is what would normally own the fixture via the
+                # descendant walk above, and the cwd test exists only to
+                # cover the narrow gap where that core died before it could
+                # be reaped (see the comment above this function). A run
+                # whose own core never started (e.g. a prereq check failed
+                # before the "start mcpproxy" step) has no such core and no
+                # claim at all — without this guard it would match, purely
+                # by cwd, a live and healthy fixture belonging to a
+                # DIFFERENT, concurrently-running invocation of this script
+                # in the same checkout, and cleanup() would reap that
+                # run's fixture out from under it.
+                #
+                # Review round 3 (deferred): this cwd check still cannot,
+                # by itself, tell apart two DIFFERENT, concurrently-running
+                # invocations of this script from the SAME checkout that
+                # BOTH started their own core — run A's $MCPPROXY_PID is
+                # non-empty and never cleared even after A's core dies, so
+                # the guard above alone would not stop A's cleanup from
+                # matching a fixture actually owned by a live run B. In
+                # practice this is closed by the fixture itself: the
+                # launcher-test entry binds a real TCP listener on the
+                # fixed $LAUNCHER_PATTERN port (test/launcher-server/main.go,
+                # test/e2e-config.template.json), so at most one such
+                # process can ever be alive at a time regardless of which
+                # invocation's core spawned it — run B's own launcher
+                # fixture cannot even start while run A's (however orphaned)
+                # is still bound to that port, so there is no instant where
+                # this pgrep loop can be looking at a fixture that belongs
+                # to a truly independent, concurrently-alive run rather than
+                # this run's own (possibly already-orphaned) fixture. A
+                # complete fix — full per-invocation isolation (a start-of-
+                # script lock, or randomized launcher port/scratch config
+                # per run) — is a materially larger change to this test
+                # harness than this cwd guard and is out of scope here.
+                if [ -n "$MCPPROXY_PID" ] && [ "$(proc_cwd "$pid")" = "$SCRIPT_CWD" ]; then
+                    echo "$pid"
+                fi
+                ;;
+        esac
+    done
+}
 
 # Cleanup function
 cleanup() {
@@ -170,6 +255,22 @@ $(snapshot_orphans_with_comm "$MCPPROXY_PID")"
         fi
     done
     sleep 1
+
+    # Also reap any launcher-test fixture process this run's cwd owns but
+    # that the descendant walk above could not trace back to $MCPPROXY_PID
+    # (e.g. mcpproxy had already crashed/exited before this snapshot, so its
+    # children were already reparented — the "known, narrow residual gap"
+    # noted above). Scoped by cwd (see own_launcher_pids), never a
+    # system-wide pattern match.
+    local leftover_launcher_pid
+    for leftover_launcher_pid in $(own_launcher_pids); do
+        echo "Reaping this run's own leftover launcher-test fixture (PID: $leftover_launcher_pid)"
+        kill "$leftover_launcher_pid" 2>/dev/null || true
+    done
+    sleep 1
+    for leftover_launcher_pid in $(own_launcher_pids); do
+        kill -9 "$leftover_launcher_pid" 2>/dev/null || true
+    done
 
     # Review round 4 (finding F4): the audit_log sub-test's own instance and
     # scratch dirs/log are normally torn down on its own fall-through path
@@ -581,12 +682,13 @@ test_launcher_lifecycle() {
         log_fail "tools/list missing ping tool. Response: $tools_response"
     fi
 
-    # Step 2: the child should be a real OS process. pgrep over the
-    # fixture argv signature lets us detect it without knowing the PID
-    # mcpproxy assigned. Use `pgrep -f` for arg-line matching.
+    # Step 2: the child should be a real OS process. own_launcher_pids
+    # matches the fixture argv signature (`pgrep -f`) without knowing the
+    # PID mcpproxy assigned, scoped to our core's process tree so another
+    # checkout's fixture on the same host can't satisfy or fail these checks.
     log_test "Launcher lifecycle: child process is running (pgrep)"
     local before_pid
-    before_pid=$(pgrep -f 'launcher-server.*--port 39933' | head -1)
+    before_pid=$(own_launcher_pids | head -1)
     if [ -n "$before_pid" ]; then
         log_pass "child running (pid=$before_pid)"
     else
@@ -598,7 +700,7 @@ test_launcher_lifecycle() {
     eval "$curl_cmd -X POST \"${API_BASE}/servers/launcher-test/restart\"" >/dev/null
     sleep 4
     local after_pid
-    after_pid=$(pgrep -f 'launcher-server.*--port 39933' | head -1)
+    after_pid=$(own_launcher_pids | head -1)
     if [ -z "$after_pid" ]; then
         log_fail "child gone after restart — should have respawned"
     elif [ "$after_pid" = "$before_pid" ]; then
@@ -613,15 +715,15 @@ test_launcher_lifecycle() {
     # Give the launcher up to 8s to deliver SIGTERM + wait for exit.
     local waited=0
     while [ $waited -lt 8 ]; do
-        if ! pgrep -f 'launcher-server.*--port 39933' >/dev/null 2>&1; then
+        if [ -z "$(own_launcher_pids)" ]; then
             break
         fi
         sleep 1
         waited=$((waited + 1))
     done
-    if pgrep -f 'launcher-server.*--port 39933' >/dev/null 2>&1; then
+    if [ -n "$(own_launcher_pids)" ]; then
         local stragglers
-        stragglers=$(pgrep -f 'launcher-server.*--port 39933' | tr '\n' ' ')
+        stragglers=$(own_launcher_pids | tr '\n' ' ')
         log_fail "child still alive ${waited}s after disable (pids: $stragglers)"
     else
         log_pass "child reaped within ${waited}s of disable"
@@ -632,7 +734,7 @@ test_launcher_lifecycle() {
     eval "$curl_cmd -X POST \"${API_BASE}/servers/launcher-test/enable\"" >/dev/null
     if wait_for_launcher_test_server; then
         local reenabled_pid
-        reenabled_pid=$(pgrep -f 'launcher-server.*--port 39933' | head -1)
+        reenabled_pid=$(own_launcher_pids | head -1)
         if [ -n "$reenabled_pid" ] && [ "$reenabled_pid" != "$after_pid" ]; then
             log_pass "child respawned after enable (pid=$reenabled_pid, different from $after_pid)"
         else
@@ -711,13 +813,40 @@ mkdir -p "$TEST_DATA_DIR"
 echo "Copying fresh config from template..."
 cp "$CONFIG_TEMPLATE" "$CONFIG_FILE"
 
-# Substitute LISTEN_PORT in config file if not using default 8081
+# Substitute LISTEN_PORT in config file if not using default 8081.
+# `sed -i` in-place syntax differs between BSD/macOS (`-i ''`, a separate
+# argv token) and GNU/Linux (`-i` alone, or `-iSUFFIX` with no space) — the
+# BSD form breaks on Linux (empty '' becomes the script, the actual sed
+# program is then read as the FILE argument, which doesn't exist, so sed
+# errors and exits non-zero) — and since this script doesn't `set -e`, that
+# failure is silent: the port is never substituted and the run continues
+# with a mismatched config. `perl -pi -e` takes the same in-place flag on
+# both, so no OS branch is needed.
 if [ "$LISTEN_PORT" != "8081" ]; then
-    sed -i '' "s/:8081/:${LISTEN_PORT}/g" "$CONFIG_FILE"
+    perl -pi -e "s/:8081/:${LISTEN_PORT}/g" "$CONFIG_FILE"
     echo "Updated listen port to :${LISTEN_PORT}"
 fi
 
-# Start server in background
+# Start server in background.
+#
+# Known issue (live QA, fixed here): this PID's identity used to be captured
+# with `proc_id` (ps -o lstart=,comm=) immediately after backgrounding, right
+# here — racing the child's own execve(). `comm` briefly still names the
+# shell until execve() completes, so an identity check done later (once the
+# child has definitely exec'd into mcpproxy) would never match this
+# early-captured value, and a cleanup() gated on that match would then treat
+# its OWN core as a foreign/reused PID and never stop it — leaking it as an
+# orphan on every run. Fixed by not needing that comparison at all: this PID
+# is our own direct child ($!), tracked by the shell's own job control from
+# the moment it is assigned, so cleanup() below stops it unconditionally by
+# PID — the same trusted-direct-child approach already used for AUDIT_PID.
+# Identity re-verification (via proc_id) is reserved for PIDs whose identity
+# we can only ever learn by searching the process table after the fact (the
+# orphan/launcher reaping in cleanup() below), where a real time gap invites
+# PID reuse — and even there, only ever among a known process's OWN
+# descendants, never a wider pattern match that could reach an unrelated
+# process sharing this checkout's directory (e.g. a manually-started
+# `mcpproxy serve` for local testing).
 $MCPPROXY_BINARY serve --config="$CONFIG_FILE" --log-level=info > "/tmp/mcpproxy_e2e.log" 2>&1 &
 MCPPROXY_PID=$!
 
@@ -1295,7 +1424,6 @@ echo ""
 echo -e "${YELLOW}Testing audit_log sink (Spec 107 PR-D)...${NC}"
 echo ""
 
-AUDIT_BINARY="./mcpproxy-server"
 AUDIT_SCHEMA="./docs/schemas/audit-line-v1.schema.json"
 AUDIT_PORT="${AUDIT_LISTEN_PORT:-18181}"
 AUDIT_BASE_URL="http://localhost:${AUDIT_PORT}"
@@ -1501,10 +1629,17 @@ JSON
         fi
     fi
 
-    # Stop only the audit instance by PID — never a blanket pkill here
-    # (that is cleanup()'s job on script exit, and it would also hit
-    # concurrent sessions' cores; see memory reference_isolated_dev_instance).
-    if [ -n "$AUDIT_PID" ]; then
+    # Stop only the audit instance by PID — never a blanket pkill (it would
+    # also hit concurrent sessions' cores; see the helpers above cleanup()).
+    # This is our own direct child ($!), tracked by the shell's own job
+    # control since the moment it was assigned above, so (like MCPPROXY_PID)
+    # no identity re-verification against a later `ps` snapshot is needed —
+    # see the note above the `$MCPPROXY_BINARY serve ... &` line for why an
+    # early-captured identity would in fact be actively wrong here (it would
+    # race the child's own execve()). The kill -0 below is a plain liveness
+    # check only: skip the teardown if the audit core already exited on its
+    # own (e.g. it crashed mid-test).
+    if [ -n "$AUDIT_PID" ] && kill -0 "$AUDIT_PID" 2>/dev/null; then
         kill "$AUDIT_PID" 2>/dev/null || true
         AUDIT_WAIT_COUNT=0
         while [ "$AUDIT_WAIT_COUNT" -lt 10 ]; do
@@ -1516,6 +1651,10 @@ JSON
             kill -9 "$AUDIT_PID" 2>/dev/null || true
         fi
     fi
+    # Cleared either way — stopped above, or already exited on its own — so
+    # cleanup()'s own AUDIT_PID handling (further up this script) becomes a
+    # harmless no-op for this instance.
+    AUDIT_PID=""
     rm -rf "$AUDIT_DATA_DIR" "$AUDIT_JSONL_DIR"
     rm -f "$AUDIT_SERVER_LOG"
 fi
