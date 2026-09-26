@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
 
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
 
@@ -741,6 +741,25 @@ class APIService {
     return this.request<SearchRegistryServersResponse>(url)
   }
 
+  // Catalog (Spec 109 FR-060): source-agnostic search across every enabled
+  // catalog source. `source` narrows to one (never selects a UI tab — that's
+  // the caller's job, FR-062).
+  async catalogSearch(options?: {
+    q?: string
+    source?: string
+    tag?: string
+    limit?: number
+  }): Promise<APIResponse<CatalogSearchResponse>> {
+    const params = new URLSearchParams()
+    if (options?.q) params.append('q', options.q)
+    if (options?.source) params.append('source', options.source)
+    if (options?.tag) params.append('tag', options.tag)
+    if (options?.limit) params.append('limit', options.limit.toString())
+
+    const url = `/api/v1/catalog/search${params.toString() ? '?' + params.toString() : ''}`
+    return this.request<CatalogSearchResponse>(url)
+  }
+
   // MCP-866 / MCP-867: add a user-supplied registry source. The server tags an
   // added source as custom provenance (provenance is NOT part of the request) —
   // informational only (MCP-1072); servers added from it follow the global
@@ -1042,6 +1061,17 @@ class APIService {
     format?: string
     server_names?: string[]
     preview?: boolean
+    // Paste tab env/header edits (Value or Secret-ref), applied server-side
+    // to the server this same request's `content` parses to — only takes
+    // effect when preview is false. See PasteServer.vue's handleAdd.
+    env_override?: Record<string, string>
+    header_override?: Record<string, string>
+    // Opt into detecting a bare URL or single command line (FR-064) when
+    // JSON/TOML detection fails. Only the Paste tab sets this — every other
+    // caller (the general "Import config" panel, canonical-path import)
+    // must keep getting a clear detection error for a plain one-liner
+    // instead of it being silently guessed at (review round 4 F-E).
+    allow_paste_fallback?: boolean
   }): Promise<APIResponse<ImportResponse>> {
     const url = `/api/v1/servers/import/json${params.preview ? '?preview=true' : ''}`
     return this.request<ImportResponse>(url, {
@@ -1049,7 +1079,10 @@ class APIService {
       body: JSON.stringify({
         content: params.content,
         format: params.format,
-        server_names: params.server_names
+        server_names: params.server_names,
+        env_override: params.env_override,
+        header_override: params.header_override,
+        allow_paste_fallback: params.allow_paste_fallback
       })
     })
   }

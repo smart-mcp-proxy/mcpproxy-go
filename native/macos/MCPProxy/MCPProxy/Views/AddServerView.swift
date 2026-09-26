@@ -8,7 +8,11 @@ import SwiftUI
 
 // MARK: - Add Server Tab
 
+/// Spec 109 FR-062: Catalog (default) · Paste · Import · Manual — same order
+/// and same default as the Web UI's `views/AddServer.vue`.
 enum AddServerTab: String, CaseIterable {
+    case catalog = "Catalog"
+    case paste = "Paste"
     case importConfig = "Import"
     case manual = "Manual"
 }
@@ -21,13 +25,17 @@ struct AddServerView: View {
     @Environment(\.fontScale) var fontScale
 
     @State private var selectedTab: AddServerTab
+    /// Narrows the Catalog tab only (mirrors the Web UI's `?source=`); never
+    /// selects a tab itself (FR-062).
+    let catalogSourceFilter: String?
 
     private var apiClient: APIClient? { appState.apiClient }
 
-    init(appState: AppState, isPresented: Binding<Bool>, initialTab: AddServerTab = .importConfig) {
+    init(appState: AppState, isPresented: Binding<Bool>, initialTab: AddServerTab = .catalog, catalogSourceFilter: String? = nil) {
         self.appState = appState
         self._isPresented = isPresented
         self._selectedTab = State(initialValue: initialTab)
+        self.catalogSourceFilter = catalogSourceFilter
     }
 
     var body: some View {
@@ -56,10 +64,15 @@ struct AddServerView: View {
             .pickerStyle(.segmented)
             .padding(.horizontal)
             .padding(.bottom, 8)
+            .accessibilityIdentifier("add-server-tab-picker")
 
             Divider()
 
             switch selectedTab {
+            case .catalog:
+                CatalogView(appState: appState, sourceFilter: catalogSourceFilter, onAdded: { _ in isPresented = false })
+            case .paste:
+                PasteServerView(appState: appState, onAdded: { _ in isPresented = false })
             case .importConfig:
                 ImportServerForm(appState: appState, onDone: { isPresented = false })
             case .manual:

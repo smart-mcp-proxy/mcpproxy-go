@@ -10,7 +10,11 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     // native home — a tray-first user could not answer "which of my 942 tools
     // does X?" without opening a browser.
     case tools = "Tools"
-    case registries = "Registries"
+    // Spec 109 T109: the Registries sidebar item is retired — server
+    // discovery moved into the Add Server sheet's Catalog tab (CatalogView,
+    // aggregated across every enabled source) and registry SOURCE management
+    // moved to Settings -> Catalog Sources, mirroring the Web UI's
+    // `views/Repositories.vue` -> `/add-server?tab=catalog` + Settings move.
     case activity = "Activity Log"
     case secrets = "Secrets"
     // F5: TokensView was a complete, API-complete create/list/revoke UI that
@@ -25,7 +29,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .dashboard: return "rectangle.3.group"
         case .servers: return "server.rack"
         case .tools: return "wrench.and.screwdriver"
-        case .registries: return "books.vertical"
         case .activity: return "clock.arrow.circlepath"
         case .secrets: return "key.fill"
         case .tokens: return "key.horizontal"
@@ -82,8 +85,6 @@ struct MainWindow: View {
                         ServersView(appState: appState)
                     case .tools:
                         ToolsView(appState: appState)
-                    case .registries:
-                        RegistriesView(appState: appState)
                     case .activity:
                         ActivityView(appState: appState)
                     case .secrets:

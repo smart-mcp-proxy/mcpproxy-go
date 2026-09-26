@@ -98,7 +98,10 @@ struct ServersView: View {
                     .foregroundStyle(.secondary)
 
                 Button {
-                    addServerInitialTab = .importConfig
+                    // Spec 109 FR-062: the generic entry point opens on the
+                    // catalog-first Catalog tab, matching the Web UI default —
+                    // "Import" and "Manual" stay explicit choices below.
+                    addServerInitialTab = .catalog
                     showAddServer = true
                 } label: {
                     Image(systemName: "plus")
@@ -124,7 +127,7 @@ struct ServersView: View {
             // Prominent "Add Server" button bar
             HStack {
                 Button {
-                    addServerInitialTab = .importConfig
+                    addServerInitialTab = .catalog
                     showAddServer = true
                 } label: {
                     Label("Add Server", systemImage: "plus.circle.fill")
@@ -170,7 +173,7 @@ struct ServersView: View {
                             .frame(maxWidth: 300)
                         HStack(spacing: 12) {
                             Button {
-                                addServerInitialTab = .manual
+                                addServerInitialTab = .catalog
                                 showAddServer = true
                             } label: {
                                 Label("Add Server", systemImage: "plus.circle.fill")
@@ -215,6 +218,22 @@ struct ServersView: View {
         }
         .onChange(of: appState.serversVersion) { _ in
             triggerLoad()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { notification in
+            if let tab = notification.object as? AddServerTab {
+                addServerInitialTab = tab
+            } else {
+                addServerInitialTab = .catalog
+            }
+            showAddServer = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showServerDetail)) { notification in
+            guard let serverName = notification.object as? String else { return }
+            // Find the server by name in the current list or appState
+            if let server = servers.first(where: { $0.name == serverName })
+                ?? appState.servers.first(where: { $0.name == serverName }) {
+                selectedServer = server
+            }
         }
     }
 

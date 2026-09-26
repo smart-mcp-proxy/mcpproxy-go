@@ -1322,23 +1322,17 @@ struct ServerDetailView: View {
         enum Scope: String { case header, env }
     }
 
-    /// Suggest a keyring secret name derived from server.name + key.
-    /// Lowercased, alphanumeric + hyphens, capped at 64 chars — same
-    /// convention as the Web UI / Secrets view.
-    private func suggestedSecretName(for key: String) -> String {
-        let base = "\(server.name)-\(key)"
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
-        let scrubbed = base.lowercased().unicodeScalars
-            .map { allowed.contains($0) ? Character($0) : "-" }
-        var out = String(scrubbed)
-            .split(separator: "-", omittingEmptySubsequences: true)
-            .joined(separator: "-")
-        if out.count > 64 { out = String(out.prefix(64)) }
-        return out
+    /// Suggest a keyring secret name derived from server.name + key (FR-065):
+    /// the shared SecretRefName helper (also used by the Add Server sheet)
+    /// keeps the field KIND (env vs header) in the name, so a header and an
+    /// env var with the same key never collide on one keyring entry.
+    private func suggestedSecretName(scope: ConvertToSecretContext.Scope, key: String) -> String {
+        let kind: SecretRefName.Kind = scope == .header ? .header : .env
+        return SecretRefName.compute(server: server.name, kind: kind, key: key)
     }
 
     private func openConvertSheet(scope: ConvertToSecretContext.Scope, key: String, value: String) {
-        convertSheetSecretName = suggestedSecretName(for: key)
+        convertSheetSecretName = suggestedSecretName(scope: scope, key: key)
         convertSheetBusy = false
         convertSheetError = nil
         convertSheet = ConvertToSecretContext(scope: scope, key: key, value: value)

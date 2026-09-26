@@ -28,7 +28,9 @@ func TestUpstreamAddConfigModeQuarantineFollowsTrustMode(t *testing.T) {
 			TrustMode:   trustMode,
 			Quarantined: explicit,
 		}
-		require.NoError(t, runUpstreamAddConfigMode(req, cfg))
+		added, err := runUpstreamAddConfigMode(req, cfg)
+		require.NoError(t, err)
+		require.True(t, added)
 		require.Len(t, cfg.Servers, 1)
 		return cfg.Servers[0]
 	}

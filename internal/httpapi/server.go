@@ -1142,6 +1142,11 @@ func (s *Server) setupRoutes() {
 		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)                                                            // spec 070 FR-007
 		r.Post("/registries/{id}/servers/{serverId}/add", s.requireServerOp(auth.ServerOpAddFromRegistry, s.handleAddFromRegistry)) // spec 070 keystone add
 
+		// Catalog (Spec 109 FR-060): source-agnostic, ranked search across
+		// every enabled registry. Open like GET /registries/{id}/servers —
+		// "added" is the only field filtered per caller scope (FR-007).
+		r.Get("/catalog/search", s.handleCatalogSearch)
+
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
 		r.Get("/activity/summary", s.handleActivitySummary)
@@ -4484,6 +4489,11 @@ func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to extract config secrets")
 		return
 	}
+
+	// FR-065: report whether the OS keyring is usable so the Paste/Manual/
+	// Catalog secret toggle can disable itself with the reason instead of
+	// failing silently on Add.
+	configSecrets.KeyringAvailable, configSecrets.KeyringReason = resolver.KeyringAvailability()
 
 	s.writeSuccess(w, configSecrets)
 }

@@ -197,10 +197,16 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 //     by issue #1236), so on those surfaces the entry CHANGES from the stub to
 //     the live tool; mcp_menu_surface_test.go pins that transition field by
 //     field (assertCodeExecutionLive).
+//   - search_servers / list_registries — Spec 109 FR-060/067: 'registry'
+//     becomes optional on search_servers (was required) so it searches every
+//     enabled catalog source when omitted, and both tools' descriptions gained
+//     "catalog source" wording. Pinned field by field by
+//     TestMenuSurface_ExactDeltaFromPreFeature's assertSearchServersDelta /
+//     assertListRegistriesDelta.
 var toolsListAllowedDelta = map[string][]string{
-	"default_server":      {"describe_tool", "quarantine_security", "upstream_servers"},
-	"retrieve_tools_mode": {"code_execution", "describe_tool", "quarantine_security", "upstream_servers"},
-	"code_execution_mode": {"code_execution", "quarantine_security", "upstream_servers"},
+	"default_server":      {"describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries"},
+	"retrieve_tools_mode": {"code_execution", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries"},
+	"code_execution_mode": {"code_execution", "quarantine_security", "upstream_servers", "search_servers", "list_registries"},
 }
 
 // toolsListAllowedAdditions enumerates the tool entries a shipped change was
@@ -346,6 +352,17 @@ const (
 	spec105CodeExecutionTool = "code_execution"
 )
 
+// spec109CatalogTools are the two entries Spec 109 (FR-060/067) allowed to
+// move relative to the pre-105 baseline: search_servers' 'registry'
+// parameter becomes optional (was required) and both tools' descriptions
+// gained "catalog source" wording. Skipped in the pre-105 byte-comparison
+// loop below the same way code_execution is; their delta is pinned field by
+// field against the newer pre-099 baseline instead
+// (TestToolsListSnapshot_DeltaIsEnumerated / toolsListAllowedDelta) and by
+// TestMenuSurface_ExactDeltaFromPreFeature's assertSearchServersDelta /
+// assertListRegistriesDelta.
+var spec109CatalogTools = map[string]bool{"search_servers": true, "list_registries": true}
+
 // spec105EnumerationPhrases are the pre-105 fragments that advertised
 // discovery-by-failed-call. Neither may survive in the live strings.
 var spec105EnumerationPhrases = []string{
@@ -389,7 +406,7 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 
 			// Every other entry is byte-equal to the frozen capture.
 			for name, pre := range before {
-				if name == spec105CodeExecutionTool {
+				if name == spec105CodeExecutionTool || spec109CatalogTools[name] {
 					continue
 				}
 				assert.True(t, bytes.Equal(pre, after[name]),

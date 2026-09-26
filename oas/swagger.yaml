@@ -3449,6 +3449,26 @@ components:
           description: Defaults to "mcpproxy"
           type: string
       type: object
+    httpapi.EnvFieldPreview:
+      properties:
+        empty_or_placeholder:
+          type: boolean
+        name:
+          type: string
+        secret_like:
+          type: boolean
+        value_present:
+          type: boolean
+      type: object
+    httpapi.HeaderFieldPreview:
+      properties:
+        empty_or_placeholder:
+          type: boolean
+        name:
+          type: string
+        secret_like:
+          type: boolean
+      type: object
     httpapi.ImportFromPathRequest:
       properties:
         format:
@@ -3478,12 +3498,45 @@ components:
       type: object
     httpapi.ImportRequest:
       properties:
+        allow_paste_fallback:
+          description: |-
+            AllowPasteFallback opts into detecting a bare URL or a single command
+            line (FR-064) when Format/format detection would otherwise fail — see
+            configimport.ImportOptions.AllowPasteFallback for why this must stay
+            opt-in (review round 4 F-E). Only the interactive Paste tab sets this;
+            every other caller of this endpoint (the general "Import config"
+            panel, or a direct API call) leaves it false and gets a clear
+            "unable to detect configuration format" error for a plain one-liner
+            instead of it being silently guessed at and, on apply, added as a
+            real server with no confirmation step.
+          type: boolean
         content:
           description: Raw JSON or TOML content
           type: string
+        env_override:
+          additionalProperties:
+            type: string
+          description: |-
+            EnvOverride/HeaderOverride (Spec 109 FR-064/065, PR review round 4
+            F-A/F-D fix): the Paste tab's per-field Value/Secret edits — a plain
+            value the user typed, or a keyring ref path if they chose Secret —
+            keyed by field name. Applied to the matching imported server's
+            Env/Headers ONLY when preview=false, directly on the server this
+            request's own raw Content parses to server-side. This is what lets
+            the apply call carry the user's edited env/header values without
+            ever round-tripping the redacted preview: url/command/args on apply
+            always come from re-parsing Content here, never from a client-held
+            preview response, so a credential embedded in a URL query param or
+            argv flag (which the preview necessarily redacted for display) is
+            never overwritten with the masked placeholder.
+          type: object
         format:
           description: Optional format hint
           type: string
+        header_override:
+          additionalProperties:
+            type: string
+          type: object
         server_names:
           description: 'Optional: import only these servers'
           items:
@@ -3529,9 +3582,19 @@ components:
           uniqueItems: false
         command:
           type: string
+        env:
+          items:
+            $ref: '#/components/schemas/httpapi.EnvFieldPreview'
+          type: array
+          uniqueItems: false
         fields_skipped:
           items:
             type: string
+          type: array
+          uniqueItems: false
+        headers:
+          items:
+            $ref: '#/components/schemas/httpapi.HeaderFieldPreview'
           type: array
           uniqueItems: false
         name:
@@ -3542,6 +3605,20 @@ components:
           type: string
         source_format:
           type: string
+        summary:
+          description: |-
+            Summary, Tags, Env and Headers are the Spec 109 FR-064 preview
+            enrichment (contracts/rest-api.md "Import preview"). Summary and Tags
+            are built from the already-redacted URL/Command/Args above, so a
+            secret embedded in argv or a URL query never reaches Summary either.
+            Env/Headers never carry the raw value — only its presence and two
+            booleans a surface uses to default the Value/Secret toggle (FR-065).
+          type: string
+        tags:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         url:
           type: string
         warnings:
@@ -4319,6 +4396,46 @@ paths:
       summary: Get annotation coverage report
       tags:
       - annotations
+  /api/v1/catalog/search:
+    get:
+      description: Fans out to every enabled catalog source (registry) in parallel,
+        merges, de-duplicates and ranks the results (FR-060/061). An empty q returns
+        official + popular sections instead of a flat list. Open to any authenticated
+        caller — added is the only field filtered per caller scope (FR-007).
+      parameters:
+      - description: Free-text search
+        in: query
+        name: q
+        schema:
+          type: string
+      - description: Narrow to one catalog source id
+        in: query
+        name: source
+        schema:
+          type: string
+      - description: Filter by tag
+        in: query
+        name: tag
+        schema:
+          type: string
+      - description: Max results (default 20, max 50)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: OK
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Search the server catalog across every enabled source
+      tags:
+      - catalog
   /api/v1/code/scripts:
     get:
       description: 'List the stored scripts available to the code_execution tool.

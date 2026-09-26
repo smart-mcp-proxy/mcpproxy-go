@@ -95,6 +95,13 @@
         </div>
       </div>
 
+      <!-- Catalog sources (Spec 109 FR-062, moved from the retired Repositories.vue) -->
+      <div v-show="activeTab === 'catalog'" class="card bg-base-100 shadow-md">
+        <div class="card-body">
+          <CatalogSourcesSettings />
+        </div>
+      </div>
+
       <!-- Advanced -->
       <div v-show="activeTab === 'advanced'" class="space-y-3">
         <details v-for="acc in advancedAccordions" :key="acc.id" class="collapse collapse-arrow bg-base-100 shadow-md">
@@ -184,6 +191,7 @@ import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import ConnectModal from '@/components/ConnectModal.vue'
 import SettingsSection from '@/components/settings/SettingsSection.vue'
+import CatalogSourcesSettings from '@/components/CatalogSourcesSettings.vue'
 import {
   SECURITY_FIELDS,
   GENERAL_FIELDS,
@@ -340,6 +348,11 @@ const IconWrench = makeTabIcon(
 const IconUsers = makeTabIcon(
   'M17 20v-2a4 4 0 00-3-3.87M9 20v-2a4 4 0 013-3.87m0-4.13a4 4 0 100-8 4 4 0 000 8zm8 4v-2a4 4 0 00-3-3.85m-1-4.15a4 4 0 010 7.75'
 )
+// Spec 109 FR-062: catalog-source management moved here from the retired
+// Repositories.vue.
+const IconCatalog = makeTabIcon(
+  'M4 6a2 2 0 012-2h3l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2V6z'
+)
 const IconBraces = makeTabIcon(
   'M8 4c-2 0-3 1-3 3v3c0 1-1 2-2 2 1 0 2 1 2 2v3c0 2 1 3 3 3m8-16c2 0 3 1 3 3v3c0 1 1 2 2 2-1 0-2 1-2 2v3c0 2-1 3-3 3'
 )
@@ -348,6 +361,7 @@ const tabs = computed(() => {
   const base = [
     { id: 'security', label: 'Security & Access', icon: IconLock },
     { id: 'general', label: 'General', icon: IconGear },
+    { id: 'catalog', label: 'Catalog sources', icon: IconCatalog },
     { id: 'advanced', label: 'Advanced', icon: IconWrench },
   ] as Array<{ id: string; label: string; icon: FunctionalComponent }>
   if (hasServerEdition.value) base.push({ id: 'teams', label: SERVER_EDITION_TAB_LABEL, icon: IconUsers })

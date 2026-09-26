@@ -568,6 +568,11 @@ export interface ConfigSecretsResponse {
   environment_vars: EnvVarStatus[]
   total_secrets: number
   total_env_vars: number
+  // FR-065: whether the OS keyring provider is usable, and why not when it
+  // isn't — the Paste/Manual/Catalog secret toggle disables itself with this
+  // reason instead of failing silently on Add.
+  keyring_available: boolean
+  keyring_reason?: string
 }
 
 // Tool Call History types
@@ -817,6 +822,59 @@ export interface SearchRegistryServersResponse {
   tag?: string
 }
 
+// Catalog (Spec 109 FR-060/061), GET /api/v1/catalog/search. Mirrors
+// registries.CatalogResult — a DTO distinct from RepositoryServer/ServerEntry;
+// see contracts/rest-api.md#catalog.
+export interface CatalogPopularity {
+  stars?: number
+  installs?: number
+}
+
+export interface CatalogInstall {
+  url?: string
+  command?: string
+  args?: string[]
+}
+
+export interface CatalogInput {
+  name: string
+  description?: string
+  secret_like: boolean
+}
+
+export interface CatalogResult {
+  source: string
+  id: string
+  title: string
+  publisher?: string
+  verified: boolean
+  official: boolean
+  popularity?: CatalogPopularity
+  description: string
+  transport: 'http' | 'stdio'
+  install: CatalogInstall
+  required_inputs?: CatalogInput[]
+  source_code_url?: string
+  added: boolean
+}
+
+export interface CatalogSourceError {
+  source: string
+  reason: string
+}
+
+export interface CatalogSections {
+  official: CatalogResult[]
+  popular: CatalogResult[]
+}
+
+export interface CatalogSearchResponse {
+  query: string
+  results: CatalogResult[]
+  sections: CatalogSections | null
+  unavailable: CatalogSourceError[]
+}
+
 // Activity Log types (RFC-003)
 
 export type ActivityType =
@@ -973,6 +1031,22 @@ export interface ImportSummary {
   failed: number
 }
 
+// ImportFieldPreview types mirror httpapi.EnvFieldPreview / HeaderFieldPreview
+// (Spec 109 FR-064/065): never the raw value, only presence + two booleans a
+// surface uses to default the Value/Secret toggle.
+export interface ImportEnvFieldPreview {
+  name: string
+  value_present: boolean
+  secret_like: boolean
+  empty_or_placeholder: boolean
+}
+
+export interface ImportHeaderFieldPreview {
+  name: string
+  secret_like: boolean
+  empty_or_placeholder: boolean
+}
+
 export interface ImportedServer {
   name: string
   protocol: string
@@ -983,6 +1057,11 @@ export interface ImportedServer {
   original_name: string
   fields_skipped?: string[]
   warnings?: string[]
+  // FR-064 preview enrichment (contracts/rest-api.md "Import preview").
+  summary?: string
+  tags?: string[]
+  env?: ImportEnvFieldPreview[]
+  headers?: ImportHeaderFieldPreview[]
 }
 
 export interface SkippedServer {
