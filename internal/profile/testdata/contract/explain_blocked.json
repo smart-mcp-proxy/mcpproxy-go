@@ -1,0 +1,21 @@
+{
+  "subject": {"client": "cursor"},
+  "tool": "github:create_issue",
+  "steps": [
+    {"step": "credential", "status": "pass", "detail": ""},
+    {"step": "profile", "status": "pass", "detail": ""},
+    {"step": "server_in_scope", "status": "pass", "detail": ""},
+    {"step": "tool_rule", "status": "pass", "detail": ""},
+    {"step": "tier_cap", "status": "fail", "detail": "write exceeds max_tier read"},
+    {"step": "token_permission", "status": "skip", "detail": ""},
+    {"step": "global_gate", "status": "skip", "detail": ""},
+    {"step": "server_state", "status": "skip", "detail": ""},
+    {"step": "tool_approval", "status": "skip", "detail": ""}
+  ],
+  "verdict": "blocked",
+  "first_failure": "tier_cap",
+  "fixes": [
+    {"step": "tier_cap", "action": "allow_in_profile", "target": "work-readonly", "label": "Allow this tool in Work Read-only"},
+    {"step": "tier_cap", "action": "move_client", "target": "work-full", "label": "Move Cursor to Work Full"}
+  ]
+}
