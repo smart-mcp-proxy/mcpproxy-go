@@ -59,6 +59,22 @@ type SessionInfo struct {
 	// calls wait on it rather than racing ahead to UpdateSessionStats, which
 	// errors if the row is not there yet.
 	persistDone chan struct{}
+
+	// TokenName and ClientID identify the credential that authenticated this
+	// session (Spec 108-c, data-model.md §6): the agent-token/client-
+	// credential name and, for a client credential, its client id. Both
+	// empty for an admin/anonymous session. Set once at initialize from the
+	// AuthContext (SetSessionIdentity) — never re-derived per call, because
+	// the credential does not change mid-connection.
+	TokenName string
+	ClientID  string
+
+	// Profile and ProfileSource are the LATEST effective resolution for this
+	// session (data-model.md §6 "latest effective, updated on each call").
+	// The session's BASE (pin, bound profile or anonymous_profile) is
+	// deliberately not stored here — see UpdateSessionProfile.
+	Profile       string
+	ProfileSource string
 }
 
 // SessionStore manages MCP session information
@@ -428,6 +444,62 @@ func (s *SessionStore) SetActiveProfile(sessionID, profileSlug string) {
 		return
 	}
 	s.activeProfiles[sessionID] = profileSlug
+}
+
+// SetSessionIdentity records the credential that authenticated a session
+// (Spec 108-c, data-model.md §6): the agent-token/client-credential name and
+// its client id (empty for a regular agent token or an admin/anonymous
+// session). Called once at initialize, from the request's AuthContext — the
+// credential never changes mid-connection, so this is never called again for
+// the same sessionID.
+func (s *SessionStore) SetSessionIdentity(sessionID, tokenName, clientID string) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.TokenName = tokenName
+		info.ClientID = clientID
+	}
+}
+
+// UpdateSessionProfile records the LATEST effective profile resolution for a
+// session (data-model.md §6), called after resolving a request's
+// ProfileResolution. The session's BASE is deliberately not stored: it
+// changes on reassignment and rename, so every consumer derives it at use
+// time from TokenName -> the token's current profile_pin, or, for a session
+// with no TokenName, from the snapshot's anonymous_profile — never from a
+// value cached here.
+func (s *SessionStore) UpdateSessionProfile(sessionID, profileName, source string) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.Profile = profileName
+		info.ProfileSource = source
+	}
+}
+
+// SessionsForToken returns the ids of every live session currently
+// authenticated by the named token — the FR-026/FR-027 notification
+// fan-out seam ("send notifications/tools/list_changed to every live MCP
+// session authenticated by that credential"). Order is unspecified.
+func (s *SessionStore) SessionsForToken(tokenName string) []string {
+	if tokenName == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var ids []string
+	for id, info := range s.sessions {
+		if info.TokenName == tokenName {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // GetActiveProfile returns the active profile slug for a session, or "" when the
