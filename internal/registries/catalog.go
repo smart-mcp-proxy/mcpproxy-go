@@ -105,6 +105,15 @@ type SearchOptions struct {
 	// could silently drop a narrower source's real matches that simply
 	// didn't survive the pre-filter truncation.
 	Source string
+
+	// PopularityWait bounds how long SearchAll waits (Spec 110 FR-007) for a
+	// background popularity fetch to land before returning. Zero — the Go
+	// zero value, i.e. left unset — means the default (800ms), matching
+	// every other *Timeout-shaped field in this struct (see SourceTimeout).
+	// A NEGATIVE value disables the wait entirely: SearchAll still enqueues
+	// the misses for background fetching, it just never blocks for them.
+	// The wait never outlives ctx.
+	PopularityWait time.Duration
 }
 
 const (
@@ -112,6 +121,11 @@ const (
 	catalogSectionCap           = 12
 	defaultCatalogLimit         = 10
 	maxCatalogLimit             = 50
+
+	// defaultPopularityWait is SearchOptions.PopularityWait's zero-value
+	// default (Spec 110 FR-007): long enough for a warm cached/in-flight
+	// GitHub round trip, short enough to never meaningfully slow a search.
+	defaultPopularityWait = 800 * time.Millisecond
 )
 
 // SearchAll fans SearchServers out to every enabled registry in parallel
@@ -132,6 +146,21 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 		limit = maxCatalogLimit
 	}
 
+	empty := strings.TrimSpace(q) == ""
+
+	// Spec 110 FR-005 (zcode review round 1, finding 2): an empty q fans out
+	// each source at the per-source MAXIMUM, not the caller's `limit`, so the
+	// section pool (Official/Popular) is as wide as each source will give —
+	// otherwise a `limit` of 10 would starve Popular of anything beyond the
+	// first 10 official hits before popularity ever gets a say. The final
+	// `results` list is still truncated to `limit` below. A non-empty q keeps
+	// fetching exactly `limit` per source (unchanged), since it has no
+	// sections to populate.
+	fetchLimit := limit
+	if empty {
+		fetchLimit = maxCatalogLimit
+	}
+
 	sources := ListRegistries()
 
 	type sourceOutcome struct {
@@ -149,7 +178,7 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 			sctx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
 
-			entries, err := SearchServers(sctx, reg.ID, tag, q, limit, nil)
+			entries, err := SearchServers(sctx, reg.ID, tag, q, fetchLimit, nil)
 			if err != nil {
 				reason := err.Error()
 				if sctx.Err() != nil {
@@ -169,6 +198,12 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 	wg.Wait()
 
 	seen := make(map[string]bool)
+	// all is built and kept in MERGE order (registry list order, then each
+	// source's native order) until buildSections has taken its snapshot
+	// below — Spec 110 FR-005 (zcode review finding 1): Official must come
+	// from a copy taken BEFORE any Rank sort, or it silently degrades back
+	// into popularity order on an all-official default install (the exact
+	// bug this spec fixes).
 	var all []CatalogHit
 	var unavailable []SourceError
 	for _, outcome := range outcomes {
@@ -190,6 +225,19 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 		all = filterHitsBySource(all, opts.Source)
 	}
 
+	// Spec 110 FR-002/007: resolve popularity (cache hits immediately, misses
+	// queued for a bounded background wait) BEFORE ranking, so both the
+	// Rank tiebreak (US2) and the Popular section see up-to-date signal. This
+	// mutates each hit's Popularity in place but does not reorder `all`.
+	resolvePopularity(ctx, all, q, popularityWait(opts.PopularityWait))
+
+	var sections *CatalogSections
+	if empty {
+		// Built from `all` in its current MERGE order, before the Rank sort
+		// below (FR-005).
+		sections = buildSections(all, q)
+	}
+
 	sort.SliceStable(all, func(i, j int) bool { return Rank(all[i], all[j], q) })
 	sort.SliceStable(unavailable, func(i, j int) bool { return unavailable[i].Source < unavailable[j].Source })
 
@@ -197,12 +245,65 @@ func SearchAll(ctx context.Context, q, tag string, limit int, opts SearchOptions
 		all = all[:limit]
 	}
 
-	var sections *CatalogSections
-	if strings.TrimSpace(q) == "" {
-		sections = buildSections(all)
+	return all, sections, unavailable
+}
+
+// popularityWait resolves SearchOptions.PopularityWait's documented
+// convention: zero (unset) means the 800ms default; negative disables the
+// wait entirely (fetches are still enqueued, SearchAll just never blocks on
+// them).
+func popularityWait(configured time.Duration) time.Duration {
+	switch {
+	case configured < 0:
+		return 0
+	case configured == 0:
+		return defaultPopularityWait
+	default:
+		return configured
+	}
+}
+
+// resolvePopularity is Spec 110's FR-007 hook: it asks the installed
+// PopularityProvider (if any) to resolve every hit's GitHub repo key, waits
+// up to `wait` for the background fetch to land, and re-applies whatever is
+// now cached. A nil provider (no popularity wiring — e.g. most tests) is a
+// fast no-op.
+func resolvePopularity(ctx context.Context, hits []CatalogHit, q string, wait time.Duration) {
+	provider := getPopularityProvider()
+	if provider == nil {
+		return
 	}
 
-	return all, sections, unavailable
+	// FR-009(e): enqueue misses in the order SearchAll ranks them, so the
+	// most relevant ones are fetched first. This priority copy is throwaway —
+	// it never replaces `hits`' own order, which Official's merge-order
+	// requirement (FR-005) depends on.
+	priority := append([]CatalogHit(nil), hits...)
+	sort.SliceStable(priority, func(i, j int) bool { return Rank(priority[i], priority[j], q) })
+
+	seen := make(map[string]bool, len(priority))
+	keys := make([]string, 0, len(priority))
+	for _, h := range priority {
+		key, ok := GitHubRepoKey(h.Entry.SourceCodeURL)
+		if !ok || seen[key] {
+			continue
+		}
+		seen[key] = true
+		// Only Stale/Absent need a fetch (FR-008): a Fresh positive or a
+		// still-fresh Negative (confirmed 404/451, or an error entry backing
+		// off within its own shorter TTL) is left alone.
+		if _, state := provider.Lookup(key); state == LookupStale || state == LookupAbsent {
+			keys = append(keys, key)
+		}
+	}
+
+	provider.Resolve(ctx, keys, wait)
+
+	// Re-apply lookups: any key that landed during the bounded wait now shows
+	// its stars; everything else is unchanged.
+	for i := range hits {
+		applyCachedStars(&hits[i])
+	}
 }
 
 // filterHitsBySource keeps only the hits from one catalog source, applied
@@ -230,7 +331,7 @@ func BuildCatalogHit(reg *RegistryEntry, entry ServerEntry) CatalogHit {
 	if title == "" {
 		title = entry.ID
 	}
-	return CatalogHit{
+	hit := CatalogHit{
 		Entry:     entry,
 		Source:    reg.ID,
 		Title:     title,
@@ -238,6 +339,40 @@ func BuildCatalogHit(reg *RegistryEntry, entry ServerEntry) CatalogHit {
 		Verified:  official,
 		Official:  official,
 	}
+	// FR-001/FR-002: copy the source-native signal (e.g. Docker pull_count)
+	// first, then layer in GitHub stars from the provider's cache only — no
+	// network call, so this stays synchronous.
+	if entry.Popularity != nil {
+		p := *entry.Popularity
+		hit.Popularity = &p
+	}
+	applyCachedStars(&hit)
+	return hit
+}
+
+// applyCachedStars fills in hit.Popularity.Stars from the installed
+// PopularityProvider's cache ONLY (Spec 110 FR-002): no I/O, so both
+// BuildCatalogHit and SearchAll's post-Resolve re-apply can call this freely.
+// A nil provider, an entry with no GitHub-shaped SourceCodeURL, or a
+// non-displayable lookup state (Absent/Negative) leave the hit unchanged.
+func applyCachedStars(hit *CatalogHit) {
+	key, ok := GitHubRepoKey(hit.Entry.SourceCodeURL)
+	if !ok {
+		return
+	}
+	provider := getPopularityProvider()
+	if provider == nil {
+		return
+	}
+	stars, state := provider.Lookup(key)
+	if state != LookupFresh && state != LookupStale {
+		return
+	}
+	if hit.Popularity == nil {
+		hit.Popularity = &Popularity{}
+	}
+	s := stars
+	hit.Popularity.Stars = &s
 }
 
 // derivePublisher extracts a display publisher from an official-protocol
@@ -267,8 +402,8 @@ func Rank(a, b CatalogHit, q string) bool {
 	if a.Verified != b.Verified {
 		return a.Verified
 	}
-	if ap, bp := popularityScore(a.Popularity), popularityScore(b.Popularity); ap != bp {
-		return ap > bp
+	if !popularityEqual(a.Popularity, b.Popularity) {
+		return morePopular(a.Popularity, b.Popularity)
 	}
 	if ar, br := relevanceScore(a, q), relevanceScore(b, q); ar != br {
 		return ar > br
@@ -290,18 +425,40 @@ func catalogTitle(h CatalogHit) string {
 	return h.Entry.ID
 }
 
-func popularityScore(p *Popularity) int {
+// popularityKey extracts the (stars, installs) tuple a Popularity compares
+// on, with a nil pointer or nil field reading as 0 (Spec 110 FR-004).
+func popularityKey(p *Popularity) (stars, installs int) {
 	if p == nil {
-		return 0
+		return 0, 0
 	}
-	score := 0
 	if p.Stars != nil {
-		score += *p.Stars
+		stars = *p.Stars
 	}
 	if p.Installs != nil {
-		score += *p.Installs
+		installs = *p.Installs
 	}
-	return score
+	return stars, installs
+}
+
+// morePopular reports whether a ranks strictly ABOVE b: stars desc, then
+// installs desc (FR-004). Stars and installs are never summed or converted
+// into one another — a lexicographic tuple compare, not a score.
+func morePopular(a, b *Popularity) bool {
+	as, ai := popularityKey(a)
+	bs, bi := popularityKey(b)
+	if as != bs {
+		return as > bs
+	}
+	return ai > bi
+}
+
+// popularityEqual reports whether a and b compare equal under morePopular's
+// ordering (both keys tie), the signal Rank and buildSections use to decide
+// whether to fall through to the next sort key.
+func popularityEqual(a, b *Popularity) bool {
+	as, ai := popularityKey(a)
+	bs, bi := popularityKey(b)
+	return as == bs && ai == bi
 }
 
 // relevanceScore is a simple, deterministic token-match count of q against
@@ -331,23 +488,58 @@ func relevanceScore(h CatalogHit, q string) int {
 	return score
 }
 
-// buildSections splits the already-ranked merged hits into the empty-query
-// landing sections (FR-060): official-source hits (in rank order) and the
-// top-popularity hits across every source, each capped at 12.
-func buildSections(ranked []CatalogHit) *CatalogSections {
+// buildSections splits the merged, de-duplicated, source-filtered pool
+// (BEFORE limit truncation and BEFORE any Rank sort) into the empty-query
+// landing sections (Spec 110 FR-005, amending Spec 109 FR-060):
+//
+//   - Official: official-source hits in `pool`'s own MERGE (source-native)
+//     order — registry-list order, then each source's native order. Pool
+//     MUST NOT have been Rank-sorted yet: on an all-official default install
+//     every hit ties on Official/Verified, so Rank order IS popularity order,
+//     and building Official from a ranked pool silently reintroduces the bug
+//     this spec fixes. Capped at 12.
+//   - Popular: hits with a known signal (stars>0 ∨ installs>0), sorted by
+//     popularity (FR-004) then Rank as a tiebreak, at most one per GitHub
+//     repo key (a monorepo's shared star count keeps only the first by Rank —
+//     spec.md edge cases), capped at 12.
+func buildSections(pool []CatalogHit, q string) *CatalogSections {
 	sections := &CatalogSections{Official: []CatalogHit{}, Popular: []CatalogHit{}}
-	for _, h := range ranked {
+
+	for _, h := range pool {
 		if h.Official && len(sections.Official) < catalogSectionCap {
 			sections.Official = append(sections.Official, h)
 		}
 	}
 
-	byPopularity := append([]CatalogHit(nil), ranked...)
-	sort.SliceStable(byPopularity, func(i, j int) bool {
-		return popularityScore(byPopularity[i].Popularity) > popularityScore(byPopularity[j].Popularity)
+	candidates := make([]CatalogHit, 0, len(pool))
+	for _, h := range pool {
+		if stars, installs := popularityKey(h.Popularity); stars > 0 || installs > 0 {
+			candidates = append(candidates, h)
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if !popularityEqual(candidates[i].Popularity, candidates[j].Popularity) {
+			return morePopular(candidates[i].Popularity, candidates[j].Popularity)
+		}
+		return Rank(candidates[i], candidates[j], q)
 	})
-	for i := 0; i < len(byPopularity) && i < catalogSectionCap; i++ {
-		sections.Popular = append(sections.Popular, byPopularity[i])
+
+	seenRepo := make(map[string]bool, len(candidates))
+	for _, h := range candidates {
+		if len(sections.Popular) >= catalogSectionCap {
+			break
+		}
+		dedupKey, hasRepo := GitHubRepoKey(h.Entry.SourceCodeURL)
+		if !hasRepo {
+			// No GitHub repo to dedup against (e.g. a Docker-only pull-count
+			// hit) — (source, id) already made this unique within `pool`.
+			dedupKey = "no-repo:" + h.Source + "\x00" + h.Entry.ID
+		}
+		if seenRepo[dedupKey] {
+			continue
+		}
+		seenRepo[dedupKey] = true
+		sections.Popular = append(sections.Popular, h)
 	}
 	return sections
 }

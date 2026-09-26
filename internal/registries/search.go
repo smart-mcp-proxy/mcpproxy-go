@@ -406,6 +406,16 @@ func parseDocker(rawData interface{}) []ServerEntry {
 				server.UpdatedAt = lastUpdated
 			}
 
+			// Spec 110 FR-001: pull_count -> Installs (comes free with the
+			// listing this parser already fetches). Docker's own star_count
+			// is deliberately NEVER mapped to Stars — it lives on a wildly
+			// different scale from GitHub stars (single digits vs tens of
+			// thousands) and mixing them would be meaningless.
+			if pullCount, ok := itemMap["pull_count"].(float64); ok && pullCount >= 0 {
+				installs := int(pullCount)
+				server.Popularity = &Popularity{Installs: &installs}
+			}
+
 			servers = append(servers, server)
 		}
 	}
