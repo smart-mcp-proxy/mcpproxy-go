@@ -5,16 +5,61 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
+// errMalformedCredential is the exact FR-021 refusal text returned by
+// ValidateTokenInvariants for every violation (contracts/refusals.md:
+// `401 {"error":"Agent token invalid: malformed credential record"}`).
+var errMalformedCredential = errors.New("malformed credential record")
+
 // Token prefix used for all agent tokens.
 const TokenPrefixStr = "mcp_agt_"
+
+// ClientTokenPrefixStr is the secret prefix for a per-client credential
+// (Spec 108-c, FR-021). Same length and HMAC-SHA256 scheme as a regular
+// agent token, so the kind is carried by the secret itself: a pre-108
+// binary, which only recognises TokenPrefixStr, never treats a client
+// credential as a wildcard agent token (rollback safety, research D27).
+const ClientTokenPrefixStr = "mcp_cli_"
+
+// Kind values for AgentToken.Kind (data-model.md §3). The empty string is
+// the legacy default and is always equivalent to KindAgent.
+const (
+	KindAgent  = "agent"
+	KindClient = "client"
+)
+
+// ProfileMode values for a client credential's AgentToken.ProfileMode
+// (data-model.md §3). Applies to Kind=client only; empty/not-applicable for
+// every regular token.
+const (
+	ProfileModeLocked     = "locked"
+	ProfileModeSwitchable = "switchable"
+)
+
+// clientIDPattern is the FR-021 client_id format: lower-case letters,
+// digits, '-' or '_', starting with a letter or digit, at most 56 characters
+// — so "client-"+client_id always satisfies the token-name rule
+// ([A-Za-z0-9][A-Za-z0-9_-]{0,63}) and is a single safe path segment.
+var clientIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,55}$`)
+
+// ValidClientID reports whether id matches the FR-021 client_id pattern.
+func ValidClientID(id string) bool {
+	return clientIDPattern.MatchString(id)
+}
+
+// ClientTokenName is the FR-021 token name for a client credential.
+func ClientTokenName(clientID string) string {
+	return "client-" + clientID
+}
 
 // Permission constants define the allowed permission tiers.
 const (
@@ -56,6 +101,27 @@ type AgentToken struct {
 	Revoked        bool       `json:"revoked"`
 	UserID         string     `json:"user_id,omitempty"`     // Owner user ID (server edition)
 	ProfilePin     string     `json:"profile_pin,omitempty"` // Profile this token is pinned to (Profiles v2 T3)
+
+	// Kind, ClientID and ProfileMode are the Spec 108-c client-credential
+	// fields (data-model.md §3). Kind is ""/"agent" for a regular token,
+	// "client" for a per-client credential; any other value is invalid
+	// (fail closed at authentication, FR-021). ClientID and ProfileMode are
+	// set iff Kind=client.
+	Kind        string `json:"kind,omitempty"`
+	ClientID    string `json:"client_id,omitempty"`
+	ProfileMode string `json:"profile_mode,omitempty"`
+
+	// PendingHash/PendingPrefix/RotationStartedAt track an in-progress
+	// staged rotation (FR-021a, Kind=client only): both the old secret's
+	// hash (the record's own TokenHash) and PendingHash authenticate while
+	// a rotation is staged, until finalize promotes PendingHash and clears
+	// these fields.
+	PendingHash       string     `json:"pending_hash,omitempty"`
+	PendingPrefix     string     `json:"pending_prefix,omitempty"`
+	RotationStartedAt *time.Time `json:"rotation_started_at,omitempty"`
+
+	// ConnectedAt is when connect/add minted this credential.
+	ConnectedAt *time.Time `json:"connected_at,omitempty"`
 
 	// OwnerEmail, OwnerProvider and OwnerRole are the owner's identity as of
 	// THIS authentication (Spec 107 FR-004/FR-013, data-model.md §3). They are
@@ -145,6 +211,9 @@ func (t *AgentToken) AuthContext() *AuthContext {
 		Provider:       t.OwnerProvider,
 		Role:           t.OwnerRole,
 		CredentialKind: CredentialKindAgentToken,
+		TokenKind:      normalizeKind(t.Kind),
+		ClientID:       t.ClientID,
+		ProfileMode:    t.ProfileMode,
 		// UserID carries the owning tenant (server edition). Without it an
 		// agent-token request had no tenant identity at all, so its activity
 		// could not be attributed or scoped. It does NOT confer the user tier:
@@ -178,6 +247,27 @@ func GenerateToken() (string, error) {
 	return TokenPrefixStr + hex.EncodeToString(b), nil
 }
 
+// GenerateClientToken creates a new client credential secret with the
+// mcp_cli_ prefix followed by 64 hex characters (32 random bytes) — same
+// length and shape as GenerateToken, so hashing and prefix extraction are
+// unchanged; only the prefix differs (FR-021).
+func GenerateClientToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate random bytes: %w", err)
+	}
+	return ClientTokenPrefixStr + hex.EncodeToString(b), nil
+}
+
+// normalizeKind returns the canonical Kind spelling: "" is treated exactly
+// like KindAgent everywhere invariants and authentication reason about it.
+func normalizeKind(kind string) string {
+	if kind == "" {
+		return KindAgent
+	}
+	return kind
+}
+
 // HashToken computes HMAC-SHA256 of the token using the given key
 // and returns the hex-encoded digest.
 func HashToken(token string, key []byte) string {
@@ -198,6 +288,101 @@ func ValidateTokenFormat(token string) bool {
 	// Validate remaining 64 chars are hex
 	_, err := hex.DecodeString(token[8:])
 	return err == nil
+}
+
+// ValidateAnyTokenFormat checks a raw secret against BOTH recognised
+// prefixes (mcp_agt_ and mcp_cli_, FR-021/FR-023) and reports which kind the
+// secret CLAIMS to be, so the caller (storage.ValidateAgentToken) can check
+// that claim against the stored record's own Kind (ValidateTokenInvariants)
+// rather than trusting the record alone. ok is false for any other shape,
+// including a correctly-shaped but foreign prefix.
+func ValidateAnyTokenFormat(token string) (kind string, ok bool) {
+	if len(token) != 72 {
+		return "", false
+	}
+	prefix := token[:8]
+	if _, err := hex.DecodeString(token[8:]); err != nil {
+		return "", false
+	}
+	switch prefix {
+	case TokenPrefixStr:
+		return KindAgent, true
+	case ClientTokenPrefixStr:
+		return KindClient, true
+	default:
+		return "", false
+	}
+}
+
+// ValidateTokenInvariants is THE fail-closed check for FR-021: every
+// AgentToken record must satisfy these invariants before it may authenticate
+// a request, checked IDENTICALLY at mint time (self-consistent: claimedKind
+// == normalizeKind(t.Kind)) and on every authentication
+// (storage.ValidateAgentToken, claimedKind derived from the presented
+// secret's prefix via ValidateAnyTokenFormat). Any violation returns the
+// exact FR-021 refusal text "malformed credential record" — never a
+// downgrade to a regular wildcard agent token.
+func ValidateTokenInvariants(t *AgentToken, claimedKind string) error {
+	if t == nil {
+		return errMalformedCredential
+	}
+	kind := normalizeKind(t.Kind)
+	if kind != KindAgent && kind != KindClient {
+		return errMalformedCredential
+	}
+	// The secret actually presented must match the record it resolved to —
+	// a mcp_cli_ secret whose record is not kind=client (and vice versa) is
+	// exactly the "malformed" case the spec calls out (never a downgrade).
+	if claimedKind != "" && kind != claimedKind {
+		return errMalformedCredential
+	}
+	if kind == KindClient {
+		if t.ClientID == "" || !ValidClientID(t.ClientID) {
+			return errMalformedCredential
+		}
+		if t.Name != ClientTokenName(t.ClientID) {
+			return errMalformedCredential
+		}
+		if len(t.AllowedServers) != 1 || t.AllowedServers[0] != "*" {
+			return errMalformedCredential
+		}
+		if !hasAllPermissions(t.Permissions) {
+			return errMalformedCredential
+		}
+		if t.ProfileMode != ProfileModeLocked && t.ProfileMode != ProfileModeSwitchable {
+			return errMalformedCredential
+		}
+		if t.ProfileMode == ProfileModeLocked && t.ProfilePin == "" {
+			return errMalformedCredential
+		}
+		return nil
+	}
+	// kind == KindAgent (legacy pinned or unpinned token): none of the
+	// client-only fields may be set. A legacy unpinned token (no mode, no
+	// pin) and a legacy pinned token (no mode, a pin) are both VALID and
+	// keep their exact existing semantics.
+	if t.ClientID != "" || t.ProfileMode != "" || t.PendingHash != "" {
+		return errMalformedCredential
+	}
+	return nil
+}
+
+// hasAllPermissions reports whether perms is exactly the three permission
+// tiers (order-independent, no duplicates) — the invariant a client
+// credential's Permissions must satisfy (FR-021: "scope comes from the
+// profile only").
+func hasAllPermissions(perms []string) bool {
+	if len(perms) != 3 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, p := range perms {
+		if !validPermissions[p] || seen[p] {
+			return false
+		}
+		seen[p] = true
+	}
+	return len(seen) == 3
 }
 
 // TokenPrefix returns the first 12 characters of the token for display purposes.
