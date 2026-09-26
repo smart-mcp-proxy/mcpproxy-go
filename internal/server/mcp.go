@@ -30,6 +30,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputvalidation"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -1846,7 +1847,32 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// that is allowed to see nothing leave a new index directory behind — for a
 	// profile that may no longer exist. The post-filter below returns the same
 	// empty result set from the shared index.
-	profileName, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
+	profileName, profileScope, profileIdx, profileSource := p.resolveActiveProfileWithSource(ctx)
+	// Spec 108 FR-011: the compiled policy for the effective profile, resolved
+	// once and reused by the admit predicate below, the response's
+	// hidden_by_profile/profile fields and nothing else — a dangling base
+	// (profileName set but no matching ProfileConfig in this snapshot, e.g. a
+	// stale legacy pin) has no CompiledPolicy to fetch and leaves policy nil;
+	// its server scope is already deny-all (profileScope), so the admit
+	// predicate excludes everything via RejectScope regardless.
+	var policy *profile.CompiledPolicy
+	if profileName != "" {
+		policy = profileIdx.PolicyFor(profileName)
+	}
+	// nonLegacyProfile gates BOTH new response fields (FR-011, SC-003 byte
+	// parity): a dangling base always counts as non-legacy (data-model.md §2
+	// "Index API extension" / contracts/mcp-tools.md), and an existing
+	// ProfileConfig counts by its own IsLegacy() — Title/Description alone
+	// never flip it non-legacy, so a legacy profile that only sets a display
+	// title stays byte-identical to a nameless one.
+	nonLegacyProfile := false
+	if profileName != "" {
+		if pc := profileIdx.lookup(profileName); pc != nil {
+			nonLegacyProfile = !pc.IsLegacy()
+		} else {
+			nonLegacyProfile = true
+		}
+	}
 	// Spec 104 FR-016a: the cache stamp is the authorization THIS search runs
 	// under, captured now rather than re-resolved when the response is cut.
 	// The index/snapshot pair is threaded through too (Spec 105 PR D review
@@ -1910,10 +1936,40 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// plain Search — byte-for-byte with the pre-105 behaviour.
 	useScopedSearch := auth.IsScopedCaller(ctx) || (profileName != "" && sharedIndexFallback)
 
+	// Spec 108 FR-011: whenever a profile is genuinely in effect (profileName
+	// != ""), search must filter by TOOL POLICY before the cut too, not only
+	// by server scope — otherwise a policy-excluded hit could displace an
+	// admitted one from the window and hidden_by_profile would undercount
+	// (plan.md "codex round 1"). This is the ONLY new branch: the plain
+	// unprofiled admin/token paths above are untouched, byte-identical to
+	// pre-108 (SC-003). CompiledPolicy.Decide is safe to run even for a
+	// LEGACY profile (Cap 0 admits every tier, no rules) — it can only ever
+	// agree with serverDiscoverable's own verdict for that case — so this
+	// branch does not need to special-case legacy; only the RESPONSE FIELDS
+	// below are gated on nonLegacyProfile.
+	admitPolicy := func(hit index.Hit) index.Admission {
+		if !serverDiscoverable(hit.Server) {
+			return index.RejectScope
+		}
+		if policy == nil {
+			return index.Admit
+		}
+		annotations, found := p.EffectiveAnnotations(hit.Server, hit.Tool)
+		intrinsic := profile.IntrinsicTier(annotations, found)
+		if admitted, _, _ := policy.Decide(hit.Server, hit.Tool, intrinsic); !admitted {
+			return index.RejectPolicy
+		}
+		return index.Admit
+	}
+
 	var results []*config.SearchResult
-	if useScopedSearch {
+	var hiddenByPolicy int
+	switch {
+	case profileName != "":
+		results, hiddenByPolicy, err = searchIndex.SearchToolsAdmitted(query, limit, admitPolicy)
+	case useScopedSearch:
 		results, err = searchIndex.SearchToolsScoped(query, limit, serverDiscoverable)
-	} else {
+	default:
 		results, err = searchIndex.Search(query, limit)
 	}
 	if err != nil {
@@ -1958,14 +2014,16 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		// toolVisibleToSession, so it can never return a definition search
 		// would not. Results are index hits by construction, so the
 		// index-presence step is skipped here.
-		visible, reason := p.indexedToolVisible(authCtx, profileScope, serverName, toolName)
+		visible, reason := p.indexedToolVisible(authCtx, profileScope, policy, serverName, toolName)
 		if visible {
 			callableResults = append(callableResults, result)
 			continue
 		}
 
-		if reason == visReasonServerNotInScope {
-			// Out-of-scope servers are invisible, never "locked".
+		if reason == visReasonServerNotInScope || reason == visReasonToolPolicyExcluded {
+			// Out-of-scope servers and profile-excluded tools are both
+			// invisible, never "locked" — FR-013 forbids naming or
+			// describing a profile-hidden tool the way a locked entry would.
 			continue
 		}
 
@@ -2117,6 +2175,20 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		"query":              query,
 		"total":              len(results),
 		"usage_instructions": usageInstructions,
+	}
+
+	// Spec 108 FR-011: hidden_by_profile is present — possibly 0 — whenever
+	// the effective profile is non-legacy, and NEVER for no profile or a
+	// legacy one (SC-003 byte parity: a legacy profile, even one that sets
+	// only a display title, must not gain this field). profile names the
+	// slug only when the caller itself selected it (url/session) — never for
+	// a pin, so discovery can never confirm that a caller is pinned or to
+	// what (research D27).
+	if nonLegacyProfile {
+		response["hidden_by_profile"] = hiddenByPolicy
+		if profileSource == profile.SourceURL || profileSource == profile.SourceSession {
+			response["profile"] = profileName
+		}
 	}
 
 	// Spec 094 (FR-001): explain the annotation filters only when they actually
