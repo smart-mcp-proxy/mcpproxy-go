@@ -62,6 +62,12 @@ DECOY_PID=""
 LAUNCHER_PATTERN='launcher-server.*--port 39933'
 STANDIN_PID=""
 SAMPLER_PID=""
+# Review round 2 (finding 3): the expected `comm` of the suite's own core,
+# so the own-core-leak check below can tell "this PID is still the suite's
+# core" apart from "this PID was reused for some other, comm-stable
+# process" — not just tell two back-to-back reads of the SAME (possibly
+# already-reused) PID apart from each other.
+EXPECTED_CORE_COMM="mcpproxy"
 SAMPLE_FILE="$DECOY_DIR/pid-samples.txt"
 : > "$SAMPLE_FILE"
 CLEANUP_DECOY_DONE=0
@@ -148,8 +154,30 @@ echo -e "${GREEN}Decoy running (pid=$DECOY_PID).${NC}"
 # leave alone — is what would die, and prove the regression actually
 # happened rather than relying on the real fixture's own (potentially
 # coincidental) survival.
+#
+# Review round 2 (finding NEW-1): must run from a cwd DIFFERENT from the
+# E2E suite's own SCRIPT_CWD (the repo root this script is invoked from —
+# see test-api-e2e.sh's own_launcher_pids()). A bystander is only a valid
+# stand-in for "a process the scoped code correctly leaves alone" if it
+# actually fails BOTH of the scoped code's criteria: it is not a descendant
+# of the suite's core (true here — it is a plain sibling process) AND it
+# does not share the suite's cwd. Without the `cd` below, this stand-in
+# would run with the same cwd as the E2E suite it exercises (repo root,
+# inherited, no intervening `cd` anywhere in this script), which satisfies
+# own_launcher_pids()'s cwd fallback ([-n "$MCPPROXY_PID"] is true once the
+# suite's real core has started) — so the suite's OWN cleanup(), and its
+# test_launcher_lifecycle PID assertions mid-run, would treat this stand-in
+# as if it were their own fixture: reaping it at cleanup (making the
+# survival assertion below fail and misattribute the cause to a pkill
+# regression that did not actually happen) and/or corrupting the
+# before/after-restart PID checks. Running it from $DECOY_DIR instead
+# matches the profile of a genuinely foreign process — same argv pattern,
+# different cwd — which is what the scoped code is actually supposed to
+# tell apart from the real fixture.
 echo -e "${YELLOW}Starting launcher-fixture stand-in (argv-only bystander)...${NC}"
-exec -a "launcher-server --port 39933 (cleanup-check stand-in)" sleep 3600 &
+(
+    cd "$DECOY_DIR" && exec -a "launcher-server --port 39933 (cleanup-check stand-in)" sleep 3600
+) &
 STANDIN_PID=$!
 sleep 0.2
 if ! kill -0 "$STANDIN_PID" 2>/dev/null; then
@@ -257,16 +285,24 @@ suite_core_pid="$(sed -n 's/^Started mcpproxy with PID: \([0-9]*\)$/\1/p' "$E2E_
 if [ -z "$suite_core_pid" ]; then
     echo -e "${YELLOW}WARN: could not find the suite's own core PID in its log; skipping the own-core-leak check.${NC}"
 elif kill -0 "$suite_core_pid" 2>/dev/null; then
-    # Finding 3 (this review): re-verify identity right before force-killing
-    # a PID parsed out of a log line — the same TOCTOU this script already
-    # guards against elsewhere (test-api-e2e.sh's snapshot_orphans_with_comm
-    # re-checks `comm` before every kill -9). In the realistic multi-second
-    # gap between the core's actual exit and this check (its own graceful
-    # wait, then this script's decoy/standin curls and sed calls), the OS
-    # can reuse suite_core_pid for an unrelated process; a bare kill -0/-9
-    # would then report a false FAIL and SIGKILL an innocent bystander.
+    # Finding 3 (review round 1): re-verify identity right before
+    # force-killing a PID parsed out of a log line — the same TOCTOU this
+    # script already guards against elsewhere (test-api-e2e.sh's
+    # snapshot_orphans_with_comm re-checks `comm` before every kill -9).
+    #
+    # Finding 3 (review round 2): comparing two fresh reads to EACH OTHER
+    # only closes the narrow, sub-millisecond gap between them — it does
+    # nothing for the real, multi-second gap between the core's ACTUAL exit
+    # (during its own graceful shutdown inside test-api-e2e.sh's cleanup(),
+    # which runs well before this script ever gets here) and this check's
+    # FIRST read. If the OS reuses suite_core_pid for an unrelated
+    # comm-stable process within that wider window, both reads agree with
+    # each other despite neither being the suite's own core — a false
+    # "leaked as an orphan" FAIL that SIGKILLs an innocent bystander. Also
+    # require the first read to actually name the suite's own binary.
     core_comm="$(ps -o comm= -p "$suite_core_pid" 2>/dev/null | tr -d ' ')"
-    if [ -n "$core_comm" ] && kill -0 "$suite_core_pid" 2>/dev/null; then
+    core_basename="$(basename -- "$core_comm" 2>/dev/null)"
+    if [ -n "$core_comm" ] && [ "$core_basename" = "$EXPECTED_CORE_COMM" ] && kill -0 "$suite_core_pid" 2>/dev/null; then
         recheck_comm="$(ps -o comm= -p "$suite_core_pid" 2>/dev/null | tr -d ' ')"
         if [ "$recheck_comm" = "$core_comm" ]; then
             echo -e "${RED}FAIL: the suite's own mcpproxy core (pid=$suite_core_pid, $core_comm) is still running after its cleanup trap — leaked as an orphan.${NC}" >&2
@@ -275,6 +311,8 @@ elif kill -0 "$suite_core_pid" 2>/dev/null; then
         else
             echo -e "${YELLOW}WARN: pid=$suite_core_pid changed identity between checks ($core_comm -> $recheck_comm) — likely PID reuse, not a leak. Not killing it.${NC}"
         fi
+    elif [ -n "$core_comm" ]; then
+        echo -e "${YELLOW}WARN: pid=$suite_core_pid is alive but named '$core_comm', not the suite's own core ('$EXPECTED_CORE_COMM') — the real core likely already exited and the OS reused its PID before this check ran. Not touching it.${NC}"
     else
         echo -e "${GREEN}PASS: the suite's own mcpproxy core (pid=$suite_core_pid) was stopped by its own cleanup trap.${NC}"
     fi
