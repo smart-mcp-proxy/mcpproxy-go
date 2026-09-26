@@ -103,12 +103,13 @@ type ActivityFilter struct {
 func (f *ActivityFilter) Validate() error {
 	// Validate type(s) - supports comma-separated values (Spec 024)
 	if f.Type != "" {
-		validTypes := []string{
-			"tool_call", "policy_decision", "quarantine_change", "server_change",
-			"system_start", "system_stop", "internal_tool_call", "config_change", // Spec 024: new types
-			string(storage.ActivityTypePreflight), // Spec 098: required-tools preflight
-			string(storage.ActivityTypePromptGet), // Finding F10: prompts/get activity
-		}
+		// Sourced from storage.ValidActivityTypes rather than hand-copied: a
+		// second hardcoded list here had the exact same drift
+		// activitySystemTypes was fixed for (live QA,
+		// 109-k-activity-scope-filters) — missing tool_quarantine_change,
+		// security_scan and credential_broker — which made `--view system`
+		// compute a type filter this Validate() then rejected outright.
+		validTypes := storage.ValidActivityTypes
 		// Split by comma for multi-type support
 		types := strings.Split(f.Type, ",")
 		for _, t := range types {

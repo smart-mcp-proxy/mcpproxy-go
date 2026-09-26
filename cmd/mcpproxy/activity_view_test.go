@@ -72,6 +72,31 @@ func TestActivitySystemTypes_MatchesStorageValidTypesMinusCalls(t *testing.T) {
 	}
 }
 
+// TestActivityListView_SystemPassesValidate is a live-QA regression found by
+// actually running `mcpproxy activity list --view system` against a real
+// instance (109-k-activity-scope-filters): activitySystemTypes was fixed
+// above to derive from storage.ValidActivityTypes, but ActivityFilter.Validate
+// had its OWN second hand-maintained type list (the exact same drift bug,
+// missing tool_quarantine_change/security_scan/credential_broker), so the
+// view-derived type string it now correctly produces was then rejected right
+// back out by Validate() — `--view system` errored on every real instance
+// despite TestActivitySystemTypes_MatchesStorageValidTypesMinusCalls and
+// TestActivityViewTypeFilter both passing, because neither exercises this
+// seam: the --view flag's output actually reaching Validate(). Assert the
+// whole pipeline, not either half in isolation.
+func TestActivityListView_SystemPassesValidate(t *testing.T) {
+	for _, view := range []string{"", "all", "calls", "system"} {
+		t.Run(view, func(t *testing.T) {
+			typeFilter, err := activityViewTypeFilter(view)
+			require.NoError(t, err)
+
+			filter := &ActivityFilter{Type: typeFilter}
+			assert.NoError(t, filter.Validate(),
+				"the type filter --view %q derives must itself pass Validate()", view)
+		})
+	}
+}
+
 func TestResolveActivityTime(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 
