@@ -10,14 +10,6 @@ import "github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 // appears (data-model.md §2-3: a captured-but-unannotated record is still
 // TierUnannotated; TierUnknown is reserved for a record with no captured
 // annotations at all, e.g. one predating this spec).
-//
-// NOTE (Spec 108 PR 108-a): this file is a leaf dependency of Spec 109-a
-// (`contracts.AnnotationTier`, research D30) that Spec 108's
-// `internal/profile.IntrinsicTier` calls through an exhaustive adapter so
-// tier classification can never disagree across surfaces. 108-a merges
-// after 109-a per plan.md; until 109-a's own PR (#1378) merges, this file
-// is carried here verbatim (byte-identical) as the shared dependency, so
-// merging 109-a afterwards is a no-op on this file.
 type Tier string
 
 const (

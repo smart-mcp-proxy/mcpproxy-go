@@ -1239,7 +1239,10 @@ actor APIClient {
         do {
             let bodyData = try JSONSerialization.data(withJSONObject: body)
             let (data, response) = try await rawRequest(path: path, method: "POST", body: bodyData)
-            if (200...299).contains(response.statusCode) { return .ok() }
+            if (200...299).contains(response.statusCode) {
+                let body = try? JSONDecoder().decode(RegistryAddServerSuccessBody.self, from: data)
+                return .ok(serverName: body?.data?.server?.name)
+            }
             let err = try? JSONDecoder().decode(RegistryAddServerErrorBody.self, from: data)
             return .failure(
                 message: err?.message ?? "HTTP \(response.statusCode): \(HTTPURLResponse.localizedString(forStatusCode: response.statusCode))",

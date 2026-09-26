@@ -1,5 +1,5 @@
 <template>
-  <dialog :open="show" class="modal">
+  <dialog ref="dialogEl" class="modal">
     <div class="modal-box max-w-lg">
       <h3 class="font-bold text-lg mb-2">Connect MCPProxy to AI Agents</h3>
       <p class="text-sm opacity-70 mb-4">
@@ -443,6 +443,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
 import { useOnboardingStore } from '@/stores/onboarding'
+import { useDialogOpen } from '@/composables/useDialogOpen'
 import type { ClientStatus, AccessState, ConnectPreview } from '@/types'
 
 interface Props {
@@ -455,6 +456,7 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
+const { dialogEl } = useDialogOpen(() => props.show, () => close())
 const systemStore = useSystemStore()
 const onboarding = useOnboardingStore()
 
@@ -950,6 +952,12 @@ function close() {
   previewError.value = {}
   lastConnect.value = null
   undoPanelOpen.value = false
+  // Review round 2, finding 3: this also fires on a native Escape/backdrop
+  // dismiss (it's useDialogOpen's onClose), which can happen while the
+  // "Disconnect X?" confirm sub-panel is open. Without resetting it, the
+  // stale confirm panel reappears for a client the user may no longer
+  // intend to touch the next time the modal opens.
+  disconnectTarget.value = null
   emit('close')
 }
 

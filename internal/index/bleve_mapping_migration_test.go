@@ -1,0 +1,331 @@
+package index
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+
+	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/analysis/analyzer/keyword"
+	"github.com/blevesearch/bleve/v2/analysis/analyzer/standard"
+	"github.com/blevesearch/bleve/v2/mapping"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+)
+
+// preAnnotationsMapping replicates createBleveIndex's mapping as it existed
+// before the annotations_json field was added (Spec 109 PR-a), so tests can
+// simulate opening an index created by an older mcpproxy version.
+func preAnnotationsMapping() *mapping.IndexMappingImpl {
+	indexMapping := bleve.NewIndexMapping()
+	toolMapping := bleve.NewDocumentMapping()
+
+	toolNameFieldKeyword := bleve.NewTextFieldMapping()
+	toolNameFieldKeyword.Analyzer = keyword.Name
+	toolNameFieldKeyword.Store = true
+	toolNameFieldKeyword.Index = true
+	toolMapping.AddFieldMappingsAt("tool_name", toolNameFieldKeyword)
+
+	fullToolNameField := bleve.NewTextFieldMapping()
+	fullToolNameField.Analyzer = keyword.Name
+	fullToolNameField.Store = true
+	fullToolNameField.Index = true
+	toolMapping.AddFieldMappingsAt("full_tool_name", fullToolNameField)
+
+	serverNameField := bleve.NewTextFieldMapping()
+	serverNameField.Analyzer = keyword.Name
+	serverNameField.Store = true
+	serverNameField.Index = true
+	toolMapping.AddFieldMappingsAt("server_name", serverNameField)
+
+	descriptionField := bleve.NewTextFieldMapping()
+	descriptionField.Analyzer = standard.Name
+	descriptionField.Store = true
+	descriptionField.Index = true
+	toolMapping.AddFieldMappingsAt("description", descriptionField)
+
+	paramsField := bleve.NewTextFieldMapping()
+	paramsField.Analyzer = standard.Name
+	paramsField.Store = true
+	paramsField.Index = true
+	toolMapping.AddFieldMappingsAt("params_json", paramsField)
+
+	hashField := bleve.NewTextFieldMapping()
+	hashField.Analyzer = keyword.Name
+	hashField.Store = true
+	hashField.Index = false
+	toolMapping.AddFieldMappingsAt("hash", hashField)
+
+	// Deliberately no annotations_json field mapping: this is the point.
+
+	tagsField := bleve.NewTextFieldMapping()
+	tagsField.Analyzer = standard.Name
+	tagsField.Store = true
+	tagsField.Index = true
+	toolMapping.AddFieldMappingsAt("tags", tagsField)
+
+	searchableTextField := bleve.NewTextFieldMapping()
+	searchableTextField.Analyzer = standard.Name
+	searchableTextField.Store = false
+	searchableTextField.Index = true
+	toolMapping.AddFieldMappingsAt("searchable_text", searchableTextField)
+
+	indexMapping.AddDocumentMapping("tool", toolMapping)
+	indexMapping.DefaultMapping = toolMapping
+
+	return indexMapping
+}
+
+// TestNewBleveIndexAt_WarnsOnPreAnnotationsMapping is a regression test for
+// review round 6, finding 1 (high): opening an index created before the
+// annotations_json field mapping existed must surface a warning, since
+// bleve.Open never migrates the mapping and the resulting dynamic-field
+// leakage into full-text search is otherwise silent.
+func TestNewBleveIndexAt_WarnsOnPreAnnotationsMapping(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+
+	oldIdx, err := bleve.New(indexPath, preAnnotationsMapping())
+	require.NoError(t, err)
+	require.NoError(t, oldIdx.Close())
+
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+
+	bi, err := newBleveIndexAt(indexPath, logger)
+	require.NoError(t, err)
+	defer bi.Close()
+
+	warnings := logs.FilterMessageSnippet("predates the annotations_json field mapping")
+	assert.Equal(t, 1, warnings.Len(), "opening a pre-annotations index must log exactly one actionable warning")
+}
+
+// TestNewBleveIndexAt_AutoRebuildsPreAnnotationsMapping is a regression test
+// for review round 7, finding 2 (medium): round 6 only warned and left an
+// in-place-upgraded index with the old mapping (and its dynamic-field
+// leakage) in place forever unless an operator noticed the log line and
+// deleted the directory by hand. Opening a pre-annotations index must now
+// self-heal: end up with the current mapping with no manual step, and log
+// that the automatic rebuild happened.
+func TestNewBleveIndexAt_AutoRebuildsPreAnnotationsMapping(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+
+	oldIdx, err := bleve.New(indexPath, preAnnotationsMapping())
+	require.NoError(t, err)
+	require.NoError(t, oldIdx.Close())
+
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core)
+
+	bi, err := newBleveIndexAt(indexPath, logger)
+	require.NoError(t, err)
+	defer bi.Close()
+
+	fm := bi.index.Mapping().FieldMappingForPath("annotations_json")
+	assert.NotEmpty(t, fm.Type, "the index must carry the CURRENT mapping after opening a pre-annotations index, with no operator step")
+
+	rebuilds := logs.FilterMessageSnippet("Rebuilt Bleve index with the current field mapping")
+	assert.Equal(t, 1, rebuilds.Len(), "the automatic rebuild must be observable in the log")
+
+	// The rebuilt index must behave like any other current-mapping index:
+	// annotations_json is stored-only and must not leak into `_all`.
+	require.NoError(t, bi.index.Index("doc1", map[string]interface{}{
+		"tool_name":        "delete_everything",
+		"annotations_json": "should not become searchable via _all",
+	}))
+	res, err := bi.index.Search(bleve.NewSearchRequest(bleve.NewMatchQuery("should not become searchable via _all")))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), res.Total, "annotations_json must not be free-text searchable after the rebuild")
+}
+
+// TestRebuildIfMappingPredatesAnnotations_ConstructionFailureKeepsStaleIndexUsable
+// is a regression test for review round 8, finding 1 (high): the migration
+// used to be destructive-before-construct (Close -> os.RemoveAll ->
+// createBleveIndex), so any failure building the replacement (disk full,
+// permission error) left the daemon with no index at all and no way to
+// recover without operator intervention, turning a previously-degraded-but-
+// working deployment into a hard outage on every restart. The fix builds the
+// replacement at a temporary sibling path FIRST; if that fails, the original
+// (stale-mapping but fully functional) index must be left untouched and
+// still usable rather than destroyed.
+//
+// This forces createBleveIndex to fail deterministically by pre-creating a
+// plain file at the temporary path the rebuild uses, so bleve's underlying
+// mkdir fails with ENOTDIR — the same failure shape as a real disk error,
+// without depending on actually exhausting disk space.
+func TestRebuildIfMappingPredatesAnnotations_ConstructionFailureKeepsStaleIndexUsable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+
+	parent := t.TempDir()
+	indexPath := filepath.Join(parent, "index.bleve")
+
+	oldIdx, err := bleve.New(indexPath, preAnnotationsMapping())
+	require.NoError(t, err)
+	require.NoError(t, oldIdx.Close())
+
+	// Block the rebuild's temporary construction path by making its parent
+	// directory read-only, so createBleveIndex(tmpPath)'s mkdir fails before
+	// anything touches indexPath (mirrors a real permission/disk error
+	// without depending on actually exhausting disk space). Restored before
+	// t.TempDir()'s own cleanup runs, since that needs write access too.
+	require.NoError(t, os.Chmod(parent, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+
+	reopened, err := bleve.Open(indexPath)
+	require.NoError(t, err)
+
+	idx, err := rebuildIfMappingPredatesAnnotations(reopened, indexPath, logger)
+	require.NoError(t, err, "a failed rebuild attempt must not fail index startup")
+	require.NotNil(t, idx)
+	defer idx.Close()
+
+	// The original index directory must still exist and still be the
+	// pre-annotations one that was there before the failed rebuild attempt
+	// (proving it was never removed).
+	_, statErr := os.Stat(indexPath)
+	require.NoError(t, statErr, "the original index directory must survive a failed rebuild attempt")
+
+	fm := idx.Mapping().FieldMappingForPath("annotations_json")
+	assert.Empty(t, fm.Type, "on a failed rebuild the returned index is still the stale-mapping one, not a fabricated fresh one")
+
+	errs := logs.FilterMessageSnippet("Failed to build replacement Bleve index")
+	assert.Equal(t, 1, errs.Len(), "the construction failure must be logged, since it is silently swallowed to keep startup unblocked")
+}
+
+// TestRebuildIfMappingPredatesAnnotations_FinalizeSurvivesUnremovableOriginal
+// is a regression test for review round 9, finding 1 (medium): round 8 fixed
+// destructive-before-construct (build the replacement before touching
+// anything), but the finalize step still retired the original with
+// os.RemoveAll(indexPath). A partial failure of that RemoveAll — one
+// permission-impaired or locked leftover file inside the index directory —
+// can delete most-but-not-all of the original and still return an error. On
+// the next startup bleve.Open(indexPath) fails on the mangled remnant,
+// newBleveIndexAt falls through to createBleveIndex(indexPath), and if
+// index_meta.json happens to survive whatever was left behind, vendored
+// bleve's index_meta.Save (O_CREATE|O_EXCL) makes bleve.New return
+// ErrorIndexPathExists ("cannot create new index, path already exists") —
+// daemon startup then fails on every retry until an operator manually clears
+// the directory: the same outage class round 8 fixed, reachable through a
+// narrower (partial-delete) door instead of the wider
+// (any-construction-failure) door round 8 closed.
+//
+// The fix renames the original aside (os.Rename) instead of deleting its
+// contents: a rename only needs write access to indexPath's PARENT, never to
+// anything inside indexPath itself, so a permission-impaired file nested
+// inside the index directory can no longer block the swap.
+//
+// This reproduces the exact failure shape confirmed against the real
+// os.RemoveAll implementation: stripping the write bit from bleve's internal
+// "store" subdirectory makes a plain os.RemoveAll(indexPath) return
+// "permission denied" after already deleting some but not all of the
+// directory's contents (verified directly: index_meta.json is removed,
+// store/root.bolt is not, and indexPath itself survives, mangled). The test
+// asserts the rebuild still fully succeeds despite that.
+func TestRebuildIfMappingPredatesAnnotations_FinalizeSurvivesUnremovableOriginal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions are not enforced")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+
+	parent := t.TempDir()
+	indexPath := filepath.Join(parent, "index.bleve")
+
+	oldIdx, err := bleve.New(indexPath, preAnnotationsMapping())
+	require.NoError(t, err)
+	require.NoError(t, oldIdx.Close())
+
+	// bleve's scorch backend lays out a "store" subdirectory holding its
+	// bolt file. Stripping its write bit means nothing inside it can be
+	// unlinked — the shape of "one permission-impaired leftover file" the
+	// finding describes — without touching indexPath's own permissions (a
+	// rename of indexPath needs write on `parent`, not on indexPath itself,
+	// so this alone must not be enough to block the fixed code path).
+	storeDir := filepath.Join(indexPath, "store")
+	_, statErr := os.Stat(storeDir)
+	require.NoError(t, statErr, "test assumption: bleve's scorch backend lays out indexPath/store")
+	require.NoError(t, os.Chmod(storeDir, 0o555))
+	// On success the fix renames indexPath aside to indexPath+".rebuild-old"
+	// before best-effort-removing it, so the chmod'd "store" subdirectory
+	// ends up there, not at its original path; t.TempDir()'s own cleanup
+	// needs write access to whichever location it lands at.
+	t.Cleanup(func() {
+		_ = os.Chmod(storeDir, 0o755)
+		_ = os.Chmod(filepath.Join(indexPath+".rebuild-old", "store"), 0o755)
+	})
+
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core)
+
+	reopened, err := bleve.Open(indexPath)
+	require.NoError(t, err)
+
+	idx, err := rebuildIfMappingPredatesAnnotations(reopened, indexPath, logger)
+	require.NoError(t, err, "the rebuild must succeed even though a file inside the original index directory cannot be removed")
+	require.NotNil(t, idx)
+	defer idx.Close()
+
+	fm := idx.Mapping().FieldMappingForPath("annotations_json")
+	assert.NotEmpty(t, fm.Type, "the swap must have completed: the returned index carries the current mapping")
+
+	rebuilds := logs.FilterMessageSnippet("Rebuilt Bleve index with the current field mapping")
+	assert.Equal(t, 1, rebuilds.Len())
+}
+
+// TestNewBleveIndexAt_NoWarningOnCurrentMapping guards against a false
+// positive: an index created (or previously opened) by the CURRENT code must
+// never trigger the migration warning.
+func TestNewBleveIndexAt_NoWarningOnCurrentMapping(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+
+	// First open creates the index with the current mapping.
+	bi, err := newBleveIndexAt(indexPath, logger)
+	require.NoError(t, err)
+	require.NoError(t, bi.Close())
+
+	// Re-opening it (the common restart path) must not warn either.
+	bi2, err := newBleveIndexAt(indexPath, logger)
+	require.NoError(t, err)
+	defer bi2.Close()
+
+	warnings := logs.FilterMessageSnippet("predates the annotations_json field mapping")
+	assert.Equal(t, 0, warnings.Len(), "a current-mapping index must never trigger the migration warning")
+}
+
+// TestCreateBleveIndex_DynamicMappingDisabled locks in the defense-in-depth
+// half of the round-6 finding-1 fix: a freshly created index must not fall
+// back to bleve's dynamic-field defaults for an unmapped field, so adding a
+// future ToolDocument field without also updating createBleveIndex fails
+// loudly (the field is simply not indexed/stored) instead of silently
+// leaking into full-text search and `_all`, the way annotations_json did on
+// indexes created before this PR.
+func TestCreateBleveIndex_DynamicMappingDisabled(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+
+	idx, err := createBleveIndex(indexPath)
+	require.NoError(t, err)
+	defer idx.Close()
+
+	require.NoError(t, idx.Index("doc1", map[string]interface{}{
+		"tool_name":     "delete_everything",
+		"totally_novel": "should not become searchable via _all",
+	}))
+
+	res, err := idx.Search(bleve.NewSearchRequest(bleve.NewMatchQuery("should not become searchable via _all")))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), res.Total, "an unmapped field must not be dynamically indexed once Dynamic=false")
+}

@@ -1763,12 +1763,9 @@ struct ToolRow: View {
     }
 
     private func approvalStatusLabel(_ status: String) -> String {
-        switch status {
-        case "approved": return "Approved"
-        case "pending": return "Pending Approval"
-        case "changed": return "Changed (needs re-approval)"
-        default: return status.capitalized
-        }
+        // Spec 109 FR-027: one vocabulary, shared with ToolsView and the Web
+        // UI — see ToolLabels.swift.
+        ToolLabels.approvalStatusLabel(status)
     }
 
     // MARK: - Diff Section

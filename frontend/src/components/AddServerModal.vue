@@ -1,5 +1,5 @@
 <template>
-  <dialog :open="show" class="modal" data-test="add-server-modal">
+  <dialog ref="nativeDialogEl" class="modal" data-test="add-server-modal">
     <!--
       UX audit F6: the box is a flex column with its own scroll region so the
       submit row stays pinned to the bottom instead of falling below the fold,
@@ -557,7 +557,7 @@ Example (Claude Desktop):
             <div class="collapse-content">
               <div v-for="server in previewResult.skipped" :key="server.name" class="py-2 border-b border-base-300 last:border-0">
                 <div class="font-medium">{{ server.name }}</div>
-                <div class="text-sm text-warning">{{ server.reason }}</div>
+                <div class="text-sm text-warning">{{ skipReasonLabel(server.reason) }}</div>
               </div>
             </div>
           </div>
@@ -615,7 +615,9 @@ import { useSystemStore } from '@/stores/system'
 import api, { type CanonicalConfigPath } from '@/services/api'
 import TrustModeSelector from '@/components/TrustModeSelector.vue'
 import { useModalA11y } from '@/composables/useModalA11y'
+import { useDialogOpen } from '@/composables/useDialogOpen'
 import type { TrustMode } from '@/utils/trustMode'
+import { skipReasonLabel } from '@/utils/importSkipReason'
 import type { ImportResponse, ImportedServer } from '@/types'
 
 interface Props {
@@ -637,6 +639,9 @@ const emit = defineEmits<Emits>()
 // UX audit F6: Escape closes, focus enters the dialog on open and is trapped
 // inside it, and returns to the trigger on close.
 const { dialogRef } = useModalA11y(() => props.show, () => handleClose())
+// Spec 109 FR-055: the <dialog> itself opens via showModal() (top layer),
+// separate from dialogRef above (the inner .modal-box, used for focus trap).
+const { dialogEl: nativeDialogEl } = useDialogOpen(() => props.show, () => handleClose())
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()

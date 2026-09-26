@@ -333,14 +333,19 @@ type MCPSession struct {
 
 // Tool represents an MCP tool with its metadata
 type Tool struct {
-	Name           string                 `json:"name"`
-	ServerName     string                 `json:"server_name"`
-	Description    string                 `json:"description"`
-	Schema         map[string]interface{} `json:"schema,omitempty" swaggertype:"object"`
-	Usage          int                    `json:"usage"`
-	LastUsed       *time.Time             `json:"last_used,omitempty"`
-	Annotations    *ToolAnnotation        `json:"annotations,omitempty"`
-	ApprovalStatus string                 `json:"approval_status,omitempty"`
+	Name        string                 `json:"name"`
+	ServerName  string                 `json:"server_name"`
+	Description string                 `json:"description"`
+	Schema      map[string]interface{} `json:"schema,omitempty" swaggertype:"object"`
+	Usage       int                    `json:"usage"`
+	LastUsed    *time.Time             `json:"last_used,omitempty"`
+	Annotations *ToolAnnotation        `json:"annotations,omitempty"`
+	// Tier is computed by AnnotationTier (Spec 109 FR-028/X11) from
+	// Annotations — read|write|destructive|unannotated. Set by every producer
+	// of a Tool (enrichServerTools, the global tools handler); never left for
+	// a consuming surface to compute.
+	Tier           Tier   `json:"tier,omitempty"`
+	ApprovalStatus string `json:"approval_status,omitempty"`
 	// Disabled mirrors ToolApprovalRecord.Disabled so per-tool enable state is
 	// available without a second round-trip to the approvals endpoint. Absent
 	// in the JSON when false (default) to keep responses compact.
