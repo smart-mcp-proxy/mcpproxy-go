@@ -2858,6 +2858,16 @@ components:
         average_query_result_size:
           description: Typical retrieve_tools output (tokens)
           type: integer
+        estimated:
+          description: |-
+            Estimated (Spec 109-k FR-070-ish, url-filter-contract.md / audit F-Token):
+            true while AverageQueryResultSize is a synthetic simulation (a sample of
+            the first `tools_limit` tools' schemas — no real retrieve_tools call has
+            completed yet in this runtime's usage aggregate); false once at least one
+            real retrieve_tools call has, at which point AverageQueryResultSize is
+            derived from the real observed average response size instead. The Web
+            UI and macOS render an "estimate" label while this is true.
+          type: boolean
         per_server_tool_list_sizes:
           additionalProperties:
             type: integer
@@ -3175,6 +3185,13 @@ components:
         tokens_saved:
           description: echoed from ServerTokenMetrics (FR-007)
           type: integer
+        tokens_saved_estimated:
+          description: |-
+            TokensSavedEstimated echoes ServerTokenMetrics.Estimated (Spec 109-k):
+            true while TokensSaved is a synthetic simulation rather than derived
+            from a real retrieve_tools call. Dropped (false, the zero value) for a
+            scoped caller along with TokensSaved itself, above.
+          type: boolean
         tokens_saved_percentage:
           type: number
         tools:
@@ -4129,6 +4146,12 @@ paths:
               schema:
                 type: string
           description: Streamed activity records
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Bad Request
         "401":
           content:
             application/json:
@@ -5792,6 +5815,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.GetServersResponse'
           description: Server list with statistics
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unsupported scope filter (profile/client/token, Spec 109-k
+            FR-080a)
         "500":
           content:
             application/json:
@@ -7419,6 +7449,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.GlobalToolsResponse'
           description: All tools across all servers
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unsupported scope filter (profile/client/token, Spec 109-k
+            FR-080a)
         "500":
           content:
             application/json:

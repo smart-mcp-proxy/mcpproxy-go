@@ -127,12 +127,15 @@ const router = createRouter({
       },
     },
     {
+      // Spec 109-k/109-ux-navigation-consistency FR-070: Sessions is now one
+      // of Activity's views (Tool calls · Sessions · System events · All),
+      // not its own page — `/sessions` keeps working as a redirect so old
+      // links/bookmarks still land somewhere, but the query string (a deep
+      // link like `?session=<id>`) has to survive the hop, same as the
+      // `/review` redirect above.
       path: '/sessions',
       name: 'sessions',
-      component: () => import('@/views/Sessions.vue'),
-      meta: {
-        title: 'MCP Sessions',
-      },
+      redirect: (to) => ({ path: '/activity', query: { ...to.query, view: 'sessions' }, hash: to.hash }),
     },
     {
       path: '/tools',

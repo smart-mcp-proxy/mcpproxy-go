@@ -3,6 +3,7 @@ import {
   formatRunDuration,
   formatRunSpan,
   groupActivityRuns,
+  quarantineBatchSummary,
   runDurationRange,
 } from '@/utils/activity'
 
@@ -179,6 +180,74 @@ describe('groupActivityRuns', () => {
 
   it('handles an empty list', () => {
     expect(groupActivityRuns([])).toEqual([])
+  })
+})
+
+// Spec 109-k (activity-scope-filters), acceptance scenario 6, and the
+// verified zcode review finding on this fix: a tool_quarantine_change run
+// folds WITHOUT agreeing on tool_name (unlike every other type above), so a
+// server's batch of per-tool baseline approvals reads as "N tools approved"
+// instead of 14 near-identical rows — but only within a bounded window, so
+// two genuinely separate same-server, same-status actions hours apart never
+// silently merge into one summary line just because nothing of a different
+// type happened to land between them.
+describe('groupActivityRuns — tool_quarantine_change batch fold', () => {
+  const quarantine = (over: Record<string, unknown> = {}) => ({
+    id: `qc-${Math.random().toString(36).slice(2)}`,
+    type: 'tool_quarantine_change',
+    server_name: 'filesystem',
+    tool_name: 'some_tool',
+    status: 'approved',
+    timestamp: '2026-08-21T10:00:00Z',
+    ...over,
+  })
+
+  it('folds 14 per-tool approvals (different tool_name each) into one run', () => {
+    const rows = Array.from({ length: 14 }, (_, i) => quarantine({ id: `qc-${i}`, tool_name: `tool_${i}` }))
+    const runs = groupActivityRuns(rows)
+    expect(runs).toHaveLength(1)
+    expect(runs[0].count).toBe(14)
+    expect(quarantineBatchSummary(runs[0].lead, runs[0].count)).toBe('filesystem: 14 tools approved')
+  })
+
+  it('does NOT fold two same-server, same-status batches more than 5 minutes apart', () => {
+    const rows = [
+      quarantine({ id: 'a', tool_name: 'x', timestamp: '2026-08-21T10:00:00Z' }),
+      quarantine({ id: 'b', tool_name: 'y', timestamp: '2026-08-21T10:01:00Z' }),
+      // A second, later action on the same server — nothing of a different
+      // type happened to land between them, so identity/adjacency alone
+      // would otherwise merge it into the first run.
+      quarantine({ id: 'c', tool_name: 'z', timestamp: '2026-08-21T10:30:00Z' }),
+    ]
+    const runs = groupActivityRuns(rows)
+    expect(runs).toHaveLength(2)
+    expect(runs[0].count).toBe(2)
+    expect(runs[1].count).toBe(1)
+    expect(runs[1].lead.id).toBe('c')
+  })
+
+  it('does fold within the 5-minute window, even with a gap between individual records', () => {
+    const rows = [
+      quarantine({ id: 'a', tool_name: 'x', timestamp: '2026-08-21T10:00:00Z' }),
+      quarantine({ id: 'b', tool_name: 'y', timestamp: '2026-08-21T10:04:00Z' }),
+    ]
+    expect(groupActivityRuns(rows)).toHaveLength(1)
+  })
+
+  it('still requires server and status to agree, exactly like the identity fields for every other type', () => {
+    const rows = [
+      quarantine({ id: 'a', tool_name: 'x', server_name: 'filesystem' }),
+      quarantine({ id: 'b', tool_name: 'y', server_name: 'github' }),
+      quarantine({ id: 'c', tool_name: 'z', server_name: 'filesystem', status: 'blocked' }),
+    ]
+    const runs = groupActivityRuns(rows)
+    expect(runs).toHaveLength(3)
+  })
+
+  it('a lone tool_quarantine_change record is not folded (no "1 tools" label)', () => {
+    const runs = groupActivityRuns([quarantine({ id: 'a', tool_name: 'read' })])
+    expect(runs).toHaveLength(1)
+    expect(runs[0].count).toBe(1)
   })
 })
 
