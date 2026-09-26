@@ -65,6 +65,18 @@ func (m *mockManagementService) RestartServer(ctx context.Context, name string) 
 	return nil
 }
 
+func (m *mockManagementService) RestartAll(ctx context.Context) (*management.BulkOperationResult, error) {
+	return &management.BulkOperationResult{Total: 1, Successful: 1, Errors: map[string]string{}}, nil
+}
+
+func (m *mockManagementService) EnableAll(ctx context.Context) (*management.BulkOperationResult, error) {
+	return &management.BulkOperationResult{Total: 1, Successful: 1, Errors: map[string]string{}}, nil
+}
+
+func (m *mockManagementService) DisableAll(ctx context.Context) (*management.BulkOperationResult, error) {
+	return &management.BulkOperationResult{Total: 1, Successful: 1, Errors: map[string]string{}}, nil
+}
+
 func (m *mockManagementService) GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error) {
 	return []map[string]interface{}{
 		{
