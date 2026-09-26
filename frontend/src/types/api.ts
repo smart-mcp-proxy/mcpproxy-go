@@ -1,5 +1,5 @@
 // Re-export common types from contracts (generated from Go constants)
-export type { APIResponse, HealthStatus, HealthLevel, AdminState, HealthAction } from './contracts'
+export type { APIResponse, HealthStatus, HealthLevel, AdminState, HealthAction, Tier } from './contracts'
 export {
   HealthLevelHealthy,
   HealthLevelDegraded,
@@ -17,8 +17,8 @@ export {
   HealthActionConfigure,
 } from './contracts'
 
-// Import HealthStatus for use in this file
-import type { HealthStatus } from './contracts'
+// Import HealthStatus/Tier for use in this file
+import type { HealthStatus, Tier } from './contracts'
 
 // Quarantine stats for tool-level quarantine (Spec 032)
 export interface QuarantineStats {
@@ -338,6 +338,9 @@ export interface GlobalTool {
   usage: number
   last_used?: string       // ISO 8601; omitted if never used in window
   annotations?: ToolAnnotation
+  // Spec 109 FR-028: computed by contracts.AnnotationTier — never derive this
+  // from `annotations` on the frontend (X11).
+  tier?: Tier
   // Hold evidence (Spec 086 FR-018, surfaced by Spec 088 FR-008): present only
   // on tools the trust gate refused to auto-approve. GET /api/v1/tools emits
   // these alongside the approval status (internal/httpapi/server.go); records
@@ -461,6 +464,11 @@ export interface SearchResult {
 // Status types
 export interface StatusUpdate {
   running: boolean
+  // Spec 109 FR-056: the SSE `status` stream (both the initial frame and every
+  // subsequent one) carries the same `edition` GET /api/v1/status reports, so
+  // the Web UI can gate edition-only UI (Settings' "Server Edition" tab) on
+  // the resolved runtime edition rather than on config content.
+  edition?: string
   listen_addr: string
   routing_mode?: string
   upstream_stats: {

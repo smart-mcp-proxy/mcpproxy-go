@@ -53,6 +53,26 @@ jobs:
       - name: Regenerate and verify OpenAPI spec
         run: scripts/verify-oas.sh
 
+  # Review round 8, finding 5: proves the recursive process-tree walk
+  # (descendant_pids, scripts/descendant-pids.sh) the E2E cleanup trap uses
+  # to reap only what a run itself spawned. Hermetic (spawns only its own
+  # sleep/bash processes) — no build, frontend or binary needed — so it runs
+  # standalone rather than piggybacking on the `test` job below. Before this,
+  # neither this nor the heavier test-e2e-cleanup-check.sh (see
+  # release-qa-gate.yml's suite-api-e2e job) was wired into any workflow, so
+  # a regression reintroducing the blanket `pkill -f "mcpproxy.*serve"` this
+  # PR removes, or breaking descendant_pids' recursion, would pass CI
+  # undetected.
+  test-descendant-pids:
+    name: Descendant-PIDs Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Run descendant_pids unit test
+        run: make test-descendant-pids
+
   test:
     name: Unit Tests
     needs: [build-frontend, verify-oas]
@@ -166,7 +186,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26'
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
         with:
           file: ./coverage.out
           flags: unittests

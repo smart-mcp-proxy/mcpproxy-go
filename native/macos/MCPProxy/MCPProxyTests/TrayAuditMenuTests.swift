@@ -262,6 +262,59 @@ final class TrayAuditMenuTests: XCTestCase {
                        "navigation keys off the server NAME, which is what .showServerDetail matches")
     }
 
+    // MARK: - F8a + sign-in · Combined quarantine + awaiting sign-in
+
+    /// Quarantine outranks sign-in in the core's health calculator, so a
+    /// quarantined server awaiting OAuth sign-in reports `health.action ==
+    /// "approve"` — the same payload shape as
+    /// `QuarantinedOAuthSignInTests.liveQuarantinedGitHub`, trimmed to what
+    /// `rebuildMenu()` reads. `QuarantinedOAuthSignInTests` only exercises the
+    /// pure `ServerStatus`/`TrayServerAction` properties for this combination;
+    /// nothing drove it through the real menu build.
+    private static func quarantinedAwaitingSignIn(name: String) -> ServerStatus {
+        let json = """
+        {
+            "id": "\(name)", "name": "\(name)", "protocol": "http",
+            "enabled": true, "connected": false, "quarantined": true, "tool_count": 0,
+            "diagnostic": {"code": "MCPX_OAUTH_LOGIN_REQUIRED", "severity": "warn", "summary": "sign in"},
+            "health": {"level": "healthy", "admin_state": "quarantined",
+                       "summary": "Quarantined for review", "action": "approve"}
+        }
+        """.data(using: .utf8)!
+        // swiftlint:disable:next force_try
+        return try! JSONDecoder().decode(ServerStatus.self, from: json)
+    }
+
+    /// The combined state: `forAttention` must still pick `.login` (sign-in
+    /// outranks the row's own dispatch even though quarantine outranks it in
+    /// `health.action`), and the row's second item must still read "Review
+    /// quarantine…" — the `detailsTitle` conditional at
+    /// `MCPProxyApp.rebuildMenu()` — not the generic "Open Server Details"
+    /// that a plain sign-in row gets. Neither `testAnAttentionRowDoesNotFireItsActionOnClick`
+    /// (plain sign-in, not quarantined) nor `testARowWithNoActionNavigatesDirectly`
+    /// (plain quarantine, no sign-in) exercises both facts on one server.
+    func testNeedsAttentionRowOffersSignInAndReviewWhenBothApply() throws {
+        let (controller, host) = makeController(servers: [
+            Self.quarantinedAwaitingSignIn(name: "github")
+        ])
+        controller.rebuildMenu()
+
+        let attention = try submenu(host, startingWith: "Needs Attention")
+        let row = try XCTUnwrap(attention.items.first)
+        let rowMenu = try XCTUnwrap(row.submenu,
+                                   "a server with a runnable attention action needs its own row menu")
+
+        XCTAssertEqual(rowMenu.items.first?.title, "Sign in",
+                       "quarantine outranks sign-in in health.action, but forAttention must still pick .login")
+        XCTAssertTrue(rowMenu.items.first?.target === controller)
+
+        let review = try XCTUnwrap(rowMenu.items.first { $0.title.hasPrefix("Review quarantine") },
+                                   "a quarantined server awaiting sign-in must keep its review path: \(rowMenu.items.map(\.title))")
+        XCTAssertEqual(review.representedObject as? String, "github")
+        XCTAssertFalse(rowMenu.items.contains { $0.title == "Open Server Details" },
+                       "quarantined rows name the review action, never the generic details row")
+    }
+
     // MARK: - F15 · A Servers submenu that fits
 
     func testDisabledServersFoldIntoTheirOwnSubmenu() throws {

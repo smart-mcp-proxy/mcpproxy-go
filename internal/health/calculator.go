@@ -187,6 +187,14 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		// still the operator's next step — so the review flow and the tray's
 		// quarantine handling keep working. Only the level and the summary
 		// stop claiming the server is fine.
+		// An OAuth server awaiting sign-in is the same story: it cannot connect
+		// until the user signs in, so it is an attention item, not healthy — but
+		// that case is caught above by quarantinedOAuthLoginState (which now
+		// folds in quarantinedAwaitingSignIn's autodetected-OAuth markers, see
+		// its own comment) and returns before this point with the fuller
+		// Action/Status/Actions triple (FR-010: `login`/StatusSignInRequired),
+		// not just an upgraded Level/Summary. Reaching here means that check
+		// already said no, so only the non-OAuth transport fault remains.
 		if (state == "error" || state == "disconnected") && input.LastError != "" {
 			status.Level = LevelUnhealthy
 			status.Summary = "Quarantined — " + formatErrorSummary(input.LastError)
@@ -270,7 +278,7 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		if input.HasEndpointURL && isEndpointAddressError(input.LastError) {
 			action = ActionEditURL
 		}
-		if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
+		if oauthActionApplies(input) {
 			level, action, summary = oauthAttentionState(input.LastError)
 		}
 		statusVal, usable, actions := connectionErrorStatus(action)
@@ -294,7 +302,7 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				action = ActionEditURL
 			}
 			// For OAuth-required servers with OAuth-related errors, suggest login
-			if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
+			if oauthActionApplies(input) {
 				level, action, summary = oauthAttentionState(input.LastError)
 			}
 		}
@@ -557,7 +565,18 @@ func quarantinedOAuthLoginState(input HealthCalculatorInput, state string) (need
 		// fallback below, so a stale OAuthStatus (still "authenticated" while
 		// the connection has already failed with an OAuth-shaped error) does
 		// not mask the sign-in verdict.
-		if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
+		//
+		// quarantinedAwaitingSignIn (not just `input.OAuthRequired &&
+		// isOAuthRelatedError`) so autodetected OAuth (OAuthRequired=false)
+		// gets the same verdict as configured OAuth when the error text
+		// itself is an unambiguous login-required or reauth marker — the
+		// same trust the non-quarantined oauthActionApplies gives those two
+		// markers. It also keeps this branch's own "error"-state generic-match
+		// exclusion (below), so a merely OAuth-shaped but non-specific string
+		// in "error" state (e.g. mcp-go's "authentication strategies failed"
+		// wrapper) still defers to the transport-fault branch, not just any
+		// quarantined server whose LastError happens to mention OAuth.
+		if quarantinedAwaitingSignIn(input) {
 			level, _, summary = oauthAttentionState(input.LastError)
 			return true, level, summary, input.LastError
 		}
@@ -787,6 +806,40 @@ func isOAuthRelatedError(err string) bool {
 	return false
 }
 
+// quarantinedAwaitingSignIn reports whether a quarantined server is waiting on
+// an OAuth sign-in: parked in Pending Auth, or its last error is OAuth-related
+// and either a first-time login-required error, a re-auth error (a
+// previously-working stored token that broke), or (for configured OAuth) any
+// other OAuth error outside the "error" state. In the "error" state a
+// non-login, non-reauth OAuth match is left to the transport-fault branch,
+// because mcp-go wraps transport failures in "authentication strategies
+// failed" and the fault summary names the real cause.
+//
+// Login-required and re-auth markers are both checked without gating on
+// OAuthRequired or state: OAuthRequired is deliberately false for autodetected
+// OAuth (see the comment at the call site), and the marker text itself (e.g.
+// "re-login available", "server error with stored token") is specific enough
+// to trust on its own, exactly like the login markers. Without this, a
+// quarantined server with autodetected OAuth whose stored token broke fell
+// through to the default healthy/"Quarantined for review", hiding a broken
+// token behind a green health level.
+func quarantinedAwaitingSignIn(input HealthCalculatorInput) bool {
+	state := strings.ToLower(input.State)
+	if state == "pending auth" || state == "pending_auth" {
+		return true
+	}
+	if !isOAuthRelatedError(input.LastError) {
+		return false
+	}
+	if isOAuthLoginRequiredError(input.LastError) {
+		return true
+	}
+	if isOAuthReauthError(input.LastError) {
+		return true
+	}
+	return input.OAuthRequired && state != "error"
+}
+
 // oauthAttentionState maps an OAuth-related error into the health level, action,
 // and summary the user should see. A first-time sign-in (ErrOAuthPending) is an
 // expected setup step, so it surfaces as degraded/amber with "Sign-in required".
@@ -845,6 +898,43 @@ func isOAuthReauthError(err string) bool {
 		}
 	}
 	return false
+}
+
+// oauthActionApplies reports whether an enabled (non-quarantined) server's
+// "error"/"disconnected" last error should surface the OAuth Login CTA
+// instead of the generic Restart. Configured OAuth (OAuthRequired) trusts any
+// OAuth-related error, matching the pre-existing behaviour. Autodetected
+// OAuth (OAuthRequired=false) additionally trusts the two specific,
+// unambiguous markers — first-time login-required and re-auth (a
+// previously-working stored token that broke) — mirroring
+// quarantinedAwaitingSignIn's rationale: OAuthRequired is deliberately false
+// for autodetected OAuth, and the marker text itself (e.g. "re-login
+// available", "server error with stored token") is specific enough to trust
+// on its own. A looser generic OAuth-related match (e.g. mcp-go's
+// "authentication strategies failed" transport-fault wrapper) is NOT
+// promoted without OAuthRequired, since that generic text can also mean an
+// unrelated transport failure — see isOAuthRelatedError's own connection
+// exclusions.
+//
+// Without this, diagnostics.classifyOAuth (which has no OAuthRequired hint
+// at all) still assigned MCPX_OAUTH_REAUTH_REQUIRED / MCPX_OAUTH_LOGIN_REQUIRED
+// from the same error text, so the Web UI's ServerCard showed a Login button
+// (driven by the diagnostic code) alongside a Restart button (driven by
+// health.action) at once, with the explanatory error alert suppressed
+// because a Login CTA was present.
+func oauthActionApplies(input HealthCalculatorInput) bool {
+	// isOAuthRelatedError is the general gate: it excludes connection-fault
+	// text (e.g. mcp-go's "authentication strategies failed" wrapper around a
+	// plain "dial tcp ... connection refused") BEFORE the OAuth patterns are
+	// checked. Both branches below rely on that exclusion having already run,
+	// exactly like quarantinedAwaitingSignIn.
+	if !isOAuthRelatedError(input.LastError) {
+		return false
+	}
+	if input.OAuthRequired {
+		return true
+	}
+	return isOAuthLoginRequiredError(input.LastError) || isOAuthReauthError(input.LastError)
 }
 
 // ExtractMissingSecret extracts the secret name from an error message if the error

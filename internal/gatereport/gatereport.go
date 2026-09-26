@@ -102,6 +102,15 @@ const (
 	EntrySuiteServerRace = "suite/server-race"
 	EntrySuiteScanEval   = "suite/scan-eval"
 
+	// EntrySuiteAPIE2ECleanupCheck is the "Run E2E cleanup-trap safety check"
+	// CI step (review round 8, finding 5): it proves the E2E cleanup trap
+	// (no blanket `pkill -f "mcpproxy.*serve"`) against a real invocation.
+	// Blocking, like the other suite entries, so deleting or typo'ing that
+	// step's --name leaves a *missing* fragment for this entry — a hard
+	// gate failure (FR-004) — rather than silently vanishing from the report
+	// (review round 9, finding 2).
+	EntrySuiteAPIE2ECleanupCheck = "suite/api-e2e-cleanup-check"
+
 	// EntryAdvisoryWebUISweep is the Spec 081 T2 Playwright Web UI sweep. It
 	// runs on every tag build but is ADVISORY: a red sweep is reported (and
 	// listed under advisory_failures) without blocking publication.
@@ -112,7 +121,7 @@ const (
 )
 
 // Manifest returns the hardcoded expected-entries manifest: 5 matrix cells +
-// 4 invariants + 4 assembled suite jobs (FR-003) + 1 advisory entry (the T2
+// 4 invariants + 5 assembled suite jobs (FR-003) + 1 advisory entry (the T2
 // Web UI sweep) + 2 reserved slots (T3/T4).
 func Manifest() []ManifestEntry {
 	return []ManifestEntry{
@@ -128,6 +137,7 @@ func Manifest() []ManifestEntry {
 		{Name: EntryInvariantUpgrade, Blocking: true},
 
 		{Name: EntrySuiteAPIE2E, Blocking: true},
+		{Name: EntrySuiteAPIE2ECleanupCheck, Blocking: true},
 		{Name: EntrySuiteUnitRace, Blocking: true},
 		{Name: EntrySuiteServerRace, Blocking: true},
 		{Name: EntrySuiteScanEval, Blocking: true},

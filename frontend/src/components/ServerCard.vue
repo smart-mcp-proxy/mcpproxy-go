@@ -375,14 +375,21 @@ const statusTooltip = computed(() => {
 // token expiring soon), so this does not gate on `status`.
 const primaryAction = computed<string>(() => {
   const health = props.server.health
+  let action = ''
   if (health) {
-    if (health.actions && health.actions.length > 0) return health.actions[0]
-    if (health.action) return health.action
-    return ''
+    if (health.actions && health.actions.length > 0) action = health.actions[0]
+    else if (health.action) action = health.action
+  } else if (signInState.value) {
+    // Old-core / diagnostic-only fallback: no health object at all.
+    action = 'login'
   }
-  // Old-core / diagnostic-only fallback: no health object at all.
-  if (signInState.value) return 'login'
-  return ''
+  // Race guard: disableServer()'s optimistic update flips top-level `enabled`
+  // to false immediately, but `health` (still reporting a pre-disable
+  // 'login') is only replaced once the SSE-triggered refresh lands. `enabled`
+  // itself always updates immediately, so it is the one field safe to gate
+  // on to stop a stale Sign-in CTA outliving the disable it just requested.
+  if (action === 'login' && !props.server.enabled) return 'enable'
+  return action
 })
 
 const primaryLabel = computed(() => healthActionLabel(primaryAction.value))

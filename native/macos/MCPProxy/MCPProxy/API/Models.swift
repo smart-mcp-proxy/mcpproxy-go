@@ -506,9 +506,15 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     /// security scanner can export its tool definitions, and a failed attempt
     /// leaves an error-severity diagnostic behind. That diagnostic used to tint
     /// the menu-bar badge red while the very same payload reported
-    /// `health.level == "healthy"` / `admin_state == "quarantined"` — so the
-    /// menu header drew a calm yellow dot under a red menu-bar dot, and the
-    /// user could not clear it without approving or disabling the server.
+    /// `admin_state == "quarantined"` — so the menu header drew a calm dot
+    /// under a red menu-bar dot, and the user could not clear it without
+    /// approving or disabling the server.
+    ///
+    /// Do not key anything on `health.level` here: it is not always "healthy".
+    /// A quarantined server whose transport faults reports unhealthy, and a
+    /// core that also surfaces sign-in under quarantine may report it degraded
+    /// or unhealthy. `admin_state == "quarantined"` and `action == "approve"`
+    /// hold in every case.
     ///
     /// The `admin_state` half is belt-and-braces, not a second independent
     /// signal: the backend derives it FROM `quarantined`
@@ -536,13 +542,45 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         isOAuthLoginRequired || isQuarantineReview
     }
 
-    /// True when the server is in the OAuth login-required state (MCP-1819/T3).
-    /// `health.action == "login"` is the stable, cross-surface contract that
-    /// CLI/REST/Web-UI/tray all key off. In this state the server needs a calm,
-    /// actionable "Sign in" affordance — NOT hard-error framing — even when the
-    /// backend also attaches an error-severity diagnostic for the failed connect.
+    /// Diagnostic codes that mean the user must sign in: the first-time login
+    /// plus the re-auth codes for a session that expired or was revoked. Mirrors
+    /// `OAuthReauthCodes` + MCPX_OAUTH_LOGIN_REQUIRED in the Web UI's
+    /// `frontend/src/utils/health.ts`. Other MCPX_OAUTH_* codes (discovery,
+    /// callback) are configuration faults a sign-in click does not fix.
+    static let oauthSignInCodes: Set<String> = [
+        "MCPX_OAUTH_LOGIN_REQUIRED",
+        "MCPX_OAUTH_REAUTH_REQUIRED",
+        "MCPX_OAUTH_REFRESH_EXPIRED",
+        "MCPX_OAUTH_REFRESH_403",
+    ]
+
+    /// True when the server needs the user to sign in (MCP-1819/T3). In this
+    /// state the server needs a calm, actionable "Sign in" affordance — NOT
+    /// hard-error framing — even when the backend also attaches an
+    /// error-severity diagnostic for the failed connect.
+    ///
+    /// `health.action == "login"` is not enough on its own: health reports one
+    /// action, and quarantine outranks sign-in, so a quarantined OAuth server
+    /// awaiting sign-in says `action == "approve"`. The diagnostic code carries
+    /// the sign-in half — the same rule as the Web UI's `oauthSignInState`.
+    /// A disabled server is excluded: its diagnostic is left over from the last
+    /// connect attempt, and its next step is Enable.
     var isOAuthLoginRequired: Bool {
-        health?.action == "login"
+        if health?.action == "login" { return true }
+        guard enabled, let code = diagnostic?.code else { return false }
+        return Self.oauthSignInCodes.contains(code)
+    }
+
+    /// The buttons the Dashboard's "Servers Needing Attention" card shows, in
+    /// order. Health carries one action and quarantine outranks sign-in, so a
+    /// quarantined server awaiting sign-in says "approve" — Sign in is added
+    /// from `isOAuthLoginRequired`, beside the health action, never instead of
+    /// it.
+    var attentionActions: [HealthAction] {
+        var actions: [HealthAction] = []
+        if isOAuthLoginRequired { actions.append(.login) }
+        if let action = health?.healthAction, action != .login { actions.append(action) }
+        return actions
     }
 
     /// Number of tools awaiting approval (pending + changed), or 0 if quarantine stats are absent.
@@ -1259,9 +1297,12 @@ struct ServerTool: Codable, Identifiable, Equatable {
     let serverName: String?
     let annotations: ToolAnnotation?
     let approvalStatus: String?
+    /// Spec 109 FR-028: server-computed (`contracts.AnnotationTier`) —
+    /// `read`|`write`|`destructive`|`unannotated`. Never derived locally.
+    let tier: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, description, annotations
+        case name, description, annotations, tier
         case serverName = "server_name"
         case approvalStatus = "approval_status"
     }
@@ -1359,9 +1400,12 @@ struct SearchTool: Codable {
     let description: String?
     let serverName: String?
     let annotations: ToolAnnotation?
+    /// Spec 109 FR-028: server-computed (`contracts.AnnotationTier`). Never
+    /// derived locally.
+    let tier: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, description, annotations
+        case name, description, annotations, tier
         case serverName = "server_name"
     }
 }

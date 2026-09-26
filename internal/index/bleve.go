@@ -1,6 +1,7 @@
 package index
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,6 +49,14 @@ type ToolDocument struct {
 	Hash             string `json:"hash"`
 	Tags             string `json:"tags"`
 	SearchableText   string `json:"searchable_text"` // Combined searchable content
+	// AnnotationsJSON is the tool's MCP behavior-hint annotations
+	// (config.ToolAnnotations), marshaled once at index time. Stored but not
+	// indexed for search, same as Hash — it exists so a search hit's tier
+	// (Spec 109 FR-028) reflects the tool's real annotations instead of
+	// always reading TierUnannotated (review round 1: GET /index/search never
+	// stored annotations at all, so a search hit's tier could not agree with
+	// the same tool's tier on GET /servers/{id}/tools).
+	AnnotationsJSON string `json:"annotations_json,omitempty"`
 }
 
 // NewBleveIndex creates (or opens) the shared default Bleve index at
@@ -75,6 +84,10 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 		}
 	} else {
 		logger.Info("Opened existing Bleve index", zap.String("path", indexPath))
+		index, err = rebuildIfMappingPredatesAnnotations(index, indexPath, logger)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &BleveIndex{
@@ -84,6 +97,170 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 	}, nil
 }
 
+// rebuildIfMappingPredatesAnnotations replaces an already-open index whose
+// on-disk mapping was created before the annotations_json field mapping below
+// (Spec 109 FR-028 tier-badge support) existed, with a fresh index that has
+// the current mapping.
+//
+// bleve.Open never re-applies createBleveIndex's mapping to an index that
+// already exists on disk — the mapping is baked in at creation time, and
+// vendored bleve v2.6.1 exposes no SetMapping or other migration path
+// (confirmed by reading mapping.IndexMapping's method set). An index that
+// predates this field keeps its old mapping forever, with bleve's
+// dynamic-field defaults (IndexDynamic=true) still enabled for it: the very
+// first write that carries annotations_json (the differential-update
+// backfill in runtime/lifecycle.go) then gets indexed as free-text,
+// including into the field-less `_all` composite field that
+// buildToolSearchQuery's clause 5 (the bare MatchQuery) searches — silently
+// making annotation JSON term-searchable and shifting BM25 corpus stats for
+// every query on an upgraded (not freshly installed) deployment (review
+// round 6, finding 1: high).
+//
+// Round 6 only logged a warning and left the fix to an operator manually
+// deleting indexPath (review round 7, finding 2: the underlying gap was still
+// open on any upgrade nobody noticed the log line for). Round 7 then made
+// this self-healing, but did so destructive-before-construct (Close ->
+// os.RemoveAll(indexPath) -> createBleveIndex(indexPath)): any failure after
+// the wipe (disk full, a permission error on a leftover file) propagated all
+// the way through index.NewManager -> runtime.New and failed daemon startup
+// on every retry, taking a previously-degraded-but-working deployment (stale
+// mapping, but an openable, functional index) down to a hard outage that
+// needed an operator to intervene (review round 8, finding 1: high).
+//
+// This builds the replacement at a temporary sibling path FIRST and only
+// touches the existing index once that succeeds. index.bleve is a derived
+// search cache, not a source of truth, so once the swap does happen an empty
+// index is fine — the normal discovery path
+// (applyDifferentialToolUpdate) unconditionally reindexes everything as each
+// server (re)connects during startup, the same way it already backfills a
+// brand-new install. But if construction fails, the original index must
+// still be there and still work: this logs the error and returns the
+// original (stale-mapping) index unchanged, the same degraded-but-running
+// outcome round 6 had, rather than failing startup.
+// Manager.RebuildIndex (internal/index/manager.go) is a separate, currently
+// unwired no-op stub for an operator-triggered full rebuild and is not used
+// here — this path only ever runs once, at index-open time, against a
+// mapping that is provably stale.
+//
+// The finalize step retires the original by renaming it aside
+// (os.Rename(indexPath, indexPath+".rebuild-old")) rather than deleting it
+// with os.RemoveAll. A partial RemoveAll failure — one permission-impaired
+// or locked leftover file inside the index directory — can delete most-but-
+// not-all of the original and still return an error; on the next startup
+// bleve.Open(indexPath) then fails on the mangled remnant, falls through to
+// createBleveIndex(indexPath), and if index_meta.json survived the partial
+// delete, vendored bleve's O_CREATE|O_EXCL index_meta.Save makes bleve.New
+// return ErrorIndexPathExists — the same operator-intervention outage round
+// 8 fixed, reachable through a narrower door (review round 9, finding 1).
+// os.Rename is a single directory-entry move: it needs write access to
+// indexPath's PARENT, never to anything inside indexPath itself, so it
+// cannot fail this way. If the second rename (moving the replacement into
+// place) fails, the aside copy is renamed back so the original stays
+// available rather than leaving indexPath empty.
+func rebuildIfMappingPredatesAnnotations(idx bleve.Index, indexPath string, logger *zap.Logger) (bleve.Index, error) {
+	fm := idx.Mapping().FieldMappingForPath("annotations_json")
+	if fm.Type != "" {
+		// Explicitly mapped (Type is only set by NewTextFieldMapping and
+		// friends, never by the zero-value fallback FieldMappingForPath
+		// returns for a path with no static mapping) — this index already
+		// has the current mapping.
+		return idx, nil
+	}
+
+	logger.Warn("Bleve index predates the annotations_json field mapping; "+
+		"annotation JSON may have been indexed as free text and skewed "+
+		"tool-search ranking. Rebuilding the index automatically with the "+
+		"current mapping (see internal/index/bleve.go:rebuildIfMappingPredatesAnnotations).",
+		zap.String("path", indexPath))
+
+	// Construct the replacement before destroying anything. tmpPath is a
+	// sibling of indexPath, never indexPath itself, so a failure here never
+	// touches the original index.
+	tmpPath := indexPath + ".rebuild-tmp"
+	_ = os.RemoveAll(tmpPath) // best-effort: clear any leftover from a previous failed attempt
+
+	fresh, err := createBleveIndex(tmpPath)
+	if err != nil {
+		logger.Error("Failed to build replacement Bleve index with the current mapping; "+
+			"continuing with the stale-mapping index instead of failing startup "+
+			"(annotation JSON may still be indexed as free text until this is retried)",
+			zap.Error(err), zap.String("path", indexPath))
+		_ = os.RemoveAll(tmpPath)
+		return idx, nil
+	}
+	if closeErr := fresh.Close(); closeErr != nil {
+		_ = os.RemoveAll(tmpPath)
+		logger.Error("Failed to close freshly built replacement Bleve index; "+
+			"continuing with the stale-mapping index instead of failing startup",
+			zap.Error(closeErr), zap.String("path", indexPath))
+		return idx, nil
+	}
+
+	// From here on the replacement exists on disk and is known-good, so it
+	// is safe to retire the original.
+	if err := idx.Close(); err != nil {
+		_ = os.RemoveAll(tmpPath)
+		return nil, fmt.Errorf("failed to close stale-mapping Bleve index for rebuild: %w", err)
+	}
+
+	// Move the original aside instead of deleting it: os.Rename either
+	// succeeds atomically or leaves indexPath completely untouched, so a
+	// file inside it that RemoveAll could not delete (permission-impaired,
+	// locked) can no longer corrupt it into a half-removed, unopenable-and-
+	// uncreatable state (see the function doc comment, round 9 finding 1).
+	oldPath := indexPath + ".rebuild-old"
+	_ = os.RemoveAll(oldPath) // best-effort: clear any leftover from a previous failed attempt
+	if err := os.Rename(indexPath, oldPath); err != nil {
+		_ = os.RemoveAll(tmpPath)
+		return nil, fmt.Errorf("failed to move aside stale-mapping Bleve index at %s: %w", indexPath, err)
+	}
+	if err := os.Rename(tmpPath, indexPath); err != nil {
+		// indexPath is now empty (just moved to oldPath): restore the
+		// original so a functional, if stale-mapping, index is still there
+		// rather than leaving nothing at all.
+		if restoreErr := os.Rename(oldPath, indexPath); restoreErr != nil {
+			return nil, fmt.Errorf("failed to move rebuilt Bleve index into place at %s (%w), and failed to restore the original from %s: %w",
+				indexPath, err, oldPath, restoreErr)
+		}
+		return nil, fmt.Errorf("failed to move rebuilt Bleve index into place at %s: %w", indexPath, err)
+	}
+
+	reopened, err := bleve.Open(indexPath)
+	if err != nil {
+		// The just-built, cleanly-closed replacement failed to reopen (rare —
+		// e.g. a transient I/O error in the gap between the two calls).
+		// Restore the original rather than leaving indexPath occupied by an
+		// unopenable index_meta.json: otherwise a later restart whose
+		// bleve.Open(indexPath) also fails falls through to
+		// createBleveIndex(indexPath), which hits the same O_CREATE|O_EXCL
+		// ErrorIndexPathExists this fix exists to prevent (zcode round-9
+		// review, finding 1 — the identical outage shape round 8 fixed,
+		// reachable through this narrower door too).
+		failedPath := indexPath + ".failed-reopen"
+		_ = os.RemoveAll(failedPath)
+		if renameErr := os.Rename(indexPath, failedPath); renameErr != nil {
+			return nil, fmt.Errorf("failed to reopen rebuilt Bleve index at %s (%w), and failed to move it aside to restore the original: %w",
+				indexPath, err, renameErr)
+		}
+		if restoreErr := os.Rename(oldPath, indexPath); restoreErr != nil {
+			return nil, fmt.Errorf("failed to reopen rebuilt Bleve index at %s (%w), and failed to restore the original from %s: %w",
+				indexPath, err, oldPath, restoreErr)
+		}
+		_ = os.RemoveAll(failedPath) // best-effort: drop the unopenable replacement
+		return nil, fmt.Errorf("failed to reopen rebuilt Bleve index at %s: %w", indexPath, err)
+	}
+
+	// Best-effort cleanup of the retired original. It is never opened or
+	// referenced by any other code path, so a failure here (the same class
+	// of permission-impaired leftover this fix exists to route around) is
+	// harmless and must not fail startup.
+	_ = os.RemoveAll(oldPath)
+
+	logger.Info("Rebuilt Bleve index with the current field mapping; "+
+		"tools will reappear as each server reconnects", zap.String("path", indexPath))
+	return reopened, nil
+}
+
 // createBleveIndex creates a new Bleve index with proper mapping
 func createBleveIndex(indexPath string) (bleve.Index, error) {
 	// Create index mapping
@@ -91,6 +268,15 @@ func createBleveIndex(indexPath string) (bleve.Index, error) {
 
 	// Create document mapping for tools
 	toolMapping := bleve.NewDocumentMapping()
+	// Disable dynamic field mapping: every field this index ever writes is
+	// declared explicitly below. Without this, adding a new ToolDocument
+	// field in the future (as annotations_json itself was added, review
+	// round 6 finding 1) would silently fall back to bleve's dynamic-field
+	// defaults — full-text-indexed and included in `_all` — on any FRESH
+	// index too, not just ones migrating forward. This does not, and cannot,
+	// retroactively fix an already-open index created before this line
+	// existed; see warnIfMappingPredatesAnnotations above.
+	toolMapping.Dynamic = false
 
 	// Tool name field (both keyword and standard analyzers for different search types)
 	toolNameFieldKeyword := bleve.NewTextFieldMapping()
@@ -127,12 +313,35 @@ func createBleveIndex(indexPath string) (bleve.Index, error) {
 	paramsField.Index = true
 	toolMapping.AddFieldMappingsAt("params_json", paramsField)
 
+	// Output schema JSON field: stored only, never searched (it is JSON, not
+	// prose) — same shape as hash and annotations_json below. Previously had
+	// no explicit mapping at all and relied entirely on bleve's dynamic-field
+	// defaults to be stored for retrieval, which also meant it was
+	// full-text-indexed and folded into `_all` on every index, the same class
+	// of bug fixed for annotations_json by this mapping (review round 6,
+	// finding 1). Made explicit here, and required now that toolMapping.Dynamic
+	// is false above — Dynamic=false without this would stop
+	// GetToolsByServer/SearchTools from ever retrieving output_schema_json
+	// again, since Store also came from the dynamic fallback.
+	outputSchemaField := bleve.NewTextFieldMapping()
+	outputSchemaField.Analyzer = keyword.Name
+	outputSchemaField.Store = true
+	outputSchemaField.Index = false
+	toolMapping.AddFieldMappingsAt("output_schema_json", outputSchemaField)
+
 	// Hash field (keyword analyzer)
 	hashField := bleve.NewTextFieldMapping()
 	hashField.Analyzer = keyword.Name
 	hashField.Store = true
 	hashField.Index = false // Don't index hash for search
 	toolMapping.AddFieldMappingsAt("hash", hashField)
+
+	// Annotations field: stored only, never searched (it is JSON, not prose).
+	annotationsField := bleve.NewTextFieldMapping()
+	annotationsField.Analyzer = keyword.Name
+	annotationsField.Store = true
+	annotationsField.Index = false
+	toolMapping.AddFieldMappingsAt("annotations_json", annotationsField)
 
 	// Tags field (standard analyzer)
 	tagsField := bleve.NewTextFieldMapping()
@@ -195,6 +404,18 @@ func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
 		toolMeta.Description,
 		toolMeta.ParamsJSON)
 
+	var annotationsJSON string
+	if toolMeta.Annotations != nil {
+		if b, err := json.Marshal(toolMeta.Annotations); err == nil {
+			annotationsJSON = string(b)
+		}
+		// A marshal error here is unreachable for config.ToolAnnotations (plain
+		// strings/bools/pointers, no cyclic or unsupported types) — silently
+		// falling back to "no annotations stored" rather than failing the whole
+		// index write matches how the rest of this function tolerates partial
+		// metadata (e.g. an empty OutputSchemaJSON).
+	}
+
 	doc := &ToolDocument{
 		ToolName:         toolName,
 		FullToolName:     toolMeta.Name,
@@ -205,6 +426,7 @@ func toolDocument(toolMeta *config.ToolMetadata) (string, *ToolDocument) {
 		Hash:             toolMeta.Hash,
 		Tags:             "", // Can be extended later
 		SearchableText:   searchableText,
+		AnnotationsJSON:  annotationsJSON,
 	}
 
 	return docID, doc
@@ -235,6 +457,17 @@ func readToolMetadata(docID string, fields map[string]interface{}) *config.ToolM
 		// name so a malformed hit still renders rather than vanishing.
 		canonical = CanonicalToolName(serverName, getStringField(fields, "full_tool_name"))
 	}
+	var annotations *config.ToolAnnotations
+	if raw := getStringField(fields, "annotations_json"); raw != "" {
+		var parsed config.ToolAnnotations
+		if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
+			annotations = &parsed
+		}
+		// A malformed stored value (should not happen; toolDocument only ever
+		// writes what json.Marshal produced) falls back to nil — TierUnannotated
+		// — rather than surfacing a decode error through every search result.
+	}
+
 	return &config.ToolMetadata{
 		Name:             canonical,
 		RawName:          strings.TrimPrefix(canonical, serverName+":"),
@@ -243,6 +476,7 @@ func readToolMetadata(docID string, fields map[string]interface{}) *config.ToolM
 		ParamsJSON:       getStringField(fields, "params_json"),
 		OutputSchemaJSON: getStringField(fields, "output_schema_json"),
 		Hash:             getStringField(fields, "hash"),
+		Annotations:      annotations,
 	}
 }
 
@@ -346,7 +580,7 @@ func newToolSearchRequest(q bquery.Query, from, size int) *bleve.SearchRequest {
 	searchReq := bleve.NewSearchRequest(q)
 	searchReq.From = from
 	searchReq.Size = size
-	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
+	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash", "annotations_json"}
 	searchReq.Highlight = bleve.NewHighlight()
 
 	// Deterministic tie-break: primary sort by score descending (bleve's
@@ -621,7 +855,7 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 	query := bleve.NewTermQuery(serverName)
 	query.SetField("server_name")
 
-	fields := []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
+	fields := []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash", "annotations_json"}
 
 	b.logger.Debug("Querying tools by server", zap.String("server", serverName))
 

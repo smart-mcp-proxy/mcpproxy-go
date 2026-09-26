@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1611,4 +1613,90 @@ func TestOutputSkipNotice(t *testing.T) {
 			t.Errorf("human notice must be on stderr, got %q", stderrStr)
 		}
 	})
+}
+
+// newDaemonStatusServer returns an httptest server serving GET /api/v1/status
+// with the given raw JSON body, requiring the expected X-API-Key. This is the
+// daemon-query branch importSelfListenAddrs uses to pick up a listen address
+// that differs from the config file (a process-only `serve --listen`
+// override, or a file edited since the daemon started) — the same live
+// address Connect writes into client configs.
+func newDaemonStatusServer(t *testing.T, key, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-Key") != key {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+// TestImportSelfListenAddrs_NoDaemon covers the common CLI case: nothing is
+// listening on the configured address, so only the config's own listen
+// address is used for the self-reference filter.
+func TestImportSelfListenAddrs_NoDaemon(t *testing.T) {
+	clearDaemonEnv(t)
+
+	cfg := &config.Config{
+		DataDir: t.TempDir(),
+		Listen:  "127.0.0.1:1", // nothing listens here
+		APIKey:  "secret",
+	}
+
+	got := importSelfListenAddrs(cfg)
+	want := []string{"127.0.0.1:1"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("importSelfListenAddrs() = %v, want %v", got, want)
+	}
+}
+
+// TestImportSelfListenAddrs_DaemonLiveAddrAppended is the regression this
+// finding calls for: it pins the "listen_addr" key GetStatus's envelope must
+// carry (internal/httpapi/server.go handleGetStatus) and the daemon-query
+// fallback (`serve --listen` overriding the file, or the file edited since
+// start) that reads it. A rename of that JSON key, or a change to the
+// envelope shape, fails this test instead of silently dropping self-reference
+// detection for every CLI import.
+func TestImportSelfListenAddrs_DaemonLiveAddrAppended(t *testing.T) {
+	clearDaemonEnv(t)
+
+	ts := newDaemonStatusServer(t, "secret", `{"success":true,"data":{"listen_addr":"127.0.0.1:19999"}}`)
+	defer ts.Close()
+
+	cfg := &config.Config{
+		DataDir: t.TempDir(), // no socket file here -> TCP fallback probes ts.URL
+		Listen:  strings.TrimPrefix(ts.URL, "http://"),
+		APIKey:  "secret",
+	}
+
+	got := importSelfListenAddrs(cfg)
+	want := []string{cfg.Listen, "127.0.0.1:19999"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("importSelfListenAddrs() = %v, want %v", got, want)
+	}
+}
+
+// TestImportSelfListenAddrs_StatusWithoutListenAddr covers a reachable daemon
+// whose status response has no (or an empty) "listen_addr" field: the
+// function must fall back to just the config's own listen address rather
+// than appending an empty string.
+func TestImportSelfListenAddrs_StatusWithoutListenAddr(t *testing.T) {
+	clearDaemonEnv(t)
+
+	ts := newDaemonStatusServer(t, "secret", `{"success":true,"data":{"running":true}}`)
+	defer ts.Close()
+
+	cfg := &config.Config{
+		DataDir: t.TempDir(),
+		Listen:  strings.TrimPrefix(ts.URL, "http://"),
+		APIKey:  "secret",
+	}
+
+	got := importSelfListenAddrs(cfg)
+	want := []string{cfg.Listen}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("importSelfListenAddrs() = %v, want %v", got, want)
+	}
 }

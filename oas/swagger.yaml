@@ -87,6 +87,16 @@ components:
           type: boolean
         allow_server_remove:
           type: boolean
+        anonymous_profile:
+          description: |-
+            AnonymousProfile confines every caller whose request authenticates as
+            credential kind "anonymous" (no credential, or an unrecognised
+            non-agent token accepted by the require_mcp_auth:false back-compat
+            branch) to the named profile (Spec 108 FR-008). Empty (default) means
+            unconfined, legacy anonymous behaviour. A name that does not match any
+            configured profile resolves anonymous callers to deny-all and is
+            reported as a validation warning (data-model.md §1).
+          type: string
         api_key:
           description: Security settings
           type: string
@@ -777,11 +787,70 @@ components:
       type: object
     config.ProfileConfig:
       properties:
+        code_execution:
+          description: |-
+            CodeExecution: nil = inherit the global enable_code_execution gate;
+            non-nil narrows it (a profile can only narrow, never widen, FR-006).
+          type: boolean
+        description:
+          description: <= 500 chars (FR-001)
+          type: string
+        management_tools:
+          description: |-
+            ManagementTools: nil = legacy/inherit (FR-016); non-nil sets the
+            profile-level visibility of upstream_servers/quarantine_security.
+          type: boolean
+        max_tier:
+          description: |-
+            MaxTier caps the tier a tool may run at under this profile: "" (no
+            cap) | "read" | "write" | "destructive" (FR-001).
+          type: string
         name:
-          description: URL slug, validated
+          description: slug (Spec 057 rules unchanged)
           type: string
         servers:
           description: references to mcpServers[].name
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        switchable_to:
+          description: |-
+            SwitchableTo is the list of profile names a session under this
+            profile may `set_profile` into (FR-022). nil = legacy/none (research
+            D6); a non-nil EMPTY list is an explicit "none" and must round-trip as
+            `[]`, never be dropped by omitempty — hence the pointer (see the
+            MarshalJSON note below, and profiles_v3_test.go's switchable_to round
+            trip case).
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        title:
+          description: display only, <= 80 chars (FR-001)
+          type: string
+        tools:
+          $ref: '#/components/schemas/config.ProfileToolRules'
+        unannotated:
+          description: |-
+            Unannotated is this profile's handling of a tool whose effective
+            annotations carry no tier hint: "" (unset, see EffectiveUnannotated) |
+            "deny" | "as_write" | "as_read" (FR-001, FR-003).
+          type: string
+      type: object
+    config.ProfileToolRules:
+      description: Tools holds the allow/deny/classify rule set (FR-001, FR-004, FR-005).
+      properties:
+        allow:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        classify:
+          additionalProperties:
+            type: string
+          type: object
+        deny:
           items:
             type: string
           type: array
@@ -1256,7 +1325,7 @@ components:
         name:
           type: string
         reason:
-          description: '"already_exists", "filtered_out", "invalid_name"'
+          description: '"already_exists", "filtered_out", "invalid_name", "self_reference"'
           type: string
       type: object
     connect.ConnectResult:
@@ -2841,6 +2910,19 @@ components:
         success:
           type: boolean
       type: object
+    contracts.Tier:
+      description: |-
+        Tier is computed by AnnotationTier (Spec 109 FR-028/X11) from
+        Annotations — read|write|destructive|unannotated. Set by every producer
+        of a Tool (enrichServerTools, the global tools handler); never left for
+        a consuming surface to compute.
+      type: string
+      x-enum-varnames:
+      - TierRead
+      - TierWrite
+      - TierDestructive
+      - TierUnannotated
+      - TierUnknown
     contracts.TokenMetrics:
       description: Token usage metrics (nil for older records)
       properties:
@@ -2926,6 +3008,8 @@ components:
           type: object
         server_name:
           type: string
+        tier:
+          $ref: '#/components/schemas/contracts.Tier'
         usage:
           type: integer
       type: object

@@ -1,0 +1,8 @@
+[
+  {
+    "name": "read_text_file",
+    "description": "read_text_file",
+    "inputSchema": { "type": "object", "properties": {} },
+    "annotations": { "readOnlyHint": true }
+  }
+]

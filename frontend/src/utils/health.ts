@@ -101,18 +101,44 @@ export function healthStatusLabel(status: string | undefined | null): string {
 
 /**
  * Resolves the status TEXT for a server carrying a `health` object: summary
- * first, then the shared status label, then a connected/disconnected
- * fallback for a version-skew payload that carries neither (round-4 review
- * finding — AdminServers.vue/UserServers.vue already had this fallback,
+ * first, then the shared status label — the ONE precedence order every
+ * surface must use (a Spec 109 review finding: AdminServers.vue/UserServers.vue
+ * carried an inline `statusLabel()`/`healthLabel()` that checked `status`
+ * BEFORE `summary`, the reverse order, so the same payload rendered
+ * different text there than on ServerCard.vue/ServerDetail.vue). Returns ''
+ * — never `health.level` (FR-011) — when a version-skew payload carries
+ * neither; the caller supplies its own final fallback (e.g. a
+ * connected/disconnected word), since that fallback's wording/casing is a
+ * per-surface convention, not part of the shared precedence.
+ *
+ * Structural rather than `HealthStatus` itself so surfaces carrying a
+ * narrower local health shape (AdminServers.vue/UserServers.vue's inline
+ * `health?: {...}` field types, which predate the full contract) can share
+ * this one helper without an unsafe cast — this reads only `summary` and
+ * `status`.
+ *
+ * @param health - the server's health object (caller handles the no-health case)
+ */
+export function healthStatusTextOrEmpty(health: { summary?: string | null; status?: string | null }): string {
+  return health.summary || healthStatusLabel(health.status) || ''
+}
+
+/**
+ * Same precedence as {@link healthStatusTextOrEmpty}, with the
+ * ServerCard.vue/ServerDetail.vue connected/disconnected fallback baked in
+ * (round-4 review finding — AdminServers.vue/UserServers.vue already had a
+ * fallback for a payload carrying neither `status` nor `summary`;
  * ServerCard.vue/ServerDetail.vue did not, which was an asymmetric guard
- * against the same gap). Never falls back to `health.level` as text
- * (FR-011).
+ * against the same gap).
  *
  * @param health - the server's health object (caller handles the no-health case)
  * @param connected - the server's legacy `connected` field, for the last-resort fallback
  */
-export function healthStatusText(health: HealthStatus, connected: boolean): string {
-  return health.summary || healthStatusLabel(health.status) || (connected ? 'Connected' : 'Disconnected')
+export function healthStatusText(
+  health: { summary?: string | null; status?: string | null },
+  connected: boolean
+): string {
+  return healthStatusTextOrEmpty(health) || (connected ? 'Connected' : 'Disconnected')
 }
 
 /**

@@ -23,8 +23,18 @@ struct ServerBrowseView: View {
     @State private var unavailable: [String] = []
     @State private var isSearching = false
     @State private var searchError: String?
+    /// Keyed by `RepositoryServer.addedKey` ("registry::id"), same as
+    /// `addedServers` below — review round 6, finding 2 follow-up (zcode):
+    /// keying this by bare `server.id` let two colliding cards from
+    /// different registries (MCP-866) show each other's spinner while only
+    /// one of them was actually being added.
     @State private var addingID: String?
     @State private var addNote: String?
+    /// Spec 109 FR-063: server.addedKey ("registry::id", not the bare
+    /// server.id — review round 6, finding 2) -> the added server's name, so
+    /// the button can flip to "Added ✓ · Open" and stay that way for the rest
+    /// of this browse session.
+    @State private var addedServers: [String: String] = [:]
     @State private var registryInfo: RegistryInfoContext?
 
     private var apiClient: APIClient? { appState.apiClient }
@@ -228,7 +238,14 @@ struct ServerBrowseView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(results) { server in
+                    // Keyed by addedKey ("registry::id"), not the Identifiable
+                    // conformance's bare id: two colliding cards from
+                    // different registries (MCP-866) both surviving
+                    // search()'s registry-qualified dedupe would otherwise
+                    // share one SwiftUI identity here — undefined-behavior
+                    // view diffing, and colliding accessibility identifiers
+                    // below (review round 6, finding 2 follow-up, zcode).
+                    ForEach(results, id: \.addedKey) { server in
                         serverCard(server)
                     }
                 }
@@ -286,14 +303,26 @@ struct ServerBrowseView: View {
                         .overlay(Capsule().stroke(Color.secondary.opacity(0.4)))
                 }
                 Spacer()
-                Button {
-                    Task { await add(server) }
-                } label: {
-                    if addingID == server.id { ProgressView().controlSize(.small) } else { Text("Add to MCP") }
+                // Spec 109 FR-063: "Add to MCPProxy", flipping to a
+                // persistent "Added ✓ · Open" once the add succeeds.
+                if let addedName = addedServers[server.addedKey] {
+                    Button {
+                        openServer(addedName)
+                    } label: {
+                        Text("Added ✓ · Open")
+                    }
+                    .controlSize(.small)
+                    .accessibilityIdentifier("browse-added-\(server.id)")
+                } else {
+                    Button {
+                        Task { await add(server) }
+                    } label: {
+                        if addingID == server.addedKey { ProgressView().controlSize(.small) } else { Text("Add to MCPProxy") }
+                    }
+                    .controlSize(.small)
+                    .disabled(addingID != nil || server.registry == nil)
+                    .accessibilityIdentifier("browse-add-\(server.id)")
                 }
-                .controlSize(.small)
-                .disabled(addingID != nil || server.registry == nil)
-                .accessibilityIdentifier("browse-add-\(server.id)")
             }
         }
         .padding(10)
@@ -346,13 +375,31 @@ struct ServerBrowseView: View {
         isSearching = false
     }
 
+    /// Spec 109 FR-063: "Added ✓ · Open" opens the server it just added.
+    private func openServer(_ name: String) {
+        NotificationCenter.default.post(name: .switchToServers, object: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NotificationCenter.default.post(name: .showServerDetail, object: name)
+        }
+    }
+
     private func add(_ server: RepositoryServer) async {
         guard let client = apiClient, let reg = server.registry else { return }
-        addingID = server.id
+        addingID = server.addedKey
         addNote = nil
         let result = await client.addServerFromRegistry(registryID: reg, serverID: server.id)
         if result.success {
+            // The backend can assign a different name than the catalog entry's
+            // own (empty name falls back to the entry id) — key "Added
+            // checkmark Open" on what it actually assigned, or Open silently
+            // no-ops (review round 1; the Web UI's Repositories.vue already
+            // does `result.server?.name || server.name`). A name COLLISION is
+            // NOT de-duplicated — it hard-fails the add (see the `else`
+            // branch below), so `result.success` is false and this branch
+            // does not run (review round 2, finding 7).
+            let assignedName = result.serverName ?? server.name
             addNote = "Added “\(server.name)”. New servers start quarantined — review under Servers."
+            addedServers[server.addedKey] = assignedName
         } else if let missing = result.missingInputs, !missing.isEmpty {
             addNote = "“\(server.name)” needs input: \(missing.joined(separator: ", ")). Add it from the Web UI to supply those values."
         } else {
