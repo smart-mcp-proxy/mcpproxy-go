@@ -1,6 +1,6 @@
 # MCPProxy Makefile
 
-.PHONY: help build build-server build-docker build-deb swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth lint dev-setup docs-setup docs-dev docs-build docs-clean bench-discovery
+.PHONY: help build build-server build-docker build-deb swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth test-e2e-cleanup-check lint dev-setup docs-setup docs-dev docs-build docs-clean bench-discovery
 
 SWAGGER_BIN ?= $(HOME)/go/bin/swag
 SWAGGER_OUT ?= oas
@@ -175,6 +175,13 @@ test-e2e-oauth:
 test-e2e: test-e2e-oauth
 	@echo "🧪 Running E2E tests..."
 	./scripts/test-api-e2e.sh
+
+# Process-hygiene check for test-api-e2e.sh's cleanup() trap: pins that it
+# only ever stops processes it started itself, never a blanket pkill that
+# would also take down a tray-managed core or a parallel worktree's run.
+test-e2e-cleanup-check:
+	@echo "🧪 Running E2E cleanup process-hygiene check..."
+	./scripts/test-api-e2e-cleanup-check.sh
 
 # Documentation site commands
 docs-setup:

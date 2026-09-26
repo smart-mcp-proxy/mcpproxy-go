@@ -11,6 +11,10 @@ NC='\033[0m' # No Color
 
 # Configuration
 MCPPROXY_BINARY="./mcpproxy"
+# The audit_log sub-test's own binary (see the "Testing audit_log sink"
+# section far below); declared here too so the stale-process self-heal near
+# the top of the script can recognize a leftover audit core from a prior run.
+AUDIT_BINARY="./mcpproxy-server"
 CONFIG_TEMPLATE="./test/e2e-config.template.json"
 CONFIG_FILE="./test/e2e-config.json"
 LISTEN_PORT="${LISTEN_PORT:-8081}"
@@ -93,6 +97,12 @@ proc_cwd() {
     fi
 }
 
+# proc_id PID: start time + executable — with the PID, a stable identity, so a
+# PID the OS reuses for an unrelated process does not match.
+proc_id() {
+    ps -o lstart= -o comm= -p "$1" 2>/dev/null | tr ' ' '_'
+}
+
 # own_launcher_pids: launcher-test fixture processes belonging to this run —
 # descendants of our core, or (if the core died before reaping it) an orphan
 # still running in this run's working directory. A fixture spawned by another
@@ -111,10 +121,30 @@ own_launcher_pids() {
     done
 }
 
-# proc_id PID: start time + executable — with the PID, a stable identity, so a
-# PID the OS reuses for an unrelated process does not match.
-proc_id() {
-    ps -o lstart= -o comm= -p "$1" 2>/dev/null | tr ' ' '_'
+# stale_own_pids: the main core, the audit_log sub-test's own core, and/or
+# the launcher-test fixture, left running from a PRIOR, hard-killed run of
+# this exact script in this exact checkout (e.g. the terminal was closed or
+# the runner was OOM-killed before cleanup() could fire). Scoped the same way
+# own_launcher_pids is scoped above: matched by cwd against THIS checkout,
+# never by a pattern alone, so it can never reach a tray-managed core or
+# another worktree's run (those have a different cwd). Self-heals the
+# "address already in use" / wait_for_server timeout a stale process from an
+# earlier crashed run would otherwise cause on the next run. Each match is
+# emitted as "pid=identity" (see proc_id above) so the caller can re-verify
+# the PID hasn't been reused for an unrelated process before signalling it —
+# same guard cleanup() below uses for the same reason.
+#
+# NOTE: this also means two *simultaneous* runs of this script in the SAME
+# checkout will stop each other's live processes at startup. Concurrent
+# same-checkout runs already collide on test/e2e-config.json, ./test-data
+# and fixed ports, so this isn't a new failure mode, just a more visible one.
+stale_own_pids() {
+    local pattern pid
+    for pattern in "${MCPPROXY_BINARY} serve" "${AUDIT_BINARY} serve" "$LAUNCHER_PATTERN"; do
+        for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+            [ "$(proc_cwd "$pid")" = "$SCRIPT_CWD" ] && echo "$pid=$(proc_id "$pid")"
+        done
+    done
 }
 
 # stop_pid PID: SIGTERM, wait up to 10s, then SIGKILL.
@@ -672,10 +702,33 @@ mkdir -p "$TEST_DATA_DIR"
 echo "Copying fresh config from template..."
 cp "$CONFIG_TEMPLATE" "$CONFIG_FILE"
 
-# Substitute LISTEN_PORT in config file if not using default 8081
+# Substitute LISTEN_PORT in config file if not using default 8081.
+# `sed -i` in-place syntax differs between BSD/macOS (`-i ''`, a separate
+# argv token) and GNU/Linux (`-i` alone, or `-iSUFFIX` with no space) — the
+# BSD form breaks on Linux (empty '' becomes the script, the actual sed
+# program is then read as the FILE argument, which doesn't exist, so sed
+# errors and exits non-zero) — and since this script doesn't `set -e`, that
+# failure is silent: the port is never substituted and the run continues
+# with a mismatched config. `perl -pi -e` takes the same in-place flag on
+# both, so no OS branch is needed.
 if [ "$LISTEN_PORT" != "8081" ]; then
-    sed -i '' "s/:8081/:${LISTEN_PORT}/g" "$CONFIG_FILE"
+    perl -pi -e "s/:8081/:${LISTEN_PORT}/g" "$CONFIG_FILE"
     echo "Updated listen port to :${LISTEN_PORT}"
+fi
+
+# Self-heal stale processes from a previous, hard-killed run of this script
+# in this same checkout — see stale_own_pids above. Never touches a
+# tray-managed core or a parallel worktree's run. Re-verify each PID's
+# identity right before signalling it (mirrors cleanup()'s own_tree/leftovers
+# guard below): between stale_own_pids' scan and here, the process could have
+# exited on its own and the PID been reused for something unrelated.
+stale_entries="$(stale_own_pids | sort -u)"
+if [ -n "$stale_entries" ]; then
+    echo -e "${YELLOW}Found a stale mcpproxy process from a previous run of this script in this checkout; stopping it...${NC}"
+    for stale_entry in $stale_entries; do
+        stale_pid="${stale_entry%%=*}"
+        [ "$(proc_id "$stale_pid")" = "${stale_entry#*=}" ] && stop_pid "$stale_pid"
+    done
 fi
 
 # Start server in background
@@ -1256,7 +1309,6 @@ echo ""
 echo -e "${YELLOW}Testing audit_log sink (Spec 107 PR-D)...${NC}"
 echo ""
 
-AUDIT_BINARY="./mcpproxy-server"
 AUDIT_SCHEMA="./docs/schemas/audit-line-v1.schema.json"
 AUDIT_PORT="${AUDIT_LISTEN_PORT:-18181}"
 AUDIT_BASE_URL="http://localhost:${AUDIT_PORT}"
