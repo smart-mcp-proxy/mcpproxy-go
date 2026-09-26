@@ -747,6 +747,13 @@ onMounted(() => {
     if (authStore.principalKind !== 'tenant') {
       void refreshSecurityScannerStatus()
     }
+    // Review finding F2: a transient GET /attention failure (on mount, or a
+    // fetch whose ticket loses a race to a newer-but-failed one) otherwise
+    // left `attentionStore.loaded` false forever — the Home list, header
+    // pill and sidebar badge all stay blank with no visible error and no
+    // recovery short of an unrelated SSE event or a route remount. Silent so
+    // a routine background retry never flashes a loading state.
+    attentionStore.fetchAttention(true)
   }, 30000)
 
   systemStore.connectEventSource()

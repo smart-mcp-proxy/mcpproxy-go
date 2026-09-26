@@ -166,6 +166,31 @@ describe('Home attention list (Spec 109 FR-001/FR-003)', () => {
     expect(rows[0].text()).toContain('github')
   })
 
+  // Review finding F2: a transient GET /attention failure on mount left the
+  // Home attention section blank forever, because the 30s auto-refresh
+  // interval only re-fetched servers/clients/sessions/security — never
+  // attention — so nothing recovered a failed initial fetch short of an
+  // unrelated SSE event or a route remount.
+  it('recovers from a failed initial fetch on the next 30s auto-refresh tick', async () => {
+    // Home.vue and the (unstubbed) AttentionList.vue each fire their own
+    // fetchAttention() on mount, so both initial calls must fail.
+    attentionSpy.mockRejectedValue(new Error('502 Bad Gateway'))
+    vi.useFakeTimers()
+    try {
+      const wrapper = await mountHome()
+      // The failed fetch never resolved `loaded`, so nothing renders yet.
+      expect(wrapper.find('[data-test="attention-list"]').exists()).toBe(false)
+
+      attentionSpy.mockResolvedValue({ success: true, data: { count: 0, items: [] } })
+      await vi.advanceTimersByTimeAsync(30000)
+      await flushPromises()
+
+      expect(wrapper.find('[data-test="attention-all-clear"]').exists()).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // Review finding: only a `verb: 'login'` fix-button href was ever asserted;
   // no fixture used `server_review`/`tool_review`, so a regression breaking
   // FR-005's review-fix routing (`/review/<n>[?change=...]`) would stay green.

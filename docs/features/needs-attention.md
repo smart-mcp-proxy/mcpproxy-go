@@ -82,6 +82,13 @@ the macOS tray, both over Server-Sent Events) receives an `attention.changed`
 notification and refreshes; the CLI and `GET /api/v1/attention` always read
 the current computed list.
 
+Testing the `client_never_seen` threshold live means waiting out the real 5
+minutes unless it is shrunk first: set the test-only environment variable
+`MCPPROXY_ATTENTION_NEVER_SEEN_AFTER` (e.g. `5s`) before starting the daemon
+to override the threshold for that run. An unset or unparseable value keeps
+the 5-minute default; there is no equivalent hook for the 60-second
+`server_error` threshold.
+
 ## Scoped callers
 
 An administrator (the API key, the local socket, or a server-edition admin

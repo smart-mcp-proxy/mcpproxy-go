@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"net/url"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,6 +11,14 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 )
+
+// attentionNeverSeenAfterEnv is a test-only hook (T060, documented in
+// specs/109-ux-navigation-consistency/quickstart.md §3) that overrides
+// AttentionClientNeverSeenThreshold so the client_never_seen 5-minute
+// threshold can be exercised in seconds against a live instance instead of
+// waiting out the real default. Unset or unparseable values leave the
+// package default untouched.
+const attentionNeverSeenAfterEnv = "MCPPROXY_ATTENTION_NEVER_SEEN_AFTER"
 
 // attentionServerState is the subscriber's in-memory record of when a
 // server's health.status last changed (data-model.md §4 "StateSince"). It is
@@ -62,12 +71,19 @@ type attentionSubscriber struct {
 }
 
 func newAttentionSubscriber(rt *Runtime, debounce time.Duration) *attentionSubscriber {
+	clientNeverSeenThreshold := AttentionClientNeverSeenThreshold
+	if raw := os.Getenv(attentionNeverSeenAfterEnv); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil {
+			clientNeverSeenThreshold = d
+		}
+	}
+
 	a := &attentionSubscriber{
 		rt:                       rt,
 		debounce:                 debounce,
 		now:                      time.Now,
 		serverErrorThreshold:     AttentionServerErrorThreshold,
-		clientNeverSeenThreshold: AttentionClientNeverSeenThreshold,
+		clientNeverSeenThreshold: clientNeverSeenThreshold,
 		timerCap:                 AttentionTimerCap,
 		state:                    make(map[string]attentionServerState),
 		lastIDs:                  make(map[string]struct{}),
@@ -209,6 +225,7 @@ func (a *attentionSubscriber) recompute() time.Duration {
 	for _, s := range serversCopy {
 		input.Servers = append(input.Servers, a.buildAttentionServer(s, now))
 	}
+	a.pruneState(serversCopy)
 
 	items := Compute(input)
 	itemsCopy := items
@@ -271,6 +288,28 @@ func (a *attentionSubscriber) buildAttentionServer(s contracts.Server, now time.
 		StateSince:  st.since,
 		Detail:      attentionServerDetail(s),
 	}
+}
+
+// pruneState removes attentionServerState entries for servers that are no
+// longer present in the latest servers.changed snapshot (review finding F1).
+// Left unpruned, a deleted server's {status, since} entry survives in
+// a.state indefinitely; if a server with the same name is later re-added and
+// its first-observed status happens to match the stale entry's status
+// (e.g. both "error"), buildAttentionServer sees no status change and keeps
+// the old StateSince — reporting the wrong Since and letting a fast-failing
+// respawn bypass FR-002's 60s threshold entirely.
+func (a *attentionSubscriber) pruneState(servers []contracts.Server) {
+	live := make(map[string]struct{}, len(servers))
+	for _, s := range servers {
+		live[s.Name] = struct{}{}
+	}
+	a.mu.Lock()
+	for name := range a.state {
+		if _, ok := live[name]; !ok {
+			delete(a.state, name)
+		}
+	}
+	a.mu.Unlock()
 }
 
 // attentionServerDetail builds the item detail line from the row: transport

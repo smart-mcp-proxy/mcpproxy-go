@@ -34,6 +34,22 @@
         <div class="text-xs opacity-60 mt-1">errors</div>
       </div>
     </router-link>
+    <!-- Review finding F3: this PR removes the old Dashboard Usage/Overview
+         switcher without adding a replacement link anywhere in Home,
+         TopHeader or the sidebar (the Monitor/Usage sidebar entry is
+         109-i's, FR-050). Keep /usage reachable from Home in the meantime. -->
+    <router-link
+      to="/usage"
+      class="card card-compact bg-base-100 border border-base-300 hover:shadow-md transition-shadow flex items-center justify-center min-w-[100px]"
+      data-test="usage-strip-view-usage"
+    >
+      <div class="card-body py-3 px-4 flex-row items-center gap-1">
+        <span class="text-sm font-medium">View usage</span>
+        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+        </svg>
+      </div>
+    </router-link>
   </div>
 </template>
 

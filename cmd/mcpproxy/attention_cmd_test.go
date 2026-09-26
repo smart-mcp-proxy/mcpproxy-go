@@ -87,6 +87,23 @@ func TestAttentionCmd_AllClear(t *testing.T) {
 	}
 }
 
+// TestAttentionCmd_InvalidFormatRejectedEvenWhenAllClear pins review finding
+// F5: printAttentionOutput's "All clear" early-return (0 items) used to run
+// before any formatter was constructed, so a typo'd -o value silently
+// succeeded with exit 0 and "All clear" — while the identical typo against a
+// non-empty list correctly failed. Format validation must not depend on
+// whether there happen to be any items.
+func TestAttentionCmd_InvalidFormatRejectedEvenWhenAllClear(t *testing.T) {
+	setOutputGlobals(t, "jso", false)
+	err := printAttentionOutput(&cliclient.AttentionResponse{Count: 0, Items: []contracts.AttentionItem{}})
+	if err == nil {
+		t.Fatal("expected an error for an invalid output format, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown output format") {
+		t.Errorf("expected 'unknown output format' error, got: %v", err)
+	}
+}
+
 // TestStatusTable_NeedsAttentionFirstLine pins T056/contracts/cli.md: the
 // first line after the "MCPProxy Status" header is the FR-001 attention
 // count, in both the non-zero and "none" shapes.

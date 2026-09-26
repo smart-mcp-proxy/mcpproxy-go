@@ -59,11 +59,20 @@ func runAttention(_ *cobra.Command, _ []string) error {
 
 func printAttentionOutput(resp *cliclient.AttentionResponse) error {
 	format := ResolveOutputFormat()
+
+	// Review finding F5: the formatter must be constructed (and its format
+	// validated) unconditionally, before either output path below — not only
+	// on the non-empty branch. Building it here first means an invalid/typo'd
+	// -o value is rejected the same way whether the daemon has 0 or 100
+	// attention items, instead of a typo silently succeeding with "All clear"
+	// whenever the instance happens to be healthy.
+	formatter, err := GetOutputFormatter()
+	if err != nil {
+		return clioutput.NewStructuredError(clioutput.ErrCodeInvalidOutputFormat, err.Error()).
+			WithGuidance("Use -o table, -o json, or -o yaml")
+	}
+
 	if format == "json" || format == "yaml" {
-		formatter, err := GetOutputFormatter()
-		if err != nil {
-			return err
-		}
 		out, err := formatter.Format(resp)
 		if err != nil {
 			return fmt.Errorf("failed to format output: %w", err)
@@ -89,11 +98,6 @@ func printAttentionOutput(resp *cliclient.AttentionResponse) error {
 		}
 	}
 
-	formatter, err := GetOutputFormatter()
-	if err != nil {
-		return clioutput.NewStructuredError(clioutput.ErrCodeInvalidOutputFormat, err.Error()).
-			WithGuidance("Use -o table, -o json, or -o yaml")
-	}
 	out, err := formatter.FormatTable(headers, rows)
 	if err != nil {
 		return fmt.Errorf("failed to format table: %w", err)
