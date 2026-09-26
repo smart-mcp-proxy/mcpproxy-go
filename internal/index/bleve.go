@@ -141,6 +141,22 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 // unwired no-op stub for an operator-triggered full rebuild and is not used
 // here — this path only ever runs once, at index-open time, against a
 // mapping that is provably stale.
+//
+// The finalize step retires the original by renaming it aside
+// (os.Rename(indexPath, indexPath+".rebuild-old")) rather than deleting it
+// with os.RemoveAll. A partial RemoveAll failure — one permission-impaired
+// or locked leftover file inside the index directory — can delete most-but-
+// not-all of the original and still return an error; on the next startup
+// bleve.Open(indexPath) then fails on the mangled remnant, falls through to
+// createBleveIndex(indexPath), and if index_meta.json survived the partial
+// delete, vendored bleve's O_CREATE|O_EXCL index_meta.Save makes bleve.New
+// return ErrorIndexPathExists — the same operator-intervention outage round
+// 8 fixed, reachable through a narrower door (review round 9, finding 1).
+// os.Rename is a single directory-entry move: it needs write access to
+// indexPath's PARENT, never to anything inside indexPath itself, so it
+// cannot fail this way. If the second rename (moving the replacement into
+// place) fails, the aside copy is renamed back so the original stays
+// available rather than leaving indexPath empty.
 func rebuildIfMappingPredatesAnnotations(idx bleve.Index, indexPath string, logger *zap.Logger) (bleve.Index, error) {
 	fm := idx.Mapping().FieldMappingForPath("annotations_json")
 	if fm.Type != "" {
@@ -186,17 +202,59 @@ func rebuildIfMappingPredatesAnnotations(idx bleve.Index, indexPath string, logg
 		_ = os.RemoveAll(tmpPath)
 		return nil, fmt.Errorf("failed to close stale-mapping Bleve index for rebuild: %w", err)
 	}
-	if err := os.RemoveAll(indexPath); err != nil {
-		return nil, fmt.Errorf("failed to remove stale-mapping Bleve index at %s: %w", indexPath, err)
+
+	// Move the original aside instead of deleting it: os.Rename either
+	// succeeds atomically or leaves indexPath completely untouched, so a
+	// file inside it that RemoveAll could not delete (permission-impaired,
+	// locked) can no longer corrupt it into a half-removed, unopenable-and-
+	// uncreatable state (see the function doc comment, round 9 finding 1).
+	oldPath := indexPath + ".rebuild-old"
+	_ = os.RemoveAll(oldPath) // best-effort: clear any leftover from a previous failed attempt
+	if err := os.Rename(indexPath, oldPath); err != nil {
+		_ = os.RemoveAll(tmpPath)
+		return nil, fmt.Errorf("failed to move aside stale-mapping Bleve index at %s: %w", indexPath, err)
 	}
 	if err := os.Rename(tmpPath, indexPath); err != nil {
+		// indexPath is now empty (just moved to oldPath): restore the
+		// original so a functional, if stale-mapping, index is still there
+		// rather than leaving nothing at all.
+		if restoreErr := os.Rename(oldPath, indexPath); restoreErr != nil {
+			return nil, fmt.Errorf("failed to move rebuilt Bleve index into place at %s (%w), and failed to restore the original from %s: %w",
+				indexPath, err, oldPath, restoreErr)
+		}
 		return nil, fmt.Errorf("failed to move rebuilt Bleve index into place at %s: %w", indexPath, err)
 	}
 
 	reopened, err := bleve.Open(indexPath)
 	if err != nil {
+		// The just-built, cleanly-closed replacement failed to reopen (rare —
+		// e.g. a transient I/O error in the gap between the two calls).
+		// Restore the original rather than leaving indexPath occupied by an
+		// unopenable index_meta.json: otherwise a later restart whose
+		// bleve.Open(indexPath) also fails falls through to
+		// createBleveIndex(indexPath), which hits the same O_CREATE|O_EXCL
+		// ErrorIndexPathExists this fix exists to prevent (zcode round-9
+		// review, finding 1 — the identical outage shape round 8 fixed,
+		// reachable through this narrower door too).
+		failedPath := indexPath + ".failed-reopen"
+		_ = os.RemoveAll(failedPath)
+		if renameErr := os.Rename(indexPath, failedPath); renameErr != nil {
+			return nil, fmt.Errorf("failed to reopen rebuilt Bleve index at %s (%w), and failed to move it aside to restore the original: %w",
+				indexPath, err, renameErr)
+		}
+		if restoreErr := os.Rename(oldPath, indexPath); restoreErr != nil {
+			return nil, fmt.Errorf("failed to reopen rebuilt Bleve index at %s (%w), and failed to restore the original from %s: %w",
+				indexPath, err, oldPath, restoreErr)
+		}
+		_ = os.RemoveAll(failedPath) // best-effort: drop the unopenable replacement
 		return nil, fmt.Errorf("failed to reopen rebuilt Bleve index at %s: %w", indexPath, err)
 	}
+
+	// Best-effort cleanup of the retired original. It is never opened or
+	// referenced by any other code path, so a failure here (the same class
+	// of permission-impaired leftover this fix exists to route around) is
+	// harmless and must not fail startup.
+	_ = os.RemoveAll(oldPath)
 
 	logger.Info("Rebuilt Bleve index with the current field mapping; "+
 		"tools will reappear as each server reconnects", zap.String("path", indexPath))
