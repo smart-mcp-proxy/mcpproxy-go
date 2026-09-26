@@ -943,6 +943,7 @@ class APIService {
     server?: string
     tool?: string
     session_id?: string
+    work_session_id?: string
     status?: string
     intent_type?: string
     /** Sub-calls of one code_execution run: the parent record's request_id. */

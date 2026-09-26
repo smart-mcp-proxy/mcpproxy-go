@@ -1346,7 +1346,7 @@ import { useAuthStore } from '@/stores/auth'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse, MCPSession } from '@/types/api'
 import { buildSessionLabels } from '@/utils/sessionLabel'
-import { splitScopeTool, useScopeQuery, resolveScopeTime } from '@/composables/useScopeQuery'
+import { splitScopeTool, useScopeQuery, resolveScopeTime, sessionRestParam } from '@/composables/useScopeQuery'
 import SessionsPanel from '@/components/activity/SessionsPanel.vue'
 import { DATE_TIME_FORMAT_HINT, formatDateTime, formatTime } from '@/utils/datetime'
 import {
@@ -2182,6 +2182,20 @@ const loadActivities = async () => {
         type: effectiveTypes.value.length > 0 ? effectiveTypes.value.join(',') : undefined,
         server: filterServer.value || undefined,
         tool: filterTool.value || undefined,
+        // Contract "session" row (url-filter-contract.md): a `ws-` prefix is a
+        // work session id, anything else a raw MCP transport session id — the
+        // CLI's existing sessionQueryParam rule, shared here via
+        // useScopeQuery's sessionRestParam so the two never drift apart. Sent
+        // to REST (unlike Tools/Servers) so filtering isn't limited to the
+        // loaded 200-row window — same trade-off the CLI already accepts: the
+        // backend match is exact on the stored session field, so a legacy row
+        // predating Spec 082 (no work_session_id recorded) can drop out of a
+        // work-session-filtered result here, same as `mcpproxy activity list
+        // --session ws-...` already misses it. matchesSessionFilter's
+        // client-side pass below still runs, but only narrows the page the
+        // server already filtered — it cannot resurrect a row the server
+        // excluded.
+        ...(filterSession.value ? { [sessionRestParam(filterSession.value)]: filterSession.value } : {}),
         // "Other / internal" is the client-side residual (OTHER_STATUS) —
         // never sent to REST, same rule as the composable's toRest().
         status: filterStatus.value && filterStatus.value !== OTHER_STATUS ? filterStatus.value : undefined,

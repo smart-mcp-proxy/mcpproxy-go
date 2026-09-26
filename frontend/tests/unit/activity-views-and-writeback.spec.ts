@@ -270,3 +270,37 @@ describe('Activity applies an incoming from/to deep link (FR-082 link map)', () 
     expect(lastCall.tool).toBe('read_0')
   })
 })
+
+// Live QA finding: `?session=` is read into the filter picker and applied
+// client-side over the loaded 200-row window, but was never sent to REST at
+// all — contracts/url-filter-contract.md's `session` row (`work_session_id`
+// when the value starts with `ws-`, otherwise `session_id`, the CLI's
+// existing `sessionQueryParam` rule) and quickstart.md's 109-k pass condition
+// ("no unfiltered fetch in the network log") both require it on the request,
+// not just on the table.
+describe('Activity sends the session filter to REST (url-filter-contract.md "session" row)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('a work session id (ws- prefix) is sent as work_session_id', async () => {
+    await mountActivityAt('/activity?view=calls&session=ws-aaaaa')
+    await flushPromises()
+
+    const api = (await import('@/services/api')).default
+    const lastCall = (api.getActivities as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0]
+    expect(lastCall.work_session_id).toBe('ws-aaaaa')
+    expect(lastCall.session_id).toBeUndefined()
+  })
+
+  it('a raw transport session id (no ws- prefix) is sent as session_id', async () => {
+    await mountActivityAt('/activity?view=calls&session=raw-transport-123')
+    await flushPromises()
+
+    const api = (await import('@/services/api')).default
+    const lastCall = (api.getActivities as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0]
+    expect(lastCall.session_id).toBe('raw-transport-123')
+    expect(lastCall.work_session_id).toBeUndefined()
+  })
+})
