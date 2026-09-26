@@ -68,6 +68,8 @@ func Import(content []byte, opts *ImportOptions) (*ImportResult, error) {
 		}
 	}
 
+	self := newSelfMatcher(opts.SelfListenAddrs)
+
 	// Track servers found (for filter validation)
 	foundServers := make(map[string]bool)
 
@@ -117,6 +119,16 @@ func Import(content []byte, opts *ImportOptions) (*ImportResult, error) {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("server '%s' renamed to '%s' due to invalid characters", originalName, effectiveName))
 		}
 		parsed.Name = effectiveName
+
+		// Never offer this instance back to itself (e.g. the entry Connect
+		// wrote into the client config) — it would proxy mcpproxy through itself.
+		if self.matchesParsed(parsed) {
+			result.Skipped = append(result.Skipped, SkippedServer{
+				Name:   parsed.Name,
+				Reason: SkipReasonSelfReference,
+			})
+			continue
+		}
 
 		// Check for duplicates
 		if existingSet[parsed.Name] {

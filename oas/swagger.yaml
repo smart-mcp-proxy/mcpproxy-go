@@ -1287,7 +1287,7 @@ components:
         name:
           type: string
         reason:
-          description: '"already_exists", "filtered_out", "invalid_name"'
+          description: '"already_exists", "filtered_out", "invalid_name", "self_reference"'
           type: string
       type: object
     connect.ConnectResult:
@@ -2830,6 +2830,19 @@ components:
         success:
           type: boolean
       type: object
+    contracts.Tier:
+      description: |-
+        Tier is computed by AnnotationTier (Spec 109 FR-028/X11) from
+        Annotations — read|write|destructive|unannotated. Set by every producer
+        of a Tool (enrichServerTools, the global tools handler); never left for
+        a consuming surface to compute.
+      type: string
+      x-enum-varnames:
+      - TierRead
+      - TierWrite
+      - TierDestructive
+      - TierUnannotated
+      - TierUnknown
     contracts.TokenMetrics:
       description: Token usage metrics (nil for older records)
       properties:
@@ -2915,6 +2928,8 @@ components:
           type: object
         server_name:
           type: string
+        tier:
+          $ref: '#/components/schemas/contracts.Tier'
         usage:
           type: integer
       type: object

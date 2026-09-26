@@ -329,14 +329,25 @@
                 </svg>
                 Source
               </button>
+              <!-- Spec 109 FR-063: "Add to MCPProxy", flipping to a
+                   persistent "Added ✓ · Open" once the add succeeds. -->
               <button
+                v-if="!addedServers[addedKey(server)]"
                 @click="addServer(server)"
                 class="btn btn-primary btn-sm"
                 :data-test="`registry-add-${server.id}`"
-                :disabled="addingServerId === server.id"
+                :disabled="addingServerId === addedKey(server)"
               >
-                <span v-if="addingServerId === server.id" class="loading loading-spinner loading-xs"></span>
-                <span v-else>Add to MCP</span>
+                <span v-if="addingServerId === addedKey(server)" class="loading loading-spinner loading-xs"></span>
+                <span v-else>Add to MCPProxy</span>
+              </button>
+              <button
+                v-else
+                @click="openAddedServer(server)"
+                class="btn btn-success btn-sm"
+                :data-test="`registry-added-${server.id}`"
+              >
+                Added ✓ · Open
               </button>
             </div>
           </div>
@@ -371,7 +382,7 @@
     </div>
 
     <!-- Required-Input Prompt (Spec 070 — blocks add until provided) -->
-    <dialog :open="showPrompt" class="modal" data-test="registry-required-input-dialog">
+    <dialog ref="promptDialogEl" class="modal" data-test="registry-required-input-dialog">
       <div class="modal-box">
         <h3 class="font-bold text-lg">Add "{{ promptServer?.name }}"</h3>
         <p class="text-sm text-base-content/70 mt-1">
@@ -412,7 +423,7 @@
               :disabled="!promptComplete || addingServerId !== null"
             >
               <span v-if="addingServerId !== null" class="loading loading-spinner loading-xs"></span>
-              <span v-else>Add to MCP</span>
+              <span v-else>Add to MCPProxy</span>
             </button>
           </div>
         </form>
@@ -423,7 +434,7 @@
     </dialog>
 
     <!-- Add / Edit Registry Source dialog (MCP-866 add, MCP-1073 edit) -->
-    <dialog :open="showAddRegistry" class="modal" data-test="registry-add-source-dialog">
+    <dialog ref="addRegistryDialogEl" class="modal" data-test="registry-add-source-dialog">
       <div class="modal-box">
         <h3 class="font-bold text-lg">{{ isEditMode ? 'Edit registry' : 'Add a registry' }}</h3>
         <p class="text-sm text-base-content/70 mt-1">
@@ -500,7 +511,7 @@
           </div>
 
           <div class="modal-action">
-            <button type="button" class="btn btn-ghost" data-test="registry-add-cancel" @click="closeAddRegistry">
+            <button type="button" class="btn btn-ghost" data-test="registry-add-cancel" :disabled="addingRegistry" @click="closeAddRegistry">
               Cancel
             </button>
             <button
@@ -521,7 +532,7 @@
     </dialog>
 
     <!-- Delete custom registry confirmation (MCP-1073, destructive) -->
-    <dialog :open="showDeleteRegistry" class="modal" data-test="registry-delete-dialog">
+    <dialog ref="deleteRegistryDialogEl" class="modal" data-test="registry-delete-dialog">
       <div class="modal-box">
         <h3 class="font-bold text-lg">Remove "{{ deleteRegistryTarget?.name }}"?</h3>
         <p class="text-sm py-2 text-base-content/80">
@@ -533,7 +544,7 @@
         </div>
 
         <div class="modal-action">
-          <button type="button" class="btn btn-ghost" data-test="registry-delete-cancel" @click="closeDeleteRegistry">
+          <button type="button" class="btn btn-ghost" data-test="registry-delete-cancel" :disabled="deletingRegistry" @click="closeDeleteRegistry">
             Cancel
           </button>
           <button
@@ -570,11 +581,14 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Registry, RepositoryServer, RequiredInput } from '@/types'
 import { REGISTRY_PROVENANCE_CUSTOM } from '@/types'
+import { useDialogOpen } from '@/composables/useDialogOpen'
+import { serverDetailPath } from '@/utils/serverRoute'
 
 // State
 const registries = ref<Registry[]>([])
@@ -589,6 +603,26 @@ const loadingRegistries = ref(false)
 const loadingServers = ref(false)
 const error = ref<string | null>(null)
 const addingServerId = ref<string | null>(null)
+// Spec 109 FR-063: keyed by a registry-qualified key (see addedKey below) ->
+// the resulting server's name, so the button can flip to "Added ✓ · Open"
+// and stay that way for the rest of this page visit (a fresh load/registry
+// refresh clears it, matching the entry possibly not being re-addable
+// anyway).
+const addedServers = ref<Record<string, string>>({})
+
+// Catalog entry ids collide across registries (MCP-866): searchServers'
+// own dedupe (`${s.registry || id}::${s.id}`, below) already accounts for
+// this to keep two same-id entries from different registries as separate
+// cards. addedServers/addingServerId must key on the same registry-qualified
+// identity, or adding one card flips every OTHER card sharing its bare id to
+// "Added ✓ · Open" too (and shows its spinner while the add is in flight),
+// with "Open" then navigating to whichever server actually got added — this
+// is the same bug the macOS half of this PR (ServerBrowseView.swift's
+// `addedKey`) already fixed on that side (review round 8, finding 4).
+function addedKey(server: RepositoryServer): string {
+  return `${server.registry || ''}::${server.id}`
+}
+const router = useRouter()
 const showSuccessToast = ref(false)
 const successMessage = ref('')
 
@@ -607,12 +641,18 @@ const addRegistryName = ref('')
 const addRegistryError = ref<string | null>(null)
 const addingRegistry = ref(false)
 const isEditMode = computed(() => editRegistryId.value !== null)
+// Spec 109 FR-055: <dialog>.showModal()/close(), not the `open` attribute —
+// keeps the top layer, so nothing (sidebar, header) can ever paint over it.
+// The native-close handler is deliberately NOT closeAddRegistry() — see the
+// comment on handleAddRegistryNativeClose for why (review round 2, finding 1).
+const { dialogEl: addRegistryDialogEl } = useDialogOpen(() => showAddRegistry.value, () => handleAddRegistryNativeClose())
 
 // Delete-custom-registry confirmation state (MCP-1073)
 const showDeleteRegistry = ref(false)
 const deleteRegistryTarget = ref<Registry | null>(null)
 const deleteRegistryError = ref<string | null>(null)
 const deletingRegistry = ref(false)
+const { dialogEl: deleteRegistryDialogEl } = useDialogOpen(() => showDeleteRegistry.value, () => handleDeleteRegistryNativeClose())
 
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -684,6 +724,7 @@ function clearRegistries() {
 }
 
 const showPrompt = computed(() => promptServer.value !== null)
+const { dialogEl: promptDialogEl } = useDialogOpen(() => showPrompt.value, () => closePrompt())
 
 // Add is blocked until every prompted input has a non-empty value.
 const promptComplete = computed(() =>
@@ -702,7 +743,7 @@ const repositoriesHints = computed<Hint[]>(() => {
           list: [
             'Select a registry from the dropdown menu',
             'Search for servers by name or description',
-            'Click "Add to MCP" to install a server',
+            'Click "Add to MCPProxy" to install a server',
             'View source code and installation commands for each server'
           ]
         }
@@ -850,7 +891,7 @@ async function addServer(server: RepositoryServer, env?: Record<string, string>)
     return
   }
 
-  addingServerId.value = server.id
+  addingServerId.value = addedKey(server)
   error.value = null
 
   try {
@@ -859,6 +900,7 @@ async function addServer(server: RepositoryServer, env?: Record<string, string>)
     if (result.success) {
       closePrompt()
       const name = result.server?.name || server.name
+      addedServers.value[addedKey(server)] = name
       showToast(`Added "${name}" — quarantined. Approve it on the Servers page to enable.`)
       return
     }
@@ -874,6 +916,13 @@ async function addServer(server: RepositoryServer, env?: Record<string, string>)
   } finally {
     addingServerId.value = null
   }
+}
+
+// Spec 109 FR-063: "Added ✓ · Open" opens the server it just added.
+function openAddedServer(server: RepositoryServer) {
+  const name = addedServers.value[addedKey(server)]
+  if (!name) return
+  router.push(serverDetailPath(name))
 }
 
 // Open the required-input prompt. Prefer the rich declarations carried on the
@@ -930,6 +979,24 @@ function openEditRegistry(registry: Registry) {
 
 function closeAddRegistry() {
   if (addingRegistry.value) return
+  showAddRegistry.value = false
+  editRegistryId.value = null
+}
+
+// The Cancel button and the invisible backdrop-dismiss button both wire to
+// closeAddRegistry(), which intentionally no-ops while a submit is in
+// flight. A native close (Escape, or `<dialog>`'s own backdrop/cancel
+// handling) is different: the dialog has ALREADY closed in the DOM by the
+// time this fires, and nothing here can undo that. Reusing closeAddRegistry
+// there (review round 1) meant its addingRegistry guard silently skipped the
+// `showAddRegistry` flip too, leaving Vue believing the dialog was still
+// open while the DOM said otherwise — the button that would reopen it then
+// sets `showAddRegistry` to a value it already holds, the driving watch
+// never re-fires, and `showModal()` never runs again (round 1's exact bug,
+// reintroduced here — review round 2, finding 1). Always resync local state
+// on a native close; doAddRegistry()/doEditRegistry() already tolerate the
+// dialog having moved on by the time their request settles.
+function handleAddRegistryNativeClose() {
   showAddRegistry.value = false
   editRegistryId.value = null
 }
@@ -1031,6 +1098,13 @@ function openDeleteRegistry(registry: Registry) {
 
 function closeDeleteRegistry() {
   if (deletingRegistry.value) return
+  showDeleteRegistry.value = false
+  deleteRegistryTarget.value = null
+}
+
+// See handleAddRegistryNativeClose above — same reasoning, applied to the
+// delete-confirm dialog (review round 2, finding 1).
+function handleDeleteRegistryNativeClose() {
   showDeleteRegistry.value = false
   deleteRegistryTarget.value = null
 }
