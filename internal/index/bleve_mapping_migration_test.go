@@ -1,6 +1,7 @@
 package index
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -527,6 +528,57 @@ func TestRebuildIndex_SwapFailureLeavesUsableEmptyIndex(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, count)
 	require.NoError(t, bi.IndexTool(migrationFixtureTools()[0]))
+	assert.NoDirExists(t, indexPath+rebuildDirSuffix)
+	require.NoError(t, bi.Close())
+}
+
+// wrappedIndex aliases bleve.Index so it can be embedded under a field name
+// other than "Index": bleve.Index itself declares an Index(id, data) method,
+// which an embedded field literally named "Index" would shadow, breaking
+// promotion.
+type wrappedIndex = bleve.Index
+
+// erroringCloseIndex wraps a real bleve.Index so Close tears the underlying
+// index down (delegating to the real Close, mirroring scorch: the internal
+// teardown — closing closeCh and draining async tasks — runs unconditionally
+// before the error-prone final store close) but still reports a synthetic
+// error, exercising the same shape as a real close failure (e.g. the
+// underlying bbolt store's own Close failing).
+type erroringCloseIndex struct {
+	wrappedIndex
+}
+
+func (e erroringCloseIndex) Close() error {
+	_ = e.wrappedIndex.Close()
+	return errors.New("simulated close failure")
+}
+
+// F1.1 (review round 1): RebuildIndex must not leave b.index pointing at the
+// old index's handle when closing it fails. The old index is torn down
+// internally the moment Close is called, regardless of the error it returns,
+// so serving it (or double-closing it later) would panic. RebuildIndex must
+// swap in the already-built replacement instead of discarding it and
+// returning early with the dead handle still installed.
+func TestRebuildIndex_OldIndexCloseFailureStillSwaps(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+	bi, err := newBleveIndexAt(indexPath, zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, bi.BatchIndex(migrationFixtureTools()))
+
+	bi.index = erroringCloseIndex{wrappedIndex: bi.index}
+
+	require.NoError(t, bi.RebuildIndex(),
+		"a Close() error on the old index must not fail the migration: the old index is unusable either way and the replacement is already built")
+	require.NotNil(t, bi.index)
+	assertCurrentMapping(t, bi.index)
+	count, err := bi.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), count, "the already-built replacement must be swapped in, not discarded")
+
+	// The swapped-in index must be a live, independent handle: writes and a
+	// later Close must both succeed (a double-close on the torn-down old
+	// handle would panic instead).
+	require.NoError(t, bi.IndexTool(&config.ToolMetadata{Name: "new_tool", ServerName: "fs", Description: "brand new"}))
 	assert.NoDirExists(t, indexPath+rebuildDirSuffix)
 	require.NoError(t, bi.Close())
 }

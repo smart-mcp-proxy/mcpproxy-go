@@ -288,10 +288,19 @@ func (b *BleveIndex) RebuildIndex() error {
 		return err
 	}
 
-	// Point of no return: the old index is closed and replaced.
+	// Point of no return: the old index is closed and replaced. Close may
+	// itself return an error (e.g. the underlying store's final close
+	// failing), but the index is torn down internally the moment Close is
+	// called regardless of what it returns (scorch closes its internal
+	// channel and drains async tasks before the error-prone part of its own
+	// Close runs), so the old handle is unusable either way. Only log the
+	// close error and proceed with the swap: bailing out here would leave
+	// b.index pointing at that dead handle (serving it, or Close-ing it
+	// again later, panics) while discarding the replacement this func just
+	// finished building.
 	if err := b.index.Close(); err != nil {
-		_ = os.RemoveAll(tmpPath)
-		return fmt.Errorf("failed to close Bleve index for rebuild: %w", err)
+		b.logger.Warn("Closing the old Bleve index during rebuild returned an error; it is torn down regardless, proceeding with the swap",
+			zap.String("path", b.path), zap.Error(err))
 	}
 	idx, err := b.swapInRebuilt(tmpPath)
 	if err != nil {
