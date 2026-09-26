@@ -73,12 +73,33 @@ const router = createRouter({
       path: '/search',
       redirect: (to) => ({ path: '/tools', query: to.query, hash: to.hash }),
     },
+    // Spec 109 T026a: interim redirects until 109-g ships the real review
+    // queue/detail views. 109-a is the first PR to link to `/review` (the
+    // Tools "Needs review" stat), so it owns these — every later PR that also
+    // links here (109-d's attention fixes, 109-e's server-card Review button,
+    // 109-f's Go tray review click) lands on a registered route, never the
+    // 404 catch-all, until 109-g replaces both with the real views.
+    {
+      path: '/review/:server',
+      redirect: (to) => ({
+        path: `/servers/${encodeURIComponent(to.params.server as string)}`,
+        query: { ...to.query, tab: 'tools' },
+        hash: to.hash,
+      }),
+    },
+    {
+      path: '/review',
+      redirect: (to) => ({ path: '/servers', query: { ...to.query, status: 'needs_review' }, hash: to.hash }),
+    },
     {
       path: '/settings',
       name: 'settings',
       component: () => import('@/views/Settings.vue'),
       meta: {
-        title: 'Configuration',
+        // Spec 109 FR-056: named "Settings" everywhere (sidebar, route title,
+        // heading, document title) — "Configuration" was one more of the
+        // three names this page had accumulated (audit W5).
+        title: 'Settings',
       },
     },
     {

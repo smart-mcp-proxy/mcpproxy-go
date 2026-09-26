@@ -1502,7 +1502,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // calm, actionable affordance (MCP-1822) — `menuStatusNSColor`
         // gives it the system accent tint instead of the red error dot +
         // red lock badge that previously framed sign-in as a hard failure.
-        let needsAuth = server.isOAuthLoginRequired
         let dotColor = server.menuStatusNSColor
 
         let iconSize = NSSize(width: 16, height: 16)
@@ -1531,9 +1530,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         sub.addItem(.separator())
 
+        let leading = TrayServerAction.leadingMenuActions(for: server)
+
         // OAuth sign-in — calm, actionable affordance shown first when
-        // login is required (MCP-1822), not error framing.
-        if needsAuth {
+        // login is required (MCP-1822), not error framing. Offered beside
+        // Review quarantine, never instead of it.
+        if leading.contains(.login) {
             let login = NSMenuItem(title: TrayServerAction.login.menuTitle,
                                    action: #selector(loginServer(_:)), keyEquivalent: "")
             login.target = self
@@ -1547,7 +1549,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Logs — the one thing it needs is a review, and the menu had no path
         // to it at all. Deep-links to Server Detail, which opens on Tools with
         // the quarantine banner.
-        if server.quarantined {
+        if leading.contains(.approve) {
             let review = NSMenuItem(title: TrayServerAction.approve.menuTitle,
                                     action: #selector(showServerDetailFromMenu(_:)), keyEquivalent: "")
             review.target = self

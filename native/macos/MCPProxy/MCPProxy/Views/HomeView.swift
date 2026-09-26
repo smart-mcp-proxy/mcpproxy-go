@@ -449,6 +449,22 @@ struct HomeView: View {
     }
 
     // MARK: - Token Distribution
+    //
+    // Spec 109 T026 ("macOS DashboardView.swift equivalent label") asks for
+    // the same fix as web's CallHistogram.vue: integer tick formatting and a
+    // "Calls to unknown tools" label for the excluded, never-completed-a-call
+    // name group. Re-scoped rather than implemented here (review round 7,
+    // finding 3, carried from rounds 5–6): that chart is a per-tool CALL
+    // COUNT histogram, and this Token Distribution bar list below is a
+    // per-server TOKEN SIZE distribution — a different metric with no ticked
+    // axis and no "unresolved tool name" concept to mislabel, since it is
+    // keyed by server name (`perServerToolListSizes`), not by tool call
+    // outcome. There is no native equivalent chart anywhere in native/macos/
+    // to attach the fix to (macOS has no per-tool call histogram at all), and
+    // Spec 109's own tasks.md explicitly lists "a native macOS Usage view" as
+    // a Follow-up "not in this spec" — building one to host this fix would be
+    // new scope, not a quick win. Tracked for that future macOS Usage view
+    // rather than bolted onto an unrelated chart here.
 
     @ViewBuilder
     private var tokenDistributionSection: some View {

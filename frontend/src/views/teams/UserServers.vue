@@ -140,7 +140,7 @@
     </div>
 
     <!-- Add Server Modal -->
-    <dialog class="modal" :class="{ 'modal-open': showAddModal }">
+    <dialog ref="addModalDialogEl" class="modal">
       <div class="modal-box">
         <h3 class="font-bold text-lg mb-4">Add Personal Server</h3>
         <form @submit.prevent="addServer">
@@ -183,7 +183,7 @@
     </dialog>
 
     <!-- Remove Confirmation Modal -->
-    <dialog class="modal" :class="{ 'modal-open': !!serverToRemove }">
+    <dialog ref="removeDialogEl" class="modal">
       <div class="modal-box">
         <h3 class="font-bold text-lg">Remove Server</h3>
         <p class="py-4">Are you sure you want to remove <strong>{{ serverToRemove }}</strong>? This action cannot be undone.</p>
@@ -202,8 +202,9 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed } from 'vue'
+import { useDialogOpen } from '@/composables/useDialogOpen'
 import { useRouter } from 'vue-router'
-import { healthStatusLabel } from '@/utils/health'
+import { healthStatusTextOrEmpty } from '@/utils/health'
 
 interface UserServer {
   name: string
@@ -231,11 +232,13 @@ const loading = ref(true)
 const error = ref('')
 const allServers = ref<UserServer[]>([])
 const showAddModal = ref(false)
+const { dialogEl: addModalDialogEl } = useDialogOpen(() => showAddModal.value, () => closeAddModal())
 const adding = ref(false)
 const addError = ref('')
 const togglingServer = ref('')
 const removingServer = ref('')
 const serverToRemove = ref('')
+const { dialogEl: removeDialogEl } = useDialogOpen(() => serverToRemove.value !== '', () => { serverToRemove.value = '' })
 
 const newServer = reactive({
   name: '',
@@ -277,16 +280,17 @@ function healthBadgeClass(server: UserServer): string {
 }
 
 function healthLabel(server: UserServer): string {
-  if (!server.health) {
-    return server.enabled ? (server.connected ? 'connected' : 'disconnected') : 'disabled'
+  // One helper, one order (Spec 109): resolve through the same
+  // `healthStatusTextOrEmpty()` ServerCard/ServerDetail use — summary first,
+  // then the shared status label. Never render `level` as text (FR-011).
+  // This table's own connected/disconnected/disabled fallback wording
+  // (lowercase, unlike the card's capitalized "Connected"/"Disconnected")
+  // stays a local convention, not part of the shared precedence.
+  if (server.health) {
+    const text = healthStatusTextOrEmpty(server.health)
+    if (text) return text
   }
-  // FR-011: no surface may render `level` as text — render `status` through
-  // the one label table, falling back to the free-text summary, and never to
-  // `level` itself (a payload lacking both, e.g. version skew against an
-  // older/newer core, must not surface the banned raw level word).
-  if (server.health.status) return healthStatusLabel(server.health.status)
-  if (server.health.summary) return server.health.summary
-  return server.connected ? 'connected' : 'disconnected'
+  return server.enabled ? (server.connected ? 'connected' : 'disconnected') : 'disabled'
 }
 
 function navigateToDetail(server: UserServer) {

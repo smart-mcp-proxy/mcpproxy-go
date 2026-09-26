@@ -12,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -39,6 +40,48 @@ func extractHealthFromMap(srvRaw map[string]interface{}) (action, detail string)
 	}
 
 	return "", ""
+}
+
+// oauthSignInState reports whether a server needs the user to sign in, and
+// which OAuthRequirement.State that is ("unauthenticated" for a first-time
+// login, "expired" for a session that expired or was revoked).
+//
+// health.action alone cannot answer this: health carries ONE action and
+// quarantine outranks sign-in, so a quarantined OAuth server awaiting sign-in
+// reports action "approve". The diagnostic code carries the sign-in half. Same
+// rule as the Web UI's oauthSignInState (frontend/src/utils/health.ts) and the
+// tray's ServerStatus.isOAuthLoginRequired. Other MCPX_OAUTH_* codes
+// (discovery, callback) are configuration faults a sign-in does not fix.
+//
+// A disabled server is excluded: its diagnostic is left over from the last
+// connect attempt and its next step is Enable (action "enable").
+func oauthSignInState(srvRaw map[string]interface{}, healthAction string) (string, bool) {
+	if enabled, ok := srvRaw["enabled"].(bool); ok && !enabled {
+		return "", false
+	}
+	switch diagnostics.Code(extractDiagnosticCode(srvRaw)) {
+	case diagnostics.OAuthReauthRequired, diagnostics.OAuthRefreshExpired, diagnostics.OAuthRefresh403:
+		return "expired", true
+	case diagnostics.OAuthLoginRequired:
+		return "unauthenticated", true
+	}
+	if healthAction == health.ActionLogin {
+		return "unauthenticated", true
+	}
+	return "", false
+}
+
+// extractDiagnosticCode returns the server's Spec 044 diagnostic code. The
+// runtime stores it twice: inside the "diagnostic" map (as the named
+// diagnostics.Code type, or a plain string after a JSON round-trip) and as
+// the flat "error_code" string.
+func extractDiagnosticCode(srvRaw map[string]interface{}) string {
+	if diagRaw, ok := srvRaw["diagnostic"].(map[string]interface{}); ok && diagRaw != nil {
+		if code := stringifyDiagnosticField(diagRaw["code"]); code != "" {
+			return code
+		}
+	}
+	return getStringFromMap(srvRaw, "error_code")
 }
 
 // Doctor aggregates health diagnostics from all system components.
@@ -116,9 +159,23 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		healthDetail = redactErr(healthDetail)
 		lastError = redactErr(lastError)
 
+		// Sign-in is read beside health.action, not from it: a quarantined
+		// server awaiting sign-in says "approve", which matched no bucket below
+		// and left the server out of the report entirely. Review stays a
+		// parallel step in the message rather than being dropped. Computed
+		// before the switch, and every branch below is gated on !needsSignIn:
+		// the diagnostic code oauthSignInState reads is independent of
+		// health.Action, so a server whose Action is restart/configure/
+		// set_secret can still carry a sign-in code. Nothing enforces the two
+		// staying mutually exclusive except convention across the health
+		// calculator, the diagnostic classifier and this function - without
+		// this gate such a server would land in OAuthRequired AND its
+		// Action-bucket, double-counting one problem in TotalIssues.
+		signInState, needsSignIn := oauthSignInState(srvRaw, healthAction)
+
 		// Aggregate based on Health.Action
-		switch healthAction {
-		case health.ActionRestart:
+		switch {
+		case healthAction == health.ActionRestart && !needsSignIn:
 			errorTime := time.Now()
 			if errorTimeStr := getStringFromMap(srvRaw, "error_time"); errorTimeStr != "" {
 				if parsed, err := time.Parse(time.RFC3339, errorTimeStr); err == nil {
@@ -131,14 +188,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 				Timestamp:    errorTime,
 			})
 
-		case health.ActionLogin:
-			diag.OAuthRequired = append(diag.OAuthRequired, contracts.OAuthRequirement{
-				ServerName: serverName,
-				State:      "unauthenticated",
-				Message:    fmt.Sprintf("Run: mcpproxy auth login --server=%s", serverName),
-			})
-
-		case health.ActionConfigure:
+		case healthAction == health.ActionConfigure && !needsSignIn:
 			// Extract parameter name from error
 			// The parameter NAME is read off the pre-scrub string: it is an
 			// OAuth parameter identifier ('resource', 'audience'), never a
@@ -157,7 +207,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 				DocumentationURL: "https://www.rfc-editor.org/rfc/rfc8707.html",
 			})
 
-		case health.ActionSetSecret:
+		case healthAction == health.ActionSetSecret && !needsSignIn:
 			// Group by secret name for cross-cutting view
 			secretName := healthDetail
 			if secretName != "" {
@@ -165,9 +215,22 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 			}
 		}
 
+		if needsSignIn {
+			message := fmt.Sprintf("Run: mcpproxy auth login --server=%s", serverName)
+			quarantined, _ := srvRaw["quarantined"].(bool)
+			if quarantined || healthAction == health.ActionApprove {
+				message += " (also quarantined: review and approve it in the Web UI)"
+			}
+			diag.OAuthRequired = append(diag.OAuthRequired, contracts.OAuthRequirement{
+				ServerName: serverName,
+				State:      signInState,
+				Message:    message,
+			})
+		}
+
 		// Fallback: check for errors without health action for backward compatibility
 		// Only add to UpstreamErrors if not already handled by health action
-		if healthAction == "" && lastError != "" {
+		if healthAction == "" && lastError != "" && !needsSignIn {
 			errorTime := time.Now()
 			if errorTimeStr := getStringFromMap(srvRaw, "error_time"); errorTimeStr != "" {
 				if parsed, err := time.Parse(time.RFC3339, errorTimeStr); err == nil {

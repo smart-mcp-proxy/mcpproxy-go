@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
+import { healthStatusLabel } from '@/utils/health'
 
 // Spec 109 FR-011 review finding: statusLabel()/healthLabel() fell back to
 // `server.health.summary || server.health.level` when `status` is absent.
@@ -30,28 +31,26 @@ function makeRouter() {
   return router
 }
 
-async function mountAdminServers() {
+async function mountAdminServers(servers: unknown[] = [
+  {
+    name: 'skewed-core',
+    protocol: 'stdio',
+    enabled: true,
+    connected: true,
+    quarantined: false,
+    shared: false,
+    // Neither `status` nor `summary` present — the version-skew shape
+    // the finding describes. `level` must never leak as the rendered
+    // text.
+    health: { level: 'healthy', admin_state: 'enabled', summary: '' },
+  },
+]) {
   const router = makeRouter()
   await router.isReady()
 
   ;(globalThis as unknown as { fetch: unknown }).fetch = vi.fn().mockResolvedValue({
     ok: true,
-    json: async () => ({
-      servers: [
-        {
-          name: 'skewed-core',
-          protocol: 'stdio',
-          enabled: true,
-          connected: true,
-          quarantined: false,
-          shared: false,
-          // Neither `status` nor `summary` present — the version-skew shape
-          // the finding describes. `level` must never leak as the rendered
-          // text.
-          health: { level: 'healthy', admin_state: 'enabled', summary: '' },
-        },
-      ],
-    }),
+    json: async () => ({ servers }),
   })
 
   getConfigMock.mockResolvedValue({
@@ -65,6 +64,15 @@ async function mountAdminServers() {
   await flushPromises()
   await flushPromises()
   return wrapper
+}
+
+function statusBadgeText(wrapper: Awaited<ReturnType<typeof mountAdminServers>>, name: string) {
+  const row = wrapper.findAll('tbody tr').find(r => r.text().includes(name))
+  expect(row).toBeTruthy()
+  const statusCell = row!.findAll('td')[3]
+  const badge = statusCell.find('span.badge')
+  expect(badge.exists()).toBe(true)
+  return badge.text()
 }
 
 describe('AdminServers STATUS column (Spec 109 FR-011)', () => {
@@ -92,5 +100,50 @@ describe('AdminServers STATUS column (Spec 109 FR-011)', () => {
     for (const banned of ['healthy', 'degraded', 'unhealthy']) {
       expect(badge.text().toLowerCase()).not.toContain(banned)
     }
+  })
+
+  // This round's review finding: statusLabel()'s quarantined/disabled fallback
+  // checks were hung off an `else if` attached to `if (server.health)`, so
+  // they only ran when `server.health` was absent entirely. A server that HAS
+  // a health object but whose summary/status are both empty (the same
+  // version-skew shape as above) fell straight through to the bare
+  // connected/disconnected fallback, skipping quarantined -> 'Needs review'
+  // and disabled -> 'Disabled' — diverging from UserServers.vue's
+  // healthLabel(), which re-checks `enabled` unconditionally in its own
+  // fallback.
+  it('renders "Disabled" for a disabled server with an empty-text health object, not connected/disconnected', async () => {
+    const wrapper = await mountAdminServers([
+      {
+        name: 'disabled-skewed',
+        protocol: 'stdio',
+        enabled: false,
+        connected: false,
+        quarantined: false,
+        shared: false,
+        health: { level: 'healthy', admin_state: 'disabled', summary: '' },
+      },
+    ])
+
+    const text = statusBadgeText(wrapper, 'disabled-skewed')
+    expect(text).toBe(healthStatusLabel('disabled'))
+    expect(text).not.toMatch(/^(dis)?connected$/)
+  })
+
+  it('renders "Needs review" for a quarantined server with an empty-text health object, not connected/disconnected', async () => {
+    const wrapper = await mountAdminServers([
+      {
+        name: 'quarantined-skewed',
+        protocol: 'stdio',
+        enabled: true,
+        connected: true,
+        quarantined: true,
+        shared: false,
+        health: { level: 'unhealthy', admin_state: 'quarantined', summary: '' },
+      },
+    ])
+
+    const text = statusBadgeText(wrapper, 'quarantined-skewed')
+    expect(text).toBe(healthStatusLabel('needs_review'))
+    expect(text).not.toMatch(/^(dis)?connected$/)
   })
 })

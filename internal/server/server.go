@@ -3682,6 +3682,14 @@ func (s *Server) searchResultsToMaps(results []*config.SearchResult) []map[strin
 				"description": result.Tool.Description,
 				"server_name": result.Tool.ServerName,
 			}
+			// Spec 109 FR-028/review round 1: without this, contracts'
+			// AnnotationTier(nil) always resolved to TierUnannotated for
+			// every search hit, regardless of the tool's real annotations,
+			// so the same tool's tier badge disagreed between the normal
+			// Tools list and the search box.
+			if result.Tool.Annotations != nil {
+				toolData["annotations"] = result.Tool.Annotations
+			}
 			// Parse params JSON as input schema if available
 			if result.Tool.ParamsJSON != "" {
 				var inputSchema map[string]interface{}

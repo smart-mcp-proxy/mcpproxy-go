@@ -431,6 +431,27 @@ func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, _ 
 }
 
 func runUpstreamListFromConfig(globalConfig *config.Config) error {
+	// Review finding (this round): the daemon-less path can only classify
+	// health.status for a disabled or quarantined server (StateDisabled /
+	// StatusNeedsReview short-circuit CalculateHealth before it ever looks at
+	// the synthetic "disconnected" connection state below); every other
+	// server's status is cleared to "" a few lines down so the STATUS column
+	// keeps the informative "Daemon not running" summary instead of a bogus
+	// "Error" (round-6 finding, see upstream_list_daemonless_test.go). But
+	// filterServersByStatus matches health.status exactly, so `--status
+	// ready|connecting|sign_in_required|needs_secret|needs_config|error`
+	// silently returns an empty (headers-only, exit 0) table for every
+	// enabled server when the daemon is down — indistinguishable from "no
+	// servers in that state", exactly the GH #938 failure mode
+	// validateStatusFlag's doc comment says it exists to prevent. Warn on
+	// stderr instead of fabricating a status this path cannot know; stdout
+	// output (including -o json/yaml) is untouched.
+	if statusFilterNeedsDaemon(upstreamListStatus) {
+		fmt.Fprintln(os.Stderr, "Notice: no mcpproxy daemon running — only 'disabled' and 'needs_review' statuses "+
+			"can be determined from the config file alone, so --status may return no rows for other values "+
+			"even though matching servers exist. Run 'mcpproxy serve' for accurate status.")
+	}
+
 	// Convert config servers to output format
 	servers := make([]map[string]interface{}, len(globalConfig.Servers))
 	for i, srv := range globalConfig.Servers {
@@ -588,6 +609,32 @@ func validateStatusFlag(rawFilters []string) error {
 		}
 	}
 	return nil
+}
+
+// statusFilterNeedsDaemon reports whether a --status filter contains any
+// value the daemon-less config-only path (runUpstreamListFromConfig) cannot
+// resolve on its own. Only "disabled" and health.StatusNeedsReview short-
+// circuit CalculateHealth before the synthetic "disconnected" state comes
+// into play, so those two are safe without a daemon; every other value in the
+// vocabulary depends on a live connection state runUpstreamListFromConfig
+// deliberately clears to "" (see its own comment).
+func statusFilterNeedsDaemon(rawFilters []string) bool {
+	resolvableWithoutDaemon := map[string]bool{
+		health.StatusDisabled:    true,
+		health.StatusNeedsReview: true,
+	}
+	for _, raw := range rawFilters {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			if !resolvableWithoutDaemon[v] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // serverHealthStatus extracts a server row's `health.status` value (the
@@ -1870,6 +1917,8 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 		existingNames[i] = srv.Name
 	}
 	opts.ExistingServers = existingNames
+	// Never import the entry that points back at this instance's /mcp endpoint.
+	opts.SelfListenAddrs = importSelfListenAddrs(globalConfig)
 
 	// Run import
 	result, err := configimport.Import(content, opts)
@@ -1891,6 +1940,29 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 	}
 
 	return outputImportResultTable(result, upstreamImportDryRun, upstreamImportNoQuarantine, globalConfig)
+}
+
+// importSelfListenAddrs returns the addresses the local mcpproxy answers on,
+// for the import self-reference filter. The configured listen can differ from
+// the running daemon's (`serve --listen` is a process-only override, and the
+// file may have been edited since start), and Connect writes the LIVE address
+// into client configs — so ask the daemon too when one is reachable.
+func importSelfListenAddrs(cfg *config.Config) []string {
+	addrs := []string{cfg.Listen}
+	client, ok := newDaemonClient(cfg, nil)
+	if !ok {
+		return addrs
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	status, err := client.GetStatus(ctx)
+	if err != nil {
+		return addrs
+	}
+	if live, ok := status["listen_addr"].(string); ok && live != "" {
+		addrs = append(addrs, live)
+	}
+	return addrs
 }
 
 // parseImportFormat converts a format string to ConfigFormat
@@ -2025,6 +2097,8 @@ func outputImportResultTable(result *configimport.ImportResult, dryRun bool, noQ
 				reason = "already exists in config"
 			case "filtered_out":
 				reason = "not in --server filter"
+			case configimport.SkipReasonSelfReference:
+				reason = "points at this mcpproxy instance"
 			}
 			fmt.Printf("  ⏭️  %s (%s)\n", s.Name, reason)
 		}
