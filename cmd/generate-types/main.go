@@ -696,5 +696,132 @@ export interface UpdatePolicy {
 }
 `)
 
+	// Spec 108 (Profiles v3) enums - generated from internal/profile/contract.go
+	// (T014). This is the ONE source of truth every surface reads from
+	// (FR-001, FR-032, FR-052); a value spelled here must match that Go file
+	// exactly.
+	sb.WriteString(`// Profiles v3 enums - generated from internal/profile/contract.go
+export const UnannotatedDeny = 'deny' as const;
+export const UnannotatedAsWrite = 'as_write' as const;
+export const UnannotatedAsRead = 'as_read' as const;
+export type UnannotatedPolicy = typeof UnannotatedDeny | typeof UnannotatedAsWrite | typeof UnannotatedAsRead;
+
+export const ProfileReasonNone = '' as const;
+export const ProfileReasonServerNotInProfile = 'server_not_in_profile' as const;
+export const ProfileReasonDeniedByRule = 'denied_by_rule' as const;
+export const ProfileReasonUnannotatedHidden = 'unannotated_hidden' as const;
+export const ProfileReasonAboveTierCap = 'above_tier_cap' as const;
+export type ProfileReason =
+  | typeof ProfileReasonNone
+  | typeof ProfileReasonServerNotInProfile
+  | typeof ProfileReasonDeniedByRule
+  | typeof ProfileReasonUnannotatedHidden
+  | typeof ProfileReasonAboveTierCap;
+
+export const ProfileSourcePin = 'pin' as const;
+export const ProfileSourceBinding = 'binding' as const;
+export const ProfileSourceURL = 'url' as const;
+export const ProfileSourceSession = 'session' as const;
+export const ProfileSourceAnonymous = 'anonymous' as const;
+export const ProfileSourceNone = 'none' as const;
+export type ProfileSource =
+  | typeof ProfileSourcePin
+  | typeof ProfileSourceBinding
+  | typeof ProfileSourceURL
+  | typeof ProfileSourceSession
+  | typeof ProfileSourceAnonymous
+  | typeof ProfileSourceNone;
+
+export const BlockReasonProfileTier = 'profile_tier' as const;
+export const BlockReasonProfileRule = 'profile_rule' as const;
+export const BlockReasonProfileUnannotated = 'profile_unannotated' as const;
+export const BlockReasonProfileCodeExecution = 'profile_code_execution' as const;
+export const BlockReasonProfileManagement = 'profile_management' as const;
+export type ProfileBlockReason =
+  | typeof BlockReasonProfileTier
+  | typeof BlockReasonProfileRule
+  | typeof BlockReasonProfileUnannotated
+  | typeof BlockReasonProfileCodeExecution
+  | typeof BlockReasonProfileManagement;
+
+export const ExplainStepCredential = 'credential' as const;
+export const ExplainStepProfile = 'profile' as const;
+export const ExplainStepServerInScope = 'server_in_scope' as const;
+export const ExplainStepToolRule = 'tool_rule' as const;
+export const ExplainStepTierCap = 'tier_cap' as const;
+export const ExplainStepTokenPermission = 'token_permission' as const;
+export const ExplainStepGlobalGate = 'global_gate' as const;
+export const ExplainStepServerState = 'server_state' as const;
+export const ExplainStepToolApproval = 'tool_approval' as const;
+export type ExplainStep =
+  | typeof ExplainStepCredential
+  | typeof ExplainStepProfile
+  | typeof ExplainStepServerInScope
+  | typeof ExplainStepToolRule
+  | typeof ExplainStepTierCap
+  | typeof ExplainStepTokenPermission
+  | typeof ExplainStepGlobalGate
+  | typeof ExplainStepServerState
+  | typeof ExplainStepToolApproval;
+
+export const FixActionAllowInProfile = 'allow_in_profile' as const;
+export const FixActionClassifyInProfile = 'classify_in_profile' as const;
+export const FixActionAddServerToProfile = 'add_server_to_profile' as const;
+export const FixActionMoveClient = 'move_client' as const;
+export const FixActionEditToken = 'edit_token' as const;
+export const FixActionEnableServer = 'enable_server' as const;
+export const FixActionApproveTool = 'approve_tool' as const;
+export const FixActionChangeSetting = 'change_setting' as const;
+export const FixActionReconnectClient = 'reconnect_client' as const;
+export type FixAction =
+  | typeof FixActionAllowInProfile
+  | typeof FixActionClassifyInProfile
+  | typeof FixActionAddServerToProfile
+  | typeof FixActionMoveClient
+  | typeof FixActionEditToken
+  | typeof FixActionEnableServer
+  | typeof FixActionApproveTool
+  | typeof FixActionChangeSetting
+  | typeof FixActionReconnectClient;
+
+export const CredentialStateClient = 'client' as const;
+export const CredentialStateAdminKey = 'admin_key' as const;
+export const CredentialStateNone = 'none' as const;
+export const CredentialStateRevoked = 'revoked' as const;
+export const CredentialStateExpired = 'expired' as const;
+export type CredentialState =
+  | typeof CredentialStateClient
+  | typeof CredentialStateAdminKey
+  | typeof CredentialStateNone
+  | typeof CredentialStateRevoked
+  | typeof CredentialStateExpired;
+
+export const ProfileSurfaceWeb = 'web' as const;
+export const ProfileSurfaceMacOS = 'macos' as const;
+export const ProfileSurfaceCLI = 'cli' as const;
+export const ProfileSurfaceMCP = 'mcp' as const;
+export const ProfileSurfaceAPI = 'api' as const;
+export type ProfileSurface =
+  | typeof ProfileSurfaceWeb
+  | typeof ProfileSurfaceMacOS
+  | typeof ProfileSurfaceCLI
+  | typeof ProfileSurfaceMCP
+  | typeof ProfileSurfaceAPI;
+
+export const WarningAnonymousDeniedByBindingGuard = 'anonymous_denied_by_binding_guard' as const;
+export const WarningClientHoldsAdminKey = 'client_holds_admin_key' as const;
+export const WarningClientCredentialExpiring = 'client_credential_expiring' as const;
+export const WarningClientRotationPending = 'client_rotation_pending' as const;
+export const WarningProfileMissing = 'profile_missing' as const;
+export const WarningClientTokenNameConflict = 'client_token_name_conflict' as const;
+export type ClientWarningCode =
+  | typeof WarningAnonymousDeniedByBindingGuard
+  | typeof WarningClientHoldsAdminKey
+  | typeof WarningClientCredentialExpiring
+  | typeof WarningClientRotationPending
+  | typeof WarningProfileMissing
+  | typeof WarningClientTokenNameConflict;
+`)
+
 	return sb.String()
 }
