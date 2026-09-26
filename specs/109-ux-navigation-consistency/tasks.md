@@ -52,7 +52,7 @@ description: "Task list for Spec 109 — Navigation, scope filters and cross-sur
 - [ ] T023 [US4] `internal/contracts/tier.go` (`Tier`, the five exported constants, `AnnotationTier` — data-model §3; Spec 108-a builds on exactly this API); `internal/httpapi/server.go` `enrichServerTools` sets `tier`; `cmd/generate-types` exports `Tier`; `views/Tools.vue` uses `tool.tier` (delete `getRisk`); `tools_cmd.go` `--tier` + `--risk` alias + `TIER` column; macOS `ToolsView` uses `tier`
 - [ ] T024 [US6] `components/TopHeader.vue`: `v-if="profilesStore.hasProfiles"` on ProfileSwitcher (FR-057)
 - [ ] T025 [US5] `views/Repositories.vue` button labels; macOS `Views/ServerBrowseView.swift` / `RegistriesView.swift` labels; `cmd/mcpproxy/registry_cmd.go` add message "Added <name> to MCPProxy (quarantined for review)"
-- [ ] T026 [US6] `views/Usage.vue` + `utils/usageFormat.ts`: integer tick option on count charts; label "Calls to unknown tools"; macOS `DashboardView.swift` equivalent label
+- [ ] T026 [US6] `views/Usage.vue` + `utils/usageFormat.ts`: integer tick option on count charts; label "Calls to unknown tools". Web only: macOS has no usage charts or "unresolved" group to relabel (its Dashboard shows only a token-distribution list), so the macOS label waits for the native macOS Usage view listed under Follow-ups (FR-074, parity row 22a)
 - [ ] T026a [US2] Web `router/index.ts`: interim redirects `/review/:server` → `/servers/:server?tab=tools` and `/review` → `/servers?status=needs_review` (query kept). 109-a is the first PR to link to `/review` (T022), so it owns the redirects; the attention fix targets (109-d), the server card's Review button (109-e) and the Go tray review click (109-f) all merge after it and never land on the 404 catch-all before 109-g. Until 109-k, `/servers` ignores `?status=` and shows the unfiltered list. Test `frontend/tests/unit/review-interim-redirect.spec.ts` (both redirects, query kept, not the catch-all). 109-g replaces both routes with the real views (T091, T093)
 
 ### Verification
@@ -370,7 +370,7 @@ Spec 108-f, 108-i, 108-j, 108-k + 109-i ──> 109-l
 - Shared artifacts across an edge (no reconciliation needed, listed so reviewers know the owner): `cmd/mcpproxy/status_cmd.go` + `testdata/cli109/status.golden` (k T120, then d T062, then h T130a; edges k → d → h fix the order, and each adds only its own line at the position contracts/cli.md fixes); `internal/runtime/attention.go` (`AttentionServer`, `AttentionClient`, subscriber: 109-d owns; 109-h adds the client feed; 109-l adds kinds) and `frontend/src/views/Home.vue` (109-d creates; 109-h swaps its import entry for `ImportServers`; 109-i switches its usage-strip links to `linkTo`).
 - 109-e does not block 109-i (the card is independent of navigation), but merge it before 109-m so the parity tests cover it.
 - 109-m runs its tests against a..k. 109-l extends them once Spec 108 lands. Neither order blocks the other.
-- Follow-ups (not in this spec): annotation changes as review triggers (research D6); remove the `/unquarantine` endpoint after a deprecation window; server-edition navigation alignment; a native macOS Usage view.
+- Follow-ups (not in this spec): annotation changes as review triggers (research D6); remove the `/unquarantine` endpoint after a deprecation window; server-edition navigation alignment; a native macOS Usage view (which carries the FR-074 integer ticks and "Calls to unknown tools" label to macOS; T026 is Web only).
 
 ## Parallel Execution Examples
 
