@@ -32,10 +32,19 @@ func TestPointsToSelf(t *testing.T) {
 		{"named listen host", []string{"myhost.lan:9000"}, "http://MyHost.lan:9000/mcp", true},
 		{"https default port", []string{"127.0.0.1:443"}, "https://127.0.0.1/mcp", true},
 		{"second listen addr", []string{"", "127.0.0.1:8080"}, "http://127.0.0.1:8080/mcp", true},
+		// Legacy /v1/tool_code and /v1/tool-code aliases: server.go maps the
+		// identical mcpHandler onto them (still documented, served whenever
+		// routing_mode is "direct"), so a hand-written or legacy python-client
+		// config addressing this instance through one of them is just as much
+		// a self-reference as /mcp itself.
+		{"legacy tool_code alias", []string{"127.0.0.1:8080"}, "http://127.0.0.1:8080/v1/tool_code", true},
+		{"legacy tool-code alias", []string{"127.0.0.1:8080"}, "http://127.0.0.1:8080/v1/tool-code", true},
+		{"legacy tool_code alias trailing slash", []string{"127.0.0.1:8080"}, "http://127.0.0.1:8080/v1/tool_code/", true},
 
 		{"different port", []string{"127.0.0.1:8080"}, "http://127.0.0.1:18412/mcp", false},
 		{"different path", []string{"127.0.0.1:8080"}, "http://127.0.0.1:8080/api/v1", false},
 		{"path prefix lookalike", []string{"127.0.0.1:8080"}, "http://127.0.0.1:8080/mcpx", false},
+		{"legacy alias lookalike", []string{"127.0.0.1:8080"}, "http://127.0.0.1:8080/v1/tool_code_extra", false},
 		{"remote host", []string{"127.0.0.1:8080"}, "https://api.github.com:8080/mcp", false},
 		{"loopback url, lan-only listen", []string{"192.168.1.5:8080"}, "http://127.0.0.1:8080/mcp", false},
 		// A socket bound to 127.0.0.1 is unreachable via ::1 or 127.0.0.2, so a

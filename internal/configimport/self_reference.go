@@ -117,7 +117,12 @@ func (m *selfMatcher) matchesURL(raw string) bool {
 		return false
 	}
 	path := strings.TrimSuffix(u.Path, "/")
-	if path != "/mcp" && !strings.HasPrefix(path, "/mcp/") {
+	// /v1/tool_code and /v1/tool-code are legacy aliases server.go maps onto
+	// the identical mcpHandler (still documented, served whenever
+	// routing_mode is "direct"): a source entry addressing this instance
+	// through one of them is exactly as much a self-reference as /mcp.
+	if path != "/mcp" && !strings.HasPrefix(path, "/mcp/") &&
+		path != "/v1/tool_code" && path != "/v1/tool-code" {
 		return false
 	}
 	port := u.Port()
