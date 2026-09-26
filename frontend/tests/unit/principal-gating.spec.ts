@@ -48,6 +48,7 @@ vi.mock('@/services/api', () => ({
 // dynamically imported later in the same file.
 const fetchInfoMock = vi.fn()
 const fetchRoutingMock = vi.fn()
+const fetchScopeFilterFeaturesMock = vi.fn()
 const connectEventSourceMock = vi.fn()
 const fetchServersMock = vi.fn()
 
@@ -60,6 +61,9 @@ vi.mock('@/stores/system', async (importOriginal) => {
       authEpoch: 0,
       fetchInfo: fetchInfoMock,
       fetchRouting: fetchRoutingMock,
+      // Spec 109-k FR-080a: fetched alongside fetchInfo/fetchRouting in
+      // App.vue's onMounted, same admin-only gating.
+      fetchScopeFilterFeatures: fetchScopeFilterFeaturesMock,
       connectEventSource: connectEventSourceMock,
       disconnectEventSource: vi.fn(),
       setAuthRequired: vi.fn(),
@@ -163,6 +167,7 @@ describe('stores/auth principalKind (Spec 107 T087/T088, data-model.md "Frontend
 describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => {
   const fetchInfo = fetchInfoMock
   const fetchRouting = fetchRoutingMock
+  const fetchScopeFilterFeatures = fetchScopeFilterFeaturesMock
   const fetchServers = fetchServersMock
   const connectEventSource = connectEventSourceMock
 
@@ -173,6 +178,7 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
     hasAPIKeyMock.mockReset().mockReturnValue(false)
     fetchInfo.mockClear()
     fetchRouting.mockClear()
+    fetchScopeFilterFeatures.mockClear()
     fetchServers.mockClear()
     connectEventSource.mockClear()
   })
@@ -212,6 +218,7 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
 
     expect(fetchInfo).not.toHaveBeenCalled()
     expect(fetchRouting).not.toHaveBeenCalled()
+    expect(fetchScopeFilterFeatures).not.toHaveBeenCalled()
     expect(fetchServers).not.toHaveBeenCalled()
     expect(connectEventSource).not.toHaveBeenCalled()
   })
@@ -221,6 +228,7 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
 
     expect(fetchInfo).toHaveBeenCalled()
     expect(fetchRouting).toHaveBeenCalled()
+    expect(fetchScopeFilterFeatures).toHaveBeenCalled()
     expect(fetchServers).toHaveBeenCalled()
     expect(connectEventSource).toHaveBeenCalled()
   })
