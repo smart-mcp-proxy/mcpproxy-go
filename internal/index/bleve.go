@@ -173,16 +173,20 @@ var bleveMappingInternalKey = []byte("_mapping")
 // is swapped into place.
 const rebuildDirSuffix = ".rebuild"
 
-// retiredEntryPrefix prefixes the names a replaced index's entries are renamed
-// to, inside the index directory, before they are deleted. Bleve only reads
-// index_meta.json and store/, so a retired entry that could not be deleted is
-// inert; the dot prefix also keeps it out of ExistingProfileDirs.
-const retiredEntryPrefix = ".retired-"
+// retiredDirSuffix names the sibling directory a replaced index directory is
+// renamed to (<indexPath>.retired-<n>) before it is deleted. The dot keeps a
+// per-profile leftover (profiles/<slug>.retired-<n>) out of ExistingProfileDirs.
+const retiredDirSuffix = ".retired-"
 
 // removeRebuildLeftovers best-effort removes the rebuild directory and retired
-// entries a previous migration left behind.
+// directories a previous migration left behind. A retired directory that still
+// holds profiles/ (a crash between retiring and moving it back) returns it
+// first, unless indexPath already has one.
 func removeRebuildLeftovers(indexPath string, logger *zap.Logger) {
-	leftovers, _ := filepath.Glob(filepath.Join(indexPath, retiredEntryPrefix+"*"))
+	leftovers, _ := filepath.Glob(indexPath + retiredDirSuffix + "*")
+	for _, p := range leftovers {
+		restoreProfilesDir(p, indexPath)
+	}
 	leftovers = append(leftovers, indexPath+rebuildDirSuffix)
 	for _, p := range leftovers {
 		if err := os.RemoveAll(p); err != nil {
@@ -190,6 +194,23 @@ func removeRebuildLeftovers(indexPath string, logger *zap.Logger) {
 				zap.String("path", p), zap.Error(err))
 		}
 	}
+}
+
+// restoreProfilesDir moves from/profiles to to/profiles when from has one and
+// to does not, creating to if needed.
+func restoreProfilesDir(from, to string) {
+	src := filepath.Join(from, profilesDirName)
+	if _, err := os.Stat(src); err != nil {
+		return
+	}
+	dst := filepath.Join(to, profilesDirName)
+	if _, err := os.Stat(dst); err == nil {
+		return
+	}
+	if err := os.MkdirAll(to, 0o755); err != nil {
+		return
+	}
+	_ = os.Rename(src, dst)
 }
 
 // indexStaleReason reports why idx must be rebuilt before use, or "" when it
@@ -407,7 +428,8 @@ func (b *BleveIndex) populateIndexAt(path string, docs []storedDocument) error {
 const indexMetaFile = "index_meta.json"
 
 // swapIndexDir replaces the closed index at dst with the complete index at src.
-// retireIndexEntries takes index_meta.json out first and it is moved in last,
+// retireIndexEntries takes the old index out atomically and index_meta.json is
+// moved in last,
 // so a crash at any point leaves dst either the old index, or no openable
 // index (which newBleveIndexAt recreates empty) — never a mix of old metadata
 // and new store. The discovery path re-populates an empty index as servers
@@ -434,51 +456,39 @@ func swapIndexDir(src, dst string) error {
 	return nil
 }
 
-// retireIndexEntries empties an index directory of bleve's own entries by
-// renaming each to a retiredEntryPrefix name in the same directory,
-// index_meta.json first, and then best-effort deleting them. A same-directory
-// rename needs write access to dir only (moving a directory to another parent
-// would also need write access to it, to update its ".." entry), so a file
-// inside store/ that cannot be deleted (a permission-impaired or locked
-// leftover) can neither fail this nor leave a half-deleted index behind with
-// its metadata intact; whatever the delete leaves is retried on the next open
-// (removeRebuildLeftovers).
+// retireIndexEntries empties an index directory of bleve's own entries: it
+// renames the whole directory to a <dir>.retired-<n> sibling, recreates dir,
+// moves profiles/ back, and then best-effort deletes the retired directory.
+//
+// Renaming the directory as a whole is atomic (dir is either the complete old
+// index or absent, never a half-deleted index whose index_meta.json survived)
+// and needs write access to dir's parent only. Deleting or renaming entries
+// inside dir would not work for a permission-impaired or locked leftover in
+// store/: RemoveAll stops partway, and some platforms (macOS 15) also refuse to
+// rename a non-writable directory within its own parent. Whatever the final
+// delete leaves is retried on the next open (removeRebuildLeftovers).
 //
 // The shared index directory also holds the per-profile indexes under
 // profilesDirName (see Manager), which are separate indexes and are kept.
 func retireIndexEntries(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("failed to read index directory: %w", err)
+	retired := fmt.Sprintf("%s%s%d", dir, retiredDirSuffix, time.Now().UnixNano())
+	if err := os.Rename(dir, retired); err != nil {
+		return fmt.Errorf("failed to move aside index directory: %w", err)
 	}
-	prefix := fmt.Sprintf("%s%d-", retiredEntryPrefix, time.Now().UnixNano())
-	var retired []string
-	move := func(name string) error {
-		to := filepath.Join(dir, prefix+name)
-		if err := os.Rename(filepath.Join(dir, name), to); err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return fmt.Errorf("failed to move aside index entry %q: %w", name, err)
-		}
-		retired = append(retired, to)
-		return nil
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		_ = os.Rename(retired, dir)
+		return fmt.Errorf("failed to recreate index directory: %w", err)
 	}
-	if err := move(indexMetaFile); err != nil {
-		return err
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if name == profilesDirName || name == indexMetaFile || strings.HasPrefix(name, retiredEntryPrefix) {
-			continue
-		}
-		if err := move(name); err != nil {
-			return err
+	profiles := filepath.Join(retired, profilesDirName)
+	if _, err := os.Stat(profiles); err == nil {
+		if err := os.Rename(profiles, filepath.Join(dir, profilesDirName)); err != nil {
+			// Put everything back rather than delete the profile indexes.
+			_ = os.Remove(dir)
+			_ = os.Rename(retired, dir)
+			return fmt.Errorf("failed to keep per-profile indexes while replacing the index: %w", err)
 		}
 	}
-	for _, p := range retired {
-		_ = os.RemoveAll(p)
-	}
+	_ = os.RemoveAll(retired)
 	return nil
 }
 

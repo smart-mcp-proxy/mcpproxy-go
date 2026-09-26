@@ -573,8 +573,8 @@ func TestNewBleveIndexAt_MigrationFailureKeepsStaleIndexServing(t *testing.T) {
 
 // Ported from PR 1378 review round 9, finding 1: a file inside the old index's
 // store that cannot be deleted (write bit stripped from store/) must not strand
-// the swap. Old entries are renamed aside, which needs write access to the
-// index directory only.
+// the swap. The old index directory is renamed aside as a whole, which needs
+// write access to its parent only.
 func TestNewBleveIndexAt_MigrationSurvivesUnremovableStore(t *testing.T) {
 	skipIfPermissionsUnenforced(t)
 	indexPath := filepath.Join(t.TempDir(), "index.bleve")
@@ -627,11 +627,35 @@ func TestNewBleveIndexAt_InterruptedSwapRecoverySurvivesUnremovableStore(t *test
 	assertCurrentMapping(t, bi.index)
 }
 
-// chmodRetiredStores restores write access to stores renamed aside by
+// chmodRetiredStores restores write access to stores retired by
 // retireIndexEntries so t.TempDir's cleanup can delete them.
 func chmodRetiredStores(indexPath string) {
-	stores, _ := filepath.Glob(filepath.Join(indexPath, retiredEntryPrefix+"*store"))
-	for _, d := range stores {
-		_ = os.Chmod(d, 0o755)
+	dirs, _ := filepath.Glob(indexPath + retiredDirSuffix + "*")
+	for _, d := range dirs {
+		_ = os.Chmod(filepath.Join(d, "store"), 0o755)
 	}
+}
+
+// A crash between retiring the shared index directory and moving profiles/
+// back leaves the profile indexes in the retired directory. The next open must
+// return them before deleting the leftover.
+func TestNewBleveIndexAt_RestoresProfilesFromRetiredLeftover(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+	retired := indexPath + retiredDirSuffix + "123"
+	pi, err := newBleveIndexAt(filepath.Join(retired, profilesDirName, "dev"), zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, pi.BatchIndex(migrationFixtureTools()[:1]))
+	require.NoError(t, pi.Close())
+
+	bi, err := newBleveIndexAt(indexPath, zap.NewNop())
+	require.NoError(t, err)
+	defer bi.Close()
+
+	assert.NoDirExists(t, retired)
+	pi, err = newBleveIndexAt(filepath.Join(indexPath, profilesDirName, "dev"), zap.NewNop())
+	require.NoError(t, err)
+	defer pi.Close()
+	count, err := pi.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), count)
 }
