@@ -466,10 +466,11 @@ const signInState = computed(() => oauthSignInState(props.server))
 
 // Login renders for any sign-in state, including a quarantined server whose
 // health.action is 'approve' — Approve and Login then show side by side. A
-// disabled server is excluded: its diagnostic is frozen from before it was
-// disabled, and Enable is the next step.
+// disabled server is excluded FIRST: its health/diagnostic can be frozen
+// from before it was disabled (disableServer's optimistic update flips
+// `enabled` immediately but only the later SSE refresh clears health), and
+// Enable is the next step regardless of what health.action still says.
 const showLogin = computed(() => {
-  if (healthAction.value === 'login') return true
   if (!props.server.enabled || props.server.health?.admin_state === 'disabled') return false
   return signInState.value !== null
 })

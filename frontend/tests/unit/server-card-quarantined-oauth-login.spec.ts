@@ -114,4 +114,26 @@ describe('ServerCard — quarantined server that needs OAuth sign-in', () => {
     expect(card.find('[data-test="server-card-login"]').exists()).toBe(false)
     expect(card.find('[data-test="server-card-enable"]').exists()).toBe(true)
   })
+
+  it('drops Login for a just-disabled server whose stale health.action is still "login" (disableServer optimistic-update race)', () => {
+    // disableServer() (stores/servers.ts) optimistically flips top-level
+    // `enabled` to false immediately, but the `health` object (admin_state
+    // still 'enabled', action still 'login') is only replaced once the
+    // SSE-triggered refresh lands. During that window showLogin must not
+    // render the stale Login CTA for a server the user just disabled.
+    const card = mountCard(
+      quarantinedOAuthServer({
+        quarantined: false,
+        enabled: false,
+        health: {
+          level: 'degraded',
+          admin_state: 'enabled',
+          summary: 'Sign-in required',
+          detail: LOGIN_ERROR,
+          action: 'login',
+        },
+      } as Partial<Server>)
+    )
+    expect(card.find('[data-test="server-card-login"]').exists()).toBe(false)
+  })
 })
