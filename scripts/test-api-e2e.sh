@@ -1530,7 +1530,11 @@ JSON
 
     # Stop only the audit instance by PID — never a blanket pkill (it would
     # also hit concurrent sessions' cores; see the helpers above cleanup()).
-    if [ -n "$AUDIT_PID" ]; then
+    # Re-verify identity (captured in AUDIT_PID_ID right after spawn) before
+    # signalling — same guard cleanup() applies to MCPPROXY_PID/AUDIT_PID, so
+    # a PID the OS reused for an unrelated process between spawn and here
+    # (e.g. the audit core crashed mid-test) is never mistakenly killed.
+    if [ -n "$AUDIT_PID" ] && [ "$(proc_id "$AUDIT_PID")" = "$AUDIT_PID_ID" ]; then
         kill "$AUDIT_PID" 2>/dev/null || true
         AUDIT_WAIT_COUNT=0
         while [ "$AUDIT_WAIT_COUNT" -lt 10 ]; do
@@ -1541,9 +1545,10 @@ JSON
         if kill -0 "$AUDIT_PID" 2>/dev/null; then
             kill -9 "$AUDIT_PID" 2>/dev/null || true
         fi
-        # Stopped: clear it so cleanup() never signals a since-reused PID.
-        AUDIT_PID=""
     fi
+    # Cleared either way — stopped above, or already exited/reused before we
+    # got here — so cleanup() never signals a since-reused PID.
+    AUDIT_PID=""
     rm -rf "$AUDIT_DATA_DIR" "$AUDIT_JSONL_DIR"
     rm -f "$AUDIT_SERVER_LOG"
 fi
