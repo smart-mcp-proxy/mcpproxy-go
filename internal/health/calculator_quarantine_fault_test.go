@@ -126,6 +126,32 @@ func TestCalculateHealth_QuarantinedOAuthReauthIsUnhealthy(t *testing.T) {
 	assert.Equal(t, "Quarantined — Authentication required", result.Summary)
 }
 
+// The reauth markers are unambiguous regardless of whether OAuth was
+// autodetected (OAuthRequired=false) or explicitly configured
+// (OAuthRequired=true): a quarantined server with autodetected OAuth whose
+// stored token broke must read the same as one with configured OAuth. Before
+// this fix, quarantinedAwaitingSignIn's final fallback
+// (`input.OAuthRequired && state != "error"`) required OAuthRequired=true, so
+// this exact case — the real production message from a server-5xx during MCP
+// init (connection_oauth.go) — fell through to the default healthy/"Quarantined
+// for review", hiding a broken token behind a green health level.
+func TestCalculateHealth_QuarantinedAutodetectedOAuthReauthIsUnhealthy(t *testing.T) {
+	reauthErr := "OAuth authentication required for github: server error with stored token - re-login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command"
+	result := CalculateHealth(HealthCalculatorInput{
+		Name:          "github",
+		Enabled:       true,
+		Quarantined:   true,
+		State:         "Disconnected",
+		OAuthRequired: false,
+		LastError:     reauthErr,
+	}, nil)
+	assert.Equal(t, LevelUnhealthy, result.Level, "a broken stored token is not healthy even for autodetected OAuth")
+	assert.Equal(t, StateQuarantined, result.AdminState)
+	assert.Equal(t, ActionApprove, result.Action)
+	assert.Equal(t, "Quarantined — Authentication required", result.Summary)
+	assert.Equal(t, reauthErr, result.Detail)
+}
+
 // mcp-go wraps transport failures in "authentication strategies failed", which
 // isOAuthRelatedError matches. In the "error" state the transport-fault branch
 // must keep naming the real cause instead of reporting an auth problem.
