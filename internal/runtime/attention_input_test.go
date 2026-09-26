@@ -56,39 +56,8 @@ func TestAttentionSubscriberBuildsServerFromServersChangedRow(t *testing.T) {
 	assert.Equal(t, t3, built3.StateSince, "a health.status change restamps StateSince")
 }
 
-func BenchmarkAttentionComputeLargeFleet(b *testing.B) {
-	now := time.Now()
-	servers := make([]AttentionServer, 0, 100)
-	for i := 0; i < 100; i++ {
-		s := AttentionServer{
-			Name:       "server-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
-			Enabled:    true,
-			StateSince: now.Add(-90 * time.Second),
-			Health:     contracts.HealthStatus{Status: health.StatusReady},
-		}
-		switch i % 5 {
-		case 0:
-			s.Health.Status = health.StatusSignInRequired
-		case 1:
-			s.Quarantined = true
-		case 2:
-			s.Changed = 3
-			s.Pending = 4
-		case 3:
-			s.Health.Status = health.StatusError
-		}
-		servers = append(servers, s)
-	}
-	clients := make([]AttentionClient, 0, 50)
-	for i := 0; i < 50; i++ {
-		connectedAt := now.Add(-10 * time.Minute)
-		clients = append(clients, AttentionClient{ID: "client", ConnectedAt: &connectedAt})
-	}
-
-	in := AttentionInput{Now: now, Servers: servers, Clients: clients}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = Compute(in)
-	}
-}
+// The SC-011 100-servers/1,000-tools Compute benchmark lives in
+// attention_bench_test.go (T059: buildAttentionBenchFleet,
+// BenchmarkComputeSC011LargeFleet, TestComputeSC011LargeFleetP95) — this
+// file's old BenchmarkAttentionComputeLargeFleet was a smaller, unasserted
+// duplicate of the same fixture and has been superseded by it.
