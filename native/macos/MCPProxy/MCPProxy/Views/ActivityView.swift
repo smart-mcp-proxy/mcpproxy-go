@@ -1,30 +1,13 @@
 // ActivityView.swift
 // MCPProxy
 //
-// Shows the activity log with summary stats, filter dropdowns for Type/Server/Status,
+// Shows the activity log with summary stats, view segments (Tool calls · Sessions ·
+// System events · All), URL-contract filters (ScopeFilter, Spec 109-k),
 // a tabular list on the left with column headers, and a detail panel on the right.
 // Features: SSE live updates, dynamic timestamps, colored JSON, intent display, export.
 
 import SwiftUI
 import UniformTypeIdentifiers
-
-// MARK: - Activity view kind (Spec 109-k, url-filter-contract.md `view` row)
-
-/// The segmented control's four options. `rawValue` matches `ScopeFilter.view`
-/// and the Web `?view=` query value exactly, so a hand-off through
-/// `AppState.scopeFilter` round-trips without a translation table.
-enum ActivityViewKind: String, CaseIterable {
-    case calls, sessions, system, all
-
-    var label: String {
-        switch self {
-        case .calls: return "Tool Calls"
-        case .sessions: return "Sessions"
-        case .system: return "System Events"
-        case .all: return "All"
-        }
-    }
-}
 
 // MARK: - Activity View
 
@@ -42,33 +25,30 @@ struct ActivityView: View {
     @State private var isSummaryLoading = false
 
     // Filter state
-    @State private var filterType = "all"
-    @State private var filterServer = "all"
-    @State private var filterStatus = "all"
+    /// Every URL-contract parameter (Spec 109-k): view segment, server, tool,
+    /// session, status, time range, type, caller, and the Spec 108 scope
+    /// filters. Its REST mapping is `ScopeFilter.restRequest(for: .activity)`,
+    /// shared with the Web UI and the CLI.
+    @State private var scope = ScopeFilter()
     @State private var filterText = ""
     /// When set, the list shows only the sub-calls of this code_execution
     /// (records whose parent_id equals it). Set by "View sub-calls" in the
     /// detail panel; cleared by the filter chip or "View parent call".
     @State private var filterParentId: String?
-    /// When set, the list shows only the records of one MCP session. Seeded by
-    /// a tray glance row (`.activityFilter`) so a click on "github:search ×12"
-    /// lands on that client's calls instead of the whole log (F10); cleared by
-    /// its own chip.
-    @State private var filterSessionId: String?
     /// Monotonic ticket for loadActivities: only the NEWEST in-flight load may
     /// publish its results, so a slow unfiltered fetch can never overwrite the
     /// sub-call view the user just asked for (or vice versa).
     @State private var loadGeneration = 0
 
-    // Spec 109-k (activity-scope-filters), T122: the four Activity views
-    // (contracts/url-filter-contract.md `view` row), matching the Web/CLI
-    // default ("calls") and mapping (`system` = every non-call type). An
-    // explicit `filterType` picker choice still overrides this, same rule as
-    // the Web composable ("An explicit `type` always overrides `view`'s
-    // mapping").
-    @State private var scopeView: ActivityViewKind = .calls
+    /// Sessions view rows (`GET /api/v1/sessions`).
     @State private var sessions: [APIClient.MCPSession] = []
-    @State private var isLoadingSessions = false
+    /// Folded System-events runs the user expanded in place (FR-071).
+    @State private var expandedRuns: Set<String> = []
+    /// The one pending reload. Several triggers can land in one main-actor
+    /// turn (a hand-off assigns `scope`, which also fires `onChange`); each
+    /// cancels the previous before it has issued its request, so they
+    /// coalesce into a single fetch.
+    @State private var reloadTask: Task<Void, Never>?
 
     private var apiClient: APIClient? { appState.apiClient }
 
@@ -85,12 +65,28 @@ struct ActivityView: View {
         ("Server Change", "server_change"),
     ]
 
+    /// Call outcomes the REST validator accepts (url-filter-contract.md
+    /// `status`); the Web-only "other" bucket has no native equivalent.
     private let statusOptions: [(label: String, value: String)] = [
         ("All Statuses", "all"),
         ("Success", "success"),
         ("Error", "error"),
         ("Blocked", "blocked"),
-        ("Description Changed", "tool_description_changed"),
+        ("Rejected", "rejected"),
+    ]
+
+    private let timeOptions: [(label: String, value: String)] = [
+        ("Any Time", "all"),
+        ("Last Hour", "-1h"),
+        ("Last 24 Hours", "-24h"),
+        ("Last 7 Days", "-7d"),
+        ("Last 30 Days", "-30d"),
+    ]
+
+    private let callerOptions: [(label: String, value: String)] = [
+        ("Any Caller", "all"),
+        ("Admin", "admin"),
+        ("Agent Token", "agent"),
     ]
 
     /// Unique server names from activity list + appState servers.
@@ -100,9 +96,40 @@ struct ActivityView: View {
             if let name = entry.serverName, !name.isEmpty { names.insert(name) }
         }
         for server in appState.servers { names.insert(server.name) }
+        if let current = scope.server, !current.isEmpty { names.insert(current) }
         var options: [(label: String, value: String)] = [("All Servers", "all")]
         for name in names.sorted() { options.append((name, name)) }
         return options
+    }
+
+    /// Canonical `server:tool` names seen in the list (plus the active one).
+    private var toolOptions: [(label: String, value: String)] {
+        var names = Set<String>()
+        for entry in activities {
+            if let server = entry.serverName, !server.isEmpty,
+               let tool = entry.toolName, !tool.isEmpty {
+                names.insert("\(server):\(tool)")
+            }
+        }
+        if let current = scope.tool, !current.isEmpty { names.insert(current) }
+        var options: [(label: String, value: String)] = [("All Tools", "all")]
+        for name in names.sorted() { options.append((name, name)) }
+        return options
+    }
+
+    /// Time presets, plus the active value when a link set a custom range.
+    private var effectiveTimeOptions: [(label: String, value: String)] {
+        guard let from = scope.from, !from.isEmpty,
+              !timeOptions.contains(where: { $0.value == from }) else { return timeOptions }
+        return timeOptions + [("Since \(from)", from)]
+    }
+
+    /// Binding that maps the pickers' "all" sentinel to a nil filter value.
+    private func optionBinding(_ keyPath: WritableKeyPath<ScopeFilter, String?>) -> Binding<String> {
+        Binding(
+            get: { scope[keyPath: keyPath].flatMap { $0.isEmpty ? nil : $0 } ?? "all" },
+            set: { scope[keyPath: keyPath] = ($0 == "all") ? nil : $0 }
+        )
     }
 
     /// Activities filtered by text search (client-side on top of API filters).
@@ -118,18 +145,16 @@ struct ActivityView: View {
         }
     }
 
-    /// What the table actually renders: `filteredActivities` with a server's
-    /// batch of `tool_quarantine_change` records folded into one summary line
-    /// (Spec 109-k, acceptance scenario 6 — "System events" showing 14
-    /// per-tool approval rows instead of one, the Web Activity Log's exact
-    /// live-QA finding).
-    private var displayedActivities: [ActivityEntry] {
-        ActivityQuarantineFolding.fold(filteredActivities)
+    /// Rows as displayed: System events fold (FR-071); every other view is
+    /// one row per record.
+    private var displayRows: [ActivityFoldRow] {
+        ActivityFolding.fold(filteredActivities, enabled: scope.view == .system)
     }
 
-    /// Build query string from current filter state.
-    private var filterQueryString: String {
-        (["limit=100"] + activeFilterParams).joined(separator: "&")
+    /// The Activity request for the current filters, or nil when they
+    /// contradict each other (rule 8) and nothing may be fetched.
+    private var activityRequest: ScopeRequest? {
+        scope.restRequest(for: .activity, scopeFiltersAvailable: appState.scopeFiltersAvailable)
     }
 
     /// The filters currently in force, as encoded `key=value` pairs.
@@ -141,40 +166,32 @@ struct ActivityView: View {
     /// parameter.
     private var activeFilterParams: [String] {
         var parts: [String] = []
-        // Spec 109-k, T122: an explicit `filterType` pick overrides the
-        // active view (url-filter-contract.md "view" row: "explicit type set
-        // (overrides `view`)"); otherwise "calls"/"system" narrow the actual
-        // request too, not just which rows the table shows, and "all"/
-        // "sessions" apply no type filter at all.
-        if filterType != "all" {
-            parts.append("type=\(APIClient.escapeQueryValue(filterType))")
-        } else if scopeView == .calls {
-            parts.append("type=\(APIClient.escapeQueryValue(ScopeFilter.callTypes.joined(separator: ",")))")
-        } else if scopeView == .system {
-            parts.append("type=\(APIClient.escapeQueryValue(ScopeFilter.systemTypes.joined(separator: ",")))")
+        if let request = activityRequest, !request.queryString.isEmpty {
+            parts.append(request.queryString)
         }
-        if filterServer != "all" { parts.append("server=\(APIClient.escapeQueryValue(filterServer))") }
-        if filterStatus != "all" { parts.append("status=\(APIClient.escapeQueryValue(filterStatus))") }
         if let parentId = filterParentId, !parentId.isEmpty {
             parts.append("parent_id=\(APIClient.escapeQueryValue(parentId))")
-        }
-        if let sessionId = filterSessionId, !sessionId.isEmpty {
-            parts.append("session_id=\(APIClient.escapeQueryValue(sessionId))")
         }
         return parts
     }
 
-    /// Scope the list to one MCP session (a tray glance row's hand-off).
-    /// Link map: "Activity row (Sessions view)" -> session ->
-    /// `/activity?view=calls&session=...` — the hand-off always lands on
-    /// Tool Calls, never leaves the operator stuck on Sessions/System events
-    /// looking at an (correctly) empty table.
-    private func showSession(_ sessionId: String) {
-        scopeView = .calls
-        filterSessionId = sessionId
+    /// Apply a hand-off from an in-app link (tray glance row, Clients row …).
+    private func apply(_ filter: ScopeFilter) {
+        scope = filter
         filterParentId = nil
         selectedActivityID = nil
-        Task { await loadActivities() }
+        scheduleReload()
+    }
+
+    /// Reload whatever the current view shows, coalescing triggers that land
+    /// in the same turn into one request (see `reloadTask`).
+    private func scheduleReload() {
+        reloadTask?.cancel()
+        reloadTask = Task {
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            await reload()
+        }
     }
 
     // MARK: - Parent/child navigation (code_execution sub-calls)
@@ -229,12 +246,16 @@ struct ActivityView: View {
                 filterBar
                 Divider()
 
-                if scopeView == .sessions {
-                    sessionsPanel
+                // Rule 8 only where server and tool apply: in Sessions both
+                // are "not applicable here" chips, and /sessions was fetched.
+                if scope.view != .sessions, let conflict = scope.conflictMessage {
+                    conflictState(conflict)
+                } else if scope.view == .sessions {
+                    sessionsList
                 } else if isLoading && activities.isEmpty {
                     ProgressView("Loading...")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if displayedActivities.isEmpty {
+                } else if filteredActivities.isEmpty {
                     emptyState
                 } else {
                     // Column headers
@@ -246,25 +267,12 @@ struct ActivityView: View {
                     TimelineView(.periodic(from: .now, by: 20)) { context in
                         ScrollView {
                             LazyVStack(spacing: 0) {
-                                ForEach(displayedActivities) { entry in
-                                    ActivityTableRow(
-                                        entry: entry,
-                                        currentDate: context.date,
-                                        isSelected: entry.id == selectedActivityID,
-                                        colTime: colTime,
-                                        colType: colType,
-                                        colServer: colServer,
-                                        colIntent: colIntent,
-                                        colStatus: colStatus,
-                                        colDuration: colDuration,
-                                        fontScale: fontScale
-                                    )
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        selectedActivityID = entry.id
+                                ForEach(displayRows) { row in
+                                    if row.count > 1 {
+                                        foldedRow(row, currentDate: context.date)
+                                    } else {
+                                        entryRow(row.lead, currentDate: context.date)
                                     }
-
-                                    Divider().padding(.leading, 8)
                                 }
                             }
                         }
@@ -279,7 +287,8 @@ struct ActivityView: View {
             // sidebar column for width and can cause the app sidebar to collapse when
             // the detail panel appears. A plain HStack with a fixed-width detail column
             // keeps the sidebar stable.
-            if let selectedID = selectedActivityID,
+            if scope.view != .sessions,
+               let selectedID = selectedActivityID,
                let selected = activities.first(where: { $0.id == selectedID }) {
                 Divider()
                 ActivityDetailView(
@@ -298,32 +307,164 @@ struct ActivityView: View {
             }
         }
         .task {
-            // A glance row (or a Tools row's "Calls" action, ...) that opened
-            // this window left a filter here (F10; Spec 109-k's
-            // AppState.scopeFilter) — consume it before the first load so the
-            // list is never briefly unfiltered.
-            applyPendingScopeFilter()
+            // An in-app link that opened this window left its filter here;
+            // consume it before the first load so the list is never briefly
+            // unfiltered.
+            if let pending = appState.consumeScopeFilter() {
+                scope = pending
+            }
+            scheduleReload()
             await loadSummary()
-            await reloadForScopeView()
+        }
+        // One reload per filter change, whichever control made it.
+        .onChange(of: scope) { _ in
+            selectedActivityID = nil
+            scheduleReload()
+        }
+        // The scope filters appear (and are sent) once the core lists them.
+        .onChange(of: appState.scopeFiltersAvailable) { _ in
+            scheduleReload()
         }
         // SSE live update: reload when activityVersion is bumped
         .onChange(of: appState.activityVersion) { _ in
-            Task {
-                await loadSummary()
-                if scopeView != .sessions { await loadActivities() }
-            }
+            scheduleReload()
+            Task { await loadSummary() }
         }
-        // F10: a tray glance row hands over the session it was derived from.
+        // F10 / Spec 109-k: an in-app link hands over its filter.
         .onReceive(NotificationCenter.default.publisher(for: .activityFilter)) { note in
-            guard let sessionId = note.object as? String, !sessionId.isEmpty else { return }
+            guard let filter = note.object as? ScopeFilter else { return }
             // This view is live, so the hand-off is settled here — clear the
             // pending value so a later-appearing view does not re-apply it.
-            appState.scopeFilter = ScopeFilter()
-            showSession(sessionId)
+            _ = appState.consumeScopeFilter()
+            apply(filter)
         }
-        .onChange(of: scopeView) { _ in
-            Task { await reloadForScopeView() }
+    }
+
+    // MARK: - Rows
+
+    @ViewBuilder
+    private func entryRow(_ entry: ActivityEntry, currentDate: Date, indent: Bool = false) -> some View {
+        ActivityTableRow(
+            entry: entry,
+            currentDate: currentDate,
+            isSelected: entry.id == selectedActivityID,
+            colTime: colTime,
+            colType: colType,
+            colServer: colServer,
+            colIntent: colIntent,
+            colStatus: colStatus,
+            colDuration: colDuration,
+            fontScale: fontScale
+        )
+        .padding(.leading, indent ? 16 : 0)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedActivityID = entry.id
         }
+
+        Divider().padding(.leading, 8)
+    }
+
+    /// A folded System-events run: one summary line that expands in place.
+    @ViewBuilder
+    private func foldedRow(_ row: ActivityFoldRow, currentDate: Date) -> some View {
+        let expanded = expandedRuns.contains(row.id)
+        Button {
+            if expanded { expandedRuns.remove(row.id) } else { expandedRuns.insert(row.id) }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.scaled(.caption2, scale: fontScale))
+                    .foregroundStyle(.secondary)
+                Text(row.summary ?? "")
+                    .font(.scaled(.caption, scale: fontScale))
+                    .lineLimit(1)
+                Spacer()
+                Text("×\(row.count)")
+                    .font(.scaled(.caption2, scale: fontScale).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("activity-folded-row")
+        .accessibilityLabel("\(row.summary ?? ""), \(expanded ? "collapse" : "expand")")
+
+        Divider().padding(.leading, 8)
+
+        if expanded {
+            ForEach(row.members) { member in
+                entryRow(member, currentDate: currentDate, indent: true)
+            }
+        }
+    }
+
+    // MARK: - Sessions view
+
+    @ViewBuilder
+    private var sessionsList: some View {
+        if isLoading && sessions.isEmpty {
+            ProgressView("Loading...")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if sessions.isEmpty {
+            VStack(spacing: 12) {
+                Image(systemName: "person.2")
+                    .font(.system(size: 48 * fontScale))
+                    .foregroundStyle(.tertiary)
+                Text("No sessions recorded")
+                    .font(.scaled(.title3, scale: fontScale))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(sessions) { session in
+                        sessionRow(session)
+                        Divider().padding(.leading, 8)
+                    }
+                }
+            }
+            .accessibilityIdentifier("activity-sessions-list")
+        }
+    }
+
+    private func sessionRow(_ session: APIClient.MCPSession) -> some View {
+        Button {
+            // Link map: the session's calls, by work session id when it has one.
+            scope = ScopeFilter.forSessionRow(session)
+        } label: {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(session.status == "active" ? Color.green : Color.secondary.opacity(0.5))
+                    .frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(session.clientName ?? "Unknown client")
+                        .font(.scaled(.callout, scale: fontScale))
+                    Text(Self.shortCorrelationId(session.workSessionId ?? session.id))
+                        .font(.scaled(.caption2, scale: fontScale).monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let calls = session.toolCallCount {
+                    Text("\(calls) calls")
+                        .font(.scaled(.caption, scale: fontScale))
+                        .foregroundStyle(.secondary)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.scaled(.caption2, scale: fontScale))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(scope.highlights(session) ? Color.accentColor.opacity(0.15) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Show this session's tool calls")
+        .accessibilityIdentifier("activity-session-row")
     }
 
     // MARK: - Table Header
@@ -367,7 +508,8 @@ struct ActivityView: View {
                     .controlSize(.small)
             }
 
-            // Export menu
+            // Export menu (always unfolded; not offered for Sessions or a
+            // contradictory filter, which have no activity query to export)
             Menu {
                 Button("Export JSON...") { exportActivity(format: "json") }
                 Button("Export CSV...") { exportActivity(format: "csv") }
@@ -376,14 +518,13 @@ struct ActivityView: View {
             }
             .menuStyle(.borderlessButton)
             .frame(width: 28)
+            .disabled(scope.view == .sessions || activityRequest == nil)
             .help("Export activity log")
             .accessibilityIdentifier("activity-export-button")
 
             Button {
-                Task {
-                    await loadSummary()
-                    await loadActivities()
-                }
+                scheduleReload()
+                Task { await loadSummary() }
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
@@ -427,133 +568,190 @@ struct ActivityView: View {
     @ViewBuilder
     private var filterBar: some View {
         VStack(spacing: 6) {
-            // Spec 109-k (activity-scope-filters), T122: Tool Calls / Sessions
-            // / System Events / All (url-filter-contract.md "view" row,
-            // default "calls"). `onChange` (not the picker action) is what
-            // reloads, so a programmatic change from applyPendingScopeFilter()
-            // reloads exactly once, not twice.
-            Picker("View", selection: $scopeView) {
-                ForEach(ActivityViewKind.allCases, id: \.self) { kind in
-                    Text(kind.label).tag(kind)
+            // View segments (FR-070): Tool calls · Sessions · System events · All
+            Picker("View", selection: $scope.view) {
+                ForEach(ActivityViewMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
                 }
             }
             .pickerStyle(.segmented)
-            .accessibilityIdentifier("activity-view-picker")
+            .labelsHidden()
+            .accessibilityIdentifier("activity-view-segments")
 
-            HStack(spacing: 12) {
-                Picker("Type", selection: $filterType) {
-                    ForEach(typeOptions, id: \.value) { option in
-                        Text(option.label).tag(option.value)
+            if scope.view != .sessions {
+                HStack(spacing: 12) {
+                    Picker("Type", selection: optionBinding(\.type)) {
+                        ForEach(typeOptions, id: \.value) { option in
+                            Text(option.label).tag(option.value)
+                        }
                     }
-                }
-                .frame(maxWidth: 180)
-                .accessibilityIdentifier("activity-filter-type")
-                .onChange(of: filterType) { _ in
-                    Task { await loadActivities() }
+                    .frame(maxWidth: 180)
+                    .accessibilityIdentifier("activity-filter-type")
+
+                    Picker("Server", selection: optionBinding(\.server)) {
+                        ForEach(serverOptions, id: \.value) { option in
+                            Text(option.label).tag(option.value)
+                        }
+                    }
+                    .frame(maxWidth: 180)
+                    .accessibilityIdentifier("activity-filter-server")
+
+                    Picker("Tool", selection: optionBinding(\.tool)) {
+                        ForEach(toolOptions, id: \.value) { option in
+                            Text(option.label).tag(option.value)
+                        }
+                    }
+                    .frame(maxWidth: 200)
+                    .accessibilityIdentifier("activity-filter-tool")
                 }
 
-                Picker("Server", selection: $filterServer) {
-                    ForEach(serverOptions, id: \.value) { option in
-                        Text(option.label).tag(option.value)
+                HStack(spacing: 12) {
+                    Picker("Status", selection: optionBinding(\.status)) {
+                        ForEach(statusOptions, id: \.value) { option in
+                            Text(option.label).tag(option.value)
+                        }
                     }
-                }
-                .frame(maxWidth: 180)
-                .accessibilityIdentifier("activity-filter-server")
-                .onChange(of: filterServer) { _ in
-                    Task { await loadActivities() }
+                    .frame(maxWidth: 180)
+                    .accessibilityIdentifier("activity-filter-status")
+
+                    Picker("Time", selection: optionBinding(\.from)) {
+                        ForEach(effectiveTimeOptions, id: \.value) { option in
+                            Text(option.label).tag(option.value)
+                        }
+                    }
+                    .frame(maxWidth: 180)
+                    .accessibilityIdentifier("activity-filter-time")
+
+                    Picker("Caller", selection: optionBinding(\.authType)) {
+                        ForEach(callerOptions, id: \.value) { option in
+                            Text(option.label).tag(option.value)
+                        }
+                    }
+                    .frame(maxWidth: 180)
+                    .accessibilityIdentifier("activity-filter-auth-type")
                 }
 
-                Picker("Status", selection: $filterStatus) {
-                    ForEach(statusOptions, id: \.value) { option in
-                        Text(option.label).tag(option.value)
+                // Text search
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search by server, tool, or type...", text: $filterText)
+                        .textFieldStyle(.plain)
+                    if !filterText.isEmpty {
+                        Button {
+                            filterText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
                     }
-                }
-                .frame(maxWidth: 180)
-                .accessibilityIdentifier("activity-filter-status")
-                .onChange(of: filterStatus) { _ in
-                    Task { await loadActivities() }
-                }
-            }
-
-            // Text search
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search by server, tool, or type...", text: $filterText)
-                    .textFieldStyle(.plain)
-                if !filterText.isEmpty {
-                    Button {
-                        filterText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless)
                 }
             }
 
             // Sub-call filter chip: the list is narrowed to one code_execution's
             // children until the chip is dismissed.
-            if let parentId = filterParentId {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.turn.down.right")
-                        .font(.scaled(.caption, scale: fontScale))
-                    Text("Sub-calls of \(Self.shortCorrelationId(parentId))")
-                        .font(.scaled(.caption, scale: fontScale))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Button {
+            if let parentId = filterParentId, scope.view != .sessions {
+                filterChip(
+                    icon: "arrow.turn.down.right",
+                    text: "Sub-calls of \(Self.shortCorrelationId(parentId))",
+                    clearLabel: "Clear sub-call filter",
+                    identifier: "activity-parent-filter",
+                    onClear: {
                         filterParentId = nil
                         Task { await loadActivities() }
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.borderless)
-                    .help("Show all activity")
-                    .accessibilityLabel("Clear sub-call filter")
-                    .accessibilityIdentifier("activity-clear-parent-filter")
-                    Spacer()
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.accentColor.opacity(0.12))
-                .clipShape(Capsule())
-                .accessibilityIdentifier("activity-parent-filter-chip")
+                )
             }
 
             // Session filter chip (F10): says which client's calls are on
-            // screen, and how to get back to everything.
-            if let sessionId = filterSessionId {
+            // screen, and how to get back to everything. In the Sessions view
+            // it only highlights that row.
+            if let sessionId = scope.session, !sessionId.isEmpty {
+                filterChip(
+                    icon: "person.crop.circle",
+                    text: "Session \(Self.shortCorrelationId(sessionId))",
+                    clearLabel: "Clear session filter",
+                    identifier: "activity-session-filter",
+                    onClear: { scope.session = nil }
+                )
+            }
+
+            // Spec 108 scope filters: only once the core advertises them.
+            ForEach(scope.visibleScopeParams(scopeFiltersAvailable: appState.scopeFiltersAvailable), id: \.self) { name in
+                filterChip(
+                    icon: "line.3.horizontal.decrease.circle",
+                    text: "\(name): \(scopeValue(name))",
+                    clearLabel: "Clear \(name) filter",
+                    identifier: "activity-\(name)-filter",
+                    onClear: { clearScopeParam(name) }
+                )
+            }
+
+            // Rule 5: set but not applicable in this view — shown, never
+            // silently dropped, and never implying it filtered anything.
+            let inapplicable = scope.inapplicableParams(for: .activity)
+            if !inapplicable.isEmpty {
                 HStack(spacing: 6) {
-                    Image(systemName: "person.crop.circle")
+                    Image(systemName: "slash.circle")
                         .font(.scaled(.caption, scale: fontScale))
-                    Text("Session \(Self.shortCorrelationId(sessionId))")
+                    Text("Not applicable here: \(inapplicable.joined(separator: ", "))")
                         .font(.scaled(.caption, scale: fontScale))
                         .lineLimit(1)
-                        .truncationMode(.middle)
-                    Button {
-                        filterSessionId = nil
-                        Task { await loadActivities() }
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Show all activity")
-                    .accessibilityLabel("Clear session filter")
-                    .accessibilityIdentifier("activity-clear-session-filter")
                     Spacer()
                 }
+                .foregroundStyle(.secondary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .background(Color.accentColor.opacity(0.12))
-                .clipShape(Capsule())
-                .accessibilityIdentifier("activity-session-filter-chip")
+                .accessibilityIdentifier("activity-inapplicable-chips")
             }
         }
         .padding(.horizontal)
         .padding(.bottom, 8)
+    }
+
+    private func scopeValue(_ name: String) -> String {
+        switch name {
+        case "profile": return scope.profile ?? ""
+        case "client": return scope.client ?? ""
+        case "token": return scope.token ?? ""
+        default: return ""
+        }
+    }
+
+    private func clearScopeParam(_ name: String) {
+        switch name {
+        case "profile": scope.profile = nil
+        case "client": scope.client = nil
+        case "token": scope.token = nil
+        default: break
+        }
+    }
+
+    private func filterChip(icon: String, text: String, clearLabel: String,
+                            identifier: String, onClear: @escaping () -> Void) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.scaled(.caption, scale: fontScale))
+            Text(text)
+                .font(.scaled(.caption, scale: fontScale))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button(action: onClear) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Show all activity")
+            .accessibilityLabel(clearLabel)
+            .accessibilityIdentifier(identifier.replacingOccurrences(of: "activity-", with: "activity-clear-"))
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Color.accentColor.opacity(0.12))
+        .clipShape(Capsule())
+        .accessibilityIdentifier("\(identifier)-chip")
     }
 
     /// Correlation ids are long ("<nanos>-code_execution-17"); the chip shows
@@ -562,63 +760,27 @@ struct ActivityView: View {
         id.count <= 24 ? id : "…" + id.suffix(24)
     }
 
-    // MARK: - Sessions view (Spec 109-k, T118/T122)
-
-    /// The "Sessions" segment's content: `GET /sessions` (contract "view ->
-    /// REST" — no `/activity` request at all), not the activity table.
-    @ViewBuilder
-    private var sessionsPanel: some View {
-        if isLoadingSessions && sessions.isEmpty {
-            ProgressView("Loading...")
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if sessions.isEmpty {
-            VStack(spacing: 12) {
-                Image(systemName: "person.2")
-                    .font(.system(size: 48 * fontScale))
-                    .foregroundStyle(.tertiary)
-                Text("No sessions found")
-                    .font(.scaled(.title3, scale: fontScale))
-                    .foregroundStyle(.secondary)
-                Text("Sessions will appear here when MCP clients connect")
-                    .font(.scaled(.caption, scale: fontScale))
-                    .foregroundStyle(.tertiary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(sessions) { session in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(session.clientName ?? "Unknown")
-                                    .font(.scaled(.body, scale: fontScale))
-                                Text(DashboardSessions.relativeTime(for: session))
-                                    .font(.scaled(.caption, scale: fontScale))
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Text("\(session.toolCallCount ?? 0) calls")
-                                .font(.scaled(.caption, scale: fontScale))
-                                .foregroundStyle(.secondary)
-                            Button("View Activity") {
-                                // Link map: "Session row (Sessions view)" ->
-                                // "-> /activity?view=calls&session=..."
-                                showSession(session.id)
-                            }
-                            .buttonStyle(.link)
-                            .accessibilityIdentifier("activity-session-view-activity")
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        Divider().padding(.leading, 8)
-                    }
-                }
-            }
-            .accessibilityIdentifier("activity-sessions-list")
-        }
-    }
-
     // MARK: - Empty State
+
+    /// Rule 8: contradictory filters — no request was made.
+    private func conflictState(_ message: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 48 * fontScale))
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.scaled(.title3, scale: fontScale))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            HStack {
+                Button("Clear server") { scope.server = nil }
+                Button("Clear tool") { scope.tool = nil }
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("activity-conflict-state")
+    }
 
     @ViewBuilder
     private var emptyState: some View {
@@ -651,56 +813,6 @@ struct ActivityView: View {
         }
     }
 
-    // MARK: - Scope filter hand-off (Spec 109-k, T122)
-
-    /// Consumes `appState.scopeFilter` (a tray glance row, a future Tools row
-    /// "Calls" action, ...) once, on first appear — the same "read before the
-    /// first fetch" rule the Web composable documents, so the initial load is
-    /// never briefly unfiltered.
-    private func applyPendingScopeFilter() {
-        let filter = appState.scopeFilter
-        guard !filter.isEmpty else { return }
-        appState.scopeFilter = ScopeFilter()
-
-        if let view = filter.view, let kind = ActivityViewKind(rawValue: view) {
-            scopeView = kind
-        }
-        if let session = filter.session, !session.isEmpty {
-            filterSessionId = session
-        }
-        if let server = filter.server, !server.isEmpty {
-            filterServer = server
-        }
-        if let status = filter.status, !status.isEmpty {
-            filterStatus = status
-        }
-    }
-
-    /// Contract "view -> REST": `sessions` issues a `GET /sessions` request,
-    /// never `/activity` — switching away from every other view resumes the
-    /// normal activity fetch.
-    private func reloadForScopeView() async {
-        if scopeView == .sessions {
-            await loadSessionsList()
-        } else {
-            await loadActivities()
-        }
-    }
-
-    private func loadSessionsList() async {
-        guard let client = apiClient else {
-            sessions = appState.recentSessions
-            return
-        }
-        isLoadingSessions = true
-        defer { isLoadingSessions = false }
-        do {
-            sessions = try await client.sessions(limit: 100)
-        } catch {
-            sessions = appState.recentSessions
-        }
-    }
-
     // MARK: - Data Loading
 
     private func loadSummary() async {
@@ -714,18 +826,65 @@ struct ActivityView: View {
         }
     }
 
+    /// Load whatever the current view shows.
+    private func reload() async {
+        if scope.view == .sessions {
+            await loadSessions()
+        } else {
+            await loadActivities()
+        }
+    }
+
+    private func loadSessions() async {
+        loadGeneration += 1
+        let ticket = loadGeneration
+        guard let client = apiClient,
+              let request = activityRequest else {
+            isLoading = false  // see loadActivities: this ticket superseded any in-flight load
+            return
+        }
+        isLoading = true
+        defer { if ticket == loadGeneration { isLoading = false } }
+        let query = (["limit=100"] + (request.queryString.isEmpty ? [] : [request.queryString]))
+            .joined(separator: "&")
+        do {
+            let data = try await client.fetchRaw(path: "\(request.path)?\(query)")
+            guard ticket == loadGeneration else { return }
+            let decoder = JSONDecoder()
+            if let wrapper = try? decoder.decode(APIResponse<APIClient.SessionsResponse>.self, from: data),
+               let payload = wrapper.data {
+                sessions = payload.sessions
+            } else if let direct = try? decoder.decode(APIClient.SessionsResponse.self, from: data) {
+                sessions = direct.sessions
+            }
+        } catch {
+            guard ticket == loadGeneration else { return }
+            sessions = appState.recentSessions
+        }
+    }
+
     private func loadActivities() async {
         loadGeneration += 1
         let ticket = loadGeneration
+        // Rule 8: contradictory filters issue no request at all.
+        guard activityRequest != nil else {
+            activities = []
+            totalCount = 0
+            // This ticket superseded any in-flight load, whose guarded defer
+            // will no longer clear the spinner — so this path must.
+            isLoading = false
+            return
+        }
         isLoading = true
-        defer { isLoading = false }
+        defer { if ticket == loadGeneration { isLoading = false } }
         guard let client = apiClient else {
             activities = appState.recentActivity
             return
         }
 
         do {
-            let data = try await client.fetchRaw(path: "/api/v1/activity?\(filterQueryString)")
+            let query = (["limit=100"] + activeFilterParams).joined(separator: "&")
+            let data = try await client.fetchRaw(path: "/api/v1/activity?\(query)")
             // A newer load was issued while this one was in flight (the user
             // toggled the sub-call chip, changed a filter …) — its answer is
             // the one the current filter state describes, not this one.

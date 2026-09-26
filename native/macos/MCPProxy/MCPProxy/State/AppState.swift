@@ -79,10 +79,10 @@ final class AppState: ObservableObject {
     /// Configured profiles for the tray profile switcher.
     @Published var profiles: [ProfileSummary] = []
 
-    /// A filter the Activity Log (or another scope-aware view) should apply
-    /// as soon as it exists (F10 — a tray glance row's hand-off; Spec 109-k's
-    /// url-filter-contract.md macOS section — replaces the former
-    /// `pendingActivitySessionFilter`, which carried only a session id).
+    /// The filter the next scope-aware view should apply as soon as it exists
+    /// (Spec 109-k T122; replaces F10's `pendingActivitySessionFilter`). Every
+    /// in-app link — tray glance client row, Clients row, Token row — sets it
+    /// through `handOffScopeFilter` BEFORE switching the sidebar selection.
     ///
     /// A notification alone cannot carry this: a window created BY the click
     /// subscribes its `onReceive` observers only once the view appears, so a
@@ -90,7 +90,31 @@ final class AppState: ObservableObject {
     /// documents for the sidebar tab. ActivityView consumes and clears this on
     /// appear; the notification still covers the already-open window, and
     /// whichever arrives first clears it for the other.
-    @Published var scopeFilter = ScopeFilter()
+    @Published var scopeFilter: ScopeFilter?
+
+    /// Whether the core advertises `features.scope_filters`. Until it does,
+    /// `profile`/`client`/`token` stay hidden and are never sent (FR-080a).
+    @Published var scopeFiltersAvailable: Bool = false
+
+    /// Publish a filter for the next scope-aware view (the in-app link channel).
+    func handOffScopeFilter(_ filter: ScopeFilter) {
+        scopeFilter = filter
+    }
+
+    /// Follow an in-app link to Activity: publish the filter first (a view
+    /// created by the switch consumes it on appear), then switch the sidebar,
+    /// then notify an already-open Activity view.
+    func openActivity(with filter: ScopeFilter) {
+        handOffScopeFilter(filter)
+        NotificationCenter.default.post(name: .switchToActivity, object: nil)
+        NotificationCenter.default.post(name: .activityFilter, object: filter)
+    }
+
+    /// Take the pending filter, clearing it so no later view re-applies it.
+    func consumeScopeFilter() -> ScopeFilter? {
+        defer { scopeFilter = nil }
+        return scopeFilter
+    }
     /// Server-level default active profile slug; empty means "all servers".
     @Published var activeProfile: String = ""
 

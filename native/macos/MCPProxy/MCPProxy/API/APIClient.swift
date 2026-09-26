@@ -561,7 +561,7 @@ actor APIClient {
 
     /// MCP session model from `GET /api/v1/sessions`.
     ///
-    /// `Equatable` (synthesised — all ten stored properties are Equatable value
+    /// `Equatable` (synthesised — all eleven stored properties are Equatable value
     /// types) so `AppState.updateGlanceSessions` can guard on the whole value.
     /// The tray's Clients rows render a live `toolCallCount` and `lastActivity`,
     /// which an id-only guard would freeze at the first poll's numbers.
@@ -579,9 +579,14 @@ actor APIClient {
         /// `last_activity` (Go `contracts.MCPSession.LastActivity`); decoding
         /// `last_active` silently produced nil for every session.
         let lastActivity: String?
+        /// Spec 082 work session grouping the reconnects of one stretch of
+        /// work. The Sessions view links a row by this id (Spec 109-k link
+        /// map); a legacy row without one links by its transport `id`.
+        let workSessionId: String?
 
         enum CodingKeys: String, CodingKey {
             case id
+            case workSessionId = "work_session_id"
             case clientName = "client_name"
             case clientVersion = "client_version"
             case status
