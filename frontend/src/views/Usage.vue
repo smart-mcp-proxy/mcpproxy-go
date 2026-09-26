@@ -155,7 +155,7 @@
     <div v-else-if="data" class="grid grid-cols-1 lg:grid-cols-2 gap-6" data-test="usage-charts">
       <div class="card bg-base-100 shadow">
         <div class="card-body p-4">
-          <CallHistogram :tools="data.tools" />
+          <CallHistogram :tools="data.tools" @select-tool="onSelectTool" />
         </div>
       </div>
       <div class="card bg-base-100 shadow">
@@ -170,7 +170,7 @@
       </div>
       <div class="card bg-base-100 shadow">
         <div class="card-body p-4">
-          <Timeline :buckets="data.timeline" :window="window" />
+          <Timeline :buckets="data.timeline" :window="window" @select-bucket="onSelectBucket" />
         </div>
       </div>
 
@@ -185,9 +185,11 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
-import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
+import { useScopeQuery, splitScopeTool } from '@/composables/useScopeQuery'
+import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, UsageToolStat } from '@/types'
 import { formatNumber, partitionUsageTools, usageHeadline } from '@/utils/usageFormat'
 import CallHistogram from '@/components/usage/CallHistogram.vue'
 import ResponseSizeRanking from '@/components/usage/ResponseSizeRanking.vue'
@@ -210,6 +212,28 @@ const error = ref<string | null>(null)
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 const authStore = useAuthStore()
+// Undefined when the view is mounted without a router installed — several
+// unit suites do exactly that (Tools.vue and Servers.vue guard the same way),
+// and useScopeQuery() itself calls useRoute()/useRouter().
+const route = useRoute() as ReturnType<typeof useRoute> | undefined
+const router = useRouter() as ReturnType<typeof useRouter> | undefined
+const scopeQuery = route ? useScopeQuery('usage') : undefined
+
+// Spec 109-k (activity-scope-filters), T119: Usage had no `server`/`tool`
+// deep-link support at all — a link built with `?server=<n>` (a server
+// card's stats line, a future Clients-row link) landed on the unfiltered
+// aggregate. Read once on mount: this page has no picker of its own for
+// either, they only ever arrive as an incoming filter.
+const filterServer = ref('')
+const filterTool = ref('')
+function applyScopeQueryParams(): void {
+  if (!route) return
+  const server = route.query.server
+  if (typeof server === 'string') filterServer.value = server
+  const tool = route.query.tool
+  if (typeof tool === 'string') filterTool.value = tool
+}
+applyScopeQueryParams()
 
 const windowLabel = computed(() => {
   switch (window.value) {
@@ -267,10 +291,17 @@ async function reload() {
   loading.value = true
   error.value = null
   try {
+    const split = splitScopeTool(filterTool.value || undefined, filterServer.value || undefined)
     const resp = await api.getActivityUsage({
       window: window.value,
       status: status.value || undefined,
       sort: sort.value,
+      // A conflicting server/tool (rule 8) has no REST request that could
+      // satisfy both — rather than silently keeping one, drop both and
+      // return the window's unfiltered aggregate rather than inventing a
+      // request under filters the URL did not actually agree on.
+      server: split.conflict ? undefined : split.server,
+      tool: split.conflict ? undefined : split.tool,
     })
     if (seq !== reloadSeq) return
     if (resp.success && resp.data) {
@@ -298,6 +329,33 @@ function resetFilters() {
   window.value = 'all'
   status.value = ''
   reload()
+}
+
+/** The active window as the `from`/`to` the link map's targets carry
+ * (url-filter-contract.md `view` -> REST: "the calls behind the bar"). */
+function windowToRange(w: UsageWindow): { from?: string; to?: string } {
+  if (w === '24h') return { from: '-24h' }
+  if (w === '7d') return { from: '-7d' }
+  return {}
+}
+
+/** Link map "Usage chart bar (tool x bucket)": a CallHistogram bar is one
+ * tool, over the whole active window. */
+function onSelectTool(tool: UsageToolStat): void {
+  if (!router || !scopeQuery) return
+  const patch: Record<string, string> = { view: 'calls', tool: `${tool.server}:${tool.tool}` }
+  const range = windowToRange(window.value)
+  if (range.from) patch.from = range.from
+  if (status.value) patch.status = status.value
+  router.push(scopeQuery.linkTo('activity', patch))
+}
+
+/** Same link map row: a Timeline bar is one time bucket, across every tool. */
+function onSelectBucket(range: { start: string; end: string }): void {
+  if (!router || !scopeQuery) return
+  const patch: Record<string, string> = { view: 'calls', from: range.start, to: range.end }
+  if (status.value) patch.status = status.value
+  router.push(scopeQuery.linkTo('activity', patch))
 }
 
 onMounted(() => {

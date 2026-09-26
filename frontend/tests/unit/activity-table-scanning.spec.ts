@@ -82,7 +82,12 @@ async function mountActivity() {
       { path: '/servers/:serverName', component: { template: '<div/>' } },
     ],
   })
-  await router.push('/activity')
+  // Spec 109-k, FR-070: a bare /activity now defaults to the "Tool calls"
+  // view, which would silently drop this suite's `security_scan` fixture row
+  // (a genuinely different concern — folding, legends, KPI tiles, the scan
+  // drawer). `view=all` keeps every type in play, same as before that default
+  // existed.
+  await router.push('/activity?view=all')
   await router.isReady()
   const wrapper = mount(Activity, { global: { plugins: [createPinia(), router] } })
   await flushPromises()

@@ -297,6 +297,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useScopeQuery } from '@/composables/useScopeQuery'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useOnboardingStore } from '@/stores/onboarding'
@@ -317,6 +318,7 @@ const systemStore = useSystemStore()
 const onboardingStore = useOnboardingStore()
 const route = useRoute()
 const router = useRouter()
+const scopeQuery = useScopeQuery('servers')
 const filter = ref<ServerFilter>('all')
 const searchQuery = ref('')
 const scanAllRunning = ref(false)
@@ -349,6 +351,19 @@ function applyScopeQueryParams() {
 
 onMounted(applyScopeQueryParams)
 watch(() => [route.query.status, route.query.q], applyScopeQueryParams)
+
+// Live QA fix (Spec 109-k, FR-080 "router.replace on change"): the read side
+// above was the whole story — a filter pill or the search box updated
+// `filter`/`searchQuery` but never wrote back, so "Clear Filters" visibly
+// reset the controls while the address bar kept the stale `?status=&q=`
+// (SC-009's URL round-trip). `filter === 'all'` is the unfiltered default and
+// clears the param entirely, matching applyScopeQueryParams()'s own read.
+watch([filter, searchQuery], () => {
+  scopeQuery.set({
+    status: filter.value === 'all' ? undefined : filter.value,
+    q: searchQuery.value || undefined,
+  })
+})
 
 // The page chrome (stat tiles, filter pills, search) only describes a list that
 // exists. `servers.length` — not `loaded` — is the right gate: it is also false

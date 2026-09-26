@@ -31,13 +31,37 @@
     </div>
 
     <!--
+      Activity views (Spec 109-k, FR-070): Tool calls / Sessions / System
+      events / All, in the URL as `?view=`, defaulting to "calls" — a fresh
+      /activity used to render every type mixed together (29 rows of tool
+      calls, policy decisions and 20 separate quarantine rows) instead of
+      just the calls the user made.
+    -->
+    <div class="tabs tabs-boxed w-fit" role="tablist" data-test="activity-view-tabs">
+      <button
+        v-for="tab in activityViewTabs"
+        :key="tab.id"
+        type="button"
+        role="tab"
+        :aria-selected="activeView === tab.id"
+        :class="['tab', activeView === tab.id ? 'tab-active' : '']"
+        :data-test="`activity-view-tab-${tab.id}`"
+        @click="setView(tab.id)"
+      >
+        {{ tab.label }}
+      </button>
+    </div>
+
+    <SessionsPanel v-if="activeView === 'sessions'" :sessions="sessionsRaw" />
+
+    <!--
       Compact header strip (default view). Five stat cards plus a nine-control
       filter grid pushed the first activity row below the fold; the default is
       now ONE line — the total, the counts that want attention, and a Filters
       toggle. Active filters stay visible as dismissable chips even collapsed,
       so the list is never silently narrowed.
     -->
-    <div class="card bg-base-100 shadow-sm">
+    <div v-show="activeView !== 'sessions'" class="card bg-base-100 shadow-sm">
       <div class="card-body py-3 gap-3">
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
           <!-- Counts: total muted; only non-zero error/blocked/rejected speak up. -->
@@ -440,7 +464,7 @@
     </div>
 
     <!-- Activity Table -->
-    <div class="card bg-base-100 shadow-md">
+    <div v-show="activeView !== 'sessions'" class="card bg-base-100 shadow-md">
       <div class="card-body">
         <!-- UX audit F30: the table auto-refreshes, so a screen reader is told
              how many rows it now holds. Rendered in every state — including the
@@ -503,9 +527,9 @@
                   Server {{ getSortIndicator('server_name') }}
                 </th>
                 <th>Details</th>
-                <th class="hidden lg:table-cell">Sensitive</th>
+                <th v-if="hasSensitiveColumn" class="hidden lg:table-cell">Sensitive</th>
                 <!-- Intent carries the declared reason, not a 52px icon slot. -->
-                <th class="hidden lg:table-cell min-w-[11rem]">Intent</th>
+                <th v-if="hasIntentColumn" class="hidden lg:table-cell min-w-[11rem]">Intent</th>
                 <!--
                   F14 follow-up: at <640px the table is `table-fixed`, so every
                   visible column takes an equal share — too narrow for the
@@ -519,7 +543,15 @@
                 <th class="cursor-pointer hover:bg-base-200 min-w-[5.5rem]" @click="sortBy('status')">
                   Status {{ getSortIndicator('status') }}
                 </th>
-                <th class="hidden md:table-cell cursor-pointer hover:bg-base-200" @click="sortBy('duration_ms')">
+                <!--
+                  Acceptance scenario 6 (Spec 109-k): a `table-fixed` layout
+                  gives every visible column an equal share, and this one had
+                  no floor — a run's span ("120ms – 4.2s") or "System events"'
+                  longer values wrapped onto two lines and clipped, the same
+                  bug the Status column's min-width above already works
+                  around.
+                -->
+                <th class="hidden md:table-cell cursor-pointer hover:bg-base-200 min-w-[4.5rem] whitespace-nowrap" @click="sortBy('duration_ms')">
                   Duration {{ getSortIndicator('duration_ms') }}
                 </th>
                 <!-- Row-open chevron. Kept at every width: it is the actual
@@ -625,7 +657,21 @@
                     >
                       🧩
                     </span>
-                    <code v-if="row.activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded truncate">
+                    <!--
+                      Acceptance scenario 6 (Spec 109-k): a folded
+                      tool_quarantine_change run reports the batch — one
+                      member's tool name would silently stand in for the
+                      other thirteen (runIdentity() ignores tool_name for
+                      exactly this type, see BATCH_FOLD_TYPES).
+                    -->
+                    <span
+                      v-if="row.activity.type === 'tool_quarantine_change' && row.runCount > 1"
+                      class="text-sm"
+                      data-test="activity-quarantine-batch-summary"
+                    >
+                      {{ quarantineBatchSummary(row.activity, row.runCount) }}
+                    </span>
+                    <code v-else-if="row.activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded truncate">
                       {{ row.activity.tool_name }}
                     </code>
                     <!--
@@ -666,7 +712,7 @@
                   </div>
                 </td>
                 <!-- Sensitive Data column (Spec 026) -->
-                <td class="hidden lg:table-cell">
+                <td v-if="hasSensitiveColumn" class="hidden lg:table-cell">
                   <div
                     v-if="row.activity.has_sensitive_data"
                     class="tooltip tooltip-top"
@@ -694,7 +740,7 @@
                   (F26, #1046). The old coloured `read` pill spent semantic colour
                   on the most common case and clipped its own icon.
                 -->
-                <td class="hidden lg:table-cell max-w-[18rem]">
+                <td v-if="hasIntentColumn" class="hidden lg:table-cell max-w-[18rem]">
                   <div
                     v-if="intentOf(row.activity).present"
                     data-test="activity-intent"
@@ -755,12 +801,12 @@
                     {{ statusPresentation(row.activity.status).label }}
                   </span>
                 </td>
-                <td class="hidden md:table-cell">
+                <td class="hidden md:table-cell whitespace-nowrap">
                   <!-- A run reports the SPAN its members took, not one member's. -->
-                  <span v-if="row.runDuration" class="text-sm" :title="`${row.runCount} calls`">
+                  <span v-if="row.runDuration" class="text-sm whitespace-nowrap" :title="`${row.runCount} calls`">
                     {{ row.runDuration }}
                   </span>
-                  <span v-else-if="row.activity.duration_ms !== undefined" class="text-sm">
+                  <span v-else-if="row.activity.duration_ms !== undefined" class="text-sm whitespace-nowrap">
                     {{ formatDuration(row.activity.duration_ms) }}
                   </span>
                   <span v-else class="text-base-content/40">-</span>
@@ -1300,7 +1346,8 @@ import { useAuthStore } from '@/stores/auth'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse, MCPSession } from '@/types/api'
 import { buildSessionLabels } from '@/utils/sessionLabel'
-import { splitScopeTool } from '@/composables/useScopeQuery'
+import { splitScopeTool, useScopeQuery } from '@/composables/useScopeQuery'
+import SessionsPanel from '@/components/activity/SessionsPanel.vue'
 import { DATE_TIME_FORMAT_HINT, formatDateTime, formatTime } from '@/utils/datetime'
 import {
   buildWorkSessionIndex,
@@ -1333,6 +1380,7 @@ import {
   preflightIdsCount,
   preflightPerTool,
   preflightReasonRollup,
+  quarantineBatchSummary,
   hasScanFindingsSummary,
   scanFindingsRollup,
   scanFindingsTotal,
@@ -1354,6 +1402,37 @@ import JsonViewer from '@/components/JsonViewer.vue'
 const route = useRoute()
 const systemStore = useSystemStore()
 const authStore = useAuthStore()
+const scopeQuery = useScopeQuery('activity')
+
+// Spec 109-k (activity-scope-filters), FR-070: the four Activity views, in
+// the URL as `?view=calls|sessions|system|all`, defaulting to `calls` when
+// the URL has no `view` at all — a fresh /activity used to render every
+// type mixed together (the audit's 29-row example) instead of "just the
+// calls the user made".
+type ActivityViewId = 'calls' | 'sessions' | 'system' | 'all'
+const ACTIVITY_VIEW_IDS: ActivityViewId[] = ['calls', 'sessions', 'system', 'all']
+const activityViewTabs: { id: ActivityViewId; label: string }[] = [
+  { id: 'calls', label: 'Tool calls' },
+  { id: 'sessions', label: 'Sessions' },
+  { id: 'system', label: 'System events' },
+  { id: 'all', label: 'All' },
+]
+
+const activeView = computed<ActivityViewId>(() => {
+  const raw = route.query.view
+  const value = typeof raw === 'string' ? raw : ''
+  return (ACTIVITY_VIEW_IDS as string[]).includes(value) ? (value as ActivityViewId) : 'calls'
+})
+
+/** Tab click: `router.replace` (FR-080), never a local-only assignment —
+ * `calls` is the default so it clears the param instead of writing it back,
+ * keeping a bare `/activity` the canonical "Tool calls" URL. Switching views
+ * also drops any explicit `type` override left from the multi-select picker
+ * below (contract "view" row: an explicit `type` overrides `view`, so
+ * leaving a stale one behind would make the tab a no-op). */
+function setView(id: ActivityViewId): void {
+  scopeQuery.set({ view: id === 'calls' ? undefined : id, type: undefined })
+}
 
 // State
 const activities = ref<ActivityRecord[]>([])
@@ -1428,13 +1507,13 @@ function applyRouteFilters(): void {
   }
 
   // An explicit `type` always overrides `view`'s calls/system/all mapping
-  // (url-filter-contract.md "view" row).
+  // (url-filter-contract.md "view" row). `selectedTypes` holds ONLY this
+  // explicit override now — the view's own types are `effectiveTypes` below,
+  // computed from `activeView` reactively rather than copied in here once at
+  // setup, so switching tabs (which never touches `type`) is not a no-op.
   const typeParam = str(q.type)
   if (typeParam) {
     selectedTypes.value = typeParam.split(',').map(t => t.trim()).filter(Boolean)
-  } else {
-    const viewTypes = activityViewTypes(str(q.view))
-    if (viewTypes) selectedTypes.value = viewTypes
   }
 }
 
@@ -1448,6 +1527,15 @@ const activityTypes = Object.keys(ACTIVITY_TYPE_LABELS).map(value => ({
   label: formatType(value),
   icon: getTypeIcon(value),
 }))
+
+/** The type filter actually in force: the multi-select's explicit override
+ * when present, else whatever the active view implies (`[]` for
+ * `all`/`sessions` — no type filter at all). This is what the table and the
+ * REST request both use, so a tab switch narrows the real fetch too, not
+ * just the 200 rows already loaded. */
+const effectiveTypes = computed<string[]>(() =>
+  selectedTypes.value.length > 0 ? selectedTypes.value : (activityViewTypes(activeView.value) ?? [])
+)
 
 // Pagination
 const currentPage = ref(1)
@@ -1787,9 +1875,10 @@ const filteredActivities = computed(() => {
     result = result.filter(a => a.parent_id === filterParentId.value)
   }
 
-  // Multi-type filter (Spec 024): OR logic - show activities matching ANY selected type
-  if (selectedTypes.value.length > 0) {
-    result = result.filter(a => selectedTypes.value.includes(a.type))
+  // Multi-type filter (Spec 024) plus the active view's implied types (Spec
+  // 109-k) - OR logic: show activities matching ANY of them.
+  if (effectiveTypes.value.length > 0) {
+    result = result.filter(a => effectiveTypes.value.includes(a.type))
   }
   if (filterServer.value) {
     result = result.filter(a => a.server_name === filterServer.value)
@@ -1922,6 +2011,18 @@ const runs = computed(() =>
 /** How many rows the folding removed from the table. 0 when nothing repeated. */
 const foldedRowCount = computed(() => sortedActivities.value.length - runs.value.length)
 
+// Empty-column hiding (Spec 109-k, acceptance scenario 6): the "System
+// events" view is exactly the rows that never carry sensitive-data
+// detections or a declared intent (both are call-record concepts), so the
+// two columns rendered nothing but a lone "-" in every row — real estate
+// spent on a column with no information in it. Computed from the CURRENT
+// page's activities (not the whole loaded set), so switching views hides and
+// reveals the columns live rather than freezing whatever the first view saw.
+const hasSensitiveColumn = computed(() => sortedActivities.value.some(a => a.has_sensitive_data))
+const hasIntentColumn = computed(() =>
+  sortedActivities.value.some(a => intentPresentation(a.metadata?.intent as Parameters<typeof intentPresentation>[0]).present)
+)
+
 const totalPages = computed(() => Math.ceil(runs.value.length / pageSize.value))
 
 const paginatedRuns = computed(() => {
@@ -1980,6 +2081,13 @@ const displayRows = computed((): ActivityDisplayRow[] => {
 
 // Load activities
 const loadActivities = async () => {
+  // Contract "view -> REST" (url-filter-contract.md): `sessions` issues no
+  // /activity request at all — `loadSessions()` (its own watch/onMounted
+  // calls) is what feeds that view. Skipping it here is also what SC-009's
+  // network assertion is actually checking: a page never fires an unfiltered
+  // (or, here, simply unnecessary) fetch behind a view it is not showing.
+  if (activeView.value === 'sessions') return
+
   loading.value = true
   error.value = null
 
@@ -2014,8 +2122,9 @@ const loadActivities = async () => {
         // Spec 109-k: url-filter-contract.md sends these to REST on Activity
         // (unlike Tools/Servers, where the same names stay client-side) — a
         // URL nav or a filter control must narrow the actual request, not
-        // just the local 200-row window.
-        type: selectedTypes.value.length > 0 ? selectedTypes.value.join(',') : undefined,
+        // just the local 200-row window. `effectiveTypes` includes the
+        // active view's implied types, not just an explicit `type=` override.
+        type: effectiveTypes.value.length > 0 ? effectiveTypes.value.join(',') : undefined,
         server: filterServer.value || undefined,
         tool: filterTool.value || undefined,
         // "Other / internal" is the client-side residual (OTHER_STATUS) —
@@ -2055,6 +2164,11 @@ const clearFilters = () => {
   filterStartDate.value = ''
   filterEndDate.value = ''
   currentPage.value = 1
+  // The write-back watch handles server/tool/status/auth_type/session/from/to;
+  // `type` is its own explicit override (see toggleTypeFilter) and is cleared
+  // here too so "Clear Filters" removes it from the URL as well as the table —
+  // `view` is left alone, since clearing filters should not also leave the tab.
+  scopeQuery.set({ type: undefined })
 
   // The parent filter is the only one narrowed on the SERVER too, so leaving it
   // needs a refetch — the loaded rows are just this run's sub-calls.
@@ -2142,7 +2256,11 @@ const viewParentCall = async (child: ActivityRecord) => {
   })
 }
 
-// Toggle type filter (Spec 024: multi-select support)
+// Toggle type filter (Spec 024: multi-select support). An explicit `type`
+// overrides the active view (contract "view" row) and is written straight to
+// the URL — the write-back watch above deliberately skips `selectedTypes`
+// because only this explicit-override path (and clearTypeFilter() below)
+// should ever put a `type=` param next to `view=` (FR-080).
 const toggleTypeFilter = (type: string) => {
   const index = selectedTypes.value.indexOf(type)
   if (index >= 0) {
@@ -2150,11 +2268,13 @@ const toggleTypeFilter = (type: string) => {
   } else {
     selectedTypes.value.push(type)
   }
+  scopeQuery.set({ type: selectedTypes.value.length > 0 ? selectedTypes.value.join(',') : undefined })
 }
 
 // Clear type filter only
 const clearTypeFilter = () => {
   selectedTypes.value = []
+  scopeQuery.set({ type: undefined })
 }
 
 // Sort by column (Spec 024: US6)
@@ -2204,8 +2324,9 @@ const filterBySession = (activity: ActivityRecord) => {
 const exportActivities = (format: 'json' | 'csv') => {
   const url = api.getActivityExportUrl({
     format,
-    // Spec 024: Pass comma-separated types for multi-type filter
-    type: selectedTypes.value.length > 0 ? selectedTypes.value.join(',') : undefined,
+    // Spec 024/109-k: pass comma-separated types for the multi-type filter
+    // or the active view's implied types, whichever is in force.
+    type: effectiveTypes.value.length > 0 ? effectiveTypes.value.join(',') : undefined,
     server: filterServer.value || undefined,
     tool: filterTool.value || undefined,
     // "Other / internal" is a client-side residual, not a stored status: the
@@ -2354,21 +2475,45 @@ const getAdditionalMetadata = (activity: ActivityRecord): Record<string, unknown
 // Reset page when filters change. Expanded runs go with it: run keys are the
 // lead row's id, and after a refilter the row that led a run may not be in the
 // list at all — a stale key would silently expand the wrong run.
-watch([selectedTypes, filterServer, filterTool, filterStatus, filterSensitiveData, filterSeverity, filterAuthType, filterAgentName, filterSession, filterStartDate, filterEndDate, sortColumn, sortDirection, groupRepeats], () => {
+watch([effectiveTypes, filterServer, filterTool, filterStatus, filterSensitiveData, filterSeverity, filterAuthType, filterAgentName, filterSession, filterStartDate, filterEndDate, sortColumn, sortDirection, groupRepeats], () => {
   currentPage.value = 1
   expandedRuns.value = new Set()
 }, { deep: true })
 
 // Spec 109-k: `type`/`server`/`tool`/`status` are sent to REST on this page
 // (loadActivities() above) — refetch whenever one changes, whether it was set
-// by applyRouteFilters() from a URL nav or by a filter control, so the loaded
-// 200-row window never disagrees with what the request asked for. Registered
-// after applyRouteFilters() already ran during setup (top of this file), so
-// the initial values it wrote never trigger this watch — only a later,
-// genuine change does; the first fetch is onMounted's explicit call below.
-watch([selectedTypes, filterServer, filterTool, filterStatus], () => {
+// by applyRouteFilters() from a URL nav, a filter control, or a view-tab
+// switch (effectiveTypes), so the loaded 200-row window never disagrees with
+// what the request asked for. Registered after applyRouteFilters() already
+// ran during setup (top of this file), so the initial values it wrote never
+// trigger this watch — only a later, genuine change does; the first fetch is
+// onMounted's explicit call below.
+watch([effectiveTypes, filterServer, filterTool, filterStatus], () => {
   void loadActivities()
 }, { deep: true })
+
+// Live QA fix (Spec 109-k, FR-080 "router.replace on change"): every filter
+// control here mutated its own ref (and, for chips, clearChip() below) but
+// none of them wrote back to the URL — clearing the "Tool: read_0" chip
+// cleared the table but left `?tool=` in the address bar (SC-009's URL
+// round-trip). `view`/`type` are excluded: those are written explicitly by
+// setView() and toggleTypeFilter()/clearTypeFilter(), which know whether a
+// change is a tab switch (no `type` write) or a manual override (writes
+// `type`, never `view`) — a blanket watch here could not tell the two apart.
+watch(
+  [filterServer, filterTool, filterStatus, filterAuthType, filterSession, filterStartDate, filterEndDate],
+  () => {
+    scopeQuery.set({
+      server: filterServer.value || undefined,
+      tool: filterTool.value || undefined,
+      status: filterStatus.value || undefined,
+      auth_type: filterAuthType.value || undefined,
+      session: filterSession.value || undefined,
+      from: filterStartDate.value || undefined,
+      to: filterEndDate.value || undefined,
+    })
+  }
+)
 
 // Whatever else moved, the page must exist. Folding on, a wider page size, a
 // filter that matched less than expected — each can shrink the list under a

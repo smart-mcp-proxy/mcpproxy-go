@@ -840,8 +840,17 @@ export interface SearchRegistryServersResponse {
 
 // Activity Log types (RFC-003)
 
+// Every value ACTIVITY_TYPE_LABELS (utils/activity.ts) knows a label for —
+// that map's own comment (#1065) already flags the drift risk of hand-copying
+// this list a second time; this union had fallen behind it (missing five
+// backend types), which is what let `row.activity.type === 'tool_quarantine_change'`
+// (Spec 109-k's quarantine-batch fold) fail as "no overlap" at compile time.
 export type ActivityType =
   | 'tool_call'
+  | 'internal_tool_call'
+  | 'system_start'
+  | 'system_stop'
+  | 'config_change'
   | 'policy_decision'
   | 'quarantine_change'
   | 'server_change'
@@ -852,6 +861,13 @@ export type ActivityType =
    * ({verdict, ids_count, reasons{code:count}, per_tool[{id,status,reason?}]}).
    */
   | 'preflight'
+  /** Spec 032, tool-level quarantine state change. */
+  | 'tool_quarantine_change'
+  /** Spec 077. */
+  | 'security_scan'
+  /** Spec 074, server edition only. */
+  | 'credential_broker'
+  | 'prompt_get'
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 

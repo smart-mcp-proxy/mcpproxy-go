@@ -8,6 +8,24 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+// MARK: - Activity view kind (Spec 109-k, url-filter-contract.md `view` row)
+
+/// The segmented control's four options. `rawValue` matches `ScopeFilter.view`
+/// and the Web `?view=` query value exactly, so a hand-off through
+/// `AppState.scopeFilter` round-trips without a translation table.
+enum ActivityViewKind: String, CaseIterable {
+    case calls, sessions, system, all
+
+    var label: String {
+        switch self {
+        case .calls: return "Tool Calls"
+        case .sessions: return "Sessions"
+        case .system: return "System Events"
+        case .all: return "All"
+        }
+    }
+}
+
 // MARK: - Activity View
 
 struct ActivityView: View {
@@ -41,6 +59,16 @@ struct ActivityView: View {
     /// publish its results, so a slow unfiltered fetch can never overwrite the
     /// sub-call view the user just asked for (or vice versa).
     @State private var loadGeneration = 0
+
+    // Spec 109-k (activity-scope-filters), T122: the four Activity views
+    // (contracts/url-filter-contract.md `view` row), matching the Web/CLI
+    // default ("calls") and mapping (`system` = every non-call type). An
+    // explicit `filterType` picker choice still overrides this, same rule as
+    // the Web composable ("An explicit `type` always overrides `view`'s
+    // mapping").
+    @State private var scopeView: ActivityViewKind = .calls
+    @State private var sessions: [APIClient.MCPSession] = []
+    @State private var isLoadingSessions = false
 
     private var apiClient: APIClient? { appState.apiClient }
 
@@ -90,6 +118,15 @@ struct ActivityView: View {
         }
     }
 
+    /// What the table actually renders: `filteredActivities` with a server's
+    /// batch of `tool_quarantine_change` records folded into one summary line
+    /// (Spec 109-k, acceptance scenario 6 — "System events" showing 14
+    /// per-tool approval rows instead of one, the Web Activity Log's exact
+    /// live-QA finding).
+    private var displayedActivities: [ActivityEntry] {
+        ActivityQuarantineFolding.fold(filteredActivities)
+    }
+
     /// Build query string from current filter state.
     private var filterQueryString: String {
         (["limit=100"] + activeFilterParams).joined(separator: "&")
@@ -104,7 +141,18 @@ struct ActivityView: View {
     /// parameter.
     private var activeFilterParams: [String] {
         var parts: [String] = []
-        if filterType != "all" { parts.append("type=\(APIClient.escapeQueryValue(filterType))") }
+        // Spec 109-k, T122: an explicit `filterType` pick overrides the
+        // active view (url-filter-contract.md "view" row: "explicit type set
+        // (overrides `view`)"); otherwise "calls"/"system" narrow the actual
+        // request too, not just which rows the table shows, and "all"/
+        // "sessions" apply no type filter at all.
+        if filterType != "all" {
+            parts.append("type=\(APIClient.escapeQueryValue(filterType))")
+        } else if scopeView == .calls {
+            parts.append("type=\(APIClient.escapeQueryValue(ScopeFilter.callTypes.joined(separator: ",")))")
+        } else if scopeView == .system {
+            parts.append("type=\(APIClient.escapeQueryValue(ScopeFilter.systemTypes.joined(separator: ",")))")
+        }
         if filterServer != "all" { parts.append("server=\(APIClient.escapeQueryValue(filterServer))") }
         if filterStatus != "all" { parts.append("status=\(APIClient.escapeQueryValue(filterStatus))") }
         if let parentId = filterParentId, !parentId.isEmpty {
@@ -117,7 +165,12 @@ struct ActivityView: View {
     }
 
     /// Scope the list to one MCP session (a tray glance row's hand-off).
+    /// Link map: "Activity row (Sessions view)" -> session ->
+    /// `/activity?view=calls&session=...` — the hand-off always lands on
+    /// Tool Calls, never leaves the operator stuck on Sessions/System events
+    /// looking at an (correctly) empty table.
     private func showSession(_ sessionId: String) {
+        scopeView = .calls
         filterSessionId = sessionId
         filterParentId = nil
         selectedActivityID = nil
@@ -176,10 +229,12 @@ struct ActivityView: View {
                 filterBar
                 Divider()
 
-                if isLoading && activities.isEmpty {
+                if scopeView == .sessions {
+                    sessionsPanel
+                } else if isLoading && activities.isEmpty {
                     ProgressView("Loading...")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if filteredActivities.isEmpty {
+                } else if displayedActivities.isEmpty {
                     emptyState
                 } else {
                     // Column headers
@@ -191,7 +246,7 @@ struct ActivityView: View {
                     TimelineView(.periodic(from: .now, by: 20)) { context in
                         ScrollView {
                             LazyVStack(spacing: 0) {
-                                ForEach(filteredActivities) { entry in
+                                ForEach(displayedActivities) { entry in
                                     ActivityTableRow(
                                         entry: entry,
                                         currentDate: context.date,
@@ -243,21 +298,19 @@ struct ActivityView: View {
             }
         }
         .task {
-            // A glance row that opened this window left its session here (F10);
-            // consume it before the first load so the list is never briefly
-            // unfiltered.
-            if let pending = appState.pendingActivitySessionFilter, !pending.isEmpty {
-                appState.pendingActivitySessionFilter = nil
-                filterSessionId = pending
-            }
+            // A glance row (or a Tools row's "Calls" action, ...) that opened
+            // this window left a filter here (F10; Spec 109-k's
+            // AppState.scopeFilter) — consume it before the first load so the
+            // list is never briefly unfiltered.
+            applyPendingScopeFilter()
             await loadSummary()
-            await loadActivities()
+            await reloadForScopeView()
         }
         // SSE live update: reload when activityVersion is bumped
         .onChange(of: appState.activityVersion) { _ in
             Task {
                 await loadSummary()
-                await loadActivities()
+                if scopeView != .sessions { await loadActivities() }
             }
         }
         // F10: a tray glance row hands over the session it was derived from.
@@ -265,8 +318,11 @@ struct ActivityView: View {
             guard let sessionId = note.object as? String, !sessionId.isEmpty else { return }
             // This view is live, so the hand-off is settled here — clear the
             // pending value so a later-appearing view does not re-apply it.
-            appState.pendingActivitySessionFilter = nil
+            appState.scopeFilter = ScopeFilter()
             showSession(sessionId)
+        }
+        .onChange(of: scopeView) { _ in
+            Task { await reloadForScopeView() }
         }
     }
 
@@ -371,6 +427,19 @@ struct ActivityView: View {
     @ViewBuilder
     private var filterBar: some View {
         VStack(spacing: 6) {
+            // Spec 109-k (activity-scope-filters), T122: Tool Calls / Sessions
+            // / System Events / All (url-filter-contract.md "view" row,
+            // default "calls"). `onChange` (not the picker action) is what
+            // reloads, so a programmatic change from applyPendingScopeFilter()
+            // reloads exactly once, not twice.
+            Picker("View", selection: $scopeView) {
+                ForEach(ActivityViewKind.allCases, id: \.self) { kind in
+                    Text(kind.label).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("activity-view-picker")
+
             HStack(spacing: 12) {
                 Picker("Type", selection: $filterType) {
                     ForEach(typeOptions, id: \.value) { option in
@@ -493,6 +562,62 @@ struct ActivityView: View {
         id.count <= 24 ? id : "…" + id.suffix(24)
     }
 
+    // MARK: - Sessions view (Spec 109-k, T118/T122)
+
+    /// The "Sessions" segment's content: `GET /sessions` (contract "view ->
+    /// REST" — no `/activity` request at all), not the activity table.
+    @ViewBuilder
+    private var sessionsPanel: some View {
+        if isLoadingSessions && sessions.isEmpty {
+            ProgressView("Loading...")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if sessions.isEmpty {
+            VStack(spacing: 12) {
+                Image(systemName: "person.2")
+                    .font(.system(size: 48 * fontScale))
+                    .foregroundStyle(.tertiary)
+                Text("No sessions found")
+                    .font(.scaled(.title3, scale: fontScale))
+                    .foregroundStyle(.secondary)
+                Text("Sessions will appear here when MCP clients connect")
+                    .font(.scaled(.caption, scale: fontScale))
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(sessions) { session in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(session.clientName ?? "Unknown")
+                                    .font(.scaled(.body, scale: fontScale))
+                                Text(DashboardSessions.relativeTime(for: session))
+                                    .font(.scaled(.caption, scale: fontScale))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text("\(session.toolCallCount ?? 0) calls")
+                                .font(.scaled(.caption, scale: fontScale))
+                                .foregroundStyle(.secondary)
+                            Button("View Activity") {
+                                // Link map: "Session row (Sessions view)" ->
+                                // "-> /activity?view=calls&session=..."
+                                showSession(session.id)
+                            }
+                            .buttonStyle(.link)
+                            .accessibilityIdentifier("activity-session-view-activity")
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        Divider().padding(.leading, 8)
+                    }
+                }
+            }
+            .accessibilityIdentifier("activity-sessions-list")
+        }
+    }
+
     // MARK: - Empty State
 
     @ViewBuilder
@@ -523,6 +648,56 @@ struct ActivityView: View {
                     .foregroundStyle(.tertiary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    // MARK: - Scope filter hand-off (Spec 109-k, T122)
+
+    /// Consumes `appState.scopeFilter` (a tray glance row, a future Tools row
+    /// "Calls" action, ...) once, on first appear — the same "read before the
+    /// first fetch" rule the Web composable documents, so the initial load is
+    /// never briefly unfiltered.
+    private func applyPendingScopeFilter() {
+        let filter = appState.scopeFilter
+        guard !filter.isEmpty else { return }
+        appState.scopeFilter = ScopeFilter()
+
+        if let view = filter.view, let kind = ActivityViewKind(rawValue: view) {
+            scopeView = kind
+        }
+        if let session = filter.session, !session.isEmpty {
+            filterSessionId = session
+        }
+        if let server = filter.server, !server.isEmpty {
+            filterServer = server
+        }
+        if let status = filter.status, !status.isEmpty {
+            filterStatus = status
+        }
+    }
+
+    /// Contract "view -> REST": `sessions` issues a `GET /sessions` request,
+    /// never `/activity` — switching away from every other view resumes the
+    /// normal activity fetch.
+    private func reloadForScopeView() async {
+        if scopeView == .sessions {
+            await loadSessionsList()
+        } else {
+            await loadActivities()
+        }
+    }
+
+    private func loadSessionsList() async {
+        guard let client = apiClient else {
+            sessions = appState.recentSessions
+            return
+        }
+        isLoadingSessions = true
+        defer { isLoadingSessions = false }
+        do {
+            sessions = try await client.sessions(limit: 100)
+        } catch {
+            sessions = appState.recentSessions
         }
     }
 

@@ -154,8 +154,24 @@ describe('Activity Log — URL query hydration (Spec 109-k live-QA regression)',
     vi.clearAllMocks()
   })
 
-  it('with no query, fetches and shows everything (baseline)', async () => {
+  it('with no query, defaults to the "Tool calls" view (FR-070), not everything', async () => {
+    // Live QA finding (109-k): a bare /activity rendered every type mixed
+    // together — 29 rows of tool calls, policy decisions and 20 separate
+    // quarantine-change rows in the real repro — instead of "just the calls
+    // the user made". FR-070's default is `calls`, so the baseline here is
+    // the same 4 rows `?view=calls` asserts below, not all six fixture rows.
     const { wrapper, api } = await mountActivityAt('/activity')
+    expect(rows(wrapper)).toHaveLength(4)
+    const text = rows(wrapper).map(r => r.text()).join(' ')
+    expect(text).not.toContain('Quarantine Change')
+    expect(text).not.toContain('Security Scan')
+    expect(api.getActivities).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'tool_call,internal_tool_call', server: undefined, tool: undefined, status: undefined })
+    )
+  })
+
+  it('?view=all shows everything, unfiltered by type', async () => {
+    const { wrapper, api } = await mountActivityAt('/activity?view=all')
     expect(rows(wrapper)).toHaveLength(ALL_ACTIVITIES.length)
     expect(api.getActivities).toHaveBeenCalledWith(
       expect.objectContaining({ type: undefined, server: undefined, tool: undefined, status: undefined })
@@ -188,11 +204,20 @@ describe('Activity Log — URL query hydration (Spec 109-k live-QA regression)',
     expect(call.type).not.toContain('tool_call,')
   })
 
-  it('?server= narrows the log to that server alone', async () => {
+  it('?server= narrows the log to that server, on top of the default "Tool calls" view', async () => {
+    // No explicit `view`/`type` here either, so FR-070's default applies same
+    // as the bare "/activity" case above — a `server` filter with no view
+    // opinion of its own (a server card's "last call…" link, for one) lands
+    // on that server's CALLS, not its calls mixed with quarantine/scan noise.
     const { wrapper, api } = await mountActivityAt('/activity?server=filesystem')
-    expect(rows(wrapper)).toHaveLength(4) // quarantine_change, security_scan, read, write
-    expect(rows(wrapper).map(r => r.text()).join(' ')).not.toContain('create_issue')
-    expect(api.getActivities).toHaveBeenCalledWith(expect.objectContaining({ server: 'filesystem' }))
+    expect(rows(wrapper)).toHaveLength(2) // read, write — quarantine_change/security_scan excluded by the default view
+    const text = rows(wrapper).map(r => r.text()).join(' ')
+    expect(text).not.toContain('create_issue')
+    expect(text).not.toContain('Quarantine Change')
+    expect(text).not.toContain('Security Scan')
+    expect(api.getActivities).toHaveBeenCalledWith(
+      expect.objectContaining({ server: 'filesystem', type: 'tool_call,internal_tool_call' })
+    )
   })
 
   it('?type= (explicit) overrides any view mapping', async () => {

@@ -1939,7 +1939,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // a race: too early and nothing is subscribed, too late and the user
         // has already read an unfiltered log.
         if let sessionId, !sessionId.isEmpty {
-            appState.pendingActivitySessionFilter = sessionId
+            appState.scopeFilter = ScopeFilter(view: "calls", session: sessionId)
         }
         showMainWindow(tab: Self.glanceActivityDestination)
         guard let sessionId, !sessionId.isEmpty else { return }

@@ -1107,6 +1107,33 @@ watch([filterServer, filterStatus, filterTier, filterApproval, sortColumn, sortD
   currentPage.value = 1
 })
 
+// Live QA fix (Spec 109-k, FR-080 "router.replace on change"): the controls
+// above only ever READ the URL (applyQueryParam()) — clearing a filter, or
+// picking a new one, updated the table but left the address bar showing the
+// stale query, so a copied/bookmarked URL silently reapplied it on reload
+// (SC-009's URL round-trip). searchQuery gets its own watcher just below,
+// rather than joining this one: it changes on every keystroke, and the two
+// need to stay independent of each other's timing.
+watch([filterServer, filterStatus, filterTier, filterApproval], () => {
+  if (!scopeQuery) return
+  scopeQuery.set({
+    server: filterServer.value || undefined,
+    status: filterStatus.value || undefined,
+    tier: filterTier.value || undefined,
+    // `risk` is only ever a read-side alias (url-filter-contract.md rule 6);
+    // once resolved into `filterTier` the canonical `tier` param is what gets
+    // written back, so a stale `?risk=` left over from an old link does not
+    // linger next to it.
+    risk: undefined,
+    approval: filterApproval.value || undefined,
+  })
+})
+
+watch(searchQuery, value => {
+  if (!scopeQuery) return
+  scopeQuery.set({ q: value || undefined })
+})
+
 // Also reset when pageSize changes
 watch(pageSize, () => { currentPage.value = 1 })
 

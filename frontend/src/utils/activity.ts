@@ -726,6 +726,18 @@ export interface ActivityRun<T extends ActivityRunFields> {
 }
 
 /**
+ * Types whose consecutive rows are folded WITHOUT agreeing on `tool_name` or
+ * the Details text (Spec 109-k, acceptance scenario 6). A tool-level
+ * quarantine change is emitted once per tool in a server's baseline — 14
+ * tools approved on connect is 14 records that agree on everything EXCEPT
+ * which tool, so the ordinary rule (below) never folds them and "System
+ * events" showed 14 near-identical rows instead of one. The collapsed line
+ * reports the batch instead of one member's tool name (quarantineBatchSummary,
+ * used by the Details column for `run.count > 1`).
+ */
+const BATCH_FOLD_TYPES = new Set(['tool_quarantine_change'])
+
+/**
  * The identity a run is keyed on: EVERYTHING THE COLLAPSED LINE PRINTS, plus
  * the code_execution parent link. That rule is what makes the compression safe
  * — a field the lead row displays on behalf of eleven others has to be one all
@@ -736,14 +748,20 @@ export interface ActivityRun<T extends ActivityRunFields> {
  * on exactly the logs that need it most. The run reports the variation instead
  * (see reasonsVary), so the lead's reason never silently stands for the rest.
  */
-const runIdentity = (a: ActivityRunFields): string =>
+const runIdentity = (a: ActivityRunFields): string => {
+  // A batch type's collapsed line reports a COUNT, not any one member's tool
+  // name or details text — those two fields are deliberately left out of its
+  // identity, the same exception the intent reason gets above, and for the
+  // same reason: keying on them would stop the fold working on exactly the
+  // rows that need it most.
+  const batch = BATCH_FOLD_TYPES.has(a.type ?? '')
   // JSON.stringify rather than a delimiter join: server names, tool names and
   // the details text are free-form, so any separator character could appear
   // inside a field and let two different rows agree on one joined string.
-  JSON.stringify([
+  return JSON.stringify([
     a.type ?? '',
     a.server_name ?? '',
-    a.tool_name ?? '',
+    batch ? '' : (a.tool_name ?? ''),
     a.status ?? '',
     a.parent_id ?? '',
     // The Intent column prints this word on the lead row's authority.
@@ -758,8 +776,28 @@ const runIdentity = (a: ActivityRunFields): string =>
     a.detection_types?.length ?? 0,
     // A preflight or config change says everything in metadata.action / verdict;
     // two of them are only "the same row twice" if that text matches too.
-    activityDetailsText(a as Parameters<typeof activityDetailsText>[0]),
+    batch ? '' : activityDetailsText(a as Parameters<typeof activityDetailsText>[0]),
   ])
+}
+
+/**
+ * Details column text for a folded `tool_quarantine_change` run
+ * (Spec 109-k, acceptance scenario 6): "filesystem: 14 tools approved"
+ * instead of one member's tool name standing in for a batch that never
+ * agreed on it (see BATCH_FOLD_TYPES). `status` is the action word the
+ * backend already stamps on the record (`ActivityService.
+ * handleToolQuarantineChange` sets `Status = action` — "approved",
+ * "pending", "changed", ...); a record with no action falls back to the
+ * type's own label so the count is never printed with nothing after it.
+ */
+export const quarantineBatchSummary = (
+  activity: { server_name?: string; status?: string } | null | undefined,
+  count: number
+): string => {
+  const server = activity?.server_name ? `${activity.server_name}: ` : ''
+  const verb = activity?.status || 'changed'
+  return `${server}${count} tools ${verb}`
+}
 
 const intentOperationOf = (a: ActivityRunFields): string =>
   String((a.metadata?.intent as ActivityIntent | undefined)?.operation_type ?? '')

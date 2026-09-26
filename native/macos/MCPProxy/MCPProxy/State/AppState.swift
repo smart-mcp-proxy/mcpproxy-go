@@ -79,8 +79,10 @@ final class AppState: ObservableObject {
     /// Configured profiles for the tray profile switcher.
     @Published var profiles: [ProfileSummary] = []
 
-    /// A session the Activity Log should scope itself to as soon as it exists
-    /// (F10 — a tray glance row's hand-off).
+    /// A filter the Activity Log (or another scope-aware view) should apply
+    /// as soon as it exists (F10 — a tray glance row's hand-off; Spec 109-k's
+    /// url-filter-contract.md macOS section — replaces the former
+    /// `pendingActivitySessionFilter`, which carried only a session id).
     ///
     /// A notification alone cannot carry this: a window created BY the click
     /// subscribes its `onReceive` observers only once the view appears, so a
@@ -88,7 +90,7 @@ final class AppState: ObservableObject {
     /// documents for the sidebar tab. ActivityView consumes and clears this on
     /// appear; the notification still covers the already-open window, and
     /// whichever arrives first clears it for the other.
-    @Published var pendingActivitySessionFilter: String?
+    @Published var scopeFilter = ScopeFilter()
     /// Server-level default active profile slug; empty means "all servers".
     @Published var activeProfile: String = ""
 
