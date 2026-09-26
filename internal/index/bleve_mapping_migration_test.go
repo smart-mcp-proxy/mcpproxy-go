@@ -500,3 +500,32 @@ func TestCurrentIndexMapping_CoversEveryToolDocumentField(t *testing.T) {
 		assert.NotEmpty(t, im.FieldMappingForPath(f).Type, "field %q has no explicit mapping", f)
 	}
 }
+
+// A failure after the old index is closed (swap or reopen) must never leave
+// the BleveIndex without an index: every later call, including Close, would
+// nil-deref. It falls back to an empty current index, which the discovery path
+// re-populates, and still reports the error.
+func TestRebuildIndex_SwapFailureLeavesUsableEmptyIndex(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.bleve")
+	bi, err := newBleveIndexAt(indexPath, zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, bi.BatchIndex(migrationFixtureTools()))
+
+	orig := swapIndexDirFn
+	swapIndexDirFn = func(src, dst string) error {
+		// Fail midway: the old metadata is already gone.
+		_ = os.Remove(filepath.Join(dst, indexMetaFile))
+		return os.ErrPermission
+	}
+	t.Cleanup(func() { swapIndexDirFn = orig })
+
+	require.Error(t, bi.RebuildIndex())
+	require.NotNil(t, bi.index)
+	assertCurrentMapping(t, bi.index)
+	count, err := bi.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Zero(t, count)
+	require.NoError(t, bi.IndexTool(migrationFixtureTools()[0]))
+	assert.NoDirExists(t, indexPath+rebuildDirSuffix)
+	require.NoError(t, bi.Close())
+}

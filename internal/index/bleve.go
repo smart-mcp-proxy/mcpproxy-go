@@ -72,7 +72,9 @@ func NewBleveIndex(dataDir string, logger *zap.Logger) (*BleveIndex, error) {
 // newBleveIndexAt opens an existing Bleve index at indexPath, or creates one if
 // it does not yet exist. The parent directory is created as needed so callers
 // may nest a per-profile index under the shared index dir
-// (<dataDir>/index.bleve/<slug>/) without pre-creating it.
+// (<dataDir>/index.bleve/profiles/<slug>/, see Manager) without pre-creating
+// it. Nothing else may be nested there: migrating or recovering the shared
+// index removes every entry of its directory except profilesDirName.
 //
 // An existing index whose persisted mapping or schema version is not the
 // current one (see indexStaleReason) is migrated before it is returned, so
@@ -247,20 +249,56 @@ func (b *BleveIndex) RebuildIndex() error {
 		_ = os.RemoveAll(tmpPath)
 		return fmt.Errorf("failed to close Bleve index for rebuild: %w", err)
 	}
-	b.index = nil
-	if err := swapIndexDir(tmpPath, b.path); err != nil {
-		return err
-	}
-	idx, err := bleve.Open(b.path)
+	idx, err := b.swapInRebuilt(tmpPath)
 	if err != nil {
-		return fmt.Errorf("failed to open rebuilt Bleve index: %w", err)
+		return b.recoverEmpty(tmpPath, err)
 	}
 	b.index = idx
+	if err := os.RemoveAll(tmpPath); err != nil {
+		// The swap is complete; the next open removes the leftover.
+		b.logger.Warn("Failed to remove Bleve rebuild directory",
+			zap.String("path", tmpPath), zap.Error(err))
+	}
 
 	b.logger.Info("Migrated Bleve index to the current mapping",
 		zap.String("path", b.path), zap.Int("documents", len(docs)),
 		zap.String("schema_version", indexSchemaVersion))
 	return nil
+}
+
+// swapIndexDirFn is swapIndexDir, replaceable in tests to simulate a failed swap.
+var swapIndexDirFn = swapIndexDir
+
+func (b *BleveIndex) swapInRebuilt(tmpPath string) (bleve.Index, error) {
+	if err := swapIndexDirFn(tmpPath, b.path); err != nil {
+		return nil, err
+	}
+	idx, err := bleve.Open(b.path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open rebuilt Bleve index: %w", err)
+	}
+	return idx, nil
+}
+
+// recoverEmpty handles a failure after the old index was closed: the on-disk
+// index may be half-swapped, and b.index must never be left closed or nil (every
+// later call, Close included, would fail or panic). It recreates an empty
+// current-mapping index in place, which the discovery path re-populates as
+// servers reconnect, and returns cause either way.
+func (b *BleveIndex) recoverEmpty(tmpPath string, cause error) error {
+	b.index = nil
+	_ = os.RemoveAll(tmpPath)
+	b.logger.Error("Bleve index rebuild failed after the old index was closed; recreating it empty",
+		zap.String("path", b.path), zap.Error(cause))
+	if err := removeIndexEntries(b.path); err != nil {
+		return fmt.Errorf("%w (recovery failed: %w)", cause, err)
+	}
+	idx, err := createBleveIndex(b.path)
+	if err != nil {
+		return fmt.Errorf("%w (recovery failed: %w)", cause, err)
+	}
+	b.index = idx
+	return cause
 }
 
 // storedDocument is one document read back for a rebuild.
@@ -372,7 +410,7 @@ func swapIndexDir(src, dst string) error {
 	if err := os.Rename(filepath.Join(src, indexMetaFile), filepath.Join(dst, indexMetaFile)); err != nil {
 		return fmt.Errorf("failed to move rebuilt index metadata: %w", err)
 	}
-	return os.RemoveAll(src)
+	return nil
 }
 
 // removeIndexEntries deletes bleve's own entries in an index directory. The
@@ -513,6 +551,9 @@ func currentIndexMapping() *mapping.IndexMappingImpl {
 
 // Close closes the index
 func (b *BleveIndex) Close() error {
+	if b.index == nil {
+		return nil // only after a rebuild whose recovery also failed
+	}
 	return b.index.Close()
 }
 
