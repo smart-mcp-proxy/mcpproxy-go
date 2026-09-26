@@ -640,6 +640,7 @@ import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import AddServerModal from '@/components/AddServerModal.vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
+import { skipReasonLabel } from '@/utils/importSkipReason'
 import type { ClientStatus, ActivityRecord, ConnectPreview } from '@/types'
 
 interface Props {
@@ -1231,6 +1232,10 @@ async function onBulkImport(quarantine: boolean) {
   let totalImported = 0
   let totalSkipped = 0
   let totalFailed = 0
+  // Tallied by human label (skipReasonLabel), not raw reason string, so
+  // e.g. a self-referencing entry doesn't get lumped into "already
+  // configured" — nothing was previously configured about it.
+  const skippedByLabel = new Map<string, number>()
   const errors: string[] = []
   try {
     const results = await Promise.all(
@@ -1250,6 +1255,10 @@ async function onBulkImport(quarantine: boolean) {
         totalImported += r.data.summary?.imported ?? 0
         totalSkipped += r.data.summary?.skipped ?? 0
         totalFailed += r.data.summary?.failed ?? 0
+        for (const skipped of r.data.skipped ?? []) {
+          const label = skipReasonLabel(skipped.reason)
+          skippedByLabel.set(label, (skippedByLabel.get(label) ?? 0) + 1)
+        }
       } else {
         errors.push(`${job.src.name}: ${r.error ?? 'unknown error'}`)
       }
@@ -1258,7 +1267,14 @@ async function onBulkImport(quarantine: boolean) {
     if (errors.length === 0) {
       const dest = quarantine ? 'into quarantine' : 'as active'
       let msg = `✓ Imported ${totalImported} server${totalImported === 1 ? '' : 's'} ${dest}`
-      if (totalSkipped > 0) msg += ` · ${totalSkipped} skipped (already configured)`
+      if (skippedByLabel.size > 0) {
+        msg += Array.from(skippedByLabel.entries())
+          .map(([label, count]) => ` · ${count} skipped (${label})`)
+          .join('')
+      } else if (totalSkipped > 0) {
+        // Reasons weren't returned (older core) — fall back to the count alone.
+        msg += ` · ${totalSkipped} skipped`
+      }
       if (totalFailed > 0) msg += ` · ${totalFailed} failed`
       if (quarantine && totalImported > 0) msg += '. Approve from the Servers page.'
       selectionImportMessage.value = msg
