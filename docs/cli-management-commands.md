@@ -26,6 +26,10 @@ mcpproxy upstream list [flags]
 - `--output, -o` - Output format (table, json) [default: table]
 - `--log-level, -l` - Log level (trace, debug, info, warn, error) [default: warn]
 - `--config, -c` - Path to config file
+- `--status` - Filter by health status (repeatable; a comma-separated value is
+  equivalent to repeating the flag — several values select the union of their
+  statuses): `ready`, `connecting`, `sign_in_required`, `needs_review`,
+  `needs_secret`, `needs_config`, `error`, `disabled`
 
 **Examples:**
 ```bash
@@ -37,29 +41,55 @@ mcpproxy upstream list --output=json
 
 # With debug logging
 mcpproxy upstream list --log-level=debug
+
+# Only servers that need a sign-in or a review
+mcpproxy upstream list --status sign_in_required --status needs_review
+mcpproxy upstream list --status sign_in_required,needs_review
 ```
 
 **Output Fields:**
 - NAME - Server name
 - PROTOCOL - Transport protocol (stdio, http, sse, streamable-http)
 - TOOLS - Number of available tools
-- STATUS - Unified health status with emoji indicator and summary
-- ACTION - Suggested remediation command (if applicable)
+- STATUS - The one status label (Spec 109), e.g. "Online", "Sign-in required",
+  "Needs review" — never the free-text summary, which stays available in
+  `-o json` as `health.summary`
+- ACTION - Suggested remediation command, keyed on `health.actions[0]` (if applicable)
 
-**Status Indicators:**
-- ✅ Healthy - Server connected and working
-- ⚠️ Degraded - Server has warnings (e.g., token expiring soon)
-- ❌ Unhealthy - Server has errors or not functioning
-- ⏸️ Disabled - Server manually disabled by user
-- 🔒 Quarantined - Server pending security approval
+**Status Indicators (emoji):** the emoji is keyed on `admin_state` first, then
+`level` (a severity signal) — independent of the `status` label shown in the
+STATUS column, so the same `status` value can render with different emoji
+depending on severity:
+- ⏸️ `disabled` admin state — server manually disabled by user, regardless of level
+- 🔒 `quarantined` admin state — server pending security approval, regardless
+  of level; this is the only emoji a `needs_review` status ever renders as
+- ✅ enabled, not quarantined, `level: healthy` — covers both `ready` and the
+  transient `connecting` status
+- ⚠️ enabled, not quarantined, `level: degraded` — e.g. a first-time
+  `sign_in_required` sign-in, or an OAuth token refresh still retrying
+- ❌ enabled, not quarantined, `level: unhealthy` — covers `error`,
+  `needs_secret`, `needs_config`, and a `sign_in_required` re-auth/expired-token case
+
+**Tool-hold overlay (GH #938):** independent of the emoji rules above, a
+server with tools pending approval, changed (rug-pull), or blocked never
+renders a bare ✅ — even when it is otherwise `ready`/healthy. STATUS gets a
+`· N held` suffix (e.g. `Online · 2 pending held`) and the emoji downgrades
+one step to ⚠️, so a hold is never hidden behind an all-clear green. ACTION
+also fills in with `tools list --server=<name>` when no other action applies.
+See `mcpproxy tools list --server=<name>` or `upstream logs` for the hold detail.
+
+`-o json`'s `health` object always carries `status`, `usable` (true only when
+`status == "ready"`) and `actions` (every applicable next step, in priority
+order) alongside the existing `level`/`admin_state`/`summary`/`detail`/`action`
+fields.
 
 **Example Output:**
 ```
 NAME                      PROTOCOL   TOOLS      STATUS                         ACTION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅    github-server           http       15         Connected (15 tools)           -
-❌    oauth-server            http       0          Token expired                  auth login --server=oauth-server
-⏸️    disabled-server         stdio      0          Disabled by user               upstream enable disabled-server
+✅    github-server           http       15         Online                         -
+❌    oauth-server            http       0          Sign-in required               auth login --server=oauth-server
+⏸️    disabled-server         stdio      0          Disabled                       upstream enable disabled-server
 ```
 
 ---
@@ -544,7 +574,7 @@ mcpproxy upstream add notion https://mcp.notion.com/sse
 
 # View quarantine status
 mcpproxy upstream list
-# 🔒 notion  http  0  Pending approval  Approve in Web UI
+# 🔒 notion  http  0  Needs review  Approve in Web UI
 
 # Approve in web UI or via API:
 curl -X POST "http://localhost:8080/api/v1/servers/notion/unquarantine" \

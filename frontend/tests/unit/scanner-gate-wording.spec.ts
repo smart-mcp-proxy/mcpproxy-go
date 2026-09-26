@@ -133,29 +133,17 @@ describe('scanner gate wording — the panel and the dialog agree (F09)', () => 
     expect(chip.attributes('title')).toContain('review-only (soft-tier)')
   })
 
-  async function openApproveDialog(wrapper: ReturnType<typeof mountQuarantinedCard>) {
-    const approve = wrapper.findAll('button').find((b) => b.text().trim() === 'Approve')
-    expect(approve).toBeTruthy()
-    await approve!.trigger('click')
-    return wrapper.get('.modal-open')
-  }
-
-  it('the force-approve dialog names the gate instead of "the scanner gate"', async () => {
-    const modal = await openApproveDialog(mountQuarantinedCard())
-    expect(modal.text()).toContain('2 dangerous findings')
-    expect(modal.text()).not.toContain('the scanner gate')
-    expect(modal.text()).toContain('scan-based approval gate')
-    expect(modal.text()).toContain('unquarantines this server')
-  })
-
-  // The gate sentence is shared by BOTH dialog modes, so it must not name
-  // findings: in no_scan mode there are none, and force skips that refusal
-  // ("no scan results found; run a scan first or use --force") too.
-  it('says nothing about findings in the no-scan mode of the same dialog', async () => {
-    const modal = await openApproveDialog(mountQuarantinedCard(false))
-    expect(modal.text()).toContain('No Security Scan Run')
-    expect(modal.text()).toContain('scan-based approval gate')
-    expect(modal.text()).not.toContain('these findings')
-    expect(modal.text()).not.toContain('dangerous finding')
+  // FR-005 (specs/109-ux-navigation-consistency/contracts/health-vocabulary.md):
+  // the card's Approve action now only navigates to the review screen (see
+  // server-card-approve-review-navigation.spec.ts) — it never renders the
+  // force-approve dialog itself, so mountQuarantinedCard's dialog is gone from
+  // here. That dialog (and its F09 wording, "names the gate instead of 'the
+  // scanner gate'" / "says nothing about findings in no-scan mode") now lives
+  // only on the review screen and is covered by
+  // server-detail-approve-dialog.spec.ts.
+  it('the card no longer renders the force-approve dialog itself (moved to the review screen)', () => {
+    const card = mountQuarantinedCard()
+    expect(card.find('.modal-open').exists()).toBe(false)
+    expect(card.findAll('button').find((b) => b.text().trim() === 'Approve')).toBeUndefined()
   })
 })

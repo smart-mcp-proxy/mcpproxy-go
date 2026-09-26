@@ -916,10 +916,30 @@ func applyServeRuntimeFlags(cmd *cobra.Command, cfg *config.Config) {
 	}
 }
 
+// flagValidationError marks a CLI flag-validation error (e.g. an invalid
+// --status or --trust-mode value) so classifyError returns
+// ExitCodeGeneralError for it directly, before the string heuristics below
+// ever see its text. Those heuristics key on words like "config" and
+// "invalid" that a flag's own enumerated valid-values list can legitimately
+// contain — validateStatusFlag's error text enumerates the real status
+// "needs_config", which used to trip the config-error heuristic and exit 4
+// instead of 1, unlike the otherwise-identical --trust-mode error (whose
+// valid-values list happens not to contain "config").
+type flagValidationError struct{ error }
+
+func newFlagValidationError(format string, args ...any) error {
+	return flagValidationError{fmt.Errorf(format, args...)}
+}
+
 // classifyError categorizes errors to return appropriate exit codes
 func classifyError(err error) int {
 	if err == nil {
 		return ExitCodeSuccess
+	}
+
+	var flagErr flagValidationError
+	if errors.As(err, &flagErr) {
+		return ExitCodeGeneralError
 	}
 
 	// Spec 098: a preflight verdict is a RESULT, not a failure of mcpproxy, and

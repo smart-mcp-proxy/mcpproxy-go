@@ -1273,7 +1273,24 @@ type HealthStatus struct {
 	Detail string `json:"detail,omitempty"`
 
 	// Action is the suggested fix action: "login", "restart", "enable", "approve", "view_logs", "set_secret", "configure", "edit_url", or "" (none)
+	// Invariant: Action always equals Actions[0], or "" when Actions is empty.
 	Action string `json:"action,omitempty"`
+
+	// Status is the ONE status vocabulary rendered as text on every surface
+	// (Web UI, macOS, tray, CLI) — Spec 109 FR-010/FR-011. Values: "ready",
+	// "connecting", "sign_in_required", "needs_review", "needs_secret",
+	// "needs_config", "error", "disabled". Unlike Level (a severity signal for
+	// badge/tray coloring only), no renderer may print Level as text.
+	Status string `json:"status"`
+
+	// Usable reports whether the server can currently serve tool calls. True
+	// only when Status == "ready".
+	Usable bool `json:"usable"`
+
+	// Actions lists every applicable next step in priority order (FR-012):
+	// login > set_secret > configure > edit_url > approve > restart >
+	// view_logs > enable. Always non-nil (empty slice, never null).
+	Actions []string `json:"actions"`
 }
 
 // UpdateInfo represents version update check information
