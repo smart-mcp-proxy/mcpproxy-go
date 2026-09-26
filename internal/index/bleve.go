@@ -726,6 +726,103 @@ func (b *BleveIndex) SearchToolsScoped(queryStr string, limit int, inScope func(
 	return results, nil
 }
 
+// Hit is the canonical registration identity SearchToolsAdmitted hands to its
+// predicate (Spec 108 FR-011, data-model.md §2): the exact (server, raw tool)
+// pair a hit resolves to, NEVER a stored annotation — the index carries no
+// annotation field and gains none (ToolDocument/readToolMetadata are
+// unchanged; research.md "Annotation source for SearchToolsAdmitted"). A
+// caller that needs the tool's effective annotations resolves them itself,
+// through the same identity seam every dispatch path already uses
+// (profile.EffectiveAnnotations = resolveExactToolIdentity), keeping
+// discovery and execution classifying from one source.
+type Hit struct {
+	Server string
+	Tool   string
+}
+
+// Admission is admit's per-hit verdict for SearchToolsAdmitted.
+type Admission int
+
+const (
+	// Admit means the hit is visible to this caller and counts toward limit.
+	Admit Admission = iota
+	// RejectScope means the hit's server is outside the caller's effective
+	// scope (agent-token allowed_servers, profile server set). Never counted
+	// in hiddenByPolicy — an out-of-scope tool must stay invisible, not merely
+	// "hidden by profile" (FR-011).
+	RejectScope
+	// RejectPolicy means the hit's server was in scope but the tool policy
+	// (Spec 108 CompiledPolicy.Decide) excluded it. Counted in hiddenByPolicy.
+	RejectPolicy
+)
+
+// SearchToolsAdmitted is SearchToolsScoped's hit-level counterpart (Spec 108
+// FR-011, data-model.md §2): the pre-limit predicate sees the hit's canonical
+// (server, tool) identity — never a stored annotation, the index carries
+// none — and returns one of three verdicts instead of a bool, so the caller
+// can tell an out-of-scope rejection (never counted, stays invisible) from a
+// policy-only one (counted in hiddenByPolicy, the FR-011 `hidden_by_profile`
+// figure) over the SAME exhaustive pre-limit scan SearchToolsScoped already
+// runs. limit is applied to ADMITTED hits only — a rejected top hit, whatever
+// its reason, never shortens the page — and hiddenByPolicy accumulates over
+// the full match set, not merely the hits collected before the cut, so a
+// caller whose page filled up before scanning every match still gets an
+// accurate count.
+//
+// Identical to SearchToolsScoped in every other respect (same query
+// construction incl. the underscore-segment enhancement, same score-then-id
+// sort, same exhaustive From/Size paging with no result cap) — a predicate
+// that only ever returns Admit/RejectScope (never RejectPolicy) makes this
+// method equal SearchToolsScoped(query, limit, func(s string) bool { admit
+// still sees the server only }) exactly (T016a).
+func (b *BleveIndex) SearchToolsAdmitted(queryStr string, limit int, admit func(Hit) Admission) (results []*config.SearchResult, hiddenByPolicy int, err error) {
+	if queryStr == "" {
+		return nil, 0, fmt.Errorf("search query cannot be empty")
+	}
+	if admit == nil || limit <= 0 {
+		return []*config.SearchResult{}, 0, nil
+	}
+
+	q, err := b.augmentedToolSearchQuery(queryStr, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	pageSize := limit
+	if pageSize < scopedSearchMinPage {
+		pageSize = scopedSearchMinPage
+	}
+
+	b.logger.Debug("Searching tools with admitted query", zap.String("query", queryStr), zap.Int("limit", limit))
+
+	results = make([]*config.SearchResult, 0, limit)
+	for from := 0; ; from += pageSize {
+		searchResult, err := b.index.Search(newToolSearchRequest(q, from, pageSize))
+		if err != nil {
+			return nil, 0, fmt.Errorf("search failed: %w", err)
+		}
+		for _, hit := range searchResult.Hits {
+			tool := readToolMetadata(hit.ID, hit.Fields)
+			switch admit(Hit{Server: tool.ServerName, Tool: config.RawToolName(tool)}) {
+			case Admit:
+				results = append(results, &config.SearchResult{Tool: tool, Score: hit.Score})
+			case RejectPolicy:
+				hiddenByPolicy++
+			case RejectScope:
+				// Invisible: never counted, never collected.
+			}
+			if len(results) >= limit {
+				return results, hiddenByPolicy, nil
+			}
+		}
+		if len(searchResult.Hits) == 0 || uint64(from+pageSize) >= searchResult.Total {
+			break
+		}
+	}
+
+	b.logger.Debug("Found admitted tools matching query", zap.Int("count", len(results)), zap.Int("hidden_by_policy", hiddenByPolicy), zap.String("query", queryStr))
+	return results, hiddenByPolicy, nil
+}
+
 func fieldsContainExactToolName(fields map[string]interface{}, queryStr string) bool {
 	for _, field := range []string{"tool_name", "full_tool_name"} {
 		if value, ok := fields[field].(string); ok && value == queryStr {
