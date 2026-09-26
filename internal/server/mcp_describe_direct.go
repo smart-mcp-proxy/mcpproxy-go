@@ -6,6 +6,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolannotations"
 )
 
@@ -154,13 +155,30 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 // operation-permission tier, and agent callability.
 func (p *MCPProxyServer) directEntryVisibleToSession(ctx context.Context, entry *directCatalogEntry) bool {
 	authCtx := auth.AuthContextFromContext(ctx)
-	_, profileScope := p.resolveActiveProfile(ctx)
+	profileName, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
 	isScopedAgent := isScopeRestrictedCaller(authCtx)
 
 	if !directEntryInScope(authCtx, profileScope, isScopedAgent, entry) {
 		return false
 	}
-	return p.directEntryCallable(authCtx, entry)
+	if !p.directEntryCallable(authCtx, entry) {
+		return false
+	}
+	// Spec 108 FR-011/T023: describe_tool on the direct surface must never
+	// return a definition for a profile-excluded tool. This function is
+	// describe-only (never consulted by the actual dispatch path), so unlike
+	// the list filter it needs no call-time exception — describe always
+	// applies the policy in full.
+	if profileName != "" {
+		if policy := profileIdx.PolicyFor(profileName); policy != nil {
+			annotations, found := p.EffectiveAnnotations(entry.ServerName, entry.ToolName)
+			intrinsic := profile.IntrinsicTier(annotations, found)
+			if admitted, _, _ := policy.Decide(entry.ServerName, entry.ToolName, intrinsic); !admitted {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // suggestDirectToolID corrects an id that differs from a listed one only by

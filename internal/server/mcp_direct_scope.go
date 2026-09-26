@@ -302,6 +302,26 @@ func directCallTimeTierExceeded(ctx context.Context, authCtx *auth.AuthContext, 
 	return !authCtx.HasPermission(tier)
 }
 
+// directPolicyExcludedForListing reports whether the Spec 108 tool policy
+// excludes (owner, rawName) from the direct surface's LISTING only (T023,
+// FR-011). It deliberately mirrors directCallTimeTierExceeded's own
+// list/call-time split: at call time (isDirectCallTimeRequest) the tool must
+// stay visible to mcp-go's WithToolFilter chain, or a policy-excluded call
+// would be answered with the chain's generic "tool not found" instead of the
+// descriptive profile refusal 108-d's own call-time gate provides
+// (handleCallToolVariant's refusal, wired through the direct dispatch path)
+// — exactly the reason an over-tier tool is let through here too instead of
+// being excluded by this filter.
+func (p *MCPProxyServer) directPolicyExcludedForListing(ctx context.Context, policy *profile.CompiledPolicy, owner, rawName string) bool {
+	if policy == nil || isDirectCallTimeRequest(ctx) {
+		return false
+	}
+	annotations, found := p.EffectiveAnnotations(owner, rawName)
+	intrinsic := profile.IntrinsicTier(annotations, found)
+	admitted, _, _ := policy.Decide(owner, rawName, intrinsic)
+	return !admitted
+}
+
 // directRequestKindMiddleware installs an empty directRequestKindBox on every
 // request's ctx. See mcpAuthMiddleware (server.go), the one production
 // caller, for why this must wrap the handler chain BEFORE mcp-go's
@@ -342,8 +362,12 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 	}
 
 	authCtx := auth.AuthContextFromContext(ctx)
-	_, profileScope := p.resolveActiveProfile(ctx)
+	profileName, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
 	isScopedAgent := isScopeRestrictedCaller(authCtx)
+	var policy *profile.CompiledPolicy
+	if profileName != "" {
+		policy = profileIdx.PolicyFor(profileName)
+	}
 
 	// Spec 105 FR-008 (FR008-G7): a tool with no registration identity is
 	// withheld from EVERY caller, administrators included, so this filter can
@@ -377,6 +401,9 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 				continue
 			}
 			if !directIdentityInScope(authCtx, profileScope, isScopedAgent, stamp.owner, stamp.tier) {
+				continue
+			}
+			if p.directPolicyExcludedForListing(ctx, policy, stamp.owner, stamp.rawName) {
 				continue
 			}
 			filtered = append(filtered, tool)

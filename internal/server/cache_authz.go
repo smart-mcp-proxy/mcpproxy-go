@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -113,6 +114,24 @@ func (p *MCPProxyServer) cacheAuthorizationWith(ctx context.Context, profileName
 			a.ProfileServers = scope.AllowedServerNames()
 		}
 		sort.Strings(a.ProfileServers)
+
+		// Spec 108 FR-027: the tool-policy dimensions of the stamp. A
+		// profile with no compiled policy (idx nil, or the name resolved to
+		// no ProfileConfig — a dangling pin) leaves PolicyFingerprint
+		// empty, matching a legacy profile's own zero-value fingerprint
+		// (Compile hashes only the six FR-001 fields, all unset either
+		// way) — the read gate still bounds correctly on ProfileServers
+		// alone in that case.
+		if idx != nil {
+			if pol := idx.PolicyFor(profileName); pol != nil {
+				a.PolicyFingerprint = hex.EncodeToString(pol.Fingerprint[:])
+			}
+		}
+		if p.mainServer != nil && p.mainServer.runtime != nil {
+			if sup := p.mainServer.runtime.Supervisor(); sup != nil {
+				a.ToolTierGeneration = sup.ToolTierGeneration()
+			}
+		}
 	}
 	return a
 }

@@ -121,6 +121,20 @@ type Supervisor struct {
 	version  int64
 	stateMu  sync.RWMutex
 
+	// toolTierGeneration is bumped once per publishDiscoveredTools call (Spec
+	// 108 FR-027): any tool's effective annotations may have changed, or a
+	// tool may have appeared/disappeared, whenever a server's discovered
+	// tool set is republished. It is a deliberately coarse, whole-fleet
+	// counter — bumped on every discovery publish, not only one that
+	// actually changed a tier — rather than a diff against the previous
+	// tool set: the safe direction for a cache-invalidation signal is to
+	// over-invalidate (an extra read_cache miss) rather than under-invalidate
+	// (a stale cached page surviving a real annotation change). Read via
+	// ToolTierGeneration(); a caller stamps it on a cache entry's producer
+	// authorization (internal/server/cache_authz.go) alongside the profile's
+	// own PolicyFingerprint.
+	toolTierGeneration atomic.Uint64
+
 	// State view for read model (Phase 4)
 	stateView *stateview.View
 
@@ -1354,6 +1368,7 @@ func (s *Supervisor) publishDiscoveredTools(toolsByServer map[string][]*config.T
 
 	s.snapshot.Store(newSnapshot)
 	s.version++
+	s.toolTierGeneration.Add(1)
 
 	// Update StateView for each accepted server
 	for serverName, serverTools := range accepted {
@@ -1617,6 +1632,14 @@ func (s *Supervisor) CurrentSnapshot() *ServerStateSnapshot {
 // This provides a lock-free view of server statuses for API consumers.
 func (s *Supervisor) StateView() *stateview.View {
 	return s.stateView
+}
+
+// ToolTierGeneration returns the Spec 108 FR-027 counter bumped once per
+// publishDiscoveredTools call — a coarse, whole-fleet signal that some
+// server's discovered tool set (and therefore some tool's effective
+// annotations) may have changed since a caller last read it. Lock-free.
+func (s *Supervisor) ToolTierGeneration() uint64 {
+	return s.toolTierGeneration.Load()
 }
 
 // Subscribe returns a channel that receives supervisor events.
