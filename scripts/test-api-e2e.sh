@@ -121,7 +121,25 @@ own_launcher_pids() {
     for pid in $(pgrep -f "$LAUNCHER_PATTERN" 2>/dev/null); do
         case "$ours" in
             *" $pid "*) echo "$pid" ;;
-            *) [ "$(proc_cwd "$pid")" = "$SCRIPT_CWD" ] && echo "$pid" ;;
+            *)
+                # Review round (finding 2): the cwd fallback below only has
+                # grounds to claim a launcher-test fixture as OURS when this
+                # run actually started its own core (MCPPROXY_PID set) —
+                # that core is what would normally own the fixture via the
+                # descendant walk above, and the cwd test exists only to
+                # cover the narrow gap where that core died before it could
+                # be reaped (see the comment above this function). A run
+                # whose own core never started (e.g. a prereq check failed
+                # before the "start mcpproxy" step) has no such core and no
+                # claim at all — without this guard it would match, purely
+                # by cwd, a live and healthy fixture belonging to a
+                # DIFFERENT, concurrently-running invocation of this script
+                # in the same checkout, and cleanup() would reap that
+                # run's fixture out from under it.
+                if [ -n "$MCPPROXY_PID" ] && [ "$(proc_cwd "$pid")" = "$SCRIPT_CWD" ]; then
+                    echo "$pid"
+                fi
+                ;;
         esac
     done
 }
