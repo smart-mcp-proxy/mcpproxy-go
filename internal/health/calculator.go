@@ -233,7 +233,7 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		if input.HasEndpointURL && isEndpointAddressError(input.LastError) {
 			action = ActionEditURL
 		}
-		if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
+		if oauthActionApplies(input) {
 			level, action, summary = oauthAttentionState(input.LastError)
 		}
 		return &contracts.HealthStatus{
@@ -253,7 +253,7 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				action = ActionEditURL
 			}
 			// For OAuth-required servers with OAuth-related errors, suggest login
-			if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
+			if oauthActionApplies(input) {
 				level, action, summary = oauthAttentionState(input.LastError)
 			}
 		}
@@ -675,6 +675,43 @@ func isOAuthReauthError(err string) bool {
 		}
 	}
 	return false
+}
+
+// oauthActionApplies reports whether an enabled (non-quarantined) server's
+// "error"/"disconnected" last error should surface the OAuth Login CTA
+// instead of the generic Restart. Configured OAuth (OAuthRequired) trusts any
+// OAuth-related error, matching the pre-existing behaviour. Autodetected
+// OAuth (OAuthRequired=false) additionally trusts the two specific,
+// unambiguous markers — first-time login-required and re-auth (a
+// previously-working stored token that broke) — mirroring
+// quarantinedAwaitingSignIn's rationale: OAuthRequired is deliberately false
+// for autodetected OAuth, and the marker text itself (e.g. "re-login
+// available", "server error with stored token") is specific enough to trust
+// on its own. A looser generic OAuth-related match (e.g. mcp-go's
+// "authentication strategies failed" transport-fault wrapper) is NOT
+// promoted without OAuthRequired, since that generic text can also mean an
+// unrelated transport failure — see isOAuthRelatedError's own connection
+// exclusions.
+//
+// Without this, diagnostics.classifyOAuth (which has no OAuthRequired hint
+// at all) still assigned MCPX_OAUTH_REAUTH_REQUIRED / MCPX_OAUTH_LOGIN_REQUIRED
+// from the same error text, so the Web UI's ServerCard showed a Login button
+// (driven by the diagnostic code) alongside a Restart button (driven by
+// health.action) at once, with the explanatory error alert suppressed
+// because a Login CTA was present.
+func oauthActionApplies(input HealthCalculatorInput) bool {
+	// isOAuthRelatedError is the general gate: it excludes connection-fault
+	// text (e.g. mcp-go's "authentication strategies failed" wrapper around a
+	// plain "dial tcp ... connection refused") BEFORE the OAuth patterns are
+	// checked. Both branches below rely on that exclusion having already run,
+	// exactly like quarantinedAwaitingSignIn.
+	if !isOAuthRelatedError(input.LastError) {
+		return false
+	}
+	if input.OAuthRequired {
+		return true
+	}
+	return isOAuthLoginRequiredError(input.LastError) || isOAuthReauthError(input.LastError)
 }
 
 // ExtractMissingSecret extracts the secret name from an error message if the error
