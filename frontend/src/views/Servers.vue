@@ -295,12 +295,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useOnboardingStore } from '@/stores/onboarding'
 import api from '@/services/api'
+import type { Server } from '@/types'
 import ServerCard from '@/components/ServerCard.vue'
 import AddServerModal from '@/components/AddServerModal.vue'
 import { serverDetailPath } from '@/utils/serverRoute'
@@ -308,15 +309,46 @@ import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 
+type ServerFilter = 'all' | 'connected' | 'enabled' | 'quarantined' | 'needs_review'
+const KNOWN_FILTERS: ServerFilter[] = ['all', 'connected', 'enabled', 'quarantined', 'needs_review']
+
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const onboardingStore = useOnboardingStore()
+const route = useRoute()
 const router = useRouter()
-const filter = ref<'all' | 'connected' | 'enabled' | 'quarantined'>('all')
+const filter = ref<ServerFilter>('all')
 const searchQuery = ref('')
 const scanAllRunning = ref(false)
 const showAddServer = ref(false)
 const { hasEnabledScanners } = useSecurityScannerStatus()
+
+// Spec 109-k (activity-scope-filters), T119: Servers wired to the URL filter
+// contract (url-filter-contract.md — `status` and `q` are client-side only
+// here, `GET /servers` takes no query string). Read on mount and on every
+// route change, one-directional (URL -> local state), matching Tools.vue's
+// existing `q` pattern — this is what makes the `/review` -> `/servers?status
+// =needs_review` redirect (router T026a) actually filter the list instead of
+// silently landing on the unfiltered one.
+function isNeedsReview(server: Server): boolean {
+  if (server.quarantined) return true
+  const q = server.quarantine
+  return !!q && (q.pending_count ?? 0) + (q.changed_count ?? 0) > 0
+}
+
+function applyScopeQueryParams() {
+  const status = route.query.status
+  if (typeof status === 'string' && (KNOWN_FILTERS as string[]).includes(status)) {
+    filter.value = status as ServerFilter
+  }
+  const q = route.query.q
+  if (typeof q === 'string' && q !== searchQuery.value) {
+    searchQuery.value = q
+  }
+}
+
+onMounted(applyScopeQueryParams)
+watch(() => [route.query.status, route.query.q], applyScopeQueryParams)
 
 // The page chrome (stat tiles, filter pills, search) only describes a list that
 // exists. `servers.length` — not `loaded` — is the right gate: it is also false
@@ -372,6 +404,9 @@ const filteredServers = computed(() => {
       break
     case 'quarantined':
       servers = serversStore.quarantinedServers
+      break
+    case 'needs_review':
+      servers = serversStore.servers.filter(isNeedsReview)
       break
     default:
       // 'all' - no additional filtering
