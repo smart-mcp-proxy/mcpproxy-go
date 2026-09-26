@@ -441,6 +441,14 @@ type ServerTokenMetrics struct {
 	SavedTokens             int            `json:"saved_tokens"`                // Difference
 	SavedTokensPercentage   float64        `json:"saved_tokens_percentage"`     // Percentage saved
 	PerServerToolListSizes  map[string]int `json:"per_server_tool_list_sizes"`  // Token size per server
+	// Estimated (Spec 109-k FR-070-ish, url-filter-contract.md / audit F-Token):
+	// true while AverageQueryResultSize is a synthetic simulation (a sample of
+	// the first `tools_limit` tools' schemas — no real retrieve_tools call has
+	// completed yet in this runtime's usage aggregate); false once at least one
+	// real retrieve_tools call has, at which point AverageQueryResultSize is
+	// derived from the real observed average response size instead. The Web
+	// UI and macOS render an "estimate" label while this is true.
+	Estimated bool `json:"estimated"`
 }
 
 // UsageAggregateResponse is the GET /api/v1/activity/usage payload (Spec 069 A3).
@@ -457,15 +465,20 @@ type ServerTokenMetrics struct {
 //     requested span. Timeline is therefore not filtered by tool/server/status.
 //   - tool/server/status act as membership filters on the per-tool rollup.
 type UsageAggregateResponse struct {
-	Window                string            `json:"window"`
-	GeneratedAt           time.Time         `json:"generated_at"`
-	FreshnessMs           int64             `json:"freshness_ms"` // age of the underlying snapshot in ms
-	TokenSource           string            `json:"token_source"` // "bytes" (size-based proxy, FR-006)
-	TokensSaved           int               `json:"tokens_saved"` // echoed from ServerTokenMetrics (FR-007)
-	TokensSavedPercentage float64           `json:"tokens_saved_percentage"`
-	Tools                 []UsageToolStat   `json:"tools"`
-	Other                 *UsageOtherBucket `json:"other,omitempty"` // present only when the list was truncated to top-N
-	Timeline              []UsageTimeBucket `json:"timeline"`
+	Window                string    `json:"window"`
+	GeneratedAt           time.Time `json:"generated_at"`
+	FreshnessMs           int64     `json:"freshness_ms"` // age of the underlying snapshot in ms
+	TokenSource           string    `json:"token_source"` // "bytes" (size-based proxy, FR-006)
+	TokensSaved           int       `json:"tokens_saved"` // echoed from ServerTokenMetrics (FR-007)
+	TokensSavedPercentage float64   `json:"tokens_saved_percentage"`
+	// TokensSavedEstimated echoes ServerTokenMetrics.Estimated (Spec 109-k):
+	// true while TokensSaved is a synthetic simulation rather than derived
+	// from a real retrieve_tools call. Dropped (false, the zero value) for a
+	// scoped caller along with TokensSaved itself, above.
+	TokensSavedEstimated bool              `json:"tokens_saved_estimated"`
+	Tools                []UsageToolStat   `json:"tools"`
+	Other                *UsageOtherBucket `json:"other,omitempty"` // present only when the list was truncated to top-N
+	Timeline             []UsageTimeBucket `json:"timeline"`
 	// TotalCalls and TotalErrors are the headline counts for the window: the sum
 	// of the timeline this same response carries, so the tiles and the histogram
 	// under them cannot disagree. They are NOT the sum of Tools — that list is

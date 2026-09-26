@@ -582,12 +582,30 @@ export interface TokenMetrics {
   was_truncated: boolean      // Whether response was truncated
 }
 
+// GET /api/v1/status (partial — only the fields the Web UI currently reads).
+// `features` (Spec 109-k / url-filter-contract.md FR-080a): which of
+// "profile"/"client"/"token" this build accepts as scope-filter query
+// parameters. Absent (or `scope_filters` absent/empty) means none yet — the
+// Spec 108 rows of useScopeQuery's parameter table stay hidden until this
+// lists them.
+export interface StatusResponse {
+  edition: string
+  running: boolean
+  routing_mode: string
+  default_instructions?: string
+  activation?: { first_real_tool_call_ever?: boolean }
+  features?: { scope_filters?: string[] }
+}
+
 export interface ServerTokenMetrics {
   total_server_tool_list_size: number
   average_query_result_size: number
   saved_tokens: number
   saved_tokens_percentage: number
   per_server_tool_list_sizes: Record<string, number>
+  // Spec 109-k: true while average_query_result_size/saved_tokens are a
+  // synthetic simulation rather than derived from a real retrieve_tools call.
+  estimated: boolean
 }
 
 // Usage statistics aggregate — GET /api/v1/activity/usage (Spec 069).
@@ -636,6 +654,9 @@ export interface UsageAggregateResponse {
   token_source: string              // "bytes" — size-based proxy (FR-006)
   tokens_saved: number              // echoed from ServerTokenMetrics (FR-007)
   tokens_saved_percentage: number
+  // Spec 109-k: true while tokens_saved is a synthetic simulation (no real
+  // retrieve_tools call observed yet) rather than derived from real usage.
+  tokens_saved_estimated: boolean
   tools: UsageToolStat[]
   other?: UsageOtherBucket | null   // present only when list truncated to top-N
   timeline: UsageTimeBucket[]
@@ -819,8 +840,17 @@ export interface SearchRegistryServersResponse {
 
 // Activity Log types (RFC-003)
 
+// Every value ACTIVITY_TYPE_LABELS (utils/activity.ts) knows a label for —
+// that map's own comment (#1065) already flags the drift risk of hand-copying
+// this list a second time; this union had fallen behind it (missing five
+// backend types), which is what let `row.activity.type === 'tool_quarantine_change'`
+// (Spec 109-k's quarantine-batch fold) fail as "no overlap" at compile time.
 export type ActivityType =
   | 'tool_call'
+  | 'internal_tool_call'
+  | 'system_start'
+  | 'system_stop'
+  | 'config_change'
   | 'policy_decision'
   | 'quarantine_change'
   | 'server_change'
@@ -831,6 +861,13 @@ export type ActivityType =
    * ({verdict, ids_count, reasons{code:count}, per_tool[{id,status,reason?}]}).
    */
   | 'preflight'
+  /** Spec 032, tool-level quarantine state change. */
+  | 'tool_quarantine_change'
+  /** Spec 077. */
+  | 'security_scan'
+  /** Spec 074, server edition only. */
+  | 'credential_broker'
+  | 'prompt_get'
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 
