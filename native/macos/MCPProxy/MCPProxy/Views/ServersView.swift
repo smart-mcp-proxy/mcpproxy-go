@@ -55,7 +55,10 @@ struct ServersView: View {
                     .foregroundStyle(.secondary)
 
                 Button {
-                    addServerInitialTab = .importConfig
+                    // Spec 109 FR-062: the generic entry point opens on the
+                    // catalog-first Catalog tab, matching the Web UI default —
+                    // "Import" and "Manual" stay explicit choices below.
+                    addServerInitialTab = .catalog
                     showAddServer = true
                 } label: {
                     Image(systemName: "plus")
@@ -81,7 +84,7 @@ struct ServersView: View {
             // Prominent "Add Server" button bar
             HStack {
                 Button {
-                    addServerInitialTab = .importConfig
+                    addServerInitialTab = .catalog
                     showAddServer = true
                 } label: {
                     Label("Add Server", systemImage: "plus.circle.fill")
@@ -127,7 +130,7 @@ struct ServersView: View {
                             .frame(maxWidth: 300)
                         HStack(spacing: 12) {
                             Button {
-                                addServerInitialTab = .manual
+                                addServerInitialTab = .catalog
                                 showAddServer = true
                             } label: {
                                 Label("Add Server", systemImage: "plus.circle.fill")
@@ -171,7 +174,7 @@ struct ServersView: View {
             if let tab = notification.object as? AddServerTab {
                 addServerInitialTab = tab
             } else {
-                addServerInitialTab = .manual
+                addServerInitialTab = .catalog
             }
             showAddServer = true
         }

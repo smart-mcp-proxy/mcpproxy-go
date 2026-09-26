@@ -152,4 +152,95 @@ final class CatalogTests: XCTestCase {
             XCTAssertFalse(SecretLikeName.looksSecret(name), name)
         }
     }
+
+    // MARK: - Secret refs decode (FR-065 taken-name check)
+
+    func testDecodesSecretRefsResponse() throws {
+        let json = """
+        {"refs": [{"type": "keyring", "name": "github-env-api-key", "original": "${keyring:github-env-api-key}"}], "count": 1}
+        """
+        let resp = try decode(SecretRefsResponse.self, from: json)
+        XCTAssertEqual(resp.refs.first?.name, "github-env-api-key")
+        XCTAssertEqual(resp.refs.first?.type, "keyring")
+    }
+
+    // MARK: - Import preview decode (FR-064, Paste tab)
+
+    func testDecodesImportPreviewWithEnvFields() throws {
+        let json = """
+        {"format": "url", "imported": [{"name": "fetch", "protocol": "http", "url": "https://api.example.com/mcp",
+         "summary": "https://api.example.com/mcp", "tags": ["remote"],
+         "headers": [{"name": "Authorization", "secret_like": true, "empty_or_placeholder": false}]}]}
+        """
+        let resp = try decode(ImportPreviewResponse.self, from: json)
+        XCTAssertEqual(resp.format, "url")
+        XCTAssertEqual(resp.imported.first?.name, "fetch")
+        XCTAssertEqual(resp.imported.first?.url, "https://api.example.com/mcp")
+        XCTAssertEqual(resp.imported.first?.headers?.first?.name, "Authorization")
+        XCTAssertEqual(resp.imported.first?.headers?.first?.secretLike, true)
+        XCTAssertNil(resp.imported.first?.command)
+    }
+
+    func testDecodesImportPreviewStdioWithEnvFields() throws {
+        let json = """
+        {"format": "command", "imported": [{"name": "server-filesystem", "protocol": "stdio",
+         "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+         "env": [{"name": "GITHUB_TOKEN", "secret_like": true, "empty_or_placeholder": true}]}]}
+        """
+        let resp = try decode(ImportPreviewResponse.self, from: json)
+        XCTAssertEqual(resp.imported.first?.command, "npx")
+        XCTAssertEqual(resp.imported.first?.args, ["-y", "@modelcontextprotocol/server-filesystem"])
+        XCTAssertEqual(resp.imported.first?.env?.first?.name, "GITHUB_TOKEN")
+        XCTAssertTrue(resp.imported.first?.env?.first?.emptyOrPlaceholder ?? false)
+    }
+
+    // MARK: - SecretFieldResolver.buildValues (pure assembly, no network)
+
+    func testBuildValuesPassesThroughValueModeFields() {
+        let fields = [SecretFieldInput(name: "PORT", value: "8080", mode: .value)]
+        let (env, headers) = SecretFieldResolver.buildValues(fields: fields, written: [:])
+        XCTAssertEqual(env["PORT"], "8080")
+        XCTAssertTrue(headers.isEmpty)
+    }
+
+    func testBuildValuesSubstitutesKeyringPlaceholderForWrittenSecretFields() {
+        let fields = [SecretFieldInput(name: "API_KEY", value: "sk-live-secret", mode: .secret)]
+        let field = fields[0]
+        let (env, _) = SecretFieldResolver.buildValues(fields: fields, written: [field.id: "github-env-api-key"])
+        XCTAssertEqual(env["API_KEY"], "${keyring:github-env-api-key}")
+        // The raw value never appears in the assembled env map.
+        XCTAssertFalse(env.values.contains("sk-live-secret"))
+    }
+
+    func testBuildValuesMixesValueAndSecretFields() {
+        let fields = [
+            SecretFieldInput(name: "REGION", value: "us-east-1", mode: .value),
+            SecretFieldInput(name: "API_KEY", value: "sk-live-secret", mode: .secret),
+        ]
+        let (env, _) = SecretFieldResolver.buildValues(fields: fields, written: [fields[1].id: "svc-env-api-key"])
+        XCTAssertEqual(env["REGION"], "us-east-1")
+        XCTAssertEqual(env["API_KEY"], "${keyring:svc-env-api-key}")
+    }
+
+    func testBuildValuesRoutesHeaderKindToHeadersMap() {
+        let fields = [
+            SecretFieldInput(name: "Authorization", kind: .header, value: "sk-live-secret", mode: .secret),
+            SecretFieldInput(name: "GITHUB_TOKEN", kind: .env, value: "sk-live-secret", mode: .secret),
+        ]
+        let written = [fields[0].id: "svc-header-authorization", fields[1].id: "svc-env-github-token"]
+        let (env, headers) = SecretFieldResolver.buildValues(fields: fields, written: written)
+        XCTAssertEqual(headers["Authorization"], "${keyring:svc-header-authorization}")
+        XCTAssertEqual(env["GITHUB_TOKEN"], "${keyring:svc-env-github-token}")
+        XCTAssertNil(env["Authorization"])
+        XCTAssertNil(headers["GITHUB_TOKEN"])
+    }
+
+    /// An env field and a header field sharing one NAME must not collide on
+    /// one `field.id` — `SecretFieldInput.id` folds in `kind` precisely so
+    /// `written` can hold both refs independently (FR-065).
+    func testFieldIdentityDistinguishesEnvAndHeaderOfSameName() {
+        let env = SecretFieldInput(name: "API_KEY", kind: .env, value: "a", mode: .secret)
+        let header = SecretFieldInput(name: "API_KEY", kind: .header, value: "b", mode: .secret)
+        XCTAssertNotEqual(env.id, header.id)
+    }
 }

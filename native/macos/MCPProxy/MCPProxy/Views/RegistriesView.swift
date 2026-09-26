@@ -1,12 +1,18 @@
 // RegistriesView.swift
 // MCPProxy
 //
-// macOS-tray registry management surface (MCP-902 / MCP-1074):
+// macOS-tray registry SOURCE management surface (MCP-902 / MCP-1074), now
+// Settings -> Catalog Sources (Spec 109 T109):
 //   - lists configured registries with a neutral Official / Custom badge
 //   - an "Add Registry" affordance (POST /api/v1/registries)
 //   - per-custom-registry Edit (PUT /api/v1/registries/{id}) and
 //     Remove (DELETE /api/v1/registries/{id}) via an ellipsis + context menu
-//   - browse + add servers across registries (ServerBrowseView)
+//
+// Server DISCOVERY (browse + add across sources) moved to the Add Server
+// sheet's Catalog tab (CatalogView.swift), which searches the aggregated
+// `GET /api/v1/catalog/search` instead of fanning out per-registry the way
+// the old embedded ServerBrowseView did — mirroring the Web UI's
+// `views/Repositories.vue` -> `/add-server?tab=catalog` + Settings move.
 //
 // Provenance is informational only (MCP-1072): servers added from any registry
 // follow the global quarantine default, so there is no third-party warning.
@@ -34,9 +40,13 @@ struct RegistryProvenanceBadge: View {
     }
 }
 
-// MARK: - Registries View
+// MARK: - Catalog Sources (Settings tab)
 
-struct RegistriesView: View {
+/// Settings -> Catalog Sources (Spec 109 T109): registry SOURCE management
+/// only — the prominent "Add Registry" affordance plus the configured-
+/// registries list with per-custom-registry edit/remove. Server discovery
+/// lives in the Add Server sheet's Catalog tab (CatalogView.swift).
+struct CatalogSourcesTab: View {
     @ObservedObject var appState: AppState
     @Environment(\.fontScale) var fontScale
 
@@ -52,12 +62,6 @@ struct RegistriesView: View {
     /// The custom registry awaiting a Remove confirmation, if any.
     @State private var pendingRemoval: Registry?
 
-    /// Discovery-first layout (MCP-1078): a segmented control splits server
-    /// discovery (default) from registry management so search controls sit on
-    /// top and the results region is the dominant area, while the configured-
-    /// registries management list no longer competes with results for space.
-    @State private var tab: RegistryTab = .discover
-
     private var apiClient: APIClient? { appState.apiClient }
 
     private var customRegistries: [Registry] { registries.filter(\.isCustom) }
@@ -72,22 +76,6 @@ struct RegistriesView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            // Discovery-first segmented control (MCP-1078): "Discover servers"
-            // is the default; "Manage registries" holds the add/edit/remove UI.
-            Picker("", selection: $tab) {
-                ForEach(RegistryTab.allCases) { t in
-                    Text(t.title).tag(t)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal)
-            .padding(.bottom, 8)
-            .accessibilityIdentifier("registries-tab-picker")
-
-            // Banners apply to both tabs: load errors affect discovery (no
-            // registries to search) and management; add/edit/remove successes
-            // surface here too.
             if let success = successMessage {
                 banner(icon: "checkmark.circle.fill", tint: .green, text: success)
             }
@@ -97,15 +85,24 @@ struct RegistriesView: View {
 
             Divider()
 
-            switch tab {
-            case .discover:
-                // Search controls on top, results fill all remaining space.
-                ServerBrowseView(appState: appState, registries: registries)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            case .manage:
-                manageTab
+            // Prominent "Add Registry" button bar (mirrors ServersView).
+            HStack {
+                Button {
+                    activeSheet = RegistrySheet(editing: nil)
+                } label: {
+                    Label("Add Registry", systemImage: "plus.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .accessibilityIdentifier("registry-add-source-button")
+                Spacer()
             }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            configuredList
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .sheet(item: $activeSheet) { sheet in
             AddRegistryView(appState: appState, editing: sheet.editing) { result in
                 let verb = sheet.editing == nil ? "Added" : "Updated"
@@ -136,40 +133,12 @@ struct RegistriesView: View {
         .task { await load() }
     }
 
-    // MARK: Manage tab
-
-    /// Registry management: the prominent "Add Registry" affordance plus the
-    /// configured-registries list with per-custom-registry edit/remove. Lives
-    /// only on this tab so it no longer competes with search results (MCP-1078).
-    @ViewBuilder
-    private var manageTab: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Prominent "Add Registry" button bar (mirrors ServersView).
-            HStack {
-                Button {
-                    activeSheet = RegistrySheet(editing: nil)
-                } label: {
-                    Label("Add Registry", systemImage: "plus.circle.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .accessibilityIdentifier("registry-add-source-button")
-                Spacer()
-            }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-
-            configuredList
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
     // MARK: Header
 
     @ViewBuilder
     private var header: some View {
         HStack {
-            Text("Registries")
+            Text("Catalog Sources")
                 .font(.scaled(.title2, scale: fontScale).bold())
             Spacer()
             Text("\(registries.count) configured")
@@ -343,22 +312,6 @@ struct RegistriesView: View {
             await load()
         } else {
             loadError = result.userMessage
-        }
-    }
-}
-
-/// The two faces of the Registries pane (MCP-1078): discovery-first server
-/// browse (default) and registry management.
-enum RegistryTab: String, CaseIterable, Identifiable {
-    case discover
-    case manage
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .discover: return "Discover servers"
-        case .manage: return "Manage registries"
         }
     }
 }

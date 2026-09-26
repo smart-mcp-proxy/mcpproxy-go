@@ -82,3 +82,76 @@ struct CatalogSearchResponse: Codable {
     let sections: CatalogSections?
     let unavailable: [CatalogSourceError]?
 }
+
+// MARK: - Secret refs (Spec 109 FR-065)
+//
+// `GET /api/v1/secrets/refs` — every keyring/env secret reference currently
+// configured, values always masked. Used by the Add Server sheet's secret
+// toggle (Catalog + Paste tabs) as the "taken names" set so two fields that
+// would compute the same `SecretRefName` collide into `-2`, `-3`, … instead
+// of silently overwriting one another (D28), mirroring the Web UI's
+// `resolveSecretFields` (frontend/src/composables/useSecretFields.ts).
+
+/// One entry of `GET /api/v1/secrets/refs`. Mirrors the masked shape written
+/// by `handleGetSecretRefs` (internal/httpapi/server.go): `type`, `name`,
+/// `original` — never the actual value.
+struct SecretRefEntry: Codable, Equatable {
+    let type: String
+    let name: String
+    let original: String?
+}
+
+/// Response wrapper for `GET /api/v1/secrets/refs`.
+struct SecretRefsResponse: Codable {
+    let refs: [SecretRefEntry]
+    let count: Int?
+}
+
+// MARK: - Import preview (Spec 109 FR-064), content-based
+//
+// `POST /api/v1/servers/import/json?preview=true` — the Paste tab's "detect
+// before add" step. Distinct from `ImportResponse` (API/Models.swift), which
+// models the simpler path-based `POST /api/v1/servers/import/path` summary
+// the Import tab uses; this mirrors `httpapi.ImportedServerResponse`'s FR-064
+// preview enrichment (`summary`, `tags`, `env`, `headers`) that the path-based
+// response never carries.
+
+/// One env-var or header field the import preview detected. Mirrors
+/// `httpapi.EnvFieldPreview` / `HeaderFieldPreview`: `secret_like` already
+/// folds in the D13 name heuristic, so the toggle default needs no
+/// client-side re-derivation.
+struct ImportPreviewField: Codable, Equatable {
+    let name: String
+    let secretLike: Bool
+    let emptyOrPlaceholder: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case secretLike = "secret_like"
+        case emptyOrPlaceholder = "empty_or_placeholder"
+    }
+}
+
+/// One detected server in an import preview. Mirrors
+/// `httpapi.ImportedServerResponse` (only the fields the Paste tab needs).
+struct ImportPreviewServer: Codable, Equatable {
+    let name: String
+    let `protocol`: String
+    let url: String?
+    let command: String?
+    let args: [String]?
+    let summary: String?
+    let tags: [String]?
+    let env: [ImportPreviewField]?
+    let headers: [ImportPreviewField]?
+}
+
+/// Response of `POST /api/v1/servers/import/json` (preview or real). Mirrors
+/// `httpapi.ImportResponse`; only `format` and `imported` are decoded here —
+/// the Paste tab only ever previews (`imported.first`), never calls this
+/// endpoint to perform the real add (it posts the resolved config to
+/// `POST /api/v1/servers` instead, same as the Manual tab).
+struct ImportPreviewResponse: Codable {
+    let format: String?
+    let imported: [ImportPreviewServer]
+}

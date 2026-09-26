@@ -305,6 +305,24 @@ actor APIClient {
         )
     }
 
+    /// Every keyring/env secret reference currently configured (masked), via
+    /// `GET /api/v1/secrets/refs`. Used by the Add Server sheet's secret
+    /// toggle (Spec 109 FR-065) as the "taken names" set before computing a
+    /// new `SecretRefName`.
+    func getSecretRefs() async throws -> [SecretRefEntry] {
+        let response: SecretRefsResponse = try await fetchWrapped(path: "/api/v1/secrets/refs")
+        return response.refs
+    }
+
+    /// Delete a keyring secret via `DELETE /api/v1/secrets/{name}?type=keyring`.
+    /// Used to roll back a secret this session's own Add Server flow just
+    /// wrote, when the add itself then fails (FR-065) — never a pre-existing
+    /// entry, since callers only ever pass back a ref they just got from
+    /// `storeSecret`.
+    func deleteSecret(name: String, type: String = "keyring") async throws {
+        try await deleteAction(path: "/api/v1/secrets/\(name.uriComponentEncoded)?type=\(type.uriComponentEncoded)")
+    }
+
     // MARK: - Connect (Client Registration)
 
     /// Client status model returned by `GET /api/v1/connect` (list, existence
@@ -779,6 +797,34 @@ actor APIClient {
             throw APIClientError.decodingError(
                 underlying: NSError(domain: "ImportDecode", code: -1,
                                     userInfo: [NSLocalizedDescriptionKey: "Cannot decode import response: \(preview)"])
+            )
+        }
+    }
+
+    /// Preview-detect a server from pasted content (URL, command line, or a
+    /// JSON/TOML config) via `POST /api/v1/servers/import/json?preview=true`
+    /// (Spec 109 FR-064). Never performs the import itself — the Paste tab
+    /// posts the resolved config to `POST /api/v1/servers` once the user
+    /// fills in the detected fields, same as the Manual tab.
+    func previewImportContent(_ content: String) async throws -> ImportPreviewResponse {
+        let data = try await postRaw(path: "/api/v1/servers/import/json?preview=true", body: ["content": content])
+        let decoder = JSONDecoder()
+
+        if let wrapper = try? decoder.decode(APIResponse<ImportPreviewResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload
+        }
+        if let errorResp = try? decoder.decode(APIErrorResponse.self, from: data),
+           !errorResp.success, let message = errorResp.error {
+            throw APIClientError.httpError(statusCode: 400, message: message)
+        }
+        do {
+            return try decoder.decode(ImportPreviewResponse.self, from: data)
+        } catch {
+            let preview = String(data: data.prefix(200), encoding: .utf8) ?? "binary"
+            throw APIClientError.decodingError(
+                underlying: NSError(domain: "ImportPreviewDecode", code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "Cannot decode import preview response: \(preview)"])
             )
         }
     }
