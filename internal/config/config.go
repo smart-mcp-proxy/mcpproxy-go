@@ -253,6 +253,14 @@ type Config struct {
 	// (Spec 057). Absent/empty is fully supported — /mcp is unchanged and configs
 	// without this key serialize byte-identically (SC-004).
 	Profiles []ProfileConfig `json:"profiles,omitempty" mapstructure:"profiles"`
+	// AnonymousProfile confines every caller whose request authenticates as
+	// credential kind "anonymous" (no credential, or an unrecognised
+	// non-agent token accepted by the require_mcp_auth:false back-compat
+	// branch) to the named profile (Spec 108 FR-008). Empty (default) means
+	// unconfined, legacy anonymous behaviour. A name that does not match any
+	// configured profile resolves anonymous callers to deny-all and is
+	// reported as a validation warning (data-model.md §1).
+	AnonymousProfile string `json:"anonymous_profile,omitempty" mapstructure:"anonymous-profile"`
 	// Deprecated: TopK is superseded by ToolsLimit and has no runtime effect. Kept for backward compatibility.
 	TopK              int      `json:"top_k,omitempty" mapstructure:"top-k"`
 	ToolsLimit        int      `json:"tools_limit" mapstructure:"tools-limit"`
@@ -2278,8 +2286,25 @@ func (v ValidationError) Error() string {
 // The boot path is deliberately NOT this function — see Validate(), which runs
 // validateDetailedCore() so that a pre-existing bad value on disk cannot brick
 // a load that has nothing to do with the offending server.
+//
+// Spec 108 FR-007: profiles are validated here (never inside
+// validateDetailedCore, which the boot path also runs) via the SAME
+// ValidateProfiles the boot path calls, so a write surface can never persist
+// a profile the boot path would then refuse to load. It stays out of
+// validateDetailedCore for two reasons: Validate() already calls
+// ValidateProfiles separately (to capture its warnings into
+// c.profileWarnings), so folding it into validateDetailedCore would run it
+// twice on every boot/reload; and wrapping its raw, exact-text error in a
+// ValidationError{Field:"profiles"} would prefix "profiles: " onto a message
+// that already starts with "profiles[%d]: ", changing the boot path's error
+// text for every existing Spec 057 profile validation failure, not only the
+// new v3 ones.
 func (c *Config) ValidateDetailed() []ValidationError {
-	return append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
+	errors := append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
+	if _, err := ValidateProfiles(c); err != nil {
+		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
+	}
+	return errors
 }
 
 // oauthRedirectURIErrors reports every per-server `oauth.redirect_uri` that the
@@ -2658,6 +2683,11 @@ func (c *Config) validateDetailedCore() []ValidationError {
 	// Spec 107 FR-014/FR-019: audit_log validated (never mutated) on every
 	// door - boot, PATCH and /config/apply.
 	errors = append(errors, validateAuditLog(c)...)
+
+	// NOTE: profiles (Spec 108 FR-007) are deliberately NOT validated here —
+	// see ValidateDetailed's doc comment for why folding it into this
+	// function would run ValidateProfiles twice on every boot/reload and
+	// change the boot path's error text.
 
 	return errors
 }
