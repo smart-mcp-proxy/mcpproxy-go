@@ -52,6 +52,14 @@ ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend)
 
 const props = defineProps<{ tools: UsageToolStat[] }>()
 
+// Spec 109-k (activity-scope-filters), T119: link map "Usage chart bar (tool
+// x bucket)" -> the calls behind the bar. Chart.js bars are canvas-rendered,
+// not DOM elements a template can put a router-link on, so the click is
+// wired through the chart's own onClick and re-emitted as a plain tool
+// selection — Usage.vue (which knows the active window/status) turns that
+// into the actual `/activity?...` navigation.
+const emit = defineEmits<{ (e: 'select-tool', tool: UsageToolStat): void }>()
+
 // This chart answers "what do my agents use". A name that has never once
 // completed a call answers nothing about use — it is a typo the agent made or a
 // server that was never reachable, and charting it invents a tool catalog out
@@ -83,6 +91,15 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
   indexAxis: 'y',
   responsive: true,
   maintainAspectRatio: false,
+  onClick: (_event, elements) => {
+    const el = elements[0]
+    const tool = el ? charted.value[el.index] : undefined
+    if (tool) emit('select-tool', tool)
+  },
+  onHover: (event, elements) => {
+    const target = event.native?.target as HTMLElement | undefined
+    if (target) target.style.cursor = elements.length > 0 ? 'pointer' : 'default'
+  },
   plugins: {
     legend: { display: false },
     tooltip: {

@@ -185,6 +185,12 @@ func applyActivityScope(ctx context.Context, filter *storage.ActivityFilter) {
 // @Security ApiKeyQuery
 // @Router /api/v1/activity [get]
 func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: GET /activity already honours `agent` (Spec 028),
+	// so it is exempt from the token-alias gate; profile/client/token stay
+	// gated until Spec 108-e/f wire them.
+	if !rejectUnsupportedScopeFilters(w, r, "agent") {
+		return
+	}
 	filter := parseActivityFilters(r)
 	applyActivityScope(r.Context(), &filter)
 
@@ -607,12 +613,18 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 // @Param limit query int false "Maximum records to export (1-50000, default 10000)"
 // @Param offset query int false "Pagination offset (default 0)"
 // @Success 200 {string} string "Streamed activity records"
+// @Failure 400 {object} contracts.APIResponse
 // @Failure 401 {object} contracts.APIResponse
 // @Failure 500 {object} contracts.APIResponse
 // @Security ApiKeyHeader
 // @Security ApiKeyQuery
 // @Router /api/v1/activity/export [get]
 func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: GET /activity/export already honours `agent`
+	// (Spec 028), same exemption as GET /activity.
+	if !rejectUnsupportedScopeFilters(w, r, "agent") {
+		return
+	}
 	filter := parseActivityFilters(r)
 	applyActivityScope(r.Context(), &filter)
 
@@ -775,6 +787,11 @@ func parsePeriodDuration(period string) (time.Duration, error) {
 // @Security ApiKeyQuery
 // @Router /api/v1/activity/summary [get]
 func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: /activity/summary ignores `agent` today, so it is
+	// gated exactly like `token` (codex round 4) — no exemption passed.
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	// Parse period parameter
 	period := r.URL.Query().Get("period")
 	if period == "" {
@@ -1153,6 +1170,11 @@ func parseUsageParams(r *http.Request) (usageParams, error) {
 // @Security ApiKeyQuery
 // @Router /api/v1/activity/usage [get]
 func (s *Server) handleActivityUsage(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: /activity/usage ignores `agent` today (parseUsageParams
+	// reads only window/server/tool/status/top/sort) — gated like `token`.
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	params, err := parseUsageParams(r)
 	if err != nil {
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
@@ -1211,6 +1233,7 @@ func buildUsageResponse(snap *internalRuntime.UsageAggregate, tokens *contracts.
 	if tokens != nil && !p.scoped {
 		resp.TokensSaved = tokens.SavedTokens
 		resp.TokensSavedPercentage = tokens.SavedTokensPercentage
+		resp.TokensSavedEstimated = tokens.Estimated
 	}
 	if snap == nil {
 		return resp

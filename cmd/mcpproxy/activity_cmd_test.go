@@ -728,6 +728,112 @@ func TestDisplayActivityEvent_FilteredByServer(t *testing.T) {
 	assert.Empty(t, strings.TrimSpace(output))
 }
 
+// TestDisplayActivityEvent_JSONOutput_FilteredByServer confirms JSON mode
+// (activity watch -o json) honors --server the same as text mode instead of
+// printing every raw event unfiltered. Regression test for the review finding
+// that displayActivityEvent's `outputFormat == "json"` branch returned before
+// any of the --server/--type/--view/--from/--to filters ran.
+func TestDisplayActivityEvent_JSONOutput_FilteredByServer(t *testing.T) {
+	eventData := `{"payload":{"id":"01JFXYZ123ABC","server_name":"filesystem","tool_name":"read_file","status":"success","duration_ms":100},"timestamp":1234567890}`
+
+	oldServer := activityServer
+	activityServer = "github" // Filter for github only; event is filesystem.
+	defer func() { activityServer = oldServer }()
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	displayActivityEvent("activity.tool_call.completed", eventData, "json")
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	output := buf.String()
+
+	assert.Empty(t, strings.TrimSpace(output), "JSON mode must apply --server filter, not stream every event")
+}
+
+// TestDisplayActivityEvent_JSONOutput_FilteredByView confirms JSON mode
+// honors --view the same as text mode.
+func TestDisplayActivityEvent_JSONOutput_FilteredByView(t *testing.T) {
+	eventData := `{"payload":{"id":"01JFXYZ123ABC","server_name":"github","tool_name":"create_issue","status":"success","duration_ms":245},"timestamp":1234567890}`
+
+	oldView := activityView
+	activityView = "system" // tool_call is not a "system" event.
+	defer func() { activityView = oldView }()
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	displayActivityEvent("activity.tool_call.completed", eventData, "json")
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	output := buf.String()
+
+	assert.Empty(t, strings.TrimSpace(output), "JSON mode must apply --view filter, not stream every event")
+}
+
+// TestDisplayActivityEvent_JSONOutput_FilteredByFromTo confirms JSON mode
+// honors --from/--to the same as text mode.
+func TestDisplayActivityEvent_JSONOutput_FilteredByFromTo(t *testing.T) {
+	// timestamp 1234567890 (2009) is far outside the --from window below.
+	eventData := `{"payload":{"id":"01JFXYZ123ABC","server_name":"github","tool_name":"create_issue","status":"success","duration_ms":245},"timestamp":1234567890}`
+
+	oldFrom, oldTo := activityWatchFromTime, activityWatchToTime
+	activityWatchFromTime = time.Now().Add(-time.Hour)
+	activityWatchToTime = time.Time{}
+	defer func() { activityWatchFromTime, activityWatchToTime = oldFrom, oldTo }()
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	displayActivityEvent("activity.tool_call.completed", eventData, "json")
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	output := buf.String()
+
+	assert.Empty(t, strings.TrimSpace(output), "JSON mode must apply --from/--to range, not stream every event")
+}
+
+// TestDisplayActivityEvent_JSONOutput_PassesFilters confirms JSON mode still
+// prints events that DO match the active filters (the fix must not turn JSON
+// mode into an always-empty no-op).
+func TestDisplayActivityEvent_JSONOutput_PassesFilters(t *testing.T) {
+	eventData := `{"payload":{"id":"01JFXYZ123ABC","server_name":"github","tool_name":"create_issue","status":"success","duration_ms":245},"timestamp":1234567890}`
+
+	oldServer := activityServer
+	activityServer = "github"
+	defer func() { activityServer = oldServer }()
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	displayActivityEvent("activity.tool_call.completed", eventData, "json")
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	output := buf.String()
+
+	assert.Contains(t, output, eventData)
+}
+
 // =============================================================================
 // SSE Parsing Tests
 // =============================================================================
@@ -861,10 +967,10 @@ func TestOutputActivityError_TableFormat(t *testing.T) {
 
 func TestFormatSensitiveDataIndicator(t *testing.T) {
 	tests := []struct {
-		name        string
-		activity    map[string]interface{}
-		noIcons     bool
-		expected    string
+		name     string
+		activity map[string]interface{}
+		noIcons  bool
+		expected string
 	}{
 		{
 			name:     "no metadata",
