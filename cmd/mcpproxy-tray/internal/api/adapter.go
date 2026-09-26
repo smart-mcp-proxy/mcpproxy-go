@@ -282,6 +282,9 @@ func (a *ServerAdapter) GetAllServers() ([]map[string]interface{}, error) {
 				"summary":     server.Health.Summary,
 				"detail":      server.Health.Detail,
 				"action":      server.Health.Action,
+				"status":      server.Health.Status,
+				"usable":      server.Health.Usable,
+				"actions":     server.Health.Actions,
 			}
 		}
 

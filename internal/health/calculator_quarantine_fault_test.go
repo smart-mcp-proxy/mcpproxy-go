@@ -80,8 +80,10 @@ func TestCalculateHealth_DisabledWithStaleErrorStaysHealthy(t *testing.T) {
 // connect until the user signs in, yet the quarantine early return used to
 // answer level=healthy. The Web UI then showed a red "needs you to sign in"
 // alert beside a green-meaning health level. It must read as an attention
-// item (amber, like the enabled-server first sign-in) while the admin
-// contract — quarantined, Approve as the next step — is unchanged.
+// item (amber, like the enabled-server first sign-in) — and, per FR-010, with
+// the Login action, not just an upgraded Level/Summary: signing in is the
+// operator's actual next step, ahead of approval (Approve stays available as
+// Actions[1], so the admin contract is not dropped, only reordered).
 func TestCalculateHealth_QuarantinedAwaitingOAuthSignIn(t *testing.T) {
 	loginErr := "OAuth authentication required for server 'github' - login available via Web UI or 'mcpproxy auth login --server=github'"
 	cases := []struct {
@@ -102,8 +104,10 @@ func TestCalculateHealth_QuarantinedAwaitingOAuthSignIn(t *testing.T) {
 			result := CalculateHealth(in, nil)
 			assert.Equal(t, LevelDegraded, result.Level, "a server that cannot connect until sign-in is not healthy")
 			assert.Equal(t, StateQuarantined, result.AdminState)
-			assert.Equal(t, ActionApprove, result.Action, "approval is still the operator's next step")
-			assert.Equal(t, "Quarantined — Sign-in required", result.Summary)
+			assert.Equal(t, ActionLogin, result.Action, "FR-010: signing in is the operator's actual next step")
+			assert.Equal(t, StatusSignInRequired, result.Status)
+			assert.Equal(t, []string{ActionLogin, ActionApprove}, result.Actions, "approval is still offered, just not first")
+			assert.Equal(t, "Sign-in required", result.Summary)
 			assert.Equal(t, loginErr, result.Detail)
 		})
 	}
@@ -122,8 +126,8 @@ func TestCalculateHealth_QuarantinedOAuthReauthIsUnhealthy(t *testing.T) {
 	}, nil)
 	assert.Equal(t, LevelUnhealthy, result.Level)
 	assert.Equal(t, StateQuarantined, result.AdminState)
-	assert.Equal(t, ActionApprove, result.Action)
-	assert.Equal(t, "Quarantined — Authentication required", result.Summary)
+	assert.Equal(t, ActionLogin, result.Action, "FR-010: signing in is the operator's actual next step")
+	assert.Equal(t, "Authentication required", result.Summary)
 }
 
 // The reauth markers are unambiguous regardless of whether OAuth was
@@ -147,8 +151,8 @@ func TestCalculateHealth_QuarantinedAutodetectedOAuthReauthIsUnhealthy(t *testin
 	}, nil)
 	assert.Equal(t, LevelUnhealthy, result.Level, "a broken stored token is not healthy even for autodetected OAuth")
 	assert.Equal(t, StateQuarantined, result.AdminState)
-	assert.Equal(t, ActionApprove, result.Action)
-	assert.Equal(t, "Quarantined — Authentication required", result.Summary)
+	assert.Equal(t, ActionLogin, result.Action, "FR-010: signing in is the operator's actual next step")
+	assert.Equal(t, "Authentication required", result.Summary)
 	assert.Equal(t, reauthErr, result.Detail)
 }
 
@@ -179,7 +183,7 @@ func TestCalculateHealth_QuarantinedPendingAuthWithoutError(t *testing.T) {
 		State:       "pending_auth",
 	}, nil)
 	assert.Equal(t, LevelUnhealthy, result.Level)
-	assert.Equal(t, ActionApprove, result.Action)
-	assert.Equal(t, "Quarantined — Authentication required", result.Summary)
+	assert.Equal(t, ActionLogin, result.Action, "FR-010: signing in is the operator's actual next step")
+	assert.Equal(t, "Authentication required", result.Summary)
 	assert.Empty(t, result.Detail)
 }

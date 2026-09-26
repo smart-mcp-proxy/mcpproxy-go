@@ -108,8 +108,12 @@ enum HealthAction: String, Codable, CaseIterable {
     case viewLogs = "view_logs"
     case setSecret = "set_secret"
     case configure
+    case editURL = "edit_url"
 
-    /// Human-readable button label.
+    /// Human-readable button label. Kept for the enum's own call sites
+    /// (decoding/matching); a renderer choosing the CROSS-SURFACE wording the
+    /// Web UI and CLI also show (FR-014) uses `HealthStatus.actionLabels`
+    /// instead — see AttentionRow in DashboardView.swift.
     var label: String {
         switch self {
         case .login:      return "Sign in"
@@ -119,6 +123,7 @@ enum HealthAction: String, Codable, CaseIterable {
         case .viewLogs:   return "View Logs"
         case .setSecret:  return "Set Secret"
         case .configure:  return "Configure"
+        case .editURL:    return "Edit URL"
         }
     }
 }
@@ -133,6 +138,16 @@ struct HealthStatus: Codable, Equatable {
     let summary: String
     let detail: String?
     let action: String?
+    /// The ONE status vocabulary rendered as text on every surface (Spec 109
+    /// FR-010/FR-011). `level` stays a severity signal for badge/tray coloring
+    /// only — no renderer may print it as text. Optional at decode time only
+    /// for tolerance against an older core; every current payload sets it.
+    let status: String?
+    /// True only when `status == "ready"`.
+    let usable: Bool?
+    /// Every applicable next step, in priority order (FR-012). `action`
+    /// always equals `actions.first`, or is nil/empty when `actions` is empty.
+    let actions: [String]?
 
     enum CodingKeys: String, CodingKey {
         case level
@@ -140,6 +155,22 @@ struct HealthStatus: Codable, Equatable {
         case summary
         case detail
         case action
+        case status
+        case usable
+        case actions
+    }
+
+    /// Every actionable next step, falling back to the legacy singular
+    /// `action` when `actions` is absent — an old-core payload that only
+    /// sends `level`/`admin_state`/`summary`/`action` (mirrors `isUsable`'s
+    /// own old-core tolerance below). Without this fallback, a renderer that
+    /// gates on `actions` alone (e.g. ServerDetailView's "Suggested Action"
+    /// row) silently drops for that payload shape — a regression from
+    /// before Spec 109.
+    var actionsOrLegacyFallback: [String] {
+        if let actions, !actions.isEmpty { return actions }
+        if let action, !action.isEmpty { return [action] }
+        return []
     }
 
     /// Parsed health level enum, falling back to `.unhealthy` for unknown values.
@@ -157,6 +188,56 @@ struct HealthStatus: Codable, Equatable {
         guard let action, !action.isEmpty else { return nil }
         return HealthAction(rawValue: action)
     }
+
+    /// Cross-surface label for `status` (Spec 109 FR-014),
+    /// binding for the Web UI, the macOS window and tray, and the CLI table.
+    /// Falls back to the raw value for forward-compat with an unrecognized
+    /// status (never crashes).
+    var statusLabel: String {
+        guard let status, !status.isEmpty else { return summary }
+        return HealthStatus.statusLabels[status] ?? status
+    }
+
+    /// True only when `status == "ready"`; defaults to the pre-Spec-109
+    /// reading (healthy level, not disabled/quarantined) when the field is
+    /// absent (older core).
+    ///
+    /// A pre-Spec-109 core's "connecting"/"idle" branch
+    /// (internal/health/calculator.go) already reported that exact shape —
+    /// level=healthy, admin_state=enabled, this literal summary — for a
+    /// mid-connect server, indistinguishable from a fully connected one on
+    /// level+adminState alone. Without this check a newer tray talking to an
+    /// older core would call a server usable before it can serve tool calls.
+    var isUsable: Bool {
+        if let usable { return usable }
+        if summary == "Connecting..." { return false }
+        return healthLevel == .healthy && adminStateEnum == .enabled
+    }
+
+    /// One label table for every `status` value (Spec 109 FR-014).
+    static let statusLabels: [String: String] = [
+        "ready": "Online",
+        "connecting": "Connecting",
+        "sign_in_required": "Sign-in required",
+        "needs_review": "Needs review",
+        "needs_secret": "Secret required",
+        "needs_config": "Needs configuration",
+        "error": "Error",
+        "disabled": "Disabled",
+    ]
+
+    /// One label table for a primary button keyed on an `actions` entry
+    /// (Spec 109 FR-014).
+    static let actionLabels: [String: String] = [
+        "login": "Sign in",
+        "set_secret": "Add secret",
+        "configure": "Fix config",
+        "edit_url": "Edit URL",
+        "approve": "Review",
+        "restart": "Restart",
+        "view_logs": "View logs",
+        "enable": "Enable",
+    ]
 }
 
 // MARK: - OAuth Status

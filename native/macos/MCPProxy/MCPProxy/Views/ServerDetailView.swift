@@ -22,6 +22,17 @@ enum ServerDetailTab: String, CaseIterable {
     }
 }
 
+/// Payload for `.showServerDetail` when the caller needs a specific tab open
+/// — e.g. the Dashboard's AttentionRow routing a `set_secret`/`configure`/
+/// `edit_url` action to Config, or `view_logs` to Logs, instead of silently
+/// no-op'ing an action `performAction` can't complete via a single API call.
+/// Older posters (tray menu, ToolsView) still send a bare `String` and land
+/// on the default `.tools` tab.
+struct ServerDetailTarget {
+    let serverName: String
+    let tab: ServerDetailTab
+}
+
 // MARK: - Isolation Override (GH #1142)
 
 /// The three states of the per-server `isolation.enabled` override.
@@ -79,11 +90,17 @@ struct ServerDetailView: View {
     @State private var isApproving = false
     @State private var actionMessage: String?
 
-    init(server: ServerStatus, appState: AppState, onDismiss: @escaping () -> Void) {
+    init(
+        server: ServerStatus,
+        appState: AppState,
+        initialTab: ServerDetailTab = .tools,
+        onDismiss: @escaping () -> Void
+    ) {
         self.initialServer = server
         self.appState = appState
         self.onDismiss = onDismiss
         self._server = State(initialValue: server)
+        self._selectedTab = State(initialValue: initialTab)
     }
 
     // Edit mode state for Config tab
@@ -170,7 +187,9 @@ struct ServerDetailView: View {
             Circle()
                 .fill(server.statusColor)
                 .frame(width: 12, height: 12)
-                .accessibilityLabel("Server health: \(server.health?.level ?? "unknown")")
+                // FR-011: no surface may render `level` as text, including
+                // accessibility labels — use the one status label table.
+                .accessibilityLabel("Server health: \(server.health?.statusLabel ?? "unknown")")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
@@ -768,15 +787,26 @@ struct ServerDetailView: View {
                     }
 
                     if let health = server.health {
+                        // Spec 109 FR-011: no surface may render `level` as text — the
+                        // Status row renders `status` through the one label table
+                        // (HealthStatus.statusLabel). `level` still exists as a
+                        // severity signal (badge/tray coloring) elsewhere, just not here.
                         configSection(title: "Health") {
-                            configRow(label: "Level", value: health.level)
+                            configRow(label: "Status", value: health.statusLabel)
                             configRow(label: "Admin State", value: health.adminState)
                             configRow(label: "Summary", value: health.summary)
                             if let detail = health.detail, !detail.isEmpty {
                                 configRow(label: "Detail", value: detail)
                             }
-                            if let action = health.action, !action.isEmpty {
-                                configRow(label: "Action", value: action)
+                            // actionsOrLegacyFallback falls back to the
+                            // legacy singular `action` when `actions` is
+                            // absent (an old-core payload) — without it this
+                            // row silently dropped for that payload shape, a
+                            // regression from before this PR.
+                            let actions = health.actionsOrLegacyFallback
+                            if !actions.isEmpty {
+                                let labels = actions.map { HealthStatus.actionLabels[$0] ?? $0 }
+                                configRow(label: "Suggested Action", value: labels.joined(separator: ", "))
                             }
                         }
                     }

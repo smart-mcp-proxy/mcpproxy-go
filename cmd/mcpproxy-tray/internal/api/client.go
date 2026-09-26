@@ -35,6 +35,17 @@ type HealthStatus struct {
 	Summary    string `json:"summary"`          // e.g., "Connected (5 tools)"
 	Detail     string `json:"detail,omitempty"` // Optional longer explanation
 	Action     string `json:"action,omitempty"` // "login", "restart", "enable", "approve", "set_secret", "configure", "view_logs", ""
+
+	// Status is the ONE status vocabulary rendered as text on every surface
+	// (Spec 109 FR-010/FR-011) — mirrors contracts.HealthStatus.Status.
+	// Unlike Level (severity/coloring only), this may be printed as text.
+	Status string `json:"status"`
+	// Usable reports whether the server can currently serve tool calls.
+	Usable bool `json:"usable"`
+	// Actions lists every applicable next step in priority order (FR-012).
+	// Always non-nil (empty slice, never null) on a current core; may be
+	// absent from an older core's payload.
+	Actions []string `json:"actions"`
 }
 
 // Server represents a server from the API
@@ -513,6 +524,9 @@ func (c *Client) GetServers() ([]Server, error) {
 				Summary:    getString(healthMap, "summary"),
 				Detail:     getString(healthMap, "detail"),
 				Action:     getString(healthMap, "action"),
+				Status:     getString(healthMap, "status"),
+				Usable:     getBool(healthMap, "usable"),
+				Actions:    getStringSlice(healthMap, "actions"),
 			}
 			if c.logger != nil && server.Health.Level != "" {
 				c.logger.Debugw("Health extracted",
@@ -1103,6 +1117,20 @@ func getFloat64(m map[string]interface{}, key string) float64 {
 		return v
 	}
 	return 0.0
+}
+
+func getStringSlice(m map[string]interface{}, key string) []string {
+	raw, ok := m[key].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func keys(m map[string]interface{}) []string {
