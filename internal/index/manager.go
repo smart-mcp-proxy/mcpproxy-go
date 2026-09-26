@@ -155,10 +155,29 @@ func (m *Manager) GetDocumentCount() (uint64, error) {
 	return m.bleveIndex.GetDocumentCount()
 }
 
-// RebuildIndex rebuilds the entire index
+// RebuildIndex re-creates this Manager's index with the current mapping,
+// keeping every document (see BleveIndex.RebuildIndex).
+//
+// On the root, the rebuild renames the shared index directory, which also
+// holds the per-profile indexes. Open profile indexes are closed and dropped
+// first — Windows cannot rename a directory with open files inside — and
+// ForProfile reopens them lazily, unchanged. A caller still holding a dropped
+// sub-Manager gets errors from its closed index, as after DropProfile.
 func (m *Manager) RebuildIndex() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	for slug, sub := range m.profiles {
+		sub.mu.Lock()
+		if sub.bleveIndex != nil {
+			if err := sub.bleveIndex.Close(); err != nil {
+				m.logger.Warn("Failed to close profile index before rebuild",
+					zap.String("profile", slug), zap.Error(err))
+			}
+		}
+		sub.mu.Unlock()
+		delete(m.profiles, slug)
+	}
 
 	return m.bleveIndex.RebuildIndex()
 }

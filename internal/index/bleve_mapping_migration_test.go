@@ -659,3 +659,24 @@ func TestNewBleveIndexAt_RestoresProfilesFromRetiredLeftover(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1), count)
 }
+
+// Rebuilding the shared index renames its directory, which holds profiles/.
+// Open per-profile indexes are closed first (Windows cannot rename a directory
+// with open files inside) and reopen lazily with their documents intact.
+func TestManager_RebuildIndexWithOpenProfileIndex(t *testing.T) {
+	m, err := NewManager(t.TempDir(), zap.NewNop())
+	require.NoError(t, err)
+	defer m.Close()
+	require.NoError(t, m.BatchIndexTools(migrationFixtureTools()))
+	require.NoError(t, m.RebuildProfileFromShared("dev", []string{"github"}))
+	require.Contains(t, m.ProfileSlugs(), "dev")
+
+	require.NoError(t, m.RebuildIndex())
+
+	assert.NotContains(t, m.ProfileSlugs(), "dev", "open profile indexes are closed before the directory rename")
+	pm, err := m.ForProfile("dev")
+	require.NoError(t, err)
+	count, err := pm.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), count)
+}
