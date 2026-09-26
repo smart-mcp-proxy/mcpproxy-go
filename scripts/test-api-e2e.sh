@@ -38,9 +38,14 @@ fi
 API_BASE="${BASE_URL}/api/v1"
 TEST_DATA_DIR="./test-data"
 MCPPROXY_PID=""
+# Identity (see proc_id below) of MCPPROXY_PID, captured right after it is
+# spawned, so cleanup() can tell this PID apart from an unrelated process the
+# OS reused it for by the time cleanup() runs.
+MCPPROXY_PID_ID=""
 # The audit_log sub-test's own core; declared here so cleanup() can stop it if
 # the script exits before that sub-test's own shutdown path runs.
 AUDIT_PID=""
+AUDIT_PID_ID=""
 # argv signature of the spec-046 launcher-test fixture (see the template).
 LAUNCHER_PATTERN='launcher-server.*--port 39933'
 # Physical cwd of this run; the launcher fixture inherits it from our core.
@@ -182,9 +187,16 @@ cleanup() {
     done
 
     # Stop this run's own cores by PID (the audit one only if its sub-test
-    # exited before stopping it).
-    stop_pid "$MCPPROXY_PID"
-    stop_pid "$AUDIT_PID"
+    # exited before stopping it). Re-verify each one's identity — captured
+    # right after it was spawned, in MCPPROXY_PID_ID/AUDIT_PID_ID — immediately
+    # before signalling: descendant_pids() above only ever returns TRUE
+    # descendants of these roots, never the roots themselves, so own_tree does
+    # not cover this case, and without this guard a core that already exited
+    # on its own could have its PID reused by the OS for an unrelated process
+    # between spawn and here (same guard used for descendants/leftovers below
+    # and for stale/launcher PIDs above).
+    [ -n "$MCPPROXY_PID" ] && [ "$(proc_id "$MCPPROXY_PID")" = "$MCPPROXY_PID_ID" ] && stop_pid "$MCPPROXY_PID"
+    [ -n "$AUDIT_PID" ] && [ "$(proc_id "$AUDIT_PID")" = "$AUDIT_PID_ID" ] && stop_pid "$AUDIT_PID"
 
     # Reap anything this run spawned that outlived its core (stdio upstreams,
     # the launcher-test fixture if the launcher-lifecycle test failed before the
@@ -734,6 +746,7 @@ fi
 # Start server in background
 $MCPPROXY_BINARY serve --config="$CONFIG_FILE" --log-level=info > "/tmp/mcpproxy_e2e.log" 2>&1 &
 MCPPROXY_PID=$!
+MCPPROXY_PID_ID="$(proc_id "$MCPPROXY_PID")"
 
 echo "Started mcpproxy with PID: $MCPPROXY_PID"
 echo "Log file: /tmp/mcpproxy_e2e.log"
@@ -1400,6 +1413,7 @@ else
 
     "$AUDIT_BINARY" serve --config="$AUDIT_CONFIG_FILE" --log-level=info > "$AUDIT_SERVER_LOG" 2>&1 &
     AUDIT_PID=$!
+    AUDIT_PID_ID="$(proc_id "$AUDIT_PID")"
     echo "Started audit-log instance with PID: $AUDIT_PID (port $AUDIT_PORT)"
 
     if ! wait_for_audit_server; then
