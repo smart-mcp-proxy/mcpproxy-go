@@ -128,6 +128,19 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(health.healthAction)
     }
 
+    func testHealthActionParsesEditURL() throws {
+        // HealthAction previously had no case for "edit_url", so
+        // HealthAction(rawValue:) returned nil for it and the Dashboard's
+        // AttentionRow rendered no action button at all for a server whose
+        // actions[0] is edit_url — silently missing the CTA that the Web UI
+        // and CLI both show.
+        let json = """
+        {"level": "unhealthy", "admin_state": "enabled", "summary": "Bad endpoint", "action": "edit_url"}
+        """
+        let health = try decode(HealthStatus.self, from: json)
+        XCTAssertEqual(health.healthAction, .editURL)
+    }
+
     // MARK: - HealthLevel Enum
 
     func testHealthLevelSFSymbolNames() {
@@ -152,6 +165,7 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(HealthAction.viewLogs.label, "View Logs")
         XCTAssertEqual(HealthAction.setSecret.label, "Set Secret")
         XCTAssertEqual(HealthAction.configure.label, "Configure")
+        XCTAssertEqual(HealthAction.editURL.label, "Edit URL")
     }
 
     // MARK: - ServerStatus
@@ -969,7 +983,7 @@ final class ModelsTests: XCTestCase {
 
     func testHealthActionCaseIterable() {
         let allCases = HealthAction.allCases
-        XCTAssertEqual(allCases.count, 7)
+        XCTAssertEqual(allCases.count, 8)
     }
 
     func testHealthActionRawValues() {
@@ -980,6 +994,7 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(HealthAction.enable.rawValue, "enable")
         XCTAssertEqual(HealthAction.approve.rawValue, "approve")
         XCTAssertEqual(HealthAction.configure.rawValue, "configure")
+        XCTAssertEqual(HealthAction.editURL.rawValue, "edit_url")
     }
 
     // MARK: - ActivityEntry glance accessors (spec 090, data-model.md)
