@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Spec 108 (Profiles v3) T018: describe_tool on a profile-excluded tool must
@@ -45,6 +47,24 @@ func TestDescribeTool_ProfileV3_ExcludedEqualsNonexistent(t *testing.T) {
 		resp := callDescribe(t, proxy, legacyCtx, []interface{}{"github:create_issue"})
 		require.Empty(t, resp.Errors)
 		require.Len(t, resp.Definitions, 1, "legacy has no policy field set — create_issue is simply admitted")
+	})
+
+	t.Run("a tool that is BOTH policy-excluded and pending approval still answers the uniform not-found, never the pending lock (zcode review round 1)", func(t *testing.T) {
+		require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "github", ToolName: "create_issue", Status: storage.ToolApprovalStatusPending,
+		}))
+		t.Cleanup(func() {
+			require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+				ServerName: "github", ToolName: "create_issue", Status: storage.ToolApprovalStatusApproved,
+			}))
+		})
+
+		resp := callDescribe(t, proxy, ctx, []interface{}{"github:create_issue"})
+		require.Empty(t, resp.Definitions)
+		require.Len(t, resp.Errors, 1)
+		resp.Errors[0]["id"] = "SUBSTITUTED"
+		assert.Equal(t, nonexistent.Errors[0], resp.Errors[0],
+			"a policy exclusion must win over the pending-approval lock's own, more specific reason — describe_tool must never confirm the tool exists")
 	})
 
 	t.Run("pin source: the same uniform not-found, without ever naming the profile", func(t *testing.T) {

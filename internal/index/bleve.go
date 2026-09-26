@@ -804,14 +804,20 @@ func (b *BleveIndex) SearchToolsAdmitted(queryStr string, limit int, admit func(
 			tool := readToolMetadata(hit.ID, hit.Fields)
 			switch admit(Hit{Server: tool.ServerName, Tool: config.RawToolName(tool)}) {
 			case Admit:
-				results = append(results, &config.SearchResult{Tool: tool, Score: hit.Score})
+				// The page itself stops growing once it holds `limit`
+				// admitted hits, but the SCAN does not stop here: a
+				// RejectPolicy hit ranked below the cut must still be
+				// counted (FR-011 "over the full match set" — codex/zcode
+				// review round 1). Returning as soon as the page filled
+				// silently undercounted hiddenByPolicy for every match
+				// ranked after the limit-th admitted one.
+				if len(results) < limit {
+					results = append(results, &config.SearchResult{Tool: tool, Score: hit.Score})
+				}
 			case RejectPolicy:
 				hiddenByPolicy++
 			case RejectScope:
 				// Invisible: never counted, never collected.
-			}
-			if len(results) >= limit {
-				return results, hiddenByPolicy, nil
 			}
 		}
 		if len(searchResult.Hits) == 0 || uint64(from+pageSize) >= searchResult.Total {

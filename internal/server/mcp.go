@@ -2076,6 +2076,15 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		seen[e.Name] = true
 	}
 	quarantinedMatches := p.collectQuarantinedToolMatches(query, serverDiscoverable, seen, p.serverToolNames)
+	// Spec 108 FR-011/FR-013 (zcode review round 1): collectQuarantinedToolMatches
+	// filters only by server scope, so a tool that is BOTH policy-excluded and
+	// quarantined/pending/changed would otherwise be named as a locked entry
+	// and counted as "locked" — exactly the naming and miscounting FR-013
+	// forbids for a profile-hidden tool. Post-filtered here (rather than
+	// threading policy into the shared helper, which a pre-existing,
+	// non-v3 test file also calls) so a policy exclusion makes such a tool
+	// silently invisible, precisely like an in-scope-but-excluded index hit.
+	quarantinedMatches = p.filterLockedMatchesByPolicy(quarantinedMatches, policy)
 	droppedCount += len(quarantinedMatches)
 	if includeDisabled {
 		disabledEntries = append(quarantinedMatches, disabledEntries...)
@@ -7200,6 +7209,34 @@ func disabledToolRemediation(status contracts.DisabledToolStatus) string {
 // second-pass collects before stopping. The response itself is capped lower
 // (min(limit,10)); this just bounds work on the opt-in path.
 const maxQuarantinedMatches = 50
+
+// filterLockedMatchesByPolicy drops any collectQuarantinedToolMatches entry
+// the Spec 108 tool policy excludes (FR-011/FR-013): that helper filters only
+// by server scope, so without this pass a policy-excluded tool that also
+// happens to be quarantined or pending/changed approval would be NAMED as a
+// locked entry (and counted as one) instead of staying silently invisible
+// like every other policy-excluded tool. policy nil (no profile, or a legacy
+// one) is a no-op — matches pass through unfiltered, byte-identical to
+// pre-108 (SC-003). Tools resolved through the same seam every other 108-b
+// check uses (profile.EffectiveAnnotations = resolveExactToolIdentity), so a
+// quarantined tool this proxy cannot classify (identity unresolved) fails
+// closed to destructive, exactly like every other enforcement point.
+func (p *MCPProxyServer) filterLockedMatchesByPolicy(matches []contracts.LockedToolEntry, policy *profile.CompiledPolicy) []contracts.LockedToolEntry {
+	if policy == nil || len(matches) == 0 {
+		return matches
+	}
+	filtered := make([]contracts.LockedToolEntry, 0, len(matches))
+	for _, m := range matches {
+		toolName := strings.TrimPrefix(m.Name, m.Server+":")
+		annotations, found := p.EffectiveAnnotations(m.Server, toolName)
+		intrinsic := profile.IntrinsicTier(annotations, found)
+		if admitted, _, _ := policy.Decide(m.Server, toolName, intrinsic); !admitted {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	return filtered
+}
 
 // collectQuarantinedToolMatches finds tools that exist but are quarantined and
 // whose name matches the query, returning lean locked entries (no description

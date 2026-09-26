@@ -123,6 +123,43 @@ func TestSearchToolsAdmitted_FiltersBeforeLimitLikeScoped(t *testing.T) {
 		assert.Equal(t, 1, hiddenByPolicy, "the excluded in-scope tool must be counted")
 	})
 
+	t.Run("hiddenByPolicy still counts a RejectPolicy hit ranked BELOW an already-full page (zcode review round 1)", func(t *testing.T) {
+		// Two admitted "a" tools plus one policy-excluded "a" tool that
+		// ranks LAST among the three (single mention vs the others'
+		// heavier repetition) — with limit=2 the page fills on the first
+		// two admitted hits, and the excluded one is scanned afterward.
+		idx2, err := NewBleveIndex(t.TempDir(), zap.NewNop())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = idx2.Close() })
+		require.NoError(t, idx2.IndexTool(&config.ToolMetadata{
+			Name: "a:keep_one", ServerName: "a",
+			Description: "gadget gadget gadget gadget gadget gadget gadget gadget", ParamsJSON: "{}",
+		}))
+		require.NoError(t, idx2.IndexTool(&config.ToolMetadata{
+			Name: "a:keep_two", ServerName: "a",
+			Description: "gadget gadget gadget gadget gadget gadget", ParamsJSON: "{}",
+		}))
+		require.NoError(t, idx2.IndexTool(&config.ToolMetadata{
+			Name: "a:excluded_one", ServerName: "a",
+			Description: "gadget", ParamsJSON: "{}",
+		}))
+
+		admit := func(h Hit) Admission {
+			if h.Server != "a" {
+				return RejectScope
+			}
+			if h.Tool == "excluded_one" {
+				return RejectPolicy
+			}
+			return Admit
+		}
+		results, hiddenByPolicy, err := idx2.SearchToolsAdmitted("gadget", 2, admit)
+		require.NoError(t, err)
+		require.Len(t, results, 2, "the page must fill with the two admitted hits")
+		assert.Equal(t, 1, hiddenByPolicy,
+			"the excluded hit ranked below the already-full page must still be counted (FR-011: counted over the full match set)")
+	})
+
 	t.Run("RejectScope is never counted in hiddenByPolicy", func(t *testing.T) {
 		_, hiddenByPolicy, err := idx.SearchToolsAdmitted(admittedSeamQuery, 10, serverOnlyAdmit(inScopeA))
 		require.NoError(t, err)

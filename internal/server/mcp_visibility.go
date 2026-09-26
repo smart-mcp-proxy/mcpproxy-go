@@ -124,6 +124,28 @@ func (p *MCPProxyServer) toolVisibleToSession(ctx context.Context, serverName, t
 			return false, visReasonServerNotInScope
 		}
 	}
+	// Spec 108 FR-011/T023 (zcode review round 1): describe_tool's contract
+	// makes NO shape change for an excluded tool — the caller must see the
+	// SAME uniform not-found response a nonexistent id gets
+	// (contracts/mcp-tools.md "describe_tool"), for EVERY excluded tool,
+	// including one that also happens to be quarantined, pending/changed, or
+	// operator-disabled. Ordered right after the scope gate (before the
+	// identity/lock gates below) precisely so it wins over their more
+	// specific reasons: those gates exist to narrow what an otherwise-
+	// admitted tool reveals, and a policy exclusion must never be
+	// downgraded to a shape that confirms the tool's existence (a lock
+	// reason does exactly that). Safe to run even when profileName is
+	// legacy or "" (policy is then nil, or Decide only ever agrees with the
+	// scope check already passed above).
+	if profileName != "" {
+		if policy := profileIdx.PolicyFor(profileName); policy != nil {
+			annotations, found := p.EffectiveAnnotations(serverName, toolName)
+			intrinsic := profile.IntrinsicTier(annotations, found)
+			if admitted, _, _ := policy.Decide(serverName, toolName, intrinsic); !admitted {
+				return false, visReasonToolPolicyExcluded
+			}
+		}
+	}
 	// Spec 105 FR-009 (research D4), astra r2 C2: an index document is not a
 	// registration identity. A name the KNOWN, CONNECTED server's completed
 	// discovery does not list — a stale document whose Bleve delete failed,
@@ -148,23 +170,6 @@ func (p *MCPProxyServer) toolVisibleToSession(ctx context.Context, serverName, t
 	}
 	if !p.isExactToolCallable(serverName, toolName) {
 		return false, visReasonToolNotCallable
-	}
-	// Spec 108 FR-011/T023: describe_tool's contract makes no shape change
-	// for an excluded tool — the caller must see the SAME uniform not-found
-	// response a nonexistent id gets (contracts/mcp-tools.md "describe_tool").
-	// Ordered LAST, after every other gate, so a quarantined/pending/disabled
-	// tool still reports its own, more specific reason first; a policy
-	// exclusion only ever narrows what an otherwise-visible tool reveals.
-	// Safe to run even when profileName is legacy or "" (policy is then nil
-	// or Decide only ever agrees with the scope check already passed above).
-	if profileName != "" {
-		if policy := profileIdx.PolicyFor(profileName); policy != nil {
-			annotations, found := p.EffectiveAnnotations(serverName, toolName)
-			intrinsic := profile.IntrinsicTier(annotations, found)
-			if admitted, _, _ := policy.Decide(serverName, toolName, intrinsic); !admitted {
-				return false, visReasonToolPolicyExcluded
-			}
-		}
 	}
 	return true, ""
 }
