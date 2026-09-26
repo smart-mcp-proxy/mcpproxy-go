@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed, onScopeDispose } from 'vue'
 import type { StatusUpdate, Theme, Toast, InfoResponse, RoutingInfo } from '@/types'
 import api from '@/services/api'
+import { setAvailableFeatures } from '@/composables/useScopeQuery'
 
 /** Pseudo-theme: follow the operating system's light/dark preference. */
 export const SYSTEM_THEME = 'system'
@@ -644,6 +645,25 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
+  // Spec 109-k FR-080a: GET /api/v1/status.features.scope_filters is the one
+  // place useScopeQuery's profile/client/token rows learn whether this build
+  // supports them (zcode round 1, F1 — setAvailableFeatures previously had no
+  // production caller, so those rows stayed permanently hidden even once
+  // Spec 108 ships the feature). The SSE "status" event carries a much
+  // narrower payload (internal/httpapi/server.go) and does not include
+  // `features`, so this has to be a REST fetch, not something read off the
+  // existing event-stream `status` ref.
+  async function fetchScopeFilterFeatures() {
+    try {
+      const response = await api.getStatus()
+      if (response.success && response.data) {
+        setAvailableFeatures(response.data.features?.scope_filters)
+      }
+    } catch (error) {
+      console.error('Failed to fetch status features:', error)
+    }
+  }
+
   // Initialize theme on store creation
   loadTheme()
 
@@ -693,6 +713,7 @@ export const useSystemStore = defineStore('system', () => {
     clearToasts,
     fetchInfo,
     fetchRouting,
+    fetchScopeFilterFeatures,
     applyModeField,
     checkForUpdates,
     setAuthRequired,
