@@ -136,6 +136,29 @@ own_launcher_pids() {
                 # DIFFERENT, concurrently-running invocation of this script
                 # in the same checkout, and cleanup() would reap that
                 # run's fixture out from under it.
+                #
+                # Review round 3 (deferred): this cwd check still cannot,
+                # by itself, tell apart two DIFFERENT, concurrently-running
+                # invocations of this script from the SAME checkout that
+                # BOTH started their own core — run A's $MCPPROXY_PID is
+                # non-empty and never cleared even after A's core dies, so
+                # the guard above alone would not stop A's cleanup from
+                # matching a fixture actually owned by a live run B. In
+                # practice this is closed by the fixture itself: the
+                # launcher-test entry binds a real TCP listener on the
+                # fixed $LAUNCHER_PATTERN port (test/launcher-server/main.go,
+                # test/e2e-config.template.json), so at most one such
+                # process can ever be alive at a time regardless of which
+                # invocation's core spawned it — run B's own launcher
+                # fixture cannot even start while run A's (however orphaned)
+                # is still bound to that port, so there is no instant where
+                # this pgrep loop can be looking at a fixture that belongs
+                # to a truly independent, concurrently-alive run rather than
+                # this run's own (possibly already-orphaned) fixture. A
+                # complete fix — full per-invocation isolation (a start-of-
+                # script lock, or randomized launcher port/scratch config
+                # per run) — is a materially larger change to this test
+                # harness than this cwd guard and is out of scope here.
                 if [ -n "$MCPPROXY_PID" ] && [ "$(proc_cwd "$pid")" = "$SCRIPT_CWD" ]; then
                     echo "$pid"
                 fi
