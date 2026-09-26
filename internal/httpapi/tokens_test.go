@@ -16,6 +16,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // --- Mock token store ---
@@ -728,6 +729,27 @@ func TestRegenerateToken_NotFound(t *testing.T) {
 
 	w := doRequest(t, srv, http.MethodPost, "/api/v1/tokens/nonexistent/regenerate", nil)
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestRegenerateToken_ClientCredentialRefused is finding F1 (Spec 108-c
+// review round 1): POST /api/v1/tokens/{name}/regenerate must translate
+// storage.ErrClientCredentialRegenerateRefused into an actionable 409, not
+// the generic 500 the unclassified fall-through would produce, and must
+// never fall through to StatusOK — that would mean the handler minted and
+// wired up an mcp_agt_ secret over a kind=client record, permanently
+// bricking it.
+func TestRegenerateToken_ClientCredentialRefused(t *testing.T) {
+	store := newMockTokenStore()
+	store.regenErr = storage.ErrClientCredentialRegenerateRefused
+	srv := newTestTokenServer(t, store, nil)
+
+	w := doRequest(t, srv, http.MethodPost, "/api/v1/tokens/client-cursor/regenerate", nil)
+	require.Equal(t, http.StatusConflict, w.Code)
+
+	var errResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &errResp))
+	msg, _ := errResp["error"].(string)
+	assert.Contains(t, msg, "client credential")
 }
 
 func TestTokenEndpoints_AgentTokenRejected(t *testing.T) {
