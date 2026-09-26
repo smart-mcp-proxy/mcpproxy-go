@@ -34,7 +34,7 @@ type ServerEntry struct { …; Popularity *Popularity `json:"-"` } // FR-001: so
 type PopularityProvider interface {
     // Lookup returns the cached stars for a repo key without I/O. stale=true
     // means past TTL (still usable); ok=false means never fetched / negative.
-    Lookup(key string) (stars int, ok bool, stale bool)
+    Lookup(key string) (stars int, state LookupState) // Fresh | Stale | Negative | Absent
     // Resolve enqueues misses/stale keys (in priority order) and waits up to
     // wait (bounded by ctx) for them; fetching continues after it returns.
     Resolve(ctx context.Context, keys []string, wait time.Duration)
@@ -69,11 +69,12 @@ bbolt bucket `catalog_popularity`: key = `o/r` (lower-case), value = JSON `stars
 SearchAll(q)
   fan-out (5s/source) ─► BuildCatalogHit: hit.Popularity = entry.Popularity (docker pulls)
                                            + cache-only Lookup(GitHubRepoKey(entry.SourceCodeURL))
-  merge + dedup + source filter ─► pool
-  sort pool by Rank; keys := repo keys of pool hits (rank order) lacking fresh stars
-  provider.Resolve(ctx, keys, opts.PopularityWait)   // ≤800ms, never beyond ctx
-  re-apply Lookup to pool hits; re-sort by Rank
-  sections = buildSections(pool)   // BEFORE truncation (FR-005)
+  merge + dedup + source filter ─► pool            // merge order = source order
+  official := copy of official hits in pool, merge order   // BEFORE any sort (FR-005)
+  sort pool by Rank; keys := repo keys (rank order) whose Lookup is stale/absent
+  provider.Resolve(ctx, keys, opts.PopularityWait)   // ctx bounds the wait only; workers use provider ctx
+  re-apply Lookup to pool + official hits; re-sort pool by Rank
+  sections = {Official: official[:12], Popular: popular(pool)}   // BEFORE truncation
   results  = pool[:limit]
 ```
 
@@ -95,3 +96,7 @@ SearchAll(q)
 
 - **Stacking on an open PR.** 109-j is still in review, and round 5 made local-only changes (`16f9e8c9c` is not pushed). PR A touches `catalog.go` `SearchAll`/`buildSections`, so it may conflict when 109-j's later rounds land. Mitigation: keep catalog.go edits confined to those two functions plus `BuildCatalogHit`/`Rank`, and rebase once 109-j merges.
 - **Section semantics change** (Official is no longer popularity-sorted). This is an intentional amendment of 109 FR-060. Existing 109 tests that assert Official order must be updated to source order, not deleted.
+
+## Review log
+
+- **zcode round 1 (spec, 2026-09-26)**: 9 findings, all verified and folded into FR-005/006/007/008/009/011 and the flow above. (1) Official must be built from the pre-sort merge order. (2) The per-source cap limits the pool, so empty q now fans out at 50/source, and the Docker single page is a documented limitation. (3) Background fetch uses the provider ctx, not the request ctx. (4) Overflow must not leave dedup entries behind. (5) No wait while paused or over budget. (6) Errors keep the last-known stars. (7) Lookup distinguishes negative from absent. (8) Own request, 10 s ctx timeout, never `registryGet`, no retries. (9) Kill switch lives in the constructor.
