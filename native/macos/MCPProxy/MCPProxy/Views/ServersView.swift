@@ -18,6 +18,7 @@ struct ServersView: View {
     @State private var isLoading = false
     @State private var loadTask: Task<Void, Never>?
     @State private var selectedServer: ServerStatus?
+    @State private var selectedServerInitialTab: ServerDetailTab = .tools
     @State private var showAddServer = false
     @State private var addServerInitialTab: AddServerTab = .manual
 
@@ -27,6 +28,7 @@ struct ServersView: View {
                 ServerDetailView(
                     server: server,
                     appState: appState,
+                    initialTab: selectedServerInitialTab,
                     onDismiss: { selectedServer = nil }
                 )
             } else {
@@ -36,6 +38,47 @@ struct ServersView: View {
         .sheet(isPresented: $showAddServer) {
             AddServerView(appState: appState, isPresented: $showAddServer, initialTab: addServerInitialTab)
                 .id(addServerInitialTab)
+        }
+        // Review finding (this round): these two `.onReceive` handlers used to
+        // live on `serverListView`'s own VStack, a computed property this
+        // body's `else` branch only includes while `selectedServer == nil`.
+        // Opening a server's detail view (e.g. via DashboardView's
+        // AttentionRow -> navigateToServerDetail, which posts
+        // `.switchToServers` then `.showServerDetail` 0.3s later) swaps
+        // `serverListView` out of the tree and detaches that observer, so a
+        // second `.showServerDetail` notification arriving while a detail
+        // view is already open (a near-simultaneous click on a different
+        // server, or simply navigating to a second server without first
+        // dismissing the first) is silently dropped — nothing is listening.
+        // Attached here, to `body`'s own VStack, both stay live regardless of
+        // which branch is currently shown, so a later notification can always
+        // switch straight to a different server's detail.
+        .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { notification in
+            if let tab = notification.object as? AddServerTab {
+                addServerInitialTab = tab
+            } else {
+                addServerInitialTab = .manual
+            }
+            showAddServer = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showServerDetail)) { notification in
+            let serverName: String
+            let tab: ServerDetailTab
+            if let target = notification.object as? ServerDetailTarget {
+                serverName = target.serverName
+                tab = target.tab
+            } else if let name = notification.object as? String {
+                serverName = name
+                tab = .tools
+            } else {
+                return
+            }
+            // Find the server by name in the current list or appState
+            if let server = servers.first(where: { $0.name == serverName })
+                ?? appState.servers.first(where: { $0.name == serverName }) {
+                selectedServerInitialTab = tab
+                selectedServer = server
+            }
         }
     }
 
@@ -153,6 +196,12 @@ struct ServersView: View {
                 apiClient: appState.apiClient,
                 fontScale: fontScale,
                 onDoubleClick: { server in
+                    // Reset to the default tab: `selectedServerInitialTab` is
+                    // otherwise sticky from whatever the last `.showServerDetail`
+                    // notification requested (e.g. "Add secret" -> .config), so a
+                    // later manual double-click on an unrelated server would
+                    // silently reopen on that same stale tab instead of Tools.
+                    selectedServerInitialTab = .tools
                     selectedServer = server
                 },
                 onServersChanged: {
@@ -166,22 +215,6 @@ struct ServersView: View {
         }
         .onChange(of: appState.serversVersion) { _ in
             triggerLoad()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { notification in
-            if let tab = notification.object as? AddServerTab {
-                addServerInitialTab = tab
-            } else {
-                addServerInitialTab = .manual
-            }
-            showAddServer = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .showServerDetail)) { notification in
-            guard let serverName = notification.object as? String else { return }
-            // Find the server by name in the current list or appState
-            if let server = servers.first(where: { $0.name == serverName })
-                ?? appState.servers.first(where: { $0.name == serverName }) {
-                selectedServer = server
-            }
         }
     }
 
@@ -475,6 +508,15 @@ struct ServerTableView: NSViewRepresentable {
 
         // MARK: - Right-Click Context Menu
 
+        // This menu is deliberately NOT bound to HealthStatus.actionLabels
+        // (Spec 109 FR-014's one-table mandate for the single primary
+        // suggested-action CTA — the Dashboard button, the Web UI action
+        // label, the CLI ACTION hint). It lists every applicable command as
+        // its own imperative verb phrase ("Approve All Tools", "View Logs"),
+        // several of which (Restart, View Details, Delete Server) have no
+        // HealthAction counterpart at all, so there is no single table this
+        // menu could read from. "Approve All Tools" is also gated on
+        // `pendingApprovalCount`, a quarantine signal, not `health.action`.
         func menuNeedsUpdate(_ menu: NSMenu) {
             menu.removeAllItems()
             guard let tableView else { return }
@@ -664,7 +706,9 @@ struct ServerTableView: NSViewRepresentable {
             dot.layer?.cornerRadius = 5
             dot.layer?.backgroundColor = healthColor(for: server).cgColor
             dot.translatesAutoresizingMaskIntoConstraints = false
-            dot.setAccessibilityLabel("Health: \(server.health?.level ?? (server.connected ? "connected" : "disconnected"))")
+            // FR-011: no surface may render `level` as text, including
+            // accessibility labels — use the one status label table.
+            dot.setAccessibilityLabel("Health: \(server.health?.statusLabel ?? (server.connected ? "connected" : "disconnected"))")
             cell.addSubview(dot)
             NSLayoutConstraint.activate([
                 dot.widthAnchor.constraint(equalToConstant: 10),
@@ -710,6 +754,13 @@ struct ServerTableView: NSViewRepresentable {
             return cell
         }
 
+        // This column's visible text intentionally reads `health.summary`
+        // (free text — e.g. "Connected (5 tools)"), richer than the shared
+        // status label table, while the status dot's accessibility label
+        // (makeStatusDotCell above) reads the shared table (FR-011: no
+        // surface may render `level` itself, sighted or not). `summary` is
+        // never `level` — it is a sentence CalculateHealth composes — so this
+        // is a sighted-vs-VoiceOver wording choice, not an FR-011 violation.
         private func makeStateCell(server: ServerStatus, tableView: NSTableView) -> NSView {
             let cellId = NSUserInterfaceItemIdentifier("StateCell")
             let cell = reuseOrCreate(tableView: tableView, identifier: cellId)

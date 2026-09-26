@@ -4,6 +4,7 @@
  */
 
 import type { HealthStatus, Server } from '@/types'
+import { HEALTH_STATUS_LABELS, HEALTH_ACTION_LABELS, type HealthStatusValue } from '@/types/contracts'
 
 /**
  * Health level constants matching Go backend (internal/health/constants.go)
@@ -65,6 +66,92 @@ export function isHealthy(health: HealthStatus | undefined, legacyConnected: boo
  */
 export function isServerConnected(server: Server): boolean {
   return server.connected
+}
+
+/**
+ * Status vocabulary constants matching Go backend (internal/health/constants.go).
+ * The ONE vocabulary every surface renders as text (Spec 109 FR-010/FR-011).
+ * `HealthLevel` above stays a severity signal for badge/tray coloring only —
+ * no renderer may print it as text.
+ */
+export const HealthStatusValues = {
+  Ready: 'ready',
+  Connecting: 'connecting',
+  SignInRequired: 'sign_in_required',
+  NeedsReview: 'needs_review',
+  NeedsSecret: 'needs_secret',
+  NeedsConfig: 'needs_config',
+  Error: 'error',
+  Disabled: 'disabled',
+} as const
+
+/**
+ * Cross-surface label for a `health.status` value (Spec 109 FR-014,
+ * internal/health.StatusLabels).
+ * Falls back to the raw value for forward-compat with a status this build
+ * does not yet know (never crashes on an unrecognized value).
+ *
+ * @param status - health.status
+ * @returns the label text (e.g. "Sign-in required")
+ */
+export function healthStatusLabel(status: string | undefined | null): string {
+  if (!status) return ''
+  return HEALTH_STATUS_LABELS[status as HealthStatusValue] ?? status
+}
+
+/**
+ * Resolves the status TEXT for a server carrying a `health` object: summary
+ * first, then the shared status label — the ONE precedence order every
+ * surface must use (a Spec 109 review finding: AdminServers.vue/UserServers.vue
+ * carried an inline `statusLabel()`/`healthLabel()` that checked `status`
+ * BEFORE `summary`, the reverse order, so the same payload rendered
+ * different text there than on ServerCard.vue/ServerDetail.vue). Returns ''
+ * — never `health.level` (FR-011) — when a version-skew payload carries
+ * neither; the caller supplies its own final fallback (e.g. a
+ * connected/disconnected word), since that fallback's wording/casing is a
+ * per-surface convention, not part of the shared precedence.
+ *
+ * Structural rather than `HealthStatus` itself so surfaces carrying a
+ * narrower local health shape (AdminServers.vue/UserServers.vue's inline
+ * `health?: {...}` field types, which predate the full contract) can share
+ * this one helper without an unsafe cast — this reads only `summary` and
+ * `status`.
+ *
+ * @param health - the server's health object (caller handles the no-health case)
+ */
+export function healthStatusTextOrEmpty(health: { summary?: string | null; status?: string | null }): string {
+  return health.summary || healthStatusLabel(health.status) || ''
+}
+
+/**
+ * Same precedence as {@link healthStatusTextOrEmpty}, with the
+ * ServerCard.vue/ServerDetail.vue connected/disconnected fallback baked in
+ * (round-4 review finding — AdminServers.vue/UserServers.vue already had a
+ * fallback for a payload carrying neither `status` nor `summary`;
+ * ServerCard.vue/ServerDetail.vue did not, which was an asymmetric guard
+ * against the same gap).
+ *
+ * @param health - the server's health object (caller handles the no-health case)
+ * @param connected - the server's legacy `connected` field, for the last-resort fallback
+ */
+export function healthStatusText(
+  health: { summary?: string | null; status?: string | null },
+  connected: boolean
+): string {
+  return healthStatusTextOrEmpty(health) || (connected ? 'Connected' : 'Disconnected')
+}
+
+/**
+ * Cross-surface button label for a `health.actions[]` entry (Spec 109
+ * FR-014, internal/health.ActionLabels). Returns '' for HealthAction.None or
+ * an unrecognized value.
+ *
+ * @param action - one entry of health.actions (or health.action)
+ * @returns the button label text (e.g. "Sign in"), or '' when none
+ */
+export function healthActionLabel(action: string | undefined | null): string {
+  if (!action) return ''
+  return HEALTH_ACTION_LABELS[action] ?? ''
 }
 
 /**
