@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -139,6 +140,13 @@ type Runtime struct {
 	indexManager    *index.Manager
 	upstreamManager *upstream.Manager
 	cacheManager    *cache.Manager
+	// popularityProvider is the Spec 110 catalog popularity signal's
+	// bbolt-backed GitHub-stars provider, installed process-wide via
+	// registries.SetPopularityProvider unconditionally at startup — the
+	// FR-011 kill switch is read INSIDE the provider constructor, so this is
+	// never nil, it just starts no workers when disabled. io.Closer so this
+	// file never needs to name the unexported provider type.
+	popularityProvider io.Closer
 	// promptsRefresh debounces upstream prompts/list_changed notifications into a
 	// single RefreshPrompts fan-out (F13). Nil until lifecycle registration.
 	promptsRefresh *promptsRefreshDebouncer
@@ -294,6 +302,19 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		return nil, fmt.Errorf("failed to initialize cache manager: %w", err)
 	}
 
+	// Spec 110 (catalog popularity signal): a bbolt-backed GitHub-stars
+	// provider, installed process-wide so BuildCatalogHit/SearchAll (catalog
+	// search, CLI, MCP search_servers with registry omitted) can show real
+	// popularity. FR-011's kill switch (MCPPROXY_CATALOG_POPULARITY=false) is
+	// read inside the constructor, so this is unconditional — a disabled
+	// provider still answers Lookup from whatever is already cached, it just
+	// starts no fetch workers.
+	popularityProvider := registries.NewGitHubStarsProvider(registries.PopularityOptions{
+		DB:     storageManager.GetDB(),
+		Logger: logger,
+	})
+	registries.SetPopularityProvider(popularityProvider)
+
 	truncator := truncate.NewTruncator(cfg.ToolResponseLimit)
 
 	// Initialize tokenizer (defaults to enabled with cl100k_base)
@@ -391,24 +412,25 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	rt := &Runtime{
 		cfg: cfg,
 		// Boot: memory and disk agree by definition.
-		desiredCfg:       cfg,
-		cfgPath:          cfgPath,
-		logger:           logger,
-		configSvc:        configSvc,
-		storageManager:   storageManager,
-		indexManager:     indexManager,
-		upstreamManager:  upstreamManager,
-		cacheManager:     cacheManager,
-		sigCache:         toolsig.NewCache(),
-		secretResolver:   secretResolver,
-		tokenizer:        tokenizer,
-		refreshManager:   refreshManager,
-		activityService:  activityService,
-		supervisor:       supervisorInstance,
-		prechurnStore:    prechurnStore,
-		previousShutdown: previousShutdown,
-		appCtx:           appCtx,
-		appCancel:        appCancel,
+		desiredCfg:         cfg,
+		cfgPath:            cfgPath,
+		logger:             logger,
+		configSvc:          configSvc,
+		storageManager:     storageManager,
+		indexManager:       indexManager,
+		upstreamManager:    upstreamManager,
+		cacheManager:       cacheManager,
+		popularityProvider: popularityProvider,
+		sigCache:           toolsig.NewCache(),
+		secretResolver:     secretResolver,
+		tokenizer:          tokenizer,
+		refreshManager:     refreshManager,
+		activityService:    activityService,
+		supervisor:         supervisorInstance,
+		prechurnStore:      prechurnStore,
+		previousShutdown:   previousShutdown,
+		appCtx:             appCtx,
+		appCancel:          appCancel,
 		status: Status{
 			Phase:       PhaseInitializing,
 			Message:     "Runtime is initializing...",
@@ -867,6 +889,12 @@ func (r *Runtime) Close() error {
 
 	if r.cacheManager != nil {
 		r.cacheManager.Close()
+	}
+
+	// Spec 110: stop the popularity provider's background fetch workers.
+	// Safe even if it was never installed (nil) or already closed.
+	if r.popularityProvider != nil {
+		_ = r.popularityProvider.Close()
 	}
 
 	// Spec 080 (FR-010, review round 4): the ActivityService owns BBolt

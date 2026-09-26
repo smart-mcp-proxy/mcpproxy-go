@@ -201,6 +201,14 @@ func TestCatalogSearch_AddedScopedForNonAdminUserContext(t *testing.T) {
 // TestCatalogSearch_EmptyQueryReturnsEmptyResults pins contracts/rest-api.md#catalog:
 // "Empty q → results: [], sections: {...}". Before this fix, Results was set
 // unconditionally to the ranked hit list even when Sections was populated.
+//
+// Spec 110 (T014): sections.popular is asserted EMPTY here, not populated —
+// this fixture carries no popularity signal at all (no source_code_url, no
+// Docker pull_count), and Popular now only ever shows hits with a known
+// signal (FR-005/SC-002). Before Spec 110, Popular was just the ranked pool
+// re-sorted by a popularity score that was always 0 for everyone, so it
+// looked "populated" while actually carrying no real signal — the exact bug
+// this spec fixes.
 func TestCatalogSearch_EmptyQueryReturnsEmptyResults(t *testing.T) {
 	withCatalogFixtureRegistry(t)
 	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: catalogFixtureServers(), withManagement: true}
@@ -218,7 +226,7 @@ func TestCatalogSearch_EmptyQueryReturnsEmptyResults(t *testing.T) {
 	require.True(t, ok, "expected sections to be populated for an empty q")
 	popular, ok := sections["popular"].([]interface{})
 	require.True(t, ok)
-	assert.NotEmpty(t, popular, "expected the fixture's entries in sections.popular")
+	assert.Empty(t, popular, "Spec 110 FR-005/SC-002: no popularity signal in this fixture -> sections.popular must be empty")
 }
 
 // TestCatalogSearch_SourceFilterAppliesBeforeTruncation is the regression for
