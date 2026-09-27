@@ -12,7 +12,10 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/configimport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // jsonEscapePath escapes a path for embedding in JSON strings.
@@ -358,6 +361,68 @@ func TestLoadUpstreamConfig_FallsBackToGlobalConfigFlag(t *testing.T) {
 	if cfg.Listen != "127.0.0.1:19999" {
 		t.Errorf("expected loadUpstreamConfig to honor the global --config flag path %q, got listen=%q (likely fell back to the default config)", configPath, cfg.Listen)
 	}
+}
+
+// TestUpstreamConfigModeWritesUseSelectedConfigFile protects config-mode
+// mutations from re-deriving mcp_config.json from DataDir after the caller has
+// explicitly selected a differently named file with the root --config flag.
+// The default-config sentinel models the operator's existing configuration;
+// it must remain byte-for-byte unchanged for add, remove, and import.
+func TestUpstreamConfigModeWritesUseSelectedConfigFile(t *testing.T) {
+	oldConfigPath, oldConfigFile := upstreamConfigPath, configFile
+	t.Cleanup(func() {
+		upstreamConfigPath, configFile = oldConfigPath, oldConfigFile
+	})
+
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	defaultDir := filepath.Join(tmpDir, "home", ".mcpproxy")
+	require.NoError(t, os.MkdirAll(defaultDir, 0755))
+	defaultPath := filepath.Join(defaultDir, config.ConfigFileName)
+	sentinel := []byte(`{"sentinel":true}\n`)
+	require.NoError(t, os.WriteFile(defaultPath, sentinel, 0600))
+
+	selectedPath := filepath.Join(tmpDir, "selected", "scratch_config.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(selectedPath), 0755))
+	initial := `{"listen":"127.0.0.1:18991","mcpServers":[{"name":"remove-me","url":"https://example.invalid/remove"}]}`
+	require.NoError(t, os.WriteFile(selectedPath, []byte(initial), 0600))
+
+	upstreamConfigPath = ""
+	configFile = selectedPath
+	cfg, err := loadUpstreamConfig()
+	require.NoError(t, err)
+	assert.Equal(t, defaultDir, cfg.DataDir, "the explicit config deliberately omits data_dir and therefore uses only the scratch HOME default")
+
+	_, err = runUpstreamAddConfigMode(&cliclient.AddServerRequest{
+		Name: "added", URL: "https://example.invalid/add", Protocol: "http",
+	}, cfg)
+	require.NoError(t, err)
+	require.NoError(t, runUpstreamRemoveConfigMode("remove-me", cfg))
+	require.NoError(t, applyImportedServersConfigMode([]*configimport.ImportedServer{{
+		Server: &config.ServerConfig{Name: "imported", URL: "https://example.invalid/import", Protocol: "http", Enabled: true},
+	}}, cfg))
+
+	updated, err := config.LoadFromFile(selectedPath)
+	require.NoError(t, err)
+	assert.Len(t, updated.Servers, 2)
+	assert.Equal(t, "added", updated.Servers[0].Name)
+	assert.Equal(t, "imported", updated.Servers[1].Name)
+	actualSentinel, err := os.ReadFile(defaultPath)
+	require.NoError(t, err)
+	assert.Equal(t, sentinel, actualSentinel)
+}
+
+func TestUpstreamConfigFilePathPrecedence(t *testing.T) {
+	oldConfigPath, oldConfigFile := upstreamConfigPath, configFile
+	t.Cleanup(func() { upstreamConfigPath, configFile = oldConfigPath, oldConfigFile })
+
+	cfg := &config.Config{DataDir: "/fallback-data"}
+	upstreamConfigPath, configFile = "/local.json", "/global.json"
+	assert.Equal(t, "/local.json", upstreamConfigFilePath(cfg))
+	upstreamConfigPath = ""
+	assert.Equal(t, "/global.json", upstreamConfigFilePath(cfg))
+	configFile = ""
+	assert.Equal(t, config.GetConfigPath(cfg.DataDir), upstreamConfigFilePath(cfg))
 }
 
 func TestCreateUpstreamLogger(t *testing.T) {

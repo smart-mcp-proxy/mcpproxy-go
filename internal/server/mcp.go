@@ -1637,6 +1637,9 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
 	}
+	for i := range servers {
+		servers[i] = catalogServerEntryWithSecretLike(servers[i])
+	}
 
 	// Format response
 	response := map[string]interface{}{

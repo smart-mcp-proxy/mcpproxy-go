@@ -913,6 +913,22 @@ func outputError(err error, code string) error {
 	return err
 }
 
+// upstreamConfigFilePath resolves the config path for every `upstream`
+// subcommand. Config-mode mutations must use this same path as loading so an
+// explicit root --config file is never redirected to DataDir/mcp_config.json.
+func upstreamConfigFilePath(globalConfig *config.Config) string {
+	if upstreamConfigPath != "" {
+		return upstreamConfigPath
+	}
+	if configFile != "" {
+		return configFile
+	}
+	if globalConfig != nil {
+		return config.GetConfigPath(globalConfig.DataDir)
+	}
+	return ""
+}
+
 // loadUpstreamConfig resolves the config path for every `upstream` subcommand.
 // Only `upstream list`/`upstream logs` register their own local --config flag
 // (bound to upstreamConfigPath); every other upstream subcommand (add,
@@ -925,11 +941,7 @@ func outputError(err error, code string) error {
 // `upstream add --config=<scratch>` to write into the real production
 // config). upstreamConfigPath still wins when a command sets it explicitly.
 func loadUpstreamConfig() (*config.Config, error) {
-	explicitPath := upstreamConfigPath
-	if explicitPath == "" {
-		explicitPath = configFile
-	}
-	return loadCLIConfig(explicitPath)
+	return loadCLIConfig(upstreamConfigFilePath(nil))
 }
 
 func createUpstreamLogger(level string) (*zap.Logger, error) {
@@ -1690,7 +1702,7 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 	globalConfig.Servers = append(globalConfig.Servers, newServer)
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
 		return false, fmt.Errorf("failed to save config: %w", err)
 	}
@@ -1798,7 +1810,7 @@ func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config)
 	globalConfig.Servers = newServers
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
@@ -2446,7 +2458,7 @@ func applyImportedServersConfigMode(imported []*configimport.ImportedServer, glo
 	}
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}

@@ -154,11 +154,19 @@ func TestSearchServers_RegistryOptional_SecretLikeMatchesCatalogResult(t *testin
 		"expected secret:true via the D13 name heuristic (FR-065), matching REST/CLI's ToCatalogResult, despite the registry declaring secret:false")
 }
 
-// TestSearchServers_RegistrySpecified_UnchangedBehavior pins that passing
-// 'registry' still uses the single-source path unchanged (FR-067's ONLY
-// requirement is making it optional).
-func TestSearchServers_RegistrySpecified_UnchangedBehavior(t *testing.T) {
-	withMCPCatalogFixture(t)
+// TestSearchServers_RegistrySpecified_SecretLikeMatchesAllSources pins that
+// narrowing an MCP search to one registry retains the same secret heuristic as
+// an all-sources search, without changing the ServerEntry response shape.
+func TestSearchServers_RegistrySpecified_SecretLikeMatchesAllSources(t *testing.T) {
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"one","name":"Alpha Tool","required_inputs":[{"name":"Authorization","secret":false}]}]`))
+	}))
+	t.Cleanup(fixture.Close)
+	t.Cleanup(registries.AllowPrivateRegistryFetchForTest())
+	t.Cleanup(registries.SetRegistriesForTest([]registries.RegistryEntry{
+		{ID: "fast", Name: "Fast", ServersURL: fixture.URL},
+	}))
 	proxy := createTestMCPProxyServer(t)
 
 	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
@@ -175,4 +183,12 @@ func TestSearchServers_RegistrySpecified_UnchangedBehavior(t *testing.T) {
 	servers, ok := payload["servers"].([]interface{})
 	require.True(t, ok)
 	require.Len(t, servers, 1)
+	entry, ok := servers[0].(map[string]interface{})
+	require.True(t, ok)
+	requiredInputs, ok := entry["required_inputs"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, requiredInputs, 1)
+	input, ok := requiredInputs[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, true, input["secret"])
 }
