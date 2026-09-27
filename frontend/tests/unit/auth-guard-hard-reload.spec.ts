@@ -20,11 +20,13 @@ const deferred = <T,>() => {
 }
 
 const providerSpy = vi.hoisted(() => vi.fn())
+const sessionSpy = vi.hoisted(() => vi.fn())
 const meSpy = vi.hoisted(() => vi.fn())
 
 vi.mock('@/services/auth-api', () => ({
   authApi: {
     getProvider: providerSpy,
+    getSessionStatus: sessionSpy,
     getMe: meSpy,
     getLoginUrl: vi.fn(() => '/api/v1/auth/login'),
     logout: vi.fn(),
@@ -60,6 +62,7 @@ function serverEdition(user: typeof tenant | null) {
   const me = deferred<typeof tenant | null>()
   providerSpy.mockReturnValue(provider.promise)
   meSpy.mockReturnValue(me.promise)
+  sessionSpy.mockResolvedValue({ authenticated: true })
   return {
     settle: () => {
       provider.resolve({ display_name: 'Server SSO' })
@@ -73,6 +76,8 @@ describe('auth store: concurrent checkAuth shares one in-flight probe', () => {
     setActivePinia(createPinia())
     providerSpy.mockReset()
     meSpy.mockReset()
+    sessionSpy.mockReset()
+    sessionSpy.mockResolvedValue({ authenticated: true })
   })
 
   it('issues /auth/provider and /auth/me once for two concurrent callers, both see the settled edition', async () => {
@@ -146,6 +151,8 @@ describe('router guard: hard-reload deep link under the server edition', () => {
     setActivePinia(createPinia())
     providerSpy.mockReset()
     meSpy.mockReset()
+    sessionSpy.mockReset()
+    sessionSpy.mockResolvedValue({ authenticated: true })
   })
 
   const deepRoutes: Array<[string, string]> = [

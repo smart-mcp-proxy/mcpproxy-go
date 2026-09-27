@@ -10,7 +10,7 @@
       :class="systemStore.sidebarCollapsed ? 'lg:pl-14' : 'lg:pl-64'"
     >
       <!-- Top Header -->
-      <TopHeader />
+      <TopHeader v-if="authStore.canLoadCore" />
 
       <!-- Page content. `min-h-0` / `min-w-0`: a grid item defaults to
            `min-height:auto`, so a tall page pushed this scroll container past
@@ -32,7 +32,7 @@
     </div>
 
     <!-- Sidebar -->
-    <SidebarNav />
+    <SidebarNav v-if="authStore.canLoadCore" />
 
     <!-- Toast Notifications -->
     <ToastContainer />
@@ -162,7 +162,7 @@ onMounted(async () => {
   // instead (their own servers/activity, fetched by the routed tenant
   // views) — issuing these here would either 403 pointlessly or, worse,
   // leak fleet-wide state into a tenant's browser.
-  if (authStore.principalKind !== 'tenant') {
+  if (authStore.canLoadCore) {
     // Connect to real-time updates
     systemStore.connectEventSource()
 

@@ -54,6 +54,8 @@ async function mountTopHeaderAs(role: 'user' | 'admin') {
 
   const authStore = useAuthStore()
   authStore.isTeamsEdition = true
+  authStore.loading = false
+  authStore.authResolvedSuccessfully = true
   authStore.user = {
     id: 'u1',
     email: 'u1@example.com',

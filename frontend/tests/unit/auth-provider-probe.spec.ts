@@ -63,6 +63,8 @@ function installFetch(routes: Record<string, () => Response>): FetchLog[] {
  * must label its button with the operator-chosen `display_name`.
  */
 describe('auth-api provider probe (Spec 107 FR-030)', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+
   it('does not fetch when the served index explicitly identifies the personal edition', async () => {
     document.head.innerHTML = '<meta name="mcpproxy-server-edition" content="false">'
     const fetchSpy = vi.fn()
@@ -110,9 +112,35 @@ describe('auth-api provider probe (Spec 107 FR-030)', () => {
     expect(await authApi.getProvider()).toBeNull()
   })
 
-  it('answers null when the probe cannot be reached at all', async () => {
+  it('uses the cookie-only session hint before /auth/me and skips /auth/me when signed out', async () => {
+    const log = installFetch({
+      '/api/v1/auth/provider': () => jsonResponse(200, { display_name: 'Acme Okta' }),
+      '/api/v1/auth/session': () => jsonResponse(200, { authenticated: false }),
+    })
+    const store = useAuthStore()
+    await store.checkAuth()
+
+    expect(store.isTeamsEdition).toBe(true)
+    expect(store.isAuthenticated).toBe(false)
+    expect(log.map((entry) => entry.url)).toEqual([
+      '/api/v1/auth/provider',
+      '/api/v1/auth/session',
+    ])
+  })
+
+  it('fails closed when the public provider probe is unavailable', async () => {
+    installFetch({ '/api/v1/auth/provider': () => jsonResponse(500, { error: 'unavailable' }) })
+    const store = useAuthStore()
+    await store.checkAuth()
+
+    expect(store.isTeamsEdition).toBe(true)
+    expect(store.isAuthenticated).toBe(false)
+    expect(store.loading).toBe(false)
+  })
+
+  it('distinguishes an unavailable probe from the personal-edition 404', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('network down') }))
-    expect(await authApi.getProvider()).toBeNull()
+    expect(await authApi.getProvider()).toBeUndefined()
   })
 })
 
@@ -125,6 +153,7 @@ describe('auth store edition detection (Spec 107 FR-041)', () => {
   it('learns the server edition from the probe before /auth/me, never from a keyed call', async () => {
     const log = installFetch({
       '/api/v1/auth/provider': () => jsonResponse(200, { display_name: 'Acme Okta' }),
+      '/api/v1/auth/session': () => jsonResponse(200, { authenticated: true }),
       '/api/v1/auth/me': () =>
         jsonResponse(200, { id: 'u1', email: 'a@acme.test', display_name: 'A', role: 'user', provider: 'oidc' }),
     })
@@ -138,7 +167,7 @@ describe('auth store edition detection (Spec 107 FR-041)', () => {
 
     const paths = log.map((l) => l.url.replace(/\?.*$/, ''))
     expect(paths.indexOf('/api/v1/auth/provider')).toBe(0)
-    expect(paths.indexOf('/api/v1/auth/me')).toBeGreaterThan(paths.indexOf('/api/v1/auth/provider'))
+    expect(paths).toEqual(['/api/v1/auth/provider', '/api/v1/auth/session', '/api/v1/auth/me'])
     // The keyed status call is not how the edition is learned any more.
     expect(getStatus).not.toHaveBeenCalled()
     expect(paths).not.toContain('/api/v1/status')

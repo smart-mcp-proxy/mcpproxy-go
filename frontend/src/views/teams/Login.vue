@@ -4,12 +4,18 @@
       <div class="card-body items-center text-center">
         <h1 class="card-title text-2xl font-bold">MCPProxy Server</h1>
         <p class="text-base-content/70 mb-4">Sign in to access your MCP tools</p>
+        <p v-if="authStore.bootstrapError" class="text-sm text-error" data-test="auth-bootstrap-error">
+          {{ authStore.bootstrapError }}
+        </p>
         <div class="divider"></div>
         <button
           class="btn btn-primary w-full"
           @click="handleLogin"
         >
           Sign in with {{ providerName }}
+        </button>
+        <button v-if="authStore.bootstrapError" class="btn btn-ghost btn-sm w-full" @click="retry">
+          Retry
         </button>
         <p class="text-sm text-base-content/50 mt-4">
           Powered by MCPProxy
@@ -33,5 +39,9 @@ const providerName = computed(() => authStore.provider?.display_name || 'your or
 
 function handleLogin() {
   authStore.login()
+}
+
+function retry() {
+  void authStore.checkAuth({ fresh: true })
 }
 </script>
