@@ -427,6 +427,7 @@ describe('ConnectModal', () => {
         server_name: 'mcpproxy',
         action: 'added',
         message: 'MCPProxy registered in Cursor as mcpproxy',
+        reload_hint: 'Reload the Cursor window to load MCPProxy',
       },
     })
     const writeText = vi.fn().mockResolvedValue(undefined)
@@ -446,6 +447,7 @@ describe('ConnectModal', () => {
     await flushPromises()
 
     const backup = wrapper.find('[data-test="connect-backup-path"]')
+    expect(wrapper.find('[data-test="connect-reload-hint"]').text()).toBe('Reload the Cursor window to load MCPProxy')
     expect(backup.exists()).toBe(true)
     expect(backup.text()).toContain('A backup of your previous config was saved to')
     expect(backup.text()).toContain('/Users/test/.cursor/mcp.json.bak.20260702-101530')
@@ -606,6 +608,7 @@ describe('ConnectModal', () => {
           server_name: 'mcpproxy',
           action: 'added',
           message: `MCPProxy registered in ${id}`,
+          reload_hint: `Reload ${id} to load MCPProxy`,
         },
       })
     })
@@ -627,6 +630,9 @@ describe('ConnectModal', () => {
     await flushPromises()
 
     expect(api.connectClient).toHaveBeenCalledTimes(3)
+    expect(wrapper.find('[data-test="connect-reload-hint"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-reload-hint-cursor"]').text()).toBe('Reload cursor to load MCPProxy')
+    expect(wrapper.find('[data-test="connect-reload-hint-codex"]').text()).toBe('Reload codex to load MCPProxy')
 
     // Every modified-config client shows ITS backup path.
     const cursorRow = wrapper.find('[data-test="connect-bulk-backup-cursor"]')

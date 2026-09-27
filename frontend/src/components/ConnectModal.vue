@@ -256,6 +256,9 @@
         <div class="alert alert-sm" :class="resultSuccess ? 'alert-success' : 'alert-error'">
           <span class="text-sm">{{ resultMessage }}</span>
         </div>
+        <p v-if="resultSuccess && resultReloadHint" data-test="connect-reload-hint" class="mt-2 text-xs opacity-80">
+          {{ resultReloadHint }}
+        </p>
         <!-- Spec 078 US2 / FR-006: surface the timestamped backup after a
              successful connect/disconnect; the "no prior file" case is stated
              explicitly rather than showing a blank path. -->
@@ -366,6 +369,9 @@
               <template v-else>
                 No prior config file existed, so no backup was needed.
               </template>
+              <span v-if="b.reloadHint" :data-test="`connect-reload-hint-${b.id}`" class="mt-1 block opacity-80">
+                {{ b.reloadHint }}
+              </span>
             </span>
             <button
               v-if="b.backupPath"
@@ -464,6 +470,7 @@ const clients = ref<ClientStatus[]>([])
 const error = ref<string | null>(null)
 const resultMessage = ref('')
 const resultSuccess = ref(false)
+const resultReloadHint = ref('')
 // Spec 078 US2: backup path of the last successful connect/disconnect.
 // string = timestamped backup created; null = success but no prior file to
 // back up; undefined = no successful operation to report on.
@@ -473,7 +480,7 @@ const copiedBackup = ref(false)
 // successful connect in the bulk run keeps its own entry (string = backup
 // created; null = no prior file), so no client's backup path is overwritten
 // by the next one. Empty when the last operation was a single connect.
-const bulkBackups = ref<Array<{ id: string; name: string; backupPath: string | null }>>([])
+const bulkBackups = ref<Array<{ id: string; name: string; backupPath: string | null; reloadHint: string }>>([])
 const copiedBulkClient = ref<string | null>(null)
 const loading = reactive({
   initial: false,
@@ -710,9 +717,10 @@ async function connect(
   clientId: string,
   force = false,
   { verify = true }: { verify?: boolean } = {}
-): Promise<{ ok: boolean; backupPath: string | null; configPath: string }> {
+): Promise<{ ok: boolean; backupPath: string | null; configPath: string; reloadHint: string }> {
   loading.clients[clientId] = true
   resultMessage.value = ''
+  resultReloadHint.value = ''
   resultBackupPath.value = undefined
   copiedBackup.value = false
   lastConnect.value = null
@@ -723,6 +731,7 @@ async function connect(
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Connected to ${clientId}`
       resultSuccess.value = true
+      resultReloadHint.value = response.data.reload_hint || ''
       // Empty/absent backup_path on success means no prior file existed.
       const backupPath = response.data.backup_path || null
       resultBackupPath.value = backupPath
@@ -736,7 +745,7 @@ async function connect(
         title: 'Client Connected',
         message: `MCPProxy registered in ${clientId}`,
       })
-      return { ok: true, backupPath, configPath: response.data.config_path }
+      return { ok: true, backupPath, configPath: response.data.config_path, reloadHint: response.data.reload_hint || '' }
     }
     resultMessage.value = response.error || 'Failed to connect'
     resultSuccess.value = false
@@ -750,7 +759,7 @@ async function connect(
   } finally {
     loading.clients[clientId] = false
   }
-  return { ok: false, backupPath: null, configPath: '' }
+  return { ok: false, backupPath: null, configPath: '', reloadHint: '' }
 }
 
 // Spec 078 US3: revert the last connect performed in this modal session. The
@@ -792,6 +801,7 @@ async function confirmUndo() {
 async function disconnect(clientId: string) {
   loading.clients[clientId] = true
   resultMessage.value = ''
+  resultReloadHint.value = ''
   resultBackupPath.value = undefined
   copiedBackup.value = false
   bulkBackups.value = []
@@ -908,15 +918,18 @@ async function connectAll() {
   // Snapshot: connect() refetches the client list mid-loop, which mutates the
   // connectableClients computed while we iterate it.
   const targets = [...connectableClients.value]
-  const collected: Array<{ id: string; name: string; backupPath: string | null }> = []
+  const collected: Array<{ id: string; name: string; backupPath: string | null; reloadHint: string }> = []
   for (const client of targets) {
     const outcome = await connect(client.id, false, { verify: false })
     if (outcome.ok) {
-      collected.push({ id: client.id, name: client.name, backupPath: outcome.backupPath })
+      collected.push({ id: client.id, name: client.name, backupPath: outcome.backupPath, reloadHint: outcome.reloadHint })
     }
   }
   if (collected.length > 0) {
     bulkBackups.value = collected
+    // The bulk rows carry per-client hints; suppress the last connect's
+    // single-result hint to avoid showing a misleading duplicate.
+    resultReloadHint.value = ''
     // The per-client list is authoritative for a bulk run; suppress the
     // single-result line that would otherwise repeat only the last backup.
     resultBackupPath.value = undefined
@@ -944,6 +957,7 @@ async function copyBulkBackupPath(entry: { id: string; backupPath: string | null
 
 function close() {
   resultMessage.value = ''
+  resultReloadHint.value = ''
   resultBackupPath.value = undefined
   copiedBackup.value = false
   bulkBackups.value = []
@@ -969,6 +983,7 @@ watch(() => props.show, (newVal) => {
     fetchClients()
     void onboarding.fetchState()
     resultMessage.value = ''
+    resultReloadHint.value = ''
     resultBackupPath.value = undefined
     copiedBackup.value = false
     bulkBackups.value = []

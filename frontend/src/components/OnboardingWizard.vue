@@ -146,6 +146,9 @@
             <div v-if="connectMessage" class="mt-3">
               <div class="alert alert-sm" :class="connectMessageOk ? 'alert-success' : 'alert-error'">
                 <span class="text-sm">{{ connectMessage }}</span>
+                <p v-if="connectMessageOk && connectReloadHint" data-test="connect-reload-hint" class="mt-1 text-xs">
+                  {{ connectReloadHint }}
+                </p>
               </div>
             </div>
           </template>
@@ -716,6 +719,7 @@ const clientsError = ref<string | null>(null)
 const busyClients = reactive<Record<string, boolean>>({})
 const connectMessage = ref('')
 const connectMessageOk = ref(true)
+const connectReloadHint = ref('')
 // Spec 078 US2 / FR-006: backup path per client for connects performed in this
 // wizard session. string = timestamped backup created; null = success but no
 // prior file existed (nothing to back up); absent = no connect happened yet.
@@ -1591,11 +1595,13 @@ async function confirmConnect(clientId: string) {
 async function connectOne(clientId: string, force = false, preview?: ConnectPreview) {
   busyClients[clientId] = true
   connectMessage.value = ''
+  connectReloadHint.value = ''
   try {
     const res = await api.connectClient(clientId, 'mcpproxy', force)
     if (res.success && res.data) {
       connectMessageOk.value = true
       connectMessage.value = res.data.message || `Connected ${clientId}`
+      connectReloadHint.value = res.data.reload_hint || ''
       // Spec 078 US2: keep the backup path so the row can surface it; an
       // empty/absent backup_path on success means no prior file existed.
       connectBackups[clientId] = res.data.backup_path || null
@@ -1657,6 +1663,7 @@ function cancelUndo(clientId: string) {
 async function confirmUndo(clientId: string) {
   undoBusy[clientId] = true
   connectMessage.value = ''
+  connectReloadHint.value = ''
   try {
     const res = await api.undoConnectClient(clientId, 'mcpproxy', connectBackups[clientId] ?? null)
     if (res.success && res.data) {
