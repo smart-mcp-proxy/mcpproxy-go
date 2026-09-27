@@ -1320,37 +1320,6 @@ components:
         total:
           type: integer
       type: object
-    configimport.ImportedField:
-      properties:
-        empty_or_placeholder:
-          description: |-
-            EmptyOrPlaceholder is true when the value is empty or an obvious
-            placeholder ("YOUR_API_KEY", "<TOKEN>", "changeme", "xxx", …) — the
-            case FR-040's "needs secret" tag exists to flag.
-
-            Review round 4: without explicit `yaml` tags matching the `json` ones,
-            gopkg.in/yaml.v3's default field-name derivation (lowercased, no word
-            separators) diverged from the snake_case keys the REST DTO, swagger.yaml
-            and -o json all use — `mcpproxy upstream import -o yaml` rendered
-            `valuepresent`/`secretlike`/`emptyorplaceholder` instead.
-          type: boolean
-        name:
-          description: Name is the env var or header name.
-          type: string
-        secret_like:
-          description: |-
-            SecretLike is a name-based heuristic (research D13):
-            (?i)(token|secret|password|passwd|api[_-]?key|[_-]key$|auth|credential|
-            private[_-]?key). Delegates to oauth.IsSensitiveKeyName /
-            IsSensitiveHeaderName — the SAME heuristic the redaction and
-            reveal-secret-headers surfaces already use, so every door agrees on
-            what "looks like a secret" means.
-          type: boolean
-        value_present:
-          description: ValuePresent is true when the source config set a non-empty
-            value.
-          type: boolean
-      type: object
     configimport.SkippedServer:
       properties:
         name:
@@ -2900,6 +2869,16 @@ components:
         average_query_result_size:
           description: Typical retrieve_tools output (tokens)
           type: integer
+        estimated:
+          description: |-
+            Estimated (Spec 109-k FR-070-ish, url-filter-contract.md / audit F-Token):
+            true while AverageQueryResultSize is a synthetic simulation (a sample of
+            the first `tools_limit` tools' schemas — no real retrieve_tools call has
+            completed yet in this runtime's usage aggregate); false once at least one
+            real retrieve_tools call has, at which point AverageQueryResultSize is
+            derived from the real observed average response size instead. The Web
+            UI and macOS render an "estimate" label while this is true.
+          type: boolean
         per_server_tool_list_sizes:
           additionalProperties:
             type: integer
@@ -3217,6 +3196,13 @@ components:
         tokens_saved:
           description: echoed from ServerTokenMetrics (FR-007)
           type: integer
+        tokens_saved_estimated:
+          description: |-
+            TokensSavedEstimated echoes ServerTokenMetrics.Estimated (Spec 109-k):
+            true while TokensSaved is a synthetic simulation rather than derived
+            from a real retrieve_tools call. Dropped (false, the zero value) for a
+            scoped caller along with TokensSaved itself, above.
+          type: boolean
         tokens_saved_percentage:
           type: number
         tools:
@@ -3491,6 +3477,26 @@ components:
           description: Defaults to "mcpproxy"
           type: string
       type: object
+    httpapi.EnvFieldPreview:
+      properties:
+        empty_or_placeholder:
+          type: boolean
+        name:
+          type: string
+        secret_like:
+          type: boolean
+        value_present:
+          type: boolean
+      type: object
+    httpapi.HeaderFieldPreview:
+      properties:
+        empty_or_placeholder:
+          type: boolean
+        name:
+          type: string
+        secret_like:
+          type: boolean
+      type: object
     httpapi.ImportFromPathRequest:
       properties:
         format:
@@ -3520,12 +3526,45 @@ components:
       type: object
     httpapi.ImportRequest:
       properties:
+        allow_paste_fallback:
+          description: |-
+            AllowPasteFallback opts into detecting a bare URL or a single command
+            line (FR-064) when Format/format detection would otherwise fail — see
+            configimport.ImportOptions.AllowPasteFallback for why this must stay
+            opt-in (review round 4 F-E). Only the interactive Paste tab sets this;
+            every other caller of this endpoint (the general "Import config"
+            panel, or a direct API call) leaves it false and gets a clear
+            "unable to detect configuration format" error for a plain one-liner
+            instead of it being silently guessed at and, on apply, added as a
+            real server with no confirmation step.
+          type: boolean
         content:
           description: Raw JSON or TOML content
           type: string
+        env_override:
+          additionalProperties:
+            type: string
+          description: |-
+            EnvOverride/HeaderOverride (Spec 109 FR-064/065, PR review round 4
+            F-A/F-D fix): the Paste tab's per-field Value/Secret edits — a plain
+            value the user typed, or a keyring ref path if they chose Secret —
+            keyed by field name. Applied to the matching imported server's
+            Env/Headers ONLY when preview=false, directly on the server this
+            request's own raw Content parses to server-side. This is what lets
+            the apply call carry the user's edited env/header values without
+            ever round-tripping the redacted preview: url/command/args on apply
+            always come from re-parsing Content here, never from a client-held
+            preview response, so a credential embedded in a URL query param or
+            argv flag (which the preview necessarily redacted for display) is
+            never overwritten with the masked placeholder.
+          type: object
         format:
           description: Optional format hint
           type: string
+        header_override:
+          additionalProperties:
+            type: string
+          type: object
         server_names:
           description: 'Optional: import only these servers'
           items:
@@ -3572,11 +3611,8 @@ components:
         command:
           type: string
         env:
-          description: |-
-            Env / Headers classify each env var / header for the "needs secret"
-            tag without exposing the values.
           items:
-            $ref: '#/components/schemas/configimport.ImportedField'
+            $ref: '#/components/schemas/httpapi.EnvFieldPreview'
           type: array
           uniqueItems: false
         fields_skipped:
@@ -3586,7 +3622,7 @@ components:
           uniqueItems: false
         headers:
           items:
-            $ref: '#/components/schemas/configimport.ImportedField'
+            $ref: '#/components/schemas/httpapi.HeaderFieldPreview'
           type: array
           uniqueItems: false
         name:
@@ -3599,12 +3635,14 @@ components:
           type: string
         summary:
           description: |-
-            Summary is the wizard/ImportServers second line: command+args or
-            url (auth-type), already redacted.
+            Summary, Tags, Env and Headers are the Spec 109 FR-064 preview
+            enrichment (contracts/rest-api.md "Import preview"). Summary and Tags
+            are built from the already-redacted URL/Command/Args above, so a
+            secret embedded in argv or a URL query never reaches Summary either.
+            Env/Headers never carry the raw value — only its presence and two
+            booleans a surface uses to default the Value/Secret toggle (FR-065).
           type: string
         tags:
-          description: 'Tags classifies Summary: local process|remote, needs secret,
-            oauth.'
           items:
             type: string
           type: array
@@ -4336,6 +4374,12 @@ paths:
               schema:
                 type: string
           description: Streamed activity records
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Bad Request
         "401":
           content:
             application/json:
@@ -4526,6 +4570,46 @@ paths:
       summary: Get annotation coverage report
       tags:
       - annotations
+  /api/v1/catalog/search:
+    get:
+      description: Fans out to every enabled catalog source (registry) in parallel,
+        merges, de-duplicates and ranks the results (FR-060/061). An empty q returns
+        official + popular sections instead of a flat list. Open to any authenticated
+        caller — added is the only field filtered per caller scope (FR-007).
+      parameters:
+      - description: Free-text search
+        in: query
+        name: q
+        schema:
+          type: string
+      - description: Narrow to one catalog source id
+        in: query
+        name: source
+        schema:
+          type: string
+      - description: Filter by tag
+        in: query
+        name: tag
+        schema:
+          type: string
+      - description: Max results (default 20, max 50)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: OK
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Search the server catalog across every enabled source
+      tags:
+      - catalog
   /api/v1/code/scripts:
     get:
       description: 'List the stored scripts available to the code_execution tool.
@@ -6021,6 +6105,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.GetServersResponse'
           description: Server list with statistics
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unsupported scope filter (profile/client/token, Spec 109-k
+            FR-080a)
         "500":
           content:
             application/json:
@@ -7648,6 +7739,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.GlobalToolsResponse'
           description: All tools across all servers
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unsupported scope filter (profile/client/token, Spec 109-k
+            FR-080a)
         "500":
           content:
             application/json:

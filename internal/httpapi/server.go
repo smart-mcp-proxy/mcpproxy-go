@@ -593,6 +593,10 @@ func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Reque
 // sources never resolve a session principal (only Authorization: Bearer and
 // the cookie do).
 func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, token string) {
+	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
+		s.rejectClientCredentialOnREST(w, r)
+		return
+	}
 	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
 		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
 		return
@@ -622,6 +626,10 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 		token = strings.TrimPrefix(authHeader, "Bearer ")
 	}
 
+	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
+		s.rejectClientCredentialOnREST(w, r)
+		return
+	}
 	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
 		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
 		return
@@ -645,6 +653,18 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
+}
+
+// rejectClientCredentialOnREST is the FR-023 refusal: a Spec 108-c client
+// credential (kind=client, mcp_cli_ secret prefix) authenticates on MCP
+// endpoints only. Recognised by the prefix BEFORE any store lookup — a
+// client credential can never read activity, config or other clients over
+// REST, even one presented with a malformed or since-revoked record.
+func (s *Server) rejectClientCredentialOnREST(w http.ResponseWriter, r *http.Request) {
+	s.logger.Warnw("client credential presented on the REST API; refused",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+	s.writeError(w, r, http.StatusForbidden, "client credentials are valid on MCP endpoints only")
 }
 
 // handleAgentTokenAuth validates an agent token and sets the appropriate AuthContext.
@@ -677,6 +697,16 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 			zap.String("remote_addr", r.RemoteAddr),
 			zap.String("error", err.Error()))
 		s.writeError(w, r, http.StatusUnauthorized, fmt.Sprintf("Agent token invalid: %s", err.Error()))
+		return
+	}
+
+	// FR-023, second half ("and by kind after it"): a client credential
+	// reached this far only if its secret's prefix went unrecognised above
+	// (defence in depth against a future prefix regression) — refuse by
+	// KIND too, never dispatching a client credential's request as an
+	// ordinary agent token.
+	if agentToken.Kind == auth.KindClient {
+		s.rejectClientCredentialOnREST(w, r)
 		return
 	}
 
@@ -1147,6 +1177,11 @@ func (s *Server) setupRoutes() {
 		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)                                                            // spec 070 FR-007
 		r.Post("/registries/{id}/servers/{serverId}/add", s.requireServerOp(auth.ServerOpAddFromRegistry, s.handleAddFromRegistry)) // spec 070 keystone add
 
+		// Catalog (Spec 109 FR-060): source-agnostic, ranked search across
+		// every enabled registry. Open like GET /registries/{id}/servers —
+		// "added" is the only field filtered per caller scope (FR-007).
+		r.Get("/catalog/search", s.handleCatalogSearch)
+
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
 		r.Get("/activity/summary", s.handleActivitySummary)
@@ -1447,6 +1482,15 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	// sidecar with its 1h TTL; nil on Linux / tray not running / malformed.
 	response["launch_source"] = string(telemetry.DetectLaunchSourceOnce())
 	response["autostart_enabled"] = telemetry.AutostartReaderForDataDir(autostartDataDir).Read()
+
+	// Spec 109-k FR-080a: advertise which scope filters (profile/client/token)
+	// this build accepts, so a build accepts a parameter exactly when it
+	// advertises it. Omitted while the list is empty (Spec 108-e fills it).
+	if features := scopeFiltersFeatureValue(); len(features) > 0 {
+		response["features"] = map[string]interface{}{
+			"scope_filters": features,
+		}
+	}
 
 	s.writeSuccess(w, response)
 }
@@ -1800,9 +1844,15 @@ func getSocketPath() string {
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.GetServersResponse "Server list with statistics"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (profile/client/token, Spec 109-k FR-080a)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers [get]
 func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: GET /servers parses no query string today (`status`,
+	// `q` are client-side) — profile/client/token gated like everywhere else.
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
 		// Use new management service path
@@ -3802,9 +3852,16 @@ const globalToolsUsageWindow = 30 * 24 * time.Hour
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.GlobalToolsResponse "All tools across all servers"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (profile/client/token, Spec 109-k FR-080a)"
 // @Failure 500 {object} contracts.ErrorResponse "Could not enumerate servers"
 // @Router /api/v1/tools [get]
 func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: GET /tools parses no query string today (`server`,
+	// `tool`, `status` etc. are client-side per url-filter-contract.md) —
+	// profile/client/token are gated exactly like everywhere else.
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	allServers, err := s.controller.GetAllServers()
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to enumerate servers")
@@ -4489,6 +4546,11 @@ func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to extract config secrets")
 		return
 	}
+
+	// FR-065: report whether the OS keyring is usable so the Paste/Manual/
+	// Catalog secret toggle can disable itself with the reason instead of
+	// failing silently on Add.
+	configSecrets.KeyringAvailable, configSecrets.KeyringReason = resolver.KeyringAvailability()
 
 	s.writeSuccess(w, configSecrets)
 }
@@ -6374,6 +6436,11 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.requireAdminRead(w, r, sessionsDenialMessage) {
+		return
+	}
+
+	// Spec 109-k FR-080a: /sessions ignores `agent` today — gated like `token`.
+	if !rejectUnsupportedScopeFilters(w, r) {
 		return
 	}
 

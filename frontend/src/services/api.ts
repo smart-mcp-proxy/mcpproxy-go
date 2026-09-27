@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
 
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
 
@@ -252,8 +252,8 @@ class APIService {
   // `activation` is the Spec 044 activation funnel snapshot the endpoint
   // already serves to an admin caller (omitted for scoped agent tokens, and
   // absent when telemetry is not yet wired) — hence optional all the way down.
-  async getStatus(): Promise<APIResponse<{ edition: string; running: boolean; routing_mode: string; default_instructions?: string; activation?: { first_real_tool_call_ever?: boolean } }>> {
-    return this.request<{ edition: string; running: boolean; routing_mode: string; default_instructions?: string; activation?: { first_real_tool_call_ever?: boolean } }>('/api/v1/status')
+  async getStatus(): Promise<APIResponse<StatusResponse>> {
+    return this.request<StatusResponse>('/api/v1/status')
   }
 
   // Routing mode endpoint
@@ -652,10 +652,21 @@ class APIService {
   // status narrows the listing server-side ('active' | 'closed'). Without it the
   // backend returns the most recent sessions of ANY status, so a small limit can
   // be filled entirely by closed ones and hide a live client (audit F10).
-  async getSessions(limit?: number, status?: 'active' | 'closed'): Promise<APIResponse<GetSessionsResponse>> {
+  // `scope` is Spec 108 FR-031 / url-filter-contract.md's Sessions row:
+  // profile/client/token, sent only once `features.scope_filters` lists them
+  // (macOS's ScopeFilter.restRequest does the identical thing for the same
+  // endpoint — zcode review round 1, F8).
+  async getSessions(
+    limit?: number,
+    status?: 'active' | 'closed',
+    scope?: { profile?: string; client?: string; token?: string }
+  ): Promise<APIResponse<GetSessionsResponse>> {
     const params = new URLSearchParams()
     if (limit) params.set('limit', String(limit))
     if (status) params.set('status', status)
+    if (scope?.profile) params.set('profile', scope.profile)
+    if (scope?.client) params.set('client', scope.client)
+    if (scope?.token) params.set('token', scope.token)
     const query = params.toString()
     return this.request<GetSessionsResponse>(`/api/v1/sessions${query ? `?${query}` : ''}`)
   }
@@ -739,6 +750,25 @@ class APIService {
 
     const url = `/api/v1/registries/${encodeURIComponent(registryId)}/servers${params.toString() ? '?' + params.toString() : ''}`
     return this.request<SearchRegistryServersResponse>(url)
+  }
+
+  // Catalog (Spec 109 FR-060): source-agnostic search across every enabled
+  // catalog source. `source` narrows to one (never selects a UI tab — that's
+  // the caller's job, FR-062).
+  async catalogSearch(options?: {
+    q?: string
+    source?: string
+    tag?: string
+    limit?: number
+  }): Promise<APIResponse<CatalogSearchResponse>> {
+    const params = new URLSearchParams()
+    if (options?.q) params.append('q', options.q)
+    if (options?.source) params.append('source', options.source)
+    if (options?.tag) params.append('tag', options.tag)
+    if (options?.limit) params.append('limit', options.limit.toString())
+
+    const url = `/api/v1/catalog/search${params.toString() ? '?' + params.toString() : ''}`
+    return this.request<CatalogSearchResponse>(url)
   }
 
   // MCP-866 / MCP-867: add a user-supplied registry source. The server tags an
@@ -943,6 +973,7 @@ class APIService {
     server?: string
     tool?: string
     session_id?: string
+    work_session_id?: string
     status?: string
     intent_type?: string
     /** Sub-calls of one code_execution run: the parent record's request_id. */
@@ -1016,6 +1047,7 @@ class APIService {
     format: 'json' | 'csv'
     type?: string
     server?: string
+    tool?: string
     status?: string
     /** Export only the sub-calls of one code_execution run. */
     parent_id?: string
@@ -1042,6 +1074,17 @@ class APIService {
     format?: string
     server_names?: string[]
     preview?: boolean
+    // Paste tab env/header edits (Value or Secret-ref), applied server-side
+    // to the server this same request's `content` parses to — only takes
+    // effect when preview is false. See PasteServer.vue's handleAdd.
+    env_override?: Record<string, string>
+    header_override?: Record<string, string>
+    // Opt into detecting a bare URL or single command line (FR-064) when
+    // JSON/TOML detection fails. Only the Paste tab sets this — every other
+    // caller (the general "Import config" panel, canonical-path import)
+    // must keep getting a clear detection error for a plain one-liner
+    // instead of it being silently guessed at (review round 4 F-E).
+    allow_paste_fallback?: boolean
   }): Promise<APIResponse<ImportResponse>> {
     const url = `/api/v1/servers/import/json${params.preview ? '?preview=true' : ''}`
     return this.request<ImportResponse>(url, {
@@ -1049,7 +1092,10 @@ class APIService {
       body: JSON.stringify({
         content: params.content,
         format: params.format,
-        server_names: params.server_names
+        server_names: params.server_names,
+        env_override: params.env_override,
+        header_override: params.header_override,
+        allow_paste_fallback: params.allow_paste_fallback
       })
     })
   }

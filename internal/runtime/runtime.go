@@ -2091,6 +2091,22 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 		PerServerToolListSizes:  savingsMetrics.PerServerToolListSizes,
 	}
 
+	// Spec 109-k / audit finding F-Token: once a real retrieve_tools call has
+	// completed, report its real observed average size instead of the
+	// synthetic per-topK simulation above, and say so via Estimated.
+	realAvgBytes, haveReal := r.realRetrieveToolsAvgRespBytes()
+	resolvedSize, estimated := resolveAverageQueryResultSize(result.AverageQueryResultSize, realAvgBytes, haveReal)
+	result.AverageQueryResultSize = resolvedSize
+	result.Estimated = estimated
+	if result.TotalServerToolListSize > 0 {
+		saved := result.TotalServerToolListSize - resolvedSize
+		if saved < 0 {
+			saved = 0
+		}
+		result.SavedTokens = saved
+		result.SavedTokensPercentage = float64(saved) / float64(result.TotalServerToolListSize) * 100.0
+	}
+
 	return result, nil
 }
 

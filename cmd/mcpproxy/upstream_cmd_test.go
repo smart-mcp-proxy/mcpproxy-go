@@ -644,7 +644,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -719,7 +719,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		_, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -771,7 +771,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		}
 		cfg.DataDir = tmpDir
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		if err == nil {
 			t.Error("Expected error for duplicate server")
@@ -832,7 +832,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		os.Stdout = wOut
 		os.Stderr = wErr
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		added, err := runUpstreamAddConfigMode(req, cfg)
 
 		wOut.Close()
 		wErr.Close()
@@ -844,6 +844,13 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 
 		if err != nil {
 			t.Errorf("Expected no error with --if-not-exists, got: %v", err)
+		}
+		// review round 1: added must be false on a skip, distinct from a
+		// genuine add with a nil error — runUpstreamAdd uses this to decide
+		// whether to roll back any --secret-env/--secret-header values
+		// already written to the keyring for this request.
+		if added {
+			t.Error("expected added=false for an --if-not-exists skip")
 		}
 		if !strings.Contains(bufErr.String(), "already exists") || !strings.Contains(bufErr.String(), "skipped") {
 			t.Error("Expected skip message on stderr for existing server")
@@ -892,7 +899,7 @@ func TestAddStdioServerConfigMode(t *testing.T) {
 		_, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -969,7 +976,7 @@ func TestAddStdioServerConfigMode(t *testing.T) {
 		_, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -1372,7 +1379,7 @@ func TestNewServerQuarantineDefault(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout

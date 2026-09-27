@@ -63,10 +63,21 @@ mcpproxy activity list [flags]
 | `--parent-id` | | | List child tool calls of a `code_execution` activity (value = the parent record `request_id`) |
 | `--no-icons` | | | Disable emoji icons in output (use text instead) |
 | `--session` | | | Filter by MCP session ID |
+| `--view` | | `all` | Filter by view: `calls` (tool_call, internal_tool_call), `system` (every other type), `all`; overridden by `--type` |
 | `--start-time` | | | Filter records after this time (RFC3339) |
 | `--end-time` | | | Filter records before this time (RFC3339) |
+| `--from` | | | Alias of `--start-time`; also accepts a relative shorthand: `-1h`, `-24h`, `-7d`, `-30d`, or any `-<N>m`/`-<N>h`/`-<N>d` |
+| `--to` | | | Alias of `--end-time`; same relative shorthand as `--from` |
 | `--limit` | `-n` | 50 | Max records to return (1-100) |
 | `--offset` | | 0 | Pagination offset |
+
+A `--tool` value of the form `server:tool` (e.g. `github:create_issue`) is
+split into `--server github --tool create_issue` — the REST filters compare
+bare tool names, so sending `server:tool` verbatim would match nothing. An
+explicit `--server` that disagrees with the prefix is a contradiction: the
+command exits `1` with `--server <a> conflicts with the server in --tool
+<b>:<t>` before making any request, rather than silently keeping one value
+and dropping the other.
 
 ### Examples
 
@@ -181,6 +192,9 @@ mcpproxy activity watch [flags]
 |------|-------|---------|-------------|
 | `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` |
 | `--server` | `-s` | | Filter by server name |
+| `--view` | | `all` | Filter by view: `calls`, `system`, `all`; overridden by `--type` |
+| `--from` | | | Only print records at/after this time (RFC3339 or relative: `-1h`, `-24h`, `-7d`, `-30d`) |
+| `--to` | | | Stop watching once this time has passed (RFC3339 or relative); `watch` exits cleanly instead of reconnecting once `--to` is in the past |
 
 ### Examples
 
@@ -335,6 +349,10 @@ mcpproxy activity summary [flags]
 |------|-------|---------|-------------|
 | `--period` | `-p` | 24h | Time period: `1h`, `24h`, `7d`, `30d` |
 | `--by` | | | Group by: `server`, `tool`, `status` |
+| `--from` | | | Alias of `--period`, as a relative shorthand: `-1h`, `-24h`, `-7d`, `-30d` (any other value is rejected — summary has no arbitrary range) |
+
+`--to` is accepted for symmetry with `list`/`watch`/`export` but always
+rejected on `summary`; use `--period` or `--from`.
 
 ### Examples
 

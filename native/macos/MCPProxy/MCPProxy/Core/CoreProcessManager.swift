@@ -2053,13 +2053,21 @@ actor CoreProcessManager {
         await appState.refreshUsage(from: apiClient)
     }
 
-    /// Fetch token metrics from the status endpoint and update appState.
+    /// Fetch token metrics and feature flags from the status endpoint and update appState.
     private func refreshTokenMetrics() async {
         guard let apiClient else { return }
         do {
             let status = try await apiClient.status()
             if let metrics = status.upstreamStats?.tokenMetrics {
                 await MainActor.run { appState.tokenMetrics = metrics }
+            }
+            // Spec 109-k FR-080a: rides the same periodic status read, so the
+            // scope filters appear without a restart once the core lists them.
+            let available = status.scopeFiltersAvailable
+            await MainActor.run {
+                if appState.scopeFiltersAvailable != available {
+                    appState.scopeFiltersAvailable = available
+                }
             }
         } catch {
             // Non-fatal; token metrics are optional

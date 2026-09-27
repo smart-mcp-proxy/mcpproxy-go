@@ -65,12 +65,20 @@ const router = createRouter({
       },
     },
     {
-      path: '/repositories',
-      name: 'repositories',
-      component: () => import('@/views/Repositories.vue'),
+      path: '/add-server',
+      name: 'add-server',
+      component: () => import('@/views/AddServer.vue'),
       meta: {
-        title: 'Repositories',
+        title: 'Add Server',
       },
+    },
+    // Spec 109 FR-062: adding a server now starts at /add-server (outside the
+    // /servers/:serverName path space — no server name, including "add", can
+    // be shadowed by it). /repositories redirects here on the Catalog tab,
+    // and catalog-source management moved to Settings → Catalog sources.
+    {
+      path: '/repositories',
+      redirect: (to) => ({ path: '/add-server', query: { ...to.query, tab: 'catalog' } }),
     },
     // `/search` used to be a third, sidebar-less search surface duplicating the
     // header box and the Tools page (audit F20). Tools is the canonical one —
@@ -127,12 +135,15 @@ const router = createRouter({
       },
     },
     {
+      // Spec 109-k/109-ux-navigation-consistency FR-070: Sessions is now one
+      // of Activity's views (Tool calls · Sessions · System events · All),
+      // not its own page — `/sessions` keeps working as a redirect so old
+      // links/bookmarks still land somewhere, but the query string (a deep
+      // link like `?session=<id>`) has to survive the hop, same as the
+      // `/review` redirect above.
       path: '/sessions',
       name: 'sessions',
-      component: () => import('@/views/Sessions.vue'),
-      meta: {
-        title: 'MCP Sessions',
-      },
+      redirect: (to) => ({ path: '/activity', query: { ...to.query, view: 'sessions' }, hash: to.hash }),
     },
     {
       path: '/tools',

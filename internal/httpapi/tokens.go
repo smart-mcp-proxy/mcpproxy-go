@@ -269,6 +269,12 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 	if !s.requireTokenStore(w, r) {
 		return
 	}
+	// Spec 109-k FR-080a: GET /tokens gates profile/token until Spec 108
+	// wires `?profile=`/`?token=` (url-filter-contract.md `profile`/`token`
+	// rows).
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 
 	tokens, err := s.tokenStore.ListAgentTokens()
 	if err != nil {
@@ -415,6 +421,16 @@ func (s *Server) handleRegenerateToken(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, storage.ErrAgentTokenRevoked) {
 			s.writeError(w, r, http.StatusConflict,
 				fmt.Sprintf("Token %q is revoked and cannot be regenerated. Delete it and create a new token.", name))
+			return
+		}
+		// F1 (Spec 108-c review): this generic, name-based regenerate mints a
+		// fresh mcp_agt_ secret and cannot update a kind=client record's
+		// Kind/ClientID/ProfileMode fields to match — doing so would
+		// permanently brick the credential (every future authentication
+		// fails ValidateTokenInvariants). Refused before any mutation.
+		if errors.Is(err, storage.ErrClientCredentialRegenerateRefused) {
+			s.writeError(w, r, http.StatusConflict,
+				fmt.Sprintf("Token %q is a client credential and cannot be regenerated via this endpoint. Use the client-credential rotation flow instead.", name))
 			return
 		}
 		s.logger.Errorf("Failed to regenerate agent token: %v", err)

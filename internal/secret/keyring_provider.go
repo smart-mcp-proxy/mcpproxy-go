@@ -403,6 +403,50 @@ func (p *KeyringProvider) IsAvailable() bool {
 	}
 }
 
+// IsAvailableWithReason behaves like IsAvailable but also returns a short,
+// user-facing reason when unavailable ("" when available). Used by
+// GET /secrets/config (FR-065) so the Web/macOS/CLI secret toggle can explain
+// why it is disabled instead of just going dark, and by the CLI's
+// applySecretFlags pre-check before --secret-env/--secret-header.
+//
+// Both of those callers care about WRITE availability, not just whether a
+// read-only probe succeeds: Store() has its own hard gate on macOS (it
+// refuses unconditionally unless the caller opted in via
+// MCPPROXY_KEYRING_WRITE / SetWritesEnabled — see writesEnabled()), because
+// keyring.Set can pop a destructive system modal there. A plain probe-based
+// answer would tell a headless `mcpproxy serve` or the CLI's own in-process
+// resolver "available", and the very next Store() call would then fail with
+// ErrKeyringUnavailable. So this checks the macOS write gate first and only
+// falls through to the read-only probe once writes are actually permitted.
+func (p *KeyringProvider) IsAvailableWithReason() (bool, string) {
+	if isHeadlessEnvironment() {
+		return false, headlessUnavailableReason()
+	}
+	if runtime.GOOS == "darwin" && !p.writesEnabled() {
+		return false, "OS keychain writes require opting in on macOS outside the tray app (set MCPPROXY_KEYRING_WRITE=1, or use the tray, which opts in automatically)"
+	}
+	if p.IsAvailable() {
+		return true, ""
+	}
+	return false, "the OS keychain did not respond to a probe request (it may be locked, missing, or waiting on a prompt)"
+}
+
+// headlessUnavailableReason names the specific headless condition
+// isHeadlessEnvironment detected, so the fast-path skip is not reported as an
+// opaque "unavailable".
+func headlessUnavailableReason() string {
+	if v := strings.ToLower(os.Getenv("CI")); v == "true" || v == "1" || v == "yes" {
+		return "no OS keyring in a CI environment"
+	}
+	switch runtime.GOOS {
+	case "linux":
+		return "no display session (Secret Service needs an X11 or Wayland session)"
+	case "darwin":
+		return "running as root (sudo) has no user keychain available"
+	}
+	return "OS keyring is unavailable in this environment"
+}
+
 // isHeadlessEnvironment returns true when we can confidently say no
 // interactive keyring is available. We only use this as a FAST path to
 // skip probing; returning false does not mean the keyring IS available.

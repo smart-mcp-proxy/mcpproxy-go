@@ -568,6 +568,11 @@ export interface ConfigSecretsResponse {
   environment_vars: EnvVarStatus[]
   total_secrets: number
   total_env_vars: number
+  // FR-065: whether the OS keyring provider is usable, and why not when it
+  // isn't — the Paste/Manual/Catalog secret toggle disables itself with this
+  // reason instead of failing silently on Add.
+  keyring_available: boolean
+  keyring_reason?: string
 }
 
 // Tool Call History types
@@ -582,12 +587,30 @@ export interface TokenMetrics {
   was_truncated: boolean      // Whether response was truncated
 }
 
+// GET /api/v1/status (partial — only the fields the Web UI currently reads).
+// `features` (Spec 109-k / url-filter-contract.md FR-080a): which of
+// "profile"/"client"/"token" this build accepts as scope-filter query
+// parameters. Absent (or `scope_filters` absent/empty) means none yet — the
+// Spec 108 rows of useScopeQuery's parameter table stay hidden until this
+// lists them.
+export interface StatusResponse {
+  edition: string
+  running: boolean
+  routing_mode: string
+  default_instructions?: string
+  activation?: { first_real_tool_call_ever?: boolean }
+  features?: { scope_filters?: string[] }
+}
+
 export interface ServerTokenMetrics {
   total_server_tool_list_size: number
   average_query_result_size: number
   saved_tokens: number
   saved_tokens_percentage: number
   per_server_tool_list_sizes: Record<string, number>
+  // Spec 109-k: true while average_query_result_size/saved_tokens are a
+  // synthetic simulation rather than derived from a real retrieve_tools call.
+  estimated: boolean
 }
 
 // Usage statistics aggregate — GET /api/v1/activity/usage (Spec 069).
@@ -636,6 +659,9 @@ export interface UsageAggregateResponse {
   token_source: string              // "bytes" — size-based proxy (FR-006)
   tokens_saved: number              // echoed from ServerTokenMetrics (FR-007)
   tokens_saved_percentage: number
+  // Spec 109-k: true while tokens_saved is a synthetic simulation (no real
+  // retrieve_tools call observed yet) rather than derived from real usage.
+  tokens_saved_estimated: boolean
   tools: UsageToolStat[]
   other?: UsageOtherBucket | null   // present only when list truncated to top-N
   timeline: UsageTimeBucket[]
@@ -817,10 +843,72 @@ export interface SearchRegistryServersResponse {
   tag?: string
 }
 
+// Catalog (Spec 109 FR-060/061), GET /api/v1/catalog/search. Mirrors
+// registries.CatalogResult — a DTO distinct from RepositoryServer/ServerEntry;
+// see contracts/rest-api.md#catalog.
+export interface CatalogPopularity {
+  stars?: number
+  installs?: number
+}
+
+export interface CatalogInstall {
+  url?: string
+  command?: string
+  args?: string[]
+}
+
+export interface CatalogInput {
+  name: string
+  description?: string
+  secret_like: boolean
+}
+
+export interface CatalogResult {
+  source: string
+  id: string
+  title: string
+  publisher?: string
+  verified: boolean
+  official: boolean
+  popularity?: CatalogPopularity
+  description: string
+  transport: 'http' | 'stdio'
+  install: CatalogInstall
+  required_inputs?: CatalogInput[]
+  source_code_url?: string
+  added: boolean
+}
+
+export interface CatalogSourceError {
+  source: string
+  reason: string
+}
+
+export interface CatalogSections {
+  official: CatalogResult[]
+  popular: CatalogResult[]
+}
+
+export interface CatalogSearchResponse {
+  query: string
+  results: CatalogResult[]
+  sections: CatalogSections | null
+  unavailable: CatalogSourceError[]
+}
+
 // Activity Log types (RFC-003)
 
+// Every value ACTIVITY_TYPE_LABELS (utils/activity.ts) knows a label for —
+// that map's own comment (#1065) already flags the drift risk of hand-copying
+// this list a second time; this union had fallen behind it (missing five
+// backend types), which is what let `row.activity.type === 'tool_quarantine_change'`
+// (Spec 109-k's quarantine-batch fold) fail as "no overlap" at compile time.
 export type ActivityType =
   | 'tool_call'
+  | 'internal_tool_call'
+  | 'system_start'
+  | 'system_stop'
+  | 'config_change'
   | 'policy_decision'
   | 'quarantine_change'
   | 'server_change'
@@ -831,6 +919,13 @@ export type ActivityType =
    * ({verdict, ids_count, reasons{code:count}, per_tool[{id,status,reason?}]}).
    */
   | 'preflight'
+  /** Spec 032, tool-level quarantine state change. */
+  | 'tool_quarantine_change'
+  /** Spec 077. */
+  | 'security_scan'
+  /** Spec 074, server edition only. */
+  | 'credential_broker'
+  | 'prompt_get'
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 
@@ -973,11 +1068,18 @@ export interface ImportSummary {
   failed: number
 }
 
-// Per-env/header classification for an imported server's preview row
-// (Spec 109-b FR-040). Never carries the actual value.
-export interface ImportedField {
+// ImportFieldPreview types mirror httpapi.EnvFieldPreview / HeaderFieldPreview
+// (Spec 109 FR-064/065): never the raw value, only presence + two booleans a
+// surface uses to default the Value/Secret toggle.
+export interface ImportEnvFieldPreview {
   name: string
   value_present: boolean
+  secret_like: boolean
+  empty_or_placeholder: boolean
+}
+
+export interface ImportHeaderFieldPreview {
+  name: string
   secret_like: boolean
   empty_or_placeholder: boolean
 }
@@ -992,11 +1094,11 @@ export interface ImportedServer {
   original_name: string
   fields_skipped?: string[]
   warnings?: string[]
-  // Spec 109-b FR-040: wizard/ImportServers second line + classification.
-  summary: string
-  tags: string[]
-  env?: ImportedField[]
-  headers?: ImportedField[]
+  // FR-064 preview enrichment (contracts/rest-api.md "Import preview").
+  summary?: string
+  tags?: string[]
+  env?: ImportEnvFieldPreview[]
+  headers?: ImportHeaderFieldPreview[]
 }
 
 export interface SkippedServer {
@@ -1033,8 +1135,7 @@ export interface ClientStatus {
   id: string
   name: string
   config_path: string
-  // Spec 109-b FR-037: config_path with the home directory shortened to
-  // "~", for display; config_path itself stays the full path.
+  // Spec 109-b FR-037: the presentation-safe version of config_path.
   display_path?: string
   exists: boolean
   connected: boolean
@@ -1064,9 +1165,7 @@ export interface ClientStatus {
   // mcpproxy-shaped entry exists", and an entry merely NAMED mcpproxy counts —
   // so a row can be connected to a different instance entirely (audit F18).
   endpoint_match?: EndpointMatch
-  // Spec 109-b FR-037/FR-042: this client's instruction for making a
-  // freshly-written config take effect, e.g. "Restart Cursor to load
-  // MCPProxy". Empty for an unsupported client.
+  // The client-specific action needed after a Connect write.
   reload_hint?: string
 }
 
@@ -1082,7 +1181,6 @@ export interface ConnectResult {
   action: string
   message: string
   error?: string
-  // Spec 109-b FR-037/FR-042 (populated on every branch, not only success).
   display_path?: string
   reload_hint?: string
 }
@@ -1094,10 +1192,6 @@ export interface ConnectResult {
 export interface ConnectPreview {
   client: string
   config_path: string
-  // Spec 109-b FR-037: config_path with the home directory shortened to "~",
-  // matching ClientStatus/ConnectResult — same cosmetic-only field, so the
-  // preview and the post-connect result render the same client's path
-  // identically.
   display_path?: string
   format: 'json' | 'toml'
   server_key: string
@@ -1117,7 +1211,6 @@ export interface OnboardingState {
   engaged_at?: string
   connect_step_status?: '' | 'completed' | 'skipped'
   server_step_status?: '' | 'completed' | 'skipped'
-  // Spec 109-b FR-042: client id -> last successful connect write time.
   client_connected_at?: Record<string, string>
 }
 
@@ -1133,10 +1226,6 @@ export interface OnboardingStateResponse {
   first_mcp_client_ever: boolean
   mcp_clients_seen_ever: string[]
   incomplete_tab_count: number
-  // Spec 109-b FR-041/FR-042: the real "something to try" signal — has_configured_server
-  // only means a server ENTRY exists, even while every one sits quarantined or
-  // has no approved tool. The Servers step and the Setup badge use this
-  // instead. usable_servers feeds the Verify step's suggested prompts.
   has_usable_server: boolean
   usable_servers: string[]
 }
