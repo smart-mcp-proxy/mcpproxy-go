@@ -52,7 +52,38 @@ function installFetch(routes: Record<string, () => Response>): FetchLog[] {
  * must label its button with the operator-chosen `display_name`.
  */
 describe('auth-api provider probe (Spec 107 FR-030)', () => {
+  beforeEach(() => {
+    document.head.innerHTML = ''
+  })
   afterEach(() => vi.unstubAllGlobals())
+
+  it('does not fetch when the served index explicitly identifies the personal edition', async () => {
+    document.head.innerHTML = '<meta name="mcpproxy-server-edition" content="false">'
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+
+    expect(await authApi.getProvider()).toBeNull()
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it.each(['true', '', 'unexpected'])('keeps the public probe when the marker is %j', async (content) => {
+    document.head.innerHTML = `<meta name="mcpproxy-server-edition" content="${content}">`
+    const log = installFetch({
+      '/api/v1/auth/provider': () => jsonResponse(200, { display_name: 'Acme Okta' }),
+    })
+
+    expect(await authApi.getProvider()).toEqual({ display_name: 'Acme Okta' })
+    expect(log).toHaveLength(1)
+  })
+
+  it('keeps the public probe when the marker is absent, for standalone frontend and older cores', async () => {
+    const log = installFetch({
+      '/api/v1/auth/provider': () => jsonResponse(200, { display_name: 'Acme Okta' }),
+    })
+
+    expect(await authApi.getProvider()).toEqual({ display_name: 'Acme Okta' })
+    expect(log).toHaveLength(1)
+  })
 
   it('GETs /api/v1/auth/provider and returns only the display_name', async () => {
     const log = installFetch({

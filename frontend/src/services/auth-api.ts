@@ -32,6 +32,14 @@ export const authApi = {
   // so learning the edition from a keyed endpoint would 401 for exactly the
   // people the server edition exists for.
   async getProvider(): Promise<ProviderInfo | null> {
+    // A served personal-edition index explicitly says that the public route
+    // does not exist. Avoiding this request prevents an expected 401 from
+    // being surfaced as a browser console error. Any other value deliberately
+    // falls back to the public probe for standalone development and older
+    // cores. This marker is never an authorization decision.
+    const editionHint = document.querySelector('meta[name="mcpproxy-server-edition"]')?.getAttribute('content')
+    if (editionHint === 'false') return null
+
     try {
       const response = await fetch(`${API_BASE}/auth/provider`)
       if (response.status === 404) return null

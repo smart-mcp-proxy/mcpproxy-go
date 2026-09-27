@@ -3162,10 +3162,16 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// increments the persistent web_ui_opened funnel counter — independent of
 	// the X-MCPProxy-Client-header surface_requests.webui counting. nil-safe
 	// at both layers: no telemetry service or no funnel store → no-op.
-	webUIHandler := web.NewHandlerWithIndexCallback(s.logger.Sugar(), func() {
-		if ts := s.runtime.TelemetryService(); ts != nil {
-			ts.RecordWebUIOpen()
-		}
+	webUIHandler := web.NewHandlerWithOptions(s.logger.Sugar(), web.HandlerOptions{
+		// The edition hint is pinned at startup with the web handler. A config
+		// reload cannot change it until restart, matching the server-edition
+		// startup routes it describes.
+		ServerEditionEnabled: config.ServerEditionEnabled(cfg),
+		OnIndexServe: func() {
+			if ts := s.runtime.TelemetryService(); ts != nil {
+				ts.RecordWebUIOpen()
+			}
+		},
 	})
 	selectiveProtectedWebUIHandler := s.createSelectiveWebUIProtectedHandler(http.StripPrefix("/ui", webUIHandler))
 	mux.Handle("/ui/", selectiveProtectedWebUIHandler)
