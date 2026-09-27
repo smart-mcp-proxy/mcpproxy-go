@@ -3781,14 +3781,14 @@ components:
         has_usable_server:
           description: |-
             HasUsableServer is true once at least one enabled, non-quarantined
-            server is connected AND has at least one approved (non-disabled) tool.
+            server has usable health and at least one approved (non-disabled) tool.
             This is the real "the wizard has something to try" signal:
             HasConfiguredServer only means a server entry exists, even while every
-            one of them sits quarantined or has zero approved tools. The Servers
-            step and the Setup badge use this instead of HasConfiguredServer, which
-            is kept above for compatibility. Once 109-c's health vocabulary lands,
-            "connected" is replaced by health.usable (tasks.md T051); until then
-            this uses "connected" as the interim usability test.
+            one of them sits quarantined, requires sign-in, or has zero approved
+            tools. The Servers step and Setup badge use this instead of
+            HasConfiguredServer, which is kept above for compatibility.
+            HealthStatus.Usable is the shared
+            readiness contract used by every UI surface (Spec 109-c, tasks.md T051).
           type: boolean
         incomplete_tab_count:
           description: |-
