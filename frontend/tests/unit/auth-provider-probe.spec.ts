@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import { authApi } from '@/services/auth-api'
 import { useAuthStore } from '@/stores/auth'
 import Login from '@/views/teams/Login.vue'
@@ -227,5 +228,88 @@ describe('Login.vue provider label (Spec 107 FR-030)', () => {
     store.provider = { display_name: 'Acme Okta' }
     const wrapper = mount(Login)
     expect(wrapper.html()).not.toMatch(/issuer|client_id|tenant/i)
+  })
+
+  it('retries a failed bootstrap in place and replaces a safe intended route after cookie recovery', async () => {
+    const responses = [
+      () => jsonResponse(500, { error: 'unavailable' }),
+      () => jsonResponse(200, { display_name: 'Acme Okta' }),
+      () => jsonResponse(200, { authenticated: true }),
+      () => jsonResponse(200, { id: 'u1', email: 'a@acme.test', display_name: 'A', role: 'admin', provider: 'oidc' }),
+    ]
+    const fetchSpy = vi.fn(async () => responses.shift()?.() ?? jsonResponse(500, { error: 'unexpected request' }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const store = useAuthStore()
+    await store.checkAuth()
+    expect(store.bootstrapError).not.toBeNull()
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: Login },
+        { path: '/my/activity', name: 'activity', component: { template: '<div />' } },
+        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+      ],
+    })
+    await router.push({ path: '/login', query: { redirect: '/my/activity?view=mine' } })
+    await router.isReady()
+    const wrapper = mount(Login, { global: { plugins: [router] } })
+
+    await wrapper.get('button.btn-ghost').trigger('click')
+    await wrapper.vm.$nextTick()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(fetchSpy).toHaveBeenCalledTimes(4)
+    expect(store.isAuthenticated).toBe(true)
+    expect(router.currentRoute.value.fullPath).toBe('/my/activity?view=mine')
+  })
+
+  it('stays on Login after an unsuccessful retry and does not start an IdP redirect', async () => {
+    const store = useAuthStore()
+    store.provider = { display_name: 'Exact Operator Label' }
+    store.bootstrapError = 'Unable to determine sign-in status. Please retry.'
+    const checkAuth = vi.spyOn(store, 'checkAuth').mockResolvedValue()
+    const login = vi.spyOn(store, 'login')
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: Login },
+        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+      ],
+    })
+    await router.push({ path: '/login', query: { redirect: 'https://attacker.invalid' } })
+    await router.isReady()
+    const wrapper = mount(Login, { global: { plugins: [router] } })
+
+    await wrapper.get('button.btn-ghost').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(checkAuth).toHaveBeenCalledWith({ fresh: true })
+    expect(login).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(wrapper.text()).toContain('Exact Operator Label')
+  })
+
+  it('uses the dashboard rather than an external redirect after a recovered session', async () => {
+    const store = useAuthStore()
+    store.isTeamsEdition = true
+    store.user = { id: 'u1', email: 'a@acme.test', display_name: 'A', role: 'admin', provider: 'oidc', created_at: '', last_login_at: '' }
+    store.bootstrapError = 'Unable to determine sign-in status. Please retry.'
+    vi.spyOn(store, 'checkAuth').mockResolvedValue()
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: Login },
+        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+      ],
+    })
+    await router.push({ path: '/login', query: { redirect: '//attacker.invalid/steal' } })
+    await router.isReady()
+    const wrapper = mount(Login, { global: { plugins: [router] } })
+
+    await wrapper.get('button.btn-ghost').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(router.currentRoute.value.path).toBe('/')
   })
 })

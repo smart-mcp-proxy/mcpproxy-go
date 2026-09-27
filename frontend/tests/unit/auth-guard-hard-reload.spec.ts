@@ -218,6 +218,7 @@ describe('router guard: hard-reload deep link under the server edition', () => {
     await Promise.all([mount, nav])
 
     expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.redirect).toBe('/my/tokens')
   })
 
   it('guard drains a fresh probe queued behind the run it joined before deciding', async () => {

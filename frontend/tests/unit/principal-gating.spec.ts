@@ -285,4 +285,46 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
     expect(fetchInfo).not.toHaveBeenCalled()
     expect(fetchServers).not.toHaveBeenCalled()
   })
+
+  it('fails closed without session or core calls when the provider probe is unavailable', async () => {
+    getProviderMock.mockResolvedValue(undefined)
+    const { default: App } = await import('@/App.vue')
+    mount(App, { global: { stubs: ['SidebarNav', 'TopHeader', 'AppFooter', 'ToastContainer', 'ConnectionStatus', 'AuthErrorModal', 'router-view'] } })
+    await flushPromises()
+
+    const { useAuthStore } = await import('@/stores/auth')
+    const auth = useAuthStore()
+    expect(auth.authResolvedSuccessfully).toBe(false)
+    expect(auth.canShowShell).toBe(false)
+    expect(auth.canLoadCore).toBe(false)
+    expect(getSessionStatusMock).not.toHaveBeenCalled()
+    expect(getMeMock).not.toHaveBeenCalled()
+    expect(fetchInfo).not.toHaveBeenCalled()
+    expect(fetchRouting).not.toHaveBeenCalled()
+    expect(fetchScopeFilterFeatures).not.toHaveBeenCalled()
+    expect(fetchServers).not.toHaveBeenCalled()
+    expect(connectEventSource).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a session 500', () => Promise.reject(new Error('HTTP 500'))],
+    ['a malformed session status', () => Promise.resolve({ authenticated: 'yes' })],
+  ])('fails closed with no protected calls after %s', async (_case, sessionResult) => {
+    getSessionStatusMock.mockImplementation(sessionResult)
+    const { default: App } = await import('@/App.vue')
+    mount(App, { global: { stubs: ['SidebarNav', 'TopHeader', 'AppFooter', 'ToastContainer', 'ConnectionStatus', 'AuthErrorModal', 'router-view'] } })
+    await flushPromises()
+
+    const { useAuthStore } = await import('@/stores/auth')
+    const auth = useAuthStore()
+    expect(auth.authResolvedSuccessfully).toBe(false)
+    expect(auth.canShowShell).toBe(false)
+    expect(auth.canLoadCore).toBe(false)
+    expect(getMeMock).not.toHaveBeenCalled()
+    expect(fetchInfo).not.toHaveBeenCalled()
+    expect(fetchRouting).not.toHaveBeenCalled()
+    expect(fetchScopeFilterFeatures).not.toHaveBeenCalled()
+    expect(fetchServers).not.toHaveBeenCalled()
+    expect(connectEventSource).not.toHaveBeenCalled()
+  })
 })

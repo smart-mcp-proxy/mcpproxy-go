@@ -27,11 +27,13 @@ const routes = [
 let authErrorListener: ((event: { type: 'auth-error'; error: string; status: number }) => void) | null = null
 
 const getProviderMock = vi.fn()
+const getSessionStatusMock = vi.fn()
 const getMeMock = vi.fn()
 
 vi.mock('@/services/auth-api', () => ({
   authApi: {
     getProvider: (...args: unknown[]) => getProviderMock(...args),
+    getSessionStatus: (...args: unknown[]) => getSessionStatusMock(...args),
     getMe: (...args: unknown[]) => getMeMock(...args),
     generateToken: vi.fn(),
     logout: vi.fn(),
@@ -64,6 +66,7 @@ vi.mock('@/services/api', () => ({
 
 async function mountAppInServerEdition() {
   getProviderMock.mockResolvedValue({ display_name: 'Example Corp' })
+  getSessionStatusMock.mockResolvedValue({ authenticated: true })
   getMeMock.mockResolvedValue({
     id: 'u1',
     email: 'alice@example.com',
@@ -94,6 +97,7 @@ describe('Tenant login flow: background 401 redirects to /login (Spec 107 T087/T
     setActivePinia(createPinia())
     authErrorListener = null
     getProviderMock.mockReset()
+    getSessionStatusMock.mockReset()
     getMeMock.mockReset()
   })
 

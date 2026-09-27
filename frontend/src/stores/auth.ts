@@ -99,13 +99,14 @@ export const useAuthStore = defineStore('auth', () => {
         return
       }
 
-      // Older embedded/test clients can supply the pre-session-probe auth API
-      // shape. Production always has this method; keeping that compatibility
-      // does not create a browser fallback because the real client calls the
-      // public cookie-only route above.
-      const session = typeof authApi.getSessionStatus === 'function'
-        ? await authApi.getSessionStatus()
-        : { authenticated: true }
+      const session = await authApi.getSessionStatus()
+      // Validate here as well as in auth-api. The store is the authorization
+      // boundary for startup gates, so a mocked, malformed, or independently
+      // evolved client must not turn a truthy value into an authenticated
+      // browser session.
+      if (!session || typeof session.authenticated !== 'boolean') {
+        throw new Error('Invalid session status response')
+      }
       user.value = session.authenticated ? await authApi.getMe() : null
       authResolvedSuccessfully.value = true
     } catch {

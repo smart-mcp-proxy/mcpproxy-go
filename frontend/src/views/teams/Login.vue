@@ -27,9 +27,12 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
 const authStore = useAuthStore()
+const router = useRouter()
+const route = useRoute()
 
 // Spec 107 FR-030: the label comes from the public probe
 // (GET /api/v1/auth/provider → {display_name}: oauth.display_name, falling
@@ -42,6 +45,23 @@ function handleLogin() {
 }
 
 function retry() {
-  void authStore.checkAuth({ fresh: true })
+  void authStore.checkAuth({ fresh: true }).then(() => {
+    // A retry is a local bootstrap recovery, never another IdP handoff. Only
+    // a settled server-edition cookie session may leave Login. The guard puts
+    // an internal fullPath in this query; reject external, login-loop, and
+    // unmatched values before passing anything to the router.
+    if (!authStore.isTeamsEdition || !authStore.isAuthenticated) return
+    const redirect = route.query.redirect
+    if (typeof redirect !== 'string' || !redirect.startsWith('/') || redirect.startsWith('//')) {
+      void router.replace({ name: 'dashboard' })
+      return
+    }
+    const target = router.resolve(redirect)
+    if (target.path === '/login' || target.matched.length === 0 || target.matched.some((record) => record.name === 'not-found')) {
+      void router.replace({ name: 'dashboard' })
+      return
+    }
+    void router.replace(target.fullPath)
+  })
 }
 </script>
