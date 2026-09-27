@@ -279,6 +279,11 @@ type ServerController interface {
 	// Onboarding wizard (Spec 046)
 	GetOnboardingState() (*storage.OnboardingState, error)
 	SaveOnboardingState(state *storage.OnboardingState) error
+	// UpdateOnboardingState runs fn against the current onboarding state and
+	// persists it atomically (Spec 109-b, T035): every writer of the record
+	// must use this instead of a separate Get+Save pair, so a concurrent
+	// writer's field is never dropped.
+	UpdateOnboardingState(fn func(*storage.OnboardingState) error) error
 
 	// Activation state (Spec 044) — read-only access used by the v2
 	// onboarding wizard's Verify tab to detect whether any MCP client has
@@ -590,6 +595,10 @@ func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Reque
 // sources never resolve a session principal (only Authorization: Bearer and
 // the cookie do).
 func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, token string) {
+	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
+		s.rejectClientCredentialOnREST(w, r)
+		return
+	}
 	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
 		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
 		return
@@ -619,6 +628,10 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 		token = strings.TrimPrefix(authHeader, "Bearer ")
 	}
 
+	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
+		s.rejectClientCredentialOnREST(w, r)
+		return
+	}
 	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
 		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
 		return
@@ -642,6 +655,18 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
+}
+
+// rejectClientCredentialOnREST is the FR-023 refusal: a Spec 108-c client
+// credential (kind=client, mcp_cli_ secret prefix) authenticates on MCP
+// endpoints only. Recognised by the prefix BEFORE any store lookup — a
+// client credential can never read activity, config or other clients over
+// REST, even one presented with a malformed or since-revoked record.
+func (s *Server) rejectClientCredentialOnREST(w http.ResponseWriter, r *http.Request) {
+	s.logger.Warnw("client credential presented on the REST API; refused",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+	s.writeError(w, r, http.StatusForbidden, "client credentials are valid on MCP endpoints only")
 }
 
 // handleAgentTokenAuth validates an agent token and sets the appropriate AuthContext.
@@ -674,6 +699,16 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 			zap.String("remote_addr", r.RemoteAddr),
 			zap.String("error", err.Error()))
 		s.writeError(w, r, http.StatusUnauthorized, fmt.Sprintf("Agent token invalid: %s", err.Error()))
+		return
+	}
+
+	// FR-023, second half ("and by kind after it"): a client credential
+	// reached this far only if its secret's prefix went unrecognised above
+	// (defence in depth against a future prefix regression) — refuse by
+	// KIND too, never dispatching a client credential's request as an
+	// ordinary agent token.
+	if agentToken.Kind == auth.KindClient {
+		s.rejectClientCredentialOnREST(w, r)
 		return
 	}
 
@@ -1147,6 +1182,11 @@ func (s *Server) setupRoutes() {
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
 		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)                                                            // spec 070 FR-007
 		r.Post("/registries/{id}/servers/{serverId}/add", s.requireServerOp(auth.ServerOpAddFromRegistry, s.handleAddFromRegistry)) // spec 070 keystone add
+
+		// Catalog (Spec 109 FR-060): source-agnostic, ranked search across
+		// every enabled registry. Open like GET /registries/{id}/servers —
+		// "added" is the only field filtered per caller scope (FR-007).
+		r.Get("/catalog/search", s.handleCatalogSearch)
 
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
@@ -4541,6 +4581,11 @@ func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to extract config secrets")
 		return
 	}
+
+	// FR-065: report whether the OS keyring is usable so the Paste/Manual/
+	// Catalog secret toggle can disable itself with the reason instead of
+	// failing silently on Add.
+	configSecrets.KeyringAvailable, configSecrets.KeyringReason = resolver.KeyringAvailability()
 
 	s.writeSuccess(w, configSecrets)
 }

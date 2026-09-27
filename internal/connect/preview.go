@@ -21,8 +21,13 @@ const apiKeyMask = "••••" // ••••
 // what is previewed equals what is written for the same client and configuration
 // (FR-002); the embedded API key is masked for display (FR-004).
 type ConnectPreview struct {
-	Client         string                 `json:"client"`
-	ConfigPath     string                 `json:"config_path"`
+	Client     string `json:"client"`
+	ConfigPath string `json:"config_path"`
+	// DisplayPath is ConfigPath with the home directory shortened to "~"
+	// (FR-037), matching ClientStatus/ConnectResult so the same client's path
+	// renders identically across the status list, the preview, and the
+	// post-connect result. Cosmetic only; the full path stays in ConfigPath.
+	DisplayPath    string                 `json:"display_path,omitempty"`
 	Format         string                 `json:"format"`           // "json" | "toml"
 	ServerKey      string                 `json:"server_key"`       // mcpServers / servers / mcp_servers / mcp
 	ServerName     string                 `json:"server_name"`      // key written into the config ("mcpproxy")
@@ -111,6 +116,7 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 	return &ConnectPreview{
 		Client:               clientID,
 		ConfigPath:           cfgPath,
+		DisplayPath:          DisplayPath(cfgPath, s.homeDir),
 		Format:               client.Format,
 		ServerKey:            client.ServerKey,
 		ServerName:           serverName,

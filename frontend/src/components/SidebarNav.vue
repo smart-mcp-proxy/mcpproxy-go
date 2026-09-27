@@ -351,14 +351,14 @@
           <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li>
               <router-link
-                to="/repositories"
-                :class="{ 'active': isActiveRoute('/repositories') }"
+                to="/add-server"
+                :class="{ 'active': isActiveRoute('/add-server') || isActiveRoute('/repositories') }"
                 class="rounded-lg text-base-content/70"
-                :title="collapsed ? 'Repositories' : ''"
-                :aria-label="collapsed ? 'Repositories' : undefined"
+                :title="collapsed ? 'Add Server' : ''"
+                :aria-label="collapsed ? 'Add Server' : undefined"
               >
                 <IconRepo class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed" class="text-[13px]">Repositories</span>
+                <span v-show="!collapsed" class="text-[13px]">Add Server</span>
               </router-link>
             </li>
             <li>
@@ -548,7 +548,7 @@ function onClickSetup() {
 
 function loadBadgeCounts() {
   // Personal-edition only — the surrounding template gates this for personal users.
-  if (!authStore.isTeamsEdition) {
+  if (!authStore.isTeamsEdition || authStore.canLoadCore) {
     void onboardingStore.fetchState()
     void fetchToolCount()
     void fetchSecretCount()

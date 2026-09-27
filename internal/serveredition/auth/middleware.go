@@ -53,6 +53,25 @@ type ServerEditionAuthMiddleware struct {
 	logger         *zap.SugaredLogger
 }
 
+// SessionStatus answers the public browser bootstrap probe. It intentionally
+// accepts only a valid session cookie: bearer JWTs, agent tokens and API keys
+// are credentials for other surfaces, not evidence of a browser session.
+func (m *ServerEditionAuthMiddleware) SessionStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+
+	authCtx, err := m.authenticateFromSession(r)
+	if err != nil {
+		m.logger.Warnw("session bootstrap authentication error", "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "Unable to determine session status")
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(struct {
+		Authenticated bool `json:"authenticated"`
+	}{Authenticated: authCtx != nil})
+}
+
 // NewServerEditionAuthMiddleware creates a new ServerEditionAuthMiddleware.
 //
 // teamsConfig must read the LIVE configuration on every call; see

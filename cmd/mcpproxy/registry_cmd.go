@@ -361,6 +361,7 @@ The printed ID column is what you pass to 'registry add'.`,
 			if registryID == "" {
 				return fmt.Errorf("--registry is required (use 'mcpproxy registry list' to see available ids)")
 			}
+			printCatalogDeprecationNotice("registry search", fmt.Sprintf("catalog search %s --source %s", query, registryID))
 
 			ctx, cancel := registryContext()
 			defer cancel()
@@ -431,6 +432,7 @@ inputs, supply them with --env KEY=VALUE.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			registryID, serverID := args[0], args[1]
+			printCatalogDeprecationNotice("registry add", fmt.Sprintf("catalog add %s/%s", registryID, serverID))
 
 			env, err := parseRegistryEnv(registryAddEnv)
 			if err != nil {

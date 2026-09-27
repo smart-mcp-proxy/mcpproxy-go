@@ -122,6 +122,11 @@ enum ConnectChangeKind: Equatable {
 struct ConnectPreviewModel: Codable, Equatable {
     let client: String?
     let configPath: String
+    /// ConfigPath with the home directory shortened to "~" (FR-037), matching
+    /// `APIClient.ClientStatus`/`ConnectResult` so the same client's path
+    /// renders identically across the status list, this preview, and the
+    /// post-connect result. Nil from a core that predates this field.
+    let displayPath: String?
     let serverName: String
     let entryText: String
     let entryExists: Bool
@@ -153,6 +158,7 @@ struct ConnectPreviewModel: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case client
         case configPath = "config_path"
+        case displayPath = "display_path"
         case serverName = "server_name"
         case entryText = "entry_text"
         case entryExists = "entry_exists"
@@ -166,6 +172,7 @@ struct ConnectPreviewModel: Codable, Equatable {
     init(
         client: String? = nil,
         configPath: String,
+        displayPath: String? = nil,
         serverName: String,
         entryText: String,
         entryExists: Bool,
@@ -178,6 +185,7 @@ struct ConnectPreviewModel: Codable, Equatable {
     ) {
         self.client = client
         self.configPath = configPath
+        self.displayPath = displayPath
         self.serverName = serverName
         self.entryText = entryText
         self.entryExists = entryExists
@@ -193,6 +201,7 @@ struct ConnectPreviewModel: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         client = try container.decodeIfPresent(String.self, forKey: .client)
         configPath = try container.decodeIfPresent(String.self, forKey: .configPath) ?? ""
+        displayPath = try container.decodeIfPresent(String.self, forKey: .displayPath)
         serverName = try container.decodeIfPresent(String.self, forKey: .serverName)
             ?? ConnectPreviewModel.defaultServerName
         entryText = try container.decodeIfPresent(String.self, forKey: .entryText) ?? ""
@@ -217,6 +226,11 @@ struct ConnectPreviewModel: Codable, Equatable {
     static let defaultServerName = "mcpproxy"
 
     // MARK: Derived
+
+    /// `displayPath` when the core sent it, else the full `configPath` — the
+    /// same fallback `APIClient.ClientStatus`/`ConnectResult` use, so a view
+    /// can render one property regardless of which core version answered.
+    var effectiveDisplayPath: String { displayPath ?? configPath }
 
     /// Classification of the pending change (data-model). Refusal outranks
     /// everything: an OpenCode preview with an absent config is refused, NOT a
