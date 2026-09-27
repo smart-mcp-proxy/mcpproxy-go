@@ -3496,6 +3496,8 @@ components:
           type: string
         secret_like:
           type: boolean
+        value_present:
+          type: boolean
       type: object
     httpapi.ImportFromPathRequest:
       properties:

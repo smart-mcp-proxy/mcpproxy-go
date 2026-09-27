@@ -184,7 +184,7 @@ func summarizeServer(server *config.ServerConfig, envFields, headerFields []Impo
 		((server.Protocol == "" || server.Protocol == "auto") && (server.Command != "" || server.URL == ""))
 
 	if isStdio {
-		parts := append([]string{server.Command}, oauth.LiveRedaction.Argv(server.Args)...)
+		parts := append([]string{oauth.LiveRedaction.Leaf("command", server.Command)}, oauth.LiveRedaction.Argv(server.Args)...)
 		summary = strings.TrimSpace(strings.Join(parts, " "))
 		tags = []string{"local process"}
 	} else {

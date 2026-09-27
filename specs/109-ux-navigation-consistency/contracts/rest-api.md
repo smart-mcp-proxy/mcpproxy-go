@@ -199,7 +199,7 @@ These field names are the base of Spec 108's `ClientView`, which extends them wi
 ```json
 {"summary": "npx -y @modelcontextprotocol/server-filesystem /tmp", "tags": ["local process"],
  "env": [{"name": "GITHUB_TOKEN", "value_present": true, "secret_like": true, "empty_or_placeholder": false}],
- "headers": [{"name": "Authorization", "secret_like": true, "empty_or_placeholder": false}]}
+ "headers": [{"name": "Authorization", "value_present": true, "secret_like": true, "empty_or_placeholder": false}]}
 ```
 
 `tags` ⊆ `local process`, `remote`, `needs secret`, `oauth`. Preview never executes a command and never contacts a URL.

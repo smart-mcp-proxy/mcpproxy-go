@@ -341,6 +341,20 @@ func TestSummarizeServer_NeverEmbedsRawSecretArg(t *testing.T) {
 	}
 }
 
+func TestSummarizeServer_NeverEmbedsRawCredentialCommand(t *testing.T) {
+	const credentialCommand = "ghp_1234567890abcdefghijABCDEFGHIJ123456"
+	result, err := Import([]byte(`{"mcpServers":{"leaky":{"type":"stdio","command":"`+credentialCommand+`"}}}`), &ImportOptions{FormatHint: FormatClaudeDesktop})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(result.Imported) != 1 {
+		t.Fatalf("Imported count = %d, want 1", len(result.Imported))
+	}
+	if got := result.Imported[0].Summary; strings.Contains(got, credentialCommand) {
+		t.Fatalf("summary leaked raw credential command: %q", got)
+	}
+}
+
 // TestImportedField_YAMLTagsMatchJSONSnakeCase is review round 4's finding:
 // ImportedField carried only `json` tags, so `-o yaml` (internal/cli/output
 // YAMLFormatter calls yaml.Marshal directly on the Go value, not through a
