@@ -14,11 +14,13 @@ import { createPinia, setActivePinia } from 'pinia'
 // unconditionally, so both blocks below must fail until T088 lands.
 
 const getProviderMock = vi.fn()
+const getSessionStatusMock = vi.fn()
 const getMeMock = vi.fn()
 
 vi.mock('@/services/auth-api', () => ({
   authApi: {
     getProvider: (...args: unknown[]) => getProviderMock(...args),
+    getSessionStatus: (...args: unknown[]) => getSessionStatusMock(...args),
     getMe: (...args: unknown[]) => getMeMock(...args),
     generateToken: vi.fn(),
     logout: vi.fn(),
@@ -84,6 +86,7 @@ describe('stores/auth principalKind (Spec 107 T087/T088, data-model.md "Frontend
   beforeEach(() => {
     setActivePinia(createPinia())
     getProviderMock.mockReset()
+    getSessionStatusMock.mockReset().mockResolvedValue({ authenticated: true })
     getMeMock.mockReset()
     hasAPIKeyMock.mockReset().mockReturnValue(false)
   })
@@ -174,6 +177,7 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
   beforeEach(() => {
     setActivePinia(createPinia())
     getProviderMock.mockReset().mockResolvedValue({ display_name: 'Example Corp' })
+    getSessionStatusMock.mockReset().mockResolvedValue({ authenticated: true })
     getMeMock.mockReset()
     hasAPIKeyMock.mockReset().mockReturnValue(false)
     fetchInfo.mockClear()
@@ -231,5 +235,51 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
     expect(fetchScopeFilterFeatures).toHaveBeenCalled()
     expect(fetchServers).toHaveBeenCalled()
     expect(connectEventSource).toHaveBeenCalled()
+  })
+
+  it('does not mount the shell or issue core calls while provider, session, and /me settle', async () => {
+    const deferred = <T,>() => {
+      let resolve!: (value: T) => void
+      return { promise: new Promise<T>((r) => { resolve = r }), resolve }
+    }
+    const provider = deferred<{ display_name: string }>()
+    const session = deferred<{ authenticated: boolean }>()
+    const me = deferred<{ id: string; email: string; display_name: string; role: 'user'; provider: string; created_at: string; last_login_at: string }>()
+    getProviderMock.mockReturnValue(provider.promise)
+    getSessionStatusMock.mockReturnValue(session.promise)
+    getMeMock.mockReturnValue(me.promise)
+
+    const { default: App } = await import('@/App.vue')
+    const wrapper = mount(App, {
+      global: {
+        stubs: {
+          TopHeader: { name: 'TopHeader', template: '<div data-test="header" />' },
+          SidebarNav: { name: 'SidebarNav', template: '<div data-test="sidebar" />' },
+          AppFooter: true, ToastContainer: true, ConnectionStatus: true, AuthErrorModal: true, 'router-view': true,
+        },
+      },
+    })
+    await Promise.resolve()
+    expect(wrapper.find('[data-test="header"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="sidebar"]').exists()).toBe(false)
+    expect(fetchInfo).not.toHaveBeenCalled()
+    expect(fetchServers).not.toHaveBeenCalled()
+
+    provider.resolve({ display_name: 'Example Corp' })
+    await Promise.resolve()
+    expect(getSessionStatusMock).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-test="header"]').exists()).toBe(false)
+
+    session.resolve({ authenticated: true })
+    await Promise.resolve()
+    expect(getMeMock).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-test="sidebar"]').exists()).toBe(false)
+
+    me.resolve({ id: 'tenant', email: 'tenant@example.test', display_name: 'Tenant', role: 'user', provider: 'oidc', created_at: '', last_login_at: '' })
+    await flushPromises()
+    expect(wrapper.find('[data-test="header"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="sidebar"]').exists()).toBe(false)
+    expect(fetchInfo).not.toHaveBeenCalled()
+    expect(fetchServers).not.toHaveBeenCalled()
   })
 })
