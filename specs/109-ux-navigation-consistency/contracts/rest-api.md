@@ -190,7 +190,7 @@ These field names are the base of Spec 108's `ClientView`, which extends them wi
 
 ## Onboarding
 
-`GET /onboarding/state` gains `has_usable_server` (bool) and `usable_servers` (`[name]`, used by Verify prompts). `incomplete_tab_count` uses `has_usable_server` for the Servers step.
+`GET /onboarding/state` gains `has_usable_server` (bool; at least one enabled, non-quarantined server with `health.usable == true` and at least one approved, non-disabled tool) and `usable_servers` (`[name]`, used by Verify prompts). Transport-connected servers that still require sign-in are not usable. `incomplete_tab_count` uses `has_usable_server` for the Servers step.
 
 ## Import preview
 

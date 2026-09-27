@@ -119,7 +119,7 @@ Two structs: the persisted record `storage.OnboardingState` (`internal/storage/m
 | Field | New | Notes |
 |---|---|---|
 | `has_configured_server` | | DTO; kept for compatibility |
-| `has_usable_server` | ✓ | DTO. ≥ 1 enabled, non-quarantined, usable server with ≥ 1 approved tool. 109-b and 109-c are parallel PRs with no edge: whichever merges second applies the final `health.usable` definition (if 109-b merges first it uses "connected" as the interim test; if 109-c merges first, 109-b uses `health.usable` directly; tasks.md T051) |
+| `has_usable_server` | ✓ | DTO. ≥ 1 enabled, non-quarantined server with `health.usable == true` and ≥ 1 approved, non-disabled tool. Transport connectivity alone is insufficient. |
 | `usable_servers` | ✓ | DTO; names, for Verify prompts |
 | persisted `client_connected_at` map | ✓ | `storage.OnboardingState`; client id → last connect write time; keys come only from the fixed `connect` client registry (bounded by it); written by the connect success path (109-b, T035) |
 | persisted `client_disconnected_at` map | ✓ | `storage.OnboardingState`; client id → time of the last disconnect MCPProxy performed for it; keys come only from the fixed `connect` client registry (bounded by it); written by the disconnect path in the same `UpdateOnboardingState` transaction that clears `client_connected_at` (109-h, T129), and removed again by the next successful connect write. Presence ignores `client_last_seen` evidence older than it (§6) |

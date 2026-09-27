@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -88,7 +89,14 @@ func server(name string, enabled, quarantined, connected bool) map[string]interf
 		"enabled":     enabled,
 		"quarantined": quarantined,
 		"connected":   connected,
+		"health":      &contracts.HealthStatus{Usable: connected},
 	}
+}
+
+func serverWithHealth(name string, enabled, quarantined, connected, healthUsable bool) map[string]interface{} {
+	srv := server(name, enabled, quarantined, connected)
+	srv["health"] = &contracts.HealthStatus{Usable: healthUsable}
+	return srv
 }
 
 func approvalRecord(server, tool, status string, disabled bool) *storage.ToolApprovalRecord {
@@ -126,6 +134,13 @@ func TestHasUsableServer_FalseWhileAllServersUnusable(t *testing.T) {
 		{
 			name:    "not connected",
 			servers: []map[string]interface{}{server("github", true, false, false)},
+			approved: map[string][]*storage.ToolApprovalRecord{
+				"github": {approvalRecord("github", "create_issue", storage.ToolApprovalStatusApproved, false)},
+			},
+		},
+		{
+			name:    "connected but health says unusable",
+			servers: []map[string]interface{}{serverWithHealth("github", true, false, true, false)},
 			approved: map[string][]*storage.ToolApprovalRecord{
 				"github": {approvalRecord("github", "create_issue", storage.ToolApprovalStatusApproved, false)},
 			},

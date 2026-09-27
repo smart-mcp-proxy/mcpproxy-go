@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -69,14 +70,14 @@ type OnboardingStateResponse struct {
 	// --- Spec 109-b additions (FR-041/FR-042) ---
 
 	// HasUsableServer is true once at least one enabled, non-quarantined
-	// server is connected AND has at least one approved (non-disabled) tool.
+	// server has usable health and at least one approved (non-disabled) tool.
 	// This is the real "the wizard has something to try" signal:
 	// HasConfiguredServer only means a server entry exists, even while every
-	// one of them sits quarantined or has zero approved tools. The Servers
-	// step and the Setup badge use this instead of HasConfiguredServer, which
-	// is kept above for compatibility. Once 109-c's health vocabulary lands,
-	// "connected" is replaced by health.usable (tasks.md T051); until then
-	// this uses "connected" as the interim usability test.
+	// one of them sits quarantined, requires sign-in, or has zero approved
+	// tools. The Servers step and Setup badge use this instead of
+	// HasConfiguredServer, which is kept above for compatibility.
+	// HealthStatus.Usable is the shared
+	// readiness contract used by every UI surface (Spec 109-c, tasks.md T051).
 	HasUsableServer bool `json:"has_usable_server"`
 
 	// UsableServers lists the names behind HasUsableServer, for the Verify
@@ -310,7 +311,7 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 }
 
 // computeUsableServers returns the names of servers that are enabled,
-// non-quarantined, connected, and have at least one approved (non-disabled)
+// non-quarantined, health-usable, and have at least one approved (non-disabled)
 // tool (FR-041). servers is the GetAllServers() projection; a nil/failed
 // fetch yields no usable servers rather than erroring the whole onboarding
 // document — this predicate degrading to "not usable yet" is a safe default,
@@ -327,8 +328,8 @@ func (s *Server) computeUsableServers(servers []map[string]interface{}) []string
 		}
 		enabled, _ := srv["enabled"].(bool)
 		quarantined, _ := srv["quarantined"].(bool)
-		connected, _ := srv["connected"].(bool)
-		if !enabled || quarantined || !connected {
+		health, ok := srv["health"].(*contracts.HealthStatus)
+		if !enabled || quarantined || !ok || health == nil || !health.Usable {
 			continue
 		}
 		if hasUsableTool[name] {
