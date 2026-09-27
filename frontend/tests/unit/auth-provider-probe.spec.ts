@@ -16,6 +16,17 @@ vi.mock('@/services/api', () => ({
   },
 }))
 
+// Vitest shares one jsdom document across this file. Reset the index marker
+// around every describe so store and component assertions cannot inherit the
+// probe-short-circuit state from the API tests.
+beforeEach(() => {
+  document.head.innerHTML = ''
+})
+afterEach(() => {
+  document.head.innerHTML = ''
+  vi.unstubAllGlobals()
+})
+
 type FetchLog = { url: string; init?: RequestInit }
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -52,11 +63,6 @@ function installFetch(routes: Record<string, () => Response>): FetchLog[] {
  * must label its button with the operator-chosen `display_name`.
  */
 describe('auth-api provider probe (Spec 107 FR-030)', () => {
-  beforeEach(() => {
-    document.head.innerHTML = ''
-  })
-  afterEach(() => vi.unstubAllGlobals())
-
   it('does not fetch when the served index explicitly identifies the personal edition', async () => {
     document.head.innerHTML = '<meta name="mcpproxy-server-edition" content="false">'
     const fetchSpy = vi.fn()
@@ -116,8 +122,6 @@ describe('auth store edition detection (Spec 107 FR-041)', () => {
     getStatus.mockReset()
     getStatus.mockResolvedValue({ success: true, data: { edition: 'server' } })
   })
-  afterEach(() => vi.unstubAllGlobals())
-
   it('learns the server edition from the probe before /auth/me, never from a keyed call', async () => {
     const log = installFetch({
       '/api/v1/auth/provider': () => jsonResponse(200, { display_name: 'Acme Okta' }),
@@ -171,7 +175,6 @@ describe('auth store edition detection (Spec 107 FR-041)', () => {
 
 describe('Login.vue provider label (Spec 107 FR-030)', () => {
   beforeEach(() => setActivePinia(createPinia()))
-  afterEach(() => vi.unstubAllGlobals())
 
   it('labels the button with the probe display_name instead of a hardcoded organization', async () => {
     const store = useAuthStore()
