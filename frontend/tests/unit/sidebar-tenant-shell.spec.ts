@@ -3,7 +3,12 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
 
-const { logoutMock } = vi.hoisted(() => ({ logoutMock: vi.fn() }))
+const { logoutMock, getOnboardingStateMock, getGlobalToolsMock, getConfigSecretsMock } = vi.hoisted(() => ({
+  logoutMock: vi.fn(),
+  getOnboardingStateMock: vi.fn(),
+  getGlobalToolsMock: vi.fn(),
+  getConfigSecretsMock: vi.fn(),
+}))
 
 vi.mock('@/services/auth-api', () => ({
   authApi: {
@@ -18,9 +23,9 @@ vi.mock('@/services/auth-api', () => ({
 vi.mock('@/services/api', () => ({
   default: {
     hasAPIKey: vi.fn(() => false),
-    getOnboardingState: vi.fn(async () => ({ success: true, data: null })),
-    getGlobalTools: vi.fn(async () => ({ success: true, data: { stats: { total: 0 } } })),
-    getConfigSecrets: vi.fn(async () => ({ success: true, data: { total_secrets: 0 } })),
+    getOnboardingState: getOnboardingStateMock,
+    getGlobalTools: getGlobalToolsMock,
+    getConfigSecrets: getConfigSecretsMock,
   },
 }))
 
@@ -42,6 +47,9 @@ describe('SidebarNav settled tenant shell', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     logoutMock.mockReset().mockResolvedValue(undefined)
+    getOnboardingStateMock.mockReset().mockResolvedValue({ success: true, data: null })
+    getGlobalToolsMock.mockReset().mockResolvedValue({ success: true, data: { stats: { total: 0 } } })
+    getConfigSecretsMock.mockReset().mockResolvedValue({ success: true, data: { total_secrets: 0 } })
   })
 
   it('keeps tenant navigation and sign-out usable without loading core data', async () => {
@@ -60,6 +68,10 @@ describe('SidebarNav settled tenant shell', () => {
 
     const wrapper = mount(SidebarNav, { global: { plugins: [router] } })
     await flushPromises()
+
+    expect(getOnboardingStateMock).not.toHaveBeenCalled()
+    expect(getGlobalToolsMock).not.toHaveBeenCalled()
+    expect(getConfigSecretsMock).not.toHaveBeenCalled()
 
     await wrapper.get('a[href="/my/servers"]').trigger('click')
     await flushPromises()

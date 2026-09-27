@@ -438,4 +438,30 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
     expect(fetchServers).not.toHaveBeenCalled()
     expect(connectEventSource).not.toHaveBeenCalled()
   })
+
+  it('keeps a settled signed-out server session off the shell and every protected door', async () => {
+    getSessionStatusMock.mockResolvedValue({ authenticated: false })
+    const { default: App } = await import('@/App.vue')
+    const wrapper = mount(App, {
+      global: {
+        stubs: {
+          TopHeader: { name: 'TopHeader', template: '<div data-test="header" />' },
+          SidebarNav: { name: 'SidebarNav', template: '<div data-test="sidebar" />' },
+          AppFooter: true, ToastContainer: true, ConnectionStatus: true, AuthErrorModal: true, 'router-view': true,
+        },
+      },
+    })
+    await flushPromises()
+
+    const { useAuthStore } = await import('@/stores/auth')
+    const auth = useAuthStore()
+    expect(auth.canShowShell).toBe(false)
+    expect(auth.canLoadCore).toBe(false)
+    expect(wrapper.find('[data-test="header"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="sidebar"]').exists()).toBe(false)
+    expect(getMeMock).not.toHaveBeenCalled()
+    for (const fetch of [fetchInfo, fetchRouting, fetchScopeFilterFeatures, fetchServers, connectEventSource]) {
+      expect(fetch).not.toHaveBeenCalled()
+    }
+  })
 })

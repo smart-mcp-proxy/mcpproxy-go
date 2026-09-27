@@ -10,10 +10,11 @@ import Login from '@/views/teams/Login.vue'
 // Stub the keyed API service so any authenticated call through it is visible
 // (and counted) rather than a real network request.
 const getStatus = vi.fn()
+const hasAPIKey = vi.fn(() => false)
 vi.mock('@/services/api', () => ({
   default: {
     getStatus: (...args: unknown[]) => getStatus(...args),
-    hasAPIKey: vi.fn(() => false),
+    hasAPIKey: (...args: unknown[]) => hasAPIKey(...args),
   },
 }))
 
@@ -204,7 +205,10 @@ describe('auth store edition detection (Spec 107 FR-041)', () => {
 })
 
 describe('Login.vue provider label (Spec 107 FR-030)', () => {
-  beforeEach(() => setActivePinia(createPinia()))
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    hasAPIKey.mockReset().mockReturnValue(false)
+  })
 
   it('labels the button with the probe display_name instead of a hardcoded organization', async () => {
     const store = useAuthStore()
@@ -242,6 +246,8 @@ describe('Login.vue provider label (Spec 107 FR-030)', () => {
     const store = useAuthStore()
     await store.checkAuth()
     expect(store.bootstrapError).not.toBeNull()
+    const system = (await import('@/stores/system')).useSystemStore()
+    system.setAuthRequired(true)
 
     const router = createRouter({
       history: createMemoryHistory(),
@@ -262,6 +268,7 @@ describe('Login.vue provider label (Spec 107 FR-030)', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(4)
     expect(store.isAuthenticated).toBe(true)
     expect(router.currentRoute.value.fullPath).toBe('/my/activity?view=mine')
+    expect(system.authRequired).toBe(false)
   })
 
   it('stays on Login after an unsuccessful retry and does not start an IdP redirect', async () => {
@@ -288,6 +295,73 @@ describe('Login.vue provider label (Spec 107 FR-030)', () => {
     expect(login).not.toHaveBeenCalled()
     expect(router.currentRoute.value.path).toBe('/login')
     expect(wrapper.text()).toContain('Exact Operator Label')
+  })
+
+  it('does not claim a recovered session after a settled signed-out retry', async () => {
+    const store = useAuthStore()
+    store.isTeamsEdition = true
+    store.loading = false
+    store.authResolvedSuccessfully = false
+    store.bootstrapError = 'Unable to determine sign-in status. Please retry.'
+    const system = (await import('@/stores/system')).useSystemStore()
+    system.setAuthRequired(true)
+    vi.spyOn(store, 'checkAuth').mockImplementation(async () => {
+      store.loading = false
+      store.authResolvedSuccessfully = true
+      store.bootstrapError = null
+      store.user = null
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: Login },
+        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/login')
+    await router.isReady()
+    const wrapper = mount(Login, { global: { plugins: [router] } })
+
+    await wrapper.get('button.btn-ghost').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(system.authRequired).toBe(true)
+  })
+
+  it('does not attempt a browser-route bounce for a key-only server retry', async () => {
+    hasAPIKey.mockReturnValue(true)
+    const store = useAuthStore()
+    store.isTeamsEdition = true
+    store.loading = false
+    store.bootstrapError = 'Unable to determine sign-in status. Please retry.'
+    vi.spyOn(store, 'checkAuth').mockImplementation(async () => {
+      store.loading = false
+      store.authResolvedSuccessfully = true
+      store.bootstrapError = null
+      store.user = null
+    })
+    const { authGuard } = await import('@/router')
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: Login, meta: { public: true } },
+        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+      ],
+    })
+    router.beforeEach(authGuard)
+    await router.push('/login')
+    await router.isReady()
+    const replace = vi.spyOn(router, 'replace')
+    const wrapper = mount(Login, { global: { plugins: [router] } })
+
+    await wrapper.get('button.btn-ghost').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(store.canShowShell).toBe(true)
+    expect(store.isAuthenticated).toBe(false)
+    expect(replace).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.path).toBe('/login')
   })
 
   it('uses the dashboard rather than an external redirect after a recovered session', async () => {

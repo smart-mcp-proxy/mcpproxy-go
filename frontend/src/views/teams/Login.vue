@@ -29,8 +29,10 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useSystemStore } from '@/stores/system'
 
 const authStore = useAuthStore()
+const systemStore = useSystemStore()
 const router = useRouter()
 const route = useRoute()
 
@@ -47,13 +49,18 @@ function handleLogin() {
 function retry() {
   void authStore.checkAuth({ fresh: true }).then(() => {
     // A retry is a local bootstrap recovery, never another IdP handoff. Any
-    // positively settled usable principal may leave Login: a recovered cookie
-    // tenant/admin, an API-key admin, or the confirmed personal edition. The
-    // public-probe fallback is only for a supported older backend marker, not
-    // permission to treat arbitrary frontend/server version skew as usable.
+    // positively settled browser principal may leave Login: a recovered cookie
+    // tenant/admin or the confirmed personal edition. A local API key alone
+    // remains an API credential, not a server-edition browser session: the
+    // existing auth guard deliberately keeps that principal on Login.
     // The guard puts an internal fullPath in this query; reject external,
     // login-loop, and unmatched values before passing anything to the router.
-    if (!authStore.canShowShell || authStore.bootstrapError) return
+    const canLeaveLogin = !authStore.isTeamsEdition || authStore.isAuthenticated
+    if (!authStore.canShowShell || authStore.bootstrapError || !canLeaveLogin) return
+    // A successful usable recovery is the only Login path that owns clearing
+    // the modal's suppression flag. Failed and signed-out retries keep it so
+    // they cannot claim to have repaired the original authentication error.
+    systemStore.setAuthRequired(false)
     const redirect = route.query.redirect
     if (typeof redirect !== 'string' || !redirect.startsWith('/') || redirect.startsWith('//')) {
       void router.replace({ name: 'dashboard' })
