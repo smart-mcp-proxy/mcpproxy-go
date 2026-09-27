@@ -64,6 +64,7 @@ function connectOk(backupPath?: string) {
       server_name: 'mcpproxy',
       action: 'created',
       message: 'MCPProxy registered in Cursor as mcpproxy',
+      reload_hint: 'Reload the Cursor window to load MCPProxy',
     },
   }
 }
@@ -119,6 +120,7 @@ describe('ConnectModal one-click undo (Spec 078 US3)', () => {
 
     // Undo offer appears alongside the backup-path result.
     expect(wrapper.find('[data-test="connect-backup-path"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="connect-reload-hint"]').text()).toBe('Reload the Cursor window to load MCPProxy')
     const undoBtn = wrapper.find('[data-test="connect-undo"]')
     expect(undoBtn.exists()).toBe(true)
 
@@ -136,6 +138,7 @@ describe('ConnectModal one-click undo (Spec 078 US3)', () => {
 
     expect(api.undoConnectClient).toHaveBeenCalledWith('cursor', 'mcpproxy', BACKUP)
     expect(wrapper.text()).toContain('Restored /Users/test/.cursor/mcp.json from backup')
+    expect(wrapper.find('[data-test="connect-reload-hint"]').exists()).toBe(false)
     // The undo affordance is consumed: session offers it once per connect.
     expect(wrapper.find('[data-test="connect-undo"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="connect-undo-panel"]').exists()).toBe(false)

@@ -277,6 +277,11 @@ type ServerController interface {
 	// Onboarding wizard (Spec 046)
 	GetOnboardingState() (*storage.OnboardingState, error)
 	SaveOnboardingState(state *storage.OnboardingState) error
+	// UpdateOnboardingState runs fn against the current onboarding state and
+	// persists it atomically (Spec 109-b, T035): every writer of the record
+	// must use this instead of a separate Get+Save pair, so a concurrent
+	// writer's field is never dropped.
+	UpdateOnboardingState(fn func(*storage.OnboardingState) error) error
 
 	// Activation state (Spec 044) — read-only access used by the v2
 	// onboarding wizard's Verify tab to detect whether any MCP client has

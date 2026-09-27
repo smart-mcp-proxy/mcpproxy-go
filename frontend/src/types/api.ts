@@ -1135,6 +1135,8 @@ export interface ClientStatus {
   id: string
   name: string
   config_path: string
+  // Spec 109-b FR-037: the presentation-safe version of config_path.
+  display_path?: string
   exists: boolean
   connected: boolean
   supported: boolean
@@ -1163,6 +1165,8 @@ export interface ClientStatus {
   // mcpproxy-shaped entry exists", and an entry merely NAMED mcpproxy counts —
   // so a row can be connected to a different instance entirely (audit F18).
   endpoint_match?: EndpointMatch
+  // The client-specific action needed after a Connect write.
+  reload_hint?: string
 }
 
 // How a client's registered endpoint relates to this instance (audit F18).
@@ -1177,6 +1181,8 @@ export interface ConnectResult {
   action: string
   message: string
   error?: string
+  display_path?: string
+  reload_hint?: string
 }
 
 // Spec 078 US1: the exact change a connect would make, returned WITHOUT writing
@@ -1186,6 +1192,7 @@ export interface ConnectResult {
 export interface ConnectPreview {
   client: string
   config_path: string
+  display_path?: string
   format: 'json' | 'toml'
   server_key: string
   server_name: string
@@ -1204,6 +1211,7 @@ export interface OnboardingState {
   engaged_at?: string
   connect_step_status?: '' | 'completed' | 'skipped'
   server_step_status?: '' | 'completed' | 'skipped'
+  client_connected_at?: Record<string, string>
 }
 
 export interface OnboardingStateResponse {
@@ -1218,6 +1226,8 @@ export interface OnboardingStateResponse {
   first_mcp_client_ever: boolean
   mcp_clients_seen_ever: string[]
   incomplete_tab_count: number
+  has_usable_server: boolean
+  usable_servers: string[]
 }
 
 export interface OnboardingMarkRequest {
