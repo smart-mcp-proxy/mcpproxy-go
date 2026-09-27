@@ -374,9 +374,9 @@ func TestUpstreamConfigModeWritesUseSelectedConfigFile(t *testing.T) {
 		upstreamConfigPath, configFile = oldConfigPath, oldConfigFile
 	})
 
+	home := sandboxHome(t)
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
-	defaultDir := filepath.Join(tmpDir, "home", ".mcpproxy")
+	defaultDir := filepath.Join(home, ".mcpproxy")
 	require.NoError(t, os.MkdirAll(defaultDir, 0755))
 	defaultPath := filepath.Join(defaultDir, config.ConfigFileName)
 	sentinel := []byte(`{"sentinel":true}\n`)
