@@ -116,7 +116,19 @@ async function recoverAfterAuth() {
   // the repaired credential. A failed probe leaves the protected UI closed;
   // Login exposes its retry path for session-only recovery.
   await authStore.checkAuth({ fresh: true })
-  if (!authStore.canShowShell || authStore.bootstrapError) return
+  if (!authStore.canShowShell || authStore.bootstrapError) {
+    // The auth modal can be opened over any protected route. Once its fresh
+    // probe fails, the shell correctly disappears, so move to Login rather
+    // than stranding the user on a page with no visible retry affordance.
+    // router.currentRoute is router-owned internal state; retain only a
+    // single-slash path before putting it into Login's validated redirect.
+    const current = router.currentRoute.value.fullPath
+    const redirect = current.startsWith('/') && !current.startsWith('//') ? current : '/'
+    if (router.currentRoute.value.path !== '/login') {
+      await router.replace({ name: 'login', query: { redirect } })
+    }
+    return
+  }
   systemStore.markAuthRecovered()
 }
 

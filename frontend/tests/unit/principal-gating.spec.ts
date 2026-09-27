@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
+import { createMemoryHistory, createRouter } from 'vue-router'
 
 // Spec 107 PR-C, T087 (red before T088).
 //
@@ -278,6 +279,41 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
     for (const fetch of [fetchInfo, fetchRouting, fetchScopeFilterFeatures, fetchServers, connectEventSource]) {
       expect(fetch).toHaveBeenCalledTimes(1)
     }
+  })
+
+  it('sends a failed fresh key repair to Login with the safe internal route', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: { template: '<div />' } },
+        { path: '/my/activity', name: 'activity', component: { template: '<div />' } },
+        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/my/activity?view=mine')
+    await router.isReady()
+
+    getProviderMock.mockResolvedValue(undefined)
+    const { default: App } = await import('@/App.vue')
+    const wrapper = mount(App, {
+      global: {
+        plugins: [router],
+        stubs: {
+          SidebarNav: { template: '<div />' }, TopHeader: { template: '<div />' }, AppFooter: true, ToastContainer: true, ConnectionStatus: true, 'router-view': true,
+          AuthErrorModal: { template: '<button data-test="repair" @click="$emit(\'authenticated\')" />' },
+        },
+      },
+    })
+    await flushPromises()
+
+    // The modal has validated a repaired key, but the fresh server probe
+    // fails. App must expose Login's Retry rather than leave this protected
+    // route with no shell and no recovery UI.
+    await wrapper.get('[data-test="repair"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.query.redirect).toBe('/my/activity?view=mine')
+    expect(fetchInfo).not.toHaveBeenCalled()
   })
 
   it('disconnects an inherited admin SSE stream as a fresh probe becomes pending, then makes no tenant core calls', async () => {
