@@ -82,10 +82,11 @@ enum SecretFieldResolver {
         // One taken-name check up front, then tracked locally as this call
         // writes its own refs, so two fields in the same call that would
         // otherwise compute the same name get -2, not a silent collision.
-        var taken: Set<String> = []
-        if let refs = try? await client.getSecretRefs() {
-            taken = Set(refs.filter { $0.type == "keyring" }.map(\.name))
-        }
+        // Never infer an empty set after a failed list. POST /secrets can
+        // overwrite, so proceeding after this GET fails could destroy a
+        // credential the current add did not create.
+        let refs = try await client.getSecretRefs()
+        var taken = Set(refs.filter { $0.type == "keyring" }.map(\.name))
 
         var written: [String: String] = [:] // field.id -> ref
         var writtenRefs: [String] = []

@@ -12,6 +12,8 @@ struct SecretFieldToggleView: View {
     let name: String
     @Binding var value: String
     @Binding var mode: SecretFieldInput.Mode
+    let keyringAvailable: Bool
+    let keyringReason: String
     @Environment(\.fontScale) var fontScale
 
     var body: some View {
@@ -25,10 +27,17 @@ struct SecretFieldToggleView: View {
                     Text("Value").tag(SecretFieldInput.Mode.value)
                     Text("Secret").tag(SecretFieldInput.Mode.secret)
                 }
+                .disabled(!keyringAvailable && mode == .secret)
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 140)
                 .accessibilityIdentifier("secret-toggle-mode-\(name)")
+            }
+            if !keyringAvailable {
+                Text(keyringReason.isEmpty ? "OS keyring unavailable" : keyringReason)
+                    .font(.scaled(.caption2, scale: fontScale))
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("secret-toggle-keyring-unavailable-\(name)")
             }
             if mode == .secret {
                 SecureField("Secret value", text: $value)

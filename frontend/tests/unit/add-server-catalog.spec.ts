@@ -11,6 +11,7 @@ vi.mock('@/services/api', () => ({
     getSecretRefs: vi.fn(),
     setSecret: vi.fn(),
     deleteSecret: vi.fn(),
+    getServers: vi.fn(),
   },
 }))
 import api from '@/services/api'
@@ -49,6 +50,7 @@ describe('CatalogSearch', () => {
     vi.mocked(api.catalogSearch).mockReset()
     vi.mocked(api.getConfigSecrets).mockReset()
     vi.mocked(api.addServerFromRegistry).mockReset()
+    vi.mocked(api.getServers).mockReset()
   })
 
   it('defaults to the Catalog source (empty query) and renders sections', async () => {
@@ -78,6 +80,40 @@ describe('CatalogSearch', () => {
 
     const updated = wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]')
     expect(updated.text()).toContain('Added ✓')
+  })
+
+  it('resolves a prior-session Added/Open card only by visible source and install target', async () => {
+    vi.mocked(api.catalogSearch).mockResolvedValue({
+      success: true,
+      data: { query: '', results: [], sections: { official: [githubResult({ added: true })], popular: [] }, unavailable: [] },
+    })
+    vi.mocked(api.getServers).mockResolvedValue({
+      success: true,
+      data: { servers: [{ name: 'installed-github', source_registry_id: 'official', url: 'https://api.githubcopilot.com/mcp/', protocol: 'http' }] },
+    })
+    const wrapper = await mountCatalog()
+    await wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/servers/installed-github')
+  })
+
+  it('does not navigate an ambiguous prior-session Added/Open card', async () => {
+    vi.mocked(api.catalogSearch).mockResolvedValue({
+      success: true,
+      data: { query: '', results: [], sections: { official: [githubResult({ added: true })], popular: [] }, unavailable: [] },
+    })
+    vi.mocked(api.getServers).mockResolvedValue({
+      success: true,
+      data: { servers: [
+        { name: 'github-a', source_registry_id: 'official', url: 'https://api.githubcopilot.com/mcp/', protocol: 'http' },
+        { name: 'github-b', source_registry_id: 'official', url: 'https://api.githubcopilot.com/mcp/', protocol: 'http' },
+      ] },
+    })
+    const wrapper = await mountCatalog()
+    await wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="catalog-error"]').text()).toContain('More than one')
+    expect(router.currentRoute.value.path).not.toMatch(/github-[ab]/)
   })
 
   it('renders a description containing <img onerror> and markdown INERT — no element is created (D19)', async () => {

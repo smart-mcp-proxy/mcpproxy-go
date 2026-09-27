@@ -243,4 +243,24 @@ final class CatalogTests: XCTestCase {
         let header = SecretFieldInput(name: "API_KEY", kind: .header, value: "b", mode: .secret)
         XCTAssertNotEqual(env.id, header.id)
     }
+
+    /// A failed GET must stop before POST /secrets. This guards the data-loss
+    /// case where POST would overwrite a canonical name we failed to list.
+    func testSecretResolverDoesNotPostAfterSecretRefsFailure() async throws {
+        ResolverStubURLProtocol.reset()
+        ResolverStubURLProtocol.handler = { request in
+            if request.url?.path == "/api/v1/secrets/refs" {
+                return (500, Data("{\"success\":false,\"error\":\"temporary failure\"}".utf8))
+            }
+            return (200, Data("{\"success\":true,\"data\":{}}".utf8))
+        }
+        let client = ResolverStubURLProtocol.makeClient()
+        do {
+            _ = try await SecretFieldResolver.resolve(client: client, serverName: "github", fields: [
+                SecretFieldInput(name: "TOKEN", value: "not-a-real-secret", mode: .secret),
+            ])
+            XCTFail("expected getSecretRefs failure")
+        } catch {}
+        XCTAssertEqual(ResolverStubURLProtocol.requests.map(\.httpMethod), ["GET"])
+    }
 }

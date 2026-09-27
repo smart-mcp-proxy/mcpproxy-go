@@ -107,6 +107,18 @@ struct SecretRefsResponse: Codable {
     let count: Int?
 }
 
+/// The only keyring fields the Catalog form needs from `/secrets/config`.
+/// Values and configured references deliberately stay outside this DTO.
+struct KeyringAvailability: Codable, Equatable {
+    let keyringAvailable: Bool
+    let keyringReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case keyringAvailable = "keyring_available"
+        case keyringReason = "keyring_reason"
+    }
+}
+
 // MARK: - Import preview (Spec 109 FR-064), content-based
 //
 // `POST /api/v1/servers/import/json?preview=true` — the Paste tab's "detect

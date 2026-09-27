@@ -17,6 +17,7 @@
     <div v-else-if="error" class="alert alert-error text-sm" data-test="catalog-error">{{ error }}</div>
 
     <template v-else>
+      <div v-if="addError && !pendingResult" class="alert alert-error text-sm mb-3" data-test="catalog-add-error">{{ addError }}</div>
       <div v-if="unavailable.length > 0" class="alert alert-warning text-sm mb-3" data-test="catalog-unavailable-notice">
         <span>{{ unavailable.map((u) => `${u.source} (${u.reason})`).join(', ') }} unavailable</span>
       </div>
@@ -100,7 +101,7 @@
           <button
             type="button"
             class="btn btn-primary"
-            :disabled="!allPendingValuesFilled || confirming"
+            :disabled="!allPendingValuesFilled || confirming || hasUnavailableSecret"
             data-test="catalog-secrets-confirm"
             @click="confirmAdd"
           >
@@ -124,6 +125,7 @@ import { serverDetailPath } from '@/utils/serverRoute'
 
 const props = defineProps<{ source?: string }>()
 const emit = defineEmits<{ added: [name: string] }>()
+const router = useRouter()
 
 const query = ref('')
 const loading = ref(false)
@@ -192,6 +194,15 @@ const allPendingValuesFilled = computed(() => {
   const inputs = pendingResult.value?.required_inputs || []
   return inputs.every((i) => (pendingValues[i.name] || '').trim() !== '')
 })
+
+// Until the user-approved plain-text confirmation flow is implemented, fail
+// closed: an unavailable keyring may not turn a Secret selection into raw
+// configuration by accident.
+const hasUnavailableSecret = computed(() =>
+  !keyringAvailable.value && (pendingResult.value?.required_inputs || []).some(
+    (input) => (pendingModes[input.name] || (input.secret_like ? 'secret' : 'value')) === 'secret'
+  )
+)
 
 function handleAdd(result: CatalogResult) {
   const key = `${result.source}-${result.id}`
@@ -270,6 +281,36 @@ async function addResult(result: CatalogResult, key: string, env: Record<string,
   }
 }
 
+function installTarget(result: CatalogResult): string {
+  if (result.install.url) return `url:${result.install.url}`
+  return `stdio:${result.install.command || ''}\u0000${(result.install.args || []).join('\u0000')}`
+}
+
+function serverTarget(server: { url?: string; command?: string; args?: string[] }): string {
+  if (server.url) return `url:${server.url}`
+  return `stdio:${server.command || ''}\u0000${(server.args || []).join('\u0000')}`
+}
+
+async function openPreviouslyAdded(result: CatalogResult): Promise<void> {
+  const response = await api.getServers()
+  if (!response.success || !response.data) {
+    error.value = response.error || 'Could not resolve the installed server. Refresh and try again.'
+    return
+  }
+  const target = installTarget(result)
+  const matches = response.data.servers.filter((server) =>
+    serverTarget(server) === target &&
+    (server.source_registry_id === result.source || !server.source_registry_id)
+  )
+  if (matches.length === 1) {
+    await router.push(serverDetailPath(matches[0].name))
+    return
+  }
+  error.value = matches.length === 0
+    ? 'This catalog entry is marked added, but its installed server is not visible. Open it from Servers.'
+    : 'More than one installed server matches this catalog entry. Open the intended server from Servers.'
+}
+
 // CatalogResultCard is a small local functional-ish component (kept in this
 // file rather than a separate SFC: it is presentational-only and has no
 // reason to be reused outside CatalogSearch).
@@ -282,7 +323,6 @@ const CatalogResultCard = defineComponent({
   },
   emits: ['add'],
   setup(cardProps, { emit: cardEmit }) {
-    const router = useRouter()
     return () => {
       const r = cardProps.result
       const key = `${r.source}-${r.id}`
@@ -316,7 +356,11 @@ const CatalogResultCard = defineComponent({
                   class: `btn btn-sm ${added ? 'btn-success' : 'btn-primary'}`,
                   disabled: cardProps.busy,
                   'data-test': `catalog-add-${r.source}-${r.id}`,
-                  onClick: () => (added && addedName ? router.push(serverDetailPath(addedName)) : cardEmit('add')),
+                  onClick: () => {
+                    if (!added) return cardEmit('add')
+                    if (addedName) return router.push(serverDetailPath(addedName))
+                    void openPreviouslyAdded(r)
+                  },
                 },
                 added ? 'Added ✓ · Open' : cardProps.busy ? 'Adding…' : 'Add to MCPProxy'
               ),

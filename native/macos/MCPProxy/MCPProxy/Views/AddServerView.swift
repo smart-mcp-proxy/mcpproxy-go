@@ -28,14 +28,16 @@ struct AddServerView: View {
     /// Narrows the Catalog tab only (mirrors the Web UI's `?source=`); never
     /// selects a tab itself (FR-062).
     let catalogSourceFilter: String?
+    let onOpenServer: (ServerStatus) -> Void
 
     private var apiClient: APIClient? { appState.apiClient }
 
-    init(appState: AppState, isPresented: Binding<Bool>, initialTab: AddServerTab = .catalog, catalogSourceFilter: String? = nil) {
+    init(appState: AppState, isPresented: Binding<Bool>, initialTab: AddServerTab = .catalog, catalogSourceFilter: String? = nil, onOpenServer: @escaping (ServerStatus) -> Void = { _ in }) {
         self.appState = appState
         self._isPresented = isPresented
         self._selectedTab = State(initialValue: initialTab)
         self.catalogSourceFilter = catalogSourceFilter
+        self.onOpenServer = onOpenServer
     }
 
     var body: some View {
@@ -70,7 +72,7 @@ struct AddServerView: View {
 
             switch selectedTab {
             case .catalog:
-                CatalogView(appState: appState, sourceFilter: catalogSourceFilter, onAdded: { _ in isPresented = false })
+                CatalogView(appState: appState, sourceFilter: catalogSourceFilter, onOpenServer: onOpenServer)
             case .paste:
                 PasteServerView(appState: appState, onAdded: { _ in isPresented = false })
             case .importConfig:
