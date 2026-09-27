@@ -295,7 +295,11 @@ describe('Login.vue provider label (Spec 107 FR-030)', () => {
     store.isTeamsEdition = true
     store.user = { id: 'u1', email: 'a@acme.test', display_name: 'A', role: 'admin', provider: 'oidc', created_at: '', last_login_at: '' }
     store.bootstrapError = 'Unable to determine sign-in status. Please retry.'
-    vi.spyOn(store, 'checkAuth').mockResolvedValue()
+    vi.spyOn(store, 'checkAuth').mockImplementation(async () => {
+      store.loading = false
+      store.authResolvedSuccessfully = true
+      store.bootstrapError = null
+    })
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [

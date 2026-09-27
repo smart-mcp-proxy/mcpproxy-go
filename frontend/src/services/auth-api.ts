@@ -40,9 +40,10 @@ export const authApi = {
   async getProvider(): Promise<ProviderInfo | null | undefined> {
     // A served personal-edition index explicitly says that the public route
     // does not exist. Avoiding this request prevents an expected 401 from
-    // being surfaced as a browser console error. Any other value deliberately
-    // falls back to the public probe for standalone development and older
-    // cores. This marker is never an authorization decision.
+    // being surfaced as a browser console error. The explicit `false` marker
+    // is the only supported shortcut; every other value uses the public probe
+    // for compatible older cores/development. That fallback is not an
+    // authorization decision or a promise that arbitrary version skew works.
     const editionHint = document.querySelector('meta[name="mcpproxy-server-edition"]')?.getAttribute('content')
     if (editionHint === 'false') return null
 

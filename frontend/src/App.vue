@@ -53,7 +53,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import SidebarNav from '@/components/SidebarNav.vue'
 import TopHeader from '@/components/TopHeader.vue'
@@ -88,18 +88,36 @@ function handleAuthModalClose() {
   systemStore.setAuthRequired(false)
 }
 
-// Re-prime everything that only loads at mount. The <router-view> key covers
-// the routed view, but these surfaces live outside it and would otherwise keep
-// their failed state until a full page reload (#1065).
-async function reloadAfterAuth() {
+// These five doors are full-administrator reads. Keep them together so a
+// single positive, settled core-capability transition owns both initial load
+// and recovery. In particular, do not call this from an auth-key repair before
+// its fresh probe has identified the new principal.
+function loadCore() {
   systemStore.connectEventSource()
   serversStore.fetchServers()
   systemStore.fetchInfo() // TopHeader version / update state
   systemStore.fetchRouting() // TopHeader routing chip
-  // Server-edition role-based nav. The router guard does not run for a
-  // key-driven remount, so re-check here — and read with the repaired key,
-  // never by joining a probe that was issued before the key was replaced.
+  systemStore.fetchScopeFilterFeatures()
+}
+
+// Register during setup, before the mounted bootstrap begins. `canLoadCore`
+// is false while every probe is pending, and rises only after it has settled.
+// Thus this has no competing onMounted load path and exactly one owner for an
+// initial eligible principal or each recovered eligible principal. Dropping
+// eligibility closes a prior admin stream before a tenant or signed-out
+// principal can inherit it.
+watch(() => authStore.canLoadCore, (canLoad, wasAbleToLoad) => {
+  if (canLoad && !wasAbleToLoad) loadCore()
+  if (!canLoad && wasAbleToLoad) systemStore.disconnectEventSource()
+})
+
+async function recoverAfterAuth() {
+  // This must finish before either the core watcher or authEpoch can react to
+  // the repaired credential. A failed probe leaves the protected UI closed;
+  // Login exposes its retry path for session-only recovery.
   await authStore.checkAuth({ fresh: true })
+  if (!authStore.canShowShell || authStore.bootstrapError) return
+  systemStore.markAuthRecovered()
 }
 
 function handleAuthModalAuthenticated() {
@@ -107,9 +125,7 @@ function handleAuthModalAuthenticated() {
   authModal.lastError = ''
   // markAuthRecovered, not setAuthRequired(false): this path validated the key,
   // so it is safe to invalidate every view that failed while auth was broken.
-  systemStore.markAuthRecovered()
-
-  void reloadAfterAuth()
+  void recoverAfterAuth()
 }
 
 function handleAuthModalRefresh(verified: boolean) {
@@ -124,9 +140,7 @@ function handleAuthModalRefresh(verified: boolean) {
   authModal.lastError = ''
   // The modal verified the reloaded key, so this is a real recovery and the
   // views holding stale auth errors must be invalidated too (#1065).
-  systemStore.markAuthRecovered()
-
-  void reloadAfterAuth()
+  void recoverAfterAuth()
 }
 
 // Handle API authentication errors
@@ -150,35 +164,11 @@ function handleAuthError(event: APIAuthEvent) {
 }
 
 onMounted(async () => {
-  // Initialize auth state (needed for server edition role-based nav)
-  await authStore.checkAuth()
-
   // Set up API error listener
   removeAPIListener = api.addEventListener(handleAuthError)
 
-  // Spec 107 FR-041 / T088: these are all admin-only core doors (server
-  // status/version, routing mode, the full server list, the SSE event
-  // stream). A tenant principal is entitled to a narrow, per-user surface
-  // instead (their own servers/activity, fetched by the routed tenant
-  // views) — issuing these here would either 403 pointlessly or, worse,
-  // leak fleet-wide state into a tenant's browser.
-  if (authStore.canLoadCore) {
-    // Connect to real-time updates
-    systemStore.connectEventSource()
-
-    // Initial data load
-    serversStore.fetchServers()
-
-    // Fetch version info
-    systemStore.fetchInfo()
-
-    // Fetch routing mode info
-    systemStore.fetchRouting()
-
-    // Spec 109-k FR-080a: which scope filters (profile/client/token) this
-    // build accepts, so useScopeQuery's Spec 108 rows un-hide once it does.
-    systemStore.fetchScopeFilterFeatures()
-  }
+  // The watcher above is already listening when this probe settles.
+  await authStore.checkAuth()
 })
 
 onUnmounted(() => {

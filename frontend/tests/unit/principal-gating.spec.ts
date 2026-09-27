@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 
 // Spec 107 PR-C, T087 (red before T088).
@@ -52,6 +53,7 @@ const fetchInfoMock = vi.fn()
 const fetchRoutingMock = vi.fn()
 const fetchScopeFilterFeaturesMock = vi.fn()
 const connectEventSourceMock = vi.fn()
+const disconnectEventSourceMock = vi.fn()
 const fetchServersMock = vi.fn()
 
 vi.mock('@/stores/system', async (importOriginal) => {
@@ -67,7 +69,7 @@ vi.mock('@/stores/system', async (importOriginal) => {
       // App.vue's onMounted, same admin-only gating.
       fetchScopeFilterFeatures: fetchScopeFilterFeaturesMock,
       connectEventSource: connectEventSourceMock,
-      disconnectEventSource: vi.fn(),
+      disconnectEventSource: disconnectEventSourceMock,
       setAuthRequired: vi.fn(),
       markAuthRecovered: vi.fn(),
     }),
@@ -185,6 +187,7 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
     fetchScopeFilterFeatures.mockClear()
     fetchServers.mockClear()
     connectEventSource.mockClear()
+    disconnectEventSourceMock.mockClear()
   })
 
   async function mountAppWith(role: 'user' | 'admin') {
@@ -235,6 +238,78 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
     expect(fetchScopeFilterFeatures).toHaveBeenCalled()
     expect(fetchServers).toHaveBeenCalled()
     expect(connectEventSource).toHaveBeenCalled()
+  })
+
+  it.each([
+    ['an admin cookie session', () => {
+      getProviderMock.mockResolvedValue({ display_name: 'Example Corp' })
+      getSessionStatusMock.mockResolvedValue({ authenticated: true })
+      getMeMock.mockResolvedValue({ id: 'admin', email: 'root@example.test', display_name: 'Root', role: 'admin', provider: 'oidc', created_at: '', last_login_at: '' })
+    }],
+    ['the personal edition', () => {
+      getProviderMock.mockResolvedValue(null)
+    }],
+    ['a repaired local API key', () => {
+      hasAPIKeyMock.mockReturnValue(true)
+      getProviderMock.mockResolvedValue({ display_name: 'Example Corp' })
+      getSessionStatusMock.mockResolvedValue({ authenticated: false })
+    }],
+  ])('loads each core door once after a deferred failed bootstrap recovers to %s', async (_case, recover) => {
+    const deferred = <T,>() => {
+      let resolve!: (value: T) => void
+      return { promise: new Promise<T>((r) => { resolve = r }), resolve }
+    }
+    const failedProbe = deferred<undefined>()
+    getProviderMock.mockReturnValue(failedProbe.promise)
+    const { default: App } = await import('@/App.vue')
+    mount(App, { global: { stubs: ['SidebarNav', 'TopHeader', 'AppFooter', 'ToastContainer', 'ConnectionStatus', 'AuthErrorModal', 'router-view'] } })
+    await Promise.resolve()
+    expect(fetchInfo).not.toHaveBeenCalled()
+
+    failedProbe.resolve(undefined)
+    await flushPromises()
+    expect(fetchInfo).not.toHaveBeenCalled()
+
+    recover()
+    const { useAuthStore } = await import('@/stores/auth')
+    await useAuthStore().checkAuth({ fresh: true })
+    await flushPromises()
+
+    for (const fetch of [fetchInfo, fetchRouting, fetchScopeFilterFeatures, fetchServers, connectEventSource]) {
+      expect(fetch).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('disconnects an inherited admin SSE stream as a fresh probe becomes pending, then makes no tenant core calls', async () => {
+    await mountAppWith('admin')
+    const { useAuthStore } = await import('@/stores/auth')
+    const auth = useAuthStore()
+    const deferred = <T,>() => {
+      let resolve!: (value: T) => void
+      return { promise: new Promise<T>((r) => { resolve = r }), resolve }
+    }
+    const provider = deferred<{ display_name: string }>()
+    getProviderMock.mockReturnValue(provider.promise)
+    const fresh = auth.checkAuth({ fresh: true })
+    await nextTick()
+    expect(disconnectEventSourceMock).toHaveBeenCalledTimes(1)
+
+    provider.resolve({ display_name: 'Example Corp' })
+    getSessionStatusMock.mockResolvedValue({ authenticated: true })
+    getMeMock.mockResolvedValue({ id: 'tenant', email: 'tenant@example.test', display_name: 'Tenant', role: 'user', provider: 'oidc', created_at: '', last_login_at: '' })
+    await fresh
+    await flushPromises()
+    for (const fetch of [fetchInfo, fetchRouting, fetchScopeFilterFeatures, fetchServers, connectEventSource]) {
+      expect(fetch).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('disconnects an open core SSE stream on logout', async () => {
+    await mountAppWith('admin')
+    const { useAuthStore } = await import('@/stores/auth')
+    await useAuthStore().logout()
+    await nextTick()
+    expect(disconnectEventSourceMock).toHaveBeenCalledTimes(1)
   })
 
   it('does not mount the shell or issue core calls while provider, session, and /me settle', async () => {

@@ -46,11 +46,14 @@ function handleLogin() {
 
 function retry() {
   void authStore.checkAuth({ fresh: true }).then(() => {
-    // A retry is a local bootstrap recovery, never another IdP handoff. Only
-    // a settled server-edition cookie session may leave Login. The guard puts
-    // an internal fullPath in this query; reject external, login-loop, and
-    // unmatched values before passing anything to the router.
-    if (!authStore.isTeamsEdition || !authStore.isAuthenticated) return
+    // A retry is a local bootstrap recovery, never another IdP handoff. Any
+    // positively settled usable principal may leave Login: a recovered cookie
+    // tenant/admin, an API-key admin, or the confirmed personal edition. The
+    // public-probe fallback is only for a supported older backend marker, not
+    // permission to treat arbitrary frontend/server version skew as usable.
+    // The guard puts an internal fullPath in this query; reject external,
+    // login-loop, and unmatched values before passing anything to the router.
+    if (!authStore.canShowShell || authStore.bootstrapError) return
     const redirect = route.query.redirect
     if (typeof redirect !== 'string' || !redirect.startsWith('/') || redirect.startsWith('//')) {
       void router.replace({ name: 'dashboard' })
