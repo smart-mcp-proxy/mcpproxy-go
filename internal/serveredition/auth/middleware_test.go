@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -356,6 +357,34 @@ func TestSessionStatus_CookieOnlyBootstrap(t *testing.T) {
 	disabledReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
 	disabledReq.AddCookie(&http.Cookie{Name: SessionCookieName, Value: disabled.ID})
 	assertStatus(call(disabledReq), false)
+}
+
+func TestSessionStatus_StoreFailureFailsClosed(t *testing.T) {
+	s := setupMiddlewareTest(t)
+	session := s.createSessionForUser(t, s.testUser.ID)
+
+	// A valid cookie must not become a successful bootstrap when its backing
+	// store is unavailable. Closing the real BBolt handle makes the session
+	// lookup fail deterministically without replacing either the SessionManager
+	// or UserStore with a mock.
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close session store: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: session.ID})
+	rec := httptest.NewRecorder()
+	s.middleware.SessionStatus(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("expected no-store, got %q", rec.Header().Get("Cache-Control"))
+	}
+	if strings.Contains(rec.Body.String(), "authenticated") {
+		t.Fatalf("store failure disclosed session status: %s", rec.Body.String())
+	}
 }
 
 func TestMiddleware_ExpiredJWT(t *testing.T) {

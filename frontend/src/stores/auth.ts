@@ -52,6 +52,16 @@ export const useAuthStore = defineStore('auth', () => {
       (!isTeamsEdition.value || hasKey || isAdmin.value)
   })
 
+  // The shell is deliberately broader than the admin/core capability. Once
+  // the cookie bootstrap and /auth/me have settled, a tenant needs its own
+  // allowed navigation and the only sign-out control. It must still remain
+  // absent while server-edition auth is pending, unresolved, or signed out.
+  const canShowShell = computed(() => {
+    const hasKey = typeof api.hasAPIKey === 'function' && api.hasAPIKey()
+    return !loading.value && authResolvedSuccessfully.value &&
+      (!isTeamsEdition.value || isAuthenticated.value || hasKey)
+  })
+
   // One probe at a time. On a hard reload two callers race for checkAuth():
   // App.vue's onMounted and the router guard for the initial navigation.
   // Without sharing, each ran its own /status + /auth/me pair, and the guard
@@ -141,6 +151,7 @@ export const useAuthStore = defineStore('auth', () => {
     isAdmin,
     principalKind,
     canLoadCore,
+    canShowShell,
     displayName,
     checkAuth,
     logout,

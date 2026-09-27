@@ -10,7 +10,7 @@
       :class="systemStore.sidebarCollapsed ? 'lg:pl-14' : 'lg:pl-64'"
     >
       <!-- Top Header -->
-      <TopHeader v-if="authStore.canLoadCore" />
+      <TopHeader v-if="authStore.canShowShell" />
 
       <!-- Page content. `min-h-0` / `min-w-0`: a grid item defaults to
            `min-height:auto`, so a tall page pushed this scroll container past
@@ -32,7 +32,7 @@
     </div>
 
     <!-- Sidebar -->
-    <SidebarNav v-if="authStore.canLoadCore" />
+    <SidebarNav v-if="authStore.canShowShell" />
 
     <!-- Toast Notifications -->
     <ToastContainer />

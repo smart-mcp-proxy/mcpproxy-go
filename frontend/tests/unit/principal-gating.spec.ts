@@ -277,8 +277,11 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
 
     me.resolve({ id: 'tenant', email: 'tenant@example.test', display_name: 'Tenant', role: 'user', provider: 'oidc', created_at: '', last_login_at: '' })
     await flushPromises()
-    expect(wrapper.find('[data-test="header"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="sidebar"]').exists()).toBe(false)
+    // A settled authenticated tenant gets the permitted shell so they retain
+    // navigation and the sign-out control. Its admin/core requests remain
+    // independently gated by canLoadCore.
+    expect(wrapper.find('[data-test="header"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="sidebar"]').exists()).toBe(true)
     expect(fetchInfo).not.toHaveBeenCalled()
     expect(fetchServers).not.toHaveBeenCalled()
   })
