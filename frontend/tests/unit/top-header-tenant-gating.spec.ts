@@ -39,6 +39,8 @@ vi.mock('@/services/api', () => {
 
 import TopHeader from '@/components/TopHeader.vue'
 import { useAuthStore } from '@/stores/auth'
+import { useProfilesStore } from '@/stores/profiles'
+import api from '@/services/api'
 
 function makeRouter() {
   return createRouter({
@@ -76,9 +78,78 @@ async function mountTopHeaderAs(role: 'user' | 'admin') {
   return wrapper
 }
 
+async function mountTopHeaderForProfileStartup(options: {
+  teamsEdition: boolean
+  loading: boolean
+  resolved: boolean
+  role?: 'user' | 'admin'
+}) {
+  const router = makeRouter()
+  router.push('/')
+  await router.isReady()
+
+  const authStore = useAuthStore()
+  authStore.isTeamsEdition = options.teamsEdition
+  authStore.loading = options.loading
+  authStore.authResolvedSuccessfully = options.resolved
+  authStore.user = options.role
+    ? {
+        id: 'u1', email: 'u1@example.com', display_name: 'U1', role: options.role,
+        provider: 'oidc', created_at: '', last_login_at: '',
+      }
+    : null
+
+  const wrapper = shallowMount(TopHeader, {
+    global: { plugins: [router], stubs: { RouterLink: true } },
+  })
+  await flushPromises()
+  return wrapper
+}
+
 describe('TopHeader tenant gating (Spec 107 FR-041, cross-review round 2 P1)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    // Each mount is an independent startup state. Do not let a prior header's
+    // profile requests make a skip assertion vacuously pass or fail.
+    vi.clearAllMocks()
+  })
+
+  // Spec 109 FR-057: profile population is a startup side effect, not merely
+  // a rendering detail. These direct-header cases deliberately include the
+  // personal branch: changing the guard to `canLoadCore && isAdmin` would
+  // still pass the administrator case but must stop this one from fetching.
+  it('populates the profile switcher for confirmed personal startup', async () => {
+    const wrapper = await mountTopHeaderForProfileStartup({
+      teamsEdition: false, loading: false, resolved: true,
+    })
+
+    expect(api.getProfiles).toHaveBeenCalledTimes(1)
+    expect(api.getActiveProfile).toHaveBeenCalledTimes(1)
+    expect(useProfilesStore().hasProfiles).toBe(true)
+    expect(wrapper.findComponent({ name: 'ProfileSwitcher' }).exists()).toBe(true)
+  })
+
+  it('populates profiles for a confirmed administrator startup', async () => {
+    await mountTopHeaderForProfileStartup({
+      teamsEdition: true, loading: false, resolved: true, role: 'admin',
+    })
+
+    expect(api.getProfiles).toHaveBeenCalledTimes(1)
+    expect(api.getActiveProfile).toHaveBeenCalledTimes(1)
+    expect(useProfilesStore().hasProfiles).toBe(true)
+  })
+
+  it.each([
+    ['tenant', { teamsEdition: true, loading: false, resolved: true, role: 'user' as const }],
+    ['pending', { teamsEdition: true, loading: true, resolved: false, role: 'admin' as const }],
+    ['bootstrap-failed', { teamsEdition: true, loading: false, resolved: false }],
+    ['signed-out', { teamsEdition: true, loading: false, resolved: true }],
+  ])('skips profile population for %s server startup', async (_state, options) => {
+    await mountTopHeaderForProfileStartup(options)
+
+    expect(api.getProfiles).not.toHaveBeenCalled()
+    expect(api.getActiveProfile).not.toHaveBeenCalled()
+    expect(useProfilesStore().hasProfiles).toBe(false)
   })
 
   it('hides the mode switcher for a tenant principal', async () => {
