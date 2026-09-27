@@ -105,7 +105,8 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     // Spec 107 FR-041 / T088: /onboarding/state describes the operator's
     // fleet-wide setup wizard (connected clients, configured servers across
     // the whole instance) — a tenant principal has no wizard to drive.
-    if (useAuthStore().principalKind === 'tenant') return null
+    const auth = useAuthStore()
+    if (auth.isTeamsEdition && !auth.canLoadCore) return null
 
     loading.value = true
     error.value = null

@@ -532,7 +532,7 @@ function onClickSetup() {
 
 function loadBadgeCounts() {
   // Personal-edition only — the surrounding template gates this for personal users.
-  if (!authStore.isTeamsEdition) {
+  if (!authStore.isTeamsEdition || authStore.canLoadCore) {
     void onboardingStore.fetchState()
     void fetchToolCount()
     void fetchSecretCount()

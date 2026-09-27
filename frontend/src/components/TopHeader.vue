@@ -199,7 +199,10 @@ const profilesStore = useProfilesStore()
 // never mounts to fetch it. The header fetches once up front instead, so
 // hasProfiles reflects reality before the v-if below ever evaluates it.
 onMounted(() => {
-  void profilesStore.fetchProfiles()
+  // App only mounts the shell after canLoadCore. The personal branch keeps
+  // isolated component consumers and tests working without inventing a server
+  // session; it is never reached during the browser's pending startup path.
+  if (!authStore.isTeamsEdition || authStore.canLoadCore) void profilesStore.fetchProfiles()
 })
 
 const addServerLabel = computed(() => authStore.isTeamsEdition ? 'Add Personal Server' : 'Add Server')

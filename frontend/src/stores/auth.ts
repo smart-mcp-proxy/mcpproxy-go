@@ -18,12 +18,14 @@ import api from '@/services/api'
  * server-edition instance without a browser session, and it must keep full
  * access regardless of the session's own role.
  */
-export type PrincipalKind = 'tenant' | 'admin' | 'api_key'
+export type PrincipalKind = 'tenant' | 'admin' | 'api_key' | 'signed_out'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<UserProfile | null>(null)
   const loading = ref(true)
   const isTeamsEdition = ref(false)
+  const authResolvedSuccessfully = ref(false)
+  const bootstrapError = ref<string | null>(null)
   // Spec 107 FR-030: the operator-chosen login label from the public probe;
   // null on the personal edition. Login.vue renders it.
   const provider = ref<ProviderInfo | null>(null)
@@ -41,7 +43,23 @@ export const useAuthStore = defineStore('auth', () => {
     if (isTeamsEdition.value && user.value) {
       return isAdmin.value ? 'admin' : 'tenant'
     }
-    return 'api_key'
+    return isTeamsEdition.value ? 'signed_out' : 'api_key'
+  })
+
+  const canLoadCore = computed(() => {
+    const hasKey = typeof api.hasAPIKey === 'function' && api.hasAPIKey()
+    return !loading.value && authResolvedSuccessfully.value &&
+      (!isTeamsEdition.value || hasKey || isAdmin.value)
+  })
+
+  // The shell is deliberately broader than the admin/core capability. Once
+  // the cookie bootstrap and /auth/me have settled, a tenant needs its own
+  // allowed navigation and the only sign-out control. It must still remain
+  // absent while server-edition auth is pending, unresolved, or signed out.
+  const canShowShell = computed(() => {
+    const hasKey = typeof api.hasAPIKey === 'function' && api.hasAPIKey()
+    return !loading.value && authResolvedSuccessfully.value &&
+      (!isTeamsEdition.value || isAuthenticated.value || hasKey)
   })
 
   // One probe at a time. On a hard reload two callers race for checkAuth():
@@ -56,19 +74,44 @@ export const useAuthStore = defineStore('auth', () => {
   let inflight: Promise<void> | null = null
 
   async function probe() {
+    authResolvedSuccessfully.value = false
+    bootstrapError.value = null
     try {
       // Spec 107 FR-030 / FR-041: learn the edition from the PUBLIC probe
       // before any authenticated call. The previous detection went through
       // GET /api/v1/status with the API key, which a tenant never holds — so
       // every tenant read as "personal edition" and was bounced off /login.
       const probe = await authApi.getProvider()
+      if (probe === undefined) {
+        // Never classify an unavailable server as personal: that would launch
+        // protected core requests while authentication is still unknown.
+        isTeamsEdition.value = true
+        provider.value = null
+        user.value = null
+        bootstrapError.value = 'Unable to determine sign-in status. Please retry.'
+        return
+      }
       provider.value = probe
       isTeamsEdition.value = probe != null
+      if (!isTeamsEdition.value) {
+        user.value = null
+        authResolvedSuccessfully.value = true
+        return
+      }
 
-      user.value = isTeamsEdition.value ? await authApi.getMe() : null
+      const session = await authApi.getSessionStatus()
+      // Validate here as well as in auth-api. The store is the authorization
+      // boundary for startup gates, so a mocked, malformed, or independently
+      // evolved client must not turn a truthy value into an authenticated
+      // browser session.
+      if (!session || typeof session.authenticated !== 'boolean') {
+        throw new Error('Invalid session status response')
+      }
+      user.value = session.authenticated ? await authApi.getMe() : null
+      authResolvedSuccessfully.value = true
     } catch {
-      // Not authenticated or not server edition
       user.value = null
+      bootstrapError.value = 'Unable to determine sign-in status. Please retry.'
     }
   }
 
@@ -102,10 +145,14 @@ export const useAuthStore = defineStore('auth', () => {
     user,
     loading,
     isTeamsEdition,
+    authResolvedSuccessfully,
+    bootstrapError,
     provider,
     isAuthenticated,
     isAdmin,
     principalKind,
+    canLoadCore,
+    canShowShell,
     displayName,
     checkAuth,
     logout,
