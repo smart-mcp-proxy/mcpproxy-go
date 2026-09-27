@@ -12,6 +12,7 @@ describe('/sessions redirect (Spec 109-k FR-070)', () => {
   beforeEach(() => {
     // The app router's auth guard reaches for a store on every navigation.
     setActivePinia(createPinia())
+    document.head.innerHTML = '<meta name="mcpproxy-server-edition" content="false">'
   })
 
   it('redirects /sessions to /activity?view=sessions, keeping other params', async () => {

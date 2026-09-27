@@ -17,11 +17,15 @@ Server-edition routes are `//go:build server` and therefore invisible to `swag`,
 
 Never returns issuer, client id, tenant id, scopes, domains or provider family.
 
-## 2. `GET /api/v1/auth/me` — additive fields (FR-008, PR-B)
+## 2. `GET /api/v1/auth/session` — cookie-session bootstrap hint (FR-041)
+
+Public and `Cache-Control: no-store`; returns exactly `{ "authenticated": boolean }`. It uses only the session cookie and discloses no identity, role, provider, API key, bearer credential or entitlement. Missing, malformed, expired, revoked, disabled-owner and deleted-owner cookies answer `200 false`; a session-store failure answers 500. Bearer JWTs, agent tokens and API keys alone never make it true. `/auth/me` remains protected and is revalidated after a true hint.
+
+## 3. `GET /api/v1/auth/me` — additive fields (FR-008, PR-B)
 
 Existing body (`auth_endpoints.go:58-65`) gains `groups: string[]` (the caller's own stored groups; `[]` when none) and `groups_updated_at: string|null` (RFC 3339). Session cookie or user JWT as today.
 
-## 3. `POST /api/v1/auth/token` — session-cookie principal only (FR-011, PR-C)
+## 4. `POST /api/v1/auth/token` — session-cookie principal only (FR-011, PR-C)
 
 ```yaml
 /api/v1/auth/token:

@@ -283,7 +283,7 @@ export const authGuard: NavigationGuard = async (to) => {
 
   // Require authentication for server edition
   if (!authStore.isAuthenticated) {
-    return { name: 'login' }
+    return { name: 'login', query: { redirect: to.fullPath } }
   }
 
   // Admin-only routes
