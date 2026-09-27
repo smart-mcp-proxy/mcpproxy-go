@@ -774,6 +774,7 @@ async function confirmUndo() {
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Reverted the ${target.id} connect`
       resultSuccess.value = true
+      resultReloadHint.value = ''
       resultBackupPath.value = undefined
       lastConnect.value = null
       undoPanelOpen.value = false
