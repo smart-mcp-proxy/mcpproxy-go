@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -36,6 +38,23 @@ type usableServerTestController struct {
 
 func (m *usableServerTestController) GetAllServers() ([]map[string]interface{}, error) {
 	return m.servers, nil
+}
+
+type usableMgmtController struct {
+	*usableServerTestController
+	svc management.Service
+}
+
+func (m *usableMgmtController) GetManagementService() management.Service { return m.svc }
+
+type usableMgmtService struct {
+	management.Service
+	servers []*contracts.Server
+	err     error
+}
+
+func (m *usableMgmtService) ListServers(context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
+	return m.servers, &contracts.ServerStats{TotalServers: len(m.servers)}, m.err
 }
 
 // ListToolApprovals mirrors storage.BoltDB.ListToolApprovals's documented
@@ -146,6 +165,15 @@ func TestHasUsableServer_FalseWhileAllServersUnusable(t *testing.T) {
 			},
 		},
 		{
+			name: "health missing fails closed",
+			servers: []map[string]interface{}{{
+				"name": "github", "enabled": true, "quarantined": false, "connected": true,
+			}},
+			approved: map[string][]*storage.ToolApprovalRecord{
+				"github": {approvalRecord("github", "create_issue", storage.ToolApprovalStatusApproved, false)},
+			},
+		},
+		{
 			name:     "no tool approvals at all",
 			servers:  []map[string]interface{}{server("github", true, false, true)},
 			approved: map[string][]*storage.ToolApprovalRecord{},
@@ -202,6 +230,65 @@ func TestHasUsableServer_TrueAfterApprove(t *testing.T) {
 	resp := getOnboardingState(t, srv)
 	assert.True(t, resp.HasUsableServer)
 	assert.Equal(t, []string{"github"}, resp.UsableServers)
+}
+
+func TestOnboardingUsesCanonicalManagementHealthForOAuth(t *testing.T) {
+	legacy := &usableServerTestController{approved: map[string][]*storage.ToolApprovalRecord{
+		"oauth-server": {approvalRecord("oauth-server", "read", storage.ToolApprovalStatusApproved, false)},
+	}}
+	ctrl := &usableMgmtController{
+		usableServerTestController: legacy,
+		svc: &usableMgmtService{servers: []*contracts.Server{{
+			Name: "oauth-server", Enabled: true, Authenticated: true,
+			OAuthStatus: "authenticated", Health: &contracts.HealthStatus{Usable: true},
+		}}},
+	}
+	ctrl.apiKey = "test-key"
+	ctrl.routingMode = "retrieve_tools"
+	resp := getOnboardingState(t, NewServer(ctrl, zap.NewNop().Sugar(), nil))
+	require.Equal(t, 1, resp.ConfiguredServerCount)
+	assert.True(t, resp.HasUsableServer)
+	assert.Equal(t, []string{"oauth-server"}, resp.UsableServers)
+}
+
+func TestOnboardingManagementHealthFailsClosed(t *testing.T) {
+	t.Run("missing canonical health", func(t *testing.T) {
+		legacy := &usableServerTestController{approved: map[string][]*storage.ToolApprovalRecord{
+			"oauth-server": {approvalRecord("oauth-server", "read", storage.ToolApprovalStatusApproved, false)},
+		}}
+		ctrl := &usableMgmtController{
+			usableServerTestController: legacy,
+			svc:                        &usableMgmtService{servers: []*contracts.Server{{Name: "oauth-server", Enabled: true}}},
+		}
+		ctrl.apiKey = "test-key"
+		ctrl.routingMode = "retrieve_tools"
+
+		resp := getOnboardingState(t, NewServer(ctrl, zap.NewNop().Sugar(), nil))
+		require.Equal(t, 1, resp.ConfiguredServerCount)
+		assert.False(t, resp.HasUsableServer)
+		assert.Empty(t, resp.UsableServers)
+	})
+
+	t.Run("management error preserves count but not usability", func(t *testing.T) {
+		legacy := &usableServerTestController{
+			servers: []map[string]interface{}{server("oauth-server", true, false, true)},
+			approved: map[string][]*storage.ToolApprovalRecord{
+				"oauth-server": {approvalRecord("oauth-server", "read", storage.ToolApprovalStatusApproved, false)},
+			},
+		}
+		ctrl := &usableMgmtController{
+			usableServerTestController: legacy,
+			svc:                        &usableMgmtService{err: errors.New("management unavailable")},
+		}
+		ctrl.apiKey = "test-key"
+		ctrl.routingMode = "retrieve_tools"
+
+		resp := getOnboardingState(t, NewServer(ctrl, zap.NewNop().Sugar(), nil))
+		require.Equal(t, 1, resp.ConfiguredServerCount)
+		assert.False(t, resp.HasUsableServer)
+		require.NotNil(t, resp.UsableServers, "wire shape must preserve usable_servers as an array")
+		assert.Empty(t, resp.UsableServers)
+	})
 }
 
 // TestHasUsableServer_BulkScanErrorFallsBackPerServer is review round 2's

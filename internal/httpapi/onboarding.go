@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -149,7 +150,7 @@ func (s *Server) handleGetOnboardingState(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	resp, err := s.computeOnboardingState()
+	resp, err := s.computeOnboardingState(r.Context())
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("compute onboarding state: %v", err))
 		return
@@ -247,7 +248,7 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	resp, err := s.computeOnboardingState()
+	resp, err := s.computeOnboardingState(r.Context())
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("recompute state: %v", err))
 		return
@@ -257,9 +258,10 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 
 // computeOnboardingState assembles the response from the connect service,
 // the configured-server count, and the persisted engagement record.
-func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
+func (s *Server) computeOnboardingState(ctx context.Context) (*OnboardingStateResponse, error) {
 	resp := &OnboardingStateResponse{
 		ConnectedClientIDs: []string{},
+		UsableServers:      []string{},
 	}
 
 	if svc := s.getConnectService(); svc != nil {
@@ -268,12 +270,29 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 		resp.HasConnectedClient = resp.ConnectedClientCount > 0
 	}
 
-	servers, err := s.controller.GetAllServers()
-	if err == nil {
-		resp.ConfiguredServerCount = len(servers)
-		resp.HasConfiguredServer = len(servers) > 0
+	// Prefer the canonical typed projection used by GET /servers. The legacy
+	// StateView omits health inputs for OAuth and can misclassify authenticated
+	// or call-time OAuth servers. A management read failure fails closed for
+	// usability, while preserving the configured count when the legacy view is
+	// still available.
+	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
+		servers, _, listErr := mgmtSvc.ListServers(ctx)
+		if listErr == nil {
+			resp.ConfiguredServerCount = len(servers)
+			resp.HasConfiguredServer = len(servers) > 0
+			resp.UsableServers = s.computeUsableContractServers(servers)
+		} else if legacyServers, legacyErr := s.controller.GetAllServers(); legacyErr == nil {
+			resp.ConfiguredServerCount = len(legacyServers)
+			resp.HasConfiguredServer = len(legacyServers) > 0
+		}
+	} else {
+		servers, err := s.controller.GetAllServers()
+		if err == nil {
+			resp.ConfiguredServerCount = len(servers)
+			resp.HasConfiguredServer = len(servers) > 0
+		}
+		resp.UsableServers = s.computeUsableServers(servers)
 	}
-	resp.UsableServers = s.computeUsableServers(servers)
 	resp.HasUsableServer = len(resp.UsableServers) > 0
 
 	state, err := s.controller.GetOnboardingState()
@@ -310,13 +329,25 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 	return resp, nil
 }
 
-// computeUsableServers returns the names of servers that are enabled,
-// non-quarantined, health-usable, and have at least one approved (non-disabled)
-// tool (FR-041). servers is the GetAllServers() projection; a nil/failed
-// fetch yields no usable servers rather than erroring the whole onboarding
-// document — this predicate degrading to "not usable yet" is a safe default,
-// matching computeOnboardingState's existing tolerance of a GetAllServers
-// failure for HasConfiguredServer above.
+func (s *Server) computeUsableContractServers(servers []*contracts.Server) []string {
+	legacy := make([]map[string]interface{}, 0, len(servers))
+	for _, srv := range servers {
+		if srv == nil {
+			continue
+		}
+		legacy = append(legacy, map[string]interface{}{
+			"name": srv.Name, "enabled": srv.Enabled, "quarantined": srv.Quarantined, "health": srv.Health,
+		})
+	}
+	return s.computeUsableServers(legacy)
+}
+
+// computeUsableServers returns names from the small server projection that are
+// enabled, non-quarantined, health-usable, and have at least one approved
+// (non-disabled) tool (FR-041). Production typed management results are
+// adapted to this shape. A nil/failed fetch yields no usable servers rather
+// than erroring the onboarding document, which is a safe "not usable yet"
+// default.
 func (s *Server) computeUsableServers(servers []map[string]interface{}) []string {
 	hasUsableTool := s.usableToolServerSet(servers)
 
