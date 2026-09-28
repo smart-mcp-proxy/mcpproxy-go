@@ -1054,6 +1054,10 @@ class APIService {
     server?: string
     tool?: string
     status?: string
+    /** Raw MCP transport session id (see useScopeQuery's sessionRestParam). */
+    session_id?: string
+    /** Work session id (`ws-` prefix; see useScopeQuery's sessionRestParam). */
+    work_session_id?: string
     /** Export only the sub-calls of one code_execution run. */
     parent_id?: string
     start_time?: string
