@@ -156,6 +156,14 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 func (p *MCPProxyServer) directEntryVisibleToSession(ctx context.Context, entry *directCatalogEntry) bool {
 	authCtx := auth.AuthContextFromContext(ctx)
 	profileName, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
+	if anonymousProfileCaller(ctx) {
+		// The legacy resolver has no anonymous-profile tier. Direct-mode
+		// describe and check must use the same V3 resolution as direct tools/list
+		// so FR-008a's deny-all guard cannot be bypassed by asking for a schema.
+		resolution := p.ResolveProfileV3(ctx, profileIdx)
+		profileName = resolution.Name
+		profileScope = resolution.Scope
+	}
 	isScopedAgent := isScopeRestrictedCaller(authCtx)
 
 	if !directEntryInScope(authCtx, profileScope, isScopedAgent, entry) {

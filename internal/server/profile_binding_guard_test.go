@@ -12,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 func bindingGuardTestProxy(t *testing.T, anonymousProfile string, profiles []config.ProfileConfig, mode, pin string) (*MCPProxyServer, *profileIndex) {
@@ -75,6 +76,30 @@ func TestResolveProfileV3_EqualAnonymousProfileDoesNotTripBindingGuard(t *testin
 	require.True(t, got.Scope.Allows("a"), "an anonymous profile equal to the locked binding is not bypassable")
 }
 
+func TestBindingGuard_DirectDescribeMatchesHiddenTools(t *testing.T) {
+	proxy, _ := bindingGuardTestProxy(t, "", []config.ProfileConfig{{Name: "P", Servers: []string{"a"}}}, auth.ProfileModeLocked, "P")
+	tool := &config.ToolMetadata{
+		ServerName: "a", Name: "read_tool", ParamsJSON: `{"type":"object"}`,
+		Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
+	}
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "a", ToolName: "read_tool", Status: storage.ToolApprovalStatusApproved,
+	}))
+	proxy.publishDirectCatalog(buildDirectCatalog([]*config.ToolMetadata{tool}, nil))
+
+	ctx := anonCtx()
+	listed := proxy.filterDirectModeToolsForAuth(ctx, []mcp.Tool{directStampedTool("a", "read_tool", "read")})
+	require.Empty(t, listed, "the active binding guard hides the direct tool from tools/list")
+	_, visible := proxy.resolveDirectDescribeID(ctx, "a__read_tool")
+	require.False(t, visible, "describe_tool must not disclose a tool hidden by the FR-008a guard")
+
+	cat := proxy.loadDirectCatalog()
+	plan := proxy.planDirectCheck(ctx, cat, nil, []string{"a__read_tool"})
+	require.Empty(t, plan.refs, "check:true must not ask the evaluator about a guard-hidden tool")
+	_, gated := plan.gated["a__read_tool"]
+	require.True(t, gated, "check:true must answer the hidden id as not_found")
+}
+
 func TestHandleSetProfile_AnonymousBindingGuardRefusesSelectionButAllowsClear(t *testing.T) {
 	proxy, _ := bindingGuardTestProxy(t, "", []config.ProfileConfig{{Name: "P", Servers: []string{"a"}}}, auth.ProfileModeLocked, "P")
 	ctx := sessionCtx(context.Background(), "anonymous-bound-session")
@@ -126,6 +151,10 @@ func TestBindingBypassable_FR008aReachabilityMatrix(t *testing.T) {
 		{
 			name: "wider tier cap", anonymous: "Q", pin: "P", mode: auth.ProfileModeLocked,
 			profiles: []config.ProfileConfig{{Name: "P", Servers: []string{"a"}, MaxTier: config.ProfileTierRead}, {Name: "Q", Servers: []string{"a"}, MaxTier: config.ProfileTierWrite}}, want: true,
+		},
+		{
+			name: "unset cap and destructive cap admit the same tier set", anonymous: "Q", pin: "P", mode: auth.ProfileModeLocked,
+			profiles: []config.ProfileConfig{{Name: "P", Servers: []string{"a"}, MaxTier: config.ProfileTierDestructive}, {Name: "Q", Servers: []string{"a"}}},
 		},
 		{
 			name: "more permissive unannotated handling", anonymous: "Q", pin: "P", mode: auth.ProfileModeLocked,

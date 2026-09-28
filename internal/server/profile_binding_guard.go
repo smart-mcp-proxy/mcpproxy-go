@@ -192,7 +192,10 @@ func tierCapRank(tier profile.Tier) int {
 	case profile.TierDestructive:
 		return 3
 	default:
-		return 4 // an unset cap admits every tier
+		// TierUnannotated is the no-cap sentinel. It admits the same finite
+		// tier set as TierDestructive, so treating it as wider would reject
+		// otherwise identical profiles during the binding comparison.
+		return 3
 	}
 }
 
