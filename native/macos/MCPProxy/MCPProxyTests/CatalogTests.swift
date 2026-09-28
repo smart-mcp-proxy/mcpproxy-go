@@ -153,6 +153,18 @@ final class CatalogTests: XCTestCase {
         }
     }
 
+    // MARK: - Secret toggle availability (FR-065)
+
+    /// A field detected as secret-like begins in Secret mode. If the OS
+    /// keyring is unavailable, the user must still be able to move it back to
+    /// Value mode so the Catalog/Paste Add button is no longer trapped behind
+    /// the secret-mode keyring gate. The unavailable keyring must still stop a
+    /// new Secret selection.
+    func testUnavailableKeyringAllowsValueSelectionButRejectsSecretSelection() {
+        XCTAssertTrue(SecretFieldToggleView.canSelect(mode: .value, keyringAvailable: false))
+        XCTAssertFalse(SecretFieldToggleView.canSelect(mode: .secret, keyringAvailable: false))
+    }
+
     // MARK: - Secret refs decode (FR-065 taken-name check)
 
     func testDecodesSecretRefsResponse() throws {

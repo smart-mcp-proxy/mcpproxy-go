@@ -16,6 +16,23 @@ struct SecretFieldToggleView: View {
     let keyringReason: String
     @Environment(\.fontScale) var fontScale
 
+    /// Value mode is always safe: it lets a secret-like field recover from a
+    /// keyring outage. Secret mode is only selectable while the keyring can
+    /// accept the value, preserving the add-time fail-closed guard.
+    static func canSelect(mode: SecretFieldInput.Mode, keyringAvailable: Bool) -> Bool {
+        mode == .value || keyringAvailable
+    }
+
+    private var modeSelection: Binding<SecretFieldInput.Mode> {
+        Binding(
+            get: { mode },
+            set: { proposedMode in
+                guard Self.canSelect(mode: proposedMode, keyringAvailable: keyringAvailable) else { return }
+                mode = proposedMode
+            }
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -23,11 +40,10 @@ struct SecretFieldToggleView: View {
                     .font(.scaledMonospaced(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Picker("", selection: $mode) {
+                Picker("", selection: modeSelection) {
                     Text("Value").tag(SecretFieldInput.Mode.value)
                     Text("Secret").tag(SecretFieldInput.Mode.secret)
                 }
-                .disabled(!keyringAvailable && mode == .secret)
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 140)
