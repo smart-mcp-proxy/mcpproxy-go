@@ -12,11 +12,12 @@ import { createRouter, createMemoryHistory } from 'vue-router'
 // Must be silent for a tenant principal — no call at all, not a call-then-403
 // — matching FR-041's "hidden rather than issued-and-403'd".
 //
-// Spec 109 FR-051: this test used to also cover Dashboard.vue's Usage panel
-// (GET /api/v1/activity/usage), which is now its own page (Usage.vue,
-// mounted at /usage, no longer part of Home) — that coverage moved with it.
+// Spec 109 FR-051: Usage is now its own page, and Home's new summary strip
+// has a separate activity-summary request. Both must stay silent for tenant
+// sessions because those endpoints are admin-only.
 
 const refreshSecuritySpy = vi.hoisted(() => vi.fn().mockResolvedValue(undefined))
+const getActivitySummarySpy = vi.hoisted(() => vi.fn().mockResolvedValue({ success: true, data: {} }))
 
 vi.mock('@/services/api', () => {
   const ok = (data: unknown = null) => vi.fn().mockResolvedValue({ success: true, data })
@@ -30,6 +31,7 @@ vi.mock('@/services/api', () => {
   }
   const base: Record<string, unknown> = {
     getAttention: ok({ count: 0, items: [] }),
+    getActivitySummary: getActivitySummarySpy,
     getServers: ok({ servers: [{ name: 'srv-a', enabled: true, connected: true, tool_count: 1 }] }),
     createEventSource: vi.fn(() => fakeEventSource),
     hasAPIKey: vi.fn(() => false),
@@ -98,6 +100,7 @@ async function mountHomeAsTenant() {
       plugins: [router],
       stubs: {
         RouterLink: { template: '<a><slot /></a>' },
+        UsageSummaryStrip: false,
       },
     },
   })
@@ -107,6 +110,7 @@ describe('Home tenant gating (Spec 107 FR-041, cross-review round 2 P1)', () => 
   beforeEach(() => {
     setActivePinia(createPinia())
     refreshSecuritySpy.mockClear()
+    getActivitySummarySpy.mockClear()
     ;(globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource
   })
 
@@ -115,6 +119,15 @@ describe('Home tenant gating (Spec 107 FR-041, cross-review round 2 P1)', () => 
     await flushPromises()
 
     expect(refreshSecuritySpy).not.toHaveBeenCalled()
+  })
+
+  it('hides the usage summary strip and never requests its admin-only data for a tenant', async () => {
+    const wrapper = await mountHomeAsTenant()
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="home-usage-strip-top"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="home-usage-strip-bottom"]').exists()).toBe(false)
+    expect(getActivitySummarySpy).not.toHaveBeenCalled()
   })
 
   // Spec 107 PR-C cross-review round 3, chunk 4 (P2): the topology's Connect

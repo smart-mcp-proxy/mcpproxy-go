@@ -135,8 +135,10 @@ final class AttentionTests: XCTestCase {
         let submenu = try XCTUnwrap(parent.submenu)
         let reviewRow = try XCTUnwrap(submenu.items.first { $0.title.contains("waiting for review") })
         XCTAssertNil(reviewRow.submenu, "no verb the tray can run — straight disclosure")
-        XCTAssertEqual(reviewRow.representedObject as? String, "github",
-                       "navigates by server name, never a one-click approve/unquarantine")
+        let target = try XCTUnwrap(reviewRow.representedObject as? ServerDetailTarget)
+        XCTAssertEqual(target.serverName, "github")
+        XCTAssertEqual(target.tab, .tools,
+                       "navigates to the existing review surface, never a one-click approve/unquarantine")
         XCTAssertNotEqual(reviewRow.action, NSSelectorFromString("performAttentionAction:"),
                           "a review row must never be wired to the execute-in-place action")
     }
@@ -158,10 +160,36 @@ final class AttentionTests: XCTestCase {
         XCTAssertTrue(rowMenu.items.map(\.title).contains("Open Server Details"))
     }
 
+    func testNeedsAttentionMissingSecretOpensConfigTab() throws {
+        let host = TestMenuHost()
+        let controller = AppController(glanceDataSource: CountingGlanceDataSource(), menuHost: host)
+        controller.appState.coreState = .connected
+        controller.appState.updateAttention([
+            AttentionItem(
+                id: "missing_secret:server:github",
+                kind: "missing_secret",
+                rank: 20,
+                subject: AttentionSubject(type: "server", id: "github", name: "github"),
+                summary: "github: secret required",
+                fix: AttentionFix(verb: "set_secret", label: "Add secret", target: "/servers/github?tab=config&focus=env"),
+                since: Date()
+            ),
+        ])
+        controller.rebuildMenu()
+
+        let parent = try XCTUnwrap((host.menu?.items ?? []).first { $0.title.hasPrefix("Needs Attention") })
+        let row = try XCTUnwrap(parent.submenu?.items.first { $0.title.contains("secret required") })
+        let target = try XCTUnwrap(row.representedObject as? ServerDetailTarget,
+                                   "attention menu must preserve the target tab from fix.target")
+        XCTAssertEqual(target.serverName, "github")
+        XCTAssertEqual(target.tab, .config)
+    }
+
     // MARK: - Home section model (AppState.attention)
 
     func testHomeSectionModelIsTheSameListTheTrayReads() throws {
         let appState = AppState()
+        appState.coreState = .connected
         let items = try decodeFixture().items
         appState.updateAttention(items)
 
@@ -171,10 +199,29 @@ final class AttentionTests: XCTestCase {
 
     func testUpdateAttentionIsIdempotentOnAnUnchangedList() throws {
         let appState = AppState()
+        appState.coreState = .connected
         let items = try decodeFixture().items
         appState.updateAttention(items)
         let first = appState.attention
         appState.updateAttention(items)
         XCTAssertEqual(appState.attention.map(\.id), first.map(\.id))
+    }
+
+    func testAttentionIsClearedWhenCoreStopsAndOldConnectionCannotRepublishIt() throws {
+        let appState = AppState()
+        appState.coreState = .connected
+        let oldConnection = appState.connectionGeneration
+        let item = try XCTUnwrap(decodeFixture().items.first)
+        appState.updateAttention([item], connectionGeneration: oldConnection)
+        XCTAssertEqual(appState.attention.map(\.id), [item.id])
+
+        appState.coreState = .idle
+        XCTAssertTrue(appState.attention.isEmpty,
+                      "stopping the core must remove attention rows that no longer have live actions")
+
+        appState.coreState = .connected
+        appState.updateAttention([item], connectionGeneration: oldConnection)
+        XCTAssertTrue(appState.attention.isEmpty,
+                      "a response from the stopped connection must not republish stale attention")
     }
 }

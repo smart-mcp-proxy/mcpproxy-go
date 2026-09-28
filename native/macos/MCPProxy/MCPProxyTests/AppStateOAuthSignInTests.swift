@@ -132,6 +132,7 @@ final class AppStateOAuthSignInTests: XCTestCase {
     @MainActor
     func testLoginRequiredServerStillNeedsAttention() throws {
         let state = AppState()
+        state.coreState = .connected
         state.servers = [try loginRequiredServer()]
         state.updateAttention([
             AttentionItem(

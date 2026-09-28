@@ -127,6 +127,7 @@ final class TrayBadgeExemptionTests: XCTestCase {
     @MainActor
     func testQuarantineStillAsksForAttentionJustNotInRed() {
         let state = AppState()
+        state.coreState = .connected
         state.servers = [Self.quarantinedServer(name: "everything")]
         state.updateAttention([Self.serverReviewItem(for: "everything")])
 
@@ -175,6 +176,7 @@ final class TrayBadgeExemptionTests: XCTestCase {
         }
         """)
         let state = AppState()
+        state.coreState = .connected
         state.servers = [broken]
         state.updateAttention([Self.serverReviewItem(for: "demo")])
 

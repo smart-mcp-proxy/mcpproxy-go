@@ -36,6 +36,28 @@ final class HomeReviewActionTests: XCTestCase {
         )
     }
 
+    func testLoginActionRecordsTheInjectedAPIClientRequest() async {
+        let appState = AppState()
+        appState.apiClient = HomeReviewActionStubURLProtocol.makeClient()
+        let item = AttentionItem(
+            id: "sign_in_required:server:everything",
+            kind: "sign_in_required",
+            rank: 10,
+            subject: AttentionSubject(type: "server", id: "everything", name: "everything"),
+            summary: "everything: sign in required",
+            fix: AttentionFix(verb: "login", label: "Sign in", target: "/servers/everything"),
+            since: Date()
+        )
+
+        await HomeAttentionAction.performFix(item, appState: appState)
+
+        let requests = HomeReviewActionStubURLProtocol.requests
+        XCTAssertEqual(requests.count, 1, "positive control: URLProtocol must record an actual API request")
+        XCTAssertEqual(requests.first?.method, "POST")
+        XCTAssertEqual(URL(string: requests.first?.url ?? "")?.path,
+                       "/api/v1/servers/everything/login")
+    }
+
     /// A quarantined server's review action must open the detail view and
     /// never call the core's approve/unquarantine doors.
     func testQuarantinedServerReviewActionOpensDetailViewAndNeverApproves() async throws {

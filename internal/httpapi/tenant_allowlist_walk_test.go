@@ -110,6 +110,7 @@ type tenantAllowlistedRoute struct {
 // /api/v1).
 var tenantAllowlist = []tenantAllowlistedRoute{
 	{http.MethodGet, "/api/v1/status"},
+	{http.MethodGet, "/api/v1/attention"},
 	{http.MethodGet, "/api/v1/servers"},
 	// scopedServerSubtree: every GET under /servers/{id}/** EXCEPT
 	// /servers/{id}/tool-calls (named must-refuse) and the static

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,6 +17,16 @@ import (
 // documents, for an administrator.
 func TestGetAttention_Shape(t *testing.T) {
 	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true}
+	ctrl.attentionItemsOverride = []contracts.AttentionItem{{
+		ID:      "sign_in_required:server:alpha",
+		Kind:    "sign_in_required",
+		Rank:    10,
+		Subject: contracts.AttentionSubject{Type: "server", ID: "alpha", Name: "alpha"},
+		Summary: "alpha: sign in required",
+		Detail:  "OAuth · alpha.example.com",
+		Fix:     contracts.AttentionFix{Verb: "login", Label: "Sign in", Target: "/servers/alpha"},
+		Since:   time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC),
+	}}
 	srv, _ := scopedAgentServer(t, ctrl, []string{"alpha"})
 
 	rec := scopeGet(t, srv, "/api/v1/attention", scopeAdminAPIKey)
@@ -31,13 +42,18 @@ func TestGetAttention_Shape(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.True(t, body.Success)
+	require.NotEmpty(t, body.Data.Items, "shape assertions must exercise at least one attention item")
 	assert.Equal(t, len(body.Data.Items), body.Data.Count)
 	assert.NotEmpty(t, body.Data.GeneratedAt)
-	for _, it := range body.Data.Items {
-		assert.NotEmpty(t, it.ID)
-		assert.NotEmpty(t, it.Kind)
-		assert.NotEmpty(t, it.Fix.Verb)
-	}
+	item := body.Data.Items[0]
+	assert.Equal(t, "sign_in_required:server:alpha", item.ID)
+	assert.Equal(t, "sign_in_required", item.Kind)
+	assert.Equal(t, 10, item.Rank)
+	assert.Equal(t, contracts.AttentionSubject{Type: "server", ID: "alpha", Name: "alpha"}, item.Subject)
+	assert.Equal(t, "alpha: sign in required", item.Summary)
+	assert.Equal(t, "OAuth · alpha.example.com", item.Detail)
+	assert.Equal(t, contracts.AttentionFix{Verb: "login", Label: "Sign in", Target: "/servers/alpha"}, item.Fix)
+	assert.Equal(t, time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC), item.Since)
 }
 
 // TestGetAttention_AgentTokenSeesOnlyAllowedServersNoClients pins T055: a

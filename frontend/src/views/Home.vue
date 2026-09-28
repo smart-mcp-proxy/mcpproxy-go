@@ -14,7 +14,7 @@
     <!-- Usage summary strip: normally sits below the topology, but moves
          above it when the attention list is empty (FR-051) so an otherwise-
          calm landing page still opens on something live. -->
-    <UsageSummaryStrip v-if="attentionStore.loaded && attentionStore.count === 0" data-test="home-usage-strip-top" />
+    <UsageSummaryStrip v-if="authStore.principalKind !== 'tenant' && attentionStore.loaded && attentionStore.count === 0" data-test="home-usage-strip-top" />
 
     <!-- Topology (moved from Dashboard.vue's Overview panel). Always shown —
          Home no longer switches between an Overview and a Usage panel;
@@ -356,7 +356,7 @@
     </div>
     <!-- /Topology -->
 
-    <UsageSummaryStrip v-if="attentionStore.loaded && attentionStore.count > 0" data-test="home-usage-strip-bottom" />
+    <UsageSummaryStrip v-if="authStore.principalKind !== 'tenant' && attentionStore.loaded && attentionStore.count > 0" data-test="home-usage-strip-bottom" />
 
     <!-- Modals -->
     <ConnectModal :show="showConnectModal" @close="showConnectModal = false" />

@@ -254,7 +254,7 @@ describe('Login.vue provider label (Spec 107 FR-030)', () => {
       routes: [
         { path: '/login', name: 'login', component: Login },
         { path: '/my/activity', name: 'activity', component: { template: '<div />' } },
-        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+        { path: '/', name: 'home', component: { template: '<div />' } },
       ],
     })
     await router.push({ path: '/login', query: { redirect: '/my/activity?view=mine' } })
@@ -281,7 +281,7 @@ describe('Login.vue provider label (Spec 107 FR-030)', () => {
       history: createMemoryHistory(),
       routes: [
         { path: '/login', name: 'login', component: Login },
-        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+        { path: '/', name: 'home', component: { template: '<div />' } },
       ],
     })
     await router.push({ path: '/login', query: { redirect: 'https://attacker.invalid' } })
@@ -364,7 +364,7 @@ describe('Login.vue provider label (Spec 107 FR-030)', () => {
     expect(router.currentRoute.value.path).toBe('/login')
   })
 
-  it('uses the dashboard rather than an external redirect after a recovered session', async () => {
+  it('uses Home rather than an external redirect after a recovered session', async () => {
     const store = useAuthStore()
     store.isTeamsEdition = true
     store.user = { id: 'u1', email: 'a@acme.test', display_name: 'A', role: 'admin', provider: 'oidc', created_at: '', last_login_at: '' }
@@ -378,7 +378,7 @@ describe('Login.vue provider label (Spec 107 FR-030)', () => {
       history: createMemoryHistory(),
       routes: [
         { path: '/login', name: 'login', component: Login },
-        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+        { path: '/', name: 'home', component: { template: '<div />' } },
       ],
     })
     await router.push({ path: '/login', query: { redirect: '//attacker.invalid/steal' } })

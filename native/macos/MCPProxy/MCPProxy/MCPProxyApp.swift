@@ -1183,7 +1183,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                                              action: #selector(showServerDetailFromMenu(_:)),
                                              keyEquivalent: "")
                     details.target = self
-                    details.representedObject = attentionItem.subject.name
+                    details.representedObject = attentionDetailTarget(for: attentionItem)
                     rowMenu.addItem(details)
 
                     item.submenu = rowMenu
@@ -1192,7 +1192,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // configuration problem. Straight to the detail view.
                     item.action = #selector(showServerDetailFromMenu(_:))
                     item.target = self
-                    item.representedObject = attentionItem.subject.name
+                    item.representedObject = attentionDetailTarget(for: attentionItem)
                 }
                 // A client-subject item (109-h) has no native screen yet:
                 // shown for disclosure, not yet actionable from the tray.
@@ -1776,13 +1776,33 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     /// Navigate to a server's detail page. The represented object is the
-    /// server NAME (what `.showServerDetail` matches on).
+    /// server name or a typed target carrying the tab from `fix.target`.
+    private func attentionDetailTarget(for item: AttentionItem) -> ServerDetailTarget {
+        let tabName = URLComponents(string: item.fix.target)?.queryItems?
+            .first(where: { $0.name == "tab" })?.value?.lowercased()
+        let tab: ServerDetailTab
+        switch tabName {
+        case "config": tab = .config
+        case "logs": tab = .logs
+        default: tab = .tools
+        }
+        return ServerDetailTarget(serverName: item.subject.name, tab: tab)
+    }
+
     @objc private func showServerDetailFromMenu(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
+        let target: Any
+        if let detailTarget = sender.representedObject as? ServerDetailTarget {
+            target = detailTarget
+        } else if let name = sender.representedObject as? String {
+            // Older menu paths intentionally keep the default Tools tab.
+            target = name
+        } else {
+            return
+        }
         showMainWindow()
         NotificationCenter.default.post(name: .switchToServers, object: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NotificationCenter.default.post(name: .showServerDetail, object: name)
+            NotificationCenter.default.post(name: .showServerDetail, object: target)
         }
     }
 

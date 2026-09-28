@@ -441,7 +441,9 @@ final class AppState: ObservableObject {
     /// `attention.changed` refetch does not spuriously re-render every
     /// subscriber (same rule as `updateServers`).
     @MainActor
-    func updateAttention(_ items: [AttentionItem]) {
+    func updateAttention(_ items: [AttentionItem], connectionGeneration generation: Int? = nil) {
+        guard coreState == .connected else { return }
+        if let generation, !isCurrentConnection(generation) { return }
         let newIDs = items.map(\.id)
         let oldIDs = attention.map(\.id)
         if newIDs != oldIDs || items != attention {
@@ -990,6 +992,7 @@ final class AppState: ObservableObject {
     /// the main actor anyway — `transition(to:)`, plus the two `MainActor.run`
     /// blocks in CoreProcessManager.awaitExternalCore and MCPProxyApp.stopCore.
     func clearGlanceState() {
+        if !attention.isEmpty { attention = [] }
         if !glanceActivity.isEmpty { glanceActivity = [] }
         if !glanceSessions.isEmpty { glanceSessions = [] }
         if usageTimeline != nil { usageTimeline = nil }

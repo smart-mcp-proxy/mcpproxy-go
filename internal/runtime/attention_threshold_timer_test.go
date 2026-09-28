@@ -75,3 +75,54 @@ func TestAttentionThresholdTimerFiresWithoutFollowUpEvent(t *testing.T) {
 	}
 	assert.True(t, found, "GET /attention (Items()) must reflect the threshold crossing")
 }
+
+// TestAttentionClientThresholdTimerFiresWithoutFollowUpEvent pins the client
+// half of T053/FR-002 independently of 109-h's ClientPresence producer. A
+// connected-but-never-seen client must cross its threshold from the subscriber
+// timer alone, appear in Items (the GET /attention snapshot), and be emitted
+// as attention.changed without a second event.
+func TestAttentionClientThresholdTimerFiresWithoutFollowUpEvent(t *testing.T) {
+	rt := &Runtime{
+		eventSubs:         make(map[chan Event]struct{}),
+		internalEventSubs: make(map[chan Event]struct{}),
+	}
+	connectedAt := time.Now()
+	sub := newAttentionSubscriber(rt, 5*time.Millisecond)
+	sub.clientNeverSeenThreshold = 120 * time.Millisecond
+	sub.timerCap = 20 * time.Millisecond
+	sub.clients = []AttentionClient{{
+		ID:          "codex",
+		DisplayName: "Codex",
+		ConnectedAt: &connectedAt,
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watcher := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(watcher)
+	sub.start(ctx)
+
+	// This single event starts the first recompute and arms the threshold timer.
+	rt.publishEvent(newEvent(EventTypeServersChanged, map[string]any{
+		"servers": []contracts.Server{},
+	}))
+
+	assertNoEvent(t, watcher, EventTypeAttentionChanged, 30*time.Millisecond)
+	for _, item := range sub.Items() {
+		assert.NotEqual(t, "client_never_seen:client:codex", item.ID,
+			"the client must not be reported before ConnectedAt + threshold")
+	}
+
+	event := waitForEvent(t, watcher, EventTypeAttentionChanged)
+	items, ok := event.Payload["items"].([]AttentionEventItem)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	assert.Equal(t, "client_never_seen:client:codex", items[0].ID)
+	assert.Equal(t, "client", items[0].SubjectType)
+	assert.Equal(t, "codex", items[0].SubjectID)
+
+	snapshot := sub.Items()
+	require.Len(t, snapshot, 1, "GET /attention snapshot must reflect the client threshold crossing")
+	assert.Equal(t, "client_never_seen:client:codex", snapshot[0].ID)
+}

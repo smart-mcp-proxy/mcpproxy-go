@@ -241,8 +241,10 @@ final class TrayAuditMenuTests: XCTestCase {
         let row = try XCTUnwrap(attention.items.first)
         XCTAssertNil(row.submenu)
         XCTAssertNotNil(row.action)
-        XCTAssertEqual(row.representedObject as? String, "everything",
-                       "navigation keys off the server NAME, which is what .showServerDetail matches")
+        let target = try XCTUnwrap(row.representedObject as? ServerDetailTarget)
+        XCTAssertEqual(target.serverName, "everything")
+        XCTAssertEqual(target.tab, .tools,
+                       "attention navigation keeps the server name and the default Tools tab")
     }
 
     // MARK: - F8a + sign-in · Combined quarantine + awaiting sign-in
@@ -303,7 +305,9 @@ final class TrayAuditMenuTests: XCTestCase {
         let reviewRow = try XCTUnwrap(attention.items.first { $0.submenu == nil },
                                       "review is never a one-click approve, so its row navigates directly with no submenu")
         XCTAssertNotNil(reviewRow.action, "a review row with no action is the F14 dead link again")
-        XCTAssertEqual(reviewRow.representedObject as? String, "github")
+        let reviewTarget = try XCTUnwrap(reviewRow.representedObject as? ServerDetailTarget)
+        XCTAssertEqual(reviewTarget.serverName, "github")
+        XCTAssertEqual(reviewTarget.tab, .tools)
     }
 
     // MARK: - F15 · A Servers submenu that fits
