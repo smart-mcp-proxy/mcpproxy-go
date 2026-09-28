@@ -95,6 +95,38 @@ func TestProfileMiddleware_ScopedRefusalIsLoggedForOperator(t *testing.T) {
 	require.Empty(t, logs.FilterMessage("profile URL refused for scoped caller").All())
 }
 
+func TestProfileURLGate_ConfinedAnonymousHonorsSwitchableTo(t *testing.T) {
+	switchTo := []string{"target"}
+	cfg := &config.Config{
+		AnonymousProfile: "base",
+		Servers:          []*config.ServerConfig{{Name: "base-srv"}, {Name: "target-srv"}, {Name: "other-srv"}},
+		Profiles: []config.ProfileConfig{
+			{Name: "base", Servers: []string{"base-srv"}, SwitchableTo: &switchTo},
+			{Name: "target", Servers: []string{"target-srv"}},
+			{Name: "other", Servers: []string{"other-srv"}},
+		},
+	}
+	handler := (profileGateFleet{srv: &Server{logger: zap.NewNop()}, cfg: cfg}).handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, tc := range []struct {
+		name, path string
+		wantStatus int
+	}{
+		{name: "bound base remains selectable", path: "/mcp/p/base", wantStatus: http.StatusOK},
+		{name: "declared switchable target is selectable", path: "/mcp/p/target", wantStatus: http.StatusOK},
+		{name: "undeclared target is refused", path: "/mcp/p/other", wantStatus: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.path, http.NoBody)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			require.Equal(t, tc.wantStatus, rec.Code)
+		})
+	}
+}
+
 // profileGateFleetConfig builds a config over a fleet of 1+n profiles: "pin"
 // (reaching "pin-srv") followed by n profiles "p0".."p<n-1>" that reach only
 // "other-srv". With n == -1 the fleet has no profiles at all. hidden further

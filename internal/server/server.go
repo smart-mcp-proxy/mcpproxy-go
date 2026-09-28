@@ -2572,16 +2572,17 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 		profiles = s.profileIndexes.For(s.runtimeConfig())
 	}
 	cfg := profiles.cfg
+	confinedAnonymous := anonymousProfileCaller(r.Context()) && cfg != nil && cfg.AnonymousProfile != ""
 
 	// One slug → profile index per snapshot (built before the snapshot was
 	// published, see warmProfileIndex): the gate below and the lookup after
 	// it resolve the slug directly, so neither the refusal nor the admission
 	// walks cfg.Profiles.
 
-	// Spec 105 FR-004: the selectable-profile gate for scoped callers. It
+	// Spec 105 FR-004: the selectable-profile gate for confined callers. It
 	// evaluates the requested profile (and the pin) ONLY — never the
 	// selectable list, whose cost is fleet-sized (profileIndex.selectable).
-	if auth.IsScopedCaller(r.Context()) {
+	if auth.IsScopedCaller(r.Context()) || confinedAnonymous {
 		if !profiles.selectable(r.Context(), slug) {
 			// Silent towards the agent, not towards the operator: the gate
 			// answers before the logging handler mounted inside it, so this
@@ -2607,7 +2608,7 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 		return
 	}
 
-	// Look up profile by slug (lock-free snapshot). A scoped caller that
+	// Look up profile by slug (lock-free snapshot). A confined caller that
 	// passed the gate always resolves here — the predicate only admits
 	// configured profiles. The position is kept, not just the *ProfileConfig,
 	// so the effective-server computation below can reuse this exact
