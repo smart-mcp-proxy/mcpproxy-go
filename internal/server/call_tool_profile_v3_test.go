@@ -113,6 +113,11 @@ func TestCallTool_ProfileDenialWritesBlockedActivityReason(t *testing.T) {
 	proxy, rt := newProfilesV3Fixture(t)
 	startCountingUpstream(t, proxy, rt, "github", writeSpec("create_issue"))
 	go rt.ActivityService().Start(rt.AppContext(), rt)
+	startDeadline := time.Now().Add(5 * time.Second)
+	for !rt.ActivityService().Started() && time.Now().Before(startDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	require.True(t, rt.ActivityService().Started(), "activity service must subscribe before the policy decision is emitted")
 	result, err := proxy.handleCallToolVariant(urlProfileCtx(proxy, "work-readonly"), auditCallToolRequest("github:create_issue", nil), contracts.ToolVariantWrite)
 	require.NoError(t, err)
 	require.True(t, result.IsError)

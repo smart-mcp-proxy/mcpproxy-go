@@ -59,7 +59,7 @@ func postToolCallNamed(t *testing.T, srv *Server, apiKey, toolName string) *http
 func TestHandleCallTool_ProfileHiddenCodeExecutionMatchesUnknownTool(t *testing.T) {
 	apiKey := "test-profile-code-exec-api-key"
 	profileCtrl := &shedController{apiKey: apiKey, err: fmt.Errorf("tool call failed: %w", profile.ErrCodeExecutionBlocked)}
-	unknownCtrl := &shedController{apiKey: apiKey, err: fmt.Errorf("unknown tool: no_such_tool")}
+	unknownCtrl := &shedController{apiKey: apiKey, err: fmt.Errorf("tool call failed: unknown tool: no_such_tool")}
 	profileResponse := postToolCallNamed(t, NewServer(profileCtrl, zap.NewNop().Sugar(), nil), apiKey, "code_execution")
 	unknownResponse := postToolCallNamed(t, NewServer(unknownCtrl, zap.NewNop().Sugar(), nil), apiKey, "no_such_tool")
 

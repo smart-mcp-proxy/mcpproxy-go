@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -32,6 +33,13 @@ func (m *profileRESTDiscoveryManagementService) GetServerTools(_ context.Context
 
 func (c *profileRESTDiscoveryController) GetManagementService() management.Service {
 	return c.managementService
+}
+
+func (c *profileRESTDiscoveryController) GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
+	if record, ok := c.globalToolsController.approvals[serverName+"\x00"+toolName]; ok {
+		return record, nil
+	}
+	return nil, fmt.Errorf("%w: %s", storage.ErrToolApprovalNotFound, storage.ToolApprovalKey(serverName, toolName))
 }
 
 func (c *profileRESTDiscoveryController) ListToolApprovals(server string) ([]*storage.ToolApprovalRecord, error) {
@@ -86,7 +94,7 @@ func TestRESTDiscovery_ProfileFiltersServerToolsAndExportAndHidesDiff(t *testing
 					{"name": "create_issue", "server_name": "github", "description": "Create issue"},
 				},
 			},
-			profileAllowed: map[string]bool{"github\x00create_issue": false},
+			profileAllowed: map[string]bool{"github\x00create_issue": false, "github\x00no_such_tool": true},
 			approvals: map[string]*storage.ToolApprovalRecord{
 				"github\x00list_issues":  {ServerName: "github", ToolName: "list_issues", Status: storage.ToolApprovalStatusApproved},
 				"github\x00create_issue": {ServerName: "github", ToolName: "create_issue", Status: storage.ToolApprovalStatusChanged},
@@ -143,7 +151,21 @@ func TestRESTDiscovery_ProfileFiltersServerToolsAndExportAndHidesDiff(t *testing
 		w := httptest.NewRecorder()
 		srv.handleGetToolDiff(w, req)
 		require.Equal(t, http.StatusNotFound, w.Code)
-		require.Contains(t, w.Body.String(), "Tool approval record not found")
+		var hiddenPayload struct {
+			Error string `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &hiddenPayload))
+
+		unknownReq := profileRouteRequest(ctx, http.MethodGet, "/api/v1/servers/github/tools/no_such_tool/diff",
+			[2]string{"id", "github"}, [2]string{"tool", "no_such_tool"})
+		unknown := httptest.NewRecorder()
+		srv.handleGetToolDiff(unknown, unknownReq)
+		require.Equal(t, http.StatusNotFound, unknown.Code)
+		var unknownPayload struct {
+			Error string `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(unknown.Body.Bytes(), &unknownPayload))
+		require.Equal(t, unknownPayload.Error, hiddenPayload.Error, "a policy-hidden tool and a nonexistent tool must have identical not-found bodies")
 	})
 
 	t.Run("unprofiled administrator keeps the current rows and diff", func(t *testing.T) {

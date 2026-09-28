@@ -72,6 +72,10 @@ func enforcementMatrixProfiles() []config.ProfileConfig {
 // annotation shape), notion (1 write tool) and filesystem (1 read tool) —
 // exactly as the matrix's fixture table lists them.
 func newProfilesV3Fixture(t *testing.T) (*MCPProxyServer, *runtime.Runtime) {
+	return newProfilesV3FixtureWithConfig(t, nil)
+}
+
+func newProfilesV3FixtureWithConfig(t *testing.T, configure func(*config.Config)) (*MCPProxyServer, *runtime.Runtime) {
 	t.Helper()
 
 	proxy, rt := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
@@ -81,6 +85,9 @@ func newProfilesV3Fixture(t *testing.T) (*MCPProxyServer, *runtime.Runtime) {
 			{Name: "filesystem", Enabled: true},
 		}
 		cfg.Profiles = enforcementMatrixProfiles()
+		if configure != nil {
+			configure(cfg)
+		}
 	})
 
 	startCountingUpstream(t, proxy, rt, "github",

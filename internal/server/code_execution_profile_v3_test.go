@@ -49,7 +49,11 @@ func TestCodeExecution_ProfileV3HiddenAndRefused(t *testing.T) {
 	require.Equal(t, "unknown tool: code_execution", resultText(t, result))
 
 	go rt.ActivityService().Start(rt.AppContext(), rt)
-	time.Sleep(20 * time.Millisecond) // wait until the event subscriber is installed
+	startDeadline := time.Now().Add(5 * time.Second)
+	for !rt.ActivityService().Started() && time.Now().Before(startDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	require.True(t, rt.ActivityService().Started(), "activity service must subscribe before the policy decision is emitted")
 	result, err = proxy.handleCodeExecution(urlCtx, mcp.CallToolRequest{
 		Params: mcp.CallToolParams{Arguments: map[string]interface{}{"code": "1 + 1"}},
 	})
@@ -81,6 +85,14 @@ func TestCodeExecution_DanglingProfileHiddenFromDiscovery(t *testing.T) {
 
 	visible := proxy.filterProfileV3Tools(ctx, []mcp.Tool{{Name: "code_execution"}, {Name: "call_tool_read"}})
 	require.Equal(t, []string{"call_tool_read"}, profileV3ToolNames(visible), "a dangling profile is deny-all and must not advertise code execution")
+
+	result, err := proxy.handleCodeExecution(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Arguments: map[string]interface{}{"code": "1 + 1"}},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.IsError, "a dangling profile must also refuse direct execution")
+	require.Equal(t, "unknown tool: code_execution", resultText(t, result))
 }
 
 func TestCodeExecution_ProfileV3ImplicitDefaults(t *testing.T) {
@@ -122,7 +134,9 @@ func TestCodeExecution_ProfileV3ImplicitDefaults(t *testing.T) {
 }
 
 func TestCallToolRoutingMode_ProfileV3FilterAndEnforcement(t *testing.T) {
-	proxy, rt := newProfilesV3Fixture(t)
+	proxy, rt := newProfilesV3FixtureWithConfig(t, func(cfg *config.Config) {
+		cfg.EnableCodeExecution = true
+	})
 	indexEnforcementMatrixFixtureTools(t, proxy)
 	up := startCountingUpstream(t, proxy, rt, "github", writeSpec("create_issue"), readSpec("list_issues"))
 	ctx := clientCtx("desktop", "work-readonly", "locked")
@@ -318,6 +332,28 @@ func TestCodeExecution_ProfileV3NestedCallBlockedBeforeUpstream(t *testing.T) {
 	require.False(t, result.IsError, "a denied nested call is returned as an error envelope to the script; result=%s", resultText(t, result))
 	require.Contains(t, resultText(t, result), "blocked by profile: github:create_issue is a write tool; this profile allows read tools only")
 	require.Empty(t, up.dispatched(), "nested profile denial must happen before upstream I/O")
+	calls, total, listErr := rt.GetToolCalls(50, 0, nil)
+	require.NoError(t, listErr)
+	require.GreaterOrEqual(t, total, 1, "the parent execution record is persisted")
+	var parentID string
+	for _, call := range calls {
+		if call.ServerName == "mcpproxy" && call.ToolName == "code_execution" {
+			parentID = call.ID
+		}
+	}
+	require.NotEmpty(t, parentID, "parent code_execution record is persisted")
+	serverConfig, configErr := rt.StorageManager().GetUpstreamServer("github")
+	require.NoError(t, configErr)
+	serverCalls, callsErr := rt.StorageManager().GetServerToolCalls(storage.GenerateServerID(serverConfig), 1000)
+	require.NoError(t, callsErr)
+	var childParentID string
+	for _, call := range serverCalls {
+		if call.ServerName == "github" && call.ToolName == "create_issue" {
+			childParentID = call.ParentCallID
+		}
+	}
+	require.NotEmpty(t, childParentID, "profile-refused nested call is persisted")
+	require.Equal(t, parentID, childParentID, "the refused child record links to its parent execution")
 }
 
 func profileV3ToolNames(tools []mcp.Tool) []string {

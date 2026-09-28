@@ -3944,6 +3944,21 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	if callArgs == nil {
 		callArgs = original.Arguments
 	}
+	// Install the attempt before the profile gate so an authorization refusal
+	// is recorded with the same audit context as every other dispatch path.
+	var operation string
+	if original.Annotations != nil {
+		operation = tierForAnnotations(toConfigToolAnnotations(original.Annotations), true)
+	}
+	requestID := mintCorrelationID(original.ServerName, original.ToolName)
+	ctx = s.mcpProxy.installAuditAttempt(ctx, auditAttemptSpec{
+		RequestID: requestID,
+		Server:    original.ServerName,
+		Tool:      original.ToolName,
+		Operation: operation,
+		Surface:   auditSurfaceREST,
+		Args:      callArgs,
+	})
 
 	// Spec 108 FR-015: replay is a dispatch path, so evaluate its recorded
 	// server/tool against the same request-scoped profile resolution before
@@ -3952,6 +3967,8 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	profileIndex := s.mcpProxy.profileIndexCurrent(ctx)
 	profileResolution := s.mcpProxy.ResolveProfileV3(ctx, profileIndex)
 	if profileResolution.Scope != nil && !profileResolution.Scope.Allows(original.ServerName) {
+		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonProfileScope)
 		return nil, profile.ErrToolOutsideProfile
 	}
 	if policy := profileResolution.Policy; policy != nil {
@@ -3960,7 +3977,6 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 		if admitted, reason, tier := policy.Decide(original.ServerName, original.ToolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
 			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName)
 			refusal := &profile.ToolBlockedError{Reason: blockReason, Message: message}
-			requestID := mintCorrelationID(original.ServerName, original.ToolName)
 			s.mcpProxy.emitActivityPolicyDecisionWithBlockReason(ctx, original.ServerName, original.ToolName,
 				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonOther, string(blockReason))
 			return nil, refusal
@@ -3968,28 +3984,9 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	}
 
 	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
-	// own annotations snapshot is the canonical target tier here — the same
-	// signal tierForAnnotations derives from a live gate's identity lookup
-	// elsewhere — so a replayed destructive/write call is not reported as
-	// `operation:"unknown"` when the snapshot is available. Left empty (and
-	// so defaulted to "unknown" by installAuditAttempt) when the record
-	// carries no annotations at all: mirrors mcp.go's own choice not to use
-	// tierForAnnotations' found=false "destructive" default for the AUDIT
-	// line — that default is an AUTHORIZATION fail-closed, and would
-	// misrepresent an unresolved tier as maximally risky rather than simply
-	// unknown to the proxy.
-	var operation string
-	if original.Annotations != nil {
-		operation = tierForAnnotations(toConfigToolAnnotations(original.Annotations), true)
-	}
-	ctx = s.mcpProxy.installAuditAttempt(ctx, auditAttemptSpec{
-		RequestID: mintCorrelationID(original.ServerName, original.ToolName),
-		Server:    original.ServerName,
-		Tool:      original.ToolName,
-		Operation: operation,
-		Surface:   auditSurfaceREST,
-		Args:      callArgs,
-	})
+	// own annotations snapshot supplies the operation tier above before any
+	// gate runs, so a denied replay has the same correctly classified audit
+	// context as a dispatched replay.
 	// Spec 107 FR-012: `decision: allow` MUST be written after the last gate
 	// and before the upstream call (round-3 cross-review finding, PR-D) —
 	// auditToolCall's own backfill only runs on completion, which would

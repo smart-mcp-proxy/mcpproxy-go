@@ -96,7 +96,8 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		return mcp.NewToolResultError("unknown tool: code_execution"), nil
 	}
 	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
-	if profileResolution.Policy != nil && !profileResolution.Policy.CodeExecution {
+	danglingProfile := profileResolution.Base != "" && profileIdx.position(profileResolution.Base) < 0
+	if danglingProfile || (profileResolution.Policy != nil && !profileResolution.Policy.CodeExecution) {
 		requestID := mintActivityRequestID("", "code_execution")
 		refusal := profile.ErrCodeExecutionBlocked
 		recordCodeExecRefusal(ctx, refusal)
@@ -308,20 +309,21 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// and installs the sandbox's authorization-decision observer so a
 	// scope/permission refusal decided inside jsruntime — which never
 	// reaches the bridge — still gets its `authz deny`, with parent_id.
+	options.ParentID = parentCallID
+	scriptCaller := auditCallerFromContext(ctx)
+	toolCaller.auditProfile, _ = p.resolveActiveProfile(ctx)
+	options.AuthzObserver = &nestedAuthzObserver{
+		proxy:         p,
+		toolCaller:    toolCaller,
+		parentCtx:     ctx,
+		caller:        scriptCaller,
+		sessionID:     sessionID,
+		clientName:    clientName,
+		clientVersion: clientVersion,
+		profile:       toolCaller.auditProfile,
+	}
 	if p.auditSink != nil {
-		scriptCaller := auditCallerFromContext(ctx)
 		toolCaller.auditCaller = &scriptCaller
-		toolCaller.auditProfile, _ = p.resolveActiveProfile(ctx)
-		options.ParentID = parentCallID
-		options.AuthzObserver = &nestedAuthzObserver{
-			proxy:         p,
-			parentCtx:     ctx,
-			caller:        scriptCaller,
-			sessionID:     sessionID,
-			clientName:    clientName,
-			clientVersion: clientVersion,
-			profile:       toolCaller.auditProfile,
-		}
 	}
 
 	// Execute code

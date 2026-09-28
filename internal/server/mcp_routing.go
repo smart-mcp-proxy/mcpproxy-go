@@ -530,7 +530,10 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			return nil, refusalErr
 		}
 		if policy := profileResolution.Policy; policy != nil {
-			intrinsic := profile.IntrinsicTier(annotations, annotations != nil)
+			// Direct routing resolves an existing catalog entry above. Nil
+			// annotations therefore mean a known but unannotated tool, which
+			// must follow the profile's fail-closed unannotated policy.
+			intrinsic := profile.IntrinsicTier(annotations, true)
 			if admitted, reason, tier := policy.Decide(serverName, toolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
 				errMsg, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, serverName, toolName)
 				p.emitActivityPolicyDecisionWithBlockReason(ctx, serverName, toolName, sessionID, requestID,
@@ -1035,7 +1038,7 @@ func (p *MCPProxyServer) filterProfileV3Tools(ctx context.Context, tools []mcp.T
 	// A dangling pinned/bound/anonymous profile is authoritative deny-all.
 	// Do not advertise code execution just because the resolution no longer
 	// has a compiled policy to consult.
-	danglingProfile := resolution.Name != "" && idx.position(resolution.Name) < 0
+	danglingProfile := resolution.Base != "" && idx.position(resolution.Base) < 0
 	filtered := make([]mcp.Tool, 0, len(tools))
 	for _, tool := range tools {
 		switch tool.Name {

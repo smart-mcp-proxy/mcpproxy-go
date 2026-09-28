@@ -5963,7 +5963,7 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 			// /tools/call bypasses MCP tools/list filters. Preserve the same
 			// unknown-tool response as the hidden builtin's wire behavior; the
 			// dedicated /code/exec route still maps the typed refusal to 403.
-			s.writeError(w, r, http.StatusInternalServerError, "Failed to call tool: unknown tool: code_execution")
+			s.writeError(w, r, http.StatusInternalServerError, "Failed to call tool: tool call failed: unknown tool: code_execution")
 			return
 		}
 		var profileRefusal *profile.ToolBlockedError
@@ -6903,6 +6903,10 @@ func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
 
 	record, err := s.controller.GetToolApproval(serverID, toolName)
 	if err != nil {
+		if errors.Is(err, storage.ErrToolApprovalNotFound) {
+			s.writeError(w, r, http.StatusNotFound, "Tool approval record not found")
+			return
+		}
 		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Tool approval record not found: %v", err))
 		return
 	}

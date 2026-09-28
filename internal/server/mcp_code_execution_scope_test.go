@@ -327,10 +327,9 @@ func TestCodeExecution_LiveClientConnectedWhileSnapshotSaysDisconnected_RefusesU
 // from "in neither" even though both are outside this token's own effective
 // reach.
 func TestCodeExecution_PinWiderThanToken_IndistinguishableFromNonexistent(t *testing.T) {
-	proxy, _ := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
-	proxy.config.Profiles = []config.ProfileConfig{
-		{Name: "P", Servers: []string{"a", "b"}},
-	}
+	proxy, _ := createTestProxyWithRuntimeCfg(t, []*config.ServerConfig{{Name: "a", Enabled: true}}, func(cfg *config.Config) {
+		cfg.Profiles = []config.ProfileConfig{{Name: "P", Servers: []string{"a", "b"}}}
+	})
 
 	ctx := agentCtx([]string{"a"}, []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}, "P")
 

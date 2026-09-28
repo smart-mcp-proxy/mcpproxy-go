@@ -67,6 +67,7 @@ type AuthzGateReport struct {
 	CanonicalTarget string // "server:tool"
 	Denied          bool
 	Code            ErrorCode // the envelope code of the refusal (SERVER_NOT_ALLOWED, ACCESS_DENIED, PERMISSION_DENIED)
+	Message         string    // the envelope message shown to the script caller
 	RequiredPerm    string    // the tier the lookup resolved, when one was resolved
 	Arguments       map[string]interface{}
 }
@@ -503,7 +504,7 @@ func (ec *ExecutionContext) checkDispatchGates(serverName, toolName string) (gat
 // T104). It is the ONLY reporting seam: resolveDispatchGates calls it on
 // every refusing return, once, so a refusal is never re-reported by the
 // completion path (which a refused call never reaches). nil observer = no-op.
-func (ec *ExecutionContext) reportAuthzRefusal(serverName, toolName string, code ErrorCode, requiredPerm string, args map[string]interface{}) {
+func (ec *ExecutionContext) reportAuthzRefusal(serverName, toolName string, code ErrorCode, message, requiredPerm string, args map[string]interface{}) {
 	if ec.authzObserver == nil {
 		return
 	}
@@ -515,6 +516,7 @@ func (ec *ExecutionContext) reportAuthzRefusal(serverName, toolName string, code
 		CanonicalTarget: serverName + ":" + toolName,
 		Denied:          true,
 		Code:            code,
+		Message:         message,
 		RequiredPerm:    requiredPerm,
 		Arguments:       stripAuthInjectedArgs(args),
 	})
@@ -580,12 +582,14 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string, ar
 	profileDenies := (ec.restrictToAllowed || len(ec.allowedServerMap) > 0) && !ec.allowedServerMap[serverName]
 	if ec.authInfo != nil && !ec.authInfo.isAdmin() {
 		if profileDenies || !ec.authInfo.CanAccessServer(serverName) {
-			ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, "", args)
-			return errorEnvelope(ErrorCodeAccessDenied, fmt.Sprintf("token does not have access to server '%s'", serverName)), "", nil
+			message := fmt.Sprintf("token does not have access to server '%s'", serverName)
+			ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, message, "", args)
+			return errorEnvelope(ErrorCodeAccessDenied, message), "", nil
 		}
 	} else if profileDenies {
-		ec.reportAuthzRefusal(serverName, toolName, ErrorCodeServerNotAllowed, "", args)
-		return errorEnvelope(ErrorCodeServerNotAllowed, fmt.Sprintf("server not allowed: %s", serverName)), "", nil
+		message := fmt.Sprintf("server not allowed: %s", serverName)
+		ec.reportAuthzRefusal(serverName, toolName, ErrorCodeServerNotAllowed, message, "", args)
+		return errorEnvelope(ErrorCodeServerNotAllowed, message), "", nil
 	}
 
 	// Determine required permission via annotation lookup. The gate-capturing
@@ -610,14 +614,14 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string, ar
 		// to the same identity rule as every HTTP caller. It answers with the
 		// permission envelope, never with an upstream's own "tool not found".
 		if requiredPerm == PermissionTierUnresolved {
-			ec.reportAuthzRefusal(serverName, toolName, ErrorCodePermissionDenied, requiredPerm, args)
-			return errorEnvelope(ErrorCodePermissionDenied,
-				fmt.Sprintf("permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it",
-					serverName, toolName, serverName)), "", nil
+			message := fmt.Sprintf("permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it",
+				serverName, toolName, serverName)
+			ec.reportAuthzRefusal(serverName, toolName, ErrorCodePermissionDenied, message, requiredPerm, args)
+			return errorEnvelope(ErrorCodePermissionDenied, message), "", nil
 		}
 		if refusal, ok := gate.(interface{ ProfilePolicyRefusal() string }); ok {
 			if message := refusal.ProfilePolicyRefusal(); message != "" {
-				ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, requiredPerm, args)
+				ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, message, requiredPerm, args)
 				return errorEnvelope(ErrorCodeAccessDenied, message), "", nil
 			}
 		}
@@ -631,9 +635,9 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string, ar
 	}
 
 	if !ec.authInfo.HasPermission(requiredPerm) {
-		ec.reportAuthzRefusal(serverName, toolName, ErrorCodePermissionDenied, requiredPerm, args)
-		return errorEnvelope(ErrorCodePermissionDenied,
-			fmt.Sprintf("token does not have '%s' permission for tool '%s:%s'", requiredPerm, serverName, toolName)), "", nil
+		message := fmt.Sprintf("token does not have '%s' permission for tool '%s:%s'", requiredPerm, serverName, toolName)
+		ec.reportAuthzRefusal(serverName, toolName, ErrorCodePermissionDenied, message, requiredPerm, args)
+		return errorEnvelope(ErrorCodePermissionDenied, message), "", nil
 	}
 
 	return nil, requiredPerm, gate

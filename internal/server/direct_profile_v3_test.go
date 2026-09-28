@@ -7,6 +7,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -86,6 +87,33 @@ func TestDirectCall_ProfileV3PolicyRefusesBeforeUpstream(t *testing.T) {
 	require.True(t, result.IsError)
 	require.Equal(t, "blocked by profile: github:create_issue is a write tool; this profile allows read tools only", resultText(t, result))
 	require.Empty(t, up.dispatched(), "direct-mode profile denials must happen before upstream I/O")
+}
+
+func TestDirectCall_ProfileV3DeniesUnannotatedTool(t *testing.T) {
+	proxy, rt := newProfilesV3Fixture(t)
+	updated := *rt.Config()
+	updated.Profiles = append([]config.ProfileConfig(nil), updated.Profiles...)
+	updated.Profiles[1].Unannotated = "deny"
+	rt.UpdateConfig(&updated, "")
+	up := startCountingUpstream(t, proxy, rt, "github", toolSpec{Name: "search_code", Description: "Search code"})
+
+	entry := &directCatalogEntry{
+		DisplayName: FormatDirectToolName("github", "search_code"),
+		ServerName:  "github",
+		ToolName:    "search_code",
+		Description: "Search code",
+	}
+	ctx := withDirectRequestKindBox(urlProfileCtx(proxy, "work-full"))
+	setDirectRequestKind(ctx, directRequestKindCall)
+	result, err := proxy.makeDirectModeHandler(entry)(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Arguments: map[string]interface{}{}},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.IsError)
+	require.Equal(t, "blocked by profile: github:search_code has no tier annotation; an operator can classify it in the profile to allow it", resultText(t, result))
+	require.Empty(t, up.dispatched(), "an unannotated tool denied by profile policy must never reach the upstream")
 }
 
 func TestFilterDirectModeToolsForAuth_ProfileV3(t *testing.T) {
