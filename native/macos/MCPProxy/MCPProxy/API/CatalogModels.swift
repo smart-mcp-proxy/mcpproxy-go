@@ -53,11 +53,16 @@ struct CatalogResult: Codable, Identifiable, Equatable {
     let requiredInputs: [CatalogInput]?
     let sourceCodeURL: String?
     let added: Bool
+    /// The server-authoritative unique visible match for an Added card. This
+    /// avoids comparing the catalog install target with redacted server URLs
+    /// or command arguments after a prior session.
+    let addedServerName: String?
 
     enum CodingKeys: String, CodingKey {
         case source, id, title, publisher, verified, official, popularity, description, transport, install, added
         case requiredInputs = "required_inputs"
         case sourceCodeURL = "source_code_url"
+        case addedServerName = "added_server_name"
     }
 }
 
@@ -105,6 +110,18 @@ struct SecretRefEntry: Codable, Equatable {
 struct SecretRefsResponse: Codable {
     let refs: [SecretRefEntry]
     let count: Int?
+}
+
+/// The only keyring fields the Catalog form needs from `/secrets/config`.
+/// Values and configured references deliberately stay outside this DTO.
+struct KeyringAvailability: Codable, Equatable {
+    let keyringAvailable: Bool
+    let keyringReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case keyringAvailable = "keyring_available"
+        case keyringReason = "keyring_reason"
+    }
 }
 
 // MARK: - Import preview (Spec 109 FR-064), content-based

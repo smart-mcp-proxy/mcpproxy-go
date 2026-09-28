@@ -46,17 +46,8 @@
           </button>
         </div>
 
-        <!-- Add Server Button. Spec 107 cross-review round 3, chunk 4 P2:
-             this always submitted through the generic AddServerModal, whose
-             serversStore.addServer() calls the core POST /api/v1/tools/call
-             dispatch door — a mandatory tenant-session refusal
-             (rest-endpoints.md §8) — so a tenant clicking their own labeled
-             "Add Personal Server" button always drew a 403 the API client
-             mistakes for an auth failure. /my/servers (UserServers.vue) is
-             the working tenant flow, wired to POST /api/v1/user/servers;
-             hidden here rather than rewired, matching the ModeSwitcher
-             precedent below (FR-041: tenant-inapplicable controls are
-             hidden, never issued-and-403'd). -->
+        <!-- Spec 107 FR-041: tenants use /my/servers, which writes through
+             the tenant-scoped API. Keep this admin add flow hidden for them. -->
         <button
           v-if="authStore.principalKind !== 'tenant'"
           @click="router.push('/add-server')"

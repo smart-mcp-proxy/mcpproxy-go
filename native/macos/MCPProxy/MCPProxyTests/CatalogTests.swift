@@ -51,6 +51,16 @@ final class CatalogTests: XCTestCase {
         XCTAssertTrue(result.added)
     }
 
+    func testDecodesServerAuthoritativeAddedName() throws {
+        let json = """
+        {"source": "official", "id": "credentialed", "title": "Credentialed", "verified": true, "official": true,
+         "description": "d", "transport": "http", "install": {"url": "https://example.test/mcp?token=catalog-value"},
+         "added": true, "added_server_name": "credentialed-installed"}
+        """
+        let result = try decode(CatalogResult.self, from: json)
+        XCTAssertEqual(result.addedServerName, "credentialed-installed")
+    }
+
     func testDecodesSearchResponseWithNullSections() throws {
         let json = """
         {"query": "github", "results": [], "sections": null,
@@ -153,6 +163,18 @@ final class CatalogTests: XCTestCase {
         }
     }
 
+    // MARK: - Secret toggle availability (FR-065)
+
+    /// A field detected as secret-like begins in Secret mode. If the OS
+    /// keyring is unavailable, the user must still be able to move it back to
+    /// Value mode so the Catalog/Paste Add button is no longer trapped behind
+    /// the secret-mode keyring gate. The unavailable keyring must still stop a
+    /// new Secret selection.
+    func testUnavailableKeyringAllowsValueSelectionButRejectsSecretSelection() {
+        XCTAssertTrue(SecretFieldToggleView.canSelect(mode: .value, keyringAvailable: false))
+        XCTAssertFalse(SecretFieldToggleView.canSelect(mode: .secret, keyringAvailable: false))
+    }
+
     // MARK: - Secret refs decode (FR-065 taken-name check)
 
     func testDecodesSecretRefsResponse() throws {
@@ -242,5 +264,25 @@ final class CatalogTests: XCTestCase {
         let env = SecretFieldInput(name: "API_KEY", kind: .env, value: "a", mode: .secret)
         let header = SecretFieldInput(name: "API_KEY", kind: .header, value: "b", mode: .secret)
         XCTAssertNotEqual(env.id, header.id)
+    }
+
+    /// A failed GET must stop before POST /secrets. This guards the data-loss
+    /// case where POST would overwrite a canonical name we failed to list.
+    func testSecretResolverDoesNotPostAfterSecretRefsFailure() async throws {
+        ResolverStubURLProtocol.reset()
+        ResolverStubURLProtocol.handler = { request in
+            if request.url?.path == "/api/v1/secrets/refs" {
+                return (500, Data("{\"success\":false,\"error\":\"temporary failure\"}".utf8))
+            }
+            return (200, Data("{\"success\":true,\"data\":{}}".utf8))
+        }
+        let client = ResolverStubURLProtocol.makeClient()
+        do {
+            _ = try await SecretFieldResolver.resolve(client: client, serverName: "github", fields: [
+                SecretFieldInput(name: "TOKEN", value: "not-a-real-secret", mode: .secret),
+            ])
+            XCTFail("expected getSecretRefs failure")
+        } catch {}
+        XCTAssertEqual(ResolverStubURLProtocol.requests.map(\.httpMethod), ["GET"])
     }
 }

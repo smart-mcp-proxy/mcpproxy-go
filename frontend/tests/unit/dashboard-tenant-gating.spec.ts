@@ -73,9 +73,29 @@ function makeRouter() {
     history: createMemoryHistory(),
     routes: [
       { path: '/', name: 'home', component: Home },
+      { path: '/add-server', name: 'add-server', component: { template: '<div />' } },
       { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
     ],
   })
+}
+
+async function mountHomeAsAdmin() {
+  const router = makeRouter()
+  router.push('/')
+  await router.isReady()
+
+  return {
+    router,
+    wrapper: shallowMount(Home, {
+      global: {
+        plugins: [router],
+        stubs: {
+          RouterLink: { template: '<a><slot /></a>' },
+          UsageSummaryStrip: false,
+        },
+      },
+    }),
+  }
 }
 
 async function mountHomeAsTenant() {
@@ -145,5 +165,20 @@ describe('Home tenant gating (Spec 107 FR-041, cross-review round 2 P1)', () => 
     expect(wrapper.find('[data-test="dashboard-admin-left-actions"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="dashboard-recent-sessions-link"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="dashboard-right-add-server"]').exists()).toBe(false)
+  })
+
+  it('routes Add Server and client-config import to their catalog-first tabs', async () => {
+    const { wrapper, router } = await mountHomeAsAdmin()
+    await flushPromises()
+
+    await wrapper.find('[data-test="dashboard-right-add-server"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.fullPath).toBe('/add-server')
+
+    await router.push('/')
+    await flushPromises()
+    await wrapper.find('[data-test="dashboard-import-configs"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.fullPath).toBe('/add-server?tab=import')
   })
 })

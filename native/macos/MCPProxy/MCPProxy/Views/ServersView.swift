@@ -25,7 +25,7 @@ struct ServersView: View {
     /// opened this server.
     @State private var selectedServerInitialFocusField: TrayConfigFocusField?
     @State private var showAddServer = false
-    @State private var addServerInitialTab: AddServerTab = .manual
+    @State private var addServerInitialTab: AddServerTab = .catalog
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -42,7 +42,7 @@ struct ServersView: View {
             }
         }
         .sheet(isPresented: $showAddServer) {
-            AddServerView(appState: appState, isPresented: $showAddServer, initialTab: addServerInitialTab)
+            AddServerView(appState: appState, isPresented: $showAddServer, initialTab: addServerInitialTab, onOpenServer: openServerAfterAddSheetDismisses)
                 .id(addServerInitialTab)
         }
         // Review finding (this round): these two `.onReceive` handlers used to
@@ -63,7 +63,7 @@ struct ServersView: View {
             if let tab = notification.object as? AddServerTab {
                 addServerInitialTab = tab
             } else {
-                addServerInitialTab = .manual
+                addServerInitialTab = .catalog
             }
             showAddServer = true
         }
@@ -90,6 +90,12 @@ struct ServersView: View {
                 selectedServer = server
             }
         }
+    }
+
+    private func openServerAfterAddSheetDismisses(_ server: ServerStatus) {
+        showAddServer = false
+        selectedServerInitialTab = .tools
+        selectedServer = server
     }
 
     @ViewBuilder

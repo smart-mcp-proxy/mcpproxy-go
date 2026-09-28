@@ -281,6 +281,9 @@
                 Add a server manually
               </button>
             </div>
+            <div v-if="addServerOpen" class="text-left mt-4" data-test="wizard-manual-form">
+              <ManualServerForm :navigate-after-add="false" @added="onServerAdded" />
+            </div>
             <p v-if="serverAddedJustNow" class="text-xs text-success mt-3">
               ✓ Server added — it's currently in quarantine. Review it on the Servers page after this wizard.
             </p>
@@ -400,12 +403,16 @@
             </summary>
             <div class="mt-3">
               <button
+                v-if="!addServerOpen"
                 class="btn btn-primary btn-sm w-full"
                 @click="openAddServer"
                 data-test="add-server-button"
               >
                 Open the add-server form
               </button>
+              <div v-else data-test="wizard-manual-form">
+                <ManualServerForm :navigate-after-add="false" @added="onServerAdded" />
+              </div>
               <p v-if="serverAddedJustNow" class="text-xs text-success mt-2">
                 ✓ Server added — it's currently in quarantine. Review it on the Servers page after this wizard.
               </p>
@@ -673,12 +680,6 @@
     <form method="dialog" class="modal-backdrop" @click.prevent="dismiss"><button>close</button></form>
   </dialog>
 
-  <!-- Embedded AddServerModal for the server tab -->
-  <AddServerModal
-    :show="addServerOpen"
-    @close="addServerOpen = false"
-    @added="onServerAdded"
-  />
 </template>
 
 <script setup lang="ts">
@@ -688,7 +689,7 @@ import api from '@/services/api'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
-import AddServerModal from '@/components/AddServerModal.vue'
+import ManualServerForm from '@/components/ManualServerForm.vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { skipReasonLabel } from '@/utils/importSkipReason'
 import type { ClientStatus, ActivityRecord, ConnectPreview, ImportedServer } from '@/types'
@@ -1135,7 +1136,7 @@ function goBack() {
 // Dashboard first, and the wizard would spring back open on return.
 async function goToRegistry() {
   await dismiss()
-  await router.push('/repositories')
+  await router.push('/add-server?tab=catalog')
 }
 
 // Review round 5: the Review/Settings/Servers links below used a plain

@@ -146,6 +146,48 @@ func TestCatalogSearch_AddedRequiresMatchingSourceForRegistryAdd(t *testing.T) {
 		"lookalike-tool (source=other) shares delta's install target but must NOT read added=true — delta was added from a different source")
 }
 
+// TestCatalogSearch_AddedServerNameIsVisibleScopedAndUnique pins the
+// server-authoritative join used by Added/Open. Server status redacts URL query
+// values and command arguments, so clients cannot safely reproduce this join
+// after GET /servers. The catalog response may name the matching server only
+// when exactly one server visible to the caller matches it.
+func TestCatalogSearch_AddedServerNameIsVisibleScopedAndUnique(t *testing.T) {
+	withCatalogFixtureRegistry(t)
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: catalogFixtureServers(), withManagement: true}
+	srv, token := scopedAgentServer(t, ctrl, []string{"gamma"})
+
+	adminRec := scopeGet(t, srv, "/api/v1/catalog/search?q=tool", scopeAdminAPIKey)
+	require.Equal(t, http.StatusOK, adminRec.Code, adminRec.Body.String())
+	adminResults := catalogDecodeResults(t, adminRec)
+	assert.Equal(t, "gamma", catalogAddedServerNameFor(adminResults, "gamma-tool"))
+	assert.Equal(t, "delta", catalogAddedServerNameFor(adminResults, "delta-tool"))
+
+	// The scoped caller may only learn the name of gamma, which it can already
+	// enumerate. Delta remains neither added nor name-resolvable.
+	agentRec := scopeGet(t, srv, "/api/v1/catalog/search?q=tool", token)
+	require.Equal(t, http.StatusOK, agentRec.Code, agentRec.Body.String())
+	agentResults := catalogDecodeResults(t, agentRec)
+	assert.Equal(t, "gamma", catalogAddedServerNameFor(agentResults, "gamma-tool"))
+	assert.Empty(t, catalogAddedServerNameFor(agentResults, "delta-tool"))
+
+	// A second matching visible server keeps added=true but intentionally omits
+	// the target name. The UI must ask the user to choose from Servers rather
+	// than silently opening either server.
+	ctrl.servers = append(ctrl.servers, contracts.Server{
+		ID:               "delta-copy",
+		Name:             "delta-copy",
+		Command:          "npx",
+		Args:             []string{"delta-server"},
+		SourceRegistryID: "official",
+		Enabled:          true,
+	})
+	ambiguousRec := scopeGet(t, srv, "/api/v1/catalog/search?q=tool", scopeAdminAPIKey)
+	require.Equal(t, http.StatusOK, ambiguousRec.Code, ambiguousRec.Body.String())
+	ambiguousResults := catalogDecodeResults(t, ambiguousRec)
+	assert.True(t, catalogAddedFor(ambiguousResults, "delta-tool"))
+	assert.Empty(t, catalogAddedServerNameFor(ambiguousResults, "delta-tool"))
+}
+
 func catalogDecodeResults(t *testing.T, rec *httptest.ResponseRecorder) []map[string]interface{} {
 	t.Helper()
 	data := scopeDecodeData(t, rec)
@@ -168,6 +210,16 @@ func catalogAddedFor(results []map[string]interface{}, id string) bool {
 		}
 	}
 	return false
+}
+
+func catalogAddedServerNameFor(results []map[string]interface{}, id string) string {
+	for _, r := range results {
+		if r["id"] == id {
+			name, _ := r["added_server_name"].(string)
+			return name
+		}
+	}
+	return ""
 }
 
 // TestCatalogSearch_AddedScopedForNonAdminUserContext pins that the FR-007
