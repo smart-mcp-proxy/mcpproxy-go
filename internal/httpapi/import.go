@@ -7,16 +7,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/configimport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secretlike"
 )
 
 // ImportRequest represents a request to import servers from JSON/TOML content
@@ -96,11 +92,7 @@ type ImportedServerResponse struct {
 	Headers []HeaderFieldPreview `json:"headers,omitempty"`
 }
 
-// EnvFieldPreview is one env var entry in the import preview
-// (contracts/rest-api.md "Import preview"). ValuePresent is always emitted
-// (even when false) — this is a distinct type from HeaderFieldPreview
-// specifically so that field only ever appears for env vars, matching the
-// documented example shape exactly.
+// EnvFieldPreview is one env var entry in the import preview.
 type EnvFieldPreview struct {
 	Name               string `json:"name"`
 	ValuePresent       bool   `json:"value_present"`
@@ -108,11 +100,11 @@ type EnvFieldPreview struct {
 	EmptyOrPlaceholder bool   `json:"empty_or_placeholder"`
 }
 
-// HeaderFieldPreview is one header entry in the import preview. It never
-// carries a "value_present" key (headers are typically required, so an
-// empty one is unusual enough that empty_or_placeholder alone covers it).
+// HeaderFieldPreview is one header entry in the import preview. Like env
+// previews, it reports whether the source supplied a value without exposing it.
 type HeaderFieldPreview struct {
 	Name               string `json:"name"`
+	ValuePresent       bool   `json:"value_present"`
 	SecretLike         bool   `json:"secret_like"`
 	EmptyOrPlaceholder bool   `json:"empty_or_placeholder"`
 }
@@ -529,12 +521,10 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 		redactedCommand := viewString(view, "command", imported.Server.Command)
 		redactedArgs := oauth.LiveRedaction.Argv(imported.Server.Args)
 
-		// FR-064 preview enrichment (contracts/rest-api.md "Import
-		// preview"): built from the redacted values above, never from the
-		// raw server, so a secret in argv/URL can only ever reach Summary
-		// through the same redaction the URL/Command/Args fields already go
-		// through.
-		summary, tags, env, headers := buildImportPreviewFields(imported.Server, redactedURL, redactedCommand, redactedArgs)
+		// FR-040 preview enrichment comes from configimport.Import, the same
+		// canonical classifier used by the CLI. Its summary is already
+		// redacted; the fields below intentionally omit raw values.
+		env, headers := importFieldPreviews(imported.EnvFields, imported.HeaderFields)
 
 		response.Imported[i] = ImportedServerResponse{
 			Name:          imported.Server.Name,
@@ -546,8 +536,8 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 			OriginalName:  imported.OriginalName,
 			FieldsSkipped: imported.FieldsSkipped,
 			Warnings:      imported.Warnings,
-			Summary:       summary,
-			Tags:          tags,
+			Summary:       imported.Summary,
+			Tags:          imported.Tags,
 			Env:           env,
 			Headers:       headers,
 		}
@@ -626,83 +616,20 @@ func parseFormat(format string) configimport.ConfigFormat {
 	}
 }
 
-// placeholderValuePattern matches a value that reads as a placeholder rather
-// than a real secret/config value (FR-064 "empty_or_placeholder"): angle
-// brackets, a bare ${...} reference, or one of the conventional
-// fill-me-in words.
-var placeholderValuePattern = regexp.MustCompile(`(?i)^(<.*>|\$\{[^}]*\}|x{3,}|changeme|change[-_ ]me|placeholder|your[-_ ].*|example|todo|redacted|\*+|-+)$`)
-
-// looksEmptyOrPlaceholder reports whether value is empty or reads as a
-// fill-me-in placeholder rather than a real value.
-func looksEmptyOrPlaceholder(value string) bool {
-	v := strings.TrimSpace(value)
-	if v == "" {
-		return true
-	}
-	return placeholderValuePattern.MatchString(v)
-}
-
-// buildImportPreviewFields computes the FR-064 preview enrichment (summary,
-// tags, env/header field previews) from the mapped server config. summaryURL
-// and summaryCommand/summaryArgs are the ALREADY-REDACTED values the caller
-// just built for the response (viewString / oauth.LiveRedaction.Argv), so a
-// secret embedded in argv or a URL query flows through the same redaction
-// exactly once and never reaches Summary via a second, unredacted path.
-func buildImportPreviewFields(server *config.ServerConfig, redactedURL, redactedCommand string, redactedArgs []string) (summary string, tags []string, env []EnvFieldPreview, headers []HeaderFieldPreview) {
-	if redactedURL != "" {
-		summary = redactedURL
-		tags = append(tags, "remote")
-	} else if redactedCommand != "" {
-		parts := append([]string{redactedCommand}, redactedArgs...)
-		summary = strings.Join(parts, " ")
-		tags = append(tags, "local process")
-	}
-
-	needsSecret := false
-
-	envNames := make([]string, 0, len(server.Env))
-	for name := range server.Env {
-		envNames = append(envNames, name)
-	}
-	sort.Strings(envNames)
-	for _, name := range envNames {
-		value := server.Env[name]
-		like := secretlike.LooksSecret(name)
-		if like {
-			needsSecret = true
-		}
+// importFieldPreviews maps the shared import classifier into the stable REST
+// contract without exposing field values.
+func importFieldPreviews(envFields, headerFields []configimport.ImportedField) (env []EnvFieldPreview, headers []HeaderFieldPreview) {
+	for _, field := range envFields {
 		env = append(env, EnvFieldPreview{
-			Name:               name,
-			ValuePresent:       value != "",
-			SecretLike:         like,
-			EmptyOrPlaceholder: looksEmptyOrPlaceholder(value),
+			Name: field.Name, ValuePresent: field.ValuePresent,
+			SecretLike: field.SecretLike, EmptyOrPlaceholder: field.EmptyOrPlaceholder,
 		})
 	}
-
-	headerNames := make([]string, 0, len(server.Headers))
-	for name := range server.Headers {
-		headerNames = append(headerNames, name)
-	}
-	sort.Strings(headerNames)
-	for _, name := range headerNames {
-		value := server.Headers[name]
-		like := secretlike.LooksSecret(name)
-		if like {
-			needsSecret = true
-		}
+	for _, field := range headerFields {
 		headers = append(headers, HeaderFieldPreview{
-			Name:               name,
-			SecretLike:         like,
-			EmptyOrPlaceholder: looksEmptyOrPlaceholder(value),
+			Name: field.Name, ValuePresent: field.ValuePresent, SecretLike: field.SecretLike,
+			EmptyOrPlaceholder: field.EmptyOrPlaceholder,
 		})
 	}
-
-	if needsSecret {
-		tags = append(tags, "needs secret")
-	}
-	if server.OAuth != nil {
-		tags = append(tags, "oauth")
-	}
-
-	return summary, tags, env, headers
+	return env, headers
 }

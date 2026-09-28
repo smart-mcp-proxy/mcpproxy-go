@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import { authApi } from '@/services/auth-api'
 import { useAuthStore } from '@/stores/auth'
 import Login from '@/views/teams/Login.vue'
@@ -9,12 +10,24 @@ import Login from '@/views/teams/Login.vue'
 // Stub the keyed API service so any authenticated call through it is visible
 // (and counted) rather than a real network request.
 const getStatus = vi.fn()
+const hasAPIKey = vi.fn(() => false)
 vi.mock('@/services/api', () => ({
   default: {
     getStatus: (...args: unknown[]) => getStatus(...args),
-    hasAPIKey: vi.fn(() => false),
+    hasAPIKey: (...args: unknown[]) => hasAPIKey(...args),
   },
 }))
+
+// Vitest shares one jsdom document across this file. Reset the index marker
+// around every describe so store and component assertions cannot inherit the
+// probe-short-circuit state from the API tests.
+beforeEach(() => {
+  document.head.innerHTML = ''
+})
+afterEach(() => {
+  document.head.innerHTML = ''
+  vi.unstubAllGlobals()
+})
 
 type FetchLog = { url: string; init?: RequestInit }
 
@@ -52,7 +65,35 @@ function installFetch(routes: Record<string, () => Response>): FetchLog[] {
  * must label its button with the operator-chosen `display_name`.
  */
 describe('auth-api provider probe (Spec 107 FR-030)', () => {
-  afterEach(() => vi.unstubAllGlobals())
+  beforeEach(() => setActivePinia(createPinia()))
+
+  it('does not fetch when the served index explicitly identifies the personal edition', async () => {
+    document.head.innerHTML = '<meta name="mcpproxy-server-edition" content="false">'
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+
+    expect(await authApi.getProvider()).toBeNull()
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it.each(['true', '', 'unexpected'])('keeps the public probe when the marker is %j', async (content) => {
+    document.head.innerHTML = `<meta name="mcpproxy-server-edition" content="${content}">`
+    const log = installFetch({
+      '/api/v1/auth/provider': () => jsonResponse(200, { display_name: 'Acme Okta' }),
+    })
+
+    expect(await authApi.getProvider()).toEqual({ display_name: 'Acme Okta' })
+    expect(log).toHaveLength(1)
+  })
+
+  it('keeps the public probe when the marker is absent, for standalone frontend and older cores', async () => {
+    const log = installFetch({
+      '/api/v1/auth/provider': () => jsonResponse(200, { display_name: 'Acme Okta' }),
+    })
+
+    expect(await authApi.getProvider()).toEqual({ display_name: 'Acme Okta' })
+    expect(log).toHaveLength(1)
+  })
 
   it('GETs /api/v1/auth/provider and returns only the display_name', async () => {
     const log = installFetch({
@@ -73,9 +114,35 @@ describe('auth-api provider probe (Spec 107 FR-030)', () => {
     expect(await authApi.getProvider()).toBeNull()
   })
 
-  it('answers null when the probe cannot be reached at all', async () => {
+  it('uses the cookie-only session hint before /auth/me and skips /auth/me when signed out', async () => {
+    const log = installFetch({
+      '/api/v1/auth/provider': () => jsonResponse(200, { display_name: 'Acme Okta' }),
+      '/api/v1/auth/session': () => jsonResponse(200, { authenticated: false }),
+    })
+    const store = useAuthStore()
+    await store.checkAuth()
+
+    expect(store.isTeamsEdition).toBe(true)
+    expect(store.isAuthenticated).toBe(false)
+    expect(log.map((entry) => entry.url)).toEqual([
+      '/api/v1/auth/provider',
+      '/api/v1/auth/session',
+    ])
+  })
+
+  it('fails closed when the public provider probe is unavailable', async () => {
+    installFetch({ '/api/v1/auth/provider': () => jsonResponse(500, { error: 'unavailable' }) })
+    const store = useAuthStore()
+    await store.checkAuth()
+
+    expect(store.isTeamsEdition).toBe(true)
+    expect(store.isAuthenticated).toBe(false)
+    expect(store.loading).toBe(false)
+  })
+
+  it('distinguishes an unavailable probe from the personal-edition 404', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('network down') }))
-    expect(await authApi.getProvider()).toBeNull()
+    expect(await authApi.getProvider()).toBeUndefined()
   })
 })
 
@@ -85,11 +152,10 @@ describe('auth store edition detection (Spec 107 FR-041)', () => {
     getStatus.mockReset()
     getStatus.mockResolvedValue({ success: true, data: { edition: 'server' } })
   })
-  afterEach(() => vi.unstubAllGlobals())
-
   it('learns the server edition from the probe before /auth/me, never from a keyed call', async () => {
     const log = installFetch({
       '/api/v1/auth/provider': () => jsonResponse(200, { display_name: 'Acme Okta' }),
+      '/api/v1/auth/session': () => jsonResponse(200, { authenticated: true }),
       '/api/v1/auth/me': () =>
         jsonResponse(200, { id: 'u1', email: 'a@acme.test', display_name: 'A', role: 'user', provider: 'oidc' }),
     })
@@ -103,7 +169,7 @@ describe('auth store edition detection (Spec 107 FR-041)', () => {
 
     const paths = log.map((l) => l.url.replace(/\?.*$/, ''))
     expect(paths.indexOf('/api/v1/auth/provider')).toBe(0)
-    expect(paths.indexOf('/api/v1/auth/me')).toBeGreaterThan(paths.indexOf('/api/v1/auth/provider'))
+    expect(paths).toEqual(['/api/v1/auth/provider', '/api/v1/auth/session', '/api/v1/auth/me'])
     // The keyed status call is not how the edition is learned any more.
     expect(getStatus).not.toHaveBeenCalled()
     expect(paths).not.toContain('/api/v1/status')
@@ -139,8 +205,10 @@ describe('auth store edition detection (Spec 107 FR-041)', () => {
 })
 
 describe('Login.vue provider label (Spec 107 FR-030)', () => {
-  beforeEach(() => setActivePinia(createPinia()))
-  afterEach(() => vi.unstubAllGlobals())
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    hasAPIKey.mockReset().mockReturnValue(false)
+  })
 
   it('labels the button with the probe display_name instead of a hardcoded organization', async () => {
     const store = useAuthStore()
@@ -164,5 +232,162 @@ describe('Login.vue provider label (Spec 107 FR-030)', () => {
     store.provider = { display_name: 'Acme Okta' }
     const wrapper = mount(Login)
     expect(wrapper.html()).not.toMatch(/issuer|client_id|tenant/i)
+  })
+
+  it('retries a failed bootstrap in place and replaces a safe intended route after cookie recovery', async () => {
+    const responses = [
+      () => jsonResponse(500, { error: 'unavailable' }),
+      () => jsonResponse(200, { display_name: 'Acme Okta' }),
+      () => jsonResponse(200, { authenticated: true }),
+      () => jsonResponse(200, { id: 'u1', email: 'a@acme.test', display_name: 'A', role: 'admin', provider: 'oidc' }),
+    ]
+    const fetchSpy = vi.fn(async () => responses.shift()?.() ?? jsonResponse(500, { error: 'unexpected request' }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const store = useAuthStore()
+    await store.checkAuth()
+    expect(store.bootstrapError).not.toBeNull()
+    const system = (await import('@/stores/system')).useSystemStore()
+    system.setAuthRequired(true)
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: Login },
+        { path: '/my/activity', name: 'activity', component: { template: '<div />' } },
+        { path: '/', name: 'home', component: { template: '<div />' } },
+      ],
+    })
+    await router.push({ path: '/login', query: { redirect: '/my/activity?view=mine' } })
+    await router.isReady()
+    const wrapper = mount(Login, { global: { plugins: [router] } })
+
+    await wrapper.get('button.btn-ghost').trigger('click')
+    await wrapper.vm.$nextTick()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(fetchSpy).toHaveBeenCalledTimes(4)
+    expect(store.isAuthenticated).toBe(true)
+    expect(router.currentRoute.value.fullPath).toBe('/my/activity?view=mine')
+    expect(system.authRequired).toBe(false)
+  })
+
+  it('stays on Login after an unsuccessful retry and does not start an IdP redirect', async () => {
+    const store = useAuthStore()
+    store.provider = { display_name: 'Exact Operator Label' }
+    store.bootstrapError = 'Unable to determine sign-in status. Please retry.'
+    const checkAuth = vi.spyOn(store, 'checkAuth').mockResolvedValue()
+    const login = vi.spyOn(store, 'login')
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: Login },
+        { path: '/', name: 'home', component: { template: '<div />' } },
+      ],
+    })
+    await router.push({ path: '/login', query: { redirect: 'https://attacker.invalid' } })
+    await router.isReady()
+    const wrapper = mount(Login, { global: { plugins: [router] } })
+
+    await wrapper.get('button.btn-ghost').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(checkAuth).toHaveBeenCalledWith({ fresh: true })
+    expect(login).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(wrapper.text()).toContain('Exact Operator Label')
+  })
+
+  it('does not claim a recovered session after a settled signed-out retry', async () => {
+    const store = useAuthStore()
+    store.isTeamsEdition = true
+    store.loading = false
+    store.authResolvedSuccessfully = false
+    store.bootstrapError = 'Unable to determine sign-in status. Please retry.'
+    const system = (await import('@/stores/system')).useSystemStore()
+    system.setAuthRequired(true)
+    vi.spyOn(store, 'checkAuth').mockImplementation(async () => {
+      store.loading = false
+      store.authResolvedSuccessfully = true
+      store.bootstrapError = null
+      store.user = null
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: Login },
+        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/login')
+    await router.isReady()
+    const wrapper = mount(Login, { global: { plugins: [router] } })
+
+    await wrapper.get('button.btn-ghost').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(system.authRequired).toBe(true)
+  })
+
+  it('does not attempt a browser-route bounce for a key-only server retry', async () => {
+    hasAPIKey.mockReturnValue(true)
+    const store = useAuthStore()
+    store.isTeamsEdition = true
+    store.loading = false
+    store.bootstrapError = 'Unable to determine sign-in status. Please retry.'
+    vi.spyOn(store, 'checkAuth').mockImplementation(async () => {
+      store.loading = false
+      store.authResolvedSuccessfully = true
+      store.bootstrapError = null
+      store.user = null
+    })
+    const { authGuard } = await import('@/router')
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: Login, meta: { public: true } },
+        { path: '/', name: 'dashboard', component: { template: '<div />' } },
+      ],
+    })
+    router.beforeEach(authGuard)
+    await router.push('/login')
+    await router.isReady()
+    const replace = vi.spyOn(router, 'replace')
+    const wrapper = mount(Login, { global: { plugins: [router] } })
+
+    await wrapper.get('button.btn-ghost').trigger('click')
+    await wrapper.vm.$nextTick()
+
+    expect(store.canShowShell).toBe(true)
+    expect(store.isAuthenticated).toBe(false)
+    expect(replace).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.path).toBe('/login')
+  })
+
+  it('uses Home rather than an external redirect after a recovered session', async () => {
+    const store = useAuthStore()
+    store.isTeamsEdition = true
+    store.user = { id: 'u1', email: 'a@acme.test', display_name: 'A', role: 'admin', provider: 'oidc', created_at: '', last_login_at: '' }
+    store.bootstrapError = 'Unable to determine sign-in status. Please retry.'
+    vi.spyOn(store, 'checkAuth').mockImplementation(async () => {
+      store.loading = false
+      store.authResolvedSuccessfully = true
+      store.bootstrapError = null
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/login', name: 'login', component: Login },
+        { path: '/', name: 'home', component: { template: '<div />' } },
+      ],
+    })
+    await router.push({ path: '/login', query: { redirect: '//attacker.invalid/steal' } })
+    await router.isReady()
+    const wrapper = mount(Login, { global: { plugins: [router] } })
+
+    await wrapper.get('button.btn-ghost').trigger('click')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(router.currentRoute.value.path).toBe('/')
   })
 })

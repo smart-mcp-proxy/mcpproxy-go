@@ -84,6 +84,10 @@ var rawServerLeafDoors = map[string]string{
 		"health.CalculateHealth from a fixed disconnected input; no upstream text and no config string reaches it.",
 	"cmd/mcpproxy/registry_cmd.go:newRegistrySearchCmd":     "registry SEARCH results are catalogue entries fetched from a remote registry, not operator configuration.",
 	"internal/runtime/runtime.go:(m).SearchRegistryServers": "same remote catalogue entries; the urls are the catalogue's.",
+	"internal/runtime/attention.go:computeServerItems": "Detail here is AttentionServer.Detail, built exclusively " +
+		"by attention_subscriber.go's attentionServerDetail from transport + URL HOST ONLY (e.g. " +
+		"\"OAuth · api.githubcopilot.com\", data-model.md §4) — never a path, query, header or credential. " +
+		"It is prose derived from an already-public field, not the operator's raw config.",
 }
 
 // openDoors is the third state a door can be in, and the only honest one for a

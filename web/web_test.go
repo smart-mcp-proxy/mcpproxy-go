@@ -2,6 +2,7 @@ package web
 
 import (
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -72,5 +73,54 @@ func TestIndexServeCallback_NilCallbackSafe(t *testing.T) {
 	h.ServeHTTP(rec2, httptest.NewRequest("GET", "/", nil))
 	if rec2.Code != 200 {
 		t.Fatalf("expected 200 via NewHandler, got %d", rec2.Code)
+	}
+}
+
+// TestServerEditionHint_OnlyIndexes verifies that the non-secret edition hint
+// is injected into every served SPA document (including deep links), while
+// asset responses and the index-open telemetry callback retain their existing
+// behavior.
+func TestServerEditionHint_OnlyIndexes(t *testing.T) {
+	var count atomic.Int64
+	h := NewHandlerWithOptions(zap.NewNop().Sugar(), HandlerOptions{
+		ServerEditionEnabled: true,
+		OnIndexServe:         func() { count.Add(1) },
+	})
+
+	for _, requestPath := range []string{"/", "/servers"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", requestPath, nil))
+		if rec.Code != 200 {
+			t.Fatalf("expected 200 for %s, got %d", requestPath, rec.Code)
+		}
+		if got := rec.Body.String(); !strings.Contains(got, `name="mcpproxy-server-edition" content="true"`) {
+			t.Fatalf("expected server-edition marker in %s response, got %q", requestPath, got)
+		}
+		if got := rec.Body.String(); strings.Count(got, "mcpproxy-server-edition") != 1 || !strings.Contains(got, "mcpproxy-server-edition\" content=\"true\">\n</head>") {
+			t.Fatalf("expected exactly one marker inside a complete head in %s response, got %q", requestPath, got)
+		}
+	}
+	if got := count.Load(); got != 2 {
+		t.Fatalf("expected 2 index serves, got %d", got)
+	}
+
+	asset := httptest.NewRecorder()
+	h.ServeHTTP(asset, httptest.NewRequest("GET", "/assets/app-abc123.js", nil))
+	if got := asset.Body.String(); strings.Contains(got, "mcpproxy-server-edition") {
+		t.Fatal("asset fallback must not be rewritten with the server-edition marker")
+	}
+	if got := count.Load(); got != 2 {
+		t.Fatalf("expected asset request not to count as an index serve, got %d", got)
+	}
+}
+
+func TestServerEditionHint_FalseDoesNotLeakConfiguration(t *testing.T) {
+	h := NewHandlerWithOptions(zap.NewNop().Sugar(), HandlerOptions{ServerEditionEnabled: false})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `name="mcpproxy-server-edition" content="false"`) {
+		t.Fatalf("expected explicit personal-edition marker, got %q", body)
 	}
 }

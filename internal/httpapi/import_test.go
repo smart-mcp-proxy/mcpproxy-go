@@ -90,6 +90,73 @@ func TestImportServersJSON_Preview(t *testing.T) {
 	}
 }
 
+// TestImportServersJSON_PreviewCarriesSummaryAndTags is Spec 109-b T036: the
+// preview response's imported rows must carry the FR-040 second line
+// (summary), its tags, and the per-env secret classification.
+func TestImportServersJSON_PreviewCarriesSummaryAndTags(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := &mockImportController{apiKey: "test-key"}
+	server := NewServer(mock, logger, nil)
+
+	reqBody := ImportRequest{
+		Content: `{
+			"mcpServers": {
+				"github": {
+					"command": "uvx",
+					"args": ["mcp-server-github"],
+					"env": {"GITHUB_TOKEN": ""}
+				}
+			}
+		}`,
+	}
+
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var wrapped wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	if len(wrapped.Data.Imported) != 1 {
+		t.Fatalf("Expected 1 imported server, got %d", len(wrapped.Data.Imported))
+	}
+	row := wrapped.Data.Imported[0]
+
+	if row.Summary == "" {
+		t.Error("expected a non-empty Summary")
+	}
+	foundLocal, foundNeedsSecret := false, false
+	for _, tag := range row.Tags {
+		if tag == "local process" {
+			foundLocal = true
+		}
+		if tag == "needs secret" {
+			foundNeedsSecret = true
+		}
+	}
+	if !foundLocal {
+		t.Errorf("Tags = %v, want to contain %q", row.Tags, "local process")
+	}
+	if !foundNeedsSecret {
+		t.Errorf("Tags = %v, want to contain %q (empty GITHUB_TOKEN)", row.Tags, "needs secret")
+	}
+	if len(row.Env) != 1 || row.Env[0].Name != "GITHUB_TOKEN" {
+		t.Fatalf("Env = %+v, want one GITHUB_TOKEN entry", row.Env)
+	}
+	if !row.Env[0].SecretLike || !row.Env[0].EmptyOrPlaceholder {
+		t.Errorf("Env[0] = %+v, want SecretLike=true EmptyOrPlaceholder=true", row.Env[0])
+	}
+}
+
 func TestImportServersJSON_InvalidContent(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	mock := &mockImportController{apiKey: "test-key"}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -298,6 +299,91 @@ func TestMiddleware_ExpiredSession(t *testing.T) {
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSessionStatus_CookieOnlyBootstrap(t *testing.T) {
+	s := setupMiddlewareTest(t)
+
+	call := func(req *http.Request) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.middleware.SessionStatus(rec, req)
+		return rec
+	}
+	assertStatus := func(rec *httptest.ResponseRecorder, want bool) {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if rec.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("expected no-store, got %q", rec.Header().Get("Cache-Control"))
+		}
+		var body struct {
+			Authenticated bool `json:"authenticated"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Authenticated != want {
+			t.Fatalf("authenticated=%v, want %v", body.Authenticated, want)
+		}
+	}
+
+	// No cookie, malformed/unknown cookie, and a bearer token are all quiet
+	// false; this public hint must never accept a non-cookie credential.
+	assertStatus(call(httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)), false)
+	unknown := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	unknown.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "unknown"})
+	assertStatus(call(unknown), false)
+	bearer := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	bearer.Header.Set("Authorization", "Bearer "+s.generateJWT(t, s.testUser.ID, s.testUser.Email, s.testUser.DisplayName, "user", s.testUser.Provider, time.Hour))
+	assertStatus(call(bearer), false)
+
+	active := s.createSessionForUser(t, s.testUser.ID)
+	valid := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	valid.AddCookie(&http.Cookie{Name: SessionCookieName, Value: active.ID})
+	assertStatus(call(valid), true)
+
+	expired := &users.Session{ID: "expired-bootstrap", UserID: s.testUser.ID, CreatedAt: time.Now().Add(-2 * time.Hour), ExpiresAt: time.Now().Add(-time.Hour)}
+	if err := s.userStore.CreateSession(expired); err != nil {
+		t.Fatal(err)
+	}
+	expiredReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	expiredReq.AddCookie(&http.Cookie{Name: SessionCookieName, Value: expired.ID})
+	assertStatus(call(expiredReq), false)
+
+	disabled := s.createSessionForUser(t, s.disabledUser.ID)
+	disabledReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	disabledReq.AddCookie(&http.Cookie{Name: SessionCookieName, Value: disabled.ID})
+	assertStatus(call(disabledReq), false)
+}
+
+func TestSessionStatus_StoreFailureFailsClosed(t *testing.T) {
+	s := setupMiddlewareTest(t)
+	session := s.createSessionForUser(t, s.testUser.ID)
+
+	// A valid cookie must not become a successful bootstrap when its backing
+	// store is unavailable. Closing the real BBolt handle makes the session
+	// lookup fail deterministically without replacing either the SessionManager
+	// or UserStore with a mock.
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close session store: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: session.ID})
+	rec := httptest.NewRecorder()
+	s.middleware.SessionStatus(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("expected no-store, got %q", rec.Header().Get("Cache-Control"))
+	}
+	if strings.Contains(rec.Body.String(), "authenticated") {
+		t.Fatalf("store failure disclosed session status: %s", rec.Body.String())
 	}
 }
 

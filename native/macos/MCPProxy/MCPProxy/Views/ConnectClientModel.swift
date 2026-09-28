@@ -224,6 +224,16 @@ final class ConnectClientModel: ObservableObject {
     @Published private(set) var preview: PreviewState = .idle
     @Published private(set) var action: ActionState = .idle
 
+    /// The client's display path/reload hint for the CURRENT `.conflict`/
+    /// `.failed` action, when the core's 409 body carried them (review round
+    /// 3 finding). `.succeeded` needs neither: its `APIClient.ConnectResult`
+    /// already carries both natively, which is what the view renders for
+    /// that case. Reset at the start of every mutating request and on a
+    /// generic (non-`connectConflict`) failure, so a stale path/hint from a
+    /// previous action never survives onto one that has none of its own.
+    @Published private(set) var actionDisplayPath: String?
+    @Published private(set) var actionReloadHint: String?
+
     @Published private(set) var undoState: UndoState = .unavailable
     @Published private(set) var pendingDisconnect: DisconnectConfirmation?
 
@@ -435,6 +445,16 @@ final class ConnectClientModel: ObservableObject {
             return (remediation, true)
         }
         if let note = client.note, !note.isEmpty { return (note, true) }
+        // Review round 3 finding: `reloadHint` is decoded (FR-037/FR-042) but
+        // was never read here — the same "decoded but never rendered" defect
+        // class round 1 found and fixed on ConnectPreview/ConnectResult. A
+        // connected client's row now surfaces it, matching the Web UI
+        // wizard's Verify step, which already shows every connected client's
+        // reload hint: most clients only read their config at startup, so a
+        // successful connect is not yet a client that has picked it up.
+        if client.connected, let hint = client.reloadHint, !hint.isEmpty {
+            return (hint, false)
+        }
         if client.supported, !client.connected, !client.exists {
             switch client.accessState {
             case .none, .unknown, .absent:
@@ -549,6 +569,8 @@ final class ConnectClientModel: ObservableObject {
 
         var outcome: ActionState
         var rePreviewOnly = false
+        var conflictDisplayPath: String?
+        var conflictReloadHint: String?
         do {
             let result = try await source.connect(
                 clientId,
@@ -565,17 +587,21 @@ final class ConnectClientModel: ObservableObject {
                 backupName: Self.backupIdentity(from: result.backupPath))
         } catch let error as APIClientError {
             switch error {
-            case .connectConflict(let conflictAction, let message)
+            case .connectConflict(let conflictAction, let message, let displayPath, let reloadHint)
                 where conflictAction == Self.preconditionFailedAction:
                 // The previewed state drifted: re-preview ONCE. Never retry the
                 // write — that is what would loop.
                 outcome = .conflict(message)
+                conflictDisplayPath = displayPath
+                conflictReloadHint = reloadHint
                 rePreviewOnly = true
-            case .connectConflict(_, let message):
+            case .connectConflict(_, let message, let displayPath, let reloadHint):
                 // The legacy `already_exists` conflict cannot occur in this flow
                 // (a replace always sends force); if it does it is a plain
                 // failure, and re-previewing on it would loop forever.
                 outcome = .failed(message)
+                conflictDisplayPath = displayPath
+                conflictReloadHint = reloadHint
             default:
                 outcome = .failed(Self.message(for: error))
             }
@@ -585,7 +611,7 @@ final class ConnectClientModel: ObservableObject {
 
         // The request is settled BEFORE the refresh: the refresh reads, it does
         // not write, so the controls are usable again while it runs.
-        endRequest(with: outcome, for: clientId)
+        endRequest(with: outcome, for: clientId, displayPath: conflictDisplayPath, reloadHint: conflictReloadHint)
 
         if rePreviewOnly {
             await refreshPreviewPreservingAction(for: clientId)
@@ -600,19 +626,28 @@ final class ConnectClientModel: ObservableObject {
     private func beginRequest() {
         inFlight = true
         action = .inFlight
+        actionDisplayPath = nil
+        actionReloadHint = nil
     }
 
     /// Settle a mutating request. The outcome is published ONLY into the pane of
     /// the client it belongs to: the user may have moved on while it was in
     /// flight, and one client's success banner must never appear under another
-    /// client's name.
-    private func endRequest(with outcome: ActionState, for clientId: String) {
+    /// client's name. `displayPath`/`reloadHint` follow the same guard — a
+    /// conflict/failure's path and hint (review round 3 finding) must never
+    /// leak onto a client the user has since switched away from either.
+    private func endRequest(
+        with outcome: ActionState, for clientId: String,
+        displayPath: String? = nil, reloadHint: String? = nil
+    ) {
         inFlight = false
         guard selection == clientId else {
             if action == .inFlight { action = .idle }
             return
         }
         action = outcome
+        actionDisplayPath = displayPath
+        actionReloadHint = reloadHint
     }
 
     /// The core's discriminator for "the state you previewed has changed".
@@ -641,16 +676,33 @@ final class ConnectClientModel: ObservableObject {
 
         beginRequest()
         var outcome: ActionState
+        var conflictDisplayPath: String?
+        var conflictReloadHint: String?
         do {
             let result = try await source.undoConnect(
                 clientId, serverName: entry, backupName: backupName)
             undoState = .unavailable
             outcome = .succeeded(result)
+        } catch let error as APIClientError {
+            // Review round 5 finding: a 409 here means the config drifted since
+            // the connect this undo is reversing — the core sends display_path/
+            // reload_hint on that conflict exactly as it does for connect()'s,
+            // and they must reach the model the same way (see connect()'s catch
+            // above) instead of being discarded by a generic catch-all.
+            switch error {
+            case .connectConflict(_, let message, let displayPath, let reloadHint):
+                // The connect stands, so the affordance stands: the user can retry.
+                outcome = .failed(message)
+                conflictDisplayPath = displayPath
+                conflictReloadHint = reloadHint
+            default:
+                outcome = .failed(Self.message(for: error))
+            }
         } catch {
             // The connect stands, so the affordance stands: the user can retry.
             outcome = .failed(Self.message(for: error))
         }
-        endRequest(with: outcome, for: clientId)
+        endRequest(with: outcome, for: clientId, displayPath: conflictDisplayPath, reloadHint: conflictReloadHint)
         if case .succeeded = outcome {
             await refreshAffectedClient(clientId)
         }

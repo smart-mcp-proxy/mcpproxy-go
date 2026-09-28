@@ -982,3 +982,46 @@ func (b *BoltDB) SaveOnboardingState(state *OnboardingState) error {
 		return bucket.Put([]byte(OnboardingStateKey), data)
 	})
 }
+
+// UpdateOnboardingState reads the current onboarding state, applies fn to it,
+// and persists the result — all inside ONE bbolt update transaction (Spec
+// 109-b, T035). Every writer of the record (the mark-state handler, the
+// connect success path, the `initialize` hook) MUST go through this instead
+// of a separate GetOnboardingState + SaveOnboardingState pair: bbolt's
+// b.db.Update transactions are serialized against each other, but two
+// separate Get/Save calls are two separate transactions, so a second writer's
+// change made in the gap between them is silently overwritten by the first
+// writer's stale snapshot on Save. Wrapping both steps in one Update closes
+// that window entirely.
+//
+// A nil fn is a caller error (bbolt would otherwise persist an unmodified
+// read as a no-op write); it returns an error rather than panicking.
+func (b *BoltDB) UpdateOnboardingState(fn func(*OnboardingState) error) error {
+	if fn == nil {
+		return fmt.Errorf("UpdateOnboardingState: fn must not be nil")
+	}
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OnboardingBucket))
+		if bucket == nil {
+			return fmt.Errorf("onboarding bucket not found")
+		}
+
+		state := &OnboardingState{}
+		if data := bucket.Get([]byte(OnboardingStateKey)); data != nil {
+			if err := json.Unmarshal(data, state); err != nil {
+				return err
+			}
+		}
+
+		if err := fn(state); err != nil {
+			return err
+		}
+
+		data, err := json.Marshal(state)
+		if err != nil {
+			return err
+		}
+
+		return bucket.Put([]byte(OnboardingStateKey), data)
+	})
+}

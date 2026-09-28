@@ -157,8 +157,80 @@ func TestImportPreview_EnvHeaderSecretLikeAndPlaceholder(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Errorf("expected 'needs secret' tag, got %v", imported.Tags)
+	if found {
+		t.Errorf("populated real secret must not need replacement, got %v", imported.Tags)
+	}
+}
+
+// A real credential must be classified identically by the HTTP preview and
+// the shared configimport result consumed by the CLI. Only empty or
+// placeholder credentials need the "needs secret" tag.
+func TestImportPreview_UsesSharedCredentialEnrichment(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := &mockImportController{apiKey: "test-key"}
+	server := NewServer(mock, logger, nil)
+
+	reqBody := ImportRequest{Content: `{"mcpServers":{"github":{"url":"https://example.test/mcp","headers":{"Authorization":"Bearer live-secret-value"},"env":{"GITHUB_TOKEN":"ghp_live-token-value"}}}}`}
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if bytesContains(rr.Body.Bytes(), "live-secret-value") || bytesContains(rr.Body.Bytes(), "ghp_live-token-value") {
+		t.Fatal("preview response exposed a credential value")
+	}
+	var wrapped wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(wrapped.Data.Imported) != 1 {
+		t.Fatalf("expected one imported server, got %d", len(wrapped.Data.Imported))
+	}
+	got := wrapped.Data.Imported[0]
+	if got.Summary != "https://example.test/mcp (header auth)" {
+		t.Errorf("summary = %q, want shared auth-aware summary", got.Summary)
+	}
+	for _, tag := range got.Tags {
+		if tag == "needs secret" {
+			t.Errorf("real populated credentials must not produce needs secret: %v", got.Tags)
+		}
+	}
+	if len(got.Headers) != 1 || !got.Headers[0].SecretLike || got.Headers[0].EmptyOrPlaceholder {
+		t.Errorf("unexpected Authorization preview: %+v", got.Headers)
+	} else if !got.Headers[0].ValuePresent {
+		t.Error("populated Authorization header must report value_present=true")
+	}
+}
+
+func TestImportPreview_RedactsCredentialShapedCommandFromSummary(t *testing.T) {
+	const credentialCommand = "ghp_1234567890abcdefghijABCDEFGHIJ123456"
+	logger := zap.NewNop().Sugar()
+	server := NewServer(&mockImportController{apiKey: "test-key"}, logger, nil)
+	body, _ := json.Marshal(ImportRequest{Content: `{"mcpServers":{"x":{"type":"stdio","command":"` + credentialCommand + `"}}}`})
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if bytesContains(rr.Body.Bytes(), credentialCommand) {
+		t.Fatal("preview response exposed credential-shaped command")
+	}
+	var wrapped wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(wrapped.Data.Imported) != 1 {
+		t.Fatalf("expected one imported server, got %d", len(wrapped.Data.Imported))
+	}
+	if got := wrapped.Data.Imported[0]; got.Command == credentialCommand || got.Summary != got.Command {
+		t.Errorf("command and summary must share a redacted value, got command=%q summary=%q", got.Command, got.Summary)
 	}
 }
 

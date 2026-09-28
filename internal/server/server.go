@@ -47,7 +47,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
-	"github.com/smart-mcp-proxy/mcpproxy-go/web"
 )
 
 // Status represents the current status of the server
@@ -657,6 +656,15 @@ func (s *Server) UnsubscribeEvents(ch chan runtime.Event) {
 		return
 	}
 	s.runtime.UnsubscribeEvents(ch)
+}
+
+// Attention returns the current needs-attention list (Spec 109 FR-001), the
+// same snapshot the runtime's debounced subscriber maintains.
+func (s *Server) Attention() []contracts.AttentionItem {
+	if s.runtime == nil {
+		return nil
+	}
+	return s.runtime.Attention()
 }
 
 // GetManagementService returns the management service instance from runtime.
@@ -3162,7 +3170,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// increments the persistent web_ui_opened funnel counter — independent of
 	// the X-MCPProxy-Client-header surface_requests.webui counting. nil-safe
 	// at both layers: no telemetry service or no funnel store → no-op.
-	webUIHandler := web.NewHandlerWithIndexCallback(s.logger.Sugar(), func() {
+	webUIHandler := newWebUIHandler(cfg, s.logger.Sugar(), func() {
 		if ts := s.runtime.TelemetryService(); ts != nil {
 			ts.RecordWebUIOpen()
 		}
@@ -4201,6 +4209,12 @@ func (s *Server) GetOnboardingState() (*storage.OnboardingState, error) {
 // SaveOnboardingState persists the wizard engagement state (Spec 046).
 func (s *Server) SaveOnboardingState(state *storage.OnboardingState) error {
 	return s.runtime.SaveOnboardingState(state)
+}
+
+// UpdateOnboardingState runs fn against the current onboarding state and
+// persists it atomically (Spec 109-b).
+func (s *Server) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	return s.runtime.UpdateOnboardingState(fn)
 }
 
 // GetActivationFirstMCPClient returns Spec 044's FirstMCPClientEver flag and

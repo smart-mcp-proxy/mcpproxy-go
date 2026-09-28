@@ -8,6 +8,7 @@ describe('/repositories redirect (Spec 109 FR-062)', () => {
   beforeEach(() => {
     // The app router's auth guard reaches for a store on every navigation.
     setActivePinia(createPinia())
+    document.head.innerHTML = '<meta name="mcpproxy-server-edition" content="false">'
   })
 
   it('redirects to /add-server?tab=catalog', async () => {

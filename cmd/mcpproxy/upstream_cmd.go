@@ -913,8 +913,35 @@ func outputError(err error, code string) error {
 	return err
 }
 
+// upstreamConfigFilePath resolves the config path for every `upstream`
+// subcommand. Config-mode mutations must use this same path as loading so an
+// explicit root --config file is never redirected to DataDir/mcp_config.json.
+func upstreamConfigFilePath(globalConfig *config.Config) string {
+	if upstreamConfigPath != "" {
+		return upstreamConfigPath
+	}
+	if configFile != "" {
+		return configFile
+	}
+	if globalConfig != nil {
+		return config.GetConfigPath(globalConfig.DataDir)
+	}
+	return ""
+}
+
+// loadUpstreamConfig resolves the config path for every `upstream` subcommand.
+// Only `upstream list`/`upstream logs` register their own local --config flag
+// (bound to upstreamConfigPath); every other upstream subcommand (add,
+// remove, enable, disable, restart, patch, inspect, import, ...) has no local
+// --config flag, so a user's --config=<path> is parsed against the ROOT
+// persistent flag and lands in the package-level configFile variable instead.
+// Falling back to configFile when upstreamConfigPath is unset means those
+// subcommands honor the flag the user actually passed rather than silently
+// defaulting to ~/.mcpproxy/mcp_config.json (found via live QA: this caused
+// `upstream add --config=<scratch>` to write into the real production
+// config). upstreamConfigPath still wins when a command sets it explicitly.
 func loadUpstreamConfig() (*config.Config, error) {
-	return loadCLIConfig(upstreamConfigPath)
+	return loadCLIConfig(upstreamConfigFilePath(nil))
 }
 
 func createUpstreamLogger(level string) (*zap.Logger, error) {
@@ -1675,7 +1702,7 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 	globalConfig.Servers = append(globalConfig.Servers, newServer)
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
 		return false, fmt.Errorf("failed to save config: %w", err)
 	}
@@ -1783,7 +1810,7 @@ func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config)
 	globalConfig.Servers = newServers
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
@@ -2072,7 +2099,7 @@ func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[s
 	result := make([]map[string]interface{}, len(imported))
 	for i, s := range imported {
 		view := oauth.RedactedConfigView("", s.Server)
-		result[i] = map[string]interface{}{
+		m := map[string]interface{}{
 			"name":           s.Server.Name,
 			"protocol":       s.Server.Protocol,
 			"url":            viewOr(view, "url", s.Server.URL),
@@ -2084,7 +2111,23 @@ func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[s
 			"original_name":  s.OriginalName,
 			"fields_skipped": s.FieldsSkipped,
 			"warnings":       s.Warnings,
+			// Spec 109-b FR-040: same second-line summary/tags the Web UI
+			// preview shows, already redacted by configimport.Import.
+			"summary": s.Summary,
+			"tags":    s.Tags,
 		}
+		// Match the REST DTO's `omitempty` (internal/httpapi/import.go
+		// ImportedServerResponse.Env/Headers): a server with nothing to
+		// classify omits the key entirely instead of emitting `null`, so a
+		// schema-sensitive consumer of `-o json` sees the same shape on
+		// both surfaces for the same import.
+		if len(s.EnvFields) > 0 {
+			m["env"] = s.EnvFields
+		}
+		if len(s.HeaderFields) > 0 {
+			m["headers"] = s.HeaderFields
+		}
+		result[i] = m
 	}
 	return result
 }
@@ -2431,7 +2474,7 @@ func applyImportedServersConfigMode(imported []*configimport.ImportedServer, glo
 	}
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}

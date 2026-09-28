@@ -265,6 +265,7 @@
         v-for="server in filteredServers"
         :key="server.name"
         :server="server"
+        :activity-stats="perServerActivity[server.name]"
         v-memo="[
           server.connected,
           server.connecting,
@@ -282,7 +283,31 @@
           // count is tracked too -- the quarantine note renders it, so a rescan
           // that stays `warnings` but changes the count must still re-render.
           server.security_scan?.status,
-          server.security_scan?.finding_counts?.warning
+          server.security_scan?.finding_counts?.warning,
+          // Spec 109 FR-013: the card's status line and its ONE primary
+          // button are now driven entirely by `health` — mergeServers()
+          // above replaces `existingServer.health` with a fresh object
+          // reference on every poll (Object.assign), so without these keys
+          // a health change carrying none of the OTHER memoized fields
+          // (e.g. actions gaining a token-expiring login nudge on an
+          // otherwise unchanged connected/enabled/quarantined server) would
+          // leave the primary button stale. Picking the scalar fields, not
+          // `server.health` itself, is what makes the comparison meaningful
+          // despite the new object reference each poll.
+          server.health?.status,
+          server.health?.summary,
+          server.health?.detail,
+          server.health?.admin_state,
+          server.health?.level,
+          // `action` always equals `actions[0]` (or '' when actions is
+          // empty) per contracts.ts — the plain scalar equivalent of
+          // actions[0], without an optional array-index chain.
+          server.health?.action,
+          // Spec 109 FR-013: the card's stats line reads this per-server slice
+          // of the one activity summary fetch.
+          perServerActivity[server.name]?.calls,
+          perServerActivity[server.name]?.errors,
+          perServerActivity[server.name]?.last_call_at
         ]"
       />
     </TransitionGroup>
@@ -309,6 +334,7 @@ import { serverDetailPath } from '@/utils/serverRoute'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
+import type { ActivityPerServer } from '@/types'
 
 type ServerFilter = 'all' | 'connected' | 'enabled' | 'quarantined' | 'needs_review'
 const KNOWN_FILTERS: ServerFilter[] = ['all', 'connected', 'enabled', 'quarantined', 'needs_review']
@@ -324,6 +350,29 @@ const searchQuery = ref('')
 const scanAllRunning = ref(false)
 const showAddServer = ref(false)
 const { hasEnabledScanners } = useSecurityScannerStatus()
+
+// Spec 109 FR-013: the server card's stats line (last call, 24h errors)
+// reads this ONE per-page-load summary rather than issuing a request per
+// card. Keyed by server name; a server absent from the map had no call in
+// the period.
+const perServerActivity = ref<Record<string, ActivityPerServer>>({})
+
+async function loadActivitySummary() {
+  try {
+    const res = await api.getActivitySummary('24h')
+    if (res.success && res.data) {
+      const byName: Record<string, ActivityPerServer> = {}
+      for (const entry of res.data.per_server ?? []) {
+        byName[entry.name] = entry
+      }
+      perServerActivity.value = byName
+    }
+  } catch {
+    // Best-effort: the card falls back to "never" / 0 errors, which is a
+    // safe (if stale) default — a failed summary fetch must not block the
+    // rest of the Servers page from rendering.
+  }
+}
 
 // Spec 109-k (activity-scope-filters), T119: Servers wired to the URL filter
 // contract (url-filter-contract.md — `status` and `q` are client-side only
@@ -349,7 +398,10 @@ function applyScopeQueryParams() {
   }
 }
 
-onMounted(applyScopeQueryParams)
+onMounted(() => {
+  void loadActivitySummary()
+  applyScopeQueryParams()
+})
 watch(() => [route.query.status, route.query.q], applyScopeQueryParams)
 
 // Live QA fix (Spec 109-k, FR-080 "router.replace on change"): the read side
@@ -443,6 +495,7 @@ const filteredServers = computed(() => {
 
 async function refreshServers() {
   await serversStore.fetchServers()
+  void loadActivitySummary()
 }
 
 async function scanAllServers() {
