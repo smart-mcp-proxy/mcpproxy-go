@@ -18,6 +18,13 @@ const (
 	FormatCursor        ConfigFormat = "cursor"
 	FormatCodex         ConfigFormat = "codex"
 	FormatGemini        ConfigFormat = "gemini"
+
+	// FormatURL and FormatCommand are the Paste-source formats (Spec 109
+	// FR-064): a single http(s):// URL, or a single command line that isn't
+	// JSON/TOML. Detected by DetectFormat as a fallback once every existing
+	// config-file format has been ruled out.
+	FormatURL     ConfigFormat = "url"
+	FormatCommand ConfigFormat = "command"
 )
 
 // String returns human-readable format name for display
@@ -33,6 +40,10 @@ func (f ConfigFormat) String() string {
 		return "Codex CLI"
 	case FormatGemini:
 		return "Gemini CLI"
+	case FormatURL:
+		return "URL"
+	case FormatCommand:
+		return "Command Line"
 	default:
 		return "Unknown"
 	}
@@ -94,6 +105,21 @@ type ImportedServer struct {
 
 	// Warnings from parsing and mapping
 	Warnings []string
+
+	// --- Spec 109-b additions (FR-040) ---
+
+	// Summary is the wizard/ImportServers second line: "command args…" for a
+	// stdio server or "url (auth-type)" for an HTTP/SSE one. Already redacted
+	// (oauth.LiveRedaction) — safe to display or log as-is.
+	Summary string `json:"summary"`
+	// Tags classifies Summary: any of "local process", "remote",
+	// "needs secret", "oauth".
+	Tags []string `json:"tags"`
+	// EnvFields / HeaderFields classify each of Server.Env/Server.Headers
+	// for the "needs secret" tag without exposing the values (nil when the
+	// server has none).
+	EnvFields    []ImportedField `json:"env,omitempty"`
+	HeaderFields []ImportedField `json:"headers,omitempty"`
 }
 
 // ImportResult contains the complete result of an import operation.
@@ -165,6 +191,17 @@ type ImportOptions struct {
 	// SkipQuarantine if true, imported servers are not quarantined.
 	// By default, all imported servers are quarantined for security review.
 	SkipQuarantine bool
+
+	// AllowPasteFallback opts into DetectFormat's URL/single-command-line
+	// guess (FR-064) when FormatHint is empty; otherwise Import uses
+	// DetectFormatStrict (TOML/JSON only), returning ErrUnknownFormat for a
+	// plain one-liner instead of guessing at it. Only the interactive Paste
+	// tab sets this — it is the one surface that previews the guess for a
+	// human to confirm before Add ever mutates anything (review round 4
+	// F-E). Every other import surface (CLI `upstream import`, a direct
+	// REST import call, the general "Import config" panel) leaves this
+	// false and keeps the pre-FR-064 behavior.
+	AllowPasteFallback bool
 
 	// Now is the timestamp to use for Created field (default: time.Now())
 	Now time.Time

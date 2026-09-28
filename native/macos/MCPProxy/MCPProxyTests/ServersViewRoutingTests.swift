@@ -23,7 +23,7 @@ final class ServersViewRoutingTests: XCTestCase {
     /// `.onReceive(.showAddServer)`) were attached to `serverListView`, a
     /// computed property only included in the view tree by `body`'s `else`
     /// branch — i.e. only while NO server detail is currently shown. Opening
-    /// server A's detail (via the notification-driven route DashboardView's
+    /// server A's detail (via the notification-driven route Home's
     /// AttentionRow uses) swaps `serverListView` out of the tree and detaches
     /// that `.onReceive`, so a second `.showServerDetail` notification (e.g. a
     /// near-simultaneous click on server B's attention row) has zero live

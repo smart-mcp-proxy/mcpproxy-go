@@ -1340,7 +1340,18 @@ components:
           type: string
         config_path:
           type: string
+        display_path:
+          description: |-
+            DisplayPath is ConfigPath with the home directory shortened to "~"
+            (FR-037). Populated for every result whose ConfigPath is known.
+          type: string
         message:
+          type: string
+        reload_hint:
+          description: |-
+            ReloadHint is this client's instruction for making the write take
+            effect (FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Empty
+            for an unknown client.
           type: string
         server_name:
           type: string
@@ -1603,6 +1614,45 @@ components:
           type: string
         url:
           description: required https registry URL
+          type: string
+      type: object
+    contracts.AttentionFix:
+      properties:
+        label:
+          type: string
+        target:
+          type: string
+        verb:
+          type: string
+      type: object
+    contracts.AttentionItem:
+      properties:
+        detail:
+          type: string
+        fix:
+          $ref: '#/components/schemas/contracts.AttentionFix'
+        id:
+          description: kind:type:subject[:state]
+          type: string
+        kind:
+          type: string
+        rank:
+          type: integer
+        since:
+          type: string
+        subject:
+          $ref: '#/components/schemas/contracts.AttentionSubject'
+        summary:
+          type: string
+      type: object
+    contracts.AttentionSubject:
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          description: server|tool|client
           type: string
       type: object
     contracts.ConfigApplyResult:
@@ -3466,6 +3516,28 @@ components:
           description: Defaults to "mcpproxy"
           type: string
       type: object
+    httpapi.EnvFieldPreview:
+      properties:
+        empty_or_placeholder:
+          type: boolean
+        name:
+          type: string
+        secret_like:
+          type: boolean
+        value_present:
+          type: boolean
+      type: object
+    httpapi.HeaderFieldPreview:
+      properties:
+        empty_or_placeholder:
+          type: boolean
+        name:
+          type: string
+        secret_like:
+          type: boolean
+        value_present:
+          type: boolean
+      type: object
     httpapi.ImportFromPathRequest:
       properties:
         format:
@@ -3495,12 +3567,45 @@ components:
       type: object
     httpapi.ImportRequest:
       properties:
+        allow_paste_fallback:
+          description: |-
+            AllowPasteFallback opts into detecting a bare URL or a single command
+            line (FR-064) when Format/format detection would otherwise fail — see
+            configimport.ImportOptions.AllowPasteFallback for why this must stay
+            opt-in (review round 4 F-E). Only the interactive Paste tab sets this;
+            every other caller of this endpoint (the general "Import config"
+            panel, or a direct API call) leaves it false and gets a clear
+            "unable to detect configuration format" error for a plain one-liner
+            instead of it being silently guessed at and, on apply, added as a
+            real server with no confirmation step.
+          type: boolean
         content:
           description: Raw JSON or TOML content
           type: string
+        env_override:
+          additionalProperties:
+            type: string
+          description: |-
+            EnvOverride/HeaderOverride (Spec 109 FR-064/065, PR review round 4
+            F-A/F-D fix): the Paste tab's per-field Value/Secret edits — a plain
+            value the user typed, or a keyring ref path if they chose Secret —
+            keyed by field name. Applied to the matching imported server's
+            Env/Headers ONLY when preview=false, directly on the server this
+            request's own raw Content parses to server-side. This is what lets
+            the apply call carry the user's edited env/header values without
+            ever round-tripping the redacted preview: url/command/args on apply
+            always come from re-parsing Content here, never from a client-held
+            preview response, so a credential embedded in a URL query param or
+            argv flag (which the preview necessarily redacted for display) is
+            never overwritten with the masked placeholder.
+          type: object
         format:
           description: Optional format hint
           type: string
+        header_override:
+          additionalProperties:
+            type: string
+          type: object
         server_names:
           description: 'Optional: import only these servers'
           items:
@@ -3546,9 +3651,19 @@ components:
           uniqueItems: false
         command:
           type: string
+        env:
+          items:
+            $ref: '#/components/schemas/httpapi.EnvFieldPreview'
+          type: array
+          uniqueItems: false
         fields_skipped:
           items:
             type: string
+          type: array
+          uniqueItems: false
+        headers:
+          items:
+            $ref: '#/components/schemas/httpapi.HeaderFieldPreview'
           type: array
           uniqueItems: false
         name:
@@ -3559,6 +3674,20 @@ components:
           type: string
         source_format:
           type: string
+        summary:
+          description: |-
+            Summary, Tags, Env and Headers are the Spec 109 FR-064 preview
+            enrichment (contracts/rest-api.md "Import preview"). Summary and Tags
+            are built from the already-redacted URL/Command/Args above, so a
+            secret embedded in argv or a URL query never reaches Summary either.
+            Env/Headers never carry the raw value — only its presence and two
+            booleans a surface uses to default the Value/Secret toggle (FR-065).
+          type: string
+        tags:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         url:
           type: string
         warnings:
@@ -3622,6 +3751,20 @@ components:
             persisted without that server-verified evidence (edge case: "never
             guess completed_external without positive evidence").
           type: string
+        connected_client_id:
+          description: |-
+            ConnectedClientID records a successful connect write for this client id
+            (Spec 109-b FR-042, review round 6). The REST connect endpoint
+            (POST /api/v1/connect/{client}) already records this itself on success;
+            this field exists so `mcpproxy connect` — which writes the client's
+            config file directly, without going through that endpoint, so the
+            command still works when no daemon is running — can relay the same
+            event to a daemon that IS running, keeping ClientConnectedAt in sync
+            across both surfaces. Must be a known id from the fixed connect client
+            registry (internal/connect.GetAllClients); any other value is rejected,
+            matching the field's "bounded by the registry" invariant
+            (data-model.md §7).
+          type: string
         engaged:
           description: |-
             Engaged marks the wizard as engaged (completed or explicitly skipped).
@@ -3636,6 +3779,92 @@ components:
             ServerStepStatus is one of: "", "completed", "skipped". Empty
             preserves the existing value.
           type: string
+      type: object
+    httpapi.OnboardingStateResponse:
+      properties:
+        configured_server_count:
+          description: |-
+            ConfiguredServerCount is the number of upstream MCP servers configured
+            in mcpproxy (counts both enabled and disabled).
+          type: integer
+        connected_client_count:
+          description: |-
+            ConnectedClientCount is the number of supported clients currently
+            pointing at mcpproxy.
+          type: integer
+        connected_client_ids:
+          description: |-
+            ConnectedClientIDs are the identifiers of supported clients currently
+            pointing at mcpproxy. Drawn exclusively from the fixed adapter table —
+            user-entered values never appear here.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        first_mcp_client_ever:
+          description: |-
+            FirstMCPClientEver is true once any MCP client has successfully completed
+            an `initialize` round-trip with this mcpproxy. Sourced from the Spec 044
+            activation bucket. Drives the Verify tab's "green check" state.
+          type: boolean
+        has_configured_server:
+          description: |-
+            HasConfiguredServer is true if at least one upstream MCP server is
+            configured (regardless of current connection health).
+          type: boolean
+        has_connected_client:
+          description: |-
+            HasConnectedClient is true if at least one supported AI client currently
+            has mcpproxy registered in its config.
+          type: boolean
+        has_usable_server:
+          description: |-
+            HasUsableServer is true once at least one enabled, non-quarantined
+            server has usable health and at least one approved (non-disabled) tool.
+            This is the real "the wizard has something to try" signal:
+            HasConfiguredServer only means a server entry exists, even while every
+            one of them sits quarantined, requires sign-in, or has zero approved
+            tools. The Servers step and Setup badge use this instead of
+            HasConfiguredServer, which is kept above for compatibility.
+            HealthStatus.Usable is the shared
+            readiness contract used by every UI surface (Spec 109-c, tasks.md T051).
+          type: boolean
+        incomplete_tab_count:
+          description: |-
+            IncompleteTabCount is the number of wizard tabs whose state is incomplete.
+            Drives the sidebar Setup entry's badge. Formula:
+              +1 if HasConnectedClient == false
+              +1 if HasUsableServer == false
+              +1 if FirstMCPClientEver == false
+          type: integer
+        mcp_clients_seen_ever:
+          description: |-
+            MCPClientsSeenEver is the capped list of recognized client names that
+            have ever called this mcpproxy. Names come from the MCP `initialize`
+            payload's `clientInfo.name` field, sanitized. Surfaces on the Verify tab
+            so the user can see whether their real IDE — not a test client — has
+            connected.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        should_show_wizard:
+          description: |-
+            ShouldShowWizard is the derived flag the frontend uses to decide
+            whether to auto-show. True when not engaged and IncompleteTabCount > 0
+            (Spec 046 v2 — semantics widened to also count the Verify tab).
+          type: boolean
+        state:
+          $ref: '#/components/schemas/storage.OnboardingState'
+        usable_servers:
+          description: |-
+            UsableServers lists the names behind HasUsableServer, for the Verify
+            step's suggested-prompt generator (FR-042): prompts are only built from
+            tools of servers in this list, never from a quarantined or toolless one.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
       type: object
     httpapi.SetActiveProfileRequest:
       properties:
@@ -3669,6 +3898,18 @@ components:
           - install
           - other
           type: string
+      type: object
+    httpapi.attentionResponse:
+      properties:
+        count:
+          type: integer
+        generated_at:
+          type: string
+        items:
+          items:
+            $ref: '#/components/schemas/contracts.AttentionItem'
+          type: array
+          uniqueItems: false
       type: object
     management.BulkOperationResult:
       properties:
@@ -3751,6 +3992,46 @@ components:
           type: boolean
         inherit_system_safe:
           type: boolean
+      type: object
+    storage.OnboardingState:
+      description: |-
+        State is the persisted wizard engagement record. Engaged is true once
+        the wizard was shown and the user completed or skipped it.
+      properties:
+        client_connected_at:
+          additionalProperties:
+            type: string
+          description: |-
+            ClientConnectedAt records, per client id from the fixed connect client
+            registry (internal/connect.GetAllClients — never user input), the last
+            time a connect write succeeded for that client (Spec 109-b FR-042).
+            Written by the connect success path through UpdateOnboardingState so a
+            concurrent onboarding/mark write can never drop it. Consumed by the
+            Verify step / presence layer to tell "connected, never seen" apart from
+            "connected seconds ago, hasn't reconnected yet".
+          type: object
+        connect_step_status:
+          description: |-
+            ConnectStepStatus is one of: "", "completed", "completed_external",
+            "skipped" (Spec 080 FR-001). "completed_external" records a dismissal
+            where the connect step was untouched but the install was already
+            connected outside the wizard (CLI, ConnectModal, manual config).
+          type: string
+        engaged:
+          description: |-
+            Engaged is true once the wizard was shown and the user completed or
+            skipped it. Once true, the wizard does not auto-show again, even if
+            state regresses (e.g. user disconnects all clients).
+          type: boolean
+        engaged_at:
+          description: EngagedAt is the timestamp of completion or explicit skip.
+          type: string
+        first_shown_at:
+          description: FirstShownAt is the timestamp of first wizard render.
+          type: string
+        server_step_status:
+          description: 'ServerStepStatus is one of: "", "completed", "skipped".'
+          type: string
       type: object
     telemetry.FeedbackContext:
       properties:
@@ -4342,6 +4623,65 @@ paths:
       summary: Get annotation coverage report
       tags:
       - annotations
+  /api/v1/attention:
+    get:
+      description: 'One list, one count, every surface (Web UI, macOS tray/Home, CLI)
+        reads from it. Filtered per caller: an administrator sees every item; a scoped
+        caller (agent token, or a non-admin server-edition OAuth user session) sees
+        only items whose server it may enumerate, and never a client item.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.attentionResponse'
+          description: The needs-attention list
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get the needs-attention list
+      tags:
+      - attention
+  /api/v1/catalog/search:
+    get:
+      description: Fans out to every enabled catalog source (registry) in parallel,
+        merges, de-duplicates and ranks the results (FR-060/061). An empty q returns
+        official + popular sections instead of a flat list. Open to any authenticated
+        caller — added is the only field filtered per caller scope (FR-007).
+      parameters:
+      - description: Free-text search
+        in: query
+        name: q
+        schema:
+          type: string
+      - description: Narrow to one catalog source id
+        in: query
+        name: source
+        schema:
+          type: string
+      - description: Filter by tag
+        in: query
+        name: tag
+        schema:
+          type: string
+      - description: Max results (default 20, max 50)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: OK
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Search the server catalog across every enabled source
+      tags:
+      - catalog
   /api/v1/code/scripts:
     get:
       description: 'List the stored scripts available to the code_execution tool.
@@ -5146,7 +5486,18 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.APIResponse'
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: Updated OnboardingStateResponse
         "400":
           content:
@@ -5183,7 +5534,18 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.APIResponse'
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: OnboardingStateResponse
         "403":
           content:

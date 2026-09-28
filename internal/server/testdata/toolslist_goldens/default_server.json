@@ -215,7 +215,7 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "📋 List all available MCP registries. Use this FIRST to discover which registries you can search with the 'search_servers' tool. Each registry contains different collections of MCP servers that can be added as upstreams.",
+    "description": "📋 List all available catalog sources (registries). 'search_servers' already searches every enabled source when 'registry' is omitted (FR-060) — call this to see source ids, e.g. to narrow a search with 'registry', or to check what's enabled. Each source contains different collections of MCP servers that can be added as upstreams.",
     "inputSchema": {
       "properties": {},
       "required": [],
@@ -381,7 +381,7 @@
       "idempotentHint": false,
       "openWorldHint": true
     },
-    "description": "🔍 Discover MCP servers from known registries with repository type detection. Search and filter servers from embedded registry list to find new MCP servers that can be added as upstreams. Features npm/PyPI package detection for enhanced install commands. WORKFLOW: 1) Call 'list_registries' first to see available registries, 2) Use this tool with a registry ID to search servers. Results include server URLs and repository information ready for direct use with upstream_servers add command.",
+    "description": "🔍 Discover MCP servers from the catalog, with repository type detection. Omit 'registry' to search every enabled catalog source at once, ranked official-first then by relevance (FR-060) — this is the recommended way to search. Pass 'registry' to narrow to one catalog source (e.g., 'smithery', 'mcprun', 'pulse'); use 'list_registries' to see source ids. Features npm/PyPI package detection for enhanced install commands. Results include server URLs and repository information ready for direct use with upstream_servers add command.",
     "inputSchema": {
       "properties": {
         "limit": {
@@ -389,7 +389,7 @@
           "type": "number"
         },
         "registry": {
-          "description": "Registry ID or name to search (e.g., 'smithery', 'mcprun', 'pulse'). Use 'list_registries' tool first to see available registries.",
+          "description": "Optional: a catalog source id or name to narrow the search to (e.g., 'smithery', 'mcprun', 'pulse'). Omit to search every enabled catalog source at once. Use 'list_registries' to see source ids.",
           "type": "string"
         },
         "search": {
@@ -401,9 +401,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "registry"
-      ],
+      "required": [],
       "type": "object"
     },
     "name": "search_servers"

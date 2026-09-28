@@ -68,21 +68,34 @@ describe('SidebarNav no longer hardcodes a z-40 that can outrank a modal', () =>
   })
 })
 
-describe('Repositories.vue dialogs use showModal()/close(), not :open (FR-055)', () => {
-  const src = readSrc('../../src/views/Repositories.vue')
+// Spec 109 FR-062: the registry-source-management dialogs moved out of the
+// retired Repositories.vue into CatalogSourcesSettings.vue (Settings →
+// Catalog sources); the required-input secrets prompt moved into
+// CatalogSearch.vue's own dialog (the Add Server page's Catalog tab).
+describe('CatalogSourcesSettings.vue dialogs use showModal()/close(), not :open (FR-055)', () => {
+  const src = readSrc('../../src/components/CatalogSourcesSettings.vue')
 
   it('has no :open="..." binding on any <dialog>', () => {
     expect(src).not.toMatch(/<dialog[^>]*:open=/)
   })
 
-  it('names all three dialogs and drives them via ref + useDialogOpen', () => {
-    for (const testId of [
-      'registry-required-input-dialog',
-      'registry-add-source-dialog',
-      'registry-delete-dialog',
-    ]) {
+  it('names both dialogs and drives them via ref + useDialogOpen', () => {
+    for (const testId of ['registry-add-source-dialog', 'registry-delete-dialog']) {
       expect(src).toContain(testId)
     }
+    expect(src).toContain('useDialogOpen')
+  })
+})
+
+describe('CatalogSearch.vue secrets-prompt dialog uses showModal()/close(), not :open (FR-055)', () => {
+  const src = readSrc('../../src/components/CatalogSearch.vue')
+
+  it('has no :open="..." binding on any <dialog>', () => {
+    expect(src).not.toMatch(/<dialog[^>]*:open=/)
+  })
+
+  it('names the dialog and drives it via ref + useDialogOpen', () => {
+    expect(src).toContain('catalog-secrets-dialog')
     expect(src).toContain('useDialogOpen')
   })
 })
@@ -93,7 +106,8 @@ describe('every <dialog class="modal"> drives its open state imperatively', () =
     '../../src/components/ConnectModal.vue',
     '../../src/components/AddSecretModal.vue',
     '../../src/components/AddServerModal.vue',
-    '../../src/views/Repositories.vue',
+    '../../src/components/CatalogSourcesSettings.vue',
+    '../../src/components/CatalogSearch.vue',
     '../../src/views/teams/UserTokens.vue',
     '../../src/views/teams/UserActivity.vue',
     '../../src/views/teams/UserServers.vue',

@@ -4,13 +4,19 @@
 import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case dashboard = "Dashboard"
+    // Spec 109 FR-051/T064: renamed from "Dashboard" — the needs-attention
+    // list is now this section's first thing, not a banner buried in it.
+    case home = "Home"
     case servers = "Servers"
     // F16: BM25 tool discovery is the product's headline feature and had no
     // native home — a tray-first user could not answer "which of my 942 tools
     // does X?" without opening a browser.
     case tools = "Tools"
-    case registries = "Registries"
+    // Spec 109 T109: the Registries sidebar item is retired — server
+    // discovery moved into the Add Server sheet's Catalog tab (CatalogView,
+    // aggregated across every enabled source) and registry SOURCE management
+    // moved to Settings -> Catalog Sources, mirroring the Web UI's
+    // `views/Repositories.vue` -> `/add-server?tab=catalog` + Settings move.
     case activity = "Activity Log"
     case secrets = "Secrets"
     // F5: TokensView was a complete, API-complete create/list/revoke UI that
@@ -22,10 +28,9 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .dashboard: return "rectangle.3.group"
+        case .home: return "rectangle.3.group"
         case .servers: return "server.rack"
         case .tools: return "wrench.and.screwdriver"
-        case .registries: return "books.vertical"
         case .activity: return "clock.arrow.circlepath"
         case .secrets: return "key.fill"
         case .tokens: return "key.horizontal"
@@ -42,7 +47,7 @@ struct MainWindow: View {
     /// on a specific section (tray "Open Activity…" → Activity). Once the
     /// window exists, later switches arrive as `.switchToSidebarTab`
     /// notifications instead — state is only readable at creation time.
-    init(appState: AppState, initialTab: SidebarItem = .dashboard) {
+    init(appState: AppState, initialTab: SidebarItem = .home) {
         self.appState = appState
         _selectedItem = State(initialValue: initialTab)
     }
@@ -75,15 +80,13 @@ struct MainWindow: View {
 
                 // Regular content
                 Group {
-                    switch selectedItem ?? .dashboard {
-                    case .dashboard:
-                        DashboardView(appState: appState)
+                    switch selectedItem ?? .home {
+                    case .home:
+                        HomeView(appState: appState)
                     case .servers:
                         ServersView(appState: appState)
                     case .tools:
                         ToolsView(appState: appState)
-                    case .registries:
-                        RegistriesView(appState: appState)
                     case .activity:
                         ActivityView(appState: appState)
                     case .secrets:

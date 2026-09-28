@@ -129,7 +129,8 @@ export function healthStatusTextOrEmpty(health: { summary?: string | null; statu
  * (round-4 review finding — AdminServers.vue/UserServers.vue already had a
  * fallback for a payload carrying neither `status` nor `summary`;
  * ServerCard.vue/ServerDetail.vue did not, which was an asymmetric guard
- * against the same gap).
+ * against the same gap). Never falls back to `health.level` as text
+ * (FR-011).
  *
  * @param health - the server's health object (caller handles the no-health case)
  * @param connected - the server's legacy `connected` field, for the last-resort fallback

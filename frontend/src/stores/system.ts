@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed, onScopeDispose } from 'vue'
+import { ref, computed, onScopeDispose, toRaw } from 'vue'
 import type { StatusUpdate, Theme, Toast, InfoResponse, RoutingInfo } from '@/types'
 import api from '@/services/api'
 import { setAvailableFeatures } from '@/composables/useScopeQuery'
@@ -164,8 +164,23 @@ export const useSystemStore = defineStore('system', () => {
   // render a warning we cannot substantiate.
   const codeExecutionEnabled = computed(() => routing.value?.code_execution_enabled ?? true)
 
+  // A disconnect is a capability boundary, not merely a socket close. Keep
+  // the retry handle and source generation here so an old errored source
+  // cannot reopen an admin stream after App drops core eligibility.
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let eventSourceGeneration = 0
+
+  function clearReconnectTimer() {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+  }
+
   // Actions
   function connectEventSource() {
+    clearReconnectTimer()
+    const generation = ++eventSourceGeneration
     if (eventSource.value) {
       eventSource.value.close()
     }
@@ -177,10 +192,25 @@ export const useSystemStore = defineStore('system', () => {
 
     const es = api.createEventSource()
     eventSource.value = es
+    const isCurrentSource = () => generation === eventSourceGeneration && toRaw(eventSource.value) === es
 
     es.onopen = () => {
+      if (!isCurrentSource()) return
       connected.value = true
       console.log('EventSource connected successfully')
+
+      // Review finding: FR-002's threshold-crossing attention events
+      // (server_error, client_never_seen, …) fire only once, at the moment
+      // the threshold is crossed. A drop that spans that moment loses the
+      // frame forever, and the header pill / sidebar badge / Home list stay
+      // wrong until an unrelated change happens to fire a fresh event. Every
+      // (re)connect — the initial one and every retry after `onerror` — is
+      // exactly the point a missed event could have been lost, so resync by
+      // re-dispatching the same window event the live `attention.changed`
+      // handler below dispatches; the attention store's own handler ignores
+      // the detail and just refetches (silent), so an extra one on first
+      // connect is harmless.
+      window.dispatchEvent(new CustomEvent('mcpproxy:attention-changed'))
     }
 
     es.onmessage = (event) => {
@@ -234,6 +264,19 @@ export const useSystemStore = defineStore('system', () => {
         window.dispatchEvent(new CustomEvent('mcpproxy:servers-changed', { detail: data }))
       } catch (error) {
         console.error('Failed to parse SSE servers.changed event:', error)
+      }
+    })
+
+    // Listen for attention.changed events (Spec 109 FR-001/FR-006). The
+    // rendered payload is already narrowed to {count, ids} per caller — the
+    // attention store refetches GET /attention for the full item shape
+    // (summaries, fixes) rather than reconstructing it from ids here.
+    es.addEventListener('attention.changed', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        window.dispatchEvent(new CustomEvent('mcpproxy:attention-changed', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE attention.changed event:', error)
       }
     })
 
@@ -386,6 +429,10 @@ export const useSystemStore = defineStore('system', () => {
     })
 
     es.onerror = () => {
+      // Browser EventSource instances can deliver a queued error after close
+      // or replacement. It belongs to the retired generation and must not
+      // schedule a reconnect for the current (or disconnected) principal.
+      if (!isCurrentSource()) return
       connected.value = false
       // SEC-07: do NOT log the error event. Its `target` is the EventSource,
       // whose `url` carries the API key as a ?apikey= query parameter, so
@@ -404,8 +451,12 @@ export const useSystemStore = defineStore('system', () => {
         }
       }
 
-      // Retry connection after a delay
-      setTimeout(() => {
+      // Retry once after a delay while this exact source remains current.
+      // Multiple error callbacks from the same EventSource share one timer.
+      if (reconnectTimer !== null) return
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        if (!isCurrentSource()) return
         console.log('Retrying EventSource connection in 5 seconds...')
         connectEventSource()
       }, 5000)
@@ -413,6 +464,8 @@ export const useSystemStore = defineStore('system', () => {
   }
 
   function disconnectEventSource() {
+    eventSourceGeneration++
+    clearReconnectTimer()
     if (eventSource.value) {
       eventSource.value.close()
       eventSource.value = null

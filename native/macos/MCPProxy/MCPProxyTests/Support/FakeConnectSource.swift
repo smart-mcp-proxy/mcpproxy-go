@@ -124,7 +124,9 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
         remediation: String? = nil,
         serverName: String? = nil,
         note: String? = nil,
-        checkedPaths: [String]? = nil
+        checkedPaths: [String]? = nil,
+        displayPath: String? = nil,
+        reloadHint: String? = nil
     ) -> APIClient.ClientStatus {
         let json: [String: Any?] = [
             "id": id,
@@ -139,7 +141,9 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
             "access_state": accessState?.rawValue,
             "remediation": remediation,
             "note": note,
-            "checked_paths": checkedPaths
+            "checked_paths": checkedPaths,
+            "display_path": displayPath,
+            "reload_hint": reloadHint
         ]
         let data = try! JSONSerialization.data(
             withJSONObject: json.compactMapValues { $0 })

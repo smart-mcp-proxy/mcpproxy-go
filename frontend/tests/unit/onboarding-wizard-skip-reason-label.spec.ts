@@ -113,7 +113,7 @@ describe('OnboardingWizard — import skip-reason labeling', () => {
     })
 
     await wrapper.find('[data-test="select-all-json"]').setValue(true)
-    await wrapper.find('[data-test="bulk-import-active"]').trigger('click')
+    await wrapper.find('[data-test="bulk-import-primary"]').trigger('click')
     await flushPromises()
 
     const message = wrapper.text()
@@ -130,7 +130,7 @@ describe('OnboardingWizard — import skip-reason labeling', () => {
     })
 
     await wrapper.find('[data-test="select-all-json"]').setValue(true)
-    await wrapper.find('[data-test="bulk-import-active"]').trigger('click')
+    await wrapper.find('[data-test="bulk-import-primary"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.text()).toContain('already configured')
@@ -148,7 +148,7 @@ describe('OnboardingWizard — import skip-reason labeling', () => {
     })
 
     await wrapper.find('[data-test="select-all-json"]').setValue(true)
-    await wrapper.find('[data-test="bulk-import-active"]').trigger('click')
+    await wrapper.find('[data-test="bulk-import-primary"]').trigger('click')
     await flushPromises()
 
     const message = wrapper.text()
