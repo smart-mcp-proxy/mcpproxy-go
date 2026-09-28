@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // A profile pin is only a security boundary if EVERY dispatch surface resolves
@@ -168,6 +169,7 @@ func TestSetProfileClearReportsPinnedScope(t *testing.T) {
 	require.False(t, result.IsError)
 	payload := decodeSetProfilePayload(t, result)
 	assert.Equal(t, "", payload["active_profile"], "the pin is not a stored selection")
+	assert.Equal(t, string(profile.SourceNone), payload["profile_source"], "clearing hides the credential's base profile")
 	assert.Equal(t, "", proxy.sessionStore.GetActiveProfile("sess-pin-clear"), "the stored selection must be cleared")
 	assert.Equal(t, []interface{}{"research-srv"}, payload["servers"],
 		"clearing must not advertise servers the pin still denies")

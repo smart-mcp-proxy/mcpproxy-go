@@ -1,7 +1,6 @@
 package server
 
 import (
-	"strings"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
@@ -237,14 +236,13 @@ func (p *MCPProxyServer) bindingGuardTools() []bindingGuardTool {
 			continue
 		}
 		for _, info := range status.Tools {
-			toolName := info.Name
-			if prefix := serverName + ":"; strings.HasPrefix(toolName, prefix) {
-				toolName = strings.TrimPrefix(toolName, prefix)
-			}
-			annotations, found := p.EffectiveAnnotations(serverName, toolName)
+			// StateView stores the upstream's raw tool name. A raw name may
+			// itself start with "<server>:"; keep it intact so the guard
+			// compares the same exact registration identity as dispatch.
+			annotations, found := p.EffectiveAnnotations(serverName, info.Name)
 			tools = append(tools, bindingGuardTool{
 				server: serverName,
-				tool:   toolName,
+				tool:   info.Name,
 				tier:   profile.IntrinsicTier(annotations, found),
 			})
 		}

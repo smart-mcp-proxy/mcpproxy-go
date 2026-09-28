@@ -698,21 +698,35 @@ func (idx *profileIndex) step() {
 // candidate declares or on how many servers are configured.
 func (idx *profileIndex) selectable(ctx context.Context, slug string) bool {
 	candidate := idx.position(slug)
-	pin := profilePinFromContext(ctx)
-	if pin != "" {
-		// The pin is the only profile a pinned caller may select; resolve it
-		// whether or not the URL named it so a mismatch costs what a match does.
-		pinned := idx.position(pin)
+	if !idx.pinAllowsSelection(ctx, slug) {
 		candidate = -1
-		if slug == pin {
-			candidate = pinned
-		}
 	}
 	reach := idx.reach(ctx, candidate)
 	// Administrators (and absent contexts) select any configured profile,
 	// including empty or ghost ones (SC-005); everyone else needs reach.
+	pin := profilePinFromContext(ctx)
 	needsReach := pin != "" || auth.IsScopedCaller(ctx)
 	return candidate >= 0 && (!needsReach || reach)
+}
+
+// pinAllowsSelection applies credential-level profile selection limits in
+// addition to server reach. Locked clients and legacy pinned agent tokens
+// may select only their pin. Switchable client credentials may select their
+// bound base or one of that base policy's explicitly declared switchable_to
+// targets (FR-022); they never inherit targets from the selected profile.
+func (idx *profileIndex) pinAllowsSelection(ctx context.Context, slug string) bool {
+	if pin, mode, ok := clientCredentialFromContext(ctx); ok && mode == auth.ProfileModeSwitchable {
+		if pin == "" {
+			// The built-in "All servers" binding has no base policy; FR-022
+			// preserves its legacy any-selectable-profile behavior.
+			return true
+		}
+		return admittedBySwitchableTo(idx.PolicyFor(pin), pin, slug)
+	}
+	if pin := profilePinFromContext(ctx); pin != "" {
+		return slug == pin
+	}
+	return true
 }
 
 // forEachSelectable visits EVERY configured profile, in configured order,
@@ -742,7 +756,7 @@ func (idx *profileIndex) forEachSelectable(ctx context.Context, visit func(name 
 		if needsReach {
 			selectable = idx.reach(ctx, i)
 		}
-		if pin != "" && p.Name != pin {
+		if !idx.pinAllowsSelection(ctx, p.Name) {
 			selectable = false
 		}
 		visit(p.Name, selectable)

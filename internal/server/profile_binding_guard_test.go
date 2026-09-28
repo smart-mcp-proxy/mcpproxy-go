@@ -65,6 +65,23 @@ func TestResolveProfileV3_AnonymousBindingGuardUsesCurrentToolPolicy(t *testing.
 	require.False(t, got.Scope.Allows("a"), "anonymous Q admits a live tool denied by P, so the binding guard must deny the whole anonymous profile")
 }
 
+func TestResolveProfileV3_AnonymousBindingGuardPreservesRawPrefixedToolName(t *testing.T) {
+	proxy, idx := bindingGuardTestProxy(t, "Q", []config.ProfileConfig{
+		{Name: "P", Servers: []string{"a"}, Tools: &config.ProfileToolRules{Deny: []string{"a:a:erase"}}},
+		{Name: "Q", Servers: []string{"a"}},
+	}, auth.ProfileModeLocked, "P")
+	proxy.mainServer.runtime.Supervisor().StateView().UpdateServer("a", func(status *stateview.ServerStatus) {
+		status.ToolsDiscovered = true
+		status.Tools = []stateview.ToolInfo{{Name: "a:erase", Annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(false)}}}
+	})
+
+	got := proxy.ResolveProfileV3(context.Background(), idx)
+
+	require.True(t, got.BindingGuarded, "the binding denies the raw tool identity a:erase while anonymous profile Q admits it")
+	require.NotNil(t, got.Scope)
+	require.True(t, got.Scope.DeniesAll(), "a raw tool name with its own server prefix must not bypass the FR-008a guard")
+}
+
 func TestResolveProfileV3_EqualAnonymousProfileDoesNotTripBindingGuard(t *testing.T) {
 	proxy, idx := bindingGuardTestProxy(t, "P", []config.ProfileConfig{{Name: "P", Servers: []string{"a"}}}, auth.ProfileModeLocked, "P")
 
