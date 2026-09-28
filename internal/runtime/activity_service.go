@@ -736,17 +736,21 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 	decision := getStringPayload(evt.Payload, "decision")
 	reason := getStringPayload(evt.Payload, "reason")
 
+	metadata := map[string]interface{}{
+		"decision": decision,
+		"reason":   reason,
+	}
+	if blockReason := getStringPayload(evt.Payload, storage.MetadataKeyBlockReason); blockReason != "" {
+		metadata[storage.MetadataKeyBlockReason] = blockReason
+	}
 	record := &storage.ActivityRecord{
 		Type:       storage.ActivityTypePolicyDecision,
 		ServerName: serverName,
 		ToolName:   toolName,
 		Status:     decision,
-		Metadata: s.withClientInfo(map[string]interface{}{
-			"decision": decision,
-			"reason":   reason,
-		}, sessionID),
-		Timestamp: evt.Timestamp,
-		SessionID: sessionID,
+		Metadata:   s.withClientInfo(metadata, sessionID),
+		Timestamp:  evt.Timestamp,
+		SessionID:  sessionID,
 		// Copied straight from the event so the persisted record and the SSE
 		// event a client already saw share one identity (spec 090). Absent on
 		// pre-090 payloads, which stays absent rather than becoming "".

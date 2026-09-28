@@ -57,7 +57,6 @@ func TestRetrieveTools_ScopeLatency_ProfileV3VsLegacy(t *testing.T) {
 	require.Greater(t, len(servers), 20, "fixture: doubling the snapshot must still name more than a handful of servers")
 
 	proxy := createTestMCPProxyServer(t)
-	config.EnablePolicyForTest(t)
 	serverCfgs := make([]*config.ServerConfig, 0, len(servers))
 	for _, s := range servers {
 		serverCfgs = append(serverCfgs, &config.ServerConfig{Name: s, Enabled: true})

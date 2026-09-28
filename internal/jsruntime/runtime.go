@@ -615,6 +615,12 @@ func (ec *ExecutionContext) resolveDispatchGates(serverName, toolName string, ar
 				fmt.Sprintf("permission denied: tool '%s:%s' cannot be resolved against the current tool list of server '%s' (undiscovered or stale name), so no permission tier applies to it",
 					serverName, toolName, serverName)), "", nil
 		}
+		if refusal, ok := gate.(interface{ ProfilePolicyRefusal() string }); ok {
+			if message := refusal.ProfilePolicyRefusal(); message != "" {
+				ec.reportAuthzRefusal(serverName, toolName, ErrorCodeAccessDenied, requiredPerm, args)
+				return errorEnvelope(ErrorCodeAccessDenied, message), "", nil
+			}
+		}
 	}
 
 	// No AuthInfo (stdio / in-process administrator): no permission tier to

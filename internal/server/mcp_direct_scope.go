@@ -363,6 +363,11 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 
 	authCtx := auth.AuthContextFromContext(ctx)
 	profileName, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
+	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
+	if profileResolution.Scope != nil {
+		profileName = profileResolution.Name
+		profileScope = profileResolution.Scope
+	}
 	isScopedAgent := isScopeRestrictedCaller(authCtx)
 	var policy *profile.CompiledPolicy
 	if profileName != "" {

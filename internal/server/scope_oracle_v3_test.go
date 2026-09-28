@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,7 +40,6 @@ type scopeOracleV3Fixture struct {
 func newScopeOracleV3Fixture(t *testing.T, full bool) *scopeOracleV3Fixture {
 	t.Helper()
 	proxy, rt := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
-		config.EnablePolicyForTest(t)
 		cfg.Servers = []*config.ServerConfig{{Name: "a", Enabled: true}}
 		if full {
 			cfg.Servers = append(cfg.Servers,
@@ -139,4 +140,41 @@ func TestScopeOracleV3_HiddenByProfileIdenticalAcrossFixtures(t *testing.T) {
 		resp := callRetrieveToolsV3(t, full.proxy, adminCtx(), "SENTINEL_scopeOracleV3B_71a2_tool", 10)
 		require.NotEmpty(t, resp.Tools, "fixture premise: an unscoped administrator must see the hidden sentinel tool")
 	})
+}
+
+// The same two-fixture non-disclosure oracle must hold for the newer
+// resolution sources added by client credentials and anonymous_profile.
+// Previously T017 only exercised an agent pin, leaving those sources
+// unprotected against hidden-server influence on hidden_by_profile/results.
+func TestScopeOracleV3_NewResolutionSourcesMatchAcrossFixtures(t *testing.T) {
+	narrow := newScopeOracleV3Fixture(t, false)
+	full := newScopeOracleV3Fixture(t, true)
+	narrow.proxy.currentConfig().AnonymousProfile = "cap-read-a"
+	full.proxy.currentConfig().AnonymousProfile = "cap-read-a"
+
+	sources := map[string]struct {
+		narrow context.Context
+		full   context.Context
+	}{
+		"locked client pin":         {clientCtx("desktop", "cap-read-a", "locked"), clientCtx("desktop", "cap-read-a", "locked")},
+		"switchable client binding": {clientCtx("desktop", "cap-read-a", "switchable"), clientCtx("desktop", "cap-read-a", "switchable")},
+		"anonymous profile":         {anonCtx(), anonCtx()},
+	}
+	for source, callers := range sources {
+		t.Run(source, func(t *testing.T) {
+			for _, query := range []string{"read_thing", "write_thing", "destroy_thing", "erase", "ns_erase"} {
+				t.Run(query, func(t *testing.T) {
+					narrowResp := callRetrieveToolsV3(t, narrow.proxy, callers.narrow, query, 10)
+					fullResp := callRetrieveToolsV3(t, full.proxy, callers.full, query, 10)
+					assert.Nil(t, narrowResp.Profile, "credential and anonymous resolution sources never reveal the base profile")
+					assert.Nil(t, fullResp.Profile, "credential and anonymous resolution sources never reveal the base profile")
+					left, err := json.Marshal(narrowResp)
+					require.NoError(t, err)
+					right, err := json.Marshal(fullResp)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(left), string(right), "hidden servers must not perturb discovery for %s", source)
+				})
+			}
+		})
+	}
 }

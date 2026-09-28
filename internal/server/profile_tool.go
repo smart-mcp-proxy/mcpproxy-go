@@ -199,8 +199,13 @@ func setProfileResult(activeProfile string, servers []string) (*mcp.CallToolResu
 	if servers == nil {
 		servers = []string{}
 	}
+	profileSource := string(profile.SourceNone)
+	if activeProfile != "" {
+		profileSource = string(profile.SourceSession)
+	}
 	payload := map[string]interface{}{
 		"active_profile": activeProfile,
+		"profile_source": profileSource,
 		"servers":        servers,
 	}
 	body, err := json.Marshal(payload)

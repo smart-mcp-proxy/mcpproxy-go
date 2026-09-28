@@ -3945,6 +3945,28 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 		callArgs = original.Arguments
 	}
 
+	// Spec 108 FR-015: replay is a dispatch path, so evaluate its recorded
+	// server/tool against the same request-scoped profile resolution before
+	// audit authorization or upstream I/O. Profile server scope is concealed
+	// as not-found; tool policy denials retain the shared refusal text.
+	profileIndex := s.mcpProxy.profileIndexCurrent(ctx)
+	profileResolution := s.mcpProxy.ResolveProfileV3(ctx, profileIndex)
+	if profileResolution.Scope != nil && !profileResolution.Scope.Allows(original.ServerName) {
+		return nil, profile.ErrToolOutsideProfile
+	}
+	if policy := profileResolution.Policy; policy != nil {
+		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
+		intrinsic := profile.IntrinsicTier(annotations, found)
+		if admitted, reason, tier := policy.Decide(original.ServerName, original.ToolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
+			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName)
+			refusal := &profile.ToolBlockedError{Reason: blockReason, Message: message}
+			requestID := mintCorrelationID(original.ServerName, original.ToolName)
+			s.mcpProxy.emitActivityPolicyDecisionWithBlockReason(ctx, original.ServerName, original.ToolName,
+				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonOther, string(blockReason))
+			return nil, refusal
+		}
+	}
+
 	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
 	// own annotations snapshot is the canonical target tier here — the same
 	// signal tierForAnnotations derives from a live gate's identity lookup

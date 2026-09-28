@@ -13,6 +13,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 )
 
@@ -223,6 +224,9 @@ func (h *CodeExecHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // spec 093 uses for a concurrency shed's 429), so the returned message is the
 // error's own wording, without the dispatch wrapper's "tool call failed:".
 func classifyCodeExecError(err error) (status int, code, message string, ok bool) {
+	if errors.Is(err, profile.ErrCodeExecutionBlocked) {
+		return http.StatusForbidden, "PROFILE_BLOCKED", profile.ErrCodeExecutionBlocked.Error(), true
+	}
 	if errors.Is(err, config.ErrCodeExecutionDisabled) {
 		return http.StatusForbidden, "FEATURE_DISABLED", config.CodeExecutionDisabledMessage, true
 	}

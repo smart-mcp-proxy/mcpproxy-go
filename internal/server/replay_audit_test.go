@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -145,6 +146,26 @@ func TestReplayToolCall_WritesAuthzAllowThenToolCallSuccess(t *testing.T) {
 	assert.Equal(t, "tool_call", lines[1]["event"])
 	assert.Equal(t, "success", lines[1]["outcome"])
 	assert.Equal(t, lines[0]["request_id"], lines[1]["request_id"])
+}
+
+func TestReplayToolCall_ProfilePolicyRefusesBeforeUpstream(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
+		cfg.Servers = []*config.ServerConfig{{Name: "github", Enabled: true}}
+		cfg.Profiles = []config.ProfileConfig{{
+			Name: "replay-readonly", Servers: []string{"github"},
+			Tools: &config.ProfileToolRules{Deny: []string{"github:create_issue"}},
+		}}
+	})
+	mainSrv := &Server{runtime: rt, mcpProxy: proxy}
+	url, calls := startRuntimeCountingUpstream(t, proxy, "github", "create_issue")
+	callID := seedReplayableCall(t, proxy, mainSrv, "github", "create_issue", url)
+
+	_, err := mainSrv.ReplayToolCall(urlProfileCtx(proxy, "replay-readonly"), callID, nil)
+
+	var refusal *profile.ToolBlockedError
+	require.ErrorAs(t, err, &refusal)
+	require.Equal(t, profile.BlockReasonRule, refusal.Reason)
+	require.Empty(t, calls.dispatched(), "profile-denied replay must stop before upstream I/O")
 }
 
 func TestReplayToolCall_UnresolvedIDDelegatesUnaudited(t *testing.T) {

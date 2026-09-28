@@ -17,6 +17,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
@@ -90,6 +91,19 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	p.recordMCPSurface()
 	p.recordBuiltinTool("code_execution")
 	p.logger.Debug("code_execution tool called")
+	profileIdx := p.profileIndexCurrent(ctx)
+	if profileIdx == nil {
+		return mcp.NewToolResultError("unknown tool: code_execution"), nil
+	}
+	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
+	if profileResolution.Policy != nil && !profileResolution.Policy.CodeExecution {
+		requestID := mintActivityRequestID("", "code_execution")
+		refusal := profile.ErrCodeExecutionBlocked
+		recordCodeExecRefusal(ctx, refusal)
+		p.emitActivityPolicyDecisionWithBlockReason(ctx, "", "code_execution", sessionIDFromContext(ctx), requestID,
+			"blocked", refusal.Error(), telemetry.BlockReasonOther, string(profile.BlockReasonCodeExecution))
+		return mcp.NewToolResultError("unknown tool: code_execution"), nil
+	}
 
 	// enable_code_execution is a FEATURE switch, so it is enforced where every
 	// surface passes rather than at registration. The MCP surfaces gate by
@@ -267,10 +281,27 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// form is wired so the lookup's read is the nested call's ONE persisted
 	// read: the bridge (CallToolWithGate) dispatches on the gate it captured
 	// rather than taking a second one (codex r9 I1).
-	options.ToolGateFunc = p.lookupToolGate
+	options.ToolGateFunc = func(serverName, toolName string) (string, jsruntime.ToolGate) {
+		required, rawGate := p.lookupToolGate(serverName, toolName)
+		sandbox, ok := rawGate.(*sandboxGate)
+		if !ok || sandbox == nil || profileResolution.Policy == nil {
+			return required, rawGate
+		}
+		identity := sandbox.gate.identity
+		if !sandbox.gated {
+			identity = p.resolveExactToolIdentityWith(nil, serverName, toolName)
+		}
+		admitted, reason, tier := profileResolution.Policy.Decide(
+			serverName, toolName, profile.IntrinsicTier(identity.Annotations, identity.Found),
+		)
+		if !admitted && reason != profile.ReasonServerNotInProfile {
+			sandbox.profileRefusal, _ = profileToolPolicyRefusal(reason, tier, profileResolution.Policy.Cap, serverName, toolName)
+		}
+		return required, rawGate
+	}
 
 	// Spec 057 (Codex #621 finding 2): Intersect profile scope into code_execution.
-	p.applyProfileScopeToExecution(ctx, &options)
+	p.applyResolvedProfileScopeToExecution(&options, profileResolution.Scope)
 
 	// Spec 107 T103/T104: the wrapper itself writes no audit line (it is a
 	// built-in), but it captures the SCRIPT's caller for every nested line
@@ -785,8 +816,16 @@ type upstreamToolCaller struct {
 // dispatchGate's second result carried along: false means no gate was
 // evaluated (a proxy without storage).
 type sandboxGate struct {
-	gate  toolGate
-	gated bool
+	gate           toolGate
+	gated          bool
+	profileRefusal string
+}
+
+func (g *sandboxGate) ProfilePolicyRefusal() string {
+	if g == nil {
+		return ""
+	}
+	return g.profileRefusal
 }
 
 // CallTool implements jsruntime.ToolCaller. It takes the gate read itself,
@@ -1501,7 +1540,18 @@ func (p *MCPProxyServer) applyProfileScopeToExecution(ctx context.Context, optio
 	if options == nil {
 		return
 	}
-	_, profileScope := p.resolveActiveProfile(ctx)
+	_, profileScope, idx := p.resolveActiveProfileWithIndex(ctx)
+	resolution := p.ResolveProfileV3(ctx, idx)
+	if resolution.Scope != nil {
+		profileScope = resolution.Scope
+	}
+	p.applyResolvedProfileScopeToExecution(options, profileScope)
+}
+
+func (p *MCPProxyServer) applyResolvedProfileScopeToExecution(options *jsruntime.ExecutionOptions, profileScope *profile.ProfileScope) {
+	if options == nil {
+		return
+	}
 	if profileScope == nil {
 		return
 	}

@@ -1,10 +1,14 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Spec 108 (Profiles v3) T019: `/mcp/all` `tools/list` omits excluded tools
@@ -15,6 +19,73 @@ import (
 func directStampedTool(server, rawName, tier string) mcp.Tool {
 	entry := &directCatalogEntry{ServerName: server, ToolName: rawName, RequiredPermission: tier}
 	return stampDirectTool(mcp.Tool{Name: server + "__" + rawName}, entry)
+}
+
+func TestDirectProtocol_ProfileV3CallRefusalOnWire(t *testing.T) {
+	proxy, rt := newProfilesV3Fixture(t)
+	indexEnforcementMatrixFixtureTools(t, proxy)
+	up := startCountingUpstream(t, proxy, rt, "github", writeSpec("create_issue"))
+	proxy.RefreshDirectModeTools()
+	ctx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "profile-locked", ProfilePin: "work-readonly",
+		AllowedServers: []string{"*"}, Permissions: []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+	})
+	// Mirror mcpAuthMiddleware: mcp-go's before-call hook needs this box to
+	// distinguish tools/call re-evaluation from list-time filtering.
+	ctx = withDirectRequestKindBox(ctx)
+
+	listPayload, err := json.Marshal(proxy.directServer.HandleMessage(ctx, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)))
+	require.NoError(t, err)
+	var listed struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(listPayload, &listed), string(listPayload))
+	for _, tool := range listed.Result.Tools {
+		assert.NotEqual(t, "github__create_issue", tool.Name, "profile-excluded direct tools are absent from /mcp/all tools/list")
+	}
+
+	callPayload, err := json.Marshal(proxy.directServer.HandleMessage(ctx,
+		[]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"github__create_issue","arguments":{}}}`)))
+	require.NoError(t, err)
+	var call struct {
+		Result struct {
+			IsError bool `json:"isError"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(callPayload, &call), string(callPayload))
+	require.True(t, call.Result.IsError, string(callPayload))
+	require.NotEmpty(t, call.Result.Content)
+	assert.Equal(t, "blocked by profile: github:create_issue is a write tool; this profile allows read tools only", call.Result.Content[0].Text)
+	assert.Empty(t, up.dispatched(), "a direct-mode refusal must precede upstream I/O")
+}
+
+func TestDirectCall_ProfileV3PolicyRefusesBeforeUpstream(t *testing.T) {
+	proxy, rt := newProfilesV3Fixture(t)
+	up := startCountingUpstream(t, proxy, rt, "github", writeSpec("create_issue"))
+	entry := &directCatalogEntry{
+		DisplayName: FormatDirectToolName("github", "create_issue"),
+		ServerName:  "github", ToolName: "create_issue",
+		Annotations: writeSpec("create_issue").Annotations,
+	}
+	ctx := withDirectRequestKindBox(urlProfileCtx(proxy, "work-readonly"))
+	setDirectRequestKind(ctx, directRequestKindCall)
+
+	result, err := proxy.makeDirectModeHandler(entry)(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Arguments: map[string]interface{}{}},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.IsError)
+	require.Equal(t, "blocked by profile: github:create_issue is a write tool; this profile allows read tools only", resultText(t, result))
+	require.Empty(t, up.dispatched(), "direct-mode profile denials must happen before upstream I/O")
 }
 
 func TestFilterDirectModeToolsForAuth_ProfileV3(t *testing.T) {
@@ -37,6 +108,12 @@ func TestFilterDirectModeToolsForAuth_ProfileV3(t *testing.T) {
 		ctx := urlProfileCtx(proxy, "work-full")
 		filtered := filterDirectToolNames(proxy.filterDirectModeToolsForAuth(ctx, tools))
 		assert.ElementsMatch(t, []string{"github__list_issues", "github__create_issue", "notion__update_page", "filesystem__read_text_file"}, filtered)
+	})
+
+	t.Run("anonymous: effective anonymous profile filters the same tools without a URL profile", func(t *testing.T) {
+		proxy.currentConfig().AnonymousProfile = "work-readonly"
+		filtered := filterDirectToolNames(proxy.filterDirectModeToolsForAuth(anonCtx(), tools))
+		assert.ElementsMatch(t, []string{"github__list_issues", "notion__update_page"}, filtered)
 	})
 
 	t.Run("legacy: policy never excludes (only server scope does, which the fixture's legacy profile restricts to github)", func(t *testing.T) {

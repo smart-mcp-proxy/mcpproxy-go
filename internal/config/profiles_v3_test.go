@@ -143,11 +143,8 @@ func TestProfileConfig_EffectiveCodeExecution(t *testing.T) {
 }
 
 // TestValidateProfiles_V3Rules pins every fatal/warning message row of
-// data-model.md §1 exactly, with the FR-009a gate opened via
-// EnablePolicyForTest (the 108-a/108-b test-only override; see
-// profiles_rollout_gate_test.go for the gate itself).
+// data-model.md §1 exactly.
 func TestValidateProfiles_V3Rules(t *testing.T) {
-	EnablePolicyForTest(t)
 
 	t.Run("invalid max_tier is fatal", func(t *testing.T) {
 		cfg := &Config{Profiles: []ProfileConfig{{Name: "prof", Servers: []string{"a"}, MaxTier: "bogus"}}}

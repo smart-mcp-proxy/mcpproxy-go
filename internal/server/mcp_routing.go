@@ -20,6 +20,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
@@ -493,7 +494,9 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// Spec 107 T103: the audit attempt, installed BEFORE the first gate.
 		// The operation is the tier this catalog entry's annotations derive
 		// (the same tier the permission gate below authorizes against).
-		profileSlug, profileScope := p.resolveActiveProfile(ctx)
+		profileIndex := p.profileIndexCurrent(ctx)
+		profileResolution := p.ResolveProfileV3(ctx, profileIndex)
+		profileSlug, profileScope := profileResolution.Name, profileResolution.Scope
 		{
 			var auditClientName, auditClientVersion string
 			if sessionID != "" {
@@ -525,6 +528,15 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			refusalErr := directScopeRefusalError(entry.DisplayName)
 			p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", refusalErr.Error(), telemetry.BlockReasonProfileScope)
 			return nil, refusalErr
+		}
+		if policy := profileResolution.Policy; policy != nil {
+			intrinsic := profile.IntrinsicTier(annotations, annotations != nil)
+			if admitted, reason, tier := policy.Decide(serverName, toolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
+				errMsg, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, serverName, toolName)
+				p.emitActivityPolicyDecisionWithBlockReason(ctx, serverName, toolName, sessionID, requestID,
+					"blocked", errMsg, telemetry.BlockReasonOther, string(blockReason))
+				return mcp.NewToolResultError(errMsg), nil
+			}
 		}
 
 		// Check auth context for server access and permissions
@@ -997,6 +1009,81 @@ func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 	}}
 }
 
+// filterProfileV3Tools applies profile-controlled built-in visibility to
+// every request-scoped tools/list response. Handler gates remain mandatory:
+// tool filters are discovery controls, not an execution boundary.
+func (p *MCPProxyServer) filterProfileV3Tools(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
+	idx, ok := profileRequestIndexFromContext(ctx)
+	if !ok {
+		idx = p.profileIndexCurrent(ctx)
+	}
+	if idx == nil {
+		resolution := p.ResolveProfileV3(ctx, nil)
+		if resolution.Scope == nil && resolution.Policy == nil {
+			return tools
+		}
+		filtered := make([]mcp.Tool, 0, len(tools))
+		for _, tool := range tools {
+			if tool.Name == "code_execution" || tool.Name == "upstream_servers" || tool.Name == "quarantine_security" {
+				continue
+			}
+			filtered = append(filtered, tool)
+		}
+		return filtered
+	}
+	resolution := p.ResolveProfileV3(ctx, idx)
+	// A dangling pinned/bound/anonymous profile is authoritative deny-all.
+	// Do not advertise code execution just because the resolution no longer
+	// has a compiled policy to consult.
+	danglingProfile := resolution.Name != "" && idx.position(resolution.Name) < 0
+	filtered := make([]mcp.Tool, 0, len(tools))
+	for _, tool := range tools {
+		switch tool.Name {
+		case "code_execution":
+			if danglingProfile || (resolution.Policy != nil && !resolution.Policy.CodeExecution) {
+				continue
+			}
+		case "upstream_servers", "quarantine_security":
+			if p.profileManagementToolHidden(ctx, tool.Name) {
+				continue
+			}
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
+}
+
+// profileManagementToolHidden keeps the execution boundary aligned with the
+// request-scoped tool filter. Legacy profiles (unset management_tools) retain
+// their existing behavior; an explicit false hides and refuses the tools.
+func (p *MCPProxyServer) profileManagementToolHidden(ctx context.Context, toolName string) bool {
+	idx, ok := profileRequestIndexFromContext(ctx)
+	if !ok {
+		idx = p.profileIndexCurrent(ctx)
+	}
+	ac := auth.AuthContextFromContext(ctx)
+	if idx == nil {
+		resolution := p.ResolveProfileV3(ctx, nil)
+		return resolution.Scope != nil || resolution.Policy != nil
+	}
+	resolution := p.ResolveProfileV3(ctx, idx)
+	confinedAnonymous := (ac == nil || ac.Anonymous) && resolution.Base != ""
+	managementEnabled := resolution.Policy != nil && resolution.Policy.ManagementTools != nil && *resolution.Policy.ManagementTools
+	if resolution.Policy != nil && resolution.Policy.ManagementTools != nil && !*resolution.Policy.ManagementTools {
+		return true
+	}
+	if ac.IsClientCredential() || confinedAnonymous {
+		if !managementEnabled {
+			return true
+		}
+		return toolName == "quarantine_security"
+	}
+	if toolName == "quarantine_security" && managementEnabled && (ac == nil || !ac.IsAdmin() || ac.Anonymous) {
+		return true
+	}
+	return false
+}
+
 // initRoutingModeServers creates separate MCP server instances for each routing mode.
 // Each server instance has its own set of tools registered appropriate for that mode.
 // The main "server" field remains the retrieve_tools mode server (default).
@@ -1112,6 +1199,7 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	// scoped and stamp-free (Spec 105 FR-006, cross-review round 2). It is a
 	// no-op while no prompts are registered.
 	opts = append(opts, mcpserver.WithPromptFilter(p.filterAggregatedPromptsForAuth))
+	opts = append(opts, mcpserver.WithToolFilter(p.filterProfileV3Tools))
 
 	// Create direct mode server. Both direct-mode tool filters are agent-scoped
 	// discovery filters and belong only on the direct server (not the shared

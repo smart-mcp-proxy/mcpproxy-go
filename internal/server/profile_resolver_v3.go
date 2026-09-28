@@ -97,13 +97,41 @@ func resolveV3Base(ctx context.Context, idx *profileIndex) (name string, source 
 
 // ResolveProfileV3 is the FR-020 resolution: highest wins — pin > url >
 // session > binding > anonymous > none — against idx's (index, snapshot)
-// pair. It is additive to, and does not replace, resolveActiveProfileFromIndex
-// (the live Profiles v2 enforcement path every existing consumer still
-// uses): wiring THIS resolution into execution (retrieve_tools, set_profile
-// admission, call_tool_*) is 108-d's FR-009a-gated enforcement cutover.
-// Exposed now so 108-d's tests can build directly on a resolver whose
-// precedence and switchable_to admission are already pinned (T029/T036).
+// pair. Profile v3 discovery and execution use this single result so the
+// effective server scope, policy, and source cannot come from separate
+// snapshots. Legacy surfaces not yet migrated can still use
+// resolveActiveProfileFromIndex.
 func (p *MCPProxyServer) ResolveProfileV3(ctx context.Context, idx *profileIndex) ProfileResolution {
+	if idx == nil {
+		// profileIndexCurrent deliberately returns nil for a scoped request
+		// during a publication gap instead of building an index on the request
+		// path. Preserve that fail-closed contract without dereferencing the
+		// missing snapshot or falling through to an unscoped view.
+		if pin, mode, ok := clientCredentialFromContext(ctx); ok {
+			source := profile.SourceBinding
+			if mode == auth.ProfileModeLocked {
+				source = profile.SourcePin
+			}
+			return ProfileResolution{Name: pin, Source: string(source), Scope: profile.NewProfileScope(pin, nil), Base: pin}
+		}
+		if pin := profilePinFromContext(ctx); pin != "" {
+			return ProfileResolution{Name: pin, Source: string(profile.SourcePin), Scope: profile.NewProfileScope(pin, nil), Base: pin}
+		}
+		if scope := profile.ProfileScopeFromContext(ctx); scope != nil {
+			return ProfileResolution{Name: scope.Name, Source: string(profile.SourceURL), Scope: profile.NewProfileScope(scope.Name, nil)}
+		}
+		ac := auth.AuthContextFromContext(ctx)
+		if ac == nil || ac.Anonymous {
+			if cfg := p.currentConfig(); cfg != nil && cfg.AnonymousProfile != "" {
+				name := cfg.AnonymousProfile
+				return ProfileResolution{Name: name, Source: string(profile.SourceAnonymous), Scope: profile.NewProfileScope(name, nil), Base: name}
+			}
+		}
+		if auth.IsScopedCaller(ctx) || (ac != nil && ac.IsClientCredential()) {
+			return ProfileResolution{Source: string(profile.SourceNone), Scope: profile.NewProfileScope("", nil)}
+		}
+		return ProfileResolution{Source: string(profile.SourceNone)}
+	}
 	base, source, dangling := resolveV3Base(ctx, idx)
 
 	// Tier 1: pin. Authoritative — never falls through, including when
