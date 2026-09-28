@@ -32,3 +32,27 @@ func AllowPrivateRegistryFetchForTest() (restore func()) {
 		registryAllowPrivateFetch.Store(prev)
 	}
 }
+
+// SetPopularityProviderForTest installs p as the process-wide popularity
+// provider (Spec 110 FR-010) and returns a restore func reinstalling
+// whatever was previously installed (typically nil).
+func SetPopularityProviderForTest(p PopularityProvider) (restore func()) {
+	prev := getPopularityProvider()
+	SetPopularityProvider(p)
+	return func() { SetPopularityProvider(prev) }
+}
+
+// SetGitHubAPIBaseForTest overrides the GitHub API base URL new
+// githubStarsProvider instances read at construction (default
+// githubAPIBaseURLDefault), so a test can point NewGitHubStarsProvider at an
+// httptest.Server. Combine with AllowPrivateRegistryFetchForTest, since the
+// SSRF guard otherwise blocks a loopback target. Returns a restore func.
+func SetGitHubAPIBaseForTest(base string) (restore func()) {
+	prev := currentGitHubAPIBase()
+	b := base
+	githubAPIBaseOverride.Store(&b)
+	return func() {
+		p := prev
+		githubAPIBaseOverride.Store(&p)
+	}
+}

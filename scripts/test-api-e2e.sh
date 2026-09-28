@@ -717,6 +717,12 @@ if [ "$LISTEN_PORT" != "8081" ]; then
     echo "Updated listen port to :${LISTEN_PORT}"
 fi
 
+# Spec 110 (catalog popularity signal, FR-011 kill switch): E2E must not
+# depend on api.github.com (SC-005) — no outbound GitHub fetch, no rate-limit
+# flakiness, no network dependency for a suite that otherwise runs fully
+# offline against the local server under test.
+export MCPPROXY_CATALOG_POPULARITY=false
+
 # Start server in background
 $MCPPROXY_BINARY serve --config="$CONFIG_FILE" --log-level=info > "/tmp/mcpproxy_e2e.log" 2>&1 &
 MCPPROXY_PID=$!
