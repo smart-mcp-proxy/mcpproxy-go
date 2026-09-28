@@ -99,9 +99,13 @@ final class HomeRoutingTests: XCTestCase {
         let source = try homeAttentionActionSource()
         let body = try performFixBody(in: source)
 
-        let configCase = try caseBody(labelContaining: "\"edit_url\"", in: body)
+        let configCase = try caseBody(labelContaining: "\"set_secret\"", in: body)
         XCTAssertTrue(configCase.contains("navigateToServerDetail(item.subject.name, tab: .config)"),
-                      "set_secret/configure/edit_url must open the Config tab")
+                      "set_secret/configure must open the Config tab")
+
+        let editURLCase = try caseBody(labelContaining: "\"edit_url\"", in: body)
+        XCTAssertTrue(editURLCase.contains("navigateToServerDetail(item.subject.name, tab: .config, focusField: .endpoint)"),
+                      "edit_url must open Config with the endpoint field focused")
 
         let logsCase = try caseBody(labelContaining: "\"view_logs\"", in: body)
         XCTAssertTrue(logsCase.contains("navigateToServerDetail(item.subject.name, tab: .logs)"),
@@ -114,10 +118,36 @@ final class HomeRoutingTests: XCTestCase {
                        "review must not call approveTools directly")
 
         let navigateBody = try functionBody(named: "navigateToServerDetail", in: source)
-        XCTAssertTrue(navigateBody.contains("ServerDetailTarget(serverName: serverName, tab: tab)"),
-                      "navigateToServerDetail must post a typed ServerDetailTarget carrying the requested tab")
+        XCTAssertTrue(navigateBody.contains("ServerDetailTarget(serverName: serverName, tab: tab, focusField: focusField)"),
+                      "navigateToServerDetail must post a typed ServerDetailTarget carrying the requested tab and focus field")
         XCTAssertFalse(navigateBody.contains("object: serverName)"),
                        "navigateToServerDetail must not post a bare server-name String — ServersView would then default the tab to .tools regardless of which verb fired")
+    }
+
+    /// `edit_url` names the one broken field, unlike the broad `configure`
+    /// and `set_secret` actions. The target must preserve that intent all the
+    /// way through the notification that ServersView consumes.
+    func testEditURLFixPostsTypedEndpointFocusedServerDetailTarget() async {
+        let item = AttentionItem(
+            id: "config_error:server:remote",
+            kind: "config_error",
+            rank: 30,
+            subject: AttentionSubject(type: "server", id: "remote", name: "remote"),
+            summary: "remote: endpoint is invalid",
+            fix: AttentionFix(verb: "edit_url", label: "Edit URL", target: "/servers/remote?tab=config&focus=endpoint"),
+            since: Date()
+        )
+        let appState = AppState()
+
+        let opened = expectation(forNotification: .showServerDetail, object: nil) { note in
+            guard let target = note.object as? ServerDetailTarget else { return false }
+            return target.serverName == "remote"
+                && target.tab == .config
+                && target.focusField == .endpoint
+        }
+
+        await HomeAttentionAction.performFix(item, appState: appState)
+        await fulfillment(of: [opened], timeout: 2)
     }
 
     /// Spec 109 FR-005 / T064 pin: Home's review action never calls
