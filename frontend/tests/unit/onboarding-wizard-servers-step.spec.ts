@@ -58,7 +58,7 @@ function makeRouter() {
     history: createMemoryHistory(),
     routes: [
       { path: '/', name: 'dashboard', component: { template: '<div />' } },
-      { path: '/repositories', name: 'repositories', component: { template: '<div />' } },
+      { path: '/add-server', name: 'add-server', component: { template: '<div />' } },
       { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
     ],
   })
@@ -90,10 +90,11 @@ async function openServersTab(importable: string[]) {
       plugins: [router],
       stubs: {
         RouterLink: { template: '<a><slot /></a>' },
-        AddServerModal: {
-          name: 'AddServerModal',
-          props: ['show'],
-          template: '<div class="add-server-modal" :data-show="String(show)" />',
+        ManualServerForm: {
+          name: 'ManualServerForm',
+          props: ['navigateAfterAdd'],
+          emits: ['added'],
+          template: '<div class="manual-server-form-stub" :data-navigate-after-add="String(navigateAfterAdd)" />',
         },
       },
     },
@@ -128,12 +129,29 @@ describe('OnboardingWizard servers step (F19)', () => {
       expect(wrapper.find('[data-test="nothing-to-import-manual"]').exists()).toBe(true)
     })
 
-    it('the manual branch opens the add-server form', async () => {
-      const { wrapper } = await openServersTab([])
+    it('opens the manual form inline in the wizard without navigating', async () => {
+      const { wrapper, router } = await openServersTab([])
 
-      expect(wrapper.find('.add-server-modal').attributes('data-show')).toBe('false')
+      expect(wrapper.find('.manual-server-form-stub').exists()).toBe(false)
       await wrapper.find('[data-test="nothing-to-import-manual"]').trigger('click')
-      expect(wrapper.find('.add-server-modal').attributes('data-show')).toBe('true')
+      expect(wrapper.find('[data-test="wizard-manual-form"] .manual-server-form-stub').exists()).toBe(true)
+      expect(wrapper.find('.manual-server-form-stub').attributes('data-navigate-after-add')).toBe('false')
+      expect(wrapper.emitted('close')).toBeFalsy()
+      expect(router.currentRoute.value.path).toBe('/')
+    })
+
+    it('records server-step completion when the inline form adds a server', async () => {
+      const { wrapper, router } = await openServersTab([])
+
+      await wrapper.find('[data-test="nothing-to-import-manual"]').trigger('click')
+      wrapper.findComponent({ name: 'ManualServerForm' }).vm.$emit('added', 'fs-server')
+      await flushPromises()
+
+      expect(api.markOnboardingState).toHaveBeenCalledWith(expect.objectContaining({ server_step_status: 'completed' }))
+      expect(wrapper.find('.manual-server-form-stub').exists()).toBe(false)
+      expect(wrapper.find('[data-test="servers-nothing-to-import"]').text()).toContain('Server added')
+      expect(wrapper.emitted('close')).toBeFalsy()
+      expect(router.currentRoute.value.path).toBe('/')
     })
 
     it('the registry branch closes the wizard before navigating away', async () => {
@@ -142,9 +160,9 @@ describe('OnboardingWizard servers step (F19)', () => {
       await wrapper.find('[data-test="nothing-to-import-registry"]').trigger('click')
       await flushPromises()
 
-      // A modal left open would hang over the registry page.
+      // The wizard must close before leaving for the catalog.
       expect(wrapper.emitted('close')).toBeTruthy()
-      expect(router.currentRoute.value.path).toBe('/repositories')
+      expect(router.currentRoute.value.fullPath).toBe('/add-server?tab=catalog')
     })
 
     it('emits close BEFORE the route changes, not after', async () => {
@@ -165,7 +183,7 @@ describe('OnboardingWizard servers step (F19)', () => {
       await flushPromises()
 
       expect(closeAlreadyEmitted, 'navigation started before close was emitted').toBe(true)
-      expect(router.currentRoute.value.path).toBe('/repositories')
+      expect(router.currentRoute.value.fullPath).toBe('/add-server?tab=catalog')
     })
 
     it('still shows the security defaults summary', async () => {

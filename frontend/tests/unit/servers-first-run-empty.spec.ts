@@ -168,16 +168,16 @@ describe('Servers first-run empty state (F3)', () => {
     expect(wrapper.findAll('.server-card')).toHaveLength(2)
   })
 
-  it('opening the add-server modal shows it', async () => {
-    const { wrapper } = await mountServers()
+  it('Add Server opens the catalog-first /add-server page', async () => {
+    const { wrapper, router } = await mountServers()
     const store = useServersStore()
     store.servers = []
     store.loaded = true
     await flushPromises()
 
-    expect(wrapper.find('.add-server-modal').attributes('data-show')).toBe('false')
     await wrapper.find('[data-test="servers-empty-add"]').trigger('click')
-    expect(wrapper.find('.add-server-modal').attributes('data-show')).toBe('true')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/add-server')
   })
 
   it('the import link routes to the dashboard with the wizard queued on the servers step', async () => {

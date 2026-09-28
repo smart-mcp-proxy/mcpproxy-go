@@ -96,6 +96,9 @@ import { resolveSecretFields, rollbackSecrets } from '@/composables/useSecretFie
 import { useServersStore } from '@/stores/servers'
 import { serverDetailPath } from '@/utils/serverRoute'
 
+const props = withDefaults(defineProps<{ navigateAfterAdd?: boolean }>(), {
+  navigateAfterAdd: true,
+})
 const emit = defineEmits<{ added: [name: string] }>()
 
 const router = useRouter()
@@ -158,7 +161,9 @@ async function handleSubmit() {
 
     await serversStore.addServer(serverData)
     emit('added', name.value)
-    void router.push(serverDetailPath(name.value))
+    if (props.navigateAfterAdd) {
+      void router.push(serverDetailPath(name.value))
+    }
   } catch (e) {
     // The secret write (if any) succeeded but something after it failed —
     // don't leave an orphaned keyring entry behind, and let a retry reuse
