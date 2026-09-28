@@ -118,6 +118,21 @@ final class MenuStructureTests: XCTestCase {
         XCTAssertTrue(addServer.target === controller)
     }
 
+    /// FR-062: the tray's generic Add Server action is another entry point to
+    /// the catalog-first add flow. It must not silently bypass discovery by
+    /// selecting Manual while every in-window generic add action selects
+    /// Catalog.
+    func testTrayAddServerPostsCatalogAsItsInitialTab() throws {
+        let source = try appControllerSource()
+        let start = try XCTUnwrap(source.range(of: "@objc private func showAddServer()"))
+        let end = try XCTUnwrap(source[start.lowerBound...].range(of: "\n    // Inject our View menu items"))
+        let body = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(body.contains("NotificationCenter.default.post(name: .showAddServer, object: AddServerTab.catalog)"),
+                      "the tray Add Server action must open the Catalog tab by default")
+        XCTAssertFalse(body.contains("NotificationCenter.default.post(name: .showAddServer, object: AddServerTab.manual)"))
+    }
+
     // MARK: - Helpers
 
     /// Built through the canonical Codable path so the fixture survives future
@@ -136,5 +151,12 @@ final class MenuStructureTests: XCTestCase {
         """.data(using: .utf8)!
         // swiftlint:disable:next force_try
         return try! JSONDecoder().decode(ServerStatus.self, from: json)
+    }
+
+    private func appControllerSource() throws -> String {
+        let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = testDirectory.deletingLastPathComponent()
+            .appendingPathComponent("MCPProxy/MCPProxyApp.swift")
+        return try String(contentsOf: source)
     }
 }
