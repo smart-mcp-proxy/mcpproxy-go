@@ -938,7 +938,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [003-tool-annotations-webui](./specs/003-tool-annotations-webui/) | `in-flight` | 37/64 (58%) |
 | [004-management-health-refactor](./specs/004-management-health-refactor/) | `in-flight` | 73/101 (72%) |
 | [005-rest-management-integration](./specs/005-rest-management-integration/) | `shipped` | 45/45 (100%) |
-| [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 43/65 (66%) |
+| [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 44/65 (68%) |
 | [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 94/103 (91%) |
 | [008-oauth-token-refresh](./specs/008-oauth-token-refresh/) | `in-flight` | 57/64 (89%) |
 | [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 47/87 (54%) |
@@ -1035,5 +1035,5 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) | `shipped` | 111/113 (98%) |
 | [106-security-residual-fixes](./specs/106-security-residual-fixes/) | `shipped` | 18/19 (95%) |
 | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) | `shipped` | 126/126 (100%) |
-| [108-profiles-v3](./specs/108-profiles-v3/) | `in-flight` | 7/153 (5%) |
-| [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) | `in-flight` | 2/179 (1%) |
+| [108-profiles-v3](./specs/108-profiles-v3/) | `in-flight` | 18/153 (12%) |
+| [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) | `in-flight` | 30/179 (17%) |
