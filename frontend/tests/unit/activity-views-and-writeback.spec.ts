@@ -362,3 +362,43 @@ describe('Activity sends the session filter to REST (url-filter-contract.md "ses
     expect(lastCall.work_session_id).toBeUndefined()
   })
 })
+
+// Export must carry the same session narrowing as the table: a
+// session-filtered view that exports every session's rows hands the user a
+// wider file than what they were looking at.
+describe('Activity export carries the session filter (url-filter-contract.md "session" row)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    vi.spyOn(window, 'open').mockImplementation(() => null)
+  })
+
+  async function exportJSON(wrapper: Awaited<ReturnType<typeof mountActivityAt>>['wrapper']) {
+    const link = wrapper.findAll('a').find(a => a.text() === 'Export as JSON')
+    expect(link, 'Export as JSON menu item').toBeTruthy()
+    await link!.trigger('click')
+    const api = (await import('@/services/api')).default
+    return (api.getActivityExportUrl as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0]
+  }
+
+  it('a work session id (ws- prefix) is exported as work_session_id', async () => {
+    const { wrapper } = await mountActivityAt('/activity?view=calls&session=ws-aaaaa')
+    const params = await exportJSON(wrapper)
+    expect(params.work_session_id).toBe('ws-aaaaa')
+    expect(params.session_id).toBeUndefined()
+  })
+
+  it('a raw transport session id (no ws- prefix) is exported as session_id', async () => {
+    const { wrapper } = await mountActivityAt('/activity?view=calls&session=raw-transport-123')
+    const params = await exportJSON(wrapper)
+    expect(params.session_id).toBe('raw-transport-123')
+    expect(params.work_session_id).toBeUndefined()
+  })
+
+  it('no session filter sends neither session param', async () => {
+    const { wrapper } = await mountActivityAt('/activity?view=calls')
+    const params = await exportJSON(wrapper)
+    expect(params.session_id).toBeUndefined()
+    expect(params.work_session_id).toBeUndefined()
+  })
+})
