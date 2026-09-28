@@ -91,6 +91,12 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 		return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug)), nil
 	}
 	cfg := profiles.cfg
+	anonymousBindingGuard := anonymousProfileCaller(ctx) && p.bindingGuardActive(profiles)
+	if slug != "" && anonymousBindingGuard {
+		// Keep the refusal shape indistinguishable from an unknown profile and
+		// leave the session untouched while the FR-008a runtime guard is active.
+		return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug)), nil
+	}
 
 	// A non-empty slug must name a configured profile the caller may select
 	// (an empty slug clears the selection and is always accepted). The check
@@ -127,6 +133,12 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	}
 
 	p.sessionStore.SetActiveProfile(sessionID, slug)
+	if slug == "" && anonymousBindingGuard {
+		// Clearing is always admitted (FR-018), but the guarded anonymous
+		// caller still has no reachable servers, so do not return the legacy
+		// administrator-shaped all-server list.
+		return setProfileResult("", []string{})
+	}
 	if slug != "" {
 		p.logger.Info("set_profile: session profile updated",
 			zap.String("session_id", sessionID),

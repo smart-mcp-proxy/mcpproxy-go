@@ -29,6 +29,15 @@ type ProfileResolution struct {
 	// admission — "" for sources url/session/none, and for a source
 	// pin/binding/anonymous whose base is "All servers" (empty pin).
 	Base string
+	// BindingGuarded marks the FR-008a anonymous deny-all resolution when the
+	// anonymous base is empty. Callers that shape management or code-execution
+	// capabilities use this alongside Base so an empty anonymous_profile cannot
+	// retain the legacy administrator-shaped view.
+	BindingGuarded bool
+}
+
+func (r ProfileResolution) anonymousConfinementActive() bool {
+	return r.Base != "" || r.BindingGuarded
 }
 
 // clientCredentialFromContext returns (pin, mode, ok) for a Spec 108-c
@@ -102,6 +111,18 @@ func resolveV3Base(ctx context.Context, idx *profileIndex) (name string, source 
 // snapshots. Legacy surfaces not yet migrated can still use
 // resolveActiveProfileFromIndex.
 func (p *MCPProxyServer) ResolveProfileV3(ctx context.Context, idx *profileIndex) ProfileResolution {
+	if anonymousProfileCaller(ctx) && p.bindingGuardActive(idx) {
+		base := ""
+		if idx != nil && idx.cfg != nil {
+			base = idx.cfg.AnonymousProfile
+		} else if cfg := p.currentConfig(); cfg != nil {
+			base = cfg.AnonymousProfile
+		}
+		return ProfileResolution{
+			Name: base, Source: string(profile.SourceAnonymous),
+			Scope: profile.NewProfileScope(base, nil), Base: base, BindingGuarded: true,
+		}
+	}
 	if idx == nil {
 		// profileIndexCurrent deliberately returns nil for a scoped request
 		// during a publication gap instead of building an index on the request
@@ -200,4 +221,9 @@ func (p *MCPProxyServer) ResolveProfileV3(ctx context.Context, idx *profileIndex
 	}
 
 	return ProfileResolution{Source: string(profile.SourceNone)}
+}
+
+func anonymousProfileCaller(ctx context.Context) bool {
+	ac := auth.AuthContextFromContext(ctx)
+	return ac == nil || ac.Anonymous
 }

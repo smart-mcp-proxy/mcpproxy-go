@@ -1043,7 +1043,7 @@ func (p *MCPProxyServer) filterProfileV3Tools(ctx context.Context, tools []mcp.T
 	for _, tool := range tools {
 		switch tool.Name {
 		case "code_execution":
-			if danglingProfile || (resolution.Policy != nil && !resolution.Policy.CodeExecution) {
+			if resolution.BindingGuarded || danglingProfile || (resolution.Policy != nil && !resolution.Policy.CodeExecution) {
 				continue
 			}
 		case "upstream_servers", "quarantine_security":
@@ -1070,7 +1070,10 @@ func (p *MCPProxyServer) profileManagementToolHidden(ctx context.Context, toolNa
 		return resolution.Scope != nil || resolution.Policy != nil
 	}
 	resolution := p.ResolveProfileV3(ctx, idx)
-	confinedAnonymous := (ac == nil || ac.Anonymous) && resolution.Base != ""
+	if resolution.BindingGuarded {
+		return true
+	}
+	confinedAnonymous := (ac == nil || ac.Anonymous) && resolution.anonymousConfinementActive()
 	managementEnabled := resolution.Policy != nil && resolution.Policy.ManagementTools != nil && *resolution.Policy.ManagementTools
 	if resolution.Policy != nil && resolution.Policy.ManagementTools != nil && !*resolution.Policy.ManagementTools {
 		return true

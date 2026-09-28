@@ -97,7 +97,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	}
 	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
 	danglingProfile := profileResolution.Base != "" && profileIdx.position(profileResolution.Base) < 0
-	if danglingProfile || (profileResolution.Policy != nil && !profileResolution.Policy.CodeExecution) {
+	if profileResolution.BindingGuarded || danglingProfile || (profileResolution.Policy != nil && !profileResolution.Policy.CodeExecution) {
 		requestID := mintActivityRequestID("", "code_execution")
 		refusal := profile.ErrCodeExecutionBlocked
 		recordCodeExecRefusal(ctx, refusal)

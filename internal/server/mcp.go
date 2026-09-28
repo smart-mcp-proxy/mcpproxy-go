@@ -2793,7 +2793,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// one. Administrators keep today's profile-only text unchanged — they
 	// have no token scope to intersect with.
 	scopeAuthCtx := auth.AuthContextFromContext(ctx)
-	confinedAnonymous := (scopeAuthCtx == nil || scopeAuthCtx.Anonymous) && profileResolution.Base != ""
+	confinedAnonymous := (scopeAuthCtx == nil || scopeAuthCtx.Anonymous) && profileResolution.anonymousConfinementActive()
 	scopeAuthCtx = auth.ScopedView(scopeAuthCtx, confinedAnonymous)
 	scopedCallerForScope := auth.IsNonAdmin(scopeAuthCtx)
 	if scopedCallerForScope {
@@ -4109,7 +4109,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	// /api/v1/servers handlers, so the two can never drift (issues #877/#878).
 	profileResolution := p.ResolveProfileV3(ctx, p.profileIndexCurrent(ctx))
 	requestAuth := auth.AuthContextFromContext(ctx)
-	authCtx := auth.ScopedView(requestAuth, profileResolution.Base != "" && (requestAuth == nil || requestAuth.Anonymous))
+	authCtx := auth.ScopedView(requestAuth, profileResolution.anonymousConfinementActive() && (requestAuth == nil || requestAuth.Anonymous))
 	if !auth.AuthorizeServerOp(authCtx, operation) {
 		errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
 		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
@@ -4492,7 +4492,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 	// Spec 028: Filter servers to only those the agent token can access
 	profileResolution := p.ResolveProfileV3(ctx, p.profileIndexCurrent(ctx))
 	requestAuth := auth.AuthContextFromContext(ctx)
-	confinedAnonymous := (requestAuth == nil || requestAuth.Anonymous) && profileResolution.Base != ""
+	confinedAnonymous := (requestAuth == nil || requestAuth.Anonymous) && profileResolution.anonymousConfinementActive()
 	authCtx := auth.ScopedView(requestAuth, confinedAnonymous)
 	scopedCaller := auth.IsNonAdmin(authCtx)
 	if scopedCaller {
@@ -6470,7 +6470,7 @@ func (p *MCPProxyServer) handleTailLog(ctx context.Context, request mcp.CallTool
 	// so the response discloses neither existence, status nor logs.
 	profileResolution := p.ResolveProfileV3(ctx, p.profileIndexCurrent(ctx))
 	requestAuth := auth.AuthContextFromContext(ctx)
-	confinedAnonymous := (requestAuth == nil || requestAuth.Anonymous) && profileResolution.Base != ""
+	confinedAnonymous := (requestAuth == nil || requestAuth.Anonymous) && profileResolution.anonymousConfinementActive()
 	authCtx := auth.ScopedView(requestAuth, confinedAnonymous)
 	profileScope := profileResolution.Scope
 	if !p.serverInScope(authCtx, profileScope, name) {
