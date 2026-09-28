@@ -126,6 +126,21 @@ func (m *Manager) SearchToolsScoped(query string, limit int, inScope func(server
 	return m.bleveIndex.SearchToolsScoped(query, limit, inScope)
 }
 
+// SearchToolsAdmitted is SearchToolsScoped's hit-level counterpart (Spec 108
+// FR-011): the predicate resolves per-hit Admission (Admit/RejectScope/
+// RejectPolicy) over the canonical (server, tool) identity. See
+// BleveIndex.SearchToolsAdmitted.
+func (m *Manager) SearchToolsAdmitted(query string, limit int, admit func(Hit) Admission) ([]*config.SearchResult, int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20 // default limit, as SearchTools
+	}
+
+	return m.bleveIndex.SearchToolsAdmitted(query, limit, admit)
+}
+
 // Search searches for tools matching the query (alias for SearchTools)
 func (m *Manager) Search(query string, limit int) ([]*config.SearchResult, error) {
 	return m.SearchTools(query, limit)

@@ -440,7 +440,7 @@ func TestStaleTokenPinDeniesOnBothSessionAndPreflightPaths(t *testing.T) {
 
 		_, scope := fixture.proxy.resolveActiveProfile(ctx)
 		require.NotNil(t, scope)
-		vis, _ := fixture.proxy.indexedToolVisible(authCtx, scope, id.server, id.tool)
+		vis, _ := fixture.proxy.indexedToolVisible(authCtx, scope, nil, id.server, id.tool)
 		assert.False(t, vis, "search path: %s:%s must be denied under a stale pin", id.server, id.tool)
 	}
 
