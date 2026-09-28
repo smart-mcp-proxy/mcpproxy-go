@@ -51,6 +51,16 @@ final class CatalogTests: XCTestCase {
         XCTAssertTrue(result.added)
     }
 
+    func testDecodesServerAuthoritativeAddedName() throws {
+        let json = """
+        {"source": "official", "id": "credentialed", "title": "Credentialed", "verified": true, "official": true,
+         "description": "d", "transport": "http", "install": {"url": "https://example.test/mcp?token=catalog-value"},
+         "added": true, "added_server_name": "credentialed-installed"}
+        """
+        let result = try decode(CatalogResult.self, from: json)
+        XCTAssertEqual(result.addedServerName, "credentialed-installed")
+    }
+
     func testDecodesSearchResponseWithNullSections() throws {
         let json = """
         {"query": "github", "results": [], "sections": null,

@@ -53,11 +53,16 @@ struct CatalogResult: Codable, Identifiable, Equatable {
     let requiredInputs: [CatalogInput]?
     let sourceCodeURL: String?
     let added: Bool
+    /// The server-authoritative unique visible match for an Added card. This
+    /// avoids comparing the catalog install target with redacted server URLs
+    /// or command arguments after a prior session.
+    let addedServerName: String?
 
     enum CodingKeys: String, CodingKey {
         case source, id, title, publisher, verified, official, popularity, description, transport, install, added
         case requiredInputs = "required_inputs"
         case sourceCodeURL = "source_code_url"
+        case addedServerName = "added_server_name"
     }
 }
 

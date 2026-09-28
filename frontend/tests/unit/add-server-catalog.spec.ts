@@ -97,6 +97,30 @@ describe('CatalogSearch', () => {
     expect(router.currentRoute.value.path).toBe('/servers/installed-github')
   })
 
+  it('opens a prior-session credential-bearing Added/Open card from the server-authoritative name', async () => {
+    vi.mocked(api.catalogSearch).mockResolvedValue({
+      success: true,
+      data: {
+        query: '',
+        results: [],
+        sections: { official: [githubResult({
+          added: true,
+          added_server_name: 'installed-github-with-secret',
+          install: { url: 'https://api.githubcopilot.com/mcp/?access_token=catalog-value' },
+        })], popular: [] },
+        unavailable: [],
+      },
+    })
+    const wrapper = await mountCatalog()
+    await wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]').trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/servers/installed-github-with-secret')
+    // GET /servers redacts credential-bearing URLs, so it is not a safe join
+    // source. The authoritative catalog name makes no second request needed.
+    expect(api.getServers).not.toHaveBeenCalled()
+  })
+
   it('does not navigate an ambiguous prior-session Added/Open card', async () => {
     vi.mocked(api.catalogSearch).mockResolvedValue({
       success: true,

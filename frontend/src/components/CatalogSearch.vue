@@ -292,6 +292,13 @@ function serverTarget(server: { url?: string; command?: string; args?: string[] 
 }
 
 async function openPreviouslyAdded(result: CatalogResult): Promise<void> {
+  // GET /servers redacts credential-bearing URL query values and argv, so an
+  // exact install-target comparison can fail even though the server-authoritative
+  // catalog response already established a unique visible match.
+  if (result.added_server_name) {
+    await router.push(serverDetailPath(result.added_server_name))
+    return
+  }
   const response = await api.getServers()
   if (!response.success || !response.data) {
     error.value = response.error || 'Could not resolve the installed server. Refresh and try again.'
@@ -307,7 +314,7 @@ async function openPreviouslyAdded(result: CatalogResult): Promise<void> {
     return
   }
   error.value = matches.length === 0
-    ? 'This catalog entry is marked added, but its installed server is not visible. Open it from Servers.'
+    ? 'This catalog entry is marked added, but MCPProxy could not identify one visible installed server. Open it from Servers.'
     : 'More than one installed server matches this catalog entry. Open the intended server from Servers.'
 }
 

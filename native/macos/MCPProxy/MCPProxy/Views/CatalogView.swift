@@ -63,6 +63,19 @@ struct CatalogView: View {
                     .accessibilityIdentifier("catalog-unavailable-notice")
             }
 
+            // Navigation failures can happen without opening the secrets
+            // sheet (for a prior-session Added/Open card), or after the user
+            // dismisses it. Keep the actionable error in the catalog itself
+            // whenever the sheet is not currently presenting it.
+            if let addError, pendingResult == nil {
+                Text(addError)
+                    .font(.scaled(.caption, scale: fontScale))
+                    .foregroundStyle(.red)
+                    .padding(.horizontal)
+                    .padding(.bottom, 6)
+                    .accessibilityIdentifier("catalog-add-error")
+            }
+
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -367,6 +380,13 @@ struct CatalogView: View {
     /// Spec 109 FR-063: "Added ✓ · Open" opens the server it just added.
     private func openPreviouslyAdded(_ result: CatalogResult) async {
         guard let client = apiClient else { return }
+        // The catalog handler performed this join over raw visible
+        // configuration before GET /servers redacts credential-bearing query
+        // values and argv. Use its name only when it established uniqueness.
+        if let name = result.addedServerName {
+            await openAddedServer(named: name)
+            return
+        }
         do {
             let refreshed = try await client.servers()
             let target = catalogTarget(result.install)
@@ -375,7 +395,7 @@ struct CatalogView: View {
             }
             guard matches.count == 1, let server = matches.first else {
                 addError = matches.isEmpty
-                    ? "This catalog entry is marked added, but its installed server is not visible. Open it from Servers."
+                    ? "This catalog entry is marked added, but MCPProxy could not identify one visible installed server. Open it from Servers."
                     : "More than one installed server matches this catalog entry. Open the intended server from Servers."
                 return
             }

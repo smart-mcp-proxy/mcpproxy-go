@@ -879,6 +879,8 @@ export interface CatalogResult {
   required_inputs?: CatalogInput[]
   source_code_url?: string
   added: boolean
+  /** Unique visible installed server selected by the backend before redaction. */
+  added_server_name?: string
 }
 
 export interface CatalogSourceError {
