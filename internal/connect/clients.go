@@ -1,24 +1,50 @@
 // Package connect provides functionality to register MCPProxy as an MCP server
-// in various client configuration files (Claude Code, Cursor, VS Code, Windsurf, Codex, Gemini).
+// in various client configuration files (Claude Code, Cursor, VS Code, Windsurf, Codex, Gemini, ZCode).
 package connect
 
 import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // ClientDef describes a known MCP client and its configuration file format.
 type ClientDef struct {
-	ID        string // Unique identifier, e.g. "claude-code"
-	Name      string // Human-readable name, e.g. "Claude Code"
-	Format    string // File format: "json" or "toml"
-	ServerKey string // Top-level key for server entries: "mcpServers" or "servers"
+	ID     string // Unique identifier, e.g. "claude-code"
+	Name   string // Human-readable name, e.g. "Claude Code"
+	Format string // File format: "json" or "toml"
+	// ServerKey is the human-readable label for the config section server
+	// entries live under ("mcpServers", "servers", ...), and doubles as the
+	// literal top-level key for every client except those special-cased in
+	// serversMapPath (e.g. ZCode's "mcp.servers" is a nested path, not a
+	// literal top-level key).
+	ServerKey string
 	Supported bool   // Whether this client can be connected (directly or via a bridge)
 	Reason    string // Explanation when Supported is false
 	Note      string // Optional caveat shown for supported clients (e.g. bridge requirement)
 	Bridge    bool   // Connects via a stdio bridge; Connect can create the config when absent
 	Icon      string // Icon identifier for frontend use
+
+	// ClientInfoNames lists the aliases this client is known to send as its MCP
+	// `initialize` request's `clientInfo.name` (Spec 109-b). Used to match a
+	// live session/activation record back to this client id (e.g. presence's
+	// "connected but never seen" detection). Best-effort: recorded from public
+	// client documentation and observed behavior, NOT verified here against a
+	// live `initialize` from every client (this environment has no way to spin
+	// up Cursor/Windsurf/etc. and inspect their handshake) — a wrong or missing
+	// alias only means a client is misclassified as "never seen" one release
+	// longer, never a security issue, so this is a reasonable place to make an
+	// informed assumption rather than block (see source comments below).
+	ClientInfoNames []string
+	// ReloadHint is the per-client, human-readable instruction for making a
+	// freshly-written config take effect (FR-037/FR-042): most of these
+	// clients only read their MCP config at startup or on an explicit
+	// reload command, so a `connect` that succeeds is not yet a client that
+	// has picked up the new server. Best-effort wording (not verified against
+	// a live client in this environment); see the per-client comment for its
+	// source.
+	ReloadHint string
 }
 
 // allClients defines all known MCP client applications.
@@ -30,6 +56,9 @@ var allClients = []ClientDef{
 		ServerKey: "mcpServers",
 		Supported: true,
 		Icon:      "claude-code",
+		// clientInfo.name observed from Claude Code's own MCP client.
+		ClientInfoNames: []string{"claude-code"},
+		ReloadHint:      "Run /mcp in Claude Code (or restart it) to load MCPProxy",
 	},
 	{
 		ID:        "claude-desktop",
@@ -40,54 +69,91 @@ var allClients = []ClientDef{
 		Note:      "Connects via an mcp-remote stdio bridge (npx -y mcp-remote). Requires Node.js.",
 		Bridge:    true,
 		Icon:      "claude-desktop",
+		// "claude-ai" is Anthropic's published clientInfo.name for the Claude
+		// Desktop app's MCP client.
+		ClientInfoNames: []string{"claude-ai", "Claude"},
+		ReloadHint:      "Restart Claude Desktop to load MCPProxy",
 	},
 	{
-		ID:        "cursor",
-		Name:      "Cursor",
-		Format:    "json",
-		ServerKey: "mcpServers",
-		Supported: true,
-		Icon:      "cursor",
+		ID:              "cursor",
+		Name:            "Cursor",
+		Format:          "json",
+		ServerKey:       "mcpServers",
+		Supported:       true,
+		Icon:            "cursor",
+		ClientInfoNames: []string{"cursor", "cursor-vscode"},
+		ReloadHint:      "Reload the Cursor window (or restart Cursor) to load MCPProxy",
 	},
 	{
-		ID:        "windsurf",
-		Name:      "Windsurf",
-		Format:    "json",
-		ServerKey: "mcpServers",
-		Supported: true,
-		Icon:      "windsurf",
+		ID:              "windsurf",
+		Name:            "Windsurf",
+		Format:          "json",
+		ServerKey:       "mcpServers",
+		Supported:       true,
+		Icon:            "windsurf",
+		ClientInfoNames: []string{"windsurf"},
+		ReloadHint:      "Reload the Windsurf window (or restart Windsurf) to load MCPProxy",
 	},
 	{
-		ID:        "vscode",
-		Name:      "VS Code",
-		Format:    "json",
-		ServerKey: "servers",
-		Supported: true,
-		Icon:      "vscode",
+		ID:              "vscode",
+		Name:            "VS Code",
+		Format:          "json",
+		ServerKey:       "servers",
+		Supported:       true,
+		Icon:            "vscode",
+		ClientInfoNames: []string{"Visual Studio Code", "visual-studio-code", "vscode"},
+		ReloadHint:      "Run \"MCP: List Servers\" → Restart (or reload the window) in VS Code to load MCPProxy",
 	},
 	{
-		ID:        "codex",
-		Name:      "Codex CLI",
-		Format:    "toml",
-		ServerKey: "mcp_servers",
-		Supported: true,
-		Icon:      "codex",
+		ID:              "codex",
+		Name:            "Codex CLI",
+		Format:          "toml",
+		ServerKey:       "mcp_servers",
+		Supported:       true,
+		Icon:            "codex",
+		ClientInfoNames: []string{"codex", "codex-cli"},
+		ReloadHint:      "Restart Codex CLI to load MCPProxy",
 	},
 	{
-		ID:        "gemini",
-		Name:      "Gemini CLI",
-		Format:    "json",
-		ServerKey: "mcpServers",
-		Supported: true,
-		Icon:      "gemini",
+		ID:              "gemini",
+		Name:            "Gemini CLI",
+		Format:          "json",
+		ServerKey:       "mcpServers",
+		Supported:       true,
+		Icon:            "gemini",
+		ClientInfoNames: []string{"gemini-cli", "gemini"},
+		ReloadHint:      "Restart Gemini CLI to load MCPProxy",
 	},
 	{
-		ID:        "opencode",
-		Name:      "OpenCode",
-		Format:    "json",
-		ServerKey: "mcp",
+		ID:              "opencode",
+		Name:            "OpenCode",
+		Format:          "json",
+		ServerKey:       "mcp",
+		Supported:       true,
+		Icon:            "opencode",
+		ClientInfoNames: []string{"opencode"},
+		ReloadHint:      "Restart OpenCode to load MCPProxy",
+	},
+	{
+		ID:     "zcode",
+		Name:   "ZCode",
+		Format: "json",
+		// Display label only — the literal access path is nested; see
+		// serversMapPath.
+		ServerKey: "mcp.servers",
 		Supported: true,
-		Icon:      "opencode",
+		// ZCode also reads ~/.agents/mcp.json (top-level mcpServers) as a
+		// same-scope fallback, but ONLY while ~/.zcode/cli/config.json itself
+		// defines no MCP servers — the moment it defines any (including ours),
+		// the fallback is ignored entirely for that scope (ZCode's own
+		// diagnosing-mcp skill doc, §2/pitfall 12). So a user whose servers
+		// live in .agents/mcp.json would see them silently stop loading in
+		// ZCode once mcpproxy connects. Nothing is deleted or corrupted, but
+		// it's worth surfacing before the user clicks Connect.
+		Note:            "If your MCP servers are defined in ~/.agents/mcp.json, they will stop loading in ZCode while this entry is present in ~/.zcode/cli/config.json.",
+		Icon:            "zcode",
+		ClientInfoNames: []string{"zcode"},
+		ReloadHint:      "Restart ZCode to load MCPProxy",
 	},
 }
 
@@ -168,8 +234,199 @@ func ConfigPath(clientID, homeDir string) string {
 	case "opencode":
 		return filepath.Join(opencodeConfigDir(homeDir), "opencode.json")
 
+	case "zcode":
+		// Same fixed-dotfile-under-$HOME pattern as Cursor/Windsurf: ZCode's own
+		// "diagnosing-mcp" skill documents this as the one user-level config file
+		// (`mcp.servers` field) on every OS — no platform app-data branching.
+		return filepath.Join(homeDir, ".zcode", "cli", "config.json")
+
 	default:
 		return ""
+	}
+}
+
+// DisplayPath returns path with a leading match of homeDir (or, when homeDir
+// is empty, os.UserHomeDir() — %USERPROFILE% on Windows, since that is what
+// os.UserHomeDir resolves through there) replaced by "~", for compact display
+// in tables and UI rows (FR-037). The full path remains available via
+// ConfigPath/config_path; this is cosmetic only and never changes what is
+// written to disk. Returns path unchanged when it does not live under the
+// home directory, or when the home directory cannot be resolved.
+func DisplayPath(path, homeDir string) string {
+	if path == "" {
+		return path
+	}
+	if homeDir == "" {
+		var err error
+		homeDir, err = os.UserHomeDir()
+		if err != nil || homeDir == "" {
+			return path
+		}
+	}
+	homeDir = strings.TrimRight(homeDir, string(filepath.Separator))
+	if homeDir == "" {
+		// homeDir was exactly the filesystem root (e.g. HOME=/ in a minimal
+		// container, or root's own home). TrimRight collapsed it to "", which
+		// would otherwise make every absolute path match the "under home"
+		// prefix below. There is no meaningful non-degenerate shortening for
+		// a root home, so leave the path as-is.
+		return path
+	}
+	if matched, rest := homePrefixMatch(path, homeDir, caseInsensitiveHomeMatch()); matched {
+		if rest == "" {
+			return "~"
+		}
+		return "~" + string(filepath.Separator) + rest
+	}
+	return path
+}
+
+// caseInsensitiveHomeMatch reports whether DisplayPath's home-prefix
+// comparison should ignore case. Windows filesystem paths are
+// case-insensitive, and the home directory (os.UserHomeDir -> %USERPROFILE%)
+// and per-client config roots (%APPDATA%/%LOCALAPPDATA%, read directly via
+// os.Getenv in ConfigPath above) are independent env vars that can
+// legitimately differ in casing — e.g. after a profile migration or with
+// roaming profiles. An exact byte comparison then fails to recognize a path
+// that IS under home, leaving the raw, un-shortened path displayed, which is
+// exactly the inconsistency DisplayPath exists to remove. A package
+// variable (rather than an inline runtime.GOOS check) so tests can exercise
+// the Windows behavior on any host platform.
+var caseInsensitiveHomeMatch = func() bool {
+	return runtime.GOOS == "windows"
+}
+
+// homePrefixMatch reports whether path equals home or lives directly under
+// it, optionally ignoring case, and returns the remainder path segment
+// (using path's own original casing, since that reflects what is actually
+// on disk) when it does.
+func homePrefixMatch(path, home string, caseInsensitive bool) (matched bool, rest string) {
+	equal := path == home
+	if caseInsensitive {
+		equal = strings.EqualFold(path, home)
+	}
+	if equal {
+		return true, ""
+	}
+	prefix := home + string(filepath.Separator)
+	if caseInsensitive {
+		if len(path) >= len(prefix) && strings.EqualFold(path[:len(prefix)], prefix) {
+			return true, path[len(prefix):]
+		}
+		return false, ""
+	}
+	if strings.HasPrefix(path, prefix) {
+		return true, strings.TrimPrefix(path, prefix)
+	}
+	return false, ""
+}
+
+// disconnectReloadHint adapts a client's connect-oriented ReloadHint text
+// (every entry in clientRegistry is worded "...to load MCPProxy") for a
+// disconnect/undo outcome, where the entry was just removed rather than
+// added — "reload ... to load MCPProxy" right after removing it reads as
+// though the removal did not happen (review round 3 finding). The reload
+// ACTION (restart/reload the client) is unchanged; only the reason is
+// reworded.
+func disconnectReloadHint(connectHint string) string {
+	const suffix = "to load MCPProxy"
+	if trimmed, ok := strings.CutSuffix(connectHint, suffix); ok {
+		return trimmed + "for this change to take effect"
+	}
+	return connectHint
+}
+
+// serversMapPath returns the sequence of nested JSON/TOML keys leading to a
+// client's servers map, for the one client whose ServerKey is not a literal
+// top-level key. Returns nil for every other client, telling
+// getServersMap/setServersMap to fall back to the plain client.ServerKey
+// lookup they used before this existed.
+//
+// ZCode's config schema is strict (an unknown top-level-adjacent key drops a
+// server entry silently), and its documented shape nests server entries two
+// levels deep — {"mcp": {"servers": {...}}} — unlike every other supported
+// client's single flat key.
+func serversMapPath(clientID string) []string {
+	if clientID == "zcode" {
+		return []string{"mcp", "servers"}
+	}
+	return nil
+}
+
+// resolveServersMapState classifies a client's servers-map location within
+// parsed config data (following serversMapPath, or the flat client.ServerKey
+// lookup for every client that doesn't need one), distinguishing three
+// outcomes that getServersMap's plain (map, bool) collapses into two:
+//
+//   - found=true: the full path resolved to an object; serversMap is it.
+//   - found=false, malformed=false: some key along the path is simply
+//     ABSENT — a legitimate "nothing here yet, safe to create" case.
+//   - found=false, malformed=true: a key along the path is PRESENT but its
+//     value is not an object (a hand-edited string/number/array/bool, or —
+//     for a nested path like ZCode's mcp.servers — an intermediate level
+//     that isn't a table either). This must never be treated the same as
+//     "absent": collapsing the two let a non-object value be silently
+//     replaced by a fresh empty map on write, with drift detection never
+//     getting a chance to refuse (Spec 091 FR-005 gap, PR #1340).
+//
+// This is the single place that distinction is computed, so both flat-key
+// clients and any future nested-path client (see serversMapPath) get it for
+// free — callers that only need the old two-way "found or not" question can
+// still use getServersMap, which is defined in terms of this.
+func resolveServersMapState(client *ClientDef, data map[string]interface{}) (serversMap map[string]interface{}, found, malformed bool) {
+	path := serversMapPath(client.ID)
+	if path == nil {
+		path = []string{client.ServerKey}
+	}
+	cur := data
+	for i, key := range path {
+		raw, present := cur[key]
+		if !present {
+			return nil, false, false
+		}
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			return nil, false, true
+		}
+		if i == len(path)-1 {
+			return m, true, false
+		}
+		cur = m
+	}
+	return nil, false, false
+}
+
+// getServersMap resolves a client's servers map from parsed config data,
+// following serversMapPath when the client needs one and falling back to the
+// flat client.ServerKey lookup otherwise. Callers that need to distinguish
+// "absent" from "present but not an object" should use
+// resolveServersMapState instead.
+func getServersMap(client *ClientDef, data map[string]interface{}) (map[string]interface{}, bool) {
+	m, found, _ := resolveServersMapState(client, data)
+	return m, found
+}
+
+// setServersMap writes serversMap back into data at a client's servers
+// location, creating any missing intermediate objects along the way (without
+// disturbing sibling keys already there) when the client needs a nested path.
+func setServersMap(client *ClientDef, data map[string]interface{}, serversMap map[string]interface{}) {
+	path := serversMapPath(client.ID)
+	if path == nil {
+		data[client.ServerKey] = serversMap
+		return
+	}
+	cur := data
+	for i, key := range path {
+		if i == len(path)-1 {
+			cur[key] = serversMap
+			return
+		}
+		next, ok := cur[key].(map[string]interface{})
+		if !ok {
+			next = make(map[string]interface{})
+			cur[key] = next
+		}
+		cur = next
 	}
 }
 
@@ -254,9 +511,10 @@ func (s *Service) checkedPaths(clientID string) []string {
 // the query fallback authenticate identically.
 func buildServerEntry(clientID string, p serverEntryParams) map[string]interface{} {
 	switch clientID {
-	case "claude-code", "vscode":
-		// Claude Code (~/.claude.json) and VS Code (mcp.json) "type":"http"
-		// entries support a "headers" object.
+	case "claude-code", "vscode", "zcode":
+		// Claude Code (~/.claude.json), VS Code (mcp.json) and ZCode
+		// (~/.zcode/cli/config.json, mcp.servers) "type":"http" entries all
+		// support a "headers" object.
 		return withAPIKeyHeader(map[string]interface{}{
 			"type": "http",
 			"url":  p.baseURL,

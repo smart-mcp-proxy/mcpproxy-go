@@ -434,6 +434,62 @@ test('the footer never overlaps the page content', async ({ page }) => {
   expect(overlap, 'main content bleeds under the footer').toBeLessThanOrEqual(1)
 })
 
+// Spec 109 PR-a review round 1 (H4) / round 3 finding 2, T007's Playwright
+// half: proves the --z-header/--z-sidebar fix (frontend/src/assets/z-index.css,
+// frontend/tests/unit/z-index-scale.spec.ts) holds under REAL layout and
+// paint, not just token ordering in jsdom. Round 1 shipped these tokens
+// inverted, which put the sticky TopHeader back on top of the open mobile
+// drawer instead of the other way around — the exact class of stacking bug
+// this z-index scale exists to prevent (see z-index.css's own header
+// comment). `elementFromPoint` at a coordinate the sticky header and the open
+// drawer both occupy is the only way to prove which one the browser actually
+// painted on top; a bounding-box/CSS-value assertion would pass even if a
+// third ancestor's stacking context silently swallowed the token.
+test('mobile drawer sidebar paints above the sticky header, not under it (H4)', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await goto(page, '/')
+
+  const header = page.locator('header')
+  await expect(header).toBeVisible()
+  const headerBox = await header.boundingBox()
+  expect(headerBox, 'header has no box').not.toBeNull()
+  // A point inside the sticky header's own bounding box — this is exactly
+  // where the header used to win when the tokens were inverted.
+  const point = { x: headerBox!.x + headerBox!.width / 2, y: headerBox!.y + headerBox!.height / 2 }
+
+  // Sanity check: before the drawer opens, that point IS the header (proves
+  // the point is meaningful, not e.g. sitting over a hole in the header).
+  const beforeOpen = await page.evaluate(
+    (p) => !!document.elementFromPoint(p.x, p.y)?.closest('header'),
+    point,
+  )
+  expect(beforeOpen, 'test point does not land on the header before the drawer opens').toBe(true)
+
+  await page.locator('label[for="sidebar-drawer"][aria-label="Open navigation menu"]').click()
+  await expect(page.locator('#sidebar-drawer')).toBeChecked()
+
+  // daisyUI's drawer opens via a `visibility`/`opacity` CSS transition
+  // (`allow-discrete`, ~0.2-0.3s), not instantly when the checkbox flips —
+  // during that brief window the drawer is not yet paintable/hit-testable
+  // and elementFromPoint legitimately still returns the header underneath,
+  // exactly like a real user would see for a couple of frames. That is
+  // normal opening animation, not the H4 regression (a permanently wrong
+  // SETTLED z-index, not a transient mid-transition frame), so poll for the
+  // settled state instead of asserting on the very next frame.
+  const elementAtPoint = () =>
+    page.evaluate((p) => {
+      const el = document.elementFromPoint(p.x, p.y)
+      return {
+        insideHeader: !!el?.closest('header'),
+        insideDrawer: !!el?.closest('.drawer-side'),
+      }
+    }, point)
+
+  await expect
+    .poll(elementAtPoint, { message: 'drawer never settled above the header at the shared point' })
+    .toEqual({ insideHeader: false, insideDrawer: true })
+})
+
 // ---------------------------------------------------------------------------
 // F30 — accessible names, live region, table caption.
 // ---------------------------------------------------------------------------

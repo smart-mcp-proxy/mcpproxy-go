@@ -1,5 +1,5 @@
 <template>
-  <div class="drawer-side z-40">
+  <div class="drawer-side z-[var(--z-sidebar)]">
     <label for="sidebar-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
     <aside
       class="bg-base-100 h-screen flex flex-col border-r border-base-300 fixed transition-[width] duration-200 ease-out"
@@ -337,14 +337,14 @@
           <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li>
               <router-link
-                to="/repositories"
-                :class="{ 'active': isActiveRoute('/repositories') }"
+                to="/add-server"
+                :class="{ 'active': isActiveRoute('/add-server') || isActiveRoute('/repositories') }"
                 class="rounded-lg text-base-content/70"
-                :title="collapsed ? 'Repositories' : ''"
-                :aria-label="collapsed ? 'Repositories' : undefined"
+                :title="collapsed ? 'Add Server' : ''"
+                :aria-label="collapsed ? 'Add Server' : undefined"
               >
                 <IconRepo class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed" class="text-[13px]">Repositories</span>
+                <span v-show="!collapsed" class="text-[13px]">Add Server</span>
               </router-link>
             </li>
             <li>
@@ -352,11 +352,11 @@
                 to="/settings"
                 :class="{ 'active': isActiveRoute('/settings') }"
                 class="rounded-lg text-base-content/70"
-                :title="collapsed ? 'Configuration' : ''"
-                :aria-label="collapsed ? 'Configuration' : undefined"
+                :title="collapsed ? 'Settings' : ''"
+                :aria-label="collapsed ? 'Settings' : undefined"
               >
                 <IconSettings class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed" class="text-[13px]">Configuration</span>
+                <span v-show="!collapsed" class="text-[13px]">Settings</span>
               </router-link>
             </li>
           </ul>
@@ -532,7 +532,7 @@ function onClickSetup() {
 
 function loadBadgeCounts() {
   // Personal-edition only — the surrounding template gates this for personal users.
-  if (!authStore.isTeamsEdition) {
+  if (!authStore.isTeamsEdition || authStore.canLoadCore) {
     void onboardingStore.fetchState()
     void fetchToolCount()
     void fetchSecretCount()
@@ -704,7 +704,7 @@ const teamsAdminMenu = [
   { name: 'Activity (All)', path: '/activity' },
   { name: 'Users', path: '/admin/users' },
   { name: 'Sessions', path: '/sessions' },
-  { name: 'Configuration', path: '/settings' },
+  { name: 'Settings', path: '/settings' },
 ]
 
 const userInitials = computed(() => {

@@ -112,6 +112,22 @@ func (s *Server) requireAdminRead(w http.ResponseWriter, r *http.Request, messag
 	return true
 }
 
+// requireAdminReadMiddleware is requireAdminRead as chi middleware, for routes
+// that are whole-handler admin-only rather than admin-only in one branch
+// (SEC-07: /metrics). It keeps the identical semantics, including the
+// nil-AuthContext passthrough, so one mux still carries one definition of
+// "not admin".
+func (s *Server) requireAdminReadMiddleware(message string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !s.requireAdminRead(w, r, message) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // requireTokenStore checks that the token store is configured.
 // Returns true if the store is available, false if a 500 was written.
 func (s *Server) requireTokenStore(w http.ResponseWriter, r *http.Request) bool {
@@ -251,6 +267,12 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.requireTokenStore(w, r) {
+		return
+	}
+	// Spec 109-k FR-080a: GET /tokens gates profile/token until Spec 108
+	// wires `?profile=`/`?token=` (url-filter-contract.md `profile`/`token`
+	// rows).
+	if !rejectUnsupportedScopeFilters(w, r) {
 		return
 	}
 
@@ -399,6 +421,16 @@ func (s *Server) handleRegenerateToken(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, storage.ErrAgentTokenRevoked) {
 			s.writeError(w, r, http.StatusConflict,
 				fmt.Sprintf("Token %q is revoked and cannot be regenerated. Delete it and create a new token.", name))
+			return
+		}
+		// F1 (Spec 108-c review): this generic, name-based regenerate mints a
+		// fresh mcp_agt_ secret and cannot update a kind=client record's
+		// Kind/ClientID/ProfileMode fields to match — doing so would
+		// permanently brick the credential (every future authentication
+		// fails ValidateTokenInvariants). Refused before any mutation.
+		if errors.Is(err, storage.ErrClientCredentialRegenerateRefused) {
+			s.writeError(w, r, http.StatusConflict,
+				fmt.Sprintf("Token %q is a client credential and cannot be regenerated via this endpoint. Use the client-credential rotation flow instead.", name))
 			return
 		}
 		s.logger.Errorf("Failed to regenerate agent token: %v", err)

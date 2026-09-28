@@ -38,7 +38,7 @@ import (
 // address / API key / require_mcp_auth changed since the connect: the entry the
 // service would write today no longer matches the one on disk, so mcpproxy can
 // no longer prove the file is untouched.
-func (s *Service) Undo(clientID, serverName, backupName string) (*ConnectResult, error) {
+func (s *Service) Undo(clientID, serverName, backupName string) (res *ConnectResult, err error) {
 	client := FindClient(clientID)
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
@@ -46,6 +46,19 @@ func (s *Service) Undo(clientID, serverName, backupName string) (*ConnectResult,
 	if !client.Supported {
 		return nil, fmt.Errorf("client %s is not supported: %s", client.Name, client.Reason)
 	}
+
+	// FR-037/FR-042 (review round 3 finding): fill DisplayPath/ReloadHint on
+	// whichever ConnectResult this call returns, matching Connect/Disconnect
+	// — every branch below, refusal or success. Undo reverts a connect (the
+	// mcpproxy entry ends up removed either way), so the hint is reworded for
+	// removal the same way Disconnect's is.
+	defer func() {
+		if res != nil {
+			res.DisplayPath = DisplayPath(res.ConfigPath, s.homeDir)
+			res.ReloadHint = disconnectReloadHint(client.ReloadHint)
+		}
+	}()
+
 	if serverName == "" {
 		serverName = defaultServerName
 	}
@@ -96,7 +109,7 @@ func (s *Service) Undo(clientID, serverName, backupName string) (*ConnectResult,
 		backupPath = filepath.Join(filepath.Dir(cfgPath), base)
 	}
 
-	res, err := s.undo(client, cfgPath, serverName, backupPath)
+	res, err = s.undo(client, cfgPath, serverName, backupPath)
 	return res, s.asAccessError(client, cfgPath, err)
 }
 
@@ -183,7 +196,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 	if info, statErr := os.Stat(cfgPath); statErr == nil {
 		perm = info.Mode()
 	}
-	if err := atomicWriteFile(cfgPath, backupRaw, perm); err != nil {
+	if err := atomicWriteFile(cfgPath, backupRaw, perm, nil); err != nil {
 		return nil, fmt.Errorf("restore from backup: %w", err)
 	}
 
@@ -227,11 +240,16 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 	}
 
 	if len(backupRaw) > 0 {
+		// unmarshalLenientJSON normalizes a top-level JSON `null` back to a
+		// non-nil map on success (a backup that is exactly "null" would
+		// otherwise reset the pre-initialized `data` above to nil and panic on
+		// the setServersMap write below), so no additional nil check is needed
+		// here.
 		if err := unmarshalLenientJSON(backupRaw, &data); err != nil {
 			return nil, fmt.Errorf("parse backup JSON: %w", err)
 		}
 	}
-	serversMap, _ := data[client.ServerKey].(map[string]interface{})
+	serversMap, _ := getServersMap(client, data)
 	if serversMap == nil {
 		serversMap = make(map[string]interface{})
 	}
@@ -243,6 +261,6 @@ func (s *Service) replayConnectWrite(client *ClientDef, serverName string, backu
 		}
 	}
 	serversMap[serverName] = buildServerEntry(client.ID, s.entryParams(false))
-	data[client.ServerKey] = serversMap
+	setServersMap(client, data, serversMap)
 	return marshalJSONIndent(data)
 }

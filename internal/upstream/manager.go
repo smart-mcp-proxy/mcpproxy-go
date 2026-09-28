@@ -46,6 +46,16 @@ var dockerResolverFn = func(logger *zap.Logger) (string, error) {
 	return shellwrap.ResolveDockerPath(logger)
 }
 
+func runDockerInfo(ctx context.Context, dockerBin string) error {
+	return exec.CommandContext(ctx, dockerBin, "info", "--format", "{{json .ServerVersion}}").Run()
+}
+
+// dockerInfoRunnerFn runs the resolved docker binary's `info` command.
+// Overridable in tests, mirroring dockerResolverFn above so the two sibling
+// fakes checkDockerAvailability needs (which binary, and running it) share one
+// injection idiom instead of two.
+var dockerInfoRunnerFn = runDockerInfo
+
 // Docker recovery constants - internal implementation defaults
 const (
 	dockerCheckInterval      = 30 * time.Second // How often to check Docker availability
@@ -3035,8 +3045,7 @@ func (m *Manager) checkDockerAvailability(ctx context.Context) error {
 		dockerBin = "docker"
 	}
 
-	cmd := exec.CommandContext(checkCtx, dockerBin, "info", "--format", "{{json .ServerVersion}}")
-	if err := cmd.Run(); err != nil {
+	if err := dockerInfoRunnerFn(checkCtx, dockerBin); err != nil {
 		return fmt.Errorf("docker unavailable: %w", err)
 	}
 	return nil

@@ -46,6 +46,7 @@ func TestSearchTools_RestNameIsBare(t *testing.T) {
 	server := NewServer(&canonicalSearchController{&MockServerController{}}, logger, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/index/search?q=issue", http.NoBody)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 

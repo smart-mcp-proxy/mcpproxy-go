@@ -756,13 +756,24 @@ func selectablePinnedCtx(pin string, allowed ...string) context.Context {
 // The oracle here is deterministic, not wall-clock: the allocation profile of
 // one predicate call is identical for every pin outcome over the same fleet
 // (the early-returning version allocated 2 / 0 / 1 times respectively).
+//
+// AllocsPerRun counts process-wide mallocs, so a goroutine still winding down
+// from an earlier test (a runtime fixture's shutdown, an index observer)
+// inflates whichever case it overlaps — CI once read 48 for one case and 12
+// for the others — and, independently, `go test -race` disables the
+// tiny-object allocator, which can make two otherwise-identical cases differ
+// by a small constant on every back-to-back reading with no gap between
+// them. Noise only ever ADDS, so retryUntilAllocsMatch (defined alongside
+// its identical use in TestProfileMiddleware_RefusalWorkIndependentOfFleet)
+// retries a full reading of the three cases, with a real sleep between
+// attempts, until one attempt finds them all equal.
 func TestSelectableProfileNames_PinOutcomesDoSameWork(t *testing.T) {
 	const n = 64
 	alive := selectableProbeConfig(n)
 	deleted := selectableProbeConfig(n)
 	deleted.Profiles[0].Name = "was-the-pin" // same fleet size, the pin is gone
 
-	cases := map[string]struct {
+	caseConfigs := map[string]struct {
 		ctx context.Context
 		cfg *config.Config
 	}{
@@ -770,21 +781,14 @@ func TestSelectableProfileNames_PinOutcomesDoSameWork(t *testing.T) {
 		"zero-reach pin first": {selectablePinnedCtx("pin", "other-srv"), alive},
 		"deleted pin":          {selectablePinnedCtx("pin", "pin-srv"), deleted},
 	}
-	// AllocsPerRun counts process-wide mallocs, so a goroutine still winding
-	// down from an earlier test (a runtime fixture's shutdown, an index
-	// observer) inflates whichever case it overlaps — CI once read 48 for
-	// one case and 12 for the others. Noise only ever ADDS, so the minimum
-	// over a few samples of the predicate alone (index built outside the
-	// window) is the deterministic figure this test is about.
-	allocs := map[string]float64{}
-	for name, c := range cases {
-		idx := newProfileIndex(c.cfg)
-		best := math.Inf(1)
-		for i := 0; i < 7; i++ {
-			best = math.Min(best, testing.AllocsPerRun(50, func() { idx.selectableNames(c.ctx) }))
-		}
-		allocs[name] = best
+
+	settleBackgroundGoroutines(t)
+	cases := make(map[string]func(), len(caseConfigs))
+	for name, c := range caseConfigs {
+		idx, ctx := newProfileIndex(c.cfg), c.ctx // index built outside the measured window
+		cases[name] = func() { idx.selectableNames(ctx) }
 	}
+	allocs := retryUntilAllocsMatch(15, 50, "reachable pin first", cases)
 	for name, got := range allocs {
 		require.Equal(t, allocs["reachable pin first"], got, "%s must allocate exactly like a reachable pin: %v", name, allocs)
 	}

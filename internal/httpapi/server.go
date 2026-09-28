@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpx"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/launch"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
@@ -40,7 +41,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
 
@@ -143,7 +143,11 @@ type ServerController interface {
 	QuarantineServer(serverName string, quarantined bool) error
 	GetQuarantinedServers() ([]map[string]interface{}, error)
 	UnquarantineServer(serverName string) error
-	GetManagementService() interface{} // Returns the management service for unified operations
+	// GetManagementService returns the unified lifecycle/diagnostics service.
+	// Typed, not interface{}: handlers must get a compile-time contract rather
+	// than re-deriving a method set with ad-hoc assertions that fail at
+	// runtime (ARC-04). May be nil before the service is installed.
+	GetManagementService() management.Service
 	DiscoverServerTools(ctx context.Context, serverName string) error
 
 	// Tools and search
@@ -165,7 +169,10 @@ type ServerController interface {
 
 	// Secrets management
 	GetSecretResolver() *secret.Resolver
-	GetCurrentConfig() interface{}
+	// GetCurrentConfig returns the live config snapshot, or nil when none is
+	// installed. Typed so apiKeyAuthMiddleware cannot be handed a value it
+	// fails to recognise and then wave through unauthenticated (SEC-02).
+	GetCurrentConfig() *config.Config
 	NotifySecretsChanged(ctx context.Context, operation, secretName string) error
 
 	// Tool call history. The ToolCallScope argument is the caller's server
@@ -270,6 +277,11 @@ type ServerController interface {
 	// Onboarding wizard (Spec 046)
 	GetOnboardingState() (*storage.OnboardingState, error)
 	SaveOnboardingState(state *storage.OnboardingState) error
+	// UpdateOnboardingState runs fn against the current onboarding state and
+	// persists it atomically (Spec 109-b, T035): every writer of the record
+	// must use this instead of a separate Get+Save pair, so a concurrent
+	// writer's field is never dropped.
+	UpdateOnboardingState(fn func(*storage.OnboardingState) error) error
 
 	// Activation state (Spec 044) — read-only access used by the v2
 	// onboarding wizard's Verify tab to detect whether any MCP client has
@@ -464,6 +476,30 @@ func (s *Server) Router() *chi.Mux {
 	return s.router
 }
 
+// currentAdminAPIKey returns the currently-configured admin API key, read
+// fresh from the controller on every call, or "" when config is unavailable
+// (nothing to redact then; apiKeyAuthMiddleware refuses such requests).
+//
+// SEC-01 gap fix (PR #1350, live-verification follow-up): every
+// oauth.LogSafeRequestPath / LogSafeQueryString / LogSafeRequestURL call site
+// below passes this so the admin key is redacted by EXACT VALUE wherever it
+// appears in a path, query or referer — the one rule that catches it with no
+// vendor shape to key on. Reading it fresh (rather than caching it once) means
+// a key rotated between requests is covered immediately, with nothing to keep
+// in sync; the cost is one more RLock through the controller per log line,
+// the same one apiKeyAuthMiddleware already pays for every authenticated
+// request. See oauth.redactKnownSecrets for the full false-positive analysis.
+func (s *Server) currentAdminAPIKey() string {
+	if s.controller == nil {
+		return ""
+	}
+	cfg := s.controller.GetCurrentConfig()
+	if cfg == nil {
+		return ""
+	}
+	return cfg.APIKey
+}
+
 // apiKeyAuthMiddleware creates middleware for API key authentication.
 // Connections from Unix socket/named pipe (tray) are trusted and skip API key validation.
 // Supports both global API key (admin) and agent tokens (mcp_agt_ prefix) with scope enforcement.
@@ -475,7 +511,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			source := transport.GetConnectionSource(r.Context())
 			if source == transport.ConnectionSourceTray {
 				s.logger.Debugw("Tray connection - skipping API key validation",
-					zap.String("path", r.URL.Path),
+					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, s.currentAdminAPIKey())),
 					zap.String("remote_addr", r.RemoteAddr),
 					zap.String("source", string(source)))
 				ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
@@ -483,19 +519,17 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// Get config from controller
-			configInterface := s.controller.GetCurrentConfig()
-			if configInterface == nil {
-				// No config available (testing scenario) - allow through
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			// Cast to config type
-			cfg, ok := configInterface.(*config.Config)
-			if !ok {
-				// Config is not the expected type (testing scenario) - allow through
-				next.ServeHTTP(w, r)
+			// SECURITY: no configuration means there is nothing to
+			// authenticate against, so the request cannot be authenticated —
+			// refuse it. This used to forward the request to the handler
+			// ("testing scenario"), which is an unauthenticated REST API for
+			// any controller that returns nil here (SEC-02).
+			cfg := s.controller.GetCurrentConfig()
+			if cfg == nil {
+				s.logger.Errorw("Request rejected - configuration unavailable, cannot authenticate",
+					zap.String("path", r.URL.Path),
+					zap.String("remote_addr", r.RemoteAddr))
+				s.writeError(w, r, http.StatusServiceUnavailable, "Configuration not available - cannot authenticate request")
 				return
 			}
 
@@ -503,7 +537,7 @@ func (s *Server) apiKeyAuthMiddleware() func(http.Handler) http.Handler {
 			// Empty API key is not allowed - this prevents accidental exposure
 			if cfg.APIKey == "" {
 				s.logger.Warnw("TCP connection rejected - API key not configured",
-					zap.String("path", r.URL.Path),
+					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 					zap.String("remote_addr", r.RemoteAddr))
 				s.writeError(w, r, http.StatusUnauthorized, "API key authentication required but not configured. Please set MCPPROXY_API_KEY or configure api_key in config file.")
 				return
@@ -549,7 +583,7 @@ func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Reque
 	}
 
 	s.logger.Warnw("TCP connection with missing API key",
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
@@ -559,20 +593,26 @@ func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Reque
 // sources never resolve a session principal (only Authorization: Bearer and
 // the cookie do).
 func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, token string) {
-	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
-		s.handleAgentTokenAuth(w, r, next, token)
+	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
+		s.rejectClientCredentialOnREST(w, r)
 		return
 	}
-	if token != "" && token == cfg.APIKey {
+	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
+		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
+		return
+	}
+	// Timing-safe compare. ConstantTimeEqual also rejects an empty token, so
+	// it subsumes the previous `token != ""` guard.
+	if auth.ConstantTimeEqual(token, cfg.APIKey) {
 		s.logger.Debugw("TCP connection with valid API key",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 			zap.String("remote_addr", r.RemoteAddr))
 		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
 		next.ServeHTTP(w, r.WithContext(ctx))
 		return
 	}
 	s.logger.Warnw("TCP connection with invalid API key",
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
@@ -586,13 +626,19 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 		token = strings.TrimPrefix(authHeader, "Bearer ")
 	}
 
-	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
-		s.handleAgentTokenAuth(w, r, next, token)
+	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
+		s.rejectClientCredentialOnREST(w, r)
 		return
 	}
-	if token != "" && token == cfg.APIKey {
+	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
+		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
+		return
+	}
+	// Timing-safe compare. ConstantTimeEqual also rejects an empty token, so
+	// it subsumes the previous `token != ""` guard.
+	if auth.ConstantTimeEqual(token, cfg.APIKey) {
 		s.logger.Debugw("TCP connection with valid API key",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 			zap.String("remote_addr", r.RemoteAddr))
 		ctx := auth.WithAuthContext(r.Context(), auth.AdminContext())
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -604,16 +650,34 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 	}
 
 	s.logger.Warnw("TCP connection with invalid API key",
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
 }
 
+// rejectClientCredentialOnREST is the FR-023 refusal: a Spec 108-c client
+// credential (kind=client, mcp_cli_ secret prefix) authenticates on MCP
+// endpoints only. Recognised by the prefix BEFORE any store lookup — a
+// client credential can never read activity, config or other clients over
+// REST, even one presented with a malformed or since-revoked record.
+func (s *Server) rejectClientCredentialOnREST(w http.ResponseWriter, r *http.Request) {
+	s.logger.Warnw("client credential presented on the REST API; refused",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+	s.writeError(w, r, http.StatusForbidden, "client credentials are valid on MCP endpoints only")
+}
+
 // handleAgentTokenAuth validates an agent token and sets the appropriate AuthContext.
-func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, next http.Handler, token string) {
+//
+// adminAPIKey is the caller's already-resolved cfg.APIKey (zcode review round
+// 1, PR #1350 follow-up): both call sites above already hold cfg, so passing
+// it through avoids a second, redundant s.controller.GetCurrentConfig() read
+// on every agent-token-authenticated request that currentAdminAPIKey() would
+// otherwise perform.
+func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, next http.Handler, adminAPIKey, token string) {
 	if s.tokenStore == nil || s.dataDir == "" {
 		s.logger.Warnw("Agent token presented but token store not configured",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminAPIKey)),
 			zap.String("remote_addr", r.RemoteAddr))
 		s.writeError(w, r, http.StatusUnauthorized, "Agent tokens are not configured on this server")
 		return
@@ -629,10 +693,20 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	agentToken, err := s.tokenStore.ValidateAgentToken(token, hmacKey)
 	if err != nil {
 		s.logger.Warnw("Agent token validation failed",
-			zap.String("path", r.URL.Path),
+			zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminAPIKey)),
 			zap.String("remote_addr", r.RemoteAddr),
 			zap.String("error", err.Error()))
 		s.writeError(w, r, http.StatusUnauthorized, fmt.Sprintf("Agent token invalid: %s", err.Error()))
+		return
+	}
+
+	// FR-023, second half ("and by kind after it"): a client credential
+	// reached this far only if its secret's prefix went unrecognised above
+	// (defence in depth against a future prefix regression) — refuse by
+	// KIND too, never dispatching a client credential's request as an
+	// ordinary agent token.
+	if agentToken.Kind == auth.KindClient {
+		s.rejectClientCredentialOnREST(w, r)
 		return
 	}
 
@@ -665,7 +739,7 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	s.logger.Debugw("Agent token authenticated",
 		zap.String("agent_name", agentToken.Name),
 		zap.String("token_prefix", agentToken.TokenPrefix),
-		zap.String("path", r.URL.Path),
+		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminAPIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 
 	next.ServeHTTP(w, r.WithContext(ctx))
@@ -761,6 +835,64 @@ func (s *Server) trustedProxiesProvider() config.TrustedProxiesProvider {
 	}
 }
 
+// trustedHostsProvider yields the LIVE trusted_hosts list through the
+// controller's config, evaluated per request so hot-reload takes effect
+// without a restart. Same shape as trustedProxiesProvider: the nil guards are
+// load-bearing because test controllers return a nil config.
+func (s *Server) trustedHostsProvider() func() []string {
+	return func() []string {
+		if s.controller == nil {
+			return nil
+		}
+		if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+			return cfg.TrustedHosts
+		}
+		return nil
+	}
+}
+
+// corsMiddleware replaces the former unconditional
+// "Access-Control-Allow-Origin: *" (SEC-04). It echoes the request Origin only
+// when that origin passes the same allowlist the MCP surface uses
+// (httpx.OriginAllowed: loopback on any port, or a host in config
+// trusted_hosts) and emits nothing at all otherwise - including when there is
+// no Origin header, which is every non-browser client. The embedded Web UI is
+// same-origin under /ui/, so nothing legitimate needs the wildcard.
+//
+// The OPTIONS short-circuit stays ahead of apiKeyAuthMiddleware: browsers
+// never send credentials on a preflight, so gating it behind the API key would
+// break legitimate cross-origin use.
+func (s *Server) corsMiddleware() func(http.Handler) http.Handler {
+	trustedHosts := s.trustedHostsProvider()
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Add, never Set: another layer may already have written a Vary
+			// and clobbering it would poison shared caches.
+			w.Header().Add("Vary", "Origin")
+
+			origin := r.Header.Get("Origin")
+			if origin != "" && httpx.OriginAllowed(origin, trustedHosts()) {
+				// Echo the concrete origin rather than "*", even when
+				// trusted_hosts is ["*"]: a reflected origin is what lets a
+				// browser cache the response per origin alongside Vary, and
+				// "*" is illegal on a credentialed response. (Reflecting an
+				// arbitrary origin is NOT itself a substitute for the
+				// allowlist — trusted_hosts ["*"] deliberately disables it.)
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+			}
+
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
 	s.logger.Debug("Setting up HTTP API routes")
@@ -780,21 +912,9 @@ func (s *Server) setupRoutes() {
 	s.router.Use(s.correlationIDMiddleware()) // Correlation ID and request source tracking
 	s.logger.Debug("Core middleware configured (request ID, logging, recovery, correlation ID)")
 
-	// CORS headers for browser access
-	s.router.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
-
-			if r.Method == "OPTIONS" {
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	})
+	// CORS headers for browser access (SEC-04). Registered with Use so it
+	// covers every route on this router, /events included.
+	s.router.Use(s.corsMiddleware())
 
 	// Health and readiness endpoints (Kubernetes-compatible with legacy aliases)
 	// See healthzHandler() and readyzHandler() for swagger documentation
@@ -816,9 +936,22 @@ func (s *Server) setupRoutes() {
 
 	// Observability /metrics endpoint (MCP-32). Independent of the health
 	// endpoints below: enabling metrics must not change readiness semantics.
+	//
+	// SEC-07: the exporter is admin-only. It was registered on the bare router,
+	// outside the /api/v1 group, so it answered any caller that could reach the
+	// listener with fleet-wide tool/server counters and API topology. It now
+	// carries the same credential chain as /events (same With() pattern) plus an
+	// admin gate, because apiKeyAuthMiddleware alone still admits scope-restricted
+	// agent tokens — which must not read fleet-wide aggregates. Scrapers
+	// authenticate with the global API key (X-API-Key, or Prometheus'
+	// `authorization: {credentials: <api key>}`); the tray keeps its Unix-socket
+	// bypass. The health/readiness probes below stay deliberately open.
 	if s.observability != nil {
 		if metrics := s.observability.Metrics(); metrics != nil {
-			s.router.Handle("/metrics", metrics.Handler())
+			tagMetrics := TagRequestMeta(reqcontext.MountAPI, s.trustedProxiesProvider())
+			s.router.
+				With(tagMetrics, s.apiKeyAuthMiddleware(), s.requireAdminReadMiddleware("Admin credentials required to read metrics")).
+				Handle("/metrics", metrics.Handler())
 		}
 	}
 
@@ -1044,6 +1177,11 @@ func (s *Server) setupRoutes() {
 		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)                                                            // spec 070 FR-007
 		r.Post("/registries/{id}/servers/{serverId}/add", s.requireServerOp(auth.ServerOpAddFromRegistry, s.handleAddFromRegistry)) // spec 070 keystone add
 
+		// Catalog (Spec 109 FR-060): source-agnostic, ranked search across
+		// every enabled registry. Open like GET /registries/{id}/servers —
+		// "added" is the only field filtered per caller scope (FR-007).
+		r.Get("/catalog/search", s.handleCatalogSearch)
+
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
 		r.Get("/activity/summary", s.handleActivitySummary)
@@ -1139,16 +1277,33 @@ func (s *Server) httpLoggingMiddleware() func(http.Handler) http.Handler {
 
 			duration := time.Since(start)
 
-			// Log request details to http.log
+			// Log request details to http.log.
+			//
+			// SEC-01: `query` and `referer` both carry `?apikey=` — it is an
+			// accepted credential source (see resolveAuth), the Web UI's SSE
+			// stream and the tray client send the ROOT admin key that way, and
+			// the Web UI is opened as /ui/?apikey=<KEY> so same-origin
+			// subresource requests put it in the Referer too. Unredacted, this
+			// line wrote the admin credential to disk on every request. The
+			// renderers are internal/oauth's — one rule for every log sink.
+			//
+			// SEC-01 follow-up (PR #1350): the admin key has no vendor shape and
+			// is bare hex, so neither the name rule nor the value-shaped detector
+			// those renderers otherwise run can catch it as a raw PATH segment
+			// (`/api/v1/status/<key>`) or a Referer fragment with no `apikey=`
+			// wrapper. currentAdminAPIKey() gives each renderer the live secret so
+			// it is caught by EXACT VALUE wherever it lands, on top of the
+			// existing name/shape rules. One controller read per request line.
+			adminKey := s.currentAdminAPIKey()
 			s.httpLogger.Info("HTTP API Request",
 				zap.String("method", r.Method),
-				zap.String("path", r.URL.Path),
-				zap.String("query", r.URL.RawQuery),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, adminKey)),
+				zap.String("query", oauth.LogSafeQueryString(r.URL.RawQuery, adminKey)),
 				zap.String("remote_addr", r.RemoteAddr),
 				zap.String("user_agent", r.UserAgent()),
 				zap.Int("status", ww.statusCode),
 				zap.Duration("duration", duration),
-				zap.String("referer", r.Referer()),
+				zap.String("referer", oauth.LogSafeRequestURL(r.Referer(), adminKey)),
 				zap.Int64("content_length", r.ContentLength),
 			)
 		})
@@ -1327,6 +1482,15 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	// sidecar with its 1h TTL; nil on Linux / tray not running / malformed.
 	response["launch_source"] = string(telemetry.DetectLaunchSourceOnce())
 	response["autostart_enabled"] = telemetry.AutostartReaderForDataDir(autostartDataDir).Read()
+
+	// Spec 109-k FR-080a: advertise which scope filters (profile/client/token)
+	// this build accepts, so a build accepts a parameter exactly when it
+	// advertises it. Omitted while the list is empty (Spec 108-e fills it).
+	if features := scopeFiltersFeatureValue(); len(features) > 0 {
+		response["features"] = map[string]interface{}{
+			"scope_filters": features,
+		}
+	}
 
 	s.writeSuccess(w, response)
 }
@@ -1680,15 +1844,19 @@ func getSocketPath() string {
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.GetServersResponse "Server list with statistics"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (profile/client/token, Spec 109-k FR-080a)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers [get]
 func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: GET /servers parses no query string today (`status`,
+	// `q` are client-side) — profile/client/token gated like everywhere else.
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
 		// Use new management service path
-		servers, stats, err := mgmtSvc.(interface {
-			ListServers(context.Context) ([]*contracts.Server, *contracts.ServerStats, error)
-		}).ListServers(r.Context())
+		servers, stats, err := mgmtSvc.ListServers(r.Context())
 
 		if err != nil {
 			s.logger.Errorw("Failed to list servers via management service", "error", err)
@@ -2224,19 +2392,17 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// separate admission override); the request Quarantined boolean (#370) still
 	// wins after, as a distinct pre-existing escape hatch.
 	quarantined := true
-	if cfgIface := s.controller.GetCurrentConfig(); cfgIface != nil {
-		if cfg, ok := cfgIface.(*config.Config); ok && cfg != nil {
-			// Carry BOTH the explicit trust_mode AND the legacy
-			// auto_approve_tool_changes so EffectiveTrustMode() resolves the same
-			// admission decision it will resolve on the persisted server: a client
-			// that sets auto_approve_tool_changes:true but omits trust_mode must be
-			// admitted as auto (not left quarantined while the saved server reads
-			// auto — a contradictory state). (codex review, spec 086.)
-			quarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{
-				TrustMode:              req.TrustMode,
-				AutoApproveToolChanges: req.AutoApproveToolChanges,
-			})
-		}
+	if cfg := s.controller.GetCurrentConfig(); cfg != nil {
+		// Carry BOTH the explicit trust_mode AND the legacy
+		// auto_approve_tool_changes so EffectiveTrustMode() resolves the same
+		// admission decision it will resolve on the persisted server: a client
+		// that sets auto_approve_tool_changes:true but omits trust_mode must be
+		// admitted as auto (not left quarantined while the saved server reads
+		// auto — a contradictory state). (codex review, spec 086.)
+		quarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{
+			TrustMode:              req.TrustMode,
+			AutoApproveToolChanges: req.AutoApproveToolChanges,
+		})
 	}
 	if req.Quarantined != nil {
 		quarantined = *req.Quarantined
@@ -2865,9 +3031,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		err := mgmtSvc.(interface {
-			EnableServer(context.Context, string, bool) error
-		}).EnableServer(r.Context(), serverID, true)
+		err := mgmtSvc.EnableServer(r.Context(), serverID, true)
 
 		if err != nil {
 			s.logger.Errorw("Failed to enable server via management service", "server", serverID, "error", err)
@@ -2932,9 +3096,7 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		err := mgmtSvc.(interface {
-			EnableServer(context.Context, string, bool) error
-		}).EnableServer(r.Context(), serverID, false)
+		err := mgmtSvc.EnableServer(r.Context(), serverID, false)
 
 		if err != nil {
 			s.logger.Errorw("Failed to disable server via management service", "server", serverID, "error", err)
@@ -3021,10 +3183,8 @@ func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Requ
 // @Router /api/v1/servers/restart_all [post]
 func (s *Server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		RestartAll(ctx context.Context) (*management.BulkOperationResult, error)
-	})
-	if !ok {
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
 		s.logger.Error("Failed to get management service")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
@@ -3053,10 +3213,8 @@ func (s *Server) handleRestartAll(w http.ResponseWriter, r *http.Request) {
 // @Router /api/v1/servers/enable_all [post]
 func (s *Server) handleEnableAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		EnableAll(ctx context.Context) (*management.BulkOperationResult, error)
-	})
-	if !ok {
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
 		s.logger.Error("Failed to get management service")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
@@ -3085,10 +3243,8 @@ func (s *Server) handleEnableAll(w http.ResponseWriter, r *http.Request) {
 // @Router /api/v1/servers/disable_all [post]
 func (s *Server) handleDisableAll(w http.ResponseWriter, r *http.Request) {
 	// Get management service from controller
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		DisableAll(ctx context.Context) (*management.BulkOperationResult, error)
-	})
-	if !ok {
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
 		s.logger.Error("Failed to get management service")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
@@ -3127,9 +3283,7 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		err := mgmtSvc.(interface {
-			RestartServer(context.Context, string) error
-		}).RestartServer(r.Context(), serverID)
+		err := mgmtSvc.RestartServer(r.Context(), serverID)
 
 		if err != nil {
 			// Check if error is OAuth-related (expected state, not a failure)
@@ -3367,11 +3521,9 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call management service TriggerOAuthLoginQuick (Spec 020 fix: returns actual browser status)
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		TriggerOAuthLoginQuick(ctx context.Context, name string) (*core.OAuthStartResult, error)
-	})
-	if !ok {
-		s.logger.Error("Management service not available or missing TriggerOAuthLoginQuick method")
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
+		s.logger.Error("Management service not available")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
@@ -3472,11 +3624,9 @@ func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call management service TriggerOAuthLogout
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		TriggerOAuthLogout(ctx context.Context, name string) error
-	})
-	if !ok {
-		s.logger.Error("Management service not available or missing TriggerOAuthLogout method")
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
+		s.logger.Error("Management service not available")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
@@ -3599,11 +3749,9 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// NEW: Call management service instead of controller (T016)
-	mgmtSvc, ok := s.controller.GetManagementService().(interface {
-		GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
-	})
-	if !ok {
-		s.logger.Error("Management service not available or missing GetServerTools method")
+	mgmtSvc := s.controller.GetManagementService()
+	if mgmtSvc == nil {
+		s.logger.Error("Management service not available")
 		s.writeError(w, r, http.StatusInternalServerError, "Management service not available")
 		return
 	}
@@ -3704,9 +3852,16 @@ const globalToolsUsageWindow = 30 * 24 * time.Hour
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
 // @Success 200 {object} contracts.GlobalToolsResponse "All tools across all servers"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (profile/client/token, Spec 109-k FR-080a)"
 // @Failure 500 {object} contracts.ErrorResponse "Could not enumerate servers"
 // @Router /api/v1/tools [get]
 func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: GET /tools parses no query string today (`server`,
+	// `tool`, `status` etc. are client-side per url-filter-contract.md) —
+	// profile/client/token are gated exactly like everywhere else.
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	allServers, err := s.controller.GetAllServers()
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to enumerate servers")
@@ -3730,9 +3885,8 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 	// explicit guard in the loop below (#1064). Fall back to the controller
 	// path when the management service is unavailable (keeps unit tests +
 	// minimal deployments working).
-	mgmtSvc, hasMgmt := s.controller.GetManagementService().(interface {
-		GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
-	})
+	mgmtSvc := s.controller.GetManagementService()
+	hasMgmt := mgmtSvc != nil
 	getTools := func(name string) ([]map[string]interface{}, error) {
 		if hasMgmt {
 			return mgmtSvc.GetServerTools(r.Context(), name)
@@ -3954,7 +4108,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// No Access-Control-Allow-Origin here: /events is a chi route on the same
+	// router, so corsMiddleware already decided this response's CORS headers.
+	// A second write would only be a place for the two policies to drift.
 	w.Header().Set("X-Accel-Buffering", "no") // Disable nginx buffering
 
 	// For HEAD requests, just return headers without body
@@ -4013,6 +4169,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 	initialLiveStats := filterUpstreamStatsServers(callerCtx, s.controller.GetUpstreamStats())
 	initialStatus := map[string]interface{}{
 		"running":        s.controller.IsRunning(),
+		"edition":        editionValue,
 		"listen_addr":    s.controller.GetListenAddress(),
 		"upstream_stats": initialLiveStats,
 		"status":         withLiveUpstreamStats(callerCtx, s.controller.GetStatus(), initialLiveStats),
@@ -4069,6 +4226,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 			eventLiveStats := filterUpstreamStatsServers(callerCtx, s.controller.GetUpstreamStats())
 			response := map[string]interface{}{
 				"running":        s.controller.IsRunning(),
+				"edition":        editionValue,
 				"listen_addr":    s.controller.GetListenAddress(),
 				"upstream_stats": eventLiveStats,
 				"status":         withLiveUpstreamStats(callerCtx, status, eventLiveStats),
@@ -4389,6 +4547,11 @@ func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// FR-065: report whether the OS keyring is usable so the Paste/Manual/
+	// Catalog secret toggle can disable itself with the reason instead of
+	// failing silently on Add.
+	configSecrets.KeyringAvailable, configSecrets.KeyringReason = resolver.KeyringAvailability()
+
 	s.writeSuccess(w, configSecrets)
 }
 
@@ -4579,9 +4742,7 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		diag, err := mgmtSvc.(interface {
-			Doctor(context.Context) (*contracts.Diagnostics, error)
-		}).Doctor(r.Context())
+		diag, err := mgmtSvc.Doctor(r.Context())
 
 		if err != nil {
 			s.logger.Errorw("Failed to get diagnostics via management service", "error", err)
@@ -6275,6 +6436,11 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.requireAdminRead(w, r, sessionsDenialMessage) {
+		return
+	}
+
+	// Spec 109-k FR-080a: /sessions ignores `agent` today — gated like `token`.
+	if !rejectUnsupportedScopeFilters(w, r) {
 		return
 	}
 

@@ -333,14 +333,19 @@ type MCPSession struct {
 
 // Tool represents an MCP tool with its metadata
 type Tool struct {
-	Name           string                 `json:"name"`
-	ServerName     string                 `json:"server_name"`
-	Description    string                 `json:"description"`
-	Schema         map[string]interface{} `json:"schema,omitempty" swaggertype:"object"`
-	Usage          int                    `json:"usage"`
-	LastUsed       *time.Time             `json:"last_used,omitempty"`
-	Annotations    *ToolAnnotation        `json:"annotations,omitempty"`
-	ApprovalStatus string                 `json:"approval_status,omitempty"`
+	Name        string                 `json:"name"`
+	ServerName  string                 `json:"server_name"`
+	Description string                 `json:"description"`
+	Schema      map[string]interface{} `json:"schema,omitempty" swaggertype:"object"`
+	Usage       int                    `json:"usage"`
+	LastUsed    *time.Time             `json:"last_used,omitempty"`
+	Annotations *ToolAnnotation        `json:"annotations,omitempty"`
+	// Tier is computed by AnnotationTier (Spec 109 FR-028/X11) from
+	// Annotations — read|write|destructive|unannotated. Set by every producer
+	// of a Tool (enrichServerTools, the global tools handler); never left for
+	// a consuming surface to compute.
+	Tier           Tier   `json:"tier,omitempty"`
+	ApprovalStatus string `json:"approval_status,omitempty"`
 	// Disabled mirrors ToolApprovalRecord.Disabled so per-tool enable state is
 	// available without a second round-trip to the approvals endpoint. Absent
 	// in the JSON when false (default) to keep responses compact.
@@ -436,6 +441,14 @@ type ServerTokenMetrics struct {
 	SavedTokens             int            `json:"saved_tokens"`                // Difference
 	SavedTokensPercentage   float64        `json:"saved_tokens_percentage"`     // Percentage saved
 	PerServerToolListSizes  map[string]int `json:"per_server_tool_list_sizes"`  // Token size per server
+	// Estimated (Spec 109-k FR-070-ish, url-filter-contract.md / audit F-Token):
+	// true while AverageQueryResultSize is a synthetic simulation (a sample of
+	// the first `tools_limit` tools' schemas — no real retrieve_tools call has
+	// completed yet in this runtime's usage aggregate); false once at least one
+	// real retrieve_tools call has, at which point AverageQueryResultSize is
+	// derived from the real observed average response size instead. The Web
+	// UI and macOS render an "estimate" label while this is true.
+	Estimated bool `json:"estimated"`
 }
 
 // UsageAggregateResponse is the GET /api/v1/activity/usage payload (Spec 069 A3).
@@ -452,15 +465,20 @@ type ServerTokenMetrics struct {
 //     requested span. Timeline is therefore not filtered by tool/server/status.
 //   - tool/server/status act as membership filters on the per-tool rollup.
 type UsageAggregateResponse struct {
-	Window                string            `json:"window"`
-	GeneratedAt           time.Time         `json:"generated_at"`
-	FreshnessMs           int64             `json:"freshness_ms"` // age of the underlying snapshot in ms
-	TokenSource           string            `json:"token_source"` // "bytes" (size-based proxy, FR-006)
-	TokensSaved           int               `json:"tokens_saved"` // echoed from ServerTokenMetrics (FR-007)
-	TokensSavedPercentage float64           `json:"tokens_saved_percentage"`
-	Tools                 []UsageToolStat   `json:"tools"`
-	Other                 *UsageOtherBucket `json:"other,omitempty"` // present only when the list was truncated to top-N
-	Timeline              []UsageTimeBucket `json:"timeline"`
+	Window                string    `json:"window"`
+	GeneratedAt           time.Time `json:"generated_at"`
+	FreshnessMs           int64     `json:"freshness_ms"` // age of the underlying snapshot in ms
+	TokenSource           string    `json:"token_source"` // "bytes" (size-based proxy, FR-006)
+	TokensSaved           int       `json:"tokens_saved"` // echoed from ServerTokenMetrics (FR-007)
+	TokensSavedPercentage float64   `json:"tokens_saved_percentage"`
+	// TokensSavedEstimated echoes ServerTokenMetrics.Estimated (Spec 109-k):
+	// true while TokensSaved is a synthetic simulation rather than derived
+	// from a real retrieve_tools call. Dropped (false, the zero value) for a
+	// scoped caller along with TokensSaved itself, above.
+	TokensSavedEstimated bool              `json:"tokens_saved_estimated"`
+	Tools                []UsageToolStat   `json:"tools"`
+	Other                *UsageOtherBucket `json:"other,omitempty"` // present only when the list was truncated to top-N
+	Timeline             []UsageTimeBucket `json:"timeline"`
 	// TotalCalls and TotalErrors are the headline counts for the window: the sum
 	// of the timeline this same response carries, so the tiles and the histogram
 	// under them cannot disagree. They are NOT the sum of Tools — that list is
@@ -1268,7 +1286,24 @@ type HealthStatus struct {
 	Detail string `json:"detail,omitempty"`
 
 	// Action is the suggested fix action: "login", "restart", "enable", "approve", "view_logs", "set_secret", "configure", "edit_url", or "" (none)
+	// Invariant: Action always equals Actions[0], or "" when Actions is empty.
 	Action string `json:"action,omitempty"`
+
+	// Status is the ONE status vocabulary rendered as text on every surface
+	// (Web UI, macOS, tray, CLI) — Spec 109 FR-010/FR-011. Values: "ready",
+	// "connecting", "sign_in_required", "needs_review", "needs_secret",
+	// "needs_config", "error", "disabled". Unlike Level (a severity signal for
+	// badge/tray coloring only), no renderer may print Level as text.
+	Status string `json:"status"`
+
+	// Usable reports whether the server can currently serve tool calls. True
+	// only when Status == "ready".
+	Usable bool `json:"usable"`
+
+	// Actions lists every applicable next step in priority order (FR-012):
+	// login > set_secret > configure > edit_url > approve > restart >
+	// view_logs > enable. Always non-nil (empty slice, never null).
+	Actions []string `json:"actions"`
 }
 
 // UpdateInfo represents version update check information

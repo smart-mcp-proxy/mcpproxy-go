@@ -167,6 +167,7 @@ Core process exit codes are mapped to specific state machine events:
 - Exit code 3 (database locked) → `EventDBLocked`
 - Exit code 4 (config error) → `EventConfigError`
 - Exit code 5 (permission error) → `EventPermissionError`
+- Exit code 6 (shutdown timeout: graceful shutdown exceeded its 60s hard deadline after SIGINT/SIGTERM) → `EventGeneralError` (no dedicated event; a restart is the right response)
 - Other errors → `EventGeneralError`
 
 ### Automatic Retry Logic

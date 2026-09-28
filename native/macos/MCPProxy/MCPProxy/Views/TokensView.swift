@@ -118,9 +118,13 @@ struct TokensView: View {
     @ViewBuilder
     private var tokenList: some View {
         List(tokens, selection: $selectedTokenID) { token in
-            TokenRow(token: token, onRevoke: {
-                Task { await revokeToken(token.name) }
-            })
+            TokenRow(
+                token: token,
+                onRevoke: { Task { await revokeToken(token.name) } },
+                onShowActivity: appState.scopeFiltersAvailable
+                    ? { appState.openActivity(with: .forToken(token.name)) }
+                    : nil
+            )
             .tag(token.id)
         }
     }
@@ -187,6 +191,9 @@ struct TokensView: View {
 struct TokenRow: View {
     let token: AgentToken
     let onRevoke: () -> Void
+    /// Link-map "Token row → Activity" (Spec 109-k): nil hides it, which is
+    /// the case until the core advertises `features.scope_filters`.
+    var onShowActivity: (() -> Void)? = nil
     @State private var showRevokeConfirmation = false
     @Environment(\.fontScale) var fontScale
 
@@ -243,6 +250,15 @@ struct TokenRow: View {
                 Text("Expires: \(formattedDate(expires))")
                     .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.tertiary)
+            }
+
+            if let onShowActivity {
+                Button(action: onShowActivity) {
+                    Image(systemName: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.borderless)
+                .help("Show this token's activity")
+                .accessibilityIdentifier("token-row-activity-link")
             }
 
             Button(role: .destructive) {

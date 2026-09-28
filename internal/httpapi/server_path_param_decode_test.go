@@ -61,6 +61,7 @@ func TestServerSubresource_SlashServerIDUnescaped(t *testing.T) {
 		server := NewServer(&MockServerController{}, logger, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/servers/"+encoded+"/tools", http.NoBody)
+		req.Header.Set("X-API-Key", mockControllerAPIKey)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -74,6 +75,7 @@ func TestServerSubresource_SlashServerIDUnescaped(t *testing.T) {
 		server := NewServer(&MockServerController{}, logger, nil)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/"+encoded+"/restart", http.NoBody)
+		req.Header.Set("X-API-Key", mockControllerAPIKey)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 
@@ -88,6 +90,7 @@ func TestServerSubresource_SlashServerIDUnescaped(t *testing.T) {
 		server := NewServer(controller, logger, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/servers/"+encoded+"/tool-calls", http.NoBody)
+		req.Header.Set("X-API-Key", mockControllerAPIKey)
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 

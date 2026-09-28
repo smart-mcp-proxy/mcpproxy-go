@@ -34,6 +34,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secretlike"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -1401,17 +1402,16 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 		tools = append(tools, mcpserver.ServerTool{Tool: quarantineSecurityTool, Handler: p.handleQuarantineSecurity})
 	}
 
-	// search_servers - Registry search and discovery
+	// search_servers - Catalog search and discovery (Spec 109 FR-060/067)
 	{
 		searchServersTool := mcp.NewTool("search_servers",
-			mcp.WithDescription("🔍 Discover MCP servers from known registries with repository type detection. Search and filter servers from embedded registry list to find new MCP servers that can be added as upstreams. Features npm/PyPI package detection for enhanced install commands. WORKFLOW: 1) Call 'list_registries' first to see available registries, 2) Use this tool with a registry ID to search servers. Results include server URLs and repository information ready for direct use with upstream_servers add command."),
+			mcp.WithDescription("🔍 Discover MCP servers from the catalog, with repository type detection. Omit 'registry' to search every enabled catalog source at once, ranked official-first then by relevance (FR-060) — this is the recommended way to search. Pass 'registry' to narrow to one catalog source (e.g., 'smithery', 'mcprun', 'pulse'); use 'list_registries' to see source ids. Features npm/PyPI package detection for enhanced install commands. Results include server URLs and repository information ready for direct use with upstream_servers add command."),
 			mcp.WithTitleAnnotation("Search Servers"),
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithDestructiveHintAnnotation(false),
 			mcp.WithOpenWorldHintAnnotation(true),
 			mcp.WithString("registry",
-				mcp.Required(),
-				mcp.Description("Registry ID or name to search (e.g., 'smithery', 'mcprun', 'pulse'). Use 'list_registries' tool first to see available registries."),
+				mcp.Description("Optional: a catalog source id or name to narrow the search to (e.g., 'smithery', 'mcprun', 'pulse'). Omit to search every enabled catalog source at once. Use 'list_registries' to see source ids."),
 			),
 			mcp.WithString("search",
 				mcp.Description("Search term to filter servers by name or description (case-insensitive)"),
@@ -1429,7 +1429,7 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 	// list_registries - Explicit registry discovery tool
 	{
 		listRegistriesTool := mcp.NewTool("list_registries",
-			mcp.WithDescription("📋 List all available MCP registries. Use this FIRST to discover which registries you can search with the 'search_servers' tool. Each registry contains different collections of MCP servers that can be added as upstreams."),
+			mcp.WithDescription("📋 List all available catalog sources (registries). 'search_servers' already searches every enabled source when 'registry' is omitted (FR-060) — call this to see source ids, e.g. to narrow a search with 'registry', or to check what's enabled. Each source contains different collections of MCP servers that can be added as upstreams."),
 			mcp.WithTitleAnnotation("List Registries"),
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithDestructiveHintAnnotation(false),
@@ -1575,11 +1575,10 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	}
 	requestID := mintCorrelationID("search_servers")
 
-	registry, err := request.RequireString("registry")
-	if err != nil {
-		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil, "")
-		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'registry': %v", err)), nil
-	}
+	// FR-067: 'registry' is optional — omitted means "every enabled catalog
+	// source" via registries.SearchAll (FR-060). Empty/whitespace is treated
+	// as omitted so a caller passing "" gets the same all-sources search.
+	registry := strings.TrimSpace(request.GetString("registry", ""))
 
 	// Get optional parameters
 	search := request.GetString("search", "")
@@ -1588,14 +1587,20 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 
 	// Build arguments map for activity logging (Spec 024)
 	args := map[string]interface{}{
-		"registry": registry,
-		"limit":    limit,
+		"limit": limit,
+	}
+	if registry != "" {
+		args["registry"] = registry
 	}
 	if search != "" {
 		args["search"] = search
 	}
 	if tag != "" {
 		args["tag"] = tag
+	}
+
+	if registry == "" {
+		return p.handleSearchServersAllSources(ctx, sessionID, requestID, startTime, args, search, tag, limit)
 	}
 
 	// Create experiments guesser if repository checking is enabled
@@ -1632,6 +1637,9 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
 	}
+	for i := range servers {
+		servers[i] = catalogServerEntryWithSecretLike(servers[i])
+	}
 
 	// Format response
 	response := map[string]interface{}{
@@ -1660,6 +1668,104 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	// Spec 024: Emit success event with args and response
 	p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "")
 
+	return mcp.NewToolResultText(string(jsonResult)), nil
+}
+
+// mcpCatalogServerEntry is the search_servers (registry omitted) per-item
+// shape (contracts/mcp-tools.md): the embedded ServerEntry keeps the exact
+// JSON shape (url, installCmd, registry, required_inputs[].secret) a
+// single-registry search already returns — encoding/json promotes an
+// anonymous embedded struct's fields to the top level — and the catalog
+// fields below are ADDED alongside it, in FR-060 order, mirroring
+// registries.CatalogResult minus the REST-only "added" field (MCP callers
+// don't carry the same per-caller visibility scope).
+type mcpCatalogServerEntry struct {
+	registries.ServerEntry
+	Title      string                 `json:"title"`
+	Publisher  string                 `json:"publisher,omitempty"`
+	Verified   bool                   `json:"verified"`
+	Official   bool                   `json:"official"`
+	Popularity *registries.Popularity `json:"popularity,omitempty"`
+	Source     string                 `json:"source"`
+}
+
+// catalogServerEntryWithSecretLike returns a copy of entry whose
+// RequiredInputs[].Secret has been OR'd with the D13 name heuristic
+// (secretlike.LooksSecret), exactly as registries.ToCatalogResult computes
+// RequiredInputs[].secret_like for REST's GET /catalog/search and the CLI's
+// `catalog search` (FR-065: a registry that omits or falsifies its own
+// isSecret flag still defaults the field to Secret). Without this, embedding
+// entry.RequiredInputs raw (as mcpCatalogServerEntry did) leaves MCP's
+// search_servers (registry omitted) reporting whatever the registry itself
+// claims, silently diverging from every other surface.
+func catalogServerEntryWithSecretLike(entry registries.ServerEntry) registries.ServerEntry {
+	detected := registries.DetectRequiredInputs(&entry)
+	if len(detected) == 0 {
+		entry.RequiredInputs = nil
+		return entry
+	}
+	inputs := make([]registries.RequiredInput, len(detected))
+	for i, in := range detected {
+		inputs[i] = registries.RequiredInput{
+			Name:        in.Name,
+			Description: in.Description,
+			Secret:      in.Secret || secretlike.LooksSecret(in.Name),
+		}
+	}
+	entry.RequiredInputs = inputs
+	return entry
+}
+
+// handleSearchServersAllSources implements search_servers with 'registry'
+// omitted (Spec 109 FR-060/067): fans out across every enabled catalog
+// source via registries.SearchAll and returns the merged, ranked list in
+// FR-060 rank order, with no "added" field (contracts/rest-api.md#catalog:
+// that field is REST-only, since it depends on caller scope MCP callers
+// don't carry the same way). Each item gains title/publisher/verified/
+// official/popularity/source (contracts/mcp-tools.md) so an MCP caller gets
+// the same catalog-ranking evidence a REST/CLI caller already does.
+func (p *MCPProxyServer) handleSearchServersAllSources(ctx context.Context, sessionID, requestID string, startTime time.Time, args map[string]interface{}, search, tag string, limit int) (*mcp.CallToolResult, error) {
+	hits, _, unavailable := registries.SearchAll(ctx, search, tag, limit, registries.SearchOptions{})
+
+	servers := make([]mcpCatalogServerEntry, 0, len(hits))
+	for _, h := range hits {
+		servers = append(servers, mcpCatalogServerEntry{
+			ServerEntry: catalogServerEntryWithSecretLike(h.Entry),
+			Title:       h.Title,
+			Publisher:   h.Publisher,
+			Verified:    h.Verified,
+			Official:    h.Official,
+			Popularity:  h.Popularity,
+			Source:      h.Source,
+		})
+	}
+
+	response := map[string]interface{}{
+		"servers": servers,
+		"total":   len(servers),
+		"query":   search,
+		"tag":     tag,
+	}
+	if len(unavailable) > 0 {
+		response["unavailable"] = unavailable
+	}
+
+	switch {
+	case len(servers) == 0 && search != "":
+		response["message"] = fmt.Sprintf("No servers found across any catalog source matching '%s'", search)
+	case len(servers) == 0:
+		response["message"] = "No servers found across any catalog source"
+	default:
+		response["message"] = fmt.Sprintf("Found %d server(s) across every enabled catalog source. Use 'upstream_servers add' with the URL to add one.", len(servers))
+	}
+
+	jsonResult, err := json.Marshal(response)
+	if err != nil {
+		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize results: %v", err)), nil
+	}
+
+	p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "")
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
@@ -1696,7 +1802,7 @@ func (p *MCPProxyServer) handleListRegistries(ctx context.Context, _ mcp.CallToo
 	response := map[string]interface{}{
 		"registries": registriesList,
 		"total":      len(registriesList),
-		"message":    "Available MCP registries. Use 'search_servers' tool with a registry ID to find servers. Newly added servers are quarantined by default until you approve them.",
+		"message":    "Available catalog sources (registries). Call 'search_servers' with no 'registry' to search all of them at once, or pass one of these ids to narrow it. Newly added servers are quarantined by default until you approve them.",
 	}
 
 	jsonResult, err := json.Marshal(response)
@@ -4598,9 +4704,7 @@ func (p *MCPProxyServer) handleEnableUpstream(ctx context.Context, request mcp.C
 	// Try to use management service if available
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if mgmtSvc := p.mainServer.runtime.GetManagementService(); mgmtSvc != nil {
-			err := mgmtSvc.(interface {
-				EnableServer(context.Context, string, bool) error
-			}).EnableServer(ctx, serverName, enabled)
+			err := mgmtSvc.EnableServer(ctx, serverName, enabled)
 
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Failed to %s server '%s': %v",
@@ -4641,9 +4745,7 @@ func (p *MCPProxyServer) handleRestartUpstream(ctx context.Context, request mcp.
 	// Try to use management service if available
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if mgmtSvc := p.mainServer.runtime.GetManagementService(); mgmtSvc != nil {
-			err := mgmtSvc.(interface {
-				RestartServer(context.Context, string) error
-			}).RestartServer(ctx, serverName)
+			err := mgmtSvc.RestartServer(ctx, serverName)
 
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Failed to restart server '%s': %v", serverName, err)), nil
@@ -4707,9 +4809,7 @@ func (p *MCPProxyServer) handleDoctor(ctx context.Context, request mcp.CallToolR
 	// Try to use management service if available
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if mgmtSvc := p.mainServer.runtime.GetManagementService(); mgmtSvc != nil {
-			diag, err := mgmtSvc.(interface {
-				Doctor(context.Context) (*contracts.Diagnostics, error)
-			}).Doctor(ctx)
+			diag, err := mgmtSvc.Doctor(ctx)
 
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Failed to run diagnostics: %v", err)), nil

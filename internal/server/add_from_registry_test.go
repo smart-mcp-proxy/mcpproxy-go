@@ -68,6 +68,31 @@ func TestAddFromRegistry_BuildStdioFromInstallCmd(t *testing.T) {
 	assert.Empty(t, cfg.URL)
 }
 
+// TestAddFromRegistry_BuildStdioFromInstallCmd_QuoteAware pins review round 4
+// F-B's secondary bug: parseInstallCommand must split quote-aware
+// (shellwords), matching internal/registries/catalog.go's toCatalogInstall.
+// A naive strings.Fields split breaks a quoted argument into extra tokens,
+// so the configured server's command+args (built here) would no longer
+// match CatalogInstallTarget's re-split of the SAME InstallCmd on the
+// catalog side, and the catalog's "added" join would silently fail for any
+// install command with a quoted arg.
+func TestAddFromRegistry_BuildStdioFromInstallCmd_QuoteAware(t *testing.T) {
+	entry := &registries.ServerEntry{
+		ID:         "quoted",
+		Name:       "quoted",
+		InstallCmd: `docker run -e "FOO=bar baz" -i --rm ghcr.io/example/server`,
+	}
+
+	cfg, err := buildServerConfigFromEntry(entry, &AddFromRegistryRequest{
+		RegistryID: "pulse",
+		ServerID:   "quoted",
+	}, true)
+
+	require.NoError(t, err)
+	assert.Equal(t, "docker", cfg.Command)
+	assert.Equal(t, []string{"run", "-e", "FOO=bar baz", "-i", "--rm", "ghcr.io/example/server"}, cfg.Args)
+}
+
 // --- Pure derivation: http/remote URL ----------------------------------------
 
 func TestAddFromRegistry_BuildHTTPFromURL(t *testing.T) {

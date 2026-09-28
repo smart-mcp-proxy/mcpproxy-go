@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -825,6 +826,19 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 	var addedTools []*config.ToolMetadata
 	var modifiedTools []*config.ToolMetadata
 	var removedTools []string
+	// Review round 2, finding 4: annotations are deliberately excluded from
+	// Hash (see calculateToolApprovalHash's comment — they are unstable
+	// across reconnections, and folding them into change-detection caused
+	// false "tool_description_changed" spam before). That means a tool whose
+	// Hash never changes can never reach the modifiedTools branch, so
+	// annotations_json — written to the index only at (re)index time — stays
+	// stale forever for anything indexed before this field existed (or
+	// before an upstream started reporting hints), short of an operator
+	// deleting index.bleve or removing/re-adding the server. Tracked
+	// separately from modifiedTools so it never touches Hash, approval state,
+	// or the "Tool schema changed" log line — this is a silent, best-effort
+	// metadata sync, not change detection.
+	var annotationsOnlyTools []*config.ToolMetadata
 
 	// Find added and modified tools
 	for toolName, newTool := range newToolsMap {
@@ -835,6 +849,8 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		} else if oldTool.Hash != newTool.Hash {
 			// Tool exists but has changed (different hash)
 			modifiedTools = append(modifiedTools, newTool)
+		} else if !reflect.DeepEqual(oldTool.Annotations, newTool.Annotations) {
+			annotationsOnlyTools = append(annotationsOnlyTools, newTool)
 		}
 		// else: tool unchanged, no action needed
 	}
@@ -976,6 +992,21 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		}
 	}
 
+	// 4b. Silently backfill/refresh annotations_json for otherwise-unchanged
+	// tools (review round 2, finding 4). Deliberately not logged at Info and
+	// not described as a "change" — see the comment on annotationsOnlyTools
+	// above — this is metadata hygiene, not a tool-contract update.
+	allowedAnnotationsOnlyTools := filterBlockedTools(annotationsOnlyTools, approvalResult.BlockedTools)
+	if len(allowedAnnotationsOnlyTools) > 0 {
+		r.logger.Debug("Refreshing stored annotations for unchanged tools",
+			zap.String("server", serverName),
+			zap.Int("count", len(allowedAnnotationsOnlyTools)))
+
+		if err := r.indexManager.BatchIndexTools(allowedAnnotationsOnlyTools); err != nil {
+			return fmt.Errorf("failed to refresh tool annotations: %w", err)
+		}
+	}
+
 	// 5. Warm the signature cache for every tool this server still serves —
 	// deliberately the WHOLE allowed set, not just what steps 3 and 4 touched.
 	//
@@ -998,7 +1029,7 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 	// that include it (Profiles v2, Spec 057). Profiles without this server are
 	// untouched. Skipped when nothing changed to avoid churn on idle sweeps.
 	changed := len(addedTools) > 0 || len(modifiedTools) > 0 || len(removedTools) > 0 ||
-		len(approvalResult.BlockedTools) > 0
+		len(annotationsOnlyTools) > 0 || len(approvalResult.BlockedTools) > 0
 	if changed {
 		r.reindexAffectedProfiles(serverName)
 		// Evict signature-cache entries orphaned by removed/redefined tools —

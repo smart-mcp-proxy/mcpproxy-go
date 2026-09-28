@@ -29,7 +29,7 @@ fragments against a hardcoded manifest and exits per the verdict.
 | Job | Blocking entries | Timeout | Notes |
 |-----|------------------|---------|-------|
 | `build-candidate` | — | 15 min | Frontend build + embed + `go build` of the candidate `mcpproxy`, the fixtures, and the `release-gate` driver; uploaded as one artifact and reused everywhere. |
-| `suite-api-e2e` | `suite/api-e2e` | 15 min | Runs `scripts/test-api-e2e.sh` **unmodified** (FR-003). |
+| `suite-api-e2e` | `suite/api-e2e`, `suite/api-e2e-cleanup-check` | 30 min | Runs `scripts/test-api-e2e.sh` **unmodified** (FR-003), then a second, real invocation of it under `scripts/test-api-e2e-cleanup-check.sh` proving the E2E cleanup trap holds (no blanket `pkill -f "mcpproxy.*serve"`). |
 | `suite-race` | `suite/unit-race`, `suite/server-race` | 25 min | `go test -race ./internal/...` + `go test -tags server -race ./internal/serveredition/...`. |
 | `suite-scan-eval` | `suite/scan-eval` | 10 min | `go run ./cmd/scan-eval --gate --min-recall 0.90 --max-fp 0.05` over the detect corpus — runs on **every** tag regardless of changed paths (FR-015). |
 | `matrix-invariants` | `matrix/{stdio,http,sse,docker,oauth}`, `invariant/{activity-request-id,counters,quarantine-flow,upgrade-in-place}` | 20 min | Boots the candidate against five local fixture upstreams (connect → list → call → kill/reconnect) and asserts the US2 invariants against the live instance. |

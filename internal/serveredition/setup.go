@@ -277,6 +277,9 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	// These are mounted outside the API key auth group.
 	deps.Router.Get("/api/v1/auth/login", oauthHandler.HandleLogin)
 	deps.Router.Get("/api/v1/auth/callback", oauthHandler.HandleCallback)
+	// Public, cookie-session-only bootstrap hint. Signed-out browsers receive a
+	// quiet 200 false; /auth/me remains protected and validates again.
+	deps.Router.Get("/api/v1/auth/session", authMiddleware.SessionStatus)
 	// The public edition probe (Spec 107 FR-030, T053) is mounted beside
 	// login/callback, outside every auth group, only on this enabled block.
 	authEndpoints := teamsapi.NewAuthEndpoints(userStore, sessionManager, cfg, hmacKey, deps.Logger)

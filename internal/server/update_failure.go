@@ -43,7 +43,7 @@ func (s *Server) RecordUpdateFailure(stage string) (bool, error) {
 		db = ts.DiagnosticsCounterDB()
 	}
 
-	cfg, _ := s.runtime.GetCurrentConfig().(*config.Config)
+	cfg := s.runtime.GetCurrentConfig()
 	return recordUpdateFailure(cfg, httpapi.GetBuildVersion(), store, db, stage)
 }
 

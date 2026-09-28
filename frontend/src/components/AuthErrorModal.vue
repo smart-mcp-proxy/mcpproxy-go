@@ -1,7 +1,13 @@
 <template>
-  <div v-if="show" class="modal modal-open">
-    <div class="modal-box max-w-2xl">
-      <h3 class="font-bold text-lg text-error mb-4">
+  <dialog ref="nativeDialogEl" class="modal" data-test="auth-error-modal">
+    <div
+      ref="dialogRef"
+      class="modal-box max-w-2xl"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="auth-error-modal-title"
+    >
+      <h3 id="auth-error-modal-title" class="font-bold text-lg text-error mb-4">
         🔒 Authentication Required
       </h3>
 
@@ -101,15 +107,21 @@
         </button>
       </div>
     </div>
-
-    <!-- Backdrop (clicking outside won't close to prevent accidental dismissal) -->
-    <div class="modal-backdrop bg-black/50"></div>
-  </div>
+    <!-- Deliberately no `<form method="dialog" class="modal-backdrop">` click
+         catcher here (contrast with AddSecretModal/AddServerModal/ConnectModal/
+         OnboardingWizard): clicking outside must not dismiss this modal, same
+         as before the FR-055 top-layer migration. The dim backdrop itself
+         still renders — `showModal()` promotes this dialog to the browser's
+         top layer with its native `::backdrop`, which daisyUI's `.modal`
+         styles independently of that click-catcher form. -->
+  </dialog>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import api from '@/services/api'
+import { useModalA11y } from '@/composables/useModalA11y'
+import { useDialogOpen } from '@/composables/useDialogOpen'
 
 interface Props {
   // Spec 107 T088 (App.vue): bound as `authModal.show || undefined` so the
@@ -133,6 +145,16 @@ const props = withDefaults(defineProps<Props>(), {
 })
 
 const emit = defineEmits<Emits>()
+
+// Spec 109 FR-055 (review round 6, finding 3): promote to the browser's top
+// layer via showModal(), same as AddSecretModal/AddServerModal/ConnectModal/
+// OnboardingWizard, so a background 401 raised while one of those is open
+// paints above it instead of underneath its backdrop. Escape and the Tab trap
+// route through handleClose below, which already gates on `canClose` — so
+// Escape is a no-op while canClose is false, matching the Dismiss button's
+// own gating rather than adding a second copy of it here.
+const { dialogRef } = useModalA11y(() => props.show, () => handleClose())
+const { dialogEl: nativeDialogEl } = useDialogOpen(() => props.show, () => handleClose())
 
 // State
 const apiKeyInput = ref('')
@@ -220,19 +242,27 @@ function handleClose() {
   }
 }
 
-// Initialize
-onMounted(() => {
-  // Clear any previous input when modal opens
-  apiKeyInput.value = ''
-  inputError.value = ''
-})
+// Reset the form each time the modal opens. Previously this lived in
+// onMounted, which was equivalent while the modal used `v-if="show"` —
+// closing and reopening destroyed and recreated the component, so
+// onMounted fired again on every open. The FR-055 top-layer migration
+// (review round 6, finding 3) keeps the <dialog> permanently mounted and
+// toggles it via showModal()/close() instead, so onMounted now fires only
+// once ever; without this watch, a stale error or leftover key from a
+// previous attempt would still be sitting there the next time the modal
+// is shown.
+watch(
+  () => props.show,
+  (open) => {
+    if (!open) return
+    apiKeyInput.value = ''
+    inputError.value = ''
+  },
+  { immediate: true }
+)
 </script>
 
 <style scoped>
-.modal-backdrop {
-  backdrop-filter: blur(2px);
-}
-
 code {
   font-family: 'Courier New', monospace;
   font-size: 0.875rem;

@@ -1,0 +1,8 @@
+{
+  "profile": "work-readonly",
+  "profile_source": "pin",
+  "client_id": "cursor",
+  "client_name": "Cursor",
+  "token_name": "client-cursor",
+  "block_reason": "profile_tier"
+}

@@ -4,11 +4,12 @@ import { shallowMount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
 
-// Roadmap analytics-dashboard / analytics-default-landing: the analytics
-// (Usage) panel of the Dashboard is what the Web UI lands on. `/` and `/usage`
-// open the analytics panel, `/overview` stays deep-linkable for the hub
-// overview, and a brand-new install (zero upstream servers) gets an
-// "add your first server" CTA instead of an empty chart grid.
+// Spec 109 FR-051 / research D3 (109-a interim step): `/` now lands on the
+// Dashboard's Overview (hub) panel, reversing #1044's Usage-first landing —
+// new users kept landing on empty charts (audit N8). `/usage` keeps the full
+// analytics panel (and its "add your first server" CTA on a brand-new
+// install), `/overview` stays deep-linkable to the same hub panel as `/`.
+// Home (needs-attention + topology + a usage strip) replaces `/` in 109-d.
 
 const serversSpy = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ success: true, data: { servers: [] } })
@@ -74,7 +75,7 @@ function makeRouter() {
   return createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/', name: 'dashboard', component: Dashboard, meta: { dashboardView: 'usage' } },
+      { path: '/', name: 'dashboard', component: Dashboard, meta: { dashboardView: 'overview' } },
       { path: '/usage', name: 'usage', component: Dashboard, meta: { dashboardView: 'usage' } },
       { path: '/overview', name: 'dashboard-overview', component: Dashboard, meta: { dashboardView: 'overview' } },
       { path: '/repositories', name: 'repositories', component: { template: '<div />' } },
@@ -112,10 +113,10 @@ describe('analytics dashboard as the default landing page', () => {
     ;(globalThis as unknown as { EventSource: unknown }).EventSource = FakeEventSource
   })
 
-  it('routes "/" to the Dashboard on its usage panel, with /usage and /overview deep-linkable', () => {
+  it('routes "/" to the Dashboard on its overview panel, with /usage and /overview deep-linkable', () => {
     const root = appRouter.resolve('/')
     expect(root.name).toBe('dashboard')
-    expect(root.meta.dashboardView).toBe('usage')
+    expect(root.meta.dashboardView).toBe('overview')
 
     const usage = appRouter.resolve('/usage')
     expect(usage.meta.dashboardView).toBe('usage')
@@ -127,16 +128,15 @@ describe('analytics dashboard as the default landing page', () => {
     expect(overview.matched[0].components?.default).toBe(root.matched[0].components?.default)
   })
 
-  it('shows the usage panel (not the overview) when landing on "/"', async () => {
+  it('shows the overview panel (not usage) when landing on "/"', async () => {
     serversSpy.mockResolvedValue({
       success: true,
       data: { servers: [{ name: 'srv-a', enabled: true, connected: true }] },
     })
     const { wrapper } = await mountDashboard('/')
 
-    expect(wrapper.find('[data-test="dashboard-usage-panel"]').isVisible()).toBe(true)
-    expect(wrapper.find('[data-test="dashboard-overview-panel"]').isVisible()).toBe(false)
-    expect(wrapper.find('[data-test="usage-view-stub"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="dashboard-overview-panel"]').isVisible()).toBe(true)
+    expect(wrapper.find('[data-test="dashboard-usage-panel"]').isVisible()).toBe(false)
   })
 
   it('honours a /overview deep link', async () => {
@@ -153,29 +153,30 @@ describe('analytics dashboard as the default landing page', () => {
   it('rewrites the URL when the tabs are used, so the panel survives a reload', async () => {
     const { wrapper, router } = await mountDashboard('/')
 
-    await wrapper.find('[data-test="dashboard-tab-overview"]').trigger('click')
-    await flushPromises()
-    expect(router.currentRoute.value.path).toBe('/overview')
-
     await wrapper.find('[data-test="dashboard-tab-usage"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/usage')
+
+    await wrapper.find('[data-test="dashboard-tab-overview"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/overview')
   })
 
   it('follows the route when it changes underneath the component', async () => {
     const { wrapper, router } = await mountDashboard('/')
-
-    await router.push('/overview')
-    await flushPromises()
     expect(wrapper.find('[data-test="dashboard-overview-panel"]').isVisible()).toBe(true)
+
+    await router.push('/usage')
+    await flushPromises()
+    expect(wrapper.find('[data-test="dashboard-usage-panel"]').isVisible()).toBe(true)
 
     await router.push('/')
     await flushPromises()
-    expect(wrapper.find('[data-test="dashboard-usage-panel"]').isVisible()).toBe(true)
+    expect(wrapper.find('[data-test="dashboard-overview-panel"]').isVisible()).toBe(true)
   })
 
   it('shows an "add your first server" CTA instead of empty charts on a fresh install', async () => {
-    const { wrapper } = await mountDashboard('/')
+    const { wrapper } = await mountDashboard('/usage')
 
     const cta = wrapper.find('[data-test="dashboard-usage-first-run"]')
     expect(cta.exists()).toBe(true)
@@ -186,7 +187,7 @@ describe('analytics dashboard as the default landing page', () => {
   })
 
   it('offers a one-click escape to the Overview panel from the first-run CTA', async () => {
-    const { wrapper, router } = await mountDashboard('/')
+    const { wrapper, router } = await mountDashboard('/usage')
 
     await wrapper.find('[data-test="dashboard-first-run-overview"]').trigger('click')
     await flushPromises()
@@ -200,7 +201,7 @@ describe('analytics dashboard as the default landing page', () => {
       success: true,
       data: { servers: [{ name: 'srv-a', enabled: true, connected: true }] },
     })
-    const { wrapper } = await mountDashboard('/')
+    const { wrapper } = await mountDashboard('/usage')
 
     expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="usage-view-stub"]').exists()).toBe(true)
@@ -211,7 +212,7 @@ describe('analytics dashboard as the default landing page', () => {
     // (empty) server list alone, so a transport error must not be mistaken for
     // a fresh install and tell a user with servers that they have none.
     serversSpy.mockResolvedValue({ success: false, error: 'boom' })
-    const { wrapper } = await mountDashboard('/')
+    const { wrapper } = await mountDashboard('/usage')
 
     expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="usage-view-stub"]').exists()).toBe(true)
@@ -222,7 +223,7 @@ describe('analytics dashboard as the default landing page', () => {
     // mounting UsageView (which would fire a request and flash "no usage data
     // yet" before the first-run CTA replaces it).
     serversSpy.mockReturnValue(new Promise(() => {}))
-    const { wrapper } = await mountDashboard('/')
+    const { wrapper } = await mountDashboard('/usage')
 
     expect(wrapper.find('[data-test="dashboard-usage-pending"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="usage-view-stub"]').exists()).toBe(false)
@@ -231,7 +232,7 @@ describe('analytics dashboard as the default landing page', () => {
 
   it('clears the chart spinner when the list arrives by SSE before the fetch settles', async () => {
     serversSpy.mockReturnValue(new Promise(() => {}))
-    const { wrapper } = await mountDashboard('/')
+    const { wrapper } = await mountDashboard('/usage')
     expect(wrapper.find('[data-test="dashboard-usage-pending"]').exists()).toBe(true)
 
     window.dispatchEvent(
@@ -288,7 +289,7 @@ describe('analytics dashboard as the default landing page', () => {
     // `loading.error` is shared: App.vue fetches concurrently on mount and
     // silent background refreshes write the field too (and never clear it on
     // success). A failure that is not ours must not suppress the CTA.
-    const { wrapper } = await mountDashboard('/')
+    const { wrapper } = await mountDashboard('/usage')
     expect(wrapper.find('[data-test="dashboard-usage-first-run"]').exists()).toBe(true)
 
     const store = useServersStore()
@@ -300,7 +301,7 @@ describe('analytics dashboard as the default landing page', () => {
 
   it('shows the CTA once a later refresh succeeds after a failed initial fetch', async () => {
     serversSpy.mockResolvedValue({ success: false, error: 'boom' })
-    const { wrapper } = await mountDashboard('/')
+    const { wrapper } = await mountDashboard('/usage')
 
     // Initial fetch failed: no CTA (we do not know the server count), and the
     // usage panel is shown rather than an endless spinner.

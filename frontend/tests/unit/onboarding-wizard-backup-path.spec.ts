@@ -143,6 +143,7 @@ async function connectViaPreview(wrapper: any, clientId: string) {
         server_name: 'mcpproxy',
         action: 'added',
         message: 'MCPProxy registered in Cursor as mcpproxy',
+        reload_hint: 'Reload the Cursor window (or restart Cursor) to load MCPProxy',
       },
     })
     const writeText = vi.fn().mockResolvedValue(undefined)
@@ -159,6 +160,9 @@ async function connectViaPreview(wrapper: any, clientId: string) {
     expect(backup.exists()).toBe(true)
     expect(backup.text()).toContain('A backup of your previous config was saved to')
     expect(backup.text()).toContain('/Users/test/.cursor/mcp.json.bak.20260702-101530')
+    expect(wrapper.find('[data-test="connect-reload-hint"]').text()).toBe(
+      'Reload the Cursor window (or restart Cursor) to load MCPProxy',
+    )
 
     // One-click copy of the backup path.
     const copyBtn = wrapper.find('[data-test="client-copy-backup-cursor"]')

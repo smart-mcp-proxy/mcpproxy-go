@@ -364,6 +364,8 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	"health.summary":     MaskDecisionNotSecret,
 	"health.detail":      MaskDecisionNotSecret, // scrubbed free-form text
 	"health.action":      MaskDecisionNotSecret,
+	"health.status":      MaskDecisionNotSecret,
+	"health.actions":     MaskDecisionNotSecret,
 
 	// Spec 044 diagnostic: a classified failure. `cause` echoes the raw connect
 	// error and is scrubbed; the rest are codes and fixed prose. Read-only.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -32,6 +33,7 @@ const toolHashTestAPIKey = "tool-hash-test-api-key"
 // toolHashMgmtService is the management service the per-server tools endpoint
 // prefers; it serves a fixed tool set for one server.
 type toolHashMgmtService struct {
+	management.Service
 	tools map[string][]map[string]interface{}
 }
 
@@ -46,11 +48,11 @@ type toolHashController struct {
 	mgmt *toolHashMgmtService
 }
 
-func (c *toolHashController) GetCurrentConfig() interface{} {
+func (c *toolHashController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: toolHashTestAPIKey}
 }
 
-func (c *toolHashController) GetManagementService() interface{} {
+func (c *toolHashController) GetManagementService() management.Service {
 	if c.mgmt == nil {
 		return nil
 	}
@@ -115,7 +117,12 @@ func fetchTools(t *testing.T, srv *Server, path, token string) map[string]map[st
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	return decodeToolsByName(t, w)
+}
 
+// decodeToolsByName indexes the tool listing envelope by tool name.
+func decodeToolsByName(t *testing.T, w *httptest.ResponseRecorder) map[string]map[string]interface{} {
+	t.Helper()
 	var resp struct {
 		Data struct {
 			Tools []map[string]interface{} `json:"tools"`
@@ -165,28 +172,26 @@ func TestToolHash_NeverDisclosedToAgentToken(t *testing.T) {
 	}
 }
 
-// Spec 099 FR-018a: a request that reached the handler with NO auth context —
-// the middleware's no-config passthrough is the only way in — is not evidence of
-// an admin, so it gets the agent-token tier and no pin. This is the second
-// consumer of disclosureTier, and the one where a residual grant would publish
-// hashes rather than merely widen a diagnosis.
+// Spec 099 FR-018a: a request that reaches the handler with NO auth context is
+// not evidence of an admin, so it gets the agent-token tier and no pin. This is
+// the second consumer of disclosureTier, and the one where a residual grant
+// would publish hashes rather than merely widen a diagnosis.
+//
+// The handler is invoked directly: since SEC-02 the auth middleware refuses a
+// request it cannot authenticate instead of forwarding it, so the floor is
+// pinned on the handler that owns it. See noAuthContextRequest.
 func TestToolHash_NoAuthContextGetsNoPin(t *testing.T) {
-	ctrl := &unconfiguredToolHashController{toolHashController: newToolHashController()}
-	srv := NewServer(ctrl, zaptest.NewLogger(t).Sugar(), nil)
+	srv := NewServer(newToolHashController(), zaptest.NewLogger(t).Sugar(), nil)
 
-	tools := fetchTools(t, srv, "/api/v1/tools", "")
+	rec := httptest.NewRecorder()
+	srv.handleGetGlobalTools(rec, noAuthContextRequest(t, "/api/v1/tools", nil))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	tools := decodeToolsByName(t, rec)
 	require.Contains(t, tools, "create_issue")
 	assert.NotContains(t, tools["create_issue"], "hash",
 		"no auth context is the disclosure floor, not the ceiling")
 }
-
-// unconfiguredToolHashController reproduces the ONE middleware path that reaches
-// a handler without installing an auth context: no readable config.
-type unconfiguredToolHashController struct {
-	*toolHashController
-}
-
-func (c *unconfiguredToolHashController) GetCurrentConfig() interface{} { return nil }
 
 // The hash is proxy state, never upstream-supplied: a server declaring a tool
 // field literally named "hash" must not be able to publish a pin through the

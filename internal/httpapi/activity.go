@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -184,6 +185,12 @@ func applyActivityScope(ctx context.Context, filter *storage.ActivityFilter) {
 // @Security ApiKeyQuery
 // @Router /api/v1/activity [get]
 func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: GET /activity already honours `agent` (Spec 028),
+	// so it is exempt from the token-alias gate; profile/client/token stay
+	// gated until Spec 108-e/f wire them.
+	if !rejectUnsupportedScopeFilters(w, r, "agent") {
+		return
+	}
 	filter := parseActivityFilters(r)
 	applyActivityScope(r.Context(), &filter)
 
@@ -214,6 +221,7 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	for i, a := range activities {
 		contractActivities[i] = storageToContractActivity(a)
 		s.maskActivityPayloads(&contractActivities[i])
+		redactForeignIdentity(r.Context(), a.Arguments, &contractActivities[i])
 		if excludePayloads {
 			contractActivities[i].Arguments = nil
 			contractActivities[i].Response = ""
@@ -272,6 +280,7 @@ func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request)
 
 	record := storageToContractActivity(activity)
 	s.maskActivityPayloads(&record)
+	redactForeignIdentity(r.Context(), activity.Arguments, &record)
 
 	response := contracts.ActivityDetailResponse{
 		Activity: record,
@@ -328,14 +337,19 @@ func (s *Server) maskActivityPayloads(record *contracts.ActivityRecord) {
 	record.Metadata = s.sensitiveMasker.MaskArguments(record.Metadata)
 }
 
-// ActivityProjector returns the exact convert+mask composition core
-// GET /activity applies to a storage record before it reaches a caller
+// ActivityProjector returns the convert+mask composition core GET /activity
+// applies to a storage record before it reaches a caller
 // (Spec 107 T086, contracts/rest-endpoints.md §"user/activity"): the
 // server-edition GET /api/v1/user/activity door holds *storage.ActivityRecord
 // values and has no access to this package's unexported
 // storageToContractActivity/maskActivityPayloads, so this is the one exported
 // seam that lets it emit the same JSON shape and the same masking as the core
 // door for the same record.
+//
+// It does NOT apply redactForeignIdentity: the projector has no request
+// context, so auth_type/agent_name pass through. That is safe only because its
+// one consumer pre-filters to the caller's own records (filter.UserID); a new
+// consumer that serves other callers' rows must redact them itself.
 func (s *Server) ActivityProjector() func(*storage.ActivityRecord) contracts.ActivityRecord {
 	return func(record *storage.ActivityRecord) contracts.ActivityRecord {
 		contract := storageToContractActivity(record)
@@ -417,11 +431,52 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 		RequestID:         a.RequestID,
 		ParentID:          a.ParentID,
 		Metadata:          a.Metadata,
+		AuthType:          authArgString(a.Arguments, "_auth_auth_type"),
+		AgentName:         authArgString(a.Arguments, "_auth_agent_name"),
 		// Sensitive data detection fields (Spec 026)
 		HasSensitiveData: hasSensitiveData,
 		DetectionTypes:   detectionTypes,
 		MaxSeverity:      maxSeverity,
 	}
+}
+
+// redactForeignIdentity blanks auth_type/agent_name on a record the caller did
+// not make, when the caller is scoped (a non-admin). Activity visibility is
+// scoped by SERVER, so without this a scoped agent token reading a shared
+// server's log would learn every other agent token's name — an inventory that
+// is otherwise admin-only (GET /api/v1/tokens). Its own rows keep their
+// identity so it can still filter on itself.
+//
+// "Own" needs the stored token prefix AND name to match the caller's: names
+// are unique per owner only (another tenant's token can share one), and the
+// 12-char prefix carries just 16 random bits, so neither alone identifies it.
+//
+// It also strips the internal `_auth_*` keys from Arguments, which the bodies
+// export otherwise returns verbatim — the same inventory by another route.
+func redactForeignIdentity(ctx context.Context, storedArgs map[string]interface{}, record *contracts.ActivityRecord) {
+	if !auth.IsScopedCaller(ctx) {
+		return
+	}
+	record.Arguments = security.StripInternalArgs(record.Arguments)
+	ac := auth.AuthContextFromContext(ctx)
+	if ac.Type == auth.AuthTypeAgent && ac.TokenPrefix != "" &&
+		authArgString(storedArgs, "_auth_token_prefix") == ac.TokenPrefix &&
+		authArgString(storedArgs, "_auth_agent_name") == ac.AgentName {
+		return
+	}
+	record.AuthType = ""
+	record.AgentName = ""
+}
+
+// authArgString reads one internal `_auth_*` identity key (Spec 028) from a
+// record's stored arguments. maskActivityPayloads strips those keys from the
+// payload view, so the identity has to be lifted into typed fields here or the
+// Web UI has nothing to filter on.
+func authArgString(args map[string]interface{}, key string) string {
+	if s, ok := args[key].(string); ok {
+		return s
+	}
+	return ""
 }
 
 // extractSensitiveDataInfo extracts sensitive data detection info from activity metadata.
@@ -514,6 +569,8 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 		RequestID:         a.RequestID,
 		ParentID:          a.ParentID,
 		Metadata:          a.Metadata,
+		AuthType:          authArgString(a.Arguments, "_auth_auth_type"),
+		AgentName:         authArgString(a.Arguments, "_auth_agent_name"),
 		// Pre-truncation byte lengths (Spec 069 A1). Copied unconditionally,
 		// NOT under includeBodies: they are sizes, not content, and the
 		// bodies-off export is exactly the case where they are the only cost
@@ -556,12 +613,18 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 // @Param limit query int false "Maximum records to export (1-50000, default 10000)"
 // @Param offset query int false "Pagination offset (default 0)"
 // @Success 200 {string} string "Streamed activity records"
+// @Failure 400 {object} contracts.APIResponse
 // @Failure 401 {object} contracts.APIResponse
 // @Failure 500 {object} contracts.APIResponse
 // @Security ApiKeyHeader
 // @Security ApiKeyQuery
 // @Router /api/v1/activity/export [get]
 func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: GET /activity/export already honours `agent`
+	// (Spec 028), same exemption as GET /activity.
+	if !rejectUnsupportedScopeFilters(w, r, "agent") {
+		return
+	}
 	filter := parseActivityFilters(r)
 	applyActivityScope(r.Context(), &filter)
 
@@ -634,6 +697,7 @@ func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// JSON Lines format - one JSON object per line
 			contractActivity := storageToContractActivityForExport(activity, includeBodies)
+			redactForeignIdentity(r.Context(), activity.Arguments, &contractActivity)
 			jsonBytes, err := json.Marshal(contractActivity)
 			if err != nil {
 				s.logger.Errorw("Failed to marshal activity for export", "error", err, "id", activity.ID)
@@ -723,6 +787,11 @@ func parsePeriodDuration(period string) (time.Duration, error) {
 // @Security ApiKeyQuery
 // @Router /api/v1/activity/summary [get]
 func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: /activity/summary ignores `agent` today, so it is
+	// gated exactly like `token` (codex round 4) — no exemption passed.
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	// Parse period parameter
 	period := r.URL.Query().Get("period")
 	if period == "" {
@@ -1101,6 +1170,11 @@ func parseUsageParams(r *http.Request) (usageParams, error) {
 // @Security ApiKeyQuery
 // @Router /api/v1/activity/usage [get]
 func (s *Server) handleActivityUsage(w http.ResponseWriter, r *http.Request) {
+	// Spec 109-k FR-080a: /activity/usage ignores `agent` today (parseUsageParams
+	// reads only window/server/tool/status/top/sort) — gated like `token`.
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	params, err := parseUsageParams(r)
 	if err != nil {
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
@@ -1127,9 +1201,8 @@ func (s *Server) handleActivityUsage(w http.ResponseWriter, r *http.Request) {
 // the value hot-reloads with config.
 func (s *Server) usageCacheTTL() time.Duration {
 	def := time.Duration(config.DefaultObservabilityConfig().UsageCacheTTL)
-	cfgIface := s.controller.GetCurrentConfig()
-	cfg, ok := cfgIface.(*config.Config)
-	if !ok || cfg == nil || cfg.Observability == nil {
+	cfg := s.controller.GetCurrentConfig()
+	if cfg == nil || cfg.Observability == nil {
 		return def
 	}
 	if d := time.Duration(cfg.Observability.UsageCacheTTL); d > 0 {
@@ -1160,6 +1233,7 @@ func buildUsageResponse(snap *internalRuntime.UsageAggregate, tokens *contracts.
 	if tokens != nil && !p.scoped {
 		resp.TokensSaved = tokens.SavedTokens
 		resp.TokensSavedPercentage = tokens.SavedTokensPercentage
+		resp.TokensSavedEstimated = tokens.Estimated
 	}
 	if snap == nil {
 		return resp

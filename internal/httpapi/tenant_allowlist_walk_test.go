@@ -41,7 +41,7 @@ type tenantWalkController struct {
 	baseController
 }
 
-func (m *tenantWalkController) GetCurrentConfig() any {
+func (m *tenantWalkController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: "admin-test-key"}
 }
 

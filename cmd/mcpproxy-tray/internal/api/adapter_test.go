@@ -399,6 +399,39 @@ func TestServerAdapter_GetAllServers_AllFieldsMapped(t *testing.T) {
 	assert.Equal(t, "login", health["action"])
 }
 
+// TestServerAdapter_GetAllServers_ForwardsHealthVocabulary is a round-4
+// review finding: the Go cross-platform tray's HealthStatus struct and
+// adapter never carried contracts.HealthStatus's Status/Usable/Actions
+// fields (Spec 109 FR-010-012), so this surface silently dropped them while
+// the Web UI, macOS tray and CLI all render them.
+func TestServerAdapter_GetAllServers_ForwardsHealthVocabulary(t *testing.T) {
+	mock := NewMockClient()
+	mock.servers = []Server{
+		{
+			Name: "quarantined-oauth-server",
+			Health: &HealthStatus{
+				Level:      "unhealthy",
+				AdminState: "quarantined",
+				Summary:    "Authentication required",
+				Action:     "login",
+				Status:     "sign_in_required",
+				Usable:     false,
+				Actions:    []string{"login", "approve"},
+			},
+		},
+	}
+	adapter := NewServerAdapter(mock)
+
+	result, err := adapter.GetAllServers()
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+
+	health := result[0]["health"].(map[string]interface{})
+	assert.Equal(t, "sign_in_required", health["status"])
+	assert.Equal(t, false, health["usable"])
+	assert.Equal(t, []string{"login", "approve"}, health["actions"])
+}
+
 func TestServerAdapter_GetAllServers_APIError(t *testing.T) {
 	mock := NewMockClient()
 	mock.serversErr = errors.New("connection refused")

@@ -93,8 +93,14 @@ Examples:
 	traceTransport bool // Enable HTTP/SSE frame-by-frame tracing
 
 	// Global list filter flags (T019)
-	toolsStatusFilter   string // enabled | disabled | config-denied
-	toolsRiskFilter     string // read | write | destructive
+	toolsStatusFilter string // enabled | disabled | config-denied
+	// toolsTierFilter / toolsRiskFilter (Spec 109 FR-028, X11): --risk is kept
+	// as an alias of --tier for old scripts/muscle-memory; whichever is
+	// non-empty wins (tier preferred if both are set). Both filter on the
+	// backend-computed `tier` field (contracts.AnnotationTier) — never a
+	// locally-derived value.
+	toolsTierFilter     string // read | write | destructive | unannotated
+	toolsRiskFilter     string // alias of --tier
 	toolsApprovalFilter string // approved | pending | changed
 )
 
@@ -136,10 +142,16 @@ func groupByServer(targets []serverToolTarget) map[string][]string {
 
 // applyGlobalToolFilters applies client-side filters to the global tool list.
 // statusFilter: "enabled" | "disabled" | "config-denied" | ""
-// riskFilter:   "read" | "write" | "destructive" | ""
+// tierFilter:   "read" | "write" | "destructive" | "unannotated" | ""
 // approvalFilter: "approved" | "pending" | "changed" | ""
-func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, riskFilter, approvalFilter string) []map[string]interface{} {
-	if statusFilter == "" && riskFilter == "" && approvalFilter == "" {
+//
+// Spec 109 FR-028 / X11: tierFilter matches the backend-computed `tier` field
+// verbatim. It used to read `annotations.operation_type` — a field that does
+// not exist on an MCP tool's annotations (operation_type is an intent-
+// declaration concept) — so `--risk read` matched nothing over a fixture of
+// read-annotated tools. `tier` is what `GET /tools` actually sends.
+func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, tierFilter, approvalFilter string) []map[string]interface{} {
+	if statusFilter == "" && tierFilter == "" && approvalFilter == "" {
 		return tools
 	}
 
@@ -165,12 +177,9 @@ func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, riskFi
 			}
 		}
 
-		if riskFilter != "" {
-			opType := ""
-			if ann, ok := t["annotations"].(map[string]interface{}); ok {
-				opType, _ = ann["operation_type"].(string)
-			}
-			if !strings.EqualFold(opType, riskFilter) {
+		if tierFilter != "" {
+			tier := getStringField(t, "tier")
+			if !strings.EqualFold(tier, tierFilter) {
 				continue
 			}
 		}
@@ -185,6 +194,98 @@ func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, riskFi
 		out = append(out, t)
 	}
 	return out
+}
+
+// filterToolMetadataByTier applies --tier/--risk to the standalone-mode
+// (no-daemon) tool list, computing each tool's tier locally via
+// contracts.AnnotationTier — the same function the daemon's
+// enrichServerTools uses to populate the "tier" field applyGlobalToolFilters
+// reads. Unlike --status/--approval (rejected outright for standalone mode,
+// since those need daemon-persisted state this path never touches), tier
+// needs nothing but the tool's own annotations (review round 6, finding 4).
+// An empty tierFilter returns tools unchanged.
+func filterToolMetadataByTier(tools []*config.ToolMetadata, tierFilter string) []*config.ToolMetadata {
+	if tierFilter == "" {
+		return tools
+	}
+	filtered := make([]*config.ToolMetadata, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		if strings.EqualFold(string(contracts.AnnotationTier(tool.Annotations)), tierFilter) {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
+}
+
+// standaloneNoToolsMessage is the table-mode diagnostic runToolsListStandalone
+// prints when the final tool list is empty.
+//
+// zcode review round 6 (backend fix for finding 4): before
+// filterToolMetadataByTier existed, this branch was reachable only when the
+// server genuinely exposed zero tools, so guessing "doesn't support tools /
+// not properly configured / connection issues" was reasonable. Once a
+// --tier/--risk filter can ALSO empty a non-empty discovery result, those
+// three guesses are all false for that case — telling an operator who ran
+// `--tier destructive` against a server that has tools, just none of that
+// tier, that the server "doesn't support tools" is the same misleading
+// signal finding 4 was originally about, one step further down the same
+// code path. discoveredCount is the count BEFORE tierFilter was applied.
+func standaloneNoToolsMessage(serverName, tierFilter string, discoveredCount int) string {
+	if tierFilter != "" && discoveredCount > 0 {
+		return fmt.Sprintf("No tools on server '%s' match --tier/--risk=%s (%d tool(s) discovered, none in that tier)\n",
+			serverName, tierFilter, discoveredCount)
+	}
+	return fmt.Sprintf("No tools found on server '%s'\n"+
+		"This could indicate:\n"+
+		"   Server doesn't support tools\n"+
+		"   Server is not properly configured\n"+
+		"   Connection issues during tool discovery\n", serverName)
+}
+
+// resolvedTierFilter returns the effective tier filter from --tier / --risk
+// (an alias of --tier, Spec 109 FR-028). --tier wins when both are set.
+func resolvedTierFilter() string {
+	if toolsTierFilter != "" {
+		return toolsTierFilter
+	}
+	return toolsRiskFilter
+}
+
+// validTierFilterValues lists the tier strings --tier/--risk accepts,
+// mirrored from contracts.Tier — excluding contracts.TierUnknown, which
+// AnnotationTier never returns (see internal/contracts/tier.go's own doc
+// comment) and so can never legitimately appear in a --tier/--risk match.
+var validTierFilterValues = []string{
+	string(contracts.TierRead),
+	string(contracts.TierWrite),
+	string(contracts.TierDestructive),
+	string(contracts.TierUnannotated),
+}
+
+// validateTierFilter rejects an unrecognized --tier/--risk value up front.
+// Without this, applyGlobalToolFilters/filterToolMetadataByTier's
+// strings.EqualFold match against every known tier simply fails on a typo
+// like `--tier destrutive`, silently returning an empty table and exiting 0
+// — a CI or audit script grepping for e.g. destructive tools reads that as
+// "the host has none", a false all-clear on exactly the safety-relevant
+// query this flag exists to answer (review round 8, finding 6).
+// flagName is only used to name the offending flag in the error, since
+// resolvedTierFilter merges --tier and --risk into one string that no
+// longer remembers which flag the caller actually set.
+func validateTierFilter(flagName, value string) error {
+	if value == "" {
+		return nil
+	}
+	for _, v := range validTierFilterValues {
+		if strings.EqualFold(value, v) {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid --%s %q: must be one of: %s (or empty for no filter)",
+		flagName, value, strings.Join(validTierFilterValues, ", "))
 }
 
 // GetToolsCommand returns the tools command for adding to the root command
@@ -219,7 +320,10 @@ func initToolsFlags() {
 
 	// Global-list filter flags (T019)
 	toolsListCmd.Flags().StringVar(&toolsStatusFilter, "status", "", "Filter by state: enabled, disabled, config-denied")
-	toolsListCmd.Flags().StringVar(&toolsRiskFilter, "risk", "", "Filter by risk: read, write, destructive")
+	// Spec 109 FR-028/X11: --tier is canonical; --risk is kept as an alias
+	// (risk stays the scan-score term elsewhere in the CLI).
+	toolsListCmd.Flags().StringVar(&toolsTierFilter, "tier", "", "Filter by tier: read, write, destructive, unannotated")
+	toolsListCmd.Flags().StringVar(&toolsRiskFilter, "risk", "", "Alias of --tier")
 	toolsListCmd.Flags().StringVar(&toolsApprovalFilter, "approval", "", "Filter by approval: approved, pending, changed")
 
 	// Note: -o/--output flag is inherited from root command via globalOutputFormat
@@ -241,6 +345,13 @@ func initToolsFlags() {
 }
 
 func runToolsList(_ *cobra.Command, _ []string) error {
+	if err := validateTierFilter("tier", toolsTierFilter); err != nil {
+		return err
+	}
+	if err := validateTierFilter("risk", toolsRiskFilter); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -306,7 +417,7 @@ func runToolsListGlobal(ctx context.Context, globalConfig *config.Config, logger
 	}
 
 	// Apply client-side filters
-	tools = applyGlobalToolFilters(tools, toolsStatusFilter, toolsRiskFilter, toolsApprovalFilter)
+	tools = applyGlobalToolFilters(tools, toolsStatusFilter, resolvedTierFilter(), toolsApprovalFilter)
 
 	return outputGlobalTools(tools)
 }
@@ -442,7 +553,7 @@ func serverToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 // of the two upstream-controlled columns, NAME and DESCRIPTION — is directly
 // testable.
 func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]string) {
-	headers = []string{"NAME", "SERVER", "STATE", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
+	headers = []string{"NAME", "SERVER", "STATE", "TIER", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
 	for _, t := range tools {
 		name := sanitizeName(getStringField(t, "name"))
 		srv := getStringField(t, "server_name")
@@ -454,6 +565,13 @@ func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 			state = "config-denied"
 		} else if disabled {
 			state = "disabled"
+		}
+
+		// Spec 109 FR-028/X11: rendered verbatim from the backend-computed
+		// `tier` field — never derived here.
+		tier := getStringField(t, "tier")
+		if tier == "" {
+			tier = "-"
 		}
 
 		approval := getStringField(t, "approval_status")
@@ -470,7 +588,7 @@ func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 
 		desc := sanitizeCell(getStringField(t, "description"), maxToolDescriptionCell)
 
-		rows = append(rows, []string{name, srv, state, approval, formatToolHold(t), usage, lastUsed, desc})
+		rows = append(rows, []string{name, srv, state, tier, approval, formatToolHold(t), usage, lastUsed, desc})
 	}
 	return headers, rows
 }
@@ -710,6 +828,17 @@ func runToolsListClientMode(ctx context.Context, client *cliclient.Client, serve
 		return cliError("failed to get server tools from daemon", err)
 	}
 
+	// Apply the same --status/--tier(--risk)/--approval client-side filters as
+	// the global list. GET /api/v1/servers/{id}/tools shares enrichServerTools
+	// with the global endpoint (spec 050), so its maps carry the identical
+	// "tier"/"disabled"/"config_denied"/"approval_status" fields
+	// applyGlobalToolFilters reads — before this fix, `--server` bypassed
+	// filtering entirely and always printed every tool unfiltered (review
+	// round 6, finding 4: an operator auditing one server for destructive
+	// tools with `--server=x --tier destructive` saw the full unfiltered
+	// list and could wrongly conclude there were none).
+	tools = applyGlobalToolFilters(tools, toolsStatusFilter, resolvedTierFilter(), toolsApprovalFilter)
+
 	// Output results
 	return outputTools(tools, logger)
 }
@@ -757,6 +886,18 @@ func runToolsListStandalone(ctx context.Context, serverName string, globalConfig
 	if serverConfig == nil {
 		return fmt.Errorf("server '%s' not found in configuration. Available servers: %v",
 			serverName, getAvailableServerNames(globalConfig))
+	}
+
+	// --status and --approval read daemon-persisted state (per-tool disabled
+	// state, config-denied checks, approval records) that this standalone path
+	// has no access to — it connects directly to the upstream server and never
+	// touches the daemon's storage. Silently ignoring the flag would print
+	// every tool unfiltered with no indication the filter never ran (review
+	// round 6, finding 4); fail fast and say so instead. --tier/--risk is
+	// still honored below since it needs only the tool's own annotations.
+	if toolsStatusFilter != "" || toolsApprovalFilter != "" {
+		return fmt.Errorf("--status and --approval require the daemon (no running daemon detected for standalone server '%s'): "+
+			"start mcpproxy (mcpproxy serve) and retry, or drop these flags — --tier/--risk still works standalone", serverName)
 	}
 
 	// Human banner/progress goes to stderr so machine formats (-o json|yaml)
@@ -815,15 +956,19 @@ func runToolsListStandalone(ctx context.Context, serverName string, globalConfig
 		return fmt.Errorf("failed to list tools: %w", err)
 	}
 
+	// Apply --tier/--risk (review round 6, finding 4). Unlike --status/
+	// --approval (rejected above), tier needs only the tool's own
+	// annotations — no daemon round trip — so it works standalone too, via
+	// the same AnnotationTier the daemon's enrichServerTools uses.
+	discoveredCount := len(tools)
+	tierFilter := resolvedTierFilter()
+	tools = filterToolMetadataByTier(tools, tierFilter)
+
 	// Output results using unified formatter
 	if len(tools) == 0 {
 		outputFormat := ResolveOutputFormat()
 		if outputFormat == "table" {
-			fmt.Printf("No tools found on server '%s'\n", serverName)
-			fmt.Printf("This could indicate:\n")
-			fmt.Printf("   Server doesn't support tools\n")
-			fmt.Printf("   Server is not properly configured\n")
-			fmt.Printf("   Connection issues during tool discovery\n")
+			fmt.Print(standaloneNoToolsMessage(serverName, tierFilter, discoveredCount))
 			return nil
 		}
 		// For JSON/YAML, output empty array

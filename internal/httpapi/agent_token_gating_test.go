@@ -20,7 +20,7 @@ type adminConfigController struct {
 	apiKey string
 }
 
-func (c *adminConfigController) GetCurrentConfig() interface{} {
+func (c *adminConfigController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: c.apiKey}
 }
 

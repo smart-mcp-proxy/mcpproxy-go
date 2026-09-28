@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -30,7 +31,7 @@ type globalToolsController struct {
 // GetManagementService returns nil so handleGetGlobalTools exercises the
 // controller GetServerTools path this mock controls. The management-service
 // path is verified end-to-end via the API E2E + curl verification.
-func (m *globalToolsController) GetManagementService() interface{} { return nil }
+func (m *globalToolsController) GetManagementService() management.Service { return nil }
 
 func (m *globalToolsController) GetAllServers() ([]map[string]interface{}, error) {
 	return m.allServers, nil
@@ -65,6 +66,7 @@ func doGlobalTools(t *testing.T, ctrl *globalToolsController) map[string]interfa
 	t.Helper()
 	srv := NewServer(ctrl, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest("GET", "/api/v1/tools", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("X-Request-Source", "socket")
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)

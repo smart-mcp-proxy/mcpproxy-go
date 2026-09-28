@@ -47,7 +47,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
-	"github.com/smart-mcp-proxy/mcpproxy-go/web"
 )
 
 // Status represents the current status of the server
@@ -487,8 +486,11 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check if this is an agent token
-		if strings.HasPrefix(token, auth.TokenPrefixStr) {
+		// Check if this is an agent token OR a Spec 108-c client credential
+		// (mcp_cli_): both authenticate on MCP through the same validator
+		// (storage.ValidateAgentToken), which enforces the FR-021 fail-closed
+		// invariants for whichever kind the prefix claims.
+		if strings.HasPrefix(token, auth.TokenPrefixStr) || strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
 			cfg := s.runtime.Config()
 			if cfg == nil {
 				// Fail closed. Forwarding here would hand the request on with NO
@@ -542,7 +544,9 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 
 		// Check if it matches the global API key — treat as admin
 		cfg := s.runtime.Config()
-		if cfg != nil && cfg.APIKey != "" && token == cfg.APIKey {
+		// Timing-safe compare; ConstantTimeEqual also rejects an empty key or
+		// token, subsuming the previous `cfg.APIKey != ""` guard.
+		if cfg != nil && auth.ConstantTimeEqual(token, cfg.APIKey) {
 			ctx := auth.WithAuthContext(r.Context(), credentialKindContext(auth.AdminContext(), auth.CredentialKindAPIKey))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
@@ -656,7 +660,7 @@ func (s *Server) UnsubscribeEvents(ch chan runtime.Event) {
 
 // GetManagementService returns the management service instance from runtime.
 // Returns nil if service hasn't been set yet.
-func (s *Server) GetManagementService() interface{} {
+func (s *Server) GetManagementService() management.Service {
 	if s.runtime == nil {
 		return nil
 	}
@@ -2739,12 +2743,12 @@ func (s *Server) extendedDeadline(d time.Duration, next http.Handler) http.Handl
 		rc := http.NewResponseController(w)
 		if err := rc.SetWriteDeadline(deadline); err != nil {
 			s.logger.Debug("Could not extend the write deadline for a long-running route",
-				zap.String("path", r.URL.Path),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 				zap.Error(err))
 		}
 		if err := rc.SetReadDeadline(deadline); err != nil {
 			s.logger.Debug("Could not extend the read deadline for a long-running route",
-				zap.String("path", r.URL.Path),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 				zap.Error(err))
 		}
 		next.ServeHTTP(w, r)
@@ -2790,13 +2794,13 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 		rc := http.NewResponseController(w)
 		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
 			s.logger.Debug("Could not clear the write deadline for a streaming route",
-				zap.String("path", r.URL.Path),
+				zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 				zap.Error(err))
 		}
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			if err := rc.SetReadDeadline(time.Time{}); err != nil {
 				s.logger.Debug("Could not clear the read deadline for a streaming route",
-					zap.String("path", r.URL.Path),
+					zap.String("path", oauth.LogSafeRequestPath(r.URL.Path)),
 					zap.Error(err))
 			}
 		}
@@ -2895,55 +2899,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux := http.NewServeMux()
 
 	// Create a logging wrapper for debugging client connections
-	loggingHandler := func(handler http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-
-			// Extract connection source from context
-			source := GetConnectionSource(r.Context())
-
-			// Log incoming request with connection details
-			s.logger.Debug("MCP client request received",
-				zap.String("method", r.Method),
-				zap.String("path", r.URL.Path),
-				zap.String("remote_addr", r.RemoteAddr),
-				zap.String("source", string(source)),
-				zap.String("user_agent", r.UserAgent()),
-				zap.String("content_type", r.Header.Get("Content-Type")),
-				zap.String("connection", r.Header.Get("Connection")),
-				zap.Int64("content_length", r.ContentLength),
-			)
-
-			// Create response writer wrapper to capture status and errors
-			wrappedWriter := &responseWriter{ResponseWriter: w, statusCode: 200}
-
-			// Handle the request
-			handler.ServeHTTP(wrappedWriter, r)
-
-			duration := time.Since(start)
-
-			// Log response with timing and status
-			if wrappedWriter.statusCode >= 400 {
-				s.logger.Warn("MCP client request completed with error",
-					zap.String("method", r.Method),
-					zap.String("path", r.URL.Path),
-					zap.String("remote_addr", r.RemoteAddr),
-					zap.String("source", string(source)),
-					zap.Int("status_code", wrappedWriter.statusCode),
-					zap.Duration("duration", duration),
-				)
-			} else {
-				s.logger.Debug("MCP client request completed successfully",
-					zap.String("method", r.Method),
-					zap.String("path", r.URL.Path),
-					zap.String("remote_addr", r.RemoteAddr),
-					zap.String("source", string(source)),
-					zap.Int("status_code", wrappedWriter.statusCode),
-					zap.Duration("duration", duration),
-				)
-			}
-		})
-	}
+	loggingHandler := s.mcpLoggingHandler
 
 	// Standard MCP endpoint according to the specification
 	// Wrap with auth middleware to inject AuthContext for agent token scope enforcement.
@@ -3141,7 +3097,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		// security_scan from every server on every SSE delivery — same bug
 		// class as the pre-existing quarantine-stats staleness PR #463
 		// already fixes for Quarantine.
-		if mgmtSvc, ok := s.runtime.GetManagementService().(management.Service); ok && mgmtSvc != nil {
+		if mgmtSvc := s.runtime.GetManagementService(); mgmtSvc != nil {
 			mgmtSvc.SetScanSummaryEnricher(&scanSummaryEnricherAdapter{scanner: secService})
 		}
 		s.setSecurityScanner(secService)
@@ -3184,7 +3140,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				token = strings.TrimPrefix(h, "Bearer ")
 			}
 		}
-		if token != cfg.APIKey {
+		if !auth.ConstantTimeEqual(token, cfg.APIKey) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -3205,7 +3161,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// increments the persistent web_ui_opened funnel counter — independent of
 	// the X-MCPProxy-Client-header surface_requests.webui counting. nil-safe
 	// at both layers: no telemetry service or no funnel store → no-op.
-	webUIHandler := web.NewHandlerWithIndexCallback(s.logger.Sugar(), func() {
+	webUIHandler := newWebUIHandler(cfg, s.logger.Sugar(), func() {
 		if ts := s.runtime.TelemetryService(); ts != nil {
 			ts.RecordWebUIOpen()
 		}
@@ -3719,6 +3675,14 @@ func (s *Server) searchResultsToMaps(results []*config.SearchResult) []map[strin
 				"description": result.Tool.Description,
 				"server_name": result.Tool.ServerName,
 			}
+			// Spec 109 FR-028/review round 1: without this, contracts'
+			// AnnotationTier(nil) always resolved to TierUnannotated for
+			// every search hit, regardless of the tool's real annotations,
+			// so the same tool's tier badge disagreed between the normal
+			// Tools list and the search box.
+			if result.Tool.Annotations != nil {
+				toolData["annotations"] = result.Tool.Annotations
+			}
 			// Parse params JSON as input schema if available
 			if result.Tool.ParamsJSON != "" {
 				var inputSchema map[string]interface{}
@@ -3924,7 +3888,10 @@ func (s *Server) EmitActiveProfileChanged(profile string) {
 }
 
 // GetCurrentConfig returns the current configuration
-func (s *Server) GetCurrentConfig() interface{} {
+func (s *Server) GetCurrentConfig() *config.Config {
+	if s.runtime == nil {
+		return nil
+	}
 	return s.runtime.GetCurrentConfig()
 }
 
@@ -4233,6 +4200,12 @@ func (s *Server) GetOnboardingState() (*storage.OnboardingState, error) {
 // SaveOnboardingState persists the wizard engagement state (Spec 046).
 func (s *Server) SaveOnboardingState(state *storage.OnboardingState) error {
 	return s.runtime.SaveOnboardingState(state)
+}
+
+// UpdateOnboardingState runs fn against the current onboarding state and
+// persists it atomically (Spec 109-b).
+func (s *Server) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	return s.runtime.UpdateOnboardingState(fn)
 }
 
 // GetActivationFirstMCPClient returns Spec 044's FirstMCPClientEver flag and
@@ -4611,4 +4584,72 @@ func (p *configServerInfoProvider) IsConnected(serverName string) bool {
 		return false
 	}
 	return serverStatus.Connected
+}
+
+// mcpLoggingHandler wraps an MCP route with the request/response debug lines
+// that every /mcp mount shares. Extracted from startCustomHTTPServer so the
+// log fields it writes are reachable from a test without binding a listener.
+func (s *Server) mcpLoggingHandler(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Extract connection source from context
+		source := GetConnectionSource(r.Context())
+
+		// SEC-01 follow-up: `/mcp/` and `/mcp/p/` are SUBTREE patterns, so
+		// everything after the prefix is whatever the caller sent, and
+		// r.URL.Path arrives percent-DECODED — an `?apikey=<KEY>` or a
+		// `Bearer <token>` encoded into the request target reaches this field
+		// as the real thing. The renderer is internal/oauth's, the same one
+		// internal/httpapi's access log uses: one rule for every log sink.
+		//
+		// Rendered ONCE for all three lines below. zap evaluates a field's
+		// value eagerly, so this runs whether or not Debug is enabled, and the
+		// renderer walks the path per segment; doing it twice per request
+		// would double that cost for nothing. Its input is capped inside
+		// LogSafeRequestPath (see maxLogSafeRequestBytes), which is what keeps
+		// the work per request bounded on this anonymous-by-default endpoint.
+		safePath := oauth.LogSafeRequestPath(r.URL.Path)
+
+		// Log incoming request with connection details
+		s.logger.Debug("MCP client request received",
+			zap.String("method", r.Method),
+			zap.String("path", safePath),
+			zap.String("remote_addr", r.RemoteAddr),
+			zap.String("source", string(source)),
+			zap.String("user_agent", r.UserAgent()),
+			zap.String("content_type", r.Header.Get("Content-Type")),
+			zap.String("connection", r.Header.Get("Connection")),
+			zap.Int64("content_length", r.ContentLength),
+		)
+
+		// Create response writer wrapper to capture status and errors
+		wrappedWriter := &responseWriter{ResponseWriter: w, statusCode: 200}
+
+		// Handle the request
+		handler.ServeHTTP(wrappedWriter, r)
+
+		duration := time.Since(start)
+
+		// Log response with timing and status
+		if wrappedWriter.statusCode >= 400 {
+			s.logger.Warn("MCP client request completed with error",
+				zap.String("method", r.Method),
+				zap.String("path", safePath),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("source", string(source)),
+				zap.Int("status_code", wrappedWriter.statusCode),
+				zap.Duration("duration", duration),
+			)
+		} else {
+			s.logger.Debug("MCP client request completed successfully",
+				zap.String("method", r.Method),
+				zap.String("path", safePath),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("source", string(source)),
+				zap.Int("status_code", wrappedWriter.statusCode),
+				zap.Duration("duration", duration),
+			)
+		}
+	})
 }

@@ -1,6 +1,6 @@
 # MCPProxy Makefile
 
-.PHONY: help build build-server build-docker build-deb swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth lint dev-setup docs-setup docs-dev docs-build docs-clean bench-discovery
+.PHONY: help build build-server build-docker build-deb swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth test-descendant-pids test-e2e-cleanup-check lint dev-setup docs-setup docs-dev docs-build docs-clean bench-discovery
 
 SWAGGER_BIN ?= $(HOME)/go/bin/swag
 SWAGGER_OUT ?= oas
@@ -20,6 +20,8 @@ help:
 	@echo "  make test-coverage   - Run tests with coverage"
 	@echo "  make test-e2e        - Run all E2E tests"
 	@echo "  make test-e2e-oauth  - Run OAuth E2E tests with Playwright"
+	@echo "  make test-descendant-pids    - Unit test for the E2E cleanup trap's process-tree walk"
+	@echo "  make test-e2e-cleanup-check  - Integration test: E2E cleanup trap reaps only its own processes"
 	@echo "  make lint            - Run linter"
 	@echo "  make dev-setup       - Install development dependencies (swag, frontend, Playwright)"
 	@echo ""
@@ -175,6 +177,22 @@ test-e2e-oauth:
 test-e2e: test-e2e-oauth
 	@echo "🧪 Running E2E tests..."
 	./scripts/test-api-e2e.sh
+
+# Unit test for descendant_pids (scripts/descendant-pids.sh), the process-tree
+# walk the E2E cleanup trap uses to reap only what a run itself spawned.
+# Hermetic — no built binary required.
+test-descendant-pids:
+	@echo "🧪 Running descendant_pids unit test..."
+	./scripts/descendant-pids.test.sh
+
+# Integration test: proves the E2E cleanup trap reaps only what its own run
+# started (a decoy mcpproxy on another port survives) and that it actually
+# reaps a real orphan of the run (the launcher-test fixture). Requires a
+# built ./mcpproxy binary; not part of `test-e2e` since it re-runs the whole
+# E2E suite as a subprocess.
+test-e2e-cleanup-check:
+	@echo "🧪 Running E2E cleanup-trap safety check..."
+	./scripts/test-api-e2e-cleanup-check.sh
 
 # Documentation site commands
 docs-setup:

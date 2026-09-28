@@ -199,6 +199,8 @@
         </div>
 
         <div v-for="group in groupedFindings" :key="group.type"
+          data-test="finding-group"
+          :data-threat-type="group.type"
           class="collapse collapse-arrow bg-base-100 shadow-md"
           :class="{ 'collapse-open': group.defaultOpen }"
         >
@@ -849,16 +851,25 @@ async function scrollToFirstHighlight() {
 // `supply_chain` threat type, so they are filtered out of `groupedFindings`.
 // 'uncategorized' is rendered as "Other Findings" so AI-scanner output that
 // ClassifyThreat can't pattern-match stays visible instead of silently vanishing.
-const threatTypeLabels: Record<Exclude<ThreatType, 'supply_chain'>, string> = {
+// Any threat_type not listed here (a newer backend, a third-party scanner) is
+// folded into 'uncategorized' too — a finding the risk score counts must never
+// be missing from this section.
+type DisplayThreatType = Exclude<ThreatType, 'supply_chain'>
+const threatTypeLabels: Record<DisplayThreatType, string> = {
   tool_poisoning: 'Tool Poisoning',
   prompt_injection: 'Prompt Injection',
+  exfiltration: 'Data Exfiltration',
   rug_pull: 'Rug Pull Detection',
   malicious_code: 'Malicious Code',
   uncategorized: 'Other Findings',
 }
+// Render order — the keys of threatTypeLabels.
+const typeOrder = Object.keys(threatTypeLabels) as DisplayThreatType[]
+const dangerousTypes: DisplayThreatType[] = ['tool_poisoning', 'prompt_injection', 'exfiltration', 'rug_pull', 'malicious_code']
 
-type DisplayThreatType = Exclude<ThreatType, 'supply_chain'>
-const dangerousTypes: DisplayThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code']
+function displayThreatType(raw: string | undefined): DisplayThreatType {
+  return raw && Object.prototype.hasOwnProperty.call(threatTypeLabels, raw) ? (raw as DisplayThreatType) : 'uncategorized'
+}
 
 interface FindingGroup {
   type: DisplayThreatType
@@ -881,24 +892,21 @@ const groupedFindings = computed<FindingGroup[]>(() => {
 
   const groups = new Map<DisplayThreatType, SecurityScanFinding[]>()
   for (const f of nonCveFindings) {
-    const rawType = (f.threat_type || 'uncategorized') as ThreatType
-    // Legacy data may still carry threat_type === 'supply_chain' on a non-CVE
-    // finding. Fold it into 'uncategorized' so it stays visible instead of
-    // being silently dropped.
-    const type: DisplayThreatType = rawType === 'supply_chain' ? 'uncategorized' : rawType
+    // Unknown types — and legacy threat_type === 'supply_chain' on a non-CVE
+    // finding — fold into 'uncategorized' so they stay visible.
+    const type = displayThreatType(f.threat_type)
     if (!groups.has(type)) groups.set(type, [])
     groups.get(type)!.push(f)
   }
 
   const result: FindingGroup[] = []
-  const typeOrder: DisplayThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code', 'uncategorized']
   for (const type of typeOrder) {
     const findings = groups.get(type)
     if (!findings) continue
     const hasDangerous = findings.some(f => f.threat_level === 'dangerous')
     result.push({
       type,
-      label: threatTypeLabels[type] || type,
+      label: threatTypeLabels[type],
       findings,
       // A highlighted finding must not be hidden inside a collapsed group —
       // scrolling to something invisible helps nobody (spec 088 FR-011).

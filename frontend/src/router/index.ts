@@ -13,18 +13,20 @@ const router = createRouter({
     },
     // Existing routes (admin/personal)
     //
-    // The landing page (`/`) opens the Dashboard on its Usage (analytics)
-    // panel — that is the "analytics dashboard as default landing page"
-    // behaviour. `/usage` and `/overview` render the same Dashboard component
-    // so each panel is deep-linkable and survives a reload; `meta.dashboardView`
-    // is what the component reads to pick the active panel.
+    // The landing page (`/`) opens the Dashboard on its Overview (hub) panel.
+    // Spec 109 FR-051 / research D3 reverses #1044's Usage-first landing: new
+    // users kept landing on empty charts (audit N8). This is the 109-a interim
+    // step only — Home (needs-attention + topology + a usage strip) replaces
+    // this route in 109-d. `/usage` and `/overview` render the same Dashboard
+    // component so each panel is deep-linkable and survives a reload;
+    // `meta.dashboardView` is what the component reads to pick the active panel.
     {
       path: '/',
       name: 'dashboard',
       component: Dashboard,
       meta: {
         title: 'Dashboard',
-        dashboardView: 'usage',
+        dashboardView: 'overview',
       },
     },
     {
@@ -63,12 +65,20 @@ const router = createRouter({
       },
     },
     {
-      path: '/repositories',
-      name: 'repositories',
-      component: () => import('@/views/Repositories.vue'),
+      path: '/add-server',
+      name: 'add-server',
+      component: () => import('@/views/AddServer.vue'),
       meta: {
-        title: 'Repositories',
+        title: 'Add Server',
       },
+    },
+    // Spec 109 FR-062: adding a server now starts at /add-server (outside the
+    // /servers/:serverName path space — no server name, including "add", can
+    // be shadowed by it). /repositories redirects here on the Catalog tab,
+    // and catalog-source management moved to Settings → Catalog sources.
+    {
+      path: '/repositories',
+      redirect: (to) => ({ path: '/add-server', query: { ...to.query, tab: 'catalog' } }),
     },
     // `/search` used to be a third, sidebar-less search surface duplicating the
     // header box and the Tools page (audit F20). Tools is the canonical one —
@@ -79,12 +89,33 @@ const router = createRouter({
       path: '/search',
       redirect: (to) => ({ path: '/tools', query: to.query, hash: to.hash }),
     },
+    // Spec 109 T026a: interim redirects until 109-g ships the real review
+    // queue/detail views. 109-a is the first PR to link to `/review` (the
+    // Tools "Needs review" stat), so it owns these — every later PR that also
+    // links here (109-d's attention fixes, 109-e's server-card Review button,
+    // 109-f's Go tray review click) lands on a registered route, never the
+    // 404 catch-all, until 109-g replaces both with the real views.
+    {
+      path: '/review/:server',
+      redirect: (to) => ({
+        path: `/servers/${encodeURIComponent(to.params.server as string)}`,
+        query: { ...to.query, tab: 'tools' },
+        hash: to.hash,
+      }),
+    },
+    {
+      path: '/review',
+      redirect: (to) => ({ path: '/servers', query: { ...to.query, status: 'needs_review' }, hash: to.hash }),
+    },
     {
       path: '/settings',
       name: 'settings',
       component: () => import('@/views/Settings.vue'),
       meta: {
-        title: 'Configuration',
+        // Spec 109 FR-056: named "Settings" everywhere (sidebar, route title,
+        // heading, document title) — "Configuration" was one more of the
+        // three names this page had accumulated (audit W5).
+        title: 'Settings',
       },
     },
     {
@@ -104,12 +135,15 @@ const router = createRouter({
       },
     },
     {
+      // Spec 109-k/109-ux-navigation-consistency FR-070: Sessions is now one
+      // of Activity's views (Tool calls · Sessions · System events · All),
+      // not its own page — `/sessions` keeps working as a redirect so old
+      // links/bookmarks still land somewhere, but the query string (a deep
+      // link like `?session=<id>`) has to survive the hop, same as the
+      // `/review` redirect above.
       path: '/sessions',
       name: 'sessions',
-      component: () => import('@/views/Sessions.vue'),
-      meta: {
-        title: 'MCP Sessions',
-      },
+      redirect: (to) => ({ path: '/activity', query: { ...to.query, view: 'sessions' }, hash: to.hash }),
     },
     {
       path: '/tools',
@@ -249,7 +283,7 @@ export const authGuard: NavigationGuard = async (to) => {
 
   // Require authentication for server edition
   if (!authStore.isAuthenticated) {
-    return { name: 'login' }
+    return { name: 'login', query: { redirect: to.fullPath } }
   }
 
   // Admin-only routes

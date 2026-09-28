@@ -1,5 +1,5 @@
 // Re-export common types from contracts (generated from Go constants)
-export type { APIResponse, HealthStatus, HealthLevel, AdminState, HealthAction } from './contracts'
+export type { APIResponse, HealthStatus, HealthLevel, AdminState, HealthAction, Tier } from './contracts'
 export {
   HealthLevelHealthy,
   HealthLevelDegraded,
@@ -17,8 +17,8 @@ export {
   HealthActionConfigure,
 } from './contracts'
 
-// Import HealthStatus for use in this file
-import type { HealthStatus } from './contracts'
+// Import HealthStatus/Tier for use in this file
+import type { HealthStatus, Tier } from './contracts'
 
 // Quarantine stats for tool-level quarantine (Spec 032)
 export interface QuarantineStats {
@@ -54,7 +54,8 @@ export interface SecurityScanSummary {
 }
 
 // Security scan finding (Spec 039)
-export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'rug_pull' | 'supply_chain' | 'malicious_code' | 'uncategorized'
+// Mirrors internal/security/scanner.Threat* plus detect.ThreatExfiltration.
+export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'exfiltration' | 'rug_pull' | 'supply_chain' | 'malicious_code' | 'uncategorized'
 export type ThreatLevel = 'dangerous' | 'warning' | 'info'
 
 // FindingSpan locates ONE check's match inside ONE raw (un-normalized) tool text
@@ -337,6 +338,9 @@ export interface GlobalTool {
   usage: number
   last_used?: string       // ISO 8601; omitted if never used in window
   annotations?: ToolAnnotation
+  // Spec 109 FR-028: computed by contracts.AnnotationTier — never derive this
+  // from `annotations` on the frontend (X11).
+  tier?: Tier
   // Hold evidence (Spec 086 FR-018, surfaced by Spec 088 FR-008): present only
   // on tools the trust gate refused to auto-approve. GET /api/v1/tools emits
   // these alongside the approval status (internal/httpapi/server.go); records
@@ -460,6 +464,11 @@ export interface SearchResult {
 // Status types
 export interface StatusUpdate {
   running: boolean
+  // Spec 109 FR-056: the SSE `status` stream (both the initial frame and every
+  // subsequent one) carries the same `edition` GET /api/v1/status reports, so
+  // the Web UI can gate edition-only UI (Settings' "Server Edition" tab) on
+  // the resolved runtime edition rather than on config content.
+  edition?: string
   listen_addr: string
   routing_mode?: string
   upstream_stats: {
@@ -559,6 +568,11 @@ export interface ConfigSecretsResponse {
   environment_vars: EnvVarStatus[]
   total_secrets: number
   total_env_vars: number
+  // FR-065: whether the OS keyring provider is usable, and why not when it
+  // isn't — the Paste/Manual/Catalog secret toggle disables itself with this
+  // reason instead of failing silently on Add.
+  keyring_available: boolean
+  keyring_reason?: string
 }
 
 // Tool Call History types
@@ -573,12 +587,30 @@ export interface TokenMetrics {
   was_truncated: boolean      // Whether response was truncated
 }
 
+// GET /api/v1/status (partial — only the fields the Web UI currently reads).
+// `features` (Spec 109-k / url-filter-contract.md FR-080a): which of
+// "profile"/"client"/"token" this build accepts as scope-filter query
+// parameters. Absent (or `scope_filters` absent/empty) means none yet — the
+// Spec 108 rows of useScopeQuery's parameter table stay hidden until this
+// lists them.
+export interface StatusResponse {
+  edition: string
+  running: boolean
+  routing_mode: string
+  default_instructions?: string
+  activation?: { first_real_tool_call_ever?: boolean }
+  features?: { scope_filters?: string[] }
+}
+
 export interface ServerTokenMetrics {
   total_server_tool_list_size: number
   average_query_result_size: number
   saved_tokens: number
   saved_tokens_percentage: number
   per_server_tool_list_sizes: Record<string, number>
+  // Spec 109-k: true while average_query_result_size/saved_tokens are a
+  // synthetic simulation rather than derived from a real retrieve_tools call.
+  estimated: boolean
 }
 
 // Usage statistics aggregate — GET /api/v1/activity/usage (Spec 069).
@@ -627,6 +659,9 @@ export interface UsageAggregateResponse {
   token_source: string              // "bytes" — size-based proxy (FR-006)
   tokens_saved: number              // echoed from ServerTokenMetrics (FR-007)
   tokens_saved_percentage: number
+  // Spec 109-k: true while tokens_saved is a synthetic simulation (no real
+  // retrieve_tools call observed yet) rather than derived from real usage.
+  tokens_saved_estimated: boolean
   tools: UsageToolStat[]
   other?: UsageOtherBucket | null   // present only when list truncated to top-N
   timeline: UsageTimeBucket[]
@@ -808,10 +843,72 @@ export interface SearchRegistryServersResponse {
   tag?: string
 }
 
+// Catalog (Spec 109 FR-060/061), GET /api/v1/catalog/search. Mirrors
+// registries.CatalogResult — a DTO distinct from RepositoryServer/ServerEntry;
+// see contracts/rest-api.md#catalog.
+export interface CatalogPopularity {
+  stars?: number
+  installs?: number
+}
+
+export interface CatalogInstall {
+  url?: string
+  command?: string
+  args?: string[]
+}
+
+export interface CatalogInput {
+  name: string
+  description?: string
+  secret_like: boolean
+}
+
+export interface CatalogResult {
+  source: string
+  id: string
+  title: string
+  publisher?: string
+  verified: boolean
+  official: boolean
+  popularity?: CatalogPopularity
+  description: string
+  transport: 'http' | 'stdio'
+  install: CatalogInstall
+  required_inputs?: CatalogInput[]
+  source_code_url?: string
+  added: boolean
+}
+
+export interface CatalogSourceError {
+  source: string
+  reason: string
+}
+
+export interface CatalogSections {
+  official: CatalogResult[]
+  popular: CatalogResult[]
+}
+
+export interface CatalogSearchResponse {
+  query: string
+  results: CatalogResult[]
+  sections: CatalogSections | null
+  unavailable: CatalogSourceError[]
+}
+
 // Activity Log types (RFC-003)
 
+// Every value ACTIVITY_TYPE_LABELS (utils/activity.ts) knows a label for —
+// that map's own comment (#1065) already flags the drift risk of hand-copying
+// this list a second time; this union had fallen behind it (missing five
+// backend types), which is what let `row.activity.type === 'tool_quarantine_change'`
+// (Spec 109-k's quarantine-batch fold) fail as "no overlap" at compile time.
 export type ActivityType =
   | 'tool_call'
+  | 'internal_tool_call'
+  | 'system_start'
+  | 'system_stop'
+  | 'config_change'
   | 'policy_decision'
   | 'quarantine_change'
   | 'server_change'
@@ -822,6 +919,13 @@ export type ActivityType =
    * ({verdict, ids_count, reasons{code:count}, per_tool[{id,status,reason?}]}).
    */
   | 'preflight'
+  /** Spec 032, tool-level quarantine state change. */
+  | 'tool_quarantine_change'
+  /** Spec 077. */
+  | 'security_scan'
+  /** Spec 074, server edition only. */
+  | 'credential_broker'
+  | 'prompt_get'
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 
@@ -863,6 +967,14 @@ export interface ActivityRecord {
    */
   parent_id?: string
   metadata?: Record<string, any>
+  /**
+   * Spec 028: caller identity — 'admin' | 'agent', plus 'user' | 'admin_user' on
+   * the server edition. Absent on records written without an auth context, and
+   * blanked for a scoped caller on rows it did not make.
+   */
+  auth_type?: 'admin' | 'agent' | 'user' | 'admin_user'
+  /** Spec 028: agent token name when auth_type is "agent". */
+  agent_name?: string
   // Spec 026: Sensitive data detection fields
   has_sensitive_data?: boolean
   detection_types?: string[]
@@ -956,6 +1068,22 @@ export interface ImportSummary {
   failed: number
 }
 
+// ImportFieldPreview types mirror httpapi.EnvFieldPreview / HeaderFieldPreview
+// (Spec 109 FR-064/065): never the raw value, only presence + two booleans a
+// surface uses to default the Value/Secret toggle.
+export interface ImportEnvFieldPreview {
+  name: string
+  value_present: boolean
+  secret_like: boolean
+  empty_or_placeholder: boolean
+}
+
+export interface ImportHeaderFieldPreview {
+  name: string
+  secret_like: boolean
+  empty_or_placeholder: boolean
+}
+
 export interface ImportedServer {
   name: string
   protocol: string
@@ -966,6 +1094,11 @@ export interface ImportedServer {
   original_name: string
   fields_skipped?: string[]
   warnings?: string[]
+  // FR-064 preview enrichment (contracts/rest-api.md "Import preview").
+  summary?: string
+  tags?: string[]
+  env?: ImportEnvFieldPreview[]
+  headers?: ImportHeaderFieldPreview[]
 }
 
 export interface SkippedServer {
@@ -1002,6 +1135,8 @@ export interface ClientStatus {
   id: string
   name: string
   config_path: string
+  // Spec 109-b FR-037: the presentation-safe version of config_path.
+  display_path?: string
   exists: boolean
   connected: boolean
   supported: boolean
@@ -1030,6 +1165,8 @@ export interface ClientStatus {
   // mcpproxy-shaped entry exists", and an entry merely NAMED mcpproxy counts —
   // so a row can be connected to a different instance entirely (audit F18).
   endpoint_match?: EndpointMatch
+  // The client-specific action needed after a Connect write.
+  reload_hint?: string
 }
 
 // How a client's registered endpoint relates to this instance (audit F18).
@@ -1044,6 +1181,8 @@ export interface ConnectResult {
   action: string
   message: string
   error?: string
+  display_path?: string
+  reload_hint?: string
 }
 
 // Spec 078 US1: the exact change a connect would make, returned WITHOUT writing
@@ -1053,6 +1192,7 @@ export interface ConnectResult {
 export interface ConnectPreview {
   client: string
   config_path: string
+  display_path?: string
   format: 'json' | 'toml'
   server_key: string
   server_name: string
@@ -1071,6 +1211,7 @@ export interface OnboardingState {
   engaged_at?: string
   connect_step_status?: '' | 'completed' | 'skipped'
   server_step_status?: '' | 'completed' | 'skipped'
+  client_connected_at?: Record<string, string>
 }
 
 export interface OnboardingStateResponse {
@@ -1085,6 +1226,8 @@ export interface OnboardingStateResponse {
   first_mcp_client_ever: boolean
   mcp_clients_seen_ever: string[]
   incomplete_tab_count: number
+  has_usable_server: boolean
+  usable_servers: string[]
 }
 
 export interface OnboardingMarkRequest {

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // ConnectRequest is the optional JSON body for POST /api/v1/connect/{client}.
@@ -74,7 +76,7 @@ func (s *Server) handleGetConnectStatus(w http.ResponseWriter, r *http.Request) 
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string true "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       client path   string true "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Success     200    {object} contracts.APIResponse "ClientStatus"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
@@ -123,7 +125,7 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client      path  string true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       client      path  string true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       server_name query string false "Entry name to preview (defaults to mcpproxy); mirror the value passed to POST connect"
 // @Success     200    {object} contracts.APIResponse "ConnectPreview"
 // @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
@@ -178,7 +180,7 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       body   body   ConnectRequest false "Optional connection parameters (server_name, force, precondition_token)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request"
@@ -238,7 +240,39 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if result.Success {
+		s.recordClientConnected(clientID)
+	}
+
 	s.writeSuccess(w, result)
+}
+
+// recordClientConnected records a successful connect write's timestamp in the
+// onboarding record (FR-042, data-model.md §7), so the Verify step and the
+// presence layer can tell "connected, hasn't reconnected yet" apart from
+// "never connected". Best-effort: a storage hiccup here must never fail the
+// connect response the write itself already succeeded on, so it only logs.
+func (s *Server) recordClientConnected(clientID string) {
+	err := s.controller.UpdateOnboardingState(func(state *storage.OnboardingState) error {
+		applyClientConnected(state, clientID, time.Now())
+		return nil
+	})
+	if err != nil && s.logger != nil {
+		s.logger.Warnf("onboarding: failed to record client_connected_at for %s: %v", clientID, err)
+	}
+}
+
+// applyClientConnected sets state.ClientConnectedAt[clientID] = now, creating
+// the map on first use. Shared by every writer of a connect-success timestamp
+// (the REST/tray path above, and the CLI's onboarding/mark relay in
+// onboarding.go, added in review round 6 to close the parity gap where
+// `mcpproxy connect` wrote a client config file directly without ever
+// recording it here) so they stay byte-for-byte identical.
+func applyClientConnected(state *storage.OnboardingState, clientID string, now time.Time) {
+	if state.ClientConnectedAt == nil {
+		state.ClientConnectedAt = map[string]time.Time{}
+	}
+	state.ClientConnectedAt[clientID] = now
 }
 
 // handleDisconnectClient godoc
@@ -250,7 +284,7 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       body   body   ConnectRequest false "Optional parameters (server_name)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request"
@@ -325,7 +359,7 @@ type UndoConnectRequest struct {
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string             true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       client path   string             true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       body   body   UndoConnectRequest false "Undo parameters (server_name, backup_name = the bare filename of the backup the preceding connect returned)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult (action restored|deleted)"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request (e.g. backup_name is a path, or not a backup of this client's config)"
