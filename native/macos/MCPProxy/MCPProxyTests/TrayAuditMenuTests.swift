@@ -37,7 +37,66 @@ final class TrayAuditMenuTests: XCTestCase {
         controller.appState.coreState = .connected
         controller.appState.servers = servers
         controller.appState.profiles = profiles
+        // Spec 109 FR-001: the tray's "Needs Attention" group is built from
+        // `appState.attention` (fed from the core's GET /api/v1/attention /
+        // SSE attention.changed), not derived from `servers` in-process any
+        // more (the retired `serversNeedingAttention` predicate). This harness
+        // re-derives the same fixture-shaped items so the existing scenarios
+        // below keep exercising the menu-building code they were written for.
+        controller.appState.updateAttention(Self.attentionItems(from: servers))
         return (controller, host)
+    }
+
+    /// Mirrors the retired `AppState.serversNeedingAttention` predicate over
+    /// the `(level, summary, action)` fixtures this file already builds — and,
+    /// since the real needs-attention list is built server-side
+    /// (`internal/runtime/attention.go`'s `computeServerItems`), mirrors that
+    /// function's own shape too: sign-in is its own item (keyed off
+    /// `ServerStatus.isOAuthLoginRequired`, the same signal the rest of the
+    /// tray/Web UI use — NOT the bare `health.action` string, since quarantine
+    /// outranks sign-in there), and quarantine review is ALWAYS its own
+    /// separate item, appended unconditionally whenever `quarantined` is set,
+    /// never folded into whatever other action is also true. A quarantined
+    /// server awaiting sign-in therefore produces TWO items here, exactly as
+    /// the real backend does — never one row carrying both verbs.
+    private static func attentionItems(from servers: [ServerStatus]) -> [AttentionItem] {
+        servers.flatMap { server -> [AttentionItem] in
+            var items: [AttentionItem] = []
+            if server.isOAuthLoginRequired {
+                items.append(AttentionItem(
+                    id: "fixture:server:\(server.name):login",
+                    kind: "fixture-login",
+                    rank: 9,
+                    subject: AttentionSubject(type: "server", id: server.name, name: server.name),
+                    summary: "\(server.name): sign in required",
+                    fix: AttentionFix(verb: "login", label: "Sign in", target: "/servers/\(server.name)"),
+                    since: Date()
+                ))
+            } else if let action = server.health?.action, !action.isEmpty, action != "enable", action != "approve" {
+                let label = HealthStatus.actionLabels[action] ?? action
+                items.append(AttentionItem(
+                    id: "fixture:server:\(server.name)",
+                    kind: "fixture",
+                    rank: 10,
+                    subject: AttentionSubject(type: "server", id: server.name, name: server.name),
+                    summary: "\(server.name): \(server.health?.summary ?? action)",
+                    fix: AttentionFix(verb: action, label: label, target: "/servers/\(server.name)"),
+                    since: Date()
+                ))
+            }
+            if server.quarantined {
+                items.append(AttentionItem(
+                    id: "fixture:server:\(server.name):review",
+                    kind: "fixture-review",
+                    rank: 11,
+                    subject: AttentionSubject(type: "server", id: server.name, name: server.name),
+                    summary: "\(server.name): waiting for review",
+                    fix: AttentionFix(verb: "review", label: "Review", target: "/review/\(server.name)"),
+                    since: Date()
+                ))
+            }
+            return items
+        }
     }
 
     private func topLevelTitles(_ host: TestMenuHost) -> [String] {
@@ -98,8 +157,12 @@ final class TrayAuditMenuTests: XCTestCase {
         XCTAssertFalse(titles.contains("Protocol: streamable-http"))
     }
 
-    // MARK: - F8a · A path to the quarantine review
+    // MARK: - F8a / Spec 109 FR-014 · A path to the quarantine review
 
+    // Spec 109 FR-014 moved this row's wording onto the ONE cross-surface
+    // label table (`HealthStatus.actionLabels`), so it now reads "Review" —
+    // the same word the Servers row and the Web UI use for `actions[0] ==
+    // "approve"` — rather than the tray's own private "Review quarantine…".
     func testAQuarantinedServerOffersAReview() throws {
         let (controller, host) = makeController(servers: [
             Self.server(name: "everything", proto: "http", enabled: true, quarantined: true)
@@ -107,7 +170,7 @@ final class TrayAuditMenuTests: XCTestCase {
         controller.rebuildMenu()
 
         let items = try serverSubmenu(host, named: "everything").items
-        let review = try XCTUnwrap(items.first { $0.title.hasPrefix("Review quarantine") },
+        let review = try XCTUnwrap(items.first { $0.title == "Review" },
                                    "quarantined server offered only \(items.map(\.title))")
         XCTAssertNotNil(review.action, "a review row with no action is the F14 dead link again")
         XCTAssertTrue(review.target === controller)
@@ -120,7 +183,79 @@ final class TrayAuditMenuTests: XCTestCase {
         ])
         controller.rebuildMenu()
         let titles = try serverSubmenu(host, named: "github").items.map(\.title)
-        XCTAssertFalse(titles.contains { $0.hasPrefix("Review quarantine") })
+        XCTAssertFalse(titles.contains("Review"))
+    }
+
+    /// Review round 1 (109-e high finding): a server that is BOTH quarantined
+    /// AND needs OAuth sign-in reports `actions = ["login", "approve"]`
+    /// (FR-010, internal/health/calculator.go quarantinedOAuthLoginState) —
+    /// the primary item is "Sign in", from `actions[0]` alone, exactly like
+    /// `TrayPrimaryItemTests` verifies. But dropping "approve" that way must
+    /// not drop the row's ONLY path to review: the old unconditional
+    /// `if server.quarantined { show Review }` block this replaced would have
+    /// still shown a review row here, and this submenu must too.
+    func testAQuarantinedServerThatAlsoNeedsLoginOffersBothSignInAndReview() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "everything", proto: "http", enabled: true, quarantined: true,
+                        health: ("degraded", "Sign-in required", "login"))
+        ])
+        controller.rebuildMenu()
+
+        let items = try serverSubmenu(host, named: "everything").items
+        let titles = items.map(\.title)
+
+        let signIn = try XCTUnwrap(items.first { $0.title == "Sign in" },
+                                   "expected the primary Sign-in row: \(titles)")
+        XCTAssertNotNil(signIn.action)
+
+        let review = try XCTUnwrap(items.first { $0.title == "Review" },
+                                   "a quarantined+login server must still offer a review path (FR-010/FR-014 parity — the ⋯/context-menu surfaces still gate independently on `quarantined`): \(titles)")
+        XCTAssertNotNil(review.action, "a review row with no action is the F14 dead link again")
+        XCTAssertTrue(review.target === controller)
+        XCTAssertEqual(review.representedObject as? String, "everything")
+    }
+
+    /// Review round 2 (109-e medium finding): `actions[0]` in
+    /// {enable, restart, view_logs} rendered the same command TWICE in this
+    /// submenu — once as the accent-tinted primary item, once as the
+    /// always-present tail row it was never suppressing. Each case here
+    /// asserts there is exactly ONE menu item for the command, not that the
+    /// primary exists (that's `TrayPrimaryItemTests`'s job).
+    func testDisabledServerWithEnablePrimaryShowsEnableOnlyOnce() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "demo", proto: "http", enabled: false,
+                        health: ("degraded", "Disabled", "enable"))
+        ])
+        controller.rebuildMenu()
+
+        let titles = try Self.disabledServerSubmenu(host, named: "demo").items.map(\.title)
+        XCTAssertEqual(titles.filter { $0 == "Enable" }.count, 1, "Enable shown twice: \(titles)")
+    }
+
+    func testRestartNeedingServerShowsRestartOnlyOnce() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "broken", proto: "http", enabled: true,
+                        health: ("unhealthy", "failed to connect", "restart"))
+        ])
+        controller.rebuildMenu()
+
+        let titles = try serverSubmenu(host, named: "broken").items.map(\.title)
+        XCTAssertEqual(titles.filter { $0 == "Restart" }.count, 1, "Restart shown twice: \(titles)")
+    }
+
+    func testTokenRefreshPendingServerShowsViewLogsOnlyOnce() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "stale-token", proto: "http", enabled: true,
+                        health: ("degraded", "Token refresh pending", "view_logs"))
+        ])
+        controller.rebuildMenu()
+
+        let items = try serverSubmenu(host, named: "stale-token").items
+        // The primary reads "View logs" (shared actionLabels wording); the
+        // static tail row reads "View Logs" — same command, different
+        // casing, so match case-insensitively to catch either spelling.
+        let logRows = items.filter { $0.title.caseInsensitiveCompare("View Logs") == .orderedSame }
+        XCTAssertEqual(logRows.count, 1, "View Logs shown twice: \(items.map(\.title))")
     }
 
     // MARK: - F4 · Attention rows do not mutate on a navigation click
@@ -182,8 +317,10 @@ final class TrayAuditMenuTests: XCTestCase {
         let row = try XCTUnwrap(attention.items.first)
         XCTAssertNil(row.submenu)
         XCTAssertNotNil(row.action)
-        XCTAssertEqual(row.representedObject as? String, "everything",
-                       "navigation keys off the server NAME, which is what .showServerDetail matches")
+        let target = try XCTUnwrap(row.representedObject as? ServerDetailTarget)
+        XCTAssertEqual(target.serverName, "everything")
+        XCTAssertEqual(target.tab, .tools,
+                       "attention navigation keeps the server name and the default Tools tab")
     }
 
     // MARK: - F8a + sign-in · Combined quarantine + awaiting sign-in
@@ -209,14 +346,19 @@ final class TrayAuditMenuTests: XCTestCase {
         return try! JSONDecoder().decode(ServerStatus.self, from: json)
     }
 
-    /// The combined state: `forAttention` must still pick `.login` (sign-in
-    /// outranks the row's own dispatch even though quarantine outranks it in
-    /// `health.action`), and the row's second item must still read "Review
-    /// quarantine…" — the `detailsTitle` conditional at
-    /// `MCPProxyApp.rebuildMenu()` — not the generic "Open Server Details"
-    /// that a plain sign-in row gets. Neither `testAnAttentionRowDoesNotFireItsActionOnClick`
-    /// (plain sign-in, not quarantined) nor `testARowWithNoActionNavigatesDirectly`
-    /// (plain quarantine, no sign-in) exercises both facts on one server.
+    /// The combined state: Spec 109's one-list design (`internal/runtime/
+    /// attention.go`'s `computeServerItems`) makes sign-in and quarantine
+    /// review two SEPARATE attention items, never one row carrying both verbs
+    /// — quarantine is appended unconditionally whenever `Quarantined` is set,
+    /// regardless of what other item the server's status also produced. So a
+    /// quarantined server awaiting sign-in gets a runnable "Sign in" row (with
+    /// its own submenu) AND a plain, non-runnable review row that navigates
+    /// straight to the server's detail view (`review` is never a one-click
+    /// approve — `MCPProxyApp.rebuildMenu()`'s `TrayServerAction
+    /// .fromHealthAction` deliberately has no case for it). Neither
+    /// `testAnAttentionRowDoesNotFireItsActionOnClick` (plain sign-in, not
+    /// quarantined) nor `testARowWithNoActionNavigatesDirectly` (plain
+    /// quarantine, no sign-in) exercises both facts on one server.
     func testNeedsAttentionRowOffersSignInAndReviewWhenBothApply() throws {
         let (controller, host) = makeController(servers: [
             Self.quarantinedAwaitingSignIn(name: "github")
@@ -224,19 +366,24 @@ final class TrayAuditMenuTests: XCTestCase {
         controller.rebuildMenu()
 
         let attention = try submenu(host, startingWith: "Needs Attention")
-        let row = try XCTUnwrap(attention.items.first)
-        let rowMenu = try XCTUnwrap(row.submenu,
-                                   "a server with a runnable attention action needs its own row menu")
+        XCTAssertEqual(attention.items.count, 2,
+                       "a quarantined server awaiting sign-in is TWO separate attention items, never one " +
+                       "row combining both verbs: \(attention.items.map(\.title))")
 
+        let signInRow = try XCTUnwrap(attention.items.first { $0.submenu != nil },
+                                     "the sign-in item is the one runnable action, so it owns a row submenu")
+        let rowMenu = try XCTUnwrap(signInRow.submenu)
         XCTAssertEqual(rowMenu.items.first?.title, "Sign in",
-                       "quarantine outranks sign-in in health.action, but forAttention must still pick .login")
+                       "quarantine outranks sign-in in health.action, but the sign-in item's own fix.verb must still be login")
         XCTAssertTrue(rowMenu.items.first?.target === controller)
+        XCTAssertTrue(rowMenu.items.map(\.title).contains("Open Server Details"))
 
-        let review = try XCTUnwrap(rowMenu.items.first { $0.title.hasPrefix("Review quarantine") },
-                                   "a quarantined server awaiting sign-in must keep its review path: \(rowMenu.items.map(\.title))")
-        XCTAssertEqual(review.representedObject as? String, "github")
-        XCTAssertFalse(rowMenu.items.contains { $0.title == "Open Server Details" },
-                       "quarantined rows name the review action, never the generic details row")
+        let reviewRow = try XCTUnwrap(attention.items.first { $0.submenu == nil },
+                                      "review is never a one-click approve, so its row navigates directly with no submenu")
+        XCTAssertNotNil(reviewRow.action, "a review row with no action is the F14 dead link again")
+        let reviewTarget = try XCTUnwrap(reviewRow.representedObject as? ServerDetailTarget)
+        XCTAssertEqual(reviewTarget.serverName, "github")
+        XCTAssertEqual(reviewTarget.tab, .tools)
     }
 
     // MARK: - F15 · A Servers submenu that fits

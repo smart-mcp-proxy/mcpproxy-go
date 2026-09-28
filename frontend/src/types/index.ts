@@ -29,6 +29,20 @@ export type {
   APIError,
   APISuccess,
   APIResult,
+  AttentionKind,
+  AttentionSubject,
+  AttentionFix,
+  AttentionItem,
+  AttentionResponse,
+} from './contracts'
+export {
+  AttentionKindSignInRequired,
+  AttentionKindMissingSecret,
+  AttentionKindConfigError,
+  AttentionKindServerError,
+  AttentionKindServerReview,
+  AttentionKindToolReview,
+  AttentionKindClientNeverSeen,
 } from './contracts'
 export { isAPIError, isAPISuccess } from './contracts'
 

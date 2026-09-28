@@ -81,6 +81,7 @@ Tenant (`user`-typed) principal — allowed, then filtered by the existing scope
 
 | Method | Route | Filter |
 |---|---|---|
+| GET | `/api/v1/attention` (Spec 109 FR-007) | filter attention items through `CanEnumerateServer`; never return client items; recompute `count` after filtering |
 | GET | `/api/v1/status` | `CanEnumerateServer` |
 | GET | `/api/v1/servers` | `visibleServers` |
 | GET | `/api/v1/servers/{id}/**` except `/servers/{id}/tool-calls` **and except the static `/api/v1/servers/import/paths`** (`server.go:788` — host filesystem paths, not a server subtree; the matcher denies it explicitly *before* the `{id}` rule because a raw-path matcher cannot tell `import` from a server id) | `scopedServerSubtree` (404 parity) |

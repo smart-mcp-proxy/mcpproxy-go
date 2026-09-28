@@ -63,12 +63,12 @@ function retry() {
     systemStore.setAuthRequired(false)
     const redirect = route.query.redirect
     if (typeof redirect !== 'string' || !redirect.startsWith('/') || redirect.startsWith('//')) {
-      void router.replace({ name: 'dashboard' })
+      void router.replace({ name: 'home' })
       return
     }
     const target = router.resolve(redirect)
     if (target.path === '/login' || target.matched.length === 0 || target.matched.some((record) => record.name === 'not-found')) {
-      void router.replace({ name: 'dashboard' })
+      void router.replace({ name: 'home' })
       return
     }
     void router.replace(target.fullPath)
