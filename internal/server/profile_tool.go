@@ -92,6 +92,7 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	}
 	cfg := profiles.cfg
 	anonymousBindingGuard := anonymousProfileCaller(ctx) && p.bindingGuardActive(profiles)
+	anonymousProfileConfined := anonymousProfileCaller(ctx) && cfg != nil && cfg.AnonymousProfile != ""
 	if slug != "" && anonymousBindingGuard {
 		// Keep the refusal shape indistinguishable from an unknown profile and
 		// leave the session untouched while the FR-008a runtime guard is active.
@@ -125,7 +126,7 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	// legitimately enumerate.
 	if slug != "" {
 		if !profiles.selectable(ctx, slug) {
-			if auth.IsScopedCaller(ctx) {
+			if auth.IsScopedCaller(ctx) || anonymousProfileConfined {
 				return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug)), nil
 			}
 			return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s' (available: %s)", slug, strings.Join(profiles.selectableNames(ctx), ", "))), nil
@@ -722,6 +723,10 @@ func (idx *profileIndex) pinAllowsSelection(ctx context.Context, slug string) bo
 			return true
 		}
 		return admittedBySwitchableTo(idx.PolicyFor(pin), pin, slug)
+	}
+	if anonymousProfileCaller(ctx) && idx.cfg != nil && idx.cfg.AnonymousProfile != "" {
+		base := idx.cfg.AnonymousProfile
+		return admittedBySwitchableTo(idx.PolicyFor(base), base, slug)
 	}
 	if pin := profilePinFromContext(ctx); pin != "" {
 		return slug == pin

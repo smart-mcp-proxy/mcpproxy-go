@@ -7,6 +7,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
@@ -75,4 +76,19 @@ func TestSetProfileV3SwitchableClientCanSelectDeclaredTarget(t *testing.T) {
 		require.False(t, result.IsError, resultText(t, result))
 		require.Equal(t, "legacy", proxy.sessionStore.GetActiveProfile("all-servers-set-profile"))
 	})
+}
+
+func TestSetProfileV3ConfinedAnonymousHonorsSwitchableTo(t *testing.T) {
+	proxy, _ := newProfilesV3FixtureWithConfig(t, func(cfg *config.Config) {
+		cfg.AnonymousProfile = "work-readonly"
+	})
+	ctx := sessionCtx(anonCtx(), "confined-anonymous-set-profile")
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]interface{}{"profile": "legacy"}
+
+	result, err := proxy.handleSetProfile(ctx, request)
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	require.Equal(t, "unknown profile 'legacy'", resultText(t, result))
+	require.Empty(t, proxy.sessionStore.GetActiveProfile("confined-anonymous-set-profile"))
 }
