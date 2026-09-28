@@ -301,7 +301,7 @@ async function openPreviouslyAdded(result: CatalogResult): Promise<void> {
   }
   const response = await api.getServers()
   if (!response.success || !response.data) {
-    error.value = response.error || 'Could not resolve the installed server. Refresh and try again.'
+    addError.value = response.error || 'Could not resolve the installed server. Refresh and try again.'
     return
   }
   const target = installTarget(result)
@@ -313,7 +313,7 @@ async function openPreviouslyAdded(result: CatalogResult): Promise<void> {
     await router.push(serverDetailPath(matches[0].name))
     return
   }
-  error.value = matches.length === 0
+  addError.value = matches.length === 0
     ? 'This catalog entry is marked added, but MCPProxy could not identify one visible installed server. Open it from Servers.'
     : 'More than one installed server matches this catalog entry. Open the intended server from Servers.'
 }

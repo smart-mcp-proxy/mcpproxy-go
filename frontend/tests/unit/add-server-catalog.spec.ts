@@ -136,7 +136,9 @@ describe('CatalogSearch', () => {
     const wrapper = await mountCatalog()
     await wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]').trigger('click')
     await flushPromises()
-    expect(wrapper.find('[data-test="catalog-error"]').text()).toContain('More than one')
+    expect(wrapper.find('[data-test="catalog-add-error"]').text()).toContain('More than one')
+    expect(wrapper.find('[data-test="catalog-section-official"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('GitHub')
     expect(router.currentRoute.value.path).not.toMatch(/github-[ab]/)
   })
 

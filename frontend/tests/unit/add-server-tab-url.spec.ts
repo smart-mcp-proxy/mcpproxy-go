@@ -15,7 +15,10 @@ vi.mock('@/services/api', () => ({
 
 const router = createRouter({
   history: createWebHistory(),
-  routes: [{ path: '/add-server', name: 'add-server', component: AddServer }],
+  routes: [
+    { path: '/add-server', name: 'add-server', component: AddServer },
+    { path: '/servers/:serverName', name: 'server-detail', component: { template: '<div />' }, props: true },
+  ],
 })
 
 async function mountAtTab(tab?: string, extraQuery = '') {
@@ -56,6 +59,16 @@ describe('AddServer tab <-> URL sync (Spec 109 FR-062)', () => {
     await flushPromises()
     expect(router.currentRoute.value.query.tab).toBe('manual')
     expect(router.currentRoute.value.query.source).toBe('official')
+  })
+
+  it('routes a newly added server to its encoded detail page', async () => {
+    const wrapper = await mountAtTab('manual')
+    const form = wrapper.findComponent({ name: 'ManualServerForm' })
+    form.vm.$emit('added', 'io.github.owner/repo')
+    await flushPromises()
+
+    expect(router.currentRoute.value.name).toBe('server-detail')
+    expect(router.currentRoute.value.params.serverName).toBe('io.github.owner/repo')
   })
 
   it('?source= narrows the Catalog tab only, never selects a tab', async () => {
