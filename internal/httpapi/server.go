@@ -116,6 +116,8 @@ type ServerController interface {
 	SubscribeEvents() chan internalRuntime.Event
 	// UnsubscribeEvents closes and removes the subscription channel.
 	UnsubscribeEvents(chan internalRuntime.Event)
+	// Attention returns the current needs-attention list (Spec 109 FR-001).
+	Attention() []contracts.AttentionItem
 
 	// Server management
 	GetAllServers() ([]map[string]interface{}, error)
@@ -277,6 +279,11 @@ type ServerController interface {
 	// Onboarding wizard (Spec 046)
 	GetOnboardingState() (*storage.OnboardingState, error)
 	SaveOnboardingState(state *storage.OnboardingState) error
+	// UpdateOnboardingState runs fn against the current onboarding state and
+	// persists it atomically (Spec 109-b, T035): every writer of the record
+	// must use this instead of a separate Get+Save pair, so a concurrent
+	// writer's field is never dropped.
+	UpdateOnboardingState(fn func(*storage.OnboardingState) error) error
 
 	// Activation state (Spec 044) — read-only access used by the v2
 	// onboarding wizard's Verify tab to detect whether any MCP client has
@@ -588,6 +595,10 @@ func (s *Server) authenticateWithPrecedence(w http.ResponseWriter, r *http.Reque
 // sources never resolve a session principal (only Authorization: Bearer and
 // the cookie do).
 func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, token string) {
+	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
+		s.rejectClientCredentialOnREST(w, r)
+		return
+	}
 	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
 		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
 		return
@@ -617,6 +628,10 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 		token = strings.TrimPrefix(authHeader, "Bearer ")
 	}
 
+	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
+		s.rejectClientCredentialOnREST(w, r)
+		return
+	}
 	if token != "" && strings.HasPrefix(token, auth.TokenPrefixStr) {
 		s.handleAgentTokenAuth(w, r, next, cfg.APIKey, token)
 		return
@@ -640,6 +655,18 @@ func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next
 		zap.String("path", oauth.LogSafeRequestPath(r.URL.Path, cfg.APIKey)),
 		zap.String("remote_addr", r.RemoteAddr))
 	s.writeError(w, r, http.StatusUnauthorized, "Invalid or missing API key")
+}
+
+// rejectClientCredentialOnREST is the FR-023 refusal: a Spec 108-c client
+// credential (kind=client, mcp_cli_ secret prefix) authenticates on MCP
+// endpoints only. Recognised by the prefix BEFORE any store lookup — a
+// client credential can never read activity, config or other clients over
+// REST, even one presented with a malformed or since-revoked record.
+func (s *Server) rejectClientCredentialOnREST(w http.ResponseWriter, r *http.Request) {
+	s.logger.Warnw("client credential presented on the REST API; refused",
+		zap.String("path", r.URL.Path),
+		zap.String("remote_addr", r.RemoteAddr))
+	s.writeError(w, r, http.StatusForbidden, "client credentials are valid on MCP endpoints only")
 }
 
 // handleAgentTokenAuth validates an agent token and sets the appropriate AuthContext.
@@ -672,6 +699,16 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 			zap.String("remote_addr", r.RemoteAddr),
 			zap.String("error", err.Error()))
 		s.writeError(w, r, http.StatusUnauthorized, fmt.Sprintf("Agent token invalid: %s", err.Error()))
+		return
+	}
+
+	// FR-023, second half ("and by kind after it"): a client credential
+	// reached this far only if its secret's prefix went unrecognised above
+	// (defence in depth against a future prefix regression) — refuse by
+	// KIND too, never dispatching a client credential's request as an
+	// ordinary agent token.
+	if agentToken.Kind == auth.KindClient {
+		s.rejectClientCredentialOnREST(w, r)
 		return
 	}
 
@@ -974,6 +1011,10 @@ func (s *Server) setupRoutes() {
 		// config-level write.
 		r.Put("/profiles/active", s.requireServerOp(auth.ServerOpConfigWrite, s.handleSetActiveProfile))
 
+		// Needs-attention list (Spec 109 FR-001): filtered per caller class,
+		// same rule as /servers (contracts/rest-api.md#attention).
+		r.Get("/attention", s.handleGetAttention)
+
 		// Server management
 		r.Get("/servers", s.handleGetServers)
 		// Mutating server routes are agent-token-gated via the shared policy
@@ -1141,6 +1182,11 @@ func (s *Server) setupRoutes() {
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
 		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)                                                            // spec 070 FR-007
 		r.Post("/registries/{id}/servers/{serverId}/add", s.requireServerOp(auth.ServerOpAddFromRegistry, s.handleAddFromRegistry)) // spec 070 keystone add
+
+		// Catalog (Spec 109 FR-060): source-agnostic, ranked search across
+		// every enabled registry. Open like GET /registries/{id}/servers —
+		// "added" is the only field filtered per caller scope (FR-007).
+		r.Get("/catalog/search", s.handleCatalogSearch)
 
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
@@ -4113,6 +4159,14 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		"status_channel_nil", statusCh == nil,
 		"events_channel_nil", eventsCh == nil)
 
+	// FR-006: attention.changed is suppressed for THIS subscriber when its
+	// narrowed id set is unchanged since the last frame it received — a
+	// scoped caller's own view is what matters, not the shared event's raw
+	// id set (two scoped subscribers with different scopes must each get
+	// their own suppression decision). nil (not an empty set) so the very
+	// first frame is never suppressed.
+	var lastAttentionIDs map[string]struct{}
+
 	// Create heartbeat ticker to keep connection alive
 	heartbeat := time.NewTicker(sseHeartbeatInterval)
 	defer heartbeat.Stop()
@@ -4218,8 +4272,26 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			rendered := s.renderEventPayloadForCaller(callerCtx, evt)
+
+			// FR-006: suppress attention.changed for this subscriber when its
+			// narrowed id set has not changed since the last frame it
+			// received (servers.changed carries no such suppression — every
+			// coalesced change is meaningful to show).
+			if evt.Type == internalRuntime.EventTypeAttentionChanged {
+				ids, _ := rendered["ids"].([]string)
+				current := make(map[string]struct{}, len(ids))
+				for _, id := range ids {
+					current[id] = struct{}{}
+				}
+				if lastAttentionIDs != nil && attentionIDSetsEqual(lastAttentionIDs, current) {
+					continue
+				}
+				lastAttentionIDs = current
+			}
+
 			eventPayload := map[string]interface{}{
-				"payload":   s.maskEventPayload(s.renderEventPayloadForCaller(callerCtx, evt)),
+				"payload":   s.maskEventPayload(rendered),
 				"timestamp": evt.Timestamp.Unix(),
 			}
 
@@ -4268,6 +4340,9 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 //     coalescing window, and only when reveal_secret_headers is on.
 func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRuntime.Event) map[string]interface{} {
 	payload := evt.Payload
+	if evt.Type == internalRuntime.EventTypeAttentionChanged {
+		return renderAttentionChangedForCaller(ctx, payload)
+	}
 	if evt.Type != internalRuntime.EventTypeServersChanged || len(payload) == 0 {
 		return payload
 	}
@@ -4506,6 +4581,11 @@ func (s *Server) handleGetConfigSecrets(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to extract config secrets")
 		return
 	}
+
+	// FR-065: report whether the OS keyring is usable so the Paste/Manual/
+	// Catalog secret toggle can disable itself with the reason instead of
+	// failing silently on Add.
+	configSecrets.KeyringAvailable, configSecrets.KeyringReason = resolver.KeyringAvailability()
 
 	s.writeSuccess(w, configSecrets)
 }

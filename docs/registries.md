@@ -113,16 +113,18 @@ Equivalent surfaces:
 
 - **REST:** `POST /api/v1/registries` with `{ "url": "https://…", "protocol": "…", "id": "…", "name": "…" }`.
 - **CLI:** `mcpproxy registry add-source <https-url>`.
-- **Web UI:** the **Repositories** page has an **Add Registry** button (URL + optional
-  protocol/name) and a **Registries** section listing every configured source as a
+- **Web UI:** Settings → **Catalog Sources** has an **Add Registry** button (URL + optional
+  protocol/name) and lists every configured source as a
   card with a neutral **Official / Custom** badge (official cards also carry a
   **Built-in** tag). There is no warning gate — adding a custom source goes straight
   through. Custom cards expose a **kebab (⋮) menu** with **Edit** (reuses the
   add dialog, pre-filled, id read-only) and **Delete** (destructive confirmation);
-  official cards are read-only.
-- **macOS tray:** the **Registries** sidebar tab lists every configured registry
-  with its provenance/trust badge, offers an **Add Registry** affordance,
-  and shows a one-time third-party warning before the first custom add.
+  official cards are read-only. Server discovery itself lives in the catalog-first
+  **Add Server** page (`/add-server`, Catalog tab), not here.
+- **macOS tray:** Settings → **Catalog Sources** lists every configured registry
+  with its provenance/trust badge and offers an **Add Registry** affordance;
+  server discovery lives in the Add Server sheet's **Catalog** tab (aggregated
+  across every enabled source, same as the Web UI).
 
 Errors share a stable code across surfaces: `invalid_registry_url` (400),
 `registries_locked` (403), `registry_shadows_builtin` / `duplicate_registry` (409).

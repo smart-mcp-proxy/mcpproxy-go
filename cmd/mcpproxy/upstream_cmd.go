@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
 
 var (
@@ -278,6 +279,12 @@ Examples:
 	upstreamAddIfNotExists  bool
 	upstreamAddNoQuarantine bool
 	upstreamAddTrustMode    string
+	// upstreamAddSecretEnvs/Headers are the Spec 109 FR-065 secret flags:
+	// each value is written to the OS keyring under the FR-065 ref name
+	// (internal/secret.RefName) and the config gets ${keyring:<ref>} instead
+	// of the raw value.
+	upstreamAddSecretEnvs    []string
+	upstreamAddSecretHeaders []string
 
 	// Remove command flags
 	upstreamRemoveYes      bool
@@ -360,6 +367,8 @@ func init() {
 	upstreamAddCmd.Flags().BoolVar(&upstreamAddIfNotExists, "if-not-exists", false, "Don't error if server already exists")
 	upstreamAddCmd.Flags().BoolVar(&upstreamAddNoQuarantine, "no-quarantine", false, "Don't quarantine the new server (use with caution)")
 	upstreamAddCmd.Flags().StringVar(&upstreamAddTrustMode, "trust-mode", "", "Per-server trust tier governing admission AND tool-change approval: auto (approve without scanning), scan (auto-approve only when the offline TPA scan is green), manual (human reviews every change). Unset inherits the default (manual)")
+	upstreamAddCmd.Flags().StringArrayVar(&upstreamAddSecretEnvs, "secret-env", nil, "Environment variable to store in the OS keyring instead of the config, in KEY=value format (repeatable, FR-065)")
+	upstreamAddCmd.Flags().StringArrayVar(&upstreamAddSecretHeaders, "secret-header", nil, "HTTP header to store in the OS keyring instead of the config, in 'Name: value' format (repeatable, FR-065)")
 
 	// Remove command flags
 	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveYes, "yes", false, "Skip confirmation prompt")
@@ -904,8 +913,35 @@ func outputError(err error, code string) error {
 	return err
 }
 
+// upstreamConfigFilePath resolves the config path for every `upstream`
+// subcommand. Config-mode mutations must use this same path as loading so an
+// explicit root --config file is never redirected to DataDir/mcp_config.json.
+func upstreamConfigFilePath(globalConfig *config.Config) string {
+	if upstreamConfigPath != "" {
+		return upstreamConfigPath
+	}
+	if configFile != "" {
+		return configFile
+	}
+	if globalConfig != nil {
+		return config.GetConfigPath(globalConfig.DataDir)
+	}
+	return ""
+}
+
+// loadUpstreamConfig resolves the config path for every `upstream` subcommand.
+// Only `upstream list`/`upstream logs` register their own local --config flag
+// (bound to upstreamConfigPath); every other upstream subcommand (add,
+// remove, enable, disable, restart, patch, inspect, import, ...) has no local
+// --config flag, so a user's --config=<path> is parsed against the ROOT
+// persistent flag and lands in the package-level configFile variable instead.
+// Falling back to configFile when upstreamConfigPath is unset means those
+// subcommands honor the flag the user actually passed rather than silently
+// defaulting to ~/.mcpproxy/mcp_config.json (found via live QA: this caused
+// `upstream add --config=<scratch>` to write into the real production
+// config). upstreamConfigPath still wins when a command sets it explicitly.
 func loadUpstreamConfig() (*config.Config, error) {
-	return loadCLIConfig(upstreamConfigPath)
+	return loadCLIConfig(upstreamConfigFilePath(nil))
 }
 
 func createUpstreamLogger(level string) (*zap.Logger, error) {
@@ -1477,10 +1513,39 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// GH #938: refuse a typo'd tier before anything is written, with the same
-	// vocabulary the REST layer reports in its 400.
+	// vocabulary the REST layer reports in its 400. Checked BEFORE the
+	// secret-write block below: applySecretFlags writes to the OS keyring,
+	// so validating trust-mode first means a typo'd tier can never orphan a
+	// secret that was written only to have the whole add aborted moments
+	// later (review round 1).
 	if err := validateTrustModeFlag(upstreamAddTrustMode); err != nil {
 		return err
 	}
+
+	// FR-065: --secret-env/--secret-header write to the OS keyring instead
+	// of the config, under the shared per-kind ref name, and merge
+	// ${keyring:<ref>} into the same env/headers maps above.
+	resolver := secret.NewResolver()
+	var writtenSecretRefs []string
+	if len(upstreamAddSecretEnvs) > 0 || len(upstreamAddSecretHeaders) > 0 {
+		var err error
+		writtenSecretRefs, err = applySecretFlags(resolver, serverName, upstreamAddSecretEnvs, upstreamAddSecretHeaders, env, headers)
+		if err != nil {
+			return err
+		}
+	}
+	// Every return path below this point that does NOT end with the server
+	// actually being added (a daemon/config-mode failure, or a
+	// --if-not-exists skip telling the user "skipped" while the secret WAS
+	// stored) must not leave an orphaned keyring entry behind — added is set
+	// true only once runUpstreamAddDaemonMode/runUpstreamAddConfigMode
+	// confirms a genuine add (review round 1).
+	added := false
+	defer func() {
+		if !added {
+			rollbackKeyringRefs(resolver, writtenSecretRefs)
+		}
+	}()
 
 	// Build the request
 	req := &cliclient.AddServerRequest{
@@ -1522,11 +1587,15 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 
 	// Check if daemon is running
 	if client, ok := newDaemonClient(globalConfig, nil); ok {
-		return runUpstreamAddDaemonMode(ctx, client, req)
+		wasAdded, addErr := runUpstreamAddDaemonMode(ctx, client, req)
+		added = wasAdded
+		return addErr
 	}
 
 	// Direct config file mode
-	return runUpstreamAddConfigMode(req, globalConfig)
+	wasAdded, addErr := runUpstreamAddConfigMode(req, globalConfig)
+	added = wasAdded
+	return addErr
 }
 
 // outputSkipNotice prints a human skip notice (for --if-not-exists /
@@ -1549,17 +1618,23 @@ func outputSkipNotice(notice string, payload map[string]interface{}) error {
 	return nil
 }
 
-func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req *cliclient.AddServerRequest) error {
+// runUpstreamAddDaemonMode returns (added, err): added is true only when the
+// daemon actually created the server. A --if-not-exists skip (nil error,
+// added=false) is deliberately distinguished from a genuine add so the
+// caller (runUpstreamAdd) knows whether to roll back any --secret-env/
+// --secret-header values it already wrote to the keyring for this request
+// (review round 1: a skip must not leave the secret orphaned).
+func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req *cliclient.AddServerRequest) (bool, error) {
 	result, err := client.AddServer(ctx, req)
 	if err != nil {
 		// Check if it's "already exists" error and --if-not-exists is set
 		if upstreamAddIfNotExists && strings.Contains(err.Error(), "already exists") {
-			return outputSkipNotice(
+			return false, outputSkipNotice(
 				fmt.Sprintf("Server '%s' already exists (skipped)", req.Name),
 				map[string]interface{}{"name": req.Name, "skipped": true},
 			)
 		}
-		return outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()).
+		return false, outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()).
 			WithGuidance("Check the server name and configuration"), output.ErrCodeOperationFailed)
 	}
 
@@ -1576,20 +1651,21 @@ func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
-func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *config.Config) error {
+// runUpstreamAddConfigMode returns (added, err) — see runUpstreamAddDaemonMode.
+func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *config.Config) (bool, error) {
 	// Check if server already exists
 	for _, srv := range globalConfig.Servers {
 		if srv.Name == req.Name {
 			if upstreamAddIfNotExists {
-				return outputSkipNotice(
+				return false, outputSkipNotice(
 					fmt.Sprintf("Server '%s' already exists (skipped)", req.Name),
 					map[string]interface{}{"name": req.Name, "skipped": true},
 				)
 			}
-			return fmt.Errorf("server '%s' already exists", req.Name)
+			return false, fmt.Errorf("server '%s' already exists", req.Name)
 		}
 	}
 
@@ -1626,9 +1702,9 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 	globalConfig.Servers = append(globalConfig.Servers, newServer)
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+		return false, fmt.Errorf("failed to save config: %w", err)
 	}
 
 	// Output success
@@ -1637,7 +1713,7 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 		fmt.Println("   ⚠️  New servers are quarantined by default. Start the daemon and approve in the web UI.")
 	}
 
-	return nil
+	return true, nil
 }
 
 // runUpstreamRemove handles the 'upstream remove' command
@@ -1734,7 +1810,7 @@ func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config)
 	globalConfig.Servers = newServers
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
@@ -1829,11 +1905,13 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 
 	// Check if daemon is running
 	if client, ok := newDaemonClient(globalConfig, nil); ok {
-		return runUpstreamAddDaemonMode(ctx, client, req)
+		_, err := runUpstreamAddDaemonMode(ctx, client, req)
+		return err
 	}
 
 	// Direct config file mode
-	return runUpstreamAddConfigMode(req, globalConfig)
+	_, err = runUpstreamAddConfigMode(req, globalConfig)
+	return err
 }
 
 // validateServerName validates server name format (alphanumeric, hyphens, underscores, 1-64 chars)
@@ -2021,7 +2099,7 @@ func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[s
 	result := make([]map[string]interface{}, len(imported))
 	for i, s := range imported {
 		view := oauth.RedactedConfigView("", s.Server)
-		result[i] = map[string]interface{}{
+		m := map[string]interface{}{
 			"name":           s.Server.Name,
 			"protocol":       s.Server.Protocol,
 			"url":            viewOr(view, "url", s.Server.URL),
@@ -2033,7 +2111,23 @@ func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[s
 			"original_name":  s.OriginalName,
 			"fields_skipped": s.FieldsSkipped,
 			"warnings":       s.Warnings,
+			// Spec 109-b FR-040: same second-line summary/tags the Web UI
+			// preview shows, already redacted by configimport.Import.
+			"summary": s.Summary,
+			"tags":    s.Tags,
 		}
+		// Match the REST DTO's `omitempty` (internal/httpapi/import.go
+		// ImportedServerResponse.Env/Headers): a server with nothing to
+		// classify omits the key entirely instead of emitting `null`, so a
+		// schema-sensitive consumer of `-o json` sees the same shape on
+		// both surfaces for the same import.
+		if len(s.EnvFields) > 0 {
+			m["env"] = s.EnvFields
+		}
+		if len(s.HeaderFields) > 0 {
+			m["headers"] = s.HeaderFields
+		}
+		result[i] = m
 	}
 	return result
 }
@@ -2380,7 +2474,7 @@ func applyImportedServersConfigMode(imported []*configimport.ImportedServer, glo
 	}
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}

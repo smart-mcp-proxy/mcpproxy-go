@@ -13,7 +13,14 @@ enum APIClientError: Error, LocalizedError {
     /// `precondition_failed` (the previewed state drifted — re-preview) versus
     /// `already_exists` (the legacy conflict). Callers must be able to tell them
     /// apart without string matching (contracts §2, research D9).
-    case connectConflict(action: String, message: String)
+    ///
+    /// `displayPath`/`reloadHint` (review round 3 finding): the core fills
+    /// both on every ConnectResult branch, conflicts included (FR-037/
+    /// FR-042's "populated for every result whose ConfigPath is known"), but
+    /// `connectConflict(from:)` used to keep only `action`/`message` and drop
+    /// them — so no conflict/failure UI state could ever show the path or
+    /// reload hint the success path already renders.
+    case connectConflict(action: String, message: String, displayPath: String? = nil, reloadHint: String? = nil)
     /// An administrative write was attempted while the app is not talking to the
     /// core over its private local socket. Never sent, by design.
     case socketRequired
@@ -30,7 +37,7 @@ enum APIClientError: Error, LocalizedError {
             return "No data in response"
         case .invalidURL(let url):
             return "Invalid URL: \(url)"
-        case .connectConflict(_, let message):
+        case .connectConflict(_, let message, _, _):
             return message
         case .socketRequired:
             return "This action requires MCPProxy's private local socket; "
@@ -182,6 +189,14 @@ actor APIClient {
         return try await fetchWrapped(path: "/api/v1/diagnostics")
     }
 
+    /// Fetch the needs-attention list from `GET /api/v1/attention`
+    /// (Spec 109 FR-001): the one list the Web UI Home page, the tray
+    /// "Needs Attention" group and Home section, and the CLI's
+    /// `attention`/`status`/`doctor` commands all read.
+    func attention() async throws -> AttentionResponse {
+        return try await fetchWrapped(path: "/api/v1/attention")
+    }
+
     // MARK: - Servers
 
     /// List all upstream servers from `GET /api/v1/servers`.
@@ -305,6 +320,24 @@ actor APIClient {
         )
     }
 
+    /// Every keyring/env secret reference currently configured (masked), via
+    /// `GET /api/v1/secrets/refs`. Used by the Add Server sheet's secret
+    /// toggle (Spec 109 FR-065) as the "taken names" set before computing a
+    /// new `SecretRefName`.
+    func getSecretRefs() async throws -> [SecretRefEntry] {
+        let response: SecretRefsResponse = try await fetchWrapped(path: "/api/v1/secrets/refs")
+        return response.refs
+    }
+
+    /// Delete a keyring secret via `DELETE /api/v1/secrets/{name}?type=keyring`.
+    /// Used to roll back a secret this session's own Add Server flow just
+    /// wrote, when the add itself then fails (FR-065) — never a pre-existing
+    /// entry, since callers only ever pass back a ref they just got from
+    /// `storeSecret`.
+    func deleteSecret(name: String, type: String = "keyring") async throws {
+        try await deleteAction(path: "/api/v1/secrets/\(name.uriComponentEncoded)?type=\(type.uriComponentEncoded)")
+    }
+
     // MARK: - Connect (Client Registration)
 
     /// Client status model returned by `GET /api/v1/connect` (list, existence
@@ -338,6 +371,13 @@ actor APIClient {
         /// Every config location the core's existence check consults, highest
         /// precedence first (e.g. OpenCode's opencode.jsonc then opencode.json).
         let checkedPaths: [String]?
+        /// `config_path` with the home directory shortened to "~" (Spec 109-b
+        /// FR-037), for display; nil for a core that predates this field.
+        let displayPath: String?
+        /// This client's instruction for making a freshly-written config take
+        /// effect (Spec 109-b FR-037/FR-042), e.g. "Restart Cursor to load
+        /// MCPProxy". Nil for an unsupported client or an older core.
+        let reloadHint: String?
 
         enum CodingKeys: String, CodingKey {
             case clientId = "id"
@@ -348,11 +388,17 @@ actor APIClient {
             case accessState = "access_state"
             case remediation
             case checkedPaths = "checked_paths"
+            case displayPath = "display_path"
+            case reloadHint = "reload_hint"
         }
 
         /// Name to render; a core newer than the app may report a client this
         /// build never heard of, which still renders by name (FR-009).
         var displayName: String { name.isEmpty ? clientId : name }
+
+        /// The path to show in the UI: the home-shortened form when the core
+        /// sent one, falling back to the full path for an older core.
+        var effectiveDisplayPath: String { displayPath ?? configPath }
 
         /// SF Symbol for the row. The core's `icon` is a registry slug, so an
         /// unknown one — the newer-core case — resolves to the generic symbol
@@ -386,13 +432,62 @@ actor APIClient {
         let serverName: String?
         let action: String?
         let message: String?
+        /// `config_path` with the home directory shortened to "~" (Spec 109-b
+        /// FR-037). Populated on every branch, not only success; nil for a
+        /// core that predates this field.
+        let displayPath: String?
+        /// This client's instruction for making the write take effect (Spec
+        /// 109-b FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Nil
+        /// for an unsupported client or a core that predates this field.
+        let reloadHint: String?
 
         enum CodingKeys: String, CodingKey {
             case success, client, action, message
             case configPath = "config_path"
             case backupPath = "backup_path"
             case serverName = "server_name"
+            case displayPath = "display_path"
+            case reloadHint = "reload_hint"
         }
+
+        init(
+            success: Bool,
+            client: String? = nil,
+            configPath: String? = nil,
+            backupPath: String? = nil,
+            serverName: String? = nil,
+            action: String? = nil,
+            message: String? = nil,
+            displayPath: String? = nil,
+            reloadHint: String? = nil
+        ) {
+            self.success = success
+            self.client = client
+            self.configPath = configPath
+            self.backupPath = backupPath
+            self.serverName = serverName
+            self.action = action
+            self.message = message
+            self.displayPath = displayPath
+            self.reloadHint = reloadHint
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            success = try container.decodeIfPresent(Bool.self, forKey: .success) ?? false
+            client = try container.decodeIfPresent(String.self, forKey: .client)
+            configPath = try container.decodeIfPresent(String.self, forKey: .configPath)
+            backupPath = try container.decodeIfPresent(String.self, forKey: .backupPath)
+            serverName = try container.decodeIfPresent(String.self, forKey: .serverName)
+            action = try container.decodeIfPresent(String.self, forKey: .action)
+            message = try container.decodeIfPresent(String.self, forKey: .message)
+            displayPath = try container.decodeIfPresent(String.self, forKey: .displayPath)
+            reloadHint = try container.decodeIfPresent(String.self, forKey: .reloadHint)
+        }
+
+        /// The path to show in the UI: the home-shortened form when the core
+        /// sent one, falling back to the full path for an older core.
+        var effectiveDisplayPath: String? { displayPath ?? configPath }
     }
 
     /// Response wrapper for the client list endpoint.
@@ -531,7 +626,9 @@ actor APIClient {
         let errorText = (try? decoder.decode(APIErrorResponse.self, from: data))?.error
         return .connectConflict(
             action: result?.action ?? "conflict",
-            message: result?.message ?? errorText ?? "The client configuration changed."
+            message: result?.message ?? errorText ?? "The client configuration changed.",
+            displayPath: result?.displayPath,
+            reloadHint: result?.reloadHint
         )
     }
 
@@ -784,6 +881,79 @@ actor APIClient {
             throw APIClientError.decodingError(
                 underlying: NSError(domain: "ImportDecode", code: -1,
                                     userInfo: [NSLocalizedDescriptionKey: "Cannot decode import response: \(preview)"])
+            )
+        }
+    }
+
+    /// Preview-detect a server from pasted content (URL, command line, or a
+    /// JSON/TOML config) via `POST /api/v1/servers/import/json?preview=true`
+    /// (Spec 109 FR-064). Never performs the import itself — the Paste tab
+    /// calls `applyImportContent` once the user fills in the detected
+    /// fields, which re-parses this same content server-side.
+    func previewImportContent(_ content: String) async throws -> ImportPreviewResponse {
+        // allow_paste_fallback (review round 4 F-E): only the Paste tab may
+        // guess a bare URL or single command line when JSON/TOML detection
+        // fails — every other import surface keeps getting a clear
+        // detection error for a plain one-liner instead of it being
+        // silently guessed at and, on apply, added with no confirmation.
+        let data = try await postRaw(
+            path: "/api/v1/servers/import/json?preview=true",
+            body: ["content": content, "allow_paste_fallback": true]
+        )
+        return try Self.decodeImportPreviewResponse(data)
+    }
+
+    /// Applies (preview=false) the server detected from `content` via
+    /// `POST /api/v1/servers/import/json` (Spec 109 FR-064/065, PR review
+    /// round 4 F-A/F-D fix). The backend re-parses `content` itself and adds
+    /// the server with the TRUE, unredacted url/command/args — the Paste
+    /// tab must never reconstruct the config from a preview response, since
+    /// a credential embedded directly in a URL query param or an argv flag
+    /// is masked there for display (`••••23 (16 chars)`) and baking that
+    /// placeholder into the real config would leave the server permanently
+    /// unable to connect with no way to recover the original secret.
+    /// `envOverride`/`headerOverride` carry the user's SecretToggle edits
+    /// (a plain value, or a keyring ref if they chose Secret) across, since
+    /// those never appeared in the preview at all. `serverName` scopes the
+    /// apply to just the one entry the Paste tab previewed, matching either
+    /// its raw or sanitized name server-side. Deliberately no `format` hint:
+    /// detection is a pure function of content, so re-detecting the
+    /// identical `content` reproduces the exact same format the preview
+    /// already showed — a preview's own format string can be e.g.
+    /// "claude_desktop", which the backend's format-hint parser does not
+    /// accept, so passing it back as a hint would 400 the apply for those
+    /// inputs. Re-detection (allow_paste_fallback) avoids that mismatch.
+    func applyImportContent(
+        _ content: String,
+        serverName: String,
+        envOverride: [String: String] = [:],
+        headerOverride: [String: String] = [:]
+    ) async throws -> ImportPreviewResponse {
+        var body: [String: Any] = ["content": content, "server_names": [serverName], "allow_paste_fallback": true]
+        if !envOverride.isEmpty { body["env_override"] = envOverride }
+        if !headerOverride.isEmpty { body["header_override"] = headerOverride }
+        let data = try await postRaw(path: "/api/v1/servers/import/json", body: body)
+        return try Self.decodeImportPreviewResponse(data)
+    }
+
+    private static func decodeImportPreviewResponse(_ data: Data) throws -> ImportPreviewResponse {
+        let decoder = JSONDecoder()
+
+        if let wrapper = try? decoder.decode(APIResponse<ImportPreviewResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload
+        }
+        if let errorResp = try? decoder.decode(APIErrorResponse.self, from: data),
+           !errorResp.success, let message = errorResp.error {
+            throw APIClientError.httpError(statusCode: 400, message: message)
+        }
+        do {
+            return try decoder.decode(ImportPreviewResponse.self, from: data)
+        } catch {
+            let preview = String(data: data.prefix(200), encoding: .utf8) ?? "binary"
+            throw APIClientError.decodingError(
+                underlying: NSError(domain: "ImportPreviewDecode", code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "Cannot decode import preview response: \(preview)"])
             )
         }
     }
@@ -1256,5 +1426,17 @@ actor APIClient {
         } catch {
             return .failure(message: error.localizedDescription)
         }
+    }
+
+    /// Search the catalog across every enabled source (Spec 109 FR-060) via
+    /// `GET /api/v1/catalog/search?q=&source=&tag=&limit=`. `source` narrows
+    /// to one catalog source id; omit for "every enabled source at once".
+    func searchCatalog(query: String = "", source: String? = nil, tag: String? = nil, limit: Int = 20) async throws -> CatalogSearchResponse {
+        var params: [String] = ["limit=\(limit)"]
+        if !query.isEmpty { params.append("q=\(query.uriComponentEncoded)") }
+        if let source, !source.isEmpty { params.append("source=\(source.uriComponentEncoded)") }
+        if let tag, !tag.isEmpty { params.append("tag=\(tag.uriComponentEncoded)") }
+        let path = "/api/v1/catalog/search?\(params.joined(separator: "&"))"
+        return try await fetchWrapped(path: path)
     }
 }

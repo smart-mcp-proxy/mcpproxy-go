@@ -90,6 +90,73 @@ func TestImportServersJSON_Preview(t *testing.T) {
 	}
 }
 
+// TestImportServersJSON_PreviewCarriesSummaryAndTags is Spec 109-b T036: the
+// preview response's imported rows must carry the FR-040 second line
+// (summary), its tags, and the per-env secret classification.
+func TestImportServersJSON_PreviewCarriesSummaryAndTags(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := &mockImportController{apiKey: "test-key"}
+	server := NewServer(mock, logger, nil)
+
+	reqBody := ImportRequest{
+		Content: `{
+			"mcpServers": {
+				"github": {
+					"command": "uvx",
+					"args": ["mcp-server-github"],
+					"env": {"GITHUB_TOKEN": ""}
+				}
+			}
+		}`,
+	}
+
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var wrapped wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	if len(wrapped.Data.Imported) != 1 {
+		t.Fatalf("Expected 1 imported server, got %d", len(wrapped.Data.Imported))
+	}
+	row := wrapped.Data.Imported[0]
+
+	if row.Summary == "" {
+		t.Error("expected a non-empty Summary")
+	}
+	foundLocal, foundNeedsSecret := false, false
+	for _, tag := range row.Tags {
+		if tag == "local process" {
+			foundLocal = true
+		}
+		if tag == "needs secret" {
+			foundNeedsSecret = true
+		}
+	}
+	if !foundLocal {
+		t.Errorf("Tags = %v, want to contain %q", row.Tags, "local process")
+	}
+	if !foundNeedsSecret {
+		t.Errorf("Tags = %v, want to contain %q (empty GITHUB_TOKEN)", row.Tags, "needs secret")
+	}
+	if len(row.Env) != 1 || row.Env[0].Name != "GITHUB_TOKEN" {
+		t.Fatalf("Env = %+v, want one GITHUB_TOKEN entry", row.Env)
+	}
+	if !row.Env[0].SecretLike || !row.Env[0].EmptyOrPlaceholder {
+		t.Errorf("Env[0] = %+v, want SecretLike=true EmptyOrPlaceholder=true", row.Env[0])
+	}
+}
+
 func TestImportServersJSON_InvalidContent(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	mock := &mockImportController{apiKey: "test-key"}
@@ -250,7 +317,7 @@ func TestRunImport_ConflictRenameSanitizableName(t *testing.T) {
 			const want = "Figma_Desktop_claude_desktop"
 			rename := map[string]string{tt.renameBy: want}
 
-			resp, err := server.runImport(req, []byte(content), "claude-desktop", nil, true, rename)
+			resp, err := server.runImport(req, []byte(content), "claude-desktop", nil, true, rename, nil, false)
 			if err != nil {
 				t.Fatalf("runImport returned error: %v", err)
 			}
@@ -396,6 +463,44 @@ func TestImportServersJSON_UnknownFormat(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("Expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestImportServersJSON_PasteFallbackRequiresOptIn pins review round 4 F-E: a
+// plain one-line, non-JSON/TOML body must return an error by default (same
+// "unable to detect configuration format" behavior as before FR-064) — the
+// Paste tab's URL/command-line guess only kicks in when the request
+// explicitly sets allow_paste_fallback.
+func TestImportServersJSON_PasteFallbackRequiresOptIn(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := &mockImportController{apiKey: "test-key"}
+	server := NewServer(mock, logger, nil)
+
+	doRequest := func(reqBody ImportRequest) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		rr := httptest.NewRecorder()
+		server.router.ServeHTTP(rr, req)
+		return rr
+	}
+
+	rr := doRequest(ImportRequest{Content: "hello world"})
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("without allow_paste_fallback: expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	rr = doRequest(ImportRequest{Content: "hello world", AllowPasteFallback: true})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("with allow_paste_fallback: expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.Data.Format != "command" {
+		t.Errorf("Format = %q, want %q", resp.Data.Format, "command")
 	}
 }
 

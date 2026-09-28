@@ -185,6 +185,9 @@ func main() {
 	// Add status command
 	statusCmd := GetStatusCommand()
 
+	// Add attention command (Spec 109 FR-001/FR-003)
+	attentionCmd := GetAttentionCommand()
+
 	// Add token command (Spec 028: Agent tokens)
 	tokenCmd := GetTokenCommand()
 
@@ -206,6 +209,7 @@ func main() {
 	rootCmd.AddCommand(newSandboxExecCommand())
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(GetRegistryCommand())
+	rootCmd.AddCommand(GetCatalogCommand())
 	rootCmd.AddCommand(toolsCmd)
 	rootCmd.AddCommand(callCmd)
 	rootCmd.AddCommand(codeCmd)
@@ -217,6 +221,7 @@ func main() {
 	rootCmd.AddCommand(activityCmd)
 	rootCmd.AddCommand(tuiCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(attentionCmd)
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(telemetryCmd)
 	rootCmd.AddCommand(dbCmd)

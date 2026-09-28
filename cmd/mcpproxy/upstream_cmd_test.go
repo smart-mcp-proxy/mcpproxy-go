@@ -12,7 +12,10 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/configimport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // jsonEscapePath escapes a path for embedding in JSON strings.
@@ -312,6 +315,114 @@ func TestLoadUpstreamConfig(t *testing.T) {
 			t.Errorf("Expected listen address '127.0.0.1:8080', got %s", cfg.Listen)
 		}
 	})
+}
+
+// TestLoadUpstreamConfig_FallsBackToGlobalConfigFlag pins a real bug found
+// during live QA: `upstream add` (and every other upstream subcommand except
+// `list`/`logs`, which register their own local --config flag bound to
+// upstreamConfigPath) has no local --config flag of its own, so a user's
+// `--config=<path>` is parsed against the ROOT persistent flag and lands in
+// the package-level `configFile` variable, never in `upstreamConfigPath`.
+// loadUpstreamConfig previously read upstreamConfigPath ONLY, silently
+// ignoring the value the user actually passed and falling through to the
+// default `~/.mcpproxy/mcp_config.json` — on a real machine this meant
+// `upstream add --config=<scratch>` wrote test servers into the operator's
+// real production config. loadUpstreamConfig must fall back to the global
+// configFile when upstreamConfigPath was never set for this command.
+func TestLoadUpstreamConfig_FallsBackToGlobalConfigFlag(t *testing.T) {
+	oldConfigPath := upstreamConfigPath
+	oldConfigFile := configFile
+	defer func() {
+		upstreamConfigPath = oldConfigPath
+		configFile = oldConfigFile
+	}()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "scratch_config.json")
+	configJSON := `{
+		"listen": "127.0.0.1:19999",
+		"data_dir": "` + jsonEscapePath(tmpDir) + `",
+		"mcpServers": []
+	}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+
+	// Simulate `mcpproxy upstream add ... --config=<scratch>`: only the root
+	// persistent flag var is populated, exactly as cobra would bind it for a
+	// subcommand with no local --config flag of its own.
+	upstreamConfigPath = ""
+	configFile = configPath
+
+	cfg, err := loadUpstreamConfig()
+	if err != nil {
+		t.Fatalf("loadUpstreamConfig() with only the global --config set: %v", err)
+	}
+	if cfg.Listen != "127.0.0.1:19999" {
+		t.Errorf("expected loadUpstreamConfig to honor the global --config flag path %q, got listen=%q (likely fell back to the default config)", configPath, cfg.Listen)
+	}
+}
+
+// TestUpstreamConfigModeWritesUseSelectedConfigFile protects config-mode
+// mutations from re-deriving mcp_config.json from DataDir after the caller has
+// explicitly selected a differently named file with the root --config flag.
+// The default-config sentinel models the operator's existing configuration;
+// it must remain byte-for-byte unchanged for add, remove, and import.
+func TestUpstreamConfigModeWritesUseSelectedConfigFile(t *testing.T) {
+	oldConfigPath, oldConfigFile := upstreamConfigPath, configFile
+	t.Cleanup(func() {
+		upstreamConfigPath, configFile = oldConfigPath, oldConfigFile
+	})
+
+	home := sandboxHome(t)
+	tmpDir := t.TempDir()
+	defaultDir := filepath.Join(home, ".mcpproxy")
+	require.NoError(t, os.MkdirAll(defaultDir, 0755))
+	defaultPath := filepath.Join(defaultDir, config.ConfigFileName)
+	sentinel := []byte(`{"sentinel":true}\n`)
+	require.NoError(t, os.WriteFile(defaultPath, sentinel, 0600))
+
+	selectedPath := filepath.Join(tmpDir, "selected", "scratch_config.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(selectedPath), 0755))
+	initial := `{"listen":"127.0.0.1:18991","mcpServers":[{"name":"remove-me","url":"https://example.invalid/remove"}]}`
+	require.NoError(t, os.WriteFile(selectedPath, []byte(initial), 0600))
+
+	upstreamConfigPath = ""
+	configFile = selectedPath
+	cfg, err := loadUpstreamConfig()
+	require.NoError(t, err)
+	assert.Equal(t, defaultDir, cfg.DataDir, "the explicit config deliberately omits data_dir and therefore uses only the scratch HOME default")
+
+	_, err = runUpstreamAddConfigMode(&cliclient.AddServerRequest{
+		Name: "added", URL: "https://example.invalid/add", Protocol: "http",
+	}, cfg)
+	require.NoError(t, err)
+	require.NoError(t, runUpstreamRemoveConfigMode("remove-me", cfg))
+	require.NoError(t, applyImportedServersConfigMode([]*configimport.ImportedServer{{
+		Server: &config.ServerConfig{Name: "imported", URL: "https://example.invalid/import", Protocol: "http", Enabled: true},
+	}}, cfg))
+
+	updated, err := config.LoadFromFile(selectedPath)
+	require.NoError(t, err)
+	assert.Len(t, updated.Servers, 2)
+	assert.Equal(t, "added", updated.Servers[0].Name)
+	assert.Equal(t, "imported", updated.Servers[1].Name)
+	actualSentinel, err := os.ReadFile(defaultPath)
+	require.NoError(t, err)
+	assert.Equal(t, sentinel, actualSentinel)
+}
+
+func TestUpstreamConfigFilePathPrecedence(t *testing.T) {
+	oldConfigPath, oldConfigFile := upstreamConfigPath, configFile
+	t.Cleanup(func() { upstreamConfigPath, configFile = oldConfigPath, oldConfigFile })
+
+	cfg := &config.Config{DataDir: "/fallback-data"}
+	upstreamConfigPath, configFile = "/local.json", "/global.json"
+	assert.Equal(t, "/local.json", upstreamConfigFilePath(cfg))
+	upstreamConfigPath = ""
+	assert.Equal(t, "/global.json", upstreamConfigFilePath(cfg))
+	configFile = ""
+	assert.Equal(t, config.GetConfigPath(cfg.DataDir), upstreamConfigFilePath(cfg))
 }
 
 func TestCreateUpstreamLogger(t *testing.T) {
@@ -644,7 +755,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -719,7 +830,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		_, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -771,7 +882,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		}
 		cfg.DataDir = tmpDir
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		if err == nil {
 			t.Error("Expected error for duplicate server")
@@ -832,7 +943,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		os.Stdout = wOut
 		os.Stderr = wErr
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		added, err := runUpstreamAddConfigMode(req, cfg)
 
 		wOut.Close()
 		wErr.Close()
@@ -844,6 +955,13 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 
 		if err != nil {
 			t.Errorf("Expected no error with --if-not-exists, got: %v", err)
+		}
+		// review round 1: added must be false on a skip, distinct from a
+		// genuine add with a nil error — runUpstreamAdd uses this to decide
+		// whether to roll back any --secret-env/--secret-header values
+		// already written to the keyring for this request.
+		if added {
+			t.Error("expected added=false for an --if-not-exists skip")
 		}
 		if !strings.Contains(bufErr.String(), "already exists") || !strings.Contains(bufErr.String(), "skipped") {
 			t.Error("Expected skip message on stderr for existing server")
@@ -892,7 +1010,7 @@ func TestAddStdioServerConfigMode(t *testing.T) {
 		_, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -969,7 +1087,7 @@ func TestAddStdioServerConfigMode(t *testing.T) {
 		_, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -1372,7 +1490,7 @@ func TestNewServerQuarantineDefault(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout

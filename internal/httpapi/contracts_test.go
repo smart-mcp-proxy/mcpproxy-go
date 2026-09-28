@@ -26,7 +26,9 @@ import (
 )
 
 // MockServerController implements ServerController for testing
-type MockServerController struct{}
+type MockServerController struct {
+	attentionItems []contracts.AttentionItem
+}
 
 // mockManagementService provides a test implementation of management service methods
 type mockManagementService struct{ management.Service }
@@ -148,6 +150,9 @@ func (m *MockServerController) SubscribeEvents() chan internalRuntime.Event {
 	return make(chan internalRuntime.Event, 16)
 }
 func (m *MockServerController) UnsubscribeEvents(chan internalRuntime.Event) {}
+func (m *MockServerController) Attention() []contracts.AttentionItem {
+	return m.attentionItems
+}
 
 func (m *MockServerController) GetAllServers() ([]map[string]interface{}, error) {
 	return []map[string]interface{}{
@@ -415,8 +420,12 @@ func (m *MockServerController) GetOnboardingState() (*storage.OnboardingState, e
 	return &storage.OnboardingState{}, nil
 }
 func (m *MockServerController) SaveOnboardingState(_ *storage.OnboardingState) error { return nil }
-func (m *MockServerController) GetActivationFirstMCPClient() (bool, []string)        { return false, nil }
-func (m *MockServerController) RecordUpdateFailure(_ string) (bool, error)           { return false, nil }
+func (m *MockServerController) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	st := &storage.OnboardingState{}
+	return fn(st)
+}
+func (m *MockServerController) GetActivationFirstMCPClient() (bool, []string) { return false, nil }
+func (m *MockServerController) RecordUpdateFailure(_ string) (bool, error)    { return false, nil }
 
 // Test contract compliance for API responses
 func TestAPIContractCompliance(t *testing.T) {

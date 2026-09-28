@@ -568,6 +568,11 @@ export interface ConfigSecretsResponse {
   environment_vars: EnvVarStatus[]
   total_secrets: number
   total_env_vars: number
+  // FR-065: whether the OS keyring provider is usable, and why not when it
+  // isn't — the Paste/Manual/Catalog secret toggle disables itself with this
+  // reason instead of failing silently on Add.
+  keyring_available: boolean
+  keyring_reason?: string
 }
 
 // Tool Call History types
@@ -838,6 +843,59 @@ export interface SearchRegistryServersResponse {
   tag?: string
 }
 
+// Catalog (Spec 109 FR-060/061), GET /api/v1/catalog/search. Mirrors
+// registries.CatalogResult — a DTO distinct from RepositoryServer/ServerEntry;
+// see contracts/rest-api.md#catalog.
+export interface CatalogPopularity {
+  stars?: number
+  installs?: number
+}
+
+export interface CatalogInstall {
+  url?: string
+  command?: string
+  args?: string[]
+}
+
+export interface CatalogInput {
+  name: string
+  description?: string
+  secret_like: boolean
+}
+
+export interface CatalogResult {
+  source: string
+  id: string
+  title: string
+  publisher?: string
+  verified: boolean
+  official: boolean
+  popularity?: CatalogPopularity
+  description: string
+  transport: 'http' | 'stdio'
+  install: CatalogInstall
+  required_inputs?: CatalogInput[]
+  source_code_url?: string
+  added: boolean
+}
+
+export interface CatalogSourceError {
+  source: string
+  reason: string
+}
+
+export interface CatalogSections {
+  official: CatalogResult[]
+  popular: CatalogResult[]
+}
+
+export interface CatalogSearchResponse {
+  query: string
+  results: CatalogResult[]
+  sections: CatalogSections | null
+  unavailable: CatalogSourceError[]
+}
+
 // Activity Log types (RFC-003)
 
 // Every value ACTIVITY_TYPE_LABELS (utils/activity.ts) knows a label for —
@@ -1021,6 +1079,22 @@ export interface ImportSummary {
   failed: number
 }
 
+// ImportFieldPreview types mirror httpapi.EnvFieldPreview / HeaderFieldPreview
+// (Spec 109 FR-064/065): never the raw value, only presence + two booleans a
+// surface uses to default the Value/Secret toggle.
+export interface ImportEnvFieldPreview {
+  name: string
+  value_present: boolean
+  secret_like: boolean
+  empty_or_placeholder: boolean
+}
+
+export interface ImportHeaderFieldPreview {
+  name: string
+  secret_like: boolean
+  empty_or_placeholder: boolean
+}
+
 export interface ImportedServer {
   name: string
   protocol: string
@@ -1031,6 +1105,11 @@ export interface ImportedServer {
   original_name: string
   fields_skipped?: string[]
   warnings?: string[]
+  // FR-064 preview enrichment (contracts/rest-api.md "Import preview").
+  summary?: string
+  tags?: string[]
+  env?: ImportEnvFieldPreview[]
+  headers?: ImportHeaderFieldPreview[]
 }
 
 export interface SkippedServer {
@@ -1067,6 +1146,8 @@ export interface ClientStatus {
   id: string
   name: string
   config_path: string
+  // Spec 109-b FR-037: the presentation-safe version of config_path.
+  display_path?: string
   exists: boolean
   connected: boolean
   supported: boolean
@@ -1095,6 +1176,8 @@ export interface ClientStatus {
   // mcpproxy-shaped entry exists", and an entry merely NAMED mcpproxy counts —
   // so a row can be connected to a different instance entirely (audit F18).
   endpoint_match?: EndpointMatch
+  // The client-specific action needed after a Connect write.
+  reload_hint?: string
 }
 
 // How a client's registered endpoint relates to this instance (audit F18).
@@ -1109,6 +1192,8 @@ export interface ConnectResult {
   action: string
   message: string
   error?: string
+  display_path?: string
+  reload_hint?: string
 }
 
 // Spec 078 US1: the exact change a connect would make, returned WITHOUT writing
@@ -1118,6 +1203,7 @@ export interface ConnectResult {
 export interface ConnectPreview {
   client: string
   config_path: string
+  display_path?: string
   format: 'json' | 'toml'
   server_key: string
   server_name: string
@@ -1136,6 +1222,7 @@ export interface OnboardingState {
   engaged_at?: string
   connect_step_status?: '' | 'completed' | 'skipped'
   server_step_status?: '' | 'completed' | 'skipped'
+  client_connected_at?: Record<string, string>
 }
 
 export interface OnboardingStateResponse {
@@ -1150,6 +1237,8 @@ export interface OnboardingStateResponse {
   first_mcp_client_ever: boolean
   mcp_clients_seen_ever: string[]
   incomplete_tab_count: number
+  has_usable_server: boolean
+  usable_servers: string[]
 }
 
 export interface OnboardingMarkRequest {

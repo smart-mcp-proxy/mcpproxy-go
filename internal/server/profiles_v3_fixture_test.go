@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
@@ -12,11 +14,24 @@ import (
 // profile-policy test across 108-a..108-h builds its callers and its policy
 // fixture from here so the contracts/enforcement-matrix.md fixture is
 // encoded exactly once.
-//
-// NOTE (108-a): clientCtx is deliberately NOT here yet — it needs
-// AuthContext.TokenKind/ClientID/ProfileMode, which land in 108-c (its
-// T027b adds it there). 108-a and 108-b merge in parallel, so this file
-// must compile without it.
+
+// clientCtx returns a context authenticated as a Spec 108-c client
+// credential (kind=client) bound to pin under mode ("locked"|"switchable")
+// — moved here from 108-a's placeholder per T027b, now that
+// AuthContext.TokenKind/ClientID/ProfileMode exist (108-c T034).
+func clientCtx(clientID, pin, mode string) context.Context {
+	return auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      fmt.Sprintf("client-%s", clientID),
+		TokenPrefix:    "mcp_cli_fix",
+		AllowedServers: []string{"*"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+		ProfilePin:     pin,
+		TokenKind:      auth.KindClient,
+		ClientID:       clientID,
+		ProfileMode:    mode,
+	})
+}
 
 // enforcementMatrixProfiles returns the three contracts/enforcement-matrix.md
 // fixture profiles, in fixture order (work-readonly, work-full, legacy).
