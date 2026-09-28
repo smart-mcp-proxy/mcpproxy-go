@@ -160,7 +160,7 @@ func TestSearchAll_PopularSectionNotLimitedByPageSize(t *testing.T) {
 	entriesFor := func(prefix string) string {
 		var entries []string
 		for i := 0; i < 10; i++ {
-			entries = append(entries, fmt.Sprintf(`{"id":"%s%02d","name":"Server %s%02d"}`, prefix, i, prefix, i))
+			entries = append(entries, fmt.Sprintf(`{"id":"%s%02d","name":"Server %s%02d","source_code_url":"https://github.com/org/%s%02d"}`, prefix, i, prefix, i, prefix, i))
 		}
 		return "[" + strings.Join(entries, ",") + "]"
 	}
@@ -170,6 +170,14 @@ func TestSearchAll_PopularSectionNotLimitedByPageSize(t *testing.T) {
 		{ID: "src1", Name: "Src1", ServersURL: src1.URL},
 		{ID: "src2", Name: "Src2", ServersURL: src2.URL},
 	})
+	stars := make(map[string]int, 20)
+	for _, prefix := range []string{"a", "b"} {
+		for i := 0; i < 10; i++ {
+			stars[fmt.Sprintf("org/%s%02d", prefix, i)] = i + 1
+		}
+	}
+	restore := SetPopularityProviderForTest(&stubPopularityProvider{stars: stars})
+	defer restore()
 
 	hits, sections, _ := SearchAll(context.Background(), "", "", 10, SearchOptions{})
 	if len(hits) != 10 {

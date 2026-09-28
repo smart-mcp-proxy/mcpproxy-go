@@ -219,6 +219,11 @@ Because every add surface (MCP, REST, CLI) funnels through the same keystone, a
 packages-only server is added as stdio and a remotes-only server as http
 identically across all surfaces.
 
+## Catalog popularity signal
+
+Catalog ordering, GitHub stars, Docker pull counts, rate limits, and opt-out
+behavior are described in [Catalog popularity](features/catalog-popularity.md).
+
 ## Adding a discovered server
 
 See [registry-add.md](features/registry-add.md). New servers are quarantined by
