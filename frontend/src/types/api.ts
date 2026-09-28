@@ -238,6 +238,8 @@ export interface ServerIsolationDefaults {
 
 export interface Server {
   name: string
+  /** Catalog provenance, used only to resolve an already-added catalog card. */
+  source_registry_id?: string
   // Human-friendly display label from the source registry (MCP-1112). When
   // present it is preferred over `name` for display; `name` stays the stable
   // identifier used for routing and API calls (it may be a reverse-DNS id such
@@ -877,6 +879,8 @@ export interface CatalogResult {
   required_inputs?: CatalogInput[]
   source_code_url?: string
   added: boolean
+  /** Unique visible installed server selected by the backend before redaction. */
+  added_server_name?: string
 }
 
 export interface CatalogSourceError {

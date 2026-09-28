@@ -56,7 +56,7 @@ func (s *Server) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
 	// source for one of the truncated top-`limit` slots.
 	hits, sections, unavailable := registries.SearchAll(r.Context(), q, tag, limit, registries.SearchOptions{Source: source})
 
-	added := s.catalogAddedPredicate(r.Context())
+	added := s.catalogAddedResolver(r.Context())
 
 	resp := catalogSearchResponse{
 		Query:       q,
@@ -81,22 +81,25 @@ func (s *Server) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, resp)
 }
 
-func toCatalogResults(hits []registries.CatalogHit, added func(registries.CatalogHit) bool) []registries.CatalogResult {
+func toCatalogResults(hits []registries.CatalogHit, added func(registries.CatalogHit) (bool, string)) []registries.CatalogResult {
 	out := make([]registries.CatalogResult, 0, len(hits))
 	for _, h := range hits {
-		out = append(out, registries.ToCatalogResult(h, added(h)))
+		isAdded, addedServerName := added(h)
+		result := registries.ToCatalogResult(h, isAdded)
+		result.AddedServerName = addedServerName
+		out = append(out, result)
 	}
 	return out
 }
 
-// catalogAddedPredicate returns a function reporting whether a catalog hit is
-// already configured, joined only against the servers visible to ctx's caller
-// (FR-007, contracts/rest-api.md#catalog): "added" is computed only over
-// servers passing CanEnumerateServer, so a scoped caller never learns from
-// "added" that an out-of-scope server exists. A configured server with a
-// source_registry_id matches on (source, install target); one without (a
-// manual add) matches on install target alone.
-func (s *Server) catalogAddedPredicate(ctx context.Context) func(registries.CatalogHit) bool {
+// catalogAddedResolver returns a function reporting whether a catalog hit is
+// already configured and, only for a unique visible match, that server's name.
+// The join uses raw configuration before GET /servers redacts credential-bearing
+// URLs and arguments. It considers only servers visible to ctx's caller (FR-007),
+// so it cannot reveal an out-of-scope server name. A configured server with a
+// source_registry_id matches on (source, install target); one without (a manual
+// add) matches on install target alone.
+func (s *Server) catalogAddedResolver(ctx context.Context) func(registries.CatalogHit) (bool, string) {
 	servers := s.getVisibleServersForCatalog(ctx)
 
 	// byRegistryAndTarget indexes servers that declare which registry they
@@ -106,26 +109,41 @@ func (s *Server) catalogAddedPredicate(ctx context.Context) func(registries.Cata
 	// byTargetOnly: without this split it would falsely read added:true for
 	// every OTHER source whose entry happens to share the same install
 	// target (contracts/rest-api.md#catalog "added").
-	byRegistryAndTarget := make(map[string]bool, len(servers))
-	byTargetOnly := make(map[string]bool, len(servers))
+	byRegistryAndTarget := make(map[string][]string, len(servers))
+	byTargetOnly := make(map[string][]string, len(servers))
 	for _, srv := range servers {
 		target := catalogInstallTargetForServer(srv)
 		if srv.SourceRegistryID == "" {
-			byTargetOnly[target] = true
+			byTargetOnly[target] = append(byTargetOnly[target], srv.Name)
 		} else {
-			byRegistryAndTarget[srv.SourceRegistryID+"\x00"+target] = true
+			key := srv.SourceRegistryID + "\x00" + target
+			byRegistryAndTarget[key] = append(byRegistryAndTarget[key], srv.Name)
 		}
 	}
 
-	return func(h registries.CatalogHit) bool {
+	return func(h registries.CatalogHit) (bool, string) {
 		// added is never itself computed from the DTO's Added field (still
 		// false here) — only its Install target, which is pure derived data
 		// from the catalog entry.
 		target := registries.CatalogInstallTarget(registries.ToCatalogResult(h, false).Install)
-		if byRegistryAndTarget[h.Source+"\x00"+target] {
-			return true
+		names := append([]string(nil), byRegistryAndTarget[h.Source+"\x00"+target]...)
+		names = append(names, byTargetOnly[target]...)
+		if len(names) == 0 {
+			return false, ""
 		}
-		return byTargetOnly[target]
+		// Names are normally unique configuration keys. De-duplicate defensively
+		// so a malformed legacy configuration cannot turn one logical server into
+		// a false ambiguity.
+		unique := make(map[string]struct{}, len(names))
+		for _, name := range names {
+			unique[name] = struct{}{}
+		}
+		if len(unique) == 1 {
+			for name := range unique {
+				return true, name
+			}
+		}
+		return true, ""
 	}
 }
 

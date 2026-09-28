@@ -686,7 +686,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Then post the showAddServer notification after the tab switch completes
         // and ServersView has fully registered its notification observer.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            NotificationCenter.default.post(name: .showAddServer, object: AddServerTab.manual)
+            // FR-062: this generic tray entry point follows the same
+            // catalog-first default as the Servers and Home add actions.
+            NotificationCenter.default.post(name: .showAddServer, object: AddServerTab.catalog)
         }
     }
 

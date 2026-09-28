@@ -550,6 +550,9 @@ struct IsolationDefaultsStatus: Codable, Equatable {
 struct ServerStatus: Codable, Identifiable, Equatable {
     let id: String
     let name: String
+    /// Catalog provenance, used to resolve an existing Added/Open card without
+    /// exposing configured server names in the catalog DTO itself.
+    let sourceRegistryID: String?
     let url: String?
     let command: String?
     let args: [String]?
@@ -596,6 +599,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, url, command, args
+        case sourceRegistryID = "source_registry_id"
         case workingDir = "working_dir"
         case headers
         case env

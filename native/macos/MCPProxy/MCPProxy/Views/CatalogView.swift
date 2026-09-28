@@ -17,7 +17,6 @@ struct CatalogView: View {
     /// `?source=` query param, which narrows the Catalog tab only — it never
     /// selects a tab, FR-062). Nil searches every enabled source.
     var sourceFilter: String?
-    let onAdded: (String) -> Void
 
     @Environment(\.fontScale) var fontScale
 
@@ -39,6 +38,9 @@ struct CatalogView: View {
     @State private var pendingFields: [SecretFieldInput] = []
     @State private var addError: String?
     @State private var confirming = false
+    @State private var keyringAvailable = false
+    @State private var keyringReason = "Checking OS keyring availability…"
+    let onOpenServer: (ServerStatus) -> Void
 
     private var apiClient: APIClient? { appState.apiClient }
 
@@ -61,11 +63,27 @@ struct CatalogView: View {
                     .accessibilityIdentifier("catalog-unavailable-notice")
             }
 
+            // Navigation failures can happen without opening the secrets
+            // sheet (for a prior-session Added/Open card), or after the user
+            // dismisses it. Keep the actionable error in the catalog itself
+            // whenever the sheet is not currently presenting it.
+            if let addError, pendingResult == nil {
+                Text(addError)
+                    .font(.scaled(.caption, scale: fontScale))
+                    .foregroundStyle(.red)
+                    .padding(.horizontal)
+                    .padding(.bottom, 6)
+                    .accessibilityIdentifier("catalog-add-error")
+            }
+
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("catalog-view")
-        .task { await search() }
+        .task {
+            await loadKeyringAvailability()
+            await search()
+        }
         .sheet(item: $pendingResult) { result in
             secretsSheet(result)
         }
@@ -162,7 +180,11 @@ struct CatalogView: View {
                 Spacer()
                 if added {
                     Button("Added ✓ · Open") {
-                        if let addedName { openServer(addedName) }
+                        if let addedName {
+                            Task { await openAddedServer(named: addedName) }
+                        } else {
+                            Task { await openPreviouslyAdded(r) }
+                        }
                     }
                     .controlSize(.small)
                     .accessibilityIdentifier("catalog-added-\(key)")
@@ -216,7 +238,7 @@ struct CatalogView: View {
                 .foregroundStyle(.secondary)
 
             ForEach($pendingFields) { $field in
-                SecretFieldToggleView(name: field.name, value: $field.value, mode: $field.mode)
+                SecretFieldToggleView(name: field.name, value: $field.value, mode: $field.mode, keyringAvailable: keyringAvailable, keyringReason: keyringReason)
             }
 
             if let addError {
@@ -236,7 +258,7 @@ struct CatalogView: View {
                     if confirming { ProgressView().controlSize(.small) } else { Text("Add to MCPProxy") }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(confirming || !allPendingValuesFilled)
+                .disabled(confirming || !allPendingValuesFilled || hasUnavailableSecret)
                 .accessibilityIdentifier("catalog-secrets-confirm")
             }
         }
@@ -246,6 +268,10 @@ struct CatalogView: View {
 
     private var allPendingValuesFilled: Bool {
         pendingFields.allSatisfy { !$0.value.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
+    private var hasUnavailableSecret: Bool {
+        !keyringAvailable && pendingFields.contains(where: { $0.mode == .secret })
     }
 
     // MARK: - Search
@@ -274,6 +300,18 @@ struct CatalogView: View {
             unavailable = resp.unavailable ?? []
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadKeyringAvailability() async {
+        guard let client = apiClient else { return }
+        do {
+            let status = try await client.keyringAvailability()
+            keyringAvailable = status.keyringAvailable
+            keyringReason = status.keyringReason ?? "OS keyring unavailable"
+        } catch {
+            keyringAvailable = false
+            keyringReason = "Could not verify OS keyring availability"
         }
     }
 
@@ -329,7 +367,10 @@ struct CatalogView: View {
         if outcome.success {
             let assignedName = outcome.serverName ?? result.title
             addedNames[key] = assignedName
-            onAdded(assignedName)
+            // Adding succeeded independently of navigation. Do not let a
+            // refresh failure make confirmAdd roll back secrets now referenced
+            // by the persisted server configuration.
+            await openAddedServer(named: assignedName)
             return true
         }
         addError = outcome.message ?? "Failed to add server"
@@ -337,10 +378,56 @@ struct CatalogView: View {
     }
 
     /// Spec 109 FR-063: "Added ✓ · Open" opens the server it just added.
-    private func openServer(_ name: String) {
-        NotificationCenter.default.post(name: .switchToServers, object: nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            NotificationCenter.default.post(name: .showServerDetail, object: name)
+    private func openPreviouslyAdded(_ result: CatalogResult) async {
+        guard let client = apiClient else { return }
+        // The catalog handler performed this join over raw visible
+        // configuration before GET /servers redacts credential-bearing query
+        // values and argv. Use its name only when it established uniqueness.
+        if let name = result.addedServerName {
+            await openAddedServer(named: name)
+            return
         }
+        do {
+            let refreshed = try await client.servers()
+            let target = catalogTarget(result.install)
+            let matches = refreshed.filter {
+                serverTarget($0) == target && ($0.sourceRegistryID == result.source || $0.sourceRegistryID == nil)
+            }
+            guard matches.count == 1, let server = matches.first else {
+                addError = matches.isEmpty
+                    ? "This catalog entry is marked added, but MCPProxy could not identify one visible installed server. Open it from Servers."
+                    : "More than one installed server matches this catalog entry. Open the intended server from Servers."
+                return
+            }
+            appState.updateServers(refreshed)
+            onOpenServer(server)
+        } catch {
+            addError = "Could not resolve the installed server. Refresh and try again."
+        }
+    }
+
+    private func openAddedServer(named name: String) async {
+        guard let client = apiClient else { return }
+        do {
+            let refreshed = try await client.servers()
+            appState.updateServers(refreshed)
+            guard let server = refreshed.first(where: { $0.name == name }) else {
+                addError = "Added to MCPProxy, but it is not visible yet. Open it from Servers."
+                return
+            }
+            onOpenServer(server)
+        } catch {
+            addError = "Added to MCPProxy, but it could not be opened. Open it from Servers."
+        }
+    }
+
+    private func catalogTarget(_ install: CatalogInstall) -> String {
+        if let url = install.url { return "url:\(url)" }
+        return "stdio:\(install.command ?? "")\u{0}\((install.args ?? []).joined(separator: "\u{0}"))"
+    }
+
+    private func serverTarget(_ server: ServerStatus) -> String {
+        if let url = server.url { return "url:\(url)" }
+        return "stdio:\(server.command ?? "")\u{0}\((server.args ?? []).joined(separator: "\u{0}"))"
     }
 }

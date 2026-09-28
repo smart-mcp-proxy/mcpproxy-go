@@ -329,6 +329,11 @@ actor APIClient {
         return response.refs
     }
 
+    /// Keyring capability for add forms. The response has no secret values.
+    func keyringAvailability() async throws -> KeyringAvailability {
+        try await fetchWrapped(path: "/api/v1/secrets/config")
+    }
+
     /// Delete a keyring secret via `DELETE /api/v1/secrets/{name}?type=keyring`.
     /// Used to roll back a secret this session's own Add Server flow just
     /// wrote, when the add itself then fails (FR-065) — never a pre-existing

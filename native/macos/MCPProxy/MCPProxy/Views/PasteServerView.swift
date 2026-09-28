@@ -28,6 +28,8 @@ struct PasteServerView: View {
     // re-parses the same input the preview was computed from, even if a
     // debounced re-preview for newer text hasn't landed yet.
     @State private var previewRawContent = ""
+    @State private var keyringAvailable = false
+    @State private var keyringReason = "Checking OS keyring availability…"
 
     private var apiClient: APIClient? { appState.apiClient }
 
@@ -60,6 +62,7 @@ struct PasteServerView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("paste-server")
+        .task { await loadKeyringAvailability() }
     }
 
     @ViewBuilder
@@ -97,7 +100,7 @@ struct PasteServerView: View {
                     }
 
                     ForEach($fields) { $field in
-                        SecretFieldToggleView(name: field.name, value: $field.value, mode: $field.mode)
+                        SecretFieldToggleView(name: field.name, value: $field.value, mode: $field.mode, keyringAvailable: keyringAvailable, keyringReason: keyringReason)
                     }
 
                     if let addError {
@@ -113,11 +116,27 @@ struct PasteServerView: View {
                         if adding { ProgressView().controlSize(.small) } else { Text("Add to MCPProxy") }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(adding)
+                    .disabled(adding || hasUnavailableSecret)
                     .accessibilityIdentifier("paste-add-button")
                 }
                 .padding()
             }
+        }
+    }
+
+    private var hasUnavailableSecret: Bool {
+        !keyringAvailable && fields.contains(where: { $0.mode == .secret })
+    }
+
+    private func loadKeyringAvailability() async {
+        guard let client = apiClient else { return }
+        do {
+            let status = try await client.keyringAvailability()
+            keyringAvailable = status.keyringAvailable
+            keyringReason = status.keyringReason ?? "OS keyring unavailable"
+        } catch {
+            keyringAvailable = false
+            keyringReason = "Could not verify OS keyring availability"
         }
     }
 

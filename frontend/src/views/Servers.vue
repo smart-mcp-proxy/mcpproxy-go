@@ -194,7 +194,7 @@
       </p>
       <div class="flex flex-wrap gap-2 justify-center">
         <button
-          @click="showAddServer = true"
+          @click="router.push('/add-server')"
           class="btn btn-primary"
           data-test="servers-empty-add"
         >
@@ -204,7 +204,7 @@
           Add Server
         </button>
         <router-link
-          to="/repositories"
+          to="/add-server?tab=catalog"
           class="btn btn-outline"
           data-test="servers-empty-registry"
         >
@@ -315,7 +315,6 @@
     <!-- Hints Panel (Bottom of Page) -->
     <CollapsibleHintsPanel :hints="serversHints" />
 
-    <AddServerModal :show="showAddServer" @close="showAddServer = false" @added="onServerAdded" />
   </div>
 </template>
 
@@ -329,8 +328,6 @@ import { useOnboardingStore } from '@/stores/onboarding'
 import api from '@/services/api'
 import type { Server } from '@/types'
 import ServerCard from '@/components/ServerCard.vue'
-import AddServerModal from '@/components/AddServerModal.vue'
-import { serverDetailPath } from '@/utils/serverRoute'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
@@ -348,7 +345,6 @@ const scopeQuery = useScopeQuery('servers')
 const filter = ref<ServerFilter>('all')
 const searchQuery = ref('')
 const scanAllRunning = ref(false)
-const showAddServer = ref(false)
 const { hasEnabledScanners } = useSecurityScannerStatus()
 
 // Spec 109 FR-013: the server card's stats line (last call, 24h errors)
@@ -428,17 +424,6 @@ const hasServers = computed(() => serversStore.servers.length > 0)
 // been applied) is what distinguishes "none configured" from "we don't know
 // yet" — `servers` starts empty either way.
 const isFirstRun = computed(() => serversStore.loaded && serversStore.servers.length === 0)
-
-function onServerAdded(serverName?: string) {
-  showAddServer.value = false
-  void serversStore.fetchServers()
-  // UX audit F07: a single add hands off to that server's detail view, where
-  // connect/scan/review/approve is already on screen. The bulk/import path
-  // emits no name and keeps the old refresh-in-place behaviour.
-  if (serverName) {
-    void router.push(serverDetailPath(serverName))
-  }
-}
 
 // The setup wizard is mounted by Dashboard.vue, so opening it from here means
 // navigating there first; the store carries the tab request across the hop.

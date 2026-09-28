@@ -74,6 +74,11 @@ type CatalogResult struct {
 	RequiredInputs []CatalogInput `json:"required_inputs,omitempty"`
 	SourceCodeURL  string         `json:"source_code_url,omitempty"`
 	Added          bool           `json:"added"`
+	// AddedServerName identifies the one visible installed server that made
+	// Added true. It is intentionally omitted when no unique match exists.
+	// This lets clients open a credential-bearing install without attempting to
+	// join against redacted GET /servers fields.
+	AddedServerName string `json:"added_server_name,omitempty"`
 }
 
 // CatalogSections groups the empty-query landing results (FR-060): the

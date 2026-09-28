@@ -155,6 +155,7 @@ type CatalogResult struct {
     RequiredInputs []CatalogInput  `json:"required_inputs,omitempty"` // {name, description?, secret_like} ← RequiredInput{Name, Description, Secret}; secret_like = Secret OR the research D13 secret-like-name rule (the one function the import preview's SecretLike uses), so a registry that omits or falsifies isSecret on GITHUB_TOKEN still defaults to Secret (FR-065)
     SourceCodeURL  string          `json:"source_code_url,omitempty"`
     Added          bool            `json:"added"`
+    AddedServerName string          `json:"added_server_name,omitempty"` // unique caller-visible installed match; omitted when ambiguous
 }
 type SearchOptions struct{ SourceTimeout time.Duration } // default 5 s; only tests set another value (T109a)
 func SearchAll(ctx, q, tag string, limit int, opts SearchOptions) (results []CatalogHit, sections *CatalogSections, unavailable []SourceError)
@@ -162,7 +163,7 @@ func Rank(a, b CatalogHit, q string) bool // pure, deterministic
 func toCatalogResult(h CatalogHit, added bool) CatalogResult // REST only; golden-tested against the contracts/rest-api.md#catalog example
 ```
 
-`Added` is computed per caller: only configured servers the caller can enumerate (`visibleServers(ctx, …)`, FR-007) take part in the join, so a scoped caller never learns from `added` that an out-of-scope server is configured. `Added` is true when such a configured server has `source_registry_id == Source` (existing field, `config.go:756`) **and** the same install URL or command (the config does not record the registry's server id, so the install target is the join key). Manually added servers match on install URL or command alone.
+`Added` is computed per caller: only configured servers the caller can enumerate (`visibleServers(ctx, …)`, FR-007) take part in the join, so a scoped caller never learns from `added` that an out-of-scope server is configured. `Added` is true when such a configured server has `source_registry_id == Source` (existing field, `config.go:756`) **and** the same install URL or command (the config does not record the registry's server id, so the install target is the join key). Manually added servers match on install URL or command alone. `AddedServerName` is sent only when that visible join has one matching server; clients use it to open credential-bearing installs without comparing the catalog target to redacted `GET /servers` values.
 
 ## 10. Token metrics (extended) — `contracts.ServerTokenMetrics`
 

@@ -39,7 +39,6 @@
 </template>
 
 <script setup lang="ts">
-import { watch } from 'vue'
 import { looksSecret } from '@/utils/secretLike'
 
 // One Value/Secret toggle for a single env var or header field (Spec 109
@@ -65,18 +64,6 @@ function setMode(mode: 'value' | 'secret') {
   if (mode === 'secret' && !props.keyringAvailable) return
   emit('update:mode', mode)
 }
-
-// Re-default to 'value' if the keyring becomes unavailable while a field was
-// already in 'secret' mode (e.g. a slow keyring-availability probe resolves
-// after the field's initial default was applied).
-watch(
-  () => props.keyringAvailable,
-  (available) => {
-    if (!available && props.mode === 'secret') {
-      emit('update:mode', 'value')
-    }
-  }
-)
 
 defineExpose({ defaultMode: () => (looksSecret(props.name) ? 'secret' : 'value') })
 </script>

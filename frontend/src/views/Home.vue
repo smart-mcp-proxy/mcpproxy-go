@@ -71,7 +71,7 @@
           <button @click="showConnectModal = true" class="btn btn-primary btn-sm w-full gap-1">
             Connect Clients
           </button>
-          <button @click="showAddServer = true" class="btn btn-secondary btn-outline btn-sm w-full gap-1">
+          <button @click="router.push('/add-server?tab=import')" class="btn btn-secondary btn-outline btn-sm w-full gap-1" data-test="dashboard-import-configs">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
             </svg>
@@ -257,11 +257,9 @@
           </div>
         </router-link>
 
-        <!-- Right Action Buttons. Spec 107 cross-review round 3, chunk 4 P2:
-             same broken AddServerModal path as the other Add Server
-             buttons on this page. -->
+        <!-- Right Action Buttons. -->
         <div class="flex flex-col gap-2 w-full max-w-[240px] pt-3">
-          <button v-if="authStore.principalKind !== 'tenant'" @click="showAddServer = true" class="btn btn-primary btn-sm w-full gap-1" data-test="dashboard-right-add-server">
+          <button v-if="authStore.principalKind !== 'tenant'" @click="router.push('/add-server')" class="btn btn-primary btn-sm w-full gap-1" data-test="dashboard-right-add-server">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
             </svg>
@@ -360,13 +358,11 @@
 
     <!-- Modals -->
     <ConnectModal :show="showConnectModal" @close="showConnectModal = false" />
-    <AddServerModal :show="showAddServer" @close="showAddServer = false" @added="handleServerAdded" />
     <OnboardingWizard :show="onboardingStore.wizardOpen" @close="onboardingStore.closeWizard" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { serverDetailPath } from '@/utils/serverRoute'
 import { computed, nextTick, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
@@ -381,7 +377,6 @@ import TelemetryBanner from '@/components/TelemetryBanner.vue'
 import UpdateBanner from '@/components/UpdateBanner.vue'
 import TokenPieChart from '@/components/TokenPieChart.vue'
 import ConnectModal from '@/components/ConnectModal.vue'
-import AddServerModal from '@/components/AddServerModal.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import AttentionList from '@/components/AttentionList.vue'
 import UsageSummaryStrip from '@/components/UsageSummaryStrip.vue'
@@ -401,7 +396,6 @@ const router = useRouter()
 
 // Modal state
 const showConnectModal = ref(false)
-const showAddServer = ref(false)
 
 // Auto-refresh interval
 let refreshInterval: ReturnType<typeof setInterval> | null = null
@@ -598,21 +592,6 @@ const openTokenSavingsDetails = () => {
 // directly instead: switched off, and not already spoken for by quarantine.
 const disabledCount = computed(() => serversStore.serverCount.disabled)
 
-// --- Add Server handler ---
-const handleServerAdded = (serverName?: string) => {
-  showAddServer.value = false
-  serversStore.fetchServers()
-  // UX audit F07: a single add hands off to that server's detail view, where
-  // connect/scan/review/approve is already on screen. The bulk/import path
-  // emits no name and keeps the old refresh-in-place behaviour.
-  if (serverName) {
-    // The modal already toasted "<name> has been added successfully"; the
-    // generic toast below would be a second one for the same add.
-    void router.push(serverDetailPath(serverName))
-    return
-  }
-  systemStore.addToast({ type: 'success', title: 'Server Added', message: 'New server has been added successfully' })
-}
 
 // --- Formatters ---
 const formatNumber = (num: number): string => {
