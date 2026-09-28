@@ -581,7 +581,8 @@ test('header search button is enabled with an empty box', async ({ page }) => {
 
 // ---------------------------------------------------------------------------
 // Spec 109 FR-062: the header entry starts the catalog-first Add Server flow,
-// rather than opening the legacy modal.
+// rather than opening the legacy modal. Keep browser-level modal focus coverage
+// on the still-reachable Add Secret dialog.
 // ---------------------------------------------------------------------------
 test('the header Add Server action opens the catalog-first Add Server page', async ({ page }) => {
   await goto(page, '/activity')
@@ -590,4 +591,42 @@ test('the header Add Server action opens the catalog-first Add Server page', asy
   await expect(page).toHaveURL(/\/ui\/add-server(?:\?|$)/)
   await expect(page.locator('[data-test="add-server-page"] h1')).toHaveText('Add Server')
   await expect(page.locator('[data-test="add-server-tab-catalog"]')).toHaveClass(/tab-active/)
+})
+
+test('the Add Secret modal takes focus, traps Tab and closes on Escape', async ({ page }) => {
+  await goto(page, '/secrets')
+
+  const trigger = page.locator('[data-test="secrets-add-button"]')
+  await trigger.click()
+  const dialog = page.locator('dialog[data-test="add-secret-modal"]')
+  await expect(dialog).toHaveAttribute('open', '')
+
+  const box = dialog.locator('[role="dialog"]')
+  const focus = await page.evaluate(() => {
+    const box = document.querySelector('[data-test="add-secret-modal"] [role="dialog"]')
+    const active = document.activeElement as HTMLElement | null
+    return {
+      inside: !!box && !!active && box.contains(active),
+      onCloseButton: !!active && active.hasAttribute('data-modal-close-button'),
+    }
+  })
+  expect(focus.inside, 'focus never entered the Add Secret dialog').toBe(true)
+  expect(focus.onCloseButton, 'focus landed on the close button instead of the form').toBe(false)
+
+  const wrapped = await box.evaluate((element) => {
+    const focusables = Array.from(
+      element.querySelectorAll<HTMLElement>(
+        'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
+      ),
+    ).filter((el) => el.checkVisibility({ checkVisibilityCSS: true }))
+    if (focusables.length < 2) return false
+    focusables[focusables.length - 1].focus()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
+    return document.activeElement === focusables[0]
+  })
+  expect(wrapped, 'Tab escaped the dialog instead of wrapping to the first control').toBe(true)
+
+  await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+  await expect(dialog).not.toHaveAttribute('open', '')
+  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('data-test') ?? null)).toBe('secrets-add-button')
 })
