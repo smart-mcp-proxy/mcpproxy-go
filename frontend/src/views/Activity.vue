@@ -2538,6 +2538,9 @@ const exportActivities = (format: 'json' | 'csv') => {
     type: effectiveTypes.value.length > 0 ? effectiveTypes.value.join(',') : undefined,
     server: filterServer.value || undefined,
     tool: filterTool.value || undefined,
+    // Same session narrowing as loadActivities() (sessionRestParam), so a
+    // session-filtered table exports only that session's rows.
+    ...(filterSession.value ? { [sessionRestParam(filterSession.value)]: filterSession.value } : {}),
     // "Other / internal" is a client-side residual, not a stored status: the
     // export endpoint matches `status` exactly against the closed vocabulary,
     // so passing it would hand back an empty file. Export unfiltered by status
