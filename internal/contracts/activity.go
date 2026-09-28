@@ -150,14 +150,33 @@ type ActivitySummaryResponse struct {
 	CallErrorCount int                 `json:"call_error_count"`
 	TopServers     []ActivityTopServer `json:"top_servers,omitempty"` // Top servers by activity count
 	TopTools       []ActivityTopTool   `json:"top_tools,omitempty"`   // Top tools by activity count
-	StartTime      string              `json:"start_time"`            // Start of the period (RFC3339)
-	EndTime        string              `json:"end_time"`              // End of the period (RFC3339)
+	// PerServer covers EVERY server with at least one call in the period
+	// (unlike TopServers, which is capped at 5 and carries no error counts).
+	// Spec 109 FR-013: the server-card stats line and the macOS Servers rows
+	// read this — one `GET /activity/summary` response per page load — rather
+	// than issuing a per-server activity query each. Computed in the same
+	// counting pass as the totals above, from the same CountsAsCall/
+	// IsManagementBuiltin definitions TopServers already uses.
+	PerServer []ActivityPerServer `json:"per_server,omitempty"`
+	StartTime string              `json:"start_time"` // Start of the period (RFC3339)
+	EndTime   string              `json:"end_time"`   // End of the period (RFC3339)
 }
 
 // ActivityTopServer represents a server's activity count in the summary
 type ActivityTopServer struct {
 	Name  string `json:"name"`  // Server name
 	Count int    `json:"count"` // Activity count
+}
+
+// ActivityPerServer is one server's call/error/recency counters within the
+// summary period (Spec 109 FR-013, additive to ActivitySummaryResponse).
+type ActivityPerServer struct {
+	Name   string `json:"name"`   // Server name
+	Calls  int    `json:"calls"`  // Calls counted per storage.CountsAsCall
+	Errors int    `json:"errors"` // Of those calls, how many failed
+	// LastCallAt is RFC3339, or "" if the server had no call in the period
+	// (PerServer only lists servers that did, so this is always set).
+	LastCallAt string `json:"last_call_at"`
 }
 
 // ActivityTopTool represents a tool's activity count in the summary

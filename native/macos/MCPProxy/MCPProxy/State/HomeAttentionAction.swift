@@ -35,11 +35,15 @@ enum HomeAttentionAction {
             } catch {
                 // Action errors are visible via the attention list's own refresh.
             }
-        case "set_secret", "configure", "edit_url":
-            // None of these complete via a single API call — they need a
-            // form (the secret value, the new URL, isolation fields). Take
-            // the user to the server's Config tab instead of no-op'ing.
+        case "set_secret", "configure":
+            // These require a form (the secret value or configuration
+            // fields), so take the user to the Config tab instead of
+            // no-op'ing.
             navigateToServerDetail(item.subject.name, tab: .config)
+        case "edit_url":
+            // The endpoint itself is invalid. Open its edit form and put the
+            // cursor in the concrete field that needs correction.
+            navigateToServerDetail(item.subject.name, tab: .config, focusField: .endpoint)
         case "view_logs":
             navigateToServerDetail(item.subject.name, tab: .logs)
         case "review":
@@ -62,12 +66,16 @@ enum HomeAttentionAction {
     /// other links already use, so a `.showServerDetail` observer set up
     /// once in ServersView handles every doorway into server detail.
     @MainActor
-    private static func navigateToServerDetail(_ serverName: String, tab: ServerDetailTab) {
+    private static func navigateToServerDetail(
+        _ serverName: String,
+        tab: ServerDetailTab,
+        focusField: TrayConfigFocusField? = nil
+    ) {
         NotificationCenter.default.post(name: .switchToServers, object: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             NotificationCenter.default.post(
                 name: .showServerDetail,
-                object: ServerDetailTarget(serverName: serverName, tab: tab)
+                object: ServerDetailTarget(serverName: serverName, tab: tab, focusField: focusField)
             )
         }
     }
