@@ -52,12 +52,17 @@ func (p *MCPProxyServer) bindingGuardActive(idx *profileIndex) bool {
 		}
 		return false
 	}
-	tools := p.bindingGuardTools()
 	now := time.Now()
+	var tools []bindingGuardTool
+	toolsLoaded := false
 	for i := range tokens {
 		token := &tokens[i]
 		if !activeNamedClientBinding(token, now) {
 			continue
+		}
+		if !toolsLoaded {
+			tools = p.bindingGuardTools()
+			toolsLoaded = true
 		}
 		if bindingBypassable(idx, cfg, token, tools) {
 			return true

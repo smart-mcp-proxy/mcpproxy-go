@@ -100,6 +100,16 @@ func TestBindingGuard_DirectDescribeMatchesHiddenTools(t *testing.T) {
 	require.True(t, gated, "check:true must answer the hidden id as not_found")
 }
 
+func TestCacheDirectProfileView_ReusesAnonymousGuardDecision(t *testing.T) {
+	proxy, _ := bindingGuardTestProxy(t, "", []config.ProfileConfig{{Name: "P", Servers: []string{"a"}}}, auth.ProfileModeLocked, "P")
+	ctx := proxy.cacheDirectProfileView(anonCtx())
+	view, ok := ctx.Value(directProfileViewContextKey{}).(directProfileView)
+	require.True(t, ok)
+	require.NotNil(t, view.scope)
+	require.True(t, view.scope.DeniesAll(), "the cached profile view must preserve the active anonymous guard")
+	require.Same(t, ctx, proxy.cacheDirectProfileView(ctx), "one direct describe request reuses its profile decision")
+}
+
 func TestHandleSetProfile_AnonymousBindingGuardRefusesSelectionButAllowsClear(t *testing.T) {
 	proxy, _ := bindingGuardTestProxy(t, "", []config.ProfileConfig{{Name: "P", Servers: []string{"a"}}}, auth.ProfileModeLocked, "P")
 	ctx := sessionCtx(context.Background(), "anonymous-bound-session")
