@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { useAuthStore } from '@/stores/auth'
 
 // The Usage panel has no request cancellation and several triggers that can
 // overlap: a 30s auto-refresh, the window selector, the status/sort selects and
@@ -14,7 +15,7 @@ vi.mock('@/services/api', () => {
   const ok = (data: unknown = null) => vi.fn().mockResolvedValue({ success: true, data })
   const base: Record<string, unknown> = {
     getActivityUsage: usageSpy,
-    hasAPIKey: vi.fn(() => true),
+    hasAPIKey: vi.fn(() => false),
     onAuthError: vi.fn(() => () => {}),
   }
   return {
@@ -46,10 +47,10 @@ function aggregate(window: string) {
   }
 }
 
-function mountUsage() {
+function mountUsage(pinia = createPinia()) {
   return mount(Usage, {
     global: {
-      plugins: [createPinia()],
+      plugins: [pinia],
       stubs: { RouterLink: { template: '<a><slot /></a>' }, Line: true, Bar: true, Doughnut: true, Pie: true },
     },
   })
@@ -107,5 +108,28 @@ describe('Usage panel overlapping reloads', () => {
     await flushPromises()
 
     expect((wrapper.vm as unknown as { loading: boolean }).loading).toBe(true)
+  })
+
+  it('does not request admin-only usage data for a tenant principal', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const authStore = useAuthStore(pinia)
+    authStore.isTeamsEdition = true
+    authStore.user = {
+      id: 'carol',
+      email: 'carol@example.com',
+      display_name: 'Carol',
+      role: 'user',
+      provider: 'oidc',
+      created_at: '',
+      last_login_at: '',
+    }
+    expect(authStore.principalKind).toBe('tenant')
+
+    const wrapper = mountUsage(pinia)
+    await flushPromises()
+
+    expect(usageSpy).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 })

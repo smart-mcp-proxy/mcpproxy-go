@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
@@ -31,7 +33,7 @@ func TestOutputDiagnostics_JSONFormat(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "json"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -70,7 +72,7 @@ func TestOutputDiagnostics_PrettyFormat_NoIssues(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -87,6 +89,61 @@ func TestOutputDiagnostics_PrettyFormat_NoIssues(t *testing.T) {
 	}
 	if !strings.Contains(output, "No issues detected") {
 		t.Error("Expected 'No issues detected' message")
+	}
+}
+
+// TestOutputDiagnostics_PrettyFormat_ZeroDiagnosticsButAttentionPending
+// covers a review finding on Spec 109 FR-004: doctor must not print the
+// "All systems operational" verdict when the FR-001 attention list (a
+// separate counter from the diagnostics `total_issues`) still has pending
+// items, e.g. a quarantined server awaiting review with no other
+// diagnostics findings. It must also still print the "Diagnostics: N
+// findings" section rather than skipping it via the zero-issue early
+// return.
+func TestOutputDiagnostics_PrettyFormat_ZeroDiagnosticsButAttentionPending(t *testing.T) {
+	diag := map[string]interface{}{
+		"total_issues": 0,
+	}
+	attention := &cliclient.AttentionResponse{
+		Count: 1,
+		Items: []contracts.AttentionItem{
+			{
+				Kind:    "server_review",
+				Summary: "github: waiting for review",
+				Fix:     contracts.AttentionFix{Label: "Review"},
+			},
+		},
+	}
+
+	// Capture stdout
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	defer func() { os.Stdout = oldStdout }()
+
+	doctorOutput = "pretty"
+	err := outputDiagnostics(diag, nil, nil, "", attention)
+
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if err != nil {
+		t.Errorf("outputDiagnostics() returned error: %v", err)
+	}
+
+	if strings.Contains(output, "All systems operational") {
+		t.Error("doctor must not claim all-clear while the attention list has pending items")
+	}
+	if !strings.Contains(output, "📋 Needs attention (1)") {
+		t.Error("Expected the FR-004 attention section header")
+	}
+	if !strings.Contains(output, "server_review") {
+		t.Error("Expected the pending attention item to be printed")
+	}
+	if !strings.Contains(output, "Diagnostics: 0 findings") {
+		t.Error("Expected the Diagnostics section to still print even with zero diagnostics findings")
 	}
 }
 
@@ -112,7 +169,7 @@ func TestOutputDiagnostics_PrettyFormat_WithUpstreamErrors(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -168,7 +225,7 @@ func TestOutputDiagnostics_PrettyFormat_WithOAuthRequired(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -214,7 +271,7 @@ func TestOutputDiagnostics_PrettyFormat_WithMissingSecrets(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -256,7 +313,7 @@ func TestOutputDiagnostics_PrettyFormat_WithRuntimeWarnings(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -310,7 +367,7 @@ func TestOutputDiagnostics_PrettyFormat_MultipleIssueTypes(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -335,12 +392,14 @@ func TestOutputDiagnostics_PrettyFormat_MultipleIssueTypes(t *testing.T) {
 		t.Error("Missing warnings section")
 	}
 
-	// Verify issue count
+	// Verify issue count. Spec 109 FR-004: "need attention" refers only to
+	// the FR-001 attention count; doctor's own diagnostics count is now
+	// worded "Diagnostics: N findings" (no singular/plural distinction).
 	if !strings.Contains(output, "5") {
 		t.Error("Missing total issue count")
 	}
-	if !strings.Contains(output, "issues") {
-		t.Error("Should use plural 'issues' for count > 1")
+	if !strings.Contains(output, "Diagnostics: 5 findings") {
+		t.Error("Should print 'Diagnostics: N findings'")
 	}
 }
 
@@ -357,7 +416,7 @@ func TestOutputDiagnostics_PrettyFormat_SingleIssue(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -368,9 +427,9 @@ func TestOutputDiagnostics_PrettyFormat_SingleIssue(t *testing.T) {
 		t.Errorf("outputDiagnostics() returned error: %v", err)
 	}
 
-	// Should use singular "issue" not "issues"
-	if !strings.Contains(output, "1 issue") {
-		t.Error("Should use singular 'issue' for count = 1")
+	// Spec 109 FR-004: "Diagnostics: N findings", not "issue(s)".
+	if !strings.Contains(output, "Diagnostics: 1 findings") {
+		t.Error("Should print 'Diagnostics: 1 findings'")
 	}
 }
 
@@ -387,7 +446,7 @@ func TestOutputDiagnostics_EmptyFormat(t *testing.T) {
 
 	// Empty string should default to pretty format
 	doctorOutput = ""
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -552,7 +611,7 @@ func TestOutputDiagnostics_WarningWithoutTitle(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -587,7 +646,7 @@ func TestOutputDiagnostics_HighSeverityWarning(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -625,7 +684,7 @@ func TestOutputDiagnostics_SecretWithoutOptionalFields(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer
@@ -666,7 +725,7 @@ func TestOutputDiagnostics_MissingSecretsRealJSON(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	doctorOutput = "pretty"
-	err := outputDiagnostics(diag, nil, nil, "")
+	err := outputDiagnostics(diag, nil, nil, "", nil)
 
 	w.Close()
 	var buf bytes.Buffer

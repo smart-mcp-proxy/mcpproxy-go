@@ -128,7 +128,7 @@ func tenantSessionAllowlist(method, path string) bool {
 	}
 
 	switch path {
-	case "/api/v1/status", "/api/v1/servers", "/api/v1/tools", "/api/v1/index/search",
+	case "/api/v1/attention", "/api/v1/status", "/api/v1/servers", "/api/v1/tools", "/api/v1/index/search",
 		"/api/v1/profiles", "/api/v1/profiles/active":
 		return true
 	}

@@ -38,6 +38,11 @@ type StatusInfo struct {
 	LaunchedBy        string                   `json:"launched_by,omitempty"` // Spec 092 FR-001a; empty = user-launched/unknown or older daemon
 	Update            *StatusUpdateInfo        `json:"update,omitempty"`
 	ServerEditionInfo *ServerEditionStatusInfo `json:"server_edition,omitempty"`
+	// NeedsAttention is the FR-001 attention count (Spec 109), the same
+	// number `mcpproxy attention` and every other surface reads. nil when the
+	// daemon could not be reached or is too old to serve GET /attention —
+	// contracts/cli.md's first line is then omitted rather than printed as 0.
+	NeedsAttention *int `json:"needs_attention,omitempty"`
 	// TokenSavings is nil when the daemon could not be reached, the caller is
 	// not an administrator (agent token), or the tokenizer is unavailable —
 	// the "Token savings:" summary line (Spec 109-k, contracts/cli.md) is then
@@ -262,6 +267,14 @@ func collectStatusFromDaemon(cfg *config.Config, client *cliclient.Client, socke
 			info.Uptime = statusFormatDuration(uptime)
 			info.UptimeSeconds = uptime.Seconds()
 		}
+	}
+
+	// Spec 109 FR-001/FR-003: the same needs-attention count every surface
+	// reads. Non-fatal — an older daemon (or a transient failure) just omits
+	// the first line rather than failing the whole status call.
+	if attResp, attErr := client.GetAttention(ctx); attErr == nil {
+		count := attResp.Count
+		info.NeedsAttention = &count
 	}
 
 	// Get info data (version, web_ui_url)
@@ -578,6 +591,16 @@ func printStatusJSON(info *StatusInfo) error {
 
 func printStatusTable(info *StatusInfo) {
 	fmt.Println("MCPProxy Status")
+
+	// Spec 109 FR-001/FR-003 (contracts/cli.md): fixed first line after the
+	// header, so parallel PRs' own lines land at a stable position.
+	if info.NeedsAttention != nil {
+		if *info.NeedsAttention > 0 {
+			fmt.Printf("Needs attention: %d (run 'mcpproxy attention')\n", *info.NeedsAttention)
+		} else {
+			fmt.Println("Needs attention: none")
+		}
+	}
 
 	fmt.Printf("  %-12s %s\n", "State:", info.State)
 	fmt.Printf("  %-12s %s\n", "Edition:", info.Edition)

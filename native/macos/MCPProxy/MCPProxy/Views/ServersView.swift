@@ -42,7 +42,7 @@ struct ServersView: View {
         // Review finding (this round): these two `.onReceive` handlers used to
         // live on `serverListView`'s own VStack, a computed property this
         // body's `else` branch only includes while `selectedServer == nil`.
-        // Opening a server's detail view (e.g. via DashboardView's
+        // Opening a server's detail view (e.g. via Home's
         // AttentionRow -> navigateToServerDetail, which posts
         // `.switchToServers` then `.showServerDetail` 0.3s later) swaps
         // `serverListView` out of the tree and detaches that observer, so a

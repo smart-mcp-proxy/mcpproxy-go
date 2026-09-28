@@ -22,6 +22,12 @@ const (
 	EventTypeOAuthTokenRefreshed EventType = "oauth.token_refreshed"
 	// EventTypeOAuthRefreshFailed is emitted when proactive token refresh fails after retries.
 	EventTypeOAuthRefreshFailed EventType = "oauth.refresh_failed"
+	// EventTypeAttentionChanged is emitted (debounced) whenever the set of
+	// needs-attention item ids changes (Spec 109 FR-001/FR-002). The payload
+	// carries the structured item list (`items: [{id, subject_type,
+	// subject_id}]`); internal/httpapi renders it per subscriber as
+	// `{count, ids}` (FR-006).
+	EventTypeAttentionChanged EventType = "attention.changed"
 
 	// Activity logging events (RFC-003)
 	// EventTypeActivityToolCallStarted is emitted when a tool execution begins.

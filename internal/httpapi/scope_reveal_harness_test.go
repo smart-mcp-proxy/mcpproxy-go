@@ -155,8 +155,39 @@ type scopeController struct {
 	servers        []contracts.Server
 	withManagement bool
 
+	// attentionItemsOverride, when non-nil, is returned by Attention() as-is
+	// (tests that need exact control, e.g. a client item scopeController's
+	// server-only Compute cannot produce). Otherwise Attention() derives a
+	// realistic list from c.servers via runtime.Compute.
+	attentionItemsOverride []contracts.AttentionItem
+
 	mu   sync.Mutex
 	subs []chan internalRuntime.Event
+}
+
+func (c *scopeController) Attention() []contracts.AttentionItem {
+	if c.attentionItemsOverride != nil {
+		return c.attentionItemsOverride
+	}
+	in := internalRuntime.AttentionInput{Now: time.Now()}
+	for i := range c.servers {
+		s := c.servers[i]
+		as := internalRuntime.AttentionServer{
+			Name:        s.Name,
+			Enabled:     s.Enabled,
+			Quarantined: s.Quarantined,
+			StateSince:  time.Now().Add(-time.Hour),
+		}
+		if s.Health != nil {
+			as.Health = *s.Health
+		}
+		if s.Quarantine != nil {
+			as.Pending = s.Quarantine.PendingCount
+			as.Changed = s.Quarantine.ChangedCount
+		}
+		in.Servers = append(in.Servers, as)
+	}
+	return internalRuntime.Compute(in)
 }
 
 func (c *scopeController) GetManagementService() management.Service {
