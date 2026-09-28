@@ -70,6 +70,52 @@ func TestRank_MissingPopularityIsZero(t *testing.T) {
 	}
 }
 
+// TestRank_StarsBeatInstalls pins FR-004: stars is the primary popularity
+// key — a hit with fewer stars never loses to one with vastly more installs.
+func TestRank_StarsBeatInstalls(t *testing.T) {
+	starred := CatalogHit{Popularity: &Popularity{Stars: intPtr(10)}, Entry: ServerEntry{ID: "b"}}
+	installed := CatalogHit{Popularity: &Popularity{Installs: intPtr(999999)}, Entry: ServerEntry{ID: "a"}}
+	if !Rank(starred, installed, "") {
+		t.Error("expected stars to outrank a much larger installs count")
+	}
+	if Rank(installed, starred, "") {
+		t.Error("expected stars to outrank installs (reverse check)")
+	}
+}
+
+// TestRank_InstallsBreakStarsTie pins FR-004's secondary key: when stars tie
+// (including both nil/0), installs decides.
+func TestRank_InstallsBreakStarsTie(t *testing.T) {
+	moreInstalls := CatalogHit{Popularity: &Popularity{Stars: intPtr(5), Installs: intPtr(200)}, Entry: ServerEntry{ID: "b"}}
+	fewerInstalls := CatalogHit{Popularity: &Popularity{Stars: intPtr(5), Installs: intPtr(10)}, Entry: ServerEntry{ID: "a"}}
+	if !Rank(moreInstalls, fewerInstalls, "") {
+		t.Error("expected higher installs to break an equal-stars tie")
+	}
+
+	// Both nil Popularity.Stars (0) but different installs: still ties on
+	// stars(0) then breaks on installs.
+	onlyInstalls := CatalogHit{Popularity: &Popularity{Installs: intPtr(50)}, Entry: ServerEntry{ID: "d"}}
+	noSignal := CatalogHit{Entry: ServerEntry{ID: "c"}}
+	if !Rank(onlyInstalls, noSignal, "") {
+		t.Error("expected a hit with installs>0 to outrank one with no signal at all")
+	}
+}
+
+// TestRank_StarsAndInstallsNeverSummed pins FR-004's "never converted into
+// one another": a hit with fewer stars AND fewer installs than another must
+// never win by having their sum happen to exceed it — i.e. this is a
+// lexicographic tuple compare, not a score.
+func TestRank_StarsAndInstallsNeverSummed(t *testing.T) {
+	a := CatalogHit{Popularity: &Popularity{Stars: intPtr(3), Installs: intPtr(1000000)}, Entry: ServerEntry{ID: "b"}}
+	b := CatalogHit{Popularity: &Popularity{Stars: intPtr(4), Installs: intPtr(1)}, Entry: ServerEntry{ID: "a"}}
+	// b has more stars (4 > 3) despite far fewer installs — b must win.
+	if !Rank(b, a, "") {
+		t.Error("expected the higher-stars hit to win regardless of the other's much larger installs")
+	}
+}
+
 func intPop(stars int) *Popularity {
 	return &Popularity{Stars: &stars}
 }
+
+func intPtr(n int) *int { return &n }
