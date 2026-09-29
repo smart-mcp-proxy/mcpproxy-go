@@ -989,6 +989,26 @@ final class ConnectClientModelTests: XCTestCase {
         XCTAssertNil(model.pendingDisconnect)
     }
 
+    /// The confirmation shows the core's home-shortened `display_path`, the same
+    /// form the adjacent row and result view use, not the raw absolute path.
+    func testDisconnectConfirmationShowsTheHomeShortenedDisplayPath() async {
+        let source = FakeConnectSource()
+        source.detailResults = [.success(FakeConnectSource.client(
+            id: "claude-code", connected: true, serverName: "mcpproxy",
+            displayPath: "~/.claude-code/config.json"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        model.requestDisconnect()
+
+        let confirmation = model.pendingDisconnect
+        XCTAssertEqual(confirmation?.configPath, "~/.claude-code/config.json")
+        XCTAssertTrue(confirmation?.message.contains("~/.claude-code/config.json") ?? false,
+                      "the confirmation must name the shortened file: \(confirmation?.message ?? "")")
+        XCTAssertFalse(confirmation?.message.contains("/Users/x/") ?? true,
+                       "the raw absolute path must not appear: \(confirmation?.message ?? "")")
+    }
+
     func testCancellingTheDisconnectConfirmationSendsNothing() async {
         let source = FakeConnectSource()
         source.detailResults = [.success(FakeConnectSource.client(

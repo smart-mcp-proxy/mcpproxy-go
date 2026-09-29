@@ -19,6 +19,17 @@ import (
 // string into the child process's environment.
 var bareShellEnvVarRegex = regexp.MustCompile(`^\$\{[^:}]+\}$`)
 
+// shellEnvRefRegex matches an unresolvable shell-style reference anywhere in a
+// value (e.g. "Bearer ${TOKEN}"): "${VAR}" with no colon inside the braces, so
+// mcpproxy's own "${type:name}" secret references are not matched.
+// bareDollarVarRegex matches a value that is nothing but a bare "$VAR". It is
+// deliberately anchored: an unanchored "$word" would false-positive on real
+// credentials that merely contain a dollar sign.
+var (
+	shellEnvRefRegex   = regexp.MustCompile(`\$\{[^:}]+\}`)
+	bareDollarVarRegex = regexp.MustCompile(`^\$[A-Za-z_][A-Za-z0-9_]*$`)
+)
+
 // ImportedField is one env var or header on an imported server preview row,
 // classified for the FR-040 "second line" without exposing the value itself
 // (see ImportedServer.EnvFields/HeaderFields).
@@ -89,7 +100,9 @@ var placeholderTokens = map[string]bool{
 // isPlaceholder reports whether value is empty or an obvious placeholder.
 func isPlaceholder(value string) bool {
 	trimmed := strings.TrimSpace(value)
-	if bareShellEnvVarRegex.MatchString(trimmed) {
+	if bareShellEnvVarRegex.MatchString(trimmed) ||
+		shellEnvRefRegex.MatchString(trimmed) ||
+		bareDollarVarRegex.MatchString(trimmed) {
 		return true
 	}
 	v := strings.ToLower(trimmed)
@@ -127,6 +140,20 @@ func describeFields(values map[string]string, isHeader bool) []ImportedField {
 		})
 	}
 	return fields
+}
+
+// Reclassify recomputes the FR-040 preview enrichment (EnvFields, HeaderFields,
+// Summary, Tags) from the imported server's CURRENT Server.Env/Headers/etc.
+// Callers that mutate the server after Import (e.g. applying credential
+// overrides) use it so the enrichment describes the values actually persisted
+// rather than the original source file's.
+func Reclassify(imported *ImportedServer) {
+	if imported == nil || imported.Server == nil {
+		return
+	}
+	imported.EnvFields = describeFields(imported.Server.Env, false)
+	imported.HeaderFields = describeFields(imported.Server.Headers, true)
+	imported.Summary, imported.Tags = summarizeServer(imported.Server, imported.EnvFields, imported.HeaderFields)
 }
 
 // needsSecretTag reports whether any field looks like a credential slot that

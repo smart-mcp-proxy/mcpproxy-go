@@ -24,11 +24,14 @@ const router = createRouter({
   ],
 })
 
-async function mountPaste() {
+async function mountPaste(keyringAvailable = true) {
   setActivePinia(createPinia())
   vi.mocked(api.getConfigSecrets).mockResolvedValue({
     success: true,
-    data: { secrets: [], environment_vars: [], total_secrets: 0, total_env_vars: 0, keyring_available: true },
+    data: {
+      secrets: [], environment_vars: [], total_secrets: 0, total_env_vars: 0, keyring_available: keyringAvailable,
+      ...(keyringAvailable ? {} : { keyring_reason: 'no secret service' }),
+    },
   })
   const wrapper = mount(PasteServer, { global: { plugins: [router] } })
   await flushPromises()
@@ -281,5 +284,43 @@ describe('PasteServer', () => {
     expect(applyCall).toBeDefined()
     expect(applyCall![0].content).toBe(rawUrl)
     expect(applyCall![0].content).not.toContain('••••')
+  })
+
+  // #1398 F-N: a secret-like field defaults to Secret mode, but when the
+  // keyring probe already resolved to "unavailable" nothing flipped it, so Add
+  // failed only after the click. It must fail closed up front (never silently
+  // fall back to plaintext) and recover once the user chooses Value.
+  it('disables Add with a reason while a secret-mode field cannot use an unavailable keyring, until switched to Value', async () => {
+    vi.mocked(api.importServersFromJSON).mockResolvedValue({
+      success: true,
+      data: {
+        format: 'command',
+        format_name: 'Command Line',
+        summary: { total: 1, imported: 1, skipped: 0, failed: 0 },
+        imported: [{
+          name: 'github', protocol: 'stdio', command: 'uvx', args: ['mcp-server-github'],
+          source_format: 'command', original_name: 'github',
+          summary: 'uvx mcp-server-github', tags: ['local process', 'needs secret'],
+          env: [{ name: 'GITHUB_TOKEN', value_present: true, secret_like: true, empty_or_placeholder: false }],
+        }],
+        skipped: [], failed: [], warnings: [],
+      },
+    })
+    const wrapper = await mountPaste(false)
+    await wrapper.find('[data-test="paste-textarea"]').setValue('uvx mcp-server-github')
+    await new Promise((r) => setTimeout(r, 450))
+    await flushPromises()
+
+    const add = wrapper.find('[data-test="paste-add-button"]')
+    expect((add.element as HTMLButtonElement).disabled).toBe(true)
+    const hint = wrapper.find('[data-test="paste-keyring-unavailable"]')
+    expect(hint.exists()).toBe(true)
+    expect(hint.text()).toContain('no secret service')
+    expect(hint.text()).toContain('Value')
+
+    await wrapper.find('[data-test="secret-toggle-mode-value"]').trigger('click')
+    await flushPromises()
+    expect((wrapper.find('[data-test="paste-add-button"]').element as HTMLButtonElement).disabled).toBe(false)
+    expect(wrapper.find('[data-test="paste-keyring-unavailable"]').exists()).toBe(false)
   })
 })

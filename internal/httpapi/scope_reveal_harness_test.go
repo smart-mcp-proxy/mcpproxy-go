@@ -118,9 +118,13 @@ type scopeMgmtService struct {
 	// silently returning a zero value.
 	management.Service
 	servers []contracts.Server
+	listErr error // when non-nil, ListServers fails with it
 }
 
 func (m *scopeMgmtService) ListServers(context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
+	if m.listErr != nil {
+		return nil, nil, m.listErr
+	}
 	out := make([]*contracts.Server, 0, len(m.servers))
 	stats := &contracts.ServerStats{}
 	for i := range m.servers {
@@ -154,6 +158,10 @@ type scopeController struct {
 	cfg            *config.Config
 	servers        []contracts.Server
 	withManagement bool
+
+	// listErr, when non-nil, makes both server-listing seams (management
+	// ListServers and legacy GetAllServers) fail with it.
+	listErr error
 
 	// attentionItemsOverride, when non-nil, is returned by Attention() as-is
 	// (tests that need exact control, e.g. a client item scopeController's
@@ -194,7 +202,7 @@ func (c *scopeController) GetManagementService() management.Service {
 	if !c.withManagement {
 		return nil
 	}
-	return &scopeMgmtService{servers: c.servers}
+	return &scopeMgmtService{servers: c.servers, listErr: c.listErr}
 }
 
 // GetCurrentConfig must return a real *config.Config or apiKeyAuthMiddleware
@@ -205,6 +213,9 @@ func (c *scopeController) GetCurrentConfig() *config.Config { return c.cfg }
 func (c *scopeController) GetConfig() (*config.Config, error) { return c.cfg, nil }
 
 func (c *scopeController) GetAllServers() ([]map[string]interface{}, error) {
+	if c.listErr != nil {
+		return nil, c.listErr
+	}
 	out := make([]map[string]interface{}, 0, len(c.servers))
 	for i := range c.servers {
 		srv := c.servers[i]

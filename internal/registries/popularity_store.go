@@ -113,3 +113,24 @@ func (s *popularityStore) delete(key string) error {
 		return b.Delete([]byte(key))
 	})
 }
+
+// deleteMany removes a set of keys in one bbolt write transaction. Startup
+// uses this when trimming a legacy bucket that exceeds the in-memory cap, so
+// a large cleanup incurs one fsync instead of one per evicted record.
+func (s *popularityStore) deleteMany(keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(popularityBucketName))
+		if b == nil {
+			return nil
+		}
+		for _, key := range keys {
+			if err := b.Delete([]byte(key)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}

@@ -29,7 +29,7 @@
           class="tab gap-2"
           :class="{ 'tab-active text-primary': activeTab === tab.id }"
           :data-test="`tab-${tab.id}`"
-          @click="activeTab = tab.id"
+          @click="selectTab(tab.id)"
         >
           <span
             class="inline-flex items-center justify-center w-5 h-5 rounded-full text-[11px] font-semibold"
@@ -261,7 +261,7 @@
               </button>
             </div>
             <div v-if="addServerOpen" class="text-left mt-4" data-test="wizard-manual-form">
-              <ManualServerForm :navigate-after-add="false" @added="onServerAdded" />
+              <ManualServerForm :navigate-after-add="false" :allow-trust-mode-selection="false" @added="onServerAdded" />
             </div>
             <p v-if="serverAddedJustNow" class="text-xs text-success mt-3">
               ✓ Server added — it's currently in quarantine. Review it in the Review queue after this wizard.
@@ -390,7 +390,7 @@
                 Open the add-server form
               </button>
               <div v-else data-test="wizard-manual-form">
-                <ManualServerForm :navigate-after-add="false" @added="onServerAdded" />
+                <ManualServerForm :navigate-after-add="false" :allow-trust-mode-selection="false" @added="onServerAdded" />
               </div>
               <p v-if="serverAddedJustNow" class="text-xs text-success mt-2">
                 ✓ Server added — it's currently in quarantine. Review it in the Review queue after this wizard.
@@ -693,6 +693,15 @@ const router = useRouter()
 
 type TabID = 'clients' | 'servers' | 'verify'
 const activeTab = ref<TabID>('clients')
+// True once the user picks a tab (tab strip or Back) during the current open.
+// onOpened() awaits several fetches before choosing the initial tab; without
+// this flag a delayed result would overwrite the tab the user already chose
+// while those fetches were pending.
+let userPickedTab = false
+function selectTab(id: TabID) {
+  userPickedTab = true
+  activeTab.value = id
+}
 
 const clients = ref<ClientStatus[]>([])
 const loadingClients = ref(false)
@@ -1026,6 +1035,7 @@ const suggestedPrompts = computed(() => {
 let openSeq = 0
 async function onOpened() {
   const seq = ++openSeq
+  userPickedTab = false
   const requested = onboarding.consumeWizardInitialTab()
   serverAddedJustNow.value = false
   connectMessage.value = ''
@@ -1073,7 +1083,8 @@ async function onOpened() {
   ])
   // Superseded (or closed) while we were loading — leave the wizard alone.
   if (seq !== openSeq || !props.show) return
-  activeTab.value = pickInitialTab(requested)
+  // Don't override a tab the user picked while the loads were in flight.
+  if (!userPickedTab) activeTab.value = pickInitialTab(requested)
   startPolling()
 }
 
@@ -1112,7 +1123,7 @@ const tabOrder: TabID[] = ['clients', 'servers', 'verify']
 const canGoBack = computed(() => tabOrder.indexOf(activeTab.value) > 0)
 function goBack() {
   const i = tabOrder.indexOf(activeTab.value)
-  if (i > 0) activeTab.value = tabOrder[i - 1]
+  if (i > 0) selectTab(tabOrder[i - 1])
 }
 
 // Leaving the wizard for the registry: the wizard is a modal owned by the

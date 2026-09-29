@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -31,22 +32,42 @@ import (
 // ever help in the "no daemon" case, where the very state it would update
 // has no live reader anyway until the daemon next starts and recomputes it.
 func notifyClientConnected(cfg *config.Config, clientID string) {
-	client, ok := newDaemonClient(cfg, nil)
-	if !ok {
+	notifyClientsConnected(cfg, []string{clientID})
+}
+
+// notifyClientsConnected is the batch form used by `connect --all`. It
+// resolves the daemon (socket stat + status probe) ONCE and relays every
+// client concurrently under a single overall deadline, so the total added
+// latency is bounded by one daemonProbeTimeout instead of growing with the
+// number of clients (the old per-client synchronous loop could add several
+// seconds per client when the daemon was slow or unreachable).
+func notifyClientsConnected(cfg *config.Config, clientIDs []string) {
+	if len(clientIDs) == 0 {
 		return
 	}
-
-	body, err := json.Marshal(map[string]string{"connected_client_id": clientID})
-	if err != nil {
+	client, ok := newDaemonClient(cfg, nil)
+	if !ok {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonProbeTimeout)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/onboarding/mark", body)
-	if err != nil {
-		return
+	var wg sync.WaitGroup
+	for _, id := range clientIDs {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			body, err := json.Marshal(map[string]string{"connected_client_id": id})
+			if err != nil {
+				return
+			}
+			resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/onboarding/mark", body)
+			if err != nil {
+				return
+			}
+			_ = resp.Body.Close()
+		}(id)
 	}
-	_ = resp.Body.Close()
+	wg.Wait()
 }
