@@ -105,7 +105,7 @@ A user reviewing a quarantined server or a changed tool sees each captured tool'
 
 **Why this priority**: Fixes S2, N6, T1 and contradictions X2, X3 and X7. Approving without seeing the tools undermines quarantine, and the macOS path currently bypasses the scan gate.
 
-**Independent Test**: A fixture with a quarantined stdio server (14 tools, 2 destructive, 1 unannotated) whose definitions were captured, and a trusted server with one `changed` tool. Assert that `GET /api/v1/servers/{id}/review`, the Web UI review screen, the macOS review sheet, `mcpproxy review show <server> -o json`, and MCP `quarantine_security inspect_quarantined` return the same tool set with the same `tier`, `annotations` and `scan_verdict` values. Then approve through each surface in turn on fresh fixtures and assert the same resulting state.
+**Independent Test**: A fixture with a quarantined stdio server (14 tools: 5 read, 3 write, 3 destructive, 2 unannotated, and 1 unknown) whose definitions were captured, and a trusted server with one `changed` tool. Assert that `GET /api/v1/servers/{id}/review`, the Web UI review screen, the macOS review sheet, `mcpproxy review show <server> -o json`, and MCP `quarantine_security inspect_quarantined` return the same tool set with the same `tier`, `annotations` and `scan_verdict` values. Then approve through each surface in turn on fresh fixtures and assert the same resulting state.
 
 **Acceptance Scenarios**:
 

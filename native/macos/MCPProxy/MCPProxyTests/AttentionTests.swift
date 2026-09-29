@@ -120,8 +120,8 @@ final class AttentionTests: XCTestCase {
     /// Drives the real `rebuildMenu()` off `appState.attention` (not
     /// `servers`) and pins F4/FR-005: a `review` row never carries a
     /// one-click execute action — it is disclosure-only, straight to the
-    /// server's detail view.
-    func testNeedsAttentionMenuRowForReviewOpensDetailNeverApprove() throws {
+    /// informed Review queue.
+    func testNeedsAttentionMenuRowForReviewOpensQueueNeverApprove() throws {
         let host = TestMenuHost()
         let controller = AppController(glanceDataSource: CountingGlanceDataSource(), menuHost: host)
         controller.appState.coreState = .connected
@@ -135,10 +135,9 @@ final class AttentionTests: XCTestCase {
         let submenu = try XCTUnwrap(parent.submenu)
         let reviewRow = try XCTUnwrap(submenu.items.first { $0.title.contains("waiting for review") })
         XCTAssertNil(reviewRow.submenu, "no verb the tray can run — straight disclosure")
-        let target = try XCTUnwrap(reviewRow.representedObject as? ServerDetailTarget)
-        XCTAssertEqual(target.serverName, "github")
-        XCTAssertEqual(target.tab, .tools,
-                       "navigates to the existing review surface, never a one-click approve/unquarantine")
+        XCTAssertEqual(reviewRow.representedObject as? String, "github")
+        XCTAssertEqual(reviewRow.action, NSSelectorFromString("showReviewFromMenu:"),
+                       "navigates to the informed review surface, never a one-click approve/unquarantine")
         XCTAssertNotEqual(reviewRow.action, NSSelectorFromString("performAttentionAction:"),
                           "a review row must never be wired to the execute-in-place action")
     }

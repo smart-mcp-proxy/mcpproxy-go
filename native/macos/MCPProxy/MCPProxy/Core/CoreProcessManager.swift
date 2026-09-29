@@ -1708,6 +1708,21 @@ actor CoreProcessManager {
             // (summaries, fixes) rather than reconstructing it from ids.
             await refreshAttention()
 
+        case "review.changed":
+            // The payload is a notification only; ReviewQueueView refetches the
+            // authoritative one-row-per-server queue when it is visible.
+            await refreshReviewQueue()
+            await MainActor.run { NotificationCenter.default.post(name: .reviewChanged, object: nil) }
+
+        case "security.scan_settled":
+            // Scan completion is separate from review changes: a clean scan
+            // can capture definitions without changing approval status.
+            guard let data = event.data.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            let payload = raw["payload"] as? [String: Any] ?? raw
+            guard let serverName = payload["server_name"] as? String else { return }
+            await MainActor.run { NotificationCenter.default.post(name: .scanSettled, object: serverName) }
+
         case "config.reloaded":
             // Configuration reloaded; refresh everything once.
             // A re-init loop re-emits config.reloaded each cycle even when the
@@ -1917,6 +1932,7 @@ actor CoreProcessManager {
         await refreshSecurityStatus()
         await refreshProfiles()
         await refreshAttention()
+        await refreshReviewQueue()
         // Bump activityVersion so ActivityView reloads. Still needed after the
         // glance's SSE work: the bus emits `activity.tool_call.completed` and
         // `activity.internal_tool_call.completed` (internal/runtime/events.go),
@@ -1995,6 +2011,12 @@ actor CoreProcessManager {
         } catch {
             // Non-fatal; we'll retry on the next refresh or SSE event.
         }
+    }
+
+    func refreshReviewQueue() async {
+        guard let apiClient else { return }
+        let count = (try? await apiClient.reviewQueue().count) ?? 0
+        await MainActor.run { appState.reviewQueueCount = count }
     }
 
     /// Spec 048: long-cadence safety-net wrapper around `refreshServers`.

@@ -81,23 +81,18 @@ const router = createRouter({
       path: '/search',
       redirect: (to) => ({ path: '/tools', query: to.query, hash: to.hash }),
     },
-    // Spec 109 T026a: interim redirects until 109-g ships the real review
-    // queue/detail views. 109-a is the first PR to link to `/review` (the
-    // Tools "Needs review" stat), so it owns these — every later PR that also
-    // links here (109-d's attention fixes, 109-e's server-card Review button,
-    // 109-f's Go tray review click) lands on a registered route, never the
-    // 404 catch-all, until 109-g replaces both with the real views.
     {
       path: '/review/:server',
-      redirect: (to) => ({
-        path: `/servers/${encodeURIComponent(to.params.server as string)}`,
-        query: { ...to.query, tab: 'tools' },
-        hash: to.hash,
-      }),
+      name: 'review-server',
+      component: () => import('@/views/Review.vue'),
+      props: true,
+      meta: { title: 'Review server' },
     },
     {
       path: '/review',
-      redirect: (to) => ({ path: '/servers', query: { ...to.query, status: 'needs_review' }, hash: to.hash }),
+      name: 'review',
+      component: () => import('@/views/Review.vue'),
+      meta: { title: 'Review queue' },
     },
     {
       path: '/settings',
@@ -155,11 +150,7 @@ const router = createRouter({
     },
     {
       path: '/security',
-      name: 'security',
-      component: () => import('@/views/Security.vue'),
-      meta: {
-        title: 'Security',
-      },
+      redirect: (to) => ({ path: '/review', query: to.query, hash: to.hash }),
     },
     {
       path: '/security/scans/:jobId',

@@ -369,6 +369,20 @@ struct AttentionResponse: Codable, Equatable {
     }
 }
 
+// MARK: - Review queue (Spec 109-g)
+struct ReviewQueueRow: Codable, Equatable, Identifiable {
+    let server: String; let kind: String; let quarantined: Bool; let pending: Int?; let changed: Int?; let toolsCaptured: Int?
+    enum CodingKeys: String, CodingKey { case server, kind, quarantined, pending, changed; case toolsCaptured = "tools_captured" }
+    var id: String { server }
+}
+struct ReviewQueueResponse: Codable, Equatable { let count: Int; let servers: [ReviewQueueRow] }
+struct ReviewScan: Codable, Equatable { let verdict: String; let riskScore: Int?; let reportID: String?; enum CodingKeys: String, CodingKey { case verdict; case riskScore = "risk_score"; case reportID = "report_id" } }
+struct ReviewServerSummary: Codable, Equatable { let name: String; let quarantined: Bool; let definitionsCaptured: Bool; let scan: ReviewScan?; enum CodingKeys: String, CodingKey { case name, quarantined, scan; case definitionsCaptured = "definitions_captured" } }
+struct ReviewToolPrevious: Codable, Equatable { let description: String; let inputSchema: JSONValue?; let outputSchema: JSONValue?; let annotations: JSONValue?; enum CodingKeys: String, CodingKey { case description, annotations; case inputSchema = "input_schema"; case outputSchema = "output_schema" } }
+struct ReviewToolDiff: Codable, Equatable { let description: String?; let inputSchema: String?; let outputSchema: String?; let annotations: String?; enum CodingKeys: String, CodingKey { case description, annotations; case inputSchema = "input_schema"; case outputSchema = "output_schema" } }
+struct ReviewTool: Codable, Equatable, Identifiable { let name: String; let description: String; let inputSchema: JSONValue?; let outputSchema: JSONValue?; let annotations: JSONValue?; let tier: String; let approvalStatus: String; let disabled: Bool; let scanVerdict: String; let previous: ReviewToolPrevious?; let diff: ReviewToolDiff?; enum CodingKeys: String, CodingKey { case name, description, annotations, tier, disabled, previous, diff; case inputSchema = "input_schema"; case outputSchema = "output_schema"; case approvalStatus = "approval_status"; case scanVerdict = "scan_verdict" }; var id: String { name } }
+struct ServerReviewResponse: Codable, Equatable { let server: ReviewServerSummary; let tools: [ReviewTool] }
+
 // MARK: - OAuth Status
 
 /// OAuth authentication status for a server that uses OAuth.

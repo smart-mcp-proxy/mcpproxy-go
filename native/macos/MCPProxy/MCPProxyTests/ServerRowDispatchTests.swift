@@ -71,13 +71,14 @@ final class ServerRowDispatchTests: XCTestCase {
 
     /// The row's REAL right-click menu for a quarantined server, dispatched
     /// through the REAL `ctxOpenReview` handler `menuNeedsUpdate` wires it to.
-    func testQuarantinedRowContextMenuReviewClickOpensToolsTabNeverApproves() async throws {
+    func testQuarantinedRowContextMenuReviewClickOpensReviewQueueNeverApproves() async throws {
         let server = Self.server(quarantined: true, health: ("healthy", "Quarantined for review", "approve"))
         let (coordinator, tableView) = makeCoordinator(servers: [server])
         tableView.fakeClickedRow = 0
 
-        var opened: (ServerStatus, ServerDetailTab)?
-        coordinator.onOpenDetail = { server, tab, _ in opened = (server, tab) }
+        let opened = expectation(forNotification: .showReview, object: nil) { note in
+            (note.object as? String) == server.name
+        }
 
         let menu = NSMenu()
         coordinator.menuNeedsUpdate(menu)
@@ -88,8 +89,7 @@ final class ServerRowDispatchTests: XCTestCase {
 
         let sent = NSApplication.shared.sendAction(review.action!, to: review.target, from: review)
         XCTAssertTrue(sent, "the Review row did not dispatch")
-        XCTAssertEqual(opened?.0.name, server.name)
-        XCTAssertEqual(opened?.1, .tools, "review must open the Tools tab, never approve directly")
+        await fulfillment(of: [opened], timeout: 1)
         await assertNoApproveOrUnquarantineRequestFired()
     }
 
@@ -112,20 +112,20 @@ final class ServerRowDispatchTests: XCTestCase {
     // MARK: - Primary icon button (`primaryActionClicked`)
 
     /// The row's REAL primary-button handler for a quarantined server (primary
-    /// = Review) must open the Tools tab, never call approve/unquarantine.
-    func testQuarantinedRowPrimaryButtonClickOpensToolsTabNeverApproves() async {
+    /// = Review) must open the Review queue, never call approve/unquarantine.
+    func testQuarantinedRowPrimaryButtonClickOpensReviewQueueNeverApproves() async {
         let server = Self.server(quarantined: true, health: ("healthy", "Quarantined for review", "approve"))
         let (coordinator, _) = makeCoordinator(servers: [server])
 
-        var opened: (ServerStatus, ServerDetailTab)?
-        coordinator.onOpenDetail = { server, tab, _ in opened = (server, tab) }
+        let opened = expectation(forNotification: .showReview, object: nil) { note in
+            (note.object as? String) == server.name
+        }
 
         let button = NSButton()
         button.tag = 0
         coordinator.primaryActionClicked(button)
 
-        XCTAssertEqual(opened?.0.name, server.name)
-        XCTAssertEqual(opened?.1, .tools, "the primary button must open Tools, never approve directly")
+        await fulfillment(of: [opened], timeout: 1)
         await assertNoApproveOrUnquarantineRequestFired()
     }
 

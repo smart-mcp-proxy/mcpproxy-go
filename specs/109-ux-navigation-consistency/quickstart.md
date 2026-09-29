@@ -66,9 +66,10 @@ mkdir -p $RUN/home/.cursor $RUN/home/.codex $RUN/home/.claude
 echo '{"mcpServers":{}}' > $RUN/home/.cursor/mcp.json; touch $RUN/home/.codex/config.toml
 FX=$PWD/internal/server/testdata/preflight_fixture_server.js
 TD=$RUN/tools; mkdir -p $TD
-# filesystem-like fixture: 14 tools (9 read, 3 write, 2 destructive); one unannotated tool in "notes"
-node -e 'const t=[];for(let i=0;i<9;i++)t.push({name:"read_"+i,description:"Read thing "+i,inputSchema:{type:"object"},annotations:{readOnlyHint:true}});for(let i=0;i<3;i++)t.push({name:"write_"+i,description:"Write thing "+i,inputSchema:{type:"object"},annotations:{readOnlyHint:false}});for(let i=0;i<2;i++)t.push({name:"delete_"+i,description:"Delete thing "+i,inputSchema:{type:"object"},annotations:{destructiveHint:true}});require("fs").writeFileSync(process.argv[1],JSON.stringify(t))' $TD/fs.json
-echo '[{"name":"search_notes","description":"Search notes","inputSchema":{"type":"object"}}]' > $TD/notes.json
+# Canonical T003 fixture: 14 tools — 5 read, 3 write, 3 destructive,
+# 2 unannotated, and 1 legacy/unknown annotation record. The count matches
+# the review payload tests and avoids the old contradictory US2 prose.
+node -e 'const t=[];for(let i=0;i<5;i++)t.push({name:"read_"+i,description:"Read thing "+i,inputSchema:{type:"object"},annotations:{readOnlyHint:true}});for(let i=0;i<3;i++)t.push({name:"write_"+i,description:"Write thing "+i,inputSchema:{type:"object"},annotations:{readOnlyHint:false}});for(let i=0;i<3;i++)t.push({name:"delete_"+i,description:"Delete thing "+i,inputSchema:{type:"object"},annotations:{destructiveHint:true}});for(let i=0;i<2;i++)t.push({name:"notes_"+i,description:"Search notes "+i,inputSchema:{type:"object"},annotations:{}});t.push({name:"legacy_unknown",description:"Legacy definition",inputSchema:{type:"object"}});require("fs").writeFileSync(process.argv[1],JSON.stringify(t))' $TD/fs.json
 cat > $RUN/mcp_config.json <<JSON
 { "listen": "127.0.0.1:$PORT", "data_dir": "$RUN/data", "quarantine_enabled": true,
   "mcpServers": [

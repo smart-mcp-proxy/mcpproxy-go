@@ -123,21 +123,16 @@ afterEach(async () => {
   useServersStore(pinia).cleanupEventListeners()
 })
 
-describe('ServerDetail — tool list after approval', () => {
-  it('refetches and renders the tools once Approve succeeds', async () => {
+describe('ServerDetail — tool approval entry point', () => {
+  it('opens informed review rather than approving directly', async () => {
     const { wrapper, api } = await mountDetail()
     expect(toolsTabLabel(wrapper)).toBe('Tools (0)')
     expect(wrapper.find('[data-test="server-tools-empty"]').exists()).toBe(true)
-    const toolsBefore = api.getServerTools.mock.calls.length
-
     await wrapper.get('[data-test="quarantine-action-approve"]').trigger('click')
     await settle()
 
-    expect(api.securityApprove).toHaveBeenCalledWith(SERVER, false)
-    expect(api.getServerTools.mock.calls.length).toBeGreaterThan(toolsBefore)
-    expect(toolsTabLabel(wrapper)).toBe('Tools (2)')
-    expect(wrapper.find('[data-test="server-tools-empty"]').exists()).toBe(false)
-    expect(wrapper.text()).toContain('echo')
+    expect(api.securityApprove).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="review-screen"]').exists()).toBe(true)
   })
 })
 

@@ -197,6 +197,11 @@ actor APIClient {
         return try await fetchWrapped(path: "/api/v1/attention")
     }
 
+    func reviewQueue() async throws -> ReviewQueueResponse { try await fetchWrapped(path: "/api/v1/review") }
+    func serverReview(_ name: String) async throws -> ServerReviewResponse { try await fetchWrapped(path: "/api/v1/servers/\(Self.escapePathComponent(name))/review") }
+    func startSecurityScan(_ id: String) async throws { try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/scan") }
+    func blockSpecificTools(_ id: String, tools: [String]) async throws { try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/tools/block", body: ["tools": tools]) }
+
     // MARK: - Servers
 
     /// List all upstream servers from `GET /api/v1/servers`.
@@ -271,8 +276,13 @@ actor APIClient {
 
     /// Approve a quarantined server through the scan gate. This is the only
     /// native path that may release quarantine.
-    func securityApproveServer(_ id: String, force: Bool = false) async throws {
-        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/security/approve", body: ["force": force])
+    func securityApproveServer(_ id: String, force: Bool = false, block: [String] = []) async throws {
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/security/approve", body: ["force": force, "block": block])
+    }
+
+    /// Reject a quarantined server after reviewing its captured definitions.
+    func securityRejectServer(_ id: String) async throws {
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/security/reject")
     }
 
     /// Approve all pending/changed tools for a server via `POST /api/v1/servers/{id}/tools/approve`.
@@ -1037,7 +1047,7 @@ actor APIClient {
     /// Approve specific tools for a server via `POST /api/v1/servers/{id}/tools/approve`.
     func approveSpecificTools(_ id: String, tools: [String]) async throws {
         let body: [String: Any] = ["tools": tools]
-        try await postAction(path: "/api/v1/servers/\(id)/tools/approve", body: body)
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/tools/approve", body: body)
     }
 
     // MARK: - Generic Endpoints (for views that need raw data access)

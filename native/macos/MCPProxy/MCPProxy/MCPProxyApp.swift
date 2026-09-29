@@ -1159,9 +1159,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // else. The tray runs only `login`, `restart` and `enable`
                 // itself (`TrayServerAction.fromHealthAction`); every other
                 // verb — including `review`, which is NEVER a one-click
-                // approve — opens the location that performs it (today, the
-                // server's detail view; `/review/<n>` and `/clients?focus=`
-                // get their own native screens in 109-g/109-h).
+                // approve — opens the location that performs it.
                 let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
                 item.toolTip = fullTitle
                 // Truncated on screen, spoken in full — tooltips are not read
@@ -1191,10 +1189,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     item.submenu = rowMenu
                 } else if attentionItem.subject.type == "server" {
                     // Nothing to run — quarantine review, a missing secret, a
-                    // configuration problem. Straight to the detail view.
-                    item.action = #selector(showServerDetailFromMenu(_:))
+                    // configuration problem. Review opens its own sheet;
+                    // configuration continues to use server detail.
+                    item.action = attentionItem.fix.verb == "review"
+                        ? #selector(showReviewFromMenu(_:))
+                        : #selector(showServerDetailFromMenu(_:))
                     item.target = self
-                    item.representedObject = attentionDetailTarget(for: attentionItem)
+                    item.representedObject = attentionItem.fix.verb == "review"
+                        ? attentionItem.subject.name
+                        : attentionDetailTarget(for: attentionItem)
                 }
                 // A client-subject item (109-h) has no native screen yet:
                 // shown for disclosure, not yet actionable from the tray.
@@ -1202,6 +1205,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             parent.submenu = submenu
             menu.addItem(parent)
+            menu.addItem(.separator())
+        }
+
+        let reviewCount = appState.reviewQueueCount
+        if reviewCount > 0 {
+            let item = NSMenuItem(
+                title: "Review Queue… (\(reviewCount))",
+                action: #selector(showReviewQueueFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Review Queue")
+            menu.addItem(item)
             menu.addItem(.separator())
         }
 
@@ -1557,7 +1573,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
                 item.image = NSImage(systemSymbolName: primaryExecuteSymbol(action), accessibilityDescription: primary.label)
             case .open(let destination):
-                item.action = #selector(showServerDetailFromMenu(_:))
+                item.action = destination == .review
+                    ? #selector(showReviewFromMenu(_:))
+                    : #selector(showServerDetailFromMenu(_:))
                 switch destination {
                 case .review:
                     item.representedObject = server.name
@@ -1589,7 +1607,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // this replaced) without reintroducing a second primary button.
         if server.quarantined && !primaryOpensReview {
             let review = NSMenuItem(title: HealthStatus.actionLabels["approve"] ?? "Review",
-                                    action: #selector(showServerDetailFromMenu(_:)), keyEquivalent: "")
+                                    action: #selector(showReviewFromMenu(_:)), keyEquivalent: "")
             review.target = self
             review.representedObject = server.name
             review.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Review")
@@ -1872,6 +1890,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             NotificationCenter.default.post(name: .showServerDetail, object: target)
         }
+    }
+
+    /// Review navigation must always reach the informed-review sheet. Tray
+    /// actions pass only a server name, so there is no approval path here.
+    @objc private func showReviewFromMenu(_ sender: NSMenuItem) {
+        guard let serverName = sender.representedObject as? String else { return }
+        showMainWindow(tab: .review)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NotificationCenter.default.post(name: .showReview, object: serverName)
+        }
+    }
+
+    @objc private func showReviewQueueFromMenu(_ sender: NSMenuItem) {
+        showMainWindow(tab: .review)
     }
 
     /// F3: the one place a per-server menu action is dispatched.
@@ -2183,6 +2215,9 @@ extension Notification.Name {
     /// view for a specific server. object = server name String (opens the
     /// Tools tab) or a ServerDetailTarget (opens its named tab).
     static let showServerDetail = Notification.Name("MCPProxy.showServerDetail")
+    static let showReview = Notification.Name("MCPProxy.showReview")
+    static let reviewChanged = Notification.Name("MCPProxy.reviewChanged")
+    static let scanSettled = Notification.Name("MCPProxy.scanSettled")
     /// Posted by `showMainWindow(tab:)` to select a sidebar section in an
     /// already-open main window (object = SidebarItem raw value string).
     static let switchToSidebarTab = Notification.Name("MCPProxy.switchToSidebarTab")

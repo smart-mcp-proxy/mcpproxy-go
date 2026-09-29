@@ -59,9 +59,7 @@ beforeEach(() => {
 // Spec 109-e rewrote ServerCard to a single primary action bound to
 // `health.actions[0]`/`health.action` (data-test="server-card-primary-action"),
 // replacing the per-action buttons (`server-card-approve` etc.) this test
-// originally targeted. The Review link now opens the Tools tab directly
-// (round 1, 109-e high finding: a `/review/<name>` redirect this used to rely
-// on never existed on this branch), not the Security tab.
+// originally targeted. The Review link opens the dedicated review screen.
 describe('ServerCard — approve action opens Review, never approves directly (FR-005)', () => {
   it('renders the primary action as "Review", not "Approve"', () => {
     const card = mountCard(makeQuarantinedServer())
@@ -71,10 +69,10 @@ describe('ServerCard — approve action opens Review, never approves directly (F
     expect(action.text()).not.toContain('Approve')
   })
 
-  it('links to the server Tools tab instead of triggering approval', () => {
+  it('links to the dedicated review screen instead of triggering approval', () => {
     const card = mountCard(makeQuarantinedServer())
     const action = card.find('[data-test="server-card-primary-action"]')
-    expect(action.attributes('href')).toContain('tab=tools')
+    expect(action.attributes('href')).toBe('/review/test-server')
   })
 
   it('never calls securityApproveServer on click, even with a clean completed scan', async () => {

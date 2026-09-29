@@ -287,7 +287,7 @@
             <p v-if="quarantinedServerCount > 0" class="text-sm mt-1">
               {{ quarantinedServerCount }} quarantined server{{ quarantinedServerCount === 1 ? '' : 's' }}
               {{ quarantinedServerCount === 1 ? 'is' : 'are' }} not listed here —
-              <router-link to="/servers" class="link">review in Servers</router-link>.
+              <router-link to="/review" class="link">review in the Review queue</router-link>.
             </p>
           </div>
           <template v-else>

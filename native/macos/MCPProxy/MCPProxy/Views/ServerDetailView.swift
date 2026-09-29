@@ -96,12 +96,7 @@ struct ServerDetailView: View {
     @State private var logLines: [String] = []
     @State private var isLoadingTools = false
     @State private var isLoadingLogs = false
-    @State private var isApproving = false
     @State private var actionMessage: String?
-    /// A normal approval is always attempted through the scan gate first. A
-    /// 409 is the gate asking the operator to explicitly force approval after
-    /// dangerous findings; it is never retried automatically.
-    @State private var showForceApprovalConfirmation = false
 
     /// FR-014's "with the field focused" for `edit_url` (review round 3,
     /// F-FR014-focus) — consumed once by `applyPendingFocusIfNeeded()` so a
@@ -189,14 +184,6 @@ struct ServerDetailView: View {
         .sheet(item: $convertSheet) { ctx in
             convertToSecretSheet(ctx)
         }
-        .alert("Dangerous findings detected", isPresented: $showForceApprovalConfirmation) {
-            Button("Force Approve", role: .destructive) {
-                Task { await approveQuarantinedServer(force: true) }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("MCPProxy blocked approval because this server has dangerous findings. Force approval activates the server despite that warning.")
-        }
     }
 
     // MARK: - Header
@@ -245,9 +232,9 @@ struct ServerDetailView: View {
 
             if server.quarantined {
                 Button {
-                    Task { await approveQuarantinedServer(force: false) }
+                    openReview()
                 } label: {
-                    Label("Approve Server", systemImage: "checkmark.shield")
+                    Label("Review Server", systemImage: "checkmark.shield")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
@@ -309,36 +296,12 @@ struct ServerDetailView: View {
         .padding()
     }
 
-    private func approveQuarantinedServer(force: Bool) async {
-        isApproving = true
-        defer { isApproving = false }
-        do {
-            try await Self.performSecurityApproval(apiClient: apiClient, serverID: server.id, force: force)
-            actionMessage = force ? "Server force-approved and activated" : "Server approved and activated"
-            await refreshServer()
-        } catch let error where Self.shouldConfirmForcedSecurityApproval(error) && !force {
-            actionMessage = "Approval requires confirmation because the scan found dangerous findings"
-            showForceApprovalConfirmation = true
-        } catch {
-            actionMessage = "Failed to approve: \(error.localizedDescription)"
+    private func openReview() {
+        NotificationCenter.default.post(name: .switchToSidebarTab, object: SidebarItem.review.rawValue)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NotificationCenter.default.post(name: .showReview, object: server.name)
         }
     }
-
-/// The security API uses 409 for several rejected approval states. Only the
-/// dangerous-findings rejection may offer a destructive force retry; a missing
-/// scan or operational conflict must remain an ordinary error.
-static func shouldConfirmForcedSecurityApproval(_ error: Error) -> Bool {
-    guard case let APIClientError.httpError(statusCode, message) = error, statusCode == 409 else {
-        return false
-    }
-
-    return message.localizedCaseInsensitiveContains("dangerous")
-}
-
-static func performSecurityApproval(apiClient: APIClient?, serverID: String, force: Bool) async throws {
-    guard let apiClient else { throw APIClientError.notReady }
-    try await apiClient.securityApproveServer(serverID, force: force)
-}
 
 // MARK: - Tab Bar
 
@@ -440,27 +403,12 @@ static func performSecurityApproval(apiClient: APIClient?, serverID: String, for
             Text("\(pendingApprovalCount) tool(s) need approval")
                 .font(.scaled(.subheadline, scale: fontScale).bold())
             Spacer()
-            if isApproving {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Button("Approve All") {
-                    Task {
-                        isApproving = true
-                        defer { isApproving = false }
-                        do {
-                            try await apiClient?.approveTools(server.id)
-                            actionMessage = "All tools approved for \(server.name)"
-                            await loadTools()
-                        } catch {
-                            actionMessage = "Failed to approve: \(error.localizedDescription)"
-                        }
-                    }
-                }
+            Button("Review tools") {
+                openReview()
+            }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .tint(.orange)
-            }
         }
         .padding()
         .background(Color.orange.opacity(0.1))
@@ -2058,22 +2006,9 @@ struct ToolRow: View {
     }
 
     private func approveTool() {
-        guard let client = apiClient else { return }
-        isApprovingTool = true
-        Task {
-            do {
-                try await client.approveSpecificTools(serverName, tools: [tool.name])
-                await MainActor.run {
-                    isApprovingTool = false
-                    approveSuccess = true
-                    onApproved?()
-                }
-            } catch {
-                await MainActor.run {
-                    isApprovingTool = false
-                    NSLog("[ToolRow] approveTool FAILED for %@: %@", tool.name, error.localizedDescription)
-                }
-            }
+        NotificationCenter.default.post(name: .switchToSidebarTab, object: SidebarItem.review.rawValue)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NotificationCenter.default.post(name: .showReview, object: serverName)
         }
     }
 
