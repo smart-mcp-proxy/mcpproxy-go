@@ -58,6 +58,17 @@ final class AppState: ObservableObject {
     /// liveness for nothing.
     @Published private(set) var connectionGeneration: Int = 0
 
+    /// Monotonic ticket counter for attention fetches; see `updateAttention`.
+    private var attentionRequestCounter = 0
+    private var attentionAppliedSequence = 0
+
+    /// Issue the next attention-fetch ticket. Call before starting the fetch.
+    @MainActor
+    func nextAttentionRequest() -> Int {
+        attentionRequestCounter += 1
+        return attentionRequestCounter
+    }
+
     /// Whether `generation` still identifies the live connection. The predicate
     /// every glance publish must satisfy: connected, and connected to the same
     /// core the fetch was issued to.
@@ -443,10 +454,21 @@ final class AppState: ObservableObject {
     /// when the id set actually differs, so a debounced-but-unchanged
     /// `attention.changed` refetch does not spuriously re-render every
     /// subscriber (same rule as `updateServers`).
+    ///
+    /// `requestSequence` (from `nextAttentionRequest()`) orders overlapping
+    /// fetches on ONE connection: `connectionGeneration` cannot tell them
+    /// apart, so a response older than one already applied is dropped rather
+    /// than restoring stale rows until the next event or poll.
     @MainActor
-    func updateAttention(_ items: [AttentionItem], connectionGeneration generation: Int? = nil) {
+    func updateAttention(_ items: [AttentionItem],
+                         connectionGeneration generation: Int? = nil,
+                         requestSequence: Int? = nil) {
         guard coreState == .connected else { return }
         if let generation, !isCurrentConnection(generation) { return }
+        if let requestSequence {
+            guard requestSequence > attentionAppliedSequence else { return }
+            attentionAppliedSequence = requestSequence
+        }
         let newIDs = items.map(\.id)
         let oldIDs = attention.map(\.id)
         if newIDs != oldIDs || items != attention {
