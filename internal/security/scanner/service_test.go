@@ -1131,6 +1131,61 @@ func TestServiceApproveServerWithBlocksPersistsBeforeUnquarantine(t *testing.T) 
 	}
 }
 
+func TestServiceApproveServerWithBlocksKeepsBlockWhenUnquarantineFails(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	blockedStore := &blockRecordingStorage{Storage: store, blocks: make(map[string]map[string]ToolApprovalBlock)}
+	svc.storage = blockedStore
+	unquarantiner := &failingStateUnquarantiner{quarantined: true, err: fmt.Errorf("injected unquarantine failure")}
+	svc.SetServerUnquarantiner(unquarantiner)
+
+	err := svc.ApproveServerWithBlocks(context.Background(), "qs-server", true, "reviewer", []string{"delete_issue"})
+	if err == nil {
+		t.Fatal("expected injected unquarantine error")
+	}
+	if !unquarantiner.quarantined {
+		t.Fatal("server must remain quarantined when unquarantine fails")
+	}
+	if unquarantiner.calls != 1 {
+		t.Fatalf("expected injected failure at the unquarantine boundary, got %d calls", unquarantiner.calls)
+	}
+	if block, ok := blockedStore.blocks["qs-server"]["delete_issue"]; !ok || block.ApprovedBy != "reviewer" {
+		t.Fatalf("tool block must be durable before unquarantine: %#v", blockedStore.blocks)
+	}
+}
+
+type blockRecordingStorage struct {
+	Storage
+	blocks map[string]map[string]ToolApprovalBlock
+}
+
+func (s *blockRecordingStorage) SaveIntegrityBaselineWithBlocks(baseline *IntegrityBaseline, blocks []ToolApprovalBlock) error {
+	if err := s.Storage.SaveIntegrityBaselineWithBlocks(baseline, blocks); err != nil {
+		return err
+	}
+	if s.blocks[baseline.ServerName] == nil {
+		s.blocks[baseline.ServerName] = make(map[string]ToolApprovalBlock)
+	}
+	for _, block := range blocks {
+		s.blocks[baseline.ServerName][block.ToolName] = block
+	}
+	return nil
+}
+
+type failingStateUnquarantiner struct {
+	quarantined bool
+	calls       int
+	err         error
+}
+
+func (u *failingStateUnquarantiner) UnquarantineServer(string) error {
+	u.calls++
+	if u.err != nil {
+		return u.err
+	}
+	u.quarantined = false
+	return nil
+}
+
 // TestServiceApproveServerBlockedDoesNotUnquarantine verifies the tier-driven
 // blocking guard stops approval BEFORE touching state (no unquarantine, no
 // baseline). It uses a HARD-tier (dangerous) baseline finding — the shape that

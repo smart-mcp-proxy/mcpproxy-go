@@ -313,7 +313,7 @@ struct ServerDetailView: View {
         isApproving = true
         defer { isApproving = false }
         do {
-            try await apiClient?.securityApproveServer(server.id, force: force)
+            try await Self.performSecurityApproval(apiClient: apiClient, serverID: server.id, force: force)
             actionMessage = force ? "Server force-approved and activated" : "Server approved and activated"
             await refreshServer()
         } catch let error where Self.shouldConfirmForcedSecurityApproval(error) && !force {
@@ -322,7 +322,7 @@ struct ServerDetailView: View {
         } catch {
             actionMessage = "Failed to approve: \(error.localizedDescription)"
         }
-}
+    }
 
 /// The security API uses 409 for several rejected approval states. Only the
 /// dangerous-findings rejection may offer a destructive force retry; a missing
@@ -331,7 +331,13 @@ static func shouldConfirmForcedSecurityApproval(_ error: Error) -> Bool {
     guard case let APIClientError.httpError(statusCode, message) = error, statusCode == 409 else {
         return false
     }
+
     return message.localizedCaseInsensitiveContains("dangerous")
+}
+
+static func performSecurityApproval(apiClient: APIClient?, serverID: String, force: Bool) async throws {
+    guard let apiClient else { throw APIClientError.notReady }
+    try await apiClient.securityApproveServer(serverID, force: force)
 }
 
 // MARK: - Tab Bar

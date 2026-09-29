@@ -1181,6 +1181,7 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	configuredServers := make(map[string]*config.ServerConfig)
 	storedServerMap := make(map[string]*config.ServerConfig)
 	var changed bool
+	var reviewChangedServers []string
 
 	for _, storedServer := range storedServers {
 		storedServerMap[storedServer.Name] = storedServer
@@ -1317,6 +1318,10 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 			continue
 		}
 		r.logger.Debug("Successfully saved server to storage", zap.String("server", serverCfg.Name))
+		if (serverCfg.Quarantined && (!existsInStorage || !storedServer.Quarantined)) ||
+			(existsInStorage && storedServer.Quarantined != serverCfg.Quarantined) {
+			reviewChangedServers = append(reviewChangedServers, serverCfg.Name)
+		}
 	}
 	r.logger.Debug("Completed synchronous storage save phase")
 
@@ -1380,6 +1385,11 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 			r.upstreamManager.RemoveServer(name)
 			if err := r.storageManager.DeleteUpstreamServer(name); err != nil {
 				r.logger.Error("Failed to delete server from storage", zap.Error(err), zap.String("server", name))
+			} else {
+				// Removing a configured server can remove either a quarantined-server
+				// row or a trusted row with pending/changed tools from the review
+				// queue. Publish after storage deletion so subscribers refetch it.
+				r.emitReviewChanged(name)
 			}
 			if err := r.indexManager.DeleteServerTools(name); err != nil {
 				r.logger.Error("Failed to delete server tools from index", zap.Error(err), zap.String("server", name))
@@ -1404,6 +1414,9 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 			"configured": len(cfg.Servers),
 			"removed":    len(serversToRemove),
 		})
+	}
+	for _, serverName := range reviewChangedServers {
+		r.emitReviewChanged(serverName)
 	}
 
 	return nil

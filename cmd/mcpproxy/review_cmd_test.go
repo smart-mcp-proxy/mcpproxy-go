@@ -82,11 +82,20 @@ func TestReviewCommandGoldens(t *testing.T) {
 	assertReviewRequest(t, requests, "POST", "/api/v1/servers/trusted/tools/block", map[string]any{"tools": []any{"write_0"}})
 }
 
-func TestReviewCommandRequiresConfirmation(t *testing.T) {
-	cmd := GetReviewCommand()
-	cmd.SetArgs([]string{"approve", "filesystem"})
-	err := cmd.Execute()
-	require.EqualError(t, err, "review approve changes server access; rerun with --yes")
+func TestReviewCommandPromptsAndHonorsDecline(t *testing.T) {
+	for _, action := range []string{"approve", "reject"} {
+		t.Run(action, func(t *testing.T) {
+			var prompt string
+			cmd := newReviewCommand(func(message string) (bool, error) {
+				prompt = message
+				return false, nil
+			})
+			cmd.SetArgs([]string{action, "filesystem"})
+			require.NoError(t, cmd.Execute())
+			require.Contains(t, prompt, "filesystem")
+			require.Contains(t, strings.ToLower(prompt), action)
+		})
+	}
 }
 
 type reviewRequest struct{ method, path, body string }

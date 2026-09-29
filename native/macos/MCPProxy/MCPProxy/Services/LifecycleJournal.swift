@@ -76,7 +76,7 @@ enum PreviousRunEnding: Equatable {
 /// the writes are serialised by an internal lock instead.
 final class LifecycleJournal {
 
-    private let url: URL
+    let url: URL
     private let maxRecords: Int
     private let lock = NSLock()
 

@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -102,7 +104,7 @@ func TestRecordToolBlocksForSecurityApproval_EmitsAuditAndReviewEventsWithoutRew
 
 	gotAudit, gotReview, gotServers := false, false, false
 	deadline := time.After(2 * time.Second)
-	for !(gotAudit && gotReview && gotServers) {
+	for !gotAudit || !gotReview || !gotServers {
 		select {
 		case event := <-events:
 			switch event.Type {
@@ -125,4 +127,72 @@ func TestRecordToolBlocksForSecurityApproval_EmitsAuditAndReviewEventsWithoutRew
 	after, err := rt.storageManager.GetToolApproval("github", "delete_issue")
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "the audit event bridge must not rewrite atomically saved state")
+}
+
+func TestLoadConfiguredServersEmitsReviewChangedForQuarantinedServerTransitions(t *testing.T) {
+	rt := setupQuarantineRuntime(t, boolP(true), nil)
+	events := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(events)
+
+	added := &config.Config{DataDir: rt.Config().DataDir, Listen: rt.Config().Listen, Servers: []*config.ServerConfig{{
+		Name: "empty-quarantine", Enabled: false, Quarantined: true,
+	}}}
+	require.NoError(t, rt.LoadConfiguredServers(added))
+	requireReviewChangedForServer(t, events, "empty-quarantine")
+
+	// The queue includes quarantined servers before their tool definitions have
+	// been captured. Removing one must wake an already-open review queue after
+	// storage deletion completes.
+	removed := &config.Config{DataDir: added.DataDir, Listen: added.Listen}
+	require.NoError(t, rt.LoadConfiguredServers(removed))
+	requireReviewChangedForServer(t, events, "empty-quarantine")
+	require.Eventually(t, func() bool {
+		_, err := rt.storageManager.GetUpstreamServer("empty-quarantine")
+		return err != nil
+	}, 2*time.Second, 10*time.Millisecond, "removed server should be deleted from storage")
+}
+
+func requireReviewChangedForServer(t *testing.T, events <-chan Event, server string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.Type == EventTypeReviewChanged && event.Payload["server"] == server {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("expected review.changed for %q", server)
+		}
+	}
+}
+
+func TestLoadConfiguredServersEmitsReviewChangedWhenTrustedPendingServerIsRemoved(t *testing.T) {
+	rt := setupQuarantineRuntime(t, boolP(true), []*config.ServerConfig{{
+		Name: "trusted-pending", Enabled: false, Quarantined: false,
+	}})
+	require.NoError(t, rt.LoadConfiguredServers(rt.Config()))
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "trusted-pending", ToolName: "new_tool", Status: storage.ToolApprovalStatusPending,
+		CurrentHash: "pending-hash", CurrentDescription: "Needs review",
+	}))
+	before, err := rt.GetReviewQueue(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, before.Count)
+
+	events := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(events)
+	updated := config.DefaultConfig()
+	updated.DataDir = rt.Config().DataDir
+	updated.Listen = rt.Config().Listen
+	updated.Servers = nil
+	_, err = rt.ApplyConfig(updated, filepath.Join(t.TempDir(), "mcp_config.json"))
+	require.NoError(t, err)
+	require.NoError(t, rt.LoadConfiguredServers(updated))
+
+	requireReviewChangedForServer(t, events, "trusted-pending")
+	require.Eventually(t, func() bool {
+		queue, queueErr := rt.GetReviewQueue(context.Background())
+		return queueErr == nil && queue.Count == 0
+	}, 2*time.Second, 10*time.Millisecond, "removed pending-tool server should disappear from review queue")
 }

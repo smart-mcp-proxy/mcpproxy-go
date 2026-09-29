@@ -33,16 +33,14 @@ final class AppLifecycleTests: XCTestCase {
     /// tests would append cores that never existed to the journal of the
     /// developer's own live install.
     func testTheSharedJournalNeverWritesToTheRealInstanceRootUnderTests() {
-        let path = AppLifecycle.defaultJournalURL.path
-        XCTAssertFalse(path.hasPrefix(InstancePaths.root.path),
-                       "under XCTest the journal must live in a scratch file, got \(path)")
+        let root = InstancePaths.root.path
+        let path = AppLifecycle.shared.journalURL.path
+        XCTAssertFalse(path.hasPrefix(root),
+                       "under XCTest the shared journal must live in a scratch file, got \(path)")
+        guard !path.hasPrefix(root) else { return }
+        XCTAssertEqual(path, AppLifecycle.defaultJournalURL.path,
+                       "the shared journal must use the test-safe default")
         AppLifecycle.shared.recordUpdateCheck("smoke")
-        XCTAssertFalse(
-            FileManager.default.fileExists(
-                atPath: InstancePaths.root.appendingPathComponent("tray-lifecycle.jsonl").path
-            ),
-            "…and writing through the shared instance must not create one there either"
-        )
     }
 
     func testAClaimedReasonIsWhatTheShutdownRecords() {

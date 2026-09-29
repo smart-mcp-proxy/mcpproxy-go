@@ -26,12 +26,24 @@ final class ApproveServerPathTests: XCTestCase {
         XCTAssertEqual(json["force"], true)
     }
 
+    func testDisconnectedCoreFailsApprovalBeforeSuccessCanBeReported() async {
+        do {
+            try await ServerDetailView.performSecurityApproval(apiClient: nil, serverID: "filesystem", force: false)
+            XCTFail("approval without a connected API client must fail")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Core is not ready")
+        }
+        XCTAssertTrue(HomeReviewActionStubURLProtocol.requests.isEmpty)
+    }
+
     func testDetailViewSourcePresentsForceConfirmationOnlyAfterTheScanGate() throws {
         let path = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("MCPProxy/Views/ServerDetailView.swift")
         let source = try String(contentsOf: path)
-        XCTAssertTrue(source.contains("securityApproveServer(server.id, force: force)"))
+        XCTAssertTrue(source.contains("apiClient.securityApproveServer(serverID, force: force)"))
+        XCTAssertTrue(source.contains("try await Self.performSecurityApproval(apiClient: apiClient"), "success is only reported after approval completes")
+        XCTAssertFalse(source.contains("apiClient?.securityApproveServer"), "optional chaining can report success without approving")
         XCTAssertTrue(source.contains("showForceApprovalConfirmation = true"))
         XCTAssertTrue(source.contains("Button(\"Force Approve\", role: .destructive)"))
         XCTAssertFalse(source.contains("unquarantineServer("))

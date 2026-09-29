@@ -683,15 +683,7 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 
 			m.quarantineMenuItems[serverName] = quarantineMenuItem
 
-			// Set up the one-time click handler
-			go func(name string, item *systray.MenuItem) {
-				for range item.ClickedCh {
-					if m.onServerAction != nil {
-						// Run in a new goroutine to avoid blocking the event channel
-						go m.onServerAction(name, "review")
-					}
-				}
-			}(serverName, quarantineMenuItem)
+			m.wireQuarantineMenuItemReviewClick(serverName, quarantineMenuItem)
 		}
 	} else {
 		// No new quarantined servers - just update existing items
@@ -709,6 +701,38 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 				menuItem.Hide()
 			}
 		}
+	}
+}
+
+// wireQuarantineMenuItemReviewClick keeps the native menu event wired to the
+// informed review flow. The callback runs asynchronously so a click cannot
+// block systray's event channel while the Web UI opens.
+func wireQuarantineMenuItemReviewClick(name string, item *systray.MenuItem, onServerAction func(string, string)) {
+	if item == nil {
+		return
+	}
+	go func() {
+		for range item.ClickedCh {
+			if onServerAction != nil {
+				go onServerAction(name, "review")
+			}
+		}
+	}()
+}
+
+// wireQuarantineMenuItemReviewClick resolves the callback at click time. The
+// first synchronization can create native menu items before tray startup has
+// installed its action handler.
+func (m *MenuManager) wireQuarantineMenuItemReviewClick(name string, item *systray.MenuItem) {
+	wireQuarantineMenuItemReviewClick(name, item, m.dispatchServerAction)
+}
+
+func (m *MenuManager) dispatchServerAction(name, action string) {
+	m.mu.RLock()
+	callback := m.onServerAction
+	m.mu.RUnlock()
+	if callback != nil {
+		callback(name, action)
 	}
 }
 

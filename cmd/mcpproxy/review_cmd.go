@@ -17,6 +17,10 @@ import (
 // GetReviewCommand exposes the same review payload and scan-gated decisions as
 // REST and MCP. It deliberately never uses the legacy unquarantine endpoint.
 func GetReviewCommand() *cobra.Command {
+	return newReviewCommand(promptConfirmation)
+}
+
+func newReviewCommand(confirm func(string) (bool, error)) *cobra.Command {
 	var except []string
 	var tools []string
 	var force bool
@@ -33,7 +37,14 @@ func GetReviewCommand() *cobra.Command {
 	cmd.AddCommand(show)
 	approve := &cobra.Command{Use: "approve <server>", Short: "Approve a server through the scan gate", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
 		if !yes {
-			return fmt.Errorf("review approve changes server access; rerun with --yes")
+			confirmed, err := confirm(fmt.Sprintf("Approve review for server '%s'?", args[0]))
+			if err != nil {
+				return err
+			}
+			if !confirmed {
+				fmt.Println("Approval cancelled.")
+				return nil
+			}
 		}
 		quarantined, err := reviewServerQuarantined(args[0])
 		if err != nil {
@@ -65,7 +76,14 @@ func GetReviewCommand() *cobra.Command {
 	cmd.AddCommand(approve)
 	reject := &cobra.Command{Use: "reject <server>", Short: "Keep a server quarantined", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
 		if !yes {
-			return fmt.Errorf("review reject changes server access; rerun with --yes")
+			confirmed, err := confirm(fmt.Sprintf("Reject review for server '%s'?", args[0]))
+			if err != nil {
+				return err
+			}
+			if !confirmed {
+				fmt.Println("Rejection cancelled.")
+				return nil
+			}
 		}
 		if len(tools) > 0 {
 			return runReviewWrite(args[0], "tools/block", map[string]interface{}{"tools": tools})
