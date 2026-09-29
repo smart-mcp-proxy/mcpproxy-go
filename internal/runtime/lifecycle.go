@@ -543,7 +543,79 @@ func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName
 // that no longer exist upstream. This is the explicit operator refresh/discover
 // path; the reactive callbacks keep the lenient behavior above.
 func (r *Runtime) RefreshServerTools(ctx context.Context, serverName string) error {
+	// A quarantined server is deliberately excluded from the search index, but
+	// an operator can still explicitly fetch its definitions for informed
+	// review. Capture the same approval records as normal discovery without
+	// publishing untrusted text to search or tool-routing surfaces.
+	if r.serverIsQuarantined(serverName) {
+		return r.captureQuarantinedToolDefinitions(ctx, serverName)
+	}
 	return r.discoverAndIndexToolsForServer(ctx, serverName, true)
+}
+
+func (r *Runtime) serverIsQuarantined(serverName string) bool {
+	for _, candidate := range r.Config().Servers {
+		if candidate != nil && candidate.Name == serverName {
+			return candidate.Enabled && candidate.Quarantined
+		}
+	}
+	return false
+}
+
+// captureQuarantinedToolDefinitions records a live tools/list response for
+// review without indexing it. The caller is the explicit refresh route, which
+// is invoked after the scanner's temporary inspection connection is ready.
+func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverName string) error {
+	if r.upstreamManager == nil {
+		return fmt.Errorf("upstream manager not initialized")
+	}
+
+	// The server may have been disconnected solely because it is quarantined.
+	// An explicit review refresh is an inspection-only operation: grant the
+	// supervisor's bounded exemption, request a connection, then re-fetch the
+	// live client as reconciliation may replace it.
+	if r.supervisor != nil {
+		if err := r.supervisor.RequestInspectionExemption(serverName, 15*time.Minute); err != nil {
+			r.logger.Warn("Failed to grant inspection exemption for definition capture", zap.String("server", serverName), zap.Error(err))
+		}
+	}
+	var lastErr error
+	// RequestInspectionExemption triggers supervisor reconciliation. Do not call
+	// RestartServer here: a second restart can cancel that in-flight inspection
+	// connection before tools/list completes. Re-read the managed client until
+	// the supervisor has published its replacement.
+	for attempt := 0; attempt < 24; attempt++ {
+		if client, ok := r.upstreamManager.GetClient(serverName); ok {
+			if tools, err := client.ListTools(ctx); err == nil {
+				return r.captureQuarantinedToolDefinitionsFromTools(serverName, tools)
+			} else {
+				lastErr = err
+			}
+		} else {
+			lastErr = fmt.Errorf("client not found")
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("capture review definitions for %s: %w", serverName, ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("list tools for quarantined server %s: %w", serverName, lastErr)
+}
+
+func (r *Runtime) captureQuarantinedToolDefinitionsFromTools(serverName string, tools []*config.ToolMetadata) error {
+	if _, err := r.checkToolApprovals(serverName, tools); err != nil {
+		return fmt.Errorf("capture review definitions for %s: %w", serverName, err)
+	}
+	r.lastGoodToolsMu.Lock()
+	snapshot := make([]*config.ToolMetadata, len(tools))
+	copy(snapshot, tools)
+	r.lastGoodTools[serverName] = snapshot
+	r.lastGoodToolsMu.Unlock()
+	r.emitReviewChanged(serverName)
+	r.logger.Info("Captured quarantined server tool definitions for review",
+		zap.String("server", serverName), zap.Int("count", len(tools)))
+	return nil
 }
 
 func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName string, authoritative bool) error {

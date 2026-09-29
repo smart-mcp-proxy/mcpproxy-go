@@ -5,13 +5,13 @@ import api from '@/services/api'
 
 vi.mock('@/services/api', () => ({ default: {
   getServerReview: vi.fn(), securityApprove: vi.fn(), securityReject: vi.fn(),
-  approveTools: vi.fn(), blockTools: vi.fn(), startScan: vi.fn(), listScanHistory: vi.fn(),
+  approveTools: vi.fn(), blockTools: vi.fn(), discoverServerTools: vi.fn(), listScanHistory: vi.fn(), scanAll: vi.fn(), getQueueProgress: vi.fn(), cancelAllScans: vi.fn(),
 } }))
 
 const review = (definitionsCaptured = true) => ({
   success: true,
   data: {
-    server: { name: 'fixture', transport: 'stdio', quarantined: true, definitions_captured: definitionsCaptured },
+    server: { name: 'fixture', transport: 'stdio', command: 'node ./fixture.js', trust_mode: 'manual', source_registry_id: 'official', source_registry_provenance: 'catalog', quarantined: true, definitions_captured: definitionsCaptured },
     tools: [
       { name: 'read_file', description: 'read', tier: 'read', approval_status: 'pending', disabled: false, scan_verdict: 'clean' },
       { name: 'write_file', description: 'write', tier: 'write', approval_status: 'pending', disabled: false, scan_verdict: 'clean' },
@@ -33,8 +33,10 @@ describe('ReviewScreen (T086)', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     ;(api.securityApprove as any).mockResolvedValue({ success: true })
-    ;(api.startScan as any).mockResolvedValue({ success: true })
+    ;(api.discoverServerTools as any).mockResolvedValue({ success: true })
     ;(api.listScanHistory as any).mockResolvedValue({ success: true, data: { scans: [], total: 0 } })
+		;(api.getQueueProgress as any).mockResolvedValue({ success: true, data: { status: 'idle' } })
+		;(api.scanAll as any).mockResolvedValue({ success: true, data: { status: 'running', total: 1, completed: 0, running: 1 } })
   })
 
   it('renders the review payload, canonical tier counts, and a changed diff', async () => {
@@ -42,6 +44,9 @@ describe('ReviewScreen (T086)', () => {
     expect(wrapper.get('[data-test="review-tier-counts"]').text()).toContain('destructive1')
     expect(wrapper.get('[data-test="review-tier-counts"]').text()).toContain('unannotated1')
     expect(wrapper.get('[data-test="review-tool-diff"]').text()).toContain('+ new')
+    expect(wrapper.get('[data-test="review-server-identity"]').text()).toContain('node ./fixture.js')
+    expect(wrapper.get('[data-test="review-server-identity"]').text()).toContain('manual')
+    expect(wrapper.get('[data-test="review-server-identity"]').text()).toContain('official')
   })
 
   it('sends unchecked tools as the block selection', async () => {
@@ -59,24 +64,26 @@ describe('ReviewScreen (T086)', () => {
     await wrapper.get('[data-test="review-approve-server"]').trigger('click')
     expect(dialog.showModal).toHaveBeenCalled()
     await wrapper.get('[data-test="review-no-definitions"] button').trigger('click')
-    expect(api.startScan).toHaveBeenCalledWith('fixture')
-    expect(wrapper.get('[data-test="review-no-definitions"]').text()).toContain('Fetching')
+    await flushPromises()
+    expect(api.discoverServerTools).toHaveBeenCalledWith('fixture')
+    expect(api.getServerReview).toHaveBeenCalledTimes(2)
     window.dispatchEvent(new CustomEvent('mcpproxy:scan-settled', { detail: { server_name: 'other' } }))
     await flushPromises()
-    expect(api.getServerReview).toHaveBeenCalledTimes(1)
+    expect(api.getServerReview).toHaveBeenCalledTimes(2)
     window.dispatchEvent(new CustomEvent('mcpproxy:scan-settled', { detail: { server_name: 'fixture' } }))
     await flushPromises()
-    expect(api.getServerReview).toHaveBeenCalledTimes(2)
+    expect(api.discoverServerTools).toHaveBeenCalledWith('fixture')
+    expect(api.getServerReview).toHaveBeenCalledTimes(3)
   })
 
-  it('blocks tools hidden by a changed-only filter and keeps scan history on the detail', async () => {
+  it('does not let a changed-only filter alter hidden tool selections and keeps scan history on the detail', async () => {
     ;(api.getServerReview as any).mockResolvedValue(review(true))
     const wrapper = mount(ReviewScreen, { props: { serverName: 'fixture', change: 'changed' }, global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
     await flushPromises()
     expect(wrapper.findAll('article[data-test^="review-tool-"]')).toHaveLength(1)
     await wrapper.get('[data-test="review-approve-server"]').trigger('click')
     await flushPromises()
-    expect(api.securityApprove).toHaveBeenCalledWith('fixture', false, ['read_file', 'write_file', 'implicit', 'legacy'])
+    expect(api.securityApprove).toHaveBeenCalledWith('fixture', false, [])
     expect(api.listScanHistory).toHaveBeenCalled()
   })
 
@@ -92,4 +99,12 @@ describe('ReviewScreen (T086)', () => {
     await flushPromises()
     expect(api.securityApprove).toHaveBeenNthCalledWith(2, 'fixture', true, [])
   })
+
+	it('keeps fleet scan start and progress controls reachable from the review flow', async () => {
+		const wrapper = await mountScreen()
+		await wrapper.get('[data-test="scan-all-button"]').trigger('click')
+		await flushPromises()
+		expect(api.scanAll).toHaveBeenCalled()
+		expect(wrapper.get('[data-test="scan-queue-progress"]').text()).toContain('1')
+	})
 })

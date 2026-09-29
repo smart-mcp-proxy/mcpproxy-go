@@ -1309,7 +1309,7 @@ export interface ReviewTool {
 export interface ServerReviewResponse {
   server: {
     name: string; transport: string; command?: string; url?: string
-    quarantined: boolean; trust_mode?: string; scan?: ReviewScan
+    quarantined: boolean; trust_mode?: string; source_registry_id?: string; source_registry_provenance?: string; scan?: ReviewScan
     definitions_captured: boolean
   }
   tools: ReviewTool[]

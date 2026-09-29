@@ -123,7 +123,6 @@ func TestReviewPayload_ClassifiesCapturedAndLegacyAnnotations(t *testing.T) {
 	tools := []*config.ToolMetadata{
 		{Name: "safe", Description: "Read data", ParamsJSON: `{"type":"object"}`, Annotations: &config.ToolAnnotations{ReadOnlyHint: &readOnly}},
 		{Name: "plain", Description: "No hints", ParamsJSON: `{"type":"object"}`, Annotations: &config.ToolAnnotations{}},
-		{Name: "legacy", Description: "No stored metadata", ParamsJSON: `{"type":"object"}`},
 	}
 	for _, tool := range tools {
 		tool.ServerName = "github"
@@ -135,6 +134,15 @@ func TestReviewPayload_ClassifiesCapturedAndLegacyAnnotations(t *testing.T) {
 	review, err := rt.GetServerReview(context.Background(), "github")
 	require.NoError(t, err)
 	require.True(t, review.Server.DefinitionsCaptured)
+	// A nil annotation value is only a historical persisted record. Fresh
+	// discovery without hints is captured as an empty record and is unannotated.
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github", ToolName: "legacy", CurrentHash: "legacy-hash",
+		Status: storage.ToolApprovalStatusPending, CurrentDescription: "No stored metadata",
+		CurrentSchema: `{"type":"object"}`,
+	}))
+	review, err = rt.GetServerReview(context.Background(), "github")
+	require.NoError(t, err)
 	require.Len(t, review.Tools, 3)
 	byName := make(map[string]ReviewTool, len(review.Tools))
 	for _, tool := range review.Tools {

@@ -241,13 +241,13 @@ describe('OnboardingWizard Servers step inline review (Spec 109-ux-navigation-co
     expect(wrapper.find('[data-test="servers-nothing-to-import"]').exists()).toBe(true)
   })
 
-  it('marks the Servers step complete after Review updates the shared usable-server list', async () => {
+  it('does not mark Servers complete from a non-quarantined tool count when every tool is blocked', async () => {
     ;(api.getOnboardingState as any).mockResolvedValue(onboardingState({ has_usable_server: false }))
     ;(api.getServers as any).mockResolvedValue({ success: true, data: { servers: [quarantinedServer('github')] } })
     const { wrapper } = await mountWizard()
     const store = useServersStore()
     store.servers = [{ ...quarantinedServer('github'), quarantined: false, connected: true, tool_count: 1 } as any]
     await flushPromises()
-    expect(wrapper.get('[data-test="tab-servers"]').text()).toContain('✓')
+    expect(wrapper.get('[data-test="tab-servers"]').text()).not.toContain('✓')
   })
 })

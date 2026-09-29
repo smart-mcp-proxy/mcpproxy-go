@@ -200,6 +200,7 @@ actor APIClient {
     func reviewQueue() async throws -> ReviewQueueResponse { try await fetchWrapped(path: "/api/v1/review") }
     func serverReview(_ name: String) async throws -> ServerReviewResponse { try await fetchWrapped(path: "/api/v1/servers/\(Self.escapePathComponent(name))/review") }
     func startSecurityScan(_ id: String) async throws { try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/scan") }
+    func discoverServerTools(_ id: String) async throws { try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/discover-tools") }
     func blockSpecificTools(_ id: String, tools: [String]) async throws { try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/tools/block", body: ["tools": tools]) }
 
     // MARK: - Servers

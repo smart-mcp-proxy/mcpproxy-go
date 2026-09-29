@@ -57,6 +57,15 @@ struct ReviewSheet: View {
         VStack(alignment: .leading) {
             HStack { Button("Back") { onDismiss() }; Spacer(); Text("Review \(serverName)").font(.title2).bold() }.padding()
             if let error { Text(error).foregroundStyle(.red).padding(.horizontal) }
+            if let server = review?.server {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Transport: \(server.transport ?? "unknown")")
+                    if let command = server.command, !command.isEmpty { Text("Command: \(command)").font(.caption.monospaced()) }
+                    else if let url = server.url, !url.isEmpty { Text("URL: \(url)").font(.caption.monospaced()) }
+                    if let trustMode = server.trustMode { Text("Trust mode: \(trustMode)") }
+                    if let origin = server.sourceRegistryID { Text("Origin: \(origin)\(server.sourceRegistryProvenance.map { " · \($0)" } ?? "")") }
+                }.font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+            }
             if let scan = review?.server.scan { Text("Baseline scan: \(scan.verdict)\(scan.riskScore.map { " · risk \($0)/100" } ?? "")").font(.subheadline).padding(.horizontal) }
             if review?.server.definitionsCaptured == false {
                 HStack { Text(scanning ? "Scan started. Refreshing when it finishes…" : "Tool definitions have not been captured yet."); Button("Fetch tool definitions") { Task { await fetchDefinitions() } }.disabled(scanning) }.padding(.horizontal)
@@ -119,12 +128,29 @@ struct ReviewSheet: View {
     private func fetchDefinitions() async {
         guard let client = appState.apiClient else { return }
         scanning = true
-        do { try await client.startSecurityScan(serverName) }
+        do { try await client.discoverServerTools(serverName); scanning = false; await load() }
         catch { scanning = false; self.error = error.localizedDescription }
     }
     private func approveTool(_ name: String) async { guard let client = appState.apiClient else { return }; do { try await client.approveSpecificTools(serverName, tools: [name]); await load() } catch { self.error = error.localizedDescription } }
     private func rejectTool(_ name: String) async { guard let client = appState.apiClient else { return }; do { try await client.blockSpecificTools(serverName, tools: [name]); await load() } catch { self.error = error.localizedDescription } }
     private func rejectServer() async { guard let client = appState.apiClient else { return }; do { try await client.securityRejectServer(serverName); await load() } catch { self.error = error.localizedDescription } }
-    private func definitionText(_ tool: ReviewTool) -> String { "input_schema: \(String(describing: tool.inputSchema))\noutput_schema: \(String(describing: tool.outputSchema))\nannotations: \(String(describing: tool.annotations))" }
-    private func diffText(_ tool: ReviewTool) -> String { "diff: \(String(describing: tool.diff))\nprevious: \(String(describing: tool.previous))" }
+    private func definitionText(_ tool: ReviewTool) -> String {
+        "input schema:\n\(tool.inputSchema?.prettyString ?? "null")\n\noutput schema:\n\(tool.outputSchema?.prettyString ?? "null")\n\nannotations:\n\(tool.annotations?.prettyString ?? "null")"
+    }
+    private func diffText(_ tool: ReviewTool) -> String {
+        var sections: [String] = []
+        if let diff = tool.diff {
+            if let description = diff.description, !description.isEmpty { sections.append("description:\n\(description)") }
+            if let schema = diff.inputSchema, !schema.isEmpty { sections.append("input schema:\n\(schema)") }
+            if let schema = diff.outputSchema, !schema.isEmpty { sections.append("output schema:\n\(schema)") }
+            if let annotations = diff.annotations, !annotations.isEmpty { sections.append("annotations:\n\(annotations)") }
+        }
+        if sections.isEmpty, let previous = tool.previous {
+            sections.append("previous description:\n\(previous.description)")
+            sections.append("previous input schema:\n\(previous.inputSchema?.prettyString ?? "null")")
+            sections.append("previous output schema:\n\(previous.outputSchema?.prettyString ?? "null")")
+            sections.append("previous annotations:\n\(previous.annotations?.prettyString ?? "null")")
+        }
+        return sections.isEmpty ? "No changed fields supplied." : sections.joined(separator: "\n\n")
+    }
 }

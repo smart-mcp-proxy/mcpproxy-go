@@ -195,7 +195,7 @@ description: "Task list for Spec 109 — Navigation, scope filters and cross-sur
 **Goal**: informed review on Web and macOS. **Independent test**: US2 scenarios 1, 2, 4, 5, 6.
 
 ### Failing tests
-- [x] T086 [P] [US2] vitest `review-screen.spec.ts`: renders T003; tier counts; per-tool checkboxes → `security/approve {block}`; changed diff; "Fetch tool definitions" → `POST /servers/{id}/scan`; "Approve without seeing tools" confirmation
+- [x] T086 [P] [US2] vitest `review-screen.spec.ts`: renders T003; tier counts; per-tool checkboxes → `security/approve {block}`; changed diff; "Fetch tool definitions" → `POST /servers/{id}/discover-tools`, waits and reloads; scan-settled refresh; "Approve without seeing tools" confirmation
 - [x] T087 [P] [US2] vitest `review-inert-text.spec.ts`: the T003 malicious description creates no `img`/`a` element; truncation + "Show all"; "from the server, not verified" label
 - [x] T088 [P] [US2] vitest `review-queue.spec.ts` (rows, links, SSE refresh, `?server=&change=` through `useScopeQuery`, which landed in 109-k) and `security-redirect.spec.ts` (`/security` → `/review`; `/security/scans/:jobId` intact); `settings-scanners.spec.ts` (Scanners section in Settings → Security, Docker toggle once)
 - [x] T089 [P] [US7] vitest `onboarding-wizard-inline-review.spec.ts`: after import, the Servers step shows the ReviewScreen list and completes once a server is approved

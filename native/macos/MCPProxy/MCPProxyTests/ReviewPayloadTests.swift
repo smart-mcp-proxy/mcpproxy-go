@@ -11,7 +11,7 @@ final class ReviewPayloadTests: XCTestCase {
         XCTAssertEqual(queue.servers.first?.toolsCaptured, 5)
 
         let review = try JSONDecoder().decode(ServerReviewResponse.self, from: Data("""
-        {"server":{"name":"fixture","quarantined":true,"definitions_captured":true,"scan":{"verdict":"dangerous","risk_score":93,"report_id":"scan-1"}},"tools":[{"name":"remove_file","description":"remove a file","input_schema":{"type":"object"},"output_schema":{"type":"string"},"annotations":{"readOnlyHint":false},"tier":"destructive","approval_status":"changed","disabled":false,"scan_verdict":"warnings","previous":{"description":"old description","input_schema":{"type":"null"},"output_schema":{"type":"null"},"annotations":{"readOnlyHint":true}},"diff":{"description":"- old\\n+ new","input_schema":"schema change","output_schema":"output change","annotations":"annotation change"}}]}
+        {"server":{"name":"fixture","transport":"stdio","command":"node fixture.js","trust_mode":"manual","source_registry_id":"official","source_registry_provenance":"catalog","quarantined":true,"definitions_captured":true,"scan":{"verdict":"dangerous","risk_score":93,"report_id":"scan-1"}},"tools":[{"name":"remove_file","description":"remove a file","input_schema":{"type":"object"},"output_schema":{"type":"string"},"annotations":{"readOnlyHint":false},"tier":"destructive","approval_status":"changed","disabled":false,"scan_verdict":"warnings","previous":{"description":"old description","input_schema":{"type":"null"},"output_schema":{"type":"null"},"annotations":{"readOnlyHint":true}},"diff":{"description":"- old\\n+ new","input_schema":"schema change","output_schema":"output change","annotations":"annotation change"}}]}
         """.utf8))
         XCTAssertTrue(review.server.definitionsCaptured)
         XCTAssertEqual(review.server.scan?.verdict, "dangerous")
@@ -22,6 +22,9 @@ final class ReviewPayloadTests: XCTestCase {
         XCTAssertNotNil(review.tools.first?.annotations)
         XCTAssertEqual(review.tools.first?.previous?.description, "old description")
         XCTAssertEqual(review.tools.first?.diff?.description, "- old\n+ new")
+		XCTAssertEqual(review.server.command, "node fixture.js")
+		XCTAssertEqual(review.server.trustMode, "manual")
+		XCTAssertEqual(review.server.sourceRegistryID, "official")
     }
 
     func testReviewQueueUsesDedicatedSidebarAndSheet() throws {
@@ -38,13 +41,17 @@ final class ReviewPayloadTests: XCTestCase {
         let source = try String(contentsOf: root.appendingPathComponent("MCPProxy/Views/ReviewQueueView.swift"))
         for expected in [
             "Text(verbatim: definitionText(tool))", "Text(verbatim: diffText(tool))",
-            "Baseline scan:", "Fetch tool definitions", "approveSpecificTools",
+            "Baseline scan:", "Fetch tool definitions", "discoverServerTools(serverName)", "approveSpecificTools",
             "blockSpecificTools", "securityRejectServer", "Reject Server",
             "Text(tool.scanVerdict)", "Dangerous findings detected", "approve(force: true)",
             "NotificationCenter.default.publisher(for: .reviewChanged)",
             "NotificationCenter.default.publisher(for: .scanSettled)",
+			"prettyString", "diff.description", "input schema:\\n",
+			"server.command", "server.trustMode", "server.sourceRegistryID",
         ] {
             XCTAssertTrue(source.contains(expected), "Review sheet is missing \(expected)")
         }
+		XCTAssertFalse(source.contains("String(describing: tool.inputSchema)"))
+		XCTAssertFalse(source.contains("String(describing: tool.diff)"))
     }
 }

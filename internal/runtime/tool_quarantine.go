@@ -669,7 +669,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					ApprovedBy:          approvedBy,
 					ApprovedAt:          now,
 					CurrentDescription:  tool.Description,
-					CurrentAnnotations:  cloneToolAnnotations(tool.Annotations),
+					CurrentAnnotations:  capturedToolAnnotations(tool.Annotations),
 					CurrentSchema:       schemaJSON,
 					CurrentOutputSchema: outputSchemaJSON,
 					Disabled:            legacyDisabled,
@@ -711,7 +711,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				HashSchemaVersion:   storage.OutputSchemaHashSchemaVersion,
 				Status:              storage.ToolApprovalStatusPending,
 				CurrentDescription:  tool.Description,
-				CurrentAnnotations:  cloneToolAnnotations(tool.Annotations),
+				CurrentAnnotations:  capturedToolAnnotations(tool.Annotations),
 				CurrentSchema:       schemaJSON,
 				CurrentOutputSchema: outputSchemaJSON,
 				Disabled:            legacyDisabled,
@@ -1372,6 +1372,17 @@ func cloneToolAnnotations(annotations *config.ToolAnnotations) *config.ToolAnnot
 		clone.OpenWorldHint = &value
 	}
 	return &clone
+}
+
+// capturedToolAnnotations marks a definition written by this runtime as
+// captured even when its upstream omitted annotation hints. Historical stored
+// nil remains meaningful to reviewTier as "unknown"; only a newly captured
+// definition gets the non-nil empty record that means "unannotated".
+func capturedToolAnnotations(annotations *config.ToolAnnotations) *config.ToolAnnotations {
+	if annotations == nil {
+		return &config.ToolAnnotations{}
+	}
+	return cloneToolAnnotations(annotations)
 }
 
 // saveReadToolApproval is saveToolApproval for a record that was READ from

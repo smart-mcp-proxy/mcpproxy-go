@@ -66,9 +66,12 @@ mkdir -p $RUN/home/.cursor $RUN/home/.codex $RUN/home/.claude
 echo '{"mcpServers":{}}' > $RUN/home/.cursor/mcp.json; touch $RUN/home/.codex/config.toml
 FX=$PWD/internal/server/testdata/preflight_fixture_server.js
 TD=$RUN/tools; mkdir -p $TD
-# Canonical T003 fixture: 14 tools — 5 read, 3 write, 3 destructive,
-# 2 unannotated, and 1 legacy/unknown annotation record. The count matches
-# the review payload tests and avoids the old contradictory US2 prose.
+# The fresh live fixture has 14 definitions: 5 read, 3 write, 3 destructive,
+# 3 unannotated, 0 unknown. Fresh capture preserves an empty annotations object
+# (and even an omitted upstream annotation value) as `{}`, so it is unannotated.
+# Canonical T003 parity remains 5/3/3/2/1 by seeding its one *historical stored*
+# nil-annotation approval record in the focused runtime fixture; never infer that
+# historical unknown row from a fresh upstream tools/list response.
 node -e 'const t=[];for(let i=0;i<5;i++)t.push({name:"read_"+i,description:"Read thing "+i,inputSchema:{type:"object"},annotations:{readOnlyHint:true}});for(let i=0;i<3;i++)t.push({name:"write_"+i,description:"Write thing "+i,inputSchema:{type:"object"},annotations:{readOnlyHint:false}});for(let i=0;i<3;i++)t.push({name:"delete_"+i,description:"Delete thing "+i,inputSchema:{type:"object"},annotations:{destructiveHint:true}});for(let i=0;i<2;i++)t.push({name:"notes_"+i,description:"Search notes "+i,inputSchema:{type:"object"},annotations:{}});t.push({name:"legacy_unknown",description:"Legacy definition",inputSchema:{type:"object"}});require("fs").writeFileSync(process.argv[1],JSON.stringify(t))' $TD/fs.json
 cat > $RUN/mcp_config.json <<JSON
 { "listen": "127.0.0.1:$PORT", "data_dir": "$RUN/data", "quarantine_enabled": true,
@@ -93,8 +96,8 @@ curl -s -H "X-API-Key: $KEY" -X POST $M/api/v1/servers -d "{\"name\":\"github\",
 # Changed tool (rug pull): notes is trusted, so its first toolset is auto-approved as a baseline (MCP-2931).
 # Check: mp tools list --server notes -o json (approval_status approved); if not, mp upstream approve notes.
 # Then edit $TD/notes.json's description; the fixture re-reads it on the next tools/list and the tool becomes `changed`.
-# Stop only yours:
-pkill -f "mcpproxy serve --config $RUN"; pkill -f "oauthserver.*-port $((PORT+1))"
+# Stop only processes started by this recipe, through their owning terminal or
+# run_in_background session (Ctrl-C). Do not use pkill.
 ```
 
 Client presence: run `mp connect cursor` (socket, scratch HOME, scratch config) and open an MCP session with `clientInfo.name` set to Cursor's alias through a JSON-RPC `initialize` curl, or with `bench/mcpcaller.go`. Codex stays "connected, never seen" once `connect codex` has run and 5 minutes have passed. For the recipe, set the test-only env `MCPPROXY_ATTENTION_NEVER_SEEN_AFTER=5s` (a test hook, documented in 109-d).

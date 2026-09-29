@@ -842,13 +842,10 @@ const quarantinedReviewRows = computed(() => quarantinedServersAwaitingReview.va
   quarantined: true,
   tools_captured: server.tool_count,
 })))
-// Approval updates the shared server list through the normal SSE/fetch path.
-// Treat that authoritative live list as a completion signal immediately, so a
-// user returning from Review does not have to wait for the onboarding snapshot
-// to be polled again.
-const hasUsableServer = computed(() => onboarding.hasUsableServer || serversStore.servers.some(server =>
-  server.enabled && !server.quarantined && server.connected && server.tool_count > 0
-))
+// Only the backend has the approval-record information needed to decide
+// usability. A visible tool_count can consist entirely of blocked tools, so it
+// must never complete onboarding on its own.
+const hasUsableServer = computed(() => onboarding.hasUsableServer)
 
 function selectionKey(path: string, name: string) {
   return `${path}::${name}`

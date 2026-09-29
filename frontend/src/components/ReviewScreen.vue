@@ -17,6 +17,13 @@
       <div v-if="review.server.scan" class="alert alert-info" data-test="review-scan-summary">
         <span>Baseline scan: {{ review.server.scan.verdict }}<template v-if="review.server.scan.risk_score != null"> · risk {{ review.server.scan.risk_score }}/100</template></span>
       </div>
+      <div class="rounded border border-base-300 p-3 text-sm" data-test="review-server-identity">
+        <div><span class="font-medium">Transport:</span> {{ review.server.transport }}</div>
+        <div v-if="review.server.command"><span class="font-medium">Command:</span> <code>{{ review.server.command }}</code></div>
+        <div v-else-if="review.server.url"><span class="font-medium">URL:</span> <code>{{ review.server.url }}</code></div>
+        <div v-if="review.server.trust_mode"><span class="font-medium">Trust mode:</span> {{ review.server.trust_mode }}</div>
+        <div v-if="review.server.source_registry_id"><span class="font-medium">Origin:</span> {{ review.server.source_registry_id }}<template v-if="review.server.source_registry_provenance"> · {{ review.server.source_registry_provenance }}</template></div>
+      </div>
 
       <div v-if="!review.server.definitions_captured" class="alert alert-warning" data-test="review-no-definitions">
         <span>Tool definitions have not been captured yet.</span>
@@ -66,8 +73,14 @@ const filteredTools = computed(() => review.value?.tools.filter(t => !props.chan
 const tierCounts = computed(() => Object.fromEntries(tiers.map(t => [t, (review.value?.tools ?? []).filter(x => x.tier === t).length])))
 function definitionText(tool: ReviewTool) { return JSON.stringify({ input_schema: tool.input_schema, output_schema: tool.output_schema, annotations: tool.annotations }, null, 2) }
 function diffText(tool: ReviewTool) { return Object.values(tool.diff ?? {}).filter(Boolean).join('\n\n') || JSON.stringify(tool.previous, null, 2) }
-async function load() { if (typeof api.getServerReview !== 'function') return; loading.value = true; error.value = ''; const res = await api.getServerReview(props.serverName); loading.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = res.data.tools.filter(t => !t.disabled && (!props.change || t.approval_status === props.change)).map(t => t.name); emit('refreshed') }
-async function fetchDefinitions() { scanning.value = true; const res = await api.startScan(props.serverName); if (!res.success) { scanning.value = false; error.value = res.error || 'Failed to start scan' } }
+async function load() { if (typeof api.getServerReview !== 'function') return; loading.value = true; error.value = ''; const res = await api.getServerReview(props.serverName); loading.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = res.data.tools.filter(t => !t.disabled).map(t => t.name); emit('refreshed') }
+async function fetchDefinitions() {
+  scanning.value = true
+  const res = await api.discoverServerTools(props.serverName)
+  scanning.value = false
+  if (!res.success) { error.value = res.error || 'Failed to capture tool definitions'; return }
+  await load()
+}
 function requestApprove() { if (!review.value?.server.definitions_captured) { confirmOpen.value = true; confirmDialog.value?.showModal(); return }; void approve(false) }
 function closeConfirm() { confirmOpen.value = false; confirmDialog.value?.close?.() }
 async function approve(force: boolean) { closeConfirm(); forceDialog.value?.close?.(); approving.value = true; const all = review.value?.tools.map(t => t.name) ?? []; const res = await api.securityApprove(props.serverName, force, all.filter(name => !allowedTools.value.includes(name))); approving.value = false; if (!res.success) { error.value = res.error || 'Approval failed'; if (!force && /dangerous/i.test(error.value)) forceDialog.value?.showModal?.(); return }; emit('approved'); await load() }
@@ -75,7 +88,7 @@ async function rejectServer() { approving.value = true; const res = await api.se
 async function approveTool(name: string) { await api.approveTools(props.serverName, [name]); await load() }
 async function blockTool(name: string) { await api.blockTools(props.serverName, [name]); await load() }
 function refreshAfterReviewChange() { scanning.value = false; void load() }
-function refreshAfterScanSettled(event: Event) {
+async function refreshAfterScanSettled(event: Event) {
   const serverName = (event as CustomEvent<{ server_name?: string }>).detail?.server_name
   if (serverName && serverName !== props.serverName) return
   scanning.value = false
