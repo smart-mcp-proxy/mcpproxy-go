@@ -207,8 +207,10 @@
             <code class="font-mono text-[11px] bg-base-200 px-1 rounded">mcpproxy_claude_code</code> so each entry stays distinct.
           </p>
 
+          <ImportServers detected @imported="onSharedImport" />
+
           <!-- Detected import sources (Spec 046 v2 — sectioned checkbox layout) -->
-          <div v-if="loadingImportSources" class="flex justify-center py-4">
+          <div v-if="false" class="flex justify-center py-4">
             <span class="loading loading-spinner loading-md"></span>
           </div>
           <!-- Spec 109-ux-navigation-consistency US7 Acceptance Scenario 4:
@@ -300,7 +302,7 @@
                that more existed; the cap also leaves the security panel below
                it partly on screen, so the choice it offers is visible rather
                than something the user has to go looking for. -->
-          <div v-else class="border border-base-300 rounded-lg overflow-hidden mb-4 max-h-[32vh] overflow-y-auto">
+          <div v-else-if="false" class="border border-base-300 rounded-lg overflow-hidden mb-4 max-h-[32vh] overflow-y-auto">
             <div
               v-for="(src, idx) in importSourcesWithServers"
               :key="src.path"
