@@ -119,8 +119,12 @@ func TestCatalogAddedFromConfig_DoesNotFlattenArgumentBoundaries(t *testing.T) {
 		Source: "official",
 		Entry:  registries.ServerEntry{ID: "different-argv", InstallCmd: `npx a "b c"`},
 	}
-	if added(otherArgv) {
+	matched, serverName := added(otherArgv)
+	if matched {
 		t.Fatal("distinct command argv values must not match a configured server")
+	}
+	if serverName != "" {
+		t.Fatalf("non-matching command argv must not return a server name, got %q", serverName)
 	}
 }
 

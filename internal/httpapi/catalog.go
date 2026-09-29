@@ -47,9 +47,11 @@ func (s *Server) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
 	// Catalog entries (registries.ServerEntry) carry no tags, so a tag filter
 	// cannot be honoured. Reject it explicitly instead of silently returning
 	// unfiltered results that look like a tag match.
-	if r.URL.Query().Get("tag") != "" {
-		s.writeError(w, r, http.StatusBadRequest, "tag filtering is not supported: catalog entries carry no tags")
-		return
+	for _, tag := range r.URL.Query()["tag"] {
+		if tag != "" {
+			s.writeError(w, r, http.StatusBadRequest, "tag filtering is not supported: catalog entries carry no tags")
+			return
+		}
 	}
 
 	limit := 20

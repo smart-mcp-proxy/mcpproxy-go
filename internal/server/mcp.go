@@ -1427,7 +1427,7 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 				mcp.Description("Search term to filter servers by name or description (case-insensitive)"),
 			),
 			mcp.WithString("tag",
-				mcp.Description("Filter servers by tag/category (if supported by registry)"),
+				mcp.Description("Catalog entries do not carry tags. Omit this parameter or pass an empty value; non-empty values return an error."),
 			),
 			mcp.WithNumber("limit",
 				mcp.Description("Maximum number of results to return (default: 10, max: 50)"),
@@ -1594,6 +1594,12 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	search := request.GetString("search", "")
 	tag := request.GetString("tag", "")
 	limit := int(request.GetFloat("limit", 10.0)) // Default limit of 10
+	if tag != "" {
+		return mcp.NewToolResultError("tag filtering is not supported: catalog entries carry no tags"), nil
+	}
+	if tag != "" {
+		return mcp.NewToolResultError("tag filtering is not supported: catalog entries carry no tags"), nil
+	}
 
 	// Build arguments map for activity logging (Spec 024)
 	args := map[string]interface{}{

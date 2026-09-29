@@ -75,6 +75,19 @@ func TestSearchServers_RegistryOptional_SearchesAllSources(t *testing.T) {
 	assert.Contains(t, entry, "publisher", "expected the catalog publisher field")
 }
 
+func TestSearchServers_RejectsNonEmptyTag(t *testing.T) {
+	withMCPCatalogFixture(t)
+	proxy := createTestMCPProxyServer(t)
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name:      "search_servers",
+		Arguments: map[string]interface{}{"search": "Alpha", "tag": "database"},
+	}}
+	result, err := proxy.handleSearchServers(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, result.IsError, "unsupported tag must fail visibly instead of returning unfiltered results")
+	assert.Contains(t, toolResultText(t, result), "tag filtering is not supported")
+}
+
 // TestSearchServers_RegistryOptional_UnavailableSourceReported pins that a
 // failed source is listed unavailable rather than failing the whole search.
 func TestSearchServers_RegistryOptional_UnavailableSourceReported(t *testing.T) {
