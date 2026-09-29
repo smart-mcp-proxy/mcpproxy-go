@@ -172,6 +172,8 @@ final class TrayAuditMenuTests: XCTestCase {
         let items = try serverSubmenu(host, named: "everything").items
         let review = try XCTUnwrap(items.first { $0.title == "Review" },
                                    "quarantined server offered only \(items.map(\.title))")
+        XCTAssertEqual(items.filter { $0.title == "Review" }.count, 1,
+                       "Review shown more than once: \(items.map(\.title))")
         XCTAssertNotNil(review.action, "a review row with no action is the F14 dead link again")
         XCTAssertTrue(review.target === controller)
         XCTAssertEqual(review.representedObject as? String, "everything")
@@ -207,6 +209,8 @@ final class TrayAuditMenuTests: XCTestCase {
         let signIn = try XCTUnwrap(items.first { $0.title == "Sign in" },
                                    "expected the primary Sign-in row: \(titles)")
         XCTAssertNotNil(signIn.action)
+        XCTAssertEqual(titles.filter { $0 == "Sign in" }.count, 1, "Sign in shown more than once: \(titles)")
+        XCTAssertEqual(titles.filter { $0 == "Review" }.count, 1, "Review shown more than once: \(titles)")
 
         let review = try XCTUnwrap(items.first { $0.title == "Review" },
                                    "a quarantined+login server must still offer a review path (FR-010/FR-014 parity — the ⋯/context-menu surfaces still gate independently on `quarantined`): \(titles)")
