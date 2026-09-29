@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/spf13/cobra"
 )
 
@@ -24,8 +25,9 @@ func GetReviewCommand() *cobra.Command {
 	cmd.AddCommand(&cobra.Command{Use: "list", Short: "List servers needing review", RunE: func(_ *cobra.Command, _ []string) error {
 		return runReviewRead("/api/v1/review")
 	}})
-	show := &cobra.Command{Use: "show <server>", Short: "Show captured tool definitions and scan verdicts", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
-		return runReviewRead("/api/v1/servers/" + url.PathEscape(args[0]) + "/review")
+	show := &cobra.Command{Use: "show <server>", Short: "Show captured tool definitions and scan verdicts", Args: cobra.ExactArgs(1), RunE: func(c *cobra.Command, args []string) error {
+		full, _ := c.Flags().GetBool("full")
+		return runReviewRead("/api/v1/servers/"+url.PathEscape(args[0])+"/review", full)
 	}}
 	show.Flags().Bool("full", false, "Show full captured schemas and descriptions")
 	cmd.AddCommand(show)
@@ -38,6 +40,9 @@ func GetReviewCommand() *cobra.Command {
 			return err
 		}
 		if quarantined {
+			if len(tools) > 0 {
+				return fmt.Errorf("--tools cannot select a quarantined server approval; use --except to block tools")
+			}
 			body := map[string]interface{}{"force": force}
 			if len(except) > 0 {
 				body["block"] = except
@@ -73,7 +78,7 @@ func GetReviewCommand() *cobra.Command {
 	return cmd
 }
 
-func runReviewRead(path string) error {
+func runReviewRead(path string, full ...bool) error {
 	client, _, err := newSecurityCLIClient()
 	if err != nil {
 		return err
@@ -92,7 +97,7 @@ func runReviewRead(path string) error {
 	if resp.StatusCode != http.StatusOK {
 		return parseAPIError(body, resp.StatusCode, "read review")
 	}
-	return formatReviewResponse(ResolveOutputFormat(), body)
+	return formatReviewResponse(ResolveOutputFormat(), body, len(full) > 0 && full[0])
 }
 
 func runReviewWrite(server, operation string, value interface{}) error {
@@ -121,7 +126,7 @@ func runReviewWrite(server, operation string, value interface{}) error {
 	if resp.StatusCode != http.StatusOK {
 		return parseAPIError(response, resp.StatusCode, strings.ReplaceAll(operation, "/", " "))
 	}
-	return formatReviewResponse(ResolveOutputFormat(), response)
+	return formatReviewResponse(ResolveOutputFormat(), response, false)
 }
 
 func reviewServerQuarantined(server string) (bool, error) {
@@ -158,7 +163,7 @@ func reviewServerQuarantined(server string) (bool, error) {
 
 // formatReviewResponse drops the REST envelope so CLI JSON/YAML is exactly the
 // shared review data object, as required by the CLI contract.
-func formatReviewResponse(format string, raw []byte) error {
+func formatReviewResponse(format string, raw []byte, full bool) error {
 	var envelope struct {
 		Data json.RawMessage `json:"data"`
 	}
@@ -168,5 +173,46 @@ func formatReviewResponse(format string, raw []byte) error {
 	if len(envelope.Data) == 0 {
 		return fmt.Errorf("response has no data")
 	}
-	return formatAndPrintRaw(format, envelope.Data)
+	if format != "table" {
+		return formatAndPrintRaw(format, envelope.Data)
+	}
+	var value map[string]interface{}
+	if err := json.Unmarshal(envelope.Data, &value); err != nil {
+		return err
+	}
+	table := &clioutput.TableFormatter{}
+	if servers, ok := value["servers"].([]interface{}); ok {
+		rows := make([][]string, 0, len(servers))
+		for _, item := range servers {
+			row, _ := item.(map[string]interface{})
+			rows = append(rows, []string{fmt.Sprint(row["server"]), fmt.Sprint(row["kind"]), fmt.Sprint(row["quarantined"]), fmt.Sprint(row["pending"]), fmt.Sprint(row["changed"]), fmt.Sprint(row["tier_counts"]), fmt.Sprint(row["scan"])})
+		}
+		out, err := table.FormatTable([]string{"SERVER", "KIND", "QUARANTINED", "PENDING", "CHANGED", "TIERS", "SCAN"}, rows)
+		if err != nil {
+			return err
+		}
+		fmt.Print(out)
+		return nil
+	}
+	server, _ := value["server"].(map[string]interface{})
+	fmt.Printf("Server: %v\n", server["name"])
+	rows := make([][]string, 0)
+	if tools, ok := value["tools"].([]interface{}); ok {
+		for _, item := range tools {
+			tool, _ := item.(map[string]interface{})
+			desc := fmt.Sprint(tool["description"])
+			if !full {
+				desc = strings.Split(desc, "\n")[0]
+			} else if diff := tool["diff"]; diff != nil {
+				desc += "\nfrom the server, not verified:\n" + fmt.Sprint(diff)
+			}
+			rows = append(rows, []string{fmt.Sprint(tool["name"]), fmt.Sprint(tool["tier"]), fmt.Sprint(tool["approval_status"]), fmt.Sprint(tool["scan_verdict"]), desc})
+		}
+	}
+	out, err := table.FormatTable([]string{"TOOL", "TIER", "APPROVAL", "SCAN", "DESCRIPTION"}, rows)
+	if err != nil {
+		return err
+	}
+	fmt.Print(out)
+	return nil
 }

@@ -265,18 +265,25 @@ func (r *Runtime) reviewScanAndFindings(ctx context.Context, serverName string) 
 	}
 	var latest, latestPass2 *scanner.ScanJobMeta
 	for _, meta := range metas {
-		if meta == nil || meta.ScanPass != scanner.ScanPassSecurityScan {
-			if meta != nil && meta.ScanPass == scanner.ScanPassSupplyChainAudit && (latestPass2 == nil || meta.StartedAt.After(latestPass2.StartedAt)) {
-				latestPass2 = meta
-			}
+		if meta == nil {
 			continue
 		}
-		if latest == nil || meta.StartedAt.After(latest.StartedAt) {
-			latest = meta
+		switch meta.ScanPass {
+		case scanner.ScanPassSupplyChainAudit:
+			if latestPass2 == nil || meta.StartedAt.After(latestPass2.StartedAt) {
+				latestPass2 = meta
+			}
+		case scanner.ScanPassSecurityScan, 0: // zero is a legacy Pass-1 record
+			if latest == nil || meta.StartedAt.After(latest.StartedAt) {
+				latest = meta
+			}
 		}
 	}
-	if latest == nil {
+	if latest == nil && latestPass2 == nil {
 		return &ReviewScan{Verdict: "not_scanned"}, nil
+	}
+	if latest == nil {
+		latest = latestPass2
 	}
 	job, err := r.storageManager.GetScanJob(latest.ID)
 	if err != nil || job == nil {
@@ -286,15 +293,19 @@ func (r *Runtime) reviewScanAndFindings(ctx context.Context, serverName string) 
 	if err != nil {
 		return &ReviewScan{Verdict: "not_scanned", ReportID: job.ID}, nil
 	}
+	primaryPass := scanner.ScanPassSecurityScan
+	if latest == latestPass2 {
+		primaryPass = scanner.ScanPassSupplyChainAudit
+	}
 	for _, report := range reports {
 		for i := range report.Findings {
-			report.Findings[i].ScanPass = scanner.ScanPassSecurityScan
+			report.Findings[i].ScanPass = primaryPass
 		}
 	}
 	// The approval gate merges the newest completed supply-chain pass with the
 	// baseline pass. Review must show the same findings and risk score rather
 	// than presenting a clean baseline while the gate sees Pass 2 warnings.
-	if latestPass2 != nil {
+	if latestPass2 != nil && latestPass2 != latest {
 		if pass2, pass2Err := r.storageManager.GetScanJob(latestPass2.ID); pass2Err == nil && pass2 != nil && pass2.Status == scanner.ScanJobStatusCompleted {
 			if pass2Reports, reportsErr := r.storageManager.ListScanReportsByJob(pass2.ID); reportsErr == nil {
 				for _, report := range pass2Reports {
@@ -306,6 +317,7 @@ func (r *Runtime) reviewScanAndFindings(ctx context.Context, serverName string) 
 			}
 		}
 	}
+	reports = deduplicateReviewPass2Findings(reports)
 	aggregated := scanner.AggregateReportsWithJobStatus(job.ID, serverName, reports, job)
 	if aggregated == nil {
 		return &ReviewScan{Verdict: "not_scanned", ReportID: job.ID, ScannedAt: reviewTimestamp(job.CompletedAt)}, nil
@@ -315,6 +327,30 @@ func (r *Runtime) reviewScanAndFindings(ctx context.Context, serverName string) 
 		verdict = "not_scanned"
 	}
 	return &ReviewScan{Verdict: verdict, RiskScore: aggregated.RiskScore, ReportID: job.ID, ScannedAt: reviewTimestamp(aggregated.ScannedAt)}, aggregated.Findings
+}
+
+func deduplicateReviewPass2Findings(reports []*scanner.ScanReport) []*scanner.ScanReport {
+	pass1 := make(map[string]struct{})
+	for _, report := range reports {
+		for _, finding := range report.Findings {
+			if finding.ScanPass == scanner.ScanPassSecurityScan {
+				pass1[finding.Scanner+"|"+finding.RuleID+"|"+finding.Title] = struct{}{}
+			}
+		}
+	}
+	for _, report := range reports {
+		filtered := report.Findings[:0]
+		for _, finding := range report.Findings {
+			if finding.ScanPass == scanner.ScanPassSupplyChainAudit {
+				if _, duplicate := pass1[finding.Scanner+"|"+finding.RuleID+"|"+finding.Title]; duplicate {
+					continue
+				}
+			}
+			filtered = append(filtered, finding)
+		}
+		report.Findings = filtered
+	}
+	return reports
 }
 
 func reviewTimestamp(value time.Time) *time.Time {
