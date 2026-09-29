@@ -216,8 +216,13 @@ func (a *attentionSubscriber) recompute() time.Duration {
 	copy(clientsCopy, a.clients)
 	a.mu.Unlock()
 	// Presence is a compact onboarding-state snapshot. Refresh it for every
-	// recompute rather than keeping a second mutable cache in the subscriber.
-	clientsCopy = a.rt.AttentionClients()
+	// recompute in a fully wired runtime rather than keeping a second mutable
+	// cache in the subscriber. Tests and early runtime wiring can construct a
+	// subscriber before storage is attached and seed clients directly; preserve
+	// that snapshot until the backing store is available.
+	if a.rt.storageManager != nil {
+		clientsCopy = a.rt.AttentionClients()
+	}
 
 	input := AttentionInput{
 		Now:                      now,
