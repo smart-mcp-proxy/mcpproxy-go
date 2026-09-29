@@ -9,11 +9,13 @@ import { createRouter, createMemoryHistory } from 'vue-router'
 // 0, matching the header pill and the CLI/macOS surfaces.
 
 const attentionSpy = vi.hoisted(() => vi.fn())
+const reviewQueueSpy = vi.hoisted(() => vi.fn())
 
 vi.mock('@/services/api', () => {
   const ok = (data: unknown = null) => vi.fn().mockResolvedValue({ success: true, data })
   const base: Record<string, unknown> = {
     getAttention: attentionSpy,
+    getReviewQueue: reviewQueueSpy,
     getOnboardingState: ok({ incomplete_tab_count: 0, state: { engaged: true } }),
     hasAPIKey: vi.fn(() => true),
     onAuthError: vi.fn(() => () => {}),
@@ -64,6 +66,8 @@ describe('sidebar Home entry and badge (Spec 109 FR-003/FR-051)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     attentionSpy.mockReset()
+    reviewQueueSpy.mockReset()
+    reviewQueueSpy.mockResolvedValue({ success: true, data: { count: 0, servers: [] } })
   })
 
   it('renames the Dashboard entry to Home and hides the badge at 0', async () => {
@@ -135,5 +139,17 @@ describe('sidebar Home entry and badge (Spec 109 FR-003/FR-051)', () => {
     const badge = wrapper.find('[data-test="sidebar-home-badge"]')
     expect(badge.exists()).toBe(true)
     expect(badge.text()).toBe('2')
+  })
+
+  it('refreshes the separate review queue badge when review.changed fires', async () => {
+    attentionSpy.mockResolvedValue({ success: true, data: { count: 0, items: [] } })
+    reviewQueueSpy.mockResolvedValueOnce({ success: true, data: { count: 0, servers: [] } })
+    const wrapper = await mountSidebar()
+    expect(wrapper.get('[data-test="sidebar-review-queue"]').text()).not.toContain('3')
+
+    reviewQueueSpy.mockResolvedValue({ success: true, data: { count: 3, servers: [] } })
+    window.dispatchEvent(new CustomEvent('mcpproxy:review-changed'))
+    await flushPromises()
+    expect(wrapper.get('[data-test="sidebar-review-queue"]').text()).toContain('3')
   })
 })

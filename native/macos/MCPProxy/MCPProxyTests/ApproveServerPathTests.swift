@@ -1,9 +1,8 @@
 import XCTest
 @testable import MCPProxy
 
-/// Spec 109-f T078: the native approval client has exactly one server-release
-/// route, the scan-gated security endpoint. The force payload is only sent by
-/// the destructive confirmation path in ServerDetailView.
+/// The native approval client uses the scan-gated security endpoint. Server
+/// Detail only opens the informed Review queue; force approval lives there.
 @MainActor
 final class ApproveServerPathTests: XCTestCase {
     override func setUp() {
@@ -22,39 +21,48 @@ final class ApproveServerPathTests: XCTestCase {
         XCTAssertFalse(request.url.contains("/unquarantine"))
 
         let body = try XCTUnwrap(HomeReviewActionStubURLProtocol.requestBodies.first ?? nil)
-        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Bool])
-        XCTAssertEqual(json["force"], true)
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["force"] as? Bool, true)
+        XCTAssertEqual(json["block"] as? [String], [])
     }
 
-    func testDisconnectedCoreFailsApprovalBeforeSuccessCanBeReported() async {
-        do {
-            try await ServerDetailView.performSecurityApproval(apiClient: nil, serverID: "filesystem", force: false)
-            XCTFail("approval without a connected API client must fail")
-        } catch {
-            XCTAssertEqual(error.localizedDescription, "Core is not ready")
-        }
-        XCTAssertTrue(HomeReviewActionStubURLProtocol.requests.isEmpty)
+    func testToolApprovalAndServerRejectEscapeTheServerName() async throws {
+        let client = HomeReviewActionStubURLProtocol.makeClient()
+        try await client.approveSpecificTools("server / one", tools: ["read_file"])
+        let toolRequest = try XCTUnwrap(HomeReviewActionStubURLProtocol.requests.first)
+        XCTAssertTrue(toolRequest.url.contains("/api/v1/servers/server%20%2F%20one/tools/approve"))
+
+        HomeReviewActionStubURLProtocol.reset()
+        try await client.securityRejectServer("server / one")
+        let rejectRequest = try XCTUnwrap(HomeReviewActionStubURLProtocol.requests.first)
+        XCTAssertTrue(rejectRequest.url.contains("/api/v1/servers/server%20%2F%20one/security/reject"))
     }
 
-    func testDetailViewSourcePresentsForceConfirmationOnlyAfterTheScanGate() throws {
+    func testServerDetailOnlyNavigatesToInformedReview() throws {
         let path = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("MCPProxy/Views/ServerDetailView.swift")
         let source = try String(contentsOf: path)
-        XCTAssertTrue(source.contains("apiClient.securityApproveServer(serverID, force: force)"))
-        XCTAssertTrue(source.contains("try await Self.performSecurityApproval(apiClient: apiClient"), "success is only reported after approval completes")
-        XCTAssertFalse(source.contains("apiClient?.securityApproveServer"), "optional chaining can report success without approving")
-        XCTAssertTrue(source.contains("showForceApprovalConfirmation = true"))
-        XCTAssertTrue(source.contains("Button(\"Force Approve\", role: .destructive)"))
+        XCTAssertTrue(source.contains("private func openReview()"))
+        XCTAssertTrue(source.contains("SidebarItem.review.rawValue"))
+        XCTAssertFalse(source.contains("securityApproveServer("))
+        XCTAssertFalse(source.contains("approveSpecificTools("))
         XCTAssertFalse(source.contains("unquarantineServer("))
     }
 
-    func testForceConfirmationIsLimitedToDangerousScanRejection() {
-        XCTAssertTrue(ServerDetailView.shouldConfirmForcedSecurityApproval(
-            APIClientError.httpError(statusCode: 409, message: "server has 1 dangerous finding")))
-        XCTAssertFalse(ServerDetailView.shouldConfirmForcedSecurityApproval(
-            APIClientError.httpError(statusCode: 409, message: "no scan results found; run a scan first")))
-        XCTAssertFalse(ServerDetailView.shouldConfirmForcedSecurityApproval(
-            APIClientError.httpError(statusCode: 500, message: "dangerous text is irrelevant")))
+    func testReviewSheetOffersForceConfirmationAfterTheScanGate() throws {
+        let path = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("MCPProxy/Views/ReviewQueueView.swift")
+        let source = try String(contentsOf: path)
+        XCTAssertTrue(source.contains("securityApproveServer(serverName, force: force, block:"))
+        XCTAssertTrue(source.contains("status == 409"))
+        XCTAssertTrue(source.contains("message.localizedCaseInsensitiveContains(\"dangerous\")"))
+        XCTAssertTrue(source.contains("showForceApprovalConfirmation = true"))
+        XCTAssertTrue(source.contains("approve(force: true)"))
+        XCTAssertTrue(source.contains("Button(\"Reject Server\", role: .destructive)"))
+        XCTAssertTrue(source.contains("securityRejectServer(serverName)"))
+        XCTAssertTrue(source.contains("Text(tool.scanVerdict)"))
+        XCTAssertTrue(source.contains("NotificationCenter.default.publisher(for: .reviewChanged)"))
     }
 }

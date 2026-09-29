@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse, AttentionResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse, AttentionResponse, ReviewQueueResponse, ServerReviewResponse } from '@/types'
 
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
 
@@ -1405,10 +1405,10 @@ class APIService {
     })
   }
 
-  async securityApprove(serverName: string, force = false): Promise<APIResponse<void>> {
+  async securityApprove(serverName: string, force = false, block: string[] = []): Promise<APIResponse<void>> {
     return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/security/approve`, {
       method: 'POST',
-      body: JSON.stringify({ force }),
+      body: JSON.stringify({ force, block }),
     })
   }
 
@@ -1416,6 +1416,14 @@ class APIService {
     return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/security/reject`, {
       method: 'POST',
     })
+  }
+
+  async getReviewQueue(): Promise<APIResponse<ReviewQueueResponse>> {
+    return this.request<ReviewQueueResponse>('/api/v1/review')
+  }
+
+  async getServerReview(serverName: string): Promise<APIResponse<ServerReviewResponse>> {
+    return this.request<ServerReviewResponse>(`/api/v1/servers/${encodeURIComponent(serverName)}/review`)
   }
 
   async checkIntegrity(serverName: string): Promise<APIResponse<any>> {

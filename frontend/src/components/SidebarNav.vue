@@ -215,6 +215,24 @@
             </li>
           </ul>
 
+          <div
+            v-if="!collapsed"
+            class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
+          >
+            Protect
+          </div>
+          <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
+
+          <ul class="menu menu-sm w-full gap-0.5 p-0">
+            <li>
+              <router-link to="/review" :class="{ 'active': isActiveRoute('/review') }" class="rounded-lg font-medium" :title="collapsed ? 'Review queue' : ''" :aria-label="collapsed ? 'Review queue' : undefined" data-test="sidebar-review-queue">
+                <IconShield class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed" class="flex-1">Review queue</span>
+                <span v-if="!collapsed && reviewCount" class="badge badge-warning badge-sm">{{ reviewCount }}</span>
+              </router-link>
+            </li>
+          </ul>
+
           <!-- Section: Workspace -->
           <div
             v-if="!collapsed"
@@ -328,18 +346,6 @@
               >
                 <IconSessions class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Sessions</span>
-              </router-link>
-            </li>
-            <li>
-              <router-link
-                to="/security"
-                :class="{ 'active': isActiveRoute('/security') }"
-                class="rounded-lg font-medium"
-                :title="collapsed ? 'Security' : ''"
-                :aria-label="collapsed ? 'Security' : undefined"
-              >
-                <IconShield class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed">Security</span>
               </router-link>
             </li>
           </ul>
@@ -494,7 +500,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, ref, watch, type FunctionalComponent } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watch, type FunctionalComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { formatDateTime } from '@/utils/datetime'
@@ -556,6 +562,7 @@ function loadBadgeCounts() {
   if (!authStore.isTeamsEdition || authStore.canLoadCore) {
     void onboardingStore.fetchState()
     void fetchToolCount()
+    void fetchReviewCount()
     void fetchSecretCount()
   }
 }
@@ -567,7 +574,10 @@ onMounted(() => {
   // so it fetches its own copy rather than depending on Home having mounted
   // first — the badge must be correct on every page, not only "/".
   attentionStore.fetchAttention()
+  window.addEventListener('mcpproxy:review-changed', fetchReviewCount)
 })
+
+onUnmounted(() => window.removeEventListener('mcpproxy:review-changed', fetchReviewCount))
 
 // #1065: the sidebar sits outside <router-view>, so App.vue's authEpoch key
 // cannot remount it. Without this, badge counts that failed while auth was
@@ -682,6 +692,15 @@ const IconTools = makeIcon(
 
 // Spec 050: live tool count for the sidebar badge.
 const toolCount = ref(0)
+const reviewCount = ref(0)
+async function fetchReviewCount() {
+  try {
+    const resp = await api.getReviewQueue()
+    if (resp.success) reviewCount.value = resp.data?.count ?? 0
+  } catch {
+    // A badge must not make the sidebar fail when a core is older or offline.
+  }
+}
 
 async function fetchToolCount() {
   try {

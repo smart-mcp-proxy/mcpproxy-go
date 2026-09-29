@@ -399,8 +399,11 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 			OutputSchemaJSON: outputSchemaJSON,
 		}
 
-		// Copy tool annotations if any are set
-		// ToolAnnotation is a value type with pointer fields, check if any hints are present
+		// ToolAnnotation is a value type in mcp-go. Preserve even its zero value:
+		// a fresh tools/list response has captured annotation metadata, while a
+		// nil record is reserved for legacy records written before capture existed.
+		// This makes an upstream annotations:{} record tier "unannotated", not
+		// "unknown", in the informed review payload.
 		hasAnnotations := tool.Annotations.Title != "" ||
 			tool.Annotations.ReadOnlyHint != nil ||
 			tool.Annotations.DestructiveHint != nil ||
@@ -415,15 +418,7 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 				zap.String("title", tool.Annotations.Title))
 		}
 
-		if hasAnnotations {
-			toolMeta.Annotations = &config.ToolAnnotations{
-				Title:           tool.Annotations.Title,
-				ReadOnlyHint:    tool.Annotations.ReadOnlyHint,
-				DestructiveHint: tool.Annotations.DestructiveHint,
-				IdempotentHint:  tool.Annotations.IdempotentHint,
-				OpenWorldHint:   tool.Annotations.OpenWorldHint,
-			}
-		}
+		toolMeta.Annotations = toolAnnotationsFromWire(tool.Annotations)
 
 		// Compute hash for tool change detection.
 		// Hash is based on serverName + toolName + description + inputSchema + outputSchema.
@@ -437,6 +432,16 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 		zap.Int("tool_count", len(tools)))
 
 	return tools, nil
+}
+
+func toolAnnotationsFromWire(annotation mcp.ToolAnnotation) *config.ToolAnnotations {
+	return &config.ToolAnnotations{
+		Title:           annotation.Title,
+		ReadOnlyHint:    annotation.ReadOnlyHint,
+		DestructiveHint: annotation.DestructiveHint,
+		IdempotentHint:  annotation.IdempotentHint,
+		OpenWorldHint:   annotation.OpenWorldHint,
+	}
 }
 
 // CallTool executes a tool on the upstream server

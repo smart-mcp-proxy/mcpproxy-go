@@ -53,14 +53,10 @@ beforeEach(() => {
 // the stat tile above, then offered the card no way to review anything.
 //
 // Spec 109 FR-013/FR-014 (109-e) folded the card's whole action row down to
-// ONE primary button = `health.actions[0]`, so "Review" is now that primary
-// button, deep-linked straight to the server's Tools tab (never the old
-// Security-tab link, and never a direct approve — FR-005). Review round 1
-// (109-e high finding): it used to link to `/review/<name>` on the theory
-// that a redirect to `?tab=tools` existed elsewhere — that route was never
-// registered, so it 404'd; the link now goes straight to the Tools tab.
+// ONE primary button = `health.actions[0]`, so "Review" opens the dedicated
+// queue detail (never a direct approval — FR-005).
 describe('ServerCard — quarantined card affords review (audit F7)', () => {
-  it('offers Review as the one primary action, deep-linked to the Tools tab', () => {
+  it('offers Review as the one primary action, deep-linked to the review screen', () => {
     const wrapper = mountCard(
       makeServer({
         quarantined: true,
@@ -75,7 +71,7 @@ describe('ServerCard — quarantined card affords review (audit F7)', () => {
     const review = wrapper.find('[data-test="server-card-primary-action"]')
     expect(review.exists()).toBe(true)
     expect(review.text()).toContain('Review')
-    expect(review.attributes('href')).toBe(`/servers/${wrapper.props('server').name}?tab=tools`)
+    expect(review.attributes('href')).toBe(`/review/${wrapper.props('server').name}`)
   })
 
   it('shows exactly one primary button, whatever the server state', () => {

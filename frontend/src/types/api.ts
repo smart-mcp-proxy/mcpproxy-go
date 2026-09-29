@@ -1256,6 +1256,69 @@ export interface OnboardingMarkRequest {
   mark_shown?: boolean
 }
 
+// Spec 109-g: the review API is intentionally separate from the ordinary
+// tools list.  Definitions come from an untrusted upstream and must be
+// rendered as text by every caller.
+export interface ReviewScan {
+  verdict: 'dangerous' | 'warnings' | 'clean' | 'not_scanned' | string
+  risk_score?: number
+  report_id?: string
+  scanned_at?: string
+}
+
+export interface ReviewQueueRow {
+  server: string
+  kind: 'server_review' | 'tool_review' | string
+  quarantined: boolean
+  tools_captured?: number
+  tier_counts?: Record<string, number>
+  pending?: number
+  changed?: number
+  scan?: ReviewScan
+  since?: string
+}
+
+export interface ReviewQueueResponse { count: number; servers: ReviewQueueRow[] }
+
+export interface ReviewToolPrevious {
+  description: string
+  input_schema?: unknown
+  output_schema?: unknown
+  annotations?: Record<string, unknown> | null
+}
+
+export interface ReviewToolDiff {
+  description?: string
+  input_schema?: string
+  output_schema?: string
+  annotations?: string
+}
+
+export interface ReviewTool {
+  name: string
+  description: string
+  input_schema?: unknown
+  output_schema?: unknown
+  annotations?: Record<string, unknown> | null
+  tier: 'read' | 'write' | 'destructive' | 'unannotated' | 'unknown' | string
+  approval_status: 'approved' | 'pending' | 'changed' | string
+  disabled: boolean
+  scan_verdict: string
+  held_reason?: string
+  held_signals?: string[]
+  previous?: ReviewToolPrevious | null
+  diff?: ReviewToolDiff | null
+}
+
+export interface ServerReviewResponse {
+  server: {
+    name: string; transport: string; command?: string; url?: string
+    quarantined: boolean; trust_mode?: string; source_registry_id?: string; source_registry_provenance?: string; scan?: ReviewScan
+    definitions_captured: boolean
+  }
+  tools: ReviewTool[]
+}
+
 // Profiles v2 (MCP-3243 / T4): a profile scopes tool discovery + calls to a
 // named subset of upstream servers. Mirrors httpapi.ProfileSummary from the
 // GET /api/v1/profiles listing (MCP-3241).

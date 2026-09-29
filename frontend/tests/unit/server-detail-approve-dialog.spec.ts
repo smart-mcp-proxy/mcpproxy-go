@@ -97,16 +97,13 @@ beforeEach(() => {
   withScan = true
 })
 
-describe('ServerDetail — the approve dialog names the gate it skips (F09)', () => {
-  it('says what force approval does instead of naming an undefined "scanner gate"', async () => {
+describe('ServerDetail — approval enters informed review (Spec 109-g)', () => {
+  it('opens review instead of a force-approval dialog for dangerous findings', async () => {
     const wrapper = await mountDetail()
     await wrapper.get('[data-test="quarantine-action-approve"]').trigger('click')
 
-    const modal = wrapper.get('.modal-open')
-    expect(modal.text()).toContain('2 dangerous findings')
-    expect(modal.text()).not.toContain('the scanner gate')
-    expect(modal.text()).toContain('skips the scan-based approval gate')
-    expect(modal.text()).toContain('unquarantines this server')
+    expect(wrapper.find('.modal-open').exists()).toBe(false)
+    expect(wrapper.find('[data-test="review-screen"]').exists()).toBe(true)
   })
 
   // Review round 2 (109-e medium finding): the gate sentence
@@ -117,15 +114,12 @@ describe('ServerDetail — the approve dialog names the gate it skips (F09)', ()
   // (the shared sentence mentioning findings even with no scan) uncoverable
   // anywhere — server-detail-quarantine-banner.spec.ts's own no-scan-mode
   // test only checks the "No Security Scan Run" title, never this body text.
-  it('says nothing about findings in the no-scan mode of the same dialog', async () => {
+  it('opens review instead of a force-approval dialog when no scan exists', async () => {
     withScan = false
     const wrapper = await mountDetail()
     await wrapper.get('[data-test="quarantine-action-approve"]').trigger('click')
 
-    const modal = wrapper.get('.modal-open')
-    expect(modal.text()).toContain('No Security Scan Run')
-    expect(modal.text()).toContain('skips the scan-based approval gate')
-    expect(modal.text()).not.toContain('dangerous finding')
-    expect(modal.text()).not.toContain('these findings')
+    expect(wrapper.find('.modal-open').exists()).toBe(false)
+    expect(wrapper.find('[data-test="review-screen"]').exists()).toBe(true)
   })
 })

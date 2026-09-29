@@ -160,15 +160,14 @@ describe('ServerDetail — quarantine banner scan summary (Spec 088 T020, FR-014
 })
 
 describe('ServerDetail — quarantine banner actions (Spec 088 T020, FR-014/FR-015)', () => {
-  it('offers approval through the existing gated approve flow', async () => {
+  it('sends approval to the informed review tab', async () => {
     serverExtra = { trust_mode: 'manual' }
     const { wrapper } = await mountDetail()
     const approve = wrapper.find('[data-test="quarantine-action-approve"]')
     expect(approve.exists()).toBe(true)
     await approve.trigger('click')
     await flushPromises()
-    // No scan has run → the existing "No Security Scan Run" confirmation opens.
-    expect(wrapper.text()).toContain('No Security Scan Run')
+    expect(wrapper.find('[data-test="review-screen"]').exists()).toBe(true)
   })
 
   it('offers a Run-scan CTA when nothing has ever been scanned, starting a scan', async () => {
