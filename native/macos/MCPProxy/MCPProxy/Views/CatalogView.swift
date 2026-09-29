@@ -141,7 +141,7 @@ struct CatalogView: View {
 
     @ViewBuilder
     private func resultCard(_ r: CatalogResult) -> some View {
-        let key = "\(r.source)-\(r.id)"
+        let key = r.id
         let addedName = addedNames[key]
         let added = addedName != nil || r.added
 
@@ -152,7 +152,7 @@ struct CatalogView: View {
                         .font(.scaled(.headline, scale: fontScale))
                         .lineLimit(1)
                         .accessibilityIdentifier("catalog-result-title")
-                    Text(r.id)
+                    Text(r.catalogID)
                         .font(.scaledMonospaced(.caption2, scale: fontScale))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -339,7 +339,7 @@ struct CatalogView: View {
         // already rolled back on a write failure.
         var writtenRefs: [String] = []
         do {
-            let serverName = result.title.isEmpty ? result.id : result.title
+            let serverName = result.title.isEmpty ? result.catalogID : result.title
             let resolved = try await SecretFieldResolver.resolve(client: client, serverName: serverName, fields: pendingFields)
             writtenRefs = resolved.writtenRefs
             let added = await addResult(result, env: resolved.env)
@@ -360,10 +360,10 @@ struct CatalogView: View {
     @discardableResult
     private func addResult(_ result: CatalogResult, env: [String: String]) async -> Bool {
         guard let client = apiClient else { return false }
-        let key = "\(result.source)-\(result.id)"
+        let key = result.id
         addingKey = key
         defer { addingKey = nil }
-        let outcome = await client.addServerFromRegistry(registryID: result.source, serverID: result.id, env: env.isEmpty ? nil : env)
+        let outcome = await client.addServerFromRegistry(registryID: result.source, serverID: result.catalogID, env: env.isEmpty ? nil : env)
         if outcome.success {
             let assignedName = outcome.serverName ?? result.title
             addedNames[key] = assignedName

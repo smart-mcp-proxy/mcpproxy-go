@@ -43,9 +43,13 @@ import { looksSecret } from '@/utils/secretLike'
 
 // One Value/Secret toggle for a single env var or header field (Spec 109
 // FR-065). The parent owns the actual value; this component only owns the
-// mode (value vs secret) and defaults it to Secret for a secret-like name —
-// unless the keyring is unavailable, in which case it can never enter secret
-// mode (FR-065: "the toggle is disabled with the reason").
+// mode (value vs secret) and defaults it to Secret for a secret-like name.
+// When the keyring is unavailable the Secret button is disabled with the
+// reason (FR-065) and setMode refuses to ENTER secret mode, but a parent that
+// seeds `mode` from secret_like can still hand this component 'secret' while
+// the keyring is unavailable. Parents therefore must fail closed themselves:
+// CatalogSearch and PasteServer disable Add while any field is in that state
+// (never silently downgrading to plaintext) until the user picks Value.
 interface Props {
   name: string
   kind: 'env' | 'header'

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -327,4 +328,47 @@ func TestCatalogSearch_SourceFilterAppliesBeforeTruncation(t *testing.T) {
 	filtered := catalogDecodeResults(t, rec)
 	require.Len(t, filtered, 1, "expected other-tool to survive source filtering despite limit=1")
 	assert.Equal(t, "other-tool", filtered[0]["id"])
+}
+
+// TestCatalogSearch_ServerListFailureIs500 pins F-O (#1398): when the
+// configured-server list cannot be read, the response must be an error, not a
+// 200 in which every entry silently reads added:false. Both server-listing
+// seams (management service and the legacy generic path) are covered.
+func TestCatalogSearch_ServerListFailureIs500(t *testing.T) {
+	for _, withMgmt := range []bool{true, false} {
+		name := "legacy"
+		if withMgmt {
+			name = "management"
+		}
+		t.Run(name, func(t *testing.T) {
+			withCatalogFixtureRegistry(t)
+			ctrl := &scopeController{
+				cfg:            scopeFixtureConfig(false),
+				servers:        catalogFixtureServers(),
+				withManagement: withMgmt,
+				listErr:        errors.New("storage unavailable"),
+			}
+			srv, _ := scopedAgentServer(t, ctrl, []string{"gamma"})
+
+			rec := scopeGet(t, srv, "/api/v1/catalog/search?q=tool", scopeAdminAPIKey)
+			require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+// TestCatalogSearch_TagUnsupportedIs400 pins F-K (#1398): catalog entries
+// carry no tags, so the `tag` parameter cannot be honoured. It is rejected
+// explicitly rather than silently ignored.
+func TestCatalogSearch_TagUnsupportedIs400(t *testing.T) {
+	withCatalogFixtureRegistry(t)
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: catalogFixtureServers(), withManagement: true}
+	srv, _ := scopedAgentServer(t, ctrl, []string{"gamma"})
+
+	rec := scopeGet(t, srv, "/api/v1/catalog/search?q=tool&tag=database", scopeAdminAPIKey)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "tag")
+
+	// Empty tag is the same as absent.
+	rec = scopeGet(t, srv, "/api/v1/catalog/search?q=tool&tag=", scopeAdminAPIKey)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }

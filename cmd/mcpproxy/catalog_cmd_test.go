@@ -281,3 +281,14 @@ func TestPrintCatalogDeprecationNotice(t *testing.T) {
 		t.Errorf("unexpected deprecation notice: %q", out)
 	}
 }
+
+// TestRejectCatalogTag pins F-K (#1398): --tag cannot be honoured, so a
+// non-empty value is an error rather than a silent no-op.
+func TestRejectCatalogTag(t *testing.T) {
+	if err := rejectCatalogTag(""); err != nil {
+		t.Errorf("empty tag should be accepted, got %v", err)
+	}
+	if err := rejectCatalogTag("database"); err == nil {
+		t.Error("non-empty tag should be rejected")
+	}
+}

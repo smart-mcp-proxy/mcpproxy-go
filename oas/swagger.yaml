@@ -4699,7 +4699,8 @@ paths:
         name: source
         schema:
           type: string
-      - description: Filter by tag
+      - description: 'Not supported: catalog entries carry no tags; a non-empty value
+          returns 400'
         in: query
         name: tag
         schema:
@@ -4716,6 +4717,18 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.SuccessResponse'
           description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: tag filtering is not supported
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: configured servers could not be listed
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []

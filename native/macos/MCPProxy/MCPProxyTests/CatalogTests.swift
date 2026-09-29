@@ -24,7 +24,7 @@ final class CatalogTests: XCTestCase {
         """
         let result = try decode(CatalogResult.self, from: json)
         XCTAssertEqual(result.source, "official")
-        XCTAssertEqual(result.id, "io.github.github/github-mcp-server")
+        XCTAssertEqual(result.catalogID, "io.github.github/github-mcp-server")
         XCTAssertEqual(result.title, "GitHub")
         XCTAssertTrue(result.official)
         XCTAssertTrue(result.verified)
@@ -120,22 +120,15 @@ final class CatalogTests: XCTestCase {
         struct Fixture: Decodable {
             let cases: [FixtureCase]
         }
-        // Kept in sync with internal/secret/testdata/ref_names.json /
-        // frontend/tests/unit/fixtures/ref_names.json by hand (no shared
-        // fixture-loading mechanism between the Go module and this SPM
-        // package's test target).
-        let fixtureJSON = """
-        {
-          "cases": [
-            {"server": "github", "kind": "env", "key": "API_KEY", "taken": [], "want": "github-env-api-key"},
-            {"server": "github", "kind": "header", "key": "API_KEY", "taken": [], "want": "github-header-api-key"},
-            {"server": "github", "kind": "env", "key": "GITHUB_TOKEN", "taken": [], "want": "github-env-github-token"},
-            {"server": "My Server!", "kind": "env", "key": "GITHUB_TOKEN", "taken": [], "want": "my-server-env-github-token"},
-            {"server": "github", "kind": "env", "key": "API_KEY", "taken": ["github-env-api-key"], "want": "github-env-api-key-2"},
-            {"server": "github", "kind": "env", "key": "API_KEY", "taken": ["github-env-api-key", "github-env-api-key-2"], "want": "github-env-api-key-3"}
-          ]
-        }
-        """
+        // Load the REAL canonical fixture from the repo (not a hand copy), so
+        // a case added to it later runs on Swift too. #filePath is
+        // <repo>/native/macos/MCPProxy/MCPProxyTests/CatalogTests.swift, so the
+        // repo root is five path components up. A missing file is a hard
+        // failure: silently skipping would make the three-way pin vacuous.
+        var repoRoot = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { repoRoot.deleteLastPathComponent() }
+        let fixtureURL = repoRoot.appendingPathComponent("internal/secret/testdata/ref_names.json")
+        let fixtureJSON = try String(contentsOf: fixtureURL, encoding: .utf8)
         let fixture = try decode(Fixture.self, from: fixtureJSON)
         XCTAssertFalse(fixture.cases.isEmpty)
         for c in fixture.cases {
@@ -147,6 +140,41 @@ final class CatalogTests: XCTestCase {
             let got = SecretRefName.compute(server: c.server, kind: kind, key: c.key, taken: { takenSet.contains($0) })
             XCTAssertEqual(got, c.want, "server=\(c.server) kind=\(c.kind) key=\(c.key)")
         }
+    }
+
+    // MARK: - CatalogResult list identity (#1398 F-J)
+
+    /// The catalog `id` is unique only within its `source`, so two sources
+    /// listing the same id must still get distinct `Identifiable` identities.
+    func testStableIDDistinguishesSameIdAcrossSources() throws {
+        func result(source: String) throws -> CatalogResult {
+            try decode(CatalogResult.self, from: """
+            {"source": "\(source)", "id": "shared-id", "title": "T", "verified": false, "official": false,
+             "description": "d", "transport": "http", "install": {"url": "https://example.test/mcp"},
+             "added": false}
+            """)
+        }
+        let a = try result(source: "official")
+        let b = try result(source: "smithery")
+        XCTAssertEqual(a.catalogID, b.catalogID)
+        XCTAssertNotEqual(a.id, b.id)
+        XCTAssertEqual(Set([a, b].map(\.id)).count, 2)
+    }
+
+    /// Delimiter concatenation must not collide when either identifier itself
+    /// contains the delimiter used between source and catalog id.
+    func testStableIDDistinguishesHyphenatedSourceAndCatalogID() throws {
+        func result(source: String, id: String) throws -> CatalogResult {
+            try decode(CatalogResult.self, from: """
+            {"source": "\(source)", "id": "\(id)", "title": "T", "verified": false, "official": false,
+             "description": "d", "transport": "http", "install": {"url": "https://example.test/mcp"},
+             "added": false}
+            """)
+        }
+        let a = try result(source: "docker-mcp-catalog", id: "x")
+        let b = try result(source: "docker-mcp", id: "catalog-x")
+        XCTAssertNotEqual(a.id, b.id)
+        XCTAssertEqual(Set([a, b].map(\.id)).count, 2)
     }
 
     // MARK: - SecretLikeName (D13)

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -20,6 +21,11 @@ type fakeKeyringProvider struct {
 	// everything stored by the calls before it.
 	failStoreOnNthCall int
 	storeCalls         int
+
+	// unavailableAfterStoreFailure flips available to false when the
+	// failStoreOnNthCall Store fails, modelling a keyring backend that wedges
+	// mid-run (rollback's Delete is then refused by the resolver).
+	unavailableAfterStoreFailure bool
 }
 
 func newFakeKeyringProvider(available bool) *fakeKeyringProvider {
@@ -33,6 +39,9 @@ func (f *fakeKeyringProvider) Resolve(_ context.Context, ref secret.Ref) (string
 func (f *fakeKeyringProvider) Store(_ context.Context, ref secret.Ref, value string) error {
 	f.storeCalls++
 	if f.failStoreOnNthCall > 0 && f.storeCalls == f.failStoreOnNthCall {
+		if f.unavailableAfterStoreFailure {
+			f.available = false
+		}
 		return fmt.Errorf("simulated keyring failure on call %d", f.storeCalls)
 	}
 	f.store[ref.Name] = value
@@ -219,5 +228,84 @@ func TestApplySecretFlags_SecondStoreFailureRollsBackFirst(t *testing.T) {
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != "github-env-first-token" {
 		t.Errorf("expected exactly one rollback delete for the first ref, got %+v", fake.deleted)
+	}
+}
+
+// TestApplySecretFlags_RollbackFailureNamesOrphanedRefs pins F-G (#1398): when
+// the keyring backend wedges (IsAvailable flips false) between the first
+// Store and the failing second Store, resolver.Delete refuses the rollback.
+// That must be surfaced with the orphaned ref named, not silently dropped.
+func TestApplySecretFlags_RollbackFailureNamesOrphanedRefs(t *testing.T) {
+	fake := newFakeKeyringProvider(true)
+	fake.failStoreOnNthCall = 2
+	fake.unavailableAfterStoreFailure = true
+	resolver := newTestSecretResolver(fake)
+
+	_, err := applySecretFlags(resolver, "github",
+		[]string{"FIRST_TOKEN=first-value", "SECOND_TOKEN=second-value"},
+		nil, map[string]string{}, map[string]string{},
+	)
+	if err == nil {
+		t.Fatal("expected an error when the second Store call fails")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "simulated keyring failure") {
+		t.Errorf("original store failure missing from error: %v", err)
+	}
+	if !strings.Contains(msg, "rollback incomplete") || !strings.Contains(msg, "github-env-first-token") {
+		t.Errorf("error should name the orphaned ref, got: %v", err)
+	}
+	if _, still := fake.store["github-env-first-token"]; !still {
+		t.Error("test setup: first ref should still be in the wedged keyring")
+	}
+}
+
+// TestRollbackKeyringRefs_ReturnsOrphanedRefs pins the runUpstreamAdd-level
+// counterpart: refs whose deletion fails are reported, not swallowed.
+func TestRollbackKeyringRefs_ReturnsOrphanedRefs(t *testing.T) {
+	fake := newFakeKeyringProvider(true)
+	fake.store["a"] = "1"
+	fake.store["b"] = "2"
+	resolver := newTestSecretResolver(fake)
+
+	if orphaned := rollbackKeyringRefs(resolver, []string{"a", "b"}); len(orphaned) != 0 {
+		t.Errorf("healthy keyring: expected no orphans, got %v", orphaned)
+	}
+
+	fake.store["c"] = "3"
+	fake.available = false
+	orphaned := rollbackKeyringRefs(resolver, []string{"c"})
+	if len(orphaned) != 1 || orphaned[0] != "c" {
+		t.Errorf("wedged keyring: expected [c] orphaned, got %v", orphaned)
+	}
+}
+
+// TestApplySecretFlags_EmptyFieldNameRejected pins F-H (#1398): an empty
+// env/header name must be rejected before anything is stored, exactly like
+// the sibling parseRegistryEnv.
+func TestApplySecretFlags_EmptyFieldNameRejected(t *testing.T) {
+	cases := []struct {
+		name    string
+		envs    []string
+		headers []string
+	}{
+		{"env empty name", []string{"=v"}, nil},
+		{"env whitespace name", []string{"  =v"}, nil},
+		{"header empty name", nil, []string{":v"}},
+		{"header whitespace name", nil, []string{" : v"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeKeyringProvider(true)
+			resolver := newTestSecretResolver(fake)
+			env, headers := map[string]string{}, map[string]string{}
+			refs, err := applySecretFlags(resolver, "github", tc.envs, tc.headers, env, headers)
+			if err == nil {
+				t.Fatal("expected an error for an empty field name")
+			}
+			if len(refs) != 0 || len(fake.store) != 0 || len(env) != 0 || len(headers) != 0 {
+				t.Errorf("nothing may be stored/persisted: refs=%v store=%v env=%v headers=%v", refs, fake.store, env, headers)
+			}
+		})
 	}
 }

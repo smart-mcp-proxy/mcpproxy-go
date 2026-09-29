@@ -23,6 +23,40 @@ func TestDetectFormat_URL(t *testing.T) {
 	}
 }
 
+// TestDetectFormat_URLWithTrailingJunkRejected pins F-L (#1398): url.Parse
+// tolerates whitespace, so a URL followed by stray text used to detect as a
+// URL and be stored verbatim as an unusable server URL. It must neither
+// detect as a URL nor fall through to a nonsense "command" whose executable
+// is the URL.
+func TestDetectFormat_URLWithTrailingJunkRejected(t *testing.T) {
+	cases := []string{
+		"https://x.com/mcp trailing",
+		"http://localhost:8080/mcp\tjunk",
+		"HTTPS://x.com/mcp -y",
+		"https://x.com/mcp\u00a0junk", // non-breaking space
+	}
+	for _, c := range cases {
+		result, err := DetectFormat([]byte(c))
+		if err == nil {
+			t.Errorf("DetectFormat(%q) = %q, want an error", c, result.Format)
+		}
+	}
+	// The clean form still detects.
+	if result, err := DetectFormat([]byte("https://x.com/mcp")); err != nil || result.Format != FormatURL {
+		t.Errorf("clean URL: got %+v, %v", result, err)
+	}
+}
+
+// TestURLParser_RejectsTrailingJunk pins the same rule at parse time.
+func TestURLParser_RejectsTrailingJunk(t *testing.T) {
+	p := &URLParser{}
+	for _, in := range []string{"https://x.com/mcp trailing", "https://x.com/mcp\u00a0junk"} {
+		if _, err := p.Parse([]byte(in)); err == nil {
+			t.Fatalf("expected an error for %q", in)
+		}
+	}
+}
+
 // TestDetectFormat_Command pins FR-064: a single non-JSON/TOML line detects as
 // the new "command" format.
 func TestDetectFormat_Command(t *testing.T) {
