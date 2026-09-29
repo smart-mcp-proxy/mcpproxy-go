@@ -31,6 +31,11 @@ var (
 	// (StageClientCredentialRotation), never an immediate replace.
 	ErrClientCredentialActive = errors.New("client credential is active; use rotation instead of mint")
 
+	// ErrClientCredentialNotActive is returned by StageClientCredentialRotation
+	// when the kind=client record exists but is revoked or expired: there is
+	// no active credential to rotate, so the caller must mint a fresh one.
+	ErrClientCredentialNotActive = errors.New("client credential is revoked or expired; mint a new one")
+
 	// ErrClientCredentialNotFound is returned by rotation/forget operations
 	// when no client-<id> record exists at all.
 	ErrClientCredentialNotFound = errors.New("client credential not found")
@@ -218,7 +223,7 @@ func (m *Manager) StageClientCredentialRotation(clientID, newRawToken string, hm
 			return ErrClientCredentialConflict
 		}
 		if existing.IsRevoked() || existing.IsExpired() {
-			return ErrClientCredentialActive // wrong direction: nothing active to rotate
+			return ErrClientCredentialNotActive
 		}
 
 		pendingBucket, err := tx.CreateBucketIfNotExists([]byte(AgentTokenPendingBucket))
@@ -422,17 +427,39 @@ func (m *Manager) ForgetClientCredential(clientID string) (*auth.AgentToken, err
 	if !auth.ValidClientID(clientID) {
 		return nil, fmt.Errorf("invalid client id %q", clientID)
 	}
-	name := auth.ClientTokenName(clientID)
-	tok, err := m.GetAgentTokenByName(name)
+
+	// Resolve and revoke inside ONE transaction under the manager lock, like
+	// every other client-credential mutation, so a concurrent mint cannot slip
+	// between the read and the revoke and leave the caller a stale record.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var revoked *auth.AgentToken
+	err := m.db.db.Update(func(tx *bbolt.Tx) error {
+		tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
+		if tokenBucket == nil {
+			return ErrClientCredentialNotFound
+		}
+		primaryHash, tok, err := findClientTokenRecordLocked(tx, clientID)
+		if err != nil {
+			return err
+		}
+		if tok == nil || tok.Kind != auth.KindClient {
+			return ErrClientCredentialNotFound
+		}
+		tok.Revoked = true
+		data, err := json.Marshal(tok)
+		if err != nil {
+			return fmt.Errorf("failed to marshal client credential: %w", err)
+		}
+		if err := tokenBucket.Put(primaryHash, data); err != nil {
+			return fmt.Errorf("failed to store revoked client credential: %w", err)
+		}
+		revoked = tok
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if tok == nil || tok.Kind != auth.KindClient {
-		return nil, ErrClientCredentialNotFound
-	}
-	if err := m.RevokeAgentToken(name); err != nil {
-		return nil, err
-	}
-	tok.Revoked = true
-	return tok, nil
+	return revoked, nil
 }
