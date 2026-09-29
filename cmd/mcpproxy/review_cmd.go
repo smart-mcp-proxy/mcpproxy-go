@@ -181,6 +181,16 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 		return err
 	}
 	table := &clioutput.TableFormatter{}
+	if message, _ := value["message"].(string); message != "" {
+		fmt.Println(message)
+		return nil
+	}
+	if status, _ := value["status"].(string); status != "" {
+		if serverName, _ := value["server_name"].(string); serverName != "" {
+			fmt.Printf("%s server %s\n", strings.ToUpper(status[:1])+status[1:], serverName)
+			return nil
+		}
+	}
 	if servers, ok := value["servers"].([]interface{}); ok {
 		rows := make([][]string, 0, len(servers))
 		for _, item := range servers {
@@ -203,8 +213,13 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 			desc := fmt.Sprint(tool["description"])
 			if !full {
 				desc = strings.Split(desc, "\n")[0]
-			} else if diff := tool["diff"]; diff != nil {
-				desc += "\nfrom the server, not verified:\n" + fmt.Sprint(diff)
+			} else {
+				desc = "from the server, not verified:\n" + desc
+				desc += reviewSchemaText("Input schema", tool["input_schema"])
+				desc += reviewSchemaText("Output schema", tool["output_schema"])
+				if diff := tool["diff"]; diff != nil {
+					desc += "\nChanges from the previous approved definition:\n" + fmt.Sprint(diff)
+				}
 			}
 			rows = append(rows, []string{fmt.Sprint(tool["name"]), fmt.Sprint(tool["tier"]), fmt.Sprint(tool["approval_status"]), fmt.Sprint(tool["scan_verdict"]), desc})
 		}
@@ -215,4 +230,15 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 	}
 	fmt.Print(out)
 	return nil
+}
+
+func reviewSchemaText(label string, schema interface{}) string {
+	if schema == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(schema)
+	if err != nil || string(encoded) == "null" {
+		return ""
+	}
+	return "\n" + label + ":\n" + string(encoded)
 }

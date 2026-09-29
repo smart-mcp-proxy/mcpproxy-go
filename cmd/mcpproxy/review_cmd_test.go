@@ -10,7 +10,7 @@ import (
 )
 
 func TestFormatReviewResponseTableHonorsFull(t *testing.T) {
-	raw := []byte(`{"data":{"server":{"name":"github"},"tools":[{"name":"create_issue","tier":"write","approval_status":"pending","scan_verdict":"warnings","description":"Create an issue\nwith labels","diff":"@@ -1 +1 @@\n-old\n+new"}]}}`)
+	raw := []byte(`{"data":{"server":{"name":"github"},"tools":[{"name":"create_issue","tier":"write","approval_status":"pending","scan_verdict":"warnings","description":"Create an issue\nwith labels","input_schema":{"type":"object"},"output_schema":{"type":"string"},"diff":"@@ -1 +1 @@\n-old\n+new"}]}}`)
 
 	compact := captureReviewOutput(t, func() error { return formatReviewResponse("table", raw, false) })
 	require.Contains(t, compact, "TOOL")
@@ -22,7 +22,24 @@ func TestFormatReviewResponseTableHonorsFull(t *testing.T) {
 	full := captureReviewOutput(t, func() error { return formatReviewResponse("table", raw, true) })
 	require.Contains(t, full, "with labels")
 	require.Contains(t, full, "from the server, not verified")
+	require.Contains(t, full, "Input schema")
+	require.Contains(t, full, "Output schema")
 	require.Contains(t, full, "@@ -1 +1 @@")
+}
+
+func TestFormatReviewResponseTableWritesActionResult(t *testing.T) {
+	for _, test := range []struct {
+		raw  []byte
+		want string
+	}{
+		{[]byte(`{"data":{"status":"approved","server_name":"github"}}`), "Approved server github"},
+		{[]byte(`{"data":{"message":"Blocked 2 tools for server github"}}`), "Blocked 2 tools for server github"},
+	} {
+		output := captureReviewOutput(t, func() error { return formatReviewResponse("table", test.raw, false) })
+		require.NotContains(t, output, "Server: <nil>")
+		require.NotContains(t, output, "No results found")
+		require.Contains(t, output, test.want)
+	}
 }
 
 func TestFormatReviewResponseTableQueueColumns(t *testing.T) {
