@@ -103,6 +103,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'update:modelValue', mode: TrustMode): void
+  (e: 'confirmation-pending', pending: boolean): void
 }>()
 
 const uid = getCurrentInstance()?.uid ?? 0
@@ -123,6 +124,7 @@ watch(
   () => props.modelValue,
   () => {
     pendingWarnMode.value = null
+    emit('confirmation-pending', false)
   }
 )
 
@@ -135,19 +137,23 @@ function onSelect(mode: TrustMode) {
   const meta = TRUST_MODES.find((m) => m.mode === mode)
   if (meta?.warnsOnSelect) {
     pendingWarnMode.value = mode
+    emit('confirmation-pending', true)
     return
   }
   pendingWarnMode.value = null
+  emit('confirmation-pending', false)
   emit('update:modelValue', mode)
 }
 
 function confirmPending() {
   const mode = pendingWarnMode.value
   pendingWarnMode.value = null
+  emit('confirmation-pending', false)
   if (mode) emit('update:modelValue', mode)
 }
 
 function cancelPending() {
   pendingWarnMode.value = null
+  emit('confirmation-pending', false)
 }
 </script>

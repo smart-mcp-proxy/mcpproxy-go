@@ -91,6 +91,7 @@ describe('ManualServerForm', () => {
       name: 'fs-server',
       protocol: 'stdio',
       enabled: true,
+      trust_mode: 'manual',
       command: 'npx',
       args_json: JSON.stringify(['-y', '@scope/server', '/tmp']),
     })
@@ -114,8 +115,36 @@ describe('ManualServerForm', () => {
       name: 'remote',
       protocol: 'http',
       enabled: true,
+      trust_mode: 'manual',
       url: 'https://api.example.com/mcp',
     })
     expect(wrapper.emitted('added')).toEqual([['remote']])
+  })
+
+  it('requires confirmation before adding with auto trust mode and submits the chosen mode', async () => {
+    vi.mocked(api.callTool).mockResolvedValue({ success: true, data: {} })
+    vi.mocked(api.getServers).mockResolvedValue({ success: true, data: { servers: [] } })
+    const wrapper = await mountManual()
+
+    await wrapper.find('[data-test="manual-name-input"]').setValue('trusted-server')
+    await wrapper.find('[data-test="manual-command-input"]').setValue('npx')
+    await wrapper.find('[data-test="trust-mode-option-auto"] input').setValue(true)
+
+    expect(wrapper.find('[data-test="trust-mode-auto-confirm"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="manual-submit"]').attributes('disabled')).toBeDefined()
+    await wrapper.find('[data-test="manual-server-form"]').trigger('submit')
+    await flushPromises()
+    expect(api.callTool).not.toHaveBeenCalled()
+
+    await wrapper.find('[data-test="trust-mode-auto-confirm-accept"]').trigger('click')
+    expect(wrapper.find('[data-test="manual-submit"]').attributes('disabled')).toBeUndefined()
+    await wrapper.find('[data-test="manual-server-form"]').trigger('submit')
+    await flushPromises()
+
+    expect(api.callTool).toHaveBeenCalledWith('upstream_servers', expect.objectContaining({
+      operation: 'add',
+      name: 'trusted-server',
+      trust_mode: 'auto',
+    }))
   })
 })
