@@ -23,6 +23,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
@@ -3929,7 +3930,7 @@ func (r *Runtime) UpdateOnboardingState(fn func(*storage.OnboardingState) error)
 // disabled, and UpdateOnboardingState keeps this write from racing connect or
 // onboarding mutations.
 func (r *Runtime) RecordClientSeen(clientName string) {
-	name := strings.ToLower(strings.TrimSpace(clientName))
+	name := sanitizeClientName(clientName)
 	if name == "" || r.storageManager == nil {
 		return
 	}
@@ -3937,14 +3938,29 @@ func (r *Runtime) RecordClientSeen(clientName string) {
 		if state.ClientLastSeen == nil {
 			state.ClientLastSeen = map[string]time.Time{}
 		}
-		state.ClientLastSeen[name] = time.Now()
+		now := time.Now()
+		// An MCP client can initialise repeatedly while reconnecting. Persisting
+		// every identical observation needlessly contends with the onboarding
+		// writers, but must not suppress a fresh generation after reconnect (the
+		// successful connect path clears its aliases).
+		if previous, ok := state.ClientLastSeen[name]; ok && now.Sub(previous) < time.Minute {
+			return nil
+		}
+		state.ClientLastSeen[name] = now
+		protected := knownClientAliases()
 		for len(state.ClientLastSeen) > 32 {
 			var oldest string
 			var at time.Time
 			for key, value := range state.ClientLastSeen {
+				if protected[key] {
+					continue
+				}
 				if oldest == "" || value.Before(at) {
 					oldest, at = key, value
 				}
+			}
+			if oldest == "" { // the fixed supported-client registry itself fits in the cap
+				break
 			}
 			delete(state.ClientLastSeen, oldest)
 		}
@@ -3952,4 +3968,30 @@ func (r *Runtime) RecordClientSeen(clientName string) {
 	}); err != nil && r.logger != nil {
 		r.logger.Debug("presence: unable to record MCP client", zap.Error(err))
 	}
+}
+
+// sanitizeClientName keeps the persisted observation bounded and safe to
+// render in terminals or UI labels. ClientInfo.name is untrusted peer input.
+func sanitizeClientName(raw string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+		if b.Len() >= 128 {
+			break
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func knownClientAliases() map[string]bool {
+	aliases := make(map[string]bool)
+	for _, client := range connect.GetAllClients() {
+		for _, alias := range client.ClientInfoNames {
+			aliases[sanitizeClientName(alias)] = true
+		}
+	}
+	return aliases
 }

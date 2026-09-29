@@ -92,8 +92,13 @@ func (s *Server) clientPresence(withSessions bool) ([]clientPresence, error) {
 		lastSeen := latestClientSeen(state.ClientLastSeen, def.ClientInfoNames)
 		row := clientPresence{ID: def.ID, DisplayName: def.Name, Kind: "supported", Icon: def.Icon, Installed: status.Exists, ConfigPath: status.ConfigPath, DisplayPath: status.DisplayPath, ReloadHint: def.ReloadHint, LastSeen: lastSeen}
 		connectedAt := state.ClientConnectedAt[def.ID]
-		row.Connected = !connectedAt.IsZero() || lastSeen != nil
-		if lastSeen != nil {
+		disconnectedAt := state.ClientDisconnectedAt[def.ID]
+		// A disconnect ends the previous connection generation. Historical
+		// initialise evidence remains useful as "last seen", but only a later
+		// initialise can make the client connected again.
+		seenAfterDisconnect := lastSeen != nil && (disconnectedAt.IsZero() || lastSeen.After(disconnectedAt))
+		row.Connected = !connectedAt.IsZero() || seenAfterDisconnect
+		if seenAfterDisconnect {
 			row.State = "connected_seen"
 		} else if !connectedAt.IsZero() {
 			row.State = "connected_never_seen"
