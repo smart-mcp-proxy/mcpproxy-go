@@ -497,3 +497,23 @@ func TestUsageAggregate_HasObservedRetrieveToolsCall(t *testing.T) {
 		assert.True(t, sizedOK)
 	})
 }
+
+func TestUsageAggregate_ClientCallsSinceUsesPersistedClientName(t *testing.T) {
+	base := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	agg := newUsageAggregate()
+	for _, client := range []string{"Claude Code", "cursor", "claude-code"} {
+		agg.Apply(&storage.ActivityRecord{
+			Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+			Status: storage.ActivityStatusSuccess, Timestamp: base,
+			Metadata: map[string]interface{}{"client_name": client},
+		})
+	}
+	// This legacy record is outside the rolling interval.
+	agg.Apply(&storage.ActivityRecord{
+		Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+		Status: storage.ActivityStatusSuccess, Timestamp: base.Add(-25 * time.Hour),
+		Metadata: map[string]interface{}{"client_name": "claude-code"},
+	})
+	require.Equal(t, 2, agg.ClientCallsSince([]string{"claude-code", "Claude Code"}, base.Add(-24*time.Hour)))
+	require.Equal(t, 1, agg.ClientCallsSince([]string{"cursor"}, base.Add(-24*time.Hour)))
+}

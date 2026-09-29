@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -183,6 +184,10 @@ type UsageAggregate struct {
 	// keeps answering a different one (the real average SIZE, which truncated
 	// calls cannot honestly contribute to — see truncatedBuiltinOverstatesDelivery).
 	RetrieveToolsObservedCalls int64 `json:"retrieve_tools_observed_calls,omitempty"`
+	// ClientCalls is a bounded hourly rolling counter keyed by the persisted
+	// activity client_name. It avoids an activity-log scan on /clients while
+	// retaining enough resolution to answer the 24-hour presence row.
+	ClientCalls map[string]map[int64]int64 `json:"client_calls,omitempty"`
 	// AdmissionVersion stamps which population rule built this aggregate. A
 	// persisted snapshot whose stamp differs from usageAdmissionVersion was
 	// counted under a different rule and cannot be patched incrementally —
@@ -200,12 +205,13 @@ type UsageAggregate struct {
 // LatencyBuckets index now means a different span), so pre-change snapshots are
 // rebuilt instead of carried forward with hours counted — or milliseconds
 // bucketed — under the old rule.
-const usageAdmissionVersion = 5
+const usageAdmissionVersion = 6
 
 func newUsageAggregate() *UsageAggregate {
 	return &UsageAggregate{
 		Tools:            make(map[string]*ToolUsage),
 		Buckets:          make(map[int64]*TimeBucket),
+		ClientCalls:      make(map[string]map[int64]int64),
 		AdmissionVersion: usageAdmissionVersion,
 	}
 }
@@ -256,10 +262,68 @@ func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 
 	a.applyToolRollup(rec)
 	a.applyRetrieveToolsSizing(rec)
+	a.applyClientCalls(rec)
 
 	if counted, isError := storage.CountsAsCall(rec); counted {
 		a.countInTimeBucket(rec, isError)
 	}
+}
+
+func (a *UsageAggregate) applyClientCalls(rec *storage.ActivityRecord) {
+	if counted, _ := storage.CountsAsCall(rec); !counted || rec.Metadata == nil {
+		return
+	}
+	raw, _ := rec.Metadata["client_name"].(string)
+	client := strings.ToLower(strings.TrimSpace(raw))
+	if client == "" {
+		return
+	}
+	if a.ClientCalls == nil {
+		a.ClientCalls = make(map[string]map[int64]int64)
+	}
+	if _, ok := a.ClientCalls[client]; !ok && len(a.ClientCalls) >= 32 {
+		var oldest string
+		var oldestBucket int64
+		for key, buckets := range a.ClientCalls {
+			for bucket := range buckets {
+				if oldest == "" || bucket < oldestBucket {
+					oldest, oldestBucket = key, bucket
+				}
+			}
+		}
+		if oldest != "" {
+			delete(a.ClientCalls, oldest)
+		}
+	}
+	bucket := rec.Timestamp.UTC().Truncate(time.Hour).Unix()
+	if a.ClientCalls[client] == nil {
+		a.ClientCalls[client] = make(map[int64]int64)
+	}
+	a.ClientCalls[client][bucket]++
+}
+
+// ClientCallsSince returns calls observed under any known client alias in the
+// requested interval. Activity records persist the client name at write time.
+func (a *UsageAggregate) ClientCallsSince(aliases []string, since time.Time) int {
+	if a == nil {
+		return 0
+	}
+	minimum := since.UTC().Truncate(time.Hour).Unix()
+	seen := make(map[string]bool)
+	total := int64(0)
+	for _, alias := range aliases {
+		key := strings.ToLower(strings.TrimSpace(alias))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		for bucket, calls := range a.ClientCalls[key] {
+			if bucket >= minimum {
+				total += calls
+			}
+		}
+	}
+	return int(total)
 }
 
 // applyRetrieveToolsSizing folds a successful retrieve_tools call's response

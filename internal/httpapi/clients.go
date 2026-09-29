@@ -75,6 +75,7 @@ func (s *Server) clientPresence(withSessions bool) ([]clientPresence, error) {
 	if err != nil {
 		return nil, err
 	}
+	usage := s.controller.UsageSnapshot()
 	sessions, _, err := s.controller.GetRecentSessions(100, "")
 	if err != nil {
 		return nil, err
@@ -91,6 +92,7 @@ func (s *Server) clientPresence(withSessions bool) ([]clientPresence, error) {
 		}
 		lastSeen := latestClientSeen(state.ClientLastSeen, def.ClientInfoNames)
 		row := clientPresence{ID: def.ID, DisplayName: def.Name, Kind: "supported", Icon: def.Icon, Installed: status.Exists, ConfigPath: status.ConfigPath, DisplayPath: status.DisplayPath, ReloadHint: def.ReloadHint, LastSeen: lastSeen}
+		row.Calls24h = usage.ClientCallsSince(def.ClientInfoNames, time.Now().Add(-24*time.Hour))
 		connectedAt := state.ClientConnectedAt[def.ID]
 		disconnectedAt := state.ClientDisconnectedAt[def.ID]
 		// A disconnect ends the previous connection generation. Historical
