@@ -48,6 +48,13 @@
         <!-- Tab: Clients -->
         <!-- ============================ -->
         <section v-if="activeTab === 'clients'" data-test="panel-clients">
+          <!-- The wizard's primary client path is the same component used by
+               Clients. Keep the legacy markup below inert temporarily while
+               its presentation-only helpers are retired; it must never own a
+               second preview/write flow. -->
+          <ClientConnectList :show="true" @close="dismiss" />
+        </section>
+        <section v-if="false" aria-hidden="true">
           <p class="text-sm opacity-70 mb-4">
             Pick at least one AI tool. MCPProxy registers itself in that tool's config so the assistant can talk to mcpproxy. You'll see the exact change before anything is written, and a timestamped backup is created first.
           </p>
@@ -695,6 +702,7 @@ import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import ManualServerForm from '@/components/ManualServerForm.vue'
 import ImportServers from '@/components/ImportServers.vue'
+import ClientConnectList from '@/components/ClientConnectList.vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { skipReasonLabel } from '@/utils/importSkipReason'
 import type { ClientStatus, ActivityRecord, ConnectPreview, ImportedServer } from '@/types'
