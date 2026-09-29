@@ -2477,6 +2477,13 @@ func (m *Manager) SaveOnboardingState(state *OnboardingState) error {
 // persists the result in one bbolt transaction (Spec 109-b, T035). Every
 // writer of the record must use this instead of a separate
 // Get/SaveOnboardingState pair — see BoltDB.UpdateOnboardingState.
+//
+// Callback constraint: fn runs while m.mu is write-locked AND inside a bbolt
+// write transaction. It must be a short, pure mutation of the *OnboardingState
+// it is handed. It MUST NOT call any Manager or BoltDB method (Get/Save/
+// UpdateOnboardingState, or anything else that takes m.mu or opens a bbolt
+// transaction) and must not block on I/O or other goroutines: re-entering
+// either lock deadlocks, and slow work stalls every other storage operation.
 func (m *Manager) UpdateOnboardingState(fn func(*OnboardingState) error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
