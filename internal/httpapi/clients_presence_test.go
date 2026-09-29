@@ -151,7 +151,8 @@ func TestClientsPresence_ListsInitializeOnlyUnknownClientWithoutConfigPath(t *te
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	for _, raw := range successData(t, rec)["clients"].([]any) {
 		row := raw.(map[string]any)
-		if row["id"] == "other:local experimental client" {
+		if row["kind"] == "other" && row["display_name"] == "local experimental client" {
+			require.True(t, strings.HasPrefix(row["id"].(string), "other:local experimental client-"))
 			require.Equal(t, "local experimental client", row["display_name"])
 			require.Equal(t, "other", row["kind"])
 			require.Equal(t, "other", row["state"])
@@ -249,11 +250,59 @@ func TestClientsPresence_SanitizesUnknownSessionClientName(t *testing.T) {
 			require.NotContains(t, id, "\x7f")
 			require.NotContains(t, name, "\x7f")
 			require.Len(t, name, 128)
-			require.Equal(t, "other:"+name, id)
+			require.True(t, strings.HasPrefix(id, "other:"+name+"-"))
+			require.Len(t, strings.TrimPrefix(id, "other:"+name+"-"), 24)
 			return
 		}
 	}
 	t.Fatal("sanitized other client is missing")
+}
+
+func TestClientsPresence_PreservesDistinctUnknownNamesWithSameDisplayPrefix(t *testing.T) {
+	prefix := strings.Repeat("x", 128)
+	ctrl := &clientPresenceController{sessions: []*contracts.MCPSession{
+		{ID: "one", ClientName: prefix + "a", Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now()},
+		{ID: "two", ClientName: prefix + "b", Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now()},
+	}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	req.Header.Set("X-API-Key", "clients-admin-key")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var otherIDs []string
+	for _, raw := range successData(t, rec)["clients"].([]any) {
+		row := raw.(map[string]any)
+		if row["kind"] == "other" {
+			require.Equal(t, prefix, row["display_name"])
+			otherIDs = append(otherIDs, row["id"].(string))
+		}
+	}
+	require.Len(t, otherIDs, 2)
+	require.NotEqual(t, otherIDs[0], otherIDs[1])
+}
+
+func TestClientsPresence_EscapePrefixedKnownAliasRemainsOtherClient(t *testing.T) {
+	ctrl := &clientPresenceController{sessions: []*contracts.MCPSession{{
+		ID: "escaped-cursor", ClientName: "\x1bcursor", Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now(),
+	}}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	req.Header.Set("X-API-Key", "clients-admin-key")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	for _, raw := range successData(t, rec)["clients"].([]any) {
+		row := raw.(map[string]any)
+		if row["kind"] == "other" {
+			require.Equal(t, "cursor", row["display_name"])
+			require.NotEqual(t, "other:cursor", row["id"])
+			return
+		}
+	}
+	t.Fatal("escape-prefixed cursor must remain an unknown client")
 }
 
 func TestClientsPresence_RejectsUnsupportedScopeBeforeReadingSessions(t *testing.T) {

@@ -3,6 +3,8 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"time"
@@ -203,16 +205,19 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 	known := make(map[string]bool)
 	for _, def := range connect.GetAllClients() {
 		for _, alias := range def.ClientInfoNames {
-			known[strings.ToLower(alias)] = true
+			known[normalizeRawClientName(alias)] = true
 		}
 	}
 	for _, session := range sessions {
+		rawIdentity := normalizeRawClientName(session.ClientName)
 		name := sanitizeOtherClientName(session.ClientName)
-		key := name
-		if name == "" || known[key] {
+		if rawIdentity == "" || known[rawIdentity] {
 			continue
 		}
-		id := "other:" + key
+		if name == "" {
+			name = "Unknown client"
+		}
+		id := otherClientID(name, rawIdentity)
 		found := -1
 		for i := range result {
 			if result[i].ID == id {
@@ -239,12 +244,15 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 	// has no session row. Preserve that evidence too, while deliberately
 	// omitting configuration paths: MCP clientInfo has no trustworthy path.
 	for name, seenAt := range state.ClientLastSeen {
+		rawIdentity := normalizeRawClientName(name)
 		name = sanitizeOtherClientName(name)
-		key := name
-		if name == "" || known[key] {
+		if rawIdentity == "" || known[rawIdentity] {
 			continue
 		}
-		id := "other:" + key
+		if name == "" {
+			name = "Unknown client"
+		}
+		id := otherClientID(name, rawIdentity)
 		found := -1
 		for i := range result {
 			if result[i].ID == id {
@@ -300,4 +308,19 @@ func sanitizeOtherClientName(raw string) string {
 		b.WriteRune(r)
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// normalizeRawClientName is used only for identity and alias matching. It must
+// run before display sanitization: stripping an escape prefix from an unknown
+// client must not turn it into a trusted supported-client alias.
+func normalizeRawClientName(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+// otherClientID keeps the client row stable without exposing an untrusted full
+// name. The display prefix is bounded and a hash of the raw normalized identity
+// prevents distinct long names that share a display prefix from collapsing.
+func otherClientID(displayName, rawIdentity string) string {
+	digest := sha256.Sum256([]byte(rawIdentity))
+	return "other:" + displayName + "-" + hex.EncodeToString(digest[:12])
 }
