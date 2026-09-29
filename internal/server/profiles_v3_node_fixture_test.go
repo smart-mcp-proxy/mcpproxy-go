@@ -52,8 +52,11 @@ var wantNodeFixtureTools = map[string]wantNodeFixtureTool{
 
 // nodeFixtureFileTools is which tools each per-server file must contain, in
 // order (matches enforcementMatrixProfiles' upstream registration order in
-// profiles_v3_fixture_test.go, so the two fixtures never drift apart on
-// content even though they are read by different runtimes).
+// profiles_v3_fixture_test.go). Only the tool names and their order are kept
+// in step across the two fixtures; per-tool descriptions and annotation
+// shapes intentionally differ (the JSON files use description==name and a
+// single hint, the in-process fixture uses descriptive text and sets both
+// readOnlyHint and destructiveHint).
 var nodeFixtureFileTools = map[string][]string{
 	"github":     {"list_issues", "create_issue", "delete_repo", "search_code", "get_secret_scanning_alert"},
 	"notion":     {"update_page"},

@@ -806,14 +806,18 @@ func isOAuthRelatedError(err string) bool {
 	return false
 }
 
-// quarantinedAwaitingSignIn reports whether a quarantined server is waiting on
-// an OAuth sign-in: parked in Pending Auth, or its last error is OAuth-related
-// and either a first-time login-required error, a re-auth error (a
-// previously-working stored token that broke), or (for configured OAuth) any
-// other OAuth error outside the "error" state. In the "error" state a
+// quarantinedAwaitingSignIn reports whether a quarantined server in the
+// "error"/"disconnected" state is waiting on an OAuth sign-in: its last error
+// is OAuth-related and either a first-time login-required error, a re-auth
+// error (a previously-working stored token that broke), or (for configured
+// OAuth) any other OAuth error outside the "error" state. In the "error" state a
 // non-login, non-reauth OAuth match is left to the transport-fault branch,
 // because mcp-go wraps transport failures in "authentication strategies
 // failed" and the fault summary names the real cause.
+//
+// The Pending Auth state is deliberately NOT handled here: the only caller,
+// quarantinedOAuthLoginState, resolves "pending auth"/"pending_auth" in its own
+// preceding switch case, so this helper never sees it.
 //
 // Login-required and re-auth markers are both checked without gating on
 // OAuthRequired or state: OAuthRequired is deliberately false for autodetected
@@ -825,9 +829,6 @@ func isOAuthRelatedError(err string) bool {
 // token behind a green health level.
 func quarantinedAwaitingSignIn(input HealthCalculatorInput) bool {
 	state := strings.ToLower(input.State)
-	if state == "pending auth" || state == "pending_auth" {
-		return true
-	}
 	if !isOAuthRelatedError(input.LastError) {
 		return false
 	}

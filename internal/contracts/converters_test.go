@@ -432,3 +432,67 @@ func TestBuildIsolationView_TriState(t *testing.T) {
 		assert.Equal(t, "none", eff.Mode)
 	})
 }
+
+// TestConvertGenericServersToTyped_Health verifies the unified health object
+// (including the Spec 109 status/usable/actions fields) survives the legacy
+// /api/v1/servers fallback projection instead of being silently dropped.
+func TestConvertGenericServersToTyped_Health(t *testing.T) {
+	want := HealthStatus{
+		Level:      "degraded",
+		AdminState: "enabled",
+		Summary:    "Token expired",
+		Detail:     "re-login available",
+		Action:     "login",
+		Status:     "sign_in_required",
+		Usable:     false,
+		Actions:    []string{"login", "view_logs"},
+	}
+
+	t.Run("pointer", func(t *testing.T) {
+		h := want
+		servers := ConvertGenericServersToTyped([]map[string]interface{}{
+			{"name": "a", "health": &h},
+		})
+		require.Len(t, servers, 1)
+		require.NotNil(t, servers[0].Health)
+		assert.Equal(t, want, *servers[0].Health)
+	})
+
+	t.Run("value", func(t *testing.T) {
+		servers := ConvertGenericServersToTyped([]map[string]interface{}{
+			{"name": "a", "health": want},
+		})
+		require.Len(t, servers, 1)
+		require.NotNil(t, servers[0].Health)
+		assert.Equal(t, want, *servers[0].Health)
+	})
+
+	t.Run("json-decoded map", func(t *testing.T) {
+		servers := ConvertGenericServersToTyped([]map[string]interface{}{
+			{"name": "a", "health": map[string]interface{}{
+				"level":       "degraded",
+				"admin_state": "enabled",
+				"summary":     "Token expired",
+				"detail":      "re-login available",
+				"action":      "login",
+				"status":      "sign_in_required",
+				"usable":      false,
+				"actions":     []interface{}{"login", "view_logs"},
+			}},
+		})
+		require.Len(t, servers, 1)
+		require.NotNil(t, servers[0].Health)
+		assert.Equal(t, want, *servers[0].Health)
+	})
+
+	t.Run("absent or nil", func(t *testing.T) {
+		var nilHealth *HealthStatus
+		servers := ConvertGenericServersToTyped([]map[string]interface{}{
+			{"name": "none"},
+			{"name": "nilptr", "health": nilHealth},
+		})
+		require.Len(t, servers, 2)
+		assert.Nil(t, servers[0].Health)
+		assert.Nil(t, servers[1].Health)
+	})
+}
