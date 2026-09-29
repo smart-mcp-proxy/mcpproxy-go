@@ -444,9 +444,9 @@ describe('ClientConnectList', () => {
     await flushPromises()
 
     // Spec 078 US1: click Review & connect → preview panel → confirm (Connect) writes.
-    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-test="connect-preview-confirm-cursor"]').trigger('click')
+    await wrapper.find('[data-test="client-preview-confirm-cursor"]').trigger('click')
     await flushPromises()
 
     const backup = wrapper.find('[data-test="connect-backup-path"]')
@@ -502,9 +502,9 @@ describe('ClientConnectList', () => {
     await flushPromises()
 
     // Spec 078 US1: preview then confirm for the bridge (no-prior-file) case.
-    await wrapper.find('[data-test="connect-start-claude-desktop"]').trigger('click')
+    await wrapper.find('[data-test="connect-claude-desktop"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-test="connect-preview-confirm-claude-desktop"]').trigger('click')
+    await wrapper.find('[data-test="client-preview-confirm-claude-desktop"]').trigger('click')
     await flushPromises()
 
     const noBackup = wrapper.find('[data-test="connect-no-backup"]')

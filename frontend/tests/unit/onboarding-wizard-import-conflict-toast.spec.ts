@@ -4,7 +4,6 @@ import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import api from '@/services/api'
-import { useSystemStore } from '@/stores/system'
 
 // Review round 3 finding: onBulkImport clears `selection` BEFORE building the
 // success toast, and the toast's "(N renamed)" suffix reads `conflictCount`,
@@ -126,11 +125,11 @@ describe('OnboardingWizard bulk-import conflict toast (review round 3)', () => {
     // the conflict, so conflictCount is 2 here.
     expect(wrapper.text()).toContain('2 renamed')
 
-    const store = useSystemStore()
     await wrapper.find('[data-test="bulk-import-primary"]').trigger('click')
     await flushPromises()
 
-    expect(store.toasts).toHaveLength(1)
-    expect(store.toasts[0].message).toContain('renamed')
+    // The shared detected-source importer owns the result message too, so the
+    // wizard cannot lose the rename count while clearing its old local state.
+    expect(wrapper.find('[data-test="detected-import-message"]').text()).toContain('2 renamed')
   })
 })

@@ -52,7 +52,7 @@
                Clients. Keep the legacy markup below inert temporarily while
                its presentation-only helpers are retired; it must never own a
                second preview/write flow. -->
-          <ClientConnectList :show="true" @close="dismiss" />
+          <ClientConnectList :show="show" @close="dismiss" />
         </section>
         <section v-if="false" aria-hidden="true">
           <p class="text-sm opacity-70 mb-4">
@@ -207,7 +207,7 @@
             <code class="font-mono text-[11px] bg-base-200 px-1 rounded">mcpproxy_claude_code</code> so each entry stays distinct.
           </p>
 
-          <ImportServers detected @imported="onSharedImport" />
+          <ImportServers :key="importSession" detected @imported="onSharedImport" />
 
           <!-- Detected import sources (Spec 046 v2 — sectioned checkbox layout) -->
           <div v-if="false" class="flex justify-center py-4">
@@ -584,7 +584,7 @@
            buttons stay visible as the list above scrolls. The security panel
            itself sits in the step body, not here — see the comment there. -->
       <div
-        v-if="activeTab === 'servers'"
+        v-if="false"
         class="border-t border-base-300 shrink-0 bg-base-200/40"
       >
         <!-- Action footer. Only shown when there is something to import — the
@@ -708,6 +708,9 @@ const router = useRouter()
 
 type TabID = 'clients' | 'servers' | 'verify'
 const activeTab = ref<TabID>('clients')
+// A reopened wizard starts a new import session. Keying the shared importer
+// ensures its selection and quarantine confirmation never leak across opens.
+const importSession = ref(0)
 
 const clients = ref<ClientStatus[]>([])
 const loadingClients = ref(false)
@@ -1042,6 +1045,7 @@ let openSeq = 0
 async function onOpened() {
   const seq = ++openSeq
   const requested = onboarding.consumeWizardInitialTab()
+  importSession.value++
   serverAddedJustNow.value = false
   connectMessage.value = ''
   // Backup lines are session-scoped (Spec 078 US2): don't replay backup
@@ -1729,7 +1733,6 @@ async function onSharedImport(count: number) {
   if (count === 0) return
   serverAddedJustNow.value = true
   await Promise.all([fetchImportSources(), serversStore.fetchServers(), onboarding.fetchState()])
-  systemStore.addToast({ type: 'success', title: 'Servers imported', message: `${count} server(s) imported for review` })
 }
 
 // `dismiss` is the onClose handler useDialogOpen calls for a NATIVE close

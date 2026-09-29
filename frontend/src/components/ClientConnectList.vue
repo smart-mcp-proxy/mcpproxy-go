@@ -24,17 +24,18 @@
         <div
           v-for="client in mergedClients"
           :key="client.id"
+          :data-test="`client-row-${client.id}`"
           class="rounded-lg border border-base-300 hover:bg-base-200/50 transition-colors overflow-hidden"
           :class="accessState(client) === 'denied' ? 'border-error/40' : ''"
         >
           <div class="flex items-center justify-between p-3">
             <div class="flex items-center gap-3 min-w-0 flex-1">
-              <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" :title="client.name">
+              <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" :title="client.name" :data-test="`client-icon-${client.id}`">
                 {{ clientIcon(client) }}
               </div>
               <div class="min-w-0 flex-1">
-                <div class="font-medium text-sm truncate">{{ client.name }}</div>
-                <div class="text-xs opacity-50 truncate" :title="client.config_path">{{ client.config_path }}</div>
+                <div class="font-medium text-sm truncate">{{ client.name }} <span v-if="client.connected" class="badge badge-success badge-xs align-middle">Connected</span></div>
+                <div class="text-xs opacity-50 truncate" :title="client.config_path" :data-test="`client-path-${client.id}`">{{ client.display_path || client.config_path }}</div>
                 <!-- Audit F18: "which endpoint am I registered to?" was
                      unanswerable — a config merely holding an entry NAMED
                      mcpproxy read as connected, even pointing at another
@@ -49,6 +50,9 @@
                   → {{ client.registered_url }}
                 </div>
                 <div v-if="client.note" class="text-xs opacity-60 italic mt-0.5" :title="client.note">{{ client.note }}</div>
+                <p v-if="showTccNote(client)" :data-test="`client-tcc-note-${client.id}`" class="text-xs text-warning mt-1">
+                  macOS may ask for permission to access data from other apps. Choose Allow to continue.
+                </p>
               </div>
             </div>
             <div class="shrink-0 ml-2 flex flex-col items-end gap-1">
@@ -102,7 +106,7 @@
               </button>
               <button
                 v-else
-                :data-test="`connect-start-${client.id}`"
+                :data-test="`connect-${client.id}`"
                 @click="startConnect(client.id)"
                 class="btn btn-primary btn-xs"
                 :disabled="loading.clients[client.id] || previewLoading[client.id]"
@@ -167,7 +171,7 @@
                changes. Confirm/Cancel gate the actual write. -->
           <div
             v-if="previews[client.id]"
-            :data-test="`connect-preview-${client.id}`"
+            :data-test="`client-preview-${client.id}`"
             class="border-t border-base-300 bg-base-200/40 px-3 py-3 space-y-2"
           >
             <p class="text-xs opacity-70 leading-relaxed">
@@ -178,7 +182,7 @@
             <!-- Overwrite warning (FR-003): an entry with this name already exists. -->
             <p
               v-if="previews[client.id]!.entry_exists"
-              :data-test="`connect-preview-overwrite-${client.id}`"
+              :data-test="`client-preview-overwrite-${client.id}`"
               class="text-xs text-warning leading-relaxed"
             >
               An entry named “{{ previews[client.id]!.server_name }}” already exists — connecting will overwrite it (a backup is saved first).
@@ -187,7 +191,7 @@
                  would fail, so connecting is blocked until the file is fixed. -->
             <p
               v-else-if="previews[client.id]!.access_state === 'malformed'"
-              :data-test="`connect-preview-malformed-${client.id}`"
+              :data-test="`client-preview-malformed-${client.id}`"
               class="text-xs text-warning leading-relaxed"
             >
               Your current config could not be parsed, so connecting would fail rather than modify an unreadable file. Fix or remove {{ previews[client.id]!.config_path }} first, then try again.
@@ -203,21 +207,21 @@
             <div>
               <div class="text-[11px] font-semibold uppercase tracking-wider text-success/80 mb-1">+ will be added</div>
               <pre
-                :data-test="`connect-preview-entry-${client.id}`"
+                :data-test="`client-preview-entry-${client.id}`"
                 class="text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5 leading-relaxed"
               >{{ previews[client.id]!.entry_text }}</pre>
             </div>
             <!-- API-key honesty (FR-004): masked in the preview, real key written. -->
             <p
               v-if="previews[client.id]!.contains_api_key"
-              :data-test="`connect-preview-apikey-${client.id}`"
+              :data-test="`client-preview-apikey-${client.id}`"
               class="text-[11px] opacity-60 leading-relaxed"
             >
               This entry includes your API key (shown masked). The real key is written into the config so the client can authenticate.
             </p>
             <div class="flex items-center gap-2 pt-1">
               <button
-                :data-test="`connect-preview-confirm-${client.id}`"
+                :data-test="`client-preview-confirm-${client.id}`"
                 @click="confirmConnect(client.id)"
                 class="btn btn-primary btn-xs"
                 :disabled="loading.clients[client.id] || previews[client.id]!.access_state === 'malformed'"
@@ -226,7 +230,7 @@
                 <span v-else>Connect</span>
               </button>
               <button
-                :data-test="`connect-preview-cancel-${client.id}`"
+                :data-test="`client-preview-cancel-${client.id}`"
                 @click="cancelPreview(client.id)"
                 class="btn btn-ghost btn-xs"
                 :disabled="loading.clients[client.id]"
@@ -263,7 +267,7 @@
              successful connect/disconnect; the "no prior file" case is stated
              explicitly rather than showing a blank path. -->
         <div
-          v-if="resultSuccess && resultBackupPath"
+          v-if="resultBackupPath"
           data-test="connect-backup-path"
           class="mt-2 flex items-start justify-between gap-2 rounded-lg bg-base-200 px-3 py-2"
         >
@@ -281,7 +285,7 @@
           </button>
         </div>
         <div
-          v-else-if="resultSuccess && resultBackupPath === null"
+          v-else-if="resultBackupPath === null && lastConnect"
           data-test="connect-no-backup"
           class="mt-2 rounded-lg bg-base-200 px-3 py-2 text-xs opacity-70"
         >
@@ -559,6 +563,12 @@ const mergedClients = computed<ClientStatus[]>(() => {
 // Default to 'unknown' for the content-read-free listing (no eager read).
 function accessState(client: ClientStatus): AccessState {
   return client.access_state ?? 'unknown'
+}
+
+function showTccNote(client: ClientStatus): boolean {
+  return Boolean(client.supported && (client.exists || client.bridge) && !client.connected && !previews.value[client.id] &&
+    /\/Library\/Application Support\//.test(client.config_path)
+  )
 }
 
 const connectableClients = computed(() =>
@@ -1044,5 +1054,5 @@ watch(() => props.show, (newVal) => {
     lastConnect.value = null
     undoPanelOpen.value = false
   }
-})
+}, { immediate: true })
 </script>
