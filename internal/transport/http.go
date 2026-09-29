@@ -171,7 +171,9 @@ func (cfg *HTTPTransportConfig) upstreamRoundTripper(base http.RoundTripper, log
 	if cfg.RetryAfter != nil {
 		rt = NewRetryAfterTransport(rt, cfg.RetryAfter, logger)
 	}
-	return rt
+	// Outermost: strips forwarded headers from everything but the tools/call
+	// request itself (Spec 112 FR-008), before tracing sees the request.
+	return newForwardGateTransport(rt)
 }
 
 // needsCustomTransport reports whether this config requires us to hand mcp-go
