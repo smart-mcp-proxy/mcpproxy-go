@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
@@ -86,6 +87,28 @@ func TestSearchServers_RejectsNonEmptyTag(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, result.IsError, "unsupported tag must fail visibly instead of returning unfiltered results")
 	assert.Contains(t, toolResultText(t, result), "tag filtering is not supported")
+}
+
+func TestSearchServers_RejectsNonEmptyTag_RecordsActivity(t *testing.T) {
+	proxy, rt := newTruncatingRetrieveToolsProxy(t, 0)
+	startDeadline := time.Now().Add(time.Second)
+	for !rt.ActivityService().Started() && time.Now().Before(startDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	require.True(t, rt.ActivityService().Started(), "activity service must subscribe before the MCP result is emitted")
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name:      "search_servers",
+		Arguments: map[string]interface{}{"tag": "database"},
+	}}
+
+	result, err := proxy.handleSearchServers(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+
+	record := awaitInternalToolActivity(t, rt.StorageManager(), "search_servers")
+	assert.Equal(t, "error", record.Status)
+	assert.Contains(t, record.ErrorMessage, "tag filtering is not supported")
+	assert.Equal(t, "database", record.Arguments["tag"])
 }
 
 // TestSearchServers_RegistryOptional_UnavailableSourceReported pins that a

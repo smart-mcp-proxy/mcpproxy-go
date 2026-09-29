@@ -1594,12 +1594,6 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	search := request.GetString("search", "")
 	tag := request.GetString("tag", "")
 	limit := int(request.GetFloat("limit", 10.0)) // Default limit of 10
-	if tag != "" {
-		return mcp.NewToolResultError("tag filtering is not supported: catalog entries carry no tags"), nil
-	}
-	if tag != "" {
-		return mcp.NewToolResultError("tag filtering is not supported: catalog entries carry no tags"), nil
-	}
 
 	// Build arguments map for activity logging (Spec 024)
 	args := map[string]interface{}{
@@ -1613,6 +1607,11 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	}
 	if tag != "" {
 		args["tag"] = tag
+	}
+	if tag != "" {
+		err := errors.New("tag filtering is not supported: catalog entries carry no tags")
+		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	if registry == "" {
