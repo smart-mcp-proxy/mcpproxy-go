@@ -92,6 +92,11 @@ the curated "official" and "popular" sections instead.`,
 				query = args[0]
 			}
 
+			if err := rejectCatalogTag(catalogSearchTag); err != nil {
+				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, err.Error()).
+					WithGuidance("Drop --tag and narrow with the query or --source instead"), clioutput.ErrCodeInvalidInput)
+			}
+
 			cfg, err := loadRegistryConfig()
 			if err != nil {
 				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConfigNotFound, err.Error()).
@@ -112,9 +117,19 @@ the curated "official" and "popular" sections instead.`,
 		},
 	}
 	cmd.Flags().StringVar(&catalogSearchSource, "source", "", "Narrow to one catalog source id (use 'registry list' to see ids)")
-	cmd.Flags().StringVarP(&catalogSearchTag, "tag", "t", "", "Filter by tag")
+	cmd.Flags().StringVarP(&catalogSearchTag, "tag", "t", "", "Not supported: catalog entries carry no tags, so a non-empty value is rejected")
 	cmd.Flags().IntVarP(&catalogSearchLimit, "limit", "l", 20, "Maximum number of results (default 20, max 50)")
 	return cmd
+}
+
+// rejectCatalogTag refuses a non-empty --tag: catalog entries carry no tags, so
+// the filter could never match and silently ignoring it would look like a
+// match (#1398 F-K). GET /catalog/search rejects the same parameter.
+func rejectCatalogTag(tag string) error {
+	if tag == "" {
+		return nil
+	}
+	return fmt.Errorf("--tag is not supported: catalog entries carry no tags")
 }
 
 func newCatalogShowCmd() *cobra.Command {

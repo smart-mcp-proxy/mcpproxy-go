@@ -39,9 +39,16 @@ struct CatalogInput: Codable, Equatable {
 }
 
 /// One `GET /api/v1/catalog/search` result. Mirrors `registries.CatalogResult`.
+///
+/// `Identifiable.id` is deliberately the composite `source-catalogID`, NOT the
+/// bare catalog id: the backend de-dupes only by (source, id), so two enabled
+/// sources can list the same catalog id and SwiftUI's `ForEach` would get
+/// duplicate identities (dropped or misrendered cards). The wire field `id`
+/// is exposed as `catalogID`.
 struct CatalogResult: Codable, Identifiable, Equatable {
     let source: String
-    let id: String
+    /// The source's own entry id (JSON `id`); unique only within `source`.
+    let catalogID: String
     let title: String
     let publisher: String?
     let verified: Bool
@@ -58,8 +65,12 @@ struct CatalogResult: Codable, Identifiable, Equatable {
     /// or command arguments after a prior session.
     let addedServerName: String?
 
+    /// Globally unique list identity (and the key for per-card local state).
+    var id: String { "\(source)-\(catalogID)" }
+
     enum CodingKeys: String, CodingKey {
-        case source, id, title, publisher, verified, official, popularity, description, transport, install, added
+        case source, title, publisher, verified, official, popularity, description, transport, install, added
+        case catalogID = "id"
         case requiredInputs = "required_inputs"
         case sourceCodeURL = "source_code_url"
         case addedServerName = "added_server_name"

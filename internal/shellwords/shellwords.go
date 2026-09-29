@@ -16,8 +16,16 @@ import (
 
 // Split tokenizes s the way a POSIX shell would for a single command line:
 // whitespace-separated words, with '...' and "..." both grouping their
-// contents into one word (no escape processing inside single quotes, no
-// expansion of any kind — this only ever feeds a preview, never a shell).
+// contents into one word (no expansion of any kind — this only ever feeds a
+// preview, never a shell).
+//
+// Backslash escaping follows POSIX with one deliberate softening so that
+// pasted Windows paths survive: inside single quotes a backslash is always
+// literal; inside double quotes it escapes only ", \, $ and `; outside quotes
+// it escapes only whitespace, ' and " (NOT another backslash), so
+// C:\Users\me\node.exe and \\host\share stay intact. A backslash before any
+// other character, or at the very end of the input, is kept literally.
+//
 // Returns an error if a quote is left unterminated. An empty or
 // whitespace-only input returns (nil, nil).
 func Split(s string) ([]string, error) {
@@ -26,14 +34,23 @@ func Split(s string) ([]string, error) {
 	haveWord := false
 
 	var quote rune // 0, '\'' or '"'
-	for _, r := range s {
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		switch {
+		case quote == '"' && r == '\\' && i+1 < len(runes) && strings.ContainsRune("\"\\$`", runes[i+1]):
+			i++
+			cur.WriteRune(runes[i])
 		case quote != 0:
 			if r == quote {
 				quote = 0
 				continue
 			}
 			cur.WriteRune(r)
+		case r == '\\' && i+1 < len(runes) && (unicode.IsSpace(runes[i+1]) || runes[i+1] == '\'' || runes[i+1] == '"'):
+			i++
+			cur.WriteRune(runes[i])
+			haveWord = true
 		case r == '\'' || r == '"':
 			quote = r
 			haveWord = true

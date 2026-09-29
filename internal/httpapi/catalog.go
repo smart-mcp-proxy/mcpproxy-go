@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -32,16 +33,24 @@ type catalogSearchResponse struct {
 // @Produce      json
 // @Param        q       query  string  false  "Free-text search"
 // @Param        source  query  string  false  "Narrow to one catalog source id"
-// @Param        tag     query  string  false  "Filter by tag"
+// @Param        tag     query  string  false  "Not supported: catalog entries carry no tags; a non-empty value returns 400"
 // @Param        limit   query  int     false  "Max results (default 20, max 50)"
 // @Success      200  {object}  contracts.SuccessResponse
+// @Failure      400  {object}  contracts.APIResponse "tag filtering is not supported"
+// @Failure      500  {object}  contracts.APIResponse "configured servers could not be listed"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Router       /api/v1/catalog/search [get]
 func (s *Server) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	source := r.URL.Query().Get("source")
-	tag := r.URL.Query().Get("tag")
+	// Catalog entries (registries.ServerEntry) carry no tags, so a tag filter
+	// cannot be honoured. Reject it explicitly instead of silently returning
+	// unfiltered results that look like a tag match.
+	if r.URL.Query().Get("tag") != "" {
+		s.writeError(w, r, http.StatusBadRequest, "tag filtering is not supported: catalog entries carry no tags")
+		return
+	}
 
 	limit := 20
 	if v := r.URL.Query().Get("limit"); v != "" {
@@ -54,9 +63,17 @@ func (s *Server) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
 	// limit — filtering after truncation could silently drop a narrower
 	// source's real matches that simply lost out to an official/verified
 	// source for one of the truncated top-`limit` slots.
-	hits, sections, unavailable := registries.SearchAll(r.Context(), q, tag, limit, registries.SearchOptions{Source: source})
+	hits, sections, unavailable := registries.SearchAll(r.Context(), q, "", limit, registries.SearchOptions{Source: source})
 
-	added := s.catalogAddedResolver(r.Context())
+	// A failed server listing must not degrade to "nothing is added": every
+	// entry would then read added:false with no error signal (as
+	// handleGetServers, it fails the request instead).
+	added, err := s.catalogAddedResolver(r.Context())
+	if err != nil {
+		s.logger.Errorw("catalog search: failed to list configured servers", "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to list configured servers")
+		return
+	}
 
 	resp := catalogSearchResponse{
 		Query:       q,
@@ -99,8 +116,11 @@ func toCatalogResults(hits []registries.CatalogHit, added func(registries.Catalo
 // so it cannot reveal an out-of-scope server name. A configured server with a
 // source_registry_id matches on (source, install target); one without (a manual
 // add) matches on install target alone.
-func (s *Server) catalogAddedResolver(ctx context.Context) func(registries.CatalogHit) (bool, string) {
-	servers := s.getVisibleServersForCatalog(ctx)
+func (s *Server) catalogAddedResolver(ctx context.Context) (func(registries.CatalogHit) (bool, string), error) {
+	servers, err := s.getVisibleServersForCatalog(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	// byRegistryAndTarget indexes servers that declare which registry they
 	// came from — those must match on (source, target); byTargetOnly indexes
@@ -144,28 +164,34 @@ func (s *Server) catalogAddedResolver(ctx context.Context) func(registries.Catal
 			}
 		}
 		return true, ""
-	}
+	}, nil
 }
 
 // getVisibleServersForCatalog returns the servers the caller carried by ctx
 // may enumerate, preferring the management service (typed) and falling back
 // to the legacy generic path — the same two sources handleGetServers reads,
 // narrowed the same way (visibleServers).
-func (s *Server) getVisibleServersForCatalog(ctx context.Context) []contracts.Server {
+func (s *Server) getVisibleServersForCatalog(ctx context.Context) ([]contracts.Server, error) {
 	var servers []contracts.Server
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
-		if list, _, err := mgmtSvc.ListServers(ctx); err == nil {
-			servers = make([]contracts.Server, 0, len(list))
-			for _, srv := range list {
-				if srv != nil {
-					servers = append(servers, *srv)
-				}
+		list, _, err := mgmtSvc.ListServers(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list servers: %w", err)
+		}
+		servers = make([]contracts.Server, 0, len(list))
+		for _, srv := range list {
+			if srv != nil {
+				servers = append(servers, *srv)
 			}
 		}
-	} else if generic, err := s.controller.GetAllServers(); err == nil {
+	} else {
+		generic, err := s.controller.GetAllServers()
+		if err != nil {
+			return nil, fmt.Errorf("get all servers: %w", err)
+		}
 		servers = contracts.ConvertGenericServersToTyped(generic)
 	}
-	return visibleServers(ctx, servers)
+	return visibleServers(ctx, servers), nil
 }
 
 // catalogInstallTargetForServer computes the same install-target key as
