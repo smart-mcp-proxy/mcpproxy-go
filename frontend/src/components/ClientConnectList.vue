@@ -1,6 +1,11 @@
 <template>
-  <dialog ref="dialogEl" class="modal">
-    <div class="modal-box max-w-lg">
+  <component
+    :is="embedded ? 'section' : 'dialog'"
+    ref="dialogEl"
+    :class="embedded ? 'space-y-4' : 'modal'"
+    data-test="client-connect-list"
+  >
+    <div :class="embedded ? 'w-full' : 'modal-box max-w-lg'">
       <h3 class="font-bold text-lg mb-2">Connect MCPProxy to AI Agents</h3>
       <p class="text-sm opacity-70 mb-4">
         Register MCPProxy as an MCP server in your AI tools. Clicking a client shows the exact change first — nothing is written until you confirm (backup created automatically).
@@ -411,7 +416,7 @@
             ? 'Connect All'
             : `Connect ${connectableClients.length} client${connectableClients.length === 1 ? '' : 's'}` }}
         </button>
-        <button @click="close" class="btn btn-ghost btn-sm">Close</button>
+        <button v-if="!embedded" @click="close" class="btn btn-ghost btn-sm">Close</button>
       </div>
 
       <!-- Audit F18: disconnecting rewrites a user-owned config file. That is
@@ -463,8 +468,8 @@
         </div>
       </div>
     </div>
-    <form method="dialog" class="modal-backdrop" @click.prevent="close"><button>close</button></form>
-  </dialog>
+    <form v-if="!embedded" method="dialog" class="modal-backdrop" @click.prevent="close"><button>close</button></form>
+  </component>
 </template>
 
 <script setup lang="ts">
@@ -477,6 +482,7 @@ import type { ClientStatus, AccessState, ConnectPreview } from '@/types'
 
 interface Props {
   show: boolean
+  embedded?: boolean
 }
 
 interface Emits {
@@ -485,7 +491,7 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
-const { dialogEl } = useDialogOpen(() => props.show, () => close())
+const { dialogEl } = useDialogOpen(() => !props.embedded && props.show, () => close())
 const systemStore = useSystemStore()
 const onboarding = useOnboardingStore()
 

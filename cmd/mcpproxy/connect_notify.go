@@ -31,12 +31,23 @@ import (
 // ever help in the "no daemon" case, where the very state it would update
 // has no live reader anyway until the daemon next starts and recomputes it.
 func notifyClientConnected(cfg *config.Config, clientID string) {
+	notifyClientConnectionChange(cfg, "connected_client_id", clientID)
+}
+
+// notifyClientDisconnected mirrors a successful local CLI disconnect into a
+// running daemon's presence record. It never makes disconnect depend on the
+// daemon being available.
+func notifyClientDisconnected(cfg *config.Config, clientID string) {
+	notifyClientConnectionChange(cfg, "disconnected_client_id", clientID)
+}
+
+func notifyClientConnectionChange(cfg *config.Config, field, clientID string) {
 	client, ok := newDaemonClient(cfg, nil)
 	if !ok {
 		return
 	}
 
-	body, err := json.Marshal(map[string]string{"connected_client_id": clientID})
+	body, err := json.Marshal(map[string]string{field: clientID})
 	if err != nil {
 		return
 	}

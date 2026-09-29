@@ -55,6 +55,7 @@ type ConnectConflictResponse struct {
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
 // @Success     200 {object} contracts.APIResponse "List of ClientStatus objects"
+// @Failure     403 {object} contracts.ErrorResponse "Administrator credentials required"
 // @Router      /api/v1/connect [get]
 func (s *Server) handleGetConnectStatus(w http.ResponseWriter, r *http.Request) {
 	svc := s.getConnectService()
@@ -79,6 +80,7 @@ func (s *Server) handleGetConnectStatus(w http.ResponseWriter, r *http.Request) 
 // @Security    ApiKeyQuery
 // @Param       client path   string true "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Success     200    {object} contracts.APIResponse "ClientStatus"
+// @Failure     403    {object} contracts.ErrorResponse "Administrator credentials required"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/connect/{client} [get]
@@ -129,7 +131,7 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 // @Param       client      path  string true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       server_name query string false "Entry name to preview (defaults to mcpproxy); mirror the value passed to POST connect"
 // @Success     200    {object} contracts.APIResponse "ConnectPreview"
-// @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
+// @Failure     403    {object} contracts.ErrorResponse "Administrator credentials required or access denied by macOS App Data"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/connect/{client}/preview [get]
@@ -347,11 +349,7 @@ func (s *Server) handleDisconnectClient(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) recordClientDisconnected(clientID string) {
 	err := s.controller.UpdateOnboardingState(func(state *storage.OnboardingState) error {
-		if state.ClientDisconnectedAt == nil {
-			state.ClientDisconnectedAt = map[string]time.Time{}
-		}
-		state.ClientDisconnectedAt[clientID] = time.Now()
-		delete(state.ClientConnectedAt, clientID)
+		applyClientDisconnected(state, clientID, time.Now())
 		return nil
 	})
 	if err != nil && s.logger != nil {
@@ -360,6 +358,16 @@ func (s *Server) recordClientDisconnected(clientID string) {
 	if err == nil {
 		s.notifyClientPresenceChanged()
 	}
+}
+
+// applyClientDisconnected updates the connection generation atomically for
+// REST and CLI disconnects relayed through onboarding/mark.
+func applyClientDisconnected(state *storage.OnboardingState, clientID string, now time.Time) {
+	if state.ClientDisconnectedAt == nil {
+		state.ClientDisconnectedAt = map[string]time.Time{}
+	}
+	state.ClientDisconnectedAt[clientID] = now
+	delete(state.ClientConnectedAt, clientID)
 }
 
 type clientPresenceNotifier interface{ NotifyClientPresenceChanged() }

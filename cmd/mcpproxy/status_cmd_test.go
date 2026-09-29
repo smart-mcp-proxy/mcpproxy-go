@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -52,6 +53,41 @@ func TestStatusMaskAPIKey(t *testing.T) {
 				t.Errorf("statusMaskAPIKey(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestPrintStatusTableEndpointModeGolden(t *testing.T) {
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = write
+	printStatusTable(&StatusInfo{
+		State: "Running", Edition: "Personal", ListenAddr: "127.0.0.1:18080",
+		APIKey: "****", WebUIURL: "http://127.0.0.1:18080/ui/", RoutingMode: "retrieve_tools",
+		Endpoints: map[string]string{
+			"default": "http://127.0.0.1:18080/mcp", "retrieve_tools": "http://127.0.0.1:18080/mcp/call",
+			"direct": "http://127.0.0.1:18080/mcp/all", "code_execution": "http://127.0.0.1:18080/mcp/code",
+		},
+	})
+	if err := write.Close(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = stdout
+	got, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := read.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile(filepath.Join("testdata", "cli109", "status.golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(got)) != strings.TrimSpace(string(want)) {
+		t.Fatalf("status output mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 

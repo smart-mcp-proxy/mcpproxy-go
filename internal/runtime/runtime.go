@@ -3954,7 +3954,7 @@ func (r *Runtime) RecordClientSeen(clientName string) {
 		// every identical observation needlessly contends with the onboarding
 		// writers, but must not suppress a fresh generation after reconnect (the
 		// successful connect path clears its aliases).
-		if previous, ok := state.ClientLastSeen[name]; ok && now.Sub(previous) < time.Minute {
+		if previous, ok := state.ClientLastSeen[name]; ok && now.Sub(previous) < time.Minute && !clientDisconnectedAfterSeen(state, name, previous) {
 			return nil
 		}
 		state.ClientLastSeen[name] = now
@@ -3984,6 +3984,25 @@ func (r *Runtime) RecordClientSeen(clientName string) {
 	if err == nil && changed {
 		r.publishEvent(newEvent(EventTypeClientPresenceChanged, nil))
 	}
+}
+
+// clientDisconnectedAfterSeen lets the first initialize in a new connection
+// generation through the write throttle. A recent observation from the prior
+// generation must not suppress fresh presence after an explicit disconnect.
+func clientDisconnectedAfterSeen(state *storage.OnboardingState, alias string, seenAt time.Time) bool {
+	if state == nil {
+		return false
+	}
+	for _, client := range connect.GetAllClients() {
+		for _, knownAlias := range client.ClientInfoNames {
+			if strings.EqualFold(alias, knownAlias) {
+				if disconnectedAt := state.ClientDisconnectedAt[client.ID]; !disconnectedAt.IsZero() && !disconnectedAt.Before(seenAt) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // AttentionClients returns the minimal client evidence needed by the attention

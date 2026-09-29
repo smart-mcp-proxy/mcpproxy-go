@@ -56,6 +56,14 @@ final class APIClientClientsTests: XCTestCase {
         XCTAssertEqual(routing.endpoints.rows.map(\.path), ["/mcp", "/mcp/all", "/mcp/code", "/mcp/call"])
     }
 
+    func testEndpointURLBuildsCopyableAbsoluteClientEndpoint() async throws {
+        let client = ConnectStubURLProtocol.makeClient()
+
+        let url = await client.endpointURL("/mcp")
+
+        XCTAssertEqual(url, "http://127.0.0.1:8080/mcp")
+    }
+
     func testRoutingModePatchUsesTheConfigMergeEndpoint() async throws {
         ConnectStubURLProtocol.responseBody = ConnectStubURLProtocol.envelope(
             #"{"requires_restart":true,"changed_fields":["routing_mode"]}"#

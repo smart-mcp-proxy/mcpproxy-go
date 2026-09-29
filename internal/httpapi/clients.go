@@ -50,7 +50,7 @@ func (s *Server) handleGetClients(w http.ResponseWriter, r *http.Request) {
 	if !rejectUnsupportedScopeFilters(w, r) {
 		return
 	}
-	rows, err := s.clientPresence(false)
+	rows, err := s.clientPresence(false, "")
 	if err != nil {
 		s.writeError(w, r, http.StatusServiceUnavailable, err.Error())
 		return
@@ -63,7 +63,7 @@ func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "client")
-	rows, err := s.clientPresence(true)
+	rows, err := s.clientPresence(true, id)
 	if err != nil {
 		s.writeError(w, r, http.StatusServiceUnavailable, err.Error())
 		return
@@ -119,7 +119,7 @@ func (s *Server) clientRoutingPayload() map[string]interface{} {
 	}
 }
 
-func (s *Server) clientPresence(withSessions bool) ([]clientPresence, error) {
+func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPresence, error) {
 	statuses := map[string]connect.ClientStatus{}
 	if svc := s.getConnectService(); svc != nil {
 		for _, status := range svc.GetAllStatus() {
@@ -138,10 +138,10 @@ func (s *Server) clientPresence(withSessions bool) ([]clientPresence, error) {
 	result := make([]clientPresence, 0, len(statuses))
 	for _, def := range connect.GetAllClients() {
 		status := statuses[def.ID]
-		if withSessions && s.getConnectService() != nil {
+		if withSessions && def.ID == detailID && s.getConnectService() != nil {
 			// The list remains metadata-only. An explicit detail read is the
-			// sole presence API allowed to inspect this client's config.
-			if resolved, getErr := s.getConnectService().GetStatus(def.ID); getErr == nil {
+			// sole presence API allowed to inspect only the requested client's config.
+			if resolved, getErr := s.getConnectService().GetStatus(detailID); getErr == nil {
 				status = resolved
 			}
 		}
@@ -154,10 +154,10 @@ func (s *Server) clientPresence(withSessions bool) ([]clientPresence, error) {
 		// initialise evidence remains useful as "last seen", but only a later
 		// initialise can make the client connected again.
 		seenAfterDisconnect := lastSeen != nil && (disconnectedAt.IsZero() || lastSeen.After(disconnectedAt))
-		row.Connected = !connectedAt.IsZero() || seenAfterDisconnect
+		row.Connected = !connectedAt.IsZero() || seenAfterDisconnect || (withSessions && status.Connected)
 		if seenAfterDisconnect {
 			row.State = "connected_seen"
-		} else if !connectedAt.IsZero() {
+		} else if !connectedAt.IsZero() || (withSessions && status.Connected) {
 			row.State = "connected_never_seen"
 		} else if status.Exists {
 			row.State = "installed"
@@ -167,6 +167,12 @@ func (s *Server) clientPresence(withSessions bool) ([]clientPresence, error) {
 		}
 		for _, session := range sessions {
 			if !clientMatches(session.ClientName, def.ClientInfoNames) {
+				continue
+			}
+			// A successful reconnect begins a new client generation. Session rows
+			// from an earlier connect are historical and must not inflate the
+			// current active count or reappear in the expanded detail.
+			if !connectedAt.IsZero() && session.StartTime.Before(connectedAt) {
 				continue
 			}
 			if session.Status == "active" {

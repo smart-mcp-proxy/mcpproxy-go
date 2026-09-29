@@ -517,3 +517,22 @@ func TestUsageAggregate_ClientCallsSinceUsesPersistedClientName(t *testing.T) {
 	require.Equal(t, 2, agg.ClientCallsSince([]string{"claude-code", "Claude Code"}, base.Add(-24*time.Hour)))
 	require.Equal(t, 1, agg.ClientCallsSince([]string{"cursor"}, base.Add(-24*time.Hour)))
 }
+
+func TestUsageAggregate_ClientCallsRetentionPreservesSupportedClients(t *testing.T) {
+	base := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	agg := newUsageAggregate()
+	for i := 0; i < 40; i++ {
+		agg.Apply(&storage.ActivityRecord{
+			Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+			Status: storage.ActivityStatusSuccess, Timestamp: base.Add(time.Duration(i) * time.Minute),
+			Metadata: map[string]interface{}{"client_name": fmt.Sprintf("other-client-%02d", i)},
+		})
+	}
+	agg.Apply(&storage.ActivityRecord{
+		Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+		Status: storage.ActivityStatusSuccess, Timestamp: base,
+		Metadata: map[string]interface{}{"client_name": "cursor"},
+	})
+	require.Equal(t, 1, agg.ClientCallsSince([]string{"cursor"}, base.Add(-24*time.Hour)))
+	require.LessOrEqual(t, len(agg.ClientCalls), 32)
+}

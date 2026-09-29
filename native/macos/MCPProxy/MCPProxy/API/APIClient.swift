@@ -78,6 +78,12 @@ actor APIClient {
     /// synchronously to decide whether a control is even enabled.
     nonisolated let transportKind: TransportKind
 
+    /// Returns an absolute URL for an advertised MCP endpoint path, for
+    /// copyable client configuration examples in the native Clients hub.
+    func endpointURL(_ path: String) -> String {
+        baseURL + (path.hasPrefix("/") ? path : "/" + path)
+    }
+
     /// Create an API client.
     ///
     /// - Parameters:

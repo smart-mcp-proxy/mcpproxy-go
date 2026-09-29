@@ -18,10 +18,17 @@ from the Web UI wizard, the macOS tray ("Connect Client…"), and the
 ## Clients hub
 
 The Clients hub in the Web UI and macOS app brings client presence, Endpoint &
-mode, and Agent tokens together. `mcpproxy client list` shows the same presence
-rows, while `mcpproxy client show <id>` includes the recorded sessions. An
-installed config is distinct from a client that has initialized against
-MCPProxy; after a successful write, follow that client's reload hint.
+mode, and Agent tokens together. The Clients tab shows lightweight presence
+counts; expanding a row fetches its retained sessions on demand. The Endpoint &
+mode tab lists the MCP endpoints and active routing mode, and the Agent tokens
+tab manages credentials. `mcpproxy client list` shows the same presence rows,
+while `mcpproxy client show <id>` includes the recorded sessions. An installed
+config is distinct from a client that has initialized against MCPProxy; after a
+successful write, follow that client's reload hint.
+
+Both Clients hubs include an **Other client?** example for the default `/mcp`
+endpoint. It contains no admin key; select and copy it into a compatible MCP
+client's configuration, then restart that client to connect.
 
 The UI flows are **preview → confirm → write** (the CLI writes directly, with
 `--force` to overwrite an existing entry):
@@ -133,6 +140,8 @@ The `409` body is machine-discriminable at the top level via `action`:
 - The **macOS Connect Client form** always sends the token from its rendered
   preview; replace flows send `force=true` **with** the token, never `force`
   alone. A `precondition_failed` triggers exactly one automatic re-preview.
-- The **Web UI** ConnectModal is unchanged and may adopt the token later.
+- The **Web UI** Clients hub uses the shared Connect client list and preview
+  flow; the setup wizard embeds the same flow inline so its native dialog does
+  not cover the wizard's remaining steps.
 - Write gating is unchanged: connect/disconnect routes still reject restricted
   agent tokens, and the tray's Unix-socket transport carries admin context.

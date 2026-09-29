@@ -284,7 +284,11 @@ func (a *UsageAggregate) applyClientCalls(rec *storage.ActivityRecord) {
 	if _, ok := a.ClientCalls[client]; !ok && len(a.ClientCalls) >= 32 {
 		var oldest string
 		var oldestBucket int64
+		protected := knownClientAliases()
 		for key, buckets := range a.ClientCalls {
+			if protected[key] {
+				continue
+			}
 			for bucket := range buckets {
 				if oldest == "" || bucket < oldestBucket {
 					oldest, oldestBucket = key, bucket

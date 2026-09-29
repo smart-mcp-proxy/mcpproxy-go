@@ -1217,10 +1217,9 @@ func (s *Server) setupRoutes() {
 		// Feedback submission (Spec 036)
 		r.Post("/feedback", s.handleFeedback)
 
-		// Client connect/disconnect. Connecting/undo/disconnect write, restore,
-		// or delete local MCP client config files and can embed the admin API
-		// key into that config — an agent must not trigger them (issue #878
-		// class). Status/preview reads stay open.
+		// Client connect/disconnect. Config reads disclose local paths and
+		// connection state; writes can modify user-owned client files or embed
+		// credentials. All reads and writes require administrator access.
 		connectRead := s.requireAdminReadMiddleware("Admin credentials required to read client connection status")
 		r.With(connectRead).Get("/connect", s.handleGetConnectStatus)
 		r.With(connectRead).Get("/connect/{client}", s.handleGetConnectClientStatus)

@@ -52,7 +52,7 @@
                Clients. Keep the legacy markup below inert temporarily while
                its presentation-only helpers are retired; it must never own a
                second preview/write flow. -->
-          <ClientConnectList :show="show" @close="dismiss" />
+          <ClientConnectList :show="show" embedded @close="dismiss" />
         </section>
         <section v-if="false" aria-hidden="true">
           <p class="text-sm opacity-70 mb-4">

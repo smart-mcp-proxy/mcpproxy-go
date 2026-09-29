@@ -3,6 +3,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
+import ClientConnectList from '@/components/ClientConnectList.vue'
 import api from '@/services/api'
 
 // Spec 109-b FR-037: client rows show the home-shortened display_path (with
@@ -116,6 +117,19 @@ describe('OnboardingWizard Clients step paths/icons (Spec 109-b FR-037)', () => 
 
     const pathEl = wrapper.find('[data-test="client-path-cursor"]')
     expect(pathEl.text()).toBe('/Users/test/.cursor/mcp.json')
+  })
+
+  it('renders the shared client flow inline so its native dialog cannot cover wizard navigation', async () => {
+    const wrapper = await mountOnClients([
+      { id: 'cursor', name: 'Cursor', config_path: '~/.cursor/mcp.json', exists: true, supported: true },
+    ])
+    const sharedFlow = wrapper.findComponent(ClientConnectList)
+    expect(sharedFlow.exists()).toBe(true)
+    expect(sharedFlow.props('embedded')).toBe(true)
+    expect((sharedFlow.element as HTMLElement).tagName).not.toBe('DIALOG')
+    expect(wrapper.find('[data-test="tab-servers"]').exists()).toBe(true)
+    await wrapper.find('[data-test="tab-servers"]').trigger('click')
+    expect(wrapper.find('[data-test="panel-servers"]').exists()).toBe(true)
   })
 
   it('renders a per-client icon', async () => {

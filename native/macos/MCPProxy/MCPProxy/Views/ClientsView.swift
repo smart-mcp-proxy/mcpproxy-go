@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The native Clients hub keeps connection, endpoint terminology, and agent
@@ -13,6 +14,8 @@ struct ClientsView: View {
     @State private var isSavingMode = false
     @State private var errorMessage: String?
     @State private var showConnect = false
+    @State private var defaultMCPEndpoint = "http://127.0.0.1:8080/mcp"
+    @State private var snippetCopied = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -86,7 +89,35 @@ struct ClientsView: View {
                 }
                 .listStyle(.inset)
             }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Other client?").font(.headline)
+                Text("Add MCPProxy to its MCP configuration with this endpoint. This example contains no admin key.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(otherClientSnippet)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.secondary.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                Button(snippetCopied ? "Copied" : "Copy config") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(otherClientSnippet, forType: .string)
+                    snippetCopied = true
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("copy-other-client-snippet")
+            }
+            .padding()
         }
+    }
+
+    private var otherClientSnippet: String {
+        let object: [String: Any] = ["mcpServers": ["mcpproxy": ["url": defaultMCPEndpoint]]]
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return "" }
+        return text
     }
 
     @ViewBuilder
@@ -242,7 +273,9 @@ struct ClientsView: View {
             async let loadedClients = apiClient.clients()
             async let loadedRouting = apiClient.routing()
             clients = try await loadedClients
-            routing = try await loadedRouting
+            let loaded = try await loadedRouting
+            routing = loaded
+            defaultMCPEndpoint = await apiClient.endpointURL(loaded.endpoints.default)
         } catch {
             errorMessage = "Unable to load clients: \(error.localizedDescription)"
         }
