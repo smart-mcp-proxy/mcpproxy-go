@@ -220,6 +220,11 @@ type UpstreamRecord struct {
 	// ExposePrompts is the per-server override for exposing upstream prompts
 	// through mcpproxy's aggregated prompts/list and prompts/get.
 	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// ForwardHeaders (Spec 112) is the per-server allowlist of inbound MCP
+	// client header NAMES to forward on tools/call. Names only, never values.
+	// Persisted here because SaveConfiguration rebuilds the JSON server list
+	// from these records: a field absent here is wiped on the next mutation.
+	ForwardHeaders []string `json:"forward_headers,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics

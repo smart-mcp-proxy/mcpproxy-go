@@ -2013,6 +2013,13 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
 	}
 
+	// ForwardHeaders (Spec 112): nil means "leave unchanged"; a non-nil slice
+	// replaces the allowlist and an empty one clears it. The PATCH handler
+	// preserves the existing slice when the request omits the field.
+	if updates.ForwardHeaders != nil {
+		existing.ForwardHeaders = append([]string{}, updates.ForwardHeaders...)
+	}
+
 	// TrustMode (spec 086) is a plain string: empty means "leave unchanged"; a
 	// non-empty value is applied. The PATCH handler preserves the existing value
 	// when the request omits the field, so this empty-guard is the second half of

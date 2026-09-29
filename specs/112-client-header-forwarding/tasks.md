@@ -19,14 +19,14 @@ description: "Tasks for Spec 112 — MCP client header forwarding"
 
 ## Phase 2 — Config and persistence
 
-- [ ] T009 [US5] `Config.ForwardClientHeaders` + `IsClientHeaderForwardingEnabled` (nil/true/false) + env override `MCPPROXY_FORWARD_CLIENT_HEADERS` via process-only Field; save round-trip does not persist env value (`internal/config/config.go`, `loader.go`, `process_overrides.go`) — FR-001, FR-003
-- [ ] T010 [US1] `ServerConfig.ForwardHeaders`; `ValidateDetailed` clause; load-time normalization with name-only warning, boot never fails (`config.go`) — FR-002, FR-005
-- [ ] T011 [US1] `CopyServerConfig` / `MergeServerConfig` (nil keeps, `[]` clears, diff entry) (`merge.go`) — FR-020
-- [ ] T012 [US5] `DetectConfigChanges` clause for the global switch (resolved bool) (`internal/runtime/config_hotreload.go`) — FR-020
-- [ ] T013 [US1] `UpstreamRecord.ForwardHeaders` in all 5 conversion sites + storage round-trip test (`internal/storage/models.go`, `manager.go`, `async_ops.go`) — FR-020
-- [ ] T014 `ServerFieldMaskDecisions` row `forward_headers: NotSecret` (`internal/oauth/serverfields.go`) — FR-021
-- [ ] T015 [US1] `contracts.Server` + converters + StateView projections; `cmd/generate-types` template + regenerate `frontend/src/types/contracts.ts` — FR-020
-- [ ] T016 [US1] REST create/PATCH (preserve on omit) and MCP `upstream_servers` add/patch; validation errors surface to caller (`internal/httpapi/server.go`, `internal/server/mcp.go`); `make swagger` — FR-020
+- [x] T009 [US5] `Config.ForwardClientHeaders` + `IsClientHeaderForwardingEnabled` (nil/true/false) + env override `MCPPROXY_FORWARD_CLIENT_HEADERS` via process-only Field; save round-trip does not persist env value (`internal/config/config.go`, `loader.go`, `process_overrides.go`) — FR-001, FR-003
+- [x] T010 [US1] `ServerConfig.ForwardHeaders`; `ValidateDetailed` clause; load-time normalization with name-only warning, boot never fails (`config.go`) — FR-002, FR-005
+- [x] T011 [US1] `CopyServerConfig` / `MergeServerConfig` (nil keeps, `[]` clears, diff entry) (`merge.go`) — FR-020
+- [x] T012 [US5] `DetectConfigChanges` clause for the global switch (resolved bool) (`internal/runtime/config_hotreload.go`) — FR-020
+- [x] T013 [US1] `UpstreamRecord.ForwardHeaders` in all 5 conversion sites + storage round-trip test (`internal/storage/models.go`, `manager.go`, `async_ops.go`) — FR-020
+- [x] T014 `ServerFieldMaskDecisions` row `forward_headers: NotSecret` (`internal/oauth/serverfields.go`) — FR-021
+- [x] T015 [US1] `contracts.Server` + converters + StateView projections; `cmd/generate-types` template + regenerate `frontend/src/types/contracts.ts` — FR-020
+- [x] T016 [US1] REST create/PATCH (preserve on omit) and MCP `upstream_servers` add/patch; validation errors surface to caller (`internal/httpapi/server.go`, `internal/server/mcp.go`); `make swagger` — FR-020
 
 ## Phase 3 — Capture and dispatch
 

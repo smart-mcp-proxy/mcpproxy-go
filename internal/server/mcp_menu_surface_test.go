@@ -324,11 +324,42 @@ const upstreamServersRedactionMarker = "REDACTION (update/patch):"
 // description, which gains the redaction note above. No parameter may be added,
 // removed or altered — this is a documentation change over an existing
 // behaviour, not a new capability.
+//
+// Spec 112 adds exactly ONE parameter, forward_headers_json (a string holding a
+// JSON array of header names), for the per-server client header forwarding
+// allowlist. It is enumerated here so any other parameter movement still fails.
 func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
 	t.Helper()
 
-	assert.Equal(t, schemaWithout(preM, "description"), schemaWithout(curM, "description"),
-		"surface %s: only upstream_servers' description may move (issue #1146)", surface)
+	const spec112Param = "forward_headers_json"
+	curProps := schemaProps(curM)
+	if assert.Contains(t, curProps, spec112Param,
+		"surface %s: upstream_servers must expose the Spec 112 forward_headers_json parameter", surface) {
+		prop, _ := curProps[spec112Param].(map[string]interface{})
+		assert.Equal(t, "string", prop["type"], "surface %s: forward_headers_json is a JSON-array string", surface)
+		assert.NotContains(t, requiredParams(curM), spec112Param, "surface %s: forward_headers_json is optional", surface)
+	}
+	// Compare the two schemas with that one added parameter removed from the
+	// current side; everything else must be identical apart from the description.
+	curWithout := schemaWithout(curM, "description")
+	if schema, ok := curWithout["inputSchema"].(map[string]interface{}); ok {
+		trimmed := make(map[string]interface{}, len(schema))
+		for k, v := range schema {
+			trimmed[k] = v
+		}
+		if props, ok := schema["properties"].(map[string]interface{}); ok {
+			np := make(map[string]interface{}, len(props))
+			for k, v := range props {
+				if k != spec112Param {
+					np[k] = v
+				}
+			}
+			trimmed["properties"] = np
+		}
+		curWithout["inputSchema"] = trimmed
+	}
+	assert.Equal(t, schemaWithout(preM, "description"), curWithout,
+		"surface %s: only upstream_servers' description and the Spec 112 forward_headers_json parameter may move", surface)
 
 	assert.Contains(t, curM["description"], upstreamServersRedactionMarker,
 		"surface %s: upstream_servers must document that update/patch mask secret values in the diff", surface)

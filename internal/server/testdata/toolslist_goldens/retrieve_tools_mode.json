@@ -454,6 +454,10 @@
           "description": "Per-server prompt-aggregation override (F9): true = include this server's MCP prompts in mcpproxy's aggregated prompts/list; false = exclude them regardless of capability. Omit to leave unchanged (patch) / inherit the default (aggregate if advertised). Only meaningful when aggregate_upstream_prompts is enabled globally. Used with add/update/patch.",
           "type": "boolean"
         },
+        "forward_headers_json": {
+          "description": "Client header forwarding allowlist (Spec 112) as a JSON array of inbound MCP client header NAMES to copy into this server's tools/call requests, e.g. [\"X-User-Id\",\"X-Tenant-Id\"]. Names only, never values; exact names, case-insensitive, at most 32, no wildcards. Authorization, Host, Cookie, X-API-Key, hop-by-hop and proxy headers are never forwarded. Only HTTP-based upstreams forward. Patch: omit to leave unchanged, '[]' to clear (the array replaces entirely). Used with add/update/patch.",
+          "type": "string"
+        },
         "headers_json": {
           "description": "HTTP headers for authentication as JSON object (e.g., '{\"Authorization\": \"Bearer token\"}'). For update/patch: MERGES with existing headers (new keys added, existing keys updated).",
           "type": "string"

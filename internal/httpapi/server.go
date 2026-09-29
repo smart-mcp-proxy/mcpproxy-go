@@ -2100,6 +2100,12 @@ type AddServerRequest struct {
 	// a nil pointer means "leave unchanged" on PATCH (and "inherit the default
 	// aggregate behavior" on create); a present value (including false) is applied.
 	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// ForwardHeaders is the per-server allowlist of inbound MCP client header
+	// NAMES forwarded to this server on tools/call (Spec 112). Names only, never
+	// values. On PATCH a nil slice (field omitted) leaves the stored allowlist
+	// unchanged and an empty array ([]) clears it. Invalid, denied, duplicate
+	// and static-header-colliding names are rejected with 400.
+	ForwardHeaders []string `json:"forward_headers,omitempty"`
 	// TrustMode is the per-server trust tier (spec 086): "auto", "scan", or
 	// "manual". Empty means "leave unchanged" on PATCH (and inherit the migrated
 	// default on create). A non-empty value is applied to ServerConfig.TrustMode
@@ -2445,6 +2451,15 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.ExposePrompts != nil {
 		serverConfig.ExposePrompts = req.ExposePrompts
 	}
+	// Spec 112: carry the forward_headers allowlist through on create, after
+	// validating the names (write-time layer of FR-005).
+	if len(req.ForwardHeaders) > 0 {
+		if errs := config.ForwardHeadersValidationErrors("forward_headers", req.ForwardHeaders, serverConfig.Headers); len(errs) > 0 {
+			s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
+			return
+		}
+		serverConfig.ForwardHeaders = append([]string(nil), req.ForwardHeaders...)
+	}
 	// Spec 086: carry the per-server trust_mode through on create. Empty means
 	// "not specified" — leave it for the loader's legacy-flag migration to
 	// populate; a present value wins.
@@ -2767,6 +2782,33 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.ExposePrompts = existingSrv.ExposePrompts
+	}
+	// Spec 112: forward_headers preserves the existing allowlist when the
+	// request omits it (nil slice); a non-nil slice replaces it and an empty
+	// one clears it. Validated against the static headers this PATCH will leave
+	// in place, so a header change cannot introduce a collision either.
+	{
+		staticAfter := updates.Headers
+		if req.Headers == nil && existingSrv != nil {
+			staticAfter = existingSrv.Headers
+		}
+		switch {
+		case req.ForwardHeaders != nil:
+			if errs := config.ForwardHeadersValidationErrors("forward_headers", req.ForwardHeaders, staticAfter); len(errs) > 0 {
+				s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
+				return
+			}
+			updates.ForwardHeaders = append([]string{}, req.ForwardHeaders...)
+			hasUpdates = true
+		case existingSrv != nil:
+			if req.Headers != nil {
+				if errs := config.ForwardHeadersValidationErrors("forward_headers", existingSrv.ForwardHeaders, staticAfter); len(errs) > 0 {
+					s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(errs))
+					return
+				}
+			}
+			updates.ForwardHeaders = existingSrv.ForwardHeaders
+		}
 	}
 	// Spec 086: trust_mode is a plain string — empty means "leave unchanged", so
 	// preserve the existing value when the request omits it (a bare PATCH of an
@@ -7144,4 +7186,14 @@ func toolApprovalPriority(status string) int {
 	default:
 		return 2
 	}
+}
+
+// joinValidationMessages renders config validation errors as one client-facing
+// message. Messages name headers only, never values (Spec 112).
+func joinValidationMessages(errs []config.ValidationError) string {
+	msgs := make([]string, 0, len(errs))
+	for _, e := range errs {
+		msgs = append(msgs, e.Field+": "+e.Message)
+	}
+	return strings.Join(msgs, "; ")
 }

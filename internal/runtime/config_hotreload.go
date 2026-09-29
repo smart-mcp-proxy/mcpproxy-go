@@ -227,6 +227,15 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "toon_min_savings_pct")
 	}
 
+	// Client header forwarding switch (Spec 112 FR-020 — hot-reloadable, no
+	// reconnect). Compare the RESOLVED bool, not the pointer: nil and an
+	// explicit true both mean enabled, so writing the default out is not a
+	// change, and a lone edit of the switch is acknowledged instead of being
+	// swallowed as "no changes detected".
+	if oldCfg.IsClientHeaderForwardingEnabled() != newCfg.IsClientHeaderForwardingEnabled() {
+		result.ChangedFields = append(result.ChangedFields, "forward_client_headers")
+	}
+
 	// Tool response mode (Spec 085 FR-015 — hot-reloadable, serialization
 	// only). Without this clause an API apply that changes only this field
 	// computes empty ChangedFields and is swallowed as "no changes detected".

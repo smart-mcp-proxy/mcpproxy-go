@@ -377,6 +377,7 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		// the operator stated anything.
 		"quarantineExplicitlySet": true,
 		"ExposePrompts":           true, // persisted to BBolt so the per-server override survives restarts
+		"ForwardHeaders":          true, // Spec 112: persisted to BBolt so the header-forwarding allowlist survives restarts and SaveConfiguration rebuilds
 	}
 
 	// Get all fields from ServerConfig
@@ -478,5 +479,64 @@ func TestManagerStopAsyncDrainsThenCloseIsIdempotent(t *testing.T) {
 	manager.StopAsync()
 	if err := manager.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// Spec 112: forward_headers must survive every persistence path — save/get,
+// list and the quarantined-servers listing — because SaveConfiguration rebuilds
+// the JSON server list from these records.
+func TestForwardHeadersRoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	manager, err := NewManager(tmpDir, zaptest.NewLogger(t).Sugar())
+	if err != nil {
+		t.Fatalf("Failed to create storage manager: %v", err)
+	}
+	defer manager.Close()
+
+	want := []string{"X-User-Id", "X-Tenant-Id"}
+	for _, sc := range []*config.ServerConfig{
+		{Name: "fwd", URL: "https://example.com/mcp", Protocol: "streamable-http", Enabled: true, Created: time.Now(), ForwardHeaders: want},
+		{Name: "fwd-q", URL: "https://example.com/mcp", Protocol: "streamable-http", Enabled: true, Quarantined: true, Created: time.Now(), ForwardHeaders: want},
+		{Name: "none", URL: "https://example.com/mcp", Protocol: "streamable-http", Enabled: true, Created: time.Now()},
+	} {
+		if err := manager.SaveUpstreamServer(sc); err != nil {
+			t.Fatalf("SaveUpstreamServer(%s): %v", sc.Name, err)
+		}
+	}
+
+	got, err := manager.GetUpstreamServer("fwd")
+	if err != nil || !reflect.DeepEqual(got.ForwardHeaders, want) {
+		t.Fatalf("Get: ForwardHeaders = %v (err %v), want %v", got.ForwardHeaders, err, want)
+	}
+	none, err := manager.GetUpstreamServer("none")
+	if err != nil || len(none.ForwardHeaders) != 0 {
+		t.Fatalf("Get none: ForwardHeaders = %v (err %v), want empty", none.ForwardHeaders, err)
+	}
+
+	listed, err := manager.ListUpstreamServers()
+	if err != nil {
+		t.Fatalf("ListUpstreamServers: %v", err)
+	}
+	for _, s := range listed {
+		if s.Name == "fwd" && !reflect.DeepEqual(s.ForwardHeaders, want) {
+			t.Errorf("List: ForwardHeaders = %v, want %v", s.ForwardHeaders, want)
+		}
+	}
+
+	quarantined, err := manager.ListQuarantinedUpstreamServers()
+	if err != nil {
+		t.Fatalf("ListQuarantinedUpstreamServers: %v", err)
+	}
+	found := false
+	for _, s := range quarantined {
+		if s.Name == "fwd-q" {
+			found = true
+			if !reflect.DeepEqual(s.ForwardHeaders, want) {
+				t.Errorf("Quarantined list: ForwardHeaders = %v, want %v", s.ForwardHeaders, want)
+			}
+		}
+	}
+	if !found {
+		t.Error("quarantined server not listed")
 	}
 }

@@ -1382,6 +1382,9 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithBoolean("expose_prompts",
 				mcp.Description("Per-server prompt-aggregation override (F9): true = include this server's MCP prompts in mcpproxy's aggregated prompts/list; false = exclude them regardless of capability. Omit to leave unchanged (patch) / inherit the default (aggregate if advertised). Only meaningful when aggregate_upstream_prompts is enabled globally. Used with add/update/patch."),
 			),
+			mcp.WithString("forward_headers_json",
+				mcp.Description("Client header forwarding allowlist (Spec 112) as a JSON array of inbound MCP client header NAMES to copy into this server's tools/call requests, e.g. [\"X-User-Id\",\"X-Tenant-Id\"]. Names only, never values; exact names, case-insensitive, at most 32, no wildcards. Authorization, Host, Cookie, X-API-Key, hop-by-hop and proxy headers are never forwarded. Only HTTP-based upstreams forward. Patch: omit to leave unchanged, '[]' to clear (the array replaces entirely). Used with add/update/patch."),
+			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: upstreamServersTool, Handler: p.handleUpstreamServers})
 	}
@@ -5686,6 +5689,18 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 	}
 
+	// Spec 112: optional forward_headers allowlist on add, validated at write time.
+	if fhJSON := request.GetString("forward_headers_json", ""); fhJSON != "" {
+		names, ferr := parseForwardHeadersJSON(fhJSON)
+		if ferr != nil {
+			return mcp.NewToolResultError(ferr.Error()), nil
+		}
+		if err := forwardHeadersWriteError(names, headers); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		serverConfig.ForwardHeaders = names
+	}
+
 	// #1148 round 6 (finding 4): on CREATE there is no stored value to bind a
 	// mask back to, so ANY mask this proxy rendered can only be a placeholder
 	// an agent copied out of another server's read payload — never a value
@@ -5921,6 +5936,13 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil, nil
 	}
+	// Spec 112 FR-005a: validate the resulting allowlist against the resulting
+	// static headers, so a headers change cannot introduce a collision either.
+	if patch.ForwardHeaders != nil || patch.Headers != nil {
+		if err := forwardHeadersWriteError(mergedServer.ForwardHeaders, mergedServer.Headers); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil, nil
+		}
+	}
 
 	// Log the config diff for audit trail (FR-006). Issue #1146: config.FieldChange
 	// carries raw before/after VALUES, so logging Modified verbatim wrote env
@@ -6033,6 +6055,13 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 	mergedServer, configDiff, err := config.MergeServerConfig(existingServer, patch, mergeOpts)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil, nil
+	}
+	// Spec 112 FR-005a: validate the resulting allowlist against the resulting
+	// static headers, so a headers change cannot introduce a collision either.
+	if patch.ForwardHeaders != nil || patch.Headers != nil {
+		if err := forwardHeadersWriteError(mergedServer.ForwardHeaders, mergedServer.Headers); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil, nil
+		}
 	}
 
 	// Log the config diff for audit trail (FR-006), values masked (issue #1146).
@@ -6272,6 +6301,17 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			}
 			patch.ExposePrompts = &b
 		}
+	}
+
+	// Spec 112: forward_headers allowlist. The array replaces entirely; '[]'
+	// clears; omitted leaves it unchanged (nil for MergeServerConfig). The
+	// merged result is validated against the merged static headers below.
+	if fhJSON := request.GetString("forward_headers_json", ""); fhJSON != "" {
+		names, ferr := parseForwardHeadersJSON(fhJSON)
+		if ferr != nil {
+			return nil, opts, ferr
+		}
+		patch.ForwardHeaders = names
 	}
 
 	// Handle oauth JSON string - deep merge for nested config
@@ -8142,4 +8182,31 @@ func rawByteSize(v interface{}) int {
 		return 0
 	}
 	return len(b)
+}
+
+// parseForwardHeadersJSON decodes the forward_headers_json argument. The result
+// is non-nil even for '[]', so MergeServerConfig treats it as "clear".
+func parseForwardHeadersJSON(raw string) ([]string, error) {
+	names := []string{}
+	if err := json.Unmarshal([]byte(raw), &names); err != nil {
+		return nil, fmt.Errorf("invalid forward_headers_json format: expected a JSON array of header names: %v", err)
+	}
+	if names == nil {
+		names = []string{}
+	}
+	return names, nil
+}
+
+// forwardHeadersWriteError is the write-time validation of a forward_headers
+// allowlist (Spec 112 FR-005a). Messages name headers only, never values.
+func forwardHeadersWriteError(names []string, static map[string]string) error {
+	errs := config.ForwardHeadersValidationErrors("forward_headers", names, static)
+	if len(errs) == 0 {
+		return nil
+	}
+	msgs := make([]string, 0, len(errs))
+	for _, e := range errs {
+		msgs = append(msgs, e.Message)
+	}
+	return fmt.Errorf("invalid forward_headers: %s", strings.Join(msgs, "; "))
 }

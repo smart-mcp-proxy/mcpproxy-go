@@ -50,6 +50,8 @@ func ConvertServerConfig(cfg *config.ServerConfig, globalIsolation *config.Docke
 		// F9: surface the per-server prompt-aggregation override so a caller that
 		// PATCHed it can read it back.
 		ExposePrompts: cfg.ExposePrompts,
+		// Spec 112: allowlist of forwarded client header names (no values).
+		ForwardHeaders: append([]string(nil), cfg.ForwardHeaders...),
 		// Spec 093: surface the per-server concurrency overrides (tri-state) so a
 		// caller that PATCHed a limit can read it back.
 		MaxConcurrentRequests: cfg.MaxConcurrentRequests,
@@ -274,6 +276,10 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			v := exposePrompts
 			server.ExposePrompts = &v
 		}
+		// Spec 112: forward_headers is a list of header names. The generic map
+		// carries []string from the runtime projection or []interface{} after a
+		// JSON round-trip.
+		server.ForwardHeaders = stringListFromAny(generic["forward_headers"])
 		// Spec 086: per-server trust tier round-trips as a plain string.
 		if trustMode, ok := generic["trust_mode"].(string); ok {
 			server.TrustMode = trustMode
@@ -738,4 +744,25 @@ func toolAnnotationToConfig(a *ToolAnnotation) *config.ToolAnnotations {
 		IdempotentHint:  a.IdempotentHint,
 		OpenWorldHint:   a.OpenWorldHint,
 	}
+}
+
+// stringListFromAny converts a []string or []interface{} of strings (the two
+// shapes a generic server map takes, depending on whether it crossed a JSON
+// round-trip) into a []string. Anything else, or an empty list, yields nil.
+func stringListFromAny(v interface{}) []string {
+	var out []string
+	switch t := v.(type) {
+	case []string:
+		out = append(out, t...)
+	case []interface{}:
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
