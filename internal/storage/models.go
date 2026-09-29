@@ -122,6 +122,12 @@ type OnboardingState struct {
 	// Verify step / presence layer to tell "connected, never seen" apart from
 	// "connected seconds ago, hasn't reconnected yet".
 	ClientConnectedAt map[string]time.Time `json:"client_connected_at,omitempty"`
+
+	// ClientLastSeen records the latest MCP initialize for a recognised client
+	// alias. It is intentionally kept with onboarding state: presence is a
+	// local UI concern and must still work when telemetry is disabled.
+	ClientLastSeen       map[string]time.Time `json:"client_last_seen,omitempty"`
+	ClientDisconnectedAt map[string]time.Time `json:"client_disconnected_at,omitempty"`
 }
 
 // Meta keys

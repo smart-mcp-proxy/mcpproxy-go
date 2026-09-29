@@ -4050,6 +4050,18 @@ components:
             Verify step / presence layer to tell "connected, never seen" apart from
             "connected seconds ago, hasn't reconnected yet".
           type: object
+        client_disconnected_at:
+          additionalProperties:
+            type: string
+          type: object
+        client_last_seen:
+          additionalProperties:
+            type: string
+          description: |-
+            ClientLastSeen records the latest MCP initialize for a recognised client
+            alias. It is intentionally kept with onboarding state: presence is a
+            local UI concern and must still work when telemetry is disabled.
+          type: object
         connect_step_status:
           description: |-
             ConnectStepStatus is one of: "", "completed", "completed_external",

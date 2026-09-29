@@ -1141,6 +1141,10 @@ export interface ImportResponse {
 // API returns a flat array of ClientStatus objects in the data field
 export type ConnectStatusResponse = ClientStatus[]
 
+export interface ClientSessionPresence { id: string; work_session_id?: string; started_at: string; last_activity: string }
+export interface ClientPresence { id: string; display_name: string; kind: 'supported' | 'other' | 'custom'; icon?: string; state: string; installed: boolean; connected: boolean; connection_unverified?: boolean; config_path?: string; display_path?: string; last_seen?: string | null; active_sessions: number; calls_24h: number; reload_hint?: string; sessions?: ClientSessionPresence[] }
+export interface ClientsResponse { clients: ClientPresence[]; routing?: RoutingInfo }
+
 // AccessState classifies a per-client config content access (Spec 075). The
 // stat-only overall listing leaves it 'unknown' (no eager read); the on-demand
 // per-client GET / connect / disconnect paths resolve it to one of the others.

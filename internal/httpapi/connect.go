@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -273,6 +274,14 @@ func applyClientConnected(state *storage.OnboardingState, clientID string, now t
 		state.ClientConnectedAt = map[string]time.Time{}
 	}
 	state.ClientConnectedAt[clientID] = now
+	if state.ClientDisconnectedAt != nil {
+		delete(state.ClientDisconnectedAt, clientID)
+	}
+	if client := connect.FindClient(clientID); client != nil && state.ClientLastSeen != nil {
+		for _, alias := range client.ClientInfoNames {
+			delete(state.ClientLastSeen, strings.ToLower(alias))
+		}
+	}
 }
 
 // handleDisconnectClient godoc

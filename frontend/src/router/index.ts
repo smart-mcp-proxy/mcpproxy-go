@@ -35,6 +35,7 @@ const router = createRouter({
         title: 'Usage Analytics',
       },
     },
+    { path: '/clients', name: 'clients', component: () => import('@/views/Clients.vue'), meta: { title: 'Clients' } },
     {
       path: '/overview',
       redirect: { name: 'home' },
@@ -170,14 +171,7 @@ const router = createRouter({
         title: 'Scan Report',
       },
     },
-    {
-      path: '/tokens',
-      name: 'tokens',
-      component: () => import('@/views/AgentTokens.vue'),
-      meta: {
-        title: 'Agent Tokens',
-      },
-    },
+    { path: '/tokens', redirect: (to) => ({ path: '/clients', query: { ...to.query, tab: 'tokens' } }) },
     // Server edition user routes
     {
       path: '/my/servers',

@@ -15,6 +15,14 @@ talks to the proxy instead of to each upstream server directly. It is available
 from the Web UI wizard, the macOS tray ("Connect Client…"), and the
 `mcpproxy connect` CLI.
 
+## Clients hub
+
+The Clients hub in the Web UI and macOS app brings client presence, Endpoint &
+mode, and Agent tokens together. `mcpproxy client list` shows the same presence
+rows, while `mcpproxy client show <id>` includes the recorded sessions. An
+installed config is distinct from a client that has initialized against
+MCPProxy; after a successful write, follow that client's reload hint.
+
 The UI flows are **preview → confirm → write** (the CLI writes directly, with
 `--force` to overwrite an existing entry):
 

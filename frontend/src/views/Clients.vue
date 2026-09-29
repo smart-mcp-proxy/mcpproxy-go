@@ -1,0 +1,44 @@
+<template>
+  <div class="space-y-6" data-test="clients-page">
+    <div class="flex items-start justify-between gap-4">
+      <div><h1 class="text-3xl font-bold">Clients</h1><p class="text-base-content/70 mt-1">Connect AI clients, check presence, and manage agent tokens.</p></div>
+      <ClientConnectList v-if="authStore.principalKind !== 'tenant'" />
+    </div>
+    <div role="tablist" class="tabs tabs-boxed w-fit" data-test="clients-tabs">
+      <button v-for="item in tabs" :key="item.id" class="tab" :class="tab === item.id && 'tab-active'" @click="selectTab(item.id)">{{ item.label }}</button>
+    </div>
+    <section v-if="tab === 'clients'" class="space-y-3">
+      <div v-if="store.loading" class="py-12 text-center"><span class="loading loading-spinner loading-lg" /></div>
+      <div v-else-if="store.error" class="alert alert-error">{{ store.error }}</div>
+      <div v-else class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+        <table class="table"><thead><tr><th>Client</th><th>State</th><th>Last seen</th><th>Sessions</th><th>Config path</th></tr></thead>
+          <tbody><template v-for="client in store.clients" :key="client.id"><tr class="cursor-pointer hover" @click="toggle(client.id)"><td class="font-medium">{{ client.display_name }}</td><td><span class="badge badge-sm">{{ stateLabel(client.state) }}</span></td><td>{{ relative(client.last_seen) }}</td><td>{{ client.active_sessions }}</td><td><code class="text-xs">{{ client.display_path || '—' }}</code></td></tr>
+          <tr v-if="expanded === client.id"><td colspan="5" class="bg-base-200/40"><p v-if="client.reload_hint" class="text-sm mb-2">{{ client.reload_hint }}</p><p v-if="!client.sessions?.length" class="text-sm opacity-60">No sessions recorded.</p><router-link v-for="session in client.sessions" :key="session.id" :to="`/activity?view=sessions&session=${encodeURIComponent(session.work_session_id || session.id)}`" class="link block text-sm">Session {{ session.work_session_id || session.id }}</router-link></td></tr></template></tbody>
+        </table>
+      </div>
+      <div class="rounded-box border border-dashed border-base-300 p-4 text-sm"><strong>Other client?</strong> Add MCPProxy to its MCP configuration using the endpoint shown in Endpoint &amp; mode.</div>
+    </section>
+    <section v-else-if="tab === 'endpoint'" class="card bg-base-100 border border-base-300"><div class="card-body"><h2 class="card-title">Endpoint &amp; mode</h2><p>Routing mode: <strong>{{ store.routing?.routing_mode || 'Loading…' }}</strong></p><dl v-if="store.routing" class="grid sm:grid-cols-2 gap-2 text-sm"><template v-for="(endpoint, name) in store.routing.endpoints" :key="name"><dt class="font-medium">{{ name }}</dt><dd><code>{{ endpoint }}</code></dd></template></dl><p v-if="store.routing?.restart_required" class="alert alert-warning text-sm">Restart MCPProxy to apply {{ store.routing.pending_routing_mode }} mode.</p></div></section>
+    <AgentTokens v-else />
+  </div>
+</template>
+
+<script setup lang="ts">
+import { onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useClientsStore } from '@/stores/clients'
+import { useAuthStore } from '@/stores/auth'
+import ClientConnectList from '@/components/ClientConnectList.vue'
+import AgentTokens from '@/views/AgentTokens.vue'
+
+const route = useRoute(); const router = useRouter(); const store = useClientsStore(); const authStore = useAuthStore()
+const tabs = [{ id: 'clients', label: 'Clients' }, { id: 'endpoint', label: 'Endpoint & mode' }, { id: 'tokens', label: 'Agent tokens' }]
+const tab = ref(typeof route.query.tab === 'string' && tabs.some(item => item.id === route.query.tab) ? route.query.tab : 'clients')
+const expanded = ref('')
+function selectTab(id: string) { tab.value = id }
+watch(tab, value => router.replace({ query: { ...route.query, tab: value } }))
+async function toggle(id: string) { expanded.value = expanded.value === id ? '' : id; if (expanded.value) await store.loadDetail(id) }
+function stateLabel(value: string) { return value.replaceAll('_', ' ') }
+function relative(value?: string | null) { return value ? new Date(value).toLocaleString() : 'Never' }
+onMounted(() => { if (authStore.principalKind !== 'tenant') void store.load() })
+</script>

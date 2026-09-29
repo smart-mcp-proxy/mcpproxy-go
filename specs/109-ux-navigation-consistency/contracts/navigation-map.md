@@ -24,6 +24,8 @@ v0.69.x  ⟳ Check
 
 Removed items: Dashboard (→ Home), Agent Tokens (→ Clients tab), Sessions (→ Activity view), Security (→ Review queue + Settings → Security → Scanners), Repositories (→ Servers → Add → Catalog + Settings → Catalog sources), Configuration (→ Settings). Group labels are uppercase section headers. Collapsed-sidebar icons keep `aria-label` = item name (existing a11y rule).
 
+The diagram is the final 109-i grouping. At 109-h, `SidebarNav.vue` adds a minimal personal-edition Clients link to the existing menu so `/clients` is reachable; 109-i then moves it into CONNECT and performs the full regroup/removal. Server-edition navigation does not gain this link because its `/clients` route is absent.
+
 ## Routes
 
 | Route | Renders | Notes |

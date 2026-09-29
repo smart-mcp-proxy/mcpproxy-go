@@ -3923,3 +3923,33 @@ func (r *Runtime) UpdateOnboardingState(fn func(*storage.OnboardingState) error)
 	}
 	return r.storageManager.UpdateOnboardingState(fn)
 }
+
+// RecordClientSeen persists an initialize observation independently of the
+// telemetry activation funnel. Presence must remain accurate when telemetry is
+// disabled, and UpdateOnboardingState keeps this write from racing connect or
+// onboarding mutations.
+func (r *Runtime) RecordClientSeen(clientName string) {
+	name := strings.ToLower(strings.TrimSpace(clientName))
+	if name == "" || r.storageManager == nil {
+		return
+	}
+	if err := r.storageManager.UpdateOnboardingState(func(state *storage.OnboardingState) error {
+		if state.ClientLastSeen == nil {
+			state.ClientLastSeen = map[string]time.Time{}
+		}
+		state.ClientLastSeen[name] = time.Now()
+		for len(state.ClientLastSeen) > 32 {
+			var oldest string
+			var at time.Time
+			for key, value := range state.ClientLastSeen {
+				if oldest == "" || value.Before(at) {
+					oldest, at = key, value
+				}
+			}
+			delete(state.ClientLastSeen, oldest)
+		}
+		return nil
+	}); err != nil && r.logger != nil {
+		r.logger.Debug("presence: unable to record MCP client", zap.Error(err))
+	}
+}

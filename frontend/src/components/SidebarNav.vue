@@ -185,6 +185,11 @@
                needs-attention count every other surface reads. -->
           <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li>
+              <router-link to="/clients" :class="{ 'active': isActiveRoute('/clients') }" class="rounded-lg font-medium" :title="collapsed ? 'Clients' : ''" :aria-label="collapsed ? 'Clients' : undefined">
+                <IconTokens class="w-5 h-5 shrink-0" /><span v-show="!collapsed">Clients</span>
+              </router-link>
+            </li>
+            <li>
               <router-link
                 to="/"
                 :class="{ 'active': isActiveRoute('/') }"
