@@ -90,8 +90,25 @@ struct FirstRunDialog: View {
             .padding(.top, 8)
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: firstRunDialogWidth)
     }
+}
+
+// MARK: - Sizing
+
+/// Fixed content width of the first-run dialog.
+let firstRunDialogWidth: CGFloat = 460
+
+/// Height the dialog never shrinks below.
+let firstRunDialogMinHeight: CGFloat = 300
+
+/// Window content size for the dialog given the SwiftUI content's fitting
+/// height. The height used to be a hard-coded 300, which clips the copy (the
+/// telemetry notice in particular) when the user's text size or a longer
+/// localisation makes the content taller; now the window grows to fit, and
+/// never drops below the original 300.
+func firstRunDialogContentSize(fittingHeight: CGFloat) -> NSSize {
+    NSSize(width: firstRunDialogWidth, height: max(firstRunDialogMinHeight, ceil(fittingHeight)))
 }
 
 // MARK: - Presentation Helper
@@ -124,7 +141,10 @@ func presentFirstRunDialogIfNeeded() {
     let host = NSHostingController(
         rootView: FirstRunDialogBinding(choice: choice)
     )
-    host.view.frame = NSRect(x: 0, y: 0, width: 460, height: 300)
+    host.view.layoutSubtreeIfNeeded()
+    host.view.frame = NSRect(
+        origin: .zero,
+        size: firstRunDialogContentSize(fittingHeight: host.view.fittingSize.height))
 
     let window = NSWindow(contentViewController: host)
     window.title = "Welcome to MCPProxy"
