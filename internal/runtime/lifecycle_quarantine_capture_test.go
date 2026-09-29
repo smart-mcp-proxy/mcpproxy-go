@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	stdruntime "runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,6 +39,8 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblockFirst := func() { releaseOnce.Do(func() { close(release) }) }
 	var listCalls atomic.Int32
 	firstHandler := captureTestServer("first", "old_definition")
 	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +62,9 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
+	// Registered after rt.Close so LIFO cleanup releases the blocked handler
+	// before closing the runtime or either httptest server.
+	t.Cleanup(unblockFirst)
 	rt.StartBackgroundInitialization()
 
 	// The capture grants its own inspection exemption, which connects A.
@@ -73,18 +79,24 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 	require.NotZero(t, captureA.Epoch, "the blocked list must be bound to a live connection")
 
 	// Replace the managed client while A's response is still in flight, then
-	// connect B directly. The supervisor receives the disconnect/connect events
-	// and moves its discovery capture before A can be stored.
+	// connect B directly. Background initialization may race this call, so an
+	// already-connecting or already-ready error is harmless; we verify the
+	// replacement reaches the expected connection generation below.
 	cfgB := *cfgA
 	cfgB.URL = second.URL
 	require.NoError(t, rt.UpstreamManager().AddServerConfig("quarantined", &cfgB))
 	clientB, ok := rt.UpstreamManager().GetClient("quarantined")
 	require.True(t, ok)
-	require.NoError(t, clientB.Connect(context.Background()))
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelConnect()
+	if err := clientB.Connect(connectCtx); err != nil {
+		require.Contains(t, err.Error(), "connection already in progress or established")
+		require.True(t, clientB.IsConnecting() || clientB.IsConnected(), "duplicate connect error without an active or ready connection: %v", err)
+	}
 	require.Eventually(t, func() bool {
-		return rt.discoveryGeneration("quarantined") != captureA
-	}, 5*time.Second, 10*time.Millisecond, "replacement must advance the capture before the old list returns")
-	close(release)
+		return clientB.IsConnected() && clientB.ConnectionEpoch() > captureA.Epoch && rt.discoveryGeneration("quarantined") != captureA
+	}, 10*time.Second, 10*time.Millisecond, "replacement must connect and advance the capture before the old list returns")
+	unblockFirst()
 
 	select {
 	case err := <-done:

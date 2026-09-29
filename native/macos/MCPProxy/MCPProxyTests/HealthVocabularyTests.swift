@@ -188,4 +188,51 @@ final class HealthVocabularyTests: XCTestCase {
             XCTAssertFalse(HealthStatus.statusLabels[status]!.isEmpty)
         }
     }
+
+    // MARK: - Golden fixture shared with Go (internal/health/testdata/status_fixtures.json)
+
+    /// `HealthStatus.statusLabels` / `actionLabels` are hand-copied from
+    /// internal/health/constants.go. The Go side pins the same fixture to
+    /// constants.go (TestStatusFixturesMatchConstants), so a label rename there
+    /// fails here too instead of leaving macOS on the old wording.
+    private struct VocabularyFixture: Decodable {
+        let statusOrder: [String]
+        let statusLabels: [String: String]
+        let actionPriority: [String]
+        let actionLabels: [String: String]
+
+        enum CodingKeys: String, CodingKey {
+            case statusOrder = "status_order"
+            case statusLabels = "status_labels"
+            case actionPriority = "action_priority"
+            case actionLabels = "action_labels"
+        }
+    }
+
+    /// Anchored on `#filePath` (not the working directory), like the other
+    /// fixture-reading tests: `swift test` runs from varying directories.
+    private func loadVocabularyFixture() throws -> VocabularyFixture {
+        let relative = "internal/health/testdata/status_fixtures.json"
+        var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        while directory.path != "/" {
+            let candidate = directory.appendingPathComponent(relative)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return try JSONDecoder().decode(VocabularyFixture.self, from: Data(contentsOf: candidate))
+            }
+            directory = directory.deletingLastPathComponent()
+        }
+        struct FixtureMissing: Error {}
+        XCTFail("could not find \(relative) above \(#filePath)")
+        throw FixtureMissing()
+    }
+
+    func testLabelTablesMatchGoldenFixture() throws {
+        let fixture = try loadVocabularyFixture()
+        XCTAssertEqual(HealthStatus.statusLabels, fixture.statusLabels,
+                       "HealthStatus.statusLabels drifted from internal/health/constants.go")
+        XCTAssertEqual(HealthStatus.actionLabels, fixture.actionLabels,
+                       "HealthStatus.actionLabels drifted from internal/health/constants.go")
+        XCTAssertEqual(Set(fixture.statusOrder), Set(HealthStatus.statusLabels.keys))
+        XCTAssertEqual(Set(fixture.actionPriority), Set(HealthStatus.actionLabels.keys))
+    }
 }
