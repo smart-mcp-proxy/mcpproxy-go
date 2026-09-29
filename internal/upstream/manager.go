@@ -1195,6 +1195,17 @@ func (m *Manager) WithCurrentClientOnEpoch(id string, expected *managed.Client, 
 	return client.WithConnectionEpoch(expectedEpoch, fn)
 }
 
+// CaptureReplacementQueued reports whether a replacement/removal is waiting
+// behind an active capture persistence section. It is primarily useful for
+// observability and deterministic concurrency tests; it never mutates state.
+func (m *Manager) CaptureReplacementQueued() bool {
+	if m.captureMu.TryRLock() {
+		m.captureMu.RUnlock()
+		return false
+	}
+	return true
+}
+
 // GetAllClients returns all clients
 func (m *Manager) GetAllClients() map[string]*managed.Client {
 	m.mu.RLock()

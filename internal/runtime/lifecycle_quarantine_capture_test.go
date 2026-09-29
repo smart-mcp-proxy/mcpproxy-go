@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	stdruntime "runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -170,6 +171,11 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 			replaceDone <- rt.UpstreamManager().AddServerConfig("quarantined", &cfgB)
 		}()
 		<-replaceStarted
+		deadline := time.Now().Add(time.Second)
+		for !rt.UpstreamManager().CaptureReplacementQueued() && time.Now().Before(deadline) {
+			stdruntime.Gosched()
+		}
+		require.True(t, rt.UpstreamManager().CaptureReplacementQueued(), "AddServerConfig writer must be queued behind capture persistence")
 		select {
 		case err := <-replaceDone:
 			t.Fatalf("AddServerConfig replaced the client before capture committed: %v", err)
