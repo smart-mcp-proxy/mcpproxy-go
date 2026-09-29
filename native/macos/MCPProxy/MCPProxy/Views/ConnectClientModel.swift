@@ -784,12 +784,14 @@ final class ConnectClientModel: ObservableObject {
     }
 
     /// The file the confirmation names: the core's own path for this client,
-    /// never one the tray composed itself.
+    /// never one the tray composed itself. It is the home-shortened
+    /// `display_path` when the core sent one (falling back to the full path for
+    /// an older core), matching the row and result view.
     private func disconnectConfigPath(for clientId: String) -> String {
-        if let resolved = resolvedDetails[clientId], !resolved.configPath.isEmpty {
-            return resolved.configPath
+        if let resolved = resolvedDetails[clientId], !resolved.effectiveDisplayPath.isEmpty {
+            return resolved.effectiveDisplayPath
         }
-        return currentPreview?.configPath ?? ""
+        return currentPreview?.effectiveDisplayPath ?? ""
     }
 
     /// After a completed action, re-read ONLY the affected client and re-run its
