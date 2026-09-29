@@ -63,7 +63,7 @@ type attentionSubscriber struct {
 
 	mu      sync.Mutex
 	servers []contracts.Server
-	clients []AttentionClient // always nil until 109-h wires ClientPresence
+	clients []AttentionClient
 	state   map[string]attentionServerState
 	lastIDs map[string]struct{}
 
@@ -164,10 +164,10 @@ func (a *attentionSubscriber) loop(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if evt.Type != EventTypeServersChanged {
+			if evt.Type != EventTypeServersChanged && evt.Type != EventTypeClientPresenceChanged {
 				continue
 			}
-			if !a.updateFromPayload(evt.Payload) {
+			if evt.Type == EventTypeServersChanged && !a.updateFromPayload(evt.Payload) {
 				continue
 			}
 			if debounceTimer == nil {
@@ -215,6 +215,9 @@ func (a *attentionSubscriber) recompute() time.Duration {
 	clientsCopy := make([]AttentionClient, len(a.clients))
 	copy(clientsCopy, a.clients)
 	a.mu.Unlock()
+	// Presence is a compact onboarding-state snapshot. Refresh it for every
+	// recompute rather than keeping a second mutable cache in the subscriber.
+	clientsCopy = a.rt.AttentionClients()
 
 	input := AttentionInput{
 		Now:                      now,

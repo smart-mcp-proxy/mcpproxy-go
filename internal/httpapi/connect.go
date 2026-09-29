@@ -261,6 +261,9 @@ func (s *Server) recordClientConnected(clientID string) {
 	if err != nil && s.logger != nil {
 		s.logger.Warnf("onboarding: failed to record client_connected_at for %s: %v", clientID, err)
 	}
+	if err == nil {
+		s.notifyClientPresenceChanged()
+	}
 }
 
 // applyClientConnected sets state.ClientConnectedAt[clientID] = now, creating
@@ -353,6 +356,17 @@ func (s *Server) recordClientDisconnected(clientID string) {
 	})
 	if err != nil && s.logger != nil {
 		s.logger.Warnf("onboarding: failed to record client_disconnected_at for %s: %v", clientID, err)
+	}
+	if err == nil {
+		s.notifyClientPresenceChanged()
+	}
+}
+
+type clientPresenceNotifier interface{ NotifyClientPresenceChanged() }
+
+func (s *Server) notifyClientPresenceChanged() {
+	if notifier, ok := s.controller.(clientPresenceNotifier); ok {
+		notifier.NotifyClientPresenceChanged()
 	}
 }
 

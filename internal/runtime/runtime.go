@@ -3934,7 +3934,8 @@ func (r *Runtime) RecordClientSeen(clientName string) {
 	if name == "" || r.storageManager == nil {
 		return
 	}
-	if err := r.storageManager.UpdateOnboardingState(func(state *storage.OnboardingState) error {
+	changed := false
+	err := r.storageManager.UpdateOnboardingState(func(state *storage.OnboardingState) error {
 		if state.ClientLastSeen == nil {
 			state.ClientLastSeen = map[string]time.Time{}
 		}
@@ -3947,6 +3948,7 @@ func (r *Runtime) RecordClientSeen(clientName string) {
 			return nil
 		}
 		state.ClientLastSeen[name] = now
+		changed = true
 		protected := knownClientAliases()
 		for len(state.ClientLastSeen) > 32 {
 			var oldest string
@@ -3965,9 +3967,53 @@ func (r *Runtime) RecordClientSeen(clientName string) {
 			delete(state.ClientLastSeen, oldest)
 		}
 		return nil
-	}); err != nil && r.logger != nil {
+	})
+	if err != nil && r.logger != nil {
 		r.logger.Debug("presence: unable to record MCP client", zap.Error(err))
 	}
+	if err == nil && changed {
+		r.publishEvent(newEvent(EventTypeClientPresenceChanged, nil))
+	}
+}
+
+// AttentionClients returns the minimal client evidence needed by the attention
+// subscriber. It intentionally does not inspect client config files or session
+// rows, keeping attention snapshot construction bounded and privacy-safe.
+func (r *Runtime) AttentionClients() []AttentionClient {
+	state, err := r.GetOnboardingState()
+	if err != nil || state == nil {
+		return nil
+	}
+	clients := make([]AttentionClient, 0, len(state.ClientConnectedAt))
+	for _, client := range connect.GetAllClients() {
+		connectedAt, ok := state.ClientConnectedAt[client.ID]
+		if !ok || connectedAt.IsZero() {
+			continue
+		}
+		at := connectedAt
+		clients = append(clients, AttentionClient{
+			ID: client.ID, DisplayName: client.Name, ConnectedAt: &at,
+			LastSeen: latestSeenForAliases(state.ClientLastSeen, client.ClientInfoNames),
+		})
+	}
+	return clients
+}
+
+// NotifyClientPresenceChanged prompts derived presenters to refresh after a
+// successful connect or disconnect write performed outside Runtime.
+func (r *Runtime) NotifyClientPresenceChanged() {
+	r.publishEvent(newEvent(EventTypeClientPresenceChanged, nil))
+}
+
+func latestSeenForAliases(seen map[string]time.Time, aliases []string) *time.Time {
+	var latest *time.Time
+	for _, alias := range aliases {
+		if at, ok := seen[sanitizeClientName(alias)]; ok && (latest == nil || at.After(*latest)) {
+			copy := at
+			latest = &copy
+		}
+	}
+	return latest
 }
 
 // sanitizeClientName keeps the persisted observation bounded and safe to
