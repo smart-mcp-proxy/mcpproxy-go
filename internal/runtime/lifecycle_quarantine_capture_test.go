@@ -156,6 +156,10 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
 	rt.StartBackgroundInitialization()
+	require.Eventually(t, func() bool {
+		clientA, ok := rt.UpstreamManager().GetClient("quarantined")
+		return ok && clientA.IsConnected() && clientA.ConnectionEpoch() > 0
+	}, 10*time.Second, 10*time.Millisecond, "initial quarantined client must finish connecting before capture serialization is tested")
 
 	replaceStarted := make(chan struct{})
 	replaceDone := make(chan error, 1)
