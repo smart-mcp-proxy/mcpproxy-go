@@ -464,8 +464,30 @@ func (s *Server) handleUndoConnectClient(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	if result.Success {
+		s.recordClientPresenceAfterUndo(svc, clientID)
+	}
 
 	s.writeSuccess(w, result)
+}
+
+// recordClientPresenceAfterUndo restores presence to match the configuration
+// Undo put back. A backup can legitimately contain an existing entry for this
+// instance, so an undo is not always a disconnect; read the just-restored
+// client config while this user-initiated write is still in scope.
+func (s *Server) recordClientPresenceAfterUndo(svc *connect.Service, clientID string) {
+	status, err := svc.GetStatus(clientID)
+	if err == nil && status.Connected && status.EndpointMatch == connect.EndpointMatchThis {
+		// The restored configuration is proven to point at this instance. Keep
+		// the previous connection generation and notify derived presenters of
+		// the completed write.
+		s.notifyClientPresenceChanged()
+		return
+	}
+	// A restored file with no entry, a different or indeterminate endpoint, or
+	// an unreadable config must not retain the connect timestamp created by the
+	// write we just undid.
+	s.recordClientDisconnected(clientID)
 }
 
 // decodeOptionalJSONBody decodes an optional JSON request body. An absent or

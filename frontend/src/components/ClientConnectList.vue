@@ -428,7 +428,7 @@
             This removes the
             <code class="font-mono">{{ disconnectTarget.server_name || 'mcpproxy' }}</code>
             entry from
-            <code class="font-mono break-all">{{ disconnectTarget.config_path }}</code>.
+            <code class="font-mono break-all" :title="disconnectTarget.config_path" data-test="connect-disconnect-path">{{ disconnectTarget.display_path || disconnectTarget.config_path }}</code>.
           </p>
           <p class="text-sm text-base-content/70 mt-2">
             A timestamped backup of the file is written first, and the path is shown afterwards
@@ -487,6 +487,7 @@ interface Props {
 
 interface Emits {
   (e: 'close'): void
+  (e: 'updated'): void
 }
 
 const props = defineProps<Props>()
@@ -747,6 +748,7 @@ async function refreshAfterWrite(clientId: string) {
   delete merged[clientId]
   resolved.value = merged
   await onboarding.fetchState()
+  emit('updated')
 }
 
 // Returns the outcome so connectAll can accumulate per-client backup results
@@ -818,8 +820,7 @@ async function confirmUndo() {
       resultBackupPath.value = undefined
       lastConnect.value = null
       undoPanelOpen.value = false
-      await fetchClients()
-      void onboarding.fetchState()
+      await refreshAfterWrite(target.id)
       systemStore.addToast({
         type: 'info',
         title: 'Connect undone',
@@ -858,6 +859,7 @@ async function disconnect(clientId: string) {
       resultMessage.value = response.data.message || `Disconnected from ${clientId}`
       resultSuccess.value = true
       resultBackupPath.value = response.data.backup_path || null
+      resultReloadHint.value = response.data.reload_hint || ''
       await refreshAfterWrite(clientId)
       systemStore.addToast({
         type: 'info',

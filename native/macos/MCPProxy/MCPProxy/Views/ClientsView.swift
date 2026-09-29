@@ -37,7 +37,9 @@ struct ClientsView: View {
         }
         .accessibilityIdentifier("clients-view")
         .task { await load() }
-        .sheet(isPresented: $showConnect) {
+        .sheet(isPresented: $showConnect, onDismiss: {
+            Task { await load() }
+        }) {
             let state = appState
             ConnectClientView(model: ConnectClientModel(source: DeferredConnectSource {
                 await MainActor.run { state.apiClient }

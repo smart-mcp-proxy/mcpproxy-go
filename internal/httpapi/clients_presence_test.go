@@ -103,6 +103,65 @@ func TestClientsPresence_ReconnectFiltersPreviousGenerationSessions(t *testing.T
 	require.Equal(t, "current", detailSessions[0].(map[string]any)["id"])
 }
 
+func TestClientsPresence_DisconnectFiltersHistoricalActiveSessions(t *testing.T) {
+	connectedAt := time.Date(2026, 9, 29, 11, 0, 0, 0, time.UTC)
+	disconnectedAt := connectedAt.Add(time.Hour)
+	ctrl := &clientPresenceController{
+		state: &storage.OnboardingState{
+			ClientDisconnectedAt: map[string]time.Time{"cursor": disconnectedAt},
+		},
+		sessions: []*contracts.MCPSession{
+			{ID: "historical", ClientName: "cursor", Status: "active", StartTime: connectedAt.Add(time.Minute), LastActivity: disconnectedAt.Add(-time.Minute)},
+		},
+	}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	list := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	list.Header.Set("X-API-Key", "clients-admin-key")
+	listRec := httptest.NewRecorder()
+	srv.ServeHTTP(listRec, list)
+	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+	for _, raw := range successData(t, listRec)["clients"].([]any) {
+		row := raw.(map[string]any)
+		if row["id"] == "cursor" {
+			require.Equal(t, float64(0), row["active_sessions"])
+			break
+		}
+	}
+
+	detail := httptest.NewRequest(http.MethodGet, "/api/v1/clients/cursor", nil)
+	detail.Header.Set("X-API-Key", "clients-admin-key")
+	detailRec := httptest.NewRecorder()
+	srv.ServeHTTP(detailRec, detail)
+	require.Equal(t, http.StatusOK, detailRec.Code, detailRec.Body.String())
+	require.Empty(t, successData(t, detailRec)["sessions"])
+}
+
+func TestClientsPresence_ListsInitializeOnlyUnknownClientWithoutConfigPath(t *testing.T) {
+	seen := time.Date(2026, 9, 29, 11, 0, 0, 0, time.UTC)
+	ctrl := &clientPresenceController{state: &storage.OnboardingState{
+		ClientLastSeen: map[string]time.Time{"local experimental client": seen},
+	}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	req.Header.Set("X-API-Key", "clients-admin-key")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, raw := range successData(t, rec)["clients"].([]any) {
+		row := raw.(map[string]any)
+		if row["id"] == "other:local experimental client" {
+			require.Equal(t, "local experimental client", row["display_name"])
+			require.Equal(t, "other", row["kind"])
+			require.Equal(t, "other", row["state"])
+			require.Equal(t, seen.Format(time.RFC3339), row["last_seen"])
+			require.NotContains(t, row, "config_path")
+			require.NotContains(t, row, "display_path")
+			return
+		}
+	}
+	t.Fatal("initialize-only unknown client is missing")
+}
+
 func TestClientsPresence_ListIsLightweightAndDetailUsesBoundedSessionPage(t *testing.T) {
 	ctrl := &clientPresenceController{}
 	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)

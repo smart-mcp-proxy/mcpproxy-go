@@ -72,10 +72,16 @@
 
     <div v-else-if="preview" class="mt-4" data-test="import-preview">
       <p class="text-sm text-base-content/70 mb-2">{{ preview.format_name }} — {{ preview.imported.length }} server(s) detected</p>
-      <div v-for="(s, i) in preview.imported" :key="s.name" class="flex items-center gap-2 py-1">
+      <div v-for="(s, i) in preview.imported" :key="s.name" class="flex items-start gap-2 py-1">
         <input v-model="selected[s.name]" type="checkbox" class="checkbox checkbox-sm" :data-test="`import-select-${i}`" />
-        <span class="font-mono text-sm">{{ s.name }}</span>
-        <span class="text-xs text-base-content/60">{{ s.protocol }}</span>
+        <span class="min-w-0">
+          <span class="font-mono text-sm">{{ s.name }}</span>
+          <span class="text-xs text-base-content/60 ml-2">{{ s.protocol }}</span>
+          <span v-if="s.summary" :data-test="`import-summary-preview-${s.name}`" class="text-[11px] opacity-50 font-mono block truncate">{{ s.summary }}</span>
+          <span v-if="s.tags?.length" class="mt-1 flex flex-wrap gap-1">
+            <span v-for="tag in s.tags" :key="tag" :data-test="`import-tag-preview-${s.name}-${tag.replaceAll(' ', '-')}`" class="badge badge-xs" :class="tag === 'needs secret' ? 'badge-warning' : 'badge-ghost'">{{ tag }}</span>
+          </span>
+        </span>
       </div>
       <div v-if="addError" class="alert alert-error text-sm mt-3" data-test="import-add-error">{{ addError }}</div>
       <button type="button" class="btn btn-primary mt-3" :disabled="importing || selectedCount === 0" data-test="import-confirm-button" @click="handleImport">

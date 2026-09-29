@@ -169,10 +169,14 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 			if !clientMatches(session.ClientName, def.ClientInfoNames) {
 				continue
 			}
-			// A successful reconnect begins a new client generation. Session rows
-			// from an earlier connect are historical and must not inflate the
-			// current active count or reappear in the expanded detail.
-			if !connectedAt.IsZero() && session.StartTime.Before(connectedAt) {
+			// Connect and disconnect both divide client generations. Session rows
+			// from before the latest lifecycle change are historical and must not
+			// inflate the active count or reappear in the expanded detail.
+			generationStartedAt := connectedAt
+			if disconnectedAt.After(generationStartedAt) {
+				generationStartedAt = disconnectedAt
+			}
+			if !generationStartedAt.IsZero() && session.StartTime.Before(generationStartedAt) {
 				continue
 			}
 			if session.Status == "active" {
@@ -220,6 +224,32 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 		}
 		if withSessions {
 			result[found].Sessions = append(result[found].Sessions, clientSession{ID: session.ID, WorkSessionID: session.WorkSessionID, StartedAt: session.StartTime, LastActivity: session.LastActivity})
+		}
+	}
+	// An unknown client can have initialized without making a tool call, so it
+	// has no session row. Preserve that evidence too, while deliberately
+	// omitting configuration paths: MCP clientInfo has no trustworthy path.
+	for name, seenAt := range state.ClientLastSeen {
+		name = strings.TrimSpace(name)
+		key := strings.ToLower(name)
+		if name == "" || known[key] {
+			continue
+		}
+		id := "other:" + key
+		found := -1
+		for i := range result {
+			if result[i].ID == id {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			result = append(result, clientPresence{ID: id, DisplayName: name, Kind: "other", State: "other"})
+			found = len(result) - 1
+		}
+		if result[found].LastSeen == nil || seenAt.After(*result[found].LastSeen) {
+			at := seenAt
+			result[found].LastSeen = &at
 		}
 	}
 	return result, nil

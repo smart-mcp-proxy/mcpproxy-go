@@ -34,7 +34,7 @@
     </section>
     <section v-else-if="tab === 'endpoint'" class="card bg-base-100 border border-base-300"><div class="card-body"><h2 class="card-title">Endpoint &amp; mode</h2><p class="text-sm text-base-content/70">Choose the MCP surface this instance serves. Changes are saved immediately and apply after restart.</p><ModeSwitcher /><dl v-if="store.routing" class="grid sm:grid-cols-2 gap-2 text-sm"><template v-for="(endpoint, name) in store.routing.endpoints" :key="name"><dt class="font-medium">{{ name }}</dt><dd><code>{{ endpoint }}</code></dd></template></dl><p v-if="store.routing?.restart_required" class="alert alert-warning text-sm">Restart MCPProxy to apply {{ store.routing.pending_routing_mode }} mode.</p></div></section>
     <AgentTokens v-else />
-    <ClientConnectList :show="connectOpen" @close="connectOpen = false" />
+    <ClientConnectList :show="connectOpen" @close="connectOpen = false" @updated="refreshClients" />
   </div>
 </template>
 
@@ -76,6 +76,7 @@ watch(() => route.query.tab, value => {
   if (typeof value === 'string' && tabs.some(item => item.id === value) && tab.value !== value) tab.value = value
 })
 async function toggle(id: string) { expanded.value = expanded.value === id ? '' : id; if (expanded.value) await store.loadDetail(id) }
+function refreshClients() { void store.load() }
 function stateLabel(value: string) { return value.replaceAll('_', ' ') }
 function relative(value?: string | null) { return value ? new Date(value).toLocaleString() : 'Never' }
 onMounted(() => { if (authStore.principalKind !== 'tenant') void store.load() })

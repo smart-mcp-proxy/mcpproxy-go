@@ -511,6 +511,7 @@ func (a *UsageAggregate) clone() *UsageAggregate {
 	c := &UsageAggregate{
 		Tools:                      make(map[string]*ToolUsage, len(a.Tools)),
 		Buckets:                    make(map[int64]*TimeBucket, len(a.Buckets)),
+		ClientCalls:                make(map[string]map[int64]int64, len(a.ClientCalls)),
 		UpdatedAt:                  a.UpdatedAt,
 		AdmissionVersion:           a.AdmissionVersion,
 		RetrieveToolsRespBytesSum:  a.RetrieveToolsRespBytesSum,
@@ -523,6 +524,13 @@ func (a *UsageAggregate) clone() *UsageAggregate {
 	for k, b := range a.Buckets {
 		bc := *b
 		c.Buckets[k] = &bc
+	}
+	for client, buckets := range a.ClientCalls {
+		copyBuckets := make(map[int64]int64, len(buckets))
+		for bucket, calls := range buckets {
+			copyBuckets[bucket] = calls
+		}
+		c.ClientCalls[client] = copyBuckets
 	}
 	return c
 }

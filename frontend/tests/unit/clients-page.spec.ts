@@ -103,4 +103,26 @@ describe('Clients page', () => {
     await flushPromises()
     expect(router.currentRoute.value.query).toMatchObject({ tab: 'clients', token: 'agent-1' })
   })
+
+  it('reloads the native Clients list after the shared connect list reports a successful write', async () => {
+    const router = makeRouter()
+    await router.push('/clients')
+    await router.isReady()
+    const wrapper = mount(Clients, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ClientConnectList: { template: '<button data-test="connect-write" @click="$emit(\'updated\')" />' },
+          AgentTokens: true,
+          ModeSwitcher: true,
+        },
+      },
+    })
+    await flushPromises()
+    expect(api.getClients).toHaveBeenCalledTimes(1)
+
+    await wrapper.find('[data-test="connect-write"]').trigger('click')
+    await flushPromises()
+    expect(api.getClients).toHaveBeenCalledTimes(2)
+  })
 })

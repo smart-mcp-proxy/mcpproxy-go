@@ -12,23 +12,35 @@ vi.mock('@/services/api', () => ({
 
 describe('ImportServers', () => {
   it('owns preview and selection before an import is committed', async () => {
+    const api = (await import('@/services/api')).default as any
+    api.importServersFromJSON.mockResolvedValueOnce({
+      success: true,
+      data: {
+        format_name: 'JSON',
+        imported: [{ name: 'demo', protocol: 'stdio', summary: 'npx demo-mcp', tags: ['stdio', 'needs secret'] }],
+      },
+    })
     const wrapper = mount(ImportServers)
     await flushPromises()
     await wrapper.find('[data-test="import-content-textarea"]').setValue('{"mcpServers":{"demo":{}}}')
     await wrapper.find('[data-test="import-preview-button"]').trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-test="import-preview"]').text()).toContain('demo')
+    expect(wrapper.find('[data-test="import-summary-preview-demo"]').text()).toContain('npx demo-mcp')
+    expect(wrapper.find('[data-test="import-tag-preview-demo-needs-secret"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="import-confirm-button"]').text()).toContain('Import 1 server')
   })
 
   it('owns the wizard detected-source preview and writes only selected servers', async () => {
     const api = (await import('@/services/api')).default as any
     api.getCanonicalConfigPaths.mockResolvedValueOnce({ success: true, data: { paths: [{ name: 'Claude Code', format: 'claude-code', path: '/tmp/claude.json', exists: true }] } })
-    api.importServersFromPath.mockResolvedValueOnce({ success: true, data: { imported: [{ name: 'github', summary: 'npx github-mcp' }, { name: 'filesystem', summary: 'npx fs-mcp' }] } })
+    api.importServersFromPath.mockResolvedValueOnce({ success: true, data: { imported: [{ name: 'github', summary: 'npx github-mcp', tags: ['needs secret'] }, { name: 'filesystem', summary: 'npx fs-mcp' }] } })
     api.importServersFromPath.mockResolvedValueOnce({ success: true, data: { summary: { imported: 1 } } })
     const wrapper = mount(ImportServers, { props: { detected: true } })
     await flushPromises()
     expect(wrapper.find('[data-test="detected-import-sources"]').text()).toContain('github')
+    expect(wrapper.find('[data-test="import-summary-claude-code-github"]').text()).toContain('npx github-mcp')
+    expect(wrapper.find('[data-test="import-tag-claude-code-github-needs-secret"]').exists()).toBe(true)
     await wrapper.find('[data-test="server-checkbox-claude-code-github"]').setValue(true)
     await wrapper.find('[data-test="bulk-import-primary"]').trigger('click')
     await flushPromises()
