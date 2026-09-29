@@ -202,6 +202,7 @@ func connectAllClients(cfg *config.Config, svc *connect.Service, formatter cliou
 	clients := connect.GetAllClients()
 	var results []*connect.ConnectResult
 	var errors []string
+	var connectedIDs []string
 
 	for _, c := range clients {
 		if !c.Supported {
@@ -213,10 +214,13 @@ func connectAllClients(cfg *config.Config, svc *connect.Service, formatter cliou
 			continue
 		}
 		if result.Success {
-			notifyClientConnected(cfg, result.Client)
+			connectedIDs = append(connectedIDs, result.Client)
 		}
 		results = append(results, result)
 	}
+	// One daemon lookup + concurrent relay for all clients, after every
+	// config write has finished (bounded latency, see notifyClientsConnected).
+	notifyClientsConnected(cfg, connectedIDs)
 
 	if format == "table" {
 		// FR-037/FR-042: --all lists many clients at once, so the same

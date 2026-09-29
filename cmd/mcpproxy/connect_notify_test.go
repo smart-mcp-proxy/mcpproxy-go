@@ -110,3 +110,67 @@ func TestNotifyClientConnected_WrongAPIKeyIsSilentNoOp(t *testing.T) {
 		t.Fatalf("expected no relay with a mismatched API key, got %v", got)
 	}
 }
+
+func TestNotifyClientsConnected_ProbesDaemonOnceForAllClients(t *testing.T) {
+	clearDaemonEnv(t)
+
+	var mu sync.Mutex
+	statusProbes := 0
+	var marks []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/status":
+			mu.Lock()
+			statusProbes++
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"success":true,"data":{"running":true}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/onboarding/mark":
+			body, _ := io.ReadAll(r.Body)
+			var req struct {
+				ConnectedClientID string `json:"connected_client_id"`
+			}
+			_ = json.Unmarshal(body, &req)
+			mu.Lock()
+			marks = append(marks, req.ConnectedClientID)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		DataDir: t.TempDir(),
+		Listen:  strings.TrimPrefix(srv.URL, "http://"),
+		APIKey:  "secret",
+	}
+
+	ids := []string{"claude-code", "cursor", "vscode", "windsurf", "zed"}
+	notifyClientsConnected(cfg, ids)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if statusProbes != 1 {
+		t.Fatalf("expected the daemon to be probed once for %d clients, got %d probes", len(ids), statusProbes)
+	}
+	if len(marks) != len(ids) {
+		t.Fatalf("expected %d relays, got %v", len(ids), marks)
+	}
+	seen := map[string]bool{}
+	for _, m := range marks {
+		seen[m] = true
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			t.Errorf("client %q was not relayed (got %v)", id, marks)
+		}
+	}
+}
+
+func TestNotifyClientsConnected_EmptyIsNoOp(t *testing.T) {
+	clearDaemonEnv(t)
+	// Must not probe or panic with a nil config.
+	notifyClientsConnected(nil, nil)
+}

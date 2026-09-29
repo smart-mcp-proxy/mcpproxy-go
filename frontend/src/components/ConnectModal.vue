@@ -34,7 +34,7 @@
               </div>
               <div class="min-w-0 flex-1">
                 <div class="font-medium text-sm truncate">{{ client.name }}</div>
-                <div class="text-xs opacity-50 truncate" :title="client.config_path">{{ client.config_path }}</div>
+                <div class="text-xs opacity-50 truncate" :title="client.config_path" data-test="connect-row-path">{{ shownPath(client) }}</div>
                 <!-- Audit F18: "which endpoint am I registered to?" was
                      unanswerable — a config merely holding an entry NAMED
                      mcpproxy read as connected, even pointing at another
@@ -172,7 +172,7 @@
           >
             <p class="text-xs opacity-70 leading-relaxed">
               Only this entry is added to
-              <code class="font-mono text-[11px] break-all" :title="previews[client.id]!.config_path">{{ previews[client.id]!.config_path }}</code>.
+              <code class="font-mono text-[11px] break-all" :title="previews[client.id]!.config_path">{{ shownPath(previews[client.id]!) }}</code>.
               Everything else in the file stays untouched, and a timestamped backup is created first.
             </p>
             <!-- Overwrite warning (FR-003): an entry with this name already exists. -->
@@ -190,7 +190,7 @@
               :data-test="`connect-preview-malformed-${client.id}`"
               class="text-xs text-warning leading-relaxed"
             >
-              Your current config could not be parsed, so connecting would fail rather than modify an unreadable file. Fix or remove {{ previews[client.id]!.config_path }} first, then try again.
+              Your current config could not be parsed, so connecting would fail rather than modify an unreadable file. Fix or remove {{ shownPath(previews[client.id]!) }} first, then try again.
             </p>
             <!-- No prior file (bridge / absent): nothing to back up. -->
             <p
@@ -419,7 +419,7 @@
             This removes the
             <code class="font-mono">{{ disconnectTarget.server_name || 'mcpproxy' }}</code>
             entry from
-            <code class="font-mono break-all">{{ disconnectTarget.config_path }}</code>.
+            <code class="font-mono break-all" :title="disconnectTarget.config_path" data-test="connect-disconnect-path">{{ shownPath(disconnectTarget) }}</code>.
           </p>
           <p class="text-sm text-base-content/70 mt-2">
             A timestamped backup of the file is written first, and the path is shown afterwards
@@ -578,6 +578,13 @@ function notFoundTitle(client: ClientStatus): string {
 
 // --- Disconnect confirmation (audit F18) ---
 const disconnectTarget = ref<ClientStatus | null>(null)
+
+// Presentation-safe path (home-shortened, Spec 109-b FR-037) with a fallback to
+// the raw path when the backend did not supply one. The full path stays
+// available in the element's title attribute.
+function shownPath(x: { display_path?: string; config_path: string }): string {
+  return x.display_path || x.config_path
+}
 
 function askDisconnect(client: ClientStatus) {
   disconnectTarget.value = client
@@ -817,6 +824,7 @@ async function disconnect(clientId: string) {
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Disconnected from ${clientId}`
       resultSuccess.value = true
+      resultReloadHint.value = response.data.reload_hint || ''
       resultBackupPath.value = response.data.backup_path || null
       await refreshAfterWrite(clientId)
       systemStore.addToast({

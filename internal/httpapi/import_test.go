@@ -581,3 +581,60 @@ func previewImportWithSelf(t *testing.T, bound, cfgListen, selfURL string) Impor
 	}
 	return wrapped.Data
 }
+
+// TestImportServersJSON_ApplyResponseReflectsOverrides: when the caller supplies
+// env/header overrides on an apply (non-preview) call, the response must
+// describe the values that were actually persisted, not the pre-override
+// source values.
+func TestImportServersJSON_ApplyResponseReflectsOverrides(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := &mockImportController{apiKey: "test-key"}
+	server := NewServer(mock, logger, nil)
+
+	reqBody := ImportRequest{
+		Content: `{
+			"mcpServers": {
+				"github": {
+					"command": "uvx",
+					"args": ["mcp-server-github"],
+					"env": {"GITHUB_TOKEN": "YOUR_API_KEY"}
+				}
+			}
+		}`,
+		EnvOverride: map[string]string{"GITHUB_TOKEN": "ghp_realvalue1234567890"},
+	}
+
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/json", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var wrapped wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	if len(wrapped.Data.Imported) != 1 {
+		t.Fatalf("Expected 1 imported server, got %d", len(wrapped.Data.Imported))
+	}
+	row := wrapped.Data.Imported[0]
+	if len(row.Env) != 1 || row.Env[0].Name != "GITHUB_TOKEN" {
+		t.Fatalf("Env = %+v, want one GITHUB_TOKEN entry", row.Env)
+	}
+	if row.Env[0].EmptyOrPlaceholder {
+		t.Errorf("Env[0] = %+v, want EmptyOrPlaceholder=false after override", row.Env[0])
+	}
+	for _, tag := range row.Tags {
+		if tag == "needs secret" {
+			t.Errorf("Tags = %v, must not contain %q after the placeholder was overridden", row.Tags, "needs secret")
+		}
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte("ghp_realvalue1234567890")) {
+		t.Error("response must not echo the override secret value")
+	}
+}
