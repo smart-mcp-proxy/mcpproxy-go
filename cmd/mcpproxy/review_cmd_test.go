@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,9 +10,123 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
+
+// TestReviewCommandGoldens exercises the CLI's complete review workflow against
+// the daemon HTTP seam.  The fixture deliberately records requests: table text
+// alone cannot prove --except is translated to security/approve's block field
+// or that trusted-tool review uses tools/approve instead.
+func TestReviewCommandGoldens(t *testing.T) {
+	var requests []reviewRequest
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/status" {
+			_, _ = w.Write([]byte(`{"success":true,"data":{"running":true}}`))
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		requests = append(requests, reviewRequest{method: r.Method, path: r.URL.Path, body: string(body)})
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/review":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"count":1,"servers":[{"server":"filesystem","kind":"server_review","quarantined":true,"pending":0,"changed":0,"tier_counts":{"destructive":1},"scan":{"verdict":"clean"}}]}}`))
+		case "/api/v1/servers/filesystem/review":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"server":{"name":"filesystem","quarantined":true},"tools":[{"name":"delete_0","tier":"destructive","approval_status":"pending","scan_verdict":"clean","description":"Delete a file\nThis cannot be undone","input_schema":{"type":"object"}}]}}`))
+		case "/api/v1/servers/trusted/review":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"server":{"name":"trusted","quarantined":false},"tools":[]}}`))
+		case "/api/v1/servers/filesystem/security/approve":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"status":"approved","server_name":"filesystem"}}`))
+		case "/api/v1/servers/trusted/tools/approve":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"message":"Approved 1 tool for server trusted"}}`))
+		case "/api/v1/servers/filesystem/security/reject":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"status":"rejected","server_name":"filesystem"}}`))
+		case "/api/v1/servers/trusted/tools/block":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"message":"Blocked 1 tool for server trusted"}}`))
+		default:
+			t.Errorf("unexpected review request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer daemon.Close()
+
+	withReviewDaemon(t, daemon.URL)
+	setOutputGlobals(t, "table", false)
+
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		golden string
+	}{
+		{"list", []string{"list"}, "review-list.golden"},
+		{"show-full", []string{"show", "filesystem", "--full"}, "review-show-full.golden"},
+		{"approve-except-force", []string{"approve", "filesystem", "--except", "delete_0", "--force", "--yes"}, "review-approve.golden"},
+		{"approve-tools", []string{"approve", "trusted", "--tools", "write_0", "--yes"}, "review-approve-tools.golden"},
+		{"reject-server", []string{"reject", "filesystem", "--yes"}, "review-reject.golden"},
+		{"reject-tools", []string{"reject", "trusted", "--tools", "write_0", "--yes"}, "review-reject-tools.golden"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := captureReviewOutput(t, func() error {
+				cmd := GetReviewCommand()
+				cmd.SetArgs(tc.args)
+				return cmd.Execute()
+			})
+			assertReviewGolden(t, tc.golden, out+"\n")
+		})
+	}
+
+	require.Len(t, requests, 8, "approve commands read review before writing")
+	assertReviewRequest(t, requests, "POST", "/api/v1/servers/filesystem/security/approve", map[string]any{"force": true, "block": []any{"delete_0"}})
+	assertReviewRequest(t, requests, "POST", "/api/v1/servers/trusted/tools/approve", map[string]any{"tools": []any{"write_0"}})
+	assertReviewRequest(t, requests, "POST", "/api/v1/servers/trusted/tools/block", map[string]any{"tools": []any{"write_0"}})
+}
+
+func TestReviewCommandRequiresConfirmation(t *testing.T) {
+	cmd := GetReviewCommand()
+	cmd.SetArgs([]string{"approve", "filesystem"})
+	err := cmd.Execute()
+	require.EqualError(t, err, "review approve changes server access; rerun with --yes")
+}
+
+type reviewRequest struct{ method, path, body string }
+
+func withReviewDaemon(t *testing.T, endpoint string) {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "mcp_config.json")
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.APIKey = "review-test-key"
+	require.NoError(t, config.SaveConfig(cfg, configPath))
+	previous := configFile
+	configFile = configPath
+	t.Cleanup(func() { configFile = previous })
+	t.Setenv("MCPPROXY_TRAY_ENDPOINT", endpoint)
+	t.Setenv("MCPPROXY_API_KEY", "review-test-key")
+}
+
+func assertReviewGolden(t *testing.T, name, got string) {
+	t.Helper()
+	want, err := os.ReadFile(filepath.Join("testdata", "cli109", name))
+	if err != nil {
+		t.Fatalf("read golden %s: %v\nactual:\n%s", name, err, got)
+	}
+	require.Equal(t, string(want), got)
+}
+
+func assertReviewRequest(t *testing.T, requests []reviewRequest, method, path string, want map[string]any) {
+	t.Helper()
+	for _, request := range requests {
+		if request.method != method || request.path != path {
+			continue
+		}
+		var got map[string]any
+		require.NoError(t, json.Unmarshal([]byte(request.body), &got))
+		require.Equal(t, want, got)
+		return
+	}
+	t.Fatalf("missing request %s %s in %#v", method, path, requests)
+}
 
 func TestFormatReviewResponseTableHonorsFull(t *testing.T) {
 	raw := []byte(`{"data":{"server":{"name":"github"},"tools":[{"name":"create_issue","tier":"write","approval_status":"pending","scan_verdict":"warnings","description":"Create an issue\nwith labels","input_schema":{"type":"object"},"output_schema":{"type":"string"},"diff":"@@ -1 +1 @@\n-old\n+new"}]}}`)

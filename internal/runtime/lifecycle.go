@@ -1572,14 +1572,31 @@ func (r *Runtime) SaveConfiguration() error {
 // paths.
 func (r *Runtime) syncServersToLegacyConfig(latestServers []*config.ServerConfig) int {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	oldServerCount := len(r.cfg.Servers)
-	r.cfg.Servers = latestServers
+	oldCfg := r.cfg
+	oldServerCount := len(oldCfg.Servers)
+	// ConfigService readers hold an immutable snapshot pointer. Mutating
+	// r.cfg.Servers in place therefore races request-time policy checks such as
+	// IsToolConfigDenied while a quarantine approval saves its new server state.
+	// Publish a cloned configuration instead, matching UpdateConfig's snapshot
+	// replacement semantics.
+	updatedCfg := (&configsvc.Snapshot{Config: oldCfg}).Clone()
+	updatedCfg.Servers = latestServers
+	r.cfg = updatedCfg
 	// The desired config is a separate struct once anything is pending, so the
 	// server list has to be written to both — otherwise the next PATCH merges
 	// onto a base whose servers are whatever they were at the last apply.
-	if r.desiredCfg != nil && r.desiredCfg != r.cfg {
-		r.desiredCfg.Servers = latestServers
+	if r.desiredCfg != nil {
+		if r.desiredCfg == oldCfg {
+			r.desiredCfg = updatedCfg
+		} else {
+			desired := (&configsvc.Snapshot{Config: r.desiredCfg}).Clone()
+			desired.Servers = latestServers
+			r.desiredCfg = desired
+		}
+	}
+	r.mu.Unlock()
+	if r.configSvc != nil {
+		_ = r.configSvc.Update(updatedCfg, configsvc.UpdateTypeModify, "sync_servers")
 	}
 	return oldServerCount
 }
