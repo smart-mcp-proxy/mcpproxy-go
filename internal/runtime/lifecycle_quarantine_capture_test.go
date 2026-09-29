@@ -97,3 +97,43 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 	require.NoError(t, err)
 	assert.Equal(t, storage.ToolApprovalStatusPending, record.Status)
 }
+
+// TestCaptureQuarantinedToolDefinitions_DropsReplacementBeforePersist covers
+// the final capture boundary: tools/list for A has returned and passed its
+// first validation, then a reconcile replaces A immediately before approval
+// records would be written. The stale response must be discarded and re-listed
+// from B rather than becoming a pending review item.
+func TestCaptureQuarantinedToolDefinitions_DropsReplacementBeforePersist(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+	first := httptest.NewServer(captureTestServer("first", "old_definition"))
+	t.Cleanup(first.Close)
+	second := httptest.NewServer(captureTestServer("second", "current_definition"))
+	t.Cleanup(second.Close)
+
+	cfgA := &config.ServerConfig{Name: "quarantined", URL: first.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+	rt.StartBackgroundInitialization()
+
+	var replaced atomic.Bool
+	rt.quarantinedCaptureBeforePersist = func() {
+		if !replaced.CompareAndSwap(false, true) {
+			return
+		}
+		cfgB := *cfgA
+		cfgB.URL = second.URL
+		require.NoError(t, rt.UpstreamManager().AddServerConfig("quarantined", &cfgB))
+		clientB, ok := rt.UpstreamManager().GetClient("quarantined")
+		require.True(t, ok)
+		require.NoError(t, clientB.Connect(context.Background()))
+	}
+
+	require.NoError(t, rt.captureQuarantinedToolDefinitions(context.Background(), "quarantined"))
+	assert.True(t, replaced.Load(), "test must replace the client at the final validation boundary")
+	_, err = rt.storageManager.GetToolApproval("quarantined", "old_definition")
+	assert.ErrorIs(t, err, storage.ErrToolApprovalNotFound, "the definition captured before replacement must not be stored")
+	current, err := rt.storageManager.GetToolApproval("quarantined", "current_definition")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusPending, current.Status)
+}

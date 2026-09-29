@@ -585,21 +585,32 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 	// connection before tools/list completes. Re-read the managed client until
 	// the supervisor has published its replacement.
 	for attempt := 0; attempt < 24; attempt++ {
+		// Take the supervisor capture before reading the managed client. If a
+		// replacement lands between these reads, the pointer/epoch validation
+		// below rejects the mismatched pair and retries under the replacement.
+		capture := r.discoveryGeneration(serverName)
 		if client, ok := r.upstreamManager.GetClient(serverName); ok {
 			// Bind this inspection result to the connection that supplied it.
 			// RequestInspectionExemption may reconcile while tools/list is in
 			// flight, replacing the managed client. Capturing an old client's
 			// untrusted definition under the replacement connection would make
 			// the review record lie about what is currently offered.
-			capture := r.discoveryGeneration(serverName)
 			if tools, err := client.ListTools(ctx); err == nil {
-				if r.discoveryGeneration(serverName) != capture {
+				if !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
 					lastErr = fmt.Errorf("inspection client replaced during tools/list")
 					r.logger.Info("Quarantined definition capture used a superseded connection; re-listing",
 						zap.String("server", serverName), zap.Int("attempt", attempt+1))
 					continue
 				}
-				return r.captureQuarantinedToolDefinitionsFromTools(serverName, tools)
+				published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, tools)
+				if err != nil {
+					return err
+				}
+				if published {
+					return nil
+				}
+				lastErr = fmt.Errorf("inspection client replaced before definition capture")
+				continue
 			} else {
 				lastErr = err
 			}
@@ -613,6 +624,32 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 		}
 	}
 	return fmt.Errorf("list tools for quarantined server %s: %w", serverName, lastErr)
+}
+
+// quarantinedCaptureIsCurrent confirms that the tools/list response belongs to
+// the currently managed client and the same supervisor/managed-client
+// generation captured before the request. Pointer equality closes the gap
+// where a replacement could otherwise pair A's client with B's generation.
+func (r *Runtime) quarantinedCaptureIsCurrent(serverName string, client interface{ ConnectionEpoch() int64 }, capture supervisor.DiscoveryCapture) bool {
+	current, ok := r.upstreamManager.GetClient(serverName)
+	return ok && current == client && client.ConnectionEpoch() == capture.Epoch && r.discoveryGeneration(serverName) == capture
+}
+
+// captureQuarantinedToolDefinitionsFromCurrentClient performs the final
+// current-generation check immediately before checkToolApprovals writes review
+// records. A false result is deliberately retried by the caller; no stale
+// response is persisted or announced as review.changed.
+func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName string, client interface{ ConnectionEpoch() int64 }, capture supervisor.DiscoveryCapture, tools []*config.ToolMetadata) (bool, error) {
+	if r.quarantinedCaptureBeforePersist != nil {
+		r.quarantinedCaptureBeforePersist()
+	}
+	if !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
+		return false, nil
+	}
+	if err := r.captureQuarantinedToolDefinitionsFromTools(serverName, tools); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (r *Runtime) captureQuarantinedToolDefinitionsFromTools(serverName string, tools []*config.ToolMetadata) error {

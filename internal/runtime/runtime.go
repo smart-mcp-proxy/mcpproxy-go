@@ -221,6 +221,12 @@ type Runtime struct {
 	// write in that window and assert it survives. Nil in production.
 	legacyStampBeforeWrite func()
 
+	// quarantinedCaptureBeforePersist is a test-only interleaving seam for the
+	// inspection capture's final current-connection validation. It lets the
+	// regression suite replace a client after tools/list but before any approval
+	// record is written. Nil in production.
+	quarantinedCaptureBeforePersist func()
+
 	// consultStampBeforeWrite is the same kind of seam for
 	// stampConsultedLegacySibling (astra r2 C1): when set, it runs between
 	// the consult's read of the collapsed sibling record and its stamp
