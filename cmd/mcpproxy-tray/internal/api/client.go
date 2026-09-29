@@ -768,22 +768,6 @@ func (c *Client) QuarantineServer(serverName string) error {
 	return nil
 }
 
-// UnquarantineServer removes a server from quarantine
-func (c *Client) UnquarantineServer(serverName string) error {
-	endpoint := fmt.Sprintf("/api/v1/servers/%s/unquarantine", serverName)
-
-	resp, err := c.makeRequest("POST", endpoint, nil)
-	if err != nil {
-		return err
-	}
-
-	if !resp.Success {
-		return fmt.Errorf("API error: %s", resp.Error)
-	}
-
-	return nil
-}
-
 // SearchTools searches for tools
 // GetInfo fetches server information from /api/v1/info endpoint
 func (c *Client) GetInfo() (map[string]interface{}, error) {
@@ -894,6 +878,13 @@ func (c *Client) SearchTools(query string, limit int) ([]SearchResult, error) {
 
 // OpenWebUI opens the web control panel in the default browser
 func (c *Client) OpenWebUI() error {
+	return c.OpenWebUIPath("")
+}
+
+// OpenWebUIPath opens a path inside the Web UI while preserving its API-key
+// authentication. Tray quarantine entries use this to open review, never to
+// approve or unquarantine a server directly.
+func (c *Client) OpenWebUIPath(path string) error {
 	// Get the actual web UI URL from the /api/v1/info endpoint
 	// This ensures we use the correct HTTP URL even when connected via socket
 	resp, err := c.makeRequest("GET", "/api/v1/info", nil)
@@ -915,7 +906,7 @@ func (c *Client) OpenWebUI() error {
 	}
 
 	// Add API key if not using socket communication
-	url := webUIURL
+	url := strings.TrimRight(webUIURL, "/") + path
 	if c.apiKey != "" && !strings.HasPrefix(c.baseURL, "unix://") && !strings.HasPrefix(c.baseURL, "npipe://") {
 		separator := "?"
 		if strings.Contains(url, "?") {

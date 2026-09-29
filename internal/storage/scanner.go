@@ -416,6 +416,64 @@ func (b *BoltDB) SaveIntegrityBaseline(baseline *scanner.IntegrityBaseline) erro
 	})
 }
 
+// SaveIntegrityBaselineWithBlocks writes the approval baseline and tool blocks
+// in one bbolt transaction. If any named tool has no captured approval record,
+// the entire update rolls back and the server remains quarantined.
+func (b *BoltDB) SaveIntegrityBaselineWithBlocks(baseline *scanner.IntegrityBaseline, blocks []scanner.ToolApprovalBlock) error {
+	if baseline == nil {
+		return fmt.Errorf("integrity baseline is required")
+	}
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		baselineBucket := tx.Bucket([]byte(IntegrityBaselinesBucket))
+		approvalBucket := tx.Bucket([]byte(ToolApprovalBucket))
+		if baselineBucket == nil || approvalBucket == nil {
+			return fmt.Errorf("required approval storage bucket is missing")
+		}
+		data, err := baseline.MarshalBinary()
+		if err != nil {
+			return err
+		}
+		if err := baselineBucket.Put([]byte(baseline.ServerName), data); err != nil {
+			return fmt.Errorf("save integrity baseline: %w", err)
+		}
+
+		for _, block := range blocks {
+			if block.ToolName == "" {
+				return fmt.Errorf("%w: empty tool name", scanner.ErrToolApprovalBlockNotFound)
+			}
+			key := ToolApprovalKey(baseline.ServerName, block.ToolName)
+			encoded := approvalBucket.Get([]byte(key))
+			if encoded == nil {
+				return fmt.Errorf("%w: %s", scanner.ErrToolApprovalBlockNotFound, block.ToolName)
+			}
+			record := &ToolApprovalRecord{}
+			if err := record.UnmarshalBinary(encoded); err != nil {
+				return fmt.Errorf("decode tool approval %q: %w", block.ToolName, err)
+			}
+			record.Status = ToolApprovalStatusApproved
+			record.ApprovedHash = record.CurrentHash
+			record.HashSchemaVersion = OutputSchemaHashSchemaVersion
+			record.ApprovedAt = block.ApprovedAt
+			record.ApprovedBy = block.ApprovedBy
+			record.PreviousDescription = ""
+			record.PreviousAnnotations = nil
+			record.PreviousSchema = ""
+			record.PreviousOutputSchema = ""
+			record.ClearScanHold()
+			record.Disabled = true
+			data, err := record.MarshalBinary()
+			if err != nil {
+				return fmt.Errorf("encode tool approval %q: %w", block.ToolName, err)
+			}
+			if err := approvalBucket.Put([]byte(key), data); err != nil {
+				return fmt.Errorf("save tool approval %q: %w", block.ToolName, err)
+			}
+		}
+
+		return nil
+	})
+}
+
 // GetIntegrityBaseline retrieves an integrity baseline by server name
 func (b *BoltDB) GetIntegrityBaseline(serverName string) (*scanner.IntegrityBaseline, error) {
 	var record *scanner.IntegrityBaseline

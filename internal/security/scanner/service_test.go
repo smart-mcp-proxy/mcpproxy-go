@@ -219,6 +219,10 @@ func (m *mockStorage) SaveIntegrityBaseline(baseline *IntegrityBaseline) error {
 	return nil
 }
 
+func (m *mockStorage) SaveIntegrityBaselineWithBlocks(baseline *IntegrityBaseline, _ []ToolApprovalBlock) error {
+	return m.SaveIntegrityBaseline(baseline)
+}
+
 func (m *mockStorage) GetIntegrityBaseline(serverName string) (*IntegrityBaseline, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -329,6 +333,28 @@ type mockUnquarantiner struct {
 	mu    sync.Mutex
 	calls []string
 	err   error
+}
+
+type orderedApprovalStorage struct {
+	Storage
+	steps *[]string
+}
+
+func (s *orderedApprovalStorage) SaveIntegrityBaselineWithBlocks(baseline *IntegrityBaseline, blocks []ToolApprovalBlock) error {
+	*s.steps = append(*s.steps, "baseline_and_blocks")
+	if len(blocks) != 1 || blocks[0].ToolName != "delete_issue" || blocks[0].ApprovedBy != "reviewer" {
+		return fmt.Errorf("unexpected blocks passed to atomic storage: %#v", blocks)
+	}
+	return s.Storage.SaveIntegrityBaselineWithBlocks(baseline, blocks)
+}
+
+type orderedUnquarantiner struct {
+	steps *[]string
+}
+
+func (u *orderedUnquarantiner) UnquarantineServer(string) error {
+	*u.steps = append(*u.steps, "unquarantine")
+	return nil
 }
 
 func (m *mockUnquarantiner) UnquarantineServer(serverName string) error {
@@ -1085,6 +1111,23 @@ func TestServiceApproveServerCallsUnquarantiner(t *testing.T) {
 	// Baseline should still be saved
 	if _, err := store.GetIntegrityBaseline("qs-server"); err != nil {
 		t.Errorf("expected baseline saved: %v", err)
+	}
+}
+
+func TestServiceApproveServerWithBlocksPersistsBeforeUnquarantine(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	steps := []string{}
+	svc.storage = &orderedApprovalStorage{Storage: store, steps: &steps}
+	svc.SetServerUnquarantiner(&orderedUnquarantiner{steps: &steps})
+
+	if err := svc.ApproveServerWithBlocks(context.Background(), "qs-server", true, "reviewer", []string{"delete_issue", "delete_issue"}); err != nil {
+		t.Fatalf("approve with block failed: %v", err)
+	}
+	if !assert.Equal(t, []string{"baseline_and_blocks", "unquarantine"}, steps) {
+		t.Fatalf("unquarantine ran before the atomic baseline+block write: %v", steps)
+	}
+	if _, err := store.GetIntegrityBaseline("qs-server"); err != nil {
+		t.Fatalf("expected baseline saved: %v", err)
 	}
 }
 

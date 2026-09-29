@@ -84,3 +84,45 @@ func TestApproveTools_NoEventOnNoOp(t *testing.T) {
 		// expected: no event delivered
 	}
 }
+
+func TestRecordToolBlocksForSecurityApproval_EmitsAuditAndReviewEventsWithoutRewritingState(t *testing.T) {
+	rt := setupQuarantineRuntime(t, boolP(true), []*config.ServerConfig{
+		{Name: "github", Enabled: true, Quarantined: true},
+	})
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github", ToolName: "delete_issue", Status: storage.ToolApprovalStatusApproved,
+		CurrentHash: "h1", ApprovedHash: "h1", ApprovedBy: "reviewer", Disabled: true,
+	}))
+	before, err := rt.storageManager.GetToolApproval("github", "delete_issue")
+	require.NoError(t, err)
+
+	events := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(events)
+	rt.RecordToolBlocksForSecurityApproval("github", []string{"delete_issue"}, "reviewer")
+
+	gotAudit, gotReview, gotServers := false, false, false
+	deadline := time.After(2 * time.Second)
+	for !(gotAudit && gotReview && gotServers) {
+		select {
+		case event := <-events:
+			switch event.Type {
+			case EventTypeActivityToolQuarantineChange:
+				gotAudit = true
+				assert.Equal(t, "delete_issue", event.Payload["tool_name"])
+				assert.Equal(t, "tool_blocked", event.Payload["action"])
+			case EventTypeReviewChanged:
+				gotReview = true
+				assert.Equal(t, "github", event.Payload["server"])
+			case EventTypeServersChanged:
+				gotServers = true
+				assert.Equal(t, "security_approval_tool_blocks", event.Payload["reason"])
+				assert.Equal(t, "reviewer", event.Payload["blocked_by"])
+			}
+		case <-deadline:
+			t.Fatalf("missing audit/review/server event: audit=%t review=%t servers=%t", gotAudit, gotReview, gotServers)
+		}
+	}
+	after, err := rt.storageManager.GetToolApproval("github", "delete_issue")
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "the audit event bridge must not rewrite atomically saved state")
+}

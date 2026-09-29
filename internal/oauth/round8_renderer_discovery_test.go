@@ -113,6 +113,10 @@ var redactionMethodRenderers = map[string][]func(string) string{
 		func(s string) string { return AuditRedaction.SpawnCommandString("npx mcp --token " + s) },
 		func(s string) string { return LiveRedaction.SpawnCommandString("npx mcp --token " + s) },
 	},
+	"Redaction.CommandString": {
+		func(s string) string { return AuditRedaction.CommandString("npx mcp --token " + s) },
+		func(s string) string { return LiveRedaction.CommandString("npx mcp --token " + s) },
+	},
 	"Redaction.URLValueDeep": {
 		func(s string) string { return AuditRedaction.URLValueDeep(s) },
 		func(s string) string { return LiveRedaction.URLValueDeep(s) },

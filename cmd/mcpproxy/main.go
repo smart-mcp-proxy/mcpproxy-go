@@ -199,6 +199,7 @@ func main() {
 
 	// Add security command (Spec 039: Security scanner plugins)
 	securityCmd := GetSecurityCommand()
+	reviewCmd := GetReviewCommand()
 
 	// Add connect/disconnect commands
 	connectCmd := GetConnectCommand()
@@ -227,6 +228,7 @@ func main() {
 	rootCmd.AddCommand(dbCmd)
 	rootCmd.AddCommand(feedbackCmd)
 	rootCmd.AddCommand(securityCmd)
+	rootCmd.AddCommand(reviewCmd)
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(disconnectCmd)
 	rootCmd.AddCommand(GetVersionCommand())

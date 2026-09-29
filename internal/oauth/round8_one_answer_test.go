@@ -51,6 +51,17 @@ func TestCommandAndWorkingDir_StayReadableWhenTheyCarryNoCredential(t *testing.T
 	assert.Equal(t, "/opt/tools/mcp", srv.WorkingDir)
 }
 
+func TestCommandWithSensitiveFlag_RedactsTheFlagValueOnEveryReadDoor(t *testing.T) {
+	const token = "secret123"
+	command := "client --token " + token
+	view := RedactedConfigView("", &config.ServerConfig{Name: "s", Command: command})
+	srv := &contracts.Server{Name: "s", Command: command}
+	RedactServerSecretFields(srv)
+
+	assert.NotContains(t, srv.Command, token)
+	assert.Equal(t, view["command"], srv.Command)
+}
+
 // The decision table is the third door: it recorded `command` / `working_dir`
 // as not-secret, which is what let two of the three implementations disagree
 // without any guard noticing.

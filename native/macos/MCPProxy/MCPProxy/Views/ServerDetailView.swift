@@ -235,8 +235,7 @@ struct ServerDetailView: View {
                 Button {
                     Task {
                         do {
-                            try await apiClient?.approveTools(server.id)
-                            try await apiClient?.unquarantineServer(server.id)
+                            try await apiClient?.securityApproveServer(server.id)
                             actionMessage = "Server approved and activated"
                             await refreshServer()
                         } catch {

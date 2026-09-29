@@ -565,28 +565,6 @@ func TestServerAdapter_TriggerOAuthLogin_Error(t *testing.T) {
 }
 
 // =============================================================================
-// ServerAdapter.UnquarantineServer Tests
-// =============================================================================
-
-func TestServerAdapter_UnquarantineServer_Success(t *testing.T) {
-	mock := NewMockClient()
-	adapter := NewServerAdapter(mock)
-
-	err := adapter.UnquarantineServer("suspicious-server")
-	require.NoError(t, err)
-	assert.Contains(t, mock.unquarantinedServers, "suspicious-server")
-}
-
-func TestServerAdapter_UnquarantineServer_Error(t *testing.T) {
-	mock := NewMockClient()
-	mock.quarantineErr = errors.New("server not found")
-	adapter := NewServerAdapter(mock)
-
-	err := adapter.UnquarantineServer("missing-server")
-	assert.Error(t, err)
-}
-
-// =============================================================================
 // ServerAdapter.QuarantineServer Tests
 // =============================================================================
 
@@ -599,16 +577,10 @@ func TestServerAdapter_QuarantineServer_Quarantine(t *testing.T) {
 	assert.True(t, mock.quarantinedServers["test-server"])
 }
 
-func TestServerAdapter_QuarantineServer_Unquarantine(t *testing.T) {
+func TestServerAdapter_QuarantineServer_RejectsUnquarantine(t *testing.T) {
 	mock := NewMockClient()
-	mock.quarantinedServers["test-server"] = true
 	adapter := NewServerAdapter(mock)
-
-	err := adapter.QuarantineServer("test-server", false)
-	require.NoError(t, err)
-	assert.Contains(t, mock.unquarantinedServers, "test-server")
-	_, stillQuarantined := mock.quarantinedServers["test-server"]
-	assert.False(t, stillQuarantined)
+	assert.Error(t, adapter.QuarantineServer("test-server", false))
 }
 
 func TestServerAdapter_QuarantineServer_Error(t *testing.T) {

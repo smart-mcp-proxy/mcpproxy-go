@@ -17,6 +17,8 @@
 //                        across the proxy's automatic reconnects, so the
 //                        server_unhealthy cell has a stable state to assert
 //                        instead of a flapping one.
+//   FIXTURE_CALL_LOG      optional path; when set, each tools/call appends its
+//                        tool name before the fixture sends the response.
 //
 // Deliberately hand-rolled: MCP's stdio transport is newline-delimited JSON-RPC,
 // so a dependency-free implementation keeps the E2E runnable with nothing but a
@@ -27,6 +29,7 @@ const fs = require('fs');
 
 const toolsFile = process.env.FIXTURE_TOOLS_FILE || '';
 const failFile = process.env.FIXTURE_FAIL_FILE || '';
+const callLogFile = process.env.FIXTURE_CALL_LOG || '';
 const initDelayMs = Number.parseInt(process.env.FIXTURE_INIT_DELAY_MS || '0', 10) || 0;
 
 if (failFile && fs.existsSync(failFile)) {
@@ -84,6 +87,10 @@ function handle(message) {
       reply(message.id, { tools: loadTools() });
       break;
     case 'tools/call':
+      if (callLogFile) {
+        const toolName = (message.params && message.params.name) || '';
+        fs.appendFileSync(callLogFile, `${toolName}\n`, { mode: 0o600 });
+      }
       reply(message.id, {
         content: [
           {

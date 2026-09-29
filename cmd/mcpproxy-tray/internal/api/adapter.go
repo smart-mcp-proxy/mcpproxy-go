@@ -19,7 +19,6 @@ type ClientInterface interface {
 	GetInfo() (map[string]interface{}, error)
 	EnableServer(serverName string, enabled bool) error
 	QuarantineServer(serverName string) error
-	UnquarantineServer(serverName string) error
 	TriggerOAuthLogin(serverName string) error
 	StatusChannel() <-chan StatusUpdate
 	GetProfiles() ([]tray.ProfileInfo, error)
@@ -230,11 +229,6 @@ func (a *ServerAdapter) GetQuarantinedServers() ([]map[string]interface{}, error
 	return quarantined, nil
 }
 
-// UnquarantineServer removes a server from quarantine
-func (a *ServerAdapter) UnquarantineServer(serverName string) error {
-	return a.client.UnquarantineServer(serverName)
-}
-
 // EnableServer enables or disables a server
 func (a *ServerAdapter) EnableServer(serverName string, enabled bool) error {
 	return a.client.EnableServer(serverName, enabled)
@@ -245,7 +239,7 @@ func (a *ServerAdapter) QuarantineServer(serverName string, quarantined bool) er
 	if quarantined {
 		return a.client.QuarantineServer(serverName)
 	}
-	return a.client.UnquarantineServer(serverName)
+	return fmt.Errorf("removing quarantine requires review approval")
 }
 
 // GetAllServers returns all servers

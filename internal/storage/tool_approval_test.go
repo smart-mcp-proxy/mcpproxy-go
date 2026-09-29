@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 func setupTestStorageForToolApproval(t *testing.T) (*Manager, func()) {
@@ -36,15 +38,17 @@ func TestToolApprovalRecord_SaveAndGet(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	record := &ToolApprovalRecord{
-		ServerName:         "github",
-		ToolName:           "create_issue",
-		ApprovedHash:       "abc123",
-		CurrentHash:        "abc123",
-		Status:             ToolApprovalStatusApproved,
-		ApprovedAt:         now,
-		ApprovedBy:         "admin",
-		CurrentDescription: "Creates a new GitHub issue",
-		CurrentSchema:      `{"type":"object","properties":{"title":{"type":"string"}}}`,
+		ServerName:          "github",
+		ToolName:            "create_issue",
+		ApprovedHash:        "abc123",
+		CurrentHash:         "abc123",
+		Status:              ToolApprovalStatusApproved,
+		ApprovedAt:          now,
+		ApprovedBy:          "admin",
+		CurrentDescription:  "Creates a new GitHub issue",
+		CurrentSchema:       `{"type":"object","properties":{"title":{"type":"string"}}}`,
+		CurrentAnnotations:  &config.ToolAnnotations{Title: "Issue creator"},
+		PreviousAnnotations: &config.ToolAnnotations{Title: "Old issue creator"},
 	}
 
 	// Save
@@ -63,6 +67,8 @@ func TestToolApprovalRecord_SaveAndGet(t *testing.T) {
 	assert.Equal(t, "admin", retrieved.ApprovedBy)
 	assert.Equal(t, "Creates a new GitHub issue", retrieved.CurrentDescription)
 	assert.Equal(t, `{"type":"object","properties":{"title":{"type":"string"}}}`, retrieved.CurrentSchema)
+	assert.Equal(t, &config.ToolAnnotations{Title: "Issue creator"}, retrieved.CurrentAnnotations)
+	assert.Equal(t, &config.ToolAnnotations{Title: "Old issue creator"}, retrieved.PreviousAnnotations)
 }
 
 func TestToolApprovalRecord_GetNotFound(t *testing.T) {

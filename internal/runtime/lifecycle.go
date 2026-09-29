@@ -1946,6 +1946,7 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 		"server":      serverName,
 		"quarantined": quarantined,
 	})
+	r.emitReviewChanged(serverName)
 
 	// Emit activity event for quarantine state change
 	reason := "Server unquarantined by administrator"

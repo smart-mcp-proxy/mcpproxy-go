@@ -47,10 +47,13 @@ type Storage interface {
 	DeleteServerScanReports(serverName string) error
 
 	SaveIntegrityBaseline(baseline *IntegrityBaseline) error
+	SaveIntegrityBaselineWithBlocks(baseline *IntegrityBaseline, blocks []ToolApprovalBlock) error
 	GetIntegrityBaseline(serverName string) (*IntegrityBaseline, error)
 	DeleteIntegrityBaseline(serverName string) error
 	ListIntegrityBaselines() ([]*IntegrityBaseline, error)
 }
+
+var ErrToolApprovalBlockNotFound = errors.New("tool approval block target not found")
 
 // EventEmitter defines how the service emits events
 type EventEmitter interface {
@@ -121,6 +124,10 @@ type allServerToolsProvider interface {
 // to depend on the full runtime package.
 type ServerUnquarantiner interface {
 	UnquarantineServer(serverName string) error
+}
+
+type ToolBlockRecorder interface {
+	RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string)
 }
 
 // Service coordinates scanner management, scan execution, and approval workflow
@@ -1687,6 +1694,29 @@ func (s *Service) CancelScan(ctx context.Context, serverName string) error {
 
 // ApproveServer approves a scanned server, storing the integrity baseline
 func (s *Service) ApproveServer(ctx context.Context, serverName string, force bool, approvedBy string) error {
+	return s.approveServer(ctx, serverName, force, approvedBy, nil)
+}
+
+// ApproveServerWithBlocks approves a scanned server and atomically records the
+// selected tool blocks with the integrity baseline before the server can be
+// unquarantined.
+func (s *Service) ApproveServerWithBlocks(ctx context.Context, serverName string, force bool, approvedBy string, toolNames []string) error {
+	seen := make(map[string]struct{}, len(toolNames))
+	blocks := make([]ToolApprovalBlock, 0, len(toolNames))
+	for _, name := range toolNames {
+		if name == "" {
+			return fmt.Errorf("%w: empty tool name", ErrToolApprovalBlockNotFound)
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		blocks = append(blocks, ToolApprovalBlock{ToolName: name, ApprovedAt: time.Now().UTC(), ApprovedBy: approvedBy})
+	}
+	return s.approveServer(ctx, serverName, force, approvedBy, blocks)
+}
+
+func (s *Service) approveServer(ctx context.Context, serverName string, force bool, approvedBy string, blocks []ToolApprovalBlock) error {
 	// Get latest scan report
 	aggReport, err := s.GetScanReport(ctx, serverName)
 	if err != nil {
@@ -1745,8 +1775,23 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 		}
 	}
 
-	if err := s.storage.SaveIntegrityBaseline(baseline); err != nil {
-		return fmt.Errorf("failed to save integrity baseline: %w", err)
+	var saveErr error
+	if len(blocks) == 0 {
+		saveErr = s.storage.SaveIntegrityBaseline(baseline)
+	} else {
+		saveErr = s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks)
+	}
+	if saveErr != nil {
+		return fmt.Errorf("failed to save integrity baseline: %w", saveErr)
+	}
+	if len(blocks) > 0 {
+		if recorder, ok := s.unquarantiner.(ToolBlockRecorder); ok {
+			toolNames := make([]string, 0, len(blocks))
+			for _, block := range blocks {
+				toolNames = append(toolNames, block.ToolName)
+			}
+			recorder.RecordToolBlocksForSecurityApproval(serverName, toolNames, approvedBy)
+		}
 	}
 
 	// Actually unquarantine the server: clear the flag in storage, persist
