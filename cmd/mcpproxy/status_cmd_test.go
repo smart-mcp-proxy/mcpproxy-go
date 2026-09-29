@@ -86,7 +86,12 @@ func TestPrintStatusTableEndpointModeGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(got)) != strings.TrimSpace(string(want)) {
+	// Windows checkouts can convert the golden file to CRLF while the Go
+	// formatter still writes LF to stdout. Compare the rendered lines rather
+	// than the checkout's line-ending convention.
+	gotOutput := strings.ReplaceAll(string(got), "\r\n", "\n")
+	wantOutput := strings.ReplaceAll(string(want), "\r\n", "\n")
+	if strings.TrimSpace(gotOutput) != strings.TrimSpace(wantOutput) {
 		t.Fatalf("status output mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
