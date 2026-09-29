@@ -86,6 +86,8 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/tool-calls/{id}":               {scopeFiltered, "unentitled == absent (404); TestToolCallDetail_UnentitledIsIndistinguishableFromAbsent"},
 	"/api/v1/security/scans":                {scopeFiltered, "canSeeServer per row (handleListScanHistory)"},
 	"/api/v1/security/scans/{jobId}/report": {scopeFiltered, "canSeeServer on report.ServerName; TestSecurityScanReportByJobID_ScopedTo404"},
+	"/api/v1/attention":                     {scopeFiltered, "same rule as /servers; TestHandleGetAttention_BranchesOnScopedCaller"},
+	"/api/v1/review":                        {scopeFiltered, "canSeeServer per row + recount; TestReviewQueueFiltersAgentAndUserScopesAndRecounts"},
 
 	// /servers/{id}/**: the whole subtree is gated by scopedServerSubtree, so an
 	// unentitled server reads exactly as an absent one (404), never the fixed 403.
@@ -101,6 +103,7 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/servers/{id}/scan/report":       {scopeFiltered, "scopedServerSubtree gate"},
 	"/api/v1/servers/{id}/scan/files":        {scopeFiltered, "scopedServerSubtree gate"},
 	"/api/v1/servers/{id}/integrity":         {scopeFiltered, "scopedServerSubtree gate"},
+	"/api/v1/servers/{id}/review":            {scopeFiltered, "scopedServerSubtree gate; TestServerReviewUsesScopedSubtreeGuard"},
 
 	// --- Open: no per-server identity a scoped token could learn beyond its grant ---
 	"/api/v1/profiles":                      {scopeOpen, "profile names, not server inventory"},
@@ -109,6 +112,7 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/docker/status":                 {scopeOpen, "Docker daemon availability, no server data"},
 	"/api/v1/registries":                    {scopeOpen, "configured registry sources, not upstream servers"},
 	"/api/v1/registries/{id}/servers":       {scopeOpen, "searches a remote registry, not the local inventory"},
+	"/api/v1/catalog/search":                {scopeOpen, "ranked search across remote registries; only the per-entry \"added\" flag is scope-filtered (Spec 109 FR-007)"},
 	"/api/v1/security/scanners":             {scopeOpen, "scanner plugin inventory, not per-server data"},
 	"/api/v1/security/scanners/{id}/status": {scopeOpen, "scanner plugin status, not per-server data"},
 	"/api/v1/servers/import/paths":          {scopeOpen, "host MCP-client config file locations, no upstream identity"},
@@ -162,13 +166,15 @@ var shortCircuitCodes = map[string]int{
 	"/api/v1/connect":                       http.StatusServiceUnavailable, // connect manager not wired in the fixture
 	"/api/v1/connect/{client}":              http.StatusServiceUnavailable,
 	"/api/v1/connect/{client}/preview":      http.StatusServiceUnavailable,
-	"/api/v1/activity/{id}":                 http.StatusNotFound, // synthetic id absent → 404 before canSeeServer
-	"/api/v1/tool-calls/{id}":               http.StatusNotFound, // synthetic id absent → 404 before canSeeServer
-	"/api/v1/security/scans/{jobId}/report": http.StatusNotFound, // synthetic jobId absent → 404 before canSeeServer
-	"/api/v1/servers/{id}/scan/status":      http.StatusNotFound, // no scan record for alpha in the fixture
-	"/api/v1/servers/{id}/scan/report":      http.StatusNotFound, // no scan record for alpha in the fixture
-	"/api/v1/servers/{id}/scan/files":       http.StatusNotFound, // no scan record for alpha in the fixture
-	"/api/v1/security/scanners/{id}/status": http.StatusNotFound, // "alpha" is not a configured scanner plugin
+	"/api/v1/activity/{id}":                 http.StatusNotFound,           // synthetic id absent → 404 before canSeeServer
+	"/api/v1/tool-calls/{id}":               http.StatusNotFound,           // synthetic id absent → 404 before canSeeServer
+	"/api/v1/security/scans/{jobId}/report": http.StatusNotFound,           // synthetic jobId absent → 404 before canSeeServer
+	"/api/v1/servers/{id}/scan/status":      http.StatusNotFound,           // no scan record for alpha in the fixture
+	"/api/v1/servers/{id}/scan/report":      http.StatusNotFound,           // no scan record for alpha in the fixture
+	"/api/v1/servers/{id}/scan/files":       http.StatusNotFound,           // no scan record for alpha in the fixture
+	"/api/v1/security/scanners/{id}/status": http.StatusNotFound,           // "alpha" is not a configured scanner plugin
+	"/api/v1/review":                        http.StatusServiceUnavailable, // review service not wired in the fixture
+	"/api/v1/servers/{id}/review":           http.StatusServiceUnavailable, // review service not wired in the fixture
 }
 
 func fillRouteParams(pattern string) string {
