@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics/hints"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -118,6 +121,12 @@ type Client struct {
 	// calculator so the UI shows a proactive Sign-in CTA instead of "Ready". A
 	// successful call or a fresh Connect clears it. MCP-2084.
 	oauthCallRequired atomic.Bool
+
+	// warnedForwardInert / warnedForwardPlain gate the one-time, name-only
+	// Spec 112 warnings (FR-014): an allowlist on a transport that cannot
+	// forward, and forwarding to a non-loopback plain-HTTP upstream.
+	warnedForwardInert atomic.Bool
+	warnedForwardPlain atomic.Bool
 
 	// connectionEpoch is bumped on every successful connect. It identifies the
 	// current connection generation so detached goroutines (the ambiguous-call
@@ -348,6 +357,13 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 	}
 	mc.cfg.Store(serverConfig)
 	mc.globalConfig.Store(globalConfig)
+
+	// Spec 112 R6: coreClient is created once and never replaced, so installing
+	// the live provider here covers every reconnect. The closure re-reads the
+	// atomically swapped configs on each call, so a hot reload takes effect on
+	// the next tools/call with no reconnect.
+	coreClient.SetForwardPolicyProvider(mc.forwardPolicy)
+	mc.warnForwardHeaders()
 
 	// Set up state change callback
 	mc.StateManager.SetStateChangeCallback(mc.onStateChange)
@@ -740,6 +756,56 @@ func (mc *Client) SetConfig(config *config.ServerConfig) {
 	mc.cfg.Store(config)
 	if mc.coreClient != nil {
 		mc.coreClient.SetExposePrompts(config.ExposePrompts)
+	}
+	mc.warnForwardHeaders()
+}
+
+// forwardPolicy is the live client-header forwarding policy (Spec 112 FR-010):
+// the global switch (including the env override) and this server's allowlist
+// and static header names, read from the atomic config pointers on every call.
+// The transport type is filled in by core.Client, which knows the resolved one.
+func (mc *Client) forwardPolicy() headerfwd.Policy {
+	cfg := mc.GetConfig()
+	if cfg == nil {
+		return headerfwd.Policy{}
+	}
+	return headerfwd.Policy{
+		Enabled: mc.GetGlobalConfig().IsClientHeaderForwardingEnabled(),
+		Allow:   cfg.ForwardHeaders,
+		Static:  cfg.Headers,
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+// warnForwardHeaders emits the one-time Spec 112 FR-014 warnings. Names only:
+// header values are never in scope here.
+func (mc *Client) warnForwardHeaders() {
+	cfg := mc.GetConfig()
+	if cfg == nil || len(cfg.ForwardHeaders) == 0 || !mc.GetGlobalConfig().IsClientHeaderForwardingEnabled() {
+		return
+	}
+	switch tt := transport.DetermineTransportType(cfg); tt {
+	case transport.TransportHTTP, transport.TransportStreamableHTTP:
+		if u, err := url.Parse(cfg.URL); err == nil && strings.EqualFold(u.Scheme, "http") &&
+			!isLoopbackHost(u.Hostname()) && mc.warnedForwardPlain.CompareAndSwap(false, true) {
+			mc.logger.Warn("forward_headers: upstream is plain HTTP on a non-loopback host; forwarded client headers are sent unencrypted",
+				zap.String("server", cfg.Name),
+				zap.Strings("headers", cfg.ForwardHeaders))
+		}
+	default:
+		if mc.warnedForwardInert.CompareAndSwap(false, true) {
+			mc.logger.Warn("forward_headers is set on a server whose transport cannot forward client headers; it has no effect (only http/streamable-http forward)",
+				zap.String("server", cfg.Name),
+				zap.String("transport", tt),
+				zap.Strings("headers", cfg.ForwardHeaders))
+		}
 	}
 }
 

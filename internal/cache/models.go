@@ -36,6 +36,15 @@ type Record struct {
 	// recognise. Both are legacy: refused for every caller and invalidated on
 	// the first gated read.
 	Version uint8 `json:"version,omitempty"`
+	// ForwardedDigest is the Spec 112 FR-017 fact: the per-process HMAC of the
+	// client headers forwarded on the call that produced this entry, and
+	// ForwardedServer the upstream they were forwarded to. Empty when the call
+	// forwarded nothing. It lives in the body only (not the frame header): the
+	// authorization gate is unchanged, and the read_cache handler admits the
+	// entry only to a request whose digest for the same server is equal. The
+	// digest is never logged or returned.
+	ForwardedDigest string `json:"forwarded_digest,omitempty"`
+	ForwardedServer string `json:"forwarded_server,omitempty"`
 }
 
 // RecordVersion is the provenance schema current binaries stamp on every
@@ -289,6 +298,11 @@ type ReadCacheResponse struct {
 	// snapshot, never with the (possibly broader) redeemer's (Spec 105
 	// FR-001).
 	Producer *Authorization `json:"-"`
+	// ForwardedDigest / ForwardedServer carry the entry's Spec 112 FR-017 fact
+	// to the handler, which enforces it and copies it to a re-cached child
+	// page. They never reach the wire.
+	ForwardedDigest string `json:"-"`
+	ForwardedServer string `json:"-"`
 }
 
 // Meta represents metadata about the cached response

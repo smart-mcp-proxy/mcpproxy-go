@@ -3,6 +3,7 @@ package transport
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
@@ -21,6 +23,41 @@ type LoggingTransport struct {
 	base   http.RoundTripper
 	logger *zap.Logger
 	mu     sync.Mutex
+	// maskNames returns the live forward_headers allowlist of the server this
+	// transport serves (Spec 112 FR-018). May be nil.
+	maskNames func() []string
+}
+
+// forwardedMask is the placeholder printed instead of a forwarded value.
+const forwardedMask = "[forwarded]"
+
+// maskForwarded returns a copy of h in which every header whose name is in the
+// request's forwarded set (key B) or in the server's allowlist carries the
+// placeholder instead of its value. Names stay visible (FR-015a). It runs
+// before oauth.RedactHeaders so arbitrary allowlisted names RedactHeaders does
+// not know (X-Tenant-Id) are still masked.
+func (t *LoggingTransport) maskForwarded(ctx context.Context, h http.Header) http.Header {
+	names := map[string]struct{}{}
+	if out, ok := headerfwd.OutboundFrom(ctx); ok {
+		for _, n := range out.Names() {
+			names[http.CanonicalHeaderKey(n)] = struct{}{}
+		}
+	}
+	if t.maskNames != nil {
+		for _, n := range t.maskNames() {
+			names[http.CanonicalHeaderKey(strings.TrimSpace(n))] = struct{}{}
+		}
+	}
+	if len(names) == 0 {
+		return h
+	}
+	c := h.Clone()
+	for n := range names {
+		if _, ok := c[n]; ok {
+			c[n] = []string{forwardedMask}
+		}
+	}
+	return c
 }
 
 // NewLoggingTransport creates a new logging HTTP transport
@@ -48,7 +85,7 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	// and an observer-only test would show green against a zap-only fix.
 	// The method, host and path survive; only credentials are replaced.
 	fmt.Printf("📤 HTTP REQUEST: %s %s\n", req.Method, oauth.AuditRedaction.URLValueDeep(req.URL.String()))
-	fmt.Printf("   Headers: %v\n", oauth.RedactHeaders(req.Header))
+	fmt.Printf("   Headers: %v\n", oauth.RedactHeaders(t.maskForwarded(req.Context(), req.Header)))
 
 	// Log request body if present (for non-SSE requests)
 	if req.Body != nil && req.Method != "GET" {
@@ -83,7 +120,7 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	// Log response using fmt.Printf
 	fmt.Printf("📥 HTTP RESPONSE: %d %s (duration: %v)\n", resp.StatusCode, resp.Status, duration)
-	safeRespHeaders := oauth.RedactHeaders(resp.Header)
+	safeRespHeaders := oauth.RedactHeaders(t.maskForwarded(req.Context(), resp.Header))
 	fmt.Printf("   Response Headers: %v\n", safeRespHeaders)
 
 	t.logger.Info("📥 HTTP RESPONSE",

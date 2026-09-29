@@ -79,6 +79,13 @@ var ErrUnauthorizedRead = errors.New("cache entry was produced under an authoriz
 // ErrUnauthorizedRead) holds.
 var ErrLegacyProvenance = fmt.Errorf("%w: entry predates provenance stamping and has been invalidated", ErrUnauthorizedRead)
 
+// ErrForwardedMismatch is the ErrUnauthorizedRead the read_cache handler
+// returns when an entry was produced by a call that forwarded client headers
+// (Spec 112 FR-017) and the redeeming request's forwarded set for the same
+// upstream differs or is absent. errors.Is(err, ErrUnauthorizedRead) holds, so
+// scoped callers get the same non-disclosing not-found body.
+var ErrForwardedMismatch = fmt.Errorf("%w: entry was produced for a different set of forwarded client headers", ErrUnauthorizedRead)
+
 // ErrEntryUnreadable is returned by a gated read to a reader the header
 // ADMITTED whose entry then proved unreadable: a body this binary cannot
 // decode, or one that disagrees with the header it sits behind. It is not an

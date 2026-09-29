@@ -22,6 +22,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
@@ -3181,7 +3182,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// tool-call latency/outcome metrics. No-ops when observability is disabled.
 	callCtx, toolSpan := p.startToolCallSpan(ctx, serverName, actualToolName, profileSlug)
 	startTime := time.Now()
-	result, err := p.dispatchOnEpoch(callCtx, certified, toolName, args)
+	// Spec 112 FR-016.3: a per-call sink receives this call's outbound set from
+	// core.Client.CallTool so every record written below can be scrubbed.
+	dispatchCtx, fwdSink := headerfwd.WithSink(callCtx)
+	result, err := p.dispatchOnEpoch(dispatchCtx, certified, toolName, args)
+	fwdOut := fwdSink.Outbound()
 	duration := time.Since(startTime)
 	p.finishToolCall(toolSpan, serverName, actualToolName, duration, err)
 
@@ -3354,12 +3359,17 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// spotlighting mutate the result in place — so the recorded message is the
 	// upstream's own words. This governs the ACTIVITY RECORD ONLY; the result
 	// itself is still forwarded to the caller verbatim below.
-	activityStatus, activityErrMsg := activityStatusForResult(result)
+	//
+	// Spec 112: recResult is what the recording sinks see. It equals result
+	// unless this call forwarded client headers, in which case it is a copy
+	// with the forwarded values scrubbed; the client still gets result.
+	recResult := scrubResultForRecord(result, fwdOut)
+	activityStatus, activityErrMsg := activityStatusForResult(recResult)
 
 	// Record the response. An isError answer is still a response — it is stored
 	// as one, with the upstream's explanation mirrored into Error so the tool
 	// call history agrees with the activity log.
-	toolCallRecord.Response = result
+	toolCallRecord.Response = recResult
 	toolCallRecord.Error = activityErrMsg
 
 	// Count output tokens for successful response
@@ -3415,7 +3425,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		toonDetectionText, toonDecisions = p.encodeToonBlocks(serverName, actualToolName, contentTrust, args, ctr)
 	}
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAs(producer), p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
@@ -3463,14 +3473,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if intent != nil {
 		intentMap = intent.ToMap()
 	}
-	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes, toonDetectionText, toonDecisions, "")
+	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, scrubForRecord(response, fwdOut), responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes, scrubForRecord(toonDetectionText, fwdOut), toonDecisions, "")
 
 	// Spec 024: Emit internal tool call event. It carries the SAME classification
 	// as the tool_call record above (issue #935) — the two describe one dispatch,
 	// and a "success" wrapper around a failed call is exactly what made the
 	// failure invisible.
 	internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
-	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, activityStatus, activityErrMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, result, intentMap, "")
+	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, activityStatus, activityErrMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, recResult, intentMap, "")
 
 	return forwarded, nil
 }
@@ -3685,7 +3695,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Call tool via upstream manager with circuit breaker pattern
 	startTime := time.Now()
-	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
+	// Spec 112 FR-016.3: per-call sink for the recording scrub below.
+	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
+	result, err := p.upstreamManager.CallTool(dispatchCtx, toolName, args)
+	fwdOut := fwdSink.Outbound()
 	duration := time.Since(startTime)
 
 	p.logger.Debug("handleCallTool: upstream call completed",
@@ -3815,11 +3828,14 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Issue #935: an upstream that answered isError:true failed, even though the
 	// transport hop did not. Classified before the result is truncated/forwarded.
-	activityStatus, activityErrMsg := activityStatusForResult(result)
+	//
+	// Spec 112: recResult is the scrubbed copy the recording sinks see.
+	recResult := scrubResultForRecord(result, fwdOut)
+	activityStatus, activityErrMsg := activityStatusForResult(recResult)
 
 	// Record the response (an isError answer is still a response; its
 	// explanation is mirrored into Error so history agrees with activity).
-	toolCallRecord.Response = result
+	toolCallRecord.Response = recResult
 	toolCallRecord.Error = activityErrMsg
 
 	// Count output tokens for successful response
@@ -3861,7 +3877,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	legacyResponseBytes := rawByteSize(result)
 	legacyRequestBytes := rawByteSize(activityArgs)
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAs(producer), p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
@@ -3904,7 +3920,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Emit activity completed event with determined source (legacy - no intent).
 	// Status comes from the upstream result, not from err alone (issue #935).
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil, "")
+	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, scrubForRecord(response, fwdOut), responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil, "")
 
 	return forwarded, nil
 }
@@ -6502,6 +6518,14 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		return readCacheRefusal(err, reader), nil
 	}
 
+	// Spec 112 FR-017: an entry produced by a call that forwarded client
+	// headers is redeemable only by a request forwarding the same set to the
+	// same upstream. Same refusal shape as an authorization mismatch.
+	if !p.forwardedEntryRedeemable(ctx, response) {
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", cache.ErrForwardedMismatch.Error(), time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
+		return readCacheRefusal(cache.ErrForwardedMismatch, reader), nil
+	}
+
 	// Serialize response
 	jsonResult, err := json.Marshal(response)
 	if err != nil {
@@ -6532,7 +6556,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		args,
 		len(response.Records),
 		p.currentTruncator(),
-		p.cacheStoreAs(childPageProducer(response, reader)),
+		p.cacheStoreAsChildPage(childPageProducer(response, reader), response),
 		p.logger,
 	)
 

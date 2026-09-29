@@ -30,15 +30,15 @@ description: "Tasks for Spec 112 — MCP client header forwarding"
 
 ## Phase 3 — Capture and dispatch
 
-- [ ] T017 [US1] `clientFacingStreamableOptions(cfgProvider)` with `WithHTTPContextFunc`; test that all five mounts and the `/v1/tool_code` aliases capture, and REST `/api/v1/tools/call` does not (`internal/server/server.go`) — FR-006
-- [ ] T018 [US1] `core.Client.SetForwardPolicyProvider`; `CallTool` sets key B, scrubs error and logged result copies, returns the per-call outbound set to its caller (`internal/upstream/core/client.go`) — FR-009, FR-016
-- [ ] T018a [US6] Recording sinks scrub the success result: activity `Response` and `ToolCallRecord` built from a result that echoes the sentinel contain no sentinel; the result returned to the client is unchanged (`internal/server/mcp.go`, `mcp_routing.go`, `mcp_code_execution.go`) — FR-016.3
-- [ ] T019 [US5] `managed.Client` installs the live provider (after construction and every reconnect); hot-reload test flips switch and allowlist with no reconnect (`internal/upstream/managed/client.go`) — FR-010, US5.3
-- [ ] T020 [US4] `transport.HTTPTransportConfig.HeaderFunc`, appended in OAuth and plain branches outside the timeout branches; existing timeout tests unchanged; SSE client untouched (`internal/transport/http.go`) — FR-014
-- [ ] T021 [US3] `CheckRedirect` strips key-B names on cross-origin 307; same-origin keeps them. Table test over **every** `CreateHTTPClient` path — plain without static headers (formerly `WithHTTPTimeout` default client), plain with static headers and no trace/Retry-After, plain with trace, plain with Retry-After, OAuth without trace/Retry-After, OAuth with Retry-After — each asserting the cross-origin target never sees the sentinel and the existing per-branch timeout is unchanged (`internal/transport/http.go`) — FR-013
-- [ ] T022 [US6] `LoggingTransport` masks key-B and allowlisted names in request and response headers; test uses a custom name unknown to `RedactHeaders` (`X-Tenant-Id`), captures both stdout and a zap observer, asserts the sentinel is absent and the name still present (`internal/transport/logging.go`) — FR-018
-- [ ] T023 [US6] `read_cache` stores `ForwardedDigest`; redeem with different/missing digest is refused (`internal/cache`, `internal/server/mcp.go`) — FR-017
-- [ ] T024 One-time name-only warnings: allowlist on sse/stdio server; plain-HTTP non-loopback upstream — FR-014
+- [x] T017 [US1] `clientFacingStreamableOptions(cfgProvider)` with `WithHTTPContextFunc`; test that all five mounts and the `/v1/tool_code` aliases capture, and REST `/api/v1/tools/call` does not (`internal/server/server.go`) — FR-006
+- [x] T018 [US1] `core.Client.SetForwardPolicyProvider`; `CallTool` sets key B, scrubs error and logged result copies, returns the per-call outbound set to its caller (`internal/upstream/core/client.go`) — FR-009, FR-016
+- [x] T018a [US6] Recording sinks scrub the success result: activity `Response` and `ToolCallRecord` built from a result that echoes the sentinel contain no sentinel; the result returned to the client is unchanged (`internal/server/mcp.go`, `mcp_routing.go`, `mcp_code_execution.go`) — FR-016.3
+- [x] T019 [US5] `managed.Client` installs the live provider (after construction and every reconnect); hot-reload test flips switch and allowlist with no reconnect (`internal/upstream/managed/client.go`) — FR-010, US5.3
+- [x] T020 [US4] `transport.HTTPTransportConfig.HeaderFunc`, appended in OAuth and plain branches outside the timeout branches; existing timeout tests unchanged; SSE client untouched (`internal/transport/http.go`) — FR-014
+- [x] T021 [US3] `CheckRedirect` strips key-B names on cross-origin 307; same-origin keeps them. Table test over **every** `CreateHTTPClient` path — plain without static headers (formerly `WithHTTPTimeout` default client), plain with static headers and no trace/Retry-After, plain with trace, plain with Retry-After, OAuth without trace/Retry-After, OAuth with Retry-After — each asserting the cross-origin target never sees the sentinel and the existing per-branch timeout is unchanged (`internal/transport/http.go`) — FR-013
+- [x] T022 [US6] `LoggingTransport` masks key-B and allowlisted names in request and response headers; test uses a custom name unknown to `RedactHeaders` (`X-Tenant-Id`), captures both stdout and a zap observer, asserts the sentinel is absent and the name still present (`internal/transport/logging.go`) — FR-018
+- [x] T023 [US6] `read_cache` stores `ForwardedDigest`; redeem with different/missing digest is refused (`internal/cache`, `internal/server/mcp.go`) — FR-017
+- [x] T024 One-time name-only warnings: allowlist on sse/stdio server; plain-HTTP non-loopback upstream — FR-014
 
 ## Phase 4 — Integration tests (`httptest` recording streamable upstream)
 

@@ -1,11 +1,14 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -138,6 +141,16 @@ type HTTPTransportConfig struct {
 	// responses into strings, so a RoundTripper is the last place the header
 	// still exists. nil disables the wrapper entirely (unchanged behaviour).
 	RetryAfter *RetryAfterRecorder
+
+	// HeaderFunc attaches client headers forwarded per call (Spec 112). It
+	// reads only the outbound context key that core.Client.CallTool sets, so it
+	// emits nothing for initialize, list or reconnect traffic. nil means the
+	// default headerfwd.HeaderFunc over Headers.
+	HeaderFunc transport.HTTPHeaderFunc
+	// ForwardNames returns the live forward_headers allowlist of this server.
+	// The trace transport masks those header names (request and response) even
+	// when a given request carries no forwarded set (FR-018). May be nil.
+	ForwardNames func() []string
 }
 
 // upstreamRoundTripper composes the outbound transport wrappers for an upstream
@@ -151,7 +164,9 @@ func (cfg *HTTPTransportConfig) upstreamRoundTripper(base http.RoundTripper, log
 		rt = http.DefaultTransport
 	}
 	if cfg.TraceEnabled {
-		rt = NewLoggingTransport(rt, logger)
+		lt := NewLoggingTransport(rt, logger)
+		lt.maskNames = cfg.ForwardNames
+		rt = lt
 	}
 	if cfg.RetryAfter != nil {
 		rt = NewRetryAfterTransport(rt, cfg.RetryAfter, logger)
@@ -163,6 +178,92 @@ func (cfg *HTTPTransportConfig) upstreamRoundTripper(base http.RoundTripper, log
 // our own *http.Client instead of letting it build the default one.
 func (cfg *HTTPTransportConfig) needsCustomTransport() bool {
 	return cfg.TraceEnabled || cfg.RetryAfter != nil
+}
+
+// maxRedirects mirrors net/http's default redirect limit.
+const maxRedirects = 10
+
+func sameOrigin(a, b *http.Request) bool {
+	return strings.EqualFold(a.URL.Scheme, b.URL.Scheme) &&
+		strings.EqualFold(a.URL.Hostname(), b.URL.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(r *http.Request) string {
+	if p := r.URL.Port(); p != "" {
+		return p
+	}
+	if strings.EqualFold(r.URL.Scheme, "https") {
+		return "443"
+	}
+	return "80"
+}
+
+// forwardedRedirectFilter is the http.Client.CheckRedirect for every streamable
+// HTTP client (Spec 112 FR-013). Go strips only Authorization and Cookie on a
+// cross-origin redirect; a custom forwarded header such as X-Tenant-Id would
+// follow a 307/308 anywhere. When the request context carries forwarded
+// headers (key B) this deletes those names from a cross-origin redirected
+// request. Requests without key B keep Go's default behaviour.
+func forwardedRedirectFilter(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if len(via) == 0 {
+		return errors.New("redirect without a prior request")
+	}
+	out, ok := headerfwd.OutboundFrom(req.Context())
+	if !ok || out.IsEmpty() {
+		return nil
+	}
+	if !sameOrigin(req, via[0]) {
+		for _, n := range out.Names() {
+			req.Header.Del(n)
+		}
+	}
+	return nil
+}
+
+// streamableHTTPClient builds the *http.Client handed to mcp-go for a
+// streamable HTTP upstream. It is always custom so CheckRedirect is present on
+// every branch (mcp-go's default client has none), while each branch keeps the
+// timeout and base transport it had before Spec 112:
+//
+//	OAuth:                 no timeout, http.DefaultTransport
+//	plain, trace:          180s, dedicated transport
+//	plain, no headers:     180s, http.DefaultTransport
+//	plain, static headers: no timeout, http.DefaultTransport
+//
+// Trace and the Retry-After recorder wrap the base as before.
+func (cfg *HTTPTransportConfig) streamableHTTPClient(oauthBranch bool, logger *zap.Logger) *http.Client {
+	base := http.RoundTripper(http.DefaultTransport)
+	timeout := time.Duration(0)
+	if !oauthBranch {
+		if cfg.TraceEnabled {
+			logger.Info("🔍 HTTP TRACE MODE ENABLED - All HTTP traffic will be logged")
+			base = &http.Transport{
+				MaxIdleConns:          10,
+				IdleConnTimeout:       90 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
+			}
+			timeout = 180 * time.Second
+		} else if len(cfg.Headers) == 0 {
+			timeout = 180 * time.Second
+		}
+	}
+	return &http.Client{
+		Transport:     cfg.upstreamRoundTripper(base, logger),
+		Timeout:       timeout,
+		CheckRedirect: forwardedRedirectFilter,
+	}
+}
+
+// headerFunc returns the configured forwarding header func or the default one.
+func (cfg *HTTPTransportConfig) headerFunc() transport.HTTPHeaderFunc {
+	if cfg.HeaderFunc != nil {
+		return cfg.HeaderFunc
+	}
+	return headerfwd.HeaderFunc(cfg.Headers)
 }
 
 // CreateHTTPClient creates a new MCP client using HTTP transport
@@ -222,14 +323,16 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		// mcp-go builds the OAuth client's transport itself; OAuthConfig.HTTPClient
 		// only covers the OAuth metadata/DCR/token requests, NOT the MCP requests.
 		// Passing our own basic client is therefore the only way the Retry-After
-		// recorder (#1040) sees a 429 on the MCP endpoint. No Timeout is set, to
-		// preserve mcp-go's default for this branch (OAuth flows rely on the
-		// caller's context deadline, which can be up to 30 minutes).
-		var oauthOpts []transport.StreamableHTTPCOption
-		if cfg.needsCustomTransport() {
-			oauthOpts = append(oauthOpts, transport.WithHTTPBasicClient(&http.Client{
-				Transport: cfg.upstreamRoundTripper(http.DefaultTransport, logger),
-			}))
+		// recorder (#1040) sees a 429 on the MCP endpoint, and the only way the
+		// forwarded-header redirect filter (Spec 112) is installed. No Timeout is
+		// set, to preserve mcp-go's default for this branch (OAuth flows rely on
+		// the caller's context deadline, which can be up to 30 minutes).
+		oauthOpts := []transport.StreamableHTTPCOption{
+			transport.WithHTTPBasicClient(cfg.streamableHTTPClient(true, logger)),
+			// Spec 112: appended unconditionally. mcp-go applies the header func
+			// after static headers and the OAuth bearer, so headerfwd's filter
+			// (deny list, static-name collision) is what keeps them authoritative.
+			transport.WithHTTPHeaderFunc(cfg.headerFunc()),
 		}
 		// GH #1271: static headers ride along with the bearer. A declared-OAuth
 		// server whose non-credential headers (x-goog-user-project, …) used to
@@ -263,32 +366,13 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		opts = append(opts, transport.WithHTTPHeaders(headers))
 	}
 
-	switch {
-	case cfg.needsCustomTransport():
-		// Timeout policy is preserved exactly as it was before #1040: the trace
-		// client and the header-less client carry a 180s request timeout, while
-		// the headers variant has always run on mcp-go's default (no timeout),
-		// which long-running tool calls depend on.
-		base := http.RoundTripper(http.DefaultTransport)
-		timeout := time.Duration(0)
-		if cfg.TraceEnabled {
-			logger.Info("🔍 HTTP TRACE MODE ENABLED - All HTTP traffic will be logged")
-			base = &http.Transport{
-				MaxIdleConns:          10,
-				IdleConnTimeout:       90 * time.Second,
-				ResponseHeaderTimeout: 30 * time.Second,
-			}
-			timeout = 180 * time.Second
-		} else if len(headers) == 0 {
-			timeout = 180 * time.Second
-		}
-		opts = append(opts, transport.WithHTTPBasicClient(&http.Client{
-			Transport: cfg.upstreamRoundTripper(base, logger),
-			Timeout:   timeout,
-		}))
-	case len(headers) == 0:
-		opts = append(opts, transport.WithHTTPTimeout(180*time.Second)) // Increased timeout for HTTP connections
-	}
+	// Always a custom client so CheckRedirect is installed (Spec 112 FR-013);
+	// timeout policy per branch is documented on streamableHTTPClient and is
+	// unchanged from #1040. The header func is appended outside the
+	// len(headers) branches.
+	opts = append(opts,
+		transport.WithHTTPBasicClient(cfg.streamableHTTPClient(false, logger)),
+		transport.WithHTTPHeaderFunc(cfg.headerFunc()))
 
 	httpTransport, err := transport.NewStreamableHTTP(cfg.URL, opts...)
 	if err != nil {
@@ -435,6 +519,7 @@ func CreateHTTPTransportConfig(serverConfig *config.ServerConfig, oauthConfig *c
 		OAuthConfig:  oauthConfig,
 		UseOAuth:     oauthConfig != nil,
 		TraceEnabled: GlobalTraceEnabled, // Use global trace flag
+		ForwardNames: func() []string { return serverConfig.ForwardHeaders },
 	}
 }
 

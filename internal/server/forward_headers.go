@@ -1,0 +1,186 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+)
+
+// forwardHeaderUnion is the union of the live per-server forward_headers
+// allowlists of enabled servers that resolve to streamable HTTP (Spec 112
+// FR-006). Capturing only this union keeps the retained copy minimal: the
+// Spec 082 workspace-roots goroutine holds the request context alive past the
+// response (R2).
+func forwardHeaderUnion(cfg *config.Config) map[string]struct{} {
+	var union map[string]struct{}
+	for _, sc := range cfg.Servers {
+		if sc == nil || !sc.Enabled || len(sc.ForwardHeaders) == 0 {
+			continue
+		}
+		switch transport.DetermineTransportType(sc) {
+		case transport.TransportHTTP, transport.TransportStreamableHTTP:
+		default:
+			continue
+		}
+		if union == nil {
+			union = make(map[string]struct{}, len(sc.ForwardHeaders))
+		}
+		for _, n := range sc.ForwardHeaders {
+			union[http.CanonicalHeaderKey(n)] = struct{}{}
+		}
+	}
+	return union
+}
+
+// captureClientHeaders is the mcp-go HTTPContextFunc that snapshots the
+// allowlist-eligible inbound headers of ONE client-facing MCP POST into the
+// request context (key A). It runs only on the Streamable HTTP mounts built by
+// clientFacingStreamableOptions, so REST /api/v1/*, replay, the CLI and the
+// tray never capture (FR-006). It reads the live config on every request and
+// does nothing when forwarding is off or no server has an allowlist.
+func captureClientHeaders(cfgProvider func() *config.Config) server.HTTPContextFunc {
+	return func(ctx context.Context, r *http.Request) context.Context {
+		if cfgProvider == nil || r == nil {
+			return ctx
+		}
+		cfg := cfgProvider()
+		if cfg == nil || !cfg.IsClientHeaderForwardingEnabled() {
+			return ctx
+		}
+		union := forwardHeaderUnion(cfg)
+		if len(union) == 0 {
+			return ctx
+		}
+		snap := headerfwd.Capture(r, union)
+		if snap.IsEmpty() {
+			return ctx
+		}
+		return headerfwd.WithSnapshot(ctx, snap)
+	}
+}
+
+// scrubForRecord scrubs text destined for a recording sink (activity records,
+// tool-call history, server-layer logs) with the call's outbound set
+// (Spec 112 FR-016.3). The result returned to the calling client is never run
+// through it: the client sent the value itself.
+func scrubForRecord(text string, out headerfwd.Snapshot) string {
+	return headerfwd.Scrub(text, out, nil)
+}
+
+// scrubResultForRecord returns a copy of an upstream result with forwarded
+// values scrubbed out of every text-bearing field, for the activity
+// `Response` and the ToolCallRecord. The original is not modified. With an
+// empty outbound set it returns the result itself (the common case, no copy).
+//
+// Text and embedded-text-resource blocks and structuredContent are scrubbed.
+// Image and audio blocks are binary and carry no echoable text.
+func scrubResultForRecord(result interface{}, out headerfwd.Snapshot) interface{} {
+	if out.IsEmpty() || result == nil {
+		return result
+	}
+	ctr, ok := result.(*mcp.CallToolResult)
+	if ok && ctr == nil {
+		return result // typed nil: keep it, callers distinguish it from nil
+	}
+	if !ok {
+		b, err := json.Marshal(result)
+		if err != nil {
+			return result
+		}
+		var generic interface{}
+		if json.Unmarshal([]byte(headerfwd.Scrub(string(b), out, nil)), &generic) != nil {
+			return result
+		}
+		return generic
+	}
+	cp := *ctr
+	cp.Content = make([]mcp.Content, len(ctr.Content))
+	for i, c := range ctr.Content {
+		switch tc := c.(type) {
+		case mcp.TextContent:
+			tc.Text = headerfwd.Scrub(tc.Text, out, nil)
+			cp.Content[i] = tc
+		case *mcp.TextContent:
+			if tc != nil {
+				n := *tc
+				n.Text = headerfwd.Scrub(n.Text, out, nil)
+				cp.Content[i] = &n
+			} else {
+				cp.Content[i] = c
+			}
+		case mcp.EmbeddedResource:
+			tc.Resource = scrubResourceContents(tc.Resource, out)
+			cp.Content[i] = tc
+		case *mcp.EmbeddedResource:
+			if tc != nil {
+				n := *tc
+				n.Resource = scrubResourceContents(n.Resource, out)
+				cp.Content[i] = &n
+			} else {
+				cp.Content[i] = c
+			}
+		default:
+			cp.Content[i] = c
+		}
+	}
+	if ctr.StructuredContent != nil {
+		if b, err := json.Marshal(ctr.StructuredContent); err == nil {
+			var generic interface{}
+			if json.Unmarshal([]byte(headerfwd.Scrub(string(b), out, nil)), &generic) == nil {
+				cp.StructuredContent = generic
+			}
+		}
+	}
+	cp.RawStructuredContent = nil
+	return &cp
+}
+
+func scrubResourceContents(rc mcp.ResourceContents, out headerfwd.Snapshot) mcp.ResourceContents {
+	switch r := rc.(type) {
+	case mcp.TextResourceContents:
+		r.Text = headerfwd.Scrub(r.Text, out, nil)
+		return r
+	case *mcp.TextResourceContents:
+		if r != nil {
+			n := *r
+			n.Text = headerfwd.Scrub(n.Text, out, nil)
+			return &n
+		}
+	}
+	return rc
+}
+
+// forwardPolicyFor is the live forwarding policy of the named upstream, built
+// from the runtime config the same way managed.Client builds it (global switch
+// and env override, the server's allowlist and static header names) with the
+// server's resolved transport. ok is false when the server is unknown.
+func (p *MCPProxyServer) forwardPolicyFor(serverName string) (headerfwd.Policy, bool) {
+	if p == nil {
+		return headerfwd.Policy{}, false
+	}
+	cfg := p.config
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		cfg = p.mainServer.runtime.Config() // the live config wins when there is a runtime
+	}
+	if cfg == nil {
+		return headerfwd.Policy{}, false
+	}
+	for _, sc := range cfg.Servers {
+		if sc != nil && sc.Name == serverName {
+			return headerfwd.Policy{
+				Enabled:   cfg.IsClientHeaderForwardingEnabled(),
+				Allow:     sc.ForwardHeaders,
+				Static:    sc.Headers,
+				Transport: transport.DetermineTransportType(sc),
+			}, true
+		}
+	}
+	return headerfwd.Policy{}, false
+}
