@@ -632,6 +632,14 @@ describe('ClientConnectList', () => {
     await connectAllBtn.trigger('click')
     await flushPromises()
 
+    // Every target is previewed before the first config write. This is the
+    // bulk equivalent of the row-level Review & connect contract.
+    expect(api.getConnectPreview).toHaveBeenCalledTimes(3)
+    expect(api.connectClient).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="connect-bulk-preview"]').exists()).toBe(true)
+    await wrapper.find('[data-test="connect-bulk-preview-confirm"]').trigger('click')
+    await flushPromises()
+
     expect(api.connectClient).toHaveBeenCalledTimes(3)
     expect(wrapper.find('[data-test="connect-reload-hint"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="connect-reload-hint-cursor"]').text()).toBe('Reload cursor to load MCPProxy')

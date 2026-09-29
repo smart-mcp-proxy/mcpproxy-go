@@ -18,7 +18,7 @@
       </div>
       <div class="rounded-box border border-dashed border-base-300 p-4 text-sm"><strong>Other client?</strong> Add MCPProxy to its MCP configuration using the endpoint shown in Endpoint &amp; mode.</div>
     </section>
-    <section v-else-if="tab === 'endpoint'" class="card bg-base-100 border border-base-300"><div class="card-body"><h2 class="card-title">Endpoint &amp; mode</h2><p>Routing mode: <strong>{{ store.routing?.routing_mode || 'Loading…' }}</strong></p><dl v-if="store.routing" class="grid sm:grid-cols-2 gap-2 text-sm"><template v-for="(endpoint, name) in store.routing.endpoints" :key="name"><dt class="font-medium">{{ name }}</dt><dd><code>{{ endpoint }}</code></dd></template></dl><p v-if="store.routing?.restart_required" class="alert alert-warning text-sm">Restart MCPProxy to apply {{ store.routing.pending_routing_mode }} mode.</p></div></section>
+    <section v-else-if="tab === 'endpoint'" class="card bg-base-100 border border-base-300"><div class="card-body"><h2 class="card-title">Endpoint &amp; mode</h2><p class="text-sm text-base-content/70">Choose the MCP surface this instance serves. Changes are saved immediately and apply after restart.</p><ModeSwitcher /><dl v-if="store.routing" class="grid sm:grid-cols-2 gap-2 text-sm"><template v-for="(endpoint, name) in store.routing.endpoints" :key="name"><dt class="font-medium">{{ name }}</dt><dd><code>{{ endpoint }}</code></dd></template></dl><p v-if="store.routing?.restart_required" class="alert alert-warning text-sm">Restart MCPProxy to apply {{ store.routing.pending_routing_mode }} mode.</p></div></section>
     <AgentTokens v-else />
     <ClientConnectList :show="connectOpen" @close="connectOpen = false" />
   </div>
@@ -30,6 +30,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useClientsStore } from '@/stores/clients'
 import { useAuthStore } from '@/stores/auth'
 import ClientConnectList from '@/components/ClientConnectList.vue'
+import ModeSwitcher from '@/components/ModeSwitcher.vue'
 import AgentTokens from '@/views/AgentTokens.vue'
 
 const route = useRoute(); const router = useRouter(); const store = useClientsStore(); const authStore = useAuthStore()
@@ -39,6 +40,9 @@ const expanded = ref('')
 const connectOpen = ref(false)
 function selectTab(id: string) { tab.value = id }
 watch(tab, value => router.replace({ query: { ...route.query, tab: value } }))
+watch(() => route.query.tab, value => {
+  if (typeof value === 'string' && tabs.some(item => item.id === value) && tab.value !== value) tab.value = value
+})
 async function toggle(id: string) { expanded.value = expanded.value === id ? '' : id; if (expanded.value) await store.loadDetail(id) }
 function stateLabel(value: string) { return value.replaceAll('_', ' ') }
 function relative(value?: string | null) { return value ? new Date(value).toLocaleString() : 'Never' }

@@ -397,7 +397,7 @@
           data-test="connect-all-hint"
         >{{ connectAllDisabledReason }}</span>
         <button
-          @click="connectAll"
+          @click="prepareConnectAll"
           class="btn btn-primary btn-sm"
           data-test="connect-all"
           :disabled="connectableClients.length === 0"
@@ -435,6 +435,25 @@
             >
               <span v-if="loading.clients[disconnectTarget.id]" class="loading loading-spinner loading-xs"></span>
               Disconnect
+            </button>
+          </div>
+        </div>
+      </div>
+      <div v-if="bulkPreview.length" class="modal modal-open" data-test="connect-bulk-preview">
+        <div class="modal-box max-w-xl">
+          <h3 class="font-bold text-lg">Review {{ bulkPreview.length }} client changes</h3>
+          <p class="text-sm opacity-70 mt-2">Nothing is written until you confirm every change below. Each existing config is backed up first.</p>
+          <div class="mt-3 space-y-2 max-h-64 overflow-y-auto">
+            <div v-for="entry in bulkPreview" :key="entry.id" class="rounded border border-base-300 p-2">
+              <p class="text-sm font-medium">{{ entry.client.name }} <span v-if="entry.preview.entry_exists" class="text-warning">(will replace existing entry)</span></p>
+              <code class="block text-xs whitespace-pre-wrap break-all opacity-70">{{ entry.preview.entry_text }}</code>
+            </div>
+          </div>
+          <div class="modal-action">
+            <button class="btn btn-ghost btn-sm" data-test="connect-bulk-preview-cancel" :disabled="bulkPreviewLoading" @click="bulkPreview = []">Cancel</button>
+            <button class="btn btn-primary btn-sm" data-test="connect-bulk-preview-confirm" :disabled="bulkPreviewLoading" @click="connectAll">
+              <span v-if="bulkPreviewLoading" class="loading loading-spinner loading-xs" />
+              <span v-else>Connect {{ bulkPreview.length }} client{{ bulkPreview.length === 1 ? '' : 's' }}</span>
             </button>
           </div>
         </div>
@@ -500,6 +519,11 @@ const copiedClient = ref<string | null>(null)
 const previews = ref<Record<string, ConnectPreview>>({})
 const previewLoading = reactive<Record<string, boolean>>({})
 const previewError = ref<Record<string, string>>({})
+// Bulk writes use the same preview contract as a row. The complete set is
+// fetched before the confirmation dialog appears, so Connect All cannot write
+// one client while a later client's diff is still unknown.
+const bulkPreview = ref<Array<{ id: string; client: ClientStatus; preview: ConnectPreview }>>([])
+const bulkPreviewLoading = ref(false)
 // Spec 078 US3: the connect performed last in THIS modal session, so a one-
 // click Undo can revert it. preview is the confirmed preview snapshot (what
 // was written), shown again in the undo panel before reverting (FR-009).
@@ -913,15 +937,40 @@ async function copyBackupPath() {
 // Spec 078 US2 / SC-005: Connect All accumulates every successful client's
 // backup outcome instead of letting each connect() overwrite the previous
 // client's backup path.
+async function prepareConnectAll() {
+  const targets = [...connectableClients.value]
+  bulkPreviewLoading.value = true
+  try {
+    const responses = await Promise.all(targets.map(async client => ({
+      client,
+      response: await api.getConnectPreview(client.id),
+    })))
+    const failed = responses.find(({ response }) => !response.success || !response.data)
+    if (failed) {
+      resultMessage.value = failed.response.error || `Could not preview ${failed.client.name}`
+      resultSuccess.value = false
+      return
+    }
+    bulkPreview.value = responses.map(({ client, response }) => ({ id: client.id, client, preview: response.data! }))
+  } catch (err) {
+    resultMessage.value = err instanceof Error ? err.message : 'Could not preview client changes'
+    resultSuccess.value = false
+  } finally {
+    bulkPreviewLoading.value = false
+  }
+}
+
 async function connectAll() {
+  const planned = [...bulkPreview.value]
+  if (!planned.length) return
+  bulkPreview.value = []
   bulkBackups.value = []
   copiedBulkClient.value = null
   // Snapshot: connect() refetches the client list mid-loop, which mutates the
   // connectableClients computed while we iterate it.
-  const targets = [...connectableClients.value]
   const collected: Array<{ id: string; name: string; backupPath: string | null; reloadHint: string }> = []
-  for (const client of targets) {
-    const outcome = await connect(client.id, false, { verify: false })
+  for (const { client, preview } of planned) {
+    const outcome = await connect(client.id, preview.entry_exists === true, { verify: false })
     if (outcome.ok) {
       collected.push({ id: client.id, name: client.name, backupPath: outcome.backupPath, reloadHint: outcome.reloadHint })
     }
@@ -965,6 +1014,7 @@ function close() {
   copiedBulkClient.value = null
   previews.value = {}
   previewError.value = {}
+  bulkPreview.value = []
   lastConnect.value = null
   undoPanelOpen.value = false
   // Review round 2, finding 3: this also fires on a native Escape/backdrop
