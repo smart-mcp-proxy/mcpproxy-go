@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -90,5 +91,50 @@ func TestToolsCallOnlyBody(t *testing.T) {
 	}
 	for body, want := range cases {
 		assert.Equal(t, want, isToolsCallBody([]byte(body)), body)
+	}
+}
+
+type ptrRC struct{ io.Reader }
+
+func (*ptrRC) Close() error { return nil }
+
+type captureRT struct {
+	req  *http.Request
+	body []byte
+}
+
+func (c *captureRT) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.req = r
+	if r.Body != nil {
+		c.body, _ = io.ReadAll(r.Body)
+	}
+	return &http.Response{StatusCode: 202, Body: http.NoBody, Header: http.Header{}}, nil
+}
+
+// Non-rewindable body (GetBody == nil): the gate must not truncate an
+// oversized body, and must not mutate the caller's request.
+func TestForwardGate_NoGetBody(t *testing.T) {
+	big := append([]byte(`{"jsonrpc":"2.0","id":1,"result":"`), make([]byte, maxGateBody+10)...)
+	small := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call"}`)
+	for name, payload := range map[string][]byte{"oversize": big, "small": small} {
+		t.Run(name, func(t *testing.T) {
+			rt := &captureRT{}
+			g := newForwardGateTransport(rt)
+			ctx := outboundCtx(t, "X-User-Id", fwdSentinel)
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://example.invalid/", nil)
+			require.NoError(t, err)
+			orig := &ptrRC{Reader: bytes.NewReader(payload)}
+			req.Body, req.GetBody = orig, nil
+			req.Header.Set("X-User-Id", fwdSentinel)
+			_, err = g.RoundTrip(req)
+			require.NoError(t, err)
+			assert.Equal(t, payload, rt.body, "body must reach upstream intact")
+			assert.Same(t, orig, req.Body, "caller's request must not be mutated")
+			if name == "small" {
+				assert.Equal(t, fwdSentinel, rt.req.Header.Get("X-User-Id"))
+			} else {
+				assert.Empty(t, rt.req.Header.Get("X-User-Id"))
+			}
+		})
 	}
 }

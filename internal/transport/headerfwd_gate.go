@@ -35,15 +35,12 @@ func (g *forwardGateTransport) RoundTrip(req *http.Request) (*http.Response, err
 		return g.base.RoundTrip(req)
 	}
 	allow := false
+	req = req.Clone(req.Context())
 	body, ok := readGateBody(req)
 	if ok {
 		allow = isToolsCallBody(body)
-		req = req.Clone(req.Context())
-		req.Body = io.NopCloser(bytes.NewReader(body))
-		req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 	}
 	if !allow {
-		req = req.Clone(req.Context())
 		for _, n := range out.Names() {
 			req.Header.Del(n)
 		}
@@ -60,29 +57,39 @@ func hasAnyHeader(h http.Header, names []string) bool {
 	return false
 }
 
-// readGateBody returns the request body bytes without consuming the original
-// (GetBody when available, otherwise buffer and restore req.Body).
+// readGateBody inspects the body of req, which must be a private clone the
+// gate may mutate. It returns the bytes when they fit within maxGateBody. The
+// body delivered by req is always the complete original: with GetBody the
+// original is left untouched; without it the bytes consumed are restored in
+// front of the remainder (also on the oversize/read-error path).
 func readGateBody(req *http.Request) ([]byte, bool) {
 	if req.Body == nil || req.Body == http.NoBody {
 		return nil, true
 	}
-	var rc io.ReadCloser
 	if req.GetBody != nil {
-		var err error
-		if rc, err = req.GetBody(); err != nil {
+		rc, err := req.GetBody()
+		if err != nil {
 			return nil, false
 		}
-	} else {
-		rc = req.Body
+		b, err := io.ReadAll(io.LimitReader(rc, maxGateBody+1))
+		_ = rc.Close()
+		if err != nil || len(b) > maxGateBody {
+			return nil, false
+		}
+		return b, true
 	}
-	b, err := io.ReadAll(io.LimitReader(rc, maxGateBody+1))
-	_ = rc.Close()
+	orig := req.Body
+	b, err := io.ReadAll(io.LimitReader(orig, maxGateBody+1))
 	if err != nil || len(b) > maxGateBody {
+		req.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(b), orig), orig}
 		return nil, false
 	}
-	if req.GetBody == nil {
-		req.Body = io.NopCloser(bytes.NewReader(b))
-	}
+	_ = orig.Close()
+	req.Body = io.NopCloser(bytes.NewReader(b))
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil }
 	return b, true
 }
 
