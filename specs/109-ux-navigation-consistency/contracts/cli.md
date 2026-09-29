@@ -13,7 +13,7 @@ Every new command honours the global `-o table|json|yaml`, `--json`, `MCPPROXY_O
 | `mcpproxy review reject <server> [--tools a,b] [--yes]` | no `--tools` → `security/reject`; `--tools` → `tools/block` | `Rejected …` |
 | `mcpproxy client list` | `GET /clients` | `CLIENT  STATE  LAST SEEN  SESSIONS  CALLS 24H  CONFIG PATH` (`display_path`). Spec 108 **appends** `CREDENTIAL  PROFILE  MODE  SOURCE  BLOCKED 24H` and `--profile`; it never removes or reorders these columns (`CONFIG PATH` stays) |
 | `mcpproxy client show <id>` | `GET /clients/{id}` | detail block incl. `reload_hint`, full `config_path`, sessions |
-| `mcpproxy catalog search <query> [--source id] [--tag t] [--limit n]` | `GET /catalog/search` | `TITLE  ID  PUBLISHER  ✓  POPULARITY  SOURCE`; unavailable sources on stderr as `note: source <id> unavailable: <reason>` |
+| `mcpproxy catalog search <query> [--source id] [--limit n]` | `GET /catalog/search` | `TITLE  ID  PUBLISHER  ✓  POPULARITY  SOURCE`; unavailable sources on stderr as `note: source <id> unavailable: <reason>`. The retained compatibility flag `--tag` accepts only an empty value; a non-empty value exits with an error because catalog entries carry no tags. |
 | `mcpproxy catalog show <source>/<id>` | Spec 070 find | detail incl. required inputs |
 | `mcpproxy catalog add <source>/<id> [--name] [--env K=V] [--secret-env K=V]` | Spec 070 add (+ secrets) | `Added <name> to MCPProxy (quarantined for review)` |
 

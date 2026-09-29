@@ -342,10 +342,11 @@ func catalogAddedFromConfig(cfg *config.Config) func(registries.CatalogHit) bool
 }
 
 func catalogInstallTargetForConfigServer(s *config.ServerConfig) string {
-	if s.URL != "" {
-		return "url:" + s.URL
-	}
-	return "cmd:" + s.Command + " " + strings.Join(s.Args, " ")
+	return registries.CatalogInstallTarget(registries.CatalogInstall{
+		URL:     s.URL,
+		Command: s.Command,
+		Args:    s.Args,
+	})
 }
 
 // renderCatalogSearch prints a search response as a table (or the raw

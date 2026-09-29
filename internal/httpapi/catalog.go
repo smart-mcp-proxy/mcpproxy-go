@@ -197,15 +197,9 @@ func (s *Server) getVisibleServersForCatalog(ctx context.Context) ([]contracts.S
 // catalogInstallTargetForServer computes the same install-target key as
 // registries.CatalogInstallTarget, from a configured contracts.Server.
 func catalogInstallTargetForServer(srv contracts.Server) string {
-	if srv.URL != "" {
-		return "url:" + srv.URL
-	}
-	args := ""
-	for i, a := range srv.Args {
-		if i > 0 {
-			args += " "
-		}
-		args += a
-	}
-	return "cmd:" + srv.Command + " " + args
+	return registries.CatalogInstallTarget(registries.CatalogInstall{
+		URL:     srv.URL,
+		Command: srv.Command,
+		Args:    srv.Args,
+	})
 }

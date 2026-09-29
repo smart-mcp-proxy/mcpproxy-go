@@ -147,6 +147,13 @@ func TestCatalogSearch_AddedRequiresMatchingSourceForRegistryAdd(t *testing.T) {
 		"lookalike-tool (source=other) shares delta's install target but must NOT read added=true — delta was added from a different source")
 }
 
+func TestCatalogInstallTargetForServer_PreservesArgumentBoundaries(t *testing.T) {
+	configured := contracts.Server{Command: "npx", Args: []string{"a b", "c"}}
+	catalog := registries.CatalogInstall{Command: "npx", Args: []string{"a", "b c"}}
+
+	assert.NotEqual(t, registries.CatalogInstallTarget(catalog), catalogInstallTargetForServer(configured))
+}
+
 // TestCatalogSearch_AddedServerNameIsVisibleScopedAndUnique pins the
 // server-authoritative join used by Added/Open. Server status redacts URL query
 // values and command arguments, so clients cannot safely reproduce this join
