@@ -2002,11 +2002,14 @@ actor CoreProcessManager {
     /// refresh, and on `attention.changed` SSE events.
     func refreshAttention() async {
         guard let apiClient else { return }
-        let generation = await MainActor.run { appState.connectionGeneration }
+        let (generation, sequence) = await MainActor.run {
+            (appState.connectionGeneration, appState.nextAttentionRequest())
+        }
         do {
             let response = try await apiClient.attention()
             await MainActor.run {
-                appState.updateAttention(response.items, connectionGeneration: generation)
+                appState.updateAttention(response.items, connectionGeneration: generation,
+                                         requestSequence: sequence)
             }
         } catch {
             // Non-fatal; we'll retry on the next refresh or SSE event.
