@@ -132,6 +132,7 @@ function onSelect(mode: TrustMode) {
   if (mode === state.value.effective) {
     // Already in effect — nothing to warn about and nothing to save.
     pendingWarnMode.value = null
+    emit('confirmation-pending', false)
     return
   }
   const meta = TRUST_MODES.find((m) => m.mode === mode)

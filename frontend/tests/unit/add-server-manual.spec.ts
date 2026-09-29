@@ -147,4 +147,27 @@ describe('ManualServerForm', () => {
       trust_mode: 'auto',
     }))
   })
+
+  it('re-enables submit when the operator returns to Manual while Auto confirmation is pending', async () => {
+    vi.mocked(api.callTool).mockResolvedValue({ success: true, data: {} })
+    vi.mocked(api.getServers).mockResolvedValue({ success: true, data: { servers: [] } })
+    const wrapper = await mountManual()
+
+    await wrapper.find('[data-test="manual-name-input"]').setValue('manual-server')
+    await wrapper.find('[data-test="manual-command-input"]').setValue('npx')
+    await wrapper.find('[data-test="trust-mode-option-auto"] input').setValue(true)
+    expect(wrapper.find('[data-test="manual-submit"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.find('[data-test="trust-mode-option-manual"] input').setValue(true)
+    expect(wrapper.find('[data-test="trust-mode-auto-confirm"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="manual-submit"]').attributes('disabled')).toBeUndefined()
+
+    await wrapper.find('[data-test="manual-server-form"]').trigger('submit')
+    await flushPromises()
+    expect(api.callTool).toHaveBeenCalledWith('upstream_servers', expect.objectContaining({
+      operation: 'add',
+      name: 'manual-server',
+      trust_mode: 'manual',
+    }))
+  })
 })

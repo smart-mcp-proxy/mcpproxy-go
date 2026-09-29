@@ -79,7 +79,7 @@
       </div>
     </template>
 
-    <div class="form-control mb-4 pt-2" data-test="manual-trust-mode">
+    <div v-if="props.allowTrustModeSelection" class="form-control mb-4 pt-2" data-test="manual-trust-mode">
       <label class="label">
         <span class="label-text font-semibold">Trust mode</span>
         <span class="label-text-alt">Decides quarantine on add and tool-change approval</span>
@@ -115,8 +115,12 @@ import { useServersStore } from '@/stores/servers'
 import { serverDetailPath } from '@/utils/serverRoute'
 import type { TrustMode } from '@/utils/trustMode'
 
-const props = withDefaults(defineProps<{ navigateAfterAdd?: boolean }>(), {
+const props = withDefaults(defineProps<{
+  navigateAfterAdd?: boolean
+  allowTrustModeSelection?: boolean
+}>(), {
   navigateAfterAdd: true,
+  allowTrustModeSelection: true,
 })
 const emit = defineEmits<{ added: [name: string] }>()
 
