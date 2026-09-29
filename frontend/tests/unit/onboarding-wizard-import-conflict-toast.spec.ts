@@ -108,7 +108,6 @@ describe('OnboardingWizard bulk-import conflict toast (review round 3)', () => {
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })

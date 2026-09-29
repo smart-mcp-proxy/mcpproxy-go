@@ -91,7 +91,6 @@ async function mountWizard() {
     global: {
       plugins: [router],
       stubs: {
-        AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
       },
     },
   })

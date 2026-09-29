@@ -170,8 +170,7 @@ func newCatalogShowCmd() *cobra.Command {
 			}
 
 			hit := registries.BuildCatalogHit(reg, *entry)
-			result := registries.ToCatalogResult(hit, catalogAddedFromConfig(cfg)(hit))
-			return renderCatalogShow(formatter, result)
+			return renderCatalogShow(formatter, catalogResultForConfig(cfg, hit))
 		},
 	}
 	return cmd
@@ -288,33 +287,43 @@ func catalogSearchInProcess(ctx context.Context, cfg *config.Config, q, source, 
 	// httpapi.handleCatalogSearch).
 	hits, sections, unavailable := registries.SearchAll(ctx, q, tag, limit, registries.SearchOptions{Source: source})
 
-	added := catalogAddedFromConfig(cfg)
 	resp := &cliclient.CatalogSearchResponse{Query: q, Unavailable: unavailable}
 	if resp.Unavailable == nil {
 		resp.Unavailable = []registries.SourceError{}
 	}
 	for _, h := range hits {
-		resp.Results = append(resp.Results, registries.ToCatalogResult(h, added(h)))
+		resp.Results = append(resp.Results, catalogResultForConfig(cfg, h))
 	}
 	if sections != nil {
 		resp.Sections = &cliclient.CatalogSections{}
 		for _, h := range sections.Official {
-			resp.Sections.Official = append(resp.Sections.Official, registries.ToCatalogResult(h, added(h)))
+			resp.Sections.Official = append(resp.Sections.Official, catalogResultForConfig(cfg, h))
 		}
 		for _, h := range sections.Popular {
-			resp.Sections.Popular = append(resp.Sections.Popular, registries.ToCatalogResult(h, added(h)))
+			resp.Sections.Popular = append(resp.Sections.Popular, catalogResultForConfig(cfg, h))
 		}
 	}
 	return resp, nil
 }
 
-// catalogAddedFromConfig returns a predicate reporting whether a catalog hit
-// matches an already-configured server (contracts/rest-api.md#catalog "added"):
-// a registry-sourced server also needs a matching source, a manual add
-// matches on install target alone.
-func catalogAddedFromConfig(cfg *config.Config) func(registries.CatalogHit) bool {
-	byRegistryAndTarget := make(map[string]bool)
-	byTargetOnly := make(map[string]bool)
+// catalogResultForConfig builds a CatalogResult for hit, joining it against the
+// loaded config the way REST does: Added, plus AddedServerName when exactly one
+// configured server matches.
+func catalogResultForConfig(cfg *config.Config, hit registries.CatalogHit) registries.CatalogResult {
+	isAdded, name := catalogAddedFromConfig(cfg)(hit)
+	result := registries.ToCatalogResult(hit, isAdded)
+	result.AddedServerName = name
+	return result
+}
+
+// catalogAddedFromConfig returns a resolver reporting whether a catalog hit
+// matches an already-configured server (contracts/rest-api.md#catalog "added")
+// and, only for a unique match, that server's name (mirrors
+// httpapi.catalogAddedResolver): a registry-sourced server also needs a
+// matching source, a manual add matches on install target alone.
+func catalogAddedFromConfig(cfg *config.Config) func(registries.CatalogHit) (bool, string) {
+	byRegistryAndTarget := make(map[string][]string)
+	byTargetOnly := make(map[string][]string)
 	if cfg != nil {
 		for _, s := range cfg.Servers {
 			if s == nil {
@@ -323,21 +332,33 @@ func catalogAddedFromConfig(cfg *config.Config) func(registries.CatalogHit) bool
 			target := catalogInstallTargetForConfigServer(s)
 			if s.SourceRegistryID == "" {
 				// Manual add: matches any source by install target alone.
-				byTargetOnly[target] = true
+				byTargetOnly[target] = append(byTargetOnly[target], s.Name)
 			} else {
 				// Registry-sourced: must also match its own source, so it
 				// never falsely matches a different source's identical
 				// install target (contracts/rest-api.md#catalog "added").
-				byRegistryAndTarget[s.SourceRegistryID+"\x00"+target] = true
+				key := s.SourceRegistryID + "\x00" + target
+				byRegistryAndTarget[key] = append(byRegistryAndTarget[key], s.Name)
 			}
 		}
 	}
-	return func(h registries.CatalogHit) bool {
+	return func(h registries.CatalogHit) (bool, string) {
 		target := registries.CatalogInstallTarget(registries.ToCatalogResult(h, false).Install)
-		if byRegistryAndTarget[h.Source+"\x00"+target] {
-			return true
+		names := append([]string(nil), byRegistryAndTarget[h.Source+"\x00"+target]...)
+		names = append(names, byTargetOnly[target]...)
+		if len(names) == 0 {
+			return false, ""
 		}
-		return byTargetOnly[target]
+		// De-duplicate defensively so a malformed legacy configuration with a
+		// repeated name is not reported as ambiguous.
+		unique := make(map[string]struct{}, len(names))
+		for _, name := range names {
+			unique[name] = struct{}{}
+		}
+		if len(unique) == 1 {
+			return true, names[0]
+		}
+		return true, ""
 	}
 }
 

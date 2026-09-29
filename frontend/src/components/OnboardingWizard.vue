@@ -261,7 +261,7 @@
               </button>
             </div>
             <div v-if="addServerOpen" class="text-left mt-4" data-test="wizard-manual-form">
-              <ManualServerForm :navigate-after-add="false" @added="onServerAdded" />
+              <ManualServerForm :navigate-after-add="false" :allow-trust-mode-selection="false" @added="onServerAdded" />
             </div>
             <p v-if="serverAddedJustNow" class="text-xs text-success mt-3">
               ✓ Server added — it's currently in quarantine. Review it in the Review queue after this wizard.
@@ -390,7 +390,7 @@
                 Open the add-server form
               </button>
               <div v-else data-test="wizard-manual-form">
-                <ManualServerForm :navigate-after-add="false" @added="onServerAdded" />
+                <ManualServerForm :navigate-after-add="false" :allow-trust-mode-selection="false" @added="onServerAdded" />
               </div>
               <p v-if="serverAddedJustNow" class="text-xs text-success mt-2">
                 ✓ Server added — it's currently in quarantine. Review it in the Review queue after this wizard.
