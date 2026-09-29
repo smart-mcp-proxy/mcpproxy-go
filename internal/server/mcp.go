@@ -6521,7 +6521,8 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	// Spec 112 FR-017: an entry produced by a call that forwarded client
 	// headers is redeemable only by a request forwarding the same set to the
 	// same upstream. Same refusal shape as an authorization mismatch.
-	if !p.forwardedEntryRedeemable(ctx, response) {
+	redeemable, fwdOut := p.forwardedEntryRedeem(ctx, response)
+	if !redeemable {
 		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", cache.ErrForwardedMismatch.Error(), time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
 		return readCacheRefusal(cache.ErrForwardedMismatch, reader), nil
 	}
@@ -6576,7 +6577,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	}
 
 	// Spec 024: Emit success event with args and response
-	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil, "")
+	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, scrubResultForRecord(response, fwdOut), nil, "")
 
 	return mcp.NewToolResultText(text), nil
 }

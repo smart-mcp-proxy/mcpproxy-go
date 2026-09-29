@@ -131,10 +131,11 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		// #1148: the transport error quotes the request URL, credentials and
 		// all. Both sinks get the redacted rendering; the error itself is
 		// returned untouched to the caller.
-		safeErr := oauth.ScrubUpstreamText(err.Error())
+		// Spec 112: the per-request scrubber also masks forwarded values.
+		safeErr := scrub(err.Error())
 		fmt.Printf("❌ HTTP REQUEST FAILED: %v (duration: %v)\n", safeErr, duration)
 		t.logger.Error("❌ HTTP REQUEST FAILED",
-			logSafeErrorField(err),
+			zap.String("error", safeErr),
 			zap.Duration("duration", duration))
 		return nil, err
 	}
@@ -281,7 +282,7 @@ func (lr *loggingReader) readSSEFramesFromPipe(pr *io.PipeReader) {
 	if err := scanner.Err(); err != nil {
 		// #1148 round 4: a stream read can fail with a *url.Error that quotes
 		// the request URL, credentials and all.
-		lr.logger.Error("❌ SSE STREAM ERROR", logSafeErrorField(err))
+		lr.logger.Error("❌ SSE STREAM ERROR", zap.String("error", lr.scrub(err.Error())))
 	}
 
 	lr.logger.Info("🔴 SSE STREAM CLOSED",

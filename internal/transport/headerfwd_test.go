@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -361,4 +362,26 @@ func TestLoggingTransport_ScrubsForwardedValueFromBodies(t *testing.T) {
 			assert.NotContains(t, zapText, fwdSentinel, "zap")
 		})
 	}
+}
+
+type failingRT struct{ err error }
+
+func (f failingRT) RoundTrip(*http.Request) (*http.Response, error) { return nil, f.err }
+
+// Spec 112 FR-015b (review round 2): a transport error that quotes a forwarded
+// value must not reach stdout or zap through the failed-request log.
+func TestLoggingTransport_ScrubsForwardedValueFromTransportError(t *testing.T) {
+	obsCore, logs := observer.New(zapcore.DebugLevel)
+	tr := NewLoggingTransport(failingRT{err: fmt.Errorf("dial failed while sending tenant %s to upstream", fwdSentinel)}, zap.New(obsCore))
+	var zapText string
+	stdout := captureStdout(t, func() {
+		req, err := http.NewRequestWithContext(outboundCtx(t, "X-Tenant-Id", fwdSentinel), http.MethodPost, "http://upstream.invalid/mcp", http.NoBody)
+		require.NoError(t, err)
+		_, err = tr.RoundTrip(req)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), fwdSentinel, "the returned error is untouched")
+		zapText = observedText(logs)
+	})
+	assert.NotContains(t, stdout, fwdSentinel, "stdout")
+	assert.NotContains(t, zapText, fwdSentinel, "zap")
 }

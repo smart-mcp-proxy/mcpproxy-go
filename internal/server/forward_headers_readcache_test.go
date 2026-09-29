@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -104,4 +105,32 @@ func TestReadCache_ChildPageInheritsForwardedFact(t *testing.T) {
 
 	assert.True(t, readCacheAs(t, proxy, edgeCtxWith(t, "bob-tenant"), "child", 0).IsError)
 	assert.False(t, readCacheAs(t, proxy, alice, "child", 0).IsError)
+}
+
+// FR-015b (review round 2): the cache holds the unscrubbed upstream payload,
+// so the activity copy of a redeemed page must be scrubbed with the redeeming
+// request's outbound set.
+func TestReadCache_RedeemedPageActivityCopyIsScrubbed(t *testing.T) {
+	const sentinel = "tenant-secret-42"
+	proxy := createTestMCPProxyServer(t)
+	proxy.config.Servers = []*config.ServerConfig{{
+		Name: "srv", Enabled: true, Protocol: "http", URL: "http://127.0.0.1:1/mcp",
+		ForwardHeaders: []string{"X-Tenant-Id"},
+	}}
+	producer := cache.Authorization{CallerKind: cache.CallerKindAnonymous}
+	ctx := edgeCtxWith(t, sentinel)
+	require.NoError(t, proxy.cacheStoreAsForwarded(producer, outboundFor(t, proxy, ctx, "srv"), "srv").
+		Store("k-echo", "srv:tool", nil, `[{"echo":"`+sentinel+`"}]`, "", 1))
+
+	page, err := proxy.cacheManager.GetRecordsAs("k-echo", 0, 1, proxy.cacheAuthorization(ctx))
+	require.NoError(t, err)
+	raw, err := json.Marshal(page)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), sentinel, "the cached page itself is unscrubbed by design")
+
+	ok, out := proxy.forwardedEntryRedeem(ctx, page)
+	require.True(t, ok)
+	rec, err := json.Marshal(scrubResultForRecord(page, out))
+	require.NoError(t, err)
+	assert.NotContains(t, string(rec), sentinel, "activity copy")
 }

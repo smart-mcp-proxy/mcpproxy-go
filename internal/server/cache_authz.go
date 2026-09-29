@@ -199,25 +199,34 @@ func (p *MCPProxyServer) cacheStoreAsChildPage(producer cache.Authorization, par
 	return s
 }
 
-// forwardedEntryRedeemable enforces the FR-017 digest fact for one gated
+// forwardedEntryRedeem enforces the FR-017 digest fact for one gated
 // read_cache page: an entry with no fact is unaffected; an entry produced
 // under forwarded headers is redeemable only when this request's forwarded set
 // for the same upstream digests equal (a different set, or none, is refused).
 // The digest is compared and dropped; it is never logged or returned.
-func (p *MCPProxyServer) forwardedEntryRedeemable(ctx context.Context, page *cache.ReadCacheResponse) bool {
+// It also returns the outbound set the
+// redeeming request forwards to the entry's upstream, so the caller can scrub
+// the forwarded values out of the activity copy of the page (FR-015b: the
+// cache store holds the unscrubbed payload, the activity log must not).
+// The set is empty for an entry with no forwarded fact.
+func (p *MCPProxyServer) forwardedEntryRedeem(ctx context.Context, page *cache.ReadCacheResponse) (bool, headerfwd.Snapshot) {
 	if page == nil || page.ForwardedDigest == "" {
-		return true
+		return true, headerfwd.Snapshot{}
 	}
 	snap, ok := headerfwd.SnapshotFrom(ctx)
 	if !ok {
-		return false
+		return false, headerfwd.Snapshot{}
 	}
 	policy, ok := p.forwardPolicyFor(page.ForwardedServer)
 	if !ok {
-		return false
+		return false, headerfwd.Snapshot{}
 	}
-	got := headerfwd.Digest(headerfwd.Outbound(snap, policy))
-	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(page.ForwardedDigest)) == 1
+	out := headerfwd.Outbound(snap, policy)
+	got := headerfwd.Digest(out)
+	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(page.ForwardedDigest)) != 1 {
+		return false, headerfwd.Snapshot{}
+	}
+	return true, out
 }
 
 // childPageProducer is the snapshot a recursively re-truncated read_cache
