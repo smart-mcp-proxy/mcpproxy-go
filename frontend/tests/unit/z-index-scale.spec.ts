@@ -105,7 +105,6 @@ describe('every <dialog class="modal"> drives its open state imperatively', () =
     '../../src/components/OnboardingWizard.vue',
     '../../src/components/ConnectModal.vue',
     '../../src/components/AddSecretModal.vue',
-    '../../src/components/AddServerModal.vue',
     '../../src/components/CatalogSourcesSettings.vue',
     '../../src/components/CatalogSearch.vue',
     '../../src/views/teams/UserTokens.vue',

@@ -68,7 +68,6 @@ async function mountWizard() {
       plugins: [router],
       stubs: {
         RouterLink: { template: '<a><slot /></a>' },
-        AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
       },
     },
   })

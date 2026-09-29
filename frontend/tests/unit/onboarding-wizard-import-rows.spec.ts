@@ -69,7 +69,6 @@ async function openServersTabWithRows(imported: any[]) {
       plugins: [router],
       stubs: {
         RouterLink: { template: '<a><slot /></a>' },
-        AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
       },
     },
   })
