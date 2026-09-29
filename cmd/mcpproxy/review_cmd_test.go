@@ -120,7 +120,13 @@ func assertReviewGolden(t *testing.T, name, got string) {
 	if err != nil {
 		t.Fatalf("read golden %s: %v\nactual:\n%s", name, err, got)
 	}
-	require.Equal(t, string(want), got)
+	// The Go CLI emits LF on every platform, while Git may check out the
+	// golden files with CRLF on Windows. Compare the rendered text independent
+	// of checkout line-ending settings.
+	normalizeNewlines := func(value string) string {
+		return strings.ReplaceAll(value, "\r\n", "\n")
+	}
+	require.Equal(t, normalizeNewlines(string(want)), normalizeNewlines(got))
 }
 
 func assertReviewRequest(t *testing.T, requests []reviewRequest, method, path string, want map[string]any) {
