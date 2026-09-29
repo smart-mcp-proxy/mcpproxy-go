@@ -12,7 +12,7 @@ func TestDenied(t *testing.T) {
 		"Trailer", "Transfer-Encoding", "Upgrade", "Expect", "Proxy-Foo", "Content-Type", "Content-Length",
 		"Content-Encoding", "Accept", "Accept-Encoding", "Range", "If-Match", "If-None-Match", "Last-Event-Id",
 		"Mcp-Session-Id", "Mcp-Protocol-Version", "Mcp-Method", "Mcp-Param-X", "Traceparent", "Tracestate",
-		"Baggage", "X-Request-Id", "X-Mcpproxy-Foo", "Sec-Fetch-Mode", "User-Agent", "Origin", "Referer",
+		"Baggage", "X-Request-Id", "X-Mcpproxy-Foo", "X_Forwarded_For", "X_Real_Ip", "X_Api_Key", "Mcp_Session_Id", "Content_Type", "Sec-Fetch-Mode", "User-Agent", "Origin", "Referer",
 	}
 	for _, n := range denied {
 		for _, v := range []string{n, strings.ToLower(n), strings.ToUpper(n)} {

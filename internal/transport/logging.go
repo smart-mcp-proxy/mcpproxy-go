@@ -239,11 +239,12 @@ func (lr *loggingReader) readSSEFramesFromPipe(pr *io.PipeReader) {
 
 				frameContent := currentFrame.String()
 				safeData := lr.scrub(dataContent)
+				safeEvent := lr.scrub(eventType)
 				safeContent := lr.scrub(frameContent)
 				fmt.Printf("🔵 SSE FRAME #%d (event: %s, data: %s, duration since prev: %v)\n%s\n",
-					lr.frameID, eventType, safeData, frameDuration, safeContent)
+					lr.frameID, safeEvent, safeData, frameDuration, safeContent)
 				lr.logger.Info(fmt.Sprintf("🔵 SSE FRAME #%d", lr.frameID),
-					zap.String("event", eventType),
+					zap.String("event", safeEvent),
 					zap.String("data", safeData),
 					zap.String("content", safeContent),
 					zap.Duration("time_since_prev", frameDuration),

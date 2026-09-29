@@ -3430,7 +3430,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
 	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded); blockResult != nil {
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded, fwdOut); blockResult != nil {
 		return blockResult, nil
 	}
 
@@ -3882,7 +3882,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
 	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded); blockResult != nil {
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded, fwdOut); blockResult != nil {
 		return blockResult, nil
 	}
 
@@ -8154,7 +8154,7 @@ func (p *MCPProxyServer) lookupOutputSchema(serverName, toolName string) string 
 // schema violation.
 // requestID is the dispatch's correlation id, passed down because the decision
 // this records belongs to that call and is otherwise unattributable.
-func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, toolName, requestID string, forwarded *mcp.CallToolResult) *mcp.CallToolResult {
+func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, toolName, requestID string, forwarded *mcp.CallToolResult, fwdOut headerfwd.Snapshot) *mcp.CallToolResult {
 	// Disabled (mode=off) or validator not constructed -> no-op (FR-A4/FR-A7).
 	if p.outputValidator == nil || !p.config.OutputValidation.IsEnabled() {
 		return nil
@@ -8183,6 +8183,9 @@ func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, 
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
+	// FR-016.3: the validator reason can quote the offending instance value,
+	// which may be an echoed forwarded header value.
+	d.reason = scrubForRecord(d.reason, fwdOut)
 	p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, d.decision, d.reason, telemetry.BlockReasonOutputSchema)
 	if d.block {
 		return mcp.NewToolResultError("output schema validation failed: " + d.reason)

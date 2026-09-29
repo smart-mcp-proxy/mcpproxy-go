@@ -35,7 +35,8 @@ var deniedPrefixes = []string{
 // Denied reports whether name must never be forwarded (FR-004). The comparison
 // is case-insensitive.
 func Denied(name string) bool {
-	l := strings.ToLower(strings.TrimSpace(name))
+	// CGI-style upstreams fold "_" and "-" together, so X_Real_Ip is X-Real-Ip.
+	l := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
 	if l == "" {
 		return true
 	}

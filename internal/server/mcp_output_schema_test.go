@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
+	"net/http"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -73,7 +75,7 @@ func TestApplyOutputValidation_StrictBlock_CarriesRequestID(t *testing.T) {
 		mcp.TextContent{Type: "text", Text: "some prose"},
 	}}
 
-	block := proxy.applyOutputValidation(context.Background(), "github", "get_repo", "req-schema-1", forwarded)
+	block := proxy.applyOutputValidation(context.Background(), "github", "get_repo", "req-schema-1", forwarded, headerfwd.Snapshot{})
 	require.NotNil(t, block, "strict mode + missing structured content must block")
 	require.True(t, block.IsError)
 
@@ -93,4 +95,33 @@ func seedOutputSchema(t *testing.T, rt *runtime.Runtime, serverName, toolName, s
 	supervisor.StateView().UpdateServer(serverName, func(s *stateview.ServerStatus) {
 		s.Tools = []stateview.ToolInfo{{Name: toolName, OutputSchemaJSON: schemaJSON}}
 	})
+}
+
+// FR-016.3: a validator reason that quotes an echoed forwarded value must not
+// reach the policy_decision record.
+func TestApplyOutputValidation_ScrubsForwardedValueFromReason(t *testing.T) {
+	const secret = "ALICE-FWD-SECRET-7431"
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+	proxy.config.OutputValidation = &config.OutputValidationConfig{Mode: "warn"}
+	proxy.outputValidator = outputvalidation.New(
+		proxy.config.OutputValidation.EffectiveMaxBytes(),
+		proxy.config.OutputValidation.EffectiveMaxDepth(),
+		zap.NewNop(),
+	)
+	seedOutputSchema(t, rt, "github", "get_repo", `{"type":"object","properties":{"url":{"type":"string","pattern":"^https://"}}}`)
+	probe := watchPolicyDecisions(t, rt)
+
+	r, _ := http.NewRequest(http.MethodPost, "/mcp", http.NoBody)
+	r.Header.Set("X-User-Id", secret)
+	snap := headerfwd.Capture(r, map[string]struct{}{"X-User-Id": {}})
+	out := headerfwd.Outbound(snap, headerfwd.Policy{Enabled: true, Transport: "http", Allow: []string{"X-User-Id"}})
+
+	forwarded := &mcp.CallToolResult{StructuredContent: map[string]any{"url": secret}}
+	_ = proxy.applyOutputValidation(context.Background(), "github", "get_repo", "req-s", forwarded, out)
+
+	payload := probe.awaitOne(t)
+	b, _ := json.Marshal(payload)
+	assert.NotContains(t, string(b), secret)
 }
