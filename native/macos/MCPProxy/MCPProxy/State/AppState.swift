@@ -81,6 +81,9 @@ final class AppState: ObservableObject {
     /// badge) reads this — none of them re-derives its own predicate
     /// (`serversNeedingAttention` is retired; FR-003).
     @Published var attention: [AttentionItem] = []
+    /// One row per server from GET /review; intentionally separate from the
+    /// attention count, which can contain multiple reasons for one server.
+    @Published var reviewQueueCount: Int = 0
 
     /// The `reload_hint` fix (`client_never_seen`, "How to restart") has no
     /// native client screen yet (109-h adds `/clients?focus=<id>`). Setting

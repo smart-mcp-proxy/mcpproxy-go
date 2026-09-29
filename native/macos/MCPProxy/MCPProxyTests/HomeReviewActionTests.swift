@@ -58,16 +58,15 @@ final class HomeReviewActionTests: XCTestCase {
                        "/api/v1/servers/everything/login")
     }
 
-    /// A quarantined server's review action must open the detail view and
+    /// A quarantined server's review action must open the Review queue and
     /// never call the core's approve/unquarantine doors.
-    func testQuarantinedServerReviewActionOpensDetailViewAndNeverApproves() async throws {
+    func testQuarantinedServerReviewActionOpensReviewQueueAndNeverApproves() async throws {
         let appState = AppState()
         appState.apiClient = HomeReviewActionStubURLProtocol.makeClient()
         let item = reviewItem(kind: "server_review", id: "everything")
 
-        let opened = expectation(forNotification: .showServerDetail, object: nil) { note in
-            guard let target = note.object as? ServerDetailTarget else { return false }
-            return target.serverName == "everything" && target.tab == .tools
+        let opened = expectation(forNotification: .showReview, object: nil) { note in
+            (note.object as? String) == "everything"
         }
 
         await HomeAttentionAction.performFix(item, appState: appState)
@@ -77,15 +76,14 @@ final class HomeReviewActionTests: XCTestCase {
     }
 
     /// A trusted server with pending/changed tools — `tool_review` — must
-    /// route through the exact same review location, never a direct approve.
-    func testToolReviewActionOpensDetailViewAndNeverApproves() async throws {
+    /// route through the exact same Review queue, never a direct approve.
+    func testToolReviewActionOpensReviewQueueAndNeverApproves() async throws {
         let appState = AppState()
         appState.apiClient = HomeReviewActionStubURLProtocol.makeClient()
         let item = reviewItem(kind: "tool_review", id: "github")
 
-        let opened = expectation(forNotification: .showServerDetail, object: nil) { note in
-            guard let target = note.object as? ServerDetailTarget else { return false }
-            return target.serverName == "github" && target.tab == .tools
+        let opened = expectation(forNotification: .showReview, object: nil) { note in
+            (note.object as? String) == "github"
         }
 
         await HomeAttentionAction.performFix(item, appState: appState)

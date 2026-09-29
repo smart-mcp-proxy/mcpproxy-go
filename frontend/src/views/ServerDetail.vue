@@ -91,7 +91,7 @@
               <li>
                 <button @click="server.quarantined ? handleApproveClick() : quarantineServer()" :disabled="actionLoading">
                   <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                  {{ server.quarantined ? 'Approve' : 'Quarantine' }}
+                  {{ server.quarantined ? 'Review' : 'Quarantine' }}
                 </button>
               </li>
               <li>
@@ -306,58 +306,6 @@
         </div>
       </div>
 
-      <!-- Approve Confirmation Modal (F-04: security scanner gated) -->
-      <div v-if="showApproveConfirmation" class="modal modal-open">
-        <div class="modal-box">
-          <h3 class="font-bold text-lg mb-4">
-            {{ approveDialogMode === 'no_scan' ? 'No Security Scan Run' : 'Dangerous Findings Detected' }}
-          </h3>
-          <p v-if="approveDialogMode === 'critical'" class="mb-4">
-            <strong>{{ server.name }}</strong> has
-            <span class="text-error font-semibold">{{ dangerousFindingCount }} dangerous finding{{ dangerousFindingCount === 1 ? '' : 's' }}</span>
-            in its most recent security scan. Approving will allow this server to run despite these warnings.
-          </p>
-          <p v-else class="mb-4">
-            No security scan has been run for <strong>{{ server.name }}</strong>. We strongly recommend running a scan first.
-          </p>
-          <p class="text-sm text-base-content/70 mb-6">
-            <!-- UX audit F09: "the scanner gate" was never defined anywhere in
-                 the UI, while the flagged-tools panel on the same screen called
-                 the very findings behind the 409 informational. Name what force
-                 approval actually does. This line is shared by BOTH dialog
-                 modes, so it must not mention findings — the no_scan mode has
-                 none, and force skips that refusal ("no scan results found")
-                 just as it skips the hard-tier one. -->
-            The security scanner is an experimental heuristic. Force-approving skips the scan-based approval gate and unquarantines this server.
-          </p>
-          <div class="modal-action">
-            <button
-              @click="showApproveConfirmation = false"
-              :disabled="actionLoading"
-              class="btn btn-outline"
-            >
-              Cancel
-            </button>
-            <button
-              v-if="approveDialogMode === 'no_scan'"
-              @click="scanFirstFromDialog"
-              :disabled="actionLoading"
-              class="btn btn-primary"
-            >
-              Scan First
-            </button>
-            <button
-              @click="confirmForceApprove"
-              :disabled="actionLoading"
-              class="btn btn-error"
-            >
-              <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-              Force Approve
-            </button>
-          </div>
-        </div>
-      </div>
-
       <!-- Tabs -->
       <div class="tabs tabs-border">
         <button
@@ -366,6 +314,7 @@
         >
           Tools ({{ serverTools.length }})
         </button>
+        <button :class="['tab tab-lg', activeTab === 'review' ? 'tab-active' : '']" @click="activeTab = 'review'">Review</button>
         <button
           :class="['tab tab-lg', activeTab === 'logs' ? 'tab-active' : '']"
           @click="activeTab = 'logs'"
@@ -517,7 +466,7 @@
                   class="btn btn-sm btn-warning"
                 >
                   <span v-if="approvalLoading" class="loading loading-spinner loading-xs"></span>
-                  Approve All
+                  Review all tools
                 </button>
                 <!-- MCP-2199: reject every quarantined tool (reversible). -->
                 <button
@@ -621,7 +570,7 @@
                         :disabled="approvalLoading"
                         class="btn btn-sm btn-outline"
                       >
-                        Approve
+                        Review
                       </button>
                       <!-- MCP-2199: reject this quarantined tool (reversible). -->
                       <button
@@ -792,6 +741,9 @@
               </div>
             </div>
           </div>
+        </div>
+        <div v-if="activeTab === 'review'">
+          <ReviewScreen :server-name="server.name" @approved="refreshData" />
         </div>
 
         <!-- Logs Tab -->
@@ -1642,6 +1594,7 @@ import HoldEvidenceBadge from '@/components/HoldEvidenceBadge.vue'
 import ToolDescription from '@/components/ToolDescription.vue'
 import FindingChip from '@/components/FindingChip.vue'
 import FlaggedToolsPanel from '@/components/FlaggedToolsPanel.vue'
+import ReviewScreen from '@/components/ReviewScreen.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport, HealthStatus } from '@/types'
 import api from '@/services/api'
@@ -1719,7 +1672,7 @@ function mutateStoreServer(fn: (s: Server) => void) {
   const s = serversStore.servers.find(srv => srv.name === props.serverName)
   if (s) fn(s)
 }
-const activeTab = ref<'tools' | 'logs' | 'config' | 'security'>('tools')
+const activeTab = ref<'tools' | 'logs' | 'config' | 'security' | 'review'>('tools')
 // Spec 109 FR-016: every tab change (click, or a programmatic jump such as
 // the auto-approve flow landing on Security) is reflected in `?tab=`, keeping
 // every other query param, so the active tab survives a reload or a shared
@@ -1740,7 +1693,7 @@ watch(activeTab, (tab) => {
 function readTabFromQuery() {
   const tabParam = route.query.tab as string
   activeTab.value =
-    tabParam && ['tools', 'logs', 'config', 'security'].includes(tabParam)
+    tabParam && ['tools', 'logs', 'config', 'security', 'review'].includes(tabParam)
       ? (tabParam as typeof activeTab.value)
       : 'tools'
 }
@@ -2628,70 +2581,12 @@ async function _loadToolApprovalsWithGen(gen: number) {
   }
 }
 
-async function approveTool(toolName: string) {
-  if (!server.value) return
-  approvalLoading.value = true
-  try {
-    const response = await api.approveTools(server.value.name, [toolName])
-    if (response.success) {
-      systemStore.addToast({
-        type: 'success',
-        title: 'Tool Approved',
-        message: `${toolName} has been approved`,
-      })
-      await loadToolApprovals()
-      // Refresh server data to update quarantine counts
-      await serversStore.fetchServers()
-      // server is a computed from the store — no manual reassignment needed.
-    } else {
-      systemStore.addToast({
-        type: 'error',
-        title: 'Approval Failed',
-        message: response.error || 'Failed to approve tool',
-      })
-    }
-  } catch (err) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Approval Failed',
-      message: err instanceof Error ? err.message : 'Failed to approve tool',
-    })
-  } finally {
-    approvalLoading.value = false
-  }
+function approveTool(_toolName: string) {
+  activeTab.value = 'review'
 }
 
-async function approveAllTools() {
-  if (!server.value) return
-  approvalLoading.value = true
-  try {
-    const response = await api.approveTools(server.value.name)
-    if (response.success) {
-      systemStore.addToast({
-        type: 'success',
-        title: 'Tools Approved',
-        message: `All tools for ${server.value.name} have been approved`,
-      })
-      await loadToolApprovals()
-      // Refresh server data to update quarantine counts
-      await serversStore.fetchServers()
-      // server is a computed from the store — no manual reassignment needed.
-    } else {
-      systemStore.addToast({
-        type: 'error',
-        title: 'Approval Failed',
-        message: response.error || 'Failed to approve tools',
-      })
-    }
-  } catch (err) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Approval Failed',
-      message: err instanceof Error ? err.message : 'Failed to approve tools',
-    })
-  } finally {
-    approvalLoading.value = false
-  }
+function approveAllTools() {
+  activeTab.value = 'review'
 }
 
 // MCP-2199: reject a quarantined tool — it leaves the quarantine list and is
@@ -3089,31 +2984,6 @@ async function quarantineServer() {
   }
 }
 
-// --- Security-aware approval flow (F-04) ---
-// Approve buttons go through POST /security/approve which enforces the
-// scanner gate before unquarantining the server. Force is only used after
-// the user explicitly confirms in the dialog.
-const showApproveConfirmation = ref(false)
-const approveDialogMode = ref<'no_scan' | 'critical'>('no_scan')
-
-// Spec 077 FR-021: the approval gate blocks on baseline DANGEROUS findings only
-// (hard-tier). Deep-scan findings inform but never gate. The server-side verdict
-// is tier-driven, so the modal mirrors it via the TIER-DRIVEN finding_counts —
-// NOT the raw threat-level report summary, where a tierless deep-scan/external
-// finding can read "dangerous" and would show the "Dangerous Findings Detected"
-// dialog even though the backend gate (hard-tier only) would not block.
-const dangerousFindingCount = computed(() => {
-  // Prefer the tier-driven counts on the loaded report, then the server's
-  // security_scan summary; the raw report summary is only a last-resort
-  // fallback for cores that predate report-level finding_counts.
-  const rep = scanReport.value as any
-  if (rep?.finding_counts?.dangerous != null) return rep.finding_counts.dangerous as number
-  const scan = server.value?.security_scan as any
-  if (scan?.finding_counts?.dangerous != null) return scan.finding_counts.dangerous as number
-  if (rep?.summary?.dangerous != null) return rep.summary.dangerous as number
-  return 0
-})
-
 // Tier-driven counts for the Security-tab summary strip (Spec 077 FR-014):
 // buckets findings exactly like the server list's finding_counts — a tierless
 // deep-scan/external "dangerous" finding shows as a warning on both surfaces.
@@ -3212,63 +3082,8 @@ function applyToolFocus() {
   void showToolInDescription(String(toolName))
 }
 
-const hasCompletedScanForApprove = computed(() => {
-  if (scanReport.value) return true
-  return !!server.value?.security_scan?.last_scan_at
-})
-
 function handleApproveClick() {
-  if (!server.value) return
-  if (!hasCompletedScanForApprove.value) {
-    approveDialogMode.value = 'no_scan'
-    showApproveConfirmation.value = true
-    return
-  }
-  if (dangerousFindingCount.value > 0) {
-    approveDialogMode.value = 'critical'
-    showApproveConfirmation.value = true
-    return
-  }
-  void doSecurityApprove(false)
-}
-
-async function doSecurityApprove(force: boolean) {
-  if (!server.value) return
-  actionLoading.value = true
-  try {
-    await serversStore.securityApproveServer(server.value.name, force)
-    systemStore.addToast({
-      type: 'success',
-      title: 'Server Approved',
-      message: `${server.value.name} has been approved and unquarantined`,
-    })
-    showApproveConfirmation.value = false
-    await serversStore.fetchServers()
-    // server is a computed from the store — no manual reassignment needed.
-    // Approval releases the withheld tools, but the server was usually already
-    // connected, so the connected/enabled watch does not fire: refetch here.
-    await Promise.all([refreshToolsSilently(), loadToolApprovals()])
-  } catch (error) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Approve Failed',
-      message: error instanceof Error ? error.message : 'Unknown error',
-    })
-  } finally {
-    actionLoading.value = false
-  }
-}
-
-function confirmForceApprove() {
-  void doSecurityApprove(true)
-}
-
-async function scanFirstFromDialog() {
-  showApproveConfirmation.value = false
-  activeTab.value = 'security'
-  // Kick off a scan; the Security tab will show progress. User can return to
-  // approve once the scan completes.
-  await startSecurityScan()
+  activeTab.value = 'review'
 }
 
 async function refreshData() {

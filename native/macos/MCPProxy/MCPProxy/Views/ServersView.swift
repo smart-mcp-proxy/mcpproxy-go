@@ -569,6 +569,13 @@ struct ServerTableView: NSViewRepresentable {
                     await MainActor.run { onServersChanged?() }
                 }
             case .open(let destination):
+                if case .review = destination {
+                    NotificationCenter.default.post(name: .switchToSidebarTab, object: SidebarItem.review.rawValue)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        NotificationCenter.default.post(name: .showReview, object: server.name)
+                    }
+                    return
+                }
                 let tab: ServerDetailTab
                 switch destination {
                 case .review: tab = .tools
@@ -765,7 +772,10 @@ struct ServerTableView: NSViewRepresentable {
         // handler `.openReview` can dispatch to.
         @objc private func ctxOpenReview(_ sender: NSMenuItem) {
             guard let server = sender.representedObject as? ServerStatus else { return }
-            onOpenDetail?(server, .tools, nil)
+            NotificationCenter.default.post(name: .switchToSidebarTab, object: SidebarItem.review.rawValue)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                NotificationCenter.default.post(name: .showReview, object: server.name)
+            }
         }
 
         @objc private func ctxViewDetails(_ sender: NSMenuItem) {

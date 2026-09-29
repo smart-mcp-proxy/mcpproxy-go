@@ -210,7 +210,7 @@
                import" dead end below is wrong here: there IS something to do,
                it's reviewing what was already brought in. -->
           <div
-            v-else-if="importSourcesWithServers.length === 0 && !onboarding.hasUsableServer && quarantinedServersAwaitingReview.length > 0"
+            v-else-if="importSourcesWithServers.length === 0 && !hasUsableServer && quarantinedServersAwaitingReview.length > 0"
             class="border border-base-300 rounded-lg mb-5"
             data-test="servers-inline-review"
           >
@@ -223,30 +223,9 @@
                 review its tools before it can run.
               </span>
             </div>
-            <ul class="divide-y divide-base-300">
-              <li
-                v-for="s in quarantinedServersAwaitingReview"
-                :key="s.name"
-                class="flex items-center justify-between gap-3 px-4 py-2"
-                :data-test="`servers-review-row-${s.name}`"
-              >
-                <span class="min-w-0 flex-1">
-                  <span class="text-sm font-medium truncate block">{{ s.name }}</span>
-                  <span class="text-[11px] opacity-50 font-mono truncate block">{{ s.url || s.command || '' }}</span>
-                </span>
-                <span class="badge badge-warning badge-sm font-normal shrink-0">Quarantined</span>
-                <a
-                  :href="hrefFor(`/servers/${encodeURIComponent(s.name)}`)"
-                  class="btn btn-primary btn-xs shrink-0"
-                  :data-test="`servers-review-link-${s.name}`"
-                  @click="goToServerReview($event, s.name)"
-                >
-                  Review
-                </a>
-              </li>
-            </ul>
+            <ReviewQueueList :rows="quarantinedReviewRows" @review="goToServerReview" />
             <p v-if="serverAddedJustNow" class="text-xs text-success px-4 pb-3 pt-1">
-              ✓ Server added — it's currently in quarantine. Review it on the Servers page after this wizard.
+              ✓ Server added — it's currently in quarantine. Review it in the Review queue after this wizard.
             </p>
           </div>
           <!-- Nothing to import. Step 2 is otherwise entirely about picking
@@ -285,7 +264,7 @@
               <ManualServerForm :navigate-after-add="false" @added="onServerAdded" />
             </div>
             <p v-if="serverAddedJustNow" class="text-xs text-success mt-3">
-              ✓ Server added — it's currently in quarantine. Review it on the Servers page after this wizard.
+              ✓ Server added — it's currently in quarantine. Review it in the Review queue after this wizard.
             </p>
           </div>
           <!-- The list is capped and scrolls in place. Uncapped it ran off the
@@ -414,7 +393,7 @@
                 <ManualServerForm :navigate-after-add="false" @added="onServerAdded" />
               </div>
               <p v-if="serverAddedJustNow" class="text-xs text-success mt-2">
-                ✓ Server added — it's currently in quarantine. Review it on the Servers page after this wizard.
+                ✓ Server added — it's currently in quarantine. Review it in the Review queue after this wizard.
               </p>
               <p v-else-if="onboarding.hasConfiguredServer" class="text-xs opacity-60 mt-2">
                 {{ serverCountLabel }} configured.
@@ -690,6 +669,7 @@ import { useOnboardingStore } from '@/stores/onboarding'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import ManualServerForm from '@/components/ManualServerForm.vue'
+import ReviewQueueList from '@/components/ReviewQueueList.vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { skipReasonLabel } from '@/utils/importSkipReason'
 import type { ClientStatus, ActivityRecord, ConnectPreview, ImportedServer } from '@/types'
@@ -850,14 +830,22 @@ const importSourcesWithServers = computed(() =>
 // "Nothing to import" dead end — that copy ("Start from the registry
 // instead, or add a server yourself") is actively wrong when servers already
 // exist and only need a review. This is a scoped stand-in for the full
-// cross-surface review screen (Spec 109-ux-navigation-consistency User
-// Story 2 / T093), which lands in a later PR and will replace it; until
-// then this list only surfaces the servers and links to the existing,
-// fully-featured Approve flow on the Servers page rather than
-// reimplementing its scan-gate/force-approve confirmation here.
+// cross-surface review screen. The queue list is shared with Review.vue so
+// the wizard preserves its step semantics without becoming a second approval
+// implementation.
 const quarantinedServersAwaitingReview = computed(() =>
   serversStore.quarantinedServers
 )
+const quarantinedReviewRows = computed(() => quarantinedServersAwaitingReview.value.map(server => ({
+  server: server.name,
+  kind: 'server_review',
+  quarantined: true,
+  tools_captured: server.tool_count,
+})))
+// Only the backend has the approval-record information needed to decide
+// usability. A visible tool_count can consist entirely of blocked tools, so it
+// must never complete onboarding on its own.
+const hasUsableServer = computed(() => onboarding.hasUsableServer)
 
 function selectionKey(path: string, name: string) {
   return `${path}::${name}`
@@ -945,7 +933,7 @@ const tabs = computed(() => [
     // Spec 109-b FR-041: complete only once a server is actually usable
     // (enabled, not quarantined, connected, with an approved tool) — a
     // server entry that still needs review does not finish this step.
-    complete: onboarding.hasUsableServer,
+    complete: hasUsableServer.value,
   },
   {
     id: 'verify' as TabID,
@@ -1111,7 +1099,7 @@ function pickInitialTab(requested: TabID | null): TabID {
   // predicates would have chosen.
   if (requested) return requested
   if (!onboarding.hasConnectedClient) return 'clients'
-  if (!onboarding.hasUsableServer) return 'servers'
+  if (!hasUsableServer.value) return 'servers'
   if (!onboarding.firstMCPClientEver) return 'verify'
   return 'clients'
 }
@@ -1169,7 +1157,7 @@ async function goToServerReview(event: MouseEvent, name: string) {
   if (!isPlainLeftClick(event)) return
   event.preventDefault()
   await dismiss()
-  await router.push(`/servers/${encodeURIComponent(name)}`)
+  await router.push(`/review/${encodeURIComponent(name)}`)
 }
 
 async function goToSettings(event: MouseEvent) {
@@ -1718,7 +1706,7 @@ async function onServerAdded() {
   systemStore.addToast({
     type: 'success',
     title: 'Server added',
-    message: 'It is in quarantine. Review and approve from the Servers page.',
+    message: 'It is in quarantine. Review and approve from the Review queue.',
   })
 }
 

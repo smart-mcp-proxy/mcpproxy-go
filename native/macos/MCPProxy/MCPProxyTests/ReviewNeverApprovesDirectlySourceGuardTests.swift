@@ -37,14 +37,14 @@ final class ReviewNeverApprovesDirectlySourceGuardTests: XCTestCase {
         "approveSpecificTools(", "unquarantineServer(",
     ]
 
-    func testShowServerDetailFromMenuNeverCallsApproveDirectly() throws {
-        let body = try functionBody(named: "showServerDetailFromMenu", in: try mcpProxyAppSource())
+    func testShowReviewFromMenuNeverCallsApproveDirectly() throws {
+        let body = try functionBody(named: "showReviewFromMenu", in: try mcpProxyAppSource())
         for call in Self.forbidden {
             XCTAssertFalse(body.contains(call),
-                           "showServerDetailFromMenu must only navigate (FR-005) — found `\(call)`")
+                           "showReviewFromMenu must only navigate (FR-005) — found `\(call)`")
         }
-        XCTAssertTrue(body.contains(".showServerDetail"),
-                      "showServerDetailFromMenu must still post the navigation notification")
+        XCTAssertTrue(body.contains(".showReview"),
+                      "showReviewFromMenu must still post the review notification")
     }
 
     /// The independent quarantine-review row (round 1's fix, restoring a
@@ -61,11 +61,21 @@ final class ReviewNeverApprovesDirectlySourceGuardTests: XCTestCase {
             return
         }
         let block = String(source[range.upperBound..<end.lowerBound])
-        XCTAssertTrue(block.contains("#selector(showServerDetailFromMenu(_:))"),
+        XCTAssertTrue(block.contains("#selector(showReviewFromMenu(_:))"),
                       "the review row must dispatch through the navigation-only handler")
         for call in Self.forbidden {
             XCTAssertFalse(block.contains(call), "the review row must never call `\(call)` directly")
         }
+    }
+
+    func testServerDetailQuarantineControlsOnlyNavigateToReview() throws {
+        let source = try serverDetailSource()
+        for call in Self.forbidden {
+            XCTAssertFalse(source.contains(call), "Server Detail must not approve while bypassing review — found `\(call)`")
+        }
+        XCTAssertTrue(source.contains("private func openReview()"))
+        XCTAssertTrue(source.contains("SidebarItem.review.rawValue"))
+        XCTAssertTrue(source.contains("Button(\"Review tools\")"))
     }
 
     // MARK: - Helpers
@@ -98,5 +108,12 @@ final class ReviewNeverApprovesDirectlySourceGuardTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path),
                       "missing source file at \(url.path)")
         return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    private func serverDetailSource() throws -> String {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return try String(contentsOf: packageRoot.appendingPathComponent("MCPProxy/Views/ServerDetailView.swift"), encoding: .utf8)
     }
 }

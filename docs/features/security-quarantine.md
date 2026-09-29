@@ -197,9 +197,15 @@ unavailable they are skipped without changing the baseline verdict.
 ### View Quarantined Servers
 
 **Web UI:**
-1. Open the dashboard
-2. Go to **Servers** and select the **Quarantined** filter tab
-3. Review pending servers
+1. Open **Review queue** in the Protect section.
+2. Select the server that is waiting for review.
+3. Read the server-provided tool definitions, scan result, tier counts, and
+   changed-definition diff before making a decision. Definitions are displayed
+   as plain text because their content is not trusted.
+
+The queue also retains recent scan history. Old `/security` links redirect to
+the queue; a specific report remains available at `/security/scans/:jobId`.
+Optional scanner setup lives at **Settings → Security → Scanners**.
 
 **CLI:**
 ```bash
@@ -210,34 +216,43 @@ mcpproxy upstream list
 ### Approve a Server
 
 **Web UI:**
-1. Click on the quarantined server
-2. Review the security analysis
-3. Click "Approve" to remove from quarantine
+1. Select the quarantined server from **Review queue**.
+2. Choose the tools to allow; unselected tools are submitted as explicit
+   blocks with the approval decision.
+3. Choose **Approve server**. If no tool definitions have been captured, the
+   UI asks for a separate confirmation before a blind approval can proceed.
+
+The review controls are deliberate: **Fetch tool definitions** uses the
+inspection-only `discover-tools` capture to store current upstream metadata
+without indexing it, **Allow this tool** selects an individual tool for
+the server decision, **Approve server** releases only the selected tools, and
+**Reject server** keeps the server quarantined. Existing trusted servers use
+the same screen to approve or reject a changed tool definition.
 
 **API:**
 ```bash
 curl -X POST \
   -H "X-API-Key: your-key" \
-  http://127.0.0.1:8080/api/v1/servers/server-name/unquarantine
+  http://127.0.0.1:8080/api/v1/servers/server-name/discover-tools
+
+# The capture action reports success only. Read the stored, redacted review
+# payload before deciding which tools to block.
+curl -H "X-API-Key: your-key" \
+  http://127.0.0.1:8080/api/v1/servers/server-name/review
+
+# Submit the scan-gated approval. Omit block[] or list only the tools to keep
+# disabled; direct unquarantine is legacy-only.
+curl -X POST -H "X-API-Key: your-key" -H "Content-Type: application/json" \
+  -d '{"block":["tool-to-keep-disabled"]}' \
+  http://127.0.0.1:8080/api/v1/servers/server-name/security/approve
 ```
 
-**Config File:**
+**Configuration:**
 
-Edit `~/.mcpproxy/mcp_config.json` and add `"quarantined": false`:
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "reviewed-server",
-      "command": "npx",
-      "args": ["@example/mcp-server"],
-      "quarantined": false,
-      "enabled": true
-    }
-  ]
-}
-```
+Leave a new server quarantined until the review flow has captured its tool
+definitions and the scan-gated approval is complete. Do not edit
+`quarantined: false` into the configuration file as an approval shortcut:
+that bypasses the informed-review record and its baseline check.
 
 ### Re-quarantine a Server
 

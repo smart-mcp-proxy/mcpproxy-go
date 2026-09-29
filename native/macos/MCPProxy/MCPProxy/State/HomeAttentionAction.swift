@@ -10,11 +10,8 @@ import Foundation
 
 /// Runs one `AttentionItem`'s fix. `login`/`restart`/`enable` execute in
 /// place, mirroring the tray's `TrayServerAction.fromHealthAction` (the same
-/// three verbs it runs itself). Every other verb — including `review`, which
-/// is NEVER a one-click approve — opens the location that performs it: today
-/// the server's detail view (its existing per-tool review for `review`);
-/// `/review/<n>` and `/clients?focus=` get their own native screens in
-/// 109-g/109-h.
+/// three verbs it runs itself). Every other verb opens the form or screen
+/// that performs it. `review` always opens the informed-review sheet.
 enum HomeAttentionAction {
     @MainActor
     static func performFix(_ item: AttentionItem, appState: AppState) async {
@@ -47,9 +44,10 @@ enum HomeAttentionAction {
         case "view_logs":
             navigateToServerDetail(item.subject.name, tab: .logs)
         case "review":
-            // Interim fix target (contracts/rest-api.md#attention): opens the
-            // server's existing per-tool review, never a one-click approve.
-            navigateToServerDetail(item.subject.name, tab: .tools)
+            NotificationCenter.default.post(name: .switchToSidebarTab, object: SidebarItem.review.rawValue)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                NotificationCenter.default.post(name: .showReview, object: item.subject.name)
+            }
         case "reload_hint":
             // 109-h: the client's `/clients?focus=<id>` screen doesn't exist
             // yet. Never a dead link (contracts/rest-api.md#attention): until

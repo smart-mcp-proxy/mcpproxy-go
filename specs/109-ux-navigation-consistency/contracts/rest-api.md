@@ -136,7 +136,7 @@ One row per server awaiting review: a quarantined server (`kind: server_review`)
 - `source_registry_id`, `source_registry_provenance`: the existing MCP-866 origin fields of the server config, `omitempty` (absent for a manually added server).
 - `tier`: `unknown` when the record carries no stored annotations (captured before this spec).
 - `scan_verdict` per tool: `dangerous|warnings|clean|not_scanned`, from the latest baseline report's findings for that tool, else the record's `held_verdict`.
-- `definitions_captured: false` → `tools: []`. Surfaces offer "Fetch tool definitions" = `POST /servers/{id}/scan` (the existing offline baseline scan under the inspection exemption).
+- `definitions_captured: false` → `tools: []`. Surfaces offer "Fetch tool definitions" = `POST /servers/{id}/discover-tools`; the explicit inspection-only capture obtains a bounded supervisor exemption, stores approval records, emits `review.changed`, and never indexes the quarantined definitions. Baseline scanning remains a separate security operation.
 - Descriptions are returned verbatim. Surfaces render them as inert text (research D19).
 
 Review verbs (existing routes; one change):
