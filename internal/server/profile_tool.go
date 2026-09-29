@@ -91,6 +91,13 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 		return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug)), nil
 	}
 	cfg := profiles.cfg
+	anonymousBindingGuard := anonymousProfileCaller(ctx) && p.bindingGuardActive(profiles)
+	anonymousProfileConfined := anonymousProfileCaller(ctx) && cfg != nil && cfg.AnonymousProfile != ""
+	if slug != "" && anonymousBindingGuard {
+		// Keep the refusal shape indistinguishable from an unknown profile and
+		// leave the session untouched while the FR-008a runtime guard is active.
+		return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug)), nil
+	}
 
 	// A non-empty slug must name a configured profile the caller may select
 	// (an empty slug clears the selection and is always accepted). The check
@@ -119,7 +126,7 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	// legitimately enumerate.
 	if slug != "" {
 		if !profiles.selectable(ctx, slug) {
-			if auth.IsScopedCaller(ctx) {
+			if auth.IsScopedCaller(ctx) || anonymousProfileConfined {
 				return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s'", slug)), nil
 			}
 			return mcp.NewToolResultError(fmt.Sprintf("unknown profile '%s' (available: %s)", slug, strings.Join(profiles.selectableNames(ctx), ", "))), nil
@@ -127,6 +134,12 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 	}
 
 	p.sessionStore.SetActiveProfile(sessionID, slug)
+	if slug == "" && anonymousBindingGuard {
+		// Clearing is always admitted (FR-018), but the guarded anonymous
+		// caller still has no reachable servers, so do not return the legacy
+		// administrator-shaped all-server list.
+		return setProfileResult("", []string{})
+	}
 	if slug != "" {
 		p.logger.Info("set_profile: session profile updated",
 			zap.String("session_id", sessionID),
@@ -199,8 +212,13 @@ func setProfileResult(activeProfile string, servers []string) (*mcp.CallToolResu
 	if servers == nil {
 		servers = []string{}
 	}
+	profileSource := string(profile.SourceNone)
+	if activeProfile != "" {
+		profileSource = string(profile.SourceSession)
+	}
 	payload := map[string]interface{}{
 		"active_profile": activeProfile,
+		"profile_source": profileSource,
 		"servers":        servers,
 	}
 	body, err := json.Marshal(payload)
@@ -681,21 +699,39 @@ func (idx *profileIndex) step() {
 // candidate declares or on how many servers are configured.
 func (idx *profileIndex) selectable(ctx context.Context, slug string) bool {
 	candidate := idx.position(slug)
-	pin := profilePinFromContext(ctx)
-	if pin != "" {
-		// The pin is the only profile a pinned caller may select; resolve it
-		// whether or not the URL named it so a mismatch costs what a match does.
-		pinned := idx.position(pin)
+	if !idx.pinAllowsSelection(ctx, slug) {
 		candidate = -1
-		if slug == pin {
-			candidate = pinned
-		}
 	}
 	reach := idx.reach(ctx, candidate)
 	// Administrators (and absent contexts) select any configured profile,
 	// including empty or ghost ones (SC-005); everyone else needs reach.
+	pin := profilePinFromContext(ctx)
 	needsReach := pin != "" || auth.IsScopedCaller(ctx)
 	return candidate >= 0 && (!needsReach || reach)
+}
+
+// pinAllowsSelection applies credential-level profile selection limits in
+// addition to server reach. Locked clients and legacy pinned agent tokens
+// may select only their pin. Switchable client credentials may select their
+// bound base or one of that base policy's explicitly declared switchable_to
+// targets (FR-022); they never inherit targets from the selected profile.
+func (idx *profileIndex) pinAllowsSelection(ctx context.Context, slug string) bool {
+	if pin, mode, ok := clientCredentialFromContext(ctx); ok && mode == auth.ProfileModeSwitchable {
+		if pin == "" {
+			// The built-in "All servers" binding has no base policy; FR-022
+			// preserves its legacy any-selectable-profile behavior.
+			return true
+		}
+		return admittedBySwitchableTo(idx.PolicyFor(pin), pin, slug)
+	}
+	if anonymousProfileCaller(ctx) && idx.cfg != nil && idx.cfg.AnonymousProfile != "" {
+		base := idx.cfg.AnonymousProfile
+		return admittedBySwitchableTo(idx.PolicyFor(base), base, slug)
+	}
+	if pin := profilePinFromContext(ctx); pin != "" {
+		return slug == pin
+	}
+	return true
 }
 
 // forEachSelectable visits EVERY configured profile, in configured order,
@@ -725,7 +761,7 @@ func (idx *profileIndex) forEachSelectable(ctx context.Context, visit func(name 
 		if needsReach {
 			selectable = idx.reach(ctx, i)
 		}
-		if pin != "" && p.Name != pin {
+		if !idx.pinAllowsSelection(ctx, p.Name) {
 			selectable = false
 		}
 		visit(p.Name, selectable)

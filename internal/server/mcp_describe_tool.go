@@ -375,6 +375,9 @@ func (p *MCPProxyServer) handleDescribeToolOnSurface(ctx context.Context, reques
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	if surface == describeSurfaceDirect && anonymousProfileCaller(ctx) {
+		ctx = p.cacheDirectProfileView(ctx)
+	}
 	if mode.check {
 		return p.handleDescribeToolCheck(ctx, request, mode, surface, sessionID, requestID)
 	}

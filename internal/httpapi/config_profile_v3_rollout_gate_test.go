@@ -1,18 +1,8 @@
 package httpapi
 
-// T004a (FR-009a): the rollout gate that rejects any v3 policy field (and a
-// non-empty anonymous_profile) while config.PolicyEnforcementReady() is false
-// must be proven through BOTH REST write doors, not only through config load
-// (internal/config/profiles_rollout_gate_test.go) — a regression in the
-// PATCH/apply handler plumbing (e.g. ValidateDetailed skipped, or the
-// message re-wrapped) would otherwise ship undetected while the config-load
-// and binary-level probes stay green.
-//
-// The fake controller's ApplyConfig calls the REAL config.ValidateDetailed()
-// on the config it is handed — exactly the first step
-// internal/runtime.Runtime.applyConfigLocked takes before persisting anything
-// — so these tests exercise the real ValidateProfiles/FR-009a logic through
-// the handlers' real decode/merge/unmask pipeline, not a canned result.
+// FR-009a rollout completion: the fake controller's ApplyConfig calls the
+// real config.ValidateDetailed(), so these tests pin that both REST write
+// doors now admit supported Profiles v3 policies and anonymous confinement.
 
 import (
 	"bytes"
@@ -78,37 +68,29 @@ func profileGateDo(t *testing.T, srv *Server, method, path string, body []byte) 
 	return w
 }
 
-// TestPatchConfig_RejectsV3PolicyFieldWhileGateClosed: PATCH /api/v1/config
-// with a v3 policy field (max_tier) on a new profile is refused with the
-// exact FR-009a message, and ApplyConfig's success path is never reached.
-func TestPatchConfig_RejectsV3PolicyFieldWhileGateClosed(t *testing.T) {
-	require.False(t, config.PolicyEnforcementReady(), "test assumes the gate ships closed")
+func TestPatchConfig_AcceptsV3PolicyField(t *testing.T) {
 	srv, ctrl := newProfileGateServer(t)
 
 	body := []byte(`{"profiles":[{"name":"prof","servers":[],"max_tier":"read"}]}`)
 	w := profileGateDo(t, srv, http.MethodPatch, "/api/v1/config", body)
 
-	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
-	assert.Contains(t, w.Body.String(), "max_tier is not supported by this build")
-	assert.Zero(t, ctrl.applied, "a config rejected by the gate must never be persisted")
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, 1, ctrl.applied)
 }
 
 // TestPatchConfig_RejectsAnonymousProfileWhileGateClosed: PATCH with a bare
 // anonymous_profile (no policy fields at all) is refused the same way.
-func TestPatchConfig_RejectsAnonymousProfileWhileGateClosed(t *testing.T) {
+func TestPatchConfig_AcceptsAnonymousProfile(t *testing.T) {
 	srv, ctrl := newProfileGateServer(t)
 
 	body := []byte(`{"anonymous_profile":"someone"}`)
 	w := profileGateDo(t, srv, http.MethodPatch, "/api/v1/config", body)
 
-	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
-	assert.Contains(t, w.Body.String(), "anonymous_profile is not supported by this build")
-	assert.Zero(t, ctrl.applied)
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, 1, ctrl.applied)
 }
 
-// TestPatchConfig_LegacyProfileStillPasses is the control: a legacy profile
-// (no v3 policy field set) is accepted by the same PATCH door while the gate
-// is closed, so the fix above is scoped to v3 fields only.
+// TestPatchConfig_LegacyProfileStillPasses preserves legacy profile support.
 func TestPatchConfig_LegacyProfileStillPasses(t *testing.T) {
 	srv, ctrl := newProfileGateServer(t)
 
@@ -119,10 +101,7 @@ func TestPatchConfig_LegacyProfileStillPasses(t *testing.T) {
 	assert.Equal(t, 1, ctrl.applied)
 }
 
-// TestApplyConfig_RejectsV3PolicyFieldWhileGateClosed: POST
-// /api/v1/config/apply with a full document carrying a v3 policy field is
-// refused the same way as PATCH.
-func TestApplyConfig_RejectsV3PolicyFieldWhileGateClosed(t *testing.T) {
+func TestApplyConfig_AcceptsV3PolicyField(t *testing.T) {
 	srv, ctrl := newProfileGateServer(t)
 
 	doc := defaultConfigDocument(t)
@@ -134,14 +113,13 @@ func TestApplyConfig_RejectsV3PolicyFieldWhileGateClosed(t *testing.T) {
 
 	w := profileGateDo(t, srv, http.MethodPost, "/api/v1/config/apply", body)
 
-	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
-	assert.Contains(t, w.Body.String(), "max_tier is not supported by this build")
-	assert.Zero(t, ctrl.applied, "a config rejected by the gate must never be persisted")
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, 1, ctrl.applied)
 }
 
 // TestApplyConfig_RejectsAnonymousProfileWhileGateClosed: POST
 // /api/v1/config/apply with a bare anonymous_profile is refused the same way.
-func TestApplyConfig_RejectsAnonymousProfileWhileGateClosed(t *testing.T) {
+func TestApplyConfig_AcceptsAnonymousProfile(t *testing.T) {
 	srv, ctrl := newProfileGateServer(t)
 
 	doc := defaultConfigDocument(t)
@@ -151,9 +129,8 @@ func TestApplyConfig_RejectsAnonymousProfileWhileGateClosed(t *testing.T) {
 
 	w := profileGateDo(t, srv, http.MethodPost, "/api/v1/config/apply", body)
 
-	require.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
-	assert.Contains(t, w.Body.String(), "anonymous_profile is not supported by this build")
-	assert.Zero(t, ctrl.applied)
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, 1, ctrl.applied)
 }
 
 // TestApplyConfig_LegacyProfileStillPasses is the control for the apply door.

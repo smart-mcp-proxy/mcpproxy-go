@@ -592,6 +592,16 @@ func (r *Runtime) EmitActivityToolCallRejected(serverName, toolName, source, req
 // gained it in spec 090, so records written before then have none and must not
 // be correlated at all (FR-015) rather than correlated by an empty key.
 func (r *Runtime) EmitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason string) {
+	r.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, "")
+}
+
+// EmitActivityPolicyDecisionWithBlockReason records the typed profile reason
+// alongside the operator-facing policy decision metadata.
+func (r *Runtime) EmitActivityPolicyDecisionWithBlockReason(serverName, toolName, sessionID, requestID, decision, reason, blockReason string) {
+	r.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, blockReason)
+}
+
+func (r *Runtime) emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, blockReason string) {
 	// Spec 042: classify policy blocks as a tool quarantine error category.
 	// "blocked" decisions are user-visible reliability events worth counting.
 	if decision == "blocked" || decision == "block" {
@@ -605,6 +615,9 @@ func (r *Runtime) EmitActivityPolicyDecision(serverName, toolName, sessionID, re
 		"request_id":  requestID,
 		"decision":    decision,
 		"reason":      reason,
+	}
+	if blockReason != "" {
+		payload["block_reason"] = blockReason
 	}
 	r.publishEvent(newEvent(EventTypeActivityPolicyDecision, payload))
 }

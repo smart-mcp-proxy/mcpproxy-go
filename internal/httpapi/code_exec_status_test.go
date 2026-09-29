@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // postFailingCodeExec runs one POST /api/v1/code/exec against a tool caller
@@ -170,4 +171,13 @@ func TestCodeExec_DisabledFeatureIsForbidden(t *testing.T) {
 		assert.Equal(t, "FEATURE_DISABLED", decoded.Error.Code)
 		assert.Contains(t, decoded.Error.Message, "enable_code_execution")
 	}
+}
+
+func TestCodeExec_ProfileBlockedPrecedesGlobalFeatureGate(t *testing.T) {
+	err := fmt.Errorf("tool call failed: %w", profile.ErrCodeExecutionBlocked)
+	w, decoded := postFailingCodeExec(t, map[string]interface{}{"code": "1"}, err)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	require.NotNil(t, decoded.Error)
+	assert.Equal(t, "PROFILE_BLOCKED", decoded.Error.Code)
+	assert.Equal(t, "blocked by profile: code execution is disabled for this profile", decoded.Error.Message)
 }

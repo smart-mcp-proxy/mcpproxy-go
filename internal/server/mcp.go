@@ -674,6 +674,7 @@ func NewMCPProxyServer(
 	// FR-006, cross-review round 2). With no prompts registered the filter is
 	// never invoked, so binding it early changes nothing while prompts are off.
 	mcpserver.WithPromptFilter(proxy.filterAggregatedPromptsForAuth)(mcpServer)
+	mcpserver.WithToolFilter(proxy.filterProfileV3Tools)(mcpServer)
 
 	// Register prompts if enabled
 	if config.EnablePrompts {
@@ -890,6 +891,10 @@ func (p *MCPProxyServer) auditToolCallFromStatus(ctx context.Context, status str
 // and becomes the attempt's `tool_call outcome:blocked` line — never a
 // second authz (FR-043(j)). Warnings and redactions write no audit line.
 func (p *MCPProxyServer) emitActivityPolicyDecision(ctx context.Context, serverName, toolName, sessionID, requestID, decision, reason, reasonKey string) {
+	p.emitActivityPolicyDecisionWithBlockReason(ctx, serverName, toolName, sessionID, requestID, decision, reason, reasonKey, "")
+}
+
+func (p *MCPProxyServer) emitActivityPolicyDecisionWithBlockReason(ctx context.Context, serverName, toolName, sessionID, requestID, decision, reason, reasonKey, blockReason string) {
 	if decision == "blocked" {
 		if isPostDispatchBlockKey(reasonKey) {
 			p.auditToolCall(ctx, "blocked", reasonKey, "", auditDurationMs(ctx), nil, nil)
@@ -898,7 +903,11 @@ func (p *MCPProxyServer) emitActivityPolicyDecision(ctx context.Context, serverN
 		}
 	}
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason)
+		if blockReason == "" {
+			p.mainServer.runtime.EmitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason)
+		} else {
+			p.mainServer.runtime.EmitActivityPolicyDecisionWithBlockReason(serverName, toolName, sessionID, requestID, decision, reason, blockReason)
+		}
 	}
 	// Issue #969 (Phase 0): availability baseline. Only outright blocks count —
 	// a warning or a redaction still delivered the call.
@@ -1954,6 +1963,12 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// profile that may no longer exist. The post-filter below returns the same
 	// empty result set from the shared index.
 	profileName, profileScope, profileIdx, profileSource := p.resolveActiveProfileWithSource(ctx)
+	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
+	if profileResolution.Scope != nil {
+		profileName = profileResolution.Name
+		profileScope = profileResolution.Scope
+		profileSource = profile.Source(profileResolution.Source)
+	}
 	// Spec 108 FR-011: the compiled policy for the effective profile, resolved
 	// once and reused by the admit predicate below, the response's
 	// hidden_by_profile/profile fields and nothing else — a dangling base
@@ -2656,7 +2671,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// (Spec 105 PR D review round 17) — one resolution for the whole call,
 	// never a second, independent one that could pair a decision made
 	// against this snapshot with an index built from a later one.
-	profileSlug, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
+	_, _, profileIdx := p.resolveActiveProfileWithIndex(ctx)
+	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
+	// Spec 108-d is the execution cutover from the Profiles v2 resolver to
+	// this single v3 result, including the authoritative empty-base case.
+	// Keeping a v2 selection when v3 resolves no profile would bypass
+	// switchable_to admission for client credentials.
+	profileSlug := profileResolution.Name
+	profileScope := profileResolution.Scope
 
 	// Spec 107 T103: the audit attempt, installed BEFORE the first gate so
 	// every refusal below — the intent gates included — writes its `authz
@@ -2771,7 +2793,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// one. Administrators keep today's profile-only text unchanged — they
 	// have no token scope to intersect with.
 	scopeAuthCtx := auth.AuthContextFromContext(ctx)
-	scopedCallerForScope := scopeAuthCtx != nil && !scopeAuthCtx.IsAdmin()
+	confinedAnonymous := (scopeAuthCtx == nil || scopeAuthCtx.Anonymous) && profileResolution.anonymousConfinementActive()
+	scopeAuthCtx = auth.ScopedView(scopeAuthCtx, confinedAnonymous)
+	scopedCallerForScope := auth.IsNonAdmin(scopeAuthCtx)
 	if scopedCallerForScope {
 		if !p.serverInScope(scopeAuthCtx, profileScope, serverName) {
 			errMsg := fmt.Sprintf("Server '%s' is not in scope for this agent token", serverName)
@@ -2829,27 +2853,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Spec 028: Enforce agent token scope restrictions. The server-scope gate
 	// above (effective scope = profile ∩ token, Spec 105 FR-010 G7) already
 	// ran before the identity gate so a scoped caller learns nothing about a
-	// server outside its scope from the shape of the refusal; only the
-	// variant-permission gate remains here.
+	// server outside its scope from the shape of the refusal. The variant
+	// permission gate runs after tool identity and profile policy below, per
+	// the refusal precedence contract.
 	authCtx := scopeAuthCtx
 	scopedCaller := scopedCallerForScope
-	if scopedCaller {
-		// Check permission scope — map tool variant to required permission
-		var requiredPerm string
-		switch toolVariant {
-		case contracts.ToolVariantRead:
-			requiredPerm = auth.PermRead
-		case contracts.ToolVariantWrite:
-			requiredPerm = auth.PermWrite
-		case contracts.ToolVariantDestructive:
-			requiredPerm = auth.PermDestructive
-		}
-		if requiredPerm != "" && !authCtx.HasPermission(requiredPerm) {
-			errMsg := fmt.Sprintf("Insufficient permissions: '%s' requires '%s' permission", toolVariant, requiredPerm)
-			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
-			return mcp.NewToolResultError(errMsg), nil
-		}
-	}
 
 	// Spec 105 FR-009 (research D4): a name the discovery snapshot of a KNOWN,
 	// CONNECTED server with a POPULATED snapshot does not contain has no
@@ -2886,6 +2894,41 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// rather than widening it.
 		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
 		return mcp.NewToolResultError(errMsg), nil
+	}
+
+	// Spec 108 FR-013: discovery and dispatch share the same compiled policy
+	// and effective annotation identity. This gate follows server-scope and
+	// identity resolution, but precedes token permissions, global gates,
+	// server state, and tool approval. A profile denial therefore never
+	// reaches the upstream and cannot reveal a profile's name to the caller.
+	if policy := profileResolution.Policy; policy != nil {
+		intrinsic := profile.IntrinsicTier(annotations, annotationsFound)
+		admitted, reason, tier := policy.Decide(serverName, actualToolName, intrinsic)
+		if !admitted && reason != profile.ReasonServerNotInProfile {
+			errMsg, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, serverName, actualToolName)
+			recordProfileToolRefusal(ctx, &profile.ToolBlockedError{Reason: blockReason, Message: errMsg})
+			p.emitActivityPolicyDecisionWithBlockReason(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonOther, string(blockReason))
+			return mcp.NewToolResultError(errMsg), nil
+		}
+	}
+	if scopedCaller {
+		// Check the caller-selected variant permission after the profile gate,
+		// so a profile denial has the same precedence for every credential
+		// whose token permissions also disallow the attempted operation.
+		var requiredPerm string
+		switch toolVariant {
+		case contracts.ToolVariantRead:
+			requiredPerm = auth.PermRead
+		case contracts.ToolVariantWrite:
+			requiredPerm = auth.PermWrite
+		case contracts.ToolVariantDestructive:
+			requiredPerm = auth.PermDestructive
+		}
+		if requiredPerm != "" && !authCtx.HasPermission(requiredPerm) {
+			errMsg := fmt.Sprintf("Insufficient permissions: '%s' requires '%s' permission", toolVariant, requiredPerm)
+			p.emitActivityPolicyDecision(ctx, serverName, actualToolName, getSessionID(), requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
+			return mcp.NewToolResultError(errMsg), nil
+		}
 	}
 
 	if scopedCaller {
@@ -3998,6 +4041,9 @@ func (p *MCPProxyServer) handleAddServerFromRegistry(ctx context.Context, reques
 func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	p.recordMCPSurface()
 	p.recordBuiltinTool("upstream_servers")
+	if p.profileManagementToolHidden(ctx, "upstream_servers") {
+		return mcp.NewToolResultError("unknown tool: upstream_servers"), nil
+	}
 	startTime := time.Now()
 
 	// Extract session info for activity logging (Spec 024)
@@ -4061,7 +4107,10 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	// all write operations. The denied set is the shared agent-operation policy
 	// (internal/auth) consumed by both this MCP surface and the REST
 	// /api/v1/servers handlers, so the two can never drift (issues #877/#878).
-	if authCtx := auth.AuthContextFromContext(ctx); !auth.AuthorizeServerOp(authCtx, operation) {
+	profileResolution := p.ResolveProfileV3(ctx, p.profileIndexCurrent(ctx))
+	requestAuth := auth.AuthContextFromContext(ctx)
+	authCtx := auth.ScopedView(requestAuth, profileResolution.anonymousConfinementActive() && (requestAuth == nil || requestAuth.Anonymous))
+	if !auth.AuthorizeServerOp(authCtx, operation) {
 		errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
 		p.emitActivityInternalToolCall("upstream_servers", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(errMsg), nil
@@ -4149,6 +4198,9 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	p.recordMCPSurface()
 	p.recordBuiltinTool("quarantine_security")
+	if p.profileManagementToolHidden(ctx, "quarantine_security") {
+		return mcp.NewToolResultError("unknown tool: quarantine_security"), nil
+	}
 	startTime := time.Now()
 
 	// Extract session info for activity logging (Spec 024)
@@ -4174,7 +4226,7 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	args := activityArgsFromRequest(request)
 
 	// Spec 028: Agent tokens cannot perform quarantine operations
-	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
+	if auth.IsNonAdmin(auth.AuthContextFromContext(ctx)) {
 		errMsg := "Agent tokens cannot perform quarantine security operations"
 		p.emitActivityInternalToolCall("quarantine_security", targetServer, "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(errMsg), nil
@@ -4438,8 +4490,11 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 	}
 
 	// Spec 028: Filter servers to only those the agent token can access
-	authCtx := auth.AuthContextFromContext(ctx)
-	scopedCaller := authCtx != nil && !authCtx.IsAdmin()
+	profileResolution := p.ResolveProfileV3(ctx, p.profileIndexCurrent(ctx))
+	requestAuth := auth.AuthContextFromContext(ctx)
+	confinedAnonymous := (requestAuth == nil || requestAuth.Anonymous) && profileResolution.anonymousConfinementActive()
+	authCtx := auth.ScopedView(requestAuth, confinedAnonymous)
+	scopedCaller := auth.IsNonAdmin(authCtx)
 	if scopedCaller {
 		var filtered []*config.ServerConfig
 		for _, s := range servers {
@@ -4453,7 +4508,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 	// Spec 057 (FR-004) / Profiles v2: Filter servers to only those visible in the
 	// active profile (token pin > URL > session set_profile). Independent of
 	// agent-scope so unauthenticated /mcp/p/<slug> connections are filtered.
-	if _, profileScope := p.resolveActiveProfile(ctx); profileScope != nil {
+	if profileScope := profileResolution.Scope; profileScope != nil {
 		var filtered []*config.ServerConfig
 		for _, s := range servers {
 			if profileScope.Allows(s.Name) {
@@ -6413,8 +6468,11 @@ func (p *MCPProxyServer) handleTailLog(ctx context.Context, request mcp.CallTool
 	// profile-scoped connections; unscoped administrators are unaffected. The
 	// refusal is rendered by the same function as the nonexistent-server case
 	// so the response discloses neither existence, status nor logs.
-	authCtx := auth.AuthContextFromContext(ctx)
-	_, profileScope := p.resolveActiveProfile(ctx)
+	profileResolution := p.ResolveProfileV3(ctx, p.profileIndexCurrent(ctx))
+	requestAuth := auth.AuthContextFromContext(ctx)
+	confinedAnonymous := (requestAuth == nil || requestAuth.Anonymous) && profileResolution.anonymousConfinementActive()
+	authCtx := auth.ScopedView(requestAuth, confinedAnonymous)
+	profileScope := profileResolution.Scope
 	if !p.serverInScope(authCtx, profileScope, name) {
 		return tailLogNotFound(name), nil
 	}
@@ -6467,7 +6525,7 @@ func (p *MCPProxyServer) handleTailLog(ctx context.Context, request mcp.CallTool
 	// keep the whole file exactly as before (SC-005) — a profile scope bounds
 	// WHICH server they may name (above), not which records of it they see.
 	var logLines []string
-	if authCtx == nil || authCtx.IsAdmin() {
+	if auth.IsAdminOrAbsent(authCtx) {
 		logLines, err = logs.ReadUpstreamServerLogTail(logConfig, name, lines)
 	} else {
 		logLines, err = logs.ReadUpstreamServerLogTailAttributed(logConfig, name, lines)
@@ -6507,7 +6565,7 @@ func (p *MCPProxyServer) handleTailLog(ctx context.Context, request mcp.CallTool
 			// same predicate the attributed reader applies to the log record
 			// — uniformly, whether or not a co-owner exists; administrators
 			// keep the text (SC-005).
-			if authCtx != nil && !authCtx.IsAdmin() {
+			if auth.IsNonAdmin(authCtx) {
 				lastError = logs.RedactContainerMentions(lastError)
 			}
 			connectionStatus["last_error"] = lastError
@@ -6850,6 +6908,7 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 	// only answer with an isError result. Capture the typed refusal so the HTTP
 	// layer classifies it without re-parsing the message.
 	ctx, codeExecRefusal := withCodeExecCapture(ctx)
+	ctx, profileToolRefusal := withProfileToolCapture(ctx)
 
 	// Route to the appropriate handler based on tool name
 	var result *mcp.CallToolResult
@@ -6905,6 +6964,9 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 		}
 		if len(result.Content) > 0 {
 			if textContent, ok := result.Content[0].(mcp.TextContent); ok {
+				if refusal := profileToolRefusal.take(); refusal != nil {
+					return nil, refusal
+				}
 				// A code_execution refusal keeps its typed identity so the HTTP
 				// layer can answer 403/404/400 (Spec 097). The message stays the
 				// agent-readable one either way.

@@ -3,8 +3,6 @@ package config
 import (
 	"fmt"
 	"regexp"
-	"sync/atomic"
-	"testing"
 	"unicode/utf8"
 )
 
@@ -125,22 +123,11 @@ const (
 	ProfileUnannotatedAsRead  = "as_read"
 )
 
-// policyEnforcementReadyBase is the FR-009a rollout gate's compile-time
-// value: false from PR 108-a and flips to true in PR 108-d, in the same
-// commit that lands the last execution gate — so a release built from any
-// commit between 108-a and 108-d rejects every v3 policy field at load time
-// and behaves exactly like a pre-108 build for profiles (discovery can never
-// hide a tool that execution would still run). It is an unexported const —
-// never a package variable — so no import can open the gate by assigning to
-// it; the only way to open it outside 108-d is EnablePolicyForTest below.
-const policyEnforcementReadyBase = false
-
-// policyEnforcementTestOverride is the FR-009a test-only override's flag
-// (zcode review: "the override cannot ship" — it must be unreachable from
-// any non-test call site). It is flipped only by EnablePolicyForTest, whose
-// own testing.Testing() guard is what keeps it out of production, not the
-// atomic type.
-var policyEnforcementTestOverride atomic.Bool
+// policyEnforcementReadyBase is the FR-009a rollout gate. Spec 108-d wires
+// enforcement into every MCP and REST execution/discovery path, so this
+// compile-time constant now admits Profiles v3 policy fields and anonymous
+// confinement in every build.
+const policyEnforcementReadyBase = true
 
 // PolicyEnforcementReady reports whether the FR-009a rollout gate is open:
 // no build may admit a v3 policy field it cannot yet enforce on every
@@ -154,24 +141,7 @@ var policyEnforcementTestOverride atomic.Bool
 // a reference the other way round would cycle. internal/profile and every
 // other consumer calls config.PolicyEnforcementReady() directly.
 func PolicyEnforcementReady() bool {
-	return policyEnforcementReadyBase || (policyEnforcementTestOverride.Load() && testing.Testing())
-}
-
-// EnablePolicyForTest opens the FR-009a gate for the duration of the
-// caller's test only (the 108-a/108-b "test-only override" the spec and
-// tasks.md call for). It panics when called outside a test binary
-// (testing.Testing() false) — no env var, config field, flag or build tag
-// can open the gate — and registers a tb.Cleanup that closes it again when
-// the test ends, so callers need no defer/restore bookkeeping of their own.
-// It takes testing.TB (not *testing.T) so any package's tests — not only
-// internal/config's — can use it.
-func EnablePolicyForTest(tb testing.TB) {
-	if !testing.Testing() {
-		panic("config: EnablePolicyForTest called outside a test binary")
-	}
-	tb.Helper()
-	policyEnforcementTestOverride.Store(true)
-	tb.Cleanup(func() { policyEnforcementTestOverride.Store(false) })
+	return policyEnforcementReadyBase
 }
 
 // profileSlugPattern is the allowed profile-name form (FR-007): lowercase

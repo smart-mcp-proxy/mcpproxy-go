@@ -67,6 +67,12 @@ func createTestProxyWithRuntimeCfg(t *testing.T, servers []*config.ServerConfig,
 	tr := truncate.NewTruncator(0)
 
 	mainSrv := &Server{runtime: rt}
+	// Production warms the profile index for the initial runtime snapshot
+	// during server construction. Scoped request tests rely on the same
+	// publication guarantee: a nil cache result intentionally fails closed,
+	// which would otherwise make every scoped fixture appear to have no
+	// code_execution tool even when no profile applies.
+	mainSrv.profileIndexes.warmCurrent(rt.Config())
 	proxy := NewMCPProxyServer(sm, idx, um, cm, func() *truncate.Truncator { return tr }, logger, mainSrv, false, cfg, rt.SignatureCache())
 	return proxy, rt
 }
