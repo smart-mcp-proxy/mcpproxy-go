@@ -2,6 +2,8 @@ package headerfwd
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"sync"
 )
 
@@ -74,18 +76,47 @@ func (k *Sink) Outbound() Snapshot {
 // String never prints values.
 func (k *Sink) String() string { return "forward_sink{" + k.Outbound().String() + "}" }
 
-// scrubbedError carries scrubbed text while keeping the wrapped chain, so
-// errors.Is/As classification upstream of core.Client.CallTool still works.
+// TextScrubber is implemented by typed errors that carry upstream text (for
+// example transport.HTTPError's Body). ScrubbedCopy returns a copy with every
+// text field passed through scrub; it must not modify the receiver.
+type TextScrubber interface {
+	ScrubbedCopy(scrub func(string) string) error
+}
+
+// scrubbedError carries scrubbed text. It deliberately has no Unwrap: that
+// would hand the raw error (and its unscrubbed text) to any caller that walks
+// the chain. Classification still works through Is and As, and As swaps a
+// text-carrying typed error for its scrubbed copy.
 type scrubbedError struct {
-	msg string
-	err error
+	msg   string
+	err   error
+	scrub func(string) string
 }
 
 func (e *scrubbedError) Error() string { return e.msg }
-func (e *scrubbedError) Unwrap() error { return e.err }
+
+// Is reports whether the original chain matches target. It returns only a
+// bool, so no text escapes.
+func (e *scrubbedError) Is(target error) bool { return errors.Is(e.err, target) }
+
+// As finds target in the original chain. A match that implements TextScrubber
+// is replaced with its scrubbed copy before it is handed back.
+func (e *scrubbedError) As(target any) bool {
+	if !errors.As(e.err, target) {
+		return false
+	}
+	v := reflect.ValueOf(target).Elem()
+	if ts, ok := v.Interface().(TextScrubber); ok {
+		if c := reflect.ValueOf(ts.ScrubbedCopy(e.scrub)); c.IsValid() && c.Type().AssignableTo(v.Type()) {
+			v.Set(c)
+		}
+	}
+	return true
+}
 
 // ScrubError returns err unchanged when s is empty or nothing matched;
-// otherwise an error whose text is scrubbed and whose chain is preserved.
+// otherwise an error whose text is scrubbed. errors.Is keeps working, and
+// errors.As returns scrubbed copies of text-carrying typed errors.
 func ScrubError(err error, s Snapshot, allow []string) error {
 	if err == nil || s.IsEmpty() {
 		return err
@@ -95,5 +126,5 @@ func ScrubError(err error, s Snapshot, allow []string) error {
 	if clean == msg {
 		return err
 	}
-	return &scrubbedError{msg: clean, err: err}
+	return &scrubbedError{msg: clean, err: err, scrub: func(t string) string { return Scrub(t, s, allow) }}
 }

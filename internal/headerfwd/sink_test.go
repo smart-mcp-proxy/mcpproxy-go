@@ -67,3 +67,45 @@ func TestSinkMerge(t *testing.T) {
 		t.Fatalf("merge = %v", got)
 	}
 }
+
+// textErr is a typed error carrying upstream text, like transport.HTTPError.
+type textErr struct{ Body string }
+
+func (e *textErr) Error() string { return "HTTP 500: " + e.Body }
+
+func (e *textErr) ScrubbedCopy(scrub func(string) string) error {
+	return &textErr{Body: scrub(e.Body)}
+}
+
+type plainTypedErr struct{ Code int }
+
+func (e *plainTypedErr) Error() string { return fmt.Sprintf("code %d", e.Code) }
+
+// Review round 9 (codex gpt-6-luna): the scrubbed wrapper must not hand the
+// raw error back through Unwrap / errors.As.
+func TestScrubErrorChainDoesNotExposeRawValue(t *testing.T) {
+	s := snapWith(t, "X-Tenant-Id", "tenant-secret-1")
+	raw := &textErr{Body: "echo tenant-secret-1"}
+	got := ScrubError(fmt.Errorf("call failed: %w", raw), s, []string{"X-Tenant-Id"})
+
+	for u := errors.Unwrap(got); u != nil; u = errors.Unwrap(u) {
+		if strings.Contains(u.Error(), "tenant-secret-1") {
+			t.Fatalf("Unwrap exposed the raw value: %v", u)
+		}
+	}
+	var te *textErr
+	if !errors.As(got, &te) {
+		t.Fatal("typed error must stay reachable via errors.As")
+	}
+	if strings.Contains(te.Body, "tenant-secret-1") || te == raw {
+		t.Fatalf("errors.As returned the raw typed error: %q", te.Body)
+	}
+
+	// Typed errors without text keep classification unchanged.
+	pe := &plainTypedErr{Code: 7}
+	got = ScrubError(fmt.Errorf("tenant-secret-1: %w", pe), s, nil)
+	var gotPE *plainTypedErr
+	if !errors.As(got, &gotPE) || gotPE.Code != 7 {
+		t.Fatal("non-text typed error must stay reachable via errors.As")
+	}
+}
