@@ -82,6 +82,13 @@ func (s *Server) clientPresence(withSessions bool) ([]clientPresence, error) {
 	result := make([]clientPresence, 0, len(statuses))
 	for _, def := range connect.GetAllClients() {
 		status := statuses[def.ID]
+		if withSessions && s.getConnectService() != nil {
+			// The list remains metadata-only. An explicit detail read is the
+			// sole presence API allowed to inspect this client's config.
+			if resolved, getErr := s.getConnectService().GetStatus(def.ID); getErr == nil {
+				status = resolved
+			}
+		}
 		lastSeen := latestClientSeen(state.ClientLastSeen, def.ClientInfoNames)
 		row := clientPresence{ID: def.ID, DisplayName: def.Name, Kind: "supported", Icon: def.Icon, Installed: status.Exists, ConfigPath: status.ConfigPath, DisplayPath: status.DisplayPath, ReloadHint: def.ReloadHint, LastSeen: lastSeen}
 		connectedAt := state.ClientConnectedAt[def.ID]
@@ -108,6 +115,44 @@ func (s *Server) clientPresence(withSessions bool) ([]clientPresence, error) {
 			}
 		}
 		result = append(result, row)
+	}
+	// A client that initializes with an unrecognised clientInfo.name is real
+	// local activity, not a manually-created client. Preserve that evidence as
+	// an `other:` row without granting it a guessed configuration path.
+	known := make(map[string]bool)
+	for _, def := range connect.GetAllClients() {
+		for _, alias := range def.ClientInfoNames {
+			known[strings.ToLower(alias)] = true
+		}
+	}
+	for _, session := range sessions {
+		name := strings.TrimSpace(session.ClientName)
+		key := strings.ToLower(name)
+		if name == "" || known[key] {
+			continue
+		}
+		id := "other:" + key
+		found := -1
+		for i := range result {
+			if result[i].ID == id {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			result = append(result, clientPresence{ID: id, DisplayName: name, Kind: "other", State: "other"})
+			found = len(result) - 1
+		}
+		if session.Status == "active" {
+			result[found].ActiveSessions++
+		}
+		if result[found].LastSeen == nil || session.LastActivity.After(*result[found].LastSeen) {
+			at := session.LastActivity
+			result[found].LastSeen = &at
+		}
+		if withSessions {
+			result[found].Sessions = append(result[found].Sessions, clientSession{ID: session.ID, WorkSessionID: session.WorkSessionID, StartedAt: session.StartTime, LastActivity: session.LastActivity})
+		}
 	}
 	return result, nil
 }

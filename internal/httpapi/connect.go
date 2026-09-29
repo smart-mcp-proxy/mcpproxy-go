@@ -335,8 +335,25 @@ func (s *Server) handleDisconnectClient(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusNotFound, result.Message)
 		return
 	}
+	if result.Success {
+		s.recordClientDisconnected(clientID)
+	}
 
 	s.writeSuccess(w, result)
+}
+
+func (s *Server) recordClientDisconnected(clientID string) {
+	err := s.controller.UpdateOnboardingState(func(state *storage.OnboardingState) error {
+		if state.ClientDisconnectedAt == nil {
+			state.ClientDisconnectedAt = map[string]time.Time{}
+		}
+		state.ClientDisconnectedAt[clientID] = time.Now()
+		delete(state.ClientConnectedAt, clientID)
+		return nil
+	})
+	if err != nil && s.logger != nil {
+		s.logger.Warnf("onboarding: failed to record client_disconnected_at for %s: %v", clientID, err)
+	}
 }
 
 // UndoConnectRequest is the JSON body for POST /api/v1/connect/{client}/undo.
