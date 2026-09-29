@@ -10,7 +10,7 @@
           <div class="flex gap-2">
             <button v-if="scanner.status === 'error'" :data-test="`scanner-retry-${scanner.id}`" class="btn btn-sm btn-error btn-outline" @click="retry(scanner)">Retry</button>
             <button class="btn btn-sm btn-ghost" @click="openConfig(scanner)">Configure</button>
-            <button class="btn btn-sm" :class="isEnabled(scanner) ? 'btn-outline' : 'btn-primary'" @click="toggle(scanner)">{{ isEnabled(scanner) ? 'Disable' : 'Enable' }}</button>
+            <button class="btn btn-sm" :class="isEnabled(scanner) ? 'btn-outline' : 'btn-primary'" :disabled="scanner.status === 'pulling'" @click="toggle(scanner)">{{ isEnabled(scanner) ? 'Disable' : 'Enable' }}</button>
           </div>
         </div>
       </div>
@@ -38,7 +38,17 @@ async function toggle(scanner: any) { if (isEnabled(scanner)) await api.removeSc
 async function retry(scanner: any) { await api.installScanner(scanner.id); await load() }
 function openConfig(scanner: any) { configuring.value = scanner; values.value = { ...(scanner.configured_env || {}) }; dockerImage.value = scanner.image_override || ''; customKey.value = ''; customValue.value = ''; dialog.value?.showModal?.() }
 function addCustom() { if (!customKey.value || !customValue.value) return; values.value = { ...values.value, [customKey.value]: customValue.value }; customKey.value = ''; customValue.value = '' }
-async function saveConfig() { if (!configuring.value) return; const env = Object.fromEntries(Object.entries(values.value).filter(([, value]) => value)); const res = await api.configureScanner(configuring.value.id, env, dockerImage.value || undefined); if (res.success) { dialog.value?.close(); await load() } }
+async function saveConfig() {
+  if (!configuring.value) return
+  // The API redacts existing scanner secrets. They are evidence that a value
+  // exists, not values that may be written back; resubmitting either form can
+  // replace a secret or produce an empty-config validation error.
+  const env = Object.fromEntries(Object.entries(values.value).filter(([, value]) => value && value !== '***' && !value.startsWith('${keyring:')))
+  const imageChanged = dockerImage.value && dockerImage.value !== (configuring.value.image_override || '')
+  if (!Object.keys(env).length && !imageChanged) { dialog.value?.close?.(); return }
+  const res = await api.configureScanner(configuring.value.id, env, imageChanged ? dockerImage.value : undefined)
+  if (res.success) { dialog.value?.close?.(); await load() }
+}
 function changed() { void load() }
 onMounted(() => { void load(); window.addEventListener('mcpproxy:scanner-changed', changed) }); onUnmounted(() => window.removeEventListener('mcpproxy:scanner-changed', changed))
 </script>

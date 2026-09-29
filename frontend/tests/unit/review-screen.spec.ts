@@ -107,4 +107,11 @@ describe('ReviewScreen (T086)', () => {
 		expect(api.scanAll).toHaveBeenCalled()
 		expect(wrapper.get('[data-test="scan-queue-progress"]').text()).toContain('1')
 	})
+
+	it('restores fleet scan polling and disables duplicate starts after reopening review', async () => {
+		;(api.getQueueProgress as any).mockResolvedValue({ success: true, data: { status: 'running', total: 2, completed: 1, running: 1 } })
+		const wrapper = await mountScreen()
+		expect(wrapper.get('[data-test="scan-queue-progress"]').text()).toContain('1/2')
+		expect((wrapper.get('[data-test="scan-all-button"]').element as HTMLButtonElement).disabled).toBe(true)
+	})
 })

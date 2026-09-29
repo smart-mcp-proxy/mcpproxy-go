@@ -235,30 +235,24 @@ curl -X POST \
   -H "X-API-Key: your-key" \
   http://127.0.0.1:8080/api/v1/servers/server-name/discover-tools
 
-# Review the returned payload, then submit the scan-gated approval. Omit or
-# list every tool in block[] explicitly; direct unquarantine is legacy-only.
+# The capture action reports success only. Read the stored, redacted review
+# payload before deciding which tools to block.
+curl -H "X-API-Key: your-key" \
+  http://127.0.0.1:8080/api/v1/servers/server-name/review
+
+# Submit the scan-gated approval. Omit block[] or list only the tools to keep
+# disabled; direct unquarantine is legacy-only.
 curl -X POST -H "X-API-Key: your-key" -H "Content-Type: application/json" \
   -d '{"block":["tool-to-keep-disabled"]}' \
   http://127.0.0.1:8080/api/v1/servers/server-name/security/approve
 ```
 
-**Config File:**
+**Configuration:**
 
-Edit `~/.mcpproxy/mcp_config.json` and add `"quarantined": false`:
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "reviewed-server",
-      "command": "npx",
-      "args": ["@example/mcp-server"],
-      "quarantined": false,
-      "enabled": true
-    }
-  ]
-}
-```
+Leave a new server quarantined until the review flow has captured its tool
+definitions and the scan-gated approval is complete. Do not edit
+`quarantined: false` into the configuration file as an approval shortcut:
+that bypasses the informed-review record and its baseline check.
 
 ### Re-quarantine a Server
 

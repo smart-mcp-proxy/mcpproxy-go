@@ -586,7 +586,19 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 	// the supervisor has published its replacement.
 	for attempt := 0; attempt < 24; attempt++ {
 		if client, ok := r.upstreamManager.GetClient(serverName); ok {
+			// Bind this inspection result to the connection that supplied it.
+			// RequestInspectionExemption may reconcile while tools/list is in
+			// flight, replacing the managed client. Capturing an old client's
+			// untrusted definition under the replacement connection would make
+			// the review record lie about what is currently offered.
+			capture := r.discoveryGeneration(serverName)
 			if tools, err := client.ListTools(ctx); err == nil {
+				if r.discoveryGeneration(serverName) != capture {
+					lastErr = fmt.Errorf("inspection client replaced during tools/list")
+					r.logger.Info("Quarantined definition capture used a superseded connection; re-listing",
+						zap.String("server", serverName), zap.Int("attempt", attempt+1))
+					continue
+				}
 				return r.captureQuarantinedToolDefinitionsFromTools(serverName, tools)
 			} else {
 				lastErr = err
