@@ -189,3 +189,34 @@ func TestLoggingTransport_RedactsSSEEventField(t *testing.T) {
 	assert.NotContains(t, zapText, secret)
 	assert.NotContains(t, stdout, secret)
 }
+
+// Round 4: an upstream that echoes a forwarded value under a differently
+// named response header must not leak it into the trace sinks.
+func TestLoggingTransport_ScrubsEchoedValueInOtherHeader(t *testing.T) {
+	const val = "alice-tenant-42"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Echo-User", val)
+		w.Header().Set("Location", "https://up/cb?user="+val)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	obsCore, logs := observer.New(zapcore.DebugLevel)
+	tr := NewLoggingTransport(srv.Client().Transport, zap.New(obsCore))
+	stdout := captureStdout(t, func() {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("X-Tenant-Id", val)
+		snap := headerfwd.Capture(r, map[string]struct{}{"X-Tenant-Id": {}})
+		out := headerfwd.Outbound(snap, headerfwd.Policy{Enabled: true, Allow: []string{"X-Tenant-Id"}, Transport: "http"})
+		req, err := http.NewRequestWithContext(headerfwd.WithOutbound(context.Background(), out), http.MethodPost, srv.URL, strings.NewReader("{}"))
+		require.NoError(t, err)
+		req.Header.Set("X-Tenant-Id", val)
+		resp, err := tr.RoundTrip(req)
+		require.NoError(t, err)
+		_, _ = io.ReadAll(resp.Body)
+		require.NoError(t, resp.Body.Close())
+	})
+	assert.NotContains(t, stdout, val)
+	assert.NotContains(t, observedText(logs), val)
+	assert.Contains(t, stdout, "X-Echo-User")
+}

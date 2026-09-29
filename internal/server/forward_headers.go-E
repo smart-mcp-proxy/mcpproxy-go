@@ -95,7 +95,7 @@ func scrubResultForRecord(result interface{}, out headerfwd.Snapshot) interface{
 			return result
 		}
 		var generic interface{}
-		if json.Unmarshal([]byte(headerfwd.ScrubRecord(string(b), out)), &generic) != nil {
+		if json.Unmarshal([]byte(headerfwd.Scrub(string(b), out, nil)), &generic) != nil {
 			return result
 		}
 		return generic
@@ -105,12 +105,12 @@ func scrubResultForRecord(result interface{}, out headerfwd.Snapshot) interface{
 	for i, c := range ctr.Content {
 		switch tc := c.(type) {
 		case mcp.TextContent:
-			tc.Text = headerfwd.ScrubRecord(tc.Text, out)
+			tc.Text = headerfwd.Scrub(tc.Text, out, nil)
 			cp.Content[i] = tc
 		case *mcp.TextContent:
 			if tc != nil {
 				n := *tc
-				n.Text = headerfwd.ScrubRecord(n.Text, out)
+				n.Text = headerfwd.Scrub(n.Text, out, nil)
 				cp.Content[i] = &n
 			} else {
 				cp.Content[i] = c
@@ -133,7 +133,7 @@ func scrubResultForRecord(result interface{}, out headerfwd.Snapshot) interface{
 	if ctr.StructuredContent != nil {
 		if b, err := json.Marshal(ctr.StructuredContent); err == nil {
 			var generic interface{}
-			if json.Unmarshal([]byte(headerfwd.ScrubRecord(string(b), out)), &generic) == nil {
+			if json.Unmarshal([]byte(headerfwd.Scrub(string(b), out, nil)), &generic) == nil {
 				cp.StructuredContent = generic
 			}
 		}
@@ -141,7 +141,7 @@ func scrubResultForRecord(result interface{}, out headerfwd.Snapshot) interface{
 	cp.RawStructuredContent = nil
 	cp.RequestState = scrubForRecord(ctr.RequestState, out)
 	if ctr.InputRequests != nil {
-		cp.InputRequests = scrubJSONCopy(ctr.InputRequests, out, mcp.InputRequests(nil))
+		cp.InputRequests = scrubJSONCopy(ctr.InputRequests, out, ctr.InputRequests)
 	}
 	if ctr.Meta != nil {
 		m := *ctr.Meta
@@ -156,12 +156,12 @@ func scrubResultForRecord(result interface{}, out headerfwd.Snapshot) interface{
 func scrubResourceContents(rc mcp.ResourceContents, out headerfwd.Snapshot) mcp.ResourceContents {
 	switch r := rc.(type) {
 	case mcp.TextResourceContents:
-		r.Text = headerfwd.ScrubRecord(r.Text, out)
+		r.Text = headerfwd.Scrub(r.Text, out, nil)
 		return r
 	case *mcp.TextResourceContents:
 		if r != nil {
 			n := *r
-			n.Text = headerfwd.ScrubRecord(n.Text, out)
+			n.Text = headerfwd.Scrub(n.Text, out, nil)
 			return &n
 		}
 	}

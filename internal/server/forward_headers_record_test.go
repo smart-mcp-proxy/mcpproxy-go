@@ -157,3 +157,35 @@ func TestForwardedHeaderSuccessEchoScrubbedFromRecords(t *testing.T) {
 		assert.False(t, strings.Contains(string(b), recSentinel), "ToolCallRecord must not carry the sentinel")
 	}
 }
+
+// Round 4: Meta.AdditionalFields, RequestState and InputRequests are record
+// copies too.
+func TestScrubResultForRecord_MetaAndMultiRoundTrip(t *testing.T) {
+	r := httptestRequestWith("X-Tenant-Id", recSentinel)
+	out := headerfwd.Outbound(headerfwd.Capture(r, map[string]struct{}{"X-Tenant-Id": {}}),
+		headerfwd.Policy{Enabled: true, Allow: []string{"X-Tenant-Id"}, Transport: "http"})
+	orig := &mcp.CallToolResult{
+		Content: []mcp.Content{mcp.NewTextContent("ok")},
+	}
+	orig.Meta = &mcp.Meta{AdditionalFields: map[string]any{"echo": "who " + recSentinel}}
+	orig.RequestState = "state-" + recSentinel
+	got := scrubResultForRecord(orig, out).(*mcp.CallToolResult)
+	b, _ := json.Marshal(got)
+	assert.NotContains(t, string(b), recSentinel)
+	assert.Equal(t, "state-[forwarded:X-Tenant-Id]", got.RequestState)
+	// Original untouched.
+	assert.Contains(t, orig.RequestState, recSentinel)
+	assert.Contains(t, orig.Meta.AdditionalFields["echo"], recSentinel)
+}
+
+// Round 4: a value cut by response truncation must not survive as a prefix.
+func TestScrubForRecord_TruncatedPrefix(t *testing.T) {
+	r := httptestRequestWith("X-Tenant-Id", recSentinel)
+	out := headerfwd.Outbound(headerfwd.Capture(r, map[string]struct{}{"X-Tenant-Id": {}}),
+		headerfwd.Policy{Enabled: true, Allow: []string{"X-Tenant-Id"}, Transport: "http"})
+	cut := recSentinel[:len(recSentinel)-5]
+	for _, in := range []string{"data " + cut, "data " + cut + "\n\n... [truncated by mcpproxy]"} {
+		got := scrubForRecord(in, out)
+		assert.NotContains(t, got, cut[:10], in)
+	}
+}

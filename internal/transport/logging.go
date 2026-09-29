@@ -60,6 +60,28 @@ func (t *LoggingTransport) maskForwarded(ctx context.Context, h http.Header) htt
 	return c
 }
 
+// scrubHeaderValues runs every value of h through scrub, so a forwarded value
+// echoed under a header NAME maskForwarded does not know (X-Echo-User,
+// Location, WWW-Authenticate) is still removed. h is cloned only when a value
+// changes.
+func scrubHeaderValues(h http.Header, scrub func(string) string) http.Header {
+	var c http.Header
+	for k, vs := range h {
+		for i, v := range vs {
+			if nv := scrub(v); nv != v {
+				if c == nil {
+					c = h.Clone()
+				}
+				c[k][i] = nv
+			}
+		}
+	}
+	if c == nil {
+		return h
+	}
+	return c
+}
+
 // bodyScrubber returns the text scrubber for the bodies and SSE frames of ONE
 // round trip: forwarded values (key B of ctx) and the server's allowlisted
 // names first, then the shape-based credential scrubber. An upstream that
@@ -104,9 +126,8 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	// and an observer-only test would show green against a zap-only fix.
 	// The method, host and path survive; only credentials are replaced.
 	fmt.Printf("📤 HTTP REQUEST: %s %s\n", req.Method, oauth.AuditRedaction.URLValueDeep(req.URL.String()))
-	fmt.Printf("   Headers: %v\n", oauth.RedactHeaders(t.maskForwarded(req.Context(), req.Header)))
-
 	scrub := t.bodyScrubber(req.Context())
+	fmt.Printf("   Headers: %v\n", oauth.RedactHeaders(scrubHeaderValues(t.maskForwarded(req.Context(), req.Header), scrub)))
 
 	// Log request body if present (for non-SSE requests)
 	if req.Body != nil && req.Method != "GET" {
@@ -142,7 +163,7 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	// Log response using fmt.Printf
 	fmt.Printf("📥 HTTP RESPONSE: %d %s (duration: %v)\n", resp.StatusCode, resp.Status, duration)
-	safeRespHeaders := oauth.RedactHeaders(t.maskForwarded(req.Context(), resp.Header))
+	safeRespHeaders := oauth.RedactHeaders(scrubHeaderValues(t.maskForwarded(req.Context(), resp.Header), scrub))
 	fmt.Printf("   Response Headers: %v\n", safeRespHeaders)
 
 	t.logger.Info("📥 HTTP RESPONSE",

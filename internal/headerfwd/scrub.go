@@ -56,3 +56,27 @@ func uniq(a, b string) []string {
 	}
 	return []string{a, b}
 }
+
+// minTruncatedPrefix is the shortest cut-off prefix ScrubRecord removes; shorter
+// fragments are too common in ordinary text to scrub safely.
+const minTruncatedPrefix = 8
+
+// ScrubRecord is Scrub for recording sinks. Response truncation cuts text at a
+// raw offset, so a forwarded value straddling the cut survives as a prefix that
+// Scrub cannot match; ScrubRecord additionally masks such prefixes (FR-016.3).
+func ScrubRecord(text string, s Snapshot) string {
+	text = Scrub(text, s, nil)
+	if text == "" || s.IsEmpty() {
+		return text
+	}
+	for _, n := range s.Names() {
+		for _, v := range uniq(s.h[n], jsonEscaped(s.h[n])) {
+			for k := len(v) - 1; k >= minTruncatedPrefix; k-- {
+				if strings.Contains(text, v[:k]) {
+					text = strings.ReplaceAll(text, v[:k], "[forwarded:"+n+"]")
+				}
+			}
+		}
+	}
+	return text
+}
