@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -360,5 +361,58 @@ func waitExit(t *testing.T, cmd *exec.Cmd, wantCode int) {
 	case <-time.After(15 * time.Second):
 		_ = cmd.Process.Kill()
 		t.Fatal("fixture did not exit within 15s of SIGTERM")
+	}
+}
+
+// TestHTTPEchoHeaders proves the opt-in echo_headers tool reports the inbound
+// headers of the tools/call POST (Spec 112 local verification), and that the
+// tool is absent unless --echo-headers is passed.
+func TestHTTPEchoHeaders(t *testing.T) {
+	skipIfWindows(t)
+	port := freePort(t)
+	cmd := exec.Command(fixtureBin, "--transport", "http", "--port", fmt.Sprint(port), "--echo-headers")
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	waitForListen(t, port)
+
+	c := connectNetworkClient(t, func(port int) (*client.Client, error) {
+		return client.NewStreamableHttpClient(fmt.Sprintf("http://127.0.0.1:%d/mcp", port),
+			transport.WithHTTPHeaderFunc(func(context.Context) map[string]string {
+				return map[string]string{"X-Tenant-Id": "sentinel-tenant-42"}
+			}))
+	}, port)
+	defer c.Close()
+	initializeClient(t, c)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "echo_headers"
+	res, err := c.CallTool(ctx, req)
+	if err != nil {
+		t.Fatalf("echo_headers: %v", err)
+	}
+	var got struct {
+		Headers map[string][]string `json:"headers"`
+	}
+	if err := json.Unmarshal([]byte(textContent(t, res)), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if v := got.Headers["X-Tenant-Id"]; len(v) != 1 || v[0] != "sentinel-tenant-42" {
+		t.Fatalf("X-Tenant-Id = %v, want [sentinel-tenant-42]; all=%v", v, got.Headers)
+	}
+}
+
+// TestEchoHeadersOffByDefault keeps the gate's two-tool contract intact.
+func TestEchoHeadersOffByDefault(t *testing.T) {
+	names := map[string]bool{}
+	for _, tool := range newFixtureServer().ListTools() {
+		names[tool.Tool.Name] = true
+	}
+	if names["echo_headers"] || len(names) != 2 {
+		t.Fatalf("default tools = %v, want exactly echo and ping", names)
 	}
 }

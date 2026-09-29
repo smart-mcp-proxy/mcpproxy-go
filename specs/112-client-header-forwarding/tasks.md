@@ -55,8 +55,8 @@ description: "Tasks for Spec 112 — MCP client header forwarding"
 
 ## Phase 5 — Docs and verification
 
-- [ ] T033 `docs/configuration.md`: "Client Header Forwarding" section (format, default, deny list, precedence, transport limits, redaction and its best-effort echo boundary, the unverified-client-assertion trust warning per FR-022, limitations), Server Fields row, env var row, Validation bullets
-- [ ] T034 `cmd/mcpfixture`: `echo_headers` tool for local verification
+- [x] T033 `docs/configuration.md`: "Client Header Forwarding" section (format, default, deny list, precedence, transport limits, redaction and its best-effort echo boundary, the unverified-client-assertion trust warning per FR-022, limitations), Server Fields row, env var row, Validation bullets
+- [x] T034 `cmd/mcpfixture`: `echo_headers` tool for local verification
 - [ ] T035 Run gates: race tests, server-tag tests with CI skip regex, golangci-lint v2 twice, `make swagger` verify, `./scripts/test-api-e2e.sh`
 - [ ] T036 Real instance verification (isolated HOME/data dir, high port, mcpfixture upstream, curl `/mcp` with allowlisted + denied headers, grep logs for sentinel) — SC-006
 - [ ] T037 Cross-model review (codex, user-specified model), stdin closed, `gtimeout`; ≤10 rounds
