@@ -192,3 +192,62 @@ func TestSearchServers_RegistrySpecified_SecretLikeMatchesAllSources(t *testing.
 	require.True(t, ok)
 	assert.Equal(t, true, input["secret"])
 }
+
+// TestSearchServers_SecretFalseNegativeControl is the inverse of the
+// Authorization cases above (#1402, #1403): a plainly named input the registry
+// declares secret:false (PORT) must NOT be reported secret:true over MCP, while
+// a secret-shaped sibling (Authorization) in the same entry still is. This
+// guards against a regression that forces every MCP input to secret-like. Both
+// the registry-omitted (all sources) and registry-specified paths are covered.
+func TestSearchServers_SecretFalseNegativeControl(t *testing.T) {
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"one","name":"Alpha Tool","description":"d1","required_inputs":[{"name":"Authorization","secret":false},{"name":"PORT","secret":false}]}]`))
+	}))
+	t.Cleanup(fixture.Close)
+	t.Cleanup(registries.AllowPrivateRegistryFetchForTest())
+	t.Cleanup(registries.SetRegistriesForTest([]registries.RegistryEntry{
+		{ID: "fast", Name: "Fast", ServersURL: fixture.URL},
+	}))
+	proxy := createTestMCPProxyServer(t)
+
+	cases := []struct {
+		name string
+		args map[string]interface{}
+	}{
+		{"registry omitted", map[string]interface{}{"search": "Alpha"}},
+		{"registry specified", map[string]interface{}{"registry": "fast"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "search_servers", Arguments: tc.args}}
+			result, err := proxy.handleSearchServers(context.Background(), req)
+			require.NoError(t, err)
+			require.False(t, result.IsError, "unexpected tool error: %+v", result.Content)
+
+			var payload map[string]interface{}
+			require.NoError(t, json.Unmarshal([]byte(toolResultText(t, result)), &payload))
+			servers, ok := payload["servers"].([]interface{})
+			require.True(t, ok, "expected a servers array, got %#v", payload)
+			require.Len(t, servers, 1)
+			entry, ok := servers[0].(map[string]interface{})
+			require.True(t, ok)
+			requiredInputs, ok := entry["required_inputs"].([]interface{})
+			require.True(t, ok, "expected required_inputs in the entry, got %#v", entry)
+
+			secretByName := map[string]interface{}{}
+			for _, ri := range requiredInputs {
+				input, ok := ri.(map[string]interface{})
+				require.True(t, ok)
+				name, _ := input["name"].(string)
+				secretByName[name] = input["secret"]
+			}
+			require.Contains(t, secretByName, "PORT")
+			require.Contains(t, secretByName, "Authorization")
+			assert.NotEqual(t, true, secretByName["PORT"],
+				"PORT is declared secret:false and is not secret-shaped; it must not be reported secret:true")
+			assert.Equal(t, true, secretByName["Authorization"],
+				"Authorization must still be secret:true via the name heuristic")
+		})
+	}
+}

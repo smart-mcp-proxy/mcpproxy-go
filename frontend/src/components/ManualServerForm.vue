@@ -79,9 +79,26 @@
       </div>
     </template>
 
+    <div v-if="props.allowTrustModeSelection" class="form-control mb-4 pt-2" data-test="manual-trust-mode">
+      <label class="label">
+        <span class="label-text font-semibold">Trust mode</span>
+        <span class="label-text-alt">Decides quarantine on add and tool-change approval</span>
+      </label>
+      <TrustModeSelector
+        v-model="trustMode"
+        name="manual-server-trust-mode"
+        @confirmation-pending="trustModeConfirmationPending = $event"
+      />
+    </div>
+
     <div v-if="error" class="alert alert-error text-sm mb-4" data-test="manual-error">{{ error }}</div>
 
-    <button type="submit" class="btn btn-primary" :disabled="submitting" data-test="manual-submit">
+    <button
+      type="submit"
+      class="btn btn-primary"
+      :disabled="submitting || trustModeConfirmationPending"
+      data-test="manual-submit"
+    >
       {{ submitting ? 'Adding…' : 'Add to MCPProxy' }}
     </button>
   </form>
@@ -92,12 +109,18 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import SecretToggle from '@/components/SecretToggle.vue'
+import TrustModeSelector from '@/components/TrustModeSelector.vue'
 import { resolveSecretFields, rollbackSecrets } from '@/composables/useSecretFields'
 import { useServersStore } from '@/stores/servers'
 import { serverDetailPath } from '@/utils/serverRoute'
+import type { TrustMode } from '@/utils/trustMode'
 
-const props = withDefaults(defineProps<{ navigateAfterAdd?: boolean }>(), {
+const props = withDefaults(defineProps<{
+  navigateAfterAdd?: boolean
+  allowTrustModeSelection?: boolean
+}>(), {
   navigateAfterAdd: true,
+  allowTrustModeSelection: true,
 })
 const emit = defineEmits<{ added: [name: string] }>()
 
@@ -106,6 +129,8 @@ const serversStore = useServersStore()
 
 const name = ref('')
 const protocol = ref<'stdio' | 'http'>('stdio')
+const trustMode = ref<TrustMode>('manual')
+const trustModeConfirmationPending = ref(false)
 const url = ref('')
 const command = ref('')
 const argsText = ref('')
@@ -129,6 +154,7 @@ function parseArgs(): string[] {
 }
 
 async function handleSubmit() {
+  if (trustModeConfirmationPending.value) return
   error.value = null
   submitting.value = true
   // Populated only once resolveSecretFields has returned successfully, so
@@ -148,6 +174,7 @@ async function handleSubmit() {
       name: name.value,
       protocol: protocol.value,
       enabled: true,
+      trust_mode: trustMode.value,
     }
     if (protocol.value === 'http') {
       serverData.url = url.value

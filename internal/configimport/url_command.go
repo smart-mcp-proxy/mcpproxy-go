@@ -20,7 +20,7 @@ func (p *URLParser) Format() ConfigFormat { return FormatURL }
 func (p *URLParser) Parse(content []byte) ([]*ParsedServer, error) {
 	raw := strings.TrimSpace(string(content))
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || hasWhitespace(raw) || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, &ImportError{
 			Type:    "invalid_url",
 			Message: fmt.Sprintf("not a valid http(s) URL: %q", raw),

@@ -92,9 +92,9 @@ async function openServersTab(importable: string[]) {
         RouterLink: { template: '<a><slot /></a>' },
         ManualServerForm: {
           name: 'ManualServerForm',
-          props: ['navigateAfterAdd'],
+          props: ['navigateAfterAdd', 'allowTrustModeSelection'],
           emits: ['added'],
-          template: '<div class="manual-server-form-stub" :data-navigate-after-add="String(navigateAfterAdd)" />',
+          template: '<div class="manual-server-form-stub" :data-navigate-after-add="String(navigateAfterAdd)" :data-allow-trust-mode-selection="String(allowTrustModeSelection)" />',
         },
       },
     },
@@ -136,6 +136,7 @@ describe('OnboardingWizard servers step (F19)', () => {
       await wrapper.find('[data-test="nothing-to-import-manual"]').trigger('click')
       expect(wrapper.find('[data-test="wizard-manual-form"] .manual-server-form-stub').exists()).toBe(true)
       expect(wrapper.find('.manual-server-form-stub').attributes('data-navigate-after-add')).toBe('false')
+      expect(wrapper.find('.manual-server-form-stub').attributes('data-allow-trust-mode-selection')).toBe('false')
       expect(wrapper.emitted('close')).toBeFalsy()
       expect(router.currentRoute.value.path).toBe('/')
     })
@@ -250,6 +251,14 @@ describe('OnboardingWizard servers step (F19)', () => {
       expect(wrapper.find('[data-test="wizard-back"]').exists()).toBe(true)
     })
 
+    it('keeps the optional manual-add form locked to its secure Manual trust mode', async () => {
+      const { wrapper } = await openServersTab(['memory'])
+      await wrapper.find('[data-test="manual-add-details"] summary').trigger('click')
+      await wrapper.find('[data-test="add-server-button"]').trigger('click')
+
+      expect(wrapper.find('.manual-server-form-stub').attributes('data-allow-trust-mode-selection')).toBe('false')
+    })
+
     it('keeps a Close, so the step is never a trap', async () => {
       // A step whose only exits are "import" strands the user, and the
       // committed e2e sweep dismisses an auto-opened wizard through exactly
@@ -311,7 +320,6 @@ describe('OnboardingWizard mounted already-open', () => {
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })
@@ -349,7 +357,6 @@ describe('OnboardingWizard mounted already-open', () => {
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })
@@ -391,7 +398,6 @@ describe('OnboardingWizard mounted already-open', () => {
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })

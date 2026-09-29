@@ -68,3 +68,19 @@ func TestBuildImportedServersOutput_IncludesPopulatedEnvAndHeaders(t *testing.T)
 		t.Errorf("expected headers to carry 1 classified field, got %#v", out[0]["headers"])
 	}
 }
+
+// TestBuildImportedServersOutput_OmitsEmptySummary pins parity with the REST
+// DTO's `summary,omitempty`: a malformed stdio entry (no command, no URL) has
+// an empty summary, which must be omitted rather than emitted as "".
+func TestBuildImportedServersOutput_OmitsEmptySummary(t *testing.T) {
+	out := buildImportedServersOutput([]*configimport.ImportedServer{
+		{Server: &config.ServerConfig{Name: "malformed", Protocol: "stdio"}},
+		{Server: &config.ServerConfig{Name: "ok", Command: "npx"}, Summary: "npx"},
+	})
+	if _, ok := out[0]["summary"]; ok {
+		t.Errorf(`"summary" must be omitted when empty, got %#v`, out[0]["summary"])
+	}
+	if got := out[1]["summary"]; got != "npx" {
+		t.Errorf(`"summary" = %#v, want "npx"`, got)
+	}
+}

@@ -35,10 +35,10 @@ function githubResult(overrides: Partial<Record<string, unknown>> = {}) {
   }
 }
 
-async function mountCatalog() {
+async function mountCatalog(keyringAvailable = true) {
   vi.mocked(api.getConfigSecrets).mockResolvedValue({
     success: true,
-    data: { secrets: [], environment_vars: [], total_secrets: 0, total_env_vars: 0, keyring_available: true },
+    data: { secrets: [], environment_vars: [], total_secrets: 0, total_env_vars: 0, keyring_available: keyringAvailable },
   })
   const wrapper = mount(CatalogSearch, { global: { plugins: [router] } })
   await flushPromises()
@@ -219,5 +219,34 @@ describe('CatalogSearch', () => {
     // The secret this failed attempt wrote must be rolled back so a retry
     // doesn't orphan a keyring entry or get a -2-suffixed name.
     expect(api.deleteSecret).toHaveBeenCalledWith('github-env-github-token')
+  })
+
+  // #1398 F-N: with the keyring already known-unavailable, a secret-like
+  // input still defaults to Secret mode; Add must fail closed (disabled) and
+  // recover only once the user switches that input to Value.
+  it('disables the secrets dialog Add button while a Secret-mode input cannot use an unavailable keyring', async () => {
+    vi.mocked(api.catalogSearch).mockResolvedValue({
+      success: true,
+      data: {
+        query: '',
+        results: [],
+        sections: {
+          official: [githubResult({ required_inputs: [{ name: 'GITHUB_TOKEN', secret_like: true }] })],
+          popular: [],
+        },
+        unavailable: [],
+      },
+    })
+    const wrapper = await mountCatalog(false)
+    await wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.find('[data-test="secret-toggle-value-input"]').setValue('ghp_xxx')
+    const confirm = () => wrapper.find('[data-test="catalog-secrets-confirm"]').element as HTMLButtonElement
+    expect(confirm().disabled).toBe(true)
+
+    await wrapper.find('[data-test="secret-toggle-mode-value"]').trigger('click')
+    await flushPromises()
+    expect(confirm().disabled).toBe(false)
   })
 })

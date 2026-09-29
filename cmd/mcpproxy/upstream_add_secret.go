@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -58,17 +59,24 @@ func applySecretFlags(resolver *secret.Resolver, serverName string, secretEnvs, 
 	// fail rolls back everything written so far in this call before
 	// returning err, so a failure partway through (e.g. the second of two
 	// --secret-env flags) never leaves the first flag's secret orphaned.
+	// A refused/failed delete (e.g. a backend that wedged after the earlier
+	// Store) is reported in the returned error rather than dropped, so the
+	// user learns which refs are still in the keyring.
 	fail := func(err error) ([]string, error) {
-		for _, ref := range writtenRefs {
-			_ = resolver.Delete(ctx, secret.Ref{Type: secret.SecretTypeKeyring, Name: ref})
+		if orphaned := deleteKeyringRefs(ctx, resolver, writtenRefs); len(orphaned) > 0 {
+			err = fmt.Errorf("%w; %s", err, orphanedRefsNote(orphaned))
 		}
 		return nil, err
 	}
 
 	for _, kv := range secretEnvs {
 		name, value, ok := strings.Cut(kv, "=")
+		name = strings.TrimSpace(name)
 		if !ok {
 			return fail(fmt.Errorf("invalid --secret-env format: %q (expected KEY=value)", kv))
+		}
+		if name == "" {
+			return fail(fmt.Errorf("invalid --secret-env format: %q (empty name; expected KEY=value)", kv))
 		}
 		ref := secret.RefName(serverName, "env", name, takenFn)
 		if err := resolver.Store(ctx, secret.Ref{Type: secret.SecretTypeKeyring, Name: ref}, value); err != nil {
@@ -86,6 +94,9 @@ func applySecretFlags(resolver *secret.Resolver, serverName string, secretEnvs, 
 		}
 		name = strings.TrimSpace(name)
 		value = strings.TrimSpace(value)
+		if name == "" {
+			return fail(fmt.Errorf("invalid --secret-header format: %q (empty name; expected 'Name: value')", kv))
+		}
 		ref := secret.RefName(serverName, "header", name, takenFn)
 		if err := resolver.Store(ctx, secret.Ref{Type: secret.SecretTypeKeyring, Name: ref}, value); err != nil {
 			return fail(fmt.Errorf("failed to store secret for header %s: %w", name, err))
@@ -98,20 +109,43 @@ func applySecretFlags(resolver *secret.Resolver, serverName string, secretEnvs, 
 	return writtenRefs, nil
 }
 
+// deleteKeyringRefs deletes each ref and returns those that could NOT be
+// deleted. resolver.Delete refuses outright when the keyring provider reports
+// itself unavailable, so on a wedged backend every ref comes back orphaned.
+func deleteKeyringRefs(ctx context.Context, resolver *secret.Resolver, refs []string) []string {
+	var orphaned []string
+	for _, ref := range refs {
+		if err := resolver.Delete(ctx, secret.Ref{Type: secret.SecretTypeKeyring, Name: ref}); err != nil {
+			orphaned = append(orphaned, ref)
+		}
+	}
+	return orphaned
+}
+
+// orphanedRefsNote is the user-facing warning naming refs a rollback could
+// not remove, with the command that cleans them up once the keyring recovers.
+func orphanedRefsNote(orphaned []string) string {
+	return fmt.Sprintf("rollback incomplete: %s left in the keyring; remove with `mcpproxy secrets del <name>` once it is available",
+		strings.Join(orphaned, ", "))
+}
+
 // rollbackKeyringRefs is the runUpstreamAdd-level counterpart of
 // applySecretFlags' internal rollback: it deletes refs that WERE
 // successfully written by applySecretFlags but must not survive because a
 // later step (trust-mode validation, config load, the daemon/config-mode add
 // itself, or a --if-not-exists skip) didn't result in the server actually
-// being added. Best-effort: a delete failure here is not surfaced, since the
-// original error is what the user needs to see.
-func rollbackKeyringRefs(resolver *secret.Resolver, refs []string) {
+// being added. The original error is what the user needs to see, so a delete
+// failure does not replace it, but refs left behind are warned about on
+// stderr and returned.
+func rollbackKeyringRefs(resolver *secret.Resolver, refs []string) []string {
 	if len(refs) == 0 {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	for _, ref := range refs {
-		_ = resolver.Delete(ctx, secret.Ref{Type: secret.SecretTypeKeyring, Name: ref})
+	orphaned := deleteKeyringRefs(ctx, resolver, refs)
+	if len(orphaned) > 0 {
+		fmt.Fprintln(os.Stderr, "Warning: "+orphanedRefsNote(orphaned))
 	}
+	return orphaned
 }

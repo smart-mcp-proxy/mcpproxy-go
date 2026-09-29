@@ -80,11 +80,6 @@ async function openServersTab(importable: string[]) {
       plugins: [router],
       stubs: {
         RouterLink: { template: '<a><slot /></a>' },
-        AddServerModal: {
-          name: 'AddServerModal',
-          props: ['show'],
-          template: '<div class="add-server-modal" :data-show="String(show)" />',
-        },
       },
     },
   })

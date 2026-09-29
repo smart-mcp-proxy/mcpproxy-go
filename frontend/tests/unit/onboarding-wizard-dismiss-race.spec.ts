@@ -69,7 +69,6 @@ describe('OnboardingWizard dismiss() race (review round 2, finding 2)', () => {
       global: {
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { template: '<div />' },
         },
       },
     })
@@ -98,7 +97,6 @@ describe('OnboardingWizard dismiss() race (review round 2, finding 2)', () => {
       global: {
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { template: '<div />' },
         },
       },
     })

@@ -417,6 +417,35 @@ func TestIsPlaceholder_BareShellEnvVar(t *testing.T) {
 	}
 }
 
+// TestIsPlaceholder_EmbeddedAndBareShellRefs covers shell-style references that
+// are not the whole value: an embedded "${VAR}" inside a larger string (e.g. a
+// "Bearer ${TOKEN}" header) and a bare "$VAR" value. mcpproxy never expands
+// these, so the literal text would reach the upstream unresolved.
+func TestIsPlaceholder_EmbeddedAndBareShellRefs(t *testing.T) {
+	for _, v := range []string{
+		"Bearer ${GITHUB_TOKEN}",
+		"prefix-${X}-suffix",
+		"${A}${B}",
+		"$GITHUB_TOKEN",
+		" $API_KEY ",
+		"Bearer ${env:OK} ${UNRESOLVED}",
+	} {
+		if !isPlaceholder(v) {
+			t.Errorf("isPlaceholder(%q) = false, want true (unresolvable shell reference)", v)
+		}
+	}
+	for _, v := range []string{
+		"Bearer ${env:GITHUB_TOKEN}",
+		"${keyring:foo}",
+		"abc$def123", // a real credential that merely contains a dollar sign
+		"p@$$w0rd-real",
+	} {
+		if isPlaceholder(v) {
+			t.Errorf("isPlaceholder(%q) = true, want false", v)
+		}
+	}
+}
+
 // TestIsPlaceholder_ValidSecretRefNotFlagged guards against the bare-env-var
 // fix over-flagging mcpproxy's own "type:name" secret reference syntax
 // (e.g. "${env:GITHUB_TOKEN}" or "${keychain:github-token}"), which IS

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 )
@@ -83,6 +84,15 @@ func tryDetectURLOrCommand(content []byte) *DetectionResult {
 	// a typo) or parses but lacks mcpServers. Falling back to "command" here
 	// would silently swallow the real error into a nonsense command preview.
 	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return nil
+	}
+
+	// A line that opens like an http(s) URL but contains whitespace is a URL
+	// with trailing (or embedded) junk: url.Parse tolerates that, and
+	// treating it as a command would make the URL the executable. Reject it
+	// so the user sees an error instead of a stored, unusable URL.
+	lower := strings.ToLower(trimmed)
+	if (strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")) && hasWhitespace(trimmed) {
 		return nil
 	}
 
@@ -293,4 +303,10 @@ func tryDetectJSON(content []byte) *DetectionResult {
 		Confidence: "low",
 		Indicators: []string{"json_format", "mcpServers_key", "generic_fallback"},
 	}
+}
+
+// hasWhitespace reports whether s contains any Unicode whitespace (not just
+// ASCII space/tab), e.g. a non-breaking space pasted from a web page.
+func hasWhitespace(s string) bool {
+	return strings.IndexFunc(s, unicode.IsSpace) >= 0
 }
