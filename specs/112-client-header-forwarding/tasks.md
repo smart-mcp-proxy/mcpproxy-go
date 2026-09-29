@@ -42,16 +42,16 @@ description: "Tasks for Spec 112 — MCP client header forwarding"
 
 ## Phase 4 — Integration tests (`httptest` recording streamable upstream)
 
-- [ ] T025 [US1] Allowed header forwarded on `call_tool_read`, direct surface and `code_execution` sub-calls; missing header omitted; non-allowlisted never sent; other server gets nothing — FR-008
-- [ ] T026 [US2] 50 concurrent clients, unique values, `-race`; every upstream call carries its own value — SC-001
-- [ ] T027 [US3] Blocked names (all FR-004, 3 casings) under plain, static-header and OAuth upstreams; OAuth upstream receives the proxy token — SC-002
-- [ ] T028 [US4] Static collision: static value wins; configs without `forward_headers` produce identical requests — SC-005
-- [ ] T029 [US1] `reconnect_on_use` by client A: initialize/tools/list carry nothing, the following `tools/call` does; background discovery and `upstream_servers refresh` carry nothing — FR-008
-- [ ] T030 [US5] Disabled via config and env: nothing forwarded — SC-004
-- [ ] T031a [US6] Upstream echoes headers in a **successful** result (exact, JSON-escaped, `Name: value`) and in a response header: client gets the unmodified result; sentinel absent from activity `Response`, tool-call record, logs, trace stdout — SC-003, FR-016.3
-- [ ] T031b [US1] Mount coverage: enumerate every client-facing streamable mount from the router (`/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<slug>`, `/v1/tool_code` aliases) and assert an allowlisted header reaches the upstream on `tools/call` from each — SC-007
-- [ ] T031 [US6] Upstream echoes headers in a 500 body: sentinel absent from `main.log`, per-server log, trace stdout, activity, BBolt tool-call record, audit line, health `LastError`, client error — SC-003
-- [ ] T032 REST `/api/v1/tools/call` with an allowlisted-name header forwards nothing — FR-006
+- [x] T025 [US1] Allowed header forwarded on `call_tool_read`, direct surface and `code_execution` sub-calls; missing header omitted; non-allowlisted never sent; other server gets nothing — FR-008
+- [x] T026 [US2] 50 concurrent clients, unique values, `-race`; every upstream call carries its own value — SC-001
+- [x] T027 [US3] Blocked names (all FR-004, 3 casings) under plain, static-header and OAuth upstreams; OAuth upstream receives the proxy token — SC-002
+- [x] T028 [US4] Static collision: static value wins; configs without `forward_headers` produce identical requests — SC-005
+- [x] T029 [US1] `reconnect_on_use` by client A: initialize/tools/list carry nothing, the following `tools/call` does; background discovery and `upstream_servers refresh` carry nothing — FR-008
+- [x] T030 [US5] Disabled via config and env: nothing forwarded — SC-004
+- [x] T031a [US6] Upstream echoes headers in a **successful** result (exact, JSON-escaped, `Name: value`) and in a response header: client gets the unmodified result; sentinel absent from activity `Response`, tool-call record, logs, trace stdout — SC-003, FR-016.3
+- [x] T031b [US1] Mount coverage: enumerate every client-facing streamable mount from the router (`/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<slug>`, `/v1/tool_code` aliases) and assert an allowlisted header reaches the upstream on `tools/call` from each — SC-007
+- [x] T031 [US6] Upstream echoes headers in a 500 body: sentinel absent from `main.log`, per-server log, trace stdout, activity, BBolt tool-call record, audit line, health `LastError`, client error — SC-003
+- [x] T032 REST `/api/v1/tools/call` with an allowlisted-name header forwards nothing — FR-006
 
 ## Phase 5 — Docs and verification
 

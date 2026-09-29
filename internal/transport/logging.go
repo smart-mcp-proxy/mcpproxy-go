@@ -60,6 +60,25 @@ func (t *LoggingTransport) maskForwarded(ctx context.Context, h http.Header) htt
 	return c
 }
 
+// bodyScrubber returns the text scrubber for the bodies and SSE frames of ONE
+// round trip: forwarded values (key B of ctx) and the server's allowlisted
+// names first, then the shape-based credential scrubber. An upstream that
+// echoes a forwarded header into a result or an error body would otherwise
+// have the value written to the log verbatim (Spec 112 FR-015b, FR-016).
+func (t *LoggingTransport) bodyScrubber(ctx context.Context) func(string) string {
+	out, ok := headerfwd.OutboundFrom(ctx)
+	if !ok || out.IsEmpty() {
+		return oauth.ScrubUpstreamText
+	}
+	var allow []string
+	if t.maskNames != nil {
+		allow = t.maskNames()
+	}
+	return func(text string) string {
+		return oauth.ScrubUpstreamText(headerfwd.Scrub(text, out, allow))
+	}
+}
+
 // NewLoggingTransport creates a new logging HTTP transport
 func NewLoggingTransport(base http.RoundTripper, logger *zap.Logger) *LoggingTransport {
 	if base == nil {
@@ -87,6 +106,8 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	fmt.Printf("📤 HTTP REQUEST: %s %s\n", req.Method, oauth.AuditRedaction.URLValueDeep(req.URL.String()))
 	fmt.Printf("   Headers: %v\n", oauth.RedactHeaders(t.maskForwarded(req.Context(), req.Header)))
 
+	scrub := t.bodyScrubber(req.Context())
+
 	// Log request body if present (for non-SSE requests)
 	if req.Body != nil && req.Method != "GET" {
 		bodyBytes, err := io.ReadAll(req.Body)
@@ -97,7 +118,7 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 				// refresh_token; ScrubUpstreamText rewrites only the
 				// recognised credential shapes, so the rest of the JSON stays
 				// byte-identical and trace mode keeps its purpose.
-				t.logger.Debug("📤 REQUEST BODY", zap.String("body", oauth.ScrubUpstreamText(string(bodyBytes))))
+				t.logger.Debug("📤 REQUEST BODY", zap.String("body", scrub(string(bodyBytes))))
 			}
 		}
 	}
@@ -136,10 +157,10 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if isSSE {
 		fmt.Println("🌊 SSE STREAM DETECTED - Starting frame-by-frame logging")
 		t.logger.Info("🌊 SSE STREAM DETECTED - Starting frame-by-frame logging")
-		resp.Body = newSSELoggingReader(resp.Body, t.logger)
+		resp.Body = newSSELoggingReader(resp.Body, t.logger, scrub)
 	} else {
 		// For regular HTTP responses, log body
-		resp.Body = newLoggingReader(resp.Body, t.logger, false)
+		resp.Body = newLoggingReader(resp.Body, t.logger, false, scrub)
 	}
 
 	return resp, nil
@@ -152,18 +173,28 @@ type loggingReader struct {
 	isSSE   bool
 	frameID int
 	buffer  *bytes.Buffer
+	// scrub redacts every body byte and SSE frame before it reaches stdout or
+	// zap. Never nil.
+	scrub func(string) string
 }
 
-func newLoggingReader(rc io.ReadCloser, logger *zap.Logger, isSSE bool) io.ReadCloser {
+func newLoggingReader(rc io.ReadCloser, logger *zap.Logger, isSSE bool, scrub func(string) string) io.ReadCloser {
+	if scrub == nil {
+		scrub = oauth.ScrubUpstreamText
+	}
 	return &loggingReader{
 		rc:     rc,
 		logger: logger,
 		isSSE:  isSSE,
 		buffer: &bytes.Buffer{},
+		scrub:  scrub,
 	}
 }
 
-func newSSELoggingReader(rc io.ReadCloser, logger *zap.Logger) io.ReadCloser {
+func newSSELoggingReader(rc io.ReadCloser, logger *zap.Logger, scrub func(string) string) io.ReadCloser {
+	if scrub == nil {
+		scrub = oauth.ScrubUpstreamText
+	}
 	// Create a pipe to tee the SSE stream
 	pr, pw := io.Pipe()
 
@@ -175,6 +206,7 @@ func newSSELoggingReader(rc io.ReadCloser, logger *zap.Logger) io.ReadCloser {
 		logger: logger,
 		isSSE:  true,
 		buffer: &bytes.Buffer{},
+		scrub:  scrub,
 	}
 
 	// Start background goroutine to read and log SSE frames from the tee'd pipe
@@ -197,7 +229,7 @@ func (lr *loggingReader) readSSEFramesFromPipe(pr *io.PipeReader) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Printf("   📜 Raw SSE line: %q\n", oauth.ScrubUpstreamText(line))
+		fmt.Printf("   📜 Raw SSE line: %q\n", lr.scrub(line))
 
 		// Empty line indicates end of frame
 		if line == "" {
@@ -206,8 +238,8 @@ func (lr *loggingReader) readSSEFramesFromPipe(pr *io.PipeReader) {
 				frameDuration := time.Since(frameStartTime)
 
 				frameContent := currentFrame.String()
-				safeData := oauth.ScrubUpstreamText(dataContent)
-				safeContent := oauth.ScrubUpstreamText(frameContent)
+				safeData := lr.scrub(dataContent)
+				safeContent := lr.scrub(frameContent)
 				fmt.Printf("🔵 SSE FRAME #%d (event: %s, data: %s, duration since prev: %v)\n%s\n",
 					lr.frameID, eventType, safeData, frameDuration, safeContent)
 				lr.logger.Info(fmt.Sprintf("🔵 SSE FRAME #%d", lr.frameID),
@@ -268,11 +300,11 @@ func (lr *loggingReader) Read(p []byte) (n int, err error) {
 	if err == io.EOF && !lr.isSSE && lr.buffer.Len() > 0 {
 		body := lr.buffer.String()
 		if len(body) < 10000 {
-			lr.logger.Debug("📥 RESPONSE BODY", zap.String("body", oauth.ScrubUpstreamText(body)))
+			lr.logger.Debug("📥 RESPONSE BODY", zap.String("body", lr.scrub(body)))
 		} else {
 			lr.logger.Debug("📥 RESPONSE BODY (truncated)",
 				zap.Int("total_size", len(body)),
-				zap.String("preview", scrubbedPreview(body, 1000)+"..."))
+				zap.String("preview", scrubbedPreviewWith(body, 1000, lr.scrub)+"..."))
 		}
 	}
 
@@ -302,7 +334,13 @@ func (lr *loggingReader) Close() error {
 // of multi-byte U+2022 bullets, and slicing one in half produces invalid UTF-8
 // that zap escapes into noise.
 func scrubbedPreview(body string, limit int) string {
-	scrubbed := oauth.ScrubUpstreamText(body)
+	return scrubbedPreviewWith(body, limit, oauth.ScrubUpstreamText)
+}
+
+// scrubbedPreviewWith is scrubbedPreview with the caller's scrubber (the
+// per-round-trip one that also removes forwarded header values).
+func scrubbedPreviewWith(body string, limit int, scrub func(string) string) string {
+	scrubbed := scrub(body)
 	if len(scrubbed) <= limit {
 		return scrubbed
 	}

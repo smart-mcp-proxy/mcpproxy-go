@@ -323,3 +323,42 @@ func TestLoggingTransport_MasksForwardedHeaders(t *testing.T) {
 		assert.Contains(t, stdout, "visible-value", name+": other headers are untouched")
 	}
 }
+
+// Spec 112 FR-015b: an upstream that echoes a forwarded value in a response
+// BODY (a result or a 500 page, plain JSON or an SSE frame) must not have it
+// written to stdout or zap by the trace transport.
+func TestLoggingTransport_ScrubsForwardedValueFromBodies(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{"json-error-body", "application/json", `upstream exploded; X-Tenant-Id: ` + fwdSentinel + ` and "v":"` + fwdSentinel + `"`},
+		{"sse-frame", "text/event-stream", "event: message\ndata: {\"text\":\"plain " + fwdSentinel + "\"}\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			obsCore, logs := observer.New(zapcore.DebugLevel)
+			tr := NewLoggingTransport(srv.Client().Transport, zap.New(obsCore))
+			var zapText string
+			stdout := captureStdout(t, func() {
+				req, err := http.NewRequestWithContext(outboundCtx(t, "X-Tenant-Id", fwdSentinel), http.MethodPost, srv.URL+"/mcp", http.NoBody)
+				require.NoError(t, err)
+				resp, err := tr.RoundTrip(req)
+				require.NoError(t, err)
+				got, _ := io.ReadAll(resp.Body)
+				require.NoError(t, resp.Body.Close())
+				assert.Contains(t, string(got), fwdSentinel, "the caller still receives the body unmodified")
+				time.Sleep(100 * time.Millisecond) // the SSE reader logs from a goroutine
+				zapText = observedText(logs)
+			})
+			assert.NotContains(t, stdout, fwdSentinel, "stdout")
+			assert.NotContains(t, zapText, fwdSentinel, "zap")
+		})
+	}
+}
