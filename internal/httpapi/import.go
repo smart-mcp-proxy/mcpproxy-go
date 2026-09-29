@@ -494,6 +494,36 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 		}
 	}
 
+	// Apply the caller's field overrides (Paste tab env/header edits)
+	// directly to the server(s) this call's own raw Content parsed to,
+	// never to a value carried over from an earlier preview response. This
+	// runs BEFORE the response is built so the enrichment (env/headers
+	// classification, summary, tags) describes the values actually persisted
+	// instead of the pre-override source values.
+	if !preview && fieldOverrides != nil {
+		for _, imported := range result.Imported {
+			if len(fieldOverrides.Env) > 0 {
+				if imported.Server.Env == nil {
+					imported.Server.Env = make(map[string]string, len(fieldOverrides.Env))
+				}
+				for k, v := range fieldOverrides.Env {
+					imported.Server.Env[k] = v
+				}
+			}
+			if len(fieldOverrides.Headers) > 0 {
+				if imported.Server.Headers == nil {
+					imported.Server.Headers = make(map[string]string, len(fieldOverrides.Headers))
+				}
+				for k, v := range fieldOverrides.Headers {
+					imported.Server.Headers[k] = v
+				}
+			}
+		}
+		for _, imported := range result.Imported {
+			configimport.Reclassify(imported)
+		}
+	}
+
 	// Build response
 	response := &ImportResponse{
 		Format:     string(result.Format),
@@ -545,29 +575,6 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 
 	// If not preview, actually add the servers
 	if !preview && len(result.Imported) > 0 {
-		// Apply the caller's field overrides (Paste tab env/header edits)
-		// directly to the server(s) this call's own raw Content parsed to,
-		// never to a value carried over from an earlier preview response.
-		if fieldOverrides != nil {
-			for _, imported := range result.Imported {
-				if len(fieldOverrides.Env) > 0 {
-					if imported.Server.Env == nil {
-						imported.Server.Env = make(map[string]string, len(fieldOverrides.Env))
-					}
-					for k, v := range fieldOverrides.Env {
-						imported.Server.Env[k] = v
-					}
-				}
-				if len(fieldOverrides.Headers) > 0 {
-					if imported.Server.Headers == nil {
-						imported.Server.Headers = make(map[string]string, len(fieldOverrides.Headers))
-					}
-					for k, v := range fieldOverrides.Headers {
-						imported.Server.Headers[k] = v
-					}
-				}
-			}
-		}
 		for _, imported := range result.Imported {
 			if err := s.controller.AddServer(r.Context(), imported.Server); err != nil {
 				logger.Warn("Failed to add imported server", "server", imported.Server.Name, "error", err)

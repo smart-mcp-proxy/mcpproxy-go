@@ -160,15 +160,26 @@ var allClients = []ClientDef{
 // GetAllClients returns the definitions of all known clients.
 func GetAllClients() []ClientDef {
 	result := make([]ClientDef, len(allClients))
-	copy(result, allClients)
+	for i := range allClients {
+		result[i] = cloneClientDef(allClients[i])
+	}
 	return result
+}
+
+// cloneClientDef copies a ClientDef including its slice fields, so callers can
+// never mutate the package-global registry through a returned value.
+func cloneClientDef(c ClientDef) ClientDef {
+	if c.ClientInfoNames != nil {
+		c.ClientInfoNames = append([]string(nil), c.ClientInfoNames...)
+	}
+	return c
 }
 
 // FindClient looks up a client definition by ID. Returns nil if not found.
 func FindClient(clientID string) *ClientDef {
 	for i := range allClients {
 		if allClients[i].ID == clientID {
-			c := allClients[i]
+			c := cloneClientDef(allClients[i])
 			return &c
 		}
 	}

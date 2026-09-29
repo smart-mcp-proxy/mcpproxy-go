@@ -22,7 +22,7 @@ func TestProfileConfig_LegacyRoundTrip(t *testing.T) {
 
 	out, err := json.Marshal(p)
 	require.NoError(t, err)
-	require.JSONEq(t, src, string(out))
+	require.Equal(t, src, string(out))
 }
 
 // TestProfileConfig_V3FieldsParse pins that every v3 field round-trips and

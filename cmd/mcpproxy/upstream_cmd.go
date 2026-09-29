@@ -2113,10 +2113,15 @@ func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[s
 			"original_name":  s.OriginalName,
 			"fields_skipped": s.FieldsSkipped,
 			"warnings":       s.Warnings,
-			// Spec 109-b FR-040: same second-line summary/tags the Web UI
-			// preview shows, already redacted by configimport.Import.
-			"summary": s.Summary,
-			"tags":    s.Tags,
+			// Spec 109-b FR-040: same tags the Web UI preview shows, already
+			// redacted by configimport.Import. `summary` follows below.
+			"tags": s.Tags,
+		}
+		// Match the REST DTO's `omitempty` on summary: a malformed stdio
+		// entry with neither command nor URL has an empty summary, which
+		// REST omits, so the CLI must not emit `"summary": ""` either.
+		if s.Summary != "" {
+			m["summary"] = s.Summary
 		}
 		// Match the REST DTO's `omitempty` (internal/httpapi/import.go
 		// ImportedServerResponse.Env/Headers): a server with nothing to
