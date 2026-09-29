@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,8 +41,10 @@ func TestGitHubStarsProvider_Fetch200StoresStarsAndSendsExactHeaders(t *testing.
 	if got := gotHeaders.Get("X-GitHub-Api-Version"); got != "2022-11-28" {
 		t.Errorf("X-GitHub-Api-Version header = %q", got)
 	}
-	if got := gotHeaders.Get("User-Agent"); got == "" {
-		t.Error("expected a non-empty User-Agent")
+	// Compare against the exact versioned value: Go's default User-Agent is
+	// non-empty, so a bare non-empty check passes without the required header.
+	if got, want := gotHeaders.Get("User-Agent"), registryUserAgent(); got != want {
+		t.Errorf("User-Agent = %q, want %q", got, want)
 	}
 	if got := gotHeaders.Get("Authorization"); got != "" {
 		t.Errorf("expected no Authorization header without MCPPROXY_GITHUB_TOKEN, got %q", got)
@@ -531,5 +534,242 @@ func TestGitHubStarsProvider_KillSwitchNeverFetches(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if got := atomic.LoadInt32(&reqCount); got != 0 {
 		t.Fatalf("expected the kill switch to prevent any outbound request, got %d", got)
+	}
+}
+
+// --- #1410: provider-level budget, TTL, env, breaker coverage ---------------
+
+// testClock is a mutable injected clock safe to read from worker goroutines.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newTestClock() *testClock { return &testClock{t: time.Unix(1_800_000_000, 0)} }
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+func countingServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *int32) {
+	t.Helper()
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&n, 1)
+		handler(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &n
+}
+
+func okStars(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"stargazers_count": 7}`))
+}
+
+// TestGitHubStarsProvider_RollingBudgetGatesRequests proves the provider
+// really stops issuing requests once the rolling budget is spent (not just
+// that the rollingBudget helper counts), and resumes after the window rolls.
+func TestGitHubStarsProvider_RollingBudgetGatesRequests(t *testing.T) {
+	srv, reqs := countingServer(t, okStars)
+	defer SetGitHubAPIBaseForTest(srv.URL)()
+	p := NewGitHubStarsProvider(PopularityOptions{})
+	defer p.Close()
+	clock := newTestClock()
+	p.now = clock.Now
+	p.budget = newRollingBudget(2)
+
+	p.Resolve(context.Background(), []string{"o/a", "o/b", "o/c", "o/d", "o/e"}, 2*time.Second)
+	if got := atomic.LoadInt32(reqs); got != 2 {
+		t.Fatalf("requests with a budget of 2 = %d, want exactly 2", got)
+	}
+
+	// Budget spent: a further Resolve bails out without any request.
+	p.Resolve(context.Background(), []string{"o/f"}, 200*time.Millisecond)
+	if got := atomic.LoadInt32(reqs); got != 2 {
+		t.Fatalf("requests after the budget was spent = %d, want still 2", got)
+	}
+
+	clock.Advance(61 * time.Minute)
+	p.Resolve(context.Background(), []string{"o/f"}, 2*time.Second)
+	if got := atomic.LoadInt32(reqs); got != 3 {
+		t.Fatalf("requests after the window rolled = %d, want 3", got)
+	}
+}
+
+// TestGitHubStarsProvider_FreshEntriesDoNotRequeue pins that a fresh positive
+// entry and a fresh negative (404) entry are not re-requested before their
+// TTL, and that they are once it passes.
+func TestGitHubStarsProvider_FreshEntriesDoNotRequeue(t *testing.T) {
+	srv, reqs := countingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/gone") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		okStars(w, r)
+	})
+	defer SetGitHubAPIBaseForTest(srv.URL)()
+	p := NewGitHubStarsProvider(PopularityOptions{})
+	defer p.Close()
+	clock := newTestClock()
+	p.now = clock.Now
+
+	keys := []string{"o/live", "o/gone"}
+	p.Resolve(context.Background(), keys, 2*time.Second)
+	if got := atomic.LoadInt32(reqs); got != 2 {
+		t.Fatalf("initial requests = %d, want 2", got)
+	}
+	if _, state := p.Lookup("o/live"); state != LookupFresh {
+		t.Fatalf("o/live state = %d, want Fresh", state)
+	}
+	if _, state := p.Lookup("o/gone"); state != LookupNegative {
+		t.Fatalf("o/gone state = %d, want Negative", state)
+	}
+
+	clock.Advance(githubFreshTTL - time.Minute)
+	for _, k := range keys {
+		if ch := p.enqueue(k); ch != nil {
+			t.Fatalf("enqueue(%s) admitted a fresh entry", k)
+		}
+	}
+	p.Resolve(context.Background(), keys, 200*time.Millisecond)
+	if got := atomic.LoadInt32(reqs); got != 2 {
+		t.Fatalf("requests before TTL expiry = %d, want still 2", got)
+	}
+
+	clock.Advance(2 * time.Minute)
+	p.Resolve(context.Background(), keys, 2*time.Second)
+	if got := atomic.LoadInt32(reqs); got != 4 {
+		t.Fatalf("requests after TTL expiry = %d, want 4", got)
+	}
+}
+
+// TestGitHubStarsProvider_GenericGitHubTokenIgnored pins FR-011: with only
+// the generic GITHUB_TOKEN set, no Authorization header is sent and the
+// unauthenticated budget is selected.
+func TestGitHubStarsProvider_GenericGitHubTokenIgnored(t *testing.T) {
+	var gotAuth string
+	srv, _ := countingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		okStars(w, r)
+	})
+	defer SetGitHubAPIBaseForTest(srv.URL)()
+	t.Setenv("GITHUB_TOKEN", "generic-token")
+	t.Setenv("MCPPROXY_GITHUB_TOKEN", "")
+	p := NewGitHubStarsProvider(PopularityOptions{})
+	defer p.Close()
+
+	p.Resolve(context.Background(), []string{"o/r"}, 2*time.Second)
+	if _, state := p.Lookup("o/r"); state != LookupFresh {
+		t.Fatalf("expected the fetch to complete, got state=%d", state)
+	}
+	if gotAuth != "" {
+		t.Fatalf("Authorization = %q, want none when only GITHUB_TOKEN is set", gotAuth)
+	}
+	if p.budget.limit != githubRateLimitUnauth {
+		t.Fatalf("budget limit = %d, want the unauthenticated %d", p.budget.limit, githubRateLimitUnauth)
+	}
+}
+
+// TestGitHubStarsProvider_ApplyBreakerTable covers the FR-009(d) pause
+// computation and recovery once the injected clock passes the pause.
+func TestGitHubStarsProvider_ApplyBreakerTable(t *testing.T) {
+	t.Setenv("MCPPROXY_CATALOG_POPULARITY", "false")
+	base := time.Unix(1_800_000_000, 0)
+	reset := base.Add(30 * time.Minute)
+	resetStr := strconv.FormatInt(reset.Unix(), 10)
+	httpDate := base.Add(90 * time.Second).UTC().Format(http.TimeFormat)
+
+	tests := []struct {
+		name      string
+		status    int
+		headers   rateLimitHeaders
+		wantPause time.Duration // 0 = not paused
+	}{
+		{"429 Retry-After seconds", 429, rateLimitHeaders{retryAfter: "120"}, 120 * time.Second},
+		{"429 Retry-After HTTP-date", 429, rateLimitHeaders{retryAfter: httpDate}, 90 * time.Second},
+		{"429 Retry-After wins over reset", 429, rateLimitHeaders{retryAfter: "10", reset: resetStr}, 10 * time.Second},
+		{"403 reset only", 403, rateLimitHeaders{reset: resetStr}, 30 * time.Minute},
+		{"403 no headers uses default", 403, rateLimitHeaders{}, githubBreakerPause},
+		{"429 bad Retry-After falls back to default", 429, rateLimitHeaders{retryAfter: "soon"}, githubBreakerPause},
+		{"200 remaining at threshold", 200, rateLimitHeaders{remaining: "5", reset: resetStr}, 30 * time.Minute},
+		{"200 remaining at threshold no reset", 200, rateLimitHeaders{remaining: "5"}, githubBreakerPause},
+		{"200 remaining above threshold", 200, rateLimitHeaders{remaining: "6", reset: resetStr}, 0},
+		{"200 no rate-limit headers", 200, rateLimitHeaders{}, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewGitHubStarsProvider(PopularityOptions{})
+			defer p.Close()
+			p.now = func() time.Time { return base }
+
+			p.applyBreaker(tc.status, tc.headers)
+
+			if tc.wantPause == 0 {
+				if p.pausedNow(base) {
+					t.Fatal("breaker engaged, want it idle")
+				}
+				return
+			}
+			if !p.pausedNow(base) {
+				t.Fatal("breaker idle, want it engaged")
+			}
+			if !p.pausedNow(base.Add(tc.wantPause - time.Second)) {
+				t.Errorf("breaker released before the %s pause elapsed", tc.wantPause)
+			}
+			if p.pausedNow(base.Add(tc.wantPause)) {
+				t.Errorf("breaker still engaged once the %s pause elapsed", tc.wantPause)
+			}
+		})
+	}
+}
+
+// TestGitHubStarsProvider_429PausesThenRecovers is the end-to-end 429 case: a
+// 429 with Retry-After blocks further requests until the injected clock
+// passes the pause, after which fetching resumes.
+func TestGitHubStarsProvider_429PausesThenRecovers(t *testing.T) {
+	var limited atomic.Bool
+	limited.Store(true)
+	srv, reqs := countingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if limited.Load() {
+			w.Header().Set("Retry-After", "120")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		okStars(w, r)
+	})
+	defer SetGitHubAPIBaseForTest(srv.URL)()
+	p := NewGitHubStarsProvider(PopularityOptions{})
+	defer p.Close()
+	clock := newTestClock()
+	p.now = clock.Now
+
+	p.Resolve(context.Background(), []string{"o/r1"}, 2*time.Second)
+	if got := atomic.LoadInt32(reqs); got != 1 {
+		t.Fatalf("requests before the pause = %d, want 1", got)
+	}
+
+	clock.Advance(60 * time.Second)
+	p.Resolve(context.Background(), []string{"o/r2"}, 200*time.Millisecond)
+	if got := atomic.LoadInt32(reqs); got != 1 {
+		t.Fatalf("requests during the Retry-After pause = %d, want still 1", got)
+	}
+
+	limited.Store(false)
+	clock.Advance(61 * time.Second) // 121s total: past Retry-After
+	p.Resolve(context.Background(), []string{"o/r2"}, 2*time.Second)
+	if got := atomic.LoadInt32(reqs); got != 2 {
+		t.Fatalf("requests after the pause elapsed = %d, want 2", got)
+	}
+	if stars, state := p.Lookup("o/r2"); state != LookupFresh || stars != 7 {
+		t.Fatalf("expected recovery to fetch o/r2 (Fresh/7), got state=%d stars=%d", state, stars)
 	}
 }
