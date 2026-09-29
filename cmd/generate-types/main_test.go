@@ -108,9 +108,21 @@ func TestHealthVocabularyMatchesConstants(t *testing.T) {
 	}
 
 	// unionValues resolves `| typeof Const` members to their literal values.
+	// Any member that is not a `typeof Const` reference (e.g. a bare string
+	// literal) is reported, so an extra hand-written member cannot slip past.
+	unionMember := regexp.MustCompile(`^typeof (\w+)$`)
 	unionValues := func(body string) []string {
 		var vals []string
-		for _, m := range regexp.MustCompile(`typeof (\w+)`).FindAllStringSubmatch(body, -1) {
+		for _, member := range strings.Split(body, "|") {
+			member = strings.TrimSpace(member)
+			if member == "" {
+				continue
+			}
+			m := unionMember.FindStringSubmatch(member)
+			if m == nil {
+				t.Errorf("union member %q is not a `typeof <Const>` reference", member)
+				continue
+			}
 			v, ok := constValue[m[1]]
 			if !ok {
 				t.Errorf("union member typeof %s has no `export const %s = '...' as const` declaration", m[1], m[1])
