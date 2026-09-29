@@ -667,6 +667,25 @@ func (s *Server) Attention() []contracts.AttentionItem {
 	return s.runtime.Attention()
 }
 
+// GetReviewQueue forwards the REST review read through the production server
+// controller to the runtime implementation. The HTTP API is mounted with
+// *Server as its controller, so handler-level tests alone do not prove this
+// adapter is wired.
+func (s *Server) GetReviewQueue(ctx context.Context) (*runtime.ReviewQueue, error) {
+	if s.runtime == nil {
+		return nil, fmt.Errorf("runtime unavailable")
+	}
+	return s.runtime.GetReviewQueue(ctx)
+}
+
+// GetServerReview forwards the scoped REST review read to the runtime.
+func (s *Server) GetServerReview(ctx context.Context, serverName string) (*runtime.ServerReview, error) {
+	if s.runtime == nil {
+		return nil, fmt.Errorf("runtime unavailable")
+	}
+	return s.runtime.GetServerReview(ctx, serverName)
+}
+
 // GetManagementService returns the management service instance from runtime.
 // Returns nil if service hasn't been set yet.
 func (s *Server) GetManagementService() management.Service {
@@ -4281,6 +4300,17 @@ func (a *serverUnquarantinerAdapter) UnquarantineServer(serverName string) error
 	}
 	return a.server.UnquarantineServer(serverName)
 }
+
+// RecordToolBlocksForSecurityApproval publishes audit events for blocks that
+// the scanner service committed atomically with the approved baseline.
+func (a *serverUnquarantinerAdapter) RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string) {
+	if a.server == nil || a.server.runtime == nil {
+		return
+	}
+	a.server.runtime.RecordToolBlocksForSecurityApproval(serverName, toolNames, blockedBy)
+}
+
+var _ scanner.ToolBlockRecorder = (*serverUnquarantinerAdapter)(nil)
 
 // scanSummaryEnricherAdapter bridges scanner.Service.GetScanSummary (which
 // returns the scanner-internal *scanner.ScanSummary type) to

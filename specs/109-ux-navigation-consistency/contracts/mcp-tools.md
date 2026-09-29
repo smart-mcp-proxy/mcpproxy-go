@@ -1,6 +1,6 @@
 # Contract: MCP built-in tool changes (Spec 109)
 
-Small by design. MCP is the agent surface; this spec changes only what agents already do (search the catalog, inspect quarantine, read server health), so that agents and humans see the same data. Frozen tool-surface goldens (`internal/server/testdata/*.golden.json`, `toolslist_goldens/`) change only where listed, and each PR declares the files it changes.
+Small by design. MCP is a client surface with per-tool authorization. Search and server-health reads are available to their authorized callers; `quarantine_security` is administrator-only for all operations, including inspection, under Spec 028 FR-009 and Spec 108 FR-016. Scoped review reads use the filtered REST routes instead. Frozen tool-surface goldens (`internal/server/testdata/*.golden.json`, `toolslist_goldens/`) change only where listed, and each PR declares the files it changes.
 
 | Tool | Change | PR | Golden impact |
 |---|---|---|---|

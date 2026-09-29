@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,7 +70,6 @@ type ServerInterface interface {
 
 	// Quarantine management methods
 	GetQuarantinedServers() ([]map[string]interface{}, error)
-	UnquarantineServer(serverName string) error
 
 	// Server management methods for tray menu
 	EnableServer(serverName string, enabled bool) error
@@ -97,10 +97,13 @@ type ServerInterface interface {
 // App represents the system tray application
 type App struct {
 	server    ServerInterface
-	apiClient interface{ OpenWebUI() error } // API client for web UI access (optional)
-	logger    *zap.SugaredLogger
-	version   string
-	shutdown  func()
+	apiClient interface {
+		OpenWebUI() error
+		OpenWebUIPath(string) error
+	} // API client for web UI access (optional)
+	logger   *zap.SugaredLogger
+	version  string
+	shutdown func()
 
 	connectionState   ConnectionState
 	connectionStateMu sync.RWMutex
@@ -177,7 +180,10 @@ func New(server ServerInterface, logger *zap.SugaredLogger, version string, shut
 }
 
 // NewWithAPIClient creates a new tray application with an API client for web UI access
-func NewWithAPIClient(server ServerInterface, apiClient interface{ OpenWebUI() error }, logger *zap.SugaredLogger, version string, shutdown func()) *App {
+func NewWithAPIClient(server ServerInterface, apiClient interface {
+	OpenWebUI() error
+	OpenWebUIPath(string) error
+}, logger *zap.SugaredLogger, version string, shutdown func()) *App {
 	app := &App{
 		server:          server,
 		apiClient:       apiClient,
@@ -1808,8 +1814,12 @@ func (a *App) handleServerAction(serverName, action string) {
 	case "quarantine":
 		err = a.syncManager.HandleServerQuarantine(serverName, true)
 
-	case "unquarantine":
-		err = a.syncManager.HandleServerUnquarantine(serverName)
+	case "review":
+		if a.apiClient == nil {
+			err = fmt.Errorf("API client unavailable")
+		} else {
+			err = a.apiClient.OpenWebUIPath("/review/" + url.PathEscape(serverName))
+		}
 
 	case "switch_profile":
 		// Profiles v2 T5: serverName carries the profile slug ("" = all servers).

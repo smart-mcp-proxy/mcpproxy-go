@@ -464,6 +464,14 @@ type IntegrityBaseline struct {
 	ApprovedBy    string            `json:"approved_by"`
 }
 
+// ToolApprovalBlock describes the approval fields needed to persist a block
+// alongside the server integrity baseline in one storage transaction.
+type ToolApprovalBlock struct {
+	ToolName   string
+	ApprovedAt time.Time
+	ApprovedBy string
+}
+
 // SecurityOverview provides dashboard aggregate stats
 type SecurityOverview struct {
 	TotalScans         int           `json:"total_scans"`

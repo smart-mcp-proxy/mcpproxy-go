@@ -261,6 +261,10 @@ func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
 	r.publishEvent(evt)
 }
 
+func (r *Runtime) emitReviewChanged(serverName string) {
+	r.publishEvent(newEvent(EventTypeReviewChanged, map[string]any{"server": serverName}))
+}
+
 // buildServersChangedPayload materialises the full servers.changed event
 // from a (reason, extra) marker. Spec 047 embeds the current server list +
 // stats so SSE subscribers (Swift tray, Web UI) can update local state

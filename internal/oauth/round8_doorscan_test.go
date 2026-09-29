@@ -53,6 +53,9 @@ var rawServerLeafDoors = map[string]string{
 		"single-server children) and at runtime's /events servers.changed publisher; the MCP door builds its own " +
 		"payload from redactedServerView instead. Redacting here as well would double-mask and break the " +
 		"reveal_secret_headers opt-out, which is resolved at those boundaries.",
+	"internal/runtime/review.go:(m).GetServerReview": "the review server summary is copied into contracts.Server, " +
+		"then oauth.RedactServerSecretFields is applied before any field is projected into the response; this door " +
+		"always redacts even when reveal_secret_headers is enabled.",
 	"internal/runtime/runtime.go:(m).getAllServersLegacy":         "storage fallback of GetAllServers; same boundary, same consumers.",
 	"internal/server/server.go:(m).GetAllServers":                 "the tray/legacy projection behind the same httpapi + SSE boundary.",
 	"internal/server/server.go:(m).getAllServersLegacy":           "storage fallback of the above; same boundary.",

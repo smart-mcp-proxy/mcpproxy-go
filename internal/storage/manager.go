@@ -759,6 +759,15 @@ func (m *Manager) SaveIntegrityBaseline(baseline *scanner.IntegrityBaseline) err
 	return m.db.SaveIntegrityBaseline(baseline)
 }
 
+// SaveIntegrityBaselineWithBlocks commits the scan approval and the selected
+// disabled tool records atomically in the underlying bbolt database.
+func (m *Manager) SaveIntegrityBaselineWithBlocks(baseline *scanner.IntegrityBaseline, blocks []scanner.ToolApprovalBlock) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.SaveIntegrityBaselineWithBlocks(baseline, blocks)
+}
+
 // GetIntegrityBaseline retrieves an integrity baseline by server name
 func (m *Manager) GetIntegrityBaseline(serverName string) (*scanner.IntegrityBaseline, error) {
 	m.mu.RLock()

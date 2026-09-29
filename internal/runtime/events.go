@@ -28,6 +28,9 @@ const (
 	// subject_id}]`); internal/httpapi renders it per subscriber as
 	// `{count, ids}` (FR-006).
 	EventTypeAttentionChanged EventType = "attention.changed"
+	// EventTypeReviewChanged signals that the review queue or a server's
+	// composed review payload changed. Its server field is scope-bearing.
+	EventTypeReviewChanged EventType = "review.changed"
 
 	// Activity logging events (RFC-003)
 	// EventTypeActivityToolCallStarted is emitted when a tool execution begins.

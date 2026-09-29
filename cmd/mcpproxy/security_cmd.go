@@ -262,7 +262,8 @@ func newSecurityApproveCmd() *cobra.Command {
 		Use:   "approve <server>",
 		Short: "Approve a server after security scan",
 		Long: `Approve a server's security posture based on scan results.
-Use --force to approve even if findings exist.
+Use --force to approve even if findings exist. This remains an alias for
+'mcpproxy review approve <server>'.
 
 Examples:
   mcpproxy security approve github-server
@@ -280,7 +281,8 @@ func newSecurityRejectCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "reject <server>",
 		Short: "Reject a server and quarantine it",
-		Long: `Reject a server's security posture and quarantine it.
+		Long: `Reject a server's security posture and quarantine it. This remains
+an alias for 'mcpproxy review reject <server>'.
 
 Examples:
   mcpproxy security reject github-server`,

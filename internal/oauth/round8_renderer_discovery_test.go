@@ -4,7 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -112,6 +112,10 @@ var redactionMethodRenderers = map[string][]func(string) string{
 	"Redaction.SpawnCommandString": {
 		func(s string) string { return AuditRedaction.SpawnCommandString("npx mcp --token " + s) },
 		func(s string) string { return LiveRedaction.SpawnCommandString("npx mcp --token " + s) },
+	},
+	"Redaction.CommandString": {
+		func(s string) string { return AuditRedaction.CommandString("npx mcp --token " + s) },
+		func(s string) string { return LiveRedaction.CommandString("npx mcp --token " + s) },
 	},
 	"Redaction.URLValueDeep": {
 		func(s string) string { return AuditRedaction.URLValueDeep(s) },
@@ -235,28 +239,30 @@ func discoverExportedStringFuncs(t *testing.T) []string {
 	dir := packageDir(t)
 
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 
 	var names []string
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || !fn.Name.IsExported() {
-					continue
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, parseErr := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		require.NoError(t, parseErr)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || !fn.Name.IsExported() {
+				continue
+			}
+			if fn.Recv == nil {
+				if isStringToString(fn.Type) || isStringVariadicToString(fn.Type) {
+					names = append(names, fn.Name.Name)
 				}
-				if fn.Recv == nil {
-					if isStringToString(fn.Type) || isStringVariadicToString(fn.Type) {
-						names = append(names, fn.Name.Name)
-					}
-					continue
-				}
-				if receiverTypeName(fn.Recv) == "Redaction" && rendersAValue(fn.Type) {
-					names = append(names, "Redaction."+fn.Name.Name)
-				}
+				continue
+			}
+			if receiverTypeName(fn.Recv) == "Redaction" && rendersAValue(fn.Type) {
+				names = append(names, "Redaction."+fn.Name.Name)
 			}
 		}
 	}

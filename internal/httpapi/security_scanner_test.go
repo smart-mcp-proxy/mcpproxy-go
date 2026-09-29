@@ -42,6 +42,9 @@ type mockSecurityController struct {
 	queueRunning bool
 
 	deepScanEnabled bool
+	approvedBy      string
+	approvedForce   bool
+	approvedBlocks  []string
 
 	// What the last ConfigureScanner call carried.
 	configuredEnv   map[string]string
@@ -128,6 +131,15 @@ func (m *mockSecurityController) CancelScan(_ context.Context, serverName string
 }
 
 func (m *mockSecurityController) ApproveServer(_ context.Context, serverName string, force bool, approvedBy string) error {
+	m.approvedBy = approvedBy
+	m.approvedForce = force
+	return m.approveErr
+}
+
+func (m *mockSecurityController) ApproveServerWithBlocks(_ context.Context, _ string, force bool, approvedBy string, blocks []string) error {
+	m.approvedBy = approvedBy
+	m.approvedForce = force
+	m.approvedBlocks = append([]string(nil), blocks...)
 	return m.approveErr
 }
 
@@ -597,6 +609,36 @@ func TestSecurityHandlerApproveServer(t *testing.T) {
 	var resp map[string]string
 	secParseData(t, w.Body, &resp)
 	assert.Equal(t, "approved", resp["status"])
+}
+
+func TestSecurityHandlerApproveServerWithBlocks(t *testing.T) {
+	secCtrl := &mockSecurityController{}
+	srv := newTestServerWithSecurity(t, secCtrl)
+
+	body := bytes.NewBufferString(`{"force":true,"block":["delete_issue","remove_user"]}`)
+	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.True(t, secCtrl.approvedForce)
+	require.Equal(t, []string{"delete_issue", "remove_user"}, secCtrl.approvedBlocks)
+}
+
+func TestSecurityHandlerApproveServerWithUnknownBlockIsBadRequest(t *testing.T) {
+	secCtrl := &mockSecurityController{approveErr: fmt.Errorf("%w: missing", scanner.ErrToolApprovalBlockNotFound)}
+	srv := newTestServerWithSecurity(t, secCtrl)
+
+	body := bytes.NewBufferString(`{"block":["missing"]}`)
+	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestSecurityHandlerApproveServerBlocked(t *testing.T) {

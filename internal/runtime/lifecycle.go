@@ -1181,6 +1181,7 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	configuredServers := make(map[string]*config.ServerConfig)
 	storedServerMap := make(map[string]*config.ServerConfig)
 	var changed bool
+	var reviewChangedServers []string
 
 	for _, storedServer := range storedServers {
 		storedServerMap[storedServer.Name] = storedServer
@@ -1317,6 +1318,10 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 			continue
 		}
 		r.logger.Debug("Successfully saved server to storage", zap.String("server", serverCfg.Name))
+		if (serverCfg.Quarantined && (!existsInStorage || !storedServer.Quarantined)) ||
+			(existsInStorage && storedServer.Quarantined != serverCfg.Quarantined) {
+			reviewChangedServers = append(reviewChangedServers, serverCfg.Name)
+		}
 	}
 	r.logger.Debug("Completed synchronous storage save phase")
 
@@ -1380,6 +1385,11 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 			r.upstreamManager.RemoveServer(name)
 			if err := r.storageManager.DeleteUpstreamServer(name); err != nil {
 				r.logger.Error("Failed to delete server from storage", zap.Error(err), zap.String("server", name))
+			} else {
+				// Removing a configured server can remove either a quarantined-server
+				// row or a trusted row with pending/changed tools from the review
+				// queue. Publish after storage deletion so subscribers refetch it.
+				r.emitReviewChanged(name)
 			}
 			if err := r.indexManager.DeleteServerTools(name); err != nil {
 				r.logger.Error("Failed to delete server tools from index", zap.Error(err), zap.String("server", name))
@@ -1404,6 +1414,9 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 			"configured": len(cfg.Servers),
 			"removed":    len(serversToRemove),
 		})
+	}
+	for _, serverName := range reviewChangedServers {
+		r.emitReviewChanged(serverName)
 	}
 
 	return nil
@@ -1572,14 +1585,31 @@ func (r *Runtime) SaveConfiguration() error {
 // paths.
 func (r *Runtime) syncServersToLegacyConfig(latestServers []*config.ServerConfig) int {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	oldServerCount := len(r.cfg.Servers)
-	r.cfg.Servers = latestServers
+	oldCfg := r.cfg
+	oldServerCount := len(oldCfg.Servers)
+	// ConfigService readers hold an immutable snapshot pointer. Mutating
+	// r.cfg.Servers in place therefore races request-time policy checks such as
+	// IsToolConfigDenied while a quarantine approval saves its new server state.
+	// Publish a cloned configuration instead, matching UpdateConfig's snapshot
+	// replacement semantics.
+	updatedCfg := (&configsvc.Snapshot{Config: oldCfg}).Clone()
+	updatedCfg.Servers = latestServers
+	r.cfg = updatedCfg
 	// The desired config is a separate struct once anything is pending, so the
 	// server list has to be written to both — otherwise the next PATCH merges
 	// onto a base whose servers are whatever they were at the last apply.
-	if r.desiredCfg != nil && r.desiredCfg != r.cfg {
-		r.desiredCfg.Servers = latestServers
+	if r.desiredCfg != nil {
+		if r.desiredCfg == oldCfg {
+			r.desiredCfg = updatedCfg
+		} else {
+			desired := (&configsvc.Snapshot{Config: r.desiredCfg}).Clone()
+			desired.Servers = latestServers
+			r.desiredCfg = desired
+		}
+	}
+	r.mu.Unlock()
+	if r.configSvc != nil {
+		_ = r.configSvc.Update(updatedCfg, configsvc.UpdateTypeModify, "sync_servers")
 	}
 	return oldServerCount
 }
@@ -1946,6 +1976,7 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 		"server":      serverName,
 		"quarantined": quarantined,
 	})
+	r.emitReviewChanged(serverName)
 
 	// Emit activity event for quarantine state change
 	reason := "Server unquarantined by administrator"

@@ -1,0 +1,2 @@
+SERVER      KIND           QUARANTINED  PENDING  CHANGED  TIERS               SCAN
+filesystem  server_review  true         0        0        map[destructive:1]  map[verdict:clean]

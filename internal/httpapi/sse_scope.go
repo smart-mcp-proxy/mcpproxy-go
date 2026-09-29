@@ -212,6 +212,7 @@ var identityBearingEventTypes = map[internalRuntime.EventType]struct{}{
 	internalRuntime.EventTypeOAuthRefreshFailed:           {},
 	internalRuntime.EventTypeSecurityScanSettled:          {},
 	internalRuntime.EventTypeSecurityIntegrityAlert:       {},
+	internalRuntime.EventTypeReviewChanged:                {},
 }
 
 // eventVisibleToCaller reports whether a runtime event may be delivered to the

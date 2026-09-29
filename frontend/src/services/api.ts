@@ -327,12 +327,6 @@ class APIService {
     })
   }
 
-  async unquarantineServer(serverName: string): Promise<APIResponse> {
-    return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}/unquarantine`, {
-      method: 'POST',
-    })
-  }
-
   async discoverServerTools(serverName: string): Promise<APIResponse> {
     return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}/discover-tools`, {
       method: 'POST',
