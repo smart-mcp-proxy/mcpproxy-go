@@ -35,6 +35,12 @@ function githubResult(overrides: Partial<Record<string, unknown>> = {}) {
   }
 }
 
+function catalogAddSelector(source: string, id: string) {
+  return `[data-test="catalog-add-${source.length}:${source}${id.length}:${id}"]`
+}
+
+const githubAddSelector = catalogAddSelector('official', 'io.github.github/github-mcp-server')
+
 async function mountCatalog(keyringAvailable = true) {
   vi.mocked(api.getConfigSecrets).mockResolvedValue({
     success: true,
@@ -73,13 +79,32 @@ describe('CatalogSearch', () => {
     vi.mocked(api.addServerFromRegistry).mockResolvedValue({ success: true, server: { name: 'github' } as never })
     const wrapper = await mountCatalog()
 
-    const button = wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]')
+    const button = wrapper.find(githubAddSelector)
     expect(button.text()).toBe('Add to MCPProxy')
     await button.trigger('click')
     await flushPromises()
 
-    const updated = wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]')
+    const updated = wrapper.find(githubAddSelector)
     expect(updated.text()).toContain('Added ✓')
+  })
+
+  it('keeps added state separate for source/id pairs that collide when joined with a dash', async () => {
+    const first = githubResult({ source: 'a-b', id: 'c', title: 'First' })
+    const second = githubResult({ source: 'a', id: 'b-c', title: 'Second' })
+    vi.mocked(api.catalogSearch).mockResolvedValue({
+      success: true,
+      data: { query: 'collision', results: [first, second], sections: null, unavailable: [] },
+    })
+    vi.mocked(api.addServerFromRegistry).mockResolvedValue({ success: true, server: { name: 'first' } as never })
+    const wrapper = await mountCatalog()
+
+    const buttons = wrapper.findAll('[data-test^="catalog-add-"]')
+    expect(buttons).toHaveLength(2)
+    await buttons[0].trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-test^="catalog-add-"]')[0].text()).toContain('Added ✓')
+    expect(wrapper.findAll('[data-test^="catalog-add-"]')[1].text()).toBe('Add to MCPProxy')
   })
 
   it('resolves a prior-session Added/Open card only by visible source and install target', async () => {
@@ -92,7 +117,7 @@ describe('CatalogSearch', () => {
       data: { servers: [{ name: 'installed-github', source_registry_id: 'official', url: 'https://api.githubcopilot.com/mcp/', protocol: 'http' }] },
     })
     const wrapper = await mountCatalog()
-    await wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]').trigger('click')
+    await wrapper.find(githubAddSelector).trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/servers/installed-github')
   })
@@ -112,7 +137,7 @@ describe('CatalogSearch', () => {
       },
     })
     const wrapper = await mountCatalog()
-    await wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]').trigger('click')
+    await wrapper.find(githubAddSelector).trigger('click')
     await flushPromises()
 
     expect(router.currentRoute.value.path).toBe('/servers/installed-github-with-secret')
@@ -134,7 +159,7 @@ describe('CatalogSearch', () => {
       ] },
     })
     const wrapper = await mountCatalog()
-    await wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]').trigger('click')
+    await wrapper.find(githubAddSelector).trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-test="catalog-add-error"]').text()).toContain('More than one')
     expect(wrapper.find('[data-test="catalog-section-official"]').exists()).toBe(true)
@@ -199,7 +224,7 @@ describe('CatalogSearch', () => {
     vi.mocked(api.addServerFromRegistry).mockResolvedValue({ success: false, error: 'a server named "github" already exists' })
 
     const wrapper = await mountCatalog()
-    await wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]').trigger('click')
+    await wrapper.find(githubAddSelector).trigger('click')
     await flushPromises()
 
     const dialog = wrapper.find('[data-test="catalog-secrets-dialog"]')
@@ -238,7 +263,7 @@ describe('CatalogSearch', () => {
       },
     })
     const wrapper = await mountCatalog(false)
-    await wrapper.find('[data-test="catalog-add-official-io.github.github/github-mcp-server"]').trigger('click')
+    await wrapper.find(githubAddSelector).trigger('click')
     await flushPromises()
 
     await wrapper.find('[data-test="secret-toggle-value-input"]').setValue('ghp_xxx')

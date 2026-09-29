@@ -109,6 +109,25 @@ func TestCatalogSearchInProcess_AddedServerName(t *testing.T) {
 	}
 }
 
+func TestCatalogAddedFromConfig_DoesNotFlattenArgumentBoundaries(t *testing.T) {
+	cfg := &config.Config{Servers: []*config.ServerConfig{
+		{Name: "from-official", Command: "npx", Args: []string{"a b", "c"}, SourceRegistryID: "official"},
+	}}
+	added := catalogAddedFromConfig(cfg)
+
+	otherArgv := registries.CatalogHit{
+		Source: "official",
+		Entry:  registries.ServerEntry{ID: "different-argv", InstallCmd: `npx a "b c"`},
+	}
+	matched, serverName := added(otherArgv)
+	if matched {
+		t.Fatal("distinct command argv values must not match a configured server")
+	}
+	if serverName != "" {
+		t.Fatalf("non-matching command argv must not return a server name, got %q", serverName)
+	}
+}
+
 func withCatalogCLIFixture(t *testing.T, body string) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

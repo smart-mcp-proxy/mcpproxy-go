@@ -210,7 +210,7 @@ No new route: the Web UI and macOS write each secret with the existing `POST /se
 
 ## Catalog
 
-`GET /catalog/search?q=&source=&tag=&limit=20` — both editions. Rule: **filtered** on `added` only. Catalog entries are catalog-source data, readable by any authenticated caller exactly like today's `GET /registries/{id}/servers` (no admin gate). `added` is derived from the configured servers, so for a scoped caller it is computed only over servers passing `CanEnumerateServer`: an entry matching an out-of-scope server reads `added: false`, and no field names or reveals a configured server's name, URL or command. The MCP `search_servers` result carries no `added` field at all (contracts/mcp-tools.md).
+`GET /catalog/search?q=&source=&tag=&limit=20` — both editions. Rule: **filtered** on `added` only. Catalog entries do not carry tags: an absent or empty `tag` is accepted for compatibility, while a non-empty `tag` returns `400` and never produces an unfiltered result. Catalog entries are catalog-source data, readable by any authenticated caller exactly like today's `GET /registries/{id}/servers` (no admin gate). `added` is derived from the configured servers, so for a scoped caller it is computed only over servers passing `CanEnumerateServer`: an entry matching an out-of-scope server reads `added: false`, and no field names or reveals a configured server's name, URL or command. The MCP `search_servers` result carries no `added` field at all (contracts/mcp-tools.md).
 
 ```json
 {

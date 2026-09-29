@@ -1427,7 +1427,7 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 				mcp.Description("Search term to filter servers by name or description (case-insensitive)"),
 			),
 			mcp.WithString("tag",
-				mcp.Description("Filter servers by tag/category (if supported by registry)"),
+				mcp.Description("Catalog entries do not carry tags. Omit this parameter or pass an empty value; non-empty values return an error."),
 			),
 			mcp.WithNumber("limit",
 				mcp.Description("Maximum number of results to return (default: 10, max: 50)"),
@@ -1607,6 +1607,11 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	}
 	if tag != "" {
 		args["tag"] = tag
+	}
+	if tag != "" {
+		err := errors.New("tag filtering is not supported: catalog entries carry no tags")
+		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	if registry == "" {

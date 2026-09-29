@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -643,5 +644,19 @@ func CatalogInstallTarget(install CatalogInstall) string {
 	if install.URL != "" {
 		return "url:" + install.URL
 	}
-	return "cmd:" + install.Command + " " + strings.Join(install.Args, " ")
+
+	// Command arguments are structured values: joining them with spaces makes
+	// ["a b", "c"] indistinguishable from ["a", "b c"]. Length-prefix every
+	// value so catalog entries only join the exact configured argv.
+	var target strings.Builder
+	target.WriteString("cmd:")
+	target.WriteString(strconv.Itoa(len(install.Command)))
+	target.WriteByte(':')
+	target.WriteString(install.Command)
+	for _, arg := range install.Args {
+		target.WriteString(strconv.Itoa(len(arg)))
+		target.WriteByte(':')
+		target.WriteString(arg)
+	}
+	return target.String()
 }
