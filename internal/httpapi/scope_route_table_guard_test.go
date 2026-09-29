@@ -69,8 +69,6 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/telemetry/payload":        {scopeRefused, "fleet heartbeat counts; TestTelemetryPayload_DeniedToScopedCaller"},
 	"/api/v1/tokens/":                  {scopeRefused, "agent tokens cannot manage tokens (requireManageTokens)"},
 	"/api/v1/tokens/{name}/":           {scopeRefused, "agent tokens cannot manage tokens (requireManageTokens)"},
-	"/api/v1/clients":                  {scopeRefused, "MCP client/session presence; TestClientsPresence_AdministratorOnly"},
-	"/api/v1/clients/{client}":         {scopeRefused, "MCP client/session presence detail; TestClientsPresence_AdministratorOnly"},
 	"/api/v1/connect":                  {scopeRefused, "MCP client connection status is admin-only"},
 	"/api/v1/connect/{client}":         {scopeRefused, "MCP client connection status is admin-only"},
 	"/api/v1/connect/{client}/preview": {scopeRefused, "MCP client configuration preview is admin-only"},
@@ -193,11 +191,18 @@ const scopeDenialMarker = "Agent tokens cannot"
 // routeDenialMarkers records refusal middleware whose admin-only message is
 // intentionally more specific than the generic agent-token scope denial.
 var routeDenialMarkers = map[string]string{
-	"/api/v1/clients":                  "Admin credentials required to read clients",
-	"/api/v1/clients/{client}":         "Admin credentials required to read clients",
 	"/api/v1/connect":                  "Admin credentials required to read client connection status",
 	"/api/v1/connect/{client}":         "Admin credentials required to read client connection status",
 	"/api/v1/connect/{client}/preview": "Admin credentials required to read client connection status",
+}
+
+func init() {
+	for route, scope := range editionGetRouteScopes() {
+		getRouteScopes[route] = scope
+	}
+	for route, marker := range editionRouteDenialMarkers() {
+		routeDenialMarkers[route] = marker
+	}
 }
 
 // TestScopeRouteTableGuard walks the production /api/v1 GET surface and holds
@@ -239,6 +244,9 @@ func TestScopeRouteTableGuard(t *testing.T) {
 	// (and its now-meaningless reason) does not linger.
 	for route := range getRouteScopes {
 		require.Truef(t, seen[route], "getRouteScopes lists %s but the walk did not find it — remove the stale entry", route)
+	}
+	for route, reason := range editionAbsentGetRoutes() {
+		require.Falsef(t, seen[route], "GET %s must be absent in this edition (%s)", route, reason)
 	}
 
 	// Drive each route with the scoped token and hold it to its verdict.
