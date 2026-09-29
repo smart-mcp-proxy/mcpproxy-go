@@ -384,3 +384,134 @@ func TestValidateAgentToken_RejectsUnrecognisedPrefix(t *testing.T) {
 	_, err := mgr.ValidateAgentToken("mcp_xyz_"+"0000000000000000000000000000000000000000000000000000000000000000", testHMACKey)
 	require.Error(t, err)
 }
+
+// expireClientCredential rewrites the stored kind=client record for clientID
+// so it expired an hour ago. MintClientCredential refuses a past expiry, so a
+// record can only reach the expired state by aging in place; this is the test
+// stand-in for that.
+func expireClientCredential(t *testing.T, mgr *Manager, clientID string) {
+	t.Helper()
+	require.NoError(t, mgr.db.db.Update(func(tx *bbolt.Tx) error {
+		hash, tok, err := findClientTokenRecordLocked(tx, clientID)
+		if err != nil {
+			return err
+		}
+		require.NotNil(t, tok)
+		tok.ExpiresAt = time.Now().Add(-time.Hour)
+		data, err := json.Marshal(tok)
+		if err != nil {
+			return err
+		}
+		return tx.Bucket([]byte(AgentTokensBucket)).Put(hash, data)
+	}))
+}
+
+// TestMintClientCredential_ReplacesExpired covers the expired half of T028
+// "mint replaces revoked OR expired" (#1395).
+func TestMintClientCredential_ReplacesExpired(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	raw1, _ := auth.GenerateClientToken()
+	_, err := mgr.MintClientCredential("cursor", raw1, testHMACKey, auth.ProfileModeSwitchable, "", time.Now().Add(24*time.Hour))
+	require.NoError(t, err)
+	expireClientCredential(t, mgr, "cursor")
+
+	// The aged-out secret no longer authenticates.
+	_, err = mgr.ValidateAgentToken(raw1, testHMACKey)
+	require.Error(t, err)
+
+	raw2, _ := auth.GenerateClientToken()
+	tok, err := mgr.MintClientCredential("cursor", raw2, testHMACKey, auth.ProfileModeLocked, "work-full", time.Now().Add(24*time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, "work-full", tok.ProfilePin)
+
+	_, err = mgr.ValidateAgentToken(raw1, testHMACKey)
+	require.Error(t, err)
+	validated, err := mgr.ValidateAgentToken(raw2, testHMACKey)
+	require.NoError(t, err)
+	assert.Equal(t, "work-full", validated.ProfilePin)
+}
+
+// TestStageClientCredentialRotation_RefusesInactive pins that staging over a
+// revoked or expired credential reports ErrClientCredentialNotActive, not the
+// inverse ErrClientCredentialActive (#1395).
+func TestStageClientCredentialRotation_RefusesInactive(t *testing.T) {
+	cases := []struct {
+		name string
+		age  func(t *testing.T, mgr *Manager)
+	}{
+		{"revoked", func(t *testing.T, mgr *Manager) {
+			require.NoError(t, mgr.RevokeAgentToken("client-cursor"))
+		}},
+		{"expired", func(t *testing.T, mgr *Manager) {
+			expireClientCredential(t, mgr, "cursor")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, cleanup := setupTestStorageForAgentTokens(t)
+			defer cleanup()
+
+			raw, _ := auth.GenerateClientToken()
+			_, err := mgr.MintClientCredential("cursor", raw, testHMACKey, auth.ProfileModeSwitchable, "", time.Now().Add(24*time.Hour))
+			require.NoError(t, err)
+			tc.age(t, mgr)
+
+			newRaw, _ := auth.GenerateClientToken()
+			_, err = mgr.StageClientCredentialRotation("cursor", newRaw, testHMACKey)
+			require.ErrorIs(t, err, ErrClientCredentialNotActive)
+			require.NotErrorIs(t, err, ErrClientCredentialActive)
+		})
+	}
+}
+
+// TestForgetClientCredential_ReturnsPersistedRecord pins that the record
+// ForgetClientCredential returns is the one it revoked: same hash/prefix as
+// the persisted row, Revoked set, and a staged pending secret is revoked with
+// it (#1395).
+func TestForgetClientCredential_ReturnsPersistedRecord(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	raw, _ := auth.GenerateClientToken()
+	_, err := mgr.MintClientCredential("cursor", raw, testHMACKey, auth.ProfileModeSwitchable, "", time.Now().Add(24*time.Hour))
+	require.NoError(t, err)
+	pendingRaw, _ := auth.GenerateClientToken()
+	_, err = mgr.StageClientCredentialRotation("cursor", pendingRaw, testHMACKey)
+	require.NoError(t, err)
+
+	got, err := mgr.ForgetClientCredential("cursor")
+	require.NoError(t, err)
+	assert.True(t, got.Revoked)
+
+	stored, err := mgr.GetAgentTokenByName("client-cursor")
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.True(t, stored.Revoked)
+	assert.Equal(t, stored.TokenHash, got.TokenHash)
+	assert.Equal(t, stored.TokenPrefix, got.TokenPrefix)
+
+	// Neither the primary nor the staged secret authenticates.
+	_, err = mgr.ValidateAgentToken(raw, testHMACKey)
+	require.Error(t, err)
+	_, err = mgr.ValidateAgentToken(pendingRaw, testHMACKey)
+	require.Error(t, err)
+}
+
+// TestForgetClientCredential_NotFoundAndConflict pins the error shapes.
+func TestForgetClientCredential_NotFoundAndConflict(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	_, err := mgr.ForgetClientCredential("cursor")
+	require.ErrorIs(t, err, ErrClientCredentialNotFound)
+
+	tok, raw := makeTestToken("client-cursor")
+	createGrandfatheredRegularToken(t, mgr, tok, raw)
+	_, err = mgr.ForgetClientCredential("cursor")
+	require.ErrorIs(t, err, ErrClientCredentialNotFound)
+	stored, err := mgr.GetAgentTokenByName("client-cursor")
+	require.NoError(t, err)
+	assert.False(t, stored.Revoked, "a grandfathered agent token must not be revoked")
+}

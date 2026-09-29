@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { authApi, type ProviderInfo, type UserProfile } from '@/services/auth-api'
 import api from '@/services/api'
 
@@ -61,6 +61,20 @@ export const useAuthStore = defineStore('auth', () => {
     return !loading.value && authResolvedSuccessfully.value &&
       (!isTeamsEdition.value || isAuthenticated.value || hasKey)
   })
+
+  // Presentation only (#1401). A fresh probe (API-key repair) drops
+  // canShowShell for its whole duration, which unmounted TopHeader/SidebarNav
+  // and threw away search text and open menus on recovery. Keep an
+  // already-visible shell mounted while a probe is pending; it goes away as
+  // soon as a SETTLED probe leaves canShowShell false. This never gates
+  // data: canShowShell, canLoadCore and the router guard stay fail-closed.
+  const shellWasVisible = ref(false)
+  watch([canShowShell, loading], ([show, pending]) => {
+    if (show) shellWasVisible.value = true
+    else if (!pending) shellWasVisible.value = false
+  }, { flush: 'sync' })
+  const shellPresented = computed(() =>
+    canShowShell.value || (loading.value && shellWasVisible.value))
 
   // One probe at a time. On a hard reload two callers race for checkAuth():
   // App.vue's onMounted and the router guard for the initial navigation.
@@ -153,6 +167,7 @@ export const useAuthStore = defineStore('auth', () => {
     principalKind,
     canLoadCore,
     canShowShell,
+    shellPresented,
     displayName,
     checkAuth,
     logout,
