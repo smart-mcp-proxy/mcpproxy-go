@@ -146,6 +146,14 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 	return s
 }
 
+// Started reports whether the activity service has registered its runtime
+// event subscription. It is safe to call while Start is running.
+func (s *ActivityService) Started() bool {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	return s.started
+}
+
 // SetSessionClientResolver wires the session -> MCP client lookup. Safe to leave
 // unset (records then carry no client name).
 func (s *ActivityService) SetSessionClientResolver(r SessionClientResolver) {
@@ -281,10 +289,9 @@ func (s *ActivityService) Start(ctx context.Context, rt *Runtime) {
 		s.logger.Warn("Activity service Start called twice; ignoring")
 		return
 	}
-	s.started = true
-
 	// Subscribe to runtime events
 	eventCh := rt.subscribeInternalEvents()
+	s.started = true
 
 	// Start retention loop in a separate goroutine. Tracked in workersWG: it
 	// prunes activity records (BBolt writes), so Stop must await it.
@@ -736,17 +743,21 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 	decision := getStringPayload(evt.Payload, "decision")
 	reason := getStringPayload(evt.Payload, "reason")
 
+	metadata := map[string]interface{}{
+		"decision": decision,
+		"reason":   reason,
+	}
+	if blockReason := getStringPayload(evt.Payload, storage.MetadataKeyBlockReason); blockReason != "" {
+		metadata[storage.MetadataKeyBlockReason] = blockReason
+	}
 	record := &storage.ActivityRecord{
 		Type:       storage.ActivityTypePolicyDecision,
 		ServerName: serverName,
 		ToolName:   toolName,
 		Status:     decision,
-		Metadata: s.withClientInfo(map[string]interface{}{
-			"decision": decision,
-			"reason":   reason,
-		}, sessionID),
-		Timestamp: evt.Timestamp,
-		SessionID: sessionID,
+		Metadata:   s.withClientInfo(metadata, sessionID),
+		Timestamp:  evt.Timestamp,
+		SessionID:  sessionID,
 		// Copied straight from the event so the persisted record and the SSE
 		// event a client already saw share one identity (spec 090). Absent on
 		// pre-090 payloads, which stays absent rather than becoming "".

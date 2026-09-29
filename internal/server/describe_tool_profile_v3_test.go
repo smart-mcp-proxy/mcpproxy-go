@@ -76,4 +76,12 @@ func TestDescribeTool_ProfileV3_ExcludedEqualsNonexistent(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("anonymous source: excluded tool is indistinguishable from nonexistent", func(t *testing.T) {
+		proxy.currentConfig().AnonymousProfile = "work-readonly"
+		resp := callDescribe(t, proxy, anonCtx(), []interface{}{"github:create_issue"})
+		require.Len(t, resp.Errors, 1)
+		resp.Errors[0]["id"] = "SUBSTITUTED"
+		assert.Equal(t, nonexistent.Errors[0], resp.Errors[0])
+	})
 }

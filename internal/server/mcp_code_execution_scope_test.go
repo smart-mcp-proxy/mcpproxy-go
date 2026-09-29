@@ -327,10 +327,14 @@ func TestCodeExecution_LiveClientConnectedWhileSnapshotSaysDisconnected_RefusesU
 // from "in neither" even though both are outside this token's own effective
 // reach.
 func TestCodeExecution_PinWiderThanToken_IndistinguishableFromNonexistent(t *testing.T) {
-	proxy, _ := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
-	proxy.config.Profiles = []config.ProfileConfig{
-		{Name: "P", Servers: []string{"a", "b"}},
-	}
+	proxy, _ := createTestProxyWithRuntimeCfg(t, []*config.ServerConfig{
+		{Name: "a", Enabled: true},
+		// b is in P's effective scope but remains outside the token grant.
+		// It need not be connected: the scope/token denial happens first.
+		{Name: "b", Enabled: false},
+	}, func(cfg *config.Config) {
+		cfg.Profiles = []config.ProfileConfig{{Name: "P", Servers: []string{"a", "b"}}}
+	})
 
 	ctx := agentCtx([]string{"a"}, []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}, "P")
 
@@ -339,6 +343,9 @@ func TestCodeExecution_PinWiderThanToken_IndistinguishableFromNonexistent(t *tes
 
 	assert.False(t, callB.OK, "'b' is in the pin but outside the token's own scope — must refuse")
 	assert.False(t, callZZZ.OK, "'zzz' does not exist — must refuse")
+	assert.Equal(t, string(jsruntime.ErrorCodeAccessDenied), callB.Code,
+		"the in-profile/out-of-token cell must take the token-scope refusal")
+	assert.Contains(t, callB.Message, "token does not have access to server")
 	assert.Equal(t, callZZZ.Code, callB.Code,
 		"the envelope CODE must be identical whether the server is in the pin-but-not-token, or in neither")
 

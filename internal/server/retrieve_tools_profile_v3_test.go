@@ -157,6 +157,54 @@ func TestRetrieveTools_ProfileV3_ProfileFieldSourceGating(t *testing.T) {
 		assert.Nil(t, resp.Profile, "a pinned caller must never learn it is pinned or to what (research D27)")
 		require.NotNil(t, resp.HiddenByProfile, "hidden_by_profile is independent of source and still applies")
 	})
+
+	t.Run("switchable client binding: policy applies without disclosing the base", func(t *testing.T) {
+		resp := callRetrieveToolsV3(t, proxy, clientCtx("desktop", "work-readonly", "switchable"), "create_issue", 5)
+		assert.Empty(t, resp.Tools)
+		require.NotNil(t, resp.HiddenByProfile)
+		assert.Equal(t, 1, *resp.HiddenByProfile)
+		assert.Nil(t, resp.Profile)
+	})
+
+	t.Run("switchable client session selection: selected profile is reported", func(t *testing.T) {
+		const sessionID = "client-session-v3"
+		proxy.sessionStore.SetActiveProfile(sessionID, "work-full")
+		helper := mcpserver.NewMCPServer("test", "1.0.0")
+		ctx := helper.WithContext(context.Background(), &fakeClientSession{id: sessionID})
+		ctx = auth.WithAuthContext(ctx, &auth.AuthContext{
+			Type: auth.AuthTypeAgent, AgentName: "client-desktop", TokenPrefix: "mcp_cli_fix",
+			AllowedServers: []string{"*"}, Permissions: []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+			ProfilePin: "work-readonly", TokenKind: auth.KindClient, ClientID: "desktop", ProfileMode: "switchable",
+		})
+		resp := callRetrieveToolsV3(t, proxy, ctx, "create_issue", 5)
+		require.Len(t, resp.Tools, 1)
+		require.NotNil(t, resp.Profile)
+		assert.Equal(t, "work-full", *resp.Profile)
+	})
+
+	t.Run("anonymous profile: policy applies without disclosing the base", func(t *testing.T) {
+		proxy.currentConfig().AnonymousProfile = "work-readonly"
+		resp := callRetrieveToolsV3(t, proxy, anonCtx(), "create_issue", 5)
+		assert.Empty(t, resp.Tools)
+		require.NotNil(t, resp.HiddenByProfile)
+		assert.Equal(t, 1, *resp.HiddenByProfile)
+		assert.Nil(t, resp.Profile)
+	})
+
+	t.Run("dangling binding and anonymous base deny all without hidden count", func(t *testing.T) {
+		binding := callRetrieveToolsV3(t, proxy, clientCtx("lost", "missing-profile", "switchable"), "list_issues", 5)
+		assert.Empty(t, binding.Tools)
+		require.NotNil(t, binding.HiddenByProfile)
+		assert.Zero(t, *binding.HiddenByProfile)
+		assert.Nil(t, binding.Profile)
+
+		proxy.currentConfig().AnonymousProfile = "missing-profile"
+		anonymous := callRetrieveToolsV3(t, proxy, anonCtx(), "list_issues", 5)
+		assert.Empty(t, anonymous.Tools)
+		require.NotNil(t, anonymous.HiddenByProfile)
+		assert.Zero(t, *anonymous.HiddenByProfile)
+		assert.Nil(t, anonymous.Profile)
+	})
 }
 
 // TestRetrieveTools_ProfileV3_DanglingPinDenyAll pins FR-020: a legacy agent
@@ -184,7 +232,6 @@ func TestRetrieveTools_ProfileV3_DanglingPinDenyAll(t *testing.T) {
 // this is the same property proven end-to-end through retrieve_tools.
 func TestRetrieveTools_ProfileV3_FilterBeforeLimit(t *testing.T) {
 	proxy, rt := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
-		config.EnablePolicyForTest(t)
 		cfg.Servers = []*config.ServerConfig{{Name: "a", Enabled: true}}
 		cfg.Profiles = []config.ProfileConfig{
 			{Name: "cap-read", Servers: []string{"a"}, MaxTier: "read"},

@@ -998,12 +998,16 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 	env.ConnectClient(mcpClient)
 	defer mcpClient.Close()
 
-	// Create mock server with some tools
+	// Create mock server with some tools. The live-inspection fallback must
+	// classify annotations from the upstream response even though no review
+	// definitions have been captured yet.
+	readOnly := false
 	mockTools := []mcp.Tool{
 		{
 			Name:        "test_tool_1",
 			Description: "First test tool",
 			InputSchema: mcp.ToolInputSchema{Type: "object"},
+			Annotations: mcp.ToolAnnotation{ReadOnlyHint: &readOnly},
 		},
 		{
 			Name:        "test_tool_2",
@@ -1035,6 +1039,53 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 
 	// Wait for server to be added to storage (quarantined servers don't get clients created immediately)
 	time.Sleep(500 * time.Millisecond)
+
+	// The REST review remains an empty, uncaptured snapshot until an upstream
+	// definition scan explicitly records one. MCP inspection still performs
+	// the existing temporary-exemption live fetch below.
+	reviewURL := strings.TrimSuffix(env.proxyAddr, "/mcp") + "/api/v1/servers/quarantined-server/review"
+	reviewReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reviewURL, nil)
+	require.NoError(t, err)
+	reviewReq.Header.Set("X-API-Key", "test-api-key-e2e")
+	reviewResp, err := http.DefaultClient.Do(reviewReq)
+	require.NoError(t, err)
+	defer reviewResp.Body.Close()
+	require.Equal(t, http.StatusOK, reviewResp.StatusCode)
+	var reviewEnvelope struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Server struct {
+				DefinitionsCaptured bool `json:"definitions_captured"`
+			} `json:"server"`
+			Tools []json.RawMessage `json:"tools"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(reviewResp.Body).Decode(&reviewEnvelope))
+	require.True(t, reviewEnvelope.Success)
+	require.False(t, reviewEnvelope.Data.Server.DefinitionsCaptured)
+	require.Empty(t, reviewEnvelope.Data.Tools)
+
+	queueURL := strings.TrimSuffix(env.proxyAddr, "/mcp") + "/api/v1/review"
+	queueReq, err := http.NewRequestWithContext(ctx, http.MethodGet, queueURL, nil)
+	require.NoError(t, err)
+	queueReq.Header.Set("X-API-Key", "test-api-key-e2e")
+	queueResp, err := http.DefaultClient.Do(queueReq)
+	require.NoError(t, err)
+	defer queueResp.Body.Close()
+	require.Equal(t, http.StatusOK, queueResp.StatusCode)
+	var queueEnvelope struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Count   int `json:"count"`
+			Servers []struct {
+				Server string `json:"server"`
+			} `json:"servers"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(queueResp.Body).Decode(&queueEnvelope))
+	require.True(t, queueEnvelope.Success)
+	require.Equal(t, 1, queueEnvelope.Data.Count)
+	require.Equal(t, "quarantined-server", queueEnvelope.Data.Servers[0].Server)
 
 	t.Log("🔍 Calling inspect_quarantined for quarantined-server...")
 
@@ -1088,6 +1139,21 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 	}
 	assert.Contains(t, resultText, "test_tool_1", "Result should mention test_tool_1")
 	assert.Contains(t, resultText, "test_tool_2", "Result should mention test_tool_2")
+	var liveReview struct {
+		DefinitionsSource string `json:"definitions_source"`
+		Tools             []struct {
+			Name        string          `json:"name"`
+			Tier        string          `json:"tier"`
+			ScanVerdict string          `json:"scan_verdict"`
+			Annotations json.RawMessage `json:"annotations"`
+		} `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resultText), &liveReview))
+	require.Equal(t, "live", liveReview.DefinitionsSource)
+	require.Len(t, liveReview.Tools, 2)
+	require.Equal(t, "write", liveReview.Tools[0].Tier)
+	require.Equal(t, "not_scanned", liveReview.Tools[0].ScanVerdict)
+	require.NotEmpty(t, liveReview.Tools[0].Annotations)
 
 	// After inspection, server should be disconnected again (exemption revoked)
 	time.Sleep(1 * time.Second)

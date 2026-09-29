@@ -86,6 +86,11 @@ const (
 func (p *MCPProxyServer) toolVisibleToSession(ctx context.Context, serverName, toolName string) (visible bool, reason string) {
 	authCtx := auth.AuthContextFromContext(ctx)
 	profileName, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
+	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
+	if profileResolution.Scope != nil {
+		profileName = profileResolution.Name
+		profileScope = profileResolution.Scope
+	}
 
 	// Spec 105 FR-010 G2: for a SCOPED caller (agent token), scope is
 	// checked BEFORE index presence. An id whose server is outside the

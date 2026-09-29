@@ -3941,6 +3941,16 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.securityApproveRequest:
+      properties:
+        block:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        force:
+          type: boolean
+      type: object
     management.BulkOperationResult:
       properties:
         errors:
@@ -6073,6 +6083,29 @@ paths:
       summary: Add an upstream server from a registry reference
       tags:
       - registries
+  /api/v1/review:
+    get:
+      description: Returns one row per quarantined server or trusted server with pending
+        or changed tools. Scoped callers see only servers they may enumerate.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Review queue
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to load review queue
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get the server review queue
+      tags:
+      - review
   /api/v1/routing:
     get:
       description: |-
@@ -6870,6 +6903,85 @@ paths:
       summary: Restart an upstream server
       tags:
       - servers
+  /api/v1/servers/{id}/review:
+    get:
+      description: Returns redacted server configuration, captured tool definitions,
+        annotations, scan verdicts, and diffs. Scoped callers receive the same 404
+        for invisible and missing servers.
+      parameters:
+      - description: Server name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Server review
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to load server review
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get review details for a server
+      tags:
+      - review
+  /api/v1/servers/{id}/security/approve:
+    post:
+      description: Saves the integrity baseline and optionally blocks selected tools
+        atomically before unquarantining the server.
+      parameters:
+      - description: Server name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.securityApproveRequest'
+        description: Force approval and tool names to keep disabled
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Server approved
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid request or unknown tool block target
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Dangerous scan verdict requires force or approval failed
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Approve a server after security review
+      tags:
+      - security
   /api/v1/servers/{id}/tool-calls:
     get:
       description: Retrieves tool call history filtered by upstream server ID. Returns

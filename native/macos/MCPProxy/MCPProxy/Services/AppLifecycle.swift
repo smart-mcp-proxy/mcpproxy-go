@@ -42,8 +42,15 @@ final class AppLifecycle: @unchecked Sendable {
     /// than no diagnostic.
     static var defaultJournalURL: URL {
         let name = "tray-lifecycle.jsonl"
+        let processInfo = ProcessInfo.processInfo
+        let launchedByXCTest = processInfo.processName == "xctest"
+            || processInfo.arguments.contains { $0.hasSuffix(".xctest") }
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
-              NSClassFromString("XCTestCase") == nil else {
+              NSClassFromString("XCTestCase") == nil,
+              // The shared singleton can initialize before XCTest loads
+              // XCTestCase or publishes its configuration path. Detect the
+              // runner executable/argument while that marker is still absent.
+              !launchedByXCTest else {
             return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
                 .appendingPathComponent("mcpproxy-tests-\(name)")
         }
@@ -51,6 +58,7 @@ final class AppLifecycle: @unchecked Sendable {
     }
 
     private let journal: LifecycleJournal
+    var journalURL: URL { journal.url }
     private let startedAt: Date
     private let lock = NSLock()
     private var claimedReason: String?

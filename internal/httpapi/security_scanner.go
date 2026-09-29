@@ -3,6 +3,8 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -330,6 +332,25 @@ func (s *Server) handleCancelScan(w http.ResponseWriter, r *http.Request) {
 
 // --- Approval handlers ---
 
+type securityApproveRequest struct {
+	Force bool     `json:"force"`
+	Block []string `json:"block,omitempty"`
+}
+
+// handleSecurityApprove godoc
+// @Summary Approve a server after security review
+// @Description Saves the integrity baseline and optionally blocks selected tools atomically before unquarantining the server.
+// @Tags security
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server name"
+// @Param body body securityApproveRequest false "Force approval and tool names to keep disabled"
+// @Success 200 {object} contracts.SuccessResponse "Server approved"
+// @Failure 400 {object} contracts.ErrorResponse "Invalid request or unknown tool block target"
+// @Failure 409 {object} contracts.ErrorResponse "Dangerous scan verdict requires force or approval failed"
+// @Router /api/v1/servers/{id}/security/approve [post]
 func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
 		return
@@ -340,14 +361,34 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Force bool `json:"force"`
+	var req securityApproveRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
+			return
+		}
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	// Use "api" as the approver since we don't have user context in personal edition
-	if err := s.securityController.ApproveServer(r.Context(), name, req.Force, "api"); err != nil {
-		s.writeError(w, r, http.StatusConflict, err.Error())
+	var approveErr error
+	if len(req.Block) > 0 {
+		blockApprover, ok := s.securityController.(interface {
+			ApproveServerWithBlocks(context.Context, string, bool, string, []string) error
+		})
+		if !ok {
+			s.writeError(w, r, http.StatusServiceUnavailable, "Security approval with tool blocks is unavailable")
+			return
+		}
+		approveErr = blockApprover.ApproveServerWithBlocks(r.Context(), name, req.Force, "api", req.Block)
+	} else {
+		approveErr = s.securityController.ApproveServer(r.Context(), name, req.Force, "api")
+	}
+	if approveErr != nil {
+		if errors.Is(approveErr, scanner.ErrToolApprovalBlockNotFound) {
+			s.writeError(w, r, http.StatusBadRequest, approveErr.Error())
+			return
+		}
+		s.writeError(w, r, http.StatusConflict, approveErr.Error())
 		return
 	}
 	s.writeSuccess(w, map[string]string{"status": "approved", "server_name": name})

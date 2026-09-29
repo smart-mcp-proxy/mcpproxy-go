@@ -13,6 +13,9 @@ const ActivityRecordsBucket = "activity_records"
 type ActivityType string
 
 const (
+	// MetadataKeyBlockReason is the typed cause of a profile policy refusal.
+	MetadataKeyBlockReason = "block_reason"
+
 	// ActivityTypeToolCall represents a tool execution event
 	ActivityTypeToolCall ActivityType = "tool_call"
 	// ActivityTypePolicyDecision represents a policy blocking a tool call

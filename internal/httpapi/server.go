@@ -32,6 +32,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -1024,7 +1025,8 @@ func (s *Server) setupRoutes() {
 		r.Post("/servers/import", s.requireServerOp(auth.ServerOpAdd, s.handleImportServers))          // Import from file upload
 		r.Post("/servers/import/json", s.requireServerOp(auth.ServerOpAdd, s.handleImportServersJSON)) // Import from JSON/TOML content
 		r.Get("/servers/import/paths", s.handleGetCanonicalConfigPaths)                                // Get canonical config paths
-		r.Post("/servers/import/path", s.requireServerOp(auth.ServerOpAdd, s.handleImportFromPath))    // Import from file path
+		r.Get("/review", s.handleGetReviewQueue)
+		r.Post("/servers/import/path", s.requireServerOp(auth.ServerOpAdd, s.handleImportFromPath)) // Import from file path
 		r.Post("/servers/reconnect", s.requireServerOp(auth.ServerOpRestart, s.handleForceReconnectServers))
 		// T076-T077: Bulk operation routes
 		r.Post("/servers/restart_all", s.requireServerOp(auth.ServerOpRestart, s.handleRestartAll))
@@ -1063,6 +1065,7 @@ func (s *Server) setupRoutes() {
 			// operation (issue #873): pure rediscover + reindex, no state change.
 			r.Post("/refresh", s.requireServerOp(auth.ServerOpRefresh, s.handleRefreshServer))
 			r.Get("/tools", s.handleGetServerTools)
+			r.Get("/review", s.handleGetServerReview)
 			r.Get("/logs", s.handleGetServerLogs)
 			// Spec 044: per-server diagnostics with stable error_code.
 			r.Get("/diagnostics", s.handleGetServerDiagnostics)
@@ -3774,6 +3777,7 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to get tools: %v", err))
 		return
 	}
+	tools = filterProfileToolRows(s.controller, r.Context(), serverID, tools)
 
 	// Convert + enrich (shared with the global tools endpoint, spec 050).
 	// Hash pins are operator-tier only (Spec 098 T020).
@@ -3940,6 +3944,7 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 			s.logger.Debugw("Global tools: server tools fetch failed", "server", name, "error", terr)
 			continue
 		}
+		generic = filterProfileToolRows(s.controller, r.Context(), name, generic)
 
 		typed := s.enrichServerTools(name, generic, discloseHash)
 		for i := range typed {
@@ -4048,7 +4053,19 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 
 	var results []map[string]interface{}
 	var err error
-	if auth.IsScopedCaller(r.Context()) {
+	profileSearchHandled := false
+	if profileController, ok := s.controller.(profileToolVisibilityController); ok {
+		inScope := func(serverName string) bool { return canSeeServer(r.Context(), serverName) }
+		if auth.IsScopedCaller(r.Context()) {
+			if ac := auth.AuthContextFromContext(r.Context()); ac != nil && len(ac.AllowedServers) == 0 {
+				results, profileSearchHandled = []map[string]interface{}{}, true
+			}
+		}
+		if !profileSearchHandled {
+			results, profileSearchHandled, err = profileController.SearchToolsForProfile(r.Context(), query, limit, inScope)
+		}
+	}
+	if !profileSearchHandled && auth.IsScopedCaller(r.Context()) {
 		// #1166 / Spec 107 T075a: the MCP twin of this discovery surface
 		// filters through serverInScope (internal/server/mcp_visibility.go);
 		// this one used to post-filter a GLOBAL top-K, so a hidden server
@@ -4065,7 +4082,7 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 				return canSeeServer(ctx, serverName)
 			})
 		}
-	} else {
+	} else if !profileSearchHandled {
 		results, err = s.controller.SearchTools(query, limit)
 	}
 	if err != nil {
@@ -5309,6 +5326,15 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 	// concurrency slot releases that slot immediately (spec 093 FR-005).
 	newToolCall, err := s.controller.ReplayToolCall(r.Context(), id, request.Arguments)
 	if err != nil {
+		if errors.Is(err, profile.ErrToolOutsideProfile) {
+			s.writeError(w, r, http.StatusNotFound, "Tool call not found")
+			return
+		}
+		var profileRefusal *profile.ToolBlockedError
+		if errors.As(err, &profileRefusal) {
+			s.writeError(w, r, http.StatusForbidden, profileRefusal.Error())
+			return
+		}
 		// Spec 093 FR-011: a replay shed by a concurrency limit is backpressure,
 		// answered like any other shed tool call — 429 + Retry-After, not a 500
 		// and certainly not the 200 success:true it used to produce when the
@@ -5935,6 +5961,18 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	// Call tool via controller
 	result, err := s.controller.CallTool(ctx, request.ToolName, request.Arguments)
 	if err != nil {
+		if request.ToolName == "code_execution" && errors.Is(err, profile.ErrCodeExecutionBlocked) {
+			// /tools/call bypasses MCP tools/list filters. Preserve the same
+			// unknown-tool response as the hidden builtin's wire behavior; the
+			// dedicated /code/exec route still maps the typed refusal to 403.
+			s.writeError(w, r, http.StatusInternalServerError, "Failed to call tool: tool call failed: unknown tool: code_execution")
+			return
+		}
+		var profileRefusal *profile.ToolBlockedError
+		if errors.As(err, &profileRefusal) {
+			s.writeError(w, r, http.StatusForbidden, profileRefusal.Error())
+			return
+		}
 		// Spec 093 FR-011: a concurrency-limiter shed is backpressure, not a
 		// server fault — answer 429 with a Retry-After derived from the shedding
 		// scope's effective queue_timeout so a client can back off correctly.
@@ -6859,9 +6897,18 @@ func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")
 		return
 	}
+	if profileController, ok := s.controller.(profileToolVisibilityController); ok &&
+		!profileController.ToolAllowedByProfile(r.Context(), serverID, toolName) {
+		s.writeError(w, r, http.StatusNotFound, "Tool approval record not found")
+		return
+	}
 
 	record, err := s.controller.GetToolApproval(serverID, toolName)
 	if err != nil {
+		if errors.Is(err, storage.ErrToolApprovalNotFound) {
+			s.writeError(w, r, http.StatusNotFound, "Tool approval record not found")
+			return
+		}
 		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Tool approval record not found: %v", err))
 		return
 	}
@@ -6909,6 +6956,15 @@ func (s *Server) handleExportToolDescriptions(w http.ResponseWriter, r *http.Req
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to list tool approvals: %v", err))
 		return
+	}
+	if profileController, ok := s.controller.(profileToolVisibilityController); ok {
+		visible := records[:0]
+		for _, record := range records {
+			if profileController.ToolAllowedByProfile(r.Context(), record.ServerName, record.ToolName) {
+				visible = append(visible, record)
+			}
+		}
+		records = visible
 	}
 
 	format := r.URL.Query().Get("format")

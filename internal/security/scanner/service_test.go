@@ -219,6 +219,10 @@ func (m *mockStorage) SaveIntegrityBaseline(baseline *IntegrityBaseline) error {
 	return nil
 }
 
+func (m *mockStorage) SaveIntegrityBaselineWithBlocks(baseline *IntegrityBaseline, _ []ToolApprovalBlock) error {
+	return m.SaveIntegrityBaseline(baseline)
+}
+
 func (m *mockStorage) GetIntegrityBaseline(serverName string) (*IntegrityBaseline, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -329,6 +333,28 @@ type mockUnquarantiner struct {
 	mu    sync.Mutex
 	calls []string
 	err   error
+}
+
+type orderedApprovalStorage struct {
+	Storage
+	steps *[]string
+}
+
+func (s *orderedApprovalStorage) SaveIntegrityBaselineWithBlocks(baseline *IntegrityBaseline, blocks []ToolApprovalBlock) error {
+	*s.steps = append(*s.steps, "baseline_and_blocks")
+	if len(blocks) != 1 || blocks[0].ToolName != "delete_issue" || blocks[0].ApprovedBy != "reviewer" {
+		return fmt.Errorf("unexpected blocks passed to atomic storage: %#v", blocks)
+	}
+	return s.Storage.SaveIntegrityBaselineWithBlocks(baseline, blocks)
+}
+
+type orderedUnquarantiner struct {
+	steps *[]string
+}
+
+func (u *orderedUnquarantiner) UnquarantineServer(string) error {
+	*u.steps = append(*u.steps, "unquarantine")
+	return nil
 }
 
 func (m *mockUnquarantiner) UnquarantineServer(serverName string) error {
@@ -1086,6 +1112,78 @@ func TestServiceApproveServerCallsUnquarantiner(t *testing.T) {
 	if _, err := store.GetIntegrityBaseline("qs-server"); err != nil {
 		t.Errorf("expected baseline saved: %v", err)
 	}
+}
+
+func TestServiceApproveServerWithBlocksPersistsBeforeUnquarantine(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	steps := []string{}
+	svc.storage = &orderedApprovalStorage{Storage: store, steps: &steps}
+	svc.SetServerUnquarantiner(&orderedUnquarantiner{steps: &steps})
+
+	if err := svc.ApproveServerWithBlocks(context.Background(), "qs-server", true, "reviewer", []string{"delete_issue", "delete_issue"}); err != nil {
+		t.Fatalf("approve with block failed: %v", err)
+	}
+	if !assert.Equal(t, []string{"baseline_and_blocks", "unquarantine"}, steps) {
+		t.Fatalf("unquarantine ran before the atomic baseline+block write: %v", steps)
+	}
+	if _, err := store.GetIntegrityBaseline("qs-server"); err != nil {
+		t.Fatalf("expected baseline saved: %v", err)
+	}
+}
+
+func TestServiceApproveServerWithBlocksKeepsBlockWhenUnquarantineFails(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	blockedStore := &blockRecordingStorage{Storage: store, blocks: make(map[string]map[string]ToolApprovalBlock)}
+	svc.storage = blockedStore
+	unquarantiner := &failingStateUnquarantiner{quarantined: true, err: fmt.Errorf("injected unquarantine failure")}
+	svc.SetServerUnquarantiner(unquarantiner)
+
+	err := svc.ApproveServerWithBlocks(context.Background(), "qs-server", true, "reviewer", []string{"delete_issue"})
+	if err == nil {
+		t.Fatal("expected injected unquarantine error")
+	}
+	if !unquarantiner.quarantined {
+		t.Fatal("server must remain quarantined when unquarantine fails")
+	}
+	if unquarantiner.calls != 1 {
+		t.Fatalf("expected injected failure at the unquarantine boundary, got %d calls", unquarantiner.calls)
+	}
+	if block, ok := blockedStore.blocks["qs-server"]["delete_issue"]; !ok || block.ApprovedBy != "reviewer" {
+		t.Fatalf("tool block must be durable before unquarantine: %#v", blockedStore.blocks)
+	}
+}
+
+type blockRecordingStorage struct {
+	Storage
+	blocks map[string]map[string]ToolApprovalBlock
+}
+
+func (s *blockRecordingStorage) SaveIntegrityBaselineWithBlocks(baseline *IntegrityBaseline, blocks []ToolApprovalBlock) error {
+	if err := s.Storage.SaveIntegrityBaselineWithBlocks(baseline, blocks); err != nil {
+		return err
+	}
+	if s.blocks[baseline.ServerName] == nil {
+		s.blocks[baseline.ServerName] = make(map[string]ToolApprovalBlock)
+	}
+	for _, block := range blocks {
+		s.blocks[baseline.ServerName][block.ToolName] = block
+	}
+	return nil
+}
+
+type failingStateUnquarantiner struct {
+	quarantined bool
+	calls       int
+	err         error
+}
+
+func (u *failingStateUnquarantiner) UnquarantineServer(string) error {
+	u.calls++
+	if u.err != nil {
+		return u.err
+	}
+	u.quarantined = false
+	return nil
 }
 
 // TestServiceApproveServerBlockedDoesNotUnquarantine verifies the tier-driven

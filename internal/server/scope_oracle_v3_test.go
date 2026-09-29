@@ -1,6 +1,9 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,7 +41,6 @@ type scopeOracleV3Fixture struct {
 func newScopeOracleV3Fixture(t *testing.T, full bool) *scopeOracleV3Fixture {
 	t.Helper()
 	proxy, rt := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
-		config.EnablePolicyForTest(t)
 		cfg.Servers = []*config.ServerConfig{{Name: "a", Enabled: true}}
 		if full {
 			cfg.Servers = append(cfg.Servers,
@@ -138,5 +140,62 @@ func TestScopeOracleV3_HiddenByProfileIdenticalAcrossFixtures(t *testing.T) {
 	t.Run("admin control: the full fixture really does contain the hidden sentinel tools", func(t *testing.T) {
 		resp := callRetrieveToolsV3(t, full.proxy, adminCtx(), "SENTINEL_scopeOracleV3B_71a2_tool", 10)
 		require.NotEmpty(t, resp.Tools, "fixture premise: an unscoped administrator must see the hidden sentinel tool")
+	})
+}
+
+// The same two-fixture non-disclosure oracle must hold for the newer
+// resolution sources added by client credentials and anonymous_profile.
+// Previously T017 only exercised an agent pin, leaving those sources
+// unprotected against hidden-server influence on hidden_by_profile/results.
+func TestScopeOracleV3_NewResolutionSourcesMatchAcrossFixtures(t *testing.T) {
+	narrow := newScopeOracleV3Fixture(t, false)
+	full := newScopeOracleV3Fixture(t, true)
+	narrow.proxy.currentConfig().AnonymousProfile = "cap-read-a"
+	full.proxy.currentConfig().AnonymousProfile = "cap-read-a"
+
+	sources := map[string]struct {
+		narrow context.Context
+		full   context.Context
+	}{
+		"locked client pin":         {clientCtx("desktop", "cap-read-a", "locked"), clientCtx("desktop", "cap-read-a", "locked")},
+		"switchable client binding": {clientCtx("desktop", "cap-read-a", "switchable"), clientCtx("desktop", "cap-read-a", "switchable")},
+		"anonymous profile":         {anonCtx(), anonCtx()},
+	}
+	queries := []string{
+		"read_thing", "write_thing", "destroy_thing", "erase", "ns_erase",
+		"SENTINEL_scopeOracleV3B_71a2_tool", "SENTINEL_scopeOracleV3AB_39fe_tool",
+	}
+	for source, callers := range sources {
+		t.Run(source, func(t *testing.T) {
+			for _, query := range queries {
+				t.Run(query, func(t *testing.T) {
+					narrowResp := callRetrieveToolsV3(t, narrow.proxy, callers.narrow, query, 10)
+					fullResp := callRetrieveToolsV3(t, full.proxy, callers.full, query, 10)
+					require.NotNil(t, narrowResp.HiddenByProfile, "the profile must be active for %s", source)
+					require.NotNil(t, fullResp.HiddenByProfile, "the profile must be active for %s", source)
+					assert.Nil(t, narrowResp.Profile, "credential and anonymous resolution sources never reveal the base profile")
+					assert.Nil(t, fullResp.Profile, "credential and anonymous resolution sources never reveal the base profile")
+					if query == "read_thing" {
+						require.NotEmpty(t, narrowResp.Tools, "positive control: the admitted read tool is discoverable")
+						require.NotEmpty(t, fullResp.Tools, "positive control: the admitted read tool is discoverable")
+					}
+					if strings.HasPrefix(query, "SENTINEL") {
+						assert.Empty(t, narrowResp.Tools)
+						assert.Empty(t, fullResp.Tools, "out-of-profile servers must stay hidden for %s", source)
+					}
+					left, err := json.Marshal(narrowResp)
+					require.NoError(t, err)
+					right, err := json.Marshal(fullResp)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(left), string(right), "hidden servers must not perturb discovery for %s", source)
+				})
+			}
+		})
+	}
+	t.Run("admin control: full fixture contains both hidden sentinel tools", func(t *testing.T) {
+		for _, query := range queries[5:] {
+			resp := callRetrieveToolsV3(t, full.proxy, adminCtx(), query, 10)
+			require.NotEmpty(t, resp.Tools, "fixture premise: administrator must find %s", query)
+		}
 	})
 }

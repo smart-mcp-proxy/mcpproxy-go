@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -19,13 +20,16 @@ import (
 // globalToolsController drives the GET /api/v1/tools handler (spec 050).
 type globalToolsController struct {
 	MockServerController
-	allServers   []map[string]interface{}
-	serverTools  map[string][]map[string]interface{}
-	serverErr    map[string]error
-	approvals    map[string]*storage.ToolApprovalRecord // key serverName + "\x00" + toolName
-	configDenied map[string]bool
-	usage        map[string]storage.ToolUsageStat
-	usageErr     error
+	allServers           []map[string]interface{}
+	serverTools          map[string][]map[string]interface{}
+	serverErr            map[string]error
+	approvals            map[string]*storage.ToolApprovalRecord // key serverName + "\x00" + toolName
+	configDenied         map[string]bool
+	usage                map[string]storage.ToolUsageStat
+	usageErr             error
+	profileSearchResults []map[string]interface{}
+	profileSearchHandled bool
+	profileAllowed       map[string]bool
 }
 
 // GetManagementService returns nil so handleGetGlobalTools exercises the
@@ -60,6 +64,15 @@ func (m *globalToolsController) AggregateToolUsage(_ time.Time) (map[string]stor
 		return nil, m.usageErr
 	}
 	return m.usage, nil
+}
+
+func (m *globalToolsController) SearchToolsForProfile(_ context.Context, _ string, _ int, _ func(string) bool) ([]map[string]interface{}, bool, error) {
+	return m.profileSearchResults, m.profileSearchHandled, nil
+}
+
+func (m *globalToolsController) ToolAllowedByProfile(_ context.Context, serverName, toolName string) bool {
+	allowed, exists := m.profileAllowed[serverName+"\x00"+toolName]
+	return !exists || allowed
 }
 
 func doGlobalTools(t *testing.T, ctrl *globalToolsController) map[string]interface{} {
@@ -133,6 +146,23 @@ func TestGlobalTools_MergeEnrichmentStatsUsage(t *testing.T) {
 	assert.Equal(t, float64(1), stats["enabled"])
 	assert.Equal(t, float64(1), stats["pending_approval"]) // delete_repo pending
 	assert.NotEqual(t, true, data["partial"])
+}
+
+func TestGlobalTools_ProfileFiltersDisallowedRows(t *testing.T) {
+	ctrl := &globalToolsController{
+		allServers: []map[string]interface{}{{"name": "github"}},
+		serverTools: map[string][]map[string]interface{}{
+			"github": {{"name": "list_issues", "description": "List issues"}, {"name": "create_issue", "description": "Create issue"}},
+		},
+		profileAllowed: map[string]bool{"github\x00create_issue": false},
+	}
+	data := doGlobalTools(t, ctrl)
+	tools, ok := data["tools"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, tools, 1)
+	tool := tools[0].(map[string]interface{})
+	require.Equal(t, "list_issues", tool["name"])
+	require.Equal(t, "github", tool["server_name"])
 }
 
 func TestGlobalTools_PartialServerFailureDoesNotFail(t *testing.T) {

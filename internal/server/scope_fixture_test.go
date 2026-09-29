@@ -106,7 +106,21 @@ type countingUpstream struct {
 // runtime discovery lists it; storage records are never seeded here.
 func (u *countingUpstream) serve(spec toolSpec) {
 	u.Tools = append(u.Tools, spec.info())
-	u.mcpSrv.AddTool(mcp.Tool{Name: spec.Name, Description: spec.Description, InputSchema: mcp.ToolInputSchema{Type: "object"}},
+	tool := mcp.Tool{
+		Name: spec.Name, Description: spec.Description,
+		InputSchema: mcp.ToolInputSchema{Type: "object"},
+		// NewTool's defaults advertise destructive=true and readOnly=false.
+		// This fixture's nil annotations mean genuinely unannotated, while a
+		// non-nil toolSpec carries the exact hints the runtime StateView gets.
+		Annotations: mcp.ToolAnnotation{},
+	}
+	if spec.Annotations != nil {
+		tool.Annotations.ReadOnlyHint = spec.Annotations.ReadOnlyHint
+		tool.Annotations.DestructiveHint = spec.Annotations.DestructiveHint
+		tool.Annotations.IdempotentHint = spec.Annotations.IdempotentHint
+		tool.Annotations.OpenWorldHint = spec.Annotations.OpenWorldHint
+	}
+	u.mcpSrv.AddTool(tool,
 		func(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			u.record(request.Params.Name)
 			return mcp.NewToolResultText("ok"), nil

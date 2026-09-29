@@ -746,6 +746,9 @@ func (r Redaction) Value(key string, v interface{}) interface{} {
 		}
 		return out
 	case string:
+		if strings.EqualFold(key, "command") {
+			return r.CapString(r.CommandString(typed))
+		}
 		return r.CapString(r.Leaf(key, typed))
 	default:
 		// Bools, json.Number and nil carry no secrets and stay verbatim.

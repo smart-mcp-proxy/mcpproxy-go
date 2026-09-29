@@ -62,7 +62,7 @@ func RedactServerSecretFields(server *contracts.Server) {
 	// answer differently about the same string. The rule is also the only thing
 	// that catches a token pasted into either field.
 	if server.Command != "" {
-		server.Command = LiveRedaction.Leaf("command", server.Command)
+		server.Command = LiveRedaction.CommandString(server.Command)
 	}
 	if server.WorkingDir != "" {
 		server.WorkingDir = LiveRedaction.Leaf("working_dir", server.WorkingDir)

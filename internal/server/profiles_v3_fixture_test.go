@@ -70,12 +70,13 @@ func enforcementMatrixProfiles() []config.ProfileConfig {
 // contracts/enforcement-matrix.md fixture profiles (work-readonly, work-full,
 // legacy) and three fake upstreams — github (5 tools spanning every
 // annotation shape), notion (1 write tool) and filesystem (1 read tool) —
-// exactly as the matrix's fixture table lists them. It enables the FR-009a
-// policy gate for the duration of the test (config.EnablePolicyForTest) so a
-// v3 profile loads before 108-d ships real enforcement.
+// exactly as the matrix's fixture table lists them.
 func newProfilesV3Fixture(t *testing.T) (*MCPProxyServer, *runtime.Runtime) {
+	return newProfilesV3FixtureWithConfig(t, nil)
+}
+
+func newProfilesV3FixtureWithConfig(t *testing.T, configure func(*config.Config)) (*MCPProxyServer, *runtime.Runtime) {
 	t.Helper()
-	config.EnablePolicyForTest(t)
 
 	proxy, rt := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
 		cfg.Servers = []*config.ServerConfig{
@@ -84,6 +85,9 @@ func newProfilesV3Fixture(t *testing.T) (*MCPProxyServer, *runtime.Runtime) {
 			{Name: "filesystem", Enabled: true},
 		}
 		cfg.Profiles = enforcementMatrixProfiles()
+		if configure != nil {
+			configure(cfg)
+		}
 	})
 
 	startCountingUpstream(t, proxy, rt, "github",

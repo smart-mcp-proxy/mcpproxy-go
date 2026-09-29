@@ -269,9 +269,10 @@ actor APIClient {
         try await postAction(path: "/api/v1/servers/\(id)/quarantine")
     }
 
-    /// Unquarantine a server via `POST /api/v1/servers/{id}/unquarantine`.
-    func unquarantineServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/unquarantine")
+    /// Approve a quarantined server through the scan gate. This is the only
+    /// native path that may release quarantine.
+    func securityApproveServer(_ id: String, force: Bool = false) async throws {
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/security/approve", body: ["force": force])
     }
 
     /// Approve all pending/changed tools for a server via `POST /api/v1/servers/{id}/tools/approve`.

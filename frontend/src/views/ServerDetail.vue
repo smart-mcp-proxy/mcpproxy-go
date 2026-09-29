@@ -3089,32 +3089,6 @@ async function quarantineServer() {
   }
 }
 
-async function unquarantineServer() {
-  if (!server.value) return
-
-  actionLoading.value = true
-  try {
-    await serversStore.unquarantineServer(server.value.name)
-    systemStore.addToast({
-      type: 'success',
-      title: 'Server Unquarantined',
-      message: `${server.value.name} has been removed from quarantine`,
-    })
-    // Update local server reference
-    await serversStore.fetchServers()
-    // server is a computed from the store — no manual reassignment needed.
-    await Promise.all([refreshToolsSilently(), loadToolApprovals()])
-  } catch (error) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Unquarantine Failed',
-      message: error instanceof Error ? error.message : 'Unknown error',
-    })
-  } finally {
-    actionLoading.value = false
-  }
-}
-
 // --- Security-aware approval flow (F-04) ---
 // Approve buttons go through POST /security/approve which enforces the
 // scanner gate before unquarantining the server. Force is only used after

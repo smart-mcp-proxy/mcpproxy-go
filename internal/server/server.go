@@ -667,6 +667,25 @@ func (s *Server) Attention() []contracts.AttentionItem {
 	return s.runtime.Attention()
 }
 
+// GetReviewQueue forwards the REST review read through the production server
+// controller to the runtime implementation. The HTTP API is mounted with
+// *Server as its controller, so handler-level tests alone do not prove this
+// adapter is wired.
+func (s *Server) GetReviewQueue(ctx context.Context) (*runtime.ReviewQueue, error) {
+	if s.runtime == nil {
+		return nil, fmt.Errorf("runtime unavailable")
+	}
+	return s.runtime.GetReviewQueue(ctx)
+}
+
+// GetServerReview forwards the scoped REST review read to the runtime.
+func (s *Server) GetServerReview(ctx context.Context, serverName string) (*runtime.ServerReview, error) {
+	if s.runtime == nil {
+		return nil, fmt.Errorf("runtime unavailable")
+	}
+	return s.runtime.GetServerReview(ctx, serverName)
+}
+
 // GetManagementService returns the management service instance from runtime.
 // Returns nil if service hasn't been set yet.
 func (s *Server) GetManagementService() management.Service {
@@ -2544,6 +2563,11 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 	slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
 	slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
 	slug = strings.Trim(slug, "/")
+	// An active client binding can turn an otherwise unprofiled anonymous
+	// caller into a deny-all BindingGuarded resolution. Compute it before the
+	// publication-gap branch too, so that branch cannot restore URL probing.
+	bindingGuardedAnonymous := anonymousProfileCaller(r.Context()) && s.mcpProxy != nil &&
+		s.mcpProxy.ResolveProfileV3(r.Context(), profiles).BindingGuarded
 
 	if profiles == nil {
 		// Acquire could not pair this request's own runtime.Config() read
@@ -2557,7 +2581,7 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 		// (Spec 105 PR D review round 11, MUST-FIX). An administrator-shaped
 		// caller is not timing-contract-bound (SC-005) and falls back to a
 		// fresh build over the live config, matching pre-105 behaviour.
-		if auth.IsScopedCaller(r.Context()) {
+		if auth.IsScopedCaller(r.Context()) || bindingGuardedAnonymous {
 			var agentName string
 			if ac := auth.AuthContextFromContext(r.Context()); ac != nil {
 				agentName = ac.AgentName
@@ -2570,18 +2594,33 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 			return
 		}
 		profiles = s.profileIndexes.For(s.runtimeConfig())
+		bindingGuardedAnonymous = anonymousProfileCaller(r.Context()) && s.mcpProxy != nil &&
+			s.mcpProxy.ResolveProfileV3(r.Context(), profiles).BindingGuarded
 	}
 	cfg := profiles.cfg
+	if bindingGuardedAnonymous {
+		// ResolveProfileV3 represents this anonymous request with a deny-all
+		// scope. selectable intentionally treats administrator-shaped callers
+		// as selectable, so applying it here would re-open the URL inventory.
+		// Refuse before the slug lookup, exactly like every other inaccessible
+		// profile outcome.
+		s.logger.Info("profile URL refused for scoped caller",
+			zap.String("profile", slug),
+			zap.String("remote_addr", r.RemoteAddr))
+		profileNotSelectable(w, slug)
+		return
+	}
+	confinedAnonymous := anonymousProfileCaller(r.Context()) && cfg != nil && cfg.AnonymousProfile != ""
 
 	// One slug → profile index per snapshot (built before the snapshot was
 	// published, see warmProfileIndex): the gate below and the lookup after
 	// it resolve the slug directly, so neither the refusal nor the admission
 	// walks cfg.Profiles.
 
-	// Spec 105 FR-004: the selectable-profile gate for scoped callers. It
+	// Spec 105 FR-004: the selectable-profile gate for confined callers. It
 	// evaluates the requested profile (and the pin) ONLY — never the
 	// selectable list, whose cost is fleet-sized (profileIndex.selectable).
-	if auth.IsScopedCaller(r.Context()) {
+	if auth.IsScopedCaller(r.Context()) || confinedAnonymous {
 		if !profiles.selectable(r.Context(), slug) {
 			// Silent towards the agent, not towards the operator: the gate
 			// answers before the logging handler mounted inside it, so this
@@ -2607,7 +2646,7 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 		return
 	}
 
-	// Look up profile by slug (lock-free snapshot). A scoped caller that
+	// Look up profile by slug (lock-free snapshot). A confined caller that
 	// passed the gate always resolves here — the predicate only admits
 	// configured profiles. The position is kept, not just the *ProfileConfig,
 	// so the effective-server computation below can reuse this exact
@@ -3944,30 +3983,49 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	if callArgs == nil {
 		callArgs = original.Arguments
 	}
-
-	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
-	// own annotations snapshot is the canonical target tier here — the same
-	// signal tierForAnnotations derives from a live gate's identity lookup
-	// elsewhere — so a replayed destructive/write call is not reported as
-	// `operation:"unknown"` when the snapshot is available. Left empty (and
-	// so defaulted to "unknown" by installAuditAttempt) when the record
-	// carries no annotations at all: mirrors mcp.go's own choice not to use
-	// tierForAnnotations' found=false "destructive" default for the AUDIT
-	// line — that default is an AUTHORIZATION fail-closed, and would
-	// misrepresent an unresolved tier as maximally risky rather than simply
-	// unknown to the proxy.
+	// Install the attempt before the profile gate so an authorization refusal
+	// is recorded with the same audit context as every other dispatch path.
 	var operation string
 	if original.Annotations != nil {
 		operation = tierForAnnotations(toConfigToolAnnotations(original.Annotations), true)
 	}
+	requestID := mintCorrelationID(original.ServerName, original.ToolName)
 	ctx = s.mcpProxy.installAuditAttempt(ctx, auditAttemptSpec{
-		RequestID: mintCorrelationID(original.ServerName, original.ToolName),
+		RequestID: requestID,
 		Server:    original.ServerName,
 		Tool:      original.ToolName,
 		Operation: operation,
 		Surface:   auditSurfaceREST,
 		Args:      callArgs,
 	})
+
+	// Spec 108 FR-015: replay is a dispatch path, so evaluate its recorded
+	// server/tool against the same request-scoped profile resolution before
+	// audit authorization or upstream I/O. Profile server scope is concealed
+	// as not-found; tool policy denials retain the shared refusal text.
+	profileIndex := s.mcpProxy.profileIndexCurrent(ctx)
+	profileResolution := s.mcpProxy.ResolveProfileV3(ctx, profileIndex)
+	if profileResolution.Scope != nil && !profileResolution.Scope.Allows(original.ServerName) {
+		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonProfileScope)
+		return nil, profile.ErrToolOutsideProfile
+	}
+	if policy := profileResolution.Policy; policy != nil {
+		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
+		intrinsic := profile.IntrinsicTier(annotations, found)
+		if admitted, reason, tier := policy.Decide(original.ServerName, original.ToolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
+			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName)
+			refusal := &profile.ToolBlockedError{Reason: blockReason, Message: message}
+			s.mcpProxy.emitActivityPolicyDecisionWithBlockReason(ctx, original.ServerName, original.ToolName,
+				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonOther, string(blockReason))
+			return nil, refusal
+		}
+	}
+
+	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
+	// own annotations snapshot supplies the operation tier above before any
+	// gate runs, so a denied replay has the same correctly classified audit
+	// context as a dispatched replay.
 	// Spec 107 FR-012: `decision: allow` MUST be written after the last gate
 	// and before the upstream call (round-3 cross-review finding, PR-D) —
 	// auditToolCall's own backfill only runs on completion, which would
@@ -4242,6 +4300,17 @@ func (a *serverUnquarantinerAdapter) UnquarantineServer(serverName string) error
 	}
 	return a.server.UnquarantineServer(serverName)
 }
+
+// RecordToolBlocksForSecurityApproval publishes audit events for blocks that
+// the scanner service committed atomically with the approved baseline.
+func (a *serverUnquarantinerAdapter) RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string) {
+	if a.server == nil || a.server.runtime == nil {
+		return
+	}
+	a.server.runtime.RecordToolBlocksForSecurityApproval(serverName, toolNames, blockedBy)
+}
+
+var _ scanner.ToolBlockRecorder = (*serverUnquarantinerAdapter)(nil)
 
 // scanSummaryEnricherAdapter bridges scanner.Service.GetScanSummary (which
 // returns the scanner-internal *scanner.ScanSummary type) to

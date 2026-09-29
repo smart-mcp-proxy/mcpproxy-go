@@ -233,26 +233,6 @@ func (m *ServerStateManager) QuarantineServer(serverName string, quarantined boo
 	return nil
 }
 
-// UnquarantineServer removes a server from quarantine and ensures all state is synchronized
-func (m *ServerStateManager) UnquarantineServer(serverName string) error {
-	m.logger.Info("UnquarantineServer called", zap.String("server", serverName))
-
-	// Update the server quarantine status
-	if err := m.server.UnquarantineServer(serverName); err != nil {
-		return fmt.Errorf("failed to unquarantine server: %w", err)
-	}
-
-	// Force state refresh immediately after the change
-	if err := m.RefreshState(); err != nil {
-		m.logger.Error("Failed to refresh state after unquarantine change", zap.Error(err))
-		// Don't return error here as the unquarantine operation itself succeeded
-	}
-
-	m.logger.Info("Server unquarantine completed successfully", zap.String("server", serverName))
-
-	return nil
-}
-
 // EnableServer enables/disables a server and ensures all state is synchronized
 func (m *ServerStateManager) EnableServer(serverName string, enabled bool) error {
 	action := actionDisable
@@ -300,7 +280,7 @@ type MenuManager struct {
 	serverOAuthItems      map[string]*systray.MenuItem // server name -> OAuth login menu item
 	serverRestartItems    map[string]*systray.MenuItem // server name -> restart action menu item
 	quarantineInfoEmpty   *systray.MenuItem            // "No servers" info item
-	quarantineInfoHelp    *systray.MenuItem            // "Click to unquarantine" help item
+	quarantineInfoHelp    *systray.MenuItem            // Review guidance
 
 	// Profile switcher tracking (Profiles v2 T5). profileMenuItems is keyed by
 	// profile slug; the "" key is the synthetic "All servers" entry.
@@ -616,7 +596,7 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 	// --- Create Info Items if Needed ---
 	if m.quarantineInfoEmpty == nil || m.quarantineInfoHelp == nil {
 		m.quarantineInfoEmpty = m.quarantineMenu.AddSubMenuItem("(No servers quarantined)", "No servers are currently quarantined")
-		m.quarantineInfoHelp = m.quarantineMenu.AddSubMenuItem("Click to unquarantine", "Click on a quarantined server to remove it from quarantine")
+		m.quarantineInfoHelp = m.quarantineMenu.AddSubMenuItem("Click a server to review", "Review captured tools before approving a quarantined server")
 		m.quarantineInfoEmpty.Disable()
 		m.quarantineInfoHelp.Disable()
 		// Add empty separator for visual separation
@@ -685,7 +665,7 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 
 			quarantineMenuItem := m.quarantineMenu.AddSubMenuItem(
 				displayText,
-				fmt.Sprintf("Click to unquarantine %s", serverName),
+				fmt.Sprintf("Click to review %s in the Web UI", serverName),
 			)
 
 			if quarantineMenuItem == nil {
@@ -703,15 +683,7 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 
 			m.quarantineMenuItems[serverName] = quarantineMenuItem
 
-			// Set up the one-time click handler
-			go func(name string, item *systray.MenuItem) {
-				for range item.ClickedCh {
-					if m.onServerAction != nil {
-						// Run in a new goroutine to avoid blocking the event channel
-						go m.onServerAction(name, "unquarantine")
-					}
-				}
-			}(serverName, quarantineMenuItem)
+			m.wireQuarantineMenuItemReviewClick(serverName, quarantineMenuItem)
 		}
 	} else {
 		// No new quarantined servers - just update existing items
@@ -729,6 +701,38 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 				menuItem.Hide()
 			}
 		}
+	}
+}
+
+// wireQuarantineMenuItemReviewClick keeps the native menu event wired to the
+// informed review flow. The callback runs asynchronously so a click cannot
+// block systray's event channel while the Web UI opens.
+func wireQuarantineMenuItemReviewClick(name string, item *systray.MenuItem, onServerAction func(string, string)) {
+	if item == nil {
+		return
+	}
+	go func() {
+		for range item.ClickedCh {
+			if onServerAction != nil {
+				go onServerAction(name, "review")
+			}
+		}
+	}()
+}
+
+// wireQuarantineMenuItemReviewClick resolves the callback at click time. The
+// first synchronization can create native menu items before tray startup has
+// installed its action handler.
+func (m *MenuManager) wireQuarantineMenuItemReviewClick(name string, item *systray.MenuItem) {
+	wireQuarantineMenuItemReviewClick(name, item, m.dispatchServerAction)
+}
+
+func (m *MenuManager) dispatchServerAction(name, action string) {
+	m.mu.RLock()
+	callback := m.onServerAction
+	m.mu.RUnlock()
+	if callback != nil {
+		callback(name, action)
 	}
 }
 
@@ -1303,19 +1307,6 @@ func (m *SynchronizationManager) HandleServerQuarantine(serverName string, quara
 
 	// Update state
 	if err := m.stateManager.QuarantineServer(serverName, quarantined); err != nil {
-		return err
-	}
-
-	// Force immediate sync
-	return m.SyncNow()
-}
-
-// HandleServerUnquarantine handles server unquarantine with full synchronization
-func (m *SynchronizationManager) HandleServerUnquarantine(serverName string) error {
-	m.logger.Info("Handling server unquarantine", zap.String("server", serverName))
-
-	// Update state
-	if err := m.stateManager.UnquarantineServer(serverName); err != nil {
 		return err
 	}
 
