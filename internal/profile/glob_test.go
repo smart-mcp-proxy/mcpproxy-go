@@ -22,13 +22,16 @@ func TestGlobMatcher(t *testing.T) {
 		{"anchored: no partial prefix match", "github:list", "github:list_issues", false},
 		{"anchored: no partial suffix match", "github:issues", "github:list_issues", false},
 		{"case-sensitive", "github:List_Issues", "github:list_issues", false},
-		{"tool name containing a slash", "filesystem:read_text_file", "filesystem:read_text_file", true},
+		{"underscored tool name, exact", "filesystem:read_text_file", "filesystem:read_text_file", true},
+		{"tool name containing a slash, exact", "ns:sub/erase", "ns:sub/erase", true},
 		{"tool name containing a slash, glob", "ns:sub/*", "ns:sub/erase", true},
 		{"tool name containing double underscore (direct-surface alias shape)", "github:list__issues", "github:list__issues", true},
 		{"tool identity with an embedded colon (namespaced raw name)", "a:ns:erase", "a:ns:erase", true},
 		{"tool identity with an embedded colon, mismatch", "a:ns:erase", "a:ns:wipe", false},
 		{"literal dot is not a regex any-char wildcard", "github:v1.0-sync", "github:v1.0-sync", true},
 		{"literal dot near-miss: dot must match exactly, not any char", "github:v1.0-sync", "github:v1x0-sync", false},
+		{"star matches an embedded newline (deny rules must not fail open)", "github:delete*", "github:delete\nrepo", true},
+		{"leading star matches across a newline", "github:*repo", "github:delete\nrepo", true},
 		{"literal hyphen", "github:v1.0-sync", "github:v1.0_sync", false},
 	}
 	for _, tc := range cases {
