@@ -113,6 +113,15 @@ type OnboardingState struct {
 
 	// ServerStepStatus is one of: "", "completed", "skipped".
 	ServerStepStatus string `json:"server_step_status,omitempty"`
+
+	// ClientConnectedAt records, per client id from the fixed connect client
+	// registry (internal/connect.GetAllClients — never user input), the last
+	// time a connect write succeeded for that client (Spec 109-b FR-042).
+	// Written by the connect success path through UpdateOnboardingState so a
+	// concurrent onboarding/mark write can never drop it. Consumed by the
+	// Verify step / presence layer to tell "connected, never seen" apart from
+	// "connected seconds ago, hasn't reconnected yet".
+	ClientConnectedAt map[string]time.Time `json:"client_connected_at,omitempty"`
 }
 
 // Meta keys
@@ -259,21 +268,23 @@ const MaxToolHeldSignals = 16
 // When a tool is first discovered, it starts as "pending". Once approved, it becomes "approved".
 // If the tool's description or schema changes after approval, it becomes "changed".
 type ToolApprovalRecord struct {
-	ServerName           string    `json:"server_name"`
-	ToolName             string    `json:"tool_name"`
-	ApprovedHash         string    `json:"approved_hash"`
-	CurrentHash          string    `json:"current_hash"`
-	HashSchemaVersion    uint64    `json:"hash_schema_version,omitempty"`
-	Status               string    `json:"status"` // "approved", "pending", "changed"
-	ApprovedAt           time.Time `json:"approved_at"`
-	ApprovedBy           string    `json:"approved_by"`
-	PreviousDescription  string    `json:"previous_description,omitempty"`
-	CurrentDescription   string    `json:"current_description,omitempty"`
-	PreviousSchema       string    `json:"previous_schema,omitempty"`
-	CurrentSchema        string    `json:"current_schema,omitempty"`
-	PreviousOutputSchema string    `json:"previous_output_schema,omitempty"`
-	CurrentOutputSchema  string    `json:"current_output_schema,omitempty"`
-	Disabled             bool      `json:"disabled,omitempty"`
+	ServerName           string                  `json:"server_name"`
+	ToolName             string                  `json:"tool_name"`
+	ApprovedHash         string                  `json:"approved_hash"`
+	CurrentHash          string                  `json:"current_hash"`
+	HashSchemaVersion    uint64                  `json:"hash_schema_version,omitempty"`
+	Status               string                  `json:"status"` // "approved", "pending", "changed"
+	ApprovedAt           time.Time               `json:"approved_at"`
+	ApprovedBy           string                  `json:"approved_by"`
+	PreviousDescription  string                  `json:"previous_description,omitempty"`
+	CurrentDescription   string                  `json:"current_description,omitempty"`
+	PreviousAnnotations  *config.ToolAnnotations `json:"previous_annotations,omitempty"`
+	CurrentAnnotations   *config.ToolAnnotations `json:"current_annotations,omitempty"`
+	PreviousSchema       string                  `json:"previous_schema,omitempty"`
+	CurrentSchema        string                  `json:"current_schema,omitempty"`
+	PreviousOutputSchema string                  `json:"previous_output_schema,omitempty"`
+	CurrentOutputSchema  string                  `json:"current_output_schema,omitempty"`
+	Disabled             bool                    `json:"disabled,omitempty"`
 
 	// HeldReason, HeldVerdict and HeldSignals carry the scan evidence that made
 	// the trust_mode: scan gate hold this tool for human review (spec 086

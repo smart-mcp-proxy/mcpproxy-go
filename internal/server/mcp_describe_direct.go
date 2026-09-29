@@ -6,8 +6,42 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolannotations"
 )
+
+type directProfileViewContextKey struct{}
+
+type directProfileView struct {
+	name  string
+	scope *profile.ProfileScope
+	index *profileIndex
+}
+
+// cacheDirectProfileView pins the direct surface's profile decision once per
+// describe_tool request. The direct resolver checks multiple catalog entries
+// for visibility and suggestions; recomputing the anonymous binding guard for
+// each entry would repeat a token-store read and a full live-tool comparison.
+func (p *MCPProxyServer) cacheDirectProfileView(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(directProfileViewContextKey{}).(directProfileView); ok {
+		return ctx
+	}
+	name, scope, idx := p.resolveActiveProfileWithIndex(ctx)
+	if anonymousProfileCaller(ctx) {
+		resolution := p.ResolveProfileV3(ctx, idx)
+		name, scope = resolution.Name, resolution.Scope
+	}
+	return context.WithValue(ctx, directProfileViewContextKey{}, directProfileView{name: name, scope: scope, index: idx})
+}
+
+func (p *MCPProxyServer) directProfileViewFor(ctx context.Context) directProfileView {
+	if view, ok := ctx.Value(directProfileViewContextKey{}).(directProfileView); ok {
+		return view
+	}
+	ctx = p.cacheDirectProfileView(ctx)
+	view, _ := ctx.Value(directProfileViewContextKey{}).(directProfileView)
+	return view
+}
 
 // Spec 102 US2 — describe_tool's id resolver for the DIRECT surface.
 //
@@ -154,13 +188,30 @@ func (p *MCPProxyServer) resolveDirectDescribeIDIn(ctx context.Context, cat *dir
 // operation-permission tier, and agent callability.
 func (p *MCPProxyServer) directEntryVisibleToSession(ctx context.Context, entry *directCatalogEntry) bool {
 	authCtx := auth.AuthContextFromContext(ctx)
-	_, profileScope := p.resolveActiveProfile(ctx)
+	view := p.directProfileViewFor(ctx)
 	isScopedAgent := isScopeRestrictedCaller(authCtx)
 
-	if !directEntryInScope(authCtx, profileScope, isScopedAgent, entry) {
+	if !directEntryInScope(authCtx, view.scope, isScopedAgent, entry) {
 		return false
 	}
-	return p.directEntryCallable(authCtx, entry)
+	if !p.directEntryCallable(authCtx, entry) {
+		return false
+	}
+	// Spec 108 FR-011/T023: describe_tool on the direct surface must never
+	// return a definition for a profile-excluded tool. This function is
+	// describe-only (never consulted by the actual dispatch path), so unlike
+	// the list filter it needs no call-time exception — describe always
+	// applies the policy in full.
+	if view.name != "" && view.index != nil {
+		if policy := view.index.PolicyFor(view.name); policy != nil {
+			annotations, found := p.EffectiveAnnotations(entry.ServerName, entry.ToolName)
+			intrinsic := profile.IntrinsicTier(annotations, found)
+			if admitted, _, _ := policy.Decide(entry.ServerName, entry.ToolName, intrinsic); !admitted {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // suggestDirectToolID corrects an id that differs from a listed one only by

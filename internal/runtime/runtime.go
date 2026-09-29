@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
@@ -138,6 +140,13 @@ type Runtime struct {
 	indexManager    *index.Manager
 	upstreamManager *upstream.Manager
 	cacheManager    *cache.Manager
+	// popularityProvider is the Spec 110 catalog popularity signal's
+	// bbolt-backed GitHub-stars provider, installed process-wide via
+	// registries.SetPopularityProvider unconditionally at startup — the
+	// FR-011 kill switch is read INSIDE the provider constructor, so this is
+	// never nil, it just starts no workers when disabled. io.Closer so this
+	// file never needs to name the unexported provider type.
+	popularityProvider io.Closer
 	// promptsRefresh debounces upstream prompts/list_changed notifications into a
 	// single RefreshPrompts fan-out (F13). Nil until lifecycle registration.
 	promptsRefresh *promptsRefreshDebouncer
@@ -158,9 +167,14 @@ type Runtime struct {
 	// outcome of the PREVIOUS process instance, derived exactly once in New
 	// when the marker is armed (FR-010/FR-011) and handed to the telemetry
 	// service in SetTelemetry.
-	prechurnStore     telemetry.PreChurnStore
-	previousShutdown  string
-	managementService interface{}      // Initialized later to avoid import cycle
+	prechurnStore    telemetry.PreChurnStore
+	previousShutdown string
+	// managementService is the unified lifecycle/diagnostics service. It is
+	// installed after New (SetManagementService) because the service is built
+	// on top of the Runtime, not because the type has to be erased: the
+	// management package does not import runtime, so the field carries the
+	// real interface and every consumer gets a compile-time contract.
+	managementService management.Service
 	activityService   *ActivityService // Activity logging service
 
 	// rejectionMetric counts a concurrency shed SYNCHRONOUSLY at the rejection
@@ -183,6 +197,11 @@ type Runtime struct {
 	// lifecycle storm into one settled event per server per scan.
 	scanNotify *scanNotifyDebouncer
 
+	// Spec 109 FR-001: the one needs-attention list every surface reads.
+	// Recomputes (debounced) on servers.changed and on a threshold timer for
+	// time-based items (FR-002).
+	attention *attentionSubscriber
+
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
 
@@ -201,6 +220,16 @@ type Runtime struct {
 	// pre-105 records and the stamp write, so a test can land an operator
 	// write in that window and assert it survives. Nil in production.
 	legacyStampBeforeWrite func()
+
+	// quarantinedCaptureBeforePersist is a test-only interleaving seam for the
+	// inspection capture's final current-connection validation. It lets the
+	// regression suite replace a client after tools/list but before any approval
+	// record is written. Nil in production.
+	quarantinedCaptureBeforePersist func()
+	// quarantinedCaptureDuringPersist runs inside the manager/client
+	// linearization region immediately before review records are stored. It is
+	// test-only and nil in production.
+	quarantinedCaptureDuringPersist func()
 
 	// consultStampBeforeWrite is the same kind of seam for
 	// stampConsultedLegacySibling (astra r2 C1): when set, it runs between
@@ -287,6 +316,19 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		_ = storageManager.Close()
 		return nil, fmt.Errorf("failed to initialize cache manager: %w", err)
 	}
+
+	// Spec 110 (catalog popularity signal): a bbolt-backed GitHub-stars
+	// provider, installed process-wide so BuildCatalogHit/SearchAll (catalog
+	// search, CLI, MCP search_servers with registry omitted) can show real
+	// popularity. FR-011's kill switch (MCPPROXY_CATALOG_POPULARITY=false) is
+	// read inside the constructor, so this is unconditional — a disabled
+	// provider still answers Lookup from whatever is already cached, it just
+	// starts no fetch workers.
+	popularityProvider := registries.NewGitHubStarsProvider(registries.PopularityOptions{
+		DB:     storageManager.GetDB(),
+		Logger: logger,
+	})
+	registries.SetPopularityProvider(popularityProvider)
 
 	truncator := truncate.NewTruncator(cfg.ToolResponseLimit)
 
@@ -385,24 +427,25 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	rt := &Runtime{
 		cfg: cfg,
 		// Boot: memory and disk agree by definition.
-		desiredCfg:       cfg,
-		cfgPath:          cfgPath,
-		logger:           logger,
-		configSvc:        configSvc,
-		storageManager:   storageManager,
-		indexManager:     indexManager,
-		upstreamManager:  upstreamManager,
-		cacheManager:     cacheManager,
-		sigCache:         toolsig.NewCache(),
-		secretResolver:   secretResolver,
-		tokenizer:        tokenizer,
-		refreshManager:   refreshManager,
-		activityService:  activityService,
-		supervisor:       supervisorInstance,
-		prechurnStore:    prechurnStore,
-		previousShutdown: previousShutdown,
-		appCtx:           appCtx,
-		appCancel:        appCancel,
+		desiredCfg:         cfg,
+		cfgPath:            cfgPath,
+		logger:             logger,
+		configSvc:          configSvc,
+		storageManager:     storageManager,
+		indexManager:       indexManager,
+		upstreamManager:    upstreamManager,
+		cacheManager:       cacheManager,
+		popularityProvider: popularityProvider,
+		sigCache:           toolsig.NewCache(),
+		secretResolver:     secretResolver,
+		tokenizer:          tokenizer,
+		refreshManager:     refreshManager,
+		activityService:    activityService,
+		supervisor:         supervisorInstance,
+		prechurnStore:      prechurnStore,
+		previousShutdown:   previousShutdown,
+		appCtx:             appCtx,
+		appCancel:          appCancel,
 		status: Status{
 			Phase:       PhaseInitializing,
 			Message:     "Runtime is initializing...",
@@ -427,12 +470,30 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// signals of a reconnect storm without noticeably delaying the result.
 	rt.scanNotify = newScanNotifyDebouncer(rt, 750*time.Millisecond)
 
+	// Spec 109 FR-001: one needs-attention list computed from the same
+	// servers.changed rows the coalescer above builds. 200ms trails the
+	// coalescer's own 50ms window so a burst settles into one recompute.
+	rt.attention = newAttentionSubscriber(rt, 200*time.Millisecond)
+	rt.attention.start(appCtx)
+
 	// Spec 093 FR-012/FR-013: origin-independent shed seam. Installed here (not
 	// in the MCP dispatch layer) so code_execution and activity replay are
 	// covered by construction.
 	rt.installRejectionObserver()
 
 	return rt, nil
+}
+
+// Attention returns the current needs-attention list (Spec 109 FR-001): one
+// function, served verbatim by GET /api/v1/attention (filtered per caller by
+// internal/httpapi), the CLI `attention`/`status`/`doctor` commands, and the
+// same snapshot the SSE attention.changed event is derived from. Safe to call
+// concurrently with the background recompute (atomic snapshot read).
+func (r *Runtime) Attention() []contracts.AttentionItem {
+	if r.attention == nil {
+		return nil
+	}
+	return r.attention.Items()
 }
 
 // Config returns the underlying configuration pointer.
@@ -863,6 +924,12 @@ func (r *Runtime) Close() error {
 		r.cacheManager.Close()
 	}
 
+	// Spec 110: stop the popularity provider's background fetch workers.
+	// Safe even if it was never installed (nil) or already closed.
+	if r.popularityProvider != nil {
+		_ = r.popularityProvider.Close()
+	}
+
 	// Spec 080 (FR-010, review round 4): the ActivityService owns BBolt
 	// writers — activity records, retention pruning, usage-snapshot flushes,
 	// async sensitive-data detection. The appCancel at the top of Close
@@ -1118,8 +1185,9 @@ func (r *Runtime) NotifySecretsChanged(ctx context.Context, operation, secretNam
 	return nil
 }
 
-// GetCurrentConfig returns the current configuration
-func (r *Runtime) GetCurrentConfig() interface{} {
+// GetCurrentConfig returns the current configuration. It may be nil only
+// before the config is installed; New rejects a nil config outright.
+func (r *Runtime) GetCurrentConfig() *config.Config {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.cfg
@@ -2084,6 +2152,22 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 		PerServerToolListSizes:  savingsMetrics.PerServerToolListSizes,
 	}
 
+	// Spec 109-k / audit finding F-Token: once a real retrieve_tools call has
+	// completed, report its real observed average size instead of the
+	// synthetic per-topK simulation above, and say so via Estimated.
+	realAvgBytes, haveReal := r.realRetrieveToolsAvgRespBytes()
+	resolvedSize, estimated := resolveAverageQueryResultSize(result.AverageQueryResultSize, realAvgBytes, haveReal)
+	result.AverageQueryResultSize = resolvedSize
+	result.Estimated = estimated
+	if result.TotalServerToolListSize > 0 {
+		saved := result.TotalServerToolListSize - resolvedSize
+		if saved < 0 {
+			saved = 0
+		}
+		result.SavedTokens = saved
+		result.SavedTokensPercentage = float64(saved) / float64(result.TotalServerToolListSize) * 100.0
+	}
+
 	return result, nil
 }
 
@@ -2287,15 +2371,17 @@ func (r *Runtime) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 	return r.upstreamManager.GetDockerRecoveryStatus()
 }
 
-// SetManagementService stores the management service instance.
-// This is called after runtime initialization to avoid import cycles.
-func (r *Runtime) SetManagementService(svc interface{}) {
+// SetManagementService stores the management service instance. It is called
+// after runtime initialization because the service is CONSTRUCTED on top of
+// the Runtime (it takes one as its RuntimeOperations), not because of an
+// import cycle — internal/management does not import internal/runtime.
+func (r *Runtime) SetManagementService(svc management.Service) {
 	r.managementService = svc
 }
 
 // GetManagementService returns the management service instance.
 // Returns nil if service hasn't been set yet.
-func (r *Runtime) GetManagementService() interface{} {
+func (r *Runtime) GetManagementService() management.Service {
 	return r.managementService
 }
 
@@ -3835,4 +3921,15 @@ func (r *Runtime) SaveOnboardingState(state *storage.OnboardingState) error {
 		return fmt.Errorf("storage not available")
 	}
 	return r.storageManager.SaveOnboardingState(state)
+}
+
+// UpdateOnboardingState runs fn against the current onboarding state and
+// persists it atomically (Spec 109-b, T035): every writer (the mark handler,
+// the connect success path, the `initialize` hook) goes through this so
+// concurrent writes never drop each other's fields.
+func (r *Runtime) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	if r.storageManager == nil {
+		return fmt.Errorf("storage not available")
+	}
+	return r.storageManager.UpdateOnboardingState(fn)
 }

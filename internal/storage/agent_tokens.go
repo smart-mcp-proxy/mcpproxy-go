@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
@@ -196,6 +197,14 @@ func (m *Manager) countAgentTokensForOwnerLocked(tx *bbolt.Tx, userID string) (i
 func (m *Manager) CreateAgentToken(token auth.AgentToken, rawToken string, hmacKey []byte) error {
 	if token.Name == "" {
 		return fmt.Errorf("agent token name cannot be empty")
+	}
+	// FR-021: the "client-" name prefix is reserved for kind=client
+	// credentials, minted only through MintClientCredential. A regular
+	// token created through this door must never claim it — a grandfathered
+	// pre-108 token that already holds such a name is untouched (this guard
+	// only refuses NEW creates).
+	if token.Kind != auth.KindClient && strings.HasPrefix(token.Name, "client-") {
+		return fmt.Errorf("token names starting with \"client-\" are reserved for client credentials")
 	}
 
 	hash := auth.HashToken(rawToken, hmacKey)
@@ -650,6 +659,16 @@ func (m *Manager) RegenerateAgentTokenForOwner(userID, name string, newRawToken 
 			return ErrAgentTokenNotFound
 		}
 
+		// A kind=client record must never go through the generic, name-based
+		// regenerate path: it mints an mcp_agt_ secret and leaves
+		// Kind/ClientID/ProfileMode as-is, which bricks the credential
+		// forever (see ErrClientCredentialRegenerateRefused). Checked before
+		// the Revoked branch below since this is a structural kind mismatch,
+		// not a revocation state.
+		if token.Kind == auth.KindClient {
+			return ErrClientCredentialRegenerateRefused
+		}
+
 		// A revoked token is BURNED, and rotation must not resurrect it.
 		//
 		// This used to set Revoked = false, which quietly made regenerate an
@@ -958,7 +977,8 @@ func (m *Manager) agentTokenOwnerResolver() AgentTokenOwnerResolver {
 // is still allowed to authenticate.
 // Returns an error describing why validation failed.
 func (m *Manager) ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.AgentToken, error) {
-	if !auth.ValidateTokenFormat(rawToken) {
+	claimedKind, ok := auth.ValidateAnyTokenFormat(rawToken)
+	if !ok {
 		return nil, fmt.Errorf("invalid token format")
 	}
 
@@ -969,7 +989,18 @@ func (m *Manager) ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.Age
 		return nil, fmt.Errorf("failed to look up token: %w", err)
 	}
 	if token == nil {
-		return nil, fmt.Errorf("token not found")
+		// A client credential mid staged-rotation authenticates by its
+		// pending hash too (FR-021a): both the old and new secrets are
+		// valid until finalize. Checked only when the primary hash misses,
+		// so an already-promoted secret never pays this extra lookup.
+		if claimedKind == auth.KindClient {
+			if pending, perr := m.getAgentTokenByPendingHashLocked(hash); perr == nil && pending != nil {
+				token = pending
+			}
+		}
+		if token == nil {
+			return nil, fmt.Errorf("token not found")
+		}
 	}
 
 	if token.IsRevoked() {
@@ -978,6 +1009,17 @@ func (m *Manager) ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.Age
 
 	if token.IsExpired() {
 		return nil, fmt.Errorf("token has expired")
+	}
+
+	// FR-021 fail-closed invariants, checked on EVERY authentication (not
+	// only at mint time): a violation never degrades to a regular wildcard
+	// agent token.
+	if err := auth.ValidateTokenInvariants(token, claimedKind); err != nil {
+		if m.logger != nil {
+			m.logger.Warnw("denying malformed credential record",
+				"name", token.Name, "token_prefix", token.TokenPrefix)
+		}
+		return nil, err
 	}
 
 	// The identity behind the token must still be live, and its grant must

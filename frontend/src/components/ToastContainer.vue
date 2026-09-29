@@ -1,5 +1,5 @@
 <template>
-  <div class="toast toast-end z-50">
+  <div class="toast toast-end z-[var(--z-toast)]">
     <transition-group name="toast" tag="div">
       <div
         v-for="toast in systemStore.toasts"

@@ -10,12 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -110,10 +112,19 @@ func scopeFixtureConfig(reveal bool) *config.Config {
 // distinct type from mockManagementService so the fixture is under this test's
 // control.
 type scopeMgmtService struct {
+	// Embedded so the fixture satisfies the whole typed seam while
+	// implementing only the two methods these tests drive. The embedded
+	// interface is nil: an unexpected call panics loudly rather than
+	// silently returning a zero value.
+	management.Service
 	servers []contracts.Server
+	listErr error // when non-nil, ListServers fails with it
 }
 
 func (m *scopeMgmtService) ListServers(context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
+	if m.listErr != nil {
+		return nil, nil, m.listErr
+	}
 	out := make([]*contracts.Server, 0, len(m.servers))
 	stats := &contracts.ServerStats{}
 	for i := range m.servers {
@@ -168,25 +179,63 @@ type scopeController struct {
 	servers        []contracts.Server
 	withManagement bool
 
+	// listErr, when non-nil, makes both server-listing seams (management
+	// ListServers and legacy GetAllServers) fail with it.
+	listErr error
+
+	// attentionItemsOverride, when non-nil, is returned by Attention() as-is
+	// (tests that need exact control, e.g. a client item scopeController's
+	// server-only Compute cannot produce). Otherwise Attention() derives a
+	// realistic list from c.servers via runtime.Compute.
+	attentionItemsOverride []contracts.AttentionItem
+
 	mu   sync.Mutex
 	subs []chan internalRuntime.Event
 }
 
-func (c *scopeController) GetManagementService() interface{} {
+func (c *scopeController) Attention() []contracts.AttentionItem {
+	if c.attentionItemsOverride != nil {
+		return c.attentionItemsOverride
+	}
+	in := internalRuntime.AttentionInput{Now: time.Now()}
+	for i := range c.servers {
+		s := c.servers[i]
+		as := internalRuntime.AttentionServer{
+			Name:        s.Name,
+			Enabled:     s.Enabled,
+			Quarantined: s.Quarantined,
+			StateSince:  time.Now().Add(-time.Hour),
+		}
+		if s.Health != nil {
+			as.Health = *s.Health
+		}
+		if s.Quarantine != nil {
+			as.Pending = s.Quarantine.PendingCount
+			as.Changed = s.Quarantine.ChangedCount
+		}
+		in.Servers = append(in.Servers, as)
+	}
+	return internalRuntime.Compute(in)
+}
+
+func (c *scopeController) GetManagementService() management.Service {
 	if !c.withManagement {
 		return nil
 	}
-	return &scopeMgmtService{servers: c.servers}
+	return &scopeMgmtService{servers: c.servers, listErr: c.listErr}
 }
 
 // GetCurrentConfig must return a real *config.Config or apiKeyAuthMiddleware
 // forwards the request with NO AuthContext at all and every scoped assertion
 // below would pass for the wrong reason.
-func (c *scopeController) GetCurrentConfig() interface{} { return c.cfg }
+func (c *scopeController) GetCurrentConfig() *config.Config { return c.cfg }
 
 func (c *scopeController) GetConfig() (*config.Config, error) { return c.cfg, nil }
 
 func (c *scopeController) GetAllServers() ([]map[string]interface{}, error) {
+	if c.listErr != nil {
+		return nil, c.listErr
+	}
 	out := make([]map[string]interface{}, 0, len(c.servers))
 	for i := range c.servers {
 		srv := c.servers[i]
@@ -386,6 +435,30 @@ func scopeGet(t *testing.T, srv *Server, path, apiKey string) *httptest.Response
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	return rec
+}
+
+// noAuthContextRequest builds a GET that reaches a handler with NO AuthContext
+// in its context, supplying chi URL params directly.
+//
+// Until SEC-02 the auth middleware manufactured exactly this shape: a request
+// whose config it could not read was forwarded to the handler unauthenticated.
+// It now refuses those (503), but the floors pinned by the tests that used to
+// enter this way — Spec 099 FR-018a's disclosure tier, and
+// auth.AuthorizeServerOp's unrestricted-on-absence default — are properties of
+// the HANDLERS and the subtree gate, not of that branch. So those tests drive
+// this request straight at the code under test instead of vanishing with the
+// branch that used to reach it.
+func noAuthContextRequest(t *testing.T, path string, urlParams map[string]string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+	rctx := chi.NewRouteContext()
+	for k, v := range urlParams {
+		rctx.URLParams.Add(k, v)
+	}
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	require.Nil(t, auth.AuthContextFromContext(req.Context()),
+		"precondition: the request must carry no AuthContext")
+	return req
 }
 
 // scopeDecodeData decodes the `data` object of the standard API envelope.

@@ -434,6 +434,62 @@ test('the footer never overlaps the page content', async ({ page }) => {
   expect(overlap, 'main content bleeds under the footer').toBeLessThanOrEqual(1)
 })
 
+// Spec 109 PR-a review round 1 (H4) / round 3 finding 2, T007's Playwright
+// half: proves the --z-header/--z-sidebar fix (frontend/src/assets/z-index.css,
+// frontend/tests/unit/z-index-scale.spec.ts) holds under REAL layout and
+// paint, not just token ordering in jsdom. Round 1 shipped these tokens
+// inverted, which put the sticky TopHeader back on top of the open mobile
+// drawer instead of the other way around — the exact class of stacking bug
+// this z-index scale exists to prevent (see z-index.css's own header
+// comment). `elementFromPoint` at a coordinate the sticky header and the open
+// drawer both occupy is the only way to prove which one the browser actually
+// painted on top; a bounding-box/CSS-value assertion would pass even if a
+// third ancestor's stacking context silently swallowed the token.
+test('mobile drawer sidebar paints above the sticky header, not under it (H4)', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await goto(page, '/')
+
+  const header = page.locator('header')
+  await expect(header).toBeVisible()
+  const headerBox = await header.boundingBox()
+  expect(headerBox, 'header has no box').not.toBeNull()
+  // A point inside the sticky header's own bounding box — this is exactly
+  // where the header used to win when the tokens were inverted.
+  const point = { x: headerBox!.x + headerBox!.width / 2, y: headerBox!.y + headerBox!.height / 2 }
+
+  // Sanity check: before the drawer opens, that point IS the header (proves
+  // the point is meaningful, not e.g. sitting over a hole in the header).
+  const beforeOpen = await page.evaluate(
+    (p) => !!document.elementFromPoint(p.x, p.y)?.closest('header'),
+    point,
+  )
+  expect(beforeOpen, 'test point does not land on the header before the drawer opens').toBe(true)
+
+  await page.locator('label[for="sidebar-drawer"][aria-label="Open navigation menu"]').click()
+  await expect(page.locator('#sidebar-drawer')).toBeChecked()
+
+  // daisyUI's drawer opens via a `visibility`/`opacity` CSS transition
+  // (`allow-discrete`, ~0.2-0.3s), not instantly when the checkbox flips —
+  // during that brief window the drawer is not yet paintable/hit-testable
+  // and elementFromPoint legitimately still returns the header underneath,
+  // exactly like a real user would see for a couple of frames. That is
+  // normal opening animation, not the H4 regression (a permanently wrong
+  // SETTLED z-index, not a transient mid-transition frame), so poll for the
+  // settled state instead of asserting on the very next frame.
+  const elementAtPoint = () =>
+    page.evaluate((p) => {
+      const el = document.elementFromPoint(p.x, p.y)
+      return {
+        insideHeader: !!el?.closest('header'),
+        insideDrawer: !!el?.closest('.drawer-side'),
+      }
+    }, point)
+
+  await expect
+    .poll(elementAtPoint, { message: 'drawer never settled above the header at the shared point' })
+    .toEqual({ insideHeader: false, insideDrawer: true })
+})
+
 // ---------------------------------------------------------------------------
 // F30 — accessible names, live region, table caption.
 // ---------------------------------------------------------------------------
@@ -524,69 +580,53 @@ test('header search button is enabled with an empty box', async ({ page }) => {
 })
 
 // ---------------------------------------------------------------------------
-// F6 — the Add Server modal must take focus, trap Tab, close on Escape and
-// hand focus back to its trigger.
-//
-// These five `<dialog :open>` modals are opened by the `open` ATTRIBUTE rather
-// than showModal(), so the browser supplies none of the modal affordances;
-// every one of them comes from `useModalA11y`. Its own comment delegates the
-// real-browser half of its coverage to "the Playwright sweep" — this is that
-// test. Without it, deleting the document keydown listener or the nextTick
-// focusInitial() passes the whole sweep.
-//
-// Escape is dispatched IN-PAGE, never with page.keyboard.press(). Re-checking
-// F6 during the audit produced a FALSE NEGATIVE for exactly that reason: a key
-// sent through the automation layer never reached the document listener under
-// test, so the assertion measured the harness instead of the app.
-//
-// Assert on the `[open]` ATTRIBUTE, not on DOM presence — the modal box is not
-// behind a v-if, so it stays in the DOM when closed. Checking "is it in the
-// DOM" is how the original audit mis-measured this.
+// Spec 109 FR-062: the header entry starts the catalog-first Add Server flow,
+// rather than opening the legacy modal. Keep browser-level modal focus coverage
+// on the still-reachable Add Secret dialog.
 // ---------------------------------------------------------------------------
-test('the Add Server modal takes focus, traps Tab and closes on Escape', async ({ page }) => {
-  // /activity mounts exactly one AddServerModal (TopHeader's). `/` and
-  // /servers mount a second copy of the same component, which makes the
-  // data-test locator strict-mode ambiguous there.
+test('the header Add Server action opens the catalog-first Add Server page', async ({ page }) => {
   await goto(page, '/activity')
 
   await page.locator('[data-test="header-add-server"]').click()
-  await expect(page.locator('dialog[data-test="add-server-modal"][open]')).toHaveCount(1)
+  await expect(page).toHaveURL(/\/ui\/add-server(?:\?|$)/)
+  await expect(page.locator('[data-test="add-server-page"] h1')).toHaveText('Add Server')
+  await expect(page.locator('[data-test="add-server-tab-catalog"]')).toHaveClass(/tab-active/)
+})
 
+test('the Add Secret modal takes focus, traps Tab and closes on Escape', async ({ page }) => {
+  await goto(page, '/secrets')
+
+  const trigger = page.locator('[data-test="secrets-add-button"]')
+  await trigger.click()
+  const dialog = page.locator('dialog[data-test="add-secret-modal"]')
+  await expect(dialog).toHaveAttribute('open', '')
+
+  const box = dialog.locator('[role="dialog"]')
   const focus = await page.evaluate(() => {
-    const box = document.querySelector('[data-test="add-server-modal-box"]')
+    const box = document.querySelector('[data-test="add-secret-modal"] [role="dialog"]')
     const active = document.activeElement as HTMLElement | null
     return {
       inside: !!box && !!active && box.contains(active),
       onCloseButton: !!active && active.hasAttribute('data-modal-close-button'),
     }
   })
-  expect(focus.inside, 'focus never entered the Add Server dialog').toBe(true)
-  expect(focus.onCloseButton, 'focus landed on the header ✕ instead of the form').toBe(false)
+  expect(focus.inside, 'focus never entered the Add Secret dialog').toBe(true)
+  expect(focus.onCloseButton, 'focus landed on the close button instead of the form').toBe(false)
 
-  // Tab from the last focusable wraps to the first instead of walking out into
-  // the page behind the modal.
-  const wrapped = await page.evaluate(() => {
-    const box = document.querySelector('[data-test="add-server-modal-box"]')
-    if (!box) return null
+  const wrapped = await box.evaluate((element) => {
     const focusables = Array.from(
-      box.querySelectorAll<HTMLElement>(
+      element.querySelectorAll<HTMLElement>(
         'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
       ),
     ).filter((el) => el.checkVisibility({ checkVisibilityCSS: true }))
-    if (focusables.length < 2) return null
+    if (focusables.length < 2) return false
     focusables[focusables.length - 1].focus()
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }))
     return document.activeElement === focusables[0]
   })
   expect(wrapped, 'Tab escaped the dialog instead of wrapping to the first control').toBe(true)
 
-  await page.evaluate(() =>
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })),
-  )
-  await expect(page.locator('dialog[data-test="add-server-modal"][open]')).toHaveCount(0)
-
-  // Focus restoration is deferred a tick, so poll rather than read once.
-  await expect
-    .poll(() => page.evaluate(() => document.activeElement?.getAttribute('data-test') ?? null))
-    .toBe('header-add-server')
+  await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+  await expect(dialog).not.toHaveAttribute('open', '')
+  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('data-test') ?? null)).toBe('secrets-add-button')
 })

@@ -322,28 +322,10 @@ export const useServersStore = defineStore('servers', () => {
     }
   }
 
-  async function unquarantineServer(serverName: string) {
-    try {
-      const response = await api.unquarantineServer(serverName)
-      if (response.success) {
-        const server = servers.value.find(s => s.name === serverName)
-        if (server) {
-          server.quarantined = false
-        }
-        return true
-      } else {
-        throw new Error(response.error || 'Failed to unquarantine server')
-      }
-    } catch (error) {
-      console.error('Failed to unquarantine server:', error)
-      throw error
-    }
-  }
-
   // Security-aware approval path (Spec 039 / F-04). Goes through
   // POST /api/v1/servers/{name}/security/approve which enforces the
-  // scanner gate before unquarantining the server. Use this — not
-  // unquarantineServer — for all user-facing "Approve" buttons.
+    // scanner gate before unquarantining the server. Use this for all
+    // user-facing "Approve" buttons.
   async function securityApproveServer(serverName: string, force = false) {
     try {
       const response = await api.securityApprove(serverName, force)
@@ -477,7 +459,6 @@ export const useServersStore = defineStore('servers', () => {
     triggerOAuthLogin,
     triggerOAuthLogout,
     quarantineServer,
-    unquarantineServer,
     securityApproveServer,
     deleteServer,
     updateServerStatus,

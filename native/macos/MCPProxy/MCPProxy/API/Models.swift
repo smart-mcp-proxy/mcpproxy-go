@@ -108,8 +108,14 @@ enum HealthAction: String, Codable, CaseIterable {
     case viewLogs = "view_logs"
     case setSecret = "set_secret"
     case configure
+    case editURL = "edit_url"
 
-    /// Human-readable button label.
+    /// Human-readable button label. Kept for the enum's own call sites
+    /// (decoding/matching); a renderer choosing the CROSS-SURFACE wording the
+    /// Web UI and CLI also show (FR-014) uses `HealthStatus.actionLabels`
+    /// instead — see e.g. ServerDetailView's "Suggested Action" row. Home's
+    /// own AttentionRow (HomeView.swift) renders `AttentionFix.label`
+    /// directly, which the core already sends pre-worded (Spec 109).
     var label: String {
         switch self {
         case .login:      return "Sign in"
@@ -119,6 +125,7 @@ enum HealthAction: String, Codable, CaseIterable {
         case .viewLogs:   return "View Logs"
         case .setSecret:  return "Set Secret"
         case .configure:  return "Configure"
+        case .editURL:    return "Edit URL"
         }
     }
 }
@@ -133,6 +140,16 @@ struct HealthStatus: Codable, Equatable {
     let summary: String
     let detail: String?
     let action: String?
+    /// The ONE status vocabulary rendered as text on every surface (Spec 109
+    /// FR-010/FR-011). `level` stays a severity signal for badge/tray coloring
+    /// only — no renderer may print it as text. Optional at decode time only
+    /// for tolerance against an older core; every current payload sets it.
+    let status: String?
+    /// True only when `status == "ready"`.
+    let usable: Bool?
+    /// Every applicable next step, in priority order (FR-012). `action`
+    /// always equals `actions.first`, or is nil/empty when `actions` is empty.
+    let actions: [String]?
 
     enum CodingKeys: String, CodingKey {
         case level
@@ -140,6 +157,22 @@ struct HealthStatus: Codable, Equatable {
         case summary
         case detail
         case action
+        case status
+        case usable
+        case actions
+    }
+
+    /// Every actionable next step, falling back to the legacy singular
+    /// `action` when `actions` is absent — an old-core payload that only
+    /// sends `level`/`admin_state`/`summary`/`action` (mirrors `isUsable`'s
+    /// own old-core tolerance below). Without this fallback, a renderer that
+    /// gates on `actions` alone (e.g. ServerDetailView's "Suggested Action"
+    /// row) silently drops for that payload shape — a regression from
+    /// before Spec 109.
+    var actionsOrLegacyFallback: [String] {
+        if let actions, !actions.isEmpty { return actions }
+        if let action, !action.isEmpty { return [action] }
+        return []
     }
 
     /// Parsed health level enum, falling back to `.unhealthy` for unknown values.
@@ -157,7 +190,198 @@ struct HealthStatus: Codable, Equatable {
         guard let action, !action.isEmpty else { return nil }
         return HealthAction(rawValue: action)
     }
+
+    /// Cross-surface label for `status` (Spec 109 FR-014),
+    /// binding for the Web UI, the macOS window and tray, and the CLI table.
+    /// Falls back to the raw value for forward-compat with an unrecognized
+    /// status (never crashes).
+    var statusLabel: String {
+        guard let status, !status.isEmpty else { return summary }
+        return HealthStatus.statusLabels[status] ?? status
+    }
+
+    /// True only when `status == "ready"`; defaults to the pre-Spec-109
+    /// reading (healthy level, not disabled/quarantined) when the field is
+    /// absent (older core).
+    ///
+    /// A pre-Spec-109 core's "connecting"/"idle" branch
+    /// (internal/health/calculator.go) already reported that exact shape —
+    /// level=healthy, admin_state=enabled, this literal summary — for a
+    /// mid-connect server, indistinguishable from a fully connected one on
+    /// level+adminState alone. Without this check a newer tray talking to an
+    /// older core would call a server usable before it can serve tool calls.
+    var isUsable: Bool {
+        if let usable { return usable }
+        if summary == "Connecting..." { return false }
+        return healthLevel == .healthy && adminStateEnum == .enabled
+    }
+
+    /// One label table for every `status` value (Spec 109 FR-014).
+    static let statusLabels: [String: String] = [
+        "ready": "Online",
+        "connecting": "Connecting",
+        "sign_in_required": "Sign-in required",
+        "needs_review": "Needs review",
+        "needs_secret": "Secret required",
+        "needs_config": "Needs configuration",
+        "error": "Error",
+        "disabled": "Disabled",
+    ]
+
+    /// One label table for a primary button keyed on an `actions` entry
+    /// (Spec 109 FR-014).
+    static let actionLabels: [String: String] = [
+        "login": "Sign in",
+        "set_secret": "Add secret",
+        "configure": "Fix config",
+        "edit_url": "Edit URL",
+        "approve": "Review",
+        "restart": "Restart",
+        "view_logs": "View logs",
+        "enable": "Enable",
+    ]
 }
+
+// MARK: - Attention (Spec 109 FR-001)
+
+/// What an `AttentionItem` is about. Matches the Go `contracts.AttentionSubject`.
+struct AttentionSubject: Codable, Equatable {
+    let type: String // "server" | "tool" | "client"
+    let id: String
+    let name: String
+}
+
+/// The one action that resolves an `AttentionItem` (FR-005): a verb the
+/// caller may run directly, and a target screen/route. Matches the Go
+/// `contracts.AttentionFix`.
+struct AttentionFix: Codable, Equatable {
+    let verb: String
+    let label: String
+    let target: String
+}
+
+/// One row of the needs-attention list (contracts/rest-api.md#attention),
+/// identical across every surface (Web UI, macOS tray/Home, CLI). Matches
+/// the Go `contracts.AttentionItem`.
+struct AttentionItem: Codable, Equatable, Identifiable {
+    let id: String
+    let kind: String
+    let rank: Int
+    let subject: AttentionSubject
+    let summary: String
+    let detail: String?
+    let fix: AttentionFix
+    let since: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, rank, subject, summary, detail, fix, since
+    }
+
+    /// Convenience for tests/fixtures (the custom `init(from:)` below
+    /// suppresses the synthesised memberwise initialiser).
+    init(id: String, kind: String, rank: Int, subject: AttentionSubject, summary: String,
+         detail: String? = nil, fix: AttentionFix, since: Date) {
+        self.id = id
+        self.kind = kind
+        self.rank = rank
+        self.subject = subject
+        self.summary = summary
+        self.detail = detail
+        self.fix = fix
+        self.since = since
+    }
+
+    // Manual Codable: `since` is Go's RFC 3339 rendering, which the shared
+    // `JSONDecoder` in `fetchWrapped` cannot parse with its default
+    // `.deferredToDate` strategy (see `UsageBucket`, the precedent for this
+    // pattern — kept model-local rather than forcing a decoder-wide date
+    // strategy onto every other model).
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        kind = try container.decode(String.self, forKey: .kind)
+        rank = try container.decode(Int.self, forKey: .rank)
+        subject = try container.decode(AttentionSubject.self, forKey: .subject)
+        summary = try container.decode(String.self, forKey: .summary)
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
+        fix = try container.decode(AttentionFix.self, forKey: .fix)
+        let raw = try container.decode(String.self, forKey: .since)
+        guard let parsed = UsageBucket.parseRFC3339(raw) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .since, in: container,
+                debugDescription: "Not an RFC 3339 timestamp: \(raw)"
+            )
+        }
+        since = parsed
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(rank, forKey: .rank)
+        try container.encode(subject, forKey: .subject)
+        try container.encode(summary, forKey: .summary)
+        try container.encodeIfPresent(detail, forKey: .detail)
+        try container.encode(fix, forKey: .fix)
+        try container.encode(UsageBucket.rfc3339String(from: since), forKey: .since)
+    }
+}
+
+/// `GET /api/v1/attention` success `data` payload.
+struct AttentionResponse: Codable, Equatable {
+    let count: Int
+    let generatedAt: Date
+    let items: [AttentionItem]
+
+    enum CodingKeys: String, CodingKey {
+        case count
+        case generatedAt = "generated_at"
+        case items
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        count = try container.decode(Int.self, forKey: .count)
+        let raw = try container.decode(String.self, forKey: .generatedAt)
+        guard let parsed = UsageBucket.parseRFC3339(raw) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .generatedAt, in: container,
+                debugDescription: "Not an RFC 3339 timestamp: \(raw)"
+            )
+        }
+        generatedAt = parsed
+        items = try container.decode([AttentionItem].self, forKey: .items)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(count, forKey: .count)
+        try container.encode(UsageBucket.rfc3339String(from: generatedAt), forKey: .generatedAt)
+        try container.encode(items, forKey: .items)
+    }
+
+    /// Convenience for tests/fixtures.
+    init(count: Int, generatedAt: Date, items: [AttentionItem]) {
+        self.count = count
+        self.generatedAt = generatedAt
+        self.items = items
+    }
+}
+
+// MARK: - Review queue (Spec 109-g)
+struct ReviewQueueRow: Codable, Equatable, Identifiable {
+    let server: String; let kind: String; let quarantined: Bool; let pending: Int?; let changed: Int?; let toolsCaptured: Int?
+    enum CodingKeys: String, CodingKey { case server, kind, quarantined, pending, changed; case toolsCaptured = "tools_captured" }
+    var id: String { server }
+}
+struct ReviewQueueResponse: Codable, Equatable { let count: Int; let servers: [ReviewQueueRow] }
+struct ReviewScan: Codable, Equatable { let verdict: String; let riskScore: Int?; let reportID: String?; enum CodingKeys: String, CodingKey { case verdict; case riskScore = "risk_score"; case reportID = "report_id" } }
+struct ReviewServerSummary: Codable, Equatable { let name: String; let transport: String?; let command: String?; let url: String?; let quarantined: Bool; let trustMode: String?; let sourceRegistryID: String?; let sourceRegistryProvenance: String?; let definitionsCaptured: Bool; let scan: ReviewScan?; enum CodingKeys: String, CodingKey { case name, transport, command, url, quarantined, scan; case trustMode = "trust_mode"; case sourceRegistryID = "source_registry_id"; case sourceRegistryProvenance = "source_registry_provenance"; case definitionsCaptured = "definitions_captured" } }
+struct ReviewToolPrevious: Codable, Equatable { let description: String; let inputSchema: JSONValue?; let outputSchema: JSONValue?; let annotations: JSONValue?; enum CodingKeys: String, CodingKey { case description, annotations; case inputSchema = "input_schema"; case outputSchema = "output_schema" } }
+struct ReviewToolDiff: Codable, Equatable { let description: String?; let inputSchema: String?; let outputSchema: String?; let annotations: String?; enum CodingKeys: String, CodingKey { case description, annotations; case inputSchema = "input_schema"; case outputSchema = "output_schema" } }
+struct ReviewTool: Codable, Equatable, Identifiable { let name: String; let description: String; let inputSchema: JSONValue?; let outputSchema: JSONValue?; let annotations: JSONValue?; let tier: String; let approvalStatus: String; let disabled: Bool; let scanVerdict: String; let previous: ReviewToolPrevious?; let diff: ReviewToolDiff?; enum CodingKeys: String, CodingKey { case name, description, annotations, tier, disabled, previous, diff; case inputSchema = "input_schema"; case outputSchema = "output_schema"; case approvalStatus = "approval_status"; case scanVerdict = "scan_verdict" }; var id: String { name } }
+struct ServerReviewResponse: Codable, Equatable { let server: ReviewServerSummary; let tools: [ReviewTool] }
 
 // MARK: - OAuth Status
 
@@ -340,6 +564,9 @@ struct IsolationDefaultsStatus: Codable, Equatable {
 struct ServerStatus: Codable, Identifiable, Equatable {
     let id: String
     let name: String
+    /// Catalog provenance, used to resolve an existing Added/Open card without
+    /// exposing configured server names in the catalog DTO itself.
+    let sourceRegistryID: String?
     let url: String?
     let command: String?
     let args: [String]?
@@ -386,6 +613,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, url, command, args
+        case sourceRegistryID = "source_registry_id"
         case workingDir = "working_dir"
         case headers
         case env
@@ -425,9 +653,15 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     /// security scanner can export its tool definitions, and a failed attempt
     /// leaves an error-severity diagnostic behind. That diagnostic used to tint
     /// the menu-bar badge red while the very same payload reported
-    /// `health.level == "healthy"` / `admin_state == "quarantined"` — so the
-    /// menu header drew a calm yellow dot under a red menu-bar dot, and the
-    /// user could not clear it without approving or disabling the server.
+    /// `admin_state == "quarantined"` — so the menu header drew a calm dot
+    /// under a red menu-bar dot, and the user could not clear it without
+    /// approving or disabling the server.
+    ///
+    /// Do not key anything on `health.level` here: it is not always "healthy".
+    /// A quarantined server whose transport faults reports unhealthy, and a
+    /// core that also surfaces sign-in under quarantine may report it degraded
+    /// or unhealthy. `admin_state == "quarantined"` and `action == "approve"`
+    /// hold in every case.
     ///
     /// The `admin_state` half is belt-and-braces, not a second independent
     /// signal: the backend derives it FROM `quarantined`
@@ -455,13 +689,45 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         isOAuthLoginRequired || isQuarantineReview
     }
 
-    /// True when the server is in the OAuth login-required state (MCP-1819/T3).
-    /// `health.action == "login"` is the stable, cross-surface contract that
-    /// CLI/REST/Web-UI/tray all key off. In this state the server needs a calm,
-    /// actionable "Sign in" affordance — NOT hard-error framing — even when the
-    /// backend also attaches an error-severity diagnostic for the failed connect.
+    /// Diagnostic codes that mean the user must sign in: the first-time login
+    /// plus the re-auth codes for a session that expired or was revoked. Mirrors
+    /// `OAuthReauthCodes` + MCPX_OAUTH_LOGIN_REQUIRED in the Web UI's
+    /// `frontend/src/utils/health.ts`. Other MCPX_OAUTH_* codes (discovery,
+    /// callback) are configuration faults a sign-in click does not fix.
+    static let oauthSignInCodes: Set<String> = [
+        "MCPX_OAUTH_LOGIN_REQUIRED",
+        "MCPX_OAUTH_REAUTH_REQUIRED",
+        "MCPX_OAUTH_REFRESH_EXPIRED",
+        "MCPX_OAUTH_REFRESH_403",
+    ]
+
+    /// True when the server needs the user to sign in (MCP-1819/T3). In this
+    /// state the server needs a calm, actionable "Sign in" affordance — NOT
+    /// hard-error framing — even when the backend also attaches an
+    /// error-severity diagnostic for the failed connect.
+    ///
+    /// `health.action == "login"` is not enough on its own: health reports one
+    /// action, and quarantine outranks sign-in, so a quarantined OAuth server
+    /// awaiting sign-in says `action == "approve"`. The diagnostic code carries
+    /// the sign-in half — the same rule as the Web UI's `oauthSignInState`.
+    /// A disabled server is excluded: its diagnostic is left over from the last
+    /// connect attempt, and its next step is Enable.
     var isOAuthLoginRequired: Bool {
-        health?.action == "login"
+        if health?.action == "login" { return true }
+        guard enabled, let code = diagnostic?.code else { return false }
+        return Self.oauthSignInCodes.contains(code)
+    }
+
+    /// The buttons the Dashboard's "Servers Needing Attention" card shows, in
+    /// order. Health carries one action and quarantine outranks sign-in, so a
+    /// quarantined server awaiting sign-in says "approve" — Sign in is added
+    /// from `isOAuthLoginRequired`, beside the health action, never instead of
+    /// it.
+    var attentionActions: [HealthAction] {
+        var actions: [HealthAction] = []
+        if isOAuthLoginRequired { actions.append(.login) }
+        if let action = health?.healthAction, action != .login { actions.append(action) }
+        return actions
     }
 
     /// Number of tools awaiting approval (pending + changed), or 0 if quarantine stats are absent.
@@ -549,6 +815,15 @@ struct TokenMetrics: Codable, Equatable {
     let savedTokens: Int
     let savedTokensPercentage: Double
     let perServerToolListSizes: [String: Int]?
+    /// Mirrors `contracts.ServerTokenMetrics.Estimated` (Spec 109-k, FR-073/T120):
+    /// true while `averageQueryResultSize` is a synthetic simulation (no real
+    /// `retrieve_tools` call has completed yet in this runtime), false once a
+    /// real one has. Web (Usage/Home) and the CLI (`mcpproxy status`) both
+    /// render an "estimate" label while this is true — macOS had no field to
+    /// read it from at all until now (zcode review round 1, F7). Absent from
+    /// an older core's response, so it defaults to `false` (never claims
+    /// "estimate" on a build too old to say so) rather than failing to decode.
+    let estimated: Bool
 
     enum CodingKeys: String, CodingKey {
         case totalServerToolListSize = "total_server_tool_list_size"
@@ -556,6 +831,33 @@ struct TokenMetrics: Codable, Equatable {
         case savedTokens = "saved_tokens"
         case savedTokensPercentage = "saved_tokens_percentage"
         case perServerToolListSizes = "per_server_tool_list_sizes"
+        case estimated
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        totalServerToolListSize = try container.decode(Int.self, forKey: .totalServerToolListSize)
+        averageQueryResultSize = try container.decode(Int.self, forKey: .averageQueryResultSize)
+        savedTokens = try container.decode(Int.self, forKey: .savedTokens)
+        savedTokensPercentage = try container.decode(Double.self, forKey: .savedTokensPercentage)
+        perServerToolListSizes = try container.decodeIfPresent([String: Int].self, forKey: .perServerToolListSizes)
+        estimated = try container.decodeIfPresent(Bool.self, forKey: .estimated) ?? false
+    }
+
+    init(
+        totalServerToolListSize: Int,
+        averageQueryResultSize: Int,
+        savedTokens: Int,
+        savedTokensPercentage: Double,
+        perServerToolListSizes: [String: Int]?,
+        estimated: Bool = false
+    ) {
+        self.totalServerToolListSize = totalServerToolListSize
+        self.averageQueryResultSize = averageQueryResultSize
+        self.savedTokens = savedTokens
+        self.savedTokensPercentage = savedTokensPercentage
+        self.perServerToolListSizes = perServerToolListSizes
+        self.estimated = estimated
     }
 }
 
@@ -903,6 +1205,9 @@ struct StatusResponse: Codable {
     /// default never drifts from `resolveInstructions("")`. Optional — a core
     /// older than the field simply omits it.
     let defaultInstructions: String?
+    /// Spec 109-k FR-080a: availability signals. Omitted by a core that
+    /// supports none of them (109-k itself ships the list empty).
+    let features: StatusFeatures?
 
     enum CodingKeys: String, CodingKey {
         case running
@@ -912,6 +1217,22 @@ struct StatusResponse: Codable {
         case upstreamStats = "upstream_stats"
         case timestamp
         case defaultInstructions = "default_instructions"
+        case features
+    }
+
+    /// Whether the core accepts the Spec 108 `profile`/`client`/`token`
+    /// scope filters — until it does, the UI hides them and never sends them.
+    var scopeFiltersAvailable: Bool {
+        !(features?.scopeFilters ?? []).isEmpty
+    }
+}
+
+/// `GET /api/v1/status` → `features`.
+struct StatusFeatures: Codable, Equatable {
+    let scopeFilters: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case scopeFilters = "scope_filters"
     }
 }
 
@@ -1178,9 +1499,12 @@ struct ServerTool: Codable, Identifiable, Equatable {
     let serverName: String?
     let annotations: ToolAnnotation?
     let approvalStatus: String?
+    /// Spec 109 FR-028: server-computed (`contracts.AnnotationTier`) —
+    /// `read`|`write`|`destructive`|`unannotated`. Never derived locally.
+    let tier: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, description, annotations
+        case name, description, annotations, tier
         case serverName = "server_name"
         case approvalStatus = "approval_status"
     }
@@ -1278,9 +1602,12 @@ struct SearchTool: Codable {
     let description: String?
     let serverName: String?
     let annotations: ToolAnnotation?
+    /// Spec 109 FR-028: server-computed (`contracts.AnnotationTier`). Never
+    /// derived locally.
+    let tier: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, description, annotations
+        case name, description, annotations, tier
         case serverName = "server_name"
     }
 }

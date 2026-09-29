@@ -1090,6 +1090,39 @@ func TestEmitActivityPolicyDecision_RequestIDReachesSSEAndRecord(t *testing.T) {
 		"the SSE event and the persisted record must share one identity")
 }
 
+func TestEmitActivityPolicyDecisionWithBlockReasonPersistsTypedProfileReason(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	defer logger.Sync()
+
+	rt := &Runtime{logger: logger, eventSubs: make(map[chan Event]struct{})}
+	eventChan := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(eventChan)
+	rt.EmitActivityPolicyDecisionWithBlockReason(
+		"github", "create_issue", "session-profile", "req-profile-block",
+		"blocked", "blocked by profile: github:create_issue is a write tool; this profile allows read tools only",
+		"profile_tier",
+	)
+
+	var evt Event
+	select {
+	case evt = <-eventChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive activity.policy_decision event within timeout")
+	}
+	assert.Equal(t, "profile_tier", evt.Payload["block_reason"])
+
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+	svc := NewActivityService(store, zap.NewNop())
+	svc.handleEvent(evt)
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, "profile_tier", records[0].Metadata[storage.MetadataKeyBlockReason])
+}
+
 // Records written before this change have no request_id, and FR-015 says such
 // rows are never correlated rather than being correlated by an empty key — so
 // the subscriber must leave the field empty rather than inventing an id.

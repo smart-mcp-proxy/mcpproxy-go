@@ -16,6 +16,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
@@ -30,7 +31,7 @@ type shedController struct {
 	err    error
 }
 
-func (m *shedController) GetCurrentConfig() any {
+func (m *shedController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 
@@ -39,14 +40,35 @@ func (m *shedController) CallTool(_ context.Context, _ string, _ map[string]inte
 }
 
 func postToolCall(t *testing.T, srv *Server, apiKey string) *httptest.ResponseRecorder {
+	return postToolCallNamed(t, srv, apiKey, "call_tool_read")
+}
+
+func postToolCallNamed(t *testing.T, srv *Server, apiKey, toolName string) *httptest.ResponseRecorder {
 	t.Helper()
-	body := strings.NewReader(`{"tool_name":"call_tool_read","arguments":{"name":"db:query"}}`)
+	bodyJSON, err := json.Marshal(map[string]interface{}{"tool_name": toolName, "arguments": map[string]interface{}{}})
+	require.NoError(t, err)
+	body := strings.NewReader(string(bodyJSON))
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tools/call", body)
 	req.Header.Set("X-API-Key", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	return w
+}
+
+func TestHandleCallTool_ProfileHiddenCodeExecutionMatchesUnknownTool(t *testing.T) {
+	apiKey := "test-profile-code-exec-api-key"
+	profileCtrl := &shedController{apiKey: apiKey, err: fmt.Errorf("tool call failed: %w", profile.ErrCodeExecutionBlocked)}
+	unknownCtrl := &shedController{apiKey: apiKey, err: fmt.Errorf("tool call failed: unknown tool: no_such_tool")}
+	profileResponse := postToolCallNamed(t, NewServer(profileCtrl, zap.NewNop().Sugar(), nil), apiKey, "code_execution")
+	unknownResponse := postToolCallNamed(t, NewServer(unknownCtrl, zap.NewNop().Sugar(), nil), apiKey, "no_such_tool")
+
+	require.Equal(t, http.StatusInternalServerError, profileResponse.Code)
+	require.Equal(t, unknownResponse.Code, profileResponse.Code)
+	var profileBody, unknownBody map[string]interface{}
+	require.NoError(t, json.Unmarshal(profileResponse.Body.Bytes(), &profileBody))
+	require.NoError(t, json.Unmarshal(unknownResponse.Body.Bytes(), &unknownBody))
+	require.Equal(t, strings.ReplaceAll(unknownBody["error"].(string), "no_such_tool", "code_execution"), profileBody["error"])
 }
 
 // TestHandleCallTool_ShedReturns429WithRetryAfter is the FR-011 contract: the
@@ -111,6 +133,21 @@ func TestHandleCallTool_ShedReturns429WithRetryAfter(t *testing.T) {
 	}
 }
 
+func TestHandleCallTool_ProfileBlockedReturns403(t *testing.T) {
+	apiKey := "test-profile-api-key"
+	message := "blocked by profile: github:create_issue is a write tool; this profile allows read tools only"
+	ctrl := &shedController{
+		apiKey: apiKey,
+		err:    &profile.ToolBlockedError{Reason: profile.BlockReasonTier, Message: message},
+	}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	w := postToolCall(t, srv, apiKey)
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), message)
+}
+
 // TestHandleCallTool_ServerUnavailableIsNot429 keeps FR-009 separate from
 // FR-011: a server that went away mid-queue is not backpressure.
 func TestHandleCallTool_ServerUnavailableIsNot429(t *testing.T) {
@@ -163,6 +200,32 @@ func TestHandleReplayToolCall_ShedReturns429(t *testing.T) {
 	msg, _ := body["error"].(string)
 	assert.Contains(t, msg, "analytics-db")
 	assert.Contains(t, msg, limiter.RetryAdvice)
+}
+
+func TestReplayToolCall_ProfileGateUses403AndNonDisclosing404(t *testing.T) {
+	apiKey := "test-replay-profile-api-key"
+	message := "blocked by profile: github:create_issue is denied by a profile rule"
+	cases := []struct {
+		name string
+		err  error
+		want int
+		body string
+	}{
+		{name: "policy denial", err: &profile.ToolBlockedError{Reason: profile.BlockReasonRule, Message: message}, want: http.StatusForbidden, body: message},
+		{name: "server outside profile", err: profile.ErrToolOutsideProfile, want: http.StatusNotFound, body: "Tool call not found"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := &replayShedController{shedController{apiKey: apiKey, err: tc.err}}
+			srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/tool-calls/hidden-call/replay", strings.NewReader(`{}`))
+			req.Header.Set("X-API-Key", apiKey)
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+			require.Equal(t, tc.want, w.Code)
+			assert.Contains(t, w.Body.String(), tc.body)
+		})
+	}
 }
 
 type replayShedController struct {

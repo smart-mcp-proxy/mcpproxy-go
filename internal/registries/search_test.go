@@ -279,6 +279,48 @@ func TestParseDocker(t *testing.T) {
 	}
 }
 
+func TestParseDockerPopularitySignalsAndJSONShape(t *testing.T) {
+	testData := map[string]interface{}{
+		"results": []interface{}{
+			map[string]interface{}{"name": "positive", "pull_count": float64(1234), "star_count": float64(9999)},
+			map[string]interface{}{"name": "negative", "pull_count": float64(-1), "star_count": float64(42)},
+			map[string]interface{}{"name": "non-numeric", "pull_count": "many", "star_count": float64(7)},
+			map[string]interface{}{"name": "stars-only", "star_count": float64(88)},
+		},
+	}
+
+	servers := parseDocker(testData)
+	if len(servers) != 4 {
+		t.Fatalf("expected 4 parsed Docker servers, got %d", len(servers))
+	}
+
+	if got := servers[0].Popularity; got == nil || got.Installs == nil || *got.Installs != 1234 {
+		t.Fatalf("expected pull_count 1234 to map to Installs, got %+v", got)
+	}
+	if servers[0].Popularity.Stars != nil {
+		t.Errorf("Docker star_count must not be mapped to GitHub Stars, got %d", *servers[0].Popularity.Stars)
+	}
+	for _, server := range servers[1:] {
+		if server.Popularity != nil {
+			t.Errorf("expected no popularity for %q with invalid or absent pull_count, got %+v", server.ID, server.Popularity)
+		}
+	}
+
+	withPopularity, err := json.Marshal(servers[0])
+	if err != nil {
+		t.Fatalf("marshal parsed ServerEntry: %v", err)
+	}
+	withoutPopularity := servers[0]
+	withoutPopularity.Popularity = nil
+	wantJSON, err := json.Marshal(withoutPopularity)
+	if err != nil {
+		t.Fatalf("marshal baseline ServerEntry: %v", err)
+	}
+	if !assert.JSONEq(t, string(wantJSON), string(withPopularity)) {
+		t.Errorf("source-native popularity changed the ServerEntry JSON shape: got %s, want %s", withPopularity, wantJSON)
+	}
+}
+
 func TestDerivePulseServerDetails(t *testing.T) {
 	tests := []struct {
 		name            string

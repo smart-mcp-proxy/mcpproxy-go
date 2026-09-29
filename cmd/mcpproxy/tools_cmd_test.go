@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 
@@ -137,23 +140,15 @@ func TestApplyGlobalToolFilters_Status(t *testing.T) {
 }
 
 // TestApplyGlobalToolFilters_Risk verifies the risk filter matches annotations.
-func TestApplyGlobalToolFilters_Risk(t *testing.T) {
+// TestApplyGlobalToolFilters_Tier is the corrected form of the filter's
+// former "risk" test — see tools_tier_test.go for the X11 regression this
+// replaces (the field it used to read, annotations.operation_type, does not
+// exist on the real GET /tools payload; `tier` does).
+func TestApplyGlobalToolFilters_Tier(t *testing.T) {
 	tools := []map[string]interface{}{
-		{
-			"name":        "read_file",
-			"server_name": "srv",
-			"annotations": map[string]interface{}{"operation_type": "read"},
-		},
-		{
-			"name":        "write_file",
-			"server_name": "srv",
-			"annotations": map[string]interface{}{"operation_type": "write"},
-		},
-		{
-			"name":        "delete_repo",
-			"server_name": "srv",
-			"annotations": map[string]interface{}{"operation_type": "destructive"},
-		},
+		{"name": "read_file", "server_name": "srv", "tier": "read"},
+		{"name": "write_file", "server_name": "srv", "tier": "write"},
+		{"name": "delete_repo", "server_name": "srv", "tier": "destructive"},
 	}
 
 	got := applyGlobalToolFilters(tools, "", "read", "")
@@ -491,4 +486,156 @@ func TestOutputGlobalTools_HeldColumn(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, outStr, "HELD", "table must contain the HELD column")
 	assert.Contains(t, outStr, "TPA-2026-0001", "held tool must surface its matched TPA signature")
+}
+
+// TestRunToolsListStandalone_RejectsStatusAndApprovalFilters is a regression
+// test for review round 6, finding 4: `--server` bypassed `--status`/
+// `--tier`/`--risk`/`--approval` filtering entirely (they were only ever
+// applied in the global, no-`--server` path), so `mcpproxy tools list
+// --server=x --tier destructive` silently printed every tool on that server
+// unfiltered — an operator auditing one server for destructive tools could
+// wrongly conclude there were none.
+//
+// The standalone (no-daemon) path has no access to the daemon-persisted
+// disabled/config-denied/approval state --status and --approval need, so
+// rather than silently ignoring them (the exact bug this finding reports),
+// it must fail fast with a clear, actionable error instead.
+func TestRunToolsListStandalone_RejectsStatusAndApprovalFilters(t *testing.T) {
+	origStatus, origApproval := toolsStatusFilter, toolsApprovalFilter
+	defer func() { toolsStatusFilter, toolsApprovalFilter = origStatus, origApproval }()
+
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{
+			{Name: "demo", Command: "true"},
+		},
+	}
+	logger := zap.NewNop()
+
+	toolsStatusFilter = "disabled"
+	toolsApprovalFilter = ""
+	err := runToolsListStandalone(context.Background(), "demo", cfg, logger)
+	require.Error(t, err, "--status must be rejected, not silently ignored, without a daemon")
+	assert.Contains(t, err.Error(), "--status and --approval require the daemon")
+
+	toolsStatusFilter = ""
+	toolsApprovalFilter = "pending"
+	err = runToolsListStandalone(context.Background(), "demo", cfg, logger)
+	require.Error(t, err, "--approval must be rejected, not silently ignored, without a daemon")
+	assert.Contains(t, err.Error(), "--status and --approval require the daemon")
+}
+
+// TestFilterToolMetadataByTier_ReviewRound6Finding4 covers the standalone
+// (no-daemon) half of the fix: --tier/--risk needs only the tool's own
+// annotations, computed locally via the same contracts.AnnotationTier the
+// daemon uses, so it is honored even without a daemon.
+func TestFilterToolMetadataByTier_ReviewRound6Finding4(t *testing.T) {
+	destructive := true
+	readOnly := true
+	tools := []*config.ToolMetadata{
+		{Name: "delete_repo", Annotations: &config.ToolAnnotations{DestructiveHint: &destructive}},
+		{Name: "list_repos", Annotations: &config.ToolAnnotations{ReadOnlyHint: &readOnly}},
+		{Name: "mystery_tool"},
+	}
+
+	assert.Equal(t, tools, filterToolMetadataByTier(tools, ""), "empty filter must return the list unchanged")
+
+	destructiveOnly := filterToolMetadataByTier(tools, "destructive")
+	require.Len(t, destructiveOnly, 1)
+	assert.Equal(t, "delete_repo", destructiveOnly[0].Name)
+
+	readOnlyOnly := filterToolMetadataByTier(tools, "read")
+	require.Len(t, readOnlyOnly, 1)
+	assert.Equal(t, "list_repos", readOnlyOnly[0].Name)
+
+	unannotatedOnly := filterToolMetadataByTier(tools, "unannotated")
+	require.Len(t, unannotatedOnly, 1)
+	assert.Equal(t, "mystery_tool", unannotatedOnly[0].Name)
+
+	assert.Empty(t, filterToolMetadataByTier(tools, "write"), "no tool is tier=write in this fixture")
+}
+
+// TestRunToolsListClientMode_AppliesTierFilter is the daemon-mode half of the
+// review round 6, finding 4 regression: `mcpproxy tools list --server=x
+// --tier destructive` against a running daemon used to print every tool on
+// that server, ignoring --tier entirely (only the global, no-`--server` path
+// ever called applyGlobalToolFilters). GET /api/v1/servers/{id}/tools shares
+// enrichServerTools with the global endpoint (spec 050), so its maps already
+// carry the same "tier" field — the fix is applying the identical filter,
+// not adding new data.
+func TestRunToolsListClientMode_AppliesTierFilter(t *testing.T) {
+	origTier, origRisk, origStatus, origApproval := toolsTierFilter, toolsRiskFilter, toolsStatusFilter, toolsApprovalFilter
+	defer func() {
+		toolsTierFilter, toolsRiskFilter, toolsStatusFilter, toolsApprovalFilter = origTier, origRisk, origStatus, origApproval
+	}()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/status":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+		case "/api/v1/servers/demo/tools":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"data": map[string]interface{}{
+					"tools": []map[string]interface{}{
+						{"name": "delete_repo", "server_name": "demo", "tier": "destructive"},
+						{"name": "list_repos", "server_name": "demo", "tier": "read"},
+					},
+				},
+			})
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	client := cliclient.NewClientWithAPIKey(ts.URL, "", nil)
+
+	setOutputGlobals(t, "json", false)
+	toolsTierFilter, toolsRiskFilter, toolsStatusFilter, toolsApprovalFilter = "destructive", "", "", ""
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	defer func() { os.Stdout = oldStdout }()
+
+	err := runToolsListClientMode(context.Background(), client, "demo", zap.NewNop())
+
+	w.Close()
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	outStr := buf.String()
+
+	require.NoError(t, err)
+	assert.Contains(t, outStr, "delete_repo", "the destructive tool must survive --tier destructive")
+	assert.NotContains(t, outStr, "list_repos", "--server must filter out the non-matching tier just like the global list does")
+}
+
+// TestStandaloneNoToolsMessage_TierFilteredResult is a regression test for a
+// defect zcode's review round 6 found in the finding-4 fix itself: emptying
+// the standalone tool list via --tier/--risk fell into the same "no tools
+// found" branch as a server that genuinely has none, printing three false
+// diagnostic guesses ("doesn't support tools", "not properly configured",
+// "connection issues") for a server that has tools, just none in that tier.
+func TestStandaloneNoToolsMessage_TierFilteredResult(t *testing.T) {
+	msg := standaloneNoToolsMessage("demo", "destructive", 5)
+	assert.Contains(t, msg, "No tools on server 'demo' match --tier/--risk=destructive")
+	assert.Contains(t, msg, "5 tool(s) discovered")
+	assert.NotContains(t, msg, "doesn't support tools", "a tier-filtered empty result must not claim the server lacks tool support")
+	assert.NotContains(t, msg, "not properly configured")
+}
+
+// TestStandaloneNoToolsMessage_GenuinelyNoTools proves the original
+// diagnostic still appears when the server truly exposed zero tools (no
+// filter involved, or a filter with nothing to filter).
+func TestStandaloneNoToolsMessage_GenuinelyNoTools(t *testing.T) {
+	msg := standaloneNoToolsMessage("demo", "", 0)
+	assert.Contains(t, msg, "No tools found on server 'demo'")
+	assert.Contains(t, msg, "doesn't support tools")
+
+	// A tier filter with nothing discovered at all: still the generic
+	// message, since there is nothing to attribute to filtering.
+	msg = standaloneNoToolsMessage("demo", "destructive", 0)
+	assert.Contains(t, msg, "No tools found on server 'demo'")
 }

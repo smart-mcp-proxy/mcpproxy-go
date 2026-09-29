@@ -22,6 +22,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -484,6 +485,7 @@ func auditDurationMs(ctx context.Context) int64 {
 // funnels enforce per attempt applies per refusal.
 type nestedAuthzObserver struct {
 	proxy         *MCPProxyServer
+	toolCaller    *upstreamToolCaller
 	parentCtx     context.Context
 	caller        audit.Caller
 	sessionID     string
@@ -493,7 +495,21 @@ type nestedAuthzObserver struct {
 }
 
 func (o *nestedAuthzObserver) ObserveAuthzGate(report jsruntime.AuthzGateReport) {
-	if o == nil || o.proxy == nil || o.proxy.auditSink == nil || !report.Denied {
+	if o == nil || !report.Denied {
+		return
+	}
+	// resolveDispatchGates refuses before the JavaScript bridge reaches
+	// upstreamToolCaller.CallToolWithGate, which is where nested history is
+	// normally persisted. Preserve the refused attempt here so history has the
+	// same parent correlation as the activity and audit records.
+	if o.toolCaller != nil {
+		startedAt := time.Now()
+		refusal := errors.New(report.Message)
+		o.toolCaller.storeToolCallInHistory(report.ServerName, report.ToolName, report.Arguments, nil, refusal, startedAt, 0)
+		o.toolCaller.emitSubCallRefused(report.Ctx, report.ServerName, report.ToolName,
+			mintCorrelationID(report.ServerName, report.ToolName), report.Arguments, refusal, startedAt, 0)
+	}
+	if o.proxy == nil || o.proxy.auditSink == nil {
 		return
 	}
 	reasonKey := telemetry.BlockReasonTokenScope

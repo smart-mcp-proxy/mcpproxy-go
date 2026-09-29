@@ -1,0 +1,31 @@
+[
+  {
+    "name": "list_issues",
+    "description": "list_issues",
+    "inputSchema": { "type": "object", "properties": {} },
+    "annotations": { "readOnlyHint": true }
+  },
+  {
+    "name": "create_issue",
+    "description": "create_issue",
+    "inputSchema": { "type": "object", "properties": {} },
+    "annotations": { "readOnlyHint": false }
+  },
+  {
+    "name": "delete_repo",
+    "description": "delete_repo",
+    "inputSchema": { "type": "object", "properties": {} },
+    "annotations": { "destructiveHint": true }
+  },
+  {
+    "name": "search_code",
+    "description": "search_code",
+    "inputSchema": { "type": "object", "properties": {} }
+  },
+  {
+    "name": "get_secret_scanning_alert",
+    "description": "get_secret_scanning_alert",
+    "inputSchema": { "type": "object", "properties": {} },
+    "annotations": { "readOnlyHint": true }
+  }
+]

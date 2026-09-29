@@ -91,7 +91,7 @@
               <li>
                 <button @click="server.quarantined ? handleApproveClick() : quarantineServer()" :disabled="actionLoading">
                   <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                  {{ server.quarantined ? 'Approve' : 'Quarantine' }}
+                  {{ server.quarantined ? 'Review' : 'Quarantine' }}
                 </button>
               </li>
               <li>
@@ -306,58 +306,6 @@
         </div>
       </div>
 
-      <!-- Approve Confirmation Modal (F-04: security scanner gated) -->
-      <div v-if="showApproveConfirmation" class="modal modal-open">
-        <div class="modal-box">
-          <h3 class="font-bold text-lg mb-4">
-            {{ approveDialogMode === 'no_scan' ? 'No Security Scan Run' : 'Dangerous Findings Detected' }}
-          </h3>
-          <p v-if="approveDialogMode === 'critical'" class="mb-4">
-            <strong>{{ server.name }}</strong> has
-            <span class="text-error font-semibold">{{ dangerousFindingCount }} dangerous finding{{ dangerousFindingCount === 1 ? '' : 's' }}</span>
-            in its most recent security scan. Approving will allow this server to run despite these warnings.
-          </p>
-          <p v-else class="mb-4">
-            No security scan has been run for <strong>{{ server.name }}</strong>. We strongly recommend running a scan first.
-          </p>
-          <p class="text-sm text-base-content/70 mb-6">
-            <!-- UX audit F09: "the scanner gate" was never defined anywhere in
-                 the UI, while the flagged-tools panel on the same screen called
-                 the very findings behind the 409 informational. Name what force
-                 approval actually does. This line is shared by BOTH dialog
-                 modes, so it must not mention findings — the no_scan mode has
-                 none, and force skips that refusal ("no scan results found")
-                 just as it skips the hard-tier one. -->
-            The security scanner is an experimental heuristic. Force-approving skips the scan-based approval gate and unquarantines this server.
-          </p>
-          <div class="modal-action">
-            <button
-              @click="showApproveConfirmation = false"
-              :disabled="actionLoading"
-              class="btn btn-outline"
-            >
-              Cancel
-            </button>
-            <button
-              v-if="approveDialogMode === 'no_scan'"
-              @click="scanFirstFromDialog"
-              :disabled="actionLoading"
-              class="btn btn-primary"
-            >
-              Scan First
-            </button>
-            <button
-              @click="confirmForceApprove"
-              :disabled="actionLoading"
-              class="btn btn-error"
-            >
-              <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-              Force Approve
-            </button>
-          </div>
-        </div>
-      </div>
-
       <!-- Tabs -->
       <div class="tabs tabs-border">
         <button
@@ -366,6 +314,7 @@
         >
           Tools ({{ serverTools.length }})
         </button>
+        <button :class="['tab tab-lg', activeTab === 'review' ? 'tab-active' : '']" @click="activeTab = 'review'">Review</button>
         <button
           :class="['tab tab-lg', activeTab === 'logs' ? 'tab-active' : '']"
           @click="activeTab = 'logs'"
@@ -517,7 +466,7 @@
                   class="btn btn-sm btn-warning"
                 >
                   <span v-if="approvalLoading" class="loading loading-spinner loading-xs"></span>
-                  Approve All
+                  Review all tools
                 </button>
                 <!-- MCP-2199: reject every quarantined tool (reversible). -->
                 <button
@@ -621,7 +570,7 @@
                         :disabled="approvalLoading"
                         class="btn btn-sm btn-outline"
                       >
-                        Approve
+                        Review
                       </button>
                       <!-- MCP-2199: reject this quarantined tool (reversible). -->
                       <button
@@ -792,6 +741,9 @@
               </div>
             </div>
           </div>
+        </div>
+        <div v-if="activeTab === 'review'">
+          <ReviewScreen :server-name="server.name" @approved="refreshData" />
         </div>
 
         <!-- Logs Tab -->
@@ -1245,14 +1197,17 @@
               </div>
             </div>
 
-            <!-- Health (calculated by backend; same shape consumed by macOS tray) -->
+            <!-- Health (calculated by backend; same shape consumed by macOS tray).
+                 Spec 109 FR-011: this row renders `status` through the one label
+                 table (healthStatusLabel) — never `level` as text. `level` still
+                 drives the badge COLOR only (a severity signal, not the text). -->
             <div v-if="server.health" class="card bg-base-100 shadow-sm">
               <div class="card-body py-4">
                 <h3 class="card-title text-base">Health</h3>
                 <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
-                  <dt class="text-base-content/60">Level</dt>
-                  <dd>
-                    <span :class="healthLevelBadgeClass(server.health.level)">{{ server.health.level }}</span>
+                  <dt class="text-base-content/60">Status</dt>
+                  <dd data-test="server-config-health-status">
+                    <span :class="healthLevelBadgeClass(server.health.level)">{{ configHealthStatusLabel(server.health) }}</span>
                   </dd>
                   <dt class="text-base-content/60">Admin State</dt>
                   <dd><span class="badge badge-ghost badge-sm">{{ server.health.admin_state }}</span></dd>
@@ -1262,9 +1217,15 @@
                     <dt class="text-base-content/60">Detail</dt>
                     <dd class="text-base-content/70 break-words whitespace-pre-wrap">{{ server.health.detail }}</dd>
                   </template>
-                  <template v-if="server.health.action">
+                  <template v-if="configHealthActions(server.health).length">
                     <dt class="text-base-content/60">Suggested Action</dt>
-                    <dd><span class="badge badge-info badge-outline badge-sm">{{ server.health.action }}</span></dd>
+                    <dd class="flex flex-wrap gap-1" data-test="server-config-health-actions">
+                      <span
+                        v-for="a in configHealthActions(server.health)"
+                        :key="a"
+                        class="badge badge-info badge-outline badge-sm"
+                      >{{ healthActionLabel(a) }}</span>
+                    </dd>
                   </template>
                 </dl>
               </div>
@@ -1619,7 +1580,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
@@ -1633,14 +1594,16 @@ import HoldEvidenceBadge from '@/components/HoldEvidenceBadge.vue'
 import ToolDescription from '@/components/ToolDescription.vue'
 import FindingChip from '@/components/FindingChip.vue'
 import FlaggedToolsPanel from '@/components/FlaggedToolsPanel.vue'
+import ReviewScreen from '@/components/ReviewScreen.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
+import type { Server, Tool, ToolApproval, SecurityScanReport, HealthStatus } from '@/types'
 import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
+import { refName } from '@/utils/secretRef'
 import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
-import { oauthSignInState } from '@/utils/health'
+import { oauthSignInState, healthStatusLabel, healthActionLabel, healthStatusText } from '@/utils/health'
 import { describeIsolation } from '@/utils/isolationState'
 import { computeToolDiffSections } from '@/utils/toolDiff'
 import { groupFindingsByTool, type FlaggedToolGroup } from '@/utils/toolLocation'
@@ -1660,6 +1623,7 @@ interface Props {
 
 const props = defineProps<Props>()
 const route = useRoute()
+const router = useRouter()
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
@@ -1708,7 +1672,31 @@ function mutateStoreServer(fn: (s: Server) => void) {
   const s = serversStore.servers.find(srv => srv.name === props.serverName)
   if (s) fn(s)
 }
-const activeTab = ref<'tools' | 'logs' | 'config' | 'security'>('tools')
+const activeTab = ref<'tools' | 'logs' | 'config' | 'security' | 'review'>('tools')
+// Spec 109 FR-016: every tab change (click, or a programmatic jump such as
+// the auto-approve flow landing on Security) is reflected in `?tab=`, keeping
+// every other query param, so the active tab survives a reload or a shared
+// link. The initial value is read from `?tab=` in onMounted below; this watch
+// only ever writes forward from there.
+watch(activeTab, (tab) => {
+  if (route.query.tab === tab) return
+  void router.replace({ query: { ...route.query, tab } })
+})
+// Sets activeTab from `?tab=` (or resets it to the default when absent),
+// shared by onMounted and the props.serverName watch below. App.vue's
+// <router-view> is keyed on the auth epoch, not the route, so navigating
+// from one /servers/:serverName to another reuses this same component
+// instance — onMounted never runs again, so a stale tab left over from the
+// PREVIOUS server (e.g. Security) would otherwise keep showing for the new
+// one even though its URL carries no `?tab=` at all (review round 8,
+// finding 3).
+function readTabFromQuery() {
+  const tabParam = route.query.tab as string
+  activeTab.value =
+    tabParam && ['tools', 'logs', 'config', 'security', 'review'].includes(tabParam)
+      ? (tabParam as typeof activeTab.value)
+      : 'tools'
+}
 const actionLoading = ref(false)
 
 // Tools
@@ -1883,7 +1871,11 @@ const statusBadgeText = computed(() => {
   const health = server.value?.health
   if (health) {
     if (signInState.value && health.admin_state !== 'disabled') return 'Sign-in required'
-    return health.summary || health.level
+    // FR-011: no surface may render `level` as text. Falls back to
+    // connected/disconnected (round-4 review finding) when a version-skew
+    // payload carries neither summary nor status, matching the teams tables'
+    // fallback and this file's own healthLevelLabel below.
+    return healthStatusText(health, server.value?.connected ?? false)
   }
   if (signInState.value) return 'Sign-in required'
   if (server.value?.connected) return 'Connected'
@@ -1932,33 +1924,42 @@ const healthLevelLabel = computed(() => {
     case 'Disabled':
       return 'Off'
   }
-  const level = server.value?.health?.level
-  switch (level) {
-    case 'healthy':
-      return 'Healthy'
-    case 'degraded':
-      return 'Degraded'
-    case 'unhealthy':
-      return 'Unhealthy'
-    default:
-      return server.value?.connected ? 'Healthy' : 'Unknown'
-  }
+  // Spec 109 FR-011: no surface may render `level` as text — render `status`
+  // through the one label table instead. `level` still drives the tile's
+  // color only, via healthLevelTone below. Without this, a "connecting"
+  // server (level=healthy/status=connecting/usable=false) rendered a green
+  // "Healthy" directly above the sub-line's "Connecting..." text.
+  const status = server.value?.health?.status
+  if (status) return healthStatusLabel(status)
+  // Version-skew fallback (old core, no `status` field): mirror
+  // statusBadgeText's and ServerCard's own fallback order — sign-in state
+  // wins over a raw `connected` reading. Without this, an OAuth-expired but
+  // still-connected server (summary="Token expired", action="login",
+  // level="unhealthy") rendered "Online" here directly above the sub-line's
+  // "Sign-in required" text, one of SC-003's forbidden words for a
+  // usable=false server.
+  if (signInState.value) return 'Sign-in required'
+  return server.value?.connected ? 'Online' : 'Unknown'
 })
 
 // Never a success tone on an unhealthy server (audit F11). A disabled server is
 // not "green healthy" either — its health level is healthy only because being
-// off is intentional, so it reads neutral.
+// off is intentional, so it reads neutral. Keyed off `level` (the severity
+// signal), not the FR-011 status label text above, so an unrecognized/missing
+// status still gets a sensible color.
 const healthLevelTone = computed(() => {
   if (adminStateLabel.value === 'Disabled') return 'text-base-content/50'
-  switch (healthLevelLabel.value) {
-    case 'Healthy':
+  if (adminStateLabel.value === 'Quarantined') return 'text-base-content/50'
+  const level = server.value?.health?.level
+  switch (level) {
+    case 'healthy':
       return 'text-success'
-    case 'Degraded':
+    case 'degraded':
       return 'text-warning'
-    case 'Unhealthy':
+    case 'unhealthy':
       return 'text-error'
     default:
-      return 'text-base-content/50'
+      return server.value?.connected ? 'text-success' : 'text-base-content/50'
   }
 })
 
@@ -2260,6 +2261,7 @@ watch(
   (next, prev) => {
     if (next === prev) return
     serverTools.value = []
+    toolsLoadedKey = ''
     toolsError.value = null
     selectedToolSchema.value = null
     toolApprovals.value = []
@@ -2275,6 +2277,12 @@ watch(
     scanFilesLoaded.value = false
     // Per-server UI state must not leak onto the next server's page.
     trustModeRestartRequired.value = false
+    // Re-read (or reset) the tab for the new server's URL — see
+    // readTabFromQuery's own comment for why onMounted alone is not enough.
+    readTabFromQuery()
+    if (activeTab.value === 'security') {
+      loadScannerNames()
+    }
     void loadServerDetails().then(() => {
       // Same reasons as onMounted: banner (US3) + hold-evidence report links
       // (US2) need the latest report's job id on every tab — onMounted does
@@ -2458,25 +2466,57 @@ function loadTools() {
   return _loadToolsWithGen(loadGeneration)
 }
 
-async function _loadToolsWithGen(gen: number) {
+// Background refetch for live updates (approval, servers.changed): no loading
+// spinner, and a failure keeps the list on screen instead of replacing it with
+// an error — the next event or a manual Refresh re-converges.
+function refreshToolsSilently() {
+  return _loadToolsWithGen(loadGeneration, true)
+}
+
+// The server fields the tool list depends on. A quarantined stdio server is
+// already connected with its tools withheld, so approval changes `quarantined`
+// and `tool_count` but neither of the flags the connected/enabled watch keys on.
+type ToolsStateFields = Pick<Server, 'quarantined' | 'connected' | 'enabled' | 'tool_count'>
+function toolsStateKey(s: Partial<ToolsStateFields> | null | undefined): string {
+  if (!s) return ''
+  return [s.quarantined, s.connected, s.enabled, s.tool_count].join('|')
+}
+// Key of the server state the displayed tool list was requested under. It only
+// advances when a response is committed, so a failed refetch leaves it behind
+// and the next servers.changed event for the same state retries.
+let toolsLoadedKey = ''
+// Overlapping tool fetches for the same server (approval, reconnect events, the
+// connected/enabled watch) can resolve out of order; only a response newer than
+// the last committed one may replace the list.
+let toolsIssueSeq = 0
+let toolsAppliedSeq = 0
+
+async function _loadToolsWithGen(gen: number, silent = false) {
   if (!server.value) return
 
-  toolsLoading.value = true
-  toolsError.value = null
+  const mySeq = ++toolsIssueSeq
+  const myKey = toolsStateKey(server.value)
+  if (!silent) {
+    toolsLoading.value = true
+    toolsError.value = null
+  }
 
   try {
     const response = await api.getServerTools(server.value.name)
-    if (gen !== loadGeneration) return
+    if (gen !== loadGeneration || mySeq < toolsAppliedSeq) return
     if (response.success && response.data) {
       serverTools.value = response.data.tools || []
-    } else {
+      toolsError.value = null
+      toolsAppliedSeq = mySeq
+      toolsLoadedKey = myKey
+    } else if (!silent) {
       toolsError.value = response.error || 'Failed to load tools'
     }
   } catch (err) {
-    if (gen !== loadGeneration) return
+    if (gen !== loadGeneration || silent || mySeq < toolsAppliedSeq) return
     toolsError.value = err instanceof Error ? err.message : 'Failed to load tools'
   } finally {
-    if (gen === loadGeneration) toolsLoading.value = false
+    if (gen === loadGeneration && !silent) toolsLoading.value = false
   }
 }
 
@@ -2541,70 +2581,12 @@ async function _loadToolApprovalsWithGen(gen: number) {
   }
 }
 
-async function approveTool(toolName: string) {
-  if (!server.value) return
-  approvalLoading.value = true
-  try {
-    const response = await api.approveTools(server.value.name, [toolName])
-    if (response.success) {
-      systemStore.addToast({
-        type: 'success',
-        title: 'Tool Approved',
-        message: `${toolName} has been approved`,
-      })
-      await loadToolApprovals()
-      // Refresh server data to update quarantine counts
-      await serversStore.fetchServers()
-      // server is a computed from the store — no manual reassignment needed.
-    } else {
-      systemStore.addToast({
-        type: 'error',
-        title: 'Approval Failed',
-        message: response.error || 'Failed to approve tool',
-      })
-    }
-  } catch (err) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Approval Failed',
-      message: err instanceof Error ? err.message : 'Failed to approve tool',
-    })
-  } finally {
-    approvalLoading.value = false
-  }
+function approveTool(_toolName: string) {
+  activeTab.value = 'review'
 }
 
-async function approveAllTools() {
-  if (!server.value) return
-  approvalLoading.value = true
-  try {
-    const response = await api.approveTools(server.value.name)
-    if (response.success) {
-      systemStore.addToast({
-        type: 'success',
-        title: 'Tools Approved',
-        message: `All tools for ${server.value.name} have been approved`,
-      })
-      await loadToolApprovals()
-      // Refresh server data to update quarantine counts
-      await serversStore.fetchServers()
-      // server is a computed from the store — no manual reassignment needed.
-    } else {
-      systemStore.addToast({
-        type: 'error',
-        title: 'Approval Failed',
-        message: response.error || 'Failed to approve tools',
-      })
-    }
-  } catch (err) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Approval Failed',
-      message: err instanceof Error ? err.message : 'Failed to approve tools',
-    })
-  } finally {
-    approvalLoading.value = false
-  }
+function approveAllTools() {
+  activeTab.value = 'review'
 }
 
 // MCP-2199: reject a quarantined tool — it leaves the quarantine list and is
@@ -2990,6 +2972,7 @@ async function quarantineServer() {
     // Update local server reference
     await serversStore.fetchServers()
     // server is a computed from the store — no manual reassignment needed.
+    await Promise.all([refreshToolsSilently(), loadToolApprovals()])
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -3000,56 +2983,6 @@ async function quarantineServer() {
     actionLoading.value = false
   }
 }
-
-async function unquarantineServer() {
-  if (!server.value) return
-
-  actionLoading.value = true
-  try {
-    await serversStore.unquarantineServer(server.value.name)
-    systemStore.addToast({
-      type: 'success',
-      title: 'Server Unquarantined',
-      message: `${server.value.name} has been removed from quarantine`,
-    })
-    // Update local server reference
-    await serversStore.fetchServers()
-    // server is a computed from the store — no manual reassignment needed.
-  } catch (error) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Unquarantine Failed',
-      message: error instanceof Error ? error.message : 'Unknown error',
-    })
-  } finally {
-    actionLoading.value = false
-  }
-}
-
-// --- Security-aware approval flow (F-04) ---
-// Approve buttons go through POST /security/approve which enforces the
-// scanner gate before unquarantining the server. Force is only used after
-// the user explicitly confirms in the dialog.
-const showApproveConfirmation = ref(false)
-const approveDialogMode = ref<'no_scan' | 'critical'>('no_scan')
-
-// Spec 077 FR-021: the approval gate blocks on baseline DANGEROUS findings only
-// (hard-tier). Deep-scan findings inform but never gate. The server-side verdict
-// is tier-driven, so the modal mirrors it via the TIER-DRIVEN finding_counts —
-// NOT the raw threat-level report summary, where a tierless deep-scan/external
-// finding can read "dangerous" and would show the "Dangerous Findings Detected"
-// dialog even though the backend gate (hard-tier only) would not block.
-const dangerousFindingCount = computed(() => {
-  // Prefer the tier-driven counts on the loaded report, then the server's
-  // security_scan summary; the raw report summary is only a last-resort
-  // fallback for cores that predate report-level finding_counts.
-  const rep = scanReport.value as any
-  if (rep?.finding_counts?.dangerous != null) return rep.finding_counts.dangerous as number
-  const scan = server.value?.security_scan as any
-  if (scan?.finding_counts?.dangerous != null) return scan.finding_counts.dangerous as number
-  if (rep?.summary?.dangerous != null) return rep.summary.dangerous as number
-  return 0
-})
 
 // Tier-driven counts for the Security-tab summary strip (Spec 077 FR-014):
 // buckets findings exactly like the server list's finding_counts — a tierless
@@ -3149,60 +3082,8 @@ function applyToolFocus() {
   void showToolInDescription(String(toolName))
 }
 
-const hasCompletedScanForApprove = computed(() => {
-  if (scanReport.value) return true
-  return !!server.value?.security_scan?.last_scan_at
-})
-
 function handleApproveClick() {
-  if (!server.value) return
-  if (!hasCompletedScanForApprove.value) {
-    approveDialogMode.value = 'no_scan'
-    showApproveConfirmation.value = true
-    return
-  }
-  if (dangerousFindingCount.value > 0) {
-    approveDialogMode.value = 'critical'
-    showApproveConfirmation.value = true
-    return
-  }
-  void doSecurityApprove(false)
-}
-
-async function doSecurityApprove(force: boolean) {
-  if (!server.value) return
-  actionLoading.value = true
-  try {
-    await serversStore.securityApproveServer(server.value.name, force)
-    systemStore.addToast({
-      type: 'success',
-      title: 'Server Approved',
-      message: `${server.value.name} has been approved and unquarantined`,
-    })
-    showApproveConfirmation.value = false
-    await serversStore.fetchServers()
-    // server is a computed from the store — no manual reassignment needed.
-  } catch (error) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Approve Failed',
-      message: error instanceof Error ? error.message : 'Unknown error',
-    })
-  } finally {
-    actionLoading.value = false
-  }
-}
-
-function confirmForceApprove() {
-  void doSecurityApprove(true)
-}
-
-async function scanFirstFromDialog() {
-  showApproveConfirmation.value = false
-  activeTab.value = 'security'
-  // Kick off a scan; the Security tab will show progress. User can return to
-  // approve once the scan completes.
-  await startSecurityScan()
+  activeTab.value = 'review'
 }
 
 async function refreshData() {
@@ -3562,17 +3443,13 @@ async function commitNewEnv() {
   if (ok) addingEnv.value = false
 }
 
-// Suggest a keyring secret name derived from the kv key. Keep it short,
-// lowercase, alphanumeric + hyphens — the same convention as the existing
-// Secrets view.
+// Suggest a keyring secret name derived from the kv key (FR-065): the shared
+// helper (also used by Paste/Manual/Catalog secret toggles) keeps the field
+// KIND (env vs header) in the name, so a header and an env var with the same
+// key never collide on one keyring entry — the bug this used to have before
+// it was switched to refName.
 function suggestSecretName(scope: 'header' | 'env', k: string): string {
-  const base = `${server.value?.name || 'server'}-${k}`
-  return base
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 64)
+  return refName(server.value?.name || 'server', scope, k)
 }
 
 function openConvertModal(scope: 'header' | 'env', k: string, rawValue: string) {
@@ -3661,6 +3538,27 @@ function healthLevelBadgeClass(level: string): string {
     default:
       return 'badge badge-ghost badge-sm'
   }
+}
+
+// configHealthStatusLabel is the Config tab's Health card Status field
+// (Spec 109 FR-011 review finding): `healthStatusLabel(status)` alone renders
+// blank when `status` is absent — an old-core payload that only sends the
+// legacy singular `action`/`level`/`summary` fields (no `status`). Falling
+// back to `summary` mirrors the macOS equivalent (HealthStatus.statusLabel in
+// API/Models.swift), which already supports that old-core shape.
+function configHealthStatusLabel(health: HealthStatus): string {
+  if (health.status) return healthStatusLabel(health.status)
+  return health.summary || ''
+}
+
+// configHealthActions is the Config tab's "Suggested Action" row (Spec 109
+// FR-011 review finding): gating and iterating on `health.actions` alone
+// drops the row entirely for an old-core payload that only sends the legacy
+// singular `action` field (`actions` absent) — a regression from pre-109-c
+// behavior, where the row rendered from `action`.
+function configHealthActions(health: HealthStatus): string[] {
+  if (health.actions?.length) return health.actions
+  return health.action ? [health.action] : []
 }
 
 function stopScanPolling() {
@@ -3904,14 +3802,51 @@ async function refreshAfterScanSettled() {
 }
 
 /**
- * Server state changed (typically a CLI/MCP tool approval). The servers store
- * registers its own listener for this event and refreshes the projection
- * itself — either from the event payload or with a silent refetch — so the
- * only thing missing here is this server's approval list.
+ * Whether a servers.changed event may have changed this server's tool list.
+ * The event's `server`/`reason` fields cannot scope it: the core coalesces
+ * bursts and keeps only the LAST marker, so a change to this server can arrive
+ * tagged with another server's name. The embedded server list is
+ * authoritative, so compare this server's entry against the state the current
+ * tool list was requested under. A notify-only event (older core, or a
+ * ListServers failure) carries no list — refetch defensively.
  */
-async function refreshAfterServersChanged() {
+function serversChangedTouchesTools(detail: unknown): boolean {
+  const servers = (detail as { payload?: { servers?: unknown } } | null | undefined)?.payload?.servers
+  if (!Array.isArray(servers)) return true
+  const entry = servers.find(
+    (s): s is Partial<ToolsStateFields> & { name: string } =>
+      !!s && typeof s === 'object' && (s as { name?: unknown }).name === props.serverName
+  )
+  if (!entry) return false
+  // `tool_count` on the wire is a sticky, supervisor-re-stuck value: it is
+  // only zeroed while quarantined and otherwise survives a disconnect/
+  // reconnect cycle unchanged even though the reconnect clears the actual
+  // StateView tool list (MCP-2083). So a state transition that empties the
+  // real list (e.g. approving a quarantined server) and one that later
+  // repopulates it via background discovery can carry the IDENTICAL key,
+  // and the second, real change would be wrongly deduped away, leaving the
+  // Tools tab stuck on "No tools available" forever (the S3 symptom).
+  // Self-heal that case: whenever the server is active and we're currently
+  // showing zero tools, don't trust the key — always retry. This costs at
+  // most one extra refetch per empty state and closes the permanent-stall
+  // window regardless of which event/reason produced it.
+  if (serverTools.value.length === 0 && entry.connected && entry.enabled && !entry.quarantined) {
+    return true
+  }
+  return toolsStateKey(entry) !== toolsLoadedKey
+}
+
+/**
+ * Server state changed (a CLI/MCP tool approval, a server approval, tools
+ * released after reconnect). The servers store registers its own listener for
+ * this event and refreshes the projection itself — either from the event
+ * payload or with a silent refetch — so what is missing here is this server's
+ * approval list and, when the event touches it, its tool list.
+ */
+async function refreshAfterServersChanged(detail: unknown) {
   if (!server.value) return
-  await loadToolApprovals()
+  const refetchTools = serversChangedTouchesTools(detail)
+  await Promise.all([loadToolApprovals(), refetchTools ? refreshToolsSilently() : Promise.resolve()])
 }
 
 function handleScanSettledEvent(event: Event) {
@@ -3923,8 +3858,8 @@ function handleScanSettledEvent(event: Event) {
   void refreshAfterScanSettled()
 }
 
-function handleServersChangedEvent() {
-  void refreshAfterServersChanged()
+function handleServersChangedEvent(event: Event) {
+  void refreshAfterServersChanged((event as CustomEvent).detail)
 }
 
 
@@ -4011,10 +3946,7 @@ watch(logTail, () => {
 // Load data on mount
 onMounted(() => {
   // Read tab from query parameter (e.g., ?tab=security)
-  const tabParam = route.query.tab as string
-  if (tabParam && ['tools', 'logs', 'config', 'security'].includes(tabParam)) {
-    activeTab.value = tabParam as typeof activeTab.value
-  }
+  readTabFromQuery()
   loadServerDetails().then(() => {
     // Audit F11: honor ?focus=endpoint once the server payload is in, so the
     // Edit URL action lands on a focused, pre-filled field.

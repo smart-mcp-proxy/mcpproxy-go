@@ -22,6 +22,26 @@ enum ServerDetailTab: String, CaseIterable {
     }
 }
 
+/// Payload for `.showServerDetail` when the caller needs a specific tab open
+/// — e.g. the Dashboard's AttentionRow routing a `set_secret`/`configure`/
+/// `edit_url` action to Config, or `view_logs` to Logs, instead of silently
+/// no-op'ing an action `performAction` can't complete via a single API call.
+/// Older posters (tray menu, ToolsView) still send a bare `String` and land
+/// on the default `.tools` tab.
+struct ServerDetailTarget {
+    let serverName: String
+    let tab: ServerDetailTab
+    /// FR-014's "with the field focused" for `edit_url` — nil for every other
+    /// action (review round 3, F-FR014-focus). See `TrayConfigFocusField`.
+    let focusField: TrayConfigFocusField?
+
+    init(serverName: String, tab: ServerDetailTab, focusField: TrayConfigFocusField? = nil) {
+        self.serverName = serverName
+        self.tab = tab
+        self.focusField = focusField
+    }
+}
+
 // MARK: - Isolation Override (GH #1142)
 
 /// The three states of the per-server `isolation.enabled` override.
@@ -76,14 +96,27 @@ struct ServerDetailView: View {
     @State private var logLines: [String] = []
     @State private var isLoadingTools = false
     @State private var isLoadingLogs = false
-    @State private var isApproving = false
     @State private var actionMessage: String?
 
-    init(server: ServerStatus, appState: AppState, onDismiss: @escaping () -> Void) {
+    /// FR-014's "with the field focused" for `edit_url` (review round 3,
+    /// F-FR014-focus) — consumed once by `applyPendingFocusIfNeeded()` so a
+    /// later tab switch or re-render doesn't keep re-stealing focus.
+    @State private var pendingFocusField: TrayConfigFocusField?
+    @FocusState private var focusedConfigField: TrayConfigFocusField?
+
+    init(
+        server: ServerStatus,
+        appState: AppState,
+        initialTab: ServerDetailTab = .tools,
+        initialFocusField: TrayConfigFocusField? = nil,
+        onDismiss: @escaping () -> Void
+    ) {
         self.initialServer = server
         self.appState = appState
         self.onDismiss = onDismiss
         self._server = State(initialValue: server)
+        self._selectedTab = State(initialValue: initialTab)
+        self._pendingFocusField = State(initialValue: initialFocusField)
     }
 
     // Edit mode state for Config tab
@@ -147,6 +180,7 @@ struct ServerDetailView: View {
             case .config: configTab
             }
         }
+        .onAppear { applyPendingFocusIfNeeded() }
         .sheet(item: $convertSheet) { ctx in
             convertToSecretSheet(ctx)
         }
@@ -170,7 +204,9 @@ struct ServerDetailView: View {
             Circle()
                 .fill(server.statusColor)
                 .frame(width: 12, height: 12)
-                .accessibilityLabel("Server health: \(server.health?.level ?? "unknown")")
+                // FR-011: no surface may render `level` as text, including
+                // accessibility labels — use the one status label table.
+                .accessibilityLabel("Server health: \(server.health?.statusLabel ?? "unknown")")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
@@ -196,18 +232,9 @@ struct ServerDetailView: View {
 
             if server.quarantined {
                 Button {
-                    Task {
-                        do {
-                            try await apiClient?.approveTools(server.id)
-                            try await apiClient?.unquarantineServer(server.id)
-                            actionMessage = "Server approved and activated"
-                            await refreshServer()
-                        } catch {
-                            actionMessage = "Failed to approve: \(error.localizedDescription)"
-                        }
-                    }
+                    openReview()
                 } label: {
-                    Label("Approve Server", systemImage: "checkmark.shield")
+                    Label("Review Server", systemImage: "checkmark.shield")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
@@ -269,7 +296,14 @@ struct ServerDetailView: View {
         .padding()
     }
 
-    // MARK: - Tab Bar
+    private func openReview() {
+        NotificationCenter.default.post(name: .switchToSidebarTab, object: SidebarItem.review.rawValue)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NotificationCenter.default.post(name: .showReview, object: server.name)
+        }
+    }
+
+// MARK: - Tab Bar
 
     @ViewBuilder
     private var tabBar: some View {
@@ -369,27 +403,12 @@ struct ServerDetailView: View {
             Text("\(pendingApprovalCount) tool(s) need approval")
                 .font(.scaled(.subheadline, scale: fontScale).bold())
             Spacer()
-            if isApproving {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Button("Approve All") {
-                    Task {
-                        isApproving = true
-                        defer { isApproving = false }
-                        do {
-                            try await apiClient?.approveTools(server.id)
-                            actionMessage = "All tools approved for \(server.name)"
-                            await loadTools()
-                        } catch {
-                            actionMessage = "Failed to approve: \(error.localizedDescription)"
-                        }
-                    }
-                }
+            Button("Review tools") {
+                openReview()
+            }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .tint(.orange)
-            }
         }
         .padding()
         .background(Color.orange.opacity(0.1))
@@ -613,7 +632,8 @@ struct ServerDetailView: View {
                     if server.protocol == "http" || server.protocol == "sse" || server.protocol == "streamable-http" {
                         configSection(title: "Connection") {
                             if isEditing {
-                                configEditRow(label: "URL", text: $editURL, placeholder: "https://api.example.com/mcp")
+                                configEditRow(label: "URL", text: $editURL, placeholder: "https://api.example.com/mcp",
+                                              focusValue: .endpoint)
                             } else {
                                 configRow(label: "URL", value: server.url ?? "N/A")
                             }
@@ -768,15 +788,26 @@ struct ServerDetailView: View {
                     }
 
                     if let health = server.health {
+                        // Spec 109 FR-011: no surface may render `level` as text — the
+                        // Status row renders `status` through the one label table
+                        // (HealthStatus.statusLabel). `level` still exists as a
+                        // severity signal (badge/tray coloring) elsewhere, just not here.
                         configSection(title: "Health") {
-                            configRow(label: "Level", value: health.level)
+                            configRow(label: "Status", value: health.statusLabel)
                             configRow(label: "Admin State", value: health.adminState)
                             configRow(label: "Summary", value: health.summary)
                             if let detail = health.detail, !detail.isEmpty {
                                 configRow(label: "Detail", value: detail)
                             }
-                            if let action = health.action, !action.isEmpty {
-                                configRow(label: "Action", value: action)
+                            // actionsOrLegacyFallback falls back to the
+                            // legacy singular `action` when `actions` is
+                            // absent (an old-core payload) — without it this
+                            // row silently dropped for that payload shape, a
+                            // regression from before this PR.
+                            let actions = health.actionsOrLegacyFallback
+                            if !actions.isEmpty {
+                                let labels = actions.map { HealthStatus.actionLabels[$0] ?? $0 }
+                                configRow(label: "Suggested Action", value: labels.joined(separator: ", "))
                             }
                         }
                     }
@@ -814,7 +845,13 @@ struct ServerDetailView: View {
     }
 
     @ViewBuilder
-    private func configEditRow(label: String, text: Binding<String>, placeholder: String, multiline: Bool = false) -> some View {
+    private func configEditRow(
+        label: String,
+        text: Binding<String>,
+        placeholder: String,
+        multiline: Bool = false,
+        focusValue: TrayConfigFocusField? = nil
+    ) -> some View {
         HStack(alignment: .top) {
             Text(label)
                 .font(.scaled(.subheadline, scale: fontScale))
@@ -825,6 +862,14 @@ struct ServerDetailView: View {
                     .font(.scaledMonospaced(.subheadline, scale: fontScale))
                     .frame(height: 60)
                     .border(Color(nsColor: .separatorColor), width: 1)
+            } else if let focusValue {
+                // FR-014 (review round 3, F-FR014-focus): only the URL row
+                // passes a non-nil `focusValue` today, so this branch is the
+                // one place `focusedConfigField` actually binds to a control.
+                TextField(placeholder, text: text)
+                    .font(.scaledMonospaced(.subheadline, scale: fontScale))
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focusedConfigField, equals: focusValue)
             } else {
                 TextField(placeholder, text: text)
                     .font(.scaledMonospaced(.subheadline, scale: fontScale))
@@ -1154,6 +1199,26 @@ struct ServerDetailView: View {
         isEditing = true
     }
 
+    /// FR-014's "with the field focused" (review round 3, F-FR014-focus):
+    /// `edit_url`'s primary action lands here on `.config` carrying
+    /// `focusField == .endpoint` — enter edit mode (mirrors the Web UI's
+    /// `startEditUrl()`) and focus the URL field once it exists. Consumes
+    /// `pendingFocusField` so a later re-render (e.g. `refreshServer()`)
+    /// cannot re-steal focus away from whatever the user is doing next.
+    private func applyPendingFocusIfNeeded() {
+        guard let field = pendingFocusField else { return }
+        guard selectedTab == .config else { return }
+        pendingFocusField = nil
+        if !isEditing { startEditing() }
+        // The URL TextField materialises only once `isEditing` re-renders the
+        // Config tab body — asyncAfter this run-loop turn (same pattern the
+        // Web UI's `nextTick(() => urlInputRef.value?.focus())` uses) lets
+        // that happen before `focusedConfigField` is set.
+        DispatchQueue.main.async {
+            focusedConfigField = field
+        }
+    }
+
     private func saveEdits() async {
         guard let client = apiClient else { return }
         isSavingEdit = true
@@ -1292,23 +1357,17 @@ struct ServerDetailView: View {
         enum Scope: String { case header, env }
     }
 
-    /// Suggest a keyring secret name derived from server.name + key.
-    /// Lowercased, alphanumeric + hyphens, capped at 64 chars — same
-    /// convention as the Web UI / Secrets view.
-    private func suggestedSecretName(for key: String) -> String {
-        let base = "\(server.name)-\(key)"
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
-        let scrubbed = base.lowercased().unicodeScalars
-            .map { allowed.contains($0) ? Character($0) : "-" }
-        var out = String(scrubbed)
-            .split(separator: "-", omittingEmptySubsequences: true)
-            .joined(separator: "-")
-        if out.count > 64 { out = String(out.prefix(64)) }
-        return out
+    /// Suggest a keyring secret name derived from server.name + key (FR-065):
+    /// the shared SecretRefName helper (also used by the Add Server sheet)
+    /// keeps the field KIND (env vs header) in the name, so a header and an
+    /// env var with the same key never collide on one keyring entry.
+    private func suggestedSecretName(scope: ConvertToSecretContext.Scope, key: String) -> String {
+        let kind: SecretRefName.Kind = scope == .header ? .header : .env
+        return SecretRefName.compute(server: server.name, kind: kind, key: key)
     }
 
     private func openConvertSheet(scope: ConvertToSecretContext.Scope, key: String, value: String) {
-        convertSheetSecretName = suggestedSecretName(for: key)
+        convertSheetSecretName = suggestedSecretName(scope: scope, key: key)
         convertSheetBusy = false
         convertSheetError = nil
         convertSheet = ConvertToSecretContext(scope: scope, key: key, value: value)
@@ -1763,12 +1822,9 @@ struct ToolRow: View {
     }
 
     private func approvalStatusLabel(_ status: String) -> String {
-        switch status {
-        case "approved": return "Approved"
-        case "pending": return "Pending Approval"
-        case "changed": return "Changed (needs re-approval)"
-        default: return status.capitalized
-        }
+        // Spec 109 FR-027: one vocabulary, shared with ToolsView and the Web
+        // UI — see ToolLabels.swift.
+        ToolLabels.approvalStatusLabel(status)
     }
 
     // MARK: - Diff Section
@@ -1950,22 +2006,9 @@ struct ToolRow: View {
     }
 
     private func approveTool() {
-        guard let client = apiClient else { return }
-        isApprovingTool = true
-        Task {
-            do {
-                try await client.approveSpecificTools(serverName, tools: [tool.name])
-                await MainActor.run {
-                    isApprovingTool = false
-                    approveSuccess = true
-                    onApproved?()
-                }
-            } catch {
-                await MainActor.run {
-                    isApprovingTool = false
-                    NSLog("[ToolRow] approveTool FAILED for %@: %@", tool.name, error.localizedDescription)
-                }
-            }
+        NotificationCenter.default.post(name: .switchToSidebarTab, object: SidebarItem.review.rawValue)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NotificationCenter.default.post(name: .showReview, object: serverName)
         }
     }
 

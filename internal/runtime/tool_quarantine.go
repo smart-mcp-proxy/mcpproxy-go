@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -343,9 +344,11 @@ func (r *Runtime) scanApproveChange(serverName, toolName string, existing *stora
 	existing.ApprovedAt = time.Now().UTC()
 	existing.ApprovedBy = "scan-approved"
 	existing.CurrentDescription = tool.Description
+	existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 	existing.CurrentSchema = schemaJSON
 	existing.CurrentOutputSchema = outputSchemaJSON
 	existing.PreviousDescription = ""
+	existing.PreviousAnnotations = nil
 	existing.PreviousSchema = ""
 	existing.PreviousOutputSchema = ""
 	existing.ClearScanHold() // the record is no longer held — drop stale evidence
@@ -666,6 +669,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					ApprovedBy:          approvedBy,
 					ApprovedAt:          now,
 					CurrentDescription:  tool.Description,
+					CurrentAnnotations:  capturedToolAnnotations(tool.Annotations),
 					CurrentSchema:       schemaJSON,
 					CurrentOutputSchema: outputSchemaJSON,
 					Disabled:            legacyDisabled,
@@ -707,6 +711,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				HashSchemaVersion:   storage.OutputSchemaHashSchemaVersion,
 				Status:              storage.ToolApprovalStatusPending,
 				CurrentDescription:  tool.Description,
+				CurrentAnnotations:  capturedToolAnnotations(tool.Annotations),
 				CurrentSchema:       schemaJSON,
 				CurrentOutputSchema: outputSchemaJSON,
 				Disabled:            legacyDisabled,
@@ -802,6 +807,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				}
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.PreviousDescription = ""
+				existing.PreviousAnnotations = nil
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
@@ -817,6 +823,10 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentDescription = tool.Description
 				existing.CurrentSchema = schemaJSON
 				existing.CurrentOutputSchema = outputSchemaJSON
+				needsSave = true
+			}
+			if !reflect.DeepEqual(existing.CurrentAnnotations, tool.Annotations) {
+				existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 				needsSave = true
 			}
 			if needsSave {
@@ -840,6 +850,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// Update current info to the live snapshot.
 			existing.CurrentHash = currentHash
 			existing.CurrentDescription = tool.Description
+			existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 			existing.CurrentSchema = schemaJSON
 			existing.CurrentOutputSchema = outputSchemaJSON
 
@@ -875,6 +886,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.ApprovedAt = time.Now().UTC()
 				existing.ApprovedBy = promoteBy
 				existing.PreviousDescription = ""
+				existing.PreviousAnnotations = nil
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
@@ -937,9 +949,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
 				existing.CurrentDescription = tool.Description
+				existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 				existing.CurrentSchema = schemaJSON
 				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
+				existing.PreviousAnnotations = nil
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
@@ -966,9 +980,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.ApprovedAt = time.Now().UTC()
 				existing.ApprovedBy = "auto-approve-changes"
 				existing.CurrentDescription = tool.Description
+				existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 				existing.CurrentSchema = schemaJSON
 				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
+				existing.PreviousAnnotations = nil
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
@@ -1047,9 +1063,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
 				existing.CurrentDescription = tool.Description
+				existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 				existing.CurrentSchema = schemaJSON
 				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
+				existing.PreviousAnnotations = nil
 				existing.PreviousSchema = ""
 				existing.ClearScanHold()
 				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
@@ -1100,9 +1118,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
 				existing.CurrentDescription = tool.Description
+				existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 				existing.CurrentSchema = schemaJSON
 				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
+				existing.PreviousAnnotations = nil
 				existing.PreviousSchema = ""
 				existing.ClearScanHold()
 				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr == nil {
@@ -1146,9 +1166,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
 				existing.CurrentDescription = tool.Description
+				existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 				existing.CurrentSchema = schemaJSON
 				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
+				existing.PreviousAnnotations = nil
 				existing.PreviousSchema = ""
 				existing.ClearScanHold()
 				if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr == nil {
@@ -1176,9 +1198,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.ApprovedAt = time.Now().UTC()
 				existing.ApprovedBy = "auto-approve-changes"
 				existing.CurrentDescription = tool.Description
+				existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 				existing.CurrentSchema = schemaJSON
 				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
+				existing.PreviousAnnotations = nil
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
 				existing.ClearScanHold()
@@ -1227,11 +1251,13 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 
 			existing.Status = storage.ToolApprovalStatusChanged
 			existing.PreviousDescription = oldDesc
+			existing.PreviousAnnotations = cloneToolAnnotations(existing.CurrentAnnotations)
 			existing.PreviousSchema = oldSchema
 			existing.PreviousOutputSchema = oldOutputSchema
 			existing.CurrentHash = currentHash
 			existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
 			existing.CurrentDescription = tool.Description
+			existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 			existing.CurrentSchema = schemaJSON
 			existing.CurrentOutputSchema = outputSchemaJSON
 			holdEvidence.applyTo(existing)
@@ -1280,6 +1306,9 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			zap.Int("changed", result.ChangedCount),
 			zap.Int("total_blocked", len(result.BlockedTools)))
 	}
+	if result.PendingCount > 0 || result.ChangedCount > 0 {
+		r.emitReviewChanged(serverName)
+	}
 
 	return result, nil
 }
@@ -1316,6 +1345,44 @@ func revertedToPreviousContract(existing *storage.ToolApprovalRecord, descriptio
 func (r *Runtime) saveToolApproval(record *storage.ToolApprovalRecord) error {
 	record.IdentityKeyed = true
 	return r.storageManager.SaveToolApproval(record)
+}
+
+// cloneToolAnnotations preserves a point-in-time upstream snapshot. Annotation
+// pointers are optional and callers may reuse them across discovery passes, so
+// approval records must not retain aliases to mutable boolean values.
+func cloneToolAnnotations(annotations *config.ToolAnnotations) *config.ToolAnnotations {
+	if annotations == nil {
+		return nil
+	}
+	clone := *annotations
+	if annotations.ReadOnlyHint != nil {
+		value := *annotations.ReadOnlyHint
+		clone.ReadOnlyHint = &value
+	}
+	if annotations.DestructiveHint != nil {
+		value := *annotations.DestructiveHint
+		clone.DestructiveHint = &value
+	}
+	if annotations.IdempotentHint != nil {
+		value := *annotations.IdempotentHint
+		clone.IdempotentHint = &value
+	}
+	if annotations.OpenWorldHint != nil {
+		value := *annotations.OpenWorldHint
+		clone.OpenWorldHint = &value
+	}
+	return &clone
+}
+
+// capturedToolAnnotations marks a definition written by this runtime as
+// captured even when its upstream omitted annotation hints. Historical stored
+// nil remains meaningful to reviewTier as "unknown"; only a newly captured
+// definition gets the non-nil empty record that means "unannotated".
+func capturedToolAnnotations(annotations *config.ToolAnnotations) *config.ToolAnnotations {
+	if annotations == nil {
+		return &config.ToolAnnotations{}
+	}
+	return cloneToolAnnotations(annotations)
 }
 
 // saveReadToolApproval is saveToolApproval for a record that was READ from
@@ -1588,6 +1655,7 @@ func (r *Runtime) adoptLegacyLockOrBaseline(serverName string, existing *storage
 	existing.CurrentHash = currentHash
 	existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
 	existing.CurrentDescription = tool.Description
+	existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 	existing.CurrentSchema = schemaJSON
 	existing.CurrentOutputSchema = outputSchemaJSON
 
@@ -1604,6 +1672,7 @@ func (r *Runtime) adoptLegacyLockOrBaseline(serverName string, existing *storage
 	case sibling != nil && (sibling.Status == storage.ToolApprovalStatusPending || sibling.Status == storage.ToolApprovalStatusChanged):
 		existing.Status = sibling.Status
 		existing.PreviousDescription = sibling.PreviousDescription
+		existing.PreviousAnnotations = cloneToolAnnotations(sibling.PreviousAnnotations)
 		existing.PreviousSchema = sibling.PreviousSchema
 		existing.PreviousOutputSchema = sibling.PreviousOutputSchema
 		existing.HeldReason = sibling.HeldReason
@@ -1629,6 +1698,7 @@ func (r *Runtime) adoptLegacyLockOrBaseline(serverName string, existing *storage
 		// the evidence, as the collapsed record itself would have been marked.
 		existing.Status = storage.ToolApprovalStatusChanged
 		existing.PreviousDescription = sibling.CurrentDescription
+		existing.PreviousAnnotations = cloneToolAnnotations(sibling.CurrentAnnotations)
 		existing.PreviousSchema = sibling.CurrentSchema
 		existing.PreviousOutputSchema = sibling.CurrentOutputSchema
 		existing.ClearScanHold()
@@ -1726,6 +1796,8 @@ func (r *Runtime) adoptLegacyLockForNewTool(serverName, toolName string, prior m
 		ApprovedAt:           sibling.ApprovedAt,
 		ApprovedBy:           sibling.ApprovedBy,
 		PreviousDescription:  sibling.PreviousDescription,
+		PreviousAnnotations:  cloneToolAnnotations(sibling.PreviousAnnotations),
+		CurrentAnnotations:   cloneToolAnnotations(sibling.CurrentAnnotations),
 		PreviousSchema:       sibling.PreviousSchema,
 		PreviousOutputSchema: sibling.PreviousOutputSchema,
 		HeldReason:           sibling.HeldReason,
@@ -1744,6 +1816,7 @@ func (r *Runtime) adoptLegacyLockForNewTool(serverName, toolName string, prior m
 	} else {
 		record.CurrentHash = currentHash
 		record.CurrentDescription = tool.Description
+		record.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
 		record.CurrentSchema = schemaJSON
 		record.CurrentOutputSchema = outputSchemaJSON
 	}
@@ -1959,6 +2032,7 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 		record.ApprovedAt = time.Now().UTC()
 		record.ApprovedBy = approvedBy
 		record.PreviousDescription = ""
+		record.PreviousAnnotations = nil
 		record.PreviousSchema = ""
 		record.PreviousOutputSchema = ""
 		record.ClearScanHold()
@@ -1984,6 +2058,7 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 	// reloads — see issue #438. Emit once per call (not per tool) to keep
 	// the bus quiet on bulk approvals.
 	if approved > 0 {
+		r.emitReviewChanged(serverName)
 		r.emitServersChanged("tools_approved", map[string]any{
 			"server":         serverName,
 			"approved_count": approved,
@@ -2446,6 +2521,7 @@ func (r *Runtime) BlockTools(serverName string, toolNames []string, blockedBy st
 		record.ApprovedAt = time.Now().UTC()
 		record.ApprovedBy = blockedBy
 		record.PreviousDescription = ""
+		record.PreviousAnnotations = nil
 		record.PreviousSchema = ""
 		record.PreviousOutputSchema = ""
 		record.ClearScanHold()
@@ -2469,6 +2545,7 @@ func (r *Runtime) BlockTools(serverName string, toolNames []string, blockedBy st
 	// One SSE emit per call (not per tool) so an open Servers/overview page
 	// refreshes its quarantine badge — mirrors ApproveTools.
 	if blocked > 0 {
+		r.emitReviewChanged(serverName)
 		r.emitServersChanged("tools_blocked", map[string]any{
 			"server":        serverName,
 			"blocked_count": blocked,
@@ -2508,6 +2585,29 @@ func (r *Runtime) BlockAllTools(serverName string, blockedBy string) (int, error
 	}
 
 	return r.BlockTools(serverName, toolNames, blockedBy)
+}
+
+// RecordToolBlocksForSecurityApproval publishes the per-tool audit events for
+// records that the scanner service has already committed atomically with the
+// integrity baseline. It deliberately does not write approval state again.
+func (r *Runtime) RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string) {
+	for _, toolName := range toolNames {
+		record, err := r.storageManager.GetToolApproval(serverName, toolName)
+		if err != nil {
+			r.logger.Error("Failed to read atomically blocked tool for audit event",
+				zap.String("server", serverName), zap.String("tool", toolName), zap.Error(err))
+			r.emitToolQuarantineEvent(serverName, toolName, "tool_blocked", "", "", "", "", "", "")
+			continue
+		}
+		r.emitToolQuarantineEvent(serverName, toolName, "tool_blocked",
+			"", record.ApprovedHash, "", record.CurrentDescription, "", record.CurrentSchema)
+	}
+	if len(toolNames) > 0 {
+		r.emitReviewChanged(serverName)
+		r.emitServersChanged("security_approval_tool_blocks", map[string]any{
+			"server": serverName, "blocked_count": len(toolNames), "blocked_by": blockedBy,
+		})
+	}
 }
 
 // emitToolQuarantineEvent emits an activity event for tool quarantine changes.

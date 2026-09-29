@@ -155,6 +155,11 @@ final class SocketURLProtocol: URLProtocol {
         }
         socketFD = fd
 
+        // A peer that closes before we finish writing must surface as EPIPE
+        // (handled below), not a process-killing SIGPIPE.
+        var noSigPipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+
         // Build sockaddr_un
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)

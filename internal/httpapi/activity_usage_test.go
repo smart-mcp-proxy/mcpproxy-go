@@ -32,7 +32,7 @@ type mockUsageController struct {
 	scanCalls int
 }
 
-func (m *mockUsageController) GetCurrentConfig() any {
+func (m *mockUsageController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey, Observability: config.DefaultObservabilityConfig()}
 }
 

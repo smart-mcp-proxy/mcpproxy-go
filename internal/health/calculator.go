@@ -120,15 +120,42 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			AdminState: StateDisabled,
 			Summary:    "Disabled",
 			Action:     ActionEnable,
+			Status:     StatusDisabled,
+			Usable:     false,
+			Actions:    []string{ActionEnable},
 		}
 	}
 
 	if input.Quarantined {
+		state := strings.ToLower(input.State)
+
+		// FR-010: a quarantined server that ALSO needs OAuth sign-in reports
+		// `login` (was `approve`) — the quarantined branch now checks the same
+		// OAuth-login-required inputs the later OAuth branches use, before it
+		// short-circuits on the admin state alone. Checked first because
+		// signing in is the operator's actual next step; approval alone would
+		// leave the server unable to connect.
+		if needsLogin, level, summary, detail := quarantinedOAuthLoginState(input, state); needsLogin {
+			return &contracts.HealthStatus{
+				Level:      level,
+				AdminState: StateQuarantined,
+				Summary:    summary,
+				Detail:     detail,
+				Action:     ActionLogin,
+				Status:     StatusSignInRequired,
+				Usable:     false,
+				Actions:    []string{ActionLogin, ActionApprove},
+			}
+		}
+
 		status := &contracts.HealthStatus{
 			Level:      LevelHealthy, // Quarantined is intentional, not broken
 			AdminState: StateQuarantined,
 			Summary:    "Quarantined for review",
 			Action:     ActionApprove,
+			Status:     StatusNeedsReview,
+			Usable:     false,
+			Actions:    []string{ActionApprove},
 		}
 		// ...but a quarantined server that cannot START is broken, and this
 		// early return used to discard that. Being disconnected is NOT the
@@ -144,14 +171,36 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		// function answered healthy/approve. Approving it hands the user a
 		// second failure.
 		//
+		// Round-6 review finding: this upgrade originally checked
+		// `state == "error"` only, even though this function's own doc comment
+		// (above) says "disconnected" is the DESIGNED state a quarantined
+		// server settles into — and the round-4 regression test
+		// (TestCalculateHealth_QuarantinedDisconnectedOAuthError) already
+		// proves "disconnected" can carry a genuine LastError. A quarantined,
+		// OAuth-configured server whose inspection-exempt dial fails for a
+		// non-OAuth reason (e.g. "dial tcp: no route to host") and settles
+		// into state="disconnected" must upgrade exactly like its "error"
+		// twin, not stay "Quarantined for review" and hand the user a
+		// still-dead server on approval.
+		//
 		// The admin contract is unchanged — still quarantined, and approval is
 		// still the operator's next step — so the review flow and the tray's
 		// quarantine handling keep working. Only the level and the summary
 		// stop claiming the server is fine.
-		if strings.EqualFold(input.State, "error") && input.LastError != "" {
+		// An OAuth server awaiting sign-in is the same story: it cannot connect
+		// until the user signs in, so it is an attention item, not healthy — but
+		// that case is caught above by quarantinedOAuthLoginState (which now
+		// folds in quarantinedAwaitingSignIn's autodetected-OAuth markers, see
+		// its own comment) and returns before this point with the fuller
+		// Action/Status/Actions triple (FR-010: `login`/StatusSignInRequired),
+		// not just an upgraded Level/Summary. Reaching here means that check
+		// already said no, so only the non-OAuth transport fault remains.
+		if (state == "error" || state == "disconnected") && input.LastError != "" {
 			status.Level = LevelUnhealthy
 			status.Summary = "Quarantined — " + formatErrorSummary(input.LastError)
 			status.Detail = input.LastError
+			status.Status = StatusError
+			status.Actions = []string{ActionApprove, ActionViewLogs}
 		}
 		return status
 	}
@@ -164,6 +213,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    "Missing secret",
 			Detail:     input.MissingSecret,
 			Action:     ActionSetSecret,
+			Status:     StatusNeedsSecret,
+			Usable:     false,
+			Actions:    []string{ActionSetSecret},
 		}
 	}
 
@@ -175,6 +227,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    "OAuth configuration error",
 			Detail:     input.OAuthConfigErr,
 			Action:     ActionConfigure,
+			Status:     StatusNeedsConfig,
+			Usable:     false,
+			Actions:    []string{ActionConfigure},
 		}
 	}
 
@@ -204,6 +259,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    summary,
 			Detail:     detail,
 			Action:     ActionRestart,
+			Status:     StatusError,
+			Usable:     false,
+			Actions:    []string{ActionRestart, ActionViewLogs},
 		}
 	}
 
@@ -220,15 +278,19 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		if input.HasEndpointURL && isEndpointAddressError(input.LastError) {
 			action = ActionEditURL
 		}
-		if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
+		if oauthActionApplies(input) {
 			level, action, summary = oauthAttentionState(input.LastError)
 		}
+		statusVal, usable, actions := connectionErrorStatus(action)
 		return &contracts.HealthStatus{
 			Level:      level,
 			AdminState: StateEnabled,
 			Summary:    summary,
 			Detail:     input.LastError,
 			Action:     action,
+			Status:     statusVal,
+			Usable:     usable,
+			Actions:    actions,
 		}
 	case "disconnected":
 		level := LevelUnhealthy
@@ -240,16 +302,20 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				action = ActionEditURL
 			}
 			// For OAuth-required servers with OAuth-related errors, suggest login
-			if input.OAuthRequired && isOAuthRelatedError(input.LastError) {
+			if oauthActionApplies(input) {
 				level, action, summary = oauthAttentionState(input.LastError)
 			}
 		}
+		statusVal, usable, actions := connectionErrorStatus(action)
 		return &contracts.HealthStatus{
 			Level:      level,
 			AdminState: StateEnabled,
 			Summary:    summary,
 			Detail:     input.LastError,
 			Action:     action,
+			Status:     statusVal,
+			Usable:     usable,
+			Actions:    actions,
 		}
 	case "pending auth", "pending_auth":
 		// Parked awaiting user login (#1013): the client stopped redialing on
@@ -263,6 +329,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    summary,
 			Detail:     input.LastError,
 			Action:     action,
+			Status:     StatusSignInRequired,
+			Usable:     false,
+			Actions:    []string{ActionLogin},
 		}
 	case "connecting", "idle":
 		return &contracts.HealthStatus{
@@ -270,6 +339,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			AdminState: StateEnabled,
 			Summary:    "Connecting...",
 			Action:     ActionNone, // Will resolve on its own — not an attention item
+			Status:     StatusConnecting,
+			Usable:     false,
+			Actions:    []string{},
 		}
 	}
 
@@ -287,6 +359,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    "Sign-in required",
 			Detail:     "This server requires sign-in before its tools can be called.",
 			Action:     ActionLogin,
+			Status:     StatusSignInRequired,
+			Usable:     false,
+			Actions:    []string{ActionLogin},
 		}
 	}
 
@@ -299,6 +374,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				AdminState: StateEnabled,
 				Summary:    "Logged out",
 				Action:     ActionLogin,
+				Status:     StatusSignInRequired,
+				Usable:     false,
+				Actions:    []string{ActionLogin},
 			}
 		}
 
@@ -309,6 +387,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				AdminState: StateEnabled,
 				Summary:    "Token expired",
 				Action:     ActionLogin,
+				Status:     StatusSignInRequired,
+				Usable:     false,
+				Actions:    []string{ActionLogin},
 			}
 		}
 
@@ -320,6 +401,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				Summary:    "Authentication error",
 				Detail:     input.LastError,
 				Action:     ActionLogin,
+				Status:     StatusSignInRequired,
+				Usable:     false,
+				Actions:    []string{ActionLogin},
 			}
 		}
 
@@ -335,9 +419,15 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 						AdminState: StateEnabled,
 						Summary:    formatConnectedSummary(input.ToolCount),
 						Action:     ActionNone,
+						Status:     StatusReady,
+						Usable:     true,
+						Actions:    []string{},
 					}
 				}
-				// No refresh token - user needs to re-authenticate soon
+				// No refresh token - user needs to re-authenticate soon. Still
+				// `ready`/usable: the current token works, so this is a proactive
+				// "Sign in" nudge, never an attention item (which keys on status,
+				// not level) — the amber `level` is the badge/tray signal.
 				// M-002: Include exact expiration time in Detail field
 				return &contracts.HealthStatus{
 					Level:      LevelDegraded,
@@ -345,6 +435,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 					Summary:    formatExpiringTokenSummary(timeUntilExpiry),
 					Detail:     fmt.Sprintf("Token expires at %s", input.TokenExpiresAt.Format(time.RFC3339)),
 					Action:     ActionLogin,
+					Status:     StatusReady,
+					Usable:     true,
+					Actions:    []string{ActionLogin},
 				}
 			}
 		}
@@ -357,6 +450,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 				AdminState: StateEnabled,
 				Summary:    "Authentication required",
 				Action:     ActionLogin,
+				Status:     StatusSignInRequired,
+				Usable:     false,
+				Actions:    []string{ActionLogin},
 			}
 		}
 	}
@@ -365,7 +461,10 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 	// Check if refresh is in a degraded or failed state
 	switch input.RefreshState {
 	case RefreshStateRetrying:
-		// Refresh failed but retrying - degraded status
+		// Refresh failed but retrying - degraded status. Still `ready`/usable:
+		// the connection is up on the current token, so this is not an
+		// attention item — only View logs is offered, as a diagnostic, not a
+		// blocking remedy.
 		detail := formatRefreshRetryDetail(input.RefreshRetryCount, input.RefreshNextAttempt, input.RefreshLastError)
 		return &contracts.HealthStatus{
 			Level:      LevelDegraded,
@@ -373,6 +472,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    "Token refresh pending",
 			Detail:     detail,
 			Action:     ActionViewLogs,
+			Status:     StatusReady,
+			Usable:     true,
+			Actions:    []string{ActionViewLogs},
 		}
 	case RefreshStateFailed:
 		// Refresh permanently failed - unhealthy status
@@ -386,6 +488,9 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			Summary:    "Refresh token expired",
 			Detail:     detail,
 			Action:     ActionLogin,
+			Status:     StatusSignInRequired,
+			Usable:     false,
+			Actions:    []string{ActionLogin},
 		}
 	}
 
@@ -395,7 +500,138 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 		AdminState: StateEnabled,
 		Summary:    formatConnectedSummary(input.ToolCount),
 		Action:     ActionNone,
+		Status:     StatusReady,
+		Usable:     true,
+		Actions:    []string{},
 	}
+}
+
+// connectionErrorStatus derives the `status`/`usable`/`actions` triple from
+// the final `action` a connection-state branch (error/disconnected) settled
+// on, after its EditURL/OAuth overrides. Deriving from the final action
+// (rather than re-testing the same conditions) keeps this in lockstep with
+// whichever override wins when more than one applies.
+//
+// The default case is deliberately a safe fallback, not a silent acceptance
+// of an unrecognized value: both call sites only ever pass ActionRestart
+// (their own starting value), ActionEditURL, or ActionLogin, so today
+// `default` means exactly "the generic restart-and-view-logs case" — pinned
+// by TestConnectionErrorStatus below. It intentionally does not panic on an
+// unexpected action, because this function runs on every health render for
+// every server; failing loudly here would turn one bad caller into an outage
+// for every server's health tile rather than one wrong-but-visible row.
+func connectionErrorStatus(action string) (status string, usable bool, actions []string) {
+	switch action {
+	case ActionEditURL:
+		return StatusNeedsConfig, false, []string{ActionEditURL}
+	case ActionLogin:
+		return StatusSignInRequired, false, []string{ActionLogin}
+	default:
+		return StatusError, false, []string{ActionRestart, ActionViewLogs}
+	}
+}
+
+// quarantinedOAuthLoginState reports whether a quarantined server also needs
+// OAuth sign-in (FR-010), and if so the level/summary/detail to report. It
+// mirrors the OAuth-login signals the non-quarantined branches below use —
+// the parked "pending auth" state (#1013), an OAuth-related error while
+// connecting or disconnected, the call-time OAuth requirement (MCP-2084), an
+// explicit UserLoggedOut, and OAuthStatus of "expired"/"error"/"none"/"" —
+// because a quarantined server is still dialed under the scanner's
+// inspection exemption (or was OAuth-configured and never signed in at all)
+// and can hit any of them; these inputs are populated for quarantined
+// servers the same way they are for enabled ones. It also mirrors section
+// 4's "genuine connecting states always take priority" invariant: a
+// connecting/idle server never returns needsLogin, even with a stale OAuth
+// signal, so it is free to resolve on its own like the non-quarantined path.
+func quarantinedOAuthLoginState(input HealthCalculatorInput, state string) (needsLogin bool, level, summary, detail string) {
+	// Mirror section 4's "genuine connecting states always take priority"
+	// invariant (calculator.go, the CallTimeOAuthRequired comment): a
+	// quarantined server mid-dial resolves the connecting state on its own,
+	// so a stale OAuthRequired/OAuthStatus pair must not pre-empt it with a
+	// login CTA that may flap away moments later. Checked first, ahead of
+	// every OAuth-login signal below.
+	if state == "connecting" || state == "idle" {
+		return false, "", "", ""
+	}
+	switch state {
+	case "pending auth", "pending_auth":
+		level, _, summary = oauthAttentionState(input.LastError)
+		return true, level, summary, input.LastError
+	case "error", "disconnected":
+		// Mirror the non-quarantined "error"/"disconnected" branches
+		// (calculator.go section 4), which apply the same isOAuthRelatedError
+		// override to both states. Checked here, ahead of the OAuthStatus
+		// fallback below, so a stale OAuthStatus (still "authenticated" while
+		// the connection has already failed with an OAuth-shaped error) does
+		// not mask the sign-in verdict.
+		//
+		// quarantinedAwaitingSignIn (not just `input.OAuthRequired &&
+		// isOAuthRelatedError`) so autodetected OAuth (OAuthRequired=false)
+		// gets the same verdict as configured OAuth when the error text
+		// itself is an unambiguous login-required or reauth marker — the
+		// same trust the non-quarantined oauthActionApplies gives those two
+		// markers. It also keeps this branch's own "error"-state generic-match
+		// exclusion (below), so a merely OAuth-shaped but non-specific string
+		// in "error" state (e.g. mcp-go's "authentication strategies failed"
+		// wrapper) still defers to the transport-fault branch, not just any
+		// quarantined server whose LastError happens to mention OAuth.
+		if quarantinedAwaitingSignIn(input) {
+			level, _, summary = oauthAttentionState(input.LastError)
+			return true, level, summary, input.LastError
+		}
+		// A genuine, non-OAuth-shaped transport fault (e.g. "dial tcp: ...
+		// no route to host") must outrank a stale OAuthStatus below, exactly
+		// like the non-quarantined "error"/"disconnected" branches, which
+		// always return before OAuthStatus is ever consulted — a connection
+		// error takes priority over any OAuth signal. Without this, a
+		// quarantined server whose dial fails for a reason unrelated to
+		// OAuth (a dead host, a missing binary) fell through to the
+		// OAuthStatus checks and reported sign-in-required off a token
+		// status that has nothing to do with the actual fault, instead of
+		// the transport-fault branch CalculateHealth's own admin-state
+		// section (`(state == "error" || state == "disconnected") &&
+		// LastError != ""`) reports.
+		//
+		// Round-6 review finding: the round-5 fix above only closed this gap
+		// when LastError is non-empty. The non-quarantined "error"/
+		// "disconnected" branches (section 4) never consult OAuthStatus at
+		// all while in those states, even with an empty LastError — being in
+		// a connection-error state is itself the answer, full stop. Return
+		// unconditionally so a quarantined server with a stale OAuthStatus
+		// (e.g. "expired") and no LastError text does not fall through to the
+		// generic OAuthStatus checks below and report a misleading
+		// sign-in-required; it falls through to the (still healthy, absent an
+		// actual LastError) "Quarantined for review" default instead, mirroring
+		// the non-quarantined twin's refusal to consult OAuthStatus here.
+		return false, "", "", ""
+	}
+	if input.CallTimeOAuthRequired {
+		return true, LevelDegraded, "Sign-in required", "This server requires sign-in before its tools can be called."
+	}
+	// The signals above only fire while the connection state itself surfaces
+	// an OAuth problem (parked pending-auth, an OAuth-shaped error string, or
+	// a call-time 401). A quarantined server that is OAuth-configured but was
+	// simply never signed in, logged out, or let its token expire/error never
+	// reaches "error"/"pending auth" — the scanner's inspection-exempt dial
+	// still succeeds at the transport level — so it fell through to the
+	// generic "Quarantined for review" summary. Mirror the non-quarantined
+	// OAuth-state checks (section 5 below) so the same inputs produce the
+	// same sign-in verdict regardless of admin state.
+	if input.OAuthRequired {
+		if input.UserLoggedOut {
+			return true, LevelUnhealthy, "Logged out", ""
+		}
+		switch input.OAuthStatus {
+		case "expired":
+			return true, LevelUnhealthy, "Token expired", ""
+		case "error":
+			return true, LevelUnhealthy, "Authentication error", input.LastError
+		case "none", "":
+			return true, LevelUnhealthy, "Authentication required", ""
+		}
+	}
+	return false, "", "", ""
 }
 
 // formatConnectedSummary formats the summary for a healthy connected server.
@@ -570,6 +806,41 @@ func isOAuthRelatedError(err string) bool {
 	return false
 }
 
+// quarantinedAwaitingSignIn reports whether a quarantined server in the
+// "error"/"disconnected" state is waiting on an OAuth sign-in: its last error
+// is OAuth-related and either a first-time login-required error, a re-auth
+// error (a previously-working stored token that broke), or (for configured
+// OAuth) any other OAuth error outside the "error" state. In the "error" state a
+// non-login, non-reauth OAuth match is left to the transport-fault branch,
+// because mcp-go wraps transport failures in "authentication strategies
+// failed" and the fault summary names the real cause.
+//
+// The Pending Auth state is deliberately NOT handled here: the only caller,
+// quarantinedOAuthLoginState, resolves "pending auth"/"pending_auth" in its own
+// preceding switch case, so this helper never sees it.
+//
+// Login-required and re-auth markers are both checked without gating on
+// OAuthRequired or state: OAuthRequired is deliberately false for autodetected
+// OAuth (see the comment at the call site), and the marker text itself (e.g.
+// "re-login available", "server error with stored token") is specific enough
+// to trust on its own, exactly like the login markers. Without this, a
+// quarantined server with autodetected OAuth whose stored token broke fell
+// through to the default healthy/"Quarantined for review", hiding a broken
+// token behind a green health level.
+func quarantinedAwaitingSignIn(input HealthCalculatorInput) bool {
+	state := strings.ToLower(input.State)
+	if !isOAuthRelatedError(input.LastError) {
+		return false
+	}
+	if isOAuthLoginRequiredError(input.LastError) {
+		return true
+	}
+	if isOAuthReauthError(input.LastError) {
+		return true
+	}
+	return input.OAuthRequired && state != "error"
+}
+
 // oauthAttentionState maps an OAuth-related error into the health level, action,
 // and summary the user should see. A first-time sign-in (ErrOAuthPending) is an
 // expected setup step, so it surfaces as degraded/amber with "Sign-in required".
@@ -628,6 +899,43 @@ func isOAuthReauthError(err string) bool {
 		}
 	}
 	return false
+}
+
+// oauthActionApplies reports whether an enabled (non-quarantined) server's
+// "error"/"disconnected" last error should surface the OAuth Login CTA
+// instead of the generic Restart. Configured OAuth (OAuthRequired) trusts any
+// OAuth-related error, matching the pre-existing behaviour. Autodetected
+// OAuth (OAuthRequired=false) additionally trusts the two specific,
+// unambiguous markers — first-time login-required and re-auth (a
+// previously-working stored token that broke) — mirroring
+// quarantinedAwaitingSignIn's rationale: OAuthRequired is deliberately false
+// for autodetected OAuth, and the marker text itself (e.g. "re-login
+// available", "server error with stored token") is specific enough to trust
+// on its own. A looser generic OAuth-related match (e.g. mcp-go's
+// "authentication strategies failed" transport-fault wrapper) is NOT
+// promoted without OAuthRequired, since that generic text can also mean an
+// unrelated transport failure — see isOAuthRelatedError's own connection
+// exclusions.
+//
+// Without this, diagnostics.classifyOAuth (which has no OAuthRequired hint
+// at all) still assigned MCPX_OAUTH_REAUTH_REQUIRED / MCPX_OAUTH_LOGIN_REQUIRED
+// from the same error text, so the Web UI's ServerCard showed a Login button
+// (driven by the diagnostic code) alongside a Restart button (driven by
+// health.action) at once, with the explanatory error alert suppressed
+// because a Login CTA was present.
+func oauthActionApplies(input HealthCalculatorInput) bool {
+	// isOAuthRelatedError is the general gate: it excludes connection-fault
+	// text (e.g. mcp-go's "authentication strategies failed" wrapper around a
+	// plain "dial tcp ... connection refused") BEFORE the OAuth patterns are
+	// checked. Both branches below rely on that exclusion having already run,
+	// exactly like quarantinedAwaitingSignIn.
+	if !isOAuthRelatedError(input.LastError) {
+		return false
+	}
+	if input.OAuthRequired {
+		return true
+	}
+	return isOAuthLoginRequiredError(input.LastError) || isOAuthReauthError(input.LastError)
 }
 
 // ExtractMissingSecret extracts the secret name from an error message if the error

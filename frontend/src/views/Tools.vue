@@ -47,17 +47,19 @@
         <div class="stat-title">Disabled</div>
         <div class="stat-value text-2xl text-warning">{{ stats.disabled }}</div>
       </button>
-      <button
-        type="button"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', activeStatCard === 'pending' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+      <!-- Spec 109 FR-027: this card is a link to the review queue, not an
+           in-page filter toggle — "needs review" means something to act on
+           elsewhere, not another way to slice this table. -->
+      <router-link
+        to="/review"
+        class="stat text-left transition-colors hover:bg-base-200/60"
         data-test="stat-pending"
-        @click="selectStatCard('pending')"
       >
-        <div class="stat-title">Pending Approval</div>
+        <div class="stat-title">Needs review</div>
         <div class="stat-value text-2xl" :class="stats.pending_approval > 0 ? 'text-error' : ''">
           {{ stats.pending_approval }}
         </div>
-      </button>
+      </router-link>
     </div>
 
     <!-- Partial-error banner -->
@@ -118,16 +120,20 @@
             </select>
           </div>
 
-          <!-- Risk filter -->
+          <!-- Tier filter. Spec 109 FR-028/X11: "Tier" (not "Risk" — risk
+               stays the scan-score term), values from the server-computed
+               `tier` field, never derived locally. `?risk=` stays a query
+               alias for `?tier=` for old bookmarks/links. -->
           <div class="form-control min-w-[120px]">
             <label class="label py-1">
-              <span class="label-text text-xs">Risk</span>
+              <span class="label-text text-xs">Tier</span>
             </label>
-            <select v-model="filterRisk" class="select select-bordered select-sm" aria-label="Filter by risk" data-test="filter-risk">
+            <select v-model="filterTier" class="select select-bordered select-sm" aria-label="Filter by tier" data-test="filter-tier">
               <option value="">All</option>
               <option value="read">Read</option>
               <option value="write">Write</option>
               <option value="destructive">Destructive</option>
+              <option value="unannotated">Unannotated</option>
             </select>
           </div>
 
@@ -136,12 +142,14 @@
             <label class="label py-1">
               <span class="label-text text-xs">Approval</span>
             </label>
+            <!-- Spec 109 FR-027: one review-state vocabulary everywhere
+                 (Web/macOS/CLI/review payload) — no "awaiting" (it duplicated
+                 pending+changed with a different name). -->
             <select v-model="filterApproval" class="select select-bordered select-sm" aria-label="Filter by approval state" data-test="filter-approval">
               <option value="">All</option>
-              <option value="awaiting">Awaiting approval</option>
               <option value="approved">Approved</option>
-              <option value="pending">Pending</option>
-              <option value="changed">Changed</option>
+              <option value="pending">New, needs review</option>
+              <option value="changed">Changed, needs review</option>
             </select>
           </div>
 
@@ -157,7 +165,7 @@
           <span v-if="searchQuery" class="badge badge-sm badge-outline">Search: {{ searchQuery }}</span>
           <span v-if="filterServer" class="badge badge-sm badge-outline">Server: {{ filterServer }}</span>
           <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
-          <span v-if="filterRisk" class="badge badge-sm badge-outline">Risk: {{ filterRisk }}</span>
+          <span v-if="filterTier" class="badge badge-sm badge-outline">Tier: {{ filterTier }}</span>
           <span v-if="filterApproval" class="badge badge-sm badge-outline">Approval: {{ filterApproval }}</span>
         </div>
       </div>
@@ -279,7 +287,7 @@
             <p v-if="quarantinedServerCount > 0" class="text-sm mt-1">
               {{ quarantinedServerCount }} quarantined server{{ quarantinedServerCount === 1 ? '' : 's' }}
               {{ quarantinedServerCount === 1 ? 'is' : 'are' }} not listed here —
-              <router-link to="/servers" class="link">review in Servers</router-link>.
+              <router-link to="/review" class="link">review in the Review queue</router-link>.
             </p>
           </div>
           <template v-else>
@@ -319,8 +327,8 @@
                   Server {{ getSortIndicator('server_name') }}
                 </th>
                 <th>Description</th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('risk')">
-                  Risk {{ getSortIndicator('risk') }}
+                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('tier')">
+                  Tier {{ getSortIndicator('tier') }}
                 </th>
                 <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('approval_status')">
                   Approval {{ getSortIndicator('approval_status') }}
@@ -379,8 +387,8 @@
                   </div>
                 </td>
                 <td>
-                  <span class="badge badge-sm" :class="getRiskBadgeClass(tool)">
-                    {{ getRiskLabel(tool) }}
+                  <span class="badge badge-sm" :class="getTierBadgeClass(tool)">
+                    {{ getTierLabel(tool) }}
                   </span>
                 </td>
                 <td>
@@ -434,7 +442,16 @@
                   <span v-else class="badge badge-sm badge-success">enabled</span>
                 </td>
                 <td class="text-sm text-right">
-                  {{ tool.usage || 0 }}
+                  <router-link
+                    v-if="tool.usage && toolCallsLink(tool)"
+                    :to="toolCallsLink(tool)!"
+                    class="link"
+                    data-test="tool-calls-link"
+                    @click.stop
+                  >
+                    {{ tool.usage }}
+                  </router-link>
+                  <span v-else>{{ tool.usage || 0 }}</span>
                 </td>
                 <td class="text-sm text-base-content/60">
                   <span v-if="tool.last_used">{{ formatRelativeTime(tool.last_used) }}</span>
@@ -480,7 +497,7 @@
               <router-link :to="serverDetailPath(selectedTool.server_name)" class="link link-primary text-sm">
                 {{ selectedTool.server_name }}
               </router-link>
-              <span class="badge badge-sm" :class="getRiskBadgeClass(selectedTool)">{{ getRiskLabel(selectedTool) }}</span>
+              <span class="badge badge-sm" :class="getTierBadgeClass(selectedTool)">{{ getTierLabel(selectedTool) }}</span>
               <span v-if="selectedTool.config_denied" class="badge badge-sm badge-error">config-denied</span>
               <span v-else-if="selectedTool.disabled" class="badge badge-sm badge-warning">disabled</span>
               <span v-else class="badge badge-sm badge-success">enabled</span>
@@ -553,6 +570,7 @@ import { serverDetailPath } from '@/utils/serverRoute'
 import { formatDate } from '@/utils/datetime'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { useScopeQuery } from '@/composables/useScopeQuery'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { GlobalTool, GlobalToolsStats } from '@/types/api'
@@ -571,6 +589,18 @@ const quarantinedServerCount = computed(() => serversStore.serverCount.quarantin
 // Undefined when the view is mounted without a router — several unit suites do
 // exactly that, and a query prefill is not worth making them install one.
 const route = useRoute() as ReturnType<typeof useRoute> | undefined
+// Spec 109-k: the row "Calls" link (url-filter-contract.md link map). Guarded
+// the same way as `route` above — several unit suites mount this view with no
+// router installed, and useScopeQuery() itself calls useRoute()/useRouter().
+const scopeQuery = route ? useScopeQuery('tools') : undefined
+
+/** `/activity?view=calls&tool=<server:tool>` for a tool row's "Calls" link
+ * (url-filter-contract.md link map: "Tools row" -> "Calls"). Null when no
+ * router is installed (unit-test harnesses that mount Tools.vue standalone). */
+function toolCallsLink(tool: GlobalTool) {
+  if (!scopeQuery) return null
+  return scopeQuery.linkTo('activity', { view: 'calls', tool: `${tool.server_name}:${tool.name}` })
+}
 
 // ---- State ----
 const allTools = ref<GlobalTool[]>([])
@@ -585,7 +615,7 @@ const selectedTool = ref<GlobalTool | null>(null)
 const searchQuery = ref('')
 const filterServer = ref('')
 const filterStatus = ref('')
-const filterRisk = ref('')
+const filterTier = ref('')
 const filterApproval = ref('')
 
 // Debounce search
@@ -596,7 +626,7 @@ watch(searchQuery, () => {
 })
 
 // ---- Sort ----
-type SortCol = 'name' | 'server_name' | 'risk' | 'approval_status' | 'enabled' | 'usage' | 'last_used'
+type SortCol = 'name' | 'server_name' | 'tier' | 'approval_status' | 'enabled' | 'usage' | 'last_used'
 const sortColumn = ref<SortCol>('name')
 const sortDirection = ref<'asc' | 'desc'>('asc')
 
@@ -767,53 +797,73 @@ const availableServers = computed(() => {
 })
 
 const hasActiveFilters = computed(() =>
-  !!searchQuery.value || !!filterServer.value || !!filterStatus.value || !!filterRisk.value || !!filterApproval.value
+  !!searchQuery.value || !!filterServer.value || !!filterStatus.value || !!filterTier.value || !!filterApproval.value
 )
 
 // Clickable stat cards (parity with Servers page): each card drives the
-// status/approval filter and toggles off when its active card is clicked again.
-type StatCard = 'total' | 'enabled' | 'disabled' | 'pending'
+// status filter and toggles off when its active card is clicked again. The
+// "Needs review" card (Spec 109 FR-027) is a plain link to /review, not one of
+// these — it never sets filterApproval.
+type StatCard = 'total' | 'enabled' | 'disabled'
 
-const activeStatCard = computed<StatCard>(() => {
-  if (filterApproval.value === 'awaiting' || filterApproval.value === 'pending') return 'pending'
+// Review round 4: Total must only read as active when the table is truly
+// unfiltered. An approval-only filter (filterStatus empty) still narrows the
+// table, so none of Total/Enabled/Disabled correctly describes it — return
+// null rather than defaulting to 'total'.
+// Round-9 fix: that filterApproval guard must only suppress TOTAL, not
+// Enabled/Disabled. It used to run before the filterStatus checks, so it
+// always won whenever an approval filter was set — activeStatCard() was
+// null no matter what filterStatus held. That made selectStatCard's toggle
+// condition (`activeStatCard.value === card`) permanently false for
+// 'enabled'/'disabled': clicking the Enabled/Disabled stat card while an
+// approval filter is active still applied filterStatus (so the table did
+// filter), but the card never rendered as active and a second click ran the
+// same no-op branch again instead of toggling off. filterStatus === 'enabled'
+// / 'disabled' fully describes the row regardless of any additional approval
+// filter, so those checks must run first; only fall through to the
+// filterApproval-only null when filterStatus is empty.
+const activeStatCard = computed<StatCard | null>(() => {
   if (filterStatus.value === 'enabled') return 'enabled'
   if (filterStatus.value === 'disabled') return 'disabled'
-  if (!filterStatus.value && !filterApproval.value) return 'total'
+  if (filterApproval.value) return null
   return 'total'
 })
 
 function selectStatCard(card: StatCard) {
   // Toggle: re-clicking the active card resets to the unfiltered "total" view.
+  // Also clears filterApproval (review round 1): Total is the row's "reset"
+  // gesture (clearFilters clears both too), and leaving an approval filter
+  // in place after Total is clicked filtered the table with no visible way
+  // to tell from the stat row.
   if (card === 'total' || activeStatCard.value === card) {
     filterStatus.value = ''
     filterApproval.value = ''
     return
   }
-  if (card === 'pending') {
-    filterStatus.value = ''
-    filterApproval.value = 'awaiting'
-  } else {
-    filterApproval.value = ''
-    filterStatus.value = card // 'enabled' | 'disabled'
-  }
+  filterStatus.value = card // 'enabled' | 'disabled'
 }
 
-// ---- Computed: risk derivation ----
-function getRisk(tool: GlobalTool): 'read' | 'write' | 'destructive' {
-  if (tool.annotations?.destructiveHint) return 'destructive'
-  if (tool.annotations?.readOnlyHint) return 'read'
-  return 'write'
+// ---- Tier (Spec 109 FR-028/X11): `tool.tier` comes from the backend
+// (contracts.AnnotationTier) — never computed here. An unannotated tool is
+// labelled "Unannotated", never silently shown as "write" (the X11 bug this
+// replaces: the old local getRisk() defaulted anything without hints to
+// "write").
+function getTier(tool: GlobalTool): string {
+  return tool.tier || 'unannotated'
 }
 
-function getRiskLabel(tool: GlobalTool): string {
-  return getRisk(tool)
+function getTierLabel(tool: GlobalTool): string {
+  const t = getTier(tool)
+  if (t === 'unannotated') return 'Unannotated'
+  return t.charAt(0).toUpperCase() + t.slice(1)
 }
 
-function getRiskBadgeClass(tool: GlobalTool): string {
-  const r = getRisk(tool)
-  if (r === 'destructive') return 'badge-error'
-  if (r === 'read') return 'badge-success'
-  return 'badge-warning'
+function getTierBadgeClass(tool: GlobalTool): string {
+  const t = getTier(tool)
+  if (t === 'destructive') return 'badge-error'
+  if (t === 'write') return 'badge-warning'
+  if (t === 'read') return 'badge-success'
+  return 'badge-ghost'
 }
 
 function getApprovalBadgeClass(status: string): string {
@@ -922,15 +972,11 @@ const searchScope = computed(() => {
     tools = tools.filter(t => t.config_denied)
   }
 
-  if (filterRisk.value) {
-    tools = tools.filter(t => getRisk(t) === filterRisk.value)
+  if (filterTier.value) {
+    tools = tools.filter(t => getTier(t) === filterTier.value)
   }
 
-  if (filterApproval.value === 'awaiting') {
-    // "Awaiting approval" mirrors the Pending Approval stat, which counts both
-    // brand-new (pending) and rug-pull (changed) tools.
-    tools = tools.filter(t => t.approval_status === 'pending' || t.approval_status === 'changed')
-  } else if (filterApproval.value) {
+  if (filterApproval.value) {
     tools = tools.filter(t => t.approval_status === filterApproval.value)
   }
 
@@ -979,8 +1025,8 @@ const sortedTools = computed(() => {
         av = a.name; bv = b.name; break
       case 'server_name':
         av = a.server_name; bv = b.server_name; break
-      case 'risk':
-        av = getRisk(a); bv = getRisk(b); break
+      case 'tier':
+        av = getTier(a); bv = getTier(b); break
       case 'approval_status':
         av = a.approval_status || ''; bv = b.approval_status || ''; break
       case 'enabled': {
@@ -1054,7 +1100,7 @@ function clearFilters() {
   searchQuery.value = ''
   filterServer.value = ''
   filterStatus.value = ''
-  filterRisk.value = ''
+  filterTier.value = ''
   filterApproval.value = ''
   currentPage.value = 1
 }
@@ -1069,8 +1115,35 @@ function formatRelativeTime(ts: string): string {
 }
 
 // Reset page when filters/sort change
-watch([filterServer, filterStatus, filterRisk, filterApproval, sortColumn, sortDirection], () => {
+watch([filterServer, filterStatus, filterTier, filterApproval, sortColumn, sortDirection], () => {
   currentPage.value = 1
+})
+
+// Live QA fix (Spec 109-k, FR-080 "router.replace on change"): the controls
+// above only ever READ the URL (applyQueryParam()) — clearing a filter, or
+// picking a new one, updated the table but left the address bar showing the
+// stale query, so a copied/bookmarked URL silently reapplied it on reload
+// (SC-009's URL round-trip). searchQuery gets its own watcher just below,
+// rather than joining this one: it changes on every keystroke, and the two
+// need to stay independent of each other's timing.
+watch([filterServer, filterStatus, filterTier, filterApproval], () => {
+  if (!scopeQuery) return
+  scopeQuery.set({
+    server: filterServer.value || undefined,
+    status: filterStatus.value || undefined,
+    tier: filterTier.value || undefined,
+    // `risk` is only ever a read-side alias (url-filter-contract.md rule 6);
+    // once resolved into `filterTier` the canonical `tier` param is what gets
+    // written back, so a stale `?risk=` left over from an old link does not
+    // linger next to it.
+    risk: undefined,
+    approval: filterApproval.value || undefined,
+  })
+})
+
+watch(searchQuery, value => {
+  if (!scopeQuery) return
+  scopeQuery.set({ q: value || undefined })
 })
 
 // Also reset when pageSize changes
@@ -1087,7 +1160,7 @@ const toolsHints = computed<Hint[]>(() => [
         title: 'Audit and cleanup',
         list: [
           'Search by tool name, description, or server',
-          'Filter by status, risk level, or approval state',
+          'Filter by status, tier, or approval state',
           'Sort any column to find stale or unused tools',
           'Select multiple tools for batch enable/disable, or batch approve/reject across servers',
         ],
@@ -1107,23 +1180,50 @@ const toolsHints = computed<Hint[]>(() => [
 onMounted(() => {
   // Tools is the canonical search surface (audit F20): the header box and the
   // retired /search route both arrive here with ?q=, so the query has to
-  // prefill the filter rather than being silently dropped.
+  // prefill the filter rather than being silently dropped. Spec 109-k: the
+  // rest of the contract's Tools-page parameters (`server`, `tier`/`risk`,
+  // `status`, `approval` — url-filter-contract.md "Parameters", all
+  // client-side here per the contract) are read the same way, so a deep link
+  // (Home/Server-card links, a Clients row "Tools it sees", ...) actually
+  // narrows the page instead of landing on the unfiltered table.
   applyQueryParam()
   loadTools()
 })
 
-// A second search from the header while Tools is already open is a route query
-// change, not a remount — without this watch the box would appear to do nothing.
+// A second search/filter from elsewhere while Tools is already open is a
+// route query change, not a remount — without this watch the controls would
+// appear to do nothing (this is exactly the gap the audit found: a URL nav
+// after the initial mount had no effect either).
 watch(
-  () => route?.query.q,
-  () => applyQueryParam()
+  () => route?.query,
+  () => applyQueryParam(),
+  { deep: true }
 )
 
 function applyQueryParam() {
-  const q = route?.query.q
-  if (typeof q === 'string' && q !== searchQuery.value) {
-    searchQuery.value = q
+  const q = route?.query
+  if (!q) return
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+
+  const query = str(q.q)
+  if (query && query !== searchQuery.value) {
+    searchQuery.value = query
     currentPage.value = 1
   }
+
+  // Symmetric by design (zcode review round 1, F3, matching Activity.vue's
+  // applyRouteFilters): set from the query param when present AND cleared
+  // when absent. Vue Router reuses this component across a same-route
+  // navigation (no remount), so a "set only if present" read left a stale
+  // filter in force after a later URL dropped the param — and the write-back
+  // watch below then resurrected it into a URL that had just been cleared.
+  filterServer.value = str(q.server)
+  filterStatus.value = str(q.status)
+  filterApproval.value = str(q.approval)
+
+  // `?risk=` stays a query alias for `?tier=` for old bookmarks/links
+  // (url-filter-contract.md rule 6); an explicit `tier` wins if somehow both
+  // are present.
+  filterTier.value = str(q.tier) || str(q.risk)
 }
 </script>

@@ -51,7 +51,7 @@ func (m *mockRoutingController) GetDesiredConfig() (*config.Config, error) {
 	return &clone, nil
 }
 
-func (m *mockRoutingController) GetCurrentConfig() any {
+func (m *mockRoutingController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}

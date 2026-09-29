@@ -1,5 +1,5 @@
 <template>
-  <header class="bg-base-100 border-b border-base-300 sticky top-0 z-30">
+  <header class="bg-base-100 border-b border-base-300 sticky top-0 z-[var(--z-header)]">
     <div class="flex items-center justify-between px-6 py-4 max-w-full">
       <!-- Left: Mobile menu toggle + Search + Add Server -->
 <div class="flex items-center space-x-3 flex-1 min-w-0 overflow-x-hidden">
@@ -46,20 +46,11 @@
           </button>
         </div>
 
-        <!-- Add Server Button. Spec 107 cross-review round 3, chunk 4 P2:
-             this always submitted through the generic AddServerModal, whose
-             serversStore.addServer() calls the core POST /api/v1/tools/call
-             dispatch door — a mandatory tenant-session refusal
-             (rest-endpoints.md §8) — so a tenant clicking their own labeled
-             "Add Personal Server" button always drew a 403 the API client
-             mistakes for an auth failure. /my/servers (UserServers.vue) is
-             the working tenant flow, wired to POST /api/v1/user/servers;
-             hidden here rather than rewired, matching the ModeSwitcher
-             precedent below (FR-041: tenant-inapplicable controls are
-             hidden, never issued-and-403'd). -->
+        <!-- Spec 107 FR-041: tenants use /my/servers, which writes through
+             the tenant-scoped API. Keep this admin add flow hidden for them. -->
         <button
           v-if="authStore.principalKind !== 'tenant'"
-          @click="showAddServerModal = true"
+          @click="router.push('/add-server')"
           class="btn btn-primary"
           :aria-label="addServerLabel"
           data-test="header-add-server"
@@ -80,8 +71,57 @@
              lists only GET /profiles* as a tenant-reachable read) — so an
              enabled control a tenant could open always failed to act. Hidden
              for the same FR-041 reason as the button above; GET /profiles
-             stays reachable elsewhere (it is not this component's read). -->
-        <ProfileSwitcher v-if="authStore.principalKind !== 'tenant'" />
+             stays reachable elsewhere (it is not this component's read).
+             Spec 109 FR-057 (H2 interim, until Spec 108 removes it entirely):
+             also hidden when no profiles exist yet — "Profile:" otherwise
+             looked like agent scoping while only setting a UI default. -->
+        <ProfileSwitcher v-if="authStore.principalKind !== 'tenant' && profilesStore.hasProfiles" />
+
+        <!-- Needs-attention pill (Spec 109 FR-001/FR-003): hidden at 0, the
+             same FR-001 list/count every surface reads. Popover shows the
+             first 5 items; "See all" opens Home, where the full list lives. -->
+        <div v-if="attentionStore.count > 0" class="relative" data-test="header-attention-pill">
+          <button
+            @click="showAttentionPopover = !showAttentionPopover"
+            class="flex items-center space-x-2 px-3 py-2 bg-warning/10 text-warning rounded-lg cursor-pointer hover:bg-warning/20 transition-colors"
+            data-test="header-attention-pill-button"
+            :aria-label="`${attentionStore.count} items need attention`"
+          >
+            <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+            <span class="font-bold">{{ attentionStore.count }}</span>
+            <span class="text-xs hidden lg:inline">needs attention</span>
+          </button>
+          <div
+            v-if="showAttentionPopover"
+            class="absolute right-0 top-full mt-2 p-3 shadow-lg bg-base-100 rounded-box w-80 border border-base-300 z-50"
+            data-test="header-attention-popover"
+          >
+            <div class="space-y-1">
+              <router-link
+                v-for="item in attentionStore.items.slice(0, 5)"
+                :key="item.id"
+                :to="item.fix.target"
+                class="block px-2 py-1.5 rounded hover:bg-base-200 text-sm truncate"
+                :data-test="`header-attention-item-${item.id}`"
+                @click="showAttentionPopover = false"
+              >
+                {{ item.summary }}
+              </router-link>
+            </div>
+            <router-link
+              to="/"
+              class="btn btn-xs btn-ghost w-full mt-2"
+              data-test="header-attention-see-all"
+              @click="showAttentionPopover = false"
+            >
+              See all
+            </router-link>
+          </div>
+          <!-- Click-outside overlay -->
+          <div v-if="showAttentionPopover" class="fixed inset-0 z-40" @click="showAttentionPopover = false" />
+        </div>
 
         <!-- Servers -->
         <div class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm">
@@ -134,7 +174,7 @@
           </button>
           <div
             v-if="showEndpoints"
-            class="absolute right-0 top-full mt-2 p-3 shadow-lg bg-base-100 rounded-box w-96 border border-base-300 z-50"
+            class="absolute right-0 top-full mt-2 p-3 shadow-lg bg-base-100 rounded-box w-96 border border-base-300 z-[var(--z-dropdown)]"
           >
             <div class="text-xs font-semibold text-base-content/60 mb-2 px-1">MCP Endpoints</div>
             <div class="space-y-1">
@@ -166,28 +206,22 @@
             </div>
           </div>
           <!-- Click-outside overlay -->
-          <div v-if="showEndpoints" class="fixed inset-0 z-40" @click="showEndpoints = false" />
+          <div v-if="showEndpoints" class="fixed inset-0 z-[var(--z-header)]" @click="showEndpoints = false" />
         </div>
       </div>
     </div>
 
-    <!-- Add Server Modal -->
-    <AddServerModal
-      :show="showAddServerModal"
-      @close="showAddServerModal = false"
-      @added="handleServerAdded"
-    />
   </header>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import { useAuthStore } from '@/stores/auth'
-import AddServerModal from './AddServerModal.vue'
-import { serverDetailPath } from '@/utils/serverRoute'
+import { useAttentionStore } from '@/stores/attention'
+import { useProfilesStore } from '@/stores/profiles'
 import ProfileSwitcher from './ProfileSwitcher.vue'
 import ModeSwitcher from './ModeSwitcher.vue'
 
@@ -195,11 +229,37 @@ const router = useRouter()
 const systemStore = useSystemStore()
 const serversStore = useServersStore()
 const authStore = useAuthStore()
+const attentionStore = useAttentionStore()
+const profilesStore = useProfilesStore()
+
+const showAttentionPopover = ref(false)
+
+// Spec 109 FR-057: ProfileSwitcher only renders once profilesStore.hasProfiles
+// is true, but that store is populated by a fetch ProfileSwitcher itself used
+// to trigger on its own mount — a component gated on data only it fetches
+// never mounts to fetch it. The header fetches once up front instead, so
+// hasProfiles reflects reality before the v-if below ever evaluates it.
+onMounted(() => {
+  // Spec 109 FR-001/FR-003: the header is global, so it fetches its own copy
+  // rather than depending on Home having mounted first.
+  attentionStore.fetchAttention()
+  // App only mounts the shell after canLoadCore. The personal branch keeps
+  // isolated component consumers and tests working without inventing a server
+  // session; it is never reached during the browser's pending startup path.
+  if (!authStore.isTeamsEdition || authStore.canLoadCore) void profilesStore.fetchProfiles()
+})
+
+// #1401: the header now stays mounted through an auth recovery (it used to
+// remount, which re-ran the load above), so reload on the recovery epoch.
+watch(() => systemStore.authEpoch, () => {
+  attentionStore.fetchAttention()
+  // Same gate as the mount load: a tenant session never reads admin profiles.
+  if (!authStore.isTeamsEdition || authStore.canLoadCore) void profilesStore.fetchProfiles()
+})
 
 const addServerLabel = computed(() => authStore.isTeamsEdition ? 'Add Personal Server' : 'Add Server')
 
 const searchQuery = ref('')
-const showAddServerModal = ref(false)
 const showEndpoints = ref(false)
 
 interface McpEndpoint {
@@ -265,16 +325,5 @@ async function copyEndpoint(ep: McpEndpoint) {
 function handleSearch() {
   const q = searchQuery.value.trim()
   router.push(q ? { path: '/tools', query: { q } } : { path: '/tools' })
-}
-
-function handleServerAdded(serverName?: string) {
-  // Refresh servers list after adding
-  serversStore.fetchServers()
-  // UX audit F07: a single add hands off to that server's detail view, where
-  // connect/scan/review/approve is already on screen. The bulk/import path
-  // emits no name and keeps the old refresh-in-place behaviour.
-  if (serverName) {
-    void router.push(serverDetailPath(serverName))
-  }
 }
 </script>

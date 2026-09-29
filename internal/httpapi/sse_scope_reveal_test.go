@@ -139,6 +139,7 @@ func sseIdentityEventFixtures(server string) []internalRuntime.Event {
 		evt(internalRuntime.EventTypeOAuthRefreshFailed, map[string]any{"server_name": server, "error": "re-auth required"}),
 		evt(internalRuntime.EventTypeSecurityScanSettled, map[string]any{"server_name": server, "status": "completed"}),
 		evt(internalRuntime.EventTypeSecurityIntegrityAlert, map[string]any{"server_name": server, "alert_type": "hash_mismatch", "action": "quarantined"}),
+		evt(internalRuntime.EventTypeReviewChanged, map[string]any{"server": server}),
 	}
 }
 
@@ -265,6 +266,9 @@ func TestSSE_ServersChangedRenderedPerSubscriber(t *testing.T) {
 	// admin's stream stays complete.
 	// ------------------------------------------------------------------
 	betaEvents := sseIdentityEventFixtures("beta")
+	betaEvents = append(betaEvents, internalRuntime.Event{
+		Type: internalRuntime.EventTypeReviewChanged, Payload: map[string]any{"server": ""}, Timestamp: time.Now(),
+	})
 	adminOnly := sseAdminConfigEventFixtures()
 	// An event about the server the token MAY see: the filter must be a scope
 	// check, not a mute button.
@@ -585,6 +589,7 @@ func TestSSE_EveryRuntimeEventTypeIsClassified(t *testing.T) {
 	// delivered unchanged because there is nothing in it to scope.
 	noServerIdentity := map[string]string{
 		"servers.changed":          "rendered per subscriber, never dropped: coalesced last-write-wins",
+		"attention.changed":        "rendered per subscriber, never dropped: structured items narrowed by canSeeServer (Spec 109 FR-006)",
 		"config.reloaded":          "admin config document — dropped for a scoped caller",
 		"config.saved":             "admin config document — dropped for a scoped caller",
 		"secrets.changed":          "admin config document — dropped for a scoped caller",

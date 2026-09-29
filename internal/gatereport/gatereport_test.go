@@ -181,6 +181,56 @@ func TestMerge_WebUISweepMissingFragment_IsAdvisoryFailureNotBlocking(t *testing
 	}
 }
 
+// TestManifest_IncludesAPIE2ECleanupCheck is a regression test for review
+// round 9, finding 2 (medium): the "Run E2E cleanup-trap safety check" CI
+// step (suite/api-e2e-cleanup-check) was added to close round-8 finding 5 —
+// catching a reintroduced blanket `pkill -f "mcpproxy.*serve"` — but the
+// fragment name it writes was never added to Manifest(). Merge only treats a
+// *missing* fragment as a failure for entries the manifest actually lists;
+// an unrecognized name is reported only if a fragment with that name shows
+// up. If this CI step were ever deleted or its --name typo'd, no fragment
+// would be written at all, so nothing would report it missing and the gate
+// would stay green — reproducing, one level removed, the exact "regression
+// passes CI undetected" risk round-8 finding 5 was written to close.
+func TestManifest_IncludesAPIE2ECleanupCheck(t *testing.T) {
+	var found bool
+	for _, m := range Manifest() {
+		if m.Name != EntrySuiteAPIE2ECleanupCheck {
+			continue
+		}
+		found = true
+		if !m.Blocking {
+			t.Errorf("%s must be blocking: it guards against a real regression class, same as the other suite entries", m.Name)
+		}
+		if m.Reserved {
+			t.Errorf("%s must not be a reserved slot — the CI step already exists and runs today", m.Name)
+		}
+	}
+	if !found {
+		t.Fatalf("manifest is missing the %s entry: a deleted or renamed CI step for it would leave the gate green with no evidence it ever ran", EntrySuiteAPIE2ECleanupCheck)
+	}
+}
+
+// TestMerge_MissingCleanupCheckFragment_IsFail proves the manifest entry
+// actually has teeth: dropping the fragment (simulating the CI step being
+// deleted or its --name typo'd) must fail the gate, not pass it silently.
+func TestMerge_MissingCleanupCheckFragment_IsFail(t *testing.T) {
+	var kept []Fragment
+	for _, f := range passAllBlocking() {
+		if f.Name != EntrySuiteAPIE2ECleanupCheck {
+			kept = append(kept, f)
+		}
+	}
+	r := Merge(kept)
+	if r.Passed() {
+		t.Fatal("verdict must fail when the cleanup-check fragment is missing")
+	}
+	e := entryByName(t, r, EntrySuiteAPIE2ECleanupCheck)
+	if e.Status != StatusFail || e.Reason != ReasonMissingFragment {
+		t.Errorf("got status=%s reason=%q, want fail/%q", e.Status, e.Reason, ReasonMissingFragment)
+	}
+}
+
 func TestMerge_UnexpectedFailingFragment_Blocks(t *testing.T) {
 	frags := append(passAllBlocking(), Fragment{Name: "rogue/check", Status: StatusFail, Reason: "boom"})
 	r := Merge(frags)

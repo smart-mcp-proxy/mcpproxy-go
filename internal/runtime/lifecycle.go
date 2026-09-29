@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 const connectAttemptTimeout = 3*time.Minute + 15*time.Second // Must exceed per-server Docker timeout (3min)
@@ -542,7 +544,162 @@ func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName
 // that no longer exist upstream. This is the explicit operator refresh/discover
 // path; the reactive callbacks keep the lenient behavior above.
 func (r *Runtime) RefreshServerTools(ctx context.Context, serverName string) error {
+	// A quarantined server is deliberately excluded from the search index, but
+	// an operator can still explicitly fetch its definitions for informed
+	// review. Capture the same approval records as normal discovery without
+	// publishing untrusted text to search or tool-routing surfaces.
+	if r.serverIsQuarantined(serverName) {
+		return r.captureQuarantinedToolDefinitions(ctx, serverName)
+	}
 	return r.discoverAndIndexToolsForServer(ctx, serverName, true)
+}
+
+func (r *Runtime) serverIsQuarantined(serverName string) bool {
+	for _, candidate := range r.Config().Servers {
+		if candidate != nil && candidate.Name == serverName {
+			return candidate.Enabled && candidate.Quarantined
+		}
+	}
+	return false
+}
+
+// captureQuarantinedToolDefinitions records a live tools/list response for
+// review without indexing it. The caller is the explicit refresh route, which
+// is invoked after the scanner's temporary inspection connection is ready.
+func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverName string) error {
+	if r.upstreamManager == nil {
+		return fmt.Errorf("upstream manager not initialized")
+	}
+
+	// The server may have been disconnected solely because it is quarantined.
+	// An explicit review refresh is an inspection-only operation: grant the
+	// supervisor's bounded exemption, request a connection, then re-fetch the
+	// live client as reconciliation may replace it.
+	if r.supervisor != nil {
+		if err := r.supervisor.RequestInspectionExemption(serverName, 15*time.Minute); err != nil {
+			r.logger.Warn("Failed to grant inspection exemption for definition capture", zap.String("server", serverName), zap.Error(err))
+		}
+	}
+	var lastErr error
+	// RequestInspectionExemption triggers supervisor reconciliation. Do not call
+	// RestartServer here: a second restart can cancel that in-flight inspection
+	// connection before tools/list completes. Re-read the managed client until
+	// the supervisor has published its replacement.
+	for attempt := 0; attempt < 24; attempt++ {
+		// Take the supervisor capture before reading the managed client. If a
+		// replacement lands between these reads, the pointer/epoch validation
+		// below rejects the mismatched pair and retries under the replacement.
+		capture := r.discoveryGeneration(serverName)
+		if client, ok := r.upstreamManager.GetClient(serverName); ok {
+			// Bind this inspection result to the connection that supplied it.
+			// RequestInspectionExemption may reconcile while tools/list is in
+			// flight, replacing the managed client. Capturing an old client's
+			// untrusted definition under the replacement connection would make
+			// the review record lie about what is currently offered.
+			if tools, err := client.ListTools(ctx); err == nil {
+				if !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
+					lastErr = fmt.Errorf("inspection client replaced during tools/list")
+					r.logger.Info("Quarantined definition capture used a superseded connection; re-listing",
+						zap.String("server", serverName), zap.Int("attempt", attempt+1))
+					continue
+				}
+				published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, tools)
+				if err != nil {
+					return err
+				}
+				if published {
+					return nil
+				}
+				lastErr = fmt.Errorf("inspection client replaced before definition capture")
+				continue
+			} else {
+				lastErr = err
+			}
+		} else {
+			lastErr = fmt.Errorf("client not found")
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("capture review definitions for %s: %w", serverName, ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("list tools for quarantined server %s: %w", serverName, lastErr)
+}
+
+// quarantinedCaptureIsCurrent confirms that the tools/list response belongs to
+// the currently managed client and the same supervisor/managed-client
+// generation captured before the request. Pointer equality closes the gap
+// where a replacement could otherwise pair A's client with B's generation.
+func (r *Runtime) quarantinedCaptureIsCurrent(serverName string, client interface{ ConnectionEpoch() int64 }, capture supervisor.DiscoveryCapture) bool {
+	current, ok := r.upstreamManager.GetClient(serverName)
+	return ok && current == client && client.ConnectionEpoch() == capture.Epoch && r.discoveryGeneration(serverName) == capture
+}
+
+// captureQuarantinedToolDefinitionsFromCurrentClient performs the final
+// current-generation check immediately before checkToolApprovals writes review
+// records. A false result is deliberately retried by the caller; no stale
+// response is persisted or announced as review.changed.
+func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName string, client *managed.Client, capture supervisor.DiscoveryCapture, tools []*config.ToolMetadata) (bool, error) {
+	if r.quarantinedCaptureBeforePersist != nil {
+		r.quarantinedCaptureBeforePersist()
+	}
+	if r.upstreamManager == nil {
+		return false, fmt.Errorf("upstream manager not initialized")
+	}
+	persisted := false
+	current, err := r.upstreamManager.WithCurrentClientOnEpoch(serverName, client, capture.Epoch, func() error {
+		// A delayed supervisor event is also a stale capture signal. The
+		// manager/client locks below are the linearization point for actual
+		// client replacement or reconnect; this check preserves the supervisor
+		// generation contract before any review record is written.
+		if r.discoveryGeneration(serverName) != capture {
+			return nil
+		}
+		if r.quarantinedCaptureDuringPersist != nil {
+			r.quarantinedCaptureDuringPersist()
+		}
+		if r.discoveryGeneration(serverName) != capture {
+			return nil
+		}
+		if err := r.persistQuarantinedToolDefinitions(serverName, tools); err != nil {
+			return err
+		}
+		persisted = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if !current || !persisted {
+		return false, nil
+	}
+	r.emitReviewChanged(serverName)
+	r.logger.Info("Captured quarantined server tool definitions for review",
+		zap.String("server", serverName), zap.Int("count", len(tools)))
+	return true, nil
+}
+
+func (r *Runtime) captureQuarantinedToolDefinitionsFromTools(serverName string, tools []*config.ToolMetadata) error {
+	if err := r.persistQuarantinedToolDefinitions(serverName, tools); err != nil {
+		return err
+	}
+	r.emitReviewChanged(serverName)
+	r.logger.Info("Captured quarantined server tool definitions for review",
+		zap.String("server", serverName), zap.Int("count", len(tools)))
+	return nil
+}
+
+func (r *Runtime) persistQuarantinedToolDefinitions(serverName string, tools []*config.ToolMetadata) error {
+	if _, err := r.checkToolApprovals(serverName, tools); err != nil {
+		return fmt.Errorf("capture review definitions for %s: %w", serverName, err)
+	}
+	r.lastGoodToolsMu.Lock()
+	snapshot := make([]*config.ToolMetadata, len(tools))
+	copy(snapshot, tools)
+	r.lastGoodTools[serverName] = snapshot
+	r.lastGoodToolsMu.Unlock()
+	return nil
 }
 
 func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName string, authoritative bool) error {
@@ -825,6 +982,19 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 	var addedTools []*config.ToolMetadata
 	var modifiedTools []*config.ToolMetadata
 	var removedTools []string
+	// Review round 2, finding 4: annotations are deliberately excluded from
+	// Hash (see calculateToolApprovalHash's comment — they are unstable
+	// across reconnections, and folding them into change-detection caused
+	// false "tool_description_changed" spam before). That means a tool whose
+	// Hash never changes can never reach the modifiedTools branch, so
+	// annotations_json — written to the index only at (re)index time — stays
+	// stale forever for anything indexed before this field existed (or
+	// before an upstream started reporting hints), short of an operator
+	// deleting index.bleve or removing/re-adding the server. Tracked
+	// separately from modifiedTools so it never touches Hash, approval state,
+	// or the "Tool schema changed" log line — this is a silent, best-effort
+	// metadata sync, not change detection.
+	var annotationsOnlyTools []*config.ToolMetadata
 
 	// Find added and modified tools
 	for toolName, newTool := range newToolsMap {
@@ -835,6 +1005,8 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		} else if oldTool.Hash != newTool.Hash {
 			// Tool exists but has changed (different hash)
 			modifiedTools = append(modifiedTools, newTool)
+		} else if !reflect.DeepEqual(oldTool.Annotations, newTool.Annotations) {
+			annotationsOnlyTools = append(annotationsOnlyTools, newTool)
 		}
 		// else: tool unchanged, no action needed
 	}
@@ -976,6 +1148,21 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		}
 	}
 
+	// 4b. Silently backfill/refresh annotations_json for otherwise-unchanged
+	// tools (review round 2, finding 4). Deliberately not logged at Info and
+	// not described as a "change" — see the comment on annotationsOnlyTools
+	// above — this is metadata hygiene, not a tool-contract update.
+	allowedAnnotationsOnlyTools := filterBlockedTools(annotationsOnlyTools, approvalResult.BlockedTools)
+	if len(allowedAnnotationsOnlyTools) > 0 {
+		r.logger.Debug("Refreshing stored annotations for unchanged tools",
+			zap.String("server", serverName),
+			zap.Int("count", len(allowedAnnotationsOnlyTools)))
+
+		if err := r.indexManager.BatchIndexTools(allowedAnnotationsOnlyTools); err != nil {
+			return fmt.Errorf("failed to refresh tool annotations: %w", err)
+		}
+	}
+
 	// 5. Warm the signature cache for every tool this server still serves —
 	// deliberately the WHOLE allowed set, not just what steps 3 and 4 touched.
 	//
@@ -998,7 +1185,7 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 	// that include it (Profiles v2, Spec 057). Profiles without this server are
 	// untouched. Skipped when nothing changed to avoid churn on idle sweeps.
 	changed := len(addedTools) > 0 || len(modifiedTools) > 0 || len(removedTools) > 0 ||
-		len(approvalResult.BlockedTools) > 0
+		len(annotationsOnlyTools) > 0 || len(approvalResult.BlockedTools) > 0
 	if changed {
 		r.reindexAffectedProfiles(serverName)
 		// Evict signature-cache entries orphaned by removed/redefined tools —
@@ -1150,6 +1337,7 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 	configuredServers := make(map[string]*config.ServerConfig)
 	storedServerMap := make(map[string]*config.ServerConfig)
 	var changed bool
+	var reviewChangedServers []string
 
 	for _, storedServer := range storedServers {
 		storedServerMap[storedServer.Name] = storedServer
@@ -1286,6 +1474,10 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 			continue
 		}
 		r.logger.Debug("Successfully saved server to storage", zap.String("server", serverCfg.Name))
+		if (serverCfg.Quarantined && (!existsInStorage || !storedServer.Quarantined)) ||
+			(existsInStorage && storedServer.Quarantined != serverCfg.Quarantined) {
+			reviewChangedServers = append(reviewChangedServers, serverCfg.Name)
+		}
 	}
 	r.logger.Debug("Completed synchronous storage save phase")
 
@@ -1349,6 +1541,11 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 			r.upstreamManager.RemoveServer(name)
 			if err := r.storageManager.DeleteUpstreamServer(name); err != nil {
 				r.logger.Error("Failed to delete server from storage", zap.Error(err), zap.String("server", name))
+			} else {
+				// Removing a configured server can remove either a quarantined-server
+				// row or a trusted row with pending/changed tools from the review
+				// queue. Publish after storage deletion so subscribers refetch it.
+				r.emitReviewChanged(name)
 			}
 			if err := r.indexManager.DeleteServerTools(name); err != nil {
 				r.logger.Error("Failed to delete server tools from index", zap.Error(err), zap.String("server", name))
@@ -1373,6 +1570,9 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 			"configured": len(cfg.Servers),
 			"removed":    len(serversToRemove),
 		})
+	}
+	for _, serverName := range reviewChangedServers {
+		r.emitReviewChanged(serverName)
 	}
 
 	return nil
@@ -1541,14 +1741,31 @@ func (r *Runtime) SaveConfiguration() error {
 // paths.
 func (r *Runtime) syncServersToLegacyConfig(latestServers []*config.ServerConfig) int {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	oldServerCount := len(r.cfg.Servers)
-	r.cfg.Servers = latestServers
+	oldCfg := r.cfg
+	oldServerCount := len(oldCfg.Servers)
+	// ConfigService readers hold an immutable snapshot pointer. Mutating
+	// r.cfg.Servers in place therefore races request-time policy checks such as
+	// IsToolConfigDenied while a quarantine approval saves its new server state.
+	// Publish a cloned configuration instead, matching UpdateConfig's snapshot
+	// replacement semantics.
+	updatedCfg := (&configsvc.Snapshot{Config: oldCfg}).Clone()
+	updatedCfg.Servers = latestServers
+	r.cfg = updatedCfg
 	// The desired config is a separate struct once anything is pending, so the
 	// server list has to be written to both — otherwise the next PATCH merges
 	// onto a base whose servers are whatever they were at the last apply.
-	if r.desiredCfg != nil && r.desiredCfg != r.cfg {
-		r.desiredCfg.Servers = latestServers
+	if r.desiredCfg != nil {
+		if r.desiredCfg == oldCfg {
+			r.desiredCfg = updatedCfg
+		} else {
+			desired := (&configsvc.Snapshot{Config: r.desiredCfg}).Clone()
+			desired.Servers = latestServers
+			r.desiredCfg = desired
+		}
+	}
+	r.mu.Unlock()
+	if r.configSvc != nil {
+		_ = r.configSvc.Update(updatedCfg, configsvc.UpdateTypeModify, "sync_servers")
 	}
 	return oldServerCount
 }
@@ -1915,6 +2132,7 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 		"server":      serverName,
 		"quarantined": quarantined,
 	})
+	r.emitReviewChanged(serverName)
 
 	// Emit activity event for quarantine state change
 	reason := "Server unquarantined by administrator"

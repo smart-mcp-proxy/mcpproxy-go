@@ -1354,7 +1354,7 @@ func TestAtomicWriteFile(t *testing.T) {
 	path := filepath.Join(dir, "subdir", "test.json")
 
 	content := []byte(`{"atomic": true}`)
-	if err := atomicWriteFile(path, content, 0o644); err != nil {
+	if err := atomicWriteFile(path, content, 0o644, nil); err != nil {
 		t.Fatalf("atomicWriteFile failed: %v", err)
 	}
 
@@ -1603,6 +1603,61 @@ func TestConnectWithPrecondition_ValidTokenWrites(t *testing.T) {
 			t.Fatal("the adopted entry should have been replaced")
 		}
 	})
+}
+
+// TestConnectWithPrecondition_StaleResultCarriesDisplayPathAndReloadHint closes
+// the coverage gap the DisplayPath/ReloadHint deferred fill-in (Connect's
+// named-return + defer, see the comment above its declaration) exists for: a
+// precondition_failed result is a real branch that returns EARLY, before the
+// bottom `return res, ...` a naive reading might assume is the only exit, so
+// this pins that the deferred fill-in still runs on it.
+func TestConnectWithPrecondition_StaleResultCarriesDisplayPathAndReloadHint(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	preview, err := svc.Preview("claude-code", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+
+	// Drift the file after the preview so the write hits precondition_failed.
+	const drifted = `{"mcpServers":{"other":{"type":"http","url":"http://127.0.0.1:7000/mcp"}}}`
+	writeFileT(t, cfgPath, drifted)
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || res.Success || res.Action != "precondition_failed" {
+		t.Fatalf("expected a precondition refusal, got %+v", res)
+	}
+	assertHintAndPath(t, res, home)
+}
+
+// TestDisconnect_OpenCodeAlternateCandidateCarriesDisplayPathAndReloadHint
+// closes the coverage gap for Disconnect's OpenCode alternate-candidate
+// branch (#922 drift): it returns directly (`return altRes, nil`) instead of
+// falling through to the bottom `return res, ...` the deferred
+// DisplayPath/ReloadHint fill-in sits above — this pins that the deferred
+// fill-in still runs on THIS early return too.
+func TestDisconnect_OpenCodeAlternateCandidateCarriesDisplayPathAndReloadHint(t *testing.T) {
+	svc, home := testService(t)
+
+	// Entry lives in opencode.json, but opencode.jsonc now exists too, so the
+	// resolver targets the .jsonc (higher precedence) while the entry is only
+	// in the .json — the exact drift #922 fixed.
+	candidates := opencodeConfigCandidates(home)
+	jsoncPath, jsonPath := candidates[0], candidates[1]
+	writeFileT(t, jsonPath, `{"mcp":{"mcpproxy":{"type":"remote","url":"http://127.0.0.1:8080/mcp"}}}`)
+	writeFileT(t, jsoncPath, `{"mcp":{}}`)
+
+	res, err := svc.Disconnect("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	if res == nil || !res.Success {
+		t.Fatalf("expected the alternate-candidate retry to find and remove the entry, got %+v", res)
+	}
+	assertHintAndPath(t, res, home)
 }
 
 // TestConnectWithPrecondition_StaleTokenRefuses walks every drift class the

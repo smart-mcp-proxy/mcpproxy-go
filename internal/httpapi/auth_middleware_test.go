@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,7 +48,7 @@ type testControllerWithConfig struct {
 	cfg *config.Config
 }
 
-func (m *testControllerWithConfig) GetCurrentConfig() interface{} {
+func (m *testControllerWithConfig) GetCurrentConfig() *config.Config {
 	return m.cfg
 }
 
@@ -258,6 +259,71 @@ func TestAPIKeyAuth_AgentToken_Revoked(t *testing.T) {
 	assert.Contains(t, errResp["error"], "revoked")
 }
 
+// TestAPIKeyAuth_KindClientRecordViaAgentPrefix_Rejected is finding F2
+// (Spec 108-c review round 1): FR-023's second half — "a kind=client
+// credential is refused on REST by KIND, defence-in-depth, after the store
+// lookup" (handleAgentTokenAuth's `if agentToken.Kind == auth.KindClient`
+// branch in server.go) — had zero coverage, because every existing REST test
+// presents an mcp_cli_-prefixed secret, which the earlier prefix gate
+// (authenticateExplicitToken/authenticateBearer) intercepts before the store
+// is ever consulted. Deleting the Kind branch left the whole suite green.
+//
+// This test drives the code path the prefix gate cannot reach directly: an
+// mcp_agt_-shaped secret (so it clears the prefix gate) whose STORE LOOKUP
+// still returns a Kind=client record — exactly the defence-in-depth scenario
+// the comment describes ("reached this far only if its secret's prefix went
+// unrecognised above... against a future prefix regression"). The real
+// storage.ValidateAgentToken enforces ValidateTokenInvariants and would
+// itself refuse this combination with "malformed credential record" before
+// ever reaching the Kind check, which is exactly why the mock is needed to
+// isolate and pin the second, independent layer of defence.
+func TestAPIKeyAuth_KindClientRecordViaAgentPrefix_Rejected(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	tmpDir := t.TempDir()
+	_, err := auth.GetOrCreateHMACKey(tmpDir)
+	require.NoError(t, err)
+
+	rawToken, err := auth.GenerateToken() // mcp_agt_-prefixed: clears the prefix gate
+	require.NoError(t, err)
+
+	store := &testTokenStore{
+		validateFunc: func(token string, _ []byte) (*auth.AgentToken, error) {
+			if token == rawToken {
+				return &auth.AgentToken{
+					Name:           "client-cursor",
+					Kind:           auth.KindClient,
+					ClientID:       "cursor",
+					ProfileMode:    auth.ProfileModeSwitchable,
+					AllowedServers: []string{"*"},
+					Permissions:    []string{auth.PermRead, auth.PermWrite, auth.PermDestructive},
+					ExpiresAt:      time.Now().Add(24 * time.Hour),
+					CreatedAt:      time.Now(),
+				}, nil
+			}
+			return nil, fmt.Errorf("token not found")
+		},
+	}
+
+	cfg := &config.Config{APIKey: "admin-key-12345"}
+	mockCtrl := &testControllerWithConfig{cfg: cfg}
+
+	srv := NewServer(mockCtrl, logger, nil)
+	srv.SetTokenStore(store, tmpDir)
+
+	req := httptest.NewRequest("GET", "/api/v1/status", nil)
+	req.Header.Set("X-API-Key", rawToken)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code,
+		"a kind=client record reached via the store lookup must be refused on REST by kind, not dispatched as an ordinary agent token")
+
+	var errResp map[string]interface{}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&errResp))
+	assert.Contains(t, errResp["error"], "MCP endpoints only")
+}
+
 func TestAPIKeyAuth_GlobalKey_SetsAdminContext(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	apiKey := "my-admin-key"
@@ -398,4 +464,45 @@ func TestAPIKeyAuth_NoTokenStore_RejectsAgentToken(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code,
 		"Agent token should be rejected when token store is not configured")
+}
+
+// --- SEC-02: the middleware must fail CLOSED when it cannot read a config ---
+
+// failClosedController models a ServerController that hands the middleware no
+// configuration at all. apiKeyAuthMiddleware used to read that as a "testing
+// scenario" and forward the request unauthenticated; there is no configuration
+// to authenticate against, so the only safe answer is to refuse.
+//
+// reachedHandler is the real oracle: asserting only on the status code passes
+// vacuously if some unrelated 503 fires before routing.
+type failClosedController struct {
+	baseController
+	reachedHandler atomic.Bool
+}
+
+func (c *failClosedController) GetCurrentConfig() *config.Config { return nil }
+
+// GetAllServers is the sentinel: GET /api/v1/servers falls back to it because
+// baseController has no management service.
+func (c *failClosedController) GetAllServers() ([]map[string]interface{}, error) {
+	c.reachedHandler.Store(true)
+	return []map[string]interface{}{}, nil
+}
+
+func TestAPIKeyAuth_NilConfigFailsClosed(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	ctrl := &failClosedController{}
+	srv := NewServer(ctrl, logger, nil)
+
+	// A plain TCP request with no credentials of any kind.
+	req := httptest.NewRequest("GET", "/api/v1/servers", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code,
+		"an unreadable config must refuse the request, not forward it unauthenticated")
+	assert.Contains(t, w.Body.String(), "cannot authenticate",
+		"the 503 body must explain why, not just carry the right status code")
+	assert.False(t, ctrl.reachedHandler.Load(),
+		"the handler must NOT run: a nil config means the request was never authenticated")
 }

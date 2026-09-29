@@ -126,6 +126,21 @@ func (m *Manager) SearchToolsScoped(query string, limit int, inScope func(server
 	return m.bleveIndex.SearchToolsScoped(query, limit, inScope)
 }
 
+// SearchToolsAdmitted is SearchToolsScoped's hit-level counterpart (Spec 108
+// FR-011): the predicate resolves per-hit Admission (Admit/RejectScope/
+// RejectPolicy) over the canonical (server, tool) identity. See
+// BleveIndex.SearchToolsAdmitted.
+func (m *Manager) SearchToolsAdmitted(query string, limit int, admit func(Hit) Admission) ([]*config.SearchResult, int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if limit <= 0 {
+		limit = 20 // default limit, as SearchTools
+	}
+
+	return m.bleveIndex.SearchToolsAdmitted(query, limit, admit)
+}
+
 // Search searches for tools matching the query (alias for SearchTools)
 func (m *Manager) Search(query string, limit int) ([]*config.SearchResult, error) {
 	return m.SearchTools(query, limit)
@@ -155,10 +170,29 @@ func (m *Manager) GetDocumentCount() (uint64, error) {
 	return m.bleveIndex.GetDocumentCount()
 }
 
-// RebuildIndex rebuilds the entire index
+// RebuildIndex re-creates this Manager's index with the current mapping,
+// keeping every document (see BleveIndex.RebuildIndex).
+//
+// On the root, the rebuild renames the shared index directory, which also
+// holds the per-profile indexes. Open profile indexes are closed and dropped
+// first — Windows cannot rename a directory with open files inside — and
+// ForProfile reopens them lazily, unchanged. A caller still holding a dropped
+// sub-Manager gets errors from its closed index, as after DropProfile.
 func (m *Manager) RebuildIndex() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	for slug, sub := range m.profiles {
+		sub.mu.Lock()
+		if sub.bleveIndex != nil {
+			if err := sub.bleveIndex.Close(); err != nil {
+				m.logger.Warn("Failed to close profile index before rebuild",
+					zap.String("profile", slug), zap.Error(err))
+			}
+		}
+		sub.mu.Unlock()
+		delete(m.profiles, slug)
+	}
 
 	return m.bleveIndex.RebuildIndex()
 }

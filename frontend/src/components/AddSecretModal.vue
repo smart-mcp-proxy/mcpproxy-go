@@ -1,5 +1,5 @@
 <template>
-  <dialog :open="show" class="modal" data-test="add-secret-modal">
+  <dialog ref="nativeDialogEl" class="modal" data-test="add-secret-modal">
     <div
       ref="dialogRef"
       class="modal-box max-w-2xl"
@@ -98,6 +98,7 @@ import { reactive, ref, watch } from 'vue'
 import apiClient from '@/services/api'
 import { useSystemStore } from '@/stores/system'
 import { useModalA11y } from '@/composables/useModalA11y'
+import { useDialogOpen } from '@/composables/useDialogOpen'
 
 interface Props {
   show: boolean
@@ -114,6 +115,9 @@ const emit = defineEmits<Emits>()
 
 // UX audit F6/F8: Escape closes, focus enters the dialog and is trapped there.
 const { dialogRef } = useModalA11y(() => props.show, () => handleClose())
+// Spec 109 FR-055: the <dialog> itself opens via showModal() (top layer),
+// separate from dialogRef above (the inner .modal-box, used for focus trap).
+const { dialogEl: nativeDialogEl } = useDialogOpen(() => props.show, () => handleClose())
 
 const systemStore = useSystemStore()
 

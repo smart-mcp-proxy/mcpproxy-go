@@ -624,6 +624,54 @@ func (c *Client) ServerAction(ctx context.Context, serverName, action string) er
 }
 
 // GetDiagnostics retrieves diagnostics information from daemon.
+// AttentionResponse is the GET /api/v1/attention success `data` payload
+// (contracts/rest-api.md#attention, Spec 109 FR-001).
+type AttentionResponse struct {
+	Count       int                       `json:"count"`
+	GeneratedAt string                    `json:"generated_at"`
+	Items       []contracts.AttentionItem `json:"items"`
+}
+
+// GetAttention fetches the one needs-attention list every surface reads
+// from — `mcpproxy attention`, the first line of `status`, and the first
+// section of `doctor` (Spec 109 FR-003/FR-004) all call this.
+func (c *Client) GetAttention(ctx context.Context) (*AttentionResponse, error) {
+	url := c.baseURL + "/api/v1/attention"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call attention API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success   bool              `json:"success"`
+		Data      AttentionResponse `json:"data"`
+		Error     string            `json:"error"`
+		RequestID string            `json:"request_id"`
+	}
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if !apiResp.Success {
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+	return &apiResp.Data, nil
+}
+
 func (c *Client) GetDiagnostics(ctx context.Context) (map[string]interface{}, error) {
 	url := c.baseURL + "/api/v1/diagnostics"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -819,6 +867,53 @@ func (c *Client) GetStatus(ctx context.Context) (map[string]interface{}, error) 
 // GetInfo retrieves server info including version and update status.
 func (c *Client) GetInfo(ctx context.Context) (map[string]interface{}, error) {
 	return c.GetInfoWithRefresh(ctx, false)
+}
+
+// GetTokenStats retrieves token savings statistics (GET /api/v1/stats/tokens,
+// contracts.ServerTokenMetrics). Spec 109-k: 'mcpproxy status' uses this for
+// its "Token savings:" summary line. Administrator-only — a non-admin caller
+// (e.g. an agent token) gets a 403, which the caller treats like "unavailable"
+// rather than a hard failure.
+func (c *Client) GetTokenStats(ctx context.Context) (map[string]interface{}, error) {
+	url := c.baseURL + "/api/v1/stats/tokens"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call token stats API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success   bool                   `json:"success"`
+		Data      map[string]interface{} `json:"data"`
+		Error     string                 `json:"error"`
+		RequestID string                 `json:"request_id"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+
+	return apiResp.Data, nil
 }
 
 // GetInfoWithRefresh retrieves server info with optional update check refresh.

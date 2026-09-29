@@ -172,9 +172,14 @@ func TestServerSubtree_AdminUnaffected(t *testing.T) {
 		}
 	})
 
-	t.Run("no auth context passthrough is unrestricted", func(t *testing.T) {
-		srv := NewServer(passthroughController{newCtrl()}, zap.NewNop().Sugar(), nil)
-		rec := scopeGet(t, srv, "/api/v1/servers/beta/logs", "")
+	t.Run("no auth context is unrestricted", func(t *testing.T) {
+		// Driven through the real subtree gate (scopedServerSubtree) — that
+		// gate, not the auth middleware, is what must stay permissive when no
+		// AuthContext is present (auth.AuthorizeServerOp's default).
+		srv := NewServer(newCtrl(), zap.NewNop().Sugar(), nil)
+		rec := httptest.NewRecorder()
+		gated := srv.scopedServerSubtree(http.HandlerFunc(srv.handleGetServerLogs))
+		gated.ServeHTTP(rec, noAuthContextRequest(t, "/api/v1/servers/beta/logs", map[string]string{"id": "beta"}))
 		assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 		assert.Contains(t, rec.Body.String(), betaLogSecret,
 			"absence of a token must stay as permissive as it is today")

@@ -1,5 +1,5 @@
 <template>
-  <dialog :open="show" class="modal">
+  <dialog ref="dialogEl" class="modal">
     <div class="modal-box max-w-lg">
       <h3 class="font-bold text-lg mb-2">Connect MCPProxy to AI Agents</h3>
       <p class="text-sm opacity-70 mb-4">
@@ -34,7 +34,7 @@
               </div>
               <div class="min-w-0 flex-1">
                 <div class="font-medium text-sm truncate">{{ client.name }}</div>
-                <div class="text-xs opacity-50 truncate" :title="client.config_path">{{ client.config_path }}</div>
+                <div class="text-xs opacity-50 truncate" :title="client.config_path" data-test="connect-row-path">{{ shownPath(client) }}</div>
                 <!-- Audit F18: "which endpoint am I registered to?" was
                      unanswerable — a config merely holding an entry NAMED
                      mcpproxy read as connected, even pointing at another
@@ -172,7 +172,7 @@
           >
             <p class="text-xs opacity-70 leading-relaxed">
               Only this entry is added to
-              <code class="font-mono text-[11px] break-all" :title="previews[client.id]!.config_path">{{ previews[client.id]!.config_path }}</code>.
+              <code class="font-mono text-[11px] break-all" :title="previews[client.id]!.config_path">{{ shownPath(previews[client.id]!) }}</code>.
               Everything else in the file stays untouched, and a timestamped backup is created first.
             </p>
             <!-- Overwrite warning (FR-003): an entry with this name already exists. -->
@@ -190,7 +190,7 @@
               :data-test="`connect-preview-malformed-${client.id}`"
               class="text-xs text-warning leading-relaxed"
             >
-              Your current config could not be parsed, so connecting would fail rather than modify an unreadable file. Fix or remove {{ previews[client.id]!.config_path }} first, then try again.
+              Your current config could not be parsed, so connecting would fail rather than modify an unreadable file. Fix or remove {{ shownPath(previews[client.id]!) }} first, then try again.
             </p>
             <!-- No prior file (bridge / absent): nothing to back up. -->
             <p
@@ -256,6 +256,9 @@
         <div class="alert alert-sm" :class="resultSuccess ? 'alert-success' : 'alert-error'">
           <span class="text-sm">{{ resultMessage }}</span>
         </div>
+        <p v-if="resultSuccess && resultReloadHint" data-test="connect-reload-hint" class="mt-2 text-xs opacity-80">
+          {{ resultReloadHint }}
+        </p>
         <!-- Spec 078 US2 / FR-006: surface the timestamped backup after a
              successful connect/disconnect; the "no prior file" case is stated
              explicitly rather than showing a blank path. -->
@@ -366,6 +369,9 @@
               <template v-else>
                 No prior config file existed, so no backup was needed.
               </template>
+              <span v-if="b.reloadHint" :data-test="`connect-reload-hint-${b.id}`" class="mt-1 block opacity-80">
+                {{ b.reloadHint }}
+              </span>
             </span>
             <button
               v-if="b.backupPath"
@@ -413,7 +419,7 @@
             This removes the
             <code class="font-mono">{{ disconnectTarget.server_name || 'mcpproxy' }}</code>
             entry from
-            <code class="font-mono break-all">{{ disconnectTarget.config_path }}</code>.
+            <code class="font-mono break-all" :title="disconnectTarget.config_path" data-test="connect-disconnect-path">{{ shownPath(disconnectTarget) }}</code>.
           </p>
           <p class="text-sm text-base-content/70 mt-2">
             A timestamped backup of the file is written first, and the path is shown afterwards
@@ -443,6 +449,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
 import { useOnboardingStore } from '@/stores/onboarding'
+import { useDialogOpen } from '@/composables/useDialogOpen'
 import type { ClientStatus, AccessState, ConnectPreview } from '@/types'
 
 interface Props {
@@ -455,6 +462,7 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
+const { dialogEl } = useDialogOpen(() => props.show, () => close())
 const systemStore = useSystemStore()
 const onboarding = useOnboardingStore()
 
@@ -462,6 +470,7 @@ const clients = ref<ClientStatus[]>([])
 const error = ref<string | null>(null)
 const resultMessage = ref('')
 const resultSuccess = ref(false)
+const resultReloadHint = ref('')
 // Spec 078 US2: backup path of the last successful connect/disconnect.
 // string = timestamped backup created; null = success but no prior file to
 // back up; undefined = no successful operation to report on.
@@ -471,7 +480,7 @@ const copiedBackup = ref(false)
 // successful connect in the bulk run keeps its own entry (string = backup
 // created; null = no prior file), so no client's backup path is overwritten
 // by the next one. Empty when the last operation was a single connect.
-const bulkBackups = ref<Array<{ id: string; name: string; backupPath: string | null }>>([])
+const bulkBackups = ref<Array<{ id: string; name: string; backupPath: string | null; reloadHint: string }>>([])
 const copiedBulkClient = ref<string | null>(null)
 const loading = reactive({
   initial: false,
@@ -569,6 +578,13 @@ function notFoundTitle(client: ClientStatus): string {
 
 // --- Disconnect confirmation (audit F18) ---
 const disconnectTarget = ref<ClientStatus | null>(null)
+
+// Presentation-safe path (home-shortened, Spec 109-b FR-037) with a fallback to
+// the raw path when the backend did not supply one. The full path stays
+// available in the element's title attribute.
+function shownPath(x: { display_path?: string; config_path: string }): string {
+  return x.display_path || x.config_path
+}
 
 function askDisconnect(client: ClientStatus) {
   disconnectTarget.value = client
@@ -680,11 +696,38 @@ async function confirmConnect(clientId: string) {
   clearPreview(clientId)
 }
 
+// After a successful write the stat-only listing still reports connected=false
+// (#706), so re-fetch the content-resolved onboarding state — otherwise rows
+// keep "Review & connect" and the footer keeps counting connected clients.
+// Only the rewritten client's on-demand resolution is stale; other clients'
+// files are untouched, so their verified endpoint lines survive the refetch.
+async function refreshAfterWrite(clientId: string) {
+  const kept = { ...resolved.value }
+  delete kept[clientId]
+  await fetchClients()
+  // fetchClients() only clears `resolved` on success; on failure it leaves the
+  // pre-write override in place, which would resurrect the stale entry we
+  // just deleted from `kept`. Drop it unconditionally -- a caller that still
+  // wants a fresh resolution (e.g. connect()'s verify step) fetches it after
+  // this returns.
+  const merged = { ...kept, ...resolved.value }
+  delete merged[clientId]
+  resolved.value = merged
+  await onboarding.fetchState()
+}
+
 // Returns the outcome so connectAll can accumulate per-client backup results
 // (ok=true with backupPath string = backup created; null = no prior file).
-async function connect(clientId: string, force = false): Promise<{ ok: boolean; backupPath: string | null; configPath: string }> {
+// verify=false lets connectAll defer the endpoint check until every write is
+// done: each connect's fetchClients() clears earlier resolutions.
+async function connect(
+  clientId: string,
+  force = false,
+  { verify = true }: { verify?: boolean } = {}
+): Promise<{ ok: boolean; backupPath: string | null; configPath: string; reloadHint: string }> {
   loading.clients[clientId] = true
   resultMessage.value = ''
+  resultReloadHint.value = ''
   resultBackupPath.value = undefined
   copiedBackup.value = false
   lastConnect.value = null
@@ -695,16 +738,21 @@ async function connect(clientId: string, force = false): Promise<{ ok: boolean; 
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Connected to ${clientId}`
       resultSuccess.value = true
+      resultReloadHint.value = response.data.reload_hint || ''
       // Empty/absent backup_path on success means no prior file existed.
       const backupPath = response.data.backup_path || null
       resultBackupPath.value = backupPath
-      await fetchClients()
+      await refreshAfterWrite(clientId)
+      // Confirm which endpoint the client now names. The config was just
+      // written as a direct result of this click, so the read stays tied to an
+      // explicit user action (Spec 075).
+      if (verify) void checkAccess(clientId)
       systemStore.addToast({
         type: 'success',
         title: 'Client Connected',
         message: `MCPProxy registered in ${clientId}`,
       })
-      return { ok: true, backupPath, configPath: response.data.config_path }
+      return { ok: true, backupPath, configPath: response.data.config_path, reloadHint: response.data.reload_hint || '' }
     }
     resultMessage.value = response.error || 'Failed to connect'
     resultSuccess.value = false
@@ -718,7 +766,7 @@ async function connect(clientId: string, force = false): Promise<{ ok: boolean; 
   } finally {
     loading.clients[clientId] = false
   }
-  return { ok: false, backupPath: null, configPath: '' }
+  return { ok: false, backupPath: null, configPath: '', reloadHint: '' }
 }
 
 // Spec 078 US3: revert the last connect performed in this modal session. The
@@ -733,6 +781,7 @@ async function confirmUndo() {
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Reverted the ${target.id} connect`
       resultSuccess.value = true
+      resultReloadHint.value = ''
       resultBackupPath.value = undefined
       lastConnect.value = null
       undoPanelOpen.value = false
@@ -760,6 +809,7 @@ async function confirmUndo() {
 async function disconnect(clientId: string) {
   loading.clients[clientId] = true
   resultMessage.value = ''
+  resultReloadHint.value = ''
   resultBackupPath.value = undefined
   copiedBackup.value = false
   bulkBackups.value = []
@@ -774,8 +824,9 @@ async function disconnect(clientId: string) {
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Disconnected from ${clientId}`
       resultSuccess.value = true
+      resultReloadHint.value = response.data.reload_hint || ''
       resultBackupPath.value = response.data.backup_path || null
-      await fetchClients()
+      await refreshAfterWrite(clientId)
       systemStore.addToast({
         type: 'info',
         title: 'Client Disconnected',
@@ -876,19 +927,26 @@ async function connectAll() {
   // Snapshot: connect() refetches the client list mid-loop, which mutates the
   // connectableClients computed while we iterate it.
   const targets = [...connectableClients.value]
-  const collected: Array<{ id: string; name: string; backupPath: string | null }> = []
+  const collected: Array<{ id: string; name: string; backupPath: string | null; reloadHint: string }> = []
   for (const client of targets) {
-    const outcome = await connect(client.id)
+    const outcome = await connect(client.id, false, { verify: false })
     if (outcome.ok) {
-      collected.push({ id: client.id, name: client.name, backupPath: outcome.backupPath })
+      collected.push({ id: client.id, name: client.name, backupPath: outcome.backupPath, reloadHint: outcome.reloadHint })
     }
   }
   if (collected.length > 0) {
     bulkBackups.value = collected
+    // The bulk rows carry per-client hints; suppress the last connect's
+    // single-result hint to avoid showing a misleading duplicate.
+    resultReloadHint.value = ''
     // The per-client list is authoritative for a bulk run; suppress the
     // single-result line that would otherwise repeat only the last backup.
     resultBackupPath.value = undefined
   }
+  // Endpoint verification is best-effort polish on top of the summary above --
+  // don't let a slow or stalled check (these are content reads, no timeout on
+  // the API client) delay showing the backup results the user is waiting on.
+  await Promise.all(collected.map(c => checkAccess(c.id)))
 }
 
 // Per-row copy for the Connect All backup list.
@@ -908,6 +966,7 @@ async function copyBulkBackupPath(entry: { id: string; backupPath: string | null
 
 function close() {
   resultMessage.value = ''
+  resultReloadHint.value = ''
   resultBackupPath.value = undefined
   copiedBackup.value = false
   bulkBackups.value = []
@@ -916,6 +975,12 @@ function close() {
   previewError.value = {}
   lastConnect.value = null
   undoPanelOpen.value = false
+  // Review round 2, finding 3: this also fires on a native Escape/backdrop
+  // dismiss (it's useDialogOpen's onClose), which can happen while the
+  // "Disconnect X?" confirm sub-panel is open. Without resetting it, the
+  // stale confirm panel reappears for a client the user may no longer
+  // intend to touch the next time the modal opens.
+  disconnectTarget.value = null
   emit('close')
 }
 
@@ -927,6 +992,7 @@ watch(() => props.show, (newVal) => {
     fetchClients()
     void onboarding.fetchState()
     resultMessage.value = ''
+    resultReloadHint.value = ''
     resultBackupPath.value = undefined
     copiedBackup.value = false
     bulkBackups.value = []

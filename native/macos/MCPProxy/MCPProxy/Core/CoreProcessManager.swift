@@ -1702,6 +1702,27 @@ actor CoreProcessManager {
                 )
             }
 
+        case "attention.changed":
+            // Spec 109 FR-001/FR-006: the wire payload is narrowed to
+            // `{count, ids}` per subscriber — refetch the full item shape
+            // (summaries, fixes) rather than reconstructing it from ids.
+            await refreshAttention()
+
+        case "review.changed":
+            // The payload is a notification only; ReviewQueueView refetches the
+            // authoritative one-row-per-server queue when it is visible.
+            await refreshReviewQueue()
+            await MainActor.run { NotificationCenter.default.post(name: .reviewChanged, object: nil) }
+
+        case "security.scan_settled":
+            // Scan completion is separate from review changes: a clean scan
+            // can capture definitions without changing approval status.
+            guard let data = event.data.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            let payload = raw["payload"] as? [String: Any] ?? raw
+            guard let serverName = payload["server_name"] as? String else { return }
+            await MainActor.run { NotificationCenter.default.post(name: .scanSettled, object: serverName) }
+
         case "config.reloaded":
             // Configuration reloaded; refresh everything once.
             // A re-init loop re-emits config.reloaded each cycle even when the
@@ -1910,6 +1931,8 @@ actor CoreProcessManager {
         await refreshTokenMetrics()
         await refreshSecurityStatus()
         await refreshProfiles()
+        await refreshAttention()
+        await refreshReviewQueue()
         // Bump activityVersion so ActivityView reloads. Still needed after the
         // glance's SSE work: the bus emits `activity.tool_call.completed` and
         // `activity.internal_tool_call.completed` (internal/runtime/events.go),
@@ -1972,6 +1995,31 @@ actor CoreProcessManager {
         } catch {
             // Non-fatal; we'll retry on the next refresh
         }
+    }
+
+    /// Fetch the needs-attention list from `GET /api/v1/attention` and update
+    /// appState (Spec 109 FR-001). Driven on connect, on the periodic
+    /// refresh, and on `attention.changed` SSE events.
+    func refreshAttention() async {
+        guard let apiClient else { return }
+        let (generation, sequence) = await MainActor.run {
+            (appState.connectionGeneration, appState.nextAttentionRequest())
+        }
+        do {
+            let response = try await apiClient.attention()
+            await MainActor.run {
+                appState.updateAttention(response.items, connectionGeneration: generation,
+                                         requestSequence: sequence)
+            }
+        } catch {
+            // Non-fatal; we'll retry on the next refresh or SSE event.
+        }
+    }
+
+    func refreshReviewQueue() async {
+        guard let apiClient else { return }
+        let count = (try? await apiClient.reviewQueue().count) ?? 0
+        await MainActor.run { appState.reviewQueueCount = count }
     }
 
     /// Spec 048: long-cadence safety-net wrapper around `refreshServers`.
@@ -2053,13 +2101,21 @@ actor CoreProcessManager {
         await appState.refreshUsage(from: apiClient)
     }
 
-    /// Fetch token metrics from the status endpoint and update appState.
+    /// Fetch token metrics and feature flags from the status endpoint and update appState.
     private func refreshTokenMetrics() async {
         guard let apiClient else { return }
         do {
             let status = try await apiClient.status()
             if let metrics = status.upstreamStats?.tokenMetrics {
                 await MainActor.run { appState.tokenMetrics = metrics }
+            }
+            // Spec 109-k FR-080a: rides the same periodic status read, so the
+            // scope filters appear without a restart once the core lists them.
+            let available = status.scopeFiltersAvailable
+            await MainActor.run {
+                if appState.scopeFiltersAvailable != available {
+                    appState.scopeFiltersAvailable = available
+                }
             }
         } catch {
             // Non-fatal; token metrics are optional

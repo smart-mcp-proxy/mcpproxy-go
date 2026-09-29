@@ -22,6 +22,10 @@ func GetParser(format ConfigFormat) Parser {
 		return &CodexParser{}
 	case FormatGemini:
 		return &GeminiParser{}
+	case FormatURL:
+		return &URLParser{}
+	case FormatCommand:
+		return &CommandParser{}
 	default:
 		return nil
 	}

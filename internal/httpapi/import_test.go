@@ -8,6 +8,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -20,7 +22,7 @@ type mockImportController struct {
 	apiKey string
 }
 
-func (m *mockImportController) GetCurrentConfig() any {
+func (m *mockImportController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
@@ -85,6 +87,73 @@ func TestImportServersJSON_Preview(t *testing.T) {
 	}
 	if response.Imported[0].Name != "github" {
 		t.Errorf("Expected server name 'github', got '%s'", response.Imported[0].Name)
+	}
+}
+
+// TestImportServersJSON_PreviewCarriesSummaryAndTags is Spec 109-b T036: the
+// preview response's imported rows must carry the FR-040 second line
+// (summary), its tags, and the per-env secret classification.
+func TestImportServersJSON_PreviewCarriesSummaryAndTags(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := &mockImportController{apiKey: "test-key"}
+	server := NewServer(mock, logger, nil)
+
+	reqBody := ImportRequest{
+		Content: `{
+			"mcpServers": {
+				"github": {
+					"command": "uvx",
+					"args": ["mcp-server-github"],
+					"env": {"GITHUB_TOKEN": ""}
+				}
+			}
+		}`,
+	}
+
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var wrapped wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	if len(wrapped.Data.Imported) != 1 {
+		t.Fatalf("Expected 1 imported server, got %d", len(wrapped.Data.Imported))
+	}
+	row := wrapped.Data.Imported[0]
+
+	if row.Summary == "" {
+		t.Error("expected a non-empty Summary")
+	}
+	foundLocal, foundNeedsSecret := false, false
+	for _, tag := range row.Tags {
+		if tag == "local process" {
+			foundLocal = true
+		}
+		if tag == "needs secret" {
+			foundNeedsSecret = true
+		}
+	}
+	if !foundLocal {
+		t.Errorf("Tags = %v, want to contain %q", row.Tags, "local process")
+	}
+	if !foundNeedsSecret {
+		t.Errorf("Tags = %v, want to contain %q (empty GITHUB_TOKEN)", row.Tags, "needs secret")
+	}
+	if len(row.Env) != 1 || row.Env[0].Name != "GITHUB_TOKEN" {
+		t.Fatalf("Env = %+v, want one GITHUB_TOKEN entry", row.Env)
+	}
+	if !row.Env[0].SecretLike || !row.Env[0].EmptyOrPlaceholder {
+		t.Errorf("Env[0] = %+v, want SecretLike=true EmptyOrPlaceholder=true", row.Env[0])
 	}
 }
 
@@ -248,7 +317,7 @@ func TestRunImport_ConflictRenameSanitizableName(t *testing.T) {
 			const want = "Figma_Desktop_claude_desktop"
 			rename := map[string]string{tt.renameBy: want}
 
-			resp, err := server.runImport(req, []byte(content), "claude-desktop", nil, true, rename)
+			resp, err := server.runImport(req, []byte(content), "claude-desktop", nil, true, rename, nil, false)
 			if err != nil {
 				t.Fatalf("runImport returned error: %v", err)
 			}
@@ -394,5 +463,178 @@ func TestImportServersJSON_UnknownFormat(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("Expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestImportServersJSON_PasteFallbackRequiresOptIn pins review round 4 F-E: a
+// plain one-line, non-JSON/TOML body must return an error by default (same
+// "unable to detect configuration format" behavior as before FR-064) — the
+// Paste tab's URL/command-line guess only kicks in when the request
+// explicitly sets allow_paste_fallback.
+func TestImportServersJSON_PasteFallbackRequiresOptIn(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := &mockImportController{apiKey: "test-key"}
+	server := NewServer(mock, logger, nil)
+
+	doRequest := func(reqBody ImportRequest) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(reqBody)
+		req := httptest.NewRequest("POST", "/api/v1/servers/import/json?preview=true", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		rr := httptest.NewRecorder()
+		server.router.ServeHTTP(rr, req)
+		return rr
+	}
+
+	rr := doRequest(ImportRequest{Content: "hello world"})
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("without allow_paste_fallback: expected status 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	rr = doRequest(ImportRequest{Content: "hello world", AllowPasteFallback: true})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("with allow_paste_fallback: expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp.Data.Format != "command" {
+		t.Errorf("Format = %q, want %q", resp.Data.Format, "command")
+	}
+}
+
+// mockSelfImportController reports a listen address so the import endpoint can
+// recognize client entries that point back at this instance.
+type mockSelfImportController struct {
+	mockImportController
+	listen    string // bound (display) address
+	cfgListen string // configured listen
+}
+
+func (m *mockSelfImportController) GetListenAddress() string { return m.listen }
+
+func (m *mockSelfImportController) GetCurrentConfig() *config.Config {
+	return &config.Config{APIKey: m.apiKey, Listen: m.cfgListen}
+}
+
+// TestImportFromPath_SkipsSelfReference is the onboarding self-import bug: once
+// Connect has written an `mcpproxy` http entry pointing at this instance into
+// ~/.claude.json, the import preview (wizard Servers step, Add Server > Import)
+// must not list it as an importable server.
+func TestImportFromPath_SkipsSelfReference(t *testing.T) {
+	cases := []struct {
+		name, bound, cfgListen, selfURL string
+	}{
+		{"bound address", "127.0.0.1:18123", "", "http://127.0.0.1:18123/mcp"},
+		// GetListenAddress normalizes a wildcard bind to 127.0.0.1:<port>;
+		// Connect writes the raw wildcard host.
+		{"wildcard listen", "127.0.0.1:18123", "0.0.0.0:18123", "http://0.0.0.0:18123/mcp"},
+		// Not bound yet (or stdio mode): the configured listen still applies.
+		{"configured listen only", "", "127.0.0.1:18123", "http://127.0.0.1:18123/mcp/all"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := previewImportWithSelf(t, tc.bound, tc.cfgListen, tc.selfURL)
+			if len(resp.Imported) != 1 || resp.Imported[0].Name != "github" {
+				t.Fatalf("Expected only 'github' importable, got %+v", resp.Imported)
+			}
+			if len(resp.Skipped) != 1 || resp.Skipped[0].Name != "mcpproxy" || resp.Skipped[0].Reason != "self_reference" {
+				t.Errorf("Expected 'mcpproxy' skipped as self_reference, got %+v", resp.Skipped)
+			}
+		})
+	}
+}
+
+func previewImportWithSelf(t *testing.T, bound, cfgListen, selfURL string) ImportResponse {
+	t.Helper()
+	logger := zap.NewNop().Sugar()
+	mock := &mockSelfImportController{
+		mockImportController: mockImportController{apiKey: "test-key"},
+		listen:               bound,
+		cfgListen:            cfgListen,
+	}
+	server := NewServer(mock, logger, nil)
+
+	path := filepath.Join(t.TempDir(), ".claude.json")
+	content := `{"mcpServers":{
+		"mcpproxy":{"type":"http","url":"` + selfURL + `"},
+		"github":{"type":"http","url":"https://api.githubcopilot.com/mcp/"}
+	}}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(ImportFromPathRequest{Path: path, Format: "claude-code"})
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/path?preview=true", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var wrapped wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	return wrapped.Data
+}
+
+// TestImportServersJSON_ApplyResponseReflectsOverrides: when the caller supplies
+// env/header overrides on an apply (non-preview) call, the response must
+// describe the values that were actually persisted, not the pre-override
+// source values.
+func TestImportServersJSON_ApplyResponseReflectsOverrides(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := &mockImportController{apiKey: "test-key"}
+	server := NewServer(mock, logger, nil)
+
+	reqBody := ImportRequest{
+		Content: `{
+			"mcpServers": {
+				"github": {
+					"command": "uvx",
+					"args": ["mcp-server-github"],
+					"env": {"GITHUB_TOKEN": "YOUR_API_KEY"}
+				}
+			}
+		}`,
+		EnvOverride: map[string]string{"GITHUB_TOKEN": "ghp_realvalue1234567890"},
+	}
+
+	body, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest("POST", "/api/v1/servers/import/json", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var wrapped wrappedImportResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &wrapped); err != nil {
+		t.Fatalf("Failed to unmarshal response: %v", err)
+	}
+	if len(wrapped.Data.Imported) != 1 {
+		t.Fatalf("Expected 1 imported server, got %d", len(wrapped.Data.Imported))
+	}
+	row := wrapped.Data.Imported[0]
+	if len(row.Env) != 1 || row.Env[0].Name != "GITHUB_TOKEN" {
+		t.Fatalf("Env = %+v, want one GITHUB_TOKEN entry", row.Env)
+	}
+	if row.Env[0].EmptyOrPlaceholder {
+		t.Errorf("Env[0] = %+v, want EmptyOrPlaceholder=false after override", row.Env[0])
+	}
+	for _, tag := range row.Tags {
+		if tag == "needs secret" {
+			t.Errorf("Tags = %v, must not contain %q after the placeholder was overridden", row.Tags, "needs secret")
+		}
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte("ghp_realvalue1234567890")) {
+		t.Error("response must not echo the override secret value")
 	}
 }

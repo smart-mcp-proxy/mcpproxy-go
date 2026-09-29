@@ -41,7 +41,7 @@ type tenantWalkController struct {
 	baseController
 }
 
-func (m *tenantWalkController) GetCurrentConfig() any {
+func (m *tenantWalkController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: "admin-test-key"}
 }
 
@@ -110,6 +110,8 @@ type tenantAllowlistedRoute struct {
 // /api/v1).
 var tenantAllowlist = []tenantAllowlistedRoute{
 	{http.MethodGet, "/api/v1/status"},
+	{http.MethodGet, "/api/v1/attention"},
+	{http.MethodGet, "/api/v1/review"},
 	{http.MethodGet, "/api/v1/servers"},
 	// scopedServerSubtree: every GET under /servers/{id}/** EXCEPT
 	// /servers/{id}/tool-calls (named must-refuse) and the static
@@ -117,6 +119,7 @@ var tenantAllowlist = []tenantAllowlistedRoute{
 	// the matcher must deny it explicitly ahead of the {id} rule, see below).
 	{http.MethodGet, "/api/v1/servers/{id}"},
 	{http.MethodGet, "/api/v1/servers/{id}/tools"},
+	{http.MethodGet, "/api/v1/servers/{id}/review"},
 	{http.MethodGet, "/api/v1/servers/{id}/logs"},
 	{http.MethodGet, "/api/v1/servers/{id}/diagnostics"},
 	{http.MethodGet, "/api/v1/servers/{id}/tools/{tool}/diff"},

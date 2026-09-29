@@ -58,6 +58,17 @@ final class AppState: ObservableObject {
     /// liveness for nothing.
     @Published private(set) var connectionGeneration: Int = 0
 
+    /// Monotonic ticket counter for attention fetches; see `updateAttention`.
+    private var attentionRequestCounter = 0
+    private var attentionAppliedSequence = 0
+
+    /// Issue the next attention-fetch ticket. Call before starting the fetch.
+    @MainActor
+    func nextAttentionRequest() -> Int {
+        attentionRequestCounter += 1
+        return attentionRequestCounter
+    }
+
     /// Whether `generation` still identifies the live connection. The predicate
     /// every glance publish must satisfy: connected, and connected to the same
     /// core the fetch was issued to.
@@ -75,12 +86,30 @@ final class AppState: ObservableObject {
     @Published var totalServers: Int = 0
     @Published var totalTools: Int = 0
 
+    /// The one needs-attention list (Spec 109 FR-001), read verbatim from
+    /// `GET /api/v1/attention` and kept live over SSE `attention.changed`.
+    /// Every surface (Home section, tray "Needs Attention" group, sidebar
+    /// badge) reads this — none of them re-derives its own predicate
+    /// (`serversNeedingAttention` is retired; FR-003).
+    @Published var attention: [AttentionItem] = []
+    /// One row per server from GET /review; intentionally separate from the
+    /// attention count, which can contain multiple reasons for one server.
+    @Published var reviewQueueCount: Int = 0
+
+    /// The `reload_hint` fix (`client_never_seen`, "How to restart") has no
+    /// native client screen yet (109-h adds `/clients?focus=<id>`). Setting
+    /// this instead of no-op'ing lets Home surface the item's own restart
+    /// guidance as an alert — never a dead click — until that screen ships.
+    @Published var pendingReloadHint: AttentionItem?
+
     // MARK: - Profiles (Profiles v2 T5)
     /// Configured profiles for the tray profile switcher.
     @Published var profiles: [ProfileSummary] = []
 
-    /// A session the Activity Log should scope itself to as soon as it exists
-    /// (F10 — a tray glance row's hand-off).
+    /// The filter the next scope-aware view should apply as soon as it exists
+    /// (Spec 109-k T122; replaces F10's `pendingActivitySessionFilter`). Every
+    /// in-app link — tray glance client row, Clients row, Token row — sets it
+    /// through `handOffScopeFilter` BEFORE switching the sidebar selection.
     ///
     /// A notification alone cannot carry this: a window created BY the click
     /// subscribes its `onReceive` observers only once the view appears, so a
@@ -88,7 +117,31 @@ final class AppState: ObservableObject {
     /// documents for the sidebar tab. ActivityView consumes and clears this on
     /// appear; the notification still covers the already-open window, and
     /// whichever arrives first clears it for the other.
-    @Published var pendingActivitySessionFilter: String?
+    @Published var scopeFilter: ScopeFilter?
+
+    /// Whether the core advertises `features.scope_filters`. Until it does,
+    /// `profile`/`client`/`token` stay hidden and are never sent (FR-080a).
+    @Published var scopeFiltersAvailable: Bool = false
+
+    /// Publish a filter for the next scope-aware view (the in-app link channel).
+    func handOffScopeFilter(_ filter: ScopeFilter) {
+        scopeFilter = filter
+    }
+
+    /// Follow an in-app link to Activity: publish the filter first (a view
+    /// created by the switch consumes it on appear), then switch the sidebar,
+    /// then notify an already-open Activity view.
+    func openActivity(with filter: ScopeFilter) {
+        handOffScopeFilter(filter)
+        NotificationCenter.default.post(name: .switchToActivity, object: nil)
+        NotificationCenter.default.post(name: .activityFilter, object: filter)
+    }
+
+    /// Take the pending filter, clearing it so no later view re-applies it.
+    func consumeScopeFilter() -> ScopeFilter? {
+        defer { scopeFilter = nil }
+        return scopeFilter
+    }
     /// Server-level default active profile slug; empty means "all servers".
     @Published var activeProfile: String = ""
 
@@ -301,16 +354,6 @@ final class AppState: ObservableObject {
 
     // MARK: Computed properties
 
-    /// Servers that need user intervention — NOT including intentionally disabled servers.
-    /// Only: auth required (login), connection errors (restart), quarantine (approve).
-    var serversNeedingAttention: [ServerStatus] {
-        servers.filter { server in
-            guard let action = server.health?.action, !action.isEmpty else { return false }
-            // "enable" means disabled by user — intentional, not attention-worthy
-            return action != "enable"
-        }
-    }
-
     /// Spec 044 — servers that have an attached, classified diagnostic with
     /// warn/error severity. These drive the "Fix issues" menu group and the
     /// tray badge tint.
@@ -405,6 +448,32 @@ final class AppState: ObservableObject {
         if totalTools != newTools { totalTools = newTools }
         if quarantinedToolsCount != newQuarantined { quarantinedToolsCount = newQuarantined }
         if !serversLoaded { serversLoaded = true }
+    }
+
+    /// Replace the needs-attention list (Spec 109 FR-001). Only publishes
+    /// when the id set actually differs, so a debounced-but-unchanged
+    /// `attention.changed` refetch does not spuriously re-render every
+    /// subscriber (same rule as `updateServers`).
+    ///
+    /// `requestSequence` (from `nextAttentionRequest()`) orders overlapping
+    /// fetches on ONE connection: `connectionGeneration` cannot tell them
+    /// apart, so a response older than one already applied is dropped rather
+    /// than restoring stale rows until the next event or poll.
+    @MainActor
+    func updateAttention(_ items: [AttentionItem],
+                         connectionGeneration generation: Int? = nil,
+                         requestSequence: Int? = nil) {
+        guard coreState == .connected else { return }
+        if let generation, !isCurrentConnection(generation) { return }
+        if let requestSequence {
+            guard requestSequence > attentionAppliedSequence else { return }
+            attentionAppliedSequence = requestSequence
+        }
+        let newIDs = items.map(\.id)
+        let oldIDs = attention.map(\.id)
+        if newIDs != oldIDs || items != attention {
+            attention = items
+        }
     }
 
     /// Replace the recent activity list.
@@ -948,6 +1017,7 @@ final class AppState: ObservableObject {
     /// the main actor anyway — `transition(to:)`, plus the two `MainActor.run`
     /// blocks in CoreProcessManager.awaitExternalCore and MCPProxyApp.stopCore.
     func clearGlanceState() {
+        if !attention.isEmpty { attention = [] }
         if !glanceActivity.isEmpty { glanceActivity = [] }
         if !glanceSessions.isEmpty { glanceSessions = [] }
         if usageTimeline != nil { usageTimeline = nil }

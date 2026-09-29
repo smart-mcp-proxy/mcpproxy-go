@@ -35,6 +35,17 @@ type HealthStatus struct {
 	Summary    string `json:"summary"`          // e.g., "Connected (5 tools)"
 	Detail     string `json:"detail,omitempty"` // Optional longer explanation
 	Action     string `json:"action,omitempty"` // "login", "restart", "enable", "approve", "set_secret", "configure", "view_logs", ""
+
+	// Status is the ONE status vocabulary rendered as text on every surface
+	// (Spec 109 FR-010/FR-011) — mirrors contracts.HealthStatus.Status.
+	// Unlike Level (severity/coloring only), this may be printed as text.
+	Status string `json:"status"`
+	// Usable reports whether the server can currently serve tool calls.
+	Usable bool `json:"usable"`
+	// Actions lists every applicable next step in priority order (FR-012).
+	// Always non-nil (empty slice, never null) on a current core; may be
+	// absent from an older core's payload.
+	Actions []string `json:"actions"`
 }
 
 // Server represents a server from the API
@@ -513,6 +524,9 @@ func (c *Client) GetServers() ([]Server, error) {
 				Summary:    getString(healthMap, "summary"),
 				Detail:     getString(healthMap, "detail"),
 				Action:     getString(healthMap, "action"),
+				Status:     getString(healthMap, "status"),
+				Usable:     getBool(healthMap, "usable"),
+				Actions:    getStringSlice(healthMap, "actions"),
 			}
 			if c.logger != nil && server.Health.Level != "" {
 				c.logger.Debugw("Health extracted",
@@ -754,22 +768,6 @@ func (c *Client) QuarantineServer(serverName string) error {
 	return nil
 }
 
-// UnquarantineServer removes a server from quarantine
-func (c *Client) UnquarantineServer(serverName string) error {
-	endpoint := fmt.Sprintf("/api/v1/servers/%s/unquarantine", serverName)
-
-	resp, err := c.makeRequest("POST", endpoint, nil)
-	if err != nil {
-		return err
-	}
-
-	if !resp.Success {
-		return fmt.Errorf("API error: %s", resp.Error)
-	}
-
-	return nil
-}
-
 // SearchTools searches for tools
 // GetInfo fetches server information from /api/v1/info endpoint
 func (c *Client) GetInfo() (map[string]interface{}, error) {
@@ -880,6 +878,13 @@ func (c *Client) SearchTools(query string, limit int) ([]SearchResult, error) {
 
 // OpenWebUI opens the web control panel in the default browser
 func (c *Client) OpenWebUI() error {
+	return c.OpenWebUIPath("")
+}
+
+// OpenWebUIPath opens a path inside the Web UI while preserving its API-key
+// authentication. Tray quarantine entries use this to open review, never to
+// approve or unquarantine a server directly.
+func (c *Client) OpenWebUIPath(path string) error {
 	// Get the actual web UI URL from the /api/v1/info endpoint
 	// This ensures we use the correct HTTP URL even when connected via socket
 	resp, err := c.makeRequest("GET", "/api/v1/info", nil)
@@ -901,7 +906,7 @@ func (c *Client) OpenWebUI() error {
 	}
 
 	// Add API key if not using socket communication
-	url := webUIURL
+	url := strings.TrimRight(webUIURL, "/") + path
 	if c.apiKey != "" && !strings.HasPrefix(c.baseURL, "unix://") && !strings.HasPrefix(c.baseURL, "npipe://") {
 		separator := "?"
 		if strings.Contains(url, "?") {
@@ -1103,6 +1108,20 @@ func getFloat64(m map[string]interface{}, key string) float64 {
 		return v
 	}
 	return 0.0
+}
+
+func getStringSlice(m map[string]interface{}, key string) []string {
+	raw, ok := m[key].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func keys(m map[string]interface{}) []string {

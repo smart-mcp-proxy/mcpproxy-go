@@ -56,11 +56,31 @@ OTLP collector.
 Invalid values are repaired on load (unknown protocol → `http`, out-of-range
 sample rate → `0.1`), so a partial block never breaks startup.
 
-> **Note:** `/metrics` is served on the same listener as the REST API. The
-> REST API requires an API key, but the `/metrics` endpoint follows the same
-> rules as the MCP endpoints. Keep `listen` bound to a trusted interface (the
-> default is localhost) or scrape via a sidecar/network policy in clustered
-> deployments.
+## Authentication
+
+`/metrics` is served on the same listener as the REST API and **requires the
+global API key** — the exporter carries fleet-wide tool, server and request
+topology, so it is treated as admin-only data. Present the key as either:
+
+- `X-API-Key: <api key>`, or
+- `Authorization: Bearer <api key>`, or
+- `?apikey=<api key>` query parameter (same precedence as the rest of the
+  REST API — see [rest-api.md](../api/rest-api.md)).
+
+> **Caution:** prefer a header over the `?apikey=` query parameter for
+> scrapers. Query strings are the credential form most likely to be copied
+> into an intermediary or reverse-proxy's access logs.
+
+Agent tokens (`mcp_agt_`) are rejected with `403`: they are scope-restricted
+and must not read fleet-wide aggregates. The tray's Unix-socket connection is
+trusted by OS-level permissions and needs no key, as everywhere else.
+
+The liveness and readiness probes (`/healthz`, `/livez`, `/health`, `/readyz`,
+`/ready`) stay unauthenticated by design.
+
+> **Changed:** before this release `/metrics` answered unauthenticated
+> requests. Existing scrapers must be updated to send the key. Keep `listen`
+> bound to a trusted interface (the default is localhost) as a second layer.
 
 ## Prometheus scrape config
 
@@ -68,6 +88,11 @@ sample rate → `0.1`), so a partial block never breaks startup.
 scrape_configs:
   - job_name: mcpproxy
     metrics_path: /metrics
+    authorization:
+      # Prometheus defaults the type to Bearer; mcpproxy accepts the global
+      # API key as the bearer credential.
+      credentials: "<mcpproxy api key>"
+      # or: credentials_file: /etc/mcpproxy/api-key
     static_configs:
       - targets: ["mcpproxy:8080"]
 ```

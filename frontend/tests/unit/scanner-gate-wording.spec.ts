@@ -3,8 +3,6 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import FlaggedToolsPanel from '@/components/FlaggedToolsPanel.vue'
 import FindingChip from '@/components/FindingChip.vue'
-import ServerCard from '@/components/ServerCard.vue'
-import type { Server } from '@/types'
 
 // UX audit F09. One Server Detail render said BOTH of these, about the same two
 // findings:
@@ -45,11 +43,6 @@ vi.mock('@/composables/useSecurityScannerStatus', () => ({
   useSecurityScannerStatus: () => ({ hasEnabledScanners: () => true }),
 }))
 
-const RouterLinkStub = {
-  props: ['to'],
-  template: '<a :href="typeof to === \'string\' ? to : \'#\'"><slot /></a>',
-}
-
 const GROUPS = [
   {
     tool: 'resolve-library-id',
@@ -68,35 +61,6 @@ const GROUPS = [
 function mountPanel() {
   return mount(FlaggedToolsPanel, {
     props: { groups: GROUPS as never, presentTools: ['resolve-library-id'] },
-  })
-}
-
-function mountQuarantinedCard(scanned = true) {
-  const server = {
-    name: 'context7-docs',
-    protocol: 'http',
-    url: 'https://mcp.context7.com/mcp',
-    enabled: true,
-    quarantined: true,
-    connected: false,
-    connecting: false,
-    tool_count: 0,
-    health: { action: 'approve' },
-    security_scan: scanned
-      ? {
-          last_scan_at: '2026-09-05T10:00:00Z',
-          status: 'dangerous',
-          finding_counts: { dangerous: 2, warning: 0, info: 0, total: 2 },
-        }
-      : undefined,
-  } as unknown as Server
-
-  return mount(ServerCard, {
-    props: { server },
-    global: {
-      plugins: [createPinia()],
-      stubs: { RouterLink: RouterLinkStub, 'router-link': RouterLinkStub },
-    },
   })
 }
 
@@ -133,29 +97,10 @@ describe('scanner gate wording — the panel and the dialog agree (F09)', () => 
     expect(chip.attributes('title')).toContain('review-only (soft-tier)')
   })
 
-  async function openApproveDialog(wrapper: ReturnType<typeof mountQuarantinedCard>) {
-    const approve = wrapper.findAll('button').find((b) => b.text().trim() === 'Approve')
-    expect(approve).toBeTruthy()
-    await approve!.trigger('click')
-    return wrapper.get('.modal-open')
-  }
-
-  it('the force-approve dialog names the gate instead of "the scanner gate"', async () => {
-    const modal = await openApproveDialog(mountQuarantinedCard())
-    expect(modal.text()).toContain('2 dangerous findings')
-    expect(modal.text()).not.toContain('the scanner gate')
-    expect(modal.text()).toContain('scan-based approval gate')
-    expect(modal.text()).toContain('unquarantines this server')
-  })
-
-  // The gate sentence is shared by BOTH dialog modes, so it must not name
-  // findings: in no_scan mode there are none, and force skips that refusal
-  // ("no scan results found; run a scan first or use --force") too.
-  it('says nothing about findings in the no-scan mode of the same dialog', async () => {
-    const modal = await openApproveDialog(mountQuarantinedCard(false))
-    expect(modal.text()).toContain('No Security Scan Run')
-    expect(modal.text()).toContain('scan-based approval gate')
-    expect(modal.text()).not.toContain('these findings')
-    expect(modal.text()).not.toContain('dangerous finding')
-  })
+  // The force-approve dialog itself (both modes) is covered by
+  // server-detail-approve-dialog.spec.ts. Spec 109 (PR 109-e, FR-005/FR-014)
+  // removed ServerCard's own copy of that dialog: the card's primary action
+  // for `approve` is now a plain "Review" link to `/review/<name>` — it never
+  // approves — so ServerDetail.vue's Security tab is the one place left that
+  // performs the approval and owns this wording.
 })

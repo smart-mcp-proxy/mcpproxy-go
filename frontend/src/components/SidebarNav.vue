@@ -1,5 +1,5 @@
 <template>
-  <div class="drawer-side z-40">
+  <div class="drawer-side z-[var(--z-sidebar)]">
     <label for="sidebar-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
     <aside
       class="bg-base-100 h-screen flex flex-col border-r border-base-300 fixed transition-[width] duration-200 ease-out"
@@ -180,18 +180,50 @@
             </li>
           </ul>
 
-          <!-- Dashboard (solo top row, no section label) -->
+          <!-- Home (solo top row, no section label). Spec 109 FR-003/FR-051:
+               renamed from "Dashboard"; the badge is the same FR-001
+               needs-attention count every other surface reads. -->
           <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li>
               <router-link
                 to="/"
                 :class="{ 'active': isActiveRoute('/') }"
                 class="rounded-lg font-medium"
-                :title="collapsed ? 'Dashboard' : ''"
-                :aria-label="collapsed ? 'Dashboard' : undefined"
+                :title="collapsed ? 'Home' : ''"
+                :aria-label="collapsed ? 'Home' : undefined"
               >
-                <IconDashboard class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed">Dashboard</span>
+                <span class="relative inline-flex">
+                  <IconDashboard class="w-5 h-5 shrink-0" />
+                  <span
+                    v-if="attentionStore.count > 0 && collapsed"
+                    class="badge badge-warning badge-xs absolute -top-1 -right-1"
+                    data-test="sidebar-home-badge-collapsed"
+                  ></span>
+                </span>
+                <span v-show="!collapsed" class="flex-1">Home</span>
+                <span
+                  v-if="attentionStore.count > 0 && !collapsed"
+                  class="badge badge-warning badge-sm"
+                  data-test="sidebar-home-badge"
+                >{{ attentionStore.count }}</span>
+              </router-link>
+            </li>
+          </ul>
+
+          <div
+            v-if="!collapsed"
+            class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
+          >
+            Protect
+          </div>
+          <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
+
+          <ul class="menu menu-sm w-full gap-0.5 p-0">
+            <li>
+              <router-link to="/review" :class="{ 'active': isActiveRoute('/review') }" class="rounded-lg font-medium" :title="collapsed ? 'Review queue' : ''" :aria-label="collapsed ? 'Review queue' : undefined" data-test="sidebar-review-queue">
+                <IconShield class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed" class="flex-1">Review queue</span>
+                <span v-if="!collapsed && reviewCount" class="badge badge-warning badge-sm">{{ reviewCount }}</span>
               </router-link>
             </li>
           </ul>
@@ -311,18 +343,6 @@
                 <span v-show="!collapsed">Sessions</span>
               </router-link>
             </li>
-            <li>
-              <router-link
-                to="/security"
-                :class="{ 'active': isActiveRoute('/security') }"
-                class="rounded-lg font-medium"
-                :title="collapsed ? 'Security' : ''"
-                :aria-label="collapsed ? 'Security' : undefined"
-              >
-                <IconShield class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed">Security</span>
-              </router-link>
-            </li>
           </ul>
 
           <!-- Section: System -->
@@ -337,14 +357,14 @@
           <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li>
               <router-link
-                to="/repositories"
-                :class="{ 'active': isActiveRoute('/repositories') }"
+                to="/add-server"
+                :class="{ 'active': isActiveRoute('/add-server') || isActiveRoute('/repositories') }"
                 class="rounded-lg text-base-content/70"
-                :title="collapsed ? 'Repositories' : ''"
-                :aria-label="collapsed ? 'Repositories' : undefined"
+                :title="collapsed ? 'Add Server' : ''"
+                :aria-label="collapsed ? 'Add Server' : undefined"
               >
                 <IconRepo class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed" class="text-[13px]">Repositories</span>
+                <span v-show="!collapsed" class="text-[13px]">Add Server</span>
               </router-link>
             </li>
             <li>
@@ -352,11 +372,11 @@
                 to="/settings"
                 :class="{ 'active': isActiveRoute('/settings') }"
                 class="rounded-lg text-base-content/70"
-                :title="collapsed ? 'Configuration' : ''"
-                :aria-label="collapsed ? 'Configuration' : undefined"
+                :title="collapsed ? 'Settings' : ''"
+                :aria-label="collapsed ? 'Settings' : undefined"
               >
                 <IconSettings class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed" class="text-[13px]">Configuration</span>
+                <span v-show="!collapsed" class="text-[13px]">Settings</span>
               </router-link>
             </li>
           </ul>
@@ -475,12 +495,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, ref, watch, type FunctionalComponent } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watch, type FunctionalComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { formatDateTime } from '@/utils/datetime'
 import { useAuthStore } from '@/stores/auth'
 import { useOnboardingStore } from '@/stores/onboarding'
+import { useAttentionStore } from '@/stores/attention'
 import api from '@/services/api'
 
 const route = useRoute()
@@ -488,6 +509,7 @@ const router = useRouter()
 const systemStore = useSystemStore()
 const authStore = useAuthStore()
 const onboardingStore = useOnboardingStore()
+const attentionStore = useAttentionStore()
 
 // Spec 046 v2: badge count drives the sidebar Setup entry's pulse + count.
 // Refetched on mount; the wizard itself drives subsequent updates while open.
@@ -532,9 +554,10 @@ function onClickSetup() {
 
 function loadBadgeCounts() {
   // Personal-edition only — the surrounding template gates this for personal users.
-  if (!authStore.isTeamsEdition) {
+  if (!authStore.isTeamsEdition || authStore.canLoadCore) {
     void onboardingStore.fetchState()
     void fetchToolCount()
+    void fetchReviewCount()
     void fetchSecretCount()
   }
 }
@@ -542,12 +565,22 @@ function loadBadgeCounts() {
 onMounted(() => {
   // Pull initial state so the badge is correct on first render.
   loadBadgeCounts()
+  // Spec 109 FR-001/FR-003: the sidebar is global (outside the Home view),
+  // so it fetches its own copy rather than depending on Home having mounted
+  // first — the badge must be correct on every page, not only "/".
+  attentionStore.fetchAttention()
+  window.addEventListener('mcpproxy:review-changed', fetchReviewCount)
 })
+
+onUnmounted(() => window.removeEventListener('mcpproxy:review-changed', fetchReviewCount))
 
 // #1065: the sidebar sits outside <router-view>, so App.vue's authEpoch key
 // cannot remount it. Without this, badge counts that failed while auth was
 // broken keep their stale values until a full page reload.
-watch(() => systemStore.authEpoch, loadBadgeCounts)
+watch(() => systemStore.authEpoch, () => {
+  loadBadgeCounts()
+  attentionStore.fetchAttention()
+})
 
 const collapsed = computed(() => systemStore.sidebarCollapsed)
 
@@ -654,6 +687,15 @@ const IconTools = makeIcon(
 
 // Spec 050: live tool count for the sidebar badge.
 const toolCount = ref(0)
+const reviewCount = ref(0)
+async function fetchReviewCount() {
+  try {
+    const resp = await api.getReviewQueue()
+    if (resp.success) reviewCount.value = resp.data?.count ?? 0
+  } catch {
+    // A badge must not make the sidebar fail when a core is older or offline.
+  }
+}
 
 async function fetchToolCount() {
   try {
@@ -704,7 +746,7 @@ const teamsAdminMenu = [
   { name: 'Activity (All)', path: '/activity' },
   { name: 'Users', path: '/admin/users' },
   { name: 'Sessions', path: '/sessions' },
-  { name: 'Configuration', path: '/settings' },
+  { name: 'Settings', path: '/settings' },
 ]
 
 const userInitials = computed(() => {
@@ -717,13 +759,14 @@ const userInitials = computed(() => {
   return name.substring(0, 2).toUpperCase()
 })
 
-// Dashboard panels are deep-linkable routes that all render the Dashboard, so
-// the "Dashboard" entry stays highlighted on each of them.
-const DASHBOARD_PATHS = ['/', '/usage', '/overview']
+// /overview redirects to / (Spec 109 FR-051), so both paths keep the "Home"
+// entry highlighted — the redirect target is what the route ends up on, but
+// this stays correct even mid-navigation.
+const HOME_PATHS = ['/', '/overview']
 
 function isActiveRoute(path: string): boolean {
   if (path === '/') {
-    return DASHBOARD_PATHS.includes(route.path)
+    return HOME_PATHS.includes(route.path)
   }
   return route.path.startsWith(path)
 }

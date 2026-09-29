@@ -468,6 +468,10 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			server.SourceRegistryProvenance = prov
 		}
 
+		// Unified health object (incl. Spec 109 status/usable/actions). The
+		// runtime emits a *HealthStatus; a JSON-decoded map is also accepted.
+		server.Health = healthFromGeneric(generic["health"])
+
 		servers = append(servers, server)
 	}
 
@@ -525,6 +529,9 @@ func ConvertGenericToolsToTyped(genericTools []map[string]interface{}) []Tool {
 				OpenWorldHint:   annotationsPtr.OpenWorldHint,
 			}
 		}
+		// Spec 109 FR-028/X11: computed here, once, for every producer of a
+		// Tool — never left for the Web/macOS/CLI surface to derive locally.
+		tool.Tier = AnnotationTier(toolAnnotationToConfig(tool.Annotations))
 
 		tools = append(tools, tool)
 	}
@@ -718,4 +725,51 @@ func convertMapToToolAnnotation(m map[string]interface{}) *ToolAnnotation {
 	}
 
 	return annotation
+}
+
+// toolAnnotationToConfig adapts the wire-shaped ToolAnnotation to
+// config.ToolAnnotations — the type AnnotationTier takes — so the tier
+// computation stays the single pure function in tier.go rather than being
+// duplicated against this package's own annotation type.
+func toolAnnotationToConfig(a *ToolAnnotation) *config.ToolAnnotations {
+	if a == nil {
+		return nil
+	}
+	return &config.ToolAnnotations{
+		Title:           a.Title,
+		ReadOnlyHint:    a.ReadOnlyHint,
+		DestructiveHint: a.DestructiveHint,
+		IdempotentHint:  a.IdempotentHint,
+		OpenWorldHint:   a.OpenWorldHint,
+	}
+}
+
+// healthFromGeneric projects the "health" entry of a generic server map onto a
+// *HealthStatus. It accepts the runtime's *HealthStatus / HealthStatus and a
+// JSON-decoded map[string]interface{}; anything else (including absent or nil)
+// yields nil. The result never aliases the input and Actions is never nil.
+func healthFromGeneric(raw interface{}) *HealthStatus {
+	var h HealthStatus
+	switch v := raw.(type) {
+	case *HealthStatus:
+		if v == nil {
+			return nil
+		}
+		h = *v
+	case HealthStatus:
+		h = v
+	case map[string]interface{}:
+		if v == nil {
+			return nil
+		}
+		// JSON round-trip: the field set and tags are owned by HealthStatus.
+		b, err := json.Marshal(v)
+		if err != nil || json.Unmarshal(b, &h) != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	h.Actions = append([]string{}, h.Actions...)
+	return &h
 }
