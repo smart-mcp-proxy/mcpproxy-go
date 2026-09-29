@@ -40,7 +40,8 @@ struct CatalogInput: Codable, Equatable {
 
 /// One `GET /api/v1/catalog/search` result. Mirrors `registries.CatalogResult`.
 ///
-/// `Identifiable.id` is deliberately the composite `source-catalogID`, NOT the
+/// `Identifiable.id` is deliberately an unambiguous composite of `source` and
+/// `catalogID`, NOT the
 /// bare catalog id: the backend de-dupes only by (source, id), so two enabled
 /// sources can list the same catalog id and SwiftUI's `ForEach` would get
 /// duplicate identities (dropped or misrendered cards). The wire field `id`
@@ -66,7 +67,9 @@ struct CatalogResult: Codable, Identifiable, Equatable {
     let addedServerName: String?
 
     /// Globally unique list identity (and the key for per-card local state).
-    var id: String { "\(source)-\(catalogID)" }
+    /// Length prefixes keep the composition unambiguous when either value
+    /// contains a hyphen or other delimiter-like text.
+    var id: String { "\(source.utf8.count):\(source)\(catalogID.utf8.count):\(catalogID)" }
 
     enum CodingKeys: String, CodingKey {
         case source, title, publisher, verified, official, popularity, description, transport, install, added

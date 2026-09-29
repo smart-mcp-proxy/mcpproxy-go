@@ -161,6 +161,22 @@ final class CatalogTests: XCTestCase {
         XCTAssertEqual(Set([a, b].map(\.id)).count, 2)
     }
 
+    /// Delimiter concatenation must not collide when either identifier itself
+    /// contains the delimiter used between source and catalog id.
+    func testStableIDDistinguishesHyphenatedSourceAndCatalogID() throws {
+        func result(source: String, id: String) throws -> CatalogResult {
+            try decode(CatalogResult.self, from: """
+            {"source": "\(source)", "id": "\(id)", "title": "T", "verified": false, "official": false,
+             "description": "d", "transport": "http", "install": {"url": "https://example.test/mcp"},
+             "added": false}
+            """)
+        }
+        let a = try result(source: "docker-mcp-catalog", id: "x")
+        let b = try result(source: "docker-mcp", id: "catalog-x")
+        XCTAssertNotEqual(a.id, b.id)
+        XCTAssertEqual(Set([a, b].map(\.id)).count, 2)
+    }
+
     // MARK: - SecretLikeName (D13)
 
     func testLooksSecretFlagsConventionalNames() {
