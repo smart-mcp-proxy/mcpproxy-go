@@ -11,11 +11,16 @@
           <label v-for="server in source.servers" :key="server.name" class="flex items-start gap-3 pl-10 pr-3 py-2 hover:bg-base-200/40 cursor-pointer">
             <input v-model="source.selected[server.name]" type="checkbox" class="checkbox checkbox-sm mt-0.5" @change="syncAll(source)" />
             <span class="min-w-0"><span class="text-sm block">{{ server.name }}</span><span class="text-[11px] opacity-50 font-mono block truncate">{{ server.summary }}</span></span>
+            <span v-if="detectedRename(source, server.name)" class="badge badge-warning badge-sm font-normal">→ {{ detectedRename(source, server.name) }}</span>
           </label>
         </div>
       </div>
       <div v-else class="text-sm opacity-70" data-test="detected-import-empty">No importable servers found in local client configs.</div>
       <div v-if="detectedError" class="alert alert-error text-sm mt-3">{{ detectedError }}</div>
+      <label v-if="detectedSelectedCount" class="label cursor-pointer justify-start gap-2 mt-2">
+        <input v-model="detectedQuarantine" type="checkbox" class="checkbox checkbox-sm" data-test="detected-import-quarantine" />
+        <span class="label-text text-sm">Import into quarantine for review</span>
+      </label>
       <button v-if="detectedSelectedCount" type="button" class="btn btn-primary btn-sm mt-3" :disabled="detectedImporting" data-test="detected-import-confirm" @click="importDetected">
         {{ detectedImporting ? 'Importing…' : `Import ${detectedSelectedCount} server${detectedSelectedCount === 1 ? '' : 's'}` }}
       </button>
@@ -95,10 +100,25 @@ const detectedSources = ref<DetectedSource[]>([])
 const detectedLoading = ref(false)
 const detectedImporting = ref(false)
 const detectedError = ref<string | null>(null)
+const detectedQuarantine = ref(true)
 const detectedSelectedCount = computed(() => detectedSources.value.reduce((n, source) => n + Object.values(source.selected).filter(Boolean).length, 0))
+const detectedRenames = computed(() => {
+  const pathsByName = new Map<string, DetectedSource[]>()
+  for (const source of detectedSources.value) for (const server of source.servers) {
+    if (!source.selected[server.name]) continue
+    const sources = pathsByName.get(server.name) ?? []
+    sources.push(source); pathsByName.set(server.name, sources)
+  }
+  const names = new Map<string, string>()
+  for (const [name, sources] of pathsByName) if (sources.length > 1) {
+    for (const source of sources) names.set(`${source.path}::${name}`, `${name}_${source.format.replace(/-/g, '_')}`)
+  }
+  return names
+})
 
 function syncAll(source: DetectedSource) { source.all = source.servers.length > 0 && source.servers.every(server => source.selected[server.name]) }
 function toggleSource(source: DetectedSource) { for (const server of source.servers) source.selected[server.name] = source.all }
+function detectedRename(source: DetectedSource, name: string) { return detectedRenames.value.get(`${source.path}::${name}`) }
 
 async function loadDetectedSources() {
   detectedLoading.value = true
@@ -124,7 +144,11 @@ async function importDetected() {
     for (const source of detectedSources.value) {
       const server_names = source.servers.filter(server => source.selected[server.name]).map(server => server.name)
       if (!server_names.length) continue
-      const response = await api.importServersFromPath({ path: source.path, format: source.format, server_names })
+      const rename = Object.fromEntries(server_names.flatMap(name => {
+        const target = detectedRename(source, name)
+        return target ? [[name, target]] : []
+      }))
+      const response = await api.importServersFromPath({ path: source.path, format: source.format, server_names, rename: Object.keys(rename).length ? rename : undefined, skip_quarantine: !detectedQuarantine.value })
       if (!response.success) throw new Error(response.error || `Could not import ${source.name}`)
       imported += response.data?.summary?.imported ?? server_names.length
     }

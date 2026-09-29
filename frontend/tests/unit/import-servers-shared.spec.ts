@@ -33,7 +33,26 @@ describe('ImportServers', () => {
     await checks[2].setValue(false)
     await wrapper.find('[data-test="detected-import-confirm"]').trigger('click')
     await flushPromises()
-    expect(api.importServersFromPath).toHaveBeenLastCalledWith(expect.objectContaining({ server_names: ['github'] }))
+    expect(api.importServersFromPath).toHaveBeenCalledWith(expect.objectContaining({ server_names: ['github'], skip_quarantine: false }))
     expect(wrapper.emitted('imported')?.[0]).toEqual([1])
+  })
+
+  it('renames duplicate selected names and can bypass quarantine explicitly', async () => {
+    const api = (await import('@/services/api')).default as any
+    api.getCanonicalConfigPaths.mockResolvedValueOnce({ success: true, data: { paths: [
+      { name: 'Claude', format: 'claude-code', path: '/tmp/claude.json', exists: true },
+      { name: 'Cursor', format: 'cursor', path: '/tmp/cursor.json', exists: true },
+    ] } })
+    api.importServersFromPath.mockResolvedValueOnce({ success: true, data: { imported: [{ name: 'github', summary: 'claude' }] } })
+    api.importServersFromPath.mockResolvedValueOnce({ success: true, data: { imported: [{ name: 'github', summary: 'cursor' }] } })
+    api.importServersFromPath.mockResolvedValue({ success: true, data: { summary: { imported: 1 }, imported: [] } })
+    const wrapper = mount(ImportServers, { props: { detected: true } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('github_claude_code')
+    await wrapper.find('[data-test="detected-import-quarantine"]').setValue(false)
+    await wrapper.find('[data-test="detected-import-confirm"]').trigger('click')
+    await flushPromises()
+    expect(api.importServersFromPath).toHaveBeenCalledWith(expect.objectContaining({ path: '/tmp/claude.json', rename: { github: 'github_claude_code' }, skip_quarantine: true }))
+    expect(api.importServersFromPath).toHaveBeenCalledWith(expect.objectContaining({ path: '/tmp/cursor.json', rename: { github: 'github_cursor' }, skip_quarantine: true }))
   })
 })
