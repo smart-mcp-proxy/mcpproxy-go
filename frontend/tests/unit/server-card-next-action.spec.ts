@@ -69,11 +69,7 @@ const FIXTURES: Array<{
   { name: 'login', actions: ['login'], label: 'Sign in', kind: 'execute' },
   { name: 'restart', actions: ['restart'], label: 'Restart', kind: 'execute' },
   { name: 'enable', actions: ['enable'], label: 'Enable', kind: 'execute' },
-  // Review round 1 (109-e high finding): `/review/<name>` is not a
-  // registered route (109-a's interim `/review` → `?tab=tools` redirect it
-  // depends on has not landed on this branch), so it 404s today. Points
-  // straight at the Tools tab it was meant to redirect to.
-  { name: 'approve', actions: ['approve'], label: 'Review', kind: 'navigate', hrefContains: 'tab=tools' },
+  { name: 'approve', actions: ['approve'], label: 'Review', kind: 'navigate', hrefContains: '/review/' },
   { name: 'set_secret', actions: ['set_secret'], label: 'Add secret', kind: 'navigate', hrefContains: '/secrets' },
   { name: 'configure', actions: ['configure'], label: 'Fix config', kind: 'navigate', hrefContains: 'tab=config' },
   { name: 'edit_url', actions: ['edit_url'], label: 'Edit URL', kind: 'navigate', hrefContains: 'focus=endpoint' },
@@ -154,9 +150,7 @@ describe('ServerCard — one primary action, from actions[0] (Spec 109 FR-013/FR
     )
     const button = wrapper.find('[data-test="server-card-primary-action"]')
     expect(button.element.tagName).toBe('A')
-    // Not `/review/srv` — that route does not exist (see the FIXTURES
-    // comment above); it goes straight to the Tools tab.
-    expect(button.attributes('href')).toBe('/servers/srv?tab=tools')
+    expect(button.attributes('href')).toBe('/review/srv')
   })
 
   // Review round 1 (109-e medium finding, coverage gap b): only the empty
@@ -289,7 +283,7 @@ describe('ServerCard — ⋯ menu (Spec 109 FR-013)', () => {
     const review = wrapper.find('[data-test="server-card-menu-review"]')
     expect(review.exists()).toBe(true)
     expect(review.text()).toBe('Review')
-    expect(review.attributes('href')).toBe('/servers/srv?tab=tools')
+    expect(review.attributes('href')).toBe('/review/srv')
   })
 
   it('does not offer Review from the ⋯ menu for a non-quarantined server', () => {

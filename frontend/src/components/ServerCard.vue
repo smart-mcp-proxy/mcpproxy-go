@@ -69,7 +69,7 @@
                  menu's only path to review when that happens. -->
             <li v-if="server.quarantined">
               <router-link
-                :to="serverDetailPath(server.name, 'tools')"
+                :to="`/review/${encodeURIComponent(server.name)}`"
                 data-test="server-card-menu-review"
               >Review</router-link>
             </li>
@@ -396,15 +396,8 @@ const primaryLabel = computed(() => healthActionLabel(primaryAction.value))
 
 // login/restart/enable run in place; every other action opens the screen
 // that performs it — never a one-click approve (FR-005/FR-014). The approve
-// action is labelled "Review" and links straight to the server's Tools tab
-// (Spec 109 FR-013's interim review surface, until the dedicated review
-// screen ships); it never approves from here.
-//
-// Review round 1 (109-e high finding): this used to link to `/review/<name>`
-// on the theory that a redirect to `?tab=tools` would land elsewhere
-// (109-a T026a). That redirect route does not exist on this branch (and
-// 109-a is not merged), so the link 404'd. Pointing straight at the Tools
-// tab needs no redirect to exist at all.
+// action is labelled "Review" and opens the dedicated review screen. It
+// never approves from this card.
 const primaryKind = computed<'execute' | 'navigate' | ''>(() => {
   switch (primaryAction.value) {
     case 'login':
@@ -425,7 +418,7 @@ const primaryKind = computed<'execute' | 'navigate' | ''>(() => {
 const primaryHref = computed(() => {
   switch (primaryAction.value) {
     case 'approve':
-      return serverDetailPath(props.server.name, 'tools')
+      return `/review/${encodeURIComponent(props.server.name)}`
     case 'set_secret':
       return '/secrets'
     case 'configure':

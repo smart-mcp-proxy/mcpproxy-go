@@ -84,6 +84,7 @@
             </span>
           </div>
           <SettingsSection :key="`sec-${formEpoch}`" section-id="security" :fields="securityFields" :working="state.working" :original="state.original" />
+          <ScannerSettings />
         </div>
       </div>
 
@@ -192,6 +193,7 @@ import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import ConnectModal from '@/components/ConnectModal.vue'
 import SettingsSection from '@/components/settings/SettingsSection.vue'
 import CatalogSourcesSettings from '@/components/CatalogSourcesSettings.vue'
+import ScannerSettings from '@/components/ScannerSettings.vue'
 import {
   SECURITY_FIELDS,
   GENERAL_FIELDS,

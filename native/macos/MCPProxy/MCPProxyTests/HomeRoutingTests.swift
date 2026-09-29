@@ -112,8 +112,9 @@ final class HomeRoutingTests: XCTestCase {
                       "view_logs must open the Logs tab, not .config")
 
         let reviewCase = try caseBody(labelContaining: "\"review\"", in: body)
-        XCTAssertTrue(reviewCase.contains("navigateToServerDetail(item.subject.name, tab: .tools)"),
-                      "review must open the server's existing per-tool review (interim fix target), never a one-click approve")
+        XCTAssertTrue(reviewCase.contains("SidebarItem.review.rawValue"))
+        XCTAssertTrue(reviewCase.contains("NotificationCenter.default.post(name: .showReview, object: item.subject.name)"),
+                      "review must open the informed Review queue, never a one-click approve")
         XCTAssertFalse(reviewCase.contains("approveTools"),
                        "review must not call approveTools directly")
 

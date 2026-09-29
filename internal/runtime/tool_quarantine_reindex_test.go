@@ -207,6 +207,21 @@ func TestDiscoverAndIndexToolsForServer_QuarantinedSkipped(t *testing.T) {
 	require.Empty(t, tools, "a quarantined server's tools must never be indexed via refresh/discovery")
 }
 
+func TestCaptureQuarantinedToolDefinitions_RecordsPendingWithoutIndexing(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "github", Enabled: true, Quarantined: true}})
+	tools := []*config.ToolMetadata{{ServerName: "github", Name: "read_issue", Description: "untrusted upstream definition", ParamsJSON: `{"type":"object"}`}}
+
+	require.NoError(t, rt.captureQuarantinedToolDefinitionsFromTools("github", tools))
+	record, err := rt.storageManager.GetToolApproval("github", "read_issue")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusPending, record.Status)
+	assert.NotNil(t, record.CurrentAnnotations,
+		"a freshly captured definition without annotation hints must retain an empty annotation record; nil is reserved for historical records")
+	indexed, err := rt.indexManager.GetToolsByServer("github")
+	require.NoError(t, err)
+	assert.Empty(t, indexed, "capturing a quarantined definition must not publish it to search")
+}
+
 // TestDiscoverAndIndexToolsForServer_DisabledSkipped mirrors the above for a
 // disabled server: it has no business (re)entering the index either.
 func TestDiscoverAndIndexToolsForServer_DisabledSkipped(t *testing.T) {

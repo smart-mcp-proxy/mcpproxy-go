@@ -7,6 +7,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     // Spec 109 FR-051/T064: renamed from "Dashboard" — the needs-attention
     // list is now this section's first thing, not a banner buried in it.
     case home = "Home"
+    case review = "Review Queue"
     case servers = "Servers"
     // F16: BM25 tool discovery is the product's headline feature and had no
     // native home — a tray-first user could not answer "which of my 942 tools
@@ -29,6 +30,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .home: return "rectangle.3.group"
+        case .review: return "checkmark.shield"
         case .servers: return "server.rack"
         case .tools: return "wrench.and.screwdriver"
         case .activity: return "clock.arrow.circlepath"
@@ -56,7 +58,16 @@ struct MainWindow: View {
         NavigationSplitView {
             List(selection: $selectedItem) {
                 ForEach(SidebarItem.allCases) { item in
-                    Label(item.rawValue, systemImage: item.icon)
+                    HStack {
+                        Label(item.rawValue, systemImage: item.icon)
+                        Spacer()
+                        if item == .review && appState.reviewQueueCount > 0 {
+                            Text("\(appState.reviewQueueCount)")
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 5).padding(.vertical, 2)
+                                .background(.orange.opacity(0.2)).clipShape(Capsule())
+                        }
+                    }
                         .tag(item)
                         .accessibilityIdentifier("sidebar-\(item.rawValue)")
                 }
@@ -83,6 +94,8 @@ struct MainWindow: View {
                     switch selectedItem ?? .home {
                     case .home:
                         HomeView(appState: appState)
+                    case .review:
+                        ReviewQueueView(appState: appState)
                     case .servers:
                         ServersView(appState: appState)
                     case .tools:

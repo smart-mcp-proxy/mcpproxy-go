@@ -280,6 +280,14 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
+    es.addEventListener('review.changed', (event) => {
+      try {
+        window.dispatchEvent(new CustomEvent('mcpproxy:review-changed', { detail: JSON.parse(event.data) }))
+      } catch (error) {
+        console.error('Failed to parse SSE review.changed event:', error)
+      }
+    })
+
     // Listen for config.reloaded events
     es.addEventListener('config.reloaded', (event) => {
       try {

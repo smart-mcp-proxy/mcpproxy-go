@@ -687,6 +687,26 @@ func (mc *Client) ConnectionEpoch() int64 {
 	return mc.connectionEpoch.Load()
 }
 
+// WithConnectionEpoch runs fn while this client remains on expectedEpoch.
+// Connect and Disconnect serialize their epoch transitions through epochMu, so
+// callers that have already established the managed-client identity can make a
+// short, non-transport state update linearizable with that identity.
+//
+// fn must not call back into Connect, Disconnect, or a path that waits for a
+// connection transition; those operations intentionally wait for this bounded
+// section to finish.
+func (mc *Client) WithConnectionEpoch(expectedEpoch int64, fn func() error) (current bool, err error) {
+	mc.epochMu.Lock()
+	defer mc.epochMu.Unlock()
+	if mc.connectionEpoch.Load() != expectedEpoch {
+		return false, nil
+	}
+	if err := fn(); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 // IsConnecting returns whether the client is in a connecting state
 func (mc *Client) IsConnecting() bool {
 	return mc.StateManager.IsConnecting()

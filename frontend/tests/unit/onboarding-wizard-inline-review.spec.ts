@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import api from '@/services/api'
+import { useServersStore } from '@/stores/servers'
 
 // Spec 109-ux-navigation-consistency US7 Acceptance Scenario 4 — live QA
 // regression: "Given both imported servers are quarantined, Then the Servers
@@ -74,7 +75,7 @@ function makeRouter() {
     history: createMemoryHistory(),
     routes: [
       { path: '/', name: 'dashboard', component: { template: '<div />' } },
-      { path: '/servers/:serverName', name: 'server-detail', component: { template: '<div />' } },
+      { path: '/review/:serverName', name: 'review-server', component: { template: '<div />' } },
       { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
     ],
   })
@@ -139,14 +140,14 @@ describe('OnboardingWizard Servers step inline review (Spec 109-ux-navigation-co
 
     expect(wrapper.find('[data-test="servers-review-row-github"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="servers-review-row-filesystem"]').exists()).toBe(true)
-    expect(wrapper.find('[data-test="servers-review-link-github"]').attributes('href')).toBe('/servers/github')
+    expect(wrapper.find('[data-test="servers-review-link-github"]').attributes('href')).toBe('/review/github')
 
     // Step is still not complete.
     const tab = wrapper.find('[data-test="tab-servers"]')
     expect(tab.text()).not.toContain('✓')
   })
 
-  it('review link closes the wizard before navigating to the server detail page (review round 5)', async () => {
+  it('review link closes the wizard before navigating to the review screen (review round 5)', async () => {
     // The Review link routes away like goToRegistry() does elsewhere in the
     // wizard — dismiss() must run first, or the route change unmounts the
     // Dashboard that owns wizardOpen and the wizard springs back open.
@@ -170,7 +171,7 @@ describe('OnboardingWizard Servers step inline review (Spec 109-ux-navigation-co
     await flushPromises()
 
     expect(wrapper.emitted('close')).toBeTruthy()
-    expect(router.currentRoute.value.path).toBe('/servers/github')
+    expect(router.currentRoute.value.path).toBe('/review/github')
   })
 
   it('review link ignores the in-app handler on a modifier/middle click, leaving the native href to open a new tab (review round 5)', async () => {
@@ -195,7 +196,7 @@ describe('OnboardingWizard Servers step inline review (Spec 109-ux-navigation-co
     await flushPromises()
 
     const link = wrapper.find('[data-test="servers-review-link-github"]')
-    expect(link.attributes('href')).toBe('/servers/github')
+    expect(link.attributes('href')).toBe('/review/github')
 
     await link.trigger('click', { ctrlKey: true })
     await flushPromises()
@@ -238,5 +239,15 @@ describe('OnboardingWizard Servers step inline review (Spec 109-ux-navigation-co
 
     expect(wrapper.find('[data-test="servers-inline-review"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="servers-nothing-to-import"]').exists()).toBe(true)
+  })
+
+  it('does not mark Servers complete from a non-quarantined tool count when every tool is blocked', async () => {
+    ;(api.getOnboardingState as any).mockResolvedValue(onboardingState({ has_usable_server: false }))
+    ;(api.getServers as any).mockResolvedValue({ success: true, data: { servers: [quarantinedServer('github')] } })
+    const { wrapper } = await mountWizard()
+    const store = useServersStore()
+    store.servers = [{ ...quarantinedServer('github'), quarantined: false, connected: true, tool_count: 1 } as any]
+    await flushPromises()
+    expect(wrapper.get('[data-test="tab-servers"]').text()).not.toContain('✓')
   })
 })
