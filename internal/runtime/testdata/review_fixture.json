@@ -1,0 +1,29 @@
+{
+  "server": {
+    "name": "filesystem",
+    "quarantined": true,
+    "definitions_captured": true,
+    "scan": {"verdict": "warnings", "risk_score": 17}
+  },
+  "tools": [
+    {"name": "read_0", "description": "Read a file", "annotations": {"readOnlyHint": true}, "tier": "read", "approval_status": "pending", "scan_verdict": "clean"},
+    {"name": "read_1", "description": "Read a directory", "annotations": {"readOnlyHint": true}, "tier": "read", "approval_status": "pending", "scan_verdict": "clean"},
+    {"name": "write_0", "description": "Write a file", "annotations": {"destructiveHint": false}, "tier": "write", "approval_status": "pending", "scan_verdict": "warnings"},
+    {"name": "write_1", "description": "Rename a file", "annotations": {"destructiveHint": false}, "tier": "write", "approval_status": "pending", "scan_verdict": "warnings"},
+    {"name": "delete_0", "description": "Delete a file", "annotations": {"destructiveHint": true}, "tier": "destructive", "approval_status": "pending", "scan_verdict": "warnings"},
+    {"name": "delete_1", "description": "Delete a directory", "annotations": {"destructiveHint": true}, "tier": "destructive", "approval_status": "pending", "scan_verdict": "warnings"},
+    {"name": "plain_0", "description": "No declaration", "annotations": {}, "tier": "unannotated", "approval_status": "pending", "scan_verdict": "not_scanned"},
+    {"name": "legacy_0", "description": "Captured before annotations", "tier": "unknown", "approval_status": "pending", "scan_verdict": "not_scanned"},
+    {"name": "changed_0", "description": "Current safe description", "annotations": {"readOnlyHint": true}, "tier": "read", "approval_status": "changed", "scan_verdict": "warnings", "previous": {"description": "Old definition"}, "diff": {"description": "@@ -1 +1 @@\n-Old definition\n+Current safe description"}},
+    {"name": "malicious_0", "description": "<img src=x onerror=alert(1)> [click me](https://attacker.example)", "annotations": {}, "tier": "unannotated", "approval_status": "pending", "scan_verdict": "dangerous"},
+    {"name": "read_2", "description": "Read metadata", "annotations": {"readOnlyHint": true}, "tier": "read", "approval_status": "pending", "scan_verdict": "clean"},
+    {"name": "write_2", "description": "Create a directory", "annotations": {"destructiveHint": false}, "tier": "write", "approval_status": "pending", "scan_verdict": "warnings"},
+    {"name": "delete_2", "description": "Remove a symlink", "annotations": {"destructiveHint": true}, "tier": "destructive", "approval_status": "pending", "scan_verdict": "warnings"},
+    {"name": "read_3", "description": "Inspect permissions", "annotations": {"readOnlyHint": true}, "tier": "read", "approval_status": "pending", "scan_verdict": "clean"}
+  ],
+  "expected": {
+    "queue_count": 1,
+    "tool_count": 14,
+    "tier_counts": {"read": 5, "write": 3, "destructive": 3, "unannotated": 2, "unknown": 1}
+  }
+}

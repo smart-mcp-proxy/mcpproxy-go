@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,6 +49,18 @@ func TestFormatReviewResponseTableQueueColumns(t *testing.T) {
 	output := captureReviewOutput(t, func() error { return formatReviewResponse("table", raw, false) })
 	for _, want := range []string{"SERVER", "QUARANTINED", "PENDING", "CHANGED", "TIERS", "SCAN", "github"} {
 		require.Contains(t, output, want)
+	}
+}
+
+func TestReviewAliasHelpPointsToReviewWorkflow(t *testing.T) {
+	for _, command := range []*cobra.Command{
+		newToolsApproveCmd(),
+		newToolsRejectCmd(),
+		newSecurityApproveCmd(),
+		newSecurityRejectCmd(),
+		upstreamApproveCmd,
+	} {
+		require.Contains(t, command.Long, "mcpproxy review", command.Use)
 	}
 }
 

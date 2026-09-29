@@ -173,7 +173,9 @@ Examples:
 		Use:   "approve <server-name> [tool-names...]",
 		Short: "Approve quarantined tools for a server",
 		Long: `Approve pending or changed tools so they can be used by AI agents.
-Without specific tool names, approves all pending/changed tools.
+Without specific tool names, approves all pending/changed tools. This legacy
+command remains available; use 'mcpproxy review approve <server> --tools ...'
+for the unified review workflow.
 
 Examples:
   mcpproxy upstream approve github                      # Approve all tools
@@ -815,7 +817,7 @@ func upstreamServerRows(servers []map[string]interface{}) [][]string {
 		case health.ActionEnable:
 			actionHint = fmt.Sprintf("upstream enable %s", name)
 		case health.ActionApprove:
-			actionHint = "Approve in Web UI"
+			actionHint = fmt.Sprintf("review show %s", name)
 		case health.ActionViewLogs:
 			actionHint = fmt.Sprintf("upstream logs %s", name)
 		case health.ActionSetSecret:

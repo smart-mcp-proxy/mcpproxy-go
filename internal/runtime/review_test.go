@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,6 +15,41 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
+
+func TestReviewFixtureContract(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "review_fixture.json"))
+	require.NoError(t, err)
+	var fixture struct {
+		Server struct {
+			Quarantined         bool `json:"quarantined"`
+			DefinitionsCaptured bool `json:"definitions_captured"`
+		} `json:"server"`
+		Tools []struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			Tier        contracts.Tier  `json:"tier"`
+			Previous    json.RawMessage `json:"previous"`
+		} `json:"tools"`
+		Expected struct {
+			ToolCount  int                    `json:"tool_count"`
+			TierCounts map[contracts.Tier]int `json:"tier_counts"`
+		} `json:"expected"`
+	}
+	require.NoError(t, json.Unmarshal(data, &fixture))
+	require.True(t, fixture.Server.Quarantined)
+	require.True(t, fixture.Server.DefinitionsCaptured)
+	require.Len(t, fixture.Tools, fixture.Expected.ToolCount)
+	counts := map[contracts.Tier]int{}
+	var malicious, changed bool
+	for _, tool := range fixture.Tools {
+		counts[tool.Tier]++
+		malicious = malicious || tool.Name == "malicious_0" && tool.Description == "<img src=x onerror=alert(1)> [click me](https://attacker.example)"
+		changed = changed || tool.Name == "changed_0" && len(tool.Previous) > 0
+	}
+	require.Equal(t, fixture.Expected.TierCounts, counts)
+	require.True(t, malicious)
+	require.True(t, changed)
+}
 
 func TestReviewPayload_ClassifiesCapturedAndLegacyAnnotations(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "github", Enabled: true, Quarantined: true}})
