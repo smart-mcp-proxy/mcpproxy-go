@@ -311,7 +311,6 @@ describe('OnboardingWizard mounted already-open', () => {
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })
@@ -349,7 +348,6 @@ describe('OnboardingWizard mounted already-open', () => {
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })
@@ -391,7 +389,6 @@ describe('OnboardingWizard mounted already-open', () => {
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })

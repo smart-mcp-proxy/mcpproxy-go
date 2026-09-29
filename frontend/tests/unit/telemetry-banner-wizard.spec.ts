@@ -135,7 +135,6 @@ describe('OnboardingWizard Verify step telemetry one-liner (Spec 109-b FR-044)',
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })
@@ -223,7 +222,6 @@ describe('Telemetry notice dismissal is shared across mounted surfaces (Spec 109
         plugins: [router],
         stubs: {
           RouterLink: { template: '<a><slot /></a>' },
-          AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
         },
       },
     })
