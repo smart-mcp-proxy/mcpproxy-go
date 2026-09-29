@@ -2,7 +2,7 @@
   <div class="space-y-6" data-test="clients-page">
     <div class="flex items-start justify-between gap-4">
       <div><h1 class="text-3xl font-bold">Clients</h1><p class="text-base-content/70 mt-1">Connect AI clients, check presence, and manage agent tokens.</p></div>
-      <ClientConnectList v-if="authStore.principalKind !== 'tenant'" />
+      <button v-if="authStore.principalKind !== 'tenant'" class="btn btn-primary" data-test="open-client-connect" @click="connectOpen = true">Connect client</button>
     </div>
     <div role="tablist" class="tabs tabs-boxed w-fit" data-test="clients-tabs">
       <button v-for="item in tabs" :key="item.id" class="tab" :class="tab === item.id && 'tab-active'" @click="selectTab(item.id)">{{ item.label }}</button>
@@ -20,6 +20,7 @@
     </section>
     <section v-else-if="tab === 'endpoint'" class="card bg-base-100 border border-base-300"><div class="card-body"><h2 class="card-title">Endpoint &amp; mode</h2><p>Routing mode: <strong>{{ store.routing?.routing_mode || 'Loading…' }}</strong></p><dl v-if="store.routing" class="grid sm:grid-cols-2 gap-2 text-sm"><template v-for="(endpoint, name) in store.routing.endpoints" :key="name"><dt class="font-medium">{{ name }}</dt><dd><code>{{ endpoint }}</code></dd></template></dl><p v-if="store.routing?.restart_required" class="alert alert-warning text-sm">Restart MCPProxy to apply {{ store.routing.pending_routing_mode }} mode.</p></div></section>
     <AgentTokens v-else />
+    <ClientConnectList :show="connectOpen" @close="connectOpen = false" />
   </div>
 </template>
 
@@ -35,6 +36,7 @@ const route = useRoute(); const router = useRouter(); const store = useClientsSt
 const tabs = [{ id: 'clients', label: 'Clients' }, { id: 'endpoint', label: 'Endpoint & mode' }, { id: 'tokens', label: 'Agent tokens' }]
 const tab = ref(typeof route.query.tab === 'string' && tabs.some(item => item.id === route.query.tab) ? route.query.tab : 'clients')
 const expanded = ref('')
+const connectOpen = ref(false)
 function selectTab(id: string) { tab.value = id }
 watch(tab, value => router.replace({ query: { ...route.query, tab: value } }))
 async function toggle(id: string) { expanded.value = expanded.value === id ? '' : id; if (expanded.value) await store.loadDetail(id) }

@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ConnectModal from '@/components/ConnectModal.vue'
+import ClientConnectList from '@/components/ClientConnectList.vue'
 import api from '@/services/api'
+
+// Keep the established test bodies while exercising the extracted owner.
+const ConnectModal = ClientConnectList
 
 vi.mock('@/services/api', () => ({
   default: {
@@ -36,7 +39,7 @@ function previewOk(overrides: Record<string, unknown> = {}) {
   }
 }
 
-describe('ConnectModal', () => {
+describe('ClientConnectList', () => {
   let pinia: any
 
   beforeEach(() => {
@@ -69,7 +72,7 @@ describe('ConnectModal', () => {
       }],
     })
 
-    const wrapper = mount(ConnectModal, {
+    const wrapper = mount(ClientConnectList, {
       props: { show: false },
       global: { plugins: [pinia] },
     })

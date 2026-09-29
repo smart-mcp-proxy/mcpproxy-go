@@ -421,6 +421,10 @@
               </p>
             </div>
           </details>
+          <details class="border border-base-300 rounded-lg p-3 text-sm mt-3" data-test="wizard-shared-import-details">
+            <summary class="cursor-pointer font-medium">Paste a config to import instead</summary>
+            <div class="mt-3"><ImportServers @imported="onSharedImport" /></div>
+          </details>
         </section>
 
         <!-- ============================ -->
@@ -690,6 +694,7 @@ import { useOnboardingStore } from '@/stores/onboarding'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import ManualServerForm from '@/components/ManualServerForm.vue'
+import ImportServers from '@/components/ImportServers.vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { skipReasonLabel } from '@/utils/importSkipReason'
 import type { ClientStatus, ActivityRecord, ConnectPreview, ImportedServer } from '@/types'
@@ -1720,6 +1725,13 @@ async function onServerAdded() {
     title: 'Server added',
     message: 'It is in quarantine. Review and approve from the Servers page.',
   })
+}
+
+async function onSharedImport(count: number) {
+  if (count === 0) return
+  serverAddedJustNow.value = true
+  await Promise.all([fetchImportSources(), serversStore.fetchServers(), onboarding.fetchState()])
+  systemStore.addToast({ type: 'success', title: 'Servers imported', message: `${count} server(s) imported for review` })
 }
 
 // `dismiss` is the onClose handler useDialogOpen calls for a NATIVE close
