@@ -275,7 +275,10 @@ struct ClientsView: View {
             clients = try await loadedClients
             let loaded = try await loadedRouting
             routing = loaded
-            defaultMCPEndpoint = await apiClient.endpointURL(loaded.endpoints.default)
+            defaultMCPEndpoint = APIClient.endpointURL(
+                loaded.endpoints.default,
+                baseURL: appState.webUIBaseURL
+            )
         } catch {
             errorMessage = "Unable to load clients: \(error.localizedDescription)"
         }

@@ -81,6 +81,13 @@ actor APIClient {
     /// Returns an absolute URL for an advertised MCP endpoint path, for
     /// copyable client configuration examples in the native Clients hub.
     func endpointURL(_ path: String) -> String {
+        Self.endpointURL(path, baseURL: baseURL)
+    }
+
+    /// Compose an advertised endpoint using the daemon's observed Web UI
+    /// address. The API client's socket fallback URL may use the default port
+    /// even when the daemon is listening elsewhere.
+    nonisolated static func endpointURL(_ path: String, baseURL: String) -> String {
         baseURL + (path.hasPrefix("/") ? path : "/" + path)
     }
 

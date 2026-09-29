@@ -64,6 +64,13 @@ final class APIClientClientsTests: XCTestCase {
         XCTAssertEqual(url, "http://127.0.0.1:8080/mcp")
     }
 
+    func testEndpointURLUsesObservedCustomListenAddress() {
+        XCTAssertEqual(
+            APIClient.endpointURL("/mcp", baseURL: "http://127.0.0.1:18765"),
+            "http://127.0.0.1:18765/mcp"
+        )
+    }
+
     func testRoutingModePatchUsesTheConfigMergeEndpoint() async throws {
         ConnectStubURLProtocol.responseBody = ConnectStubURLProtocol.envelope(
             #"{"requires_restart":true,"changed_fields":["routing_mode"]}"#
