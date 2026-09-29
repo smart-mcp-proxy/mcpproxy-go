@@ -52,9 +52,13 @@
         />
       </div>
 
+      <div v-if="hasUnavailableSecret" class="alert alert-warning text-sm" data-test="paste-keyring-unavailable">
+        {{ keyringReason || 'OS keyring unavailable' }} — a field set to Secret cannot be stored. Switch it to Value to add it as plain configuration.
+      </div>
+
       <div v-if="addError" class="alert alert-error text-sm" data-test="paste-add-error">{{ addError }}</div>
 
-      <button type="button" class="btn btn-primary" :disabled="adding" data-test="paste-add-button" @click="handleAdd">
+      <button type="button" class="btn btn-primary" :disabled="adding || hasUnavailableSecret" data-test="paste-add-button" @click="handleAdd">
         {{ adding ? 'Adding…' : 'Add to MCPProxy' }}
       </button>
     </div>
@@ -107,6 +111,18 @@ const formatLabel = computed(() => {
 const envFields = computed(() => preview.value?.env || [])
 const headerFields = computed(() => preview.value?.headers || [])
 
+// Fail closed: a field in Secret mode cannot be stored while the keyring is
+// unavailable, and we never silently turn it into plaintext. Add stays
+// disabled (with the reason shown) until the user flips it to Value. Mirrors
+// CatalogSearch's hasUnavailableSecret. keyringAvailable defaults to true
+// until the probe in onMounted resolves.
+const hasUnavailableSecret = computed(() => {
+  if (keyringAvailable.value) return false
+  const secretMode = (kind: 'env' | 'header', f: { name: string; secret_like?: boolean }) =>
+    (modes[`${kind}:${f.name}`] || (f.secret_like ? 'secret' : 'value')) === 'secret'
+  return envFields.value.some((f) => secretMode('env', f)) || headerFields.value.some((f) => secretMode('header', f))
+})
+
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
 async function runPreview() {
@@ -154,7 +170,7 @@ onMounted(async () => {
 })
 
 async function handleAdd() {
-  if (!preview.value) return
+  if (!preview.value || hasUnavailableSecret.value) return
   adding.value = true
   addError.value = null
   // Populated only once resolveSecretFields has returned successfully, so

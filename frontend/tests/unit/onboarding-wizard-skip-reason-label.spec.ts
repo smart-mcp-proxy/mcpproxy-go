@@ -81,7 +81,6 @@ async function openServersTabWithApplyResult(applyData: Record<string, unknown>)
       plugins: [router],
       stubs: {
         RouterLink: { template: '<a><slot /></a>' },
-        AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
       },
     },
   })

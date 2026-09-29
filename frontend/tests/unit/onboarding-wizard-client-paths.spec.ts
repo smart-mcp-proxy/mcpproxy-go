@@ -63,7 +63,6 @@ async function mountOnClients(clients: any[]) {
       plugins: [router],
       stubs: {
         RouterLink: { template: '<a><slot /></a>' },
-        AddServerModal: { name: 'AddServerModal', props: ['show'], template: '<div />' },
       },
     },
   })

@@ -69,11 +69,6 @@ async function mountServers() {
       plugins: [createPinia(), router],
       stubs: {
         ServerCard: { template: '<div class="server-card" />' },
-        AddServerModal: {
-          name: 'AddServerModal',
-          props: ['show'],
-          template: '<div class="add-server-modal" :data-show="String(show)" />',
-        },
         CollapsibleHintsPanel: true,
       },
     },

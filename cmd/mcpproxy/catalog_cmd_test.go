@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -38,34 +39,73 @@ func TestParseCatalogRef_RejectsMissingSlash(t *testing.T) {
 
 // TestCatalogAddedFromConfig pins the join rule (contracts/rest-api.md#catalog
 // "added"): a registry-sourced configured server needs source AND install
-// target; a manual add matches on install target alone.
+// target; a manual add matches on install target alone. The resolver also
+// reports the server name, but only for a unique match (REST parity).
 func TestCatalogAddedFromConfig(t *testing.T) {
 	cfg := &config.Config{
 		Servers: []*config.ServerConfig{
 			{Name: "manual", URL: "https://manual.example.com/mcp"},
 			{Name: "from-official", Command: "npx", Args: []string{"server-x"}, SourceRegistryID: "official"},
+			{Name: "dup-a", Command: "npx", Args: []string{"server-dup"}},
+			{Name: "dup-b", Command: "npx", Args: []string{"server-dup"}},
 		},
 	}
 	added := catalogAddedFromConfig(cfg)
 
 	manualHit := registries.CatalogHit{Source: "smithery", Entry: registries.ServerEntry{ID: "m", URL: "https://manual.example.com/mcp"}}
-	if !added(manualHit) {
-		t.Error("expected a manual add to match by install target regardless of source")
+	if ok, name := added(manualHit); !ok || name != "manual" {
+		t.Errorf("expected a manual add to match by install target regardless of source, got (%v, %q)", ok, name)
 	}
 
 	officialHit := registries.CatalogHit{Source: "official", Entry: registries.ServerEntry{ID: "x", InstallCmd: "npx server-x"}}
-	if !added(officialHit) {
-		t.Error("expected the registry-sourced server to match its own source + target")
+	if ok, name := added(officialHit); !ok || name != "from-official" {
+		t.Errorf("expected the registry-sourced server to match its own source + target, got (%v, %q)", ok, name)
 	}
 
 	wrongSourceHit := registries.CatalogHit{Source: "smithery", Entry: registries.ServerEntry{ID: "x", InstallCmd: "npx server-x"}}
-	if added(wrongSourceHit) {
-		t.Error("a registry-sourced configured server must not match a different source with the same target")
+	if ok, name := added(wrongSourceHit); ok || name != "" {
+		t.Errorf("a registry-sourced configured server must not match a different source with the same target, got (%v, %q)", ok, name)
 	}
 
 	noMatchHit := registries.CatalogHit{Source: "official", Entry: registries.ServerEntry{ID: "y", InstallCmd: "npx server-y"}}
-	if added(noMatchHit) {
-		t.Error("expected no match for an unrelated entry")
+	if ok, name := added(noMatchHit); ok || name != "" {
+		t.Errorf("expected no match for an unrelated entry, got (%v, %q)", ok, name)
+	}
+
+	ambiguousHit := registries.CatalogHit{Source: "official", Entry: registries.ServerEntry{ID: "d", InstallCmd: "npx server-dup"}}
+	if ok, name := added(ambiguousHit); !ok || name != "" {
+		t.Errorf("expected added=true with no name when two servers match, got (%v, %q)", ok, name)
+	}
+}
+
+// TestCatalogSearchInProcess_AddedServerName pins CLI/REST parity: the offline
+// search path emits added_server_name for a uniquely matched configured server.
+func TestCatalogSearchInProcess_AddedServerName(t *testing.T) {
+	withCatalogCLIFixture(t, `[{"id":"gh","name":"GitHub Tool","description":"desc","url":"https://x.example.com/mcp"}]`)
+	cfg := &config.Config{Servers: []*config.ServerConfig{{Name: "my-gh", URL: "https://x.example.com/mcp"}}}
+
+	resp, err := catalogSearchInProcess(context.Background(), cfg, "GitHub", "", "", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("expected 1 result, got %+v", resp.Results)
+	}
+	if !resp.Results[0].Added || resp.Results[0].AddedServerName != "my-gh" {
+		t.Errorf("expected added=true added_server_name=my-gh, got %+v", resp.Results[0])
+	}
+
+	empty, err := catalogSearchInProcess(context.Background(), cfg, "", "", "", 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if empty.Sections == nil {
+		t.Fatal("expected sections for an empty query")
+	}
+	for _, r := range append(append([]registries.CatalogResult{}, empty.Sections.Official...), empty.Sections.Popular...) {
+		if r.ID == "gh" && r.AddedServerName != "my-gh" {
+			t.Errorf("section entry missing added_server_name: %+v", r)
+		}
 	}
 }
 
@@ -207,6 +247,21 @@ func TestCatalogShow(t *testing.T) {
 	}
 }
 
+// TestCatalogResultForConfig pins that 'catalog show' builds its result with
+// the added_server_name join, like REST.
+func TestCatalogResultForConfig(t *testing.T) {
+	cfg := &config.Config{Servers: []*config.ServerConfig{{Name: "my-gh", URL: "https://x.example.com/mcp"}}}
+	hit := registries.CatalogHit{Source: "official", Entry: registries.ServerEntry{ID: "gh", URL: "https://x.example.com/mcp"}}
+	result := catalogResultForConfig(cfg, hit)
+	if !result.Added || result.AddedServerName != "my-gh" {
+		t.Errorf("expected added=true added_server_name=my-gh, got %+v", result)
+	}
+	data, err := json.Marshal(result)
+	if err != nil || !strings.Contains(string(data), `"added_server_name":"my-gh"`) {
+		t.Errorf("expected added_server_name in JSON, got %s (err %v)", data, err)
+	}
+}
+
 // TestPrintCatalogDeprecationNotice pins FR-066: 'registry search'/'registry
 // add' print a deprecation note pointing at the 'catalog' equivalent.
 func TestPrintCatalogDeprecationNotice(t *testing.T) {
@@ -224,5 +279,16 @@ func TestPrintCatalogDeprecationNotice(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "deprecated") || !strings.Contains(out, "catalog add official/gh") {
 		t.Errorf("unexpected deprecation notice: %q", out)
+	}
+}
+
+// TestRejectCatalogTag pins F-K (#1398): --tag cannot be honoured, so a
+// non-empty value is an error rather than a silent no-op.
+func TestRejectCatalogTag(t *testing.T) {
+	if err := rejectCatalogTag(""); err != nil {
+		t.Errorf("empty tag should be accepted, got %v", err)
+	}
+	if err := rejectCatalogTag("database"); err == nil {
+		t.Error("non-empty tag should be rejected")
 	}
 }

@@ -19,9 +19,12 @@ type globMatcher struct {
 // compileGlob compiles a "server:tool" rule pattern into an anchored
 // matcher. The pattern is assumed already validated (config.ValidateProfiles,
 // FR-004) — an unparsable pattern here would be a validator bug, not a
-// runtime condition, so this never errors.
+// runtime condition, so this never errors. The (?s) flag makes '*' (".*")
+// match embedded newlines too: a tool identity is upstream-controlled text,
+// and without it a deny pattern like "github:delete*" would silently fail
+// open on "github:delete\nrepo".
 func compileGlob(pattern string) *globMatcher {
-	return &globMatcher{pattern: pattern, re: regexp.MustCompile("^" + globToRegexp(pattern) + "$")}
+	return &globMatcher{pattern: pattern, re: regexp.MustCompile("(?s)^" + globToRegexp(pattern) + "$")}
 }
 
 // globToRegexp renders pattern as an anchor-free regexp fragment: '*'

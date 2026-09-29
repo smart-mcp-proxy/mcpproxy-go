@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -31,7 +32,7 @@ import (
 // ever help in the "no daemon" case, where the very state it would update
 // has no live reader anyway until the daemon next starts and recomputes it.
 func notifyClientConnected(cfg *config.Config, clientID string) {
-	notifyClientConnectionChange(cfg, "connected_client_id", clientID)
+	notifyClientsConnected(cfg, []string{clientID})
 }
 
 // notifyClientDisconnected mirrors a successful local CLI disconnect into a
@@ -42,22 +43,43 @@ func notifyClientDisconnected(cfg *config.Config, clientID string) {
 }
 
 func notifyClientConnectionChange(cfg *config.Config, field, clientID string) {
-	client, ok := newDaemonClient(cfg, nil)
-	if !ok {
+	notifyClientConnectionsChanged(cfg, field, []string{clientID})
+}
+
+// notifyClientsConnected is the batch form used by `connect --all`. It
+// resolves the daemon (socket stat + status probe) once and relays every
+// client concurrently under a single overall deadline.
+func notifyClientsConnected(cfg *config.Config, clientIDs []string) {
+	notifyClientConnectionsChanged(cfg, "connected_client_id", clientIDs)
+}
+
+func notifyClientConnectionsChanged(cfg *config.Config, field string, clientIDs []string) {
+	if len(clientIDs) == 0 {
 		return
 	}
-
-	body, err := json.Marshal(map[string]string{field: clientID})
-	if err != nil {
+	client, ok := newDaemonClient(cfg, nil)
+	if !ok {
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), daemonProbeTimeout)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/onboarding/mark", body)
-	if err != nil {
-		return
+	var wg sync.WaitGroup
+	for _, id := range clientIDs {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			body, err := json.Marshal(map[string]string{field: id})
+			if err != nil {
+				return
+			}
+			resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/onboarding/mark", body)
+			if err != nil {
+				return
+			}
+			_ = resp.Body.Close()
+		}(id)
 	}
-	_ = resp.Body.Close()
+	wg.Wait()
 }

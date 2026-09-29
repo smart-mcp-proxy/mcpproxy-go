@@ -468,6 +468,10 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			server.SourceRegistryProvenance = prov
 		}
 
+		// Unified health object (incl. Spec 109 status/usable/actions). The
+		// runtime emits a *HealthStatus; a JSON-decoded map is also accepted.
+		server.Health = healthFromGeneric(generic["health"])
+
 		servers = append(servers, server)
 	}
 
@@ -738,4 +742,34 @@ func toolAnnotationToConfig(a *ToolAnnotation) *config.ToolAnnotations {
 		IdempotentHint:  a.IdempotentHint,
 		OpenWorldHint:   a.OpenWorldHint,
 	}
+}
+
+// healthFromGeneric projects the "health" entry of a generic server map onto a
+// *HealthStatus. It accepts the runtime's *HealthStatus / HealthStatus and a
+// JSON-decoded map[string]interface{}; anything else (including absent or nil)
+// yields nil. The result never aliases the input and Actions is never nil.
+func healthFromGeneric(raw interface{}) *HealthStatus {
+	var h HealthStatus
+	switch v := raw.(type) {
+	case *HealthStatus:
+		if v == nil {
+			return nil
+		}
+		h = *v
+	case HealthStatus:
+		h = v
+	case map[string]interface{}:
+		if v == nil {
+			return nil
+		}
+		// JSON round-trip: the field set and tags are owned by HealthStatus.
+		b, err := json.Marshal(v)
+		if err != nil || json.Unmarshal(b, &h) != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	h.Actions = append([]string{}, h.Actions...)
+	return &h
 }
