@@ -1,3 +1,5 @@
+//go:build !server
+
 package httpapi
 
 import (
