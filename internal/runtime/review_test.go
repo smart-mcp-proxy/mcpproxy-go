@@ -25,13 +25,16 @@ func TestReviewFixtureContract(t *testing.T) {
 			DefinitionsCaptured bool `json:"definitions_captured"`
 		} `json:"server"`
 		Tools []struct {
-			Name        string                  `json:"name"`
-			Description string                  `json:"description"`
-			Tier        contracts.Tier          `json:"tier"`
-			Annotations *config.ToolAnnotations `json:"annotations"`
-			Previous    json.RawMessage         `json:"previous"`
+			Name           string                  `json:"name"`
+			Description    string                  `json:"description"`
+			Tier           contracts.Tier          `json:"tier"`
+			Annotations    *config.ToolAnnotations `json:"annotations"`
+			ApprovalStatus string                  `json:"approval_status"`
+			ScanVerdict    string                  `json:"scan_verdict"`
+			Previous       json.RawMessage         `json:"previous"`
 		} `json:"tools"`
 		Expected struct {
+			QueueCount int                    `json:"queue_count"`
 			ToolCount  int                    `json:"tool_count"`
 			TierCounts map[contracts.Tier]int `json:"tier_counts"`
 		} `json:"expected"`
@@ -53,6 +56,65 @@ func TestReviewFixtureContract(t *testing.T) {
 	require.Equal(t, fixture.Expected.TierCounts, counts)
 	require.True(t, malicious)
 	require.True(t, changed)
+
+	// The fixture is the shared contract used by the review UI.  Populate the
+	// same stored records the runtime sees and compare every contract field,
+	// rather than merely checking that the fixture is internally consistent.
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{
+		Name: "filesystem", Enabled: true, Quarantined: true,
+	}})
+	for _, want := range fixture.Tools {
+		record := &storage.ToolApprovalRecord{
+			ServerName: "filesystem", ToolName: want.Name,
+			Status: want.ApprovalStatus, CurrentDescription: want.Description,
+			CurrentAnnotations: want.Annotations, HeldVerdict: want.ScanVerdict,
+		}
+		if len(want.Previous) > 0 {
+			var previous struct {
+				Description string `json:"description"`
+			}
+			require.NoError(t, json.Unmarshal(want.Previous, &previous), want.Name)
+			record.PreviousDescription = previous.Description
+		}
+		require.NoError(t, rt.storageManager.SaveToolApproval(record), want.Name)
+	}
+
+	queue, err := rt.GetReviewQueue(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, fixture.Expected.QueueCount, queue.Count)
+	require.Len(t, queue.Servers, fixture.Expected.QueueCount)
+	require.Equal(t, fixture.Expected.ToolCount, queue.Servers[0].ToolsCaptured)
+	require.Equal(t, fixture.Expected.TierCounts, queue.Servers[0].TierCounts)
+
+	review, err := rt.GetServerReview(context.Background(), "filesystem")
+	require.NoError(t, err)
+	require.True(t, review.Server.DefinitionsCaptured)
+	require.Len(t, review.Tools, fixture.Expected.ToolCount)
+	gotByName := make(map[string]ReviewTool, len(review.Tools))
+	for _, got := range review.Tools {
+		gotByName[got.Name] = got
+	}
+	for _, want := range fixture.Tools {
+		got, ok := gotByName[want.Name]
+		require.True(t, ok, want.Name)
+		require.Equal(t, want.Description, got.Description, want.Name)
+		require.Equal(t, want.Tier, got.Tier, want.Name)
+		require.Equal(t, want.Annotations, got.Annotations, want.Name)
+		require.Equal(t, want.ScanVerdict, got.ScanVerdict, want.Name)
+		if len(want.Previous) == 0 {
+			require.Nil(t, got.Previous, want.Name)
+			require.Nil(t, got.Diff, want.Name)
+			continue
+		}
+		require.NotNil(t, got.Previous, want.Name)
+		require.NotNil(t, got.Diff, want.Name)
+		var previous struct {
+			Description string `json:"description"`
+		}
+		require.NoError(t, json.Unmarshal(want.Previous, &previous), want.Name)
+		require.Equal(t, previous.Description, got.Previous.Description, want.Name)
+		require.Equal(t, "@@ -1 +1 @@\n-"+previous.Description+"\n+"+want.Description, got.Diff.Description, want.Name)
+	}
 }
 
 func TestReviewPayload_ClassifiesCapturedAndLegacyAnnotations(t *testing.T) {
