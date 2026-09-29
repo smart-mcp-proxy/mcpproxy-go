@@ -202,6 +202,63 @@ func TestRESTDiscovery_ProfileFiltersServerToolsAndExportAndHidesDiff(t *testing
 	})
 }
 
+// StateView tool names are upstream raw identities. In particular, a raw
+// name may itself begin with its server name; REST inventory must ask the
+// profile policy about that full raw name rather than stripping a prefix.
+func TestRESTDiscovery_ProfilePreservesRawPrefixedToolNames(t *testing.T) {
+	controller := &profileRESTDiscoveryController{
+		globalToolsController: &globalToolsController{
+			allServers: []map[string]interface{}{{"name": "github", "id": "github"}},
+			serverTools: map[string][]map[string]interface{}{
+				"github": {
+					{"name": "github:erase", "server_name": "github", "description": "Raw prefixed destructive tool"},
+					{"name": "list_issues", "server_name": "github", "description": "Allowed tool"},
+				},
+			},
+			profileAllowed: map[string]bool{
+				"github\x00github:erase": false,
+			},
+		},
+	}
+	controller.managementService = &profileRESTDiscoveryManagementService{controller: controller.globalToolsController}
+	srv := NewServer(controller, zap.NewNop().Sugar(), nil)
+	ctx := pinnedDiscoveryContext()
+
+	t.Run("per-server tools", func(t *testing.T) {
+		req := profileRouteRequest(ctx, http.MethodGet, "/api/v1/servers/github/tools", [2]string{"id", "github"})
+		w := httptest.NewRecorder()
+		srv.handleGetServerTools(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var payload struct {
+			Data struct {
+				Tools []struct {
+					Name string `json:"name"`
+				} `json:"tools"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
+		require.Len(t, payload.Data.Tools, 1)
+		require.Equal(t, "list_issues", payload.Data.Tools[0].Name)
+	})
+
+	t.Run("global tools", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/tools", http.NoBody).WithContext(ctx)
+		w := httptest.NewRecorder()
+		srv.handleGetGlobalTools(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var payload struct {
+			Data struct {
+				Tools []struct {
+					Name string `json:"name"`
+				} `json:"tools"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
+		require.Len(t, payload.Data.Tools, 1)
+		require.Equal(t, "list_issues", payload.Data.Tools[0].Name)
+	})
+}
+
 func TestRESTDiscovery_ProfileSearchUsesPrelimitedProfileResults(t *testing.T) {
 	controller := &globalToolsController{
 		profileSearchResults: []map[string]interface{}{{

@@ -2544,6 +2544,11 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 	slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
 	slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
 	slug = strings.Trim(slug, "/")
+	// An active client binding can turn an otherwise unprofiled anonymous
+	// caller into a deny-all BindingGuarded resolution. Compute it before the
+	// publication-gap branch too, so that branch cannot restore URL probing.
+	bindingGuardedAnonymous := anonymousProfileCaller(r.Context()) && s.mcpProxy != nil &&
+		s.mcpProxy.ResolveProfileV3(r.Context(), profiles).BindingGuarded
 
 	if profiles == nil {
 		// Acquire could not pair this request's own runtime.Config() read
@@ -2557,7 +2562,7 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 		// (Spec 105 PR D review round 11, MUST-FIX). An administrator-shaped
 		// caller is not timing-contract-bound (SC-005) and falls back to a
 		// fresh build over the live config, matching pre-105 behaviour.
-		if auth.IsScopedCaller(r.Context()) {
+		if auth.IsScopedCaller(r.Context()) || bindingGuardedAnonymous {
 			var agentName string
 			if ac := auth.AuthContextFromContext(r.Context()); ac != nil {
 				agentName = ac.AgentName
@@ -2570,8 +2575,22 @@ func (s *Server) serveProfileURL(w http.ResponseWriter, r *http.Request, profile
 			return
 		}
 		profiles = s.profileIndexes.For(s.runtimeConfig())
+		bindingGuardedAnonymous = anonymousProfileCaller(r.Context()) && s.mcpProxy != nil &&
+			s.mcpProxy.ResolveProfileV3(r.Context(), profiles).BindingGuarded
 	}
 	cfg := profiles.cfg
+	if bindingGuardedAnonymous {
+		// ResolveProfileV3 represents this anonymous request with a deny-all
+		// scope. selectable intentionally treats administrator-shaped callers
+		// as selectable, so applying it here would re-open the URL inventory.
+		// Refuse before the slug lookup, exactly like every other inaccessible
+		// profile outcome.
+		s.logger.Info("profile URL refused for scoped caller",
+			zap.String("profile", slug),
+			zap.String("remote_addr", r.RemoteAddr))
+		profileNotSelectable(w, slug)
+		return
+	}
 	confinedAnonymous := anonymousProfileCaller(r.Context()) && cfg != nil && cfg.AnonymousProfile != ""
 
 	// One slug → profile index per snapshot (built before the snapshot was

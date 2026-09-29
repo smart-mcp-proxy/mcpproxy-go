@@ -22,12 +22,10 @@ func filterProfileToolRows(controller ServerController, ctx context.Context, ser
 		if name == "" || rowServer == "" {
 			continue
 		}
-		toolName := name
-		prefix := rowServer + ":"
-		if len(toolName) > len(prefix) && toolName[:len(prefix)] == prefix {
-			toolName = toolName[len(prefix):]
-		}
-		if profileController.ToolAllowedByProfile(ctx, rowServer, toolName) {
+		// StateView names are raw upstream registration identities. A raw name
+		// may itself start with "<server>:"; preserve it for the policy check
+		// so a rule such as github:github:erase is not bypassed as erase.
+		if profileController.ToolAllowedByProfile(ctx, rowServer, name) {
 			filtered = append(filtered, row)
 		}
 	}

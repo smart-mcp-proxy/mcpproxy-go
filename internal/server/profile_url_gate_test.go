@@ -127,6 +127,34 @@ func TestProfileURLGate_ConfinedAnonymousHonorsSwitchableTo(t *testing.T) {
 	}
 }
 
+// A locked client binding makes the otherwise-unprofiled anonymous identity
+// deny-all. The URL gate must carry that confinement through as well: both an
+// existing profile and a nonexistent one receive the same refusal before the
+// MCP handler, so the URL cannot be used to inventory profile names.
+func TestProfileURLGate_BindingGuardedAnonymousRefusesExistingAndMissingSlugs(t *testing.T) {
+	proxy, profiles := bindingGuardTestProxy(t, "", []config.ProfileConfig{
+		{Name: "locked", Servers: []string{"a"}},
+	}, auth.ProfileModeLocked, "locked")
+	srv := proxy.mainServer
+	srv.logger = zap.NewNop()
+	srv.mcpProxy = proxy
+	require.True(t, proxy.ResolveProfileV3(context.Background(), profiles).BindingGuarded)
+
+	reached := false
+	handler := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		reached = true
+	})
+	for _, slug := range []string{"locked", "does-not-exist"} {
+		req := httptest.NewRequest(http.MethodPost, "/mcp/p/"+slug, http.NoBody)
+		rec := httptest.NewRecorder()
+		srv.serveProfileURL(rec, req, profiles, handler)
+		require.Equal(t, http.StatusNotFound, rec.Code, slug)
+		require.JSONEq(t, fmt.Sprintf(`{"error":"unknown profile '%s'"}`, slug), rec.Body.String())
+	}
+
+	require.False(t, reached, "a binding-guarded anonymous request must not reach MCP")
+}
+
 // profileGateFleetConfig builds a config over a fleet of 1+n profiles: "pin"
 // (reaching "pin-srv") followed by n profiles "p0".."p<n-1>" that reach only
 // "other-srv". With n == -1 the fleet has no profiles at all. hidden further
