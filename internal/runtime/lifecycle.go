@@ -15,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 const connectAttemptTimeout = 3*time.Minute + 15*time.Second // Must exceed per-server Docker timeout (3min)
@@ -639,20 +640,57 @@ func (r *Runtime) quarantinedCaptureIsCurrent(serverName string, client interfac
 // current-generation check immediately before checkToolApprovals writes review
 // records. A false result is deliberately retried by the caller; no stale
 // response is persisted or announced as review.changed.
-func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName string, client interface{ ConnectionEpoch() int64 }, capture supervisor.DiscoveryCapture, tools []*config.ToolMetadata) (bool, error) {
+func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName string, client *managed.Client, capture supervisor.DiscoveryCapture, tools []*config.ToolMetadata) (bool, error) {
 	if r.quarantinedCaptureBeforePersist != nil {
 		r.quarantinedCaptureBeforePersist()
 	}
-	if !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
-		return false, nil
+	if r.upstreamManager == nil {
+		return false, fmt.Errorf("upstream manager not initialized")
 	}
-	if err := r.captureQuarantinedToolDefinitionsFromTools(serverName, tools); err != nil {
+	persisted := false
+	current, err := r.upstreamManager.WithCurrentClientOnEpoch(serverName, client, capture.Epoch, func() error {
+		// A delayed supervisor event is also a stale capture signal. The
+		// manager/client locks below are the linearization point for actual
+		// client replacement or reconnect; this check preserves the supervisor
+		// generation contract before any review record is written.
+		if r.discoveryGeneration(serverName) != capture {
+			return nil
+		}
+		if r.quarantinedCaptureDuringPersist != nil {
+			r.quarantinedCaptureDuringPersist()
+		}
+		if r.discoveryGeneration(serverName) != capture {
+			return nil
+		}
+		if err := r.persistQuarantinedToolDefinitions(serverName, tools); err != nil {
+			return err
+		}
+		persisted = true
+		return nil
+	})
+	if err != nil {
 		return false, err
 	}
+	if !current || !persisted {
+		return false, nil
+	}
+	r.emitReviewChanged(serverName)
+	r.logger.Info("Captured quarantined server tool definitions for review",
+		zap.String("server", serverName), zap.Int("count", len(tools)))
 	return true, nil
 }
 
 func (r *Runtime) captureQuarantinedToolDefinitionsFromTools(serverName string, tools []*config.ToolMetadata) error {
+	if err := r.persistQuarantinedToolDefinitions(serverName, tools); err != nil {
+		return err
+	}
+	r.emitReviewChanged(serverName)
+	r.logger.Info("Captured quarantined server tool definitions for review",
+		zap.String("server", serverName), zap.Int("count", len(tools)))
+	return nil
+}
+
+func (r *Runtime) persistQuarantinedToolDefinitions(serverName string, tools []*config.ToolMetadata) error {
 	if _, err := r.checkToolApprovals(serverName, tools); err != nil {
 		return fmt.Errorf("capture review definitions for %s: %w", serverName, err)
 	}
@@ -661,9 +699,6 @@ func (r *Runtime) captureQuarantinedToolDefinitionsFromTools(serverName string, 
 	copy(snapshot, tools)
 	r.lastGoodTools[serverName] = snapshot
 	r.lastGoodToolsMu.Unlock()
-	r.emitReviewChanged(serverName)
-	r.logger.Info("Captured quarantined server tool definitions for review",
-		zap.String("server", serverName), zap.Int("count", len(tools)))
 	return nil
 }
 

@@ -226,6 +226,10 @@ type Runtime struct {
 	// regression suite replace a client after tools/list but before any approval
 	// record is written. Nil in production.
 	quarantinedCaptureBeforePersist func()
+	// quarantinedCaptureDuringPersist runs inside the manager/client
+	// linearization region immediately before review records are stored. It is
+	// test-only and nil in production.
+	quarantinedCaptureDuringPersist func()
 
 	// consultStampBeforeWrite is the same kind of seam for
 	// stampConsultedLegacySibling (astra r2 C1): when set, it runs between

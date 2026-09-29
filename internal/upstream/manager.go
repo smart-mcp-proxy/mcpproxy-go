@@ -101,8 +101,14 @@ func getDockerRetryInterval(attempt int) time.Duration {
 
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
-	clients   map[string]*managed.Client
-	mu        sync.RWMutex
+	clients map[string]*managed.Client
+	mu      sync.RWMutex
+	// captureMu serializes a bounded quarantined-review persistence against
+	// client replacement/removal. It is deliberately separate from mu: approval
+	// calculation reads manager state, and holding mu.RLock across it would
+	// deadlock behind a queued AddServerConfig writer. Lock order is captureMu
+	// then mu; mutation releases both before disconnecting or invoking callbacks.
+	captureMu sync.RWMutex
 	logger    *zap.Logger
 	logConfig *config.LogConfig
 	// globalConfig holds the proxy-wide config as an atomic pointer so a config
@@ -428,6 +434,7 @@ func (m *Manager) SetPromptsChangedCallback(callback func(serverName string)) {
 
 // AddServerConfig adds a server configuration without connecting
 func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
+	m.captureMu.Lock()
 	m.mu.Lock()
 
 	// Check if existing client exists and if config has changed
@@ -465,6 +472,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 			// Update the client's config reference to the new config but don't recreate the client
 			// Use thread-safe setter to avoid race with GetServerState()
 			m.mu.Unlock()
+			m.captureMu.Unlock()
 			existingClient.SetConfig(serverConfig)
 			// Spec 093: the per-server limits may have changed even though the
 			// transport config did not.
@@ -477,6 +485,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, m.secretResolver)
 	if err != nil {
 		m.mu.Unlock()
+		m.captureMu.Unlock()
 		// Disconnect old client if we failed to create new one
 		if clientToDisconnect != nil {
 			_ = clientToDisconnect.Disconnect()
@@ -520,6 +529,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 
 	// IMPORTANT: Release lock before disconnecting to prevent deadlock
 	m.mu.Unlock()
+	m.captureMu.Unlock()
 
 	// Spec 093: publish this server's limits (or retire them when the server is
 	// disabled/quarantined, FR-009). Done off the lock — Retire wakes queued
@@ -616,6 +626,7 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 // RemoveServer removes an upstream server
 func (m *Manager) RemoveServer(id string) {
 	// Get client reference while holding lock briefly
+	m.captureMu.Lock()
 	m.mu.Lock()
 	client, exists := m.clients[id]
 	if exists {
@@ -623,6 +634,7 @@ func (m *Manager) RemoveServer(id string) {
 		delete(m.clients, id)
 	}
 	m.mu.Unlock()
+	m.captureMu.Unlock()
 
 	// Spec 093 FR-009: tombstone the limiter first so queued calls fail
 	// immediately with the server-unavailable semantics instead of waiting out
@@ -1162,6 +1174,25 @@ func (m *Manager) GetClient(id string) (*managed.Client, bool) {
 	defer m.mu.RUnlock()
 	client, exists := m.clients[id]
 	return client, exists
+}
+
+// WithCurrentClientOnEpoch runs fn only while id still names expected and that
+// exact client remains on expectedEpoch. captureMu makes the pointer check and
+// fn one linearization region with AddServerConfig/RemoveServer (which need
+// its writer lock to replace the entry); the managed-client epoch lock keeps a
+// same-pointer reconnect from changing its connection identity in the middle
+// of fn. fn must be bounded and must not initiate a connection change, because
+// those transitions wait for the locks held here.
+func (m *Manager) WithCurrentClientOnEpoch(id string, expected *managed.Client, expectedEpoch int64, fn func() error) (current bool, err error) {
+	m.captureMu.RLock()
+	defer m.captureMu.RUnlock()
+	m.mu.RLock()
+	client, ok := m.clients[id]
+	m.mu.RUnlock()
+	if !ok || client != expected {
+		return false, nil
+	}
+	return client.WithConnectionEpoch(expectedEpoch, fn)
 }
 
 // GetAllClients returns all clients
