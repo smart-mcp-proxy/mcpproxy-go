@@ -8,6 +8,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -94,4 +95,53 @@ func TestInspectToolsIncludesCanonicalReviewFields(t *testing.T) {
 		require.Truef(t, ok, "inspect_tools must expose canonical review field %q", field)
 		require.JSONEqf(t, string(want[field]), string(gotValue), "inspect_tools field %q differs from the review composer", field)
 	}
+}
+
+// inspect_quarantined serializes the review composer directly. Pin the
+// credential-bearing configuration classes here as well as REST: this MCP
+// operation is available to the unauthenticated/default MCP surface, while a
+// scoped agent is intentionally denied quarantine operations before any review
+// payload can be produced.
+func TestInspectQuarantinedNeverLeaksReviewSecrets(t *testing.T) {
+	const secret = "secret123"
+	proxy, rt := createTestProxyWithRuntimeCfg(t, []*config.ServerConfig{{
+		Name: "github", Enabled: true, Quarantined: true, Protocol: "stdio",
+		Command: "server --token " + secret, Args: []string{"--token", secret},
+		URL: "https://example.test/mcp?api_key=" + secret,
+		Env: map[string]string{"TOKEN": secret}, Headers: map[string]string{"Authorization": "Bearer " + secret},
+	}}, func(cfg *config.Config) { cfg.RevealSecretHeaders = true })
+	require.NoError(t, rt.StorageManager().SaveUpstreamServer(&config.ServerConfig{
+		Name: "github", Enabled: true, Quarantined: true, Protocol: "stdio",
+		Command: "server --token " + secret, Args: []string{"--token", secret},
+		URL: "https://example.test/mcp?api_key=" + secret,
+		Env: map[string]string{"TOKEN": secret}, Headers: map[string]string{"Authorization": "Bearer " + secret},
+	}))
+	require.NoError(t, rt.StorageManager().SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github", ToolName: "read", Status: storage.ToolApprovalStatusPending,
+		CurrentDescription: "Read safely",
+	}))
+
+	admin, err := proxy.handleQuarantineSecurity(context.Background(), quarantineRequest(map[string]interface{}{
+		"operation": "inspect_quarantined", "name": "github",
+	}))
+	require.NoError(t, err)
+	require.False(t, admin.IsError)
+	adminText := admin.Content[0].(mcp.TextContent).Text
+	require.NotContains(t, adminText, secret)
+	require.Contains(t, adminText, "••••23")
+
+	// Agent tokens cannot use quarantine_security at all. The denial is the
+	// scoped caller result, and must not accidentally serialize the server
+	// summary while reporting it.
+	scoped := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AllowedServers: []string{"github"},
+	})
+	agent, err := proxy.handleQuarantineSecurity(scoped, quarantineRequest(map[string]interface{}{
+		"operation": "inspect_quarantined", "name": "github",
+	}))
+	require.NoError(t, err)
+	require.True(t, agent.IsError)
+	agentText := agent.Content[0].(mcp.TextContent).Text
+	require.Contains(t, agentText, "cannot perform quarantine security operations")
+	require.NotContains(t, agentText, secret)
 }

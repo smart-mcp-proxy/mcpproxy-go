@@ -2,7 +2,10 @@ package main
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -62,6 +65,38 @@ func TestReviewAliasHelpPointsToReviewWorkflow(t *testing.T) {
 	} {
 		require.Contains(t, command.Long, "mcpproxy review", command.Use)
 	}
+}
+
+// The CLI's JSON mode is a deliberately thin wrapper over the review route.
+// Keep that boundary in the regression: a future formatter must not re-read a
+// configured server or otherwise turn a redacted response back into a secret.
+func TestReviewShowJSONNeverRevealsComposerRedaction(t *testing.T) {
+	const apiKey = "review-cli-key"
+	const secret = "secret123"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, apiKey, r.Header.Get("X-API-Key"))
+		switch r.URL.Path {
+		case "/api/v1/status":
+			w.WriteHeader(http.StatusOK)
+		case "/api/v1/servers/alpha/review":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"server":{"name":"alpha","command":"server --token ••••23 (9 chars)","url":"https://example.test/mcp?api_key=%E2%80%A2%E2%80%A2%E2%80%A2%E2%80%A223%20%289%20chars%29"},"tools":[]}}`))
+		default:
+			t.Fatalf("unexpected CLI request: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	configPath := filepath.Join(t.TempDir(), "mcp_config.json")
+	require.NoError(t, os.WriteFile(configPath, []byte(`{"listen":"127.0.0.1:0","api_key":"`+apiKey+`"}`), 0o600))
+	previousConfigFile := configFile
+	configFile = configPath
+	t.Cleanup(func() { configFile = previousConfigFile })
+	t.Setenv("MCPPROXY_TRAY_ENDPOINT", server.URL)
+	t.Setenv("MCPPROXY_OUTPUT", "json")
+
+	output := captureReviewOutput(t, func() error { return runReviewRead("/api/v1/servers/alpha/review") })
+	require.NotContains(t, output, secret)
+	require.Contains(t, output, "••••23")
 }
 
 func captureReviewOutput(t *testing.T, fn func() error) string {
