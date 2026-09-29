@@ -215,7 +215,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
@@ -246,6 +246,14 @@ onMounted(() => {
   // App only mounts the shell after canLoadCore. The personal branch keeps
   // isolated component consumers and tests working without inventing a server
   // session; it is never reached during the browser's pending startup path.
+  if (!authStore.isTeamsEdition || authStore.canLoadCore) void profilesStore.fetchProfiles()
+})
+
+// #1401: the header now stays mounted through an auth recovery (it used to
+// remount, which re-ran the load above), so reload on the recovery epoch.
+watch(() => systemStore.authEpoch, () => {
+  attentionStore.fetchAttention()
+  // Same gate as the mount load: a tenant session never reads admin profiles.
   if (!authStore.isTeamsEdition || authStore.canLoadCore) void profilesStore.fetchProfiles()
 })
 
