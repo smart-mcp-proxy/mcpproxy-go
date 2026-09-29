@@ -996,6 +996,14 @@ func (b *BoltDB) SaveOnboardingState(state *OnboardingState) error {
 //
 // A nil fn is a caller error (bbolt would otherwise persist an unmodified
 // read as a no-op write); it returns an error rather than panicking.
+//
+// Callback constraint: fn executes inside the open bbolt write transaction
+// (and, when reached through Manager.UpdateOnboardingState, with Manager.mu
+// held). It must be a short, pure mutation of the state it is given, and MUST
+// NOT call any BoltDB or Manager method or block on I/O: bbolt allows a single
+// writer, so a nested b.db.Update (or a re-acquired Manager.mu) self-deadlocks.
+// If fn returns an error the transaction is rolled back and nothing is
+// persisted.
 func (b *BoltDB) UpdateOnboardingState(fn func(*OnboardingState) error) error {
 	if fn == nil {
 		return fmt.Errorf("UpdateOnboardingState: fn must not be nil")
