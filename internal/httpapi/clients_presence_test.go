@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -272,8 +273,8 @@ func TestClientsPresence_SanitizesUnknownSessionClientName(t *testing.T) {
 			require.NotContains(t, id, "\x7f")
 			require.NotContains(t, name, "\x7f")
 			require.Len(t, name, 128)
-			require.True(t, strings.HasPrefix(id, "other:"+name+"-"))
-			require.Len(t, strings.TrimPrefix(id, "other:"+name+"-"), 24)
+			require.True(t, strings.HasPrefix(id, "other:~t:"+name+"-"))
+			require.Len(t, strings.TrimPrefix(id, "other:~t:"+name+"-"), 24)
 			return
 		}
 	}
@@ -303,6 +304,47 @@ func TestClientsPresence_PreservesDistinctUnknownNamesWithSameDisplayPrefix(t *t
 	}
 	require.Len(t, otherIDs, 2)
 	require.NotEqual(t, otherIDs[0], otherIDs[1])
+}
+
+func TestClientsPresence_SeparatesTransformedNameFromFormerSuffixLookalike(t *testing.T) {
+	rt, err := proxyRuntime.New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0"}, "", zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	const transformedName = "\x1bzed"
+	transformed := clientidentity.FromRaw(transformedName)
+	digest := transformed.Key[strings.LastIndexByte(transformed.Key, ':')+1:]
+	ordinaryName := "zed-" + digest
+	ordinary := clientidentity.FromRaw(ordinaryName)
+	rt.RecordClientSeen(transformedName)
+	rt.RecordClientSeen(ordinaryName)
+	state, err := rt.GetOnboardingState()
+	require.NoError(t, err)
+	require.Len(t, state.ClientLastSeen, 2, "each raw name must retain its own serialized presence key")
+	require.Contains(t, state.ClientLastSeen, transformed.Key)
+	require.Contains(t, state.ClientLastSeen, ordinary.Key)
+
+	ctrl := &clientPresenceController{state: state, sessions: []*contracts.MCPSession{
+		{ID: "transformed", ClientName: transformedName, Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now()},
+		{ID: "ordinary", ClientName: ordinaryName, Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now()},
+	}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	req.Header.Set("X-API-Key", "clients-admin-key")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	otherIDs := map[string]bool{}
+	for _, raw := range successData(t, rec)["clients"].([]any) {
+		row := raw.(map[string]any)
+		if row["kind"] == "other" {
+			otherIDs[row["id"].(string)] = true
+		}
+	}
+	require.Len(t, otherIDs, 2, "sessions and initialize evidence must group by the same distinct identity")
+	require.Contains(t, otherIDs, "other:"+transformed.PublicID)
+	require.Contains(t, otherIDs, "other:"+ordinary.PublicID)
 }
 
 func TestClientsPresence_EscapePrefixedKnownAliasRemainsOtherClient(t *testing.T) {

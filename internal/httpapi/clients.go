@@ -212,7 +212,7 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 		if identity.Key == "" || known[identity.RawNormalized] {
 			continue
 		}
-		id := "other:" + identity.Key
+		id := "other:" + identity.PublicID
 		found := -1
 		for i := range result {
 			if result[i].ID == id {
@@ -243,7 +243,7 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 		if identity.Key == "" || known[identity.RawNormalized] {
 			continue
 		}
-		id := "other:" + identity.Key
+		id := "other:" + identity.PublicID
 		found := -1
 		for i := range result {
 			if result[i].ID == id {

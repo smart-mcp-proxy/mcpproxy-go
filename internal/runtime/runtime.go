@@ -3941,7 +3941,7 @@ func (r *Runtime) UpdateOnboardingState(fn func(*storage.OnboardingState) error)
 // disabled, and UpdateOnboardingState keeps this write from racing connect or
 // onboarding mutations.
 func (r *Runtime) RecordClientSeen(clientName string) {
-	name := clientidentity.FromRaw(clientName).Key
+	name := sanitizeClientName(clientName)
 	if name == "" || r.storageManager == nil {
 		return
 	}
@@ -3996,7 +3996,7 @@ func clientDisconnectedAfterSeen(state *storage.OnboardingState, alias string, s
 	}
 	for _, client := range connect.GetAllClients() {
 		for _, knownAlias := range client.ClientInfoNames {
-			if alias == clientidentity.FromRaw(knownAlias).Key {
+			if alias == sanitizeClientName(knownAlias) {
 				if disconnectedAt := state.ClientDisconnectedAt[client.ID]; !disconnectedAt.IsZero() && !disconnectedAt.Before(seenAt) {
 					return true
 				}
@@ -4047,17 +4047,30 @@ func latestSeenForAliases(seen map[string]time.Time, aliases []string) *time.Tim
 }
 
 // sanitizeClientName returns the canonical safe key shared with session
-// presence. It retains a hash when rendering changes a raw unknown name.
+// presence. Supported aliases retain their legacy normalized key because
+// lifecycle timestamps and existing onboarding state already use it; unknown
+// names use the disjoint versioned namespace from clientidentity.
 func sanitizeClientName(raw string) string {
-	return clientidentity.FromRaw(raw).Key
+	identity := clientidentity.FromRaw(raw)
+	if identity.Key == "" {
+		return ""
+	}
+	if isKnownClientAlias(identity.RawNormalized) {
+		return identity.RawNormalized
+	}
+	return identity.Key
 }
 
 func knownClientAliases() map[string]bool {
 	aliases := make(map[string]bool)
 	for _, client := range connect.GetAllClients() {
 		for _, alias := range client.ClientInfoNames {
-			aliases[sanitizeClientName(alias)] = true
+			aliases[clientidentity.NormalizeRaw(alias)] = true
 		}
 	}
 	return aliases
+}
+
+func isKnownClientAlias(rawNormalized string) bool {
+	return knownClientAliases()[rawNormalized]
 }
