@@ -148,7 +148,10 @@ func TestGitHubStarsProvider_CapHoldsAcrossRestart(t *testing.T) {
 	if _, err := newPopularityStore(db); err != nil {
 		t.Fatalf("newPopularityStore: %v", err)
 	}
-	const over = 3
+	// This is large enough to exercise trimming a legacy bucket with many
+	// surplus records without making the test itself expensive. The provider
+	// should remove the oldest records in one pass and one store transaction.
+	const over = 5_000
 	base := time.Now().Add(-time.Hour)
 	if err := db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(popularityBucketName))

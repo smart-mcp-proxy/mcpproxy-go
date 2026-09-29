@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -238,14 +239,29 @@ func NewGitHubStarsProvider(opts PopularityOptions) *githubStarsProvider {
 		// Eager preload: memory is the source of truth from here on, so the
 		// FR-008 cap applies to what is on disk and Lookup never touches bbolt.
 		p.entries = store.all()
-		var evicted []string
-		p.mu.Lock()
-		for len(p.entries) > githubMaxCacheKeys {
-			evicted = append(evicted, p.evictOldestLocked())
-		}
-		p.mu.Unlock()
-		for _, k := range evicted {
-			p.persist("", nil, k)
+		if excess := len(p.entries) - githubMaxCacheKeys; excess > 0 {
+			type cachedKey struct {
+				key       string
+				fetchedAt time.Time
+			}
+			oldest := make([]cachedKey, 0, len(p.entries))
+			for key, entry := range p.entries {
+				oldest = append(oldest, cachedKey{key: key, fetchedAt: entry.FetchedAt})
+			}
+			sort.Slice(oldest, func(i, j int) bool {
+				if oldest[i].fetchedAt.Equal(oldest[j].fetchedAt) {
+					return oldest[i].key < oldest[j].key
+				}
+				return oldest[i].fetchedAt.Before(oldest[j].fetchedAt)
+			})
+			evicted := make([]string, excess)
+			for i := 0; i < excess; i++ {
+				evicted[i] = oldest[i].key
+				delete(p.entries, oldest[i].key)
+			}
+			if err := store.deleteMany(evicted); err != nil {
+				logger.Warn("catalog popularity: failed to evict excess entries", zap.Int("count", len(evicted)), zap.Error(err))
+			}
 		}
 	}
 	if !p.disabled {
