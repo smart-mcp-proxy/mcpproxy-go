@@ -80,6 +80,10 @@ func newFwdUpstream(t *testing.T) *fwdUpstream {
 		func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return mcp.NewToolResultText("b64=" + base64.StdEncoding.EncodeToString([]byte(req.Header.Get("X-Tenant-Id")))), nil
 		})
+	srv.AddTool(mcp.Tool{Name: "leak", Description: "Returns a secret alongside the tenant header", InputSchema: noArgs},
+		func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return mcp.NewToolResultText("key=AKIA1234567890ABCDEF tenant=" + req.Header.Get("X-Tenant-Id")), nil
+		})
 	srv.AddTool(mcp.Tool{Name: "boom", Description: "Always fails (handled by the wrapper)", InputSchema: noArgs},
 		func(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return mcp.NewToolResultText("unreachable"), nil

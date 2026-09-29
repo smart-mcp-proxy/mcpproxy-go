@@ -3406,6 +3406,13 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		return blockResult, nil
 	}
+	// Spec 112: sanitisation mutates result in place, so the scrubbed record
+	// copy is rebuilt from the sanitised result (redact/strip must reach the
+	// recording sinks too).
+	if !fwdOut.IsEmpty() {
+		recResult = scrubResultForRecord(result, fwdOut)
+		toolCallRecord.Response = recResult
+	}
 
 	// Spec 069 A1: measure raw sizes before truncation.
 	activityResponseBytes := rawByteSize(result)
@@ -3871,6 +3878,13 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// non-nil result means the call was blocked.
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		return blockResult, nil
+	}
+	// Spec 112: sanitisation mutates result in place, so the scrubbed record
+	// copy is rebuilt from the sanitised result (redact/strip must reach the
+	// recording sinks too).
+	if !fwdOut.IsEmpty() {
+		recResult = scrubResultForRecord(result, fwdOut)
+		toolCallRecord.Response = recResult
 	}
 
 	// Spec 069 A1: measure raw sizes before truncation.
