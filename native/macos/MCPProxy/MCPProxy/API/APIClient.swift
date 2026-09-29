@@ -153,6 +153,25 @@ actor APIClient {
         return try await fetchWrapped(path: "/api/v1/info")
     }
 
+    // MARK: - Clients hub (Spec 109-h)
+
+    /// Presence-only list. The core does not inspect client config contents for
+    /// this request; use `clientPresence(_:)` only after the user expands a row.
+    func clients() async throws -> [ClientPresenceRecord] {
+        let response: ClientsResponse = try await fetchWrapped(path: "/api/v1/clients")
+        return response.clients
+    }
+
+    /// One presence row including recent sessions, fetched on explicit demand.
+    func clientPresence(_ id: String) async throws -> ClientPresenceRecord {
+        try await fetchWrapped(path: "/api/v1/clients/\(id.uriComponentEncoded)")
+    }
+
+    /// The served routing mode, its restart-pending value, and every MCP path.
+    func routing() async throws -> RoutingInfo {
+        try await fetchWrapped(path: "/api/v1/routing")
+    }
+
     // MARK: - Docker & Diagnostics
 
     /// Docker status response from `GET /api/v1/docker/status`.

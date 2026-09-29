@@ -1,0 +1,20 @@
+{
+  "name": "list",
+  "description": "List client presence",
+  "usage": "mcpproxy client list [flags]",
+  "flags": [
+    {
+      "name": "help",
+      "shorthand": "h",
+      "description": "help for list",
+      "type": "bool",
+      "default": "false"
+    },
+    {
+      "name": "help-json",
+      "description": "Output help information as JSON",
+      "type": "bool",
+      "default": "false"
+    }
+  ]
+}

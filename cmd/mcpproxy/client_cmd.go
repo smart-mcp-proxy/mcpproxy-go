@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
@@ -18,15 +19,25 @@ import (
 func GetClientCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "client", Short: "Inspect connected AI clients"}
 	cmd.AddCommand(&cobra.Command{Use: "list", Short: "List client presence", RunE: runClientList})
-	cmd.AddCommand(&cobra.Command{Use: "show <id>", Short: "Show one client and its sessions", Args: cobra.ExactArgs(1), RunE: runClientShow})
+	cmd.AddCommand(&cobra.Command{Use: "show <id>", Short: "Show one client and its sessions", Args: clientShowArgs, RunE: runClientShow})
 	return cmd
+}
+
+// clientShowArgs lets the inherited --help-json hook run without a positional
+// id. Cobra validates Args before PersistentPreRunE, so ExactArgs(1) would
+// otherwise make machine-readable discovery of this command impossible.
+func clientShowArgs(cmd *cobra.Command, args []string) error {
+	if helpJSON, err := cmd.Flags().GetBool("help-json"); err == nil && helpJSON {
+		return nil
+	}
+	return cobra.ExactArgs(1)(cmd, args)
 }
 
 func runClientList(_ *cobra.Command, _ []string) error {
 	return runClientPath("/api/v1/clients", false)
 }
 func runClientShow(_ *cobra.Command, args []string) error {
-	return runClientPath("/api/v1/clients/"+args[0], true)
+	return runClientPath("/api/v1/clients/"+url.PathEscape(args[0]), true)
 }
 
 func runClientPath(path string, detail bool) error {
@@ -83,13 +94,27 @@ func runClientPath(path string, detail bool) error {
 			ConfigPath  string `json:"config_path"`
 			ReloadHint  string `json:"reload_hint"`
 			Sessions    []struct {
-				ID string `json:"id"`
+				ID            string    `json:"id"`
+				WorkSessionID string    `json:"work_session_id"`
+				StartedAt     time.Time `json:"started_at"`
+				LastActivity  time.Time `json:"last_activity"`
 			} `json:"sessions"`
 		}
 		if err := json.Unmarshal(envelope.Data, &row); err != nil {
 			return err
 		}
 		fmt.Printf("Client: %s\nState: %s\nConfig path: %s\nReload: %s\nSessions: %d\n", row.DisplayName, row.State, row.ConfigPath, row.ReloadHint, len(row.Sessions))
+		if len(row.Sessions) > 0 {
+			rows := make([][]string, 0, len(row.Sessions))
+			for _, session := range row.Sessions {
+				rows = append(rows, []string{session.ID, session.WorkSessionID, session.StartedAt.Format(time.RFC3339), session.LastActivity.Format(time.RFC3339)})
+			}
+			out, err := formatter.FormatTable([]string{"SESSION", "WORK SESSION", "STARTED AT", "LAST ACTIVITY"}, rows)
+			if err != nil {
+				return err
+			}
+			fmt.Print(out)
+		}
 		return nil
 	}
 	var list struct {

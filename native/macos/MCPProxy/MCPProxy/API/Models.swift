@@ -1191,6 +1191,142 @@ struct ActivitySummary: Codable, Equatable {
 
 // MARK: - Status / Info Responses
 
+/// One session attributed to a client by `GET /api/v1/clients/{id}`.
+///
+/// The list endpoint deliberately omits this content: opening a client config
+/// is only permitted after the operator expands that row.
+struct ClientPresenceSession: Codable, Identifiable, Equatable {
+    let id: String
+    let workSessionId: String?
+    let startedAt: String
+    let lastActivity: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case workSessionId = "work_session_id"
+        case startedAt = "started_at"
+        case lastActivity = "last_activity"
+    }
+
+    var displayID: String { workSessionId?.isEmpty == false ? workSessionId! : id }
+}
+
+/// Presence row returned by `GET /api/v1/clients` and its detail route.
+///
+/// Keep the vocabulary supplied by the core intact. A newer core may add a
+/// state, while older cores can omit additive path, hint, and session fields.
+struct ClientPresenceRecord: Codable, Identifiable, Equatable {
+    let id: String
+    let displayName: String
+    let kind: String
+    let icon: String?
+    let state: String
+    let installed: Bool
+    let connected: Bool
+    let connectionUnverified: Bool?
+    let configPath: String?
+    let displayPath: String?
+    let lastSeen: String?
+    let activeSessions: Int
+    let calls24h: Int
+    let reloadHint: String?
+    let sessions: [ClientPresenceSession]?
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, icon, state, installed, connected, sessions
+        case displayName = "display_name"
+        case connectionUnverified = "connection_unverified"
+        case configPath = "config_path"
+        case displayPath = "display_path"
+        case lastSeen = "last_seen"
+        case activeSessions = "active_sessions"
+        case calls24h = "calls_24h"
+        case reloadHint = "reload_hint"
+    }
+
+    var effectiveDisplayPath: String? { displayPath ?? configPath }
+
+    var stateLabel: String {
+        switch state {
+        case "connected_seen": return "Connected"
+        case "connected_never_seen": return "Connected — awaiting first use"
+        case "installed": return connectionUnverified == true ? "Installed — connection unverified" : "Installed"
+        case "not_installed": return "Not installed"
+        case "other": return "Observed"
+        default: return state.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    var symbolName: String {
+        switch icon ?? id {
+        case "claude-code", "claude-desktop": return "brain"
+        case "cursor": return "cursorarrow.rays"
+        case "vscode", "copilot": return "chevron.left.forwardslash.chevron.right"
+        case "windsurf": return "wind"
+        case "codex", "opencode": return "terminal"
+        case "gemini": return "sparkles"
+        default: return "app.connected.to.app.below.fill"
+        }
+    }
+}
+
+struct ClientsResponse: Codable, Equatable {
+    let clients: [ClientPresenceRecord]
+}
+
+/// The shared endpoint and routing-mode contract from `GET /api/v1/routing`.
+struct RoutingInfo: Codable, Equatable {
+    struct Endpoints: Codable, Equatable {
+        let `default`: String
+        let direct: String
+        let codeExecution: String
+        let retrieveTools: String
+
+        enum CodingKeys: String, CodingKey {
+            case `default`, direct
+            case codeExecution = "code_execution"
+            case retrieveTools = "retrieve_tools"
+        }
+
+        var rows: [(name: String, path: String)] {
+            [
+                ("Default", `default`),
+                ("Direct", direct),
+                ("Code execution", codeExecution),
+                ("Retrieve tools", retrieveTools),
+            ]
+        }
+    }
+
+    let routingMode: String
+    let description: String
+    let endpoints: Endpoints
+    let availableModes: [String]
+    let pendingRoutingMode: String?
+    let restartRequired: Bool?
+    let codeExecutionEnabled: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case description, endpoints
+        case routingMode = "routing_mode"
+        case availableModes = "available_modes"
+        case pendingRoutingMode = "pending_routing_mode"
+        case restartRequired = "restart_required"
+        case codeExecutionEnabled = "code_execution_enabled"
+    }
+
+    var servedModeLabel: String { Self.modeLabel(routingMode) }
+
+    static func modeLabel(_ mode: String) -> String {
+        switch mode {
+        case "retrieve_tools": return "Retrieve tools"
+        case "direct": return "Direct"
+        case "code_execution": return "Code execution"
+        default: return mode.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+}
+
 /// Response for `GET /api/v1/status`.
 /// The backend builds this as a dynamic map; we decode the known keys.
 struct StatusResponse: Codable {

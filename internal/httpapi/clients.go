@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 )
 
@@ -40,15 +41,25 @@ type clientsResponse struct {
 }
 
 func (s *Server) handleGetClients(w http.ResponseWriter, r *http.Request) {
+	// This endpoint does not honour scope filters until Spec 108 adds the
+	// per-client authorization model. Reject them before touching local client
+	// configuration or session state so a caller never receives an unfiltered
+	// inventory by accident.
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	rows, err := s.clientPresence(false)
 	if err != nil {
 		s.writeError(w, r, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	s.writeSuccess(w, clientsResponse{Clients: rows})
+	s.writeSuccess(w, clientsResponse{Clients: rows, Routing: s.clientRoutingPayload()})
 }
 
 func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
+	if !rejectUnsupportedScopeFilters(w, r) {
+		return
+	}
 	id := chi.URLParam(r, "client")
 	rows, err := s.clientPresence(true)
 	if err != nil {
@@ -62,6 +73,48 @@ func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.writeError(w, r, http.StatusNotFound, "client not found")
+}
+
+// clientRoutingPayload is the routing portion of the Clients hub response.
+// Keep it in the same shape as GET /routing: the Endpoint & mode tab can use
+// either response without translating or guessing a restart-pending state.
+func (s *Server) clientRoutingPayload() map[string]interface{} {
+	routingMode := config.RoutingModeRetrieveTools
+	toolResponseMode := config.ToolResponseModeFull
+	directToolResponseMode := config.DirectToolResponseModeFull
+	codeExecutionEnabled := false
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+		if cfg.RoutingMode != "" {
+			routingMode = cfg.RoutingMode
+		}
+		if cfg.ToolResponseMode != "" {
+			toolResponseMode = cfg.ToolResponseMode
+		}
+		if cfg.DirectToolResponseMode != "" {
+			directToolResponseMode = cfg.DirectToolResponseMode
+		}
+		codeExecutionEnabled = cfg.EnableCodeExecution
+	}
+	routingMode = s.servedRoutingMode(routingMode)
+	pendingRoutingMode, restartRequired := s.pendingRoutingMode(routingMode)
+	description := "BM25 search via retrieve_tools + call_tool variants (default)"
+	switch routingMode {
+	case config.RoutingModeDirect:
+		description = "All upstream tools exposed directly via serverName__toolName naming"
+	case config.RoutingModeCodeExecution:
+		description = "JavaScript orchestration via code_execution tool with tool catalog"
+	}
+	return map[string]interface{}{
+		"routing_mode":              routingMode,
+		"description":               description,
+		"endpoints":                 map[string]interface{}{"default": "/mcp", "direct": "/mcp/all", "code_execution": "/mcp/code", "retrieve_tools": "/mcp/call"},
+		"available_modes":           []string{config.RoutingModeRetrieveTools, config.RoutingModeDirect, config.RoutingModeCodeExecution},
+		"code_execution_enabled":    codeExecutionEnabled,
+		"tool_response_mode":        toolResponseMode,
+		"direct_tool_response_mode": directToolResponseMode,
+		"pending_routing_mode":      pendingRoutingMode,
+		"restart_required":          restartRequired,
+	}
 }
 
 func (s *Server) clientPresence(withSessions bool) ([]clientPresence, error) {

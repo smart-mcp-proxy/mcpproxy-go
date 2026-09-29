@@ -1,0 +1,20 @@
+{
+  "name": "show",
+  "description": "Show one client and its sessions",
+  "usage": "mcpproxy client show \u003cid\u003e [flags]",
+  "flags": [
+    {
+      "name": "help",
+      "shorthand": "h",
+      "description": "help for show",
+      "type": "bool",
+      "default": "false"
+    },
+    {
+      "name": "help-json",
+      "description": "Output help information as JSON",
+      "type": "bool",
+      "default": "false"
+    }
+  ]
+}
