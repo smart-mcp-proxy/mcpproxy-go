@@ -8,14 +8,14 @@ description: "Tasks for Spec 112 — MCP client header forwarding"
 
 ## Phase 1 — Pure pieces (`internal/headerfwd`)
 
-- [ ] T001 [P] [US3] `Denied(name)` table test: every FR-004 name and prefix in lower, canonical and upper case; allowed samples (`X-User-Id`, `X-Tenant-Id`, `Accept-Language`) pass (`internal/headerfwd/deny.go`, `deny_test.go`) — FR-004
-- [ ] T002 [P] [US3] `ValidateNames` / `NormalizeNames`: invalid token, wildcard, >32, duplicate case-insensitive, denied, static-key collision; normalize returns kept + dropped (`validate.go`) — FR-005
-- [ ] T003 [P] [US1] `Capture`: union filter, deny list, names listed in `Connection`, multi-value join, 4 KiB / 16 KiB caps, control-char drop, empty omit, clone (mutating `r.Header` afterwards does not change the snapshot) (`capture.go`) — FR-006, FR-012
-- [ ] T004 [P] [US6] `Snapshot` formatting: `%v`, `%+v`, `%#v`, `%s`, `json.Marshal`, `zap.Any`, `zap.Object`, `slog` never contain the value (`snapshot.go`) — FR-007
-- [ ] T005 [P] [US4] `Outbound(policy)`: disabled → empty; non-HTTP transport → empty; static collision dropped; allowlist subset — FR-010
-- [ ] T006 [P] [US3] `HeaderFunc`: no key B → nil; key A only → nil; re-applies deny list and static collision; returns a fresh map each call — FR-009, FR-010
-- [ ] T007 [P] [US6] `Scrub`: exact-value (≥4), JSON-escaped value, and name-pattern forms (`Name: v`, `"Name" : "v"`, `Name=v`, case-insensitive) incl. a 2-char value; base64 of the value is NOT caught (boundary asserted) — FR-016
-- [ ] T008 [P] `Digest`: stable for same set, differs by value, per-process key, never equals raw values — FR-017
+- [x] T001 [P] [US3] `Denied(name)` table test: every FR-004 name and prefix in lower, canonical and upper case; allowed samples (`X-User-Id`, `X-Tenant-Id`, `Accept-Language`) pass (`internal/headerfwd/deny.go`, `deny_test.go`) — FR-004
+- [x] T002 [P] [US3] `ValidateNames` / `NormalizeNames`: invalid token, wildcard, >32, duplicate case-insensitive, denied, static-key collision; normalize returns kept + dropped (`validate.go`) — FR-005
+- [x] T003 [P] [US1] `Capture`: union filter, deny list, names listed in `Connection`, multi-value join, 4 KiB / 16 KiB caps, control-char drop, empty omit, clone (mutating `r.Header` afterwards does not change the snapshot) (`capture.go`) — FR-006, FR-012
+- [x] T004 [P] [US6] `Snapshot` formatting: `%v`, `%+v`, `%#v`, `%s`, `json.Marshal`, `zap.Any`, `zap.Object`, `slog` never contain the value (`snapshot.go`) — FR-007
+- [x] T005 [P] [US4] `Outbound(policy)`: disabled → empty; non-HTTP transport → empty; static collision dropped; allowlist subset — FR-010
+- [x] T006 [P] [US3] `HeaderFunc`: no key B → nil; key A only → nil; re-applies deny list and static collision; returns a fresh map each call — FR-009, FR-010
+- [x] T007 [P] [US6] `Scrub`: exact-value (≥4), JSON-escaped value, and name-pattern forms (`Name: v`, `"Name" : "v"`, `Name=v`, case-insensitive) incl. a 2-char value; base64 of the value is NOT caught (boundary asserted) — FR-016
+- [x] T008 [P] `Digest`: stable for same set, differs by value, per-process key, never equals raw values — FR-017
 
 ## Phase 2 — Config and persistence
 
