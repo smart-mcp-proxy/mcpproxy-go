@@ -12,7 +12,7 @@
       <div v-else-if="store.error" class="alert alert-error">{{ store.error }}</div>
       <div v-else class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
         <table class="table"><thead><tr><th>Client</th><th>State</th><th>Last seen</th><th>Sessions</th><th>Config path</th></tr></thead>
-          <tbody><template v-for="client in store.clients" :key="client.id"><tr class="cursor-pointer hover" @click="toggle(client.id)"><td class="font-medium">{{ client.display_name }}</td><td><span class="badge badge-sm">{{ stateLabel(client.state) }}</span></td><td>{{ relative(client.last_seen) }}</td><td>{{ client.active_sessions }}</td><td><code class="text-xs">{{ client.display_path || '—' }}</code></td></tr>
+          <tbody><template v-for="client in store.clients" :key="client.id"><tr class="cursor-pointer hover" @click="toggle(client.id)"><td class="font-medium">{{ client.display_name }}</td><td><span class="badge badge-sm">{{ stateLabel(client.state) }}</span><button v-if="client.connection_unverified" type="button" class="btn btn-ghost btn-xs ml-2" data-test="check-client-connection" @click.stop="checkConnection(client.id)">Check connection</button></td><td>{{ relative(client.last_seen) }}</td><td>{{ client.active_sessions }}</td><td><code class="text-xs">{{ client.display_path || '—' }}</code></td></tr>
           <tr v-if="expanded === client.id"><td colspan="5" class="bg-base-200/40">
             <p v-if="client.reload_hint" class="text-sm mb-2">{{ client.reload_hint }}</p>
             <div v-if="clientScopeAvailable" class="flex gap-3 mb-2 text-sm">
@@ -51,7 +51,9 @@ import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuer
 
 const route = useRoute(); const router = useRouter(); const store = useClientsStore(); const authStore = useAuthStore(); const systemStore = useSystemStore()
 const tabs = [{ id: 'clients', label: 'Clients' }, { id: 'endpoint', label: 'Endpoint & mode' }, { id: 'tokens', label: 'Agent tokens' }]
-const tab = ref(typeof route.query.tab === 'string' && tabs.some(item => item.id === route.query.tab) ? route.query.tab : 'clients')
+const defaultTab = 'clients'
+function validTab(value: unknown): value is string { return typeof value === 'string' && tabs.some(item => item.id === value) }
+const tab = ref(validTab(route.query.tab) ? route.query.tab : defaultTab)
 const expanded = ref('')
 const connectOpen = ref(false)
 const scopeQuery = useScopeQuery('clients')
@@ -71,11 +73,23 @@ async function copyOtherClientSnippet() {
   }
 }
 function selectTab(id: string) { tab.value = id }
-watch(tab, value => router.replace({ query: { ...route.query, tab: value } }))
-watch(() => route.query.tab, value => {
-  if (typeof value === 'string' && tabs.some(item => item.id === value) && tab.value !== value) tab.value = value
+watch(tab, value => {
+  const query = { ...route.query }
+  if (value === defaultTab) delete query.tab
+  else query.tab = value
+  if (route.query.tab !== query.tab) void router.replace({ query })
 })
+watch(() => route.query.tab, value => {
+  const next = validTab(value) ? value : defaultTab
+  if (tab.value !== next) tab.value = next
+  if (value !== undefined && !validTab(value)) {
+    const query = { ...route.query }
+    delete query.tab
+    void router.replace({ query })
+  }
+}, { immediate: true })
 async function toggle(id: string) { expanded.value = expanded.value === id ? '' : id; if (expanded.value) await store.loadDetail(id) }
+async function checkConnection(id: string) { expanded.value = id; await store.loadDetail(id) }
 function refreshClients() { void store.load() }
 function stateLabel(value: string) { return value.replaceAll('_', ' ') }
 function relative(value?: string | null) { return value ? new Date(value).toLocaleString() : 'Never' }

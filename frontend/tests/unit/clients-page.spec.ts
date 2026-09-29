@@ -17,7 +17,7 @@ vi.mock('@/services/api', () => ({
 }))
 
 const initialClients = [
-  { id: 'cursor', display_name: 'Cursor', kind: 'supported', state: 'installed', active_sessions: 1, last_seen: null },
+  { id: 'cursor', display_name: 'Cursor', kind: 'supported', state: 'installed', connection_unverified: true, active_sessions: 1, last_seen: null },
   { id: 'other:zed', display_name: 'Zed', kind: 'other', state: 'other', active_sessions: 1, last_seen: '2026-09-29T10:00:00Z' },
 ]
 
@@ -101,7 +101,39 @@ describe('Clients page', () => {
 
     await wrapper.find('[data-test="clients-tabs"] button').trigger('click')
     await flushPromises()
-    expect(router.currentRoute.value.query).toMatchObject({ tab: 'clients', token: 'agent-1' })
+    expect(router.currentRoute.value.query).toMatchObject({ token: 'agent-1' })
+    expect(router.currentRoute.value.query.tab).toBeUndefined()
+  })
+
+  it('checks an installed hand-configured client only after the explicit action', async () => {
+    const router = makeRouter()
+    await router.push('/clients')
+    await router.isReady()
+    const wrapper = mount(Clients, { global: { plugins: [router], stubs: { ClientConnectList: true, AgentTokens: true, ModeSwitcher: true } } })
+    await flushPromises()
+
+    expect(api.getClient).not.toHaveBeenCalled()
+    await wrapper.find('[data-test="check-client-connection"]').trigger('click')
+    await flushPromises()
+    expect(api.getClient).toHaveBeenCalledWith('cursor')
+  })
+
+  it('resets to the default tab and removes an invalid tab while preserving unrelated parameters', async () => {
+    const router = makeRouter()
+    await router.push('/clients?tab=endpoint&token=agent-1')
+    await router.isReady()
+    const wrapper = mount(Clients, { global: { plugins: [router], stubs: { ClientConnectList: true, AgentTokens: true, ModeSwitcher: true } } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('Endpoint & mode')
+
+    await router.push('/clients?token=agent-1')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Cursor')
+
+    await router.push('/clients?tab=unknown&token=agent-1')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Cursor')
+    expect(router.currentRoute.value.query).toEqual({ token: 'agent-1' })
   })
 
   it('reloads the native Clients list after the shared connect list reports a successful write', async () => {

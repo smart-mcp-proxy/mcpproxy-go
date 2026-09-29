@@ -131,9 +131,18 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 		return nil, err
 	}
 	usage := s.controller.UsageSnapshot()
-	sessions, _, err := s.controller.GetRecentSessions(100, "")
+	sessions, total, err := s.controller.GetRecentSessions(100, "")
 	if err != nil {
 		return nil, err
+	}
+	// Session retention is currently capped, but the controller contract is not.
+	// Do not let another client's newer sessions hide this client's active rows
+	// or detail history when a controller retains more than this first page.
+	if total > len(sessions) {
+		sessions, _, err = s.controller.GetRecentSessions(total, "")
+		if err != nil {
+			return nil, err
+		}
 	}
 	result := make([]clientPresence, 0, len(statuses))
 	for _, def := range connect.GetAllClients() {
@@ -198,8 +207,8 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 		}
 	}
 	for _, session := range sessions {
-		name := strings.TrimSpace(session.ClientName)
-		key := strings.ToLower(name)
+		name := sanitizeOtherClientName(session.ClientName)
+		key := name
 		if name == "" || known[key] {
 			continue
 		}
@@ -230,8 +239,8 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 	// has no session row. Preserve that evidence too, while deliberately
 	// omitting configuration paths: MCP clientInfo has no trustworthy path.
 	for name, seenAt := range state.ClientLastSeen {
-		name = strings.TrimSpace(name)
-		key := strings.ToLower(name)
+		name = sanitizeOtherClientName(name)
+		key := name
 		if name == "" || known[key] {
 			continue
 		}
@@ -274,4 +283,21 @@ func clientMatches(name string, aliases []string) bool {
 		}
 	}
 	return false
+}
+
+// sanitizeOtherClientName applies the same rendering boundary as persisted
+// client presence: clientInfo.name is supplied by a peer and can otherwise
+// inject terminal controls or produce unbounded rows from older session data.
+func sanitizeOtherClientName(raw string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		if b.Len()+len(string(r)) > 128 {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
 }

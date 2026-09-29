@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -191,6 +193,67 @@ func TestClientsPresence_ListIsLightweightAndDetailUsesBoundedSessionPage(t *tes
 	detailData := successData(t, detailRec)
 	require.Len(t, detailData["sessions"].([]any), 1)
 	require.Equal(t, []int{100, 100}, ctrl.limits, "detail uses the same bounded session page")
+}
+
+func TestClientsPresence_UsesCompleteRetainedSessionSetForEachClient(t *testing.T) {
+	newest := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	sessions := make([]*contracts.MCPSession, 0, 101)
+	for i := 0; i < 100; i++ {
+		sessions = append(sessions, &contracts.MCPSession{
+			ID: "claude-" + strconv.Itoa(i), ClientName: "claude-code", Status: "closed",
+			StartTime: newest.Add(-time.Duration(i) * time.Minute), LastActivity: newest.Add(-time.Duration(i) * time.Minute),
+		})
+	}
+	sessions = append(sessions, &contracts.MCPSession{
+		ID: "cursor-active", ClientName: "cursor", Status: "active",
+		StartTime: newest.Add(-101 * time.Minute), LastActivity: newest.Add(-101 * time.Minute),
+	})
+	ctrl := &clientPresenceController{sessions: sessions}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	req.Header.Set("X-API-Key", "clients-admin-key")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	for _, raw := range successData(t, rec)["clients"].([]any) {
+		row := raw.(map[string]any)
+		if row["id"] == "cursor" {
+			require.Equal(t, float64(1), row["active_sessions"])
+			break
+		}
+	}
+	require.Equal(t, []int{100, 101}, ctrl.limits, "the complete retained set must be read when the first page is truncated")
+}
+
+func TestClientsPresence_SanitizesUnknownSessionClientName(t *testing.T) {
+	rawName := " \x1b[31m" + strings.Repeat("x", 200) + "\x7f "
+	ctrl := &clientPresenceController{sessions: []*contracts.MCPSession{{
+		ID: "unknown", ClientName: rawName, Status: "active",
+		StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now(),
+	}}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	req.Header.Set("X-API-Key", "clients-admin-key")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	for _, raw := range successData(t, rec)["clients"].([]any) {
+		row := raw.(map[string]any)
+		if row["kind"] == "other" {
+			id := row["id"].(string)
+			name := row["display_name"].(string)
+			require.NotContains(t, id, "\x1b")
+			require.NotContains(t, name, "\x1b")
+			require.NotContains(t, id, "\x7f")
+			require.NotContains(t, name, "\x7f")
+			require.Len(t, name, 128)
+			require.Equal(t, "other:"+name, id)
+			return
+		}
+	}
+	t.Fatal("sanitized other client is missing")
 }
 
 func TestClientsPresence_RejectsUnsupportedScopeBeforeReadingSessions(t *testing.T) {
