@@ -316,15 +316,25 @@ struct ServerDetailView: View {
             try await apiClient?.securityApproveServer(server.id, force: force)
             actionMessage = force ? "Server force-approved and activated" : "Server approved and activated"
             await refreshServer()
-        } catch APIClientError.httpError(let statusCode, _) where statusCode == 409 && !force {
+        } catch let error where shouldConfirmForcedSecurityApproval(error) && !force {
             actionMessage = "Approval requires confirmation because the scan found dangerous findings"
             showForceApprovalConfirmation = true
         } catch {
             actionMessage = "Failed to approve: \(error.localizedDescription)"
         }
-    }
+}
 
-    // MARK: - Tab Bar
+/// The security API uses 409 for several rejected approval states. Only the
+/// dangerous-findings rejection may offer a destructive force retry; a missing
+/// scan or operational conflict must remain an ordinary error.
+func shouldConfirmForcedSecurityApproval(_ error: Error) -> Bool {
+    guard case let APIClientError.httpError(statusCode, message) = error, statusCode == 409 else {
+        return false
+    }
+    return message.localizedCaseInsensitiveContains("dangerous")
+}
+
+// MARK: - Tab Bar
 
     @ViewBuilder
     private var tabBar: some View {

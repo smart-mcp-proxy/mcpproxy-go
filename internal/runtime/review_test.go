@@ -25,10 +25,11 @@ func TestReviewFixtureContract(t *testing.T) {
 			DefinitionsCaptured bool `json:"definitions_captured"`
 		} `json:"server"`
 		Tools []struct {
-			Name        string          `json:"name"`
-			Description string          `json:"description"`
-			Tier        contracts.Tier  `json:"tier"`
-			Previous    json.RawMessage `json:"previous"`
+			Name        string                  `json:"name"`
+			Description string                  `json:"description"`
+			Tier        contracts.Tier          `json:"tier"`
+			Annotations *config.ToolAnnotations `json:"annotations"`
+			Previous    json.RawMessage         `json:"previous"`
 		} `json:"tools"`
 		Expected struct {
 			ToolCount  int                    `json:"tool_count"`
@@ -43,6 +44,9 @@ func TestReviewFixtureContract(t *testing.T) {
 	var malicious, changed bool
 	for _, tool := range fixture.Tools {
 		counts[tool.Tier]++
+		if tool.Tier != contracts.TierUnknown {
+			require.Equal(t, tool.Tier, contracts.AnnotationTier(tool.Annotations), tool.Name)
+		}
 		malicious = malicious || tool.Name == "malicious_0" && tool.Description == "<img src=x onerror=alert(1)> [click me](https://attacker.example)"
 		changed = changed || tool.Name == "changed_0" && len(tool.Previous) > 0
 	}

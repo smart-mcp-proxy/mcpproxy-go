@@ -36,4 +36,13 @@ final class ApproveServerPathTests: XCTestCase {
         XCTAssertTrue(source.contains("Button(\"Force Approve\", role: .destructive)"))
         XCTAssertFalse(source.contains("unquarantineServer("))
     }
+
+    func testForceConfirmationIsLimitedToDangerousScanRejection() {
+        XCTAssertTrue(shouldConfirmForcedSecurityApproval(
+            APIClientError.httpError(statusCode: 409, message: "server has 1 dangerous finding")))
+        XCTAssertFalse(shouldConfirmForcedSecurityApproval(
+            APIClientError.httpError(statusCode: 409, message: "no scan results found; run a scan first")))
+        XCTAssertFalse(shouldConfirmForcedSecurityApproval(
+            APIClientError.httpError(statusCode: 500, message: "dangerous text is irrelevant")))
+    }
 }
