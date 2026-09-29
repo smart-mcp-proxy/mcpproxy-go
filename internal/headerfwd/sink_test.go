@@ -109,3 +109,21 @@ func TestScrubErrorChainDoesNotExposeRawValue(t *testing.T) {
 		t.Fatal("non-text typed error must stay reachable via errors.As")
 	}
 }
+
+// Review round 10: no fmt verb and no wrapper-shaped errors.As target may
+// reach the raw chain.
+func TestScrubErrorNoRawViaFormatOrWrapperAs(t *testing.T) {
+	s := snapWith(t, "X-Tenant-Id", "tenant-secret-1")
+	raw := fmt.Errorf("inner tenant-secret-1: %w", errors.New("base"))
+	got := ScrubError(fmt.Errorf("outer: %w", raw), s, []string{"X-Tenant-Id"})
+
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q"} {
+		if out := fmt.Sprintf(verb, got); strings.Contains(out, "tenant-secret-1") {
+			t.Fatalf("%s leaked: %s", verb, out)
+		}
+	}
+	var w interface{ Unwrap() error }
+	if errors.As(got, &w) {
+		t.Fatalf("wrapper-shaped As target reached the raw chain: %v", w)
+	}
+}

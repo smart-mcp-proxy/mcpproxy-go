@@ -3,6 +3,8 @@ package headerfwd
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"reflect"
 	"sync"
 )
@@ -100,7 +102,9 @@ func (e *scrubbedError) Error() string { return e.msg }
 func (e *scrubbedError) Is(target error) bool { return errors.Is(e.err, target) }
 
 // As finds target in the original chain. A match that implements TextScrubber
-// is replaced with its scrubbed copy before it is handed back.
+// is replaced with its scrubbed copy. Any other match whose text still carries
+// a forwarded value (for example a wrapper whose cause echoes it) is refused:
+// the target is reset and As reports no match.
 func (e *scrubbedError) As(target any) bool {
 	if !errors.As(e.err, target) {
 		return false
@@ -109,9 +113,24 @@ func (e *scrubbedError) As(target any) bool {
 	if ts, ok := v.Interface().(TextScrubber); ok {
 		if c := reflect.ValueOf(ts.ScrubbedCopy(e.scrub)); c.IsValid() && c.Type().AssignableTo(v.Type()) {
 			v.Set(c)
+			return true
 		}
 	}
+	if m, ok := v.Interface().(error); ok && m != nil && e.scrub(m.Error()) != m.Error() {
+		v.Set(reflect.Zero(v.Type()))
+		return false
+	}
 	return true
+}
+
+// Format prints only the scrubbed text for every verb, so %+v / %#v never
+// reach the struct fields.
+func (e *scrubbedError) Format(f fmt.State, verb rune) {
+	if verb == 'q' {
+		fmt.Fprintf(f, "%q", e.msg)
+		return
+	}
+	_, _ = io.WriteString(f, e.msg)
 }
 
 // ScrubError returns err unchanged when s is empty or nothing matched;
