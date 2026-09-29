@@ -3,13 +3,12 @@
 package httpapi
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 )
@@ -205,19 +204,15 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 	known := make(map[string]bool)
 	for _, def := range connect.GetAllClients() {
 		for _, alias := range def.ClientInfoNames {
-			known[normalizeRawClientName(alias)] = true
+			known[clientidentity.NormalizeRaw(alias)] = true
 		}
 	}
 	for _, session := range sessions {
-		rawIdentity := normalizeRawClientName(session.ClientName)
-		name := sanitizeOtherClientName(session.ClientName)
-		if rawIdentity == "" || known[rawIdentity] {
+		identity := clientidentity.FromRaw(session.ClientName)
+		if identity.Key == "" || known[identity.RawNormalized] {
 			continue
 		}
-		if name == "" {
-			name = "Unknown client"
-		}
-		id := otherClientID(name, rawIdentity)
+		id := "other:" + identity.Key
 		found := -1
 		for i := range result {
 			if result[i].ID == id {
@@ -226,7 +221,7 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 			}
 		}
 		if found < 0 {
-			result = append(result, clientPresence{ID: id, DisplayName: name, Kind: "other", State: "other"})
+			result = append(result, clientPresence{ID: id, DisplayName: identity.DisplayName, Kind: "other", State: "other"})
 			found = len(result) - 1
 		}
 		if session.Status == "active" {
@@ -244,15 +239,11 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 	// has no session row. Preserve that evidence too, while deliberately
 	// omitting configuration paths: MCP clientInfo has no trustworthy path.
 	for name, seenAt := range state.ClientLastSeen {
-		rawIdentity := normalizeRawClientName(name)
-		name = sanitizeOtherClientName(name)
-		if rawIdentity == "" || known[rawIdentity] {
+		identity := clientidentity.FromStoredKey(name)
+		if identity.Key == "" || known[identity.RawNormalized] {
 			continue
 		}
-		if name == "" {
-			name = "Unknown client"
-		}
-		id := otherClientID(name, rawIdentity)
+		id := "other:" + identity.Key
 		found := -1
 		for i := range result {
 			if result[i].ID == id {
@@ -261,7 +252,7 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 			}
 		}
 		if found < 0 {
-			result = append(result, clientPresence{ID: id, DisplayName: name, Kind: "other", State: "other"})
+			result = append(result, clientPresence{ID: id, DisplayName: identity.DisplayName, Kind: "other", State: "other"})
 			found = len(result) - 1
 		}
 		if result[found].LastSeen == nil || seenAt.After(*result[found].LastSeen) {
@@ -291,36 +282,4 @@ func clientMatches(name string, aliases []string) bool {
 		}
 	}
 	return false
-}
-
-// sanitizeOtherClientName applies the same rendering boundary as persisted
-// client presence: clientInfo.name is supplied by a peer and can otherwise
-// inject terminal controls or produce unbounded rows from older session data.
-func sanitizeOtherClientName(raw string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
-		if r < 0x20 || r == 0x7f {
-			continue
-		}
-		if b.Len()+len(string(r)) > 128 {
-			break
-		}
-		b.WriteRune(r)
-	}
-	return strings.TrimSpace(b.String())
-}
-
-// normalizeRawClientName is used only for identity and alias matching. It must
-// run before display sanitization: stripping an escape prefix from an unknown
-// client must not turn it into a trusted supported-client alias.
-func normalizeRawClientName(raw string) string {
-	return strings.ToLower(strings.TrimSpace(raw))
-}
-
-// otherClientID keeps the client row stable without exposing an untrusted full
-// name. The display prefix is bounded and a hash of the raw normalized identity
-// prevents distinct long names that share a display prefix from collapsing.
-func otherClientID(displayName, rawIdentity string) string {
-	digest := sha256.Sum256([]byte(rawIdentity))
-	return "other:" + displayName + "-" + hex.EncodeToString(digest[:12])
 }

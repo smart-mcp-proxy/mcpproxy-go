@@ -12,7 +12,7 @@
       <div v-else-if="store.error" class="alert alert-error">{{ store.error }}</div>
       <div v-else class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
         <table class="table"><thead><tr><th>Client</th><th>State</th><th>Last seen</th><th>Sessions</th><th>Config path</th></tr></thead>
-          <tbody><template v-for="client in store.clients" :key="client.id"><tr class="cursor-pointer hover" @click="toggle(client.id)"><td class="font-medium">{{ client.display_name }}</td><td><span class="badge badge-sm">{{ stateLabel(client.state) }}</span><button v-if="client.connection_unverified" type="button" class="btn btn-ghost btn-xs ml-2" data-test="check-client-connection" @click.stop="checkConnection(client.id)">Check connection</button></td><td>{{ relative(client.last_seen) }}</td><td>{{ client.active_sessions }}</td><td><code class="text-xs">{{ client.display_path || '—' }}</code></td></tr>
+          <tbody><template v-for="client in store.clients" :key="client.id"><tr class="cursor-pointer hover" :class="focusedClient === client.id && 'bg-primary/10'" :data-test="focusedClient === client.id ? 'focused-client-row' : undefined" @click="toggle(client.id)"><td class="font-medium">{{ client.display_name }}</td><td><span class="badge badge-sm">{{ stateLabel(client.state) }}</span><button v-if="client.connection_unverified" type="button" class="btn btn-ghost btn-xs ml-2" data-test="check-client-connection" @click.stop="checkConnection(client.id)">Check connection</button></td><td>{{ relative(client.last_seen) }}</td><td>{{ client.active_sessions }}</td><td><code class="text-xs">{{ client.display_path || '—' }}</code></td></tr>
           <tr v-if="expanded === client.id"><td colspan="5" class="bg-base-200/40">
             <p v-if="client.reload_hint" class="text-sm mb-2">{{ client.reload_hint }}</p>
             <div v-if="clientScopeAvailable" class="flex gap-3 mb-2 text-sm">
@@ -55,6 +55,7 @@ const defaultTab = 'clients'
 function validTab(value: unknown): value is string { return typeof value === 'string' && tabs.some(item => item.id === value) }
 const tab = ref(validTab(route.query.tab) ? route.query.tab : defaultTab)
 const expanded = ref('')
+const focusedClient = ref('')
 const connectOpen = ref(false)
 const scopeQuery = useScopeQuery('clients')
 const clientScopeAvailable = computed(() => isScopeParamAvailable('client'))
@@ -90,6 +91,19 @@ watch(() => route.query.tab, value => {
 }, { immediate: true })
 async function toggle(id: string) { expanded.value = expanded.value === id ? '' : id; if (expanded.value) await store.loadDetail(id) }
 async function checkConnection(id: string) { expanded.value = id; await store.loadDetail(id) }
+async function focusClientFromRoute() {
+  const id = typeof route.query.focus === 'string' ? route.query.focus : ''
+  if (!id || !store.clients.some(client => client.id === id)) {
+    focusedClient.value = ''
+    return
+  }
+  focusedClient.value = id
+  if (expanded.value !== id) {
+    expanded.value = id
+    await store.loadDetail(id)
+  }
+}
+watch([() => route.query.focus, () => store.clients.map(client => client.id).join('|')], () => { void focusClientFromRoute() }, { immediate: true })
 function refreshClients() { void store.load() }
 function stateLabel(value: string) { return value.replaceAll('_', ' ') }
 function relative(value?: string | null) { return value ? new Date(value).toLocaleString() : 'Never' }

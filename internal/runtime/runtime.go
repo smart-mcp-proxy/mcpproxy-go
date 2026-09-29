@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -3940,7 +3941,7 @@ func (r *Runtime) UpdateOnboardingState(fn func(*storage.OnboardingState) error)
 // disabled, and UpdateOnboardingState keeps this write from racing connect or
 // onboarding mutations.
 func (r *Runtime) RecordClientSeen(clientName string) {
-	name := sanitizeClientName(clientName)
+	name := clientidentity.FromRaw(clientName).Key
 	if name == "" || r.storageManager == nil {
 		return
 	}
@@ -3995,7 +3996,7 @@ func clientDisconnectedAfterSeen(state *storage.OnboardingState, alias string, s
 	}
 	for _, client := range connect.GetAllClients() {
 		for _, knownAlias := range client.ClientInfoNames {
-			if strings.EqualFold(alias, knownAlias) {
+			if alias == clientidentity.FromRaw(knownAlias).Key {
 				if disconnectedAt := state.ClientDisconnectedAt[client.ID]; !disconnectedAt.IsZero() && !disconnectedAt.Before(seenAt) {
 					return true
 				}
@@ -4045,20 +4046,10 @@ func latestSeenForAliases(seen map[string]time.Time, aliases []string) *time.Tim
 	return latest
 }
 
-// sanitizeClientName keeps the persisted observation bounded and safe to
-// render in terminals or UI labels. ClientInfo.name is untrusted peer input.
+// sanitizeClientName returns the canonical safe key shared with session
+// presence. It retains a hash when rendering changes a raw unknown name.
 func sanitizeClientName(raw string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
-		if r < 0x20 || r == 0x7f {
-			continue
-		}
-		b.WriteRune(r)
-		if b.Len() >= 128 {
-			break
-		}
-	}
-	return strings.TrimSpace(b.String())
+	return clientidentity.FromRaw(raw).Key
 }
 
 func knownClientAliases() map[string]bool {

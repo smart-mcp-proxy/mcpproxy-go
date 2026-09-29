@@ -152,7 +152,7 @@ func TestClientsPresence_ListsInitializeOnlyUnknownClientWithoutConfigPath(t *te
 	for _, raw := range successData(t, rec)["clients"].([]any) {
 		row := raw.(map[string]any)
 		if row["kind"] == "other" && row["display_name"] == "local experimental client" {
-			require.True(t, strings.HasPrefix(row["id"].(string), "other:local experimental client-"))
+			require.Equal(t, "other:local experimental client", row["id"])
 			require.Equal(t, "local experimental client", row["display_name"])
 			require.Equal(t, "other", row["kind"])
 			require.Equal(t, "other", row["state"])
@@ -163,6 +163,28 @@ func TestClientsPresence_ListsInitializeOnlyUnknownClientWithoutConfigPath(t *te
 		}
 	}
 	t.Fatal("initialize-only unknown client is missing")
+}
+
+func TestClientsPresence_OrdinaryUnknownClientKeepsReadableID(t *testing.T) {
+	ctrl := &clientPresenceController{sessions: []*contracts.MCPSession{{
+		ID: "zed-session", ClientName: "zed", Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now(),
+	}}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	req.Header.Set("X-API-Key", "clients-admin-key")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	for _, raw := range successData(t, rec)["clients"].([]any) {
+		row := raw.(map[string]any)
+		if row["kind"] == "other" {
+			require.Equal(t, "other:zed", row["id"])
+			require.Equal(t, "zed", row["display_name"])
+			return
+		}
+	}
+	t.Fatal("ordinary unknown client is missing")
 }
 
 func TestClientsPresence_ListIsLightweightAndDetailUsesBoundedSessionPage(t *testing.T) {
@@ -303,6 +325,41 @@ func TestClientsPresence_EscapePrefixedKnownAliasRemainsOtherClient(t *testing.T
 		}
 	}
 	t.Fatal("escape-prefixed cursor must remain an unknown client")
+}
+
+func TestClientsPresence_InitializeAndSessionShareUnknownIdentity(t *testing.T) {
+	rt, err := proxyRuntime.New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0"}, "", zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	const rawName = "\x1bcursor"
+	rt.RecordClientSeen(rawName)
+	state, err := rt.GetOnboardingState()
+	require.NoError(t, err)
+	ctrl := &clientPresenceController{state: state, sessions: []*contracts.MCPSession{{
+		ID: "escaped-cursor", ClientName: rawName, Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now(),
+	}}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	req.Header.Set("X-API-Key", "clients-admin-key")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var otherRows []map[string]any
+	for _, raw := range successData(t, rec)["clients"].([]any) {
+		row := raw.(map[string]any)
+		if row["id"] == "cursor" {
+			require.Nil(t, row["last_seen"], "escaped client must not credit supported Cursor")
+		}
+		if row["kind"] == "other" {
+			otherRows = append(otherRows, row)
+		}
+	}
+	require.Len(t, otherRows, 1)
+	require.Equal(t, "cursor", otherRows[0]["display_name"])
+	require.Equal(t, float64(1), otherRows[0]["active_sessions"])
+	require.NotNil(t, otherRows[0]["last_seen"])
 }
 
 func TestClientsPresence_RejectsUnsupportedScopeBeforeReadingSessions(t *testing.T) {

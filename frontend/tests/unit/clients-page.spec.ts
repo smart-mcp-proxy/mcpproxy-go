@@ -49,7 +49,7 @@ describe('Clients page', () => {
     })
     ;(api.getClient as any).mockResolvedValue({
       success: true,
-      data: { ...initialClients[0], sessions: [{ id: 'session-1', work_session_id: 'work-1' }] },
+      data: { ...initialClients[0], reload_hint: 'Restart Cursor to load MCPProxy', sessions: [{ id: 'session-1', work_session_id: 'work-1' }] },
     })
     useSystemStore().$patch({ status: { listen_addr: '127.0.0.1:18081' } as any })
   })
@@ -116,6 +116,18 @@ describe('Clients page', () => {
     await wrapper.find('[data-test="check-client-connection"]').trigger('click')
     await flushPromises()
     expect(api.getClient).toHaveBeenCalledWith('cursor')
+  })
+
+  it('focuses the requested client and expands its reload hint', async () => {
+    const router = makeRouter()
+    await router.push('/clients?focus=cursor')
+    await router.isReady()
+    const wrapper = mount(Clients, { global: { plugins: [router], stubs: { ClientConnectList: true, AgentTokens: true, ModeSwitcher: true } } })
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="focused-client-row"]').text()).toContain('Cursor')
+    expect(api.getClient).toHaveBeenCalledWith('cursor')
+    expect(wrapper.text()).toContain('Restart Cursor to load MCPProxy')
   })
 
   it('resets to the default tab and removes an invalid tab while preserving unrelated parameters', async () => {
