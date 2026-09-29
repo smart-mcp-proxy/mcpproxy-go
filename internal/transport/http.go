@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -23,11 +24,17 @@ const (
 	TransportStdio          = "stdio"
 )
 
-var (
-	// GlobalTraceEnabled controls whether HTTP/SSE frame tracing is enabled
-	// This can be set by CLI flags or other callers
-	GlobalTraceEnabled = false
-)
+// globalTraceEnabled controls whether HTTP/SSE frame tracing is enabled. It is
+// atomic because background reconnects read it while tests (and CLI setup)
+// write it.
+var globalTraceEnabled atomic.Bool
+
+// SetGlobalTraceEnabled turns HTTP/SSE frame tracing on or off for transports
+// created afterwards. Set by CLI flags or other callers.
+func SetGlobalTraceEnabled(on bool) { globalTraceEnabled.Store(on) }
+
+// GlobalTraceEnabled reports whether HTTP/SSE frame tracing is enabled.
+func GlobalTraceEnabled() bool { return globalTraceEnabled.Load() }
 
 // HTTPError represents detailed HTTP error information for debugging
 type HTTPError struct {
@@ -520,7 +527,7 @@ func CreateHTTPTransportConfig(serverConfig *config.ServerConfig, oauthConfig *c
 		Headers:      serverConfig.Headers,
 		OAuthConfig:  oauthConfig,
 		UseOAuth:     oauthConfig != nil,
-		TraceEnabled: GlobalTraceEnabled, // Use global trace flag
+		TraceEnabled: GlobalTraceEnabled(), // Use global trace flag
 		ForwardNames: func() []string { return serverConfig.ForwardHeaders },
 	}
 }

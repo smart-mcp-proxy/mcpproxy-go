@@ -698,9 +698,9 @@ func fwdGrepTree(t *testing.T, root, needle string) []string {
 }
 
 func TestForwardHeaders_EchoedValuesReachNoSink(t *testing.T) {
-	prevTrace := uptransport.GlobalTraceEnabled
-	uptransport.GlobalTraceEnabled = true
-	t.Cleanup(func() { uptransport.GlobalTraceEnabled = prevTrace })
+	prevTrace := uptransport.GlobalTraceEnabled()
+	uptransport.SetGlobalTraceEnabled(true)
+	t.Cleanup(func() { uptransport.SetGlobalTraceEnabled(prevTrace) })
 	stopStdout := fwdCaptureStdout(t)
 
 	obsCore, observed := observer.New(zapcore.DebugLevel)
