@@ -135,9 +135,15 @@ type profileChangeNotifier struct {
 	// for them, so a client re-listing on tools/list_changed never resolves a
 	// selection the rename has not yet rewritten (F5.2).
 	holds int
-	wake  chan struct{}
-	stop  chan struct{}
-	done  chan struct{}
+	// delivering is set, atomically with the held() check, while the worker
+	// delivers a batch. hold() waits for it to clear, so a rename cannot begin
+	// between the worker's check and its sends (the batch it is delivering was
+	// published before the rename began) (F1.3).
+	delivering bool
+	idle       *sync.Cond // signalled when delivering clears
+	wake       chan struct{}
+	stop       chan struct{}
+	done       chan struct{}
 	// waitFor bounds how long the worker waits for a snapshot to be published
 	// before dropping its delta (the write that produced it failed to publish).
 	waitFor time.Duration
@@ -160,11 +166,13 @@ type pendingProfileDelta struct {
 }
 
 func newProfileChangeNotifier(p *MCPProxyServer, publish func(name, change string)) *profileChangeNotifier {
-	return &profileChangeNotifier{
+	n := &profileChangeNotifier{
 		p: p, publish: publish,
 		wake: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{}),
 		waitFor: 5 * time.Second,
 	}
+	n.idle = sync.NewCond(&n.mu)
+	return n
 }
 
 // start runs the worker. It stops with close().
@@ -227,9 +235,13 @@ func (n *profileChangeNotifier) publishedAtOrAfter(batch *pendingProfileDelta) (
 	return nil, false
 }
 
-// hold defers delivery until the returned release runs.
+// hold defers delivery until the returned release runs. It first waits for a
+// delivery already in flight to finish, so delivery and a hold never overlap.
 func (n *profileChangeNotifier) hold() (release func()) {
 	n.mu.Lock()
+	for n.delivering {
+		n.idle.Wait()
+	}
 	n.holds++
 	n.mu.Unlock()
 	var once sync.Once
@@ -246,6 +258,25 @@ func (n *profileChangeNotifier) held() bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.holds > 0
+}
+
+// beginDelivery atomically checks that no write holds delivery and marks a
+// delivery in flight.
+func (n *profileChangeNotifier) beginDelivery() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.holds > 0 {
+		return false
+	}
+	n.delivering = true
+	return true
+}
+
+func (n *profileChangeNotifier) endDelivery() {
+	n.mu.Lock()
+	n.delivering = false
+	n.mu.Unlock()
+	n.idle.Broadcast()
 }
 
 func (n *profileChangeNotifier) take() *pendingProfileDelta {
@@ -272,12 +303,16 @@ func (n *profileChangeNotifier) run() {
 			continue
 		}
 		n.deliver(batch)
+		n.endDelivery()
 	}
 }
 
 // awaitPublished waits until the runtime's current snapshot IS the batch's
-// newest snapshot or a later one, merging any newer delta that arrives meanwhile. It reports
-// false when the wait times out or the notifier stops.
+// newest snapshot or a later one and no rename holds delivery, merging any
+// newer delta that arrives meanwhile. The time a write holds delivery does not
+// count against the wait (F1.2). On true the caller is delivering (see
+// beginDelivery) and must call endDelivery; it reports false when the wait times
+// out or the notifier stops.
 func (n *profileChangeNotifier) awaitPublished(batch *pendingProfileDelta) bool {
 	deadline := time.Now().Add(n.waitFor)
 	for {
@@ -285,7 +320,9 @@ func (n *profileChangeNotifier) awaitPublished(batch *pendingProfileDelta) bool 
 			batch.cfg, batch.seq = more.cfg, more.seq
 			batch.delta.merge(more.delta)
 		}
-		if cur, ok := n.publishedAtOrAfter(batch); ok && !n.held() {
+		if n.held() {
+			deadline = time.Now().Add(n.waitFor) // a rename's hold is not a failed publish
+		} else if cur, ok := n.publishedAtOrAfter(batch); ok && n.beginDelivery() {
 			batch.cfg = cur
 			return true
 		}

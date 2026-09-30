@@ -373,3 +373,26 @@ func TestClientsService_UpgradeUnresolvedClientsFailClosed(t *testing.T) {
 		})
 	}
 }
+
+// F1.1: the FR-008a guard judges the bindings the apply would actually mint. An
+// unresolved client is never written, so it must not make the guard refuse (or
+// be named in the refusal's bindings) for a named profile.
+func TestClientsService_UpgradeGuardIgnoresUnresolvedClients(t *testing.T) {
+	h, port, _ := newUpgradeHarness(t, map[string]string{"codex": "client"})
+	port.access = map[string]string{"cursor": "denied"}
+	h.guard = ConservativeBindingGuard{}
+	ro := "ro"
+
+	prev, err := h.svc.PreviewAdminKeyUpgrade(context.Background(), h.actor(), UpgradeRequest{Profile: &ro})
+	require.NoError(t, err)
+	require.Len(t, prev.Preview, 1)
+	assert.NotEmpty(t, prev.Preview[0].Error)
+	assert.Nil(t, prev.Guard, "an unresolved client gets no binding, so there is nothing to refuse")
+
+	res, err := h.svc.ApplyAdminKeyUpgrade(context.Background(), h.actor(), UpgradeRequest{Profile: &ro})
+	require.NoError(t, err, "the guard must not refuse a request that mints nothing")
+	require.Len(t, res.Failed, 1)
+	assert.Equal(t, "cursor", res.Failed[0].ClientID)
+	assert.Empty(t, res.Upgraded)
+	assert.Empty(t, port.wrote)
+}

@@ -236,8 +236,18 @@ func combinedUpgradeToken(rows []UpgradeRow) string {
 
 // upgradeGuard runs the FR-008a guard over the whole request: the client
 // credentials as they would be with one new binding per row (only when a named
-// profile is given - an All-servers binding cannot be bypassed).
+// profile is given - an All-servers binding cannot be bypassed). Rows carrying
+// an error (an unresolved client, a failed preview) are never written, so they
+// create no binding and are left out: the guard judges what the apply would
+// actually mint.
 func (s *ClientsService) upgradeGuard(rows []UpgradeRow, req UpgradeRequest) error {
+	writable := make([]UpgradeRow, 0, len(rows))
+	for _, r := range rows {
+		if r.Error == "" {
+			writable = append(writable, r)
+		}
+	}
+	rows = writable
 	if req.Profile == nil || *req.Profile == "" || len(rows) == 0 {
 		return nil
 	}
