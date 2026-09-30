@@ -11,8 +11,8 @@
     "inputSchema": {
       "properties": {
         "args": {
+          "additionalProperties": true,
           "description": "Arguments to pass to the upstream tool as a native JSON object. Build arguments from the tool's compact signature ('sig') in retrieve_tools results — '*' marks required parameters, '~' marks a lossy signature (call describe_tool for the full JSON Schema before calling). Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects.",
-          "properties": {},
           "type": "object"
         },
         "args_json": {
@@ -51,8 +51,8 @@
     "inputSchema": {
       "properties": {
         "args": {
+          "additionalProperties": true,
           "description": "Arguments to pass to the upstream tool as a native JSON object. Build arguments from the tool's compact signature ('sig') in retrieve_tools results — '*' marks required parameters, '~' marks a lossy signature (call describe_tool for the full JSON Schema before calling). Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects.",
-          "properties": {},
           "type": "object"
         },
         "args_json": {
@@ -91,8 +91,8 @@
     "inputSchema": {
       "properties": {
         "args": {
+          "additionalProperties": true,
           "description": "Arguments to pass to the upstream tool as a native JSON object. Build arguments from the tool's compact signature ('sig') in retrieve_tools results — '*' marks required parameters, '~' marks a lossy signature (call describe_tool for the full JSON Schema before calling). Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects.",
-          "properties": {},
           "type": "object"
         },
         "args_json": {
@@ -135,8 +135,8 @@
           "type": "string"
         },
         "input": {
+          "additionalProperties": true,
           "description": "Input data accessible as global `input` variable in code (default: {})",
-          "properties": {},
           "type": "object"
         },
         "language": {
@@ -148,8 +148,8 @@
           "type": "string"
         },
         "options": {
+          "additionalProperties": true,
           "description": "Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (\u003e= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed). Batch concurrency is not an execution option: call_tools() defaults to the configured code_execution_max_parallel and is overridden per batch with call_tools(requests, {max_parallel}).",
-          "properties": {},
           "type": "object"
         },
         "script": {
