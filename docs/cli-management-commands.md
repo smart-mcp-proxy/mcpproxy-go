@@ -26,6 +26,9 @@ mcpproxy upstream list [flags]
 - `--output, -o` - Output format (table, json) [default: table]
 - `--log-level, -l` - Log level (trace, debug, info, warn, error) [default: warn]
 - `--config, -c` - Path to config file
+- `--profile` - Show only the servers of this profile's effective server set;
+  the tool count of each row becomes the number of tools visible under the
+  profile (needs the running daemon)
 - `--status` - Filter by health status (repeatable; a comma-separated value is
   equivalent to repeating the flag — several values select the union of their
   statuses): `ready`, `connecting`, `sign_in_required`, `needs_review`,
@@ -683,6 +686,12 @@ mcpproxy tools list [flags]
 - `--status` - Filter by state: `enabled`, `disabled`, `config-denied`
 - `--risk` - Filter by risk level: `read`, `write`, `destructive`
 - `--approval` - Filter by approval: `approved`, `pending`, `changed`
+- `--client` - View as a client (administrator only, global list): adds `ACCESS`
+  (`callable`, `visible`, `hidden`) and `REASON` columns, the verdict of each tool
+  for that client's connection. With a scoped token this exits `1` with
+  `operation requires admin access`
+- `--profile` - View as a profile (global list): adds the same columns. A
+  non-administrator sees only the visible tools and a count of the hidden ones
 - `--output, -o` - Output format: `table`, `json`, `yaml`
 - `--log-level, -l` - Log level [default: info]
 - `--config, -c` - Path to config file

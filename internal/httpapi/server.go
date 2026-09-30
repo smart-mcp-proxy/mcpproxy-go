@@ -6596,8 +6596,12 @@ func getBool(m map[string]interface{}, key string) bool {
 // @Param        limit   query     int                               false  "Maximum number of sessions to return (1-100, default 10)"
 // @Param        offset  query     int                               false  "Number of sessions to skip for pagination (default 0)"
 // @Param        status  query     string                            false  "Filter by session status"  Enums(active, closed)
+// @Param        profile query     string                            false  "Filter by the session's latest effective profile; - selects sessions with none (Spec 108)"
+// @Param        client  query     string                            false  "Filter by the client id the session's credential is bound to; - selects sessions with none (Spec 108)"
+// @Param        token   query     string                            false  "Filter by the token name the session initialized with; - selects sessions with none (Spec 108)"
+// @Param        agent   query     string                            false  "Alias of token"
 // @Success      200     {object}  contracts.GetSessionsResponse     "Sessions retrieved successfully"
-// @Failure      400     {object}  contracts.ErrorResponse           "Invalid status filter"
+// @Failure      400     {object}  contracts.ErrorResponse           "Invalid status filter, token and agent naming different tokens, or client_name (not supported here; filter by client)"
 // @Failure      401     {object}  contracts.ErrorResponse           "Unauthorized - missing or invalid API key"
 // @Failure      403     {object}  contracts.ErrorResponse           "Agent tokens cannot read MCP session history"
 // @Failure      405     {object}  contracts.ErrorResponse           "Method not allowed"
