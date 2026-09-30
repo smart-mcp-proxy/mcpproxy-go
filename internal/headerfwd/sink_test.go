@@ -127,3 +127,30 @@ func TestScrubErrorNoRawViaFormatOrWrapperAs(t *testing.T) {
 		t.Fatalf("wrapper-shaped As target reached the raw chain: %v", w)
 	}
 }
+
+// genericWrapErr has a generic Error() but keeps the raw cause (review round 11).
+type genericWrapErr struct{ Cause error }
+
+func (e *genericWrapErr) Error() string { return "upstream call failed" }
+func (e *genericWrapErr) Unwrap() error { return e.Cause }
+
+// fieldErr keeps the raw value in a field that Error() does not print.
+type fieldErr struct{ Detail string }
+
+func (e *fieldErr) Error() string { return "request rejected" }
+
+func TestScrubErrorAsRefusesMatchesHidingRawValue(t *testing.T) {
+	s := snapWith(t, "X-Tenant-Id", "tenant-secret-1")
+	gw := &genericWrapErr{Cause: errors.New("echo tenant-secret-1")}
+	got := ScrubError(fmt.Errorf("x tenant-secret-1: %w", gw), s, nil)
+	var w *genericWrapErr
+	if errors.As(got, &w) {
+		t.Fatal("wrapper whose cause carries the value must not be returned")
+	}
+	fe := &fieldErr{Detail: "tenant-secret-1"}
+	got = ScrubError(fmt.Errorf("y tenant-secret-1: %w", fe), s, nil)
+	var f *fieldErr
+	if errors.As(got, &f) {
+		t.Fatal("typed error holding the value in a field must not be returned")
+	}
+}

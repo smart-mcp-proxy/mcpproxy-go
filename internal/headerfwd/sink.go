@@ -116,11 +116,48 @@ func (e *scrubbedError) As(target any) bool {
 			return true
 		}
 	}
-	if m, ok := v.Interface().(error); ok && m != nil && e.scrub(m.Error()) != m.Error() {
+	if e.carriesValue(v.Interface()) {
 		v.Set(reflect.Zero(v.Type()))
 		return false
 	}
 	return true
+}
+
+// carriesValue reports whether a non-scrubbable As match exposes a forwarded
+// value anywhere reachable: its Error() text, its Go-syntax fields (%#v), or
+// any error in its Unwrap chain (single or joined).
+func (e *scrubbedError) carriesValue(x any) bool {
+	dirty := func(t string) bool { return e.scrub(t) != t }
+	if dirty(fmt.Sprintf("%#v", x)) {
+		return true
+	}
+	err, ok := x.(error)
+	if !ok || err == nil {
+		return false
+	}
+	seen := 0
+	var walk func(error) bool
+	walk = func(err error) bool {
+		if err == nil || seen > 64 {
+			return false
+		}
+		seen++
+		if dirty(err.Error()) || dirty(fmt.Sprintf("%#v", err)) {
+			return true
+		}
+		switch u := err.(type) {
+		case interface{ Unwrap() error }:
+			return walk(u.Unwrap())
+		case interface{ Unwrap() []error }:
+			for _, c := range u.Unwrap() {
+				if walk(c) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(err)
 }
 
 // Format prints only the scrubbed text for every verb, so %+v / %#v never
