@@ -5,6 +5,7 @@ package httpapi
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -23,6 +24,17 @@ func (c *serverEditionClientsController) GetCurrentConfig() *config.Config {
 func TestClientsRoutes_ServerEditionNotRegistered(t *testing.T) {
 	srv := NewServer(&serverEditionClientsController{}, zap.NewNop().Sugar(), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	req.Header.Set("X-API-Key", "clients-admin-key")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+}
+
+// Client bindings are local-machine credential state too: no server-edition
+// route exists for PUT /clients/{client}/binding, even for an administrator.
+func TestClientBindingRoute_ServerEditionNotRegistered(t *testing.T) {
+	srv := NewServer(&serverEditionClientsController{}, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/clients/cursor/binding", strings.NewReader(`{"profile":""}`))
 	req.Header.Set("X-API-Key", "clients-admin-key")
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)

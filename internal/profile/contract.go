@@ -118,6 +118,51 @@ const (
 	CredentialStateNone     CredentialState = "none"
 	CredentialStateRevoked  CredentialState = "revoked"
 	CredentialStateExpired  CredentialState = "expired"
+	// CredentialStateUnknown means the client's config was not read: the
+	// stat-only GET /connect listing (Spec 075 keeps that path free of
+	// content reads) reports it for connected rows. The on-demand
+	// GET /connect/{client} resolves the real state.
+	CredentialStateUnknown CredentialState = "unknown"
+)
+
+// Error codes carried in the `code` field of a Profiles v3 refusal body
+// (contracts/refusals.md).
+const (
+	ErrorCodeBindingBypassable  = "binding_bypassable_without_auth"
+	ErrorCodeNoClientCredential = "no_client_credential"
+)
+
+// GuardFix kinds offered by the FR-008a binding-guard refusal `fixes[]`.
+const (
+	GuardFixRequireMCPAuth      = "require_mcp_auth"
+	GuardFixSetAnonymousProfile = "set_anonymous_profile"
+)
+
+// ChangeKind is the `change` of a `profile_change` activity record
+// (data-model.md §5). The clients service writes assign/lock/unlock/forget/
+// rotate; the profiles service writes the rest.
+type ChangeKind string
+
+const (
+	ChangeCreate    ChangeKind = "create"
+	ChangeUpdate    ChangeKind = "update"
+	ChangeDelete    ChangeKind = "delete"
+	ChangeRename    ChangeKind = "rename"
+	ChangeClassify  ChangeKind = "classify"
+	ChangeAssign    ChangeKind = "assign"
+	ChangeLock      ChangeKind = "lock"
+	ChangeUnlock    ChangeKind = "unlock"
+	ChangeForget    ChangeKind = "forget"
+	ChangeRotate    ChangeKind = "rotate"
+	ChangeAnonymous ChangeKind = "anonymous"
+)
+
+// Staged-rotation states (FR-021a): the `diff.outcome` of a `rotate` record
+// and a client row's `rotation.state`.
+const (
+	RotationFinalized  = "finalized"
+	RotationRolledBack = "rolled_back"
+	RotationPending    = "pending"
 )
 
 // Surface names the caller of a profile-mutating operation, recorded on

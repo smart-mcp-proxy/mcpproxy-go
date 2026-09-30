@@ -284,62 +284,6 @@ func TestHandleConnectClient_TrueConflictStillReturns409(t *testing.T) {
 	assert.NotEmpty(t, resp.Error)
 }
 
-// TestHandleConnectClientPreview_MaskedNoSideEffects exercises the Spec 078 US1
-// preview endpoint end-to-end: it returns the exact entry a connect would write
-// with the API key masked, does not modify the config, and creates no backup.
-func TestHandleConnectClientPreview_MaskedNoSideEffects(t *testing.T) {
-	logger := zap.NewNop().Sugar()
-	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
-	srv := NewServer(mockCtrl, logger, nil)
-	home := t.TempDir()
-
-	cfgPath := connect.ConfigPath("claude-code", home)
-	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
-	original := []byte(`{"mcpServers":{"other":{"url":"http://x"}}}`)
-	require.NoError(t, os.WriteFile(cfgPath, original, 0o644))
-
-	const secret = "rest-secret-key-9999"
-	// require_mcp_auth on so a credential is written (masked in the preview).
-	svc := connect.NewServiceWithHome("127.0.0.1:8080", secret, home).WithRequireMCPAuth(true)
-	srv.SetConnectService(svc)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect/claude-code/preview", http.NoBody)
-	req.Header.Set("X-API-Key", "test-key")
-	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	rawBody := w.Body.Bytes()
-	assert.NotContains(t, string(rawBody), secret, "real API key must not appear in the preview payload")
-
-	var resp struct {
-		Success bool                   `json:"success"`
-		Data    connect.ConnectPreview `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(rawBody, &resp))
-	assert.True(t, resp.Success)
-	assert.Equal(t, cfgPath, resp.Data.ConfigPath)
-	assert.Equal(t, "mcpServers", resp.Data.ServerKey)
-	assert.Equal(t, "mcpproxy", resp.Data.ServerName)
-	assert.True(t, resp.Data.ContainsAPIKey)
-	assert.False(t, resp.Data.EntryExists)
-	assert.Equal(t, "accessible", resp.Data.AccessState)
-	assert.Contains(t, resp.Data.EntryText, "http://127.0.0.1:8080/mcp")
-	// claude-code carries the masked credential in a header, not the URL.
-	assert.Contains(t, resp.Data.EntryText, "X-API-Key")
-	assert.NotContains(t, resp.Data.EntryText, "apikey=")
-
-	// No write, no backup.
-	after, err := os.ReadFile(cfgPath)
-	require.NoError(t, err)
-	assert.Equal(t, string(original), string(after))
-	entries, err := os.ReadDir(filepath.Dir(cfgPath))
-	require.NoError(t, err)
-	for _, e := range entries {
-		assert.NotContains(t, e.Name(), ".bak.", "preview must not create a backup")
-	}
-}
-
 // TestHandleConnectClientPreview_HonorsServerName asserts the preview endpoint
 // previews the exact entry name a subsequent POST connect (which accepts
 // server_name) will write, instead of always defaulting to "mcpproxy" — so a

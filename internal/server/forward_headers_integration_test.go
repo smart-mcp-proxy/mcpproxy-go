@@ -269,7 +269,9 @@ func fwdText(res *mcp.CallToolResult) string {
 }
 
 func fwdCallReadRaw(c *client.Client, server, tool string) (*mcp.CallToolResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Generous: the Windows race build needs ~85s for the 50-client test, so a
+	// 30s per-call bound sits at the edge of a slow runner.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	req := mcp.CallToolRequest{}
 	req.Params.Name = "call_tool_read"
@@ -415,7 +417,7 @@ func TestForwardHeaders_FiftyConcurrentClientsKeepTheirOwnValue(t *testing.T) {
 			}
 			c := client.NewClient(tr)
 			defer c.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 			defer cancel()
 			if err := c.Start(ctx); err != nil {
 				errs <- "start: " + err.Error()
@@ -664,31 +666,35 @@ func TestForwardHeaders_DisabledViaEnvNothingForwarded(t *testing.T) {
 
 const echoSentinel = "SENTINEL-erin-7c1d9f"
 
-// captureStdout redirects os.Stdout (where the trace transport prints request
-// and response headers) until the returned function is called.
+// fwdLockedBuffer is a bytes.Buffer safe for the concurrent writers the trace
+// transport has (background discovery and health-check goroutines).
+type fwdLockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *fwdLockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *fwdLockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// fwdCaptureStdout captures the trace transport's console output (request and
+// response headers, otherwise printed to stdout) until the test ends. It
+// redirects the transport's writer rather than swapping the os.Stdout
+// variable, which races with every goroutine that prints in the background.
 func fwdCaptureStdout(t *testing.T) func() string {
 	t.Helper()
-	orig := os.Stdout
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = w
-	var buf bytes.Buffer
-	done := make(chan struct{})
-	go func() { _, _ = io.Copy(&buf, r); close(done) }()
-	var once sync.Once
-	var out string
-	stop := func() string {
-		once.Do(func() {
-			os.Stdout = orig
-			_ = w.Close()
-			<-done
-			_ = r.Close()
-			out = buf.String()
-		})
-		return out
-	}
-	t.Cleanup(func() { stop() })
-	return stop
+	buf := &fwdLockedBuffer{}
+	restore := uptransport.SetTraceOutput(buf)
+	t.Cleanup(restore)
+	return buf.String
 }
 
 // grepTree returns every file under root whose bytes contain needle.

@@ -474,6 +474,61 @@ catalog with associated fix steps and fixer keys.
 
 ---
 
+### `mcpproxy connect <client>`
+
+Register MCPProxy in an AI client's MCP configuration (Claude Code, Cursor,
+Windsurf, VS Code, Codex, Gemini, OpenCode, ZCode). Connect **never writes the
+instance admin API key**: every write carries a per-client credential
+(`mcp_cli_...`) that identifies the client and binds it to a profile. The
+credential is valid on MCP endpoints only, so it cannot open the REST API.
+
+**Flags:**
+- `--profile <name|all>` - the profile the client's credential binds to;
+  `all` is the built-in All servers scope. A new credential defaults to
+  `all` (switchable); a reconnect **keeps the client's existing binding**
+  unless `--profile` is given
+- `--lock` / `--switchable` - lock the client to its profile so it can never
+  switch (the default for a named profile), or let it switch within the
+  profile's `switchable_to` (the default for `all`); mutually exclusive
+- `--keyless` - write an entry with no credential; only possible while
+  `require_mcp_auth` is off, and the client is then unidentified. It cannot be
+  combined with `--profile`, `--lock` or `--switchable`
+- `--force` - overwrite an existing entry; `--name` - server name in the client
+  config; `--all` - connect every supported client with the same options
+  (a refusal for one client is reported and never aborts the others)
+
+**Output:**
+```text
+MCPProxy registered in Cursor as "mcpproxy"
+Backup: ~/.cursor/mcp.json.bak.20260930-101500
+Credential: mcp_cli_•••• (token client-cursor, profile ro, locked)
+Config: ~/.cursor/mcp.json
+Next: Restart Cursor to load MCPProxy
+```
+
+The credential is shown masked; the secret is written only into the client's
+config file. Reconnecting over an active credential is a **staged rotation**:
+the old secret keeps working until the new config has been written.
+
+With `require_mcp_auth` off, a named binding is refused (exit 1, nothing
+written) when an anonymous caller could reach more than the client, because
+the client could then escape its profile by omitting its credential. The
+refusal lists the fixes: turn `require_mcp_auth` on, or set `anonymous_profile`
+to a profile that is not wider than the binding.
+
+With a running daemon the write goes through the daemon (it mints, records and
+notifies); with none, the command runs locally over the data directory with the
+strictest guard (any named binding is refused while `require_mcp_auth` is off).
+If a running mcpproxy holds the database but its socket was not reachable, the
+command reports that instead of guessing.
+
+**Examples:**
+```bash
+mcpproxy connect cursor --profile ro           # Bind Cursor to "ro" (locked)
+mcpproxy connect cursor --profile work --switchable
+mcpproxy connect --all --profile all           # Every supported client, all servers
+```
+
 ## Common Workflows
 
 ### Debugging Server Connection Issues

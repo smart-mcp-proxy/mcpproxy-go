@@ -56,7 +56,10 @@ type surfaceHeaderTransport struct {
 func (t *surfaceHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	needClientHeader := req.Header.Get("X-MCPProxy-Client") == ""
 	needAPIKey := t.apiKey != "" && req.Header.Get("X-API-Key") == ""
-	if needClientHeader || needAPIKey {
+	// Spec 108 FR-030: profile_change records attribute the surface. The
+	// header is attribution only (never authorization).
+	needSurface := req.Header.Get("X-MCPProxy-Surface") == ""
+	if needClientHeader || needAPIKey || needSurface {
 		// Clone the header map so we don't mutate caller-owned state.
 		newHeaders := req.Header.Clone()
 		if newHeaders == nil {
@@ -67,6 +70,9 @@ func (t *surfaceHeaderTransport) RoundTrip(req *http.Request) (*http.Response, e
 		}
 		if needAPIKey {
 			newHeaders.Set("X-API-Key", t.apiKey)
+		}
+		if needSurface {
+			newHeaders.Set("X-MCPProxy-Surface", "cli")
 		}
 		reqCopy := req.Clone(req.Context())
 		reqCopy.Header = newHeaders

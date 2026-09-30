@@ -116,6 +116,8 @@ Compiled policies live inside the existing `profileIndex` (Spec 105 D17), built 
 | `PendingHash`, `PendingPrefix` | `pending_hash,omitempty`, `pending_prefix,omitempty` | `kind=client` only, during a staged rotation (FR-021a); indexed by bucket `agent_token_pending` (pending hash → record hash) so the pending secret authenticates as the same record |
 | `RotationStartedAt` | `rotation_started_at,omitempty` | set with `PendingHash`; drives the 24-hour custom-client overlap and `client_rotation_pending` |
 | `ConnectedAt` | `connected_at,omitempty` | when connect/add minted it |
+
+A rotation keeps the record's `CreatedAt`/`ExpiresAt` (extending expiry on rotate is a 108-f follow-up), so the merged `ExpiresAt-CreatedAt ≤ 365 days` invariant needs no change; an **expired** record is re-minted with a fresh 365-day expiry by connect.
 | `ConfigPath` | `-` (never stored) | resolved live from the connect registry |
 
 **Secret format**: regular tokens `mcp_agt_` + 64 hex; client credentials `mcp_cli_` + 64 hex (same HMAC-SHA256 hashing). A pre-108 binary only treats `mcp_agt_` as an agent token, so a client credential can never authenticate there as a wildcard agent token (rollback safety, research D27).
@@ -149,13 +151,13 @@ One call per request returns it with the `(index, snapshot)` pair (Spec 105 pair
 | `TokenName` | `token_name,omitempty` | `AuthContext.AgentName` for agent/client tokens |
 | `BlockReason` | `block_reason,omitempty` | `profile_tier`, `profile_rule`, `profile_unannotated`, `profile_code_execution`, `profile_management` (new); existing block causes keep their current metadata and are not renamed |
 
-New `ActivityType`: `profile_change`, metadata: `{actor_kind, actor_name, surface, change, profile, previous_profile, client_id, token_name, diff}` with `change ∈ create|update|delete|rename|classify|assign|lock|unlock|forget|rotate|anonymous`. The clients service writes `assign`/`lock`/`unlock` (binding changes; a mint via connect or `client add` is `assign` with empty `previous_profile`), `rotate` (diff carries old and new `token_name`, never a secret) and `forget` (revoked `token_name`, `disconnected`); the profiles service writes the rest (FR-030).
+New `ActivityType`: `profile_change`, metadata: `{actor_kind, actor_name, surface, change, profile, previous_profile, client_id, token_name, diff}` with `change ∈ create|update|delete|rename|classify|assign|lock|unlock|forget|rotate|anonymous`. The clients service writes `assign`/`lock`/`unlock` (binding changes; a mint via connect or `client add` is `assign` with empty `previous_profile`), `rotate` (diff carries old and new `token_name`, never a secret) and `forget` (revoked `token_name`, `disconnected`); the profiles service writes the rest (FR-030). Diff keys: `rotate` carries `old_token_prefix`, `new_token_prefix` (12-character display prefixes, never a secret) and `outcome` (`finalized` \| `rolled_back`); `forget` carries `disconnected` (bool) and, for an undo of a connect, `reason: "undo"`; an `assign` that also changes the mode carries `mode: {from, to}`. `actor_kind` is the credential kind (`api_key`, `socket`, `agent_token`, `bearer_jwt`, `cookie`, `anonymous`, `system` for the staged-rotation reconciler, or `cli_offline` for a `mcpproxy connect` that ran with no daemon reachable); `actor_name` is the token name or user email, empty otherwise.
 
 `ActivityFilter` gains `Profile`, `ClientID`, `ClientName` (advisory), `TokenName` with the `-` = empty sentinel; `Matches` checks struct fields and the legacy metadata keys (`profile`, `agent_name`).
 
 ## 6. `storage.SessionRecord` / `server.SessionInfo` (extended)
 
-`TokenName`, `ClientID` (set at initialize from the auth context), `Profile`, `ProfileSource` (latest effective, updated on each call). `SessionStore` adds `SessionsForToken(name) []string` over its existing map. The session's **base** (pin, bound profile or `anonymous_profile`) is deliberately **not** stored: it changes on reassignment and rename, so every consumer (FR-027 notification fan-out, T072a) derives it at use time from `TokenName` → the token's current `profile_pin` in the token store, or, for a session with no `TokenName` (anonymous), from the current snapshot's `anonymous_profile`.
+`TokenName`, `ClientID` (set at initialize from the auth context), `Profile`, `ProfileSource` (latest effective, updated on each call). `SessionStore` adds `SessionsForToken(name) []string` over its existing map. The session's **base** (pin, bound profile or `anonymous_profile`) is deliberately **not** stored: it changes on reassignment and rename, so every consumer (FR-027 notification fan-out, T072a) derives it at use time from `TokenName` → the token's current `profile_pin` in the token store, or, for a session with no `TokenName` (anonymous), from the current snapshot's `anonymous_profile`. `SessionInfo` also carries an unexported pointer to the MCP server instance serving the session (stamped from `mcpserver.ServerFromContext` at initialize, never persisted), which the binding-change notification uses to send `tools/list_changed` on the right routing-mode instance.
 
 ## 7. Derived views (no storage)
 
@@ -171,7 +173,9 @@ New `ActivityType`: `profile_change`, metadata: `{actor_kind, actor_name, surfac
 
 ## 8. Events
 
-`profiles.changed {name, change}`, `client.binding_changed {client_id, token_name, profile, previous_profile, mode}` added to `internal/runtime/events.go`; `active_profile.changed` retained during deprecation.
+`BindingGuardDelta` (FR-008a) is defined as `Delta = {b in bindings(candidate) : bypassable(b, candidate) and not (b in bindings(current) and bypassable(b, current))}` with binding identity = `client_id`; both states are compiled with the same profile index and the tool set is the currently published snapshot, evaluated once per call; a candidate with `require_mcp_auth` on has an empty delta. The contract types and the refusal (`BindingRef`, `GuardFix`, `BindingGuard`, `*BindingGuardError`) live in `internal/runtime/binding_guard.go`; the evaluator lives in `internal/server/profile_binding_guard.go` (it needs the unexported profile index) and is injected through `Runtime.SetBindingGuard`. One mutex (`Runtime.bindingWriteMu`) is held across guard check and write by every guarded path, so two individually safe concurrent writes cannot combine into a bypassable state.
+
+`profiles.changed {name, change}`, `client.binding_changed {client_id, token_name, profile, previous_profile, mode}` added to `internal/runtime/events.go`; `active_profile.changed` retained during deprecation. `client.binding_changed` is **administrator-only** on SSE (it discloses bindings, FR-032 rule): scoped callers never receive it.
 
 ## 9. State transitions — client credential
 

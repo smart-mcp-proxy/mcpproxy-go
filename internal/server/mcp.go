@@ -519,6 +519,15 @@ func NewMCPProxyServer(
 		// Store/update session information with capabilities
 		sessionStore.SetSession(sessionID, clientName, clientVersion, hasRoots, hasSampling, experimental)
 
+		// Spec 108 FR-028 (plan D23): record which credential authenticated
+		// this session and which server instance serves it, so a binding
+		// change can find the session and notify it on the right instance.
+		// The credential never changes mid-connection, so this is once.
+		if ac := auth.AuthContextFromContext(ctx); ac != nil && ac.AgentName != "" {
+			sessionStore.SetSessionIdentity(sessionID, ac.AgentName, ac.ClientID)
+		}
+		sessionStore.SetSessionServer(sessionID, mcpserver.ServerFromContext(ctx))
+
 		// Spec 044 (T038): feed the activation funnel. Mark first-ever client
 		// + record the sanitized clientInfo.name in the capped seen-ever list.
 		// Plumbed via runtime → telemetry service → ActivationStore so the

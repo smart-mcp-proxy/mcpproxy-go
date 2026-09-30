@@ -161,14 +161,19 @@ jobs:
       # atomic coverage (the E2E workflow's -short, coverage-free run of the
       # same package takes ~450s), so the default 10m package timeout is one
       # slow runner away from "panic: test timed out" — which is how the leg
-      # failed on the first green-again push after #1266.
+      # failed on the first green-again push after #1266. It has since grown to
+      # ~1100-1200s, so the bound is 40m to leave real headroom.
       - name: Run unit tests (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: go test -v -race -timeout 20m '-coverprofile=coverage.out' -covermode=atomic '-skip=E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint' ./...
+        run: go test -v -race -timeout 40m '-coverprofile=coverage.out' -covermode=atomic '-skip=E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint' ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
+      # internal/server under -race takes ~10 minutes on the macOS runner and
+      # grows with every spec's tests, so the default 10m package timeout
+      # ("panic: test timed out") is no longer enough there; match the
+      # Windows leg's 20m.
       - name: Run unit tests (Unix)
         if: matrix.os != 'windows-latest'
         run: go test -v -race -timeout 20m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...

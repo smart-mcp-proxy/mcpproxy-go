@@ -319,6 +319,7 @@ func TestConnect_ClaudeCode_AuthOff_NoKeyWritten(t *testing.T) {
 func TestConnect_ClaudeCode_AuthOn_UsesHeader(t *testing.T) {
 	svc, _ := testServiceWithKey(t)
 	svc.WithRequireMCPAuth(true)
+	minter := withFakeMinter(svc)
 
 	result, err := svc.Connect("claude-code", "", false)
 	if err != nil {
@@ -341,8 +342,8 @@ func TestConnect_ClaudeCode_AuthOn_UsesHeader(t *testing.T) {
 	if !ok {
 		t.Fatalf("Expected headers object, got %T", entry["headers"])
 	}
-	if headers["X-API-Key"] != "test-key-123" {
-		t.Errorf("Expected X-API-Key header, got %v", headers["X-API-Key"])
+	if headers["X-API-Key"] != minter.lastSecret() || headers["X-API-Key"] == "test-key-123" {
+		t.Errorf("Expected the minted client credential in X-API-Key (never the admin key), got %v", headers["X-API-Key"])
 	}
 }
 
@@ -487,6 +488,7 @@ func TestConnect_ZCode_PreservesSiblingServer(t *testing.T) {
 func TestConnect_ZCode_AuthOn_UsesHeader(t *testing.T) {
 	svc, _ := testServiceWithKey(t)
 	svc.WithRequireMCPAuth(true)
+	minter := withFakeMinter(svc)
 
 	result, err := svc.Connect("zcode", "", false)
 	if err != nil {
@@ -509,8 +511,8 @@ func TestConnect_ZCode_AuthOn_UsesHeader(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected headers object, got %T", entry["headers"])
 	}
-	if headers["X-API-Key"] != "test-key-123" {
-		t.Errorf("expected X-API-Key header, got %v", headers["X-API-Key"])
+	if headers["X-API-Key"] != minter.lastSecret() || headers["X-API-Key"] == "test-key-123" {
+		t.Errorf("expected the minted client credential in X-API-Key, got %v", headers["X-API-Key"])
 	}
 }
 
@@ -1124,6 +1126,10 @@ func TestConnect_ClaudeDesktop_BridgeCredentialCarrier(t *testing.T) {
 		t.Run(map[bool]string{true: "auth-on", false: "auth-off"}[authOn], func(t *testing.T) {
 			svc, homeDir := testServiceWithKey(t)
 			svc.WithRequireMCPAuth(authOn)
+			var minter *fakeMinter
+			if authOn {
+				minter = withFakeMinter(svc)
+			}
 
 			cfgPath := ConfigPath("claude-desktop", homeDir)
 			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
@@ -1148,8 +1154,11 @@ func TestConnect_ClaudeDesktop_BridgeCredentialCarrier(t *testing.T) {
 			}
 			if authOn {
 				lastArg, _ := args[len(args)-1].(string)
-				if lastArg != "X-API-Key:test-key-123" {
-					t.Errorf("Expected --header X-API-Key:test-key-123, got %v", lastArg)
+				if lastArg != "X-API-Key:"+minter.lastSecret() {
+					t.Errorf("Expected --header X-API-Key:<minted client credential>, got %v", lastArg)
+				}
+				if strings.Contains(string(raw), "test-key-123") {
+					t.Errorf("the admin API key must never be written, got: %s", raw)
 				}
 				if args[len(args)-2] != "--header" {
 					t.Errorf("Expected --header flag before value, got %v", args[len(args)-2])
@@ -1404,36 +1413,60 @@ func TestBaseURL_NoQuery(t *testing.T) {
 	}
 }
 
-// Spec 078 security fix: with require_mcp_auth off (the default), no credential
-// is written into a client config even when an API key is configured.
-func TestEntryParams_AuthOff_NoCredential(t *testing.T) {
-	svc := NewService("127.0.0.1:8080", "my-secret") // require_mcp_auth defaults false
-	p := svc.entryParams(false)
-	if p.credential != "" {
-		t.Errorf("expected no credential when auth is off, got %q", p.credential)
+// Spec 108 FR-024: connect never embeds the admin API key. planCredential
+// decides whether a write mints a client credential at all (plan D9/D10).
+func TestPlanCredential(t *testing.T) {
+	strp := func(s string) *string { return &s }
+	tests := []struct {
+		name    string
+		auth    bool
+		minter  bool
+		intent  CredentialIntent
+		wantErr error
+		wantMnt bool
+	}{
+		{name: "auth off, no minter: legacy keyless entry", auth: false, minter: false},
+		{name: "auth on, no minter: refused, never the admin key", auth: true, minter: false, wantErr: ErrNoCredentialMinter},
+		{name: "auth off with a minter still mints (identity + binding)", auth: false, minter: true, wantMnt: true},
+		{name: "auth on with a minter mints", auth: true, minter: true, wantMnt: true},
+		{name: "keyless with auth on is refused", auth: true, minter: true, intent: CredentialIntent{Keyless: true}, wantErr: ErrKeylessRequiresAuthOff},
+		{name: "keyless with auth off is credential-less", auth: false, minter: true, intent: CredentialIntent{Keyless: true}},
+		{name: "keyless with a profile is refused", auth: false, minter: true, intent: CredentialIntent{Keyless: true, Profile: strp("ro")}, wantErr: ErrKeylessWithProfile},
+		{name: "keyless with a mode is refused", auth: false, minter: true, intent: CredentialIntent{Keyless: true, Mode: strp("locked")}, wantErr: ErrKeylessWithProfile},
+		{name: "keyless with All servers (empty profile) is allowed", auth: false, minter: true, intent: CredentialIntent{Keyless: true, Profile: strp("")}},
 	}
-	if svc.containsCredential() {
-		t.Error("containsCredential must be false when auth is off")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewService("127.0.0.1:8080", "admin-secret").WithRequireMCPAuth(tt.auth)
+			if tt.minter {
+				withFakeMinter(svc)
+			}
+			mint, err := svc.planCredential(tt.intent)
+			if err != tt.wantErr {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if mint != tt.wantMnt {
+				t.Fatalf("mint = %v, want %v", mint, tt.wantMnt)
+			}
+		})
 	}
 }
 
-// With require_mcp_auth on, the credential is present and the query carrier
-// URL-escapes special characters.
-func TestEntryParams_AuthOn_CredentialPresent(t *testing.T) {
-	svc := NewService("127.0.0.1:8080", "key with spaces&x=1").WithRequireMCPAuth(true)
-	p := svc.entryParams(false)
-	if p.credential != "key with spaces&x=1" {
-		t.Errorf("expected raw credential, got %q", p.credential)
+// The query carrier URL-escapes a real secret but leaves the display mask and
+// the pending placeholder literal.
+func TestCredentialQuery(t *testing.T) {
+	base := "http://127.0.0.1:8080/mcp"
+	if got := credentialQuery(base, ""); got != base {
+		t.Errorf("no credential must leave the URL clean, got %s", got)
 	}
-	if !svc.containsCredential() {
-		t.Error("containsCredential must be true when auth is on with a key")
+	if got := credentialQuery(base, "a b&x=1"); strings.Contains(got, " ") || !strings.Contains(got, "apikey=a+b%26x%3D1") {
+		t.Errorf("a real credential must be URL-escaped, got %s", got)
 	}
-	q := credentialQuery(p.baseURL, p.credential)
-	if strings.Contains(q, " ") {
-		t.Errorf("query carrier must URL-escape spaces, got %s", q)
+	if got := credentialQuery(base, maskClientCredential); got != base+"?apikey="+maskClientCredential {
+		t.Errorf("the mask stays literal, got %s", got)
 	}
-	if !strings.Contains(q, "apikey=") {
-		t.Errorf("expected apikey query, got %s", q)
+	if got := credentialQuery(base, pendingCredential); got != base+"?apikey="+pendingCredential {
+		t.Errorf("the pending placeholder stays literal, got %s", got)
 	}
 }
 
@@ -1758,19 +1791,19 @@ func TestConnectWithPrecondition_StaleTokenRefuses(t *testing.T) {
 		apiKey, requireAuth := "key-one", false
 		svc := NewServiceWithHome("127.0.0.1:8080", apiKey, home).
 			WithConfigProvider(func() (string, string, bool) { return "127.0.0.1:8080", apiKey, requireAuth })
+		withFakeMinter(svc)
 
 		preview, err := svc.Preview("claude-code", "mcpproxy")
 		if err != nil {
 			t.Fatalf("Preview: %v", err)
 		}
 		if preview.ContainsAPIKey {
-			t.Fatal("fixture should preview a keyless entry")
+			t.Fatal("fixture should never preview the admin key")
 		}
 
-		// The user is looking at a keyless preview; auth is toggled on behind
-		// their back. Writing now would embed a credential the FR-004 notice
-		// never announced — the token must refuse even though the FILE is
-		// untouched.
+		// The user is looking at a preview taken with auth off; auth is toggled
+		// on behind their back. The token binds the auth toggle, so it must
+		// refuse even though the FILE is untouched.
 		requireAuth = true
 
 		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)

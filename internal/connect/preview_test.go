@@ -92,12 +92,10 @@ func readWrittenEntry(t *testing.T, svc *Service, clientID, serverName string) m
 // TestPreview_EqualsWrite pins the core US1 guarantee: for every supported
 // client, the entry the preview is derived from is byte-for-byte the entry a
 // subsequent Connect writes — same key, same shape (Spec 078 FR-002, SC-004).
-// It compares against the SHARED constructor with the real (unmasked) URL, then
-// separately confirms the preview payload masks that URL.
+// Since Spec 108 the credential is the per-client `mcp_cli_` secret the minter
+// issued (in both auth modes: identity and binding do not depend on auth);
+// the preview shows the mask in the same position.
 func TestPreview_EqualsWrite(t *testing.T) {
-	// Matrix: every supported client × require_mcp_auth on/off. The previewed
-	// entry must equal the written entry's shape for the same configuration
-	// (Spec 078 SC-004), with the credential masked in the preview only.
 	for _, authOn := range []bool{false, true} {
 		authOn := authOn
 		for _, clientID := range supportedPreviewClients {
@@ -111,11 +109,18 @@ func TestPreview_EqualsWrite(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				svc, home := testServiceWithKey(t)
 				svc.WithRequireMCPAuth(authOn)
+				minter := withFakeMinter(svc)
 				seedClientConfig(t, home, clientID)
 
 				preview, err := svc.Preview(clientID, "mcpproxy")
 				if err != nil {
 					t.Fatalf("Preview: %v", err)
+				}
+				if preview.ContainsAPIKey {
+					t.Fatal("contains_api_key must always be false: connect never writes the admin key")
+				}
+				if preview.Credential != maskClientCredential || !strings.HasPrefix(preview.Credential, "mcp_cli_") {
+					t.Fatalf("preview credential = %q, want the masked mcp_cli_ value", preview.Credential)
 				}
 
 				res, err := svc.Connect(clientID, "mcpproxy", true)
@@ -125,64 +130,65 @@ func TestPreview_EqualsWrite(t *testing.T) {
 				if !res.Success {
 					t.Fatalf("Connect not successful: %+v", res)
 				}
+				issuedSecret := minter.lastSecret()
+				if issuedSecret == "" || minter.commits != 1 || minter.aborts != 0 {
+					t.Fatalf("expected one issued+committed credential, got secret=%q commits=%d aborts=%d", issuedSecret, minter.commits, minter.aborts)
+				}
 
 				written := readWrittenEntry(t, svc, clientID, "mcpproxy")
-
-				// The write and preview both call buildServerEntry — the single
-				// source of truth. Unmasked params == written; masked == preview.
-				wantUnmasked := buildServerEntry(clientID, svc.entryParams(false))
-				if got, want := marshalEntry(t, written), marshalEntry(t, wantUnmasked); got != want {
+				wantWritten := buildServerEntry(clientID, svc.entryParams(issuedSecret))
+				if got, want := marshalEntry(t, written), marshalEntry(t, wantWritten); got != want {
 					t.Fatalf("written entry != shared constructor output\n got: %s\nwant: %s", got, want)
 				}
-				wantMasked := buildServerEntry(clientID, svc.entryParams(true))
+				wantMasked := buildServerEntry(clientID, svc.entryParams(maskClientCredential))
 				if got, want := marshalEntry(t, preview.Entry), marshalEntry(t, wantMasked); got != want {
 					t.Fatalf("preview entry != masked constructor output\n got: %s\nwant: %s", got, want)
 				}
-
-				// Spec 078 security fix: with auth off, the written config must
-				// contain no credential at all.
-				if !authOn {
-					if strings.Contains(marshalEntry(t, written), "apikey") ||
-						strings.Contains(marshalEntry(t, written), "test-key-123") ||
-						strings.Contains(marshalEntry(t, written), "headers") {
-						t.Fatalf("auth-off write must embed no credential, got: %s", marshalEntry(t, written))
-					}
-					if preview.ContainsAPIKey {
-						t.Fatal("auth-off preview must report contains_api_key=false")
-					}
+				if strings.Contains(marshalEntry(t, written), "test-key-123") {
+					t.Fatalf("the admin API key must never be written, got: %s", marshalEntry(t, written))
+				}
+				if res.Credential != maskClientCredential || res.TokenName != "client-"+clientID {
+					t.Fatalf("result must carry the masked credential and token name, got %+v", res)
 				}
 			})
 		}
 	}
 }
 
-// TestPreview_MasksCredential verifies the real API key never appears anywhere
-// in the preview payload while ContainsAPIKey honestly flags that a credential
-// is written, and the base URL stays visible (Spec 078 FR-004). Runs with
-// require_mcp_auth on (the only mode that writes a credential).
+// TestPreview_MasksCredential verifies neither the minted secret nor the admin
+// key appears anywhere in the preview payload, while the credential is shown
+// masked with its literal mcp_cli_ prefix and the base URL stays visible
+// (Spec 078 FR-004, Spec 108 FR-024).
 func TestPreview_MasksCredential(t *testing.T) {
-	const secret = "super-secret-key-1234"
-	svc, home := serviceWithKey(t, secret)
+	const adminKey = "super-secret-key-1234"
+	svc, home := serviceWithKey(t, adminKey)
 	svc.WithRequireMCPAuth(true)
+	minter := withFakeMinter(svc)
 	seedClientConfig(t, home, "claude-code")
 
 	preview, err := svc.Preview("claude-code", "mcpproxy")
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
 	}
+	if len(minter.issued) != 0 {
+		t.Fatal("a preview must not mint anything")
+	}
 
 	payload, err := json.Marshal(preview)
 	if err != nil {
 		t.Fatalf("marshal preview: %v", err)
 	}
-	if strings.Contains(string(payload), secret) {
-		t.Fatalf("real API key leaked into preview payload: %s", payload)
+	if strings.Contains(string(payload), adminKey) {
+		t.Fatalf("admin API key leaked into preview payload: %s", payload)
 	}
-	if !preview.ContainsAPIKey {
-		t.Fatal("ContainsAPIKey must be true when auth is on with a key")
+	if preview.ContainsAPIKey {
+		t.Fatal("ContainsAPIKey must be false")
 	}
-	if !strings.Contains(preview.EntryText, apiKeyMask) {
-		t.Fatalf("EntryText should show the mask, got: %s", preview.EntryText)
+	if !strings.Contains(preview.EntryText, maskClientCredential) {
+		t.Fatalf("EntryText should show the masked credential, got: %s", preview.EntryText)
+	}
+	if strings.Contains(preview.EntryText, "mcp_agt_") {
+		t.Fatalf("the credential must never look like an agent token: %s", preview.EntryText)
 	}
 	if !strings.Contains(preview.EntryText, "http://127.0.0.1:8080/mcp") {
 		t.Fatalf("EntryText should keep the base URL visible, got: %s", preview.EntryText)
@@ -375,6 +381,7 @@ func TestPreview_UnknownClient(t *testing.T) {
 func TestPreview_LiveConfigProvider(t *testing.T) {
 	svc, home := serviceWithKey(t, "live-key-xyz")
 	seedClientConfig(t, home, "claude-code")
+	minter := withFakeMinter(svc)
 
 	// Start snapshot as auth-on; the provider overrides it live.
 	svc.WithRequireMCPAuth(true)
@@ -383,39 +390,35 @@ func TestPreview_LiveConfigProvider(t *testing.T) {
 		return "127.0.0.1:8080", "live-key-xyz", requireAuth
 	})
 
-	// Auth OFF live: preview and write must embed NO credential, even though the
-	// startup snapshot said auth-on.
-	preview, err := svc.Preview("claude-code", "mcpproxy")
+	// Auth OFF live: the admin key is never written (even though the startup
+	// snapshot said auth-on), and --keyless is possible.
+	preview, err := svc.PreviewWithIntent("claude-code", "mcpproxy", CredentialIntent{Keyless: true})
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
 	}
-	if preview.ContainsAPIKey {
-		t.Fatal("auth-off (live) preview must report contains_api_key=false despite auth-on snapshot")
+	if preview.ContainsAPIKey || preview.Credential != "" {
+		t.Fatal("auth-off (live) keyless preview must carry no credential despite the auth-on snapshot")
 	}
-	if _, err := svc.Connect("claude-code", "mcpproxy", true); err != nil {
+	if _, err := svc.ConnectWithOptions("claude-code", "mcpproxy", ConnectOptions{Force: true, Intent: CredentialIntent{Keyless: true}}); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	written := marshalEntry(t, readWrittenEntry(t, svc, "claude-code", "mcpproxy"))
 	if strings.Contains(written, "live-key-xyz") || strings.Contains(written, "headers") {
-		t.Fatalf("auth-off (live) write must embed no credential, got: %s", written)
+		t.Fatalf("auth-off (live) keyless write must embed no credential, got: %s", written)
 	}
 
-	// Flip live to auth ON: now the credential is embedded (as a header for
-	// claude-code), without rebuilding the service.
+	// Flip live to auth ON: keyless is now refused, and the entry carries the
+	// minted client credential (never the admin key), without rebuilding the service.
 	requireAuth = true
-	preview2, err := svc.Preview("claude-code", "mcpproxy")
-	if err != nil {
-		t.Fatalf("Preview: %v", err)
-	}
-	if !preview2.ContainsAPIKey {
-		t.Fatal("auth-on (live) preview must report contains_api_key=true")
+	if _, err := svc.PreviewWithIntent("claude-code", "mcpproxy", CredentialIntent{Keyless: true}); !errors.Is(err, ErrKeylessRequiresAuthOff) {
+		t.Fatalf("keyless preview with live auth on must be refused, got %v", err)
 	}
 	if _, err := svc.Connect("claude-code", "mcpproxy", true); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
 	written2 := marshalEntry(t, readWrittenEntry(t, svc, "claude-code", "mcpproxy"))
-	if !strings.Contains(written2, "live-key-xyz") {
-		t.Fatalf("auth-on (live) write must embed the real credential, got: %s", written2)
+	if strings.Contains(written2, "live-key-xyz") || !strings.Contains(written2, minter.lastSecret()) {
+		t.Fatalf("auth-on (live) write must embed the minted credential and never the admin key, got: %s", written2)
 	}
 }
 
@@ -475,17 +478,22 @@ func TestConnect_CredentialCarrierMatrix(t *testing.T) {
 		t.Run(clientID, func(t *testing.T) {
 			svc, home := testServiceWithKey(t)
 			svc.WithRequireMCPAuth(true)
+			minter := withFakeMinter(svc)
 			seedClientConfig(t, home, clientID)
 
 			if _, err := svc.Connect(clientID, "mcpproxy", true); err != nil {
 				t.Fatalf("Connect: %v", err)
 			}
+			secret := minter.lastSecret()
 			entry := readWrittenEntry(t, svc, clientID, "mcpproxy")
+			if strings.Contains(marshalEntry(t, entry), "test-key-123") {
+				t.Fatalf("%s: the admin API key must never be written: %v", clientID, entry)
+			}
 
 			switch c {
 			case header:
 				h, ok := entry["headers"].(map[string]interface{})
-				if !ok || h["X-API-Key"] != "test-key-123" {
+				if !ok || h["X-API-Key"] != secret {
 					t.Fatalf("%s: expected X-API-Key header, got %v", clientID, entry)
 				}
 				// URL carrier must NOT also carry the key.
@@ -497,12 +505,12 @@ func TestConnect_CredentialCarrierMatrix(t *testing.T) {
 			case bridgeHeaderArg:
 				args := entry["args"].([]interface{})
 				last, _ := args[len(args)-1].(string)
-				if last != "X-API-Key:test-key-123" {
+				if last != "X-API-Key:"+secret {
 					t.Fatalf("%s: expected --header arg, got %v", clientID, args)
 				}
 			case query:
 				u, _ := entry["url"].(string)
-				if !strings.Contains(u, "apikey=test-key-123") {
+				if !strings.Contains(u, "apikey="+secret) {
 					t.Fatalf("%s: expected apikey query, got %v", clientID, u)
 				}
 			}
@@ -608,6 +616,7 @@ func TestPreview_NeverLeaksExistingEntrySecrets(t *testing.T) {
 		t.Run(tc.clientID, func(t *testing.T) {
 			svc, home := serviceWithKey(t, liveKey)
 			svc.WithRequireMCPAuth(true)
+			withFakeMinter(svc)
 			cfgPath := ConfigPath(tc.clientID, home)
 			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 				t.Fatal(err)
@@ -645,6 +654,7 @@ func TestPreview_NeverLeaksExistingEntrySecrets(t *testing.T) {
 func TestPreview_TOMLExistingEntryNeverLeaksQuerySecret(t *testing.T) {
 	svc, home := serviceWithKey(t, "LIVE-ROTATED-PROXY-KEY")
 	svc.WithRequireMCPAuth(true)
+	withFakeMinter(svc)
 	cfgPath := ConfigPath("codex", home)
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 		t.Fatal(err)
