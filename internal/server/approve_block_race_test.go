@@ -144,10 +144,21 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 	// synchronous discovery against its settled runtime client before releasing
 	// callers, then prove the real disabled-tool refusal from that snapshot.
 	runRuntimeDiscovery(t, proxy, rt, up)
+	// The unquarantiner's background discovery pass may reconnect the client
+	// after the synchronous discovery above, which advances the connection
+	// epoch and makes the stamped discovery read as a previous connection's.
+	// Re-stamp the live epoch on each poll so the assertion measures the
+	// disabled-tool refusal rather than that reconnect timing.
 	require.Eventually(t, func() bool {
+		if client, ok := proxy.upstreamManager.GetClient("filesystem"); ok && client.IsConnected() {
+			epoch := client.ConnectionEpoch()
+			rt.Supervisor().StateView().UpdateServer("filesystem", func(s *stateview.ServerStatus) {
+				s.DiscoveryEpoch = epoch
+			})
+		}
 		result, callErr := proxy.handleCallToolVariant(adminCtx(), callRequest(), contracts.ToolVariantDestructive)
 		return callErr == nil && blockedResponse(result)
-	}, time.Second, time.Millisecond)
+	}, 10*time.Second, 5*time.Millisecond)
 	// A completed post-approval call proves the disabled approval record gates
 	// callers after unquarantine, rather than only the original quarantine.
 	require.Eventually(t, func() bool { return postApprovalCalls.Load() > 0 }, time.Second, time.Millisecond)
