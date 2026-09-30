@@ -26,11 +26,10 @@ make swagger-verify
 /opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...
 /opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml --build-tags server ./...
 
-# API E2E (required). First check that no other session's core is running: the script pkills them.
-# Until T011a (109-a) lands, the script's cleanup runs `pkill -f "mcpproxy.*serve"`, which kills EVERY core on
-# the machine (the user's tray core, other worktrees' instances). Run it only when the precheck prints nothing.
-if pgrep -f 'mcpproxy.*serve' >/dev/null; then echo 'another mcpproxy core is running: skip the E2E gate for now'; else LISTEN_PORT=18$((RANDOM%900+100)) ./scripts/test-api-e2e.sh; fi
-# From 109-a on (T011a) the script stops only the PIDs it started, and this precheck is dropped.
+# API E2E (required). The script stops only the PIDs it started (T011a), so it is safe to run
+# beside the user's tray core or another worktree's instance.
+LISTEN_PORT=18$((RANDOM%900+100)) ./scripts/test-api-e2e.sh
+# Optional proof: ./scripts/test-api-e2e-cleanup-check.sh (a decoy core on another port survives)
 ```
 
 Frontend PRs (a, b, c, d, e, f, g, h, i, j, k, l, m):
