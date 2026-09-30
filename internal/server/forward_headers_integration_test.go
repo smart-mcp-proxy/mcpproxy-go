@@ -658,31 +658,61 @@ func TestForwardHeaders_DisabledViaEnvNothingForwarded(t *testing.T) {
 
 const echoSentinel = "SENTINEL-erin-7c1d9f"
 
-// captureStdout redirects os.Stdout (where the trace transport prints request
-// and response headers) until the returned function is called.
+// fwdCaptureStdout redirects os.Stdout (where the trace transport prints
+// request and response headers). Background discovery goroutines read the
+// os.Stdout variable while the test runs, so the variable is written exactly
+// twice: here, before any of them exist, and in a cleanup registered before the
+// test environment's, which therefore runs after those goroutines have stopped.
+// The returned function reports what has been written so far by round-tripping
+// a marker through the pipe (writes are ordered), never by swapping the
+// variable back mid-test.
 func fwdCaptureStdout(t *testing.T) func() string {
 	t.Helper()
 	orig := os.Stdout
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	os.Stdout = w
+	var mu sync.Mutex
 	var buf bytes.Buffer
 	done := make(chan struct{})
-	go func() { _, _ = io.Copy(&buf, r); close(done) }()
-	var once sync.Once
-	var out string
-	stop := func() string {
-		once.Do(func() {
-			os.Stdout = orig
-			_ = w.Close()
-			<-done
-			_ = r.Close()
-			out = buf.String()
-		})
-		return out
+	go func() {
+		chunk := make([]byte, 32<<10)
+		for {
+			n, rerr := r.Read(chunk)
+			if n > 0 {
+				mu.Lock()
+				buf.Write(chunk[:n])
+				mu.Unlock()
+			}
+			if rerr != nil {
+				close(done)
+				return
+			}
+		}
+	}()
+	const marker = "\nFWD-CAPTURE-FLUSH-MARKER\n"
+	t.Cleanup(func() {
+		os.Stdout = orig
+		_ = w.Close()
+		<-done
+		_ = r.Close()
+	})
+	return func() string {
+		_, _ = w.WriteString(marker)
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			out := buf.String()
+			mu.Unlock()
+			if i := strings.Index(out, marker); i >= 0 {
+				return out[:i]
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
 	}
-	t.Cleanup(func() { stop() })
-	return stop
 }
 
 // grepTree returns every file under root whose bytes contain needle.
