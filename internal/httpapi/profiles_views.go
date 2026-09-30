@@ -11,7 +11,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
@@ -335,47 +334,12 @@ type ProfileConflictResponse struct {
 	RequestID string             `json:"request_id,omitempty"`
 }
 
-func (s *Server) writeProfileConflict(w http.ResponseWriter, r *http.Request, msg, code string, used *internalRuntime.UsedBy) {
-	s.writeJSON(w, http.StatusConflict, ProfileConflictResponse{
-		Success: false, Error: msg, Code: code, UsedBy: used, RequestID: reqcontext.GetRequestID(r.Context()),
-	})
-}
-
 // writeProfileServiceError maps a profiles-service error to its wire shape
 // (contracts/rest-api.md, contracts/refusals.md).
 func (s *Server) writeProfileServiceError(w http.ResponseWriter, r *http.Request, err error) {
-	if s.writeIfBindingGuardRefusal(w, r, err) {
+	if s.writeProfilesError(w, r, err) {
 		return
 	}
-	var notFound *internalRuntime.ProfileNotFoundError
-	var exists *internalRuntime.ProfileExistsError
-	var mismatch *internalRuntime.NameMismatchError
-	var inUse *internalRuntime.ProfileInUseError
-	var anon *internalRuntime.ProfileIsAnonymousError
-	var val *internalRuntime.ValidationError
-	switch {
-	case errors.As(err, &notFound), errors.Is(err, profile.ErrUnknownProfile):
-		s.writeError(w, r, http.StatusNotFound, errProfileNotFound)
-	case errors.As(err, &exists):
-		s.writeProfileConflict(w, r, exists.Error(), exists.Code(), nil)
-	case errors.As(err, &mismatch):
-		s.writeProfileConflict(w, r, mismatch.Error(), mismatch.Code(), nil)
-	case errors.As(err, &inUse):
-		u := inUse.UsedBy
-		s.writeProfileConflict(w, r, inUse.Error(), inUse.Code(), &u)
-	case errors.As(err, &anon):
-		u := anon.UsedBy
-		s.writeProfileConflict(w, r, anon.Error(), anon.Code(), &u)
-	case errors.As(err, &val):
-		s.writeClientBindingError(w, r, http.StatusBadRequest, "", val.Field, val.Message)
-	case errors.Is(err, profile.ErrUnknownClient):
-		s.writeError(w, r, http.StatusNotFound, errClientNotFound)
-	case errors.Is(err, internalRuntime.ErrEvaluatorUnavailable), errors.Is(err, errProfilesUnavailable):
-		s.writeError(w, r, http.StatusServiceUnavailable, "profiles service unavailable")
-	case errors.Is(err, internalRuntime.ErrConfigUnavailable):
-		s.writeError(w, r, http.StatusInternalServerError, "Configuration unavailable")
-	default:
-		s.logger.Errorw("profiles operation failed", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "profiles operation failed")
-	}
+	s.logger.Errorw("profiles operation failed", "error", err)
+	s.writeError(w, r, http.StatusInternalServerError, "profiles operation failed")
 }

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
@@ -41,29 +40,13 @@ type GuardFixOption struct {
 }
 
 // writeIfBindingGuardRefusal answers a *runtime.BindingGuardError with the
-// 409 body above and reports whether it handled err.
+// 409 body above (built by ProfilesErrorBody) and reports whether it handled err.
 func (s *Server) writeIfBindingGuardRefusal(w http.ResponseWriter, r *http.Request, err error) bool {
 	var refusal *internalRuntime.BindingGuardError
 	if !errors.As(err, &refusal) {
 		return false
 	}
-	bindings := make([]GuardBinding, 0, len(refusal.Bindings))
-	for _, b := range refusal.Bindings {
-		bindings = append(bindings, GuardBinding{ClientID: b.ClientID, TokenName: b.TokenName, Profile: b.Profile, Mode: b.Mode})
-	}
-	fixes := make([]GuardFixOption, 0, len(refusal.Fixes))
-	for _, f := range refusal.Fixes {
-		fixes = append(fixes, GuardFixOption{Kind: f.Kind, Target: f.Target})
-	}
-	s.writeJSON(w, http.StatusConflict, BindingGuardResponse{
-		Success:   false,
-		Error:     refusal.Error(),
-		Code:      profile.ErrorCodeBindingBypassable,
-		Bindings:  bindings,
-		Fixes:     fixes,
-		RequestID: reqcontext.GetRequestID(r.Context()),
-	})
-	return true
+	return s.writeProfilesError(w, r, err)
 }
 
 // ClientBindingErrorResponse is the 409/400 body of a refused binding write:
