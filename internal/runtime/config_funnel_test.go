@@ -283,6 +283,39 @@ func TestMutateConfig_ConcurrentWritesKeepBoth(t *testing.T) {
 	assert.Len(t, cfg.Profiles, 6, "no concurrent profile write is lost")
 }
 
+// A profile that is created or renamed through the funnel gets its per-profile
+// search index NOW: the apply reconciles indexes only when mcpServers changed,
+// and a locked client of a renamed profile would otherwise search an empty index
+// until the next discovery pass (found in live QA of Spec 108-f).
+func TestMutateConfig_ReconcilesPerProfileIndexes(t *testing.T) {
+	rt := newFunnelRuntime(t)
+	dirs := func() []string {
+		names, err := rt.IndexManager().ExistingProfileDirs()
+		require.NoError(t, err)
+		return names
+	}
+	ctx := context.Background()
+
+	_, _, err := rt.MutateConfig(ctx, funnelActor(), func(d *config.Config) (ChangeHint, error) {
+		d.Profiles = append(d.Profiles, config.ProfileConfig{Name: "fresh", Servers: []string{"a"}})
+		return ChangeHint{}, nil
+	}, TokenRewrite{})
+	require.NoError(t, err)
+	assert.Contains(t, dirs(), "fresh", "a created profile is indexed immediately")
+
+	_, _, err = rt.MutateConfig(ctx, funnelActor(), func(d *config.Config) (ChangeHint, error) {
+		for i := range d.Profiles {
+			if d.Profiles[i].Name == "fresh" {
+				d.Profiles[i].Name = "renamed"
+			}
+		}
+		return ChangeHint{Kind: profile.ChangeRename, Profile: "renamed", PreviousProfile: "fresh"}, nil
+	}, TokenRewrite{})
+	require.NoError(t, err)
+	assert.Contains(t, dirs(), "renamed")
+	assert.NotContains(t, dirs(), "fresh", "the old name's index is dropped")
+}
+
 // flakyPins fails RestorePins (and optionally RepinProfile) to prove the
 // rollback ordering never leaves a token wider than it was.
 type flakyPins struct {

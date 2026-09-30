@@ -590,7 +590,7 @@ func legacyScope(t auth.AgentToken) bool {
 	for _, p := range t.Permissions {
 		seen[p] = true
 	}
-	return !(seen[auth.PermRead] && seen[auth.PermWrite] && seen[auth.PermDestructive])
+	return !seen[auth.PermRead] || !seen[auth.PermWrite] || !seen[auth.PermDestructive]
 }
 
 // tokenToInfoResponse converts an auth.AgentToken to a tokenInfoResponse (without secrets).
