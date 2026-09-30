@@ -39,12 +39,11 @@ type AccessEvaluator struct {
 	credentialDetail string
 	skipCredential   bool
 
-	res        ProfileResolution
-	idx        *profileIndex
-	authCtx    *auth.AuthContext // the request identity after ScopedView; nil = administrator
-	scopedView bool
-	dangling   bool
-	cfg        *config.Config
+	res      ProfileResolution
+	idx      *profileIndex
+	authCtx  *auth.AuthContext // the request identity after ScopedView; nil = administrator
+	dangling bool
+	cfg      *config.Config
 }
 
 // EvaluateAccess is the one-shot form of NewAccessEvaluator(...).Evaluate.

@@ -326,9 +326,9 @@ func TestActivityScopeParams_ScopedCallerCannotProbeForeignAttribution(t *testin
 	rec := scopeGetJSON(t, srv, "/api/v1/activity?token=client-zed", token, &resp)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, 0, resp.Data.Total)
-	rec = scopeGetJSON(t, srv, "/api/v1/activity?client=zed", token, &resp)
+	scopeGetJSON(t, srv, "/api/v1/activity?client=zed", token, &resp)
 	assert.Equal(t, 0, resp.Data.Total)
-	rec = scopeGetJSON(t, srv, "/api/v1/activity?profile=work-full", token, &resp)
+	scopeGetJSON(t, srv, "/api/v1/activity?profile=work-full", token, &resp)
 	assert.Equal(t, 0, resp.Data.Total)
 
 	// Its own rows filter normally.
