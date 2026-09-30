@@ -272,6 +272,12 @@ type Runtime struct {
 	pinStoreOverride ProfilePinStore
 	// clientsService is Spec 108's single client-credential service.
 	clientsService *ClientsService
+	// profilesService is Spec 108-f's single profiles service; the evaluator
+	// and session hook are installed by the server.
+	profilesService    *ProfilesService
+	profileEvaluatorMu sync.RWMutex
+	profileEvaluator   ProfileEvaluator
+	profileSessionHook ProfileSessionHook
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -490,6 +496,8 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		Mu:       &rt.bindingWriteMu,
 		Logger:   logger,
 	})
+
+	rt.profilesService = newProfilesService(rt)
 
 	// Spec 047: drainer goroutine that publishes coalesced servers.changed
 	// events. Lifetime is tied to appCtx so it shuts down with the runtime.
