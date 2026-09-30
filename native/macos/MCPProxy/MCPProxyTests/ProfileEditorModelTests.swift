@@ -17,6 +17,9 @@ final class ProfileEditorModelTests: XCTestCase {
         var effectiveResult: Result<EffectiveToolsResponse, Error>?
         var tryResult: Result<TryResponse, Error>?
 
+        /// Runs while an update is in flight (the user typing during a save).
+        var onUpdate: (@MainActor () -> Void)?
+
         private(set) var created: [ProfileConfigPayload] = []
         private(set) var updated: [(String, ProfileConfigPayload)] = []
         private(set) var renamed: [(String, String)] = []
@@ -30,6 +33,7 @@ final class ProfileEditorModelTests: XCTestCase {
         }
         func updateProfile(_ name: String, _ payload: ProfileConfigPayload) async throws -> ProfileWriteResponse {
             updated.append((name, payload))
+            if let hook = onUpdate { await MainActor.run { hook() } }
             return try (updateResult ?? .success(StubSource.write(ProfileView(name: payload.name)))).get()
         }
         func renameProfile(_ name: String, newName: String) async throws -> ProfileRenameResponse {
@@ -204,6 +208,17 @@ final class ProfileEditorModelTests: XCTestCase {
         XCTAssertEqual(source.updated[0].1.title, "Work")
         XCTAssertTrue(source.created.isEmpty)
         XCTAssertNil(model.errorMessage)
+    }
+
+    /// Edits typed while a save is in flight are not thrown away by its response.
+    func testEditsMadeDuringASaveSurvive() async {
+        let source = StubSource()
+        let (model, _) = editor(source: source)
+        model.draft.title = "first"
+        source.onUpdate = { model.draft.title = "typed during save" }
+        await model.save()
+        XCTAssertEqual(model.draft.title, "typed during save")
+        XCTAssertTrue(model.isDirty)
     }
 
     func testSaveOfANewProfileCreatesIt() async {

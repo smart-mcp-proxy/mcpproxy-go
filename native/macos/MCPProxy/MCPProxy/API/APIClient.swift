@@ -482,8 +482,12 @@ actor APIClient {
         let keyless: Bool?
         /// `finalized` when a reconnect replaced an active credential.
         let rotation: String?
+        /// On an undo: the credential it revoked because the restored config no
+        /// longer holds it (`credential_revoked`).
+        let credentialRevoked: String?
 
         enum CodingKeys: String, CodingKey {
+            case credentialRevoked = "credential_revoked"
             case success, client, action, message
             case configPath = "config_path"
             case backupPath = "backup_path"
@@ -509,7 +513,8 @@ actor APIClient {
             profile: String? = nil,
             mode: BindingMode? = nil,
             keyless: Bool? = nil,
-            rotation: String? = nil
+            rotation: String? = nil,
+            credentialRevoked: String? = nil
         ) {
             self.success = success
             self.client = client
@@ -526,6 +531,7 @@ actor APIClient {
             self.mode = mode
             self.keyless = keyless
             self.rotation = rotation
+            self.credentialRevoked = credentialRevoked
         }
 
         init(from decoder: Decoder) throws {
@@ -536,6 +542,7 @@ actor APIClient {
             mode = try container.decodeIfPresent(BindingMode.self, forKey: .mode)
             keyless = try container.decodeIfPresent(Bool.self, forKey: .keyless)
             rotation = try container.decodeIfPresent(String.self, forKey: .rotation)
+            credentialRevoked = try container.decodeIfPresent(String.self, forKey: .credentialRevoked)
             success = try container.decodeIfPresent(Bool.self, forKey: .success) ?? false
             client = try container.decodeIfPresent(String.self, forKey: .client)
             configPath = try container.decodeIfPresent(String.self, forKey: .configPath)

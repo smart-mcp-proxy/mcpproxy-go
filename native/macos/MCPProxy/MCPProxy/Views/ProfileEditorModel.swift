@@ -158,7 +158,8 @@ final class ProfileEditorModel: ObservableObject {
         defer { isLoading = false }
         do {
             let fresh = try await source.profile(name)
-            adopt(fresh)
+            // Edits made while this request was in flight are never overwritten.
+            if isDirty { profileChangedElsewhere(fresh) } else { adopt(fresh) }
         } catch let APIClientError.service(status, body) where status == 404 {
             notFound = true
             loadError = body.error
@@ -291,15 +292,18 @@ final class ProfileEditorModel: ObservableObject {
         isSaving = true
         clearErrors()
         defer { isSaving = false }
+        let sent = draft
         do {
             let response: ProfileWriteResponse
             if isNew {
-                response = try await source.createProfile(draft)
+                response = try await source.createProfile(sent)
             } else {
-                response = try await source.updateProfile(original?.name ?? draft.name, draft)
+                response = try await source.updateProfile(original?.name ?? sent.name, sent)
             }
             original = response.profile
-            draft = ProfileConfigPayload(response.profile)
+            // Edits typed while the request was in flight stay as the draft (now
+            // an unsaved change against the saved version).
+            if draft == sent { draft = ProfileConfigPayload(response.profile) }
             warnings = response.warnings
             changedElsewhere = false
             announcement = "Saved profile \(response.profile.displayTitle)"

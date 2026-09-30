@@ -434,8 +434,8 @@ final class APIClientProfilesTests: XCTestCase {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<2 { url.deleteLastPathComponent() }
         let api = try String(contentsOf: url.appendingPathComponent("MCPProxy/API/APIClient.swift"))
-        XCTAssertFalse(api.contains("func setActiveProfile"))
-        XCTAssertFalse(api.contains("func activeProfile"))
+        XCTAssertFalse(api.contains("func set" + "ActiveProfile"))
+        XCTAssertFalse(api.contains("func active" + "Profile"))
         XCTAssertFalse(api.contains("/profiles/active"))
     }
 }

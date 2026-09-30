@@ -521,6 +521,11 @@ struct ConnectClientView: View {
                         .textSelection(.enabled)
                         .accessibilityIdentifier(ConnectClientAccessibility.resultCredential)
                 }
+                if let revoked = result.credentialRevoked, !revoked.isEmpty {
+                    Text("Revoked credential \(revoked)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 // Spec 109-b FR-037: anchor the result to the file it wrote,
                 // the same shortened path the preview pane showed above —
                 // `effectiveDisplayPath` was decoded and available since

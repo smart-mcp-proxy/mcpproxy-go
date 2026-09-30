@@ -1398,6 +1398,12 @@ final class ConnectClientPresentationTests: XCTestCase {
         XCTAssertEqual(result.tokenName, "client-cursor")
     }
 
+    func testAnUndoResultCarriesTheRevokedCredential() throws {
+        let result = try JSONDecoder().decode(APIClient.ConnectResult.self, from: Data(
+            #"{"success":true,"action":"restored","credential_revoked":"client-cursor"}"#.utf8))
+        XCTAssertEqual(result.credentialRevoked, "client-cursor")
+    }
+
     func testClientStatusDecodesTheCredentialState() throws {
         let json = #"{"id":"cursor","name":"Cursor","config_path":"/x","exists":true,"connected":true,"supported":true,"credential_state":"admin_key"}"#
         let status = try JSONDecoder().decode(APIClient.ClientStatus.self, from: Data(json.utf8))
