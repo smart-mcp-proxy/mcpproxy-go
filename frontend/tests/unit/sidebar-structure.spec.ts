@@ -127,6 +127,31 @@ describe('sidebar structure (Spec 109-i FR-050)', () => {
     expect(wrapper.get('[data-test="sidebar-item-review"]').text()).toContain('7')
   })
 
+  it('keeps the Clients badge live: tool-call activity and a 30 s tick refresh presence', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = await mountSidebar()
+      const initial = mocks.getClients.mock.calls.length
+      expect(initial).toBeGreaterThan(0)
+
+      window.dispatchEvent(new CustomEvent('mcpproxy:activity-completed'))
+      window.dispatchEvent(new CustomEvent('mcpproxy:activity-completed'))
+      await vi.advanceTimersByTimeAsync(1600)
+      // Debounced: a burst of events is one refresh.
+      expect(mocks.getClients.mock.calls.length).toBe(initial + 1)
+
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(mocks.getClients.mock.calls.length).toBeGreaterThanOrEqual(initial + 2)
+
+      wrapper.unmount()
+      const after = mocks.getClients.mock.calls.length
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(mocks.getClients.mock.calls.length).toBe(after)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('hides the Clients badge at zero live clients', async () => {
     const wrapper = await mountSidebar()
     expect(wrapper.find('[data-test="sidebar-clients-badge"]').exists()).toBe(false)

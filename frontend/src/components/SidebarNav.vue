@@ -450,7 +450,28 @@ function loadBadgeCounts() {
   }
 }
 
+// Live-client badge: sessions open and close without an SSE event of their own,
+// so refresh on tool-call activity (debounced) and on a slow tick. Personal
+// edition only, and always silent (see clientsStore.refreshPresence).
+const PRESENCE_TICK_MS = 30_000
+let presenceTimer: ReturnType<typeof setTimeout> | null = null
+let presenceTick: ReturnType<typeof setInterval> | null = null
+function refreshPresenceSoon() {
+  if (authStore.isTeamsEdition) return
+  if (presenceTimer) clearTimeout(presenceTimer)
+  presenceTimer = setTimeout(() => {
+    presenceTimer = null
+    void clientsStore.refreshPresence()
+  }, 1500)
+}
+function refreshPresenceOnTick() {
+  if (!authStore.isTeamsEdition && !document.hidden) void clientsStore.refreshPresence()
+}
+
 onMounted(() => {
+  window.addEventListener('mcpproxy:activity-completed', refreshPresenceSoon)
+  window.addEventListener('mcpproxy:activity-started', refreshPresenceSoon)
+  presenceTick = setInterval(refreshPresenceOnTick, PRESENCE_TICK_MS)
   // Pull initial state so the badge is correct on first render.
   loadBadgeCounts()
   // Spec 109 FR-001/FR-003: the sidebar is global (outside the Home view),
@@ -460,7 +481,13 @@ onMounted(() => {
   window.addEventListener('mcpproxy:review-changed', fetchReviewCount)
 })
 
-onUnmounted(() => window.removeEventListener('mcpproxy:review-changed', fetchReviewCount))
+onUnmounted(() => {
+  window.removeEventListener('mcpproxy:review-changed', fetchReviewCount)
+  window.removeEventListener('mcpproxy:activity-completed', refreshPresenceSoon)
+  window.removeEventListener('mcpproxy:activity-started', refreshPresenceSoon)
+  if (presenceTimer) clearTimeout(presenceTimer)
+  if (presenceTick) clearInterval(presenceTick)
+})
 
 // #1065: the sidebar sits outside <router-view>, so App.vue's authEpoch key
 // cannot remount it. Without this, badge counts that failed while auth was
