@@ -563,7 +563,9 @@ func TestMenuSurface_AnnotationFilterParamsShared(t *testing.T) {
 // assertCallToolVariantDelta: only the tool description and the 'args'
 // parameter description may change (FR-014); the new text references
 // signatures + describe_tool and no longer instructs reading inputSchema from
-// retrieve_tools. Everything else is byte-equal.
+// retrieve_tools. Issue #1364 additionally moved the 'args' schema shape from
+// {"properties":{}} to {"additionalProperties":true} (open object); that one
+// transition is pinned below. Everything else is byte-equal.
 func assertCallToolVariantDelta(t *testing.T, surface, name string, preM, curM map[string]interface{}) {
 	t.Helper()
 
@@ -596,8 +598,20 @@ func assertCallToolVariantDelta(t *testing.T, surface, name string, preM, curM m
 	preNorm := asMap(t, mustRemarshal(t, preM))
 	curNorm := asMap(t, mustRemarshal(t, curM))
 	preNorm["description"], curNorm["description"] = "", ""
-	schemaOf(preNorm)["args"].(map[string]interface{})["description"] = ""
-	schemaOf(curNorm)["args"].(map[string]interface{})["description"] = ""
+	preNormArgs := schemaOf(preNorm)["args"].(map[string]interface{})
+	curNormArgs := schemaOf(curNorm)["args"].(map[string]interface{})
+	preNormArgs["description"], curNormArgs["description"] = "", ""
+	// Issue #1364: args must be an OPEN object now (grammar-constrained clients
+	// read an empty "properties" map as "no keys allowed"). Pin the exact
+	// transition, then normalise it away so the rest stays byte-equal.
+	assert.Equal(t, map[string]interface{}{}, preNormArgs["properties"],
+		"golden %s args should still be the frozen empty-properties shape", name)
+	assert.Equal(t, true, curNormArgs["additionalProperties"],
+		"surface %s: %s args must allow arbitrary keys (#1364)", surface, name)
+	assert.NotContains(t, curNormArgs, "properties",
+		"surface %s: %s args must not carry an empty properties map (#1364)", surface, name)
+	delete(preNormArgs, "properties")
+	delete(curNormArgs, "additionalProperties")
 	assert.Equal(t, preNorm, curNorm,
 		"surface %s: %s may differ from pre-feature ONLY in description texts (SC-003)", surface, name)
 }
