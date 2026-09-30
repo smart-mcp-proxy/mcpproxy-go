@@ -109,16 +109,27 @@ func (s *Server) handleGetClients(w http.ResponseWriter, r *http.Request) {
 	if !rejectUnsupportedScopeFilters(w, r, "profile", "client") {
 		return
 	}
-	if s.clientsService != nil {
-		_ = s.clientsService.ReconcileTimeOnly(r.Context())
-	}
-	rows, warnings, err := s.clientRows(r.Context(), false, "")
+	resp, err := s.clientsListResponse(r.Context(), r.URL.Query().Get("profile"), r.URL.Query().Get("client"))
 	if err != nil {
 		s.writeError(w, r, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	rows = filterClientRows(rows, r.URL.Query().Get("profile"), r.URL.Query().Get("client"))
-	s.writeSuccess(w, clientsResponse{Clients: rows, Routing: s.clientRoutingPayload(), Warnings: warnings})
+	s.writeSuccess(w, resp)
+}
+
+// clientsListResponse is the data of GET /clients: the rows (filtered by the
+// current binding), the routing payload and the warnings computed over the full
+// set. It is shared by the route and the MCP `profiles` tool's list_clients.
+func (s *Server) clientsListResponse(ctx context.Context, profileFilter, clientFilter string) (clientsResponse, error) {
+	if s.clientsService != nil {
+		_ = s.clientsService.ReconcileTimeOnly(ctx)
+	}
+	rows, warnings, err := s.clientRows(ctx, false, "")
+	if err != nil {
+		return clientsResponse{}, err
+	}
+	rows = filterClientRows(rows, profileFilter, clientFilter)
+	return clientsResponse{Clients: rows, Routing: s.clientRoutingPayload(), Warnings: warnings}, nil
 }
 
 // handleGetClient godoc

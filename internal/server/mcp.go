@@ -169,6 +169,12 @@ type MCPProxyServer struct {
 	// and no request builds one (Spec 105 FR-003/FR-004).
 	profileIndexes profileIndexCache
 
+	// profilesViews is the REST server's admin views behind the `profiles`
+	// tool (Spec 108-h); installed by SetAdminViews where the REST server is
+	// wired. Nil on a bare test proxy, where every operation answers 503.
+	profilesViewsMu sync.RWMutex
+	profilesViews   profilesAdminViews
+
 	// preflightStateSource overrides the connection-state snapshot the
 	// preflight glue reads (Spec 099). Nil in production, where
 	// preflightSnapshot resolves it from the supervisor's StateView; tests
@@ -1290,6 +1296,13 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 
 	// set_profile - Profiles v2 (T2): switch the session's active profile
 	p.server.AddTool(buildSetProfileTool(), p.handleSetProfile)
+
+	// profiles - Spec 108-h admin tool. Registered unconditionally, NOT through
+	// buildManagementTools (which returns nothing under read_only_mode /
+	// disable_management): its read operations stay available there, its
+	// mutating operations refuse per call, and visibility is the tool filter's.
+	profilesTool := p.buildProfilesServerTool()
+	p.server.AddTool(profilesTool.Tool, profilesTool.Handler)
 
 	// Intent-based tool variants (Spec 018)
 	// These replace the legacy call_tool with three operation-specific variants
