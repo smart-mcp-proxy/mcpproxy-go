@@ -190,6 +190,67 @@ func (m *Manager) MintClientCredential(clientID, rawToken string, hmacKey []byte
 	return &token, nil
 }
 
+// UpdateClientCredentialBinding rewrites the (profile pin, mode) of the ACTIVE
+// kind=client credential named "client-"+clientID in one transaction and
+// returns the record as it was and as it is now. The secret is untouched, so
+// the client's config never changes (FR-026: a binding is server-side state).
+// The result must still satisfy ValidateTokenInvariants (a locked binding
+// needs a non-empty pin); otherwise nothing is written.
+func (m *Manager) UpdateClientCredentialBinding(clientID, pin, mode string) (before, after *auth.AgentToken, err error) {
+	if !auth.ValidClientID(clientID) {
+		return nil, nil, fmt.Errorf("invalid client id %q", clientID)
+	}
+	if mode != auth.ProfileModeLocked && mode != auth.ProfileModeSwitchable {
+		return nil, nil, fmt.Errorf("invalid profile mode %q", mode)
+	}
+	if mode == auth.ProfileModeLocked && pin == "" {
+		return nil, nil, fmt.Errorf("a locked client credential requires a non-empty profile")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	err = m.db.db.Update(func(tx *bbolt.Tx) error {
+		tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
+		if tokenBucket == nil {
+			return ErrClientCredentialNotFound
+		}
+		primaryHash, existing, err := findClientTokenRecordLocked(tx, clientID)
+		if err != nil {
+			return err
+		}
+		if existing == nil {
+			return ErrClientCredentialNotFound
+		}
+		if existing.Kind != auth.KindClient {
+			return ErrClientCredentialConflict
+		}
+		if existing.IsRevoked() || existing.IsExpired() {
+			return ErrClientCredentialNotActive
+		}
+		snapshot := *existing
+		updated := *existing
+		updated.ProfilePin = pin
+		updated.ProfileMode = mode
+		if err := auth.ValidateTokenInvariants(&updated, auth.KindClient); err != nil {
+			return fmt.Errorf("binding update produced an invalid client credential record: %w", err)
+		}
+		data, err := json.Marshal(updated)
+		if err != nil {
+			return fmt.Errorf("failed to marshal client credential: %w", err)
+		}
+		if err := tokenBucket.Put(primaryHash, data); err != nil {
+			return fmt.Errorf("failed to store client binding: %w", err)
+		}
+		before, after = &snapshot, &updated
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return before, after, nil
+}
+
 // StageClientCredentialRotation begins a staged rotation (FR-021a) over the
 // ACTIVE client credential named "client-"+clientID: it adds a pending
 // secret while leaving the current one valid, so an in-flight config write

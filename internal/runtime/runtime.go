@@ -21,6 +21,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -266,6 +267,8 @@ type Runtime struct {
 	bindingGuardMu sync.RWMutex
 	bindingGuard   BindingGuard
 	bindingWriteMu sync.Mutex
+	// clientsService is Spec 108's single client-credential service.
+	clientsService *ClientsService
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -467,6 +470,23 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		profileMembership: make(map[string][]string),
 	}
 	rt.truncator.Store(truncator)
+
+	// Spec 108 FR-026: the one clients service behind every client-credential
+	// operation. It shares bindingWriteMu with the guarded config apply so a
+	// binding write and a config write can never combine into a bypassable
+	// state (plan D3).
+	rt.clientsService = NewClientsService(ClientsServiceDeps{
+		Store: storageManager,
+		HMACKey: func() ([]byte, error) {
+			return auth.GetOrCreateHMACKey(rt.Config().DataDir)
+		},
+		Config:   rt.Config,
+		Guard:    rt.BindingGuard,
+		Activity: storageManager.SaveActivity,
+		Publish:  rt.publishEvent,
+		Mu:       &rt.bindingWriteMu,
+		Logger:   logger,
+	})
 
 	// Spec 047: drainer goroutine that publishes coalesced servers.changed
 	// events. Lifetime is tied to appCtx so it shuts down with the runtime.

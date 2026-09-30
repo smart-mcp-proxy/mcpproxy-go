@@ -379,6 +379,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// FR-008a: the one evaluator behind every guarded write (config routes,
 	// connect, client bindings) and the runtime anonymous guard.
 	rt.SetBindingGuard(mcpProxy)
+	// FR-026: a binding change clears the stored set_profile selection of every
+	// live session of that credential and sends tools/list_changed to each.
+	rt.ClientsService().SetNotifier(mcpProxy)
 
 	go server.forwardRuntimeStatus()
 
@@ -3087,6 +3090,20 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				}
 				return c.Listen, c.APIKey, config.EffectiveRequireMCPAuth(c)
 			})
+		// Spec 108 FR-024: connect never writes the admin API key. Every write
+		// embeds a per-client `mcp_cli_` credential minted by the runtime's
+		// clients service, which also reconciles interrupted rotations from
+		// what each client's config actually holds (FR-021a).
+		if clients := s.runtime.ClientsService(); clients != nil {
+			connectSvc.WithCredentialMinter(clients.ConnectMinter())
+			clients.SetConfigReader(connectSvc)
+			httpAPIServer.SetClientsService(clients)
+			go func() {
+				if err := clients.Reconcile(s.runtime.AppContext()); err != nil {
+					s.logger.Warn("client rotation reconcile failed", zap.Error(err))
+				}
+			}()
+		}
 		httpAPIServer.SetConnectService(connectSvc)
 
 		// Spec 046: wire the onboarding-funnel provider on the telemetry

@@ -58,6 +58,10 @@ func (r *Runtime) GuardedApplyConfig(newCfg *config.Config, cfgPath string) (*Co
 	return r.ApplyConfig(newCfg, cfgPath)
 }
 
+// ClientsService returns the runtime's single client-credential service
+// (Spec 108, FR-026).
+func (r *Runtime) ClientsService() *ClientsService { return r.clientsService }
+
 // clientCredentialSnapshot returns the stored client credential records
 // (kind=client). A store error is returned, never swallowed: the guard fails
 // closed.

@@ -300,11 +300,12 @@ type Server struct {
 	httpLogger         *zap.Logger // Separate logger for HTTP requests
 	router             *chi.Mux
 	observability      *observability.Manager
-	tokenStore         TokenStore         // Agent token CRUD (T022)
-	dataDir            string             // Data directory for HMAC key (T022)
-	feedbackSubmitter  FeedbackSubmitter  // Feedback submission (Spec 036)
-	connectService     *connect.Service   // Client connect/disconnect operations
-	securityController SecurityController // Security scanner operations (Spec 039)
+	tokenStore         TokenStore                      // Agent token CRUD (T022)
+	dataDir            string                          // Data directory for HMAC key (T022)
+	feedbackSubmitter  FeedbackSubmitter               // Feedback submission (Spec 036)
+	connectService     *connect.Service                // Client connect/disconnect operations
+	clientsService     *internalRuntime.ClientsService // Client credentials and bindings (Spec 108 FR-026)
+	securityController SecurityController              // Security scanner operations (Spec 039)
 
 	// sensitiveMasker masks detected secrets out of payloads before they are
 	// serialised (see maskActivityPayloads, maskEventPayload,
@@ -462,6 +463,12 @@ func (s *Server) SetFeedbackSubmitter(submitter FeedbackSubmitter) {
 // SetConnectService configures the client connect/disconnect service.
 func (s *Server) SetConnectService(svc *connect.Service) {
 	s.connectService = svc
+}
+
+// SetClientsService configures the clients service behind the client
+// binding route and the connect credential path (Spec 108).
+func (s *Server) SetClientsService(svc *internalRuntime.ClientsService) {
+	s.clientsService = svc
 }
 
 // SetSensitiveMasker configures the detector used to mask secrets out of
