@@ -134,7 +134,12 @@ export function setAvailableFeatures(features: readonly string[] | undefined | n
 }
 
 function isAvailable(def: ScopeParamDef): boolean {
-  return !def.requires || availableFeatures.has(def.requires)
+  if (!def.requires) return true
+  // GET /api/v1/status `features.scope_filters` lists the parameter NAMES the
+  // build accepts (["profile","client","token"]), so a parameter is available
+  // when its own name is listed. The feature name itself ("scope_filters")
+  // still enables every parameter that requires it (older tests and callers).
+  return availableFeatures.has(def.requires) || availableFeatures.has(def.name)
 }
 
 /** Reports whether a contract parameter is enabled by this server build. */
@@ -292,23 +297,33 @@ function registerDefaultScopeParams(): void {
   // Spec 108 rows, registered here under the ownership rule (109-k owns the
   // whole contract, incl. profile/client/token) and hidden until
   // features.scope_filters lists them.
+  //
+  // `restPages` is exactly the set of endpoints whose backend honours the
+  // parameter (Spec 108-e: activity, usage, sessions, tools, servers). The
+  // Clients and Tokens pages read the parameters for their chips, but nothing
+  // is sent to GET /clients or GET /tokens, which keep answering 400
+  // unsupported_scope_filter until Spec 108-f — so no page can start receiving
+  // a new 400 between the two PRs. 108-f adds those pages here.
   registerScopeParam({
     name: 'profile',
     sticky: true,
     requires: 'scope_filters',
     pages: ['activity', 'usage', 'tools', 'servers', 'clients', 'tokens'],
+    restPages: ['activity', 'usage', 'tools', 'servers'],
   })
   registerScopeParam({
     name: 'client',
     sticky: true,
     requires: 'scope_filters',
     pages: ['activity', 'usage', 'tools', 'clients'],
+    restPages: ['activity', 'usage', 'tools'],
   })
   registerScopeParam({
     name: 'token',
     sticky: true,
     requires: 'scope_filters',
     pages: ['activity', 'usage', 'tokens'],
+    restPages: ['activity', 'usage'],
   })
 }
 
