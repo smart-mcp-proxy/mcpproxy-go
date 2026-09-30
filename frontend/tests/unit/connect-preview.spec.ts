@@ -96,41 +96,41 @@ describe('ConnectModal preview (Spec 078 US1)', () => {
   it('shows the preview (path, masked entry, api-key note) before writing', async () => {
     const wrapper = await open()
 
-    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
     await flushPromises()
 
     // The write must NOT have happened yet — only the preview was fetched.
     expect(api.getConnectPreview).toHaveBeenCalledWith('cursor')
     expect(api.connectClient).not.toHaveBeenCalled()
 
-    const panel = wrapper.find('[data-test="connect-preview-cursor"]')
+    const panel = wrapper.find('[data-test="client-preview-cursor"]')
     expect(panel.exists()).toBe(true)
     expect(panel.text()).toContain('/Users/test/.cursor/mcp.json')
     expect(panel.text()).toContain('Everything else in the file stays untouched')
 
-    const entry = wrapper.find('[data-test="connect-preview-entry-cursor"]')
+    const entry = wrapper.find('[data-test="client-preview-entry-cursor"]')
     expect(entry.exists()).toBe(true)
     // Masked key visible, real key absent.
     expect(entry.text()).toContain('••••')
     expect(entry.text()).not.toContain('apikey=real')
-    expect(wrapper.find('[data-test="connect-preview-apikey-cursor"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="client-preview-apikey-cursor"]').exists()).toBe(true)
   })
 
   it('confirm writes the file; cancel writes nothing', async () => {
     const wrapper = await open()
 
     // Cancel path first.
-    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-test="connect-preview-cancel-cursor"]').trigger('click')
+    await wrapper.find('[data-test="client-preview-cancel-cursor"]').trigger('click')
     await flushPromises()
     expect(api.connectClient).not.toHaveBeenCalled()
-    expect(wrapper.find('[data-test="connect-preview-cursor"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="client-preview-cursor"]').exists()).toBe(false)
 
     // Confirm path writes.
-    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-test="connect-preview-confirm-cursor"]').trigger('click')
+    await wrapper.find('[data-test="client-preview-confirm-cursor"]').trigger('click')
     await flushPromises()
     expect(api.connectClient).toHaveBeenCalledTimes(1)
     // A create (entry_exists=false) confirms with force=false.
@@ -148,12 +148,12 @@ describe('ConnectModal preview (Spec 078 US1)', () => {
     )
     const wrapper = await open()
 
-    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('[data-test="connect-preview-cursor"]').exists()).toBe(true)
-    expect(wrapper.find('[data-test="connect-preview-apikey-cursor"]').exists()).toBe(false)
-    const entry = wrapper.find('[data-test="connect-preview-entry-cursor"]')
+    expect(wrapper.find('[data-test="client-preview-cursor"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="client-preview-apikey-cursor"]').exists()).toBe(false)
+    const entry = wrapper.find('[data-test="client-preview-entry-cursor"]')
     expect(entry.text()).not.toContain('apikey')
     expect(entry.text()).not.toContain('••••')
   })
@@ -162,11 +162,11 @@ describe('ConnectModal preview (Spec 078 US1)', () => {
     ;(api.getConnectPreview as any).mockResolvedValue(previewFor({ entry_exists: true }))
     const wrapper = await open()
 
-    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
     await flushPromises()
-    expect(wrapper.find('[data-test="connect-preview-overwrite-cursor"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="client-preview-overwrite-cursor"]').exists()).toBe(true)
 
-    await wrapper.find('[data-test="connect-preview-confirm-cursor"]').trigger('click')
+    await wrapper.find('[data-test="client-preview-confirm-cursor"]').trigger('click')
     await flushPromises()
     expect(api.connectClient).toHaveBeenCalledWith('cursor', 'mcpproxy', true)
   })
@@ -177,14 +177,14 @@ describe('ConnectModal preview (Spec 078 US1)', () => {
     ;(api.getConnectPreview as any).mockResolvedValue(previewFor({ access_state: 'malformed' }))
     const wrapper = await open()
 
-    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
     await flushPromises()
 
-    const warn = wrapper.find('[data-test="connect-preview-malformed-cursor"]')
+    const warn = wrapper.find('[data-test="client-preview-malformed-cursor"]')
     expect(warn.exists()).toBe(true)
     expect(warn.text()).toContain('connecting would fail')
 
-    const confirm = wrapper.find('[data-test="connect-preview-confirm-cursor"]')
+    const confirm = wrapper.find('[data-test="client-preview-confirm-cursor"]')
     expect(confirm.attributes('disabled')).toBeDefined()
     await confirm.trigger('click')
     await flushPromises()

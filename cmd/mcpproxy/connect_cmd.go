@@ -130,6 +130,9 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if result.Success {
+		notifyClientDisconnected(cfg, clientID)
+	}
 
 	return printConnectResult(result, formatter, format)
 }

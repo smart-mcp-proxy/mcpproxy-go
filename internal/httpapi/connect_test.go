@@ -449,6 +449,108 @@ func TestHandleUndoConnectClient_RestoresFile(t *testing.T) {
 	assert.Equal(t, string(original), string(after), "config must be byte-identical to pre-connect state")
 }
 
+func TestHandleUndoConnectClient_ClearsPresenceWhenOriginalEntryTargetsAnotherInstance(t *testing.T) {
+	ctrl := &onboardingTestController{}
+	srv := newOnboardingTestServer(t, ctrl)
+	home := t.TempDir()
+	srv.SetConnectService(connect.NewServiceWithHome("127.0.0.1:8080", "", home))
+
+	cfgPath := connect.ConfigPath("claude-code", home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`{"mcpServers":{"mcpproxy":{"url":"http://user-owned/mcp"}}}`), 0o644))
+
+	connectReq := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code", bytes.NewReader([]byte(`{"force":true}`)))
+	connectReq.Header.Set("Content-Type", "application/json")
+	connectReq.Header.Set("X-API-Key", "test-key")
+	connectRec := httptest.NewRecorder()
+	srv.ServeHTTP(connectRec, connectReq)
+	require.Equal(t, http.StatusOK, connectRec.Code, connectRec.Body.String())
+	var connected struct {
+		Data connect.ConnectResult `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(connectRec.Body).Decode(&connected))
+	require.Contains(t, ctrl.state.ClientConnectedAt, "claude-code")
+
+	undoBody, err := json.Marshal(UndoConnectRequest{BackupName: filepath.Base(connected.Data.BackupPath)})
+	require.NoError(t, err)
+	undoReq := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code/undo", bytes.NewReader(undoBody))
+	undoReq.Header.Set("Content-Type", "application/json")
+	undoReq.Header.Set("X-API-Key", "test-key")
+	undoRec := httptest.NewRecorder()
+	srv.ServeHTTP(undoRec, undoReq)
+	require.Equal(t, http.StatusOK, undoRec.Code, undoRec.Body.String())
+	require.NotContains(t, ctrl.state.ClientConnectedAt, "claude-code")
+	require.Contains(t, ctrl.state.ClientDisconnectedAt, "claude-code")
+}
+
+func TestHandleUndoConnectClient_PreservesPresenceWhenOriginalEntryTargetsThisInstance(t *testing.T) {
+	ctrl := &onboardingTestController{}
+	srv := newOnboardingTestServer(t, ctrl)
+	home := t.TempDir()
+	srv.SetConnectService(connect.NewServiceWithHome("127.0.0.1:8080", "", home))
+
+	cfgPath := connect.ConfigPath("claude-code", home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`{"mcpServers":{"mcpproxy":{"url":"http://127.0.0.1:8080/mcp"}}}`), 0o644))
+
+	connectBody, err := json.Marshal(ConnectRequest{Force: true})
+	require.NoError(t, err)
+	connectReq := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code", bytes.NewReader(connectBody))
+	connectReq.Header.Set("Content-Type", "application/json")
+	connectReq.Header.Set("X-API-Key", "test-key")
+	connectRec := httptest.NewRecorder()
+	srv.ServeHTTP(connectRec, connectReq)
+	require.Equal(t, http.StatusOK, connectRec.Code, connectRec.Body.String())
+	var connected struct {
+		Data connect.ConnectResult `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(connectRec.Body).Decode(&connected))
+
+	undoBody, err := json.Marshal(UndoConnectRequest{BackupName: filepath.Base(connected.Data.BackupPath)})
+	require.NoError(t, err)
+	undoReq := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code/undo", bytes.NewReader(undoBody))
+	undoReq.Header.Set("Content-Type", "application/json")
+	undoReq.Header.Set("X-API-Key", "test-key")
+	undoRec := httptest.NewRecorder()
+	srv.ServeHTTP(undoRec, undoReq)
+	require.Equal(t, http.StatusOK, undoRec.Code, undoRec.Body.String())
+	require.Contains(t, ctrl.state.ClientConnectedAt, "claude-code")
+	require.NotContains(t, ctrl.state.ClientDisconnectedAt, "claude-code")
+}
+
+func TestHandleUndoConnectClient_ClearsPresenceWhenOriginalEntryHasNoComparableEndpoint(t *testing.T) {
+	ctrl := &onboardingTestController{}
+	srv := newOnboardingTestServer(t, ctrl)
+	home := t.TempDir()
+	srv.SetConnectService(connect.NewServiceWithHome("127.0.0.1:8080", "", home))
+
+	cfgPath := connect.ConfigPath("claude-code", home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`{"mcpServers":{"mcpproxy":{"command":"unrelated-bridge"}}}`), 0o644))
+
+	connectReq := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code", bytes.NewReader([]byte(`{"force":true}`)))
+	connectReq.Header.Set("Content-Type", "application/json")
+	connectReq.Header.Set("X-API-Key", "test-key")
+	connectRec := httptest.NewRecorder()
+	srv.ServeHTTP(connectRec, connectReq)
+	require.Equal(t, http.StatusOK, connectRec.Code, connectRec.Body.String())
+	var connected struct {
+		Data connect.ConnectResult `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(connectRec.Body).Decode(&connected))
+
+	undoBody, err := json.Marshal(UndoConnectRequest{BackupName: filepath.Base(connected.Data.BackupPath)})
+	require.NoError(t, err)
+	undoReq := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code/undo", bytes.NewReader(undoBody))
+	undoReq.Header.Set("Content-Type", "application/json")
+	undoReq.Header.Set("X-API-Key", "test-key")
+	undoRec := httptest.NewRecorder()
+	srv.ServeHTTP(undoRec, undoReq)
+	require.Equal(t, http.StatusOK, undoRec.Code, undoRec.Body.String())
+	require.NotContains(t, ctrl.state.ClientConnectedAt, "claude-code")
+	require.Contains(t, ctrl.state.ClientDisconnectedAt, "claude-code")
+}
+
 // TestHandleUndoConnectClient_ConflictWhenDrifted asserts a 409 (and no file
 // mutation) when the config changed after the connect.
 func TestHandleUndoConnectClient_ConflictWhenDrifted(t *testing.T) {

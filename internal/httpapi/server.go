@@ -1001,6 +1001,7 @@ func (s *Server) setupRoutes() {
 
 		// Routing mode endpoint
 		r.Get("/routing", s.handleGetRouting)
+		s.registerClientRoutes(r)
 
 		// Profiles (Profiles v2 T2) — list + default active get/set for UI surfaces
 		r.Get("/profiles", s.handleListProfiles)
@@ -1216,13 +1217,13 @@ func (s *Server) setupRoutes() {
 		// Feedback submission (Spec 036)
 		r.Post("/feedback", s.handleFeedback)
 
-		// Client connect/disconnect. Connecting/undo/disconnect write, restore,
-		// or delete local MCP client config files and can embed the admin API
-		// key into that config — an agent must not trigger them (issue #878
-		// class). Status/preview reads stay open.
-		r.Get("/connect", s.handleGetConnectStatus)
-		r.Get("/connect/{client}", s.handleGetConnectClientStatus)
-		r.Get("/connect/{client}/preview", s.handleConnectClientPreview)
+		// Client connect/disconnect. Config reads disclose local paths and
+		// connection state; writes can modify user-owned client files or embed
+		// credentials. All reads and writes require administrator access.
+		connectRead := s.requireAdminReadMiddleware("Admin credentials required to read client connection status")
+		r.With(connectRead).Get("/connect", s.handleGetConnectStatus)
+		r.With(connectRead).Get("/connect/{client}", s.handleGetConnectClientStatus)
+		r.With(connectRead).Get("/connect/{client}/preview", s.handleConnectClientPreview)
 		r.Post("/connect/{client}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleConnectClient))
 		r.Post("/connect/{client}/undo", s.requireServerOp(auth.ServerOpConfigWrite, s.handleUndoConnectClient))
 		r.Delete("/connect/{client}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleDisconnectClient))

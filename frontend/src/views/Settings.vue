@@ -67,7 +67,7 @@
             <span class="text-sm grow">
               🔌 Connecting an AI client (Claude, Cursor, VS Code…)? The helper registers mcpproxy with the right endpoint and API key in the client's config.
             </span>
-            <button class="btn btn-sm btn-primary" data-test="settings-connect-client" @click="showConnect = true">
+            <button class="btn btn-sm btn-primary" data-test="settings-connect-client" @click="router.push('/clients')">
               Connect a client
             </button>
           </div>
@@ -178,7 +178,6 @@
     <CollapsibleHintsPanel :hints="settingsHints" />
 
     <!-- Connect-a-client helper (shared with Dashboard) -->
-    <ConnectModal :show="showConnect" @close="showConnect = false" />
   </div>
 </template>
 
@@ -190,7 +189,6 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import ConnectModal from '@/components/ConnectModal.vue'
 import SettingsSection from '@/components/settings/SettingsSection.vue'
 import CatalogSourcesSettings from '@/components/CatalogSourcesSettings.vue'
 import ScannerSettings from '@/components/ScannerSettings.vue'
@@ -271,7 +269,6 @@ watch(activeTab, (tab) => {
   if (route.query.tab === tab) return
   void router.replace({ query: { ...route.query, tab } })
 })
-const showConnect = ref(false)
 const state = reactive<{ working: any; original: any }>({ working: {}, original: {} })
 // Bumped on every (re)hydration so each SettingsSection remounts with a fresh
 // component-local `dirty` ref. Without this, a field the user edited and then

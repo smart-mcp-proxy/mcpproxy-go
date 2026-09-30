@@ -524,6 +524,7 @@ func NewMCPProxyServer(
 		// MCP layer stays unaware of BBolt details. nil-safe all the way down.
 		if mainServer != nil && mainServer.runtime != nil {
 			mainServer.runtime.RecordMCPClientForActivation(clientName)
+			mainServer.runtime.RecordClientSeen(clientName)
 		}
 
 		logger.Info("MCP client initialized with capabilities",

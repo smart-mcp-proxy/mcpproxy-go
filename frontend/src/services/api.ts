@@ -1265,6 +1265,9 @@ class APIService {
     return this.request<ConnectStatusResponse>('/api/v1/connect')
   }
 
+  async getClients(): Promise<APIResponse<import('@/types/api').ClientsResponse>> { return this.request('/api/v1/clients') }
+  async getClient(id: string): Promise<APIResponse<import('@/types/api').ClientPresence>> { return this.request(`/api/v1/clients/${encodeURIComponent(id)}`) }
+
   // Spec 075: resolve a single client's status on demand. This is the only
   // Connect call that reads a client config file's contents (to classify
   // access_state), so on macOS it is the sole place an App-Data privacy prompt

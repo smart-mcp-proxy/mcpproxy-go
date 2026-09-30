@@ -590,6 +590,7 @@ func TestSSE_EveryRuntimeEventTypeIsClassified(t *testing.T) {
 	noServerIdentity := map[string]string{
 		"servers.changed":          "rendered per subscriber, never dropped: coalesced last-write-wins",
 		"attention.changed":        "rendered per subscriber, never dropped: structured items narrowed by canSeeServer (Spec 109 FR-006)",
+		"clients.presence.changed": "administrator-only local client inventory invalidation; dropped for scoped callers",
 		"config.reloaded":          "admin config document — dropped for a scoped caller",
 		"config.saved":             "admin config document — dropped for a scoped caller",
 		"secrets.changed":          "admin config document — dropped for a scoped caller",

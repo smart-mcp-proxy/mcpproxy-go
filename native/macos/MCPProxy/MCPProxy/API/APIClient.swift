@@ -78,6 +78,19 @@ actor APIClient {
     /// synchronously to decide whether a control is even enabled.
     nonisolated let transportKind: TransportKind
 
+    /// Returns an absolute URL for an advertised MCP endpoint path, for
+    /// copyable client configuration examples in the native Clients hub.
+    func endpointURL(_ path: String) -> String {
+        Self.endpointURL(path, baseURL: baseURL)
+    }
+
+    /// Compose an advertised endpoint using the daemon's observed Web UI
+    /// address. The API client's socket fallback URL may use the default port
+    /// even when the daemon is listening elsewhere.
+    nonisolated static func endpointURL(_ path: String, baseURL: String) -> String {
+        baseURL + (path.hasPrefix("/") ? path : "/" + path)
+    }
+
     /// Create an API client.
     ///
     /// - Parameters:
@@ -151,6 +164,25 @@ actor APIClient {
     /// Fetch server info from `GET /api/v1/info`.
     func info() async throws -> InfoResponse {
         return try await fetchWrapped(path: "/api/v1/info")
+    }
+
+    // MARK: - Clients hub (Spec 109-h)
+
+    /// Presence-only list. The core does not inspect client config contents for
+    /// this request; use `clientPresence(_:)` only after the user expands a row.
+    func clients() async throws -> [ClientPresenceRecord] {
+        let response: ClientsResponse = try await fetchWrapped(path: "/api/v1/clients")
+        return response.clients
+    }
+
+    /// One presence row including recent sessions, fetched on explicit demand.
+    func clientPresence(_ id: String) async throws -> ClientPresenceRecord {
+        try await fetchWrapped(path: "/api/v1/clients/\(id.uriComponentEncoded)")
+    }
+
+    /// The served routing mode, its restart-pending value, and every MCP path.
+    func routing() async throws -> RoutingInfo {
+        try await fetchWrapped(path: "/api/v1/routing")
     }
 
     // MARK: - Docker & Diagnostics

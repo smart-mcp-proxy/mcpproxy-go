@@ -20,10 +20,10 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     // `views/Repositories.vue` -> `/add-server?tab=catalog` + Settings move.
     case activity = "Activity Log"
     case secrets = "Secrets"
+    case clients = "Clients"
     // F5: TokensView was a complete, API-complete create/list/revoke UI that
     // nothing instantiated — a headline security feature reachable from the
     // Web UI and the CLI but not from the app the user has open.
-    case tokens = "Agent Tokens"
 
     var id: String { rawValue }
 
@@ -35,7 +35,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .tools: return "wrench.and.screwdriver"
         case .activity: return "clock.arrow.circlepath"
         case .secrets: return "key.fill"
-        case .tokens: return "key.horizontal"
+        case .clients: return "person.2"
         }
     }
 
@@ -104,8 +104,8 @@ struct MainWindow: View {
                         ActivityView(appState: appState)
                     case .secrets:
                         SecretsView(appState: appState)
-                    case .tokens:
-                        TokensView(appState: appState)
+                    case .clients:
+                        ClientsView(appState: appState)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

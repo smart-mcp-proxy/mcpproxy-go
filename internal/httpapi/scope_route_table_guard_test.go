@@ -56,19 +56,22 @@ type routeScope struct {
 // an unclassified new route fails, and a stale entry for a removed route fails.
 var getRouteScopes = map[string]routeScope{
 	// --- Refused: deployment-wide documents an agent token cannot read ---
-	"/api/v1/config":            {scopeRefused, "whole config document; TestGetConfig_AgentTokenForbidden_AdminUnaffected"},
-	"/api/v1/code/scripts":      {scopeRefused, "stored-script listing is admin-only (scriptsListingDenialMessage)"},
-	"/api/v1/onboarding/state":  {scopeRefused, "inventory size + client ids; TestOnboardingState_DeniedToScopedCaller"},
-	"/api/v1/secrets/refs":      {scopeRefused, "credential inventory; TestSecretsInventory_DeniedToScopedCaller"},
-	"/api/v1/secrets/config":    {scopeRefused, "credential inventory; TestSecretsInventory_DeniedToScopedCaller"},
-	"/api/v1/security/overview": {scopeRefused, "fleet scan/finding counts; TestSecurityFleetDoors_DeniedToScopedCaller"},
-	"/api/v1/security/queue":    {scopeRefused, "names every queued server; TestSecurityFleetDoors_DeniedToScopedCaller"},
-	"/api/v1/sessions":          {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
-	"/api/v1/sessions/{id}":     {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
-	"/api/v1/stats/tokens":      {scopeRefused, "deployment-wide token stats; TestTokenStats_DeniedToAgentTokens"},
-	"/api/v1/telemetry/payload": {scopeRefused, "fleet heartbeat counts; TestTelemetryPayload_DeniedToScopedCaller"},
-	"/api/v1/tokens/":           {scopeRefused, "agent tokens cannot manage tokens (requireManageTokens)"},
-	"/api/v1/tokens/{name}/":    {scopeRefused, "agent tokens cannot manage tokens (requireManageTokens)"},
+	"/api/v1/config":                   {scopeRefused, "whole config document; TestGetConfig_AgentTokenForbidden_AdminUnaffected"},
+	"/api/v1/code/scripts":             {scopeRefused, "stored-script listing is admin-only (scriptsListingDenialMessage)"},
+	"/api/v1/onboarding/state":         {scopeRefused, "inventory size + client ids; TestOnboardingState_DeniedToScopedCaller"},
+	"/api/v1/secrets/refs":             {scopeRefused, "credential inventory; TestSecretsInventory_DeniedToScopedCaller"},
+	"/api/v1/secrets/config":           {scopeRefused, "credential inventory; TestSecretsInventory_DeniedToScopedCaller"},
+	"/api/v1/security/overview":        {scopeRefused, "fleet scan/finding counts; TestSecurityFleetDoors_DeniedToScopedCaller"},
+	"/api/v1/security/queue":           {scopeRefused, "names every queued server; TestSecurityFleetDoors_DeniedToScopedCaller"},
+	"/api/v1/sessions":                 {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
+	"/api/v1/sessions/{id}":            {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
+	"/api/v1/stats/tokens":             {scopeRefused, "deployment-wide token stats; TestTokenStats_DeniedToAgentTokens"},
+	"/api/v1/telemetry/payload":        {scopeRefused, "fleet heartbeat counts; TestTelemetryPayload_DeniedToScopedCaller"},
+	"/api/v1/tokens/":                  {scopeRefused, "agent tokens cannot manage tokens (requireManageTokens)"},
+	"/api/v1/tokens/{name}/":           {scopeRefused, "agent tokens cannot manage tokens (requireManageTokens)"},
+	"/api/v1/connect":                  {scopeRefused, "MCP client connection status is admin-only"},
+	"/api/v1/connect/{client}":         {scopeRefused, "MCP client connection status is admin-only"},
+	"/api/v1/connect/{client}/preview": {scopeRefused, "MCP client configuration preview is admin-only"},
 
 	// --- Filtered: reachable, per-server content narrowed to the grant ---
 	"/api/v1/servers":                       {scopeFiltered, "visibleServers; TestGetServers_AgentTokenSeesOnlyAllowedSubset_ManagementPath"},
@@ -116,9 +119,6 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/security/scanners":             {scopeOpen, "scanner plugin inventory, not per-server data"},
 	"/api/v1/security/scanners/{id}/status": {scopeOpen, "scanner plugin status, not per-server data"},
 	"/api/v1/servers/import/paths":          {scopeOpen, "host MCP-client config file locations, no upstream identity"},
-	"/api/v1/connect":                       {scopeOpen, "MCP client connect status; reads stay open (server.go connect block)"},
-	"/api/v1/connect/{client}":              {scopeOpen, "MCP client connect status; reads stay open"},
-	"/api/v1/connect/{client}/preview":      {scopeOpen, "MCP client config preview; reads stay open"},
 
 	// /diagnostics and its /doctor alias aggregate per-server health, on two
 	// paths with two separate gates: the management path delegates to
@@ -163,9 +163,6 @@ var routeParamSubstitutions = map[string]string{
 // begins serving the synthetic id) trips this and must be re-examined.
 var shortCircuitCodes = map[string]int{
 	"/api/v1/index/search":                  http.StatusBadRequest,         // no ?q= on the probe request
-	"/api/v1/connect":                       http.StatusServiceUnavailable, // connect manager not wired in the fixture
-	"/api/v1/connect/{client}":              http.StatusServiceUnavailable,
-	"/api/v1/connect/{client}/preview":      http.StatusServiceUnavailable,
 	"/api/v1/activity/{id}":                 http.StatusNotFound,           // synthetic id absent → 404 before canSeeServer
 	"/api/v1/tool-calls/{id}":               http.StatusNotFound,           // synthetic id absent → 404 before canSeeServer
 	"/api/v1/security/scans/{jobId}/report": http.StatusNotFound,           // synthetic jobId absent → 404 before canSeeServer
@@ -190,6 +187,23 @@ func fillRouteParams(pattern string) string {
 // pins the refusal to the scope layer, so an unrelated 403 cannot satisfy a
 // scopeRefused route.
 const scopeDenialMarker = "Agent tokens cannot"
+
+// routeDenialMarkers records refusal middleware whose admin-only message is
+// intentionally more specific than the generic agent-token scope denial.
+var routeDenialMarkers = map[string]string{
+	"/api/v1/connect":                  "Admin credentials required to read client connection status",
+	"/api/v1/connect/{client}":         "Admin credentials required to read client connection status",
+	"/api/v1/connect/{client}/preview": "Admin credentials required to read client connection status",
+}
+
+func init() {
+	for route, scope := range editionGetRouteScopes() {
+		getRouteScopes[route] = scope
+	}
+	for route, marker := range editionRouteDenialMarkers() {
+		routeDenialMarkers[route] = marker
+	}
+}
 
 // TestScopeRouteTableGuard walks the production /api/v1 GET surface and holds
 // every route to its classification for a real, read-only agent token scoped to
@@ -231,6 +245,9 @@ func TestScopeRouteTableGuard(t *testing.T) {
 	for route := range getRouteScopes {
 		require.Truef(t, seen[route], "getRouteScopes lists %s but the walk did not find it — remove the stale entry", route)
 	}
+	for route, reason := range editionAbsentGetRoutes() {
+		require.Falsef(t, seen[route], "GET %s must be absent in this edition (%s)", route, reason)
+	}
 
 	// Drive each route with the scoped token and hold it to its verdict.
 	for route := range seen {
@@ -242,7 +259,11 @@ func TestScopeRouteTableGuard(t *testing.T) {
 				require.Equalf(t, http.StatusForbidden, rec.Code,
 					"%s is classified scopeRefused (%s) but did not answer 403: got %d body=%s",
 					route, rc.why, rec.Code, rec.Body.String())
-				require.Containsf(t, rec.Body.String(), scopeDenialMarker,
+				denialMarker := routeDenialMarkers[route]
+				if denialMarker == "" {
+					denialMarker = scopeDenialMarker
+				}
+				require.Containsf(t, rec.Body.String(), denialMarker,
 					"%s answered 403 but not the scope-layer denial body — is this the right refusal?", route)
 				return
 			}
