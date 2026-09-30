@@ -138,8 +138,11 @@ func (e *scrubbedError) carriesValue(x any) bool {
 	seen := 0
 	var walk func(error) bool
 	walk = func(err error) bool {
-		if err == nil || seen > 64 {
+		if err == nil {
 			return false
+		}
+		if seen > 64 {
+			return true // too deep to inspect fully: fail closed
 		}
 		seen++
 		if dirty(err.Error()) || fieldsCarry(reflect.ValueOf(err), dirty, 0) {

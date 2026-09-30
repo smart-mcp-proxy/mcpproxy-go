@@ -212,3 +212,15 @@ func TestScrubErrorAsByteSlices(t *testing.T) {
 		t.Fatal("a clean byte slice must stay reachable")
 	}
 }
+
+func TestScrubErrorAsDeepChainFailsClosed(t *testing.T) {
+	s := snapWith(t, "X-Tenant-Id", "tenant-secret-1")
+	var inner error = errors.New("tenant-secret-1")
+	for i := 0; i < 100; i++ {
+		inner = &genericWrapErr{Cause: inner}
+	}
+	var w *genericWrapErr
+	if errors.As(ScrubError(fmt.Errorf("tenant-secret-1: %w", inner), s, nil), &w) {
+		t.Fatal("a chain too deep to inspect must fail closed")
+	}
+}
