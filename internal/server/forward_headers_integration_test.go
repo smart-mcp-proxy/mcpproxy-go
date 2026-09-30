@@ -36,6 +36,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	uptransport "github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -572,37 +573,41 @@ func TestForwardHeaders_ReconnectAndRefreshCarryNothing(t *testing.T) {
 	mc, ok := rt.UpstreamManager().GetClient("gw")
 	require.True(t, ok)
 
-	// reconnect_on_use is honoured by the direct surface (call_tool_* checks
-	// liveness first and refuses; code_execution calls the managed client without
-	// reconnecting). Drop the shared session so
-	// the next call reconnects under client A's request context.
-	for _, surface := range []struct {
-		name, path string
-		call       func(*testing.T, *client.Client)
-	}{
-		{"direct", "/mcp/all", func(t *testing.T, c *client.Client) { fwdCallDirect(t, c, "gw", "echo_headers") }},
-	} {
-		t.Run("reconnect_on_use via "+surface.name, func(t *testing.T) {
-			require.NoError(t, mc.Disconnect())
-			require.False(t, mc.IsConnected())
+	// Drop the shared session so the next call reconnects (reconnect_on_use)
+	// under a request context that carries client A's captured headers (key A).
+	// The manager is driven directly because no client surface reaches the
+	// reconnect_on_use branch deterministically: call_tool_* refuses a
+	// disconnected server before dispatch, code_execution does not reconnect,
+	// and the direct surface drops a disconnected server's tools on the
+	// servers.changed rebuild, so a direct call races that rebuild. Capture on
+	// every client surface is covered by the mount-coverage test.
+	t.Run("reconnect_on_use under a captured request context", func(t *testing.T) {
+		require.NoError(t, mc.Disconnect())
+		require.False(t, mc.IsConnected())
 
-			before := gw.mark()
-			value := "client-a-" + surface.name
-			a := env.fwdClient(surface.path, map[string]string{"X-User-Id": value})
-			surface.call(t, a)
+		const value = "client-a-reconnect"
+		r := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+		r.Header.Set("X-User-Id", value)
+		ctx := headerfwd.WithSnapshot(context.Background(),
+			headerfwd.Capture(r, map[string]struct{}{"X-User-Id": {}}))
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
 
-			seen := gw.since(before)
-			require.NotEmpty(t, fwdRPCCalls(seen, "initialize"), "the call must have reconnected the session")
-			for _, r := range seen {
-				if r.RPC == "tools/call" && r.Tool == "echo_headers" {
-					assert.Equal(t, value, r.Header.Get("X-User-Id"), "the tools/call itself carries the caller's header")
-					continue
-				}
-				assert.Empty(t, r.Header.Get("X-User-Id"), "%s %s must not carry the forwarded header", r.Verb, r.RPC)
+		before := gw.mark()
+		_, err := rt.UpstreamManager().CallTool(ctx, "gw:echo_headers", map[string]interface{}{})
+		require.NoError(t, err)
+
+		seen := gw.since(before)
+		require.NotEmpty(t, fwdRPCCalls(seen, "initialize"), "the call must have reconnected the session")
+		for _, r := range seen {
+			if r.RPC == "tools/call" && r.Tool == "echo_headers" {
+				assert.Equal(t, value, r.Header.Get("X-User-Id"), "the tools/call itself carries the caller's header")
+				continue
 			}
-			assert.Len(t, fwdToolCalls(seen, "echo_headers"), 1)
-		})
-	}
+			assert.Empty(t, r.Header.Get("X-User-Id"), "%s %s must not carry the forwarded header", r.Verb, r.RPC)
+		}
+		assert.Len(t, fwdToolCalls(seen, "echo_headers"), 1)
+	})
 
 	a := env.fwdClient("/mcp", map[string]string{"X-User-Id": "client-a"})
 	// upstream_servers refresh runs ListTools under client A's request ctx.
