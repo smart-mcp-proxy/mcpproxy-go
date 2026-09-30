@@ -3,7 +3,7 @@
 //
 // Native Settings window. The tray is a full alternative client to the core:
 // every backend setting is edited here over REST (GET/PATCH /api/v1/config),
-// mirroring the web UI Configuration page — the config JSON file is never read
+// mirroring the web UI Settings page — the config JSON file is never read
 // or written directly. The "App" tab holds the few OS-level prefs that are
 // genuinely the app's own concern (launch-at-login, interface size).
 

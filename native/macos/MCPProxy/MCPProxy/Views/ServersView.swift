@@ -237,9 +237,17 @@ struct ServersView: View {
         }
         .onAppear {
             triggerLoad()
+            consumePendingAddAction()
         }
         .onChange(of: appState.serversVersion) { _ in
             triggerLoad()
+        }
+        // Spec 109-i FR-052: the window toolbar "+ -> Server" hands off through
+        // AppState (a view created by the sidebar switch reads it on appear; one
+        // already showing reads it here). The tray's `.showAddServer`
+        // notification below stays as it was.
+        .onChange(of: appState.pendingAddAction) { _ in
+            consumePendingAddAction()
         }
         .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { notification in
             if let tab = notification.object as? AddServerTab {
@@ -257,6 +265,14 @@ struct ServersView: View {
                 selectedServer = server
             }
         }
+    }
+
+    /// Open the Add Server sheet on the Catalog tab for a pending toolbar
+    /// "+ -> Server" action. Only `.server` is this view's to consume.
+    private func consumePendingAddAction() {
+        guard appState.consumePendingAddAction(for: [.server]) != nil else { return }
+        addServerInitialTab = .catalog
+        showAddServer = true
     }
 
     private func triggerLoad() {

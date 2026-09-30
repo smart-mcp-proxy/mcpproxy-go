@@ -40,6 +40,9 @@ struct TokensListResponse: Codable {
 
 struct TokensView: View {
     @ObservedObject var appState: AppState
+    /// Optional one-shot request to open the create sheet (Spec 109-i toolbar
+    /// "+ -> Token"). Reset to false once consumed. Nil for other call sites.
+    var requestCreate: Binding<Bool>?
     @Environment(\.fontScale) var fontScale
     @State private var tokens: [AgentToken] = []
     @State private var isLoading = false
@@ -89,11 +92,19 @@ struct TokensView: View {
             }
         }
         .task { await loadTokens() }
+        .onAppear { consumeCreateRequest() }
+        .onChange(of: requestCreate?.wrappedValue ?? false) { _ in consumeCreateRequest() }
         .sheet(isPresented: $showCreateSheet) {
             CreateTokenSheet(appState: appState) { _ in
                 Task { await loadTokens() }
             }
         }
+    }
+
+    private func consumeCreateRequest() {
+        guard requestCreate?.wrappedValue == true else { return }
+        requestCreate?.wrappedValue = false
+        showCreateSheet = true
     }
 
     // MARK: - Subviews
