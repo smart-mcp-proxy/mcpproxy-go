@@ -930,6 +930,8 @@ export type ActivityType =
   /** Spec 074, server edition only. */
   | 'credential_broker'
   | 'prompt_get'
+  /** Spec 108: a client binding, credential rotation or forget. */
+  | 'profile_change'
 
 export type ActivitySource = 'mcp' | 'cli' | 'api'
 

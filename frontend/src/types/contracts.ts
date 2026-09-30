@@ -751,12 +751,52 @@ export const CredentialStateAdminKey = 'admin_key' as const;
 export const CredentialStateNone = 'none' as const;
 export const CredentialStateRevoked = 'revoked' as const;
 export const CredentialStateExpired = 'expired' as const;
+export const CredentialStateUnknown = 'unknown' as const;
 export type CredentialState =
   | typeof CredentialStateClient
   | typeof CredentialStateAdminKey
   | typeof CredentialStateNone
   | typeof CredentialStateRevoked
-  | typeof CredentialStateExpired;
+  | typeof CredentialStateExpired
+  | typeof CredentialStateUnknown;
+
+export const ErrorCodeBindingBypassable = 'binding_bypassable_without_auth' as const;
+export const ErrorCodeNoClientCredential = 'no_client_credential' as const;
+
+export const GuardFixRequireMCPAuth = 'require_mcp_auth' as const;
+export const GuardFixSetAnonymousProfile = 'set_anonymous_profile' as const;
+
+export const ProfileChangeCreate = 'create' as const;
+export const ProfileChangeUpdate = 'update' as const;
+export const ProfileChangeDelete = 'delete' as const;
+export const ProfileChangeRename = 'rename' as const;
+export const ProfileChangeClassify = 'classify' as const;
+export const ProfileChangeAssign = 'assign' as const;
+export const ProfileChangeLock = 'lock' as const;
+export const ProfileChangeUnlock = 'unlock' as const;
+export const ProfileChangeForget = 'forget' as const;
+export const ProfileChangeRotate = 'rotate' as const;
+export const ProfileChangeAnonymous = 'anonymous' as const;
+export type ProfileChangeKind =
+  | typeof ProfileChangeCreate
+  | typeof ProfileChangeUpdate
+  | typeof ProfileChangeDelete
+  | typeof ProfileChangeRename
+  | typeof ProfileChangeClassify
+  | typeof ProfileChangeAssign
+  | typeof ProfileChangeLock
+  | typeof ProfileChangeUnlock
+  | typeof ProfileChangeForget
+  | typeof ProfileChangeRotate
+  | typeof ProfileChangeAnonymous;
+
+export const RotationFinalized = 'finalized' as const;
+export const RotationRolledBack = 'rolled_back' as const;
+export const RotationPending = 'pending' as const;
+export type RotationState =
+  | typeof RotationFinalized
+  | typeof RotationRolledBack
+  | typeof RotationPending;
 
 export const ProfileSurfaceWeb = 'web' as const;
 export const ProfileSurfaceMacOS = 'macos' as const;
