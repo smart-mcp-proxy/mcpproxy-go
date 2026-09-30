@@ -28,11 +28,11 @@
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
             <CatalogResultCard
               v-for="r in sections.official"
-              :key="`${r.source}-${r.id}`"
+              :key="catalogEntryKey(r.source, r.id)"
               :result="r"
               :keyring-available="keyringAvailable"
               :keyring-reason="keyringReason"
-              :busy="addingKey === `${r.source}-${r.id}`"
+              :busy="addingKey === catalogEntryKey(r.source, r.id)"
               @add="handleAdd(r)"
             />
           </div>
@@ -42,11 +42,11 @@
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <CatalogResultCard
               v-for="r in sections.popular"
-              :key="`${r.source}-${r.id}`"
+              :key="catalogEntryKey(r.source, r.id)"
               :result="r"
               :keyring-available="keyringAvailable"
               :keyring-reason="keyringReason"
-              :busy="addingKey === `${r.source}-${r.id}`"
+              :busy="addingKey === catalogEntryKey(r.source, r.id)"
               @add="handleAdd(r)"
             />
           </div>
@@ -63,11 +63,11 @@
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <CatalogResultCard
             v-for="r in results"
-            :key="`${r.source}-${r.id}`"
+            :key="catalogEntryKey(r.source, r.id)"
             :result="r"
             :keyring-available="keyringAvailable"
             :keyring-reason="keyringReason"
-            :busy="addingKey === `${r.source}-${r.id}`"
+            :busy="addingKey === catalogEntryKey(r.source, r.id)"
             @add="handleAdd(r)"
           />
         </div>
@@ -139,6 +139,13 @@ const addingKey = ref<string | null>(null)
 // entry the user just added would otherwise flash back to "Add to MCPProxy").
 const addedNames = reactive<Record<string, string>>({})
 
+// Catalog sources and their entry IDs may both contain dashes. Use a
+// length-prefixed pair rather than `${source}-${id}` so state for distinct
+// entries can never collide (for example, `a-b`/`c` and `a`/`b-c`).
+function catalogEntryKey(source: string, id: string): string {
+  return `${source.length}:${source}${id.length}:${id}`
+}
+
 const keyringAvailable = ref(true)
 const keyringReason = ref('')
 
@@ -205,7 +212,7 @@ const hasUnavailableSecret = computed(() =>
 )
 
 function handleAdd(result: CatalogResult) {
-  const key = `${result.source}-${result.id}`
+  const key = catalogEntryKey(result.source, result.id)
   if (result.required_inputs && result.required_inputs.length > 0) {
     pendingResult.value = result
     for (const key of Object.keys(pendingValues)) delete pendingValues[key]
@@ -243,7 +250,7 @@ async function confirmAdd() {
     }))
     const resolved = await resolveSecretFields(result.title || result.id, fields)
     writtenRefs = resolved.writtenRefs
-    const added = await addResult(result, `${result.source}-${result.id}`, resolved.env)
+    const added = await addResult(result, catalogEntryKey(result.source, result.id), resolved.env)
     if (added) {
       closeSecretsDialog()
     } else if (writtenRefs.length > 0) {
@@ -332,12 +339,12 @@ const CatalogResultCard = defineComponent({
   setup(cardProps, { emit: cardEmit }) {
     return () => {
       const r = cardProps.result
-      const key = `${r.source}-${r.id}`
+      const key = catalogEntryKey(r.source, r.id)
       const addedName = addedNames[key]
       const added = !!addedName || r.added
       return h(
         'div',
-        { class: 'card bg-base-100 shadow-md', 'data-test': `catalog-result-${r.source}-${r.id}` },
+        { class: 'card bg-base-100 shadow-md', 'data-test': `catalog-result-${key}` },
         [
           h('div', { class: 'card-body p-4' }, [
             h('div', { class: 'flex items-start justify-between gap-2' }, [
@@ -362,7 +369,7 @@ const CatalogResultCard = defineComponent({
                   type: 'button',
                   class: `btn btn-sm ${added ? 'btn-success' : 'btn-primary'}`,
                   disabled: cardProps.busy,
-                  'data-test': `catalog-add-${r.source}-${r.id}`,
+                  'data-test': `catalog-add-${key}`,
                   onClick: () => {
                     if (!added) return cardEmit('add')
                     if (addedName) return router.push(serverDetailPath(addedName))
