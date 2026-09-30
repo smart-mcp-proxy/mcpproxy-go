@@ -1,4 +1,5 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse, AttentionResponse, ReviewQueueResponse, ServerReviewResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, AttentionResponse, ReviewQueueResponse, ServerReviewResponse } from '@/types'
+import type { ProfileConfig, ProfileList, ProfileView, ProfileWriteResult, ProfileRenameResult, ProfileDeleteResult, EffectiveToolsResult, TryProfileResponse, AccessExplanation, ExplainSubjectQuery, ClientView, ClientsResponse, BulkAssignResponse, CustomClientResponse, RotateResponse, UpgradePreview, UpgradeApplyResult, ForgetClientResponse, ConnectOptions } from '@/types/api'
 
 import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
 
@@ -44,6 +45,49 @@ export interface AddRegistrySourceResult {
   registry?: RegistrySummary
   error?: string
   code?: string
+}
+
+// Spec 108-i: a REST refusal that keeps the whole body. The generic request()
+// collapses a failure to its `error` text; a guard refusal needs `bindings` and
+// `fixes`, a delete-in-use needs `used_by`, a validator 400 needs `field`.
+type BindingRefBody = { client_id: string; token_name: string; profile: string; mode: string }
+type GuardFixBody = { kind: string; target?: string }
+
+export class ApiError extends Error {
+  status: number
+  code?: string
+  field?: string
+  used_by?: { clients: Array<{ id: string; mode: string }>; tokens: string[]; anonymous_profile: boolean }
+  bindings?: BindingRefBody[]
+  fixes?: GuardFixBody[]
+  skipped?: Array<{ client_id: string; code: string; error?: string }>
+  conflicting_token?: string
+  remediation?: string
+  action?: string
+  constructor(status: number, body: Record<string, any>, fallback: string) {
+    super(typeof body?.error === 'string' && body.error ? body.error : fallback)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = body?.code
+    this.field = body?.field
+    this.used_by = body?.used_by
+    this.bindings = body?.bindings
+    this.fixes = body?.fixes
+    this.skipped = body?.skipped
+    this.conflicting_token = body?.conflicting_token
+    this.remediation = body?.remediation
+    this.action = body?.action
+  }
+}
+
+function queryString(params: Record<string, string | number | boolean | undefined | null>): string {
+  const q = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === '') continue
+    q.set(k, String(v))
+  }
+  const text = q.toString()
+  return text ? `?${text}` : ''
 }
 
 class APIService {
@@ -244,6 +288,49 @@ class APIService {
     }
   }
 
+  // Spec 108-i I1: like request() but a failure throws an ApiError that carries
+  // the whole error body. It reports an auth error for a 401 only: a 403 from
+  // requireServerOp means "not an administrator" and is shown inline, never as
+  // a lost API key.
+  private async requestRaw<T>(endpoint: string, options: RequestInit = {}): Promise<APIResponse<T>> {
+    if (!this.initialized) this.initializeAPIKey()
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-MCPProxy-Client': 'webui/web',
+    }
+    if (options.headers) {
+      if (options.headers instanceof Headers) {
+        options.headers.forEach((value, key) => { headers[key] = value })
+      } else if (Array.isArray(options.headers)) {
+        options.headers.forEach(([key, value]) => { headers[key] = value })
+      } else {
+        Object.assign(headers, options.headers)
+      }
+    }
+    if (this.apiKey) headers['X-API-Key'] = this.apiKey
+
+    let response: Response
+    try {
+      response = await fetch(`${this.baseUrl}${endpoint}`, { ...options, headers })
+    } catch (err) {
+      throw new ApiError(0, {}, err instanceof Error ? err.message : 'Network error')
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}))
+      const error = new ApiError(response.status, body ?? {}, `HTTP ${response.status}: ${response.statusText}`)
+      if (response.status === 401) this.emitAuthError(error.message, response.status)
+      throw error
+    }
+    if (response.status === 204) return { success: true } as APIResponse<T>
+    return (await response.json()) as APIResponse<T>
+  }
+
+  // The unwrapped form the new Profiles v3 methods return: the envelope's data.
+  private async data<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    const response = await this.requestRaw<T>(endpoint, options)
+    return response.data as T
+  }
+
   // Status endpoint
   // `default_instructions` is the resolved built-in MCP instructions default
   // (MCP-2175) — present once the backend exposes it; optional so the Web UI
@@ -261,24 +348,46 @@ class APIService {
     return this.request<RoutingInfo>('/api/v1/routing')
   }
 
-  // Profiles v2 (MCP-3243 / T4) — consume the REST surface from MCP-3241.
-  // List configured profiles with their effective servers + indexed tool count.
-  async getProfiles(): Promise<APIResponse<ListProfilesResponse>> {
-    return this.request<ListProfilesResponse>('/api/v1/profiles')
+  // Profiles v3 (Spec 108-f routes, Spec 108-i names verbatim). Every method
+  // throws an ApiError on a non-2xx answer. The v2 getActiveProfile /
+  // setActiveProfile pair is gone: nothing first-party reads or writes the
+  // server-level default any more (FR-039).
+  getProfiles(): Promise<ProfileList> {
+    return this.data<ProfileList>('/api/v1/profiles')
   }
 
-  // Read the server-level default active profile (empty string = all servers).
-  async getActiveProfile(): Promise<APIResponse<ActiveProfileResponse>> {
-    return this.request<ActiveProfileResponse>('/api/v1/profiles/active')
+  getProfile(name: string): Promise<ProfileView> {
+    return this.data<ProfileView>(`/api/v1/profiles/${encodeURIComponent(name)}`)
   }
 
-  // Set the server-level default active profile. Pass an empty string to clear
-  // (back to all servers); a non-empty slug must match a configured profile.
-  async setActiveProfile(profile: string): Promise<APIResponse<ActiveProfileResponse>> {
-    return this.request<ActiveProfileResponse>('/api/v1/profiles/active', {
-      method: 'PUT',
-      body: JSON.stringify({ profile }),
-    })
+  createProfile(cfg: ProfileConfig): Promise<ProfileWriteResult> {
+    return this.data<ProfileWriteResult>('/api/v1/profiles', { method: 'POST', body: JSON.stringify(cfg) })
+  }
+
+  updateProfile(name: string, cfg: ProfileConfig): Promise<ProfileWriteResult> {
+    return this.data<ProfileWriteResult>(`/api/v1/profiles/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(cfg) })
+  }
+
+  renameProfile(name: string, new_name: string): Promise<ProfileRenameResult> {
+    return this.data<ProfileRenameResult>(`/api/v1/profiles/${encodeURIComponent(name)}/rename`, { method: 'POST', body: JSON.stringify({ new_name }) })
+  }
+
+  deleteProfile(name: string, opts: { reassign_to?: string; force?: boolean } = {}): Promise<ProfileDeleteResult> {
+    const q = queryString({ reassign_to: opts.reassign_to, force: opts.force ? 'true' : undefined })
+    return this.data<ProfileDeleteResult>(`/api/v1/profiles/${encodeURIComponent(name)}${q}`, { method: 'DELETE' })
+  }
+
+  getProfileEffectiveTools(name: string, opts: { client?: string; server?: string; reason?: string } = {}): Promise<EffectiveToolsResult> {
+    return this.data<EffectiveToolsResult>(`/api/v1/profiles/${encodeURIComponent(name)}/effective-tools${queryString(opts)}`)
+  }
+
+  tryProfile(body: { profile: ProfileConfig; query: string; limit?: number }): Promise<TryProfileResponse> {
+    return this.data<TryProfileResponse>('/api/v1/profiles/try', { method: 'POST', body: JSON.stringify(body) })
+  }
+
+  explainAccess(subject: ExplainSubjectQuery): Promise<AccessExplanation> {
+    const q = queryString({ tool: subject.tool, client: subject.client, token: subject.token, profile: subject.profile, anonymous: subject.anonymous ? 'true' : undefined })
+    return this.data<AccessExplanation>(`/api/v1/access/explain${q}`)
   }
 
   // Needs-attention list (Spec 109 FR-001): the one list every surface reads.
@@ -710,6 +819,17 @@ class APIService {
     return this.request<ConfigApplyResult>('/api/v1/config', {
       method: 'PATCH',
       body: JSON.stringify(partial)
+    })
+  }
+
+  // Spec 108-i I21: the anonymous_profile setting is written through PATCH
+  // /config like every setting, but a refusal (409 binding_bypassable_without_auth)
+  // must keep its `bindings` and `fixes`, which patchConfig's generic error path
+  // drops. `profile: ''` is "Unconfined".
+  async setAnonymousProfile(profile: string): Promise<APIResponse<ConfigApplyResult>> {
+    return this.requestRaw<ConfigApplyResult>('/api/v1/config', {
+      method: 'PATCH',
+      body: JSON.stringify({ anonymous_profile: profile }),
     })
   }
 
@@ -1181,12 +1301,15 @@ class APIService {
   }
 
   // Agent Token Management (Spec 028)
-  async listAgentTokens(): Promise<APIResponse<{ tokens: AgentTokenInfo[] }>> {
-    return this.request<{ tokens: AgentTokenInfo[] }>('/api/v1/tokens')
+  // Spec 108-i: `profile` / `token` are the Spec 108-f server-side filters
+  // (current pin; `token` is an exact name). A 400 body reaches the caller as an
+  // ApiError so a `field: "name"` refusal can be shown under the name input.
+  async listAgentTokens(scope: { profile?: string; token?: string } = {}): Promise<APIResponse<{ tokens: AgentTokenInfo[] }>> {
+    return this.requestRaw<{ tokens: AgentTokenInfo[] }>(`/api/v1/tokens${queryString(scope)}`)
   }
 
   async createAgentToken(req: CreateAgentTokenRequest): Promise<APIResponse<CreateAgentTokenResponse>> {
-    return this.request<CreateAgentTokenResponse>('/api/v1/tokens', {
+    return this.requestRaw<CreateAgentTokenResponse>('/api/v1/tokens', {
       method: 'POST',
       body: JSON.stringify(req),
     })
@@ -1265,8 +1388,38 @@ class APIService {
     return this.request<ConnectStatusResponse>('/api/v1/connect')
   }
 
-  async getClients(): Promise<APIResponse<import('@/types/api').ClientsResponse>> { return this.request('/api/v1/clients') }
+  async getClients(scope: { profile?: string; client?: string } = {}): Promise<APIResponse<ClientsResponse>> { return this.request(`/api/v1/clients${queryString(scope)}`) }
   async getClient(id: string): Promise<APIResponse<import('@/types/api').ClientPresence>> { return this.request(`/api/v1/clients/${encodeURIComponent(id)}`) }
+
+  // Spec 108-f client credential routes. They answer {client, ...}; every one
+  // throws an ApiError (guard refusals carry bindings and fixes).
+  setClientBinding(id: string, body: { profile: string; mode?: 'locked' | 'switchable' }): Promise<{ client: ClientView; warnings: ClientsResponse['warnings'] }> {
+    return this.data(`/api/v1/clients/${encodeURIComponent(id)}/binding`, { method: 'PUT', body: JSON.stringify(body) })
+  }
+
+  bulkAssignClients(body: { from_profile: string; to_profile: string; mode?: 'locked' | 'switchable' }): Promise<BulkAssignResponse> {
+    return this.data<BulkAssignResponse>('/api/v1/clients/bulk-assign', { method: 'POST', body: JSON.stringify(body) })
+  }
+
+  createCustomClient(body: { id: string; display_name?: string; profile?: string; mode?: 'locked' | 'switchable'; expires_in?: string }): Promise<CustomClientResponse> {
+    return this.data<CustomClientResponse>('/api/v1/clients', { method: 'POST', body: JSON.stringify(body) })
+  }
+
+  rotateClient(id: string, body: { precondition_token?: string } = {}): Promise<RotateResponse> {
+    return this.data<RotateResponse>(`/api/v1/clients/${encodeURIComponent(id)}/rotate`, { method: 'POST', body: JSON.stringify(body) })
+  }
+
+  finalizeClientRotation(id: string): Promise<{ client: ClientView; rotation: { state: string } }> {
+    return this.data(`/api/v1/clients/${encodeURIComponent(id)}/rotate/finalize`, { method: 'POST', body: '{}' })
+  }
+
+  forgetClient(id: string, opts: { disconnect?: boolean } = {}): Promise<ForgetClientResponse> {
+    return this.data<ForgetClientResponse>(`/api/v1/clients/${encodeURIComponent(id)}${queryString({ disconnect: opts.disconnect ? 'true' : undefined })}`, { method: 'DELETE' })
+  }
+
+  upgradeAdminKeyHolders(body: { profile?: string; mode?: 'locked' | 'switchable'; apply?: boolean; precondition_token?: string } = {}): Promise<UpgradePreview & UpgradeApplyResult> {
+    return this.data('/api/v1/clients/upgrade-admin-key-holders', { method: 'POST', body: JSON.stringify(body) })
+  }
 
   // Spec 075: resolve a single client's status on demand. This is the only
   // Connect call that reads a client config file's contents (to classify
@@ -1284,14 +1437,28 @@ class APIService {
   // masked. Like getConnectClientStatus this reads the config on demand (to
   // classify create-vs-overwrite), so on macOS it may raise an App-Data prompt;
   // a denial returns 403 with remediation (surfaced as success:false + error).
-  async getConnectPreview(clientId: string): Promise<APIResponse<ConnectPreview>> {
-    return this.request<ConnectPreview>(`/api/v1/connect/${encodeURIComponent(clientId)}/preview`)
+  async getConnectPreview(clientId: string, opts: Pick<ConnectOptions, 'profile' | 'mode' | 'keyless'> = {}): Promise<APIResponse<ConnectPreview>> {
+    // `profile: ''` is an explicit All servers, so the empty string is sent.
+    const q = new URLSearchParams()
+    if (opts.profile !== undefined) q.set('profile', opts.profile)
+    if (opts.mode) q.set('mode', opts.mode)
+    if (opts.keyless) q.set('keyless', 'true')
+    const text = q.toString()
+    return this.requestRaw<ConnectPreview>(`/api/v1/connect/${encodeURIComponent(clientId)}/preview${text ? `?${text}` : ''}`)
   }
 
-  async connectClient(clientId: string, serverName = 'mcpproxy', force = false): Promise<APIResponse<ConnectResult>> {
-    return this.request<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}`, {
+  // Spec 108-c2/108-i: the body carries the binding and the preview's
+  // precondition token only when the caller chose them, so a reconnect without
+  // them keeps the existing binding. A refusal throws an ApiError.
+  async connectClient(clientId: string, serverName = 'mcpproxy', force = false, opts: ConnectOptions = {}): Promise<APIResponse<ConnectResult>> {
+    const body: Record<string, unknown> = { server_name: serverName, force }
+    if (opts.profile !== undefined) body.profile = opts.profile
+    if (opts.mode) body.mode = opts.mode
+    if (opts.keyless) body.keyless = true
+    if (opts.precondition_token) body.precondition_token = opts.precondition_token
+    return this.requestRaw<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}`, {
       method: 'POST',
-      body: JSON.stringify({ server_name: serverName, force })
+      body: JSON.stringify(body),
     })
   }
 

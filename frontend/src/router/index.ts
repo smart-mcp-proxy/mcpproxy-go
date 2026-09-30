@@ -36,6 +36,12 @@ const router = createRouter({
       },
     },
     { path: '/clients', name: 'clients', component: () => import('@/views/Clients.vue'), meta: { title: 'Clients' } },
+    // Spec 108-i I4: two SIBLING top-level routes. The Spec 109-i gate on the
+    // sidebar item, the Add menu item and the palette action compares
+    // `route.path === '/profiles'` exactly, so the editor must not be nested
+    // under it.
+    { path: '/profiles', name: 'profiles', component: () => import('@/views/Profiles.vue'), meta: { title: 'Profiles' } },
+    { path: '/profiles/:name', name: 'profile-editor', component: () => import('@/views/ProfileEditor.vue'), props: true, meta: { title: 'Profile' } },
     {
       // Query and hash are kept explicitly (navigation-map.md "Redirects"),
       // not left to vue-router's implicit carry-over for named redirects.
@@ -164,7 +170,7 @@ const router = createRouter({
         title: 'Scan Report',
       },
     },
-    { path: '/tokens', redirect: (to) => ({ path: '/clients', query: { ...to.query, tab: 'tokens' } }) },
+    { path: '/tokens', name: 'tokens', redirect: (to) => ({ path: '/clients', query: { ...to.query, tab: 'tokens' } }) },
     // Server edition user routes
     {
       path: '/my/servers',

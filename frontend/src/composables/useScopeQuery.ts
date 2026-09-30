@@ -37,6 +37,7 @@ export type PageId =
   | 'add-server'
   | 'settings'
   | 'server-detail'
+  | 'profiles'
   | 'profile-editor'
 
 /** Context passed to a ParamDef's custom toRest hook. */
@@ -345,6 +346,28 @@ const pageRouteNames: Partial<Record<PageId, string>> = {
   sessions: 'sessions',
   tokens: 'tokens',
   clients: 'clients',
+  // Spec 108-i I4: the Profiles page and the editor are named routes, so a link
+  // to them goes through this map like every other (FR-045). The editor needs a
+  // `name` param, which a caller passes by building the route object itself.
+  profiles: 'profiles',
+  'profile-editor': 'profile-editor',
+}
+
+/** The page a route name belongs to (the inverse of the map above), or
+ * undefined for a route outside the contract (Settings, a server detail...). */
+export function pageIdForRouteName(name: unknown): PageId | undefined {
+  if (typeof name !== 'string') return undefined
+  for (const [page, routeName] of Object.entries(pageRouteNames)) {
+    if (routeName === name) return page as PageId
+  }
+  return undefined
+}
+
+/** Whether a page registers a parameter (and so applies it). The Viewing chip
+ * uses this to dim a sticky parameter the current page does not use. */
+export function scopeParamAppliesToPage(name: string, page: PageId | undefined): boolean {
+  const def = registry.get(name)
+  return Boolean(def && page && def.pages.includes(page))
 }
 
 // ---------------------------------------------------------------------------

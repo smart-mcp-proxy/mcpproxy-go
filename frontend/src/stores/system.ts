@@ -288,6 +288,17 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
+    // Spec 108-f FR-038: both are invalidations. The payload is not used; the
+    // profiles store and the clients store refetch. Scoped subscribers never
+    // receive either event, so nothing relies on them for correctness.
+    for (const name of ['profiles.changed', 'client.binding_changed']) {
+      es.addEventListener(name, (event) => {
+        let detail: unknown = null
+        try { detail = JSON.parse((event as MessageEvent).data) } catch { /* the event is a bare invalidation */ }
+        window.dispatchEvent(new CustomEvent(`mcpproxy:${name}`, { detail }))
+      })
+    }
+
     // Listen for config.reloaded events
     es.addEventListener('config.reloaded', (event) => {
       try {
