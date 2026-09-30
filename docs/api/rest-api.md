@@ -1261,8 +1261,10 @@ for an unreachable profile as for an unknown one.
 #### POST /api/v1/profiles, PUT /api/v1/profiles/{name}
 
 Body is a `ProfileConfig`. `POST` answers `201 {profile, warnings}`; `PUT`
-answers `200` with the same shape and requires the body's name to equal the path
-(`409 name_mismatch`). `409 profile_exists`; `400 {error, field}` names the
+answers `200` with the same shape and requires the body's name, when it is sent,
+to equal the path (`409 name_mismatch`). A `PUT` body whose `name` is omitted or
+an empty string takes the path's name (accepted by the spec as a convenience for
+the Web UI and CLI); a different non-empty name is always refused. `409 profile_exists`; `400 {error, field}` names the
 offending field with the unchanged validator text. `active` and `try` are
 reserved by the REST API. A `PUT` whose only change is `tools.classify` is
 recorded as `classify`.

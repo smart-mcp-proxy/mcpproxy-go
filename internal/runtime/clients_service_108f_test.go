@@ -155,11 +155,20 @@ type fakeUpgradePort struct {
 	states   map[string]string // client id -> credential_state
 	previews int
 	fail     map[string]error
+	access   map[string]string // client id -> access_state override (config read denied/malformed)
+	statErr  map[string]error  // client id -> GetStatus error
 	wrote    []string
 	intent   connect.CredentialIntent
 }
 
 func (p *fakeUpgradePort) GetStatus(id string) (connect.ClientStatus, error) {
+	if err := p.statErr[id]; err != nil {
+		return connect.ClientStatus{}, err
+	}
+	if a := p.access[id]; a != "" {
+		// A denied/malformed read resolves nothing: Connected stays false.
+		return connect.ClientStatus{ID: id, Exists: true, AccessState: a}, nil
+	}
 	st, ok := p.states[id]
 	if !ok {
 		return connect.ClientStatus{ID: id}, nil
@@ -329,4 +338,38 @@ func TestClientsService_UpgradeWithoutAPortIsUnavailable(t *testing.T) {
 	h := newSvcHarness(t)
 	_, err := h.svc.PreviewAdminKeyUpgrade(context.Background(), h.actor(), UpgradeRequest{})
 	require.ErrorIs(t, err, connect.ErrNoCredentialMinter)
+}
+
+// F3.1: a client whose config read was denied or malformed, or whose status
+// call errored, may still hold the admin key. It must surface as an unresolved
+// preview row and a failed[] entry, and withhold next_step.
+func TestClientsService_UpgradeUnresolvedClientsFailClosed(t *testing.T) {
+	for name, tc := range map[string]struct {
+		access  map[string]string
+		statErr map[string]error
+	}{
+		"denied":       {access: map[string]string{"cursor": "denied"}},
+		"malformed":    {access: map[string]string{"cursor": "malformed"}},
+		"status error": {statErr: map[string]error{"cursor": errors.New("boom")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, port, _ := newUpgradeHarness(t, map[string]string{"codex": "client"})
+			port.access, port.statErr = tc.access, tc.statErr
+
+			prev, err := h.svc.PreviewAdminKeyUpgrade(context.Background(), h.actor(), UpgradeRequest{})
+			require.NoError(t, err)
+			require.Len(t, prev.Preview, 1, "the unresolved client is reported, not skipped")
+			assert.Equal(t, "cursor", prev.Preview[0].ClientID)
+			assert.NotEmpty(t, prev.Preview[0].Error)
+			assert.Empty(t, prev.NextStep, "an unresolved client may still hold the admin key")
+
+			res, err := h.svc.ApplyAdminKeyUpgrade(context.Background(), h.actor(), UpgradeRequest{})
+			require.NoError(t, err)
+			require.Len(t, res.Failed, 1)
+			assert.Equal(t, "cursor", res.Failed[0].ClientID)
+			assert.Empty(t, res.Upgraded)
+			assert.Empty(t, res.NextStep)
+			assert.Empty(t, port.wrote)
+		})
+	}
 }

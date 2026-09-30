@@ -76,7 +76,8 @@ type UpgradePreview struct {
 	Preview           []UpgradeRow  `json:"preview"`
 	PreconditionToken string        `json:"precondition_token"`
 	Guard             *UpgradeGuard `json:"guard,omitempty"`
-	// NextStep is rotate_admin_api_key once nothing holds the admin key.
+	// NextStep is rotate_admin_api_key once nothing holds the admin key and no
+	// client is unresolved (an unresolved client may still hold it).
 	NextStep string `json:"next_step,omitempty"`
 }
 
@@ -107,17 +108,39 @@ func (e *PreconditionFailedError) Code() string { return profile.ErrorCodePrecon
 // NextStepRotateAdminKey is the follow-up once no client holds the admin key.
 const NextStepRotateAdminKey = "rotate_admin_api_key"
 
-func (s *ClientsService) classifyHolders() ([]string, error) {
+// holderScan is the result of classifying every supported client: the clients
+// known to hold the admin key, and the clients whose credential state could not
+// be resolved (config read denied or malformed, or the status call failed).
+// An unresolved client may still hold the admin key, so it is never treated as
+// "not a holder" (fail closed, F3.1).
+type holderScan struct {
+	holders    []string
+	unresolved map[string]string // client id -> why it could not be classified
+}
+
+func (s *ClientsService) classifyHolders() (holderScan, error) {
+	scan := holderScan{unresolved: map[string]string{}}
 	if s.upgrade == nil {
-		return nil, connect.ErrNoCredentialMinter
+		return scan, connect.ErrNoCredentialMinter
 	}
-	var holders []string
 	for _, def := range connect.GetAllClients() {
 		if !def.Supported {
 			continue
 		}
 		status, err := s.upgrade.GetStatus(def.ID)
-		if err != nil || !status.Connected {
+		if err != nil {
+			scan.unresolved[def.ID] = "could not read the client's config: " + err.Error()
+			continue
+		}
+		switch status.AccessState {
+		case "denied":
+			scan.unresolved[def.ID] = "the client's config could not be read (access denied); its credential is unknown"
+			continue
+		case "malformed":
+			scan.unresolved[def.ID] = "the client's config could not be parsed; its credential is unknown"
+			continue
+		}
+		if !status.Connected {
 			continue
 		}
 		state := profile.CredentialState(status.CredentialState)
@@ -125,11 +148,21 @@ func (s *ClientsService) classifyHolders() ([]string, error) {
 			s.observe(def.ID, state)
 		}
 		if state == profile.CredentialStateAdminKey {
-			holders = append(holders, def.ID)
+			scan.holders = append(scan.holders, def.ID)
 		}
 	}
-	sort.Strings(holders)
-	return holders, nil
+	sort.Strings(scan.holders)
+	return scan, nil
+}
+
+// ids returns the holders and unresolved clients in one sorted list.
+func (h holderScan) ids() []string {
+	out := append([]string{}, h.holders...)
+	for id := range h.unresolved {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *ClientsService) upgradeIntent(a Actor, req UpgradeRequest) connect.CredentialIntent {
@@ -148,13 +181,19 @@ func (s *ClientsService) previewUpgrade(a Actor, req UpgradeRequest) (*UpgradePr
 			return nil, err
 		}
 	}
-	holders, err := s.classifyHolders()
+	scan, err := s.classifyHolders()
 	if err != nil {
 		return nil, err
 	}
 	out := &UpgradePreview{Preview: []UpgradeRow{}}
-	for _, id := range holders {
+	for _, id := range scan.ids() {
 		def := connect.FindClient(id)
+		if why, bad := scan.unresolved[id]; bad {
+			out.Preview = append(out.Preview, UpgradeRow{
+				ClientID: id, DisplayName: def.Name, Diff: map[string]interface{}{}, Error: why,
+			})
+			continue
+		}
 		p, err := s.upgrade.PreviewWithIntent(id, "", s.upgradeIntent(a, req))
 		row := UpgradeRow{ClientID: id, DisplayName: def.Name, Diff: map[string]interface{}{}}
 		if err != nil {
@@ -283,7 +322,7 @@ func (s *ClientsService) ApplyAdminKeyUpgrade(ctx context.Context, a Actor, req 
 		}
 	}
 	remaining, err := s.classifyHolders()
-	if err == nil && len(remaining) == 0 {
+	if err == nil && len(remaining.holders) == 0 && len(remaining.unresolved) == 0 {
 		res.NextStep = NextStepRotateAdminKey
 	}
 	return res, nil

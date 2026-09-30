@@ -222,6 +222,15 @@ func TestProfilesCrud_AdminShapes(t *testing.T) {
 	rec = g.do(scopeAdminAPIKey, http.MethodPut, "/api/v1/profiles/tmp", `{"servers":["alpha"]}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, "tmp", g.fake.lastDraft.Name)
+	// An explicitly empty name is the same as an omitted one (F4.1) ...
+	g.fake.lastDraft.Name = "sentinel"
+	rec = g.do(scopeAdminAPIKey, http.MethodPut, "/api/v1/profiles/tmp", `{"name":"","servers":["alpha"]}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "tmp", g.fake.lastDraft.Name)
+	// ... while a different name reaches the service untouched, which refuses it
+	// with name_mismatch (see ErrorMapping).
+	_ = g.do(scopeAdminAPIKey, http.MethodPut, "/api/v1/profiles/tmp", `{"name":"other"}`)
+	assert.Equal(t, "other", g.fake.lastDraft.Name)
 
 	// Rename.
 	rec = g.do(scopeAdminAPIKey, http.MethodPost, "/api/v1/profiles/tmp/rename", `{"new_name":"tmp2"}`)

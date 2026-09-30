@@ -125,16 +125,37 @@ type profileChangeNotifier struct {
 
 	mu      sync.Mutex
 	pending *pendingProfileDelta
-	wake    chan struct{}
-	stop    chan struct{}
-	done    chan struct{}
+	// seq numbers every observed snapshot and recent remembers the newest few,
+	// EVEN those whose delta is empty: a batch is delivered once the runtime's
+	// current snapshot is the batch's or any LATER one, so an unrelated
+	// publication racing a profile edit cannot strand the batch (F5.1).
+	seq    uint64
+	recent []seqSnapshot
+	// holds counts in-flight session-rewriting writes (a rename): delivery waits
+	// for them, so a client re-listing on tools/list_changed never resolves a
+	// selection the rename has not yet rewritten (F5.2).
+	holds int
+	wake  chan struct{}
+	stop  chan struct{}
+	done  chan struct{}
 	// waitFor bounds how long the worker waits for a snapshot to be published
 	// before dropping its delta (the write that produced it failed to publish).
 	waitFor time.Duration
 }
 
+// recentSnapshotCap bounds the remembered snapshots. A batch older than this
+// many publications is accepted on the next poll by falling back to "anything
+// newer than its own sequence number".
+const recentSnapshotCap = 64
+
+type seqSnapshot struct {
+	seq uint64
+	cfg *config.Config
+}
+
 type pendingProfileDelta struct {
 	cfg   *config.Config // the newest snapshot this batch is waiting for
+	seq   uint64         // its sequence number
 	delta profileDelta
 }
 
@@ -166,20 +187,65 @@ func (n *profileChangeNotifier) close() {
 // under the config update mutex.
 func (n *profileChangeNotifier) enqueue(oldCfg, newCfg *config.Config) {
 	d := computeProfileDelta(oldCfg, newCfg)
-	if d.empty() {
-		return
-	}
 	n.mu.Lock()
-	if n.pending == nil {
-		n.pending = &pendingProfileDelta{cfg: newCfg}
+	n.seq++
+	seq := n.seq
+	n.recent = append(n.recent, seqSnapshot{seq: seq, cfg: newCfg})
+	if len(n.recent) > recentSnapshotCap {
+		n.recent = n.recent[len(n.recent)-recentSnapshotCap:]
 	}
-	n.pending.cfg = newCfg // a newer snapshot merges into the batch
+	if d.empty() {
+		n.mu.Unlock()
+		return // nothing to deliver; the snapshot is remembered for batches in flight
+	}
+	if n.pending == nil {
+		n.pending = &pendingProfileDelta{cfg: newCfg, seq: seq}
+	}
+	n.pending.cfg, n.pending.seq = newCfg, seq // a newer snapshot merges into the batch
 	n.pending.delta.merge(d)
 	n.mu.Unlock()
 	select {
 	case n.wake <- struct{}{}:
 	default:
 	}
+}
+
+// publishedAtOrAfter reports the runtime's current snapshot when it is the
+// batch's snapshot or one observed after it.
+func (n *profileChangeNotifier) publishedAtOrAfter(batch *pendingProfileDelta) (*config.Config, bool) {
+	cur := n.p.currentConfig()
+	if cur == batch.cfg {
+		return cur, true
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, s := range n.recent {
+		if s.seq > batch.seq && s.cfg == cur {
+			return cur, true
+		}
+	}
+	return nil, false
+}
+
+// hold defers delivery until the returned release runs.
+func (n *profileChangeNotifier) hold() (release func()) {
+	n.mu.Lock()
+	n.holds++
+	n.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			n.mu.Lock()
+			n.holds--
+			n.mu.Unlock()
+		})
+	}
+}
+
+func (n *profileChangeNotifier) held() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.holds > 0
 }
 
 func (n *profileChangeNotifier) take() *pendingProfileDelta {
@@ -210,16 +276,17 @@ func (n *profileChangeNotifier) run() {
 }
 
 // awaitPublished waits until the runtime's current snapshot IS the batch's
-// newest snapshot, merging any newer delta that arrives meanwhile. It reports
+// newest snapshot or a later one, merging any newer delta that arrives meanwhile. It reports
 // false when the wait times out or the notifier stops.
 func (n *profileChangeNotifier) awaitPublished(batch *pendingProfileDelta) bool {
 	deadline := time.Now().Add(n.waitFor)
 	for {
 		if more := n.take(); more != nil {
-			batch.cfg = more.cfg
+			batch.cfg, batch.seq = more.cfg, more.seq
 			batch.delta.merge(more.delta)
 		}
-		if n.p.currentConfig() == batch.cfg {
+		if cur, ok := n.publishedAtOrAfter(batch); ok && !n.held() {
+			batch.cfg = cur
 			return true
 		}
 		if time.Now().After(deadline) {
@@ -290,6 +357,16 @@ func (p *MCPProxyServer) notifyProfileDelta(cfg *config.Config, d profileDelta) 
 	}) {
 		p.sendToolsListChanged(target)
 	}
+}
+
+// HoldProfileNotifications implements runtime.ProfileSessionHook: a rename holds
+// the list_changed delivery until its session rewrite has run, so the re-list it
+// triggers follows the rename instead of clearing the old-name selection.
+func (p *MCPProxyServer) HoldProfileNotifications() (release func()) {
+	if p.profileNotifier == nil {
+		return func() {}
+	}
+	return p.profileNotifier.hold()
 }
 
 // ProfileRenamed implements runtime.ProfileSessionHook: the stored set_profile

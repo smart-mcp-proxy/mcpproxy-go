@@ -70,7 +70,7 @@ func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
 
 // handleUpdateProfile godoc
 // @Summary Replace a profile
-// @Description Replaces the named profile with the body (a ProfileConfig whose name must equal the path; 409 name_mismatch otherwise - a rename has its own route). A write whose only change is tools.classify is recorded as `classify`. Guarded by FR-008a like a create.
+// @Description Replaces the named profile with the body (a ProfileConfig whose name, when sent non-empty, must equal the path; 409 name_mismatch otherwise - a rename has its own route; an omitted or empty name takes the path's). A write whose only change is tools.classify is recorded as `classify`. Guarded by FR-008a like a create.
 // @Tags profiles
 // @Accept json
 // @Produce json

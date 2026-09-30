@@ -30,6 +30,11 @@ type ProfileSessionHook interface {
 	// tokens' pins: their sessions' base changed, so each is re-listed and its
 	// stored selection cleared (FR-026 semantics).
 	ProfileTokensMoved(tokenNames []string)
+	// HoldProfileNotifications defers the tools/list_changed delivery of the
+	// config publication a write is about to make until release runs. A rename
+	// holds it across publish AND ProfileRenamed, so the client's re-list sees
+	// the rewritten selection (F5.2).
+	HoldProfileNotifications() (release func())
 }
 
 // ProfilesService is THE service behind every profile operation (Spec 108
@@ -525,6 +530,9 @@ func (s *ProfilesService) Rename(ctx context.Context, a Actor, name, newName str
 		return nil, err
 	}
 	var moved MovedRefs
+	if h := s.sessionHook(); h != nil {
+		defer h.HoldProfileNotifications()()
+	}
 	_, _, err := s.rt.MutateConfig(ctx, a, func(d *config.Config) (ChangeHint, error) {
 		i := indexOfProfile(d, name)
 		if i < 0 {

@@ -290,17 +290,64 @@ func TestProfilesService_GuardRefusalChangesNothing(t *testing.T) {
 	assert.Len(t, h.records(), recBefore)
 }
 
-// The real conservative guard (the runtime before the server wires the
-// evaluator): with auth off, creating a profile is fine but reassigning a
-// bound client onto a new profile is refused.
-func TestProfilesService_ConservativeGuardOnDelete(t *testing.T) {
-	h := newProfilesHarness(t)
-	h.rt.SetBindingGuard(ConservativeBindingGuard{})
-	h.mintClient("cursor", "ro", auth.ProfileModeLocked)
-	ctx := context.Background()
+// spyGuard wraps the real ConservativeBindingGuard, records the (current,
+// candidate) pins every evaluation saw, and can additionally refuse any
+// candidate that re-pins a client onto a named profile.
+type spyGuard struct {
+	inner        ConservativeBindingGuard
+	refuseRepin  string // refuse when a candidate client is pinned to this profile
+	sawCurrent   []string
+	sawCandidate []string
+}
 
-	// Auth is on (newFunnelRuntime): the guard never fires.
-	_, err := h.svc.Delete(ctx, h.actor(), "ro", "full", false)
+func (g *spyGuard) BindingGuardDelta(cur, cand GuardState) []BindingRef {
+	for _, t := range cur.Tokens {
+		g.sawCurrent = append(g.sawCurrent, t.ProfilePin)
+	}
+	var refs []BindingRef
+	for i := range cand.Tokens {
+		g.sawCandidate = append(g.sawCandidate, cand.Tokens[i].ProfilePin)
+		if g.refuseRepin != "" && cand.Tokens[i].ProfilePin == g.refuseRepin {
+			refs = append(refs, BindingRefOf(&cand.Tokens[i]))
+		}
+	}
+	return append(refs, g.inner.BindingGuardDelta(cur, cand)...)
+}
+func (g *spyGuard) BindingGuardFixes(s GuardState, r []BindingRef) []GuardFix {
+	return g.inner.BindingGuardFixes(s, r)
+}
+func (g *spyGuard) BindingGuardActiveBindings() []BindingRef { return nil }
+
+// Delete-with-reassign consults the binding guard over the tokens AS THEY WOULD
+// BE after the re-pin, and a refusal leaves the pin where it was. Run with
+// require_mcp_auth OFF, the state in which the conservative guard is live: it
+// treats an already-bound client as unchanged (so reassigning is allowed), and
+// a guard that refuses the re-pin must stop the delete. Without the guard call
+// in the funnel the pin moves and this test fails.
+func TestProfilesService_GuardSeesTheReassignedBindingsOnDelete(t *testing.T) {
+	h := newProfilesHarness(t)
+	ctx := context.Background()
+	_, _, err := h.rt.MutateConfig(ctx, h.actor(), func(d *config.Config) (ChangeHint, error) {
+		d.RequireMCPAuth = false
+		return ChangeHint{}, nil
+	}, TokenRewrite{})
+	require.NoError(t, err)
+	h.mintClient("cursor", "ro", auth.ProfileModeLocked)
+
+	spy := &spyGuard{refuseRepin: "full"}
+	h.rt.SetBindingGuard(spy)
+	_, err = h.svc.Delete(ctx, h.actor(), "ro", "full", false)
+	var refusal *BindingGuardError
+	require.True(t, errors.As(err, &refusal), "the guard must be consulted and refuse: %v", err)
+	assert.Equal(t, "ro", h.pin("client-cursor"), "a refused delete leaves the pin alone")
+	assert.Contains(t, h.profileNames(), "ro", "a refused delete removes nothing")
+	assert.Contains(t, spy.sawCurrent, "ro")
+	assert.Contains(t, spy.sawCandidate, "full", "the guard saw the post-reassign binding")
+
+	// The real conservative guard, auth off: an already-bound client is not
+	// newly bypassable, so the reassign goes through.
+	h.rt.SetBindingGuard(ConservativeBindingGuard{})
+	_, err = h.svc.Delete(ctx, h.actor(), "ro", "full", false)
 	require.NoError(t, err)
 	assert.Equal(t, "full", h.pin("client-cursor"))
 }
