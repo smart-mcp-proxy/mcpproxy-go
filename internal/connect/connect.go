@@ -719,7 +719,15 @@ type credentialHandle struct {
 	intent   CredentialIntent
 	mint     bool
 	issued   *IssuedCredential
+	// wrote is set once the config write itself succeeded. A failure after
+	// that point (a verification re-read) is ambiguous — the file may hold the
+	// new secret — so it must NOT abort the mint: a fresh credential is left
+	// active and a staged rotation stays pending for the reconciler, which
+	// resolves it from what the config actually holds (FR-021a).
+	wrote bool
 }
+
+func (h *credentialHandle) markWritten() { h.wrote = true }
 
 // secret returns the credential to embed: "" for a keyless entry, otherwise
 // the freshly issued `mcp_cli_` secret (minted on first use).
@@ -745,6 +753,9 @@ func (h *credentialHandle) settle(res *ConnectResult, writeErr error) error {
 		return nil
 	}
 	if writeErr != nil || res == nil || !res.Success {
+		if h.wrote {
+			return nil // ambiguous outcome: leave it to the reconciler
+		}
 		_ = h.svc.minter.Abort(h.clientID, h.intent, h.issued)
 		h.issued = nil
 		return nil
@@ -1106,6 +1117,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
+	cred.markWritten()
 
 	// Verify by re-reading
 	if err := s.verifyJSONEntry(client, cfgPath, serverName); err != nil {
@@ -1293,6 +1305,7 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
+	cred.markWritten()
 
 	return &ConnectResult{
 		Success:    true,

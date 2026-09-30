@@ -27,7 +27,6 @@ type fakeMinter struct {
 	held     map[string]bool
 
 	forgot     string
-	forgotFor  string
 	forgetErr  error
 	forgetArgs []string
 }
