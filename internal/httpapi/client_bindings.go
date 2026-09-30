@@ -34,10 +34,19 @@ type ClientBindingView struct {
 	CredentialState profile.CredentialState `json:"credential_state"`
 }
 
+// ClientWarning is one Clients-surface warning on a binding response
+// (data-model.md §7 ClientView.warnings[]). The list is empty in 108-c2; the
+// clients decoration that fills it lands in 108-f.
+type ClientWarning struct {
+	Code     profile.WarningCode `json:"code"`
+	ClientID string              `json:"client_id,omitempty"`
+	Message  string              `json:"message"`
+}
+
 // ClientBindingResponse is the data of a successful binding write.
 type ClientBindingResponse struct {
-	Client   ClientBindingView         `json:"client"`
-	Warnings []internalRuntime.Warning `json:"warnings"`
+	Client   ClientBindingView `json:"client"`
+	Warnings []ClientWarning   `json:"warnings"`
 }
 
 // handlePutClientBinding godoc
@@ -104,7 +113,7 @@ func (s *Server) handlePutClientBinding(w http.ResponseWriter, r *http.Request) 
 			ID: view.ID, TokenName: view.TokenName, Profile: view.Profile,
 			Mode: view.Mode, CredentialState: view.CredentialState,
 		},
-		Warnings: []internalRuntime.Warning{},
+		Warnings: []ClientWarning{},
 	})
 }
 

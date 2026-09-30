@@ -34,8 +34,8 @@ The UI flows are **preview → confirm → write** (the CLI writes directly, wit
 `--force` to overwrite an existing entry):
 
 1. `GET /api/v1/connect/{client}/preview` renders the exact change — target
-   config path, format, server key, and the entry that would be written (any
-   embedded API key masked).
+   config path, format, server key, and the entry that would be written (the
+   client credential masked as `mcp_cli_••••`).
 2. `POST /api/v1/connect/{client}` performs the write, taking a timestamped
    backup of an existing file first.
 3. `POST /api/v1/connect/{client}/undo` reverts that write byte-for-byte (or
@@ -44,6 +44,36 @@ The UI flows are **preview → confirm → write** (the CLI writes directly, wit
 Endpoint-level reference — request/response shapes, backup naming, undo
 semantics, and the macOS App Data privacy prompt — lives in the
 [REST API reference](../api/rest-api.md#connect-client-wizard).
+
+## Client credentials (Spec 108)
+
+Connect never writes the instance admin API key. Every write embeds a
+**per-client credential** (`mcp_cli_…`) that identifies the client and binds it
+to a profile (`profile`, `mode` locked or switchable; the default for a new
+credential is All servers, switchable, and a reconnect keeps the existing
+binding). The credential is accepted on MCP endpoints only — the REST API
+answers it with `403` — and reconnecting over an active credential is a staged
+rotation, so the old secret keeps working until the new config is written.
+
+- `contains_api_key` is always `false`; the previewed `credential` is the masked
+  client credential, and `profile`/`mode` echo the requested binding.
+- `keyless: true` writes no credential and is only possible while
+  `require_mcp_auth` is off (and never together with a profile).
+- With `require_mcp_auth` off, a named binding is refused with
+  `409 binding_bypassable_without_auth` when the client could escape its
+  profile by omitting its credential; nothing is minted or written. A token
+  named `client-<id>` that is held by a regular agent token is refused with
+  `409` and `conflicting_token`.
+- `GET /api/v1/connect/{client}` reports `credential_state`
+  (`client`, `admin_key`, `none`, `revoked`, `expired`); the stat-only
+  `GET /api/v1/connect` listing reports `unknown` because it never reads a
+  config. Both are administrator-only.
+- Undo is "as if the connect never happened": a credential the connect minted
+  is revoked unless the restored config still holds it (`credential_revoked`).
+
+Reassigning a connected client (`PUT /api/v1/clients/{client}/binding`) changes
+its profile or mode in the token store only; the client's config file is never
+touched and its live sessions are notified.
 
 ## What the preview discloses (Spec 091)
 

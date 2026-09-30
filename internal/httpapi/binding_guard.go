@@ -15,12 +15,29 @@ import (
 // as the other typed 409 (ConnectConflictResponse), so a client reads
 // `error`/`code` the same way everywhere.
 type BindingGuardResponse struct {
-	Success   bool                         `json:"success"` // Always false
-	Error     string                       `json:"error"`   // Human-readable, byte-stable refusal text
-	Code      string                       `json:"code"`    // binding_bypassable_without_auth
-	Bindings  []internalRuntime.BindingRef `json:"bindings"`
-	Fixes     []internalRuntime.GuardFix   `json:"fixes"`
-	RequestID string                       `json:"request_id,omitempty"`
+	Success   bool             `json:"success"` // Always false
+	Error     string           `json:"error"`   // Human-readable, byte-stable refusal text
+	Code      string           `json:"code"`    // binding_bypassable_without_auth
+	Bindings  []GuardBinding   `json:"bindings"`
+	Fixes     []GuardFixOption `json:"fixes"`
+	RequestID string           `json:"request_id,omitempty"`
+}
+
+// GuardBinding names one client binding a guard refusal is about.
+type GuardBinding struct {
+	ClientID  string `json:"client_id"`
+	TokenName string `json:"token_name"`
+	Profile   string `json:"profile"`
+	Mode      string `json:"mode"`
+}
+
+// GuardFixOption is one remediation of a guard refusal: kind is
+// require_mcp_auth or set_anonymous_profile; target names the profile for the
+// latter and is present only when that profile itself would not leave any
+// binding bypassable.
+type GuardFixOption struct {
+	Kind   string `json:"kind"`
+	Target string `json:"target,omitempty"`
 }
 
 // writeIfBindingGuardRefusal answers a *runtime.BindingGuardError with the
@@ -30,12 +47,13 @@ func (s *Server) writeIfBindingGuardRefusal(w http.ResponseWriter, r *http.Reque
 	if !errors.As(err, &refusal) {
 		return false
 	}
-	bindings, fixes := refusal.Bindings, refusal.Fixes
-	if bindings == nil {
-		bindings = []internalRuntime.BindingRef{}
+	bindings := make([]GuardBinding, 0, len(refusal.Bindings))
+	for _, b := range refusal.Bindings {
+		bindings = append(bindings, GuardBinding{ClientID: b.ClientID, TokenName: b.TokenName, Profile: b.Profile, Mode: b.Mode})
 	}
-	if fixes == nil {
-		fixes = []internalRuntime.GuardFix{}
+	fixes := make([]GuardFixOption, 0, len(refusal.Fixes))
+	for _, f := range refusal.Fixes {
+		fixes = append(fixes, GuardFixOption{Kind: f.Kind, Target: f.Target})
 	}
 	s.writeJSON(w, http.StatusConflict, BindingGuardResponse{
 		Success:   false,

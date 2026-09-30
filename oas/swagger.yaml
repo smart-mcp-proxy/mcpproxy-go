@@ -1363,12 +1363,33 @@ components:
           type: string
         config_path:
           type: string
+        credential:
+          description: |-
+            Credential is the masked client credential the write embedded
+            (`mcp_cli_••••`); the real secret is never returned (FR-024). Empty for a
+            keyless entry, a disconnect and every refusal.
+          type: string
+        credential_revoked:
+          description: |-
+            CredentialRevoked names the credential an undo revoked because the
+            restored config no longer holds it (plan D16).
+          type: string
         display_path:
           description: |-
             DisplayPath is ConfigPath with the home directory shortened to "~"
             (FR-037). Populated for every result whose ConfigPath is known.
           type: string
+        keyless:
+          description: Keyless is true when the entry was written with no credential.
+          type: boolean
         message:
+          type: string
+        mode:
+          type: string
+        profile:
+          description: |-
+            Profile and Mode are the binding of the credential this write minted or
+            kept. Profile "" means the built-in All servers scope.
           type: string
         reload_hint:
           description: |-
@@ -1376,10 +1397,18 @@ components:
             effect (FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Empty
             for an unknown client.
           type: string
+        rotation:
+          description: |-
+            Rotation is "finalized" when the write replaced an active credential's
+            secret (staged rotation, FR-021a), empty otherwise.
+          type: string
         server_name:
           type: string
         success:
           type: boolean
+        token_name:
+          description: TokenName is the client credential's token name (`client-<id>`).
+          type: string
       type: object
     contracts.APIResponse:
       allOf:
@@ -3522,6 +3551,30 @@ components:
         working_dir:
           type: string
       type: object
+    httpapi.BindingGuardResponse:
+      properties:
+        bindings:
+          items:
+            $ref: '#/components/schemas/httpapi.GuardBinding'
+          type: array
+          uniqueItems: false
+        code:
+          description: binding_bypassable_without_auth
+          type: string
+        error:
+          description: Human-readable, byte-stable refusal text
+          type: string
+        fixes:
+          items:
+            $ref: '#/components/schemas/httpapi.GuardFixOption'
+          type: array
+          uniqueItems: false
+        request_id:
+          type: string
+        success:
+          description: Always false
+          type: boolean
+      type: object
     httpapi.CanonicalConfigPath:
       properties:
         description:
@@ -3555,6 +3608,52 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.ClientBindingErrorResponse:
+      properties:
+        code:
+          type: string
+        error:
+          type: string
+        field:
+          type: string
+        request_id:
+          type: string
+        success:
+          description: Always false
+          type: boolean
+      type: object
+    httpapi.ClientBindingResponse:
+      properties:
+        client:
+          $ref: '#/components/schemas/httpapi.ClientBindingView'
+        warnings:
+          items:
+            $ref: '#/components/schemas/httpapi.ClientWarning'
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ClientBindingView:
+      properties:
+        credential_state:
+          $ref: '#/components/schemas/profile.CredentialState'
+        id:
+          type: string
+        mode:
+          type: string
+        profile:
+          type: string
+        token_name:
+          type: string
+      type: object
+    httpapi.ClientWarning:
+      properties:
+        client_id:
+          type: string
+        code:
+          $ref: '#/components/schemas/profile.WarningCode'
+        message:
+          type: string
+      type: object
     httpapi.ConnectConflictResponse:
       properties:
         action:
@@ -3574,6 +3673,10 @@ components:
         force:
           description: Overwrite existing entry
           type: boolean
+        keyless:
+          type: boolean
+        mode:
+          type: string
         precondition_token:
           description: |-
             PreconditionToken is the opaque token from the preview this write was
@@ -3584,6 +3687,18 @@ components:
             means exactly the pre-091 behavior. A replace-classified flow sends this
             TOGETHER with force=true: the token, not the absence of force, is the
             overwrite safety.
+          type: string
+        profile:
+          description: |-
+            Profile, Mode and Keyless are the client-credential intent (Spec 108
+            FR-024). Profile names the profile the client's credential binds to;
+            "" is the built-in All servers scope. Omitted means "not specified": a
+            fresh credential defaults to All servers and a reconnect keeps the
+            client's existing binding (a reconnect never silently widens a locked
+            client). Mode is locked|switchable (default locked for a named profile,
+            switchable for All servers). Keyless writes a credential-less entry and
+            is only possible while require_mcp_auth is off; it cannot carry a
+            profile or mode.
           type: string
         server_name:
           description: Defaults to "mcpproxy"
@@ -3599,6 +3714,24 @@ components:
           type: boolean
         value_present:
           type: boolean
+      type: object
+    httpapi.GuardBinding:
+      properties:
+        client_id:
+          type: string
+        mode:
+          type: string
+        profile:
+          type: string
+        token_name:
+          type: string
+      type: object
+    httpapi.GuardFixOption:
+      properties:
+        kind:
+          type: string
+        target:
+          type: string
       type: object
     httpapi.HeaderFieldPreview:
       properties:
@@ -3945,6 +4078,13 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.PutClientBindingRequest:
+      properties:
+        mode:
+          type: string
+        profile:
+          type: string
+      type: object
     httpapi.SetActiveProfileRequest:
       properties:
         active_profile:
@@ -4055,6 +4195,24 @@ components:
         timestamp:
           type: string
       type: object
+    profile.CredentialState:
+      type: string
+      x-enum-varnames:
+      - CredentialStateClient
+      - CredentialStateAdminKey
+      - CredentialStateNone
+      - CredentialStateRevoked
+      - CredentialStateExpired
+      - CredentialStateUnknown
+    profile.WarningCode:
+      type: string
+      x-enum-varnames:
+      - WarningAnonymousDeniedByBindingGuard
+      - WarningClientHoldsAdminKey
+      - WarningClientCredentialExpiring
+      - WarningClientRotationPending
+      - WarningProfileMissing
+      - WarningClientTokenNameConflict
     secureenv.EnvConfig:
       description: Environment configuration for secure variable filtering
       properties:
@@ -4217,6 +4375,7 @@ paths:
           - config_change
           - preflight
           - prompt_get
+          - profile_change
           type: string
       - description: Filter by server name
         in: query
@@ -4796,6 +4955,83 @@ paths:
       summary: Search the server catalog across every enabled source
       tags:
       - catalog
+  /api/v1/clients/{client}/binding:
+    put:
+      description: |-
+        Changes the profile binding (and optionally the locked/switchable mode) of a
+        client that holds an active client credential. One service operation shared by
+        every surface: it updates the credential in the token store, clears the stored
+        set_profile selection of every live session of that credential, sends
+        notifications/tools/list_changed to each, emits client.binding_changed and writes
+        one profile_change activity record. It never touches the client's config file.
+        A client without an active client credential (none, admin key, revoked or expired)
+        is refused with 409 no_client_credential and nothing is minted or written. A
+        reassignment that would leave the binding bypassable while require_mcp_auth is off
+        is refused with 409 binding_bypassable_without_auth (FR-008a). Personal edition only.
+      parameters:
+      - description: Client id (lower-case letters, digits, '-' or '_', at most 56
+          characters)
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.PutClientBindingRequest'
+        description: profile (required; empty = All servers) and optional mode (locked|switchable)
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The client's binding after the change
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: no_client_credential, or binding_bypassable_without_auth with
+            bindings and fixes
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Reassign a client's profile and/or mode
+      tags:
+      - clients
   /api/v1/code/scripts:
     get:
       description: 'List the stored scripts available to the code_execution tool.
@@ -4906,6 +5142,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Forbidden (agent tokens cannot mutate configuration)
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: 'binding_bypassable_without_auth: the patch would let a client
+            bound to a named profile escape it while require_mcp_auth is off (FR-008a);
+            nothing was written'
         "500":
           content:
             application/json:
@@ -4956,6 +5200,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Forbidden (agent tokens cannot mutate configuration)
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: 'binding_bypassable_without_auth: the write would let a client
+            bound to a named profile escape it while require_mcp_auth is off (FR-008a);
+            nothing was written'
         "500":
           content:
             application/json:
@@ -5009,6 +5261,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Forbidden (agent tokens cannot mutate configuration)
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: binding_bypassable_without_auth (FR-008a); nothing was written
         "500":
           content:
             application/json:
@@ -5069,7 +5327,9 @@ paths:
       description: |-
         Returns the connection status for all known MCP client applications.
         Each entry indicates whether the client config file exists and whether
-        MCPProxy is currently registered in it.
+        MCPProxy is currently registered in it. This stat-only listing never reads
+        a client config (Spec 075), so a client whose config exists reports
+        credential_state "unknown"; GET /connect/{client} resolves it.
       responses:
         "200":
           content:
@@ -5152,6 +5412,10 @@ paths:
         on macOS it is the sole place an App-Data privacy prompt may legitimately
         appear (scoped to this user action). Resolves access_state to
         accessible|absent|denied|malformed and populates remediation when denied.
+        For a connected client it also resolves credential_state (Spec 108 FR-025):
+        client (an active per-client credential), admin_key (the instance admin API
+        key), none, revoked (a rotated-away or revoked credential) or expired. The
+        credential value is classified and never echoed.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
           codex, gemini, opencode, zcode)
@@ -5201,6 +5465,17 @@ paths:
         action discriminates the two conflict kinds: "precondition_failed" (stale
         preview — re-preview, do not retry) vs "already_exists" (entry present — pass
         force=true). force=true never rescues a stale token.
+
+        Spec 108 FR-024: the entry carries a per-client mcp_cli_ credential bound to the
+        requested profile (default: All servers, switchable; a reconnect keeps the client's
+        existing binding unless a profile is given), never the instance admin API key.
+        Reconnecting over an active credential is a staged rotation: the old secret keeps
+        working until the config write succeeds. keyless=true writes no credential and is
+        only possible while require_mcp_auth is off (400 otherwise, and with a profile).
+        A write that would let the client escape its profile by omitting its credential
+        while require_mcp_auth is off is refused with 409 binding_bypassable_without_auth
+        (nothing minted or written); a token named client-<id> held by a regular agent
+        token is refused with 409 conflicting_token.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
           codex, gemini, opencode, zcode)
@@ -5214,20 +5489,23 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/httpapi.ConnectRequest'
-        description: Optional connection parameters (server_name, force, precondition_token)
+        description: Optional connection parameters (server_name, force, precondition_token,
+          profile, mode, keyless)
       responses:
         "200":
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.APIResponse'
-          description: ConnectResult
+          description: ConnectResult (credential is the masked mcp_cli_ value, with
+            token_name, profile, mode, keyless and rotation)
         "400":
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Bad request
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Bad request; field names the offending input (profile, mode,
+            keyless)
         "403":
           content:
             application/json:
@@ -5246,13 +5524,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/httpapi.ConnectConflictResponse'
           description: 'Conflict: action=already_exists (use force=true) or action=precondition_failed
-            (preview is stale; re-preview)'
+            (preview is stale; re-preview); or binding_bypassable_without_auth (BindingGuardResponse);
+            or conflicting_token (ClientCredentialConflictResponse)'
         "503":
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Service unavailable
+          description: Service unavailable (or no credential store wired while require_mcp_auth
+            is on)
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -5264,8 +5544,10 @@ paths:
       description: |-
         Returns the exact entry a subsequent connect would add to the client's
         config — target path, server key, entry name, and entry contents — WITHOUT
-        modifying the file or creating a backup (Spec 078 US1). The embedded API key
-        is masked in the payload; contains_api_key flags that a credential is written.
+        modifying the file or creating a backup (Spec 078 US1). The per-client credential
+        is masked in the payload (credential, always starting mcp_cli_; contains_api_key is
+        always false since connect never writes the admin API key); profile, mode and
+        keyless echo the requested intent.
         entry_exists distinguishes a create from an overwrite of a same-named entry.
         Reads the config on demand to classify create-vs-overwrite, so on macOS this
         may raise an App-Data privacy prompt; a denial returns 403 + remediation.
@@ -5291,6 +5573,26 @@ paths:
         name: server_name
         schema:
           type: string
+      - description: Profile the client credential would bind to (empty = All servers);
+          mirror POST connect
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: locked|switchable; mirror POST connect
+        in: query
+        name: mode
+        schema:
+          enum:
+          - locked
+          - switchable
+          type: string
+      - description: Preview a credential-less entry (only while require_mcp_auth
+          is off)
+        in: query
+        name: keyless
+        schema:
+          type: boolean
       responses:
         "200":
           content:
@@ -5298,6 +5600,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.APIResponse'
           description: ConnectPreview
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid intent (field names the input; keyless with auth on
+            or with a profile)
         "403":
           content:
             application/json:
@@ -5335,7 +5644,9 @@ paths:
         Refuses with 409 when the config changed since the connect (undo never
         clobbers later edits; use DELETE /connect/{client} for a surgical entry
         removal instead). Takes its own safety backup first; its path is returned
-        as backup_path in the result.
+        as backup_path in the result. Undo is "as if the connect never happened": a
+        client credential the connect minted or rotated is revoked unless the restored
+        config still holds it, and the result names it in credential_revoked.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
           codex, gemini, opencode, zcode)

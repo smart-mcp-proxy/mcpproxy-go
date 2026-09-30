@@ -995,14 +995,44 @@ kinds:
 See [Connect Clients](../features/connect-clients.md) for the token's contents
 and threat model.
 
+**Client credential (Spec 108).** The body also accepts `profile` (a profile
+name; `""` is All servers; omitted means All servers for a fresh credential and
+the existing binding on a reconnect), `mode` (`locked` or `switchable`) and
+`keyless`. The write embeds a per-client `mcp_cli_` credential, never the admin
+API key, and the result carries `credential` (masked), `token_name`, `profile`,
+`mode`, `keyless` and, for a reconnect over an active credential, `rotation`
+(`finalized`). Refusals write nothing: `400 {error, field}` for an unknown
+profile, an invalid mode, or `keyless` with `require_mcp_auth` on or with a
+profile; `409 binding_bypassable_without_auth` (`bindings`, `fixes`) when the
+binding would be bypassable while `require_mcp_auth` is off; `409` with
+`conflicting_token` when `client-<id>` is held by a regular agent token.
+
+#### PUT /api/v1/clients/{client}/binding
+
+Reassigns a client's profile and/or mode (personal edition, administrator
+only). Body `{"profile": "<name or empty for All servers>", "mode": "locked|switchable"}`
+(`profile` required; `mode` optional — omitted keeps the current mode, except
+that an empty profile means switchable). Applies only to a client that holds an
+active client credential; otherwise `409 {code: "no_client_credential"}` and
+nothing is minted. Updates the credential in the token store, clears the stored
+`set_profile` selection of every live session of that credential, sends
+`notifications/tools/list_changed` to each and writes one `profile_change`
+activity record; the client's config file is never touched. A reassignment that
+would leave the binding bypassable is refused with `409
+binding_bypassable_without_auth`. `PATCH /api/v1/config`, `POST
+/api/v1/config/apply` and `PATCH /api/v1/config/docker-isolation` answer the
+same `409` when the write would create that condition.
+
 #### GET /api/v1/connect/{client}/preview
 
 Returns the exact change a subsequent connect would make — target config path,
 format (`json`/`toml`), server key, entry name, and the exact entry contents —
 **without** modifying the file or creating a backup (Spec 078 US1). An embedded
-API key is masked in the payload (`contains_api_key` flags that a credential is
-written); `entry_exists` distinguishes a create from an overwrite of a
-same-named entry. Reads the config on demand to classify create-vs-overwrite,
+client credential is masked in the payload (`credential`, always
+`mcp_cli_••••`; `contains_api_key` is always `false` since connect never
+writes the admin API key); `profile`, `mode` and `keyless` echo the requested
+intent (`?profile=&mode=&keyless=`); `entry_exists` distinguishes a create from
+an overwrite of a same-named entry. Reads the config on demand to classify create-vs-overwrite,
 so on macOS this may raise an App-Data prompt; a denial returns `403` +
 remediation. Optional `?server_name=` mirrors the name a subsequent connect
 would use.

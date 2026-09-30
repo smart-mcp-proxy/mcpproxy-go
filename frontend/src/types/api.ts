@@ -18,7 +18,7 @@ export {
 } from './contracts'
 
 // Import HealthStatus/Tier for use in this file
-import type { HealthStatus, Tier } from './contracts'
+import type { CredentialState, HealthStatus, Tier } from './contracts'
 
 // Quarantine stats for tool-level quarantine (Spec 032)
 export interface QuarantineStats {
@@ -1171,6 +1171,11 @@ export interface ClientStatus {
   // privacy fix including the exact tccutil reset command).
   access_state?: AccessState
   remediation?: string
+  // Spec 108 FR-025: what the client's entry carries — client | admin_key |
+  // none | revoked | expired — or 'unknown' in the stat-only listing, which
+  // never reads a config. Absent when the client is not connected.
+  // Administrator-only, like the rest of the connect reads.
+  credential_state?: CredentialState
   // Every config location the existence check consults, highest precedence
   // first (e.g. OpenCode's opencode.jsonc then opencode.json).
   checked_paths?: string[]
@@ -1204,6 +1209,18 @@ export interface ConnectResult {
   error?: string
   display_path?: string
   reload_hint?: string
+  // Spec 108 FR-024: the masked per-client credential the write embedded
+  // (`mcp_cli_••••`, never the secret), its token name and binding. Empty for a
+  // keyless entry. `rotation` is 'finalized' when a reconnect replaced an
+  // active credential's secret; `credential_revoked` names the credential an
+  // undo revoked.
+  credential?: string
+  token_name?: string
+  profile?: string
+  mode?: 'locked' | 'switchable'
+  keyless?: boolean
+  rotation?: string
+  credential_revoked?: string
 }
 
 // Spec 078 US1: the exact change a connect would make, returned WITHOUT writing
@@ -1220,7 +1237,14 @@ export interface ConnectPreview {
   entry: Record<string, unknown>
   entry_text: string
   entry_exists: boolean
+  // Always false since Spec 108: connect never writes the admin API key.
   contains_api_key: boolean
+  // Spec 108: the masked per-client credential the write would embed
+  // (`mcp_cli_••••`) and the requested binding (profile '' = All servers).
+  credential?: string
+  profile?: string
+  mode?: 'locked' | 'switchable' | ''
+  keyless?: boolean
   bridge?: boolean
   access_state?: AccessState
 }
