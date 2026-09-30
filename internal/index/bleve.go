@@ -920,10 +920,6 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 // result with; the page is max(limit, scopedSearchMinPage).
 const scopedSearchMinPage = 256
 
-// maxAdmittedPrealloc bounds SearchToolsAdmitted's result preallocation;
-// append still grows past it if a caller asks for more.
-const maxAdmittedPrealloc = 1024
-
 // SearchToolsScoped is SearchTools for a caller who may see only some servers
 // (Spec 107 T075a; Spec 105 "Ranking under scope"): the result is the top-
 // `limit` of the SAME ranked search, filtered to servers `inScope` admits
@@ -1060,13 +1056,10 @@ func (b *BleveIndex) SearchToolsAdmitted(queryStr string, limit int, admit func(
 
 	b.logger.Debug("Searching tools with admitted query", zap.String("query", queryStr), zap.Int("limit", limit))
 
-	// Callers clamp limit (e.g. ProfilesService.Try caps it at 50), but bound
-	// the preallocation here too so no caller-supplied value sizes it.
-	capHint := limit
-	if capHint > maxAdmittedPrealloc {
-		capHint = maxAdmittedPrealloc
-	}
-	results = make([]*config.SearchResult, 0, capHint)
+	// Not preallocated from limit: no caller-supplied value may size an
+	// allocation, and result lists are small (callers clamp limit, e.g.
+	// ProfilesService.Try caps it at 50), so append growth is negligible.
+	results = []*config.SearchResult{}
 	for from := 0; ; from += pageSize {
 		searchResult, err := b.index.Search(newToolSearchRequest(q, from, pageSize))
 		if err != nil {
