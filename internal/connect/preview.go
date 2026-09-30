@@ -8,13 +8,6 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// apiKeyMask is the placeholder substituted for the real credential in a
-// preview, whether it is carried in a header value, a bridge --header arg, or an
-// ?apikey= query. It is deliberately human-readable (not percent-encoded) so the
-// user plainly sees a credential is written without the secret ever leaving the
-// core in a preview payload, log, or telemetry event (Spec 078 FR-004).
-const apiKeyMask = "••••" // ••••
-
 // ConnectPreview describes the exact change a subsequent Connect would make to a
 // client config, WITHOUT modifying the file or creating a backup (Spec 078 US1).
 // The entry is derived from the same buildServerEntry used by the real write, so
@@ -27,15 +20,26 @@ type ConnectPreview struct {
 	// (FR-037), matching ClientStatus/ConnectResult so the same client's path
 	// renders identically across the status list, the preview, and the
 	// post-connect result. Cosmetic only; the full path stays in ConfigPath.
-	DisplayPath    string                 `json:"display_path,omitempty"`
-	Format         string                 `json:"format"`           // "json" | "toml"
-	ServerKey      string                 `json:"server_key"`       // mcpServers / servers / mcp_servers / mcp
-	ServerName     string                 `json:"server_name"`      // key written into the config ("mcpproxy")
-	Entry          map[string]interface{} `json:"entry"`            // exact entry (masked) that will be written
-	EntryText      string                 `json:"entry_text"`       // entry rendered in the client's format (masked)
-	EntryExists    bool                   `json:"entry_exists"`     // an entry with this name already exists (overwrite/force case)
-	ContainsAPIKey bool                   `json:"contains_api_key"` // the written URL embeds an apikey credential
-	Bridge         bool                   `json:"bridge,omitempty"` // connects via a stdio bridge (config created if absent)
+	DisplayPath string                 `json:"display_path,omitempty"`
+	Format      string                 `json:"format"`       // "json" | "toml"
+	ServerKey   string                 `json:"server_key"`   // mcpServers / servers / mcp_servers / mcp
+	ServerName  string                 `json:"server_name"`  // key written into the config ("mcpproxy")
+	Entry       map[string]interface{} `json:"entry"`        // exact entry (masked) that will be written
+	EntryText   string                 `json:"entry_text"`   // entry rendered in the client's format (masked)
+	EntryExists bool                   `json:"entry_exists"` // an entry with this name already exists (overwrite/force case)
+	// ContainsAPIKey is always false since Spec 108: connect never writes the
+	// instance admin API key. Kept on the wire so existing consumers still
+	// decode; the credential a write embeds is Credential below.
+	ContainsAPIKey bool `json:"contains_api_key"`
+	Bridge         bool `json:"bridge,omitempty"` // connects via a stdio bridge (config created if absent)
+	// Credential is the masked per-client credential the write would embed
+	// (`mcp_cli_••••`, never `mcp_agt_`), empty for a keyless entry. Profile and
+	// Mode echo the requested binding (Profile "" is All servers) and Keyless
+	// echoes the intent (Spec 108 FR-024).
+	Credential string `json:"credential,omitempty"`
+	Profile    string `json:"profile"`
+	Mode       string `json:"mode"`
+	Keyless    bool   `json:"keyless"`
 	// AccessState classifies the on-demand config read used to determine
 	// EntryExists (Spec 075): accessible|absent|malformed. A denied read never
 	// reaches here — it is returned as a typed *AccessError (403 + remediation).
@@ -71,6 +75,14 @@ type ConnectPreview struct {
 // resolve the Spec 075 access state; a permission denial surfaces as the same
 // typed *AccessError that connect/disconnect return (FR-012).
 func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) {
+	return s.PreviewWithIntent(clientID, serverName, CredentialIntent{})
+}
+
+// PreviewWithIntent is Preview for a specific credential intent: the entry
+// carries the masked client credential (or none when keyless), and the intent
+// rides into the precondition token so a write with a different intent is
+// refused as drift.
+func (s *Service) PreviewWithIntent(clientID, serverName string, intent CredentialIntent) (*ConnectPreview, error) {
 	client := FindClient(clientID)
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
@@ -85,6 +97,15 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 	cfgPath := s.configPath(clientID)
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
+	}
+
+	mint, err := s.planCredential(intent)
+	if err != nil {
+		return nil, err
+	}
+	credential := ""
+	if mint {
+		credential = maskClientCredential
 	}
 
 	// Determine create-vs-overwrite via an on-demand read. This is the same
@@ -106,7 +127,7 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 	// credential masked for display. Because the real write also calls
 	// buildServerEntry, the masked entry differs from the written entry only in
 	// the credential value — the carrier, shape, and every other field match.
-	maskedEntry := buildServerEntry(clientID, s.entryParams(true))
+	maskedEntry := buildServerEntry(clientID, s.entryParams(credential))
 
 	entryText, err := renderEntrySnippet(client, serverName, maskedEntry)
 	if err != nil {
@@ -123,7 +144,11 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		Entry:                maskedEntry,
 		EntryText:            entryText,
 		EntryExists:          pre.existing != nil,
-		ContainsAPIKey:       s.containsCredential(),
+		ContainsAPIKey:       false,
+		Credential:           credential,
+		Profile:              deref(intent.Profile),
+		Mode:                 previewMode(intent),
+		Keyless:              intent.Keyless,
 		Bridge:               client.Bridge,
 		AccessState:          pre.accessState,
 		ExistingEntrySummary: existingSummary,
@@ -131,8 +156,7 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		// client, this file, this requested entry name — and to the state it
 		// just observed, over the unmasked pending entry the write would
 		// produce (Spec 091 FR-005).
-		PreconditionToken: s.preconditionToken(clientID, cfgPath, serverName, pre.fileExists, pre.existing,
-			buildServerEntry(clientID, s.entryParams(false))),
+		PreconditionToken: s.preconditionToken(clientID, cfgPath, serverName, pre.fileExists, pre.existing, intent),
 		// Run the write's own refusal guards so the form learns "not
 		// connectable" from the preview, never from a failed click (FR-003).
 		// BOTH force-proof guards belong here: the absent-config refusal, and
@@ -141,6 +165,22 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		// write that always refuses.
 		ConnectRefusal: refusalText(connectRefusal(client, cfgPath), guardJsoncCommentsBytes(cfgPath, pre.raw)),
 	}, nil
+}
+
+// previewMode echoes the requested mode, or the default a fresh credential
+// would get (locked for a named profile, switchable for All servers). Empty for
+// a keyless preview: an unidentified client has no binding.
+func previewMode(intent CredentialIntent) string {
+	if intent.Keyless {
+		return ""
+	}
+	if intent.Mode != nil {
+		return *intent.Mode
+	}
+	if deref(intent.Profile) != "" {
+		return "locked"
+	}
+	return "switchable"
 }
 
 // refusalText renders the first refusal error as its verbatim reason string, or

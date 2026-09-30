@@ -145,11 +145,11 @@ describe('sidebar Home entry and badge (Spec 109 FR-003/FR-051)', () => {
     attentionSpy.mockResolvedValue({ success: true, data: { count: 0, items: [] } })
     reviewQueueSpy.mockResolvedValueOnce({ success: true, data: { count: 0, servers: [] } })
     const wrapper = await mountSidebar()
-    expect(wrapper.get('[data-test="sidebar-review-queue"]').text()).not.toContain('3')
+    expect(wrapper.get('[data-test="sidebar-item-review"]').text()).not.toContain('3')
 
     reviewQueueSpy.mockResolvedValue({ success: true, data: { count: 3, servers: [] } })
     window.dispatchEvent(new CustomEvent('mcpproxy:review-changed'))
     await flushPromises()
-    expect(wrapper.get('[data-test="sidebar-review-queue"]').text()).toContain('3')
+    expect(wrapper.get('[data-test="sidebar-item-review"]').text()).toContain('3')
   })
 })

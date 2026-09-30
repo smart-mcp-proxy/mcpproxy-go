@@ -204,9 +204,15 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 //     tag filter. Pinned field by field by
 //     TestMenuSurface_ExactDeltaFromPreFeature's assertSearchServersDelta /
 //     assertListRegistriesDelta.
+//   - call_tool_read / call_tool_write / call_tool_destructive — issue #1364:
+//     the `args` object parameter moves from {"properties":{}} to an open
+//     {"additionalProperties":true} object (see openObject). Grammar-constrained
+//     clients read the empty properties map as "no keys allowed". Schema shape
+//     of that one parameter only; assertCallToolVariantDelta and
+//     TestOpenObjectParamsAreNotGrammarClosed_Issue1364 pin it.
 var toolsListAllowedDelta = map[string][]string{
-	"default_server":      {"describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries"},
-	"retrieve_tools_mode": {"code_execution", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries"},
+	"default_server":      {"call_tool_read", "call_tool_write", "call_tool_destructive", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries"},
+	"retrieve_tools_mode": {"call_tool_read", "call_tool_write", "call_tool_destructive", "code_execution", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries"},
 	"code_execution_mode": {"code_execution", "quarantine_security", "upstream_servers", "search_servers", "list_registries"},
 }
 
@@ -426,6 +432,17 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 						"surface %s: upstream_servers may differ from the pre-105 golden only by the Spec 112 forward_headers_json parameter", surface)
 					continue
 				}
+				if isCallToolVariantName(name) {
+					// Issue #1364: only args' open-object shape moved.
+					var postM map[string]interface{}
+					require.NoError(t, json.Unmarshal(after[name], &postM))
+					closeOpenObjects(t, postM, "args")
+					trimmed, err := json.Marshal(postM)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(pre), string(trimmed),
+						"surface %s: %s may differ from the pre-105 golden only by the #1364 open-object args shape", surface, name)
+					continue
+				}
 				assert.True(t, bytes.Equal(pre, after[name]),
 					"surface %s: tool %q must be byte-identical to the pre-105 golden (FR-012: only code_execution may move)", surface, name)
 			}
@@ -462,6 +479,8 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 			// live entry and it must deep-equal the frozen one.
 			postM["description"] = preDesc
 			setCodeExecScriptDescription(t, postM, preScript)
+			// Issue #1364: input/options became open objects; undo just that.
+			closeOpenObjects(t, postM, "input", "options")
 			assert.Equal(t, preM, postM,
 				"surface %s: code_execution may differ from the pre-105 golden in description and script.description only (FR-012)", surface)
 		})
@@ -487,4 +506,25 @@ func setCodeExecScriptDescription(t *testing.T, tool map[string]interface{}, des
 	script, _ := props["script"].(map[string]interface{})
 	require.NotNil(t, script)
 	script["description"] = desc
+}
+
+func isCallToolVariantName(name string) bool {
+	return name == "call_tool_read" || name == "call_tool_write" || name == "call_tool_destructive"
+}
+
+// closeOpenObjects reverts the issue #1364 shape change on the named
+// parameters (asserting it is present first), turning
+// {"additionalProperties":true} back into the frozen {"properties":{}} so the
+// entry can be compared against a pre-#1364 golden.
+func closeOpenObjects(t *testing.T, tool map[string]interface{}, params ...string) {
+	t.Helper()
+	props := schemaProps(tool)
+	for _, param := range params {
+		p, ok := props[param].(map[string]interface{})
+		require.True(t, ok, "tool %v: param %q missing", tool["name"], param)
+		require.Equal(t, true, p["additionalProperties"], "tool %v: %q must be an open object (#1364)", tool["name"], param)
+		require.NotContains(t, p, "properties", "tool %v: %q must not carry empty properties (#1364)", tool["name"], param)
+		delete(p, "additionalProperties")
+		p["properties"] = map[string]interface{}{}
+	}
 }

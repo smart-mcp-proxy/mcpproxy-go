@@ -6,6 +6,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"go.uber.org/zap"
 )
 
@@ -71,10 +72,128 @@ func (p *MCPProxyServer) bindingGuardActive(idx *profileIndex) bool {
 }
 
 func activeNamedClientBinding(token *auth.AgentToken, now time.Time) bool {
-	return token != nil && token.Kind == auth.KindClient && !token.Revoked &&
-		token.ExpiresAt.After(now) && token.ProfilePin != "" &&
-		(token.ProfileMode == auth.ProfileModeLocked || token.ProfileMode == auth.ProfileModeSwitchable)
+	return runtime.ActiveNamedBinding(token, now)
 }
+
+// guardEvaluation evaluates FR-008a over explicit (config, tokens) states with
+// ONE published tool snapshot, loaded lazily so the common auth-on / no-binding
+// path never walks the tool set.
+type guardEvaluation struct {
+	p      *MCPProxyServer
+	tools  []bindingGuardTool
+	loaded bool
+	now    time.Time
+}
+
+func (p *MCPProxyServer) newGuardEvaluation() *guardEvaluation {
+	return &guardEvaluation{p: p, now: time.Now()}
+}
+
+// bypassable is bypassable(b, state): an active named binding is bypassable
+// when the state's config leaves auth off and an anonymous caller could reach
+// more than the binding. A state with no config fails closed.
+func (e *guardEvaluation) bypassable(cfg *config.Config, idx *profileIndex, token *auth.AgentToken) bool {
+	if !runtime.ActiveNamedBinding(token, e.now) || config.EffectiveRequireMCPAuth(cfg) {
+		return false
+	}
+	if cfg == nil || idx == nil || idx.cfg == nil {
+		return true
+	}
+	if !e.loaded {
+		e.tools = e.p.bindingGuardTools()
+		e.loaded = true
+	}
+	return bindingBypassable(idx, cfg, token, e.tools)
+}
+
+// BindingGuardDelta is the FR-008a "one condition function" (plan D2):
+// Delta = {b in bindings(candidate) : bypassable(b, candidate) and not
+// (b in bindings(current) and bypassable(b, current))}, binding identity =
+// client_id. A candidate with require_mcp_auth on yields an empty delta.
+// Every API path that could create the condition refuses on a non-empty
+// delta; the runtime guard and the warnings reuse the same evaluator.
+func (p *MCPProxyServer) BindingGuardDelta(current, candidate runtime.GuardState) []runtime.BindingRef {
+	if config.EffectiveRequireMCPAuth(candidate.Config) {
+		return nil
+	}
+	e := p.newGuardEvaluation()
+	curIdx := newProfileIndex(current.Config)
+	candIdx := newProfileIndex(candidate.Config)
+	already := make(map[string]bool)
+	for i := range current.Tokens {
+		t := &current.Tokens[i]
+		if e.bypassable(current.Config, curIdx, t) {
+			already[t.ClientID] = true
+		}
+	}
+	var out []runtime.BindingRef
+	for i := range candidate.Tokens {
+		t := &candidate.Tokens[i]
+		if !already[t.ClientID] && e.bypassable(candidate.Config, candIdx, t) {
+			out = append(out, runtime.BindingRefOf(t))
+		}
+	}
+	runtime.SortBindingRefs(out)
+	return out
+}
+
+// BindingGuardFixes lists the remediations for a refusal. require_mcp_auth
+// always works; set_anonymous_profile carries a target only when making the
+// first refused binding's own profile the anonymous profile would leave NO
+// binding of the delta bypassable (the same evaluator, on a candidate with
+// that anonymous_profile) — otherwise it has no target and its label reads
+// "a profile not wider than <p>".
+func (p *MCPProxyServer) BindingGuardFixes(candidate runtime.GuardState, delta []runtime.BindingRef) []runtime.GuardFix {
+	fixes := []runtime.GuardFix{{Kind: profile.GuardFixRequireMCPAuth}}
+	anon := runtime.GuardFix{Kind: profile.GuardFixSetAnonymousProfile}
+	if len(delta) > 0 && candidate.Config != nil {
+		target := delta[0].Profile
+		alt := *candidate.Config
+		alt.AnonymousProfile = target
+		altIdx := newProfileIndex(&alt)
+		e := p.newGuardEvaluation()
+		qualifies := true
+		for i := range candidate.Tokens {
+			t := &candidate.Tokens[i]
+			if e.bypassable(&alt, altIdx, t) {
+				qualifies = false
+				break
+			}
+		}
+		if qualifies {
+			anon.Target = target
+		}
+	}
+	return append(fixes, anon)
+}
+
+// BindingGuardActiveBindings returns the bindings that are bypassable right
+// now under the live config, token store and published tool snapshot.
+func (p *MCPProxyServer) BindingGuardActiveBindings() []runtime.BindingRef {
+	cfg := p.currentConfig()
+	if p.storage == nil || cfg == nil || config.EffectiveRequireMCPAuth(cfg) {
+		return nil
+	}
+	tokens, err := p.storage.ListAgentTokens()
+	if err != nil {
+		if p.logger != nil {
+			p.logger.Error("cannot inspect client bindings for the binding guard", zap.Error(err))
+		}
+		return nil
+	}
+	idx := p.profileIndexFor(cfg)
+	e := p.newGuardEvaluation()
+	var out []runtime.BindingRef
+	for i := range tokens {
+		if e.bypassable(cfg, idx, &tokens[i]) {
+			out = append(out, runtime.BindingRefOf(&tokens[i]))
+		}
+	}
+	runtime.SortBindingRefs(out)
+	return out
+}
+
+var _ runtime.BindingGuard = (*MCPProxyServer)(nil)
 
 func bindingBypassable(idx *profileIndex, cfg *config.Config, token *auth.AgentToken, tools []bindingGuardTool) bool {
 	if token == nil || token.ProfilePin == "" || idx == nil || idx.cfg == nil || cfg == nil {

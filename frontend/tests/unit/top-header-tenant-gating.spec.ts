@@ -152,33 +152,37 @@ describe('TopHeader tenant gating (Spec 107 FR-041, cross-review round 2 P1)', (
     expect(useProfilesStore().hasProfiles).toBe(false)
   })
 
-  it('hides the mode switcher for a tenant principal', async () => {
+  // Spec 109-i FR-053: the mode switcher left the header for Clients ->
+  // Endpoint & mode, so it is absent for every principal. The tenant concern
+  // (routing_mode is admin-only, Spec 107 FR-041) is now satisfied by the
+  // header simply not carrying it; Clients hides its own tenant surface.
+  it('never renders the mode switcher (admin or tenant)', async () => {
+    for (const role of ['user', 'admin'] as const) {
+      const wrapper = await mountTopHeaderAs(role)
+      expect(wrapper.find('[data-test="mode-switcher"]').exists()).toBe(false)
+      expect(wrapper.findComponent({ name: 'ModeSwitcher' }).exists()).toBe(false)
+    }
+  })
+
+  // Spec 107 PR-C cross-review round 3, chunk 4 (P2): adding a server from the
+  // header submitted through /api/v1/tools/call, a core dispatch door the
+  // tenant-session allowlist refuses with 403 (rest-endpoints.md §8). The
+  // header "+ Add" menu (Spec 109-i FR-052, formerly the Add Server button)
+  // must therefore be absent for a tenant, not merely mislabeled.
+  it('hides the add menu for a tenant principal', async () => {
     const wrapper = await mountTopHeaderAs('user')
-    expect(wrapper.find('[data-test="mode-switcher"]').exists()).toBe(false)
-    expect(wrapper.findComponent({ name: 'ModeSwitcher' }).exists()).toBe(false)
+    expect(wrapper.find('[data-test="header-add-menu"]').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'AddMenu' }).exists()).toBe(false)
   })
 
-  it('still renders the mode switcher for an admin principal', async () => {
+  it('still renders the add menu for an admin principal', async () => {
     const wrapper = await mountTopHeaderAs('admin')
-    expect(wrapper.findComponent({ name: 'ModeSwitcher' }).exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'AddMenu' }).exists()).toBe(true)
   })
 
-  // Spec 107 PR-C cross-review round 3, chunk 4 (P2): the header's "Add
-  // Server" button always submitted through AddServerModal /
-  // serversStore.addServer(), which POSTs /api/v1/tools/call — a core
-  // dispatch door the tenant-session allowlist refuses with 403
-  // (rest-endpoints.md §8) — so a tenant's own labeled "Add Personal
-  // Server" button always failed. /my/servers is the working tenant flow
-  // (POST /api/v1/user/servers); the header button must be hidden for a
-  // tenant, not merely mislabeled.
-  it('hides the add-server button for a tenant principal', async () => {
+  it('hides the status pill for a tenant (their servers store is never loaded)', async () => {
     const wrapper = await mountTopHeaderAs('user')
-    expect(wrapper.find('[data-test="header-add-server"]').exists()).toBe(false)
-  })
-
-  it('still renders the add-server button for an admin principal', async () => {
-    const wrapper = await mountTopHeaderAs('admin')
-    expect(wrapper.find('[data-test="header-add-server"]').exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'StatusPill' }).exists()).toBe(false)
   })
 
   // Spec 107 PR-C cross-review round 3, chunk 4 (P2): selecting a profile in

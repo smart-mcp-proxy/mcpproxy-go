@@ -24,7 +24,7 @@ func TestActivityViewTypeFilter(t *testing.T) {
 		{view: "", want: ""},
 		{view: "all", want: ""},
 		{view: "calls", want: "tool_call,internal_tool_call"},
-		{view: "system", want: "policy_decision,quarantine_change,server_change,system_start,system_stop,config_change,tool_quarantine_change,security_scan,credential_broker,preflight,prompt_get"},
+		{view: "system", want: "policy_decision,quarantine_change,server_change,system_start,system_stop,config_change,tool_quarantine_change,security_scan,credential_broker,preflight,prompt_get,profile_change"},
 		{view: "bogus", wantErr: true},
 	}
 

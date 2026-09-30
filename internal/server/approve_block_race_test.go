@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
@@ -144,12 +145,15 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 	// synchronous discovery against its settled runtime client before releasing
 	// callers, then prove the real disabled-tool refusal from that snapshot.
 	runRuntimeDiscovery(t, proxy, rt, up)
-	// The unquarantiner's background discovery pass may reconnect the client
-	// after the synchronous discovery above, which advances the connection
-	// epoch and makes the stamped discovery read as a previous connection's.
-	// Re-stamp the live epoch on each poll so the assertion measures the
-	// disabled-tool refusal rather than that reconnect timing.
-	require.Eventually(t, func() bool {
+	var lastOutcome atomic.Value
+	if !assert.Eventually(t, func() bool {
+		// The unquarantiner's background discovery pass may reconnect the
+		// client after the synchronous discovery above and re-stamps the
+		// StateView with the runtime manager's connection token, undoing the
+		// fixture's rebind to the proxy manager's client (the two hold
+		// independent counters only in tests). Re-bind the live epoch on every
+		// poll so the probe measures the disabled-tool refusal rather than
+		// that reconnect timing.
 		if client, ok := proxy.upstreamManager.GetClient("filesystem"); ok && client.IsConnected() {
 			epoch := client.ConnectionEpoch()
 			rt.Supervisor().StateView().UpdateServer("filesystem", func(s *stateview.ServerStatus) {
@@ -157,8 +161,11 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 			})
 		}
 		result, callErr := proxy.handleCallToolVariant(adminCtx(), callRequest(), contracts.ToolVariantDestructive)
+		lastOutcome.Store(describeCallOutcome(result, callErr))
 		return callErr == nil && blockedResponse(result)
-	}, 15*time.Second, time.Millisecond)
+	}, 15*time.Second, time.Millisecond) {
+		t.Fatalf("disabled tool was never refused after approval; last outcome: %v", lastOutcome.Load())
+	}
 	// A completed post-approval call proves the disabled approval record gates
 	// callers after unquarantine, rather than only the original quarantine.
 	require.Eventually(t, func() bool { return postApprovalCalls.Load() > 0 }, 15*time.Second, time.Millisecond)
@@ -170,4 +177,21 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 	require.Equal(t, storage.ToolApprovalStatusApproved, blocked.Status)
 	require.True(t, blocked.Disabled)
 	require.Equal(t, int64(0), up.count.Load(), "blocked tool must never reach the counting upstream")
+}
+
+// describeCallOutcome renders a call result for failure messages.
+func describeCallOutcome(result *mcp.CallToolResult, err error) string {
+	if err != nil {
+		return "err: " + err.Error()
+	}
+	if result == nil {
+		return "nil result"
+	}
+	if len(result.Content) == 0 {
+		return "empty content"
+	}
+	if text, ok := result.Content[0].(mcp.TextContent); ok {
+		return text.Text
+	}
+	return "non-text content"
 }

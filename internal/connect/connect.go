@@ -13,6 +13,8 @@ import (
 	"sync"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // AccessState classifies a per-client config access (Spec 075). It is left as
@@ -49,6 +51,25 @@ type ConnectResult struct {
 	// effect (FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Empty
 	// for an unknown client.
 	ReloadHint string `json:"reload_hint,omitempty" yaml:"reload_hint,omitempty"`
+
+	// Credential is the masked client credential the write embedded
+	// (`mcp_cli_••••`); the real secret is never returned (FR-024). Empty for a
+	// keyless entry, a disconnect and every refusal.
+	Credential string `json:"credential,omitempty" yaml:"credential,omitempty"`
+	// TokenName is the client credential's token name (`client-<id>`).
+	TokenName string `json:"token_name,omitempty" yaml:"token_name,omitempty"`
+	// Profile and Mode are the binding of the credential this write minted or
+	// kept. Profile "" means the built-in All servers scope.
+	Profile string `json:"profile,omitempty" yaml:"profile,omitempty"`
+	Mode    string `json:"mode,omitempty" yaml:"mode,omitempty"`
+	// Keyless is true when the entry was written with no credential.
+	Keyless bool `json:"keyless,omitempty" yaml:"keyless,omitempty"`
+	// Rotation is "finalized" when the write replaced an active credential's
+	// secret (staged rotation, FR-021a), empty otherwise.
+	Rotation string `json:"rotation,omitempty" yaml:"rotation,omitempty"`
+	// CredentialRevoked names the credential an undo revoked because the
+	// restored config no longer holds it (plan D16).
+	CredentialRevoked string `json:"credential_revoked,omitempty" yaml:"credential_revoked,omitempty"`
 }
 
 // ClientStatus describes the current state of a client's configuration
@@ -68,6 +89,12 @@ type ClientStatus struct {
 	Bridge     bool   `json:"bridge,omitempty" yaml:"bridge,omitempty"` // connects via a stdio bridge; connectable even without an existing config
 	Icon       string `json:"icon" yaml:"icon"`
 	ServerName string `json:"server_name,omitempty" yaml:"server_name,omitempty"` // name under which mcpproxy is registered
+
+	// CredentialState reports what the client's entry carries (FR-025):
+	// client|admin_key|none|revoked|expired, or "unknown" in the stat-only
+	// listing, which never reads a config (Spec 075). Absent when the client is
+	// not connected. Administrator-only, like the rest of the connect reads.
+	CredentialState string `json:"credential_state,omitempty" yaml:"credential_state,omitempty"`
 
 	// DisplayPath is ConfigPath with the home directory shortened to "~"
 	// (FR-037). Cosmetic only; the full path stays in ConfigPath.
@@ -157,6 +184,13 @@ type Service struct {
 	// unforgeable and non-oracular, and scopes it to this process.
 	tokenKeyOnce sync.Once
 	tokenKey     []byte
+
+	// minter mints the per-client `mcp_cli_` credential every connect write
+	// embeds (Spec 108 FR-024). Nil in unit tests and the management TCC
+	// probe: connect then writes a keyless entry while auth is off and refuses
+	// (ErrNoCredentialMinter) while it is on — it NEVER falls back to the
+	// admin API key, which has no remaining write path (plan D10).
+	minter CredentialMinter
 }
 
 // WithRequireMCPAuth sets whether the /mcp endpoint requires authentication,
@@ -261,46 +295,64 @@ func (s *Service) baseURL() string {
 
 // serverEntryParams carries everything buildServerEntry needs. credential is the
 // value to embed in the entry (as an X-API-Key header, a --header bridge arg, or
-// an ?apikey= query, per client). It is empty when no credential should be
-// written (require_mcp_auth off, or no key) and may hold the mask token in a
-// preview.
+// an ?apikey= query, per client). It is a per-client `mcp_cli_` credential, the
+// masked or placeholder form of one in a preview, or empty for a keyless entry.
+// It is NEVER the instance admin API key.
 type serverEntryParams struct {
 	baseURL    string
 	credential string
 }
 
-// entryParams resolves the credential to embed. When require_mcp_auth is off, or
-// no API key is set, credential stays empty so connect writes a clean, keyless
-// entry. When masked is true the real key is replaced with the display mask for
-// previews (the real key never leaves the core in a preview payload).
-func (s *Service) entryParams(masked bool) serverEntryParams {
-	_, apiKey, requireMCPAuth := s.resolveConfig()
-	cred := ""
-	if requireMCPAuth && apiKey != "" {
-		cred = apiKey
-		if masked {
-			cred = apiKeyMask
-		}
-	}
-	return serverEntryParams{baseURL: s.baseURL(), credential: cred}
+// pendingCredential is the fixed placeholder that stands in for the real
+// secret wherever the secret does not exist yet (the precondition token's
+// pending entry): the real secret must never enter the digest, and it is
+// unknown at preview time anyway (plan D17).
+const pendingCredential = "mcp_cli_<pending>"
+
+// entryParams builds the entry parameters for an explicit credential value.
+func (s *Service) entryParams(credential string) serverEntryParams {
+	return serverEntryParams{baseURL: s.baseURL(), credential: credential}
 }
 
-// containsCredential reports whether connect will write a credential into the
-// client config for the current configuration.
-func (s *Service) containsCredential() bool {
-	_, apiKey, requireMCPAuth := s.resolveConfig()
-	return requireMCPAuth && apiKey != ""
+// planCredential decides whether a connect with this intent mints a client
+// credential, and refuses the combinations that cannot work (plan D9/D10):
+//
+//   - keyless is only possible while require_mcp_auth is off, and cannot carry
+//     a profile or mode (an unidentified client has no binding);
+//   - with no minter wired, auth off writes the legacy keyless entry and auth on
+//     is refused — never the admin key.
+//
+// With auth off and a minter, connect still mints (identity + binding, FR-024).
+func (s *Service) planCredential(intent CredentialIntent) (mint bool, err error) {
+	_, _, requireAuth := s.resolveConfig()
+	if intent.Keyless {
+		if requireAuth {
+			return false, ErrKeylessRequiresAuthOff
+		}
+		if (intent.Profile != nil && *intent.Profile != "") || intent.Mode != nil {
+			return false, ErrKeylessWithProfile
+		}
+		return false, nil
+	}
+	if s.minter == nil {
+		if requireAuth {
+			return false, ErrNoCredentialMinter
+		}
+		return false, nil
+	}
+	return true, nil
 }
 
 // credentialQuery appends the credential as an ?apikey= query to base, for the
-// clients whose config cannot express an HTTP header. The real key is
-// URL-escaped; the display mask is left literal so the preview renders cleanly.
+// clients whose config cannot express an HTTP header. The real secret is
+// URL-escaped; the display mask and the pending placeholder are left literal
+// so a preview renders cleanly.
 func credentialQuery(base, credential string) string {
 	if credential == "" {
 		return base
 	}
 	v := credential
-	if credential != apiKeyMask {
+	if credential != maskClientCredential && credential != pendingCredential {
 		v = url.QueryEscape(credential)
 	}
 	return base + "?apikey=" + v
@@ -381,6 +433,12 @@ func (s *Service) GetAllStatus() []ClientStatus {
 		// Metadata-only existence check (no content read).
 		if _, err := s.stat(cfgPath); err == nil {
 			status.Exists = true
+			if c.Supported {
+				// The listing never reads a config (Spec 075), so it cannot say
+				// what credential an entry carries: "unknown" (plan D6). The
+				// on-demand GET /connect/{client} resolves it.
+				status.CredentialState = string(profile.CredentialStateUnknown)
+			}
 		} else if !os.IsNotExist(err) {
 			// Still no content read — but a stat we were not allowed to make is
 			// not evidence of absence, and leaving the row to say "No config
@@ -450,6 +508,11 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		status.ServerName = loc.Name
 		status.RegisteredURL = loc.Endpoint
 		status.EndpointMatch = classifyEndpointMatch(loc)
+		// What the entry carries, from the same single read. The secret itself
+		// is classified and dropped here; it is never stored on the status.
+		secret, _ := extractEntryCredential(c.ID, loc.Entry)
+		_, apiKey, _ := s.resolveConfig()
+		status.CredentialState = string(s.classifyEntrySecret(c.ID, secret, apiKey))
 	case outcome == accessDenied:
 		// A macOS App-Data block must surface as actionable remediation, not as
 		// a plain "not connected" (Spec 075 FR-004).
@@ -482,7 +545,22 @@ func (s *Service) entryAccess(client ClientDef, cfgPath string) (loc entryLocati
 // This is the tokenless entry point kept for the Web UI, the CLI and every
 // existing caller; ConnectWithPrecondition adds the Spec 091 drift guard.
 func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResult, error) {
-	return s.ConnectWithPrecondition(clientID, serverName, force, "")
+	return s.ConnectWithOptions(clientID, serverName, ConnectOptions{Force: force})
+}
+
+// ConnectOptions carries the optional parts of a connect: the overwrite flag,
+// the Spec 091 preview token, and the credential Intent (Spec 108).
+type ConnectOptions struct {
+	Force             bool
+	PreconditionToken string
+	Intent            CredentialIntent
+}
+
+// ConnectWithPrecondition is ConnectWithOptions with the default credential
+// intent (All servers for a fresh credential, the existing binding kept on a
+// reconnect).
+func (s *Service) ConnectWithPrecondition(clientID, serverName string, force bool, preconditionToken string) (res *ConnectResult, err error) {
+	return s.ConnectWithOptions(clientID, serverName, ConnectOptions{Force: force, PreconditionToken: preconditionToken})
 }
 
 // ConnectWithPrecondition is Connect guarded by the opaque token a preview
@@ -497,7 +575,16 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 //
 // An empty token means exactly today's behavior, so existing consumers are
 // unaffected (contracts §2).
-func (s *Service) ConnectWithPrecondition(clientID, serverName string, force bool, preconditionToken string) (res *ConnectResult, err error) {
+//
+// Credential (Spec 108 FR-024): the write embeds a per-client `mcp_cli_`
+// credential minted by the injected CredentialMinter, or nothing (--keyless,
+// only while require_mcp_auth is off). It never embeds the admin API key. A
+// fresh credential is minted only once every refusal that does not depend on
+// it has passed, so a refused write mints nothing; a write that then fails
+// aborts the mint (fresh: forgotten; reconnect: the staged rotation rolls
+// back and the old secret keeps working, FR-021a).
+func (s *Service) ConnectWithOptions(clientID, serverName string, opts ConnectOptions) (res *ConnectResult, err error) {
+	force, preconditionToken := opts.Force, opts.PreconditionToken
 	client := FindClient(clientID)
 
 	// FR-037/FR-042: every ConnectResult this call produces — success,
@@ -525,6 +612,12 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 	cfgPath := s.configPath(clientID)
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
+	}
+	// Pure input validation (no I/O): keyless with auth on or with a profile,
+	// or auth on with no minter, is refused before anything is read or written.
+	mint, err := s.planCredential(opts.Intent)
+	if err != nil {
+		return nil, err
 	}
 	// Resolve the pre-write state ONCE for the whole operation. The token
 	// check and the write must cover the SAME read — re-resolving per step is
@@ -581,7 +674,7 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 	// Precondition check BEFORE any backup or write, so a refusal is completely
 	// inert (Spec 091 FR-005).
 	if preconditionToken != "" {
-		if stale := s.checkPrecondition(client, cfgPath, serverName, preconditionToken, pre.fileExists, pre.existing); stale != nil {
+		if stale := s.checkPrecondition(client, cfgPath, serverName, preconditionToken, pre.fileExists, pre.existing, opts.Intent); stale != nil {
 			return stale, nil
 		}
 	}
@@ -598,15 +691,97 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 	// res/err are the function's named returns — deliberately NOT re-declared
 	// with `var` here, which would shadow them and leave the deferred
 	// DisplayPath/ReloadHint fill-in above looking at a permanently-nil res.
+	cred := &credentialHandle{svc: s, clientID: clientID, intent: opts.Intent, mint: mint}
 	if client.Format == "toml" {
-		res, err = s.connectTOML(client, cfgPath, serverName, force, pre)
+		res, err = s.connectTOML(client, cfgPath, serverName, force, pre, cred)
 	} else {
-		res, err = s.connectJSON(client, cfgPath, serverName, force, pre)
+		res, err = s.connectJSON(client, cfgPath, serverName, force, pre, cred)
 	}
 	// A permission denial anywhere in the read/backup/write chain (the errors
 	// preserve their OS cause via %w) surfaces as a typed *AccessError with
 	// remediation; other errors keep their existing semantics (Spec 075 FR-004).
-	return res, s.asAccessError(client, cfgPath, err)
+	err = s.asAccessError(client, cfgPath, err)
+	if commitErr := cred.settle(res, err); commitErr != nil {
+		return res, commitErr
+	}
+	if res != nil && res.Success && res.Action != "already_exists" {
+		cred.describe(res, opts.Intent)
+	}
+	return res, err
+}
+
+// credentialHandle defers minting to the last moment before a write (after
+// every refusal that does not depend on the credential), and remembers what
+// was issued so the outcome can be committed or aborted.
+type credentialHandle struct {
+	svc      *Service
+	clientID string
+	intent   CredentialIntent
+	mint     bool
+	issued   *IssuedCredential
+	// wrote is set once the config write itself succeeded. A failure after
+	// that point (a verification re-read) is ambiguous — the file may hold the
+	// new secret — so it must NOT abort the mint: a fresh credential is left
+	// active and a staged rotation stays pending for the reconciler, which
+	// resolves it from what the config actually holds (FR-021a).
+	wrote bool
+}
+
+func (h *credentialHandle) markWritten() { h.wrote = true }
+
+// secret returns the credential to embed: "" for a keyless entry, otherwise
+// the freshly issued `mcp_cli_` secret (minted on first use).
+func (h *credentialHandle) secret() (string, error) {
+	if !h.mint {
+		return "", nil
+	}
+	if h.issued == nil {
+		issued, err := h.svc.minter.Issue(h.clientID, h.intent)
+		if err != nil {
+			return "", err
+		}
+		h.issued = issued
+	}
+	return h.issued.Secret, nil
+}
+
+// settle commits an issued credential after a successful write and aborts it
+// after any failure or refusal. It returns a commit error only: an abort
+// failure is logged by the minter and must not mask the write error.
+func (h *credentialHandle) settle(res *ConnectResult, writeErr error) error {
+	if h.issued == nil {
+		return nil
+	}
+	if writeErr != nil || res == nil || !res.Success {
+		if h.wrote {
+			return nil // ambiguous outcome: leave it to the reconciler
+		}
+		_ = h.svc.minter.Abort(h.clientID, h.intent, h.issued)
+		h.issued = nil
+		return nil
+	}
+	if err := h.svc.minter.Commit(h.clientID, h.intent, h.issued); err != nil {
+		return fmt.Errorf("the client config was written but its credential could not be finalized: %w", err)
+	}
+	return nil
+}
+
+// describe fills the credential fields of a successful result: the masked
+// credential, token name, binding and rotation outcome — never the secret.
+func (h *credentialHandle) describe(res *ConnectResult, intent CredentialIntent) {
+	if h.issued == nil {
+		if !h.mint {
+			res.Keyless = true
+		}
+		return
+	}
+	res.Credential = maskClientCredential
+	res.TokenName = h.issued.TokenName
+	res.Profile = h.issued.Profile
+	res.Mode = h.issued.Mode
+	if h.issued.Rotating {
+		res.Rotation = profile.RotationFinalized
+	}
 }
 
 // connectRefusal reports the reason a connect would refuse for this client
@@ -827,7 +1002,7 @@ func (s *Service) refuseIfServersSectionRaced(client *ClientDef, cfgPath string)
 // already resolved and checked the precondition token against — connectJSON
 // never opens the file again, so the write acts on exactly the bytes the token
 // validated (Spec 091 FR-005) instead of racing a second, independent read.
-func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, force bool, pre preWriteResult) (*ConnectResult, error) {
+func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, force bool, pre preWriteResult, cred *credentialHandle) (*ConnectResult, error) {
 	if err := guardJsoncCommentsBytes(cfgPath, pre.raw); err != nil {
 		return nil, err
 	}
@@ -899,15 +1074,23 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 		return nil, err
 	}
 
+	// Every refusal that does not depend on the credential has passed: mint it
+	// now (guard-checked), before the backup so a refused mint leaves no stray
+	// backup file. A later failure aborts it (see ConnectWithOptions).
+	secret, err := cred.secret()
+	if err != nil {
+		return nil, err
+	}
+
 	// Create backup before modifying
 	backupPath, err := backupFile(cfgPath)
 	if err != nil {
 		return nil, fmt.Errorf("backup failed: %w", err)
 	}
 
-	// Build the entry from the credential-aware params (no credential unless
-	// require_mcp_auth is on).
-	entry := buildServerEntry(client.ID, s.entryParams(false))
+	// Build the entry with the per-client credential (empty for a keyless
+	// entry). The admin API key is never a credential source.
+	entry := buildServerEntry(client.ID, s.entryParams(secret))
 	serversMap[serverName] = entry
 	setServersMap(client, data, serversMap)
 
@@ -934,6 +1117,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
+	cred.markWritten()
 
 	// Verify by re-reading
 	if err := s.verifyJSONEntry(client, cfgPath, serverName); err != nil {
@@ -1043,7 +1227,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 // pre is the SAME pre-write read ConnectWithPrecondition already resolved and
 // checked the precondition token against (see connectJSON's doc comment for
 // why this must not open the file again).
-func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, force bool, pre preWriteResult) (*ConnectResult, error) {
+func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, force bool, pre preWriteResult, cred *credentialHandle) (*ConnectResult, error) {
 	data, perm, err := parseOrCreateTOML(cfgPath, pre.raw, pre.perm, pre.readErr)
 	if err != nil {
 		return nil, err
@@ -1085,6 +1269,13 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 		return nil, err
 	}
 
+	// Mint the credential now, after every credential-independent refusal and
+	// before the backup (see connectJSON).
+	secret, err := cred.secret()
+	if err != nil {
+		return nil, err
+	}
+
 	// Backup
 	backupPath, err := backupFile(cfgPath)
 	if err != nil {
@@ -1093,7 +1284,7 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 
 	// Build Codex entry via the shared constructor so what connect writes is
 	// exactly what preview renders (Spec 078 FR-002).
-	entry := buildServerEntry(client.ID, s.entryParams(false))
+	entry := buildServerEntry(client.ID, s.entryParams(secret))
 	serversMap[serverName] = entry
 	setServersMap(client, data, serversMap)
 
@@ -1114,6 +1305,7 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, for
 	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
+	cred.markWritten()
 
 	return &ConnectResult{
 		Success:    true,
@@ -1369,6 +1561,10 @@ type entryLocation struct {
 	Name       string
 	Endpoint   string
 	PointsHere bool
+	// Entry is the parsed entry itself. It exists only so the on-demand
+	// credential classifier can read the carrier; it is never serialised or
+	// echoed (an entry can hold a secret).
+	Entry map[string]interface{}
 }
 
 // findEntryJSONBytes parses JSON config bytes and looks for an entry that points
@@ -1408,7 +1604,7 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		for _, field := range []string{"url", "serverUrl", "httpUrl"} {
 			if u, ok := entry[field].(string); ok {
 				if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
-					return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true}, true, true
+					return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 				}
 			}
 		}
@@ -1417,14 +1613,14 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		// mcpproxy endpoint lives in the command args. Detect by inspecting
 		// args so a bridge written under a custom server name is still found.
 		if entryPointsToBridge(entry, baseURL) {
-			return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true}, true, true
+			return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 		}
 
 		// Also match by server name. This arm is why "connected" has historically
 		// over-reported: the entry is called mcpproxy but may address a different
 		// instance entirely (audit F18). Record where it actually points.
 		if name == defaultServerName && nameOnly == nil {
-			nameOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry)}
+			nameOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), Entry: entry}
 		}
 	}
 
@@ -1618,11 +1814,11 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, pars
 		}
 		if u, ok := entry["url"].(string); ok {
 			if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
-				return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true}, true, true
+				return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 			}
 		}
 		if name == defaultServerName && nameOnly == nil {
-			nameOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry)}
+			nameOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), Entry: entry}
 		}
 	}
 

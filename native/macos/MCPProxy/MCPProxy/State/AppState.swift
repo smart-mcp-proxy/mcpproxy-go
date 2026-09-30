@@ -142,6 +142,23 @@ final class AppState: ObservableObject {
         defer { scopeFilter = nil }
         return scopeFilter
     }
+
+    /// The toolbar "+" action the next destination view should perform (Spec
+    /// 109-i FR-052). Same hand-off shape as `scopeFilter`: the toolbar sets it
+    /// BEFORE switching the sidebar, and the destination consumes it on appear
+    /// (a view created by the switch) or on change (one already showing). A
+    /// notification cannot carry it for the same reason it cannot carry a scope
+    /// filter: a view created by the click subscribes too late.
+    @Published var pendingAddAction: AddMenuItem?
+
+    /// Take the pending add action only if it is one of `kinds`, clearing it.
+    /// A view consumes just the kinds it owns, so ClientsView cannot swallow a
+    /// `.server` action meant for ServersView.
+    func consumePendingAddAction(for kinds: Set<AddMenuItem>) -> AddMenuItem? {
+        guard let action = pendingAddAction, kinds.contains(action) else { return nil }
+        pendingAddAction = nil
+        return action
+    }
     /// Server-level default active profile slug; empty means "all servers".
     @Published var activeProfile: String = ""
 

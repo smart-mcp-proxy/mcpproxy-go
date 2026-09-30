@@ -48,7 +48,7 @@
 | N8 empty tab is default | FR-051 | 109-a (interim), 109-d | T006, T057 |
 | H1 crowded header | FR-052–054 | 109-i | T136, T137 |
 | H2 profile switcher dead end | FR-057 (interim; removal = 108) | 109-a | T011 |
-| H3 mode/endpoints in header | FR-031, FR-052 | 109-h, 109-i | T127, T136 |
+| H3 mode/endpoints in header | FR-031, FR-052 | 109-h, 109-i | T127, T136 (`header-layout.spec.ts`) |
 | H4 version row over modals | FR-055 | 109-a | T007 |
 | S2 blind approval | FR-020–024, FR-026 | 109-f, 109-g | T073–T078, T086–T087 |
 | S4 card shows every control | FR-013, FR-014 | 109-e, 109-leftovers | T067–T069, T049 |

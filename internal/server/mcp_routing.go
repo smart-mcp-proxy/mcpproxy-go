@@ -1006,9 +1006,11 @@ func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 			mcp.Enum("javascript", "typescript"),
 		),
 		mcp.WithObject("input",
+			openObject(),
 			mcp.Description(codeExecutionInputDescription),
 		),
 		mcp.WithObject("options",
+			openObject(),
 			mcp.Description(codeExecutionOptionsDescription),
 		),
 	)

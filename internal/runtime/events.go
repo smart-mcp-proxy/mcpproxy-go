@@ -34,6 +34,11 @@ const (
 	// EventTypeClientPresenceChanged invalidates the derived client presence
 	// and attention inputs after an MCP initialise observation.
 	EventTypeClientPresenceChanged EventType = "clients.presence.changed"
+	// EventTypeClientBindingChanged is emitted when a client credential's
+	// profile binding is assigned, locked, unlocked or first minted (Spec 108
+	// FR-026). Payload: {client_id, token_name, profile, previous_profile,
+	// mode}. It discloses bindings, so it is administrator-only on SSE.
+	EventTypeClientBindingChanged EventType = "client.binding_changed"
 
 	// Activity logging events (RFC-003)
 	// EventTypeActivityToolCallStarted is emitted when a tool execution begins.

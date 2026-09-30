@@ -111,6 +111,24 @@ func resolveV3Base(ctx context.Context, idx *profileIndex) (name string, source 
 // snapshots. Legacy surfaces not yet migrated can still use
 // resolveActiveProfileFromIndex.
 func (p *MCPProxyServer) ResolveProfileV3(ctx context.Context, idx *profileIndex) ProfileResolution {
+	res := p.resolveProfileV3(ctx, idx)
+	p.recordSessionResolution(ctx, res)
+	return res
+}
+
+// recordSessionResolution stores the latest effective profile and source on
+// the calling session (FR-028, plan D23) — the one place a resolution is
+// recorded, so session rows and reassignment notifications can find it.
+func (p *MCPProxyServer) recordSessionResolution(ctx context.Context, res ProfileResolution) {
+	if p.sessionStore == nil {
+		return
+	}
+	if sid := sessionIDFromContext(ctx); sid != "" {
+		p.sessionStore.UpdateSessionProfile(sid, res.Name, res.Source)
+	}
+}
+
+func (p *MCPProxyServer) resolveProfileV3(ctx context.Context, idx *profileIndex) ProfileResolution {
 	if anonymousProfileCaller(ctx) && p.bindingGuardActive(idx) {
 		base := ""
 		if idx != nil && idx.cfg != nil {

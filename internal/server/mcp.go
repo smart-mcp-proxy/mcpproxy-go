@@ -519,6 +519,15 @@ func NewMCPProxyServer(
 		// Store/update session information with capabilities
 		sessionStore.SetSession(sessionID, clientName, clientVersion, hasRoots, hasSampling, experimental)
 
+		// Spec 108 FR-028 (plan D23): record which credential authenticated
+		// this session and which server instance serves it, so a binding
+		// change can find the session and notify it on the right instance.
+		// The credential never changes mid-connection, so this is once.
+		if ac := auth.AuthContextFromContext(ctx); ac != nil && ac.AgentName != "" {
+			sessionStore.SetSessionIdentity(sessionID, ac.AgentName, ac.ClientID)
+		}
+		sessionStore.SetSessionServer(sessionID, mcpserver.ServerFromContext(ctx))
+
 		// Spec 044 (T038): feed the activation funnel. Mark first-ever client
 		// + record the sanitized clientInfo.name in the capped seen-ever list.
 		// Plumbed via runtime → telemetry service → ActivationStore so the
@@ -1128,6 +1137,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 			mcp.Description(fmt.Sprintf("Tool name in format 'server:tool' (e.g., '%s'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail.", nameExample)),
 		),
 		mcp.WithObject("args",
+			openObject(),
 			mcp.Description("Arguments to pass to the upstream tool as a native JSON object. Build arguments from the tool's compact signature ('sig') in retrieve_tools results — '*' marks required parameters, '~' marks a lossy signature (call describe_tool for the full JSON Schema before calling). Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects."),
 		),
 		mcp.WithString("args_json",

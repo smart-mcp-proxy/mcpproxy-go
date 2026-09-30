@@ -55,6 +55,11 @@ const (
 	// the prompt name, Arguments are the prompt arguments (scanned for sensitive
 	// data like tool args), RequestID is the correlation handle.
 	ActivityTypePromptGet ActivityType = "prompt_get"
+	// ActivityTypeProfileChange represents a Profiles v3 change: a client
+	// binding, credential rotation or forget (Spec 108, FR-030). Metadata:
+	// actor_kind, actor_name, surface, change, profile, previous_profile,
+	// client_id, token_name, diff.
+	ActivityTypeProfileChange ActivityType = "profile_change"
 )
 
 // ValidActivityTypes is the list of all valid activity types for filtering (Spec 024)
@@ -72,6 +77,7 @@ var ValidActivityTypes = []string{
 	string(ActivityTypeCredentialBroker),
 	string(ActivityTypePreflight),
 	string(ActivityTypePromptGet),
+	string(ActivityTypeProfileChange),
 }
 
 // Activity status vocabulary. Activity status is a CLOSED vocabulary: every

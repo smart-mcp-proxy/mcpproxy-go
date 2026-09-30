@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	mcpserver "github.com/mark3labs/mcp-go/server"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"go.uber.org/zap"
 )
@@ -75,6 +77,12 @@ type SessionInfo struct {
 	// deliberately not stored here — see UpdateSessionProfile.
 	Profile       string
 	ProfileSource string
+
+	// server is the MCP server instance that serves this session (one of the
+	// routing-mode servers), stamped from mcp-go's ServerFromContext at
+	// initialize so a binding change can send tools/list_changed on the right
+	// instance (Spec 108 FR-026, plan D18). Never persisted or serialised.
+	server *mcpserver.MCPServer
 }
 
 // SessionStore manages MCP session information
@@ -462,6 +470,43 @@ func (s *SessionStore) SetSessionIdentity(sessionID, tokenName, clientID string)
 		info.TokenName = tokenName
 		info.ClientID = clientID
 	}
+}
+
+// SetSessionServer records the MCP server instance serving a session (the
+// session -> server-instance map, data-model.md §6). Called once at initialize.
+func (s *SessionStore) SetSessionServer(sessionID string, srv *mcpserver.MCPServer) {
+	if sessionID == "" || srv == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.server = srv
+	}
+}
+
+// sessionTarget is one live session of a token, with the server instance that
+// serves it (nil when it was not recorded).
+type sessionTarget struct {
+	ID     string
+	Server *mcpserver.MCPServer
+}
+
+// NotifyTargets returns every live session authenticated by tokenName with its
+// serving instance — the FR-026 fan-out seam behind SessionsForToken.
+func (s *SessionStore) NotifyTargets(tokenName string) []sessionTarget {
+	if tokenName == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []sessionTarget
+	for id, info := range s.sessions {
+		if info.TokenName == tokenName {
+			out = append(out, sessionTarget{ID: id, Server: info.server})
+		}
+	}
+	return out
 }
 
 // UpdateSessionProfile records the LATEST effective profile resolution for a
