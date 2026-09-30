@@ -1860,15 +1860,29 @@ func getSocketPath() string {
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
+// @Param profile query string false "Restrict to the profile's effective servers; tool_count becomes the number of that server's tools visible under the profile (Spec 108 FR-032)"
 // @Success 200 {object} contracts.GetServersResponse "Server list with statistics"
-// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (profile/client/token, Spec 109-k FR-080a)"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (client/token), or '-' on a server filter"
+// @Failure 404 {object} contracts.ErrorResponse "Unknown or unreachable profile"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers [get]
 func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
-	// Spec 109-k FR-080a: GET /servers parses no query string today (`status`,
-	// `q` are client-side) — profile/client/token gated like everywhere else.
-	if !rejectUnsupportedScopeFilters(w, r) {
+	// Spec 108 FR-032: GET /servers honours profile (rows limited to the
+	// profile's effective servers, tool_count = the tools visible under it);
+	// client and token are not server filters, and `status`/`q` stay
+	// client-side.
+	if !rejectUnsupportedScopeFilters(w, r, "profile") {
 		return
+	}
+	viewAs, ok := s.parseViewAs(w, r)
+	if !ok {
+		return
+	}
+	var viewAsEval ViewAsEvaluator
+	if viewAs != nil {
+		if viewAsEval, ok = s.resolveViewAs(w, r, viewAs); !ok {
+			return
+		}
 	}
 	// Try to use management service if available
 	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
@@ -1918,6 +1932,10 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		// stays an exact count oracle for what the filter just hid.
 		serverValues = visibleServers(r.Context(), serverValues)
 		statsValue = recomputeServerStats(r.Context(), serverValues, statsValue)
+		if viewAsEval != nil {
+			serverValues = s.limitServersToProfile(r.Context(), serverValues, viewAs, viewAsEval)
+			statsValue = statsForServers(serverValues)
+		}
 
 		response := contracts.GetServersResponse{
 			Servers: serverValues,
@@ -1952,6 +1970,10 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	// correctness: ConvertUpstreamStatsToServerStats derives every counter by
 	// walking stats["servers"], so the counts narrow with it.
 	stats := contracts.ConvertUpstreamStatsToServerStats(filterUpstreamStatsServers(r.Context(), s.controller.GetUpstreamStats()))
+	if viewAsEval != nil {
+		servers = s.limitServersToProfile(r.Context(), servers, viewAs, viewAsEval)
+		stats = statsForServers(servers)
+	}
 
 	response := contracts.GetServersResponse{
 		Servers: servers,
@@ -3911,16 +3933,30 @@ const globalToolsUsageWindow = 30 * 24 * time.Hour
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
+// @Param client query string false "View-as (administrator only): the tools this client would see, each with its access verdict {visible, callable, reason} and profile_tier (Spec 108 FR-032)"
+// @Param profile query string false "View-as: the tools this profile would expose. An administrator gets every row with a verdict; any other caller gets only the visible rows plus counts {visible, hidden} (Spec 108 FR-032)"
 // @Success 200 {object} contracts.GlobalToolsResponse "All tools across all servers"
-// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (profile/client/token, Spec 109-k FR-080a)"
+// @Failure 400 {object} contracts.ErrorResponse "Unsupported scope filter (token), both client and profile, or '-' on a tools filter"
+// @Failure 403 {object} contracts.ErrorResponse "client= requires administrator credentials"
+// @Failure 404 {object} contracts.ErrorResponse "Unknown or unreachable client / profile"
 // @Failure 500 {object} contracts.ErrorResponse "Could not enumerate servers"
 // @Router /api/v1/tools [get]
 func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
-	// Spec 109-k FR-080a: GET /tools parses no query string today (`server`,
-	// `tool`, `status` etc. are client-side per url-filter-contract.md) —
-	// profile/client/token are gated exactly like everywhere else.
-	if !rejectUnsupportedScopeFilters(w, r) {
+	// Spec 108 FR-032: GET /tools honours profile and client (view-as); the
+	// other filters (`server`, `tool`, `status` ...) stay client-side per
+	// url-filter-contract.md, and token is not a tools filter.
+	if !rejectUnsupportedScopeFilters(w, r, "profile", "client") {
 		return
+	}
+	viewAs, ok := s.parseViewAs(w, r)
+	if !ok {
+		return
+	}
+	var viewAsEval ViewAsEvaluator
+	if viewAs != nil {
+		if viewAsEval, ok = s.resolveViewAs(w, r, viewAs); !ok {
+			return
+		}
 	}
 	allServers, err := s.controller.GetAllServers()
 	if err != nil {
@@ -4007,6 +4043,15 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp.Tools = append(resp.Tools, typed...)
+	}
+
+	// Spec 108 FR-032: view-as stamps each surviving row with the subject's
+	// verdict AFTER the caller's own scope, its own profile and the
+	// quarantine rule have removed rows (so a verdict never re-adds a row the
+	// caller may not see). A non-administrator keeps only the visible rows and
+	// gets counts; the stats below are recomputed over what is returned.
+	if viewAsEval != nil {
+		resp.Tools, resp.Counts = applyViewAs(viewAsEval, viewAs, resp.Tools)
 	}
 
 	for i := range resp.Tools {

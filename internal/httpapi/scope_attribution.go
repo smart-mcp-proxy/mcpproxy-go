@@ -20,6 +20,8 @@ const (
 	errTokenAgentMismatch      = "token and agent must name the same token (agent is an alias of token)"
 	errClientAndProfile        = "use either client or profile, not both"
 	errUnattributedOnlyOnGrids = "'-' (unattributed) is only valid on activity and session filters"
+	errProfileNotFound         = "profile not found"
+	errClientNotFound          = "client not found"
 )
 
 // errTokenAgentConflict is returned by scopeTokenParam when ?token= and

@@ -358,6 +358,13 @@ type Tool struct {
 	// a consuming surface to compute.
 	Tier           Tier   `json:"tier,omitempty"`
 	ApprovalStatus string `json:"approval_status,omitempty"`
+	// ProfileTier and Access are present only in a view-as listing (a tools
+	// listing with ?client= or ?profile=, Spec 108 FR-032). ProfileTier is the
+	// tool's tier under the viewed subject's profile (Tier above stays the
+	// intrinsic tier); Access is the subject's verdict for the tool. Absent
+	// otherwise, so an ordinary listing is byte-identical to before.
+	ProfileTier Tier        `json:"profile_tier,omitempty"`
+	Access      *ToolAccess `json:"access,omitempty"`
 	// Disabled mirrors ToolApprovalRecord.Disabled so per-tool enable state is
 	// available without a second round-trip to the approvals endpoint. Absent
 	// in the JSON when false (default) to keep responses compact.
@@ -649,6 +656,29 @@ type GlobalToolsResponse struct {
 	Stats         GlobalToolsStats `json:"stats"`
 	Partial       bool             `json:"partial,omitempty"`
 	FailedServers []string         `json:"failed_servers,omitempty"`
+	// Counts is present only for a NON-administrator profile view-as (Spec 108
+	// FR-032): the response then lists only the visible rows, and this is the
+	// only trace of the rest, with no per-server, per-tier or per-reason
+	// breakdown.
+	Counts *ViewAsCounts `json:"counts,omitempty"`
+}
+
+// ToolAccess is a view-as verdict for one tool (Spec 108 FR-032). Reason is
+// empty when the tool is callable; otherwise it is one of profile.AccessReasons
+// (server_not_in_profile, denied_by_rule, unannotated_hidden, above_tier_cap,
+// credential, profile, server_in_scope, token_permission, global_gate,
+// server_state, tool_approval). Visible means the subject's discovery would
+// list the tool; Callable means a real call would succeed.
+type ToolAccess struct {
+	Visible  bool   `json:"visible"`
+	Callable bool   `json:"callable"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// ViewAsCounts is the row accounting of a non-administrator profile view-as.
+type ViewAsCounts struct {
+	Visible int `json:"visible"`
+	Hidden  int `json:"hidden"`
 }
 
 // SearchToolsResponse is the response for GET /api/v1/index/search
