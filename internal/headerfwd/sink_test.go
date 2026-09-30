@@ -194,3 +194,21 @@ func TestScrubErrorAsByteArrayAndOversize(t *testing.T) {
 		t.Fatal("oversized value must fail closed")
 	}
 }
+
+type bytesErr struct{ raw []byte }
+
+func (e *bytesErr) Error() string { return "rejected" }
+
+func TestScrubErrorAsByteSlices(t *testing.T) {
+	s := snapWith(t, "X-Tenant-Id", "tenant-secret-1")
+	var b *bytesErr
+	if errors.As(ScrubError(fmt.Errorf("tenant-secret-1: %w", &bytesErr{raw: []byte("x tenant-secret-1")}), s, nil), &b) {
+		t.Fatal("byte slice holding the value must be refused")
+	}
+	if errors.As(ScrubError(fmt.Errorf("tenant-secret-1: %w", &bytesErr{raw: make([]byte, 2<<20)}), s, nil), &b) {
+		t.Fatal("oversized byte slice must fail closed")
+	}
+	if !errors.As(ScrubError(fmt.Errorf("tenant-secret-1: %w", &bytesErr{raw: []byte("clean")}), s, nil), &b) {
+		t.Fatal("a clean byte slice must stay reachable")
+	}
+}

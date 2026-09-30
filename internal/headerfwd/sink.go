@@ -190,7 +190,7 @@ func ScrubError(err error, s Snapshot, allow []string) error {
 // value. It fails closed: a value too deep or too large to inspect fully
 // counts as carrying a forwarded value.
 func fieldsCarry(v reflect.Value, dirty func(string) bool, depth int) bool {
-	const maxDepth, maxElems = 8, 4096
+	const maxDepth, maxElems, maxBytes = 8, 4096, 1 << 20
 	if !v.IsValid() {
 		return false
 	}
@@ -210,6 +210,12 @@ func fieldsCarry(v reflect.Value, dirty func(string) bool, depth int) bool {
 		}
 	case reflect.Slice, reflect.Array:
 		if v.Type().Elem().Kind() == reflect.Uint8 {
+			if v.Len() > maxBytes {
+				return true
+			}
+			if v.Kind() == reflect.Slice {
+				return dirty(string(v.Bytes()))
+			}
 			b := make([]byte, v.Len())
 			for i := range b {
 				b[i] = byte(v.Index(i).Uint())
