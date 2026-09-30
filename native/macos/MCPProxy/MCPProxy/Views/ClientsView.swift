@@ -16,6 +16,9 @@ struct ClientsView: View {
     @State private var showConnect = false
     @State private var defaultMCPEndpoint = "http://127.0.0.1:8080/mcp"
     @State private var snippetCopied = false
+    /// Set by the toolbar "+ -> Token" hand-off; TokensView opens its create
+    /// sheet and resets it.
+    @State private var tokenCreateRequested = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,11 +35,15 @@ struct ClientsView: View {
             } else if tab == 1 {
                 endpointAndModePane
             } else {
-                TokensView(appState: appState)
+                TokensView(appState: appState, requestCreate: $tokenCreateRequested)
             }
         }
         .accessibilityIdentifier("clients-view")
         .task { await load() }
+        // Spec 109-i FR-052: toolbar "+ -> Client / Token" hand-off (see
+        // AppState.pendingAddAction). Only Client and Token are this view's.
+        .onAppear { consumePendingAddAction() }
+        .onChange(of: appState.pendingAddAction) { _ in consumePendingAddAction() }
         .sheet(isPresented: $showConnect, onDismiss: {
             Task { await load() }
         }) {
@@ -45,6 +52,19 @@ struct ClientsView: View {
                 await MainActor.run { state.apiClient }
             }))
                 .frame(minWidth: 780, minHeight: 560)
+        }
+    }
+
+    private func consumePendingAddAction() {
+        switch appState.consumePendingAddAction(for: [.client, .token]) {
+        case .client:
+            tab = 0
+            showConnect = true
+        case .token:
+            tab = 2
+            tokenCreateRequested = true
+        default:
+            break
         }
     }
 

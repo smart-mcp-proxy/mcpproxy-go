@@ -24,6 +24,7 @@ import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
 /** Every page whose filters flow through the contract (url-filter-contract.md). */
 export type PageId =
+  | 'home'
   | 'activity'
   | 'usage'
   | 'tools'
@@ -318,6 +319,9 @@ registerDefaultScopeParams()
 // ---------------------------------------------------------------------------
 
 const pageRouteNames: Partial<Record<PageId, string>> = {
+  // 'home' registers no params of its own; UsageSummaryStrip only uses it for
+  // linkTo, so sticky scope carries from Home into Activity (Spec 109 FR-058).
+  home: 'home',
   activity: 'activity',
   usage: 'usage',
   tools: 'tools',
@@ -325,8 +329,7 @@ const pageRouteNames: Partial<Record<PageId, string>> = {
   review: 'review',
   sessions: 'sessions',
   tokens: 'tokens',
-  // 'clients' has no route until Spec 109-h ships it; linkTo falls back to
-  // a plain path so a caller that reaches for it early does not crash.
+  clients: 'clients',
 }
 
 // ---------------------------------------------------------------------------

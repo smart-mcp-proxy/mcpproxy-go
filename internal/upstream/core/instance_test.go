@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -240,11 +241,17 @@ func runInstanceIDHelperProcessWithLegacyPath(dataDir, legacyPath string) (strin
 		helperProcessDataDirEnvVar+"="+dataDir,
 		helperProcessLegacyPathEnvVar+"="+legacyPath,
 	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("helper process failed: %w\noutput: %s", err, out)
+	// Capture stdout and stderr separately: the id is printed on stdout, while
+	// a coverage-instrumented helper can emit "coverage meta-data emit failed"
+	// on stderr when two helpers race to rename the shared covmeta file on
+	// Windows. That noise must not be mistaken for part of the id.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("helper process failed: %w\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
 	}
-	return string(out), nil
+	return stdout.String(), nil
 }
 
 func TestGetInstanceIDReturnsValidUUIDPersistedUnderDataDir(t *testing.T) {

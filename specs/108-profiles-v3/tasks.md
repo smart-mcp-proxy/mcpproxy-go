@@ -230,6 +230,7 @@ description: "Task list for Spec 108 — Profiles v3"
 - [ ] T099 [US3] `components/AccessExplainer.vue`
 - [ ] T100 [US4] `views/AgentTokens.vue` dialog changes
 - [ ] T101 [US4] Remove `components/ProfileSwitcher.vue` from `TopHeader.vue`; add `components/ViewingFilter.vue` in Spec 109-i's Viewing slot, reading and writing Spec 109-k's `useScopeQuery()` (no transitional route-query binding)
+  - Contract with Spec 109-i (shipped): register the route with the path `/profiles` (the sidebar Profiles entry, the header "+ Add → Profile" item and the palette's "Create profile" action appear once a route with that path exists); honour `/profiles?create=1` by opening the editor and stripping `create`; pass the chip through `<template #viewing>` from `App.vue` (the slot's fallback is the interim `ProfileSwitcher`, which this task deletes together with the fallback); keep the chip collapsible to an icon below 1100 px so the header row never overflows. Spec 108-k adds `SidebarItem.profiles` and `AddMenuItem.profile` on macOS and extends `NavigationStructureTests`.
 - [ ] T102 [P] [US4] SSE refresh on `profiles.changed`/`client.binding_changed` in `stores/profiles.ts` and `stores/clientBindings.ts`; no `SidebarNav.vue` edit (Spec 109-i's sidebar shows Profiles in the Connect group once the `/profiles` route exists)
 - [ ] T103 Verification: vitest, `npm run build`, `make build`, recipe 108-i in the in-app browser (screenshots attached to PR, not committed); a11y sweep unchanged green
 

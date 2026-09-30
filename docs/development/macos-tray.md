@@ -45,6 +45,17 @@ The `mcpproxy-ui-test` MCP server provides 7 tools for automated UI verification
 4. Use `click_menu_item` + `list_menu_items` to verify tray menu behavior
 5. Use `screenshot_status_bar_menu` for tray menu visual verification
 
+## Verification checklist (Spec 109 navigation)
+
+After a change to `MainWindow.swift`, `ClientsView.swift`, `TokensView.swift` or the tray menu, check with `screenshot_window` and `list_menu_items`:
+
+1. **Sidebar.** Sections read Home; Connect (Clients, Servers, Tools); Protect (Review Queue, Secrets); Monitor (Activity). Home shows the needs-attention count and Review Queue the review count when they are above zero.
+2. **Toolbar "+".** The `toolbar-add-menu` button offers Server, Client and Token. Server opens the Add Server sheet on Catalog, Client opens the Connect sheet, Token opens Clients, Agent Tokens with the create sheet. Try each from a section other than its own, and once from a window that was just opened.
+3. **Clients.** Three tabs: Clients, Endpoint & Mode, Agent Tokens.
+4. **Review Queue** opens its own view.
+5. **Tray items** via `list_menu_items`: "Needs Attention (N)", "Review Queue… (N)", "Connect Client…"; "Open Activity…" lands on Activity.
+6. **Shortcuts.** ⌘1 to ⌘7 follow the visual order (Home, Clients, Servers, Tools, Review Queue, Secrets, Activity). The accessibility ids are `sidebar-<Name>` (for example `sidebar-Activity`), `sidebar-badge-<Name>`, `toolbar-add-menu` and `toolbar-add-<Server|Client|Token>`.
+
 **MCP config** (in Claude Code settings or `~/.claude/settings.json`):
 ```json
 {
