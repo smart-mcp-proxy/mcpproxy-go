@@ -42,49 +42,6 @@
         </svg>
       </button>
 
-      <!-- Version + Check for updates (expanded sidebar only). Single-line layout:
-           version on the left, action on the right. In collapsed mode the
-           version appears in the logo tooltip instead. -->
-      <div
-        v-if="!collapsed && systemStore.version"
-        class="px-3 py-2 border-b border-base-300 flex items-center gap-2"
-        data-testid="sidebar-version-block"
-      >
-        <span
-          class="font-mono text-xs text-base-content/60 shrink-0"
-          data-testid="sidebar-version"
-        >
-          v{{ displayVersion }}
-        </span>
-        <span
-          v-if="systemStore.updateAvailable && !systemStore.updateNudgesSuppressed"
-          class="badge badge-xs badge-primary shrink-0"
-          :title="latestVersionTitle"
-        >
-          update
-        </span>
-        <button
-          type="button"
-          @click="handleCheckForUpdates"
-          :disabled="systemStore.checkingForUpdates"
-          class="btn btn-ghost btn-xs ml-auto gap-1 px-1.5 font-normal text-[11px] text-base-content/70 hover:text-base-content"
-          data-testid="sidebar-check-updates"
-          :title="updateStatusTitle"
-          :aria-label="updateButtonLabel"
-        >
-          <svg
-            v-if="!systemStore.checkingForUpdates"
-            class="w-3.5 h-3.5"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0A8.003 8.003 0 014.582 15H9" />
-          </svg>
-          <span v-else class="loading loading-spinner loading-xs"></span>
-          <span class="truncate">{{ updateCompactLabel }}</span>
-        </button>
-      </div>
 
       <!-- Navigation Menu -->
       <nav
@@ -131,13 +88,15 @@
           </template>
         </template>
 
-        <!-- Personal Edition: Grouped Menu -->
+        <!-- Personal Edition: Grouped Menu (Spec 109 FR-050). Names, order and
+             targets come from navigation/navModel.ts; the palette and the
+             "+ Add" menu read the same model. -->
         <template v-else>
-          <!-- Spec 046 v2: top-pinned Setup entry (above Dashboard).
-               Shows badge with count of incomplete tabs while > 0; collapses
-               to a quiet checkmark when all three tabs (clients/servers/verify)
-               are satisfied. Click reopens the wizard at the first
-               incomplete tab. -->
+          <!-- Spec 046 v2: top-pinned Setup entry (above Home).
+               Always present: pulses with a badge while tabs are incomplete
+               and shows a quiet checkmark once clients/servers/verify are all
+               satisfied, so the wizard stays re-enterable. Click reopens the
+               wizard at the first incomplete tab. -->
           <ul class="menu menu-sm w-full gap-0.5 p-0 mb-1">
             <li>
               <a
@@ -180,32 +139,27 @@
             </li>
           </ul>
 
-          <!-- Home (solo top row, no section label). Spec 109 FR-003/FR-051:
-               renamed from "Dashboard"; the badge is the same FR-001
+          <!-- Home (solo top row, no group label). The badge is the FR-001
                needs-attention count every other surface reads. -->
           <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li>
-              <router-link to="/clients" :class="{ 'active': isActiveRoute('/clients') }" class="rounded-lg font-medium" :title="collapsed ? 'Clients' : ''" :aria-label="collapsed ? 'Clients' : undefined">
-                <IconTokens class="w-5 h-5 shrink-0" /><span v-show="!collapsed">Clients</span>
-              </router-link>
-            </li>
-            <li>
               <router-link
-                to="/"
-                :class="{ 'active': isActiveRoute('/') }"
+                :to="SIDEBAR_HOME.path"
+                :class="{ 'active': isActiveRoute(SIDEBAR_HOME.path) }"
                 class="rounded-lg font-medium"
-                :title="collapsed ? 'Home' : ''"
-                :aria-label="collapsed ? 'Home' : undefined"
+                :title="collapsed ? SIDEBAR_HOME.label : ''"
+                :aria-label="collapsed ? SIDEBAR_HOME.label : undefined"
+                :data-test="`sidebar-item-${SIDEBAR_HOME.id}`"
               >
                 <span class="relative inline-flex">
-                  <IconDashboard class="w-5 h-5 shrink-0" />
+                  <component :is="icons[SIDEBAR_HOME.icon]" class="w-5 h-5 shrink-0" />
                   <span
                     v-if="attentionStore.count > 0 && collapsed"
                     class="badge badge-warning badge-xs absolute -top-1 -right-1"
                     data-test="sidebar-home-badge-collapsed"
                   ></span>
                 </span>
-                <span v-show="!collapsed" class="flex-1">Home</span>
+                <span v-show="!collapsed" class="flex-1">{{ SIDEBAR_HOME.label }}</span>
                 <span
                   v-if="attentionStore.count > 0 && !collapsed"
                   class="badge badge-warning badge-sm"
@@ -215,176 +169,38 @@
             </li>
           </ul>
 
-          <div
-            v-if="!collapsed"
-            class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
-          >
-            Protect
-          </div>
-          <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
+          <template v-for="group in visibleGroups" :key="group.id">
+            <div
+              v-if="!collapsed"
+              class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
+              :data-test="`sidebar-group-${group.id}`"
+            >
+              {{ group.label }}
+            </div>
+            <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300" :data-test="`sidebar-group-${group.id}`"></div>
 
-          <ul class="menu menu-sm w-full gap-0.5 p-0">
-            <li>
-              <router-link to="/review" :class="{ 'active': isActiveRoute('/review') }" class="rounded-lg font-medium" :title="collapsed ? 'Review queue' : ''" :aria-label="collapsed ? 'Review queue' : undefined" data-test="sidebar-review-queue">
-                <IconShield class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed" class="flex-1">Review queue</span>
-                <span v-if="!collapsed && reviewCount" class="badge badge-warning badge-sm">{{ reviewCount }}</span>
-              </router-link>
-            </li>
-          </ul>
-
-          <!-- Section: Workspace -->
-          <div
-            v-if="!collapsed"
-            class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
-          >
-            Workspace
-          </div>
-          <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
-
-          <ul class="menu menu-sm w-full gap-0.5 p-0">
-            <li>
-              <router-link
-                to="/servers"
-                :class="{ 'active': isActiveRoute('/servers') }"
-                class="rounded-lg font-medium"
-                :title="collapsed ? 'Servers' : ''"
-                :aria-label="collapsed ? 'Servers' : undefined"
-              >
-                <IconServers class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed">Servers</span>
-                <span
-                  v-if="!collapsed && serverCount > 0"
-                  class="badge badge-sm badge-ghost ml-auto tabular-nums"
-                >{{ serverCount }}</span>
-              </router-link>
-            </li>
-            <li>
-              <router-link
-                to="/tools"
-                :class="{ 'active': isActiveRoute('/tools') }"
-                class="rounded-lg font-medium"
-                :title="collapsed ? 'Tools' : ''"
-                :aria-label="collapsed ? 'Tools' : undefined"
-              >
-                <IconTools class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed">Tools</span>
-                <span
-                  v-if="!collapsed && toolCount > 0"
-                  class="badge badge-sm badge-ghost ml-auto tabular-nums"
-                >{{ toolCount }}</span>
-              </router-link>
-            </li>
-            <li>
-              <router-link
-                to="/secrets"
-                :class="{ 'active': isActiveRoute('/secrets') }"
-                class="rounded-lg font-medium"
-                :title="collapsed ? 'Secrets' : ''"
-                :aria-label="collapsed ? 'Secrets' : undefined"
-              >
-                <IconSecrets class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed">Secrets</span>
-                <span
-                  v-if="!collapsed && secretCount > 0"
-                  class="badge badge-sm badge-ghost ml-auto tabular-nums"
-                >{{ secretCount }}</span>
-              </router-link>
-            </li>
-            <!-- Sub-item: Agent Tokens nested under Secrets.
-                 In expanded mode: indented with a left bracket.
-                 In collapsed mode: shown as a normal icon row. -->
-            <li>
-              <router-link
-                to="/tokens"
-                :class="[
-                  { 'active': isActiveRoute('/tokens') },
-                  collapsed ? 'rounded-lg' : 'rounded-lg !pl-7 text-[13px] text-base-content/75',
-                ]"
-                :title="collapsed ? 'Agent Tokens' : ''"
-                :aria-label="collapsed ? 'Agent Tokens' : undefined"
-              >
-                <IconTokens class="w-4 h-4 shrink-0" :class="collapsed ? 'w-5 h-5' : ''" />
-                <span v-show="!collapsed">Agent Tokens</span>
-              </router-link>
-            </li>
-          </ul>
-
-          <!-- Section: Observability
-               Workspace is what you CONFIGURE (servers, tools, secrets);
-               these are what you OBSERVE. Keeping them apart stops the two
-               kinds of page reading as one undifferentiated list. -->
-          <div
-            v-if="!collapsed"
-            class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
-          >
-            Observability
-          </div>
-          <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
-
-          <ul class="menu menu-sm w-full gap-0.5 p-0">
-            <li>
-              <router-link
-                to="/activity"
-                :class="{ 'active': isActiveRoute('/activity') }"
-                class="rounded-lg font-medium"
-                :title="collapsed ? 'Activity Log' : ''"
-                :aria-label="collapsed ? 'Activity Log' : undefined"
-              >
-                <IconActivity class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed">Activity Log</span>
-              </router-link>
-            </li>
-            <li>
-              <router-link
-                to="/sessions"
-                :class="{ 'active': isActiveRoute('/sessions') }"
-                class="rounded-lg font-medium"
-                :title="collapsed ? 'Sessions' : ''"
-                :aria-label="collapsed ? 'Sessions' : undefined"
-                data-test="sidebar-sessions"
-              >
-                <IconSessions class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed">Sessions</span>
-              </router-link>
-            </li>
-          </ul>
-
-          <!-- Section: System -->
-          <div
-            v-if="!collapsed"
-            class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
-          >
-            System
-          </div>
-          <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
-
-          <ul class="menu menu-sm w-full gap-0.5 p-0">
-            <li>
-              <router-link
-                to="/add-server"
-                :class="{ 'active': isActiveRoute('/add-server') || isActiveRoute('/repositories') }"
-                class="rounded-lg text-base-content/70"
-                :title="collapsed ? 'Add Server' : ''"
-                :aria-label="collapsed ? 'Add Server' : undefined"
-              >
-                <IconRepo class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed" class="text-[13px]">Add Server</span>
-              </router-link>
-            </li>
-            <li>
-              <router-link
-                to="/settings"
-                :class="{ 'active': isActiveRoute('/settings') }"
-                class="rounded-lg text-base-content/70"
-                :title="collapsed ? 'Settings' : ''"
-                :aria-label="collapsed ? 'Settings' : undefined"
-              >
-                <IconSettings class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed" class="text-[13px]">Settings</span>
-              </router-link>
-            </li>
-          </ul>
+            <ul class="menu menu-sm w-full gap-0.5 p-0">
+              <li v-for="item in group.items" :key="item.id">
+                <router-link
+                  :to="item.path"
+                  :class="{ 'active': isActiveRoute(item.path) }"
+                  class="rounded-lg font-medium"
+                  :title="collapsed ? item.label : ''"
+                  :aria-label="collapsed ? item.label : undefined"
+                  :data-test="`sidebar-item-${item.id}`"
+                >
+                  <component :is="icons[item.icon]" class="w-5 h-5 shrink-0" />
+                  <span v-show="!collapsed" class="flex-1">{{ item.label }}</span>
+                  <span
+                    v-if="!collapsed && badgeValue(item) > 0"
+                    class="badge badge-sm tabular-nums"
+                    :class="item.badge === 'review' ? 'badge-warning' : 'badge-ghost'"
+                    :data-test="`sidebar-${item.id}-badge`"
+                  >{{ badgeValue(item) }}</span>
+                </router-link>
+              </li>
+            </ul>
+          </template>
         </template>
       </nav>
 
@@ -410,33 +226,61 @@
         </div>
       </div>
 
-      <!-- Footer: theme + feedback (version is shown under the logo at the top) -->
-      <div class="border-t border-base-300 py-2" :class="collapsed ? 'px-1' : 'px-3'">
-        <!-- Action row: Theme + Feedback -->
+      <!-- Footer: Settings · Docs · Feedback · Theme, then the version row
+           (Spec 109 FR-050). The server edition keeps only Theme here — its
+           Settings lives in the admin menu and it has no Feedback page. -->
+      <div class="border-t border-base-300 py-2" :class="collapsed ? 'px-1' : 'px-2'" data-test="sidebar-footer">
         <div
-          class="flex items-stretch gap-1"
-          :class="collapsed ? 'flex-col' : ''"
+          class="flex gap-0.5"
+          :class="collapsed ? 'flex-col items-stretch' : 'flex-wrap items-center'"
         >
-          <!-- Theme dropdown -->
-          <!-- Sidebar sits at the left edge, so the theme menu must open rightward
+          <template v-if="!authStore.isTeamsEdition">
+            <template v-for="item in SIDEBAR_FOOTER" :key="item.id">
+              <a
+                v-if="item.external"
+                :href="item.path"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="btn btn-ghost btn-sm font-normal gap-1.5 px-2"
+                :class="collapsed ? 'btn-square w-full' : ''"
+                :title="collapsed ? item.label : ''"
+                :aria-label="collapsed ? item.label : undefined"
+                :data-test="`sidebar-item-${item.id}`"
+              >
+                <component :is="icons[item.icon]" class="w-4 h-4 shrink-0" />
+                <span v-show="!collapsed" class="text-xs">{{ item.label }}</span>
+              </a>
+              <router-link
+                v-else
+                :to="item.path"
+                class="btn btn-ghost btn-sm font-normal gap-1.5 px-2"
+                :class="[{ 'btn-active': isActiveRoute(item.path) }, collapsed ? 'btn-square w-full' : '']"
+                :title="collapsed ? item.label : ''"
+                :aria-label="collapsed ? item.label : undefined"
+                :data-test="`sidebar-item-${item.id}`"
+              >
+                <component :is="icons[item.icon]" class="w-4 h-4 shrink-0" />
+                <span v-show="!collapsed" class="text-xs">{{ item.label }}</span>
+              </router-link>
+            </template>
+          </template>
+
+          <!-- Theme dropdown.
+               Sidebar sits at the left edge, so the theme menu must open rightward
                (start-aligned). dropdown-end would anchor the menu's right edge to the
                button and push a ~288px menu off the left of the viewport. -->
-          <div
-            class="dropdown dropdown-top"
-            :class="collapsed ? '' : 'flex-1'"
-          >
+          <div class="dropdown dropdown-top" :class="collapsed ? 'w-full' : ''">
             <div
               tabindex="0"
               role="button"
-              class="btn btn-ghost btn-sm font-normal"
-              :class="collapsed ? 'btn-square w-full' : 'w-full justify-start gap-2 px-2'"
-              :title="collapsed ? 'Theme' : ''"
-              :aria-label="collapsed ? 'Theme' : undefined"
+              class="btn btn-ghost btn-sm font-normal gap-1.5 px-2"
+              :class="collapsed ? 'btn-square w-full' : ''"
+              :title="collapsed ? THEME_LABEL : ''"
+              :aria-label="collapsed ? THEME_LABEL : undefined"
+              data-test="sidebar-item-theme"
             >
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-              </svg>
-              <span v-show="!collapsed">Theme</span>
+              <component :is="icons.theme" class="w-4 h-4 shrink-0" />
+              <span v-show="!collapsed" class="text-xs">{{ THEME_LABEL }}</span>
             </div>
             <ul tabindex="0" class="dropdown-content z-[1] menu flex-nowrap p-2 shadow-2xl bg-base-300 rounded-box w-72 max-h-96 overflow-y-auto mb-2" aria-label="Choose theme">
               <li class="menu-title">
@@ -473,26 +317,50 @@
               </li>
             </ul>
           </div>
+        </div>
 
-          <!-- Feedback icon button.
-               Uses inline flex centering (not btn-square) because btn-square's
-               fixed aspect ratio fights with w-full in collapsed mode, and a
-               plain btn would left-align its content. -->
-          <router-link
-            v-if="!authStore.isTeamsEdition"
-            to="/feedback"
-            class="btn btn-ghost btn-sm !h-9 !min-h-[2.25rem] px-0 flex items-center justify-center"
-            :class="[
-              { 'btn-active': isActiveRoute('/feedback') },
-              collapsed ? 'w-full' : 'w-9',
-            ]"
-            title="Send feedback"
-            aria-label="Send feedback"
+        <!-- Version + Check for updates (expanded sidebar only). Single-line
+             layout: version on the left, action on the right. In collapsed
+             mode the version appears in the logo tooltip instead. -->
+        <div
+          v-if="!collapsed && systemStore.version"
+          class="mt-2 px-1 pt-2 border-t border-base-300 flex items-center gap-2"
+          data-testid="sidebar-version-block"
+        >
+          <span
+            class="font-mono text-xs text-base-content/60 shrink-0"
+            data-testid="sidebar-version"
           >
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+            v{{ displayVersion }}
+          </span>
+          <span
+            v-if="systemStore.updateAvailable && !systemStore.updateNudgesSuppressed"
+            class="badge badge-xs badge-primary shrink-0"
+            :title="latestVersionTitle"
+          >
+            update
+          </span>
+          <button
+            type="button"
+            @click="handleCheckForUpdates"
+            :disabled="systemStore.checkingForUpdates"
+            class="btn btn-ghost btn-xs ml-auto gap-1 px-1.5 font-normal text-[11px] text-base-content/70 hover:text-base-content"
+            data-testid="sidebar-check-updates"
+            :title="updateStatusTitle"
+            :aria-label="updateButtonLabel"
+          >
+            <svg
+              v-if="!systemStore.checkingForUpdates"
+              class="w-3.5 h-3.5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0A8.003 8.003 0 014.582 15H9" />
             </svg>
-          </router-link>
+            <span v-else class="loading loading-spinner loading-xs"></span>
+            <span class="truncate">{{ updateCompactLabel }}</span>
+          </button>
         </div>
       </div>
     </aside>
@@ -507,7 +375,18 @@ import { formatDateTime } from '@/utils/datetime'
 import { useAuthStore } from '@/stores/auth'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { useAttentionStore } from '@/stores/attention'
+import { useClientsStore } from '@/stores/clients'
 import api from '@/services/api'
+import {
+  SIDEBAR_FOOTER,
+  SIDEBAR_GROUPS,
+  SIDEBAR_HOME,
+  TEAMS_ADMIN_MENU,
+  TEAMS_USER_MENU,
+  THEME_LABEL,
+  type NavIcon,
+  type NavItem,
+} from '@/navigation/navModel'
 
 const route = useRoute()
 const router = useRouter()
@@ -515,6 +394,7 @@ const systemStore = useSystemStore()
 const authStore = useAuthStore()
 const onboardingStore = useOnboardingStore()
 const attentionStore = useAttentionStore()
+const clientsStore = useClientsStore()
 
 // Spec 046 v2: badge count drives the sidebar Setup entry's pulse + count.
 // Refetched on mount; the wizard itself drives subsequent updates while open.
@@ -564,6 +444,9 @@ function loadBadgeCounts() {
     void fetchToolCount()
     void fetchReviewCount()
     void fetchSecretCount()
+    // Clients badge (personal edition only: the server edition has no
+    // Clients surface). Silent refresh — never touches the page's loading state.
+    if (!authStore.isTeamsEdition) void clientsStore.refreshPresence()
   }
 }
 
@@ -662,21 +545,11 @@ const IconServers = makeIcon(
 const IconSecrets = makeIcon(
   'M12 11v3m-3-3a3 3 0 116 0m-9 3v6a1 1 0 001 1h10a1 1 0 001-1v-6a1 1 0 00-1-1H6a1 1 0 00-1 1z'
 )
-const IconTokens = makeIcon(
-  'M15 7a4 4 0 11-8 0 4 4 0 018 0zM15 7l6 6m-3-3l3 3-2 2m-4-4l2-2'
-)
 const IconActivity = makeIcon(
   'M4 12h3l3-8 4 16 3-8h3'
 )
-// Two chat bubbles — a session is one AI client's conversation with the proxy.
-const IconSessions = makeIcon(
-  'M8 10h8M8 14h5M4 5a1 1 0 011-1h14a1 1 0 011 1v10a1 1 0 01-1 1H9l-5 4V5z'
-)
 const IconShield = makeIcon(
   'M12 3l8 3v6c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V6l8-3zm-3 9l2 2 4-4'
-)
-const IconRepo = makeIcon(
-  'M4 4.5A2.5 2.5 0 016.5 2H19v16H6.5a2.5 2.5 0 000 5H19v2H6.5A2.5 2.5 0 014 22.5v-18z'
 )
 const IconSettings = makeIcon(
   'M10.3 3.6a1.5 1.5 0 013.4 0l.2 1.1a7 7 0 011.9.8l1-.6a1.5 1.5 0 012.1 2.1l-.6 1a7 7 0 01.8 1.9l1.1.2a1.5 1.5 0 010 3.4l-1.1.2a7 7 0 01-.8 1.9l.6 1a1.5 1.5 0 01-2.1 2.1l-1-.6a7 7 0 01-1.9.8l-.2 1.1a1.5 1.5 0 01-3.4 0l-.2-1.1a7 7 0 01-1.9-.8l-1 .6a1.5 1.5 0 01-2.1-2.1l.6-1a7 7 0 01-.8-1.9l-1.1-.2a1.5 1.5 0 010-3.4l1.1-.2a7 7 0 01.8-1.9l-.6-1a1.5 1.5 0 012.1-2.1l1 .6a7 7 0 011.9-.8l.2-1.1zM12 9a3 3 0 100 6 3 3 0 000-6z'
@@ -688,6 +561,56 @@ const IconSparkles = makeIcon(
 // Spec 050: wrench/tool icon for the global Tools nav entry.
 const IconTools = makeIcon(
   'M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3-3a1 1 0 000-1.4l-1.6-1.6a1 1 0 00-1.4 0l-1 1L15 3l-5 5-1.3-1.3a1 1 0 00-1.4 0l-3 3a1 1 0 000 1.4L6 13l-3 3a1 1 0 000 1.4l2.6 2.6a1 1 0 001.4 0l3-3a1 1 0 000-1.4L8.7 14l5-5 1.6 1.6z'
+)
+// Spec 109-i: Clients gets its own "people" glyph (it used to borrow the key).
+const IconUsers = makeIcon(
+  'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z'
+)
+const IconProfiles = makeIcon(
+  'M10 6H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V8a2 2 0 00-2-2h-5m-4 0V5a2 2 0 114 0v1m-4 0a2 2 0 104 0m-5 8a2 2 0 100-4 2 2 0 000 4zm0 0c1.306 0 2.417.835 2.83 2M9 14a3.001 3.001 0 00-2.83 2M15 11h3m-3 4h2'
+)
+const IconChart = makeIcon(
+  'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z'
+)
+const IconBook = makeIcon(
+  'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253'
+)
+const IconChat = makeIcon(
+  'M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z'
+)
+const IconSun = makeIcon(
+  'M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z'
+)
+
+// Icon key (navModel.ts) -> component.
+const icons: Record<NavIcon, FunctionalComponent> = {
+  home: IconDashboard,
+  clients: IconUsers,
+  profiles: IconProfiles,
+  servers: IconServers,
+  tools: IconTools,
+  review: IconShield,
+  secrets: IconSecrets,
+  activity: IconActivity,
+  usage: IconChart,
+  settings: IconSettings,
+  docs: IconBook,
+  feedback: IconChat,
+  theme: IconSun,
+}
+
+// An item with `requiresRoutePath` shows only when the router has that exact
+// path (Profiles, until Spec 108 registers /profiles). By path, not name, so
+// the owning spec may name its route freely.
+function hasRoutePath(path: string): boolean {
+  return router.getRoutes().some((r) => r.path === path)
+}
+
+const visibleGroups = computed(() =>
+  SIDEBAR_GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter((item: NavItem) => !item.requiresRoutePath || hasRoutePath(item.requiresRoutePath)),
+  })),
 )
 
 // Spec 050: live tool count for the sidebar badge.
@@ -719,6 +642,20 @@ async function fetchToolCount() {
 const serverCount = computed(() => systemStore.upstreamStats.total_servers ?? 0)
 const secretCount = ref(0)
 
+// Per-item badge value (0 hides it). Home keeps its own template because it
+// also renders a collapsed-mode dot.
+function badgeValue(item: NavItem): number {
+  switch (item.badge) {
+    case 'clients': return clientsStore.liveCount
+    case 'servers': return serverCount.value
+    case 'tools': return toolCount.value
+    case 'review': return reviewCount.value
+    case 'secrets': return secretCount.value
+    case 'attention': return attentionStore.count
+    default: return 0
+  }
+}
+
 async function fetchSecretCount() {
   try {
     // Use the same source as the Secrets page (total_secrets from
@@ -736,23 +673,9 @@ async function fetchSecretCount() {
 }
 
 // Server edition menus (unchanged behavior)
-const teamsUserMenu = [
-  { name: 'My Servers', path: '/my/servers' },
-  { name: 'My Activity', path: '/my/activity' },
-  { name: 'Agent Tokens', path: '/my/tokens' },
-  { name: 'Diagnostics', path: '/my/diagnostics' },
-  // Tools is the canonical search surface since /search folded into it (F20).
-  { name: 'Tools', path: '/tools' },
-]
+const teamsUserMenu = TEAMS_USER_MENU
 
-const teamsAdminMenu = [
-  { name: 'Dashboard', path: '/admin/dashboard' },
-  { name: 'Server Management', path: '/admin/servers' },
-  { name: 'Activity (All)', path: '/activity' },
-  { name: 'Users', path: '/admin/users' },
-  { name: 'Sessions', path: '/sessions' },
-  { name: 'Settings', path: '/settings' },
-]
+const teamsAdminMenu = TEAMS_ADMIN_MENU
 
 const userInitials = computed(() => {
   const name = authStore.displayName

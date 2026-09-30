@@ -62,9 +62,11 @@ describe('Settings naming (Spec 109 FR-056)', () => {
   })
 
   it('names the sidebar entry "Settings"', () => {
-    const src = readFileSync(resolve(__dirname, '../../src/components/SidebarNav.vue'), 'utf-8')
-    expect(src).toMatch(/>Settings<\/span>/)
-    expect(src).not.toMatch(/>Configuration<\/span>/)
+    // Spec 109-i: sidebar names live in navigation/navModel.ts (one model
+    // read by the sidebar, the "+ Add" menu and the command palette).
+    const src = readFileSync(resolve(__dirname, '../../src/navigation/navModel.ts'), 'utf-8')
+    expect(src).toMatch(/id: 'settings', label: 'Settings'/)
+    expect(src).not.toMatch(/Configuration/)
   })
 
   it('renders "Settings" as the H1', async () => {

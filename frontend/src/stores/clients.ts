@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import api from '@/services/api'
 import type { ClientPresence, RoutingInfo } from '@/types/api'
 
@@ -19,6 +19,21 @@ export const useClientsStore = defineStore('clients', () => {
     loading.value = false
   }
 
+  // Rows with at least one live session: the sidebar Clients badge (Spec 109-i).
+  const liveCount = computed(() => clients.value.filter(client => (client.active_sessions ?? 0) > 0).length)
+
+  // Silent presence refresh for the sidebar badge. It fetches GET /clients only
+  // and never touches loading/error/routing, so the Clients page does not
+  // flash a spinner when a badge poll lands underneath it.
+  async function refreshPresence() {
+    try {
+      const response = await api.getClients()
+      if (response.success && Array.isArray(response.data?.clients)) clients.value = response.data.clients
+    } catch {
+      // A badge must not fail the sidebar on an old or offline core.
+    }
+  }
+
   async function loadDetail(id: string) {
     const response = await api.getClient(id)
     if (!response.success || !response.data) return
@@ -26,5 +41,5 @@ export const useClientsStore = defineStore('clients', () => {
     if (index >= 0) clients.value[index] = response.data
   }
 
-  return { clients, routing, loading, error, load, loadDetail }
+  return { clients, routing, loading, error, liveCount, load, refreshPresence, loadDetail }
 })
