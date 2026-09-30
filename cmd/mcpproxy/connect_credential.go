@@ -254,23 +254,11 @@ func describeConnectFailure(err error, clientID string) error {
 }
 
 func guardFixText(fix runtime.GuardFix, guardErr *runtime.BindingGuardError) string {
-	switch fix.Kind {
-	case profile.GuardFixRequireMCPAuth:
-		return "set require_mcp_auth: true (config or Settings → Security)"
-	case profile.GuardFixSetAnonymousProfile:
-		if fix.Target != "" {
-			// `mcpproxy profile anonymous <p>` lands in 108-g; until then the
-			// config key is the way.
-			return fmt.Sprintf("set anonymous_profile: %q in the config", fix.Target)
-		}
-		name := ""
-		if len(guardErr.Bindings) > 0 {
-			name = guardErr.Bindings[0].Profile
-		}
-		return fmt.Sprintf("set anonymous_profile in the config to a profile not wider than %s", name)
-	default:
-		return fix.Kind
+	name := ""
+	if len(guardErr.Bindings) > 0 {
+		name = guardErr.Bindings[0].Profile
 	}
+	return guardFixLine(fix, name)
 }
 
 // connectCredentialLine is the credential line of a successful connect:

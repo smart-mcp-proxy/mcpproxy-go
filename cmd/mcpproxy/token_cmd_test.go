@@ -142,6 +142,16 @@ func TestTokenCreateCmd_RequiredFlags(t *testing.T) {
 	expiresFlag := cmd.Flags().Lookup("expires")
 	assert.NotNil(t, expiresFlag, "should have --expires flag")
 	assert.Equal(t, "30d", expiresFlag.DefValue, "default expires should be 30d")
+
+	// Spec 108-g: --profile carries the scope, so --servers/--permissions are
+	// only required when --profile is absent (checked at run time, not by Cobra).
+	assert.NotNil(t, cmd.Flags().Lookup("profile"), "should have --profile flag")
+	_, serversRequired := serversFlag.Annotations[cobra.BashCompOneRequiredFlag]
+	_, permsRequired := permsFlag.Annotations[cobra.BashCompOneRequiredFlag]
+	_, nameRequired := nameFlag.Annotations[cobra.BashCompOneRequiredFlag]
+	assert.False(t, serversRequired, "--servers is no longer mandatory")
+	assert.False(t, permsRequired, "--permissions is no longer mandatory")
+	assert.True(t, nameRequired, "--name stays mandatory")
 }
 
 // GH #897 verification follow-up: the REST API wraps token responses in the
@@ -244,6 +254,11 @@ func TestRunTokenList_TableOutput(t *testing.T) {
 	assert.Contains(t, out, "qa-list-token", "table must list the token")
 	assert.Contains(t, out, "mcp_agt_ab12")
 	assert.NotContains(t, out, "No agent tokens configured", "pre-#907 envelope bug must not regress")
+	// Spec 108-g: the table carries kind, binding and legacy-scope columns.
+	for _, header := range []string{"NAME", "PREFIX", "KIND", "CLIENT", "PROFILE", "MODE", "SERVERS", "PERMISSIONS", "LEGACY SCOPE", "REVOKED", "EXPIRES"} {
+		assert.Contains(t, out, header)
+	}
+	assert.NotContains(t, out, "PROFILE PIN")
 }
 
 func TestRunTokenCreate_DisplaysMintedToken(t *testing.T) {
