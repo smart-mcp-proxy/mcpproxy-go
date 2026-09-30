@@ -31,9 +31,19 @@ Supported clients: claude-code, cursor, windsurf, vscode, codex, gemini, opencod
 
 A backup of the original config file is created before any modification.
 
+Every connect writes a per-client credential (mcp_cli_...) instead of the
+instance admin API key. The credential identifies the client and binds it to a
+profile: --profile ro (locked by default), --profile all (all servers,
+switchable — the default for a new credential). Reconnecting a client keeps its
+existing binding unless you pass --profile. With require_mcp_auth off, a named
+binding is refused unless an anonymous caller could not reach more than the
+client (the refusal lists the fixes); --keyless writes no credential.
+
 Examples:
   mcpproxy connect --list                    # Show all clients and their status
   mcpproxy connect claude-code               # Register in Claude Code
+  mcpproxy connect cursor --profile ro       # Bind Cursor to profile "ro" (locked)
+  mcpproxy connect cursor --profile work --switchable
   mcpproxy connect cursor --force            # Overwrite existing entry
   mcpproxy connect codex --name my-proxy     # Custom server name
   mcpproxy connect opencode                  # Register in OpenCode
@@ -46,6 +56,7 @@ Examples:
 	cmd.Flags().BoolVar(&connectAll, "all", false, "Connect to all supported clients")
 	cmd.Flags().BoolVar(&connectForce, "force", false, "Overwrite existing entry")
 	cmd.Flags().StringVar(&connectServerName, "name", "", "Server name in client config (default: mcpproxy)")
+	addConnectCredentialFlags(cmd)
 
 	return cmd
 }
@@ -89,9 +100,14 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		return printConnectStatus(svc, formatter, format)
 	}
 
+	intent, err := connectIntentFromFlags(cmd)
+	if err != nil {
+		return err
+	}
+
 	// --all mode
 	if connectAll {
-		return connectAllClients(cfg, svc, formatter, format)
+		return connectAllClients(cfg, intent, formatter, format)
 	}
 
 	// Single client mode
@@ -100,11 +116,16 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	}
 
 	clientID := args[0]
-	result, err := svc.Connect(clientID, connectServerName, connectForce)
+	backend, err := newConnectBackend(cfg)
 	if err != nil {
-		return err
+		return describeConnectFailure(err, clientID)
 	}
-	if result.Success {
+	defer backend.close()
+	result, err := backend.connect(clientID, connectServerName, connectForce, intent)
+	if err != nil {
+		return describeConnectFailure(err, clientID)
+	}
+	if result.Success && !backend.viaDaemon() {
 		notifyClientConnected(cfg, result.Client)
 	}
 
@@ -201,19 +222,27 @@ func printConnectStatus(svc *connect.Service, formatter clioutput.OutputFormatte
 	return nil
 }
 
-func connectAllClients(cfg *config.Config, svc *connect.Service, formatter clioutput.OutputFormatter, format string) error {
+func connectAllClients(cfg *config.Config, intent connect.CredentialIntent, formatter clioutput.OutputFormatter, format string) error {
+	backend, err := newConnectBackend(cfg)
+	if err != nil {
+		return describeConnectFailure(err, "")
+	}
+	defer backend.close()
+
 	clients := connect.GetAllClients()
 	var results []*connect.ConnectResult
 	var errors []string
 	var connectedIDs []string
 
+	// The same intent applies to every client; a refusal for one client is
+	// reported and never aborts the others.
 	for _, c := range clients {
 		if !c.Supported {
 			continue
 		}
-		result, err := svc.Connect(c.ID, connectServerName, connectForce)
+		result, err := backend.connect(c.ID, connectServerName, connectForce, intent)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %v", c.Name, err))
+			errors = append(errors, fmt.Sprintf("%s: %v", c.Name, describeConnectFailure(err, c.ID)))
 			continue
 		}
 		if result.Success {
@@ -223,7 +252,10 @@ func connectAllClients(cfg *config.Config, svc *connect.Service, formatter cliou
 	}
 	// One daemon lookup + concurrent relay for all clients, after every
 	// config write has finished (bounded latency, see notifyClientsConnected).
-	notifyClientsConnected(cfg, connectedIDs)
+	// A daemon-backed connect already recorded itself.
+	if !backend.viaDaemon() {
+		notifyClientsConnected(cfg, connectedIDs)
+	}
 
 	if format == "table" {
 		// FR-037/FR-042: --all lists many clients at once, so the same
@@ -290,6 +322,11 @@ func printConnectResult(result *connect.ConnectResult, formatter clioutput.Outpu
 				// line below, mixing a full path and a "~"-shortened path in
 				// the same output block.
 				fmt.Printf("Backup: %s\n", connect.DisplayPath(result.BackupPath, ""))
+			}
+			// Spec 108 FR-024: which credential the entry carries (masked)
+			// and what it is bound to — never the secret.
+			if line := connectCredentialLine(result); line != "" {
+				fmt.Println(line)
 			}
 			// FR-037: Config shows the home-shortened display_path; the full
 			// path is still available via -o json's config_path.
