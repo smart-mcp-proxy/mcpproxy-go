@@ -187,10 +187,15 @@ func ScrubError(err error, s Snapshot, allow []string) error {
 
 // fieldsCarry walks v's string data directly through reflect (unexported
 // fields included), so a custom Format or GoString method cannot hide a raw
-// value. Depth-bounded; maps, slices and interfaces are followed.
+// value. It fails closed: a value too deep or too large to inspect fully
+// counts as carrying a forwarded value.
 func fieldsCarry(v reflect.Value, dirty func(string) bool, depth int) bool {
-	if !v.IsValid() || depth > 6 {
+	const maxDepth, maxElems = 8, 4096
+	if !v.IsValid() {
 		return false
+	}
+	if depth > maxDepth {
+		return true
 	}
 	switch v.Kind() {
 	case reflect.String:
@@ -204,17 +209,27 @@ func fieldsCarry(v reflect.Value, dirty func(string) bool, depth int) bool {
 			}
 		}
 	case reflect.Slice, reflect.Array:
-		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8 {
-			return dirty(string(v.Bytes()))
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			b := make([]byte, v.Len())
+			for i := range b {
+				b[i] = byte(v.Index(i).Uint())
+			}
+			return dirty(string(b))
 		}
-		for i := 0; i < v.Len() && i < 256; i++ {
+		if v.Len() > maxElems {
+			return true
+		}
+		for i := 0; i < v.Len(); i++ {
 			if fieldsCarry(v.Index(i), dirty, depth+1) {
 				return true
 			}
 		}
 	case reflect.Map:
+		if v.Len() > maxElems {
+			return true
+		}
 		it := v.MapRange()
-		for n := 0; it.Next() && n < 256; n++ {
+		for it.Next() {
 			if fieldsCarry(it.Key(), dirty, depth+1) || fieldsCarry(it.Value(), dirty, depth+1) {
 				return true
 			}

@@ -169,3 +169,28 @@ func TestScrubErrorAsSeesFieldsBehindFormatter(t *testing.T) {
 		t.Fatal("a Formatter must not hide a raw field from the As check")
 	}
 }
+
+type arrayErr struct{ raw [32]byte }
+
+func (e *arrayErr) Error() string { return "rejected" }
+
+type bigErr struct{ items []string }
+
+func (e *bigErr) Error() string { return "rejected" }
+
+// Review round 13: byte arrays are text, and oversized values fail closed.
+func TestScrubErrorAsByteArrayAndOversize(t *testing.T) {
+	s := snapWith(t, "X-Tenant-Id", "tenant-secret-1")
+	ae := &arrayErr{}
+	copy(ae.raw[:], "tenant-secret-1")
+	var a *arrayErr
+	if errors.As(ScrubError(fmt.Errorf("tenant-secret-1: %w", ae), s, nil), &a) {
+		t.Fatal("byte array holding the value must be refused")
+	}
+	be := &bigErr{items: make([]string, 5000)}
+	be.items[4999] = "tenant-secret-1"
+	var b *bigErr
+	if errors.As(ScrubError(fmt.Errorf("tenant-secret-1: %w", be), s, nil), &b) {
+		t.Fatal("oversized value must fail closed")
+	}
+}
