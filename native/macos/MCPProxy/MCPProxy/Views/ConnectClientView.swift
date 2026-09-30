@@ -75,6 +75,16 @@ enum ConnectClientAccessibility {
     /// place, not just a message — matching the preview pane's "Config file"
     /// row above.
     static let resultConfigPath = "connect-client-result-config-path"
+    /// Spec 108-k K21: the binding controls, the masked credential line, the D5
+    /// notice and the result's credential line. The short forms are the ids
+    /// `mcpproxy-ui-test` looks for (K22).
+    static let profilePicker = "connect-profile-picker"
+    static let lockToggle = "connect-lock-toggle"
+    static let keylessToggle = "connect-client-keyless"
+    static let credentialLine = "connect-client-credential-line"
+    static let managementNotice = "connect-mgmt-notice"
+    static let resultCredential = "connect-client-result-credential"
+    static let guardRefusal = "connect-client-guard-refusal"
 
     /// Identifier of one client row.
     static func row(_ clientId: String) -> String { "connect-client-row-\(clientId)" }
@@ -84,7 +94,9 @@ enum ConnectClientAccessibility {
         list, preview, entryText, configPath, existingSummary, safetyNet,
         credentialNotice, refusal, connectBlocked, entryNameField, advancedDisclosure,
         connectButton, undoButton, disconnectButton, disconnectConfirm,
-        closeButton, status, waiting, transportNotice, reloadHint, resultConfigPath
+        closeButton, status, waiting, transportNotice, reloadHint, resultConfigPath,
+        profilePicker, lockToggle, keylessToggle, credentialLine, managementNotice,
+        resultCredential, guardRefusal
     ]
 }
 
@@ -99,6 +111,11 @@ enum ConnectClientAccessibility {
 struct ConnectClientView: View {
     @ObservedObject var model: ConnectClientModel
     var onClose: () -> Void = {}
+    /// Select this client as soon as the list loads (an "Upgrade to client
+    /// credential…" or "Reconnect…" entry point).
+    var preselect: String? = nil
+    /// Follows a guard fix (Settings…). The sheet closes first.
+    var onRoute: (AppRoute) -> Void = { _ in }
 
     @State private var selectedID: String?
     @State private var showAdvanced = false
@@ -118,7 +135,13 @@ struct ConnectClientView: View {
             actionBar
         }
         .frame(minWidth: 760, minHeight: 480)
-        .task { await model.loadList() }
+        .task {
+            await model.loadList()
+            if let preselect, model.selection == nil {
+                selectedID = preselect
+                await model.select(preselect)
+            }
+        }
         .alert("Disconnect this client?", isPresented: disconnectConfirmationIsPresented,
                presenting: model.pendingDisconnect) { _ in
             Button("Cancel", role: .cancel) { model.cancelDisconnect() }
@@ -264,6 +287,7 @@ struct ConnectClientView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     detailSection
+                    bindingSection
                     previewSection
                     advancedSection
                     statusSection
@@ -339,11 +363,35 @@ struct ConnectClientView: View {
                         .accessibilityIdentifier(ConnectClientAccessibility.safetyNet)
                 }
 
-                if let credential = preview.credentialNotice {
+                if let line = preview.credentialLine {
+                    Text(line)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier(ConnectClientAccessibility.credentialLine)
+                }
+
+                if let credential = model.credentialDisclosure {
                     Label(credential, systemImage: "key.fill")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(preview.containsAPIKey ? Color.orange : Color.secondary)
                         .accessibilityIdentifier(ConnectClientAccessibility.credentialNotice)
+                }
+
+                // D5: a client credential cannot reach management tools unless
+                // its profile enables them.
+                if model.showsManagementNotice {
+                    Label(ConnectClientModel.managementNotice, systemImage: "wrench.and.screwdriver")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier(ConnectClientAccessibility.managementNotice)
+                }
+
+                if let refusal = model.guardRefusal {
+                    GuardRefusalView(body: refusal) { route in
+                        onClose()
+                        onRoute(route)
+                    }
+                    .accessibilityIdentifier(ConnectClientAccessibility.guardRefusal)
                 }
 
                 if let refusal = model.connectRefusal {
@@ -391,10 +439,50 @@ struct ConnectClientView: View {
         .accessibilityIdentifier(ConnectClientAccessibility.existingSummary)
     }
 
+    /// Spec 108-k K21: which profile the client's credential binds to, and
+    /// whether it is locked to it. Untouched, nothing is sent: a reconnect keeps
+    /// its binding and a new credential starts on All servers.
+    @ViewBuilder
+    private var bindingSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("Profile", selection: Binding(
+                get: { model.profile },
+                set: { model.chooseProfile($0) })) {
+                Text("All servers").tag("")
+                ForEach(model.profiles) { Text($0.displayTitle).tag($0.name) }
+            }
+            .frame(maxWidth: 320)
+            .disabled(model.keyless || model.isBusy)
+            .accessibilityLabel("Profile for the client credential")
+            .accessibilityIdentifier(ConnectClientAccessibility.profilePicker)
+
+            Toggle("Locked — the client cannot switch to another profile", isOn: Binding(
+                get: { model.mode == .locked },
+                set: { model.setLocked($0) }))
+                .disabled(model.profile.isEmpty || model.keyless || model.isBusy)
+                .accessibilityIdentifier(ConnectClientAccessibility.lockToggle)
+            if model.profile.isEmpty && !model.keyless {
+                Text(model.bindingTouched
+                     ? "Choose a profile to lock."
+                     : "A new credential starts on All servers; an existing one keeps its profile.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .onChange(of: model.profile) { _ in Task { await model.refreshPreview() } }
+        .onChange(of: model.lockedChoice) { _ in Task { await model.refreshPreview() } }
+        .onChange(of: model.keyless) { _ in Task { await model.refreshPreview() } }
+    }
+
     /// FR-007: the entry-name override is advanced and collapsed by default.
     private var advancedSection: some View {
         DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
             VStack(alignment: .leading, spacing: 4) {
+                if model.keylessAvailable {
+                    Toggle("Connect without a credential (authentication is off)", isOn: Binding(
+                        get: { model.keyless }, set: { model.setKeyless($0) }))
+                        .disabled(model.isBusy)
+                        .accessibilityIdentifier(ConnectClientAccessibility.keylessToggle)
+                }
                 TextField("Entry name", text: $model.entryName)
                     .textFieldStyle(.roundedBorder)
                     // The name is bound to the write that is already running.
@@ -424,6 +512,15 @@ struct ConnectClientView: View {
                     .font(.caption)
                     .foregroundStyle(.green)
                     .accessibilityIdentifier(ConnectClientAccessibility.status)
+                // Spec 108-k K21: which credential the write embedded, in the
+                // CLI's words (masked; the secret is never shown here).
+                if let line = result.credentialLine {
+                    Text(line)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier(ConnectClientAccessibility.resultCredential)
+                }
                 // Spec 109-b FR-037: anchor the result to the file it wrote,
                 // the same shortened path the preview pane showed above —
                 // `effectiveDisplayPath` was decoded and available since
