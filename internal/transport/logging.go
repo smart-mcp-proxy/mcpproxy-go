@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -17,6 +18,35 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
+
+// traceOut, when set, receives the trace transport's console output instead of
+// os.Stdout. Tests use it to capture that output: swapping the os.Stdout
+// variable itself races with every background goroutine that prints.
+var traceOut atomic.Pointer[io.Writer]
+
+// SetTraceOutput redirects the trace transport's console output to w and
+// returns a function that restores the previous destination. It is safe to
+// call while trace output is being produced.
+func SetTraceOutput(w io.Writer) (restore func()) {
+	prev := traceOut.Swap(&w)
+	return func() { traceOut.Store(prev) }
+}
+
+func tracef(format string, args ...any) {
+	if w := traceOut.Load(); w != nil {
+		_, _ = fmt.Fprintf(*w, format, args...)
+		return
+	}
+	fmt.Printf(format, args...)
+}
+
+func traceln(args ...any) {
+	if w := traceOut.Load(); w != nil {
+		_, _ = fmt.Fprintln(*w, args...)
+		return
+	}
+	fmt.Println(args...)
+}
 
 // LoggingTransport wraps http.RoundTripper to log all HTTP traffic including SSE frames
 type LoggingTransport struct {
@@ -125,9 +155,9 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	// one and not the other — the Printf copy goes to the operator's terminal
 	// and an observer-only test would show green against a zap-only fix.
 	// The method, host and path survive; only credentials are replaced.
-	fmt.Printf("📤 HTTP REQUEST: %s %s\n", req.Method, oauth.AuditRedaction.URLValueDeep(req.URL.String()))
+	tracef("📤 HTTP REQUEST: %s %s\n", req.Method, oauth.AuditRedaction.URLValueDeep(req.URL.String()))
 	scrub := t.bodyScrubber(req.Context())
-	fmt.Printf("   Headers: %v\n", oauth.RedactHeaders(scrubHeaderValues(t.maskForwarded(req.Context(), req.Header), scrub)))
+	tracef("   Headers: %v\n", oauth.RedactHeaders(scrubHeaderValues(t.maskForwarded(req.Context(), req.Header), scrub)))
 
 	// Log request body if present (for non-SSE requests)
 	if req.Body != nil && req.Method != "GET" {
@@ -154,7 +184,7 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		// returned untouched to the caller.
 		// Spec 112: the per-request scrubber also masks forwarded values.
 		safeErr := scrub(err.Error())
-		fmt.Printf("❌ HTTP REQUEST FAILED: %v (duration: %v)\n", safeErr, duration)
+		tracef("❌ HTTP REQUEST FAILED: %v (duration: %v)\n", safeErr, duration)
 		t.logger.Error("❌ HTTP REQUEST FAILED",
 			zap.String("error", safeErr),
 			zap.Duration("duration", duration))
@@ -162,9 +192,9 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 
 	// Log response using fmt.Printf
-	fmt.Printf("📥 HTTP RESPONSE: %d %s (duration: %v)\n", resp.StatusCode, resp.Status, duration)
+	tracef("📥 HTTP RESPONSE: %d %s (duration: %v)\n", resp.StatusCode, resp.Status, duration)
 	safeRespHeaders := oauth.RedactHeaders(scrubHeaderValues(t.maskForwarded(req.Context(), resp.Header), scrub))
-	fmt.Printf("   Response Headers: %v\n", safeRespHeaders)
+	tracef("   Response Headers: %v\n", safeRespHeaders)
 
 	t.logger.Info("📥 HTTP RESPONSE",
 		zap.Int("status", resp.StatusCode),
@@ -177,7 +207,7 @@ func (t *LoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	isSSE := strings.Contains(contentType, "text/event-stream")
 
 	if isSSE {
-		fmt.Println("🌊 SSE STREAM DETECTED - Starting frame-by-frame logging")
+		traceln("🌊 SSE STREAM DETECTED - Starting frame-by-frame logging")
 		t.logger.Info("🌊 SSE STREAM DETECTED - Starting frame-by-frame logging")
 		resp.Body = newSSELoggingReader(resp.Body, t.logger, scrub)
 	} else {
@@ -241,7 +271,7 @@ func newSSELoggingReader(rc io.ReadCloser, logger *zap.Logger, scrub func(string
 }
 
 func (lr *loggingReader) readSSEFramesFromPipe(pr *io.PipeReader) {
-	fmt.Println("🌊 SSE frame reader goroutine started")
+	traceln("🌊 SSE frame reader goroutine started")
 	defer pr.Close()
 	scanner := bufio.NewScanner(pr)
 	var currentFrame strings.Builder
@@ -251,7 +281,7 @@ func (lr *loggingReader) readSSEFramesFromPipe(pr *io.PipeReader) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Printf("   📜 Raw SSE line: %q\n", lr.scrub(line))
+		tracef("   📜 Raw SSE line: %q\n", lr.scrub(line))
 
 		// Empty line indicates end of frame
 		if line == "" {
@@ -263,7 +293,7 @@ func (lr *loggingReader) readSSEFramesFromPipe(pr *io.PipeReader) {
 				safeData := lr.scrub(dataContent)
 				safeEvent := lr.scrub(eventType)
 				safeContent := lr.scrub(frameContent)
-				fmt.Printf("🔵 SSE FRAME #%d (event: %s, data: %s, duration since prev: %v)\n%s\n",
+				tracef("🔵 SSE FRAME #%d (event: %s, data: %s, duration since prev: %v)\n%s\n",
 					lr.frameID, safeEvent, safeData, frameDuration, safeContent)
 				lr.logger.Info(fmt.Sprintf("🔵 SSE FRAME #%d", lr.frameID),
 					zap.String("event", safeEvent),

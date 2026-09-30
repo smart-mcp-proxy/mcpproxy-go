@@ -169,9 +169,13 @@ jobs:
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
+      # internal/server under -race takes ~10 minutes on the macOS runner and
+      # grows with every spec's tests, so the default 10m package timeout
+      # ("panic: test timed out") is no longer enough there; match the
+      # Windows leg's 20m.
       - name: Run unit tests (Unix)
         if: matrix.os != 'windows-latest'
-        run: go test -v -race -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 20m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
