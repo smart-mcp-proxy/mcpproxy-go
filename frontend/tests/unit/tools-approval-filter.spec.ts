@@ -76,6 +76,23 @@ describe('Tools approval filter vocabulary (Spec 109 FR-027 / T010)', () => {
     expect(rows[0].text()).toContain('rugpull')
   })
 
+  it('the active-filter chip uses the FR-027 label, not the raw status value', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    await wrapper.find('[data-test="filter-approval"]').setValue('pending')
+    await flushPromises()
+
+    const chip = wrapper.findAll('.badge').find((b) => b.text().startsWith('Approval:'))
+    expect(chip).toBeTruthy()
+    expect(chip!.text()).toBe('Approval: New, needs review')
+
+    await wrapper.find('[data-test="filter-approval"]').setValue('changed')
+    await flushPromises()
+    const chip2 = wrapper.findAll('.badge').find((b) => b.text().startsWith('Approval:'))
+    expect(chip2!.text()).toBe('Approval: Changed, needs review')
+  })
+
   it('the "Needs review" stat links to /review, which resolves to a registered route', async () => {
     const wrapper = mountView()
     await flushPromises()

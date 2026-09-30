@@ -905,43 +905,30 @@ struct ServerTableView: NSViewRepresentable {
             return cell
         }
 
-        // This column's visible text intentionally reads `health.summary`
-        // (free text — e.g. "Connected (5 tools)"), richer than the shared
-        // status label table, while the status dot's accessibility label
-        // (makeStatusDotCell above) reads the shared table (FR-011: no
-        // surface may render `level` itself, sighted or not). `summary` is
-        // never `level` — it is a sentence CalculateHealth composes — so this
-        // is a sighted-vs-VoiceOver wording choice, not an FR-011 violation.
+        // Spec 109 FR-011/FR-014 (T049): the visible text is the shared status
+        // label (+ optional detail) from ServerStatusLinePresentation, the same
+        // string the tray submenu and the detail header render — never a
+        // locally derived "Connected"/"Quarantined".
         private func makeStateCell(server: ServerStatus, tableView: NSTableView) -> NSView {
             let cellId = NSUserInterfaceItemIdentifier("StateCell")
             let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
 
-            let statusText: String
+            let line = ServerStatusLinePresentation.line(for: server)
             let statusColor: NSColor
-            if server.quarantined {
-                statusText = "Quarantined"
-                statusColor = .systemOrange
-            } else if !server.enabled {
-                statusText = "Disabled"
-                statusColor = .systemGray
-            } else if server.connected {
-                statusText = "Connected"
-                statusColor = .systemGreen
-            } else if let health = server.health {
-                statusText = health.summary
-                statusColor = health.level == "unhealthy" ? .systemRed : .secondaryLabelColor
-            } else {
-                statusText = "Disconnected"
-                statusColor = .systemGray
+            switch line.tone {
+            case .success: statusColor = .systemGreen
+            case .neutral: statusColor = .secondaryLabelColor
+            case .warning: statusColor = .systemOrange
+            case .error: statusColor = .systemRed
             }
 
-            let label = NSTextField(labelWithString: statusText)
+            let label = NSTextField(labelWithString: ServerStatusLinePresentation.text(for: server))
             label.font = .systemFont(ofSize: NSFont.smallSystemFontSize * fontScale)
             label.textColor = statusColor
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(label)
-            cell.toolTip = server.health?.detail ?? server.health?.summary ?? ""
+            cell.toolTip = line.tooltip ?? ""
             NSLayoutConstraint.activate([
                 label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
                 label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),

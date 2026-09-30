@@ -51,8 +51,8 @@
 | H3 mode/endpoints in header | FR-031, FR-052 | 109-h, 109-i | T127, T136 |
 | H4 version row over modals | FR-055 | 109-a | T007 |
 | S2 blind approval | FR-020–024, FR-026 | 109-f, 109-g | T073–T078, T086–T087 |
-| S4 card shows every control | FR-013, FR-014 | 109-e | T067–T069 |
-| S5 contradictory health | FR-010–012, FR-015 | 109-c | T041–T045 |
+| S4 card shows every control | FR-013, FR-014 | 109-e, 109-leftovers | T067–T069, T049 |
+| S5 contradictory health | FR-010–012, FR-015 | 109-c, 109-leftovers | T041–T045, T049 |
 | S6 tabs don't update URL | FR-016 | 109-a, 109-k, 109-h | T009, T112, T127 |
 | S7 add form | FR-064, FR-065 | 109-j | T098, T100, T102, T103 |
 | C1 ranking | FR-060, FR-061, FR-067 | 109-j | T097, T101 |
@@ -60,7 +60,8 @@
 | A1 bookkeeping buries calls | FR-070–072 | 109-k | T112 |
 | A2 metric shows zero; ticks; wording | FR-073, FR-074 | 109-a, 109-k | T013, T114 |
 | A3 nothing says what needs attention | FR-001–006 | 109-d (+ 109-h client feed) | T053–T059, T055a, T124 |
-| T1 approval filter overlap | FR-027 | 109-a | T010, T017 |
+| T1 approval filter overlap | FR-027 | 109-a, 109-leftovers | T010, T017, T022, T093 |
+| C6 `activity export --format` vs `-o` | FR-028 (accepted contradiction) | 109-leftovers | T123 |
 | URL filter contract + link map | FR-080–083 | 109-k (+ 109-l) | T111–T116, T137, T151 |
 | Needs-attention endpoint | FR-001–002, FR-006 | 109-d | T053–T055a |
 | Caller classes on new read routes (non-admin user sessions, not just agent tokens) | FR-007 | 109-d, 109-f, 109-j, 109-h | T055b, T075a, T099, T125 |

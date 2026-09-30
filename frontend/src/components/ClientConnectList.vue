@@ -455,6 +455,12 @@
           <div class="mt-3 space-y-2 max-h-64 overflow-y-auto">
             <div v-for="entry in bulkPreview" :key="entry.id" class="rounded border border-base-300 p-2">
               <p class="text-sm font-medium">{{ entry.client.name }} <span v-if="entry.preview.entry_exists" class="text-warning">(will replace existing entry)</span></p>
+              <!-- FR-032: the combined diff names every file it will write. -->
+              <p
+                class="text-xs font-mono opacity-70 break-all"
+                :data-test="`connect-bulk-preview-path-${entry.id}`"
+                :title="entry.preview.config_path"
+              >{{ entry.preview.display_path || entry.preview.config_path }}</p>
               <code class="block text-xs whitespace-pre-wrap break-all opacity-70">{{ entry.preview.entry_text }}</code>
             </div>
           </div>

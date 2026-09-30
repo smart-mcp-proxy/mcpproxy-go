@@ -1299,3 +1299,22 @@ func TestFormatSeverityWithColor(t *testing.T) {
 func boolPtr(b bool) *bool {
 	return &b
 }
+
+// Spec 109 C6 / T123: the export help explains --format vs the global -o/--output.
+func TestActivityExportHelp_CrossReferencesFormatAndOutput(t *testing.T) {
+	long := activityExportCmd.Long
+	for _, want := range []string{"--format", "file format", "-o/--output", "terminal rendering"} {
+		assert.Contains(t, long, want)
+	}
+	format := activityExportCmd.Flags().Lookup("format")
+	require.NotNil(t, format)
+	assert.Contains(t, format.Usage, "file format")
+	output := activityExportCmd.Flags().Lookup("output")
+	require.NotNil(t, output)
+	assert.Contains(t, output.Usage, "file path")
+}
+
+func TestRootOutputFlagHelp_PointsAtExportFormat(t *testing.T) {
+	assert.Contains(t, globalOutputFlagUsage, "terminal rendering")
+	assert.Contains(t, globalOutputFlagUsage, "--format")
+}

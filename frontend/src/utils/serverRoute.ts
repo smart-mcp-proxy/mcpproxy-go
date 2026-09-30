@@ -10,6 +10,15 @@ export function serverDetailPath(name: string, tab?: string): string {
   return tab ? `${base}?tab=${encodeURIComponent(tab)}` : base
 }
 
+// Spec 109 T093 (FR-027, url-filter-contract.md link map): the one builder for
+// the review screen, `/review/<server>[?change=<pending|changed>]`. The route is
+// a single `:server` segment, so the name is percent-encoded (same MCP-1112 rule
+// as serverDetailPath); `change` scopes the screen to new or changed tools.
+export function reviewPath(name: string, change?: 'pending' | 'changed'): string {
+  const base = `/review/${encodeURIComponent(name)}`
+  return change ? `${base}?change=${change}` : base
+}
+
 // MCP-2125 (#643 Defect B): scan ids embed the raw upstream server name, so an
 // official-registry server whose name contains '/' (e.g.
 // "com.pulsemcp/google-flights") yields a scan id like

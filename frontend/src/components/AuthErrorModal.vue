@@ -108,7 +108,7 @@
       </div>
     </div>
     <!-- Deliberately no `<form method="dialog" class="modal-backdrop">` click
-         catcher here (contrast with AddSecretModal/ConnectModal/
+         catcher here (contrast with AddSecretModal/ClientConnectList/
          OnboardingWizard): clicking outside must not dismiss this modal, same
          as before the FR-055 top-layer migration. The dim backdrop itself
          still renders — `showModal()` promotes this dialog to the browser's
@@ -147,7 +147,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<Emits>()
 
 // Spec 109 FR-055 (review round 6, finding 3): promote to the browser's top
-// layer via showModal(), same as AddSecretModal/ConnectModal/
+// layer via showModal(), same as AddSecretModal/ClientConnectList/
 // OnboardingWizard, so a background 401 raised while one of those is open
 // paints above it instead of underneath its backdrop. Escape and the Tab trap
 // route through handleClose below, which already gates on `canClose` — so

@@ -16,7 +16,7 @@ All commands support the following output format options:
 
 | Flag | Description |
 |------|-------------|
-| `-o, --output <format>` | Output format: `table` (default), `json`, `yaml` |
+| `-o, --output <format>` | Output format: `table` (default), `json`, `yaml` (terminal rendering; `activity export` uses `--format` for its file format) |
 | `--json` | Shorthand for `-o json` |
 
 ### Environment Variable
@@ -124,7 +124,7 @@ mcpproxy --help-json
     {
       "name": "output",
       "shorthand": "o",
-      "description": "Output format: table, json, yaml",
+      "description": "Output format: table, json, yaml (terminal rendering; activity export uses --format for its file format)",
       "type": "string",
       "default": ""
     }

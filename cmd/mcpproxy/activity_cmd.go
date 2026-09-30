@@ -1133,6 +1133,10 @@ Examples:
 		Short: "Export activity records",
 		Long: `Export activity records for compliance and auditing.
 
+--format is the export file format (json = JSON Lines, csv). On this command
+--output is the destination file path; the global -o/--output (terminal rendering:
+table, json, yaml) does not apply to 'activity export'.
+
 Examples:
   # Export all activity as JSON Lines to file
   mcpproxy activity export --output activity.jsonl
@@ -1208,8 +1212,8 @@ func init() {
 	activitySummaryCmd.Flags().StringVar(&activityTo, "to", "", "Not supported on 'activity summary' (present for contract symmetry; always rejected)")
 
 	// Export command flags
-	activityExportCmd.Flags().StringVar(&activityExportOutput, "output", "", "Output file path (stdout if not specified)")
-	activityExportCmd.Flags().StringVarP(&activityExportFormat, "format", "f", "json", "Export format: json, csv")
+	activityExportCmd.Flags().StringVar(&activityExportOutput, "output", "", "Destination file path (stdout if not specified); not the global -o/--output format flag")
+	activityExportCmd.Flags().StringVarP(&activityExportFormat, "format", "f", "json", "Export file format: json (JSON Lines), csv")
 	activityExportCmd.Flags().BoolVar(&activityIncludeBodies, "include-bodies", false, "Include full request/response bodies")
 	// Reuse list filter flags for export
 	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight")
