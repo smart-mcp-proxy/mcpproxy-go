@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -567,10 +568,27 @@ func requireString(args map[string]any, op, key string) (string, error) {
 // object (FR-037). Unknown keys inside `tools` are refused as on REST.
 func profileConfigFromArgs(args map[string]any) (config.ProfileConfig, error) {
 	fields := map[string]any{}
+	known := map[string]bool{"operation": true}
+	for _, a := range profilesOpArgs {
+		known[a.name] = true
+	}
 	for _, name := range profileConfigJSONFields() {
+		known[name] = true
 		if v, ok := args[name]; ok {
 			fields[name] = v
 		}
+	}
+	// REST decodes the body with DisallowUnknownFields; a top-level typo such as
+	// max_teir must not be dropped silently and leave the profile wider than asked.
+	var unknown []string
+	for key := range args {
+		if !known[key] {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return config.ProfileConfig{}, invalidArg(unknown[0], "unknown argument")
 	}
 	raw, err := json.Marshal(fields)
 	if err != nil {

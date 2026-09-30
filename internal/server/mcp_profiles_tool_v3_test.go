@@ -269,6 +269,22 @@ func TestProfilesTool_TypeMismatchNamesTheField(t *testing.T) {
 	assert.Nil(t, f.profileByName("bad"))
 }
 
+// F2.1: a top-level typo is refused on create/update as REST refuses it, so a
+// dropped restriction never leaves the profile wider than intended.
+func TestProfilesTool_UnknownTopLevelArgumentRefused(t *testing.T) {
+	f := newProfilesToolFixture(t, nil)
+	body := f.refused(apiKeyCtx(), map[string]any{"operation": "create", "name": "readonly", "max_teir": "read"})
+	assert.Equal(t, "max_teir", body["field"])
+	assert.Contains(t, body["error"], `invalid argument "max_teir"`)
+	assert.Nil(t, f.profileByName("readonly"), "a refused create stores nothing")
+
+	body = f.refused(apiKeyCtx(), map[string]any{"operation": "update", "name": "legacy", "max_teir": "read"})
+	assert.Equal(t, "max_teir", body["field"])
+
+	status, _, _ := f.rest(http.MethodPost, "/api/v1/profiles", map[string]any{"name": "readonly", "max_teir": "read"})
+	assert.Equal(t, http.StatusBadRequest, status, "REST refuses the same body")
+}
+
 func TestProfilesTool_OperationAndArgumentErrors(t *testing.T) {
 	f := newProfilesToolFixture(t, nil)
 	cases := []struct {
