@@ -55,6 +55,8 @@ Priority order for `actions`: `login` > `set_secret` > `configure` > `edit_url` 
 | `error` | Error | "<summary>" | Restart |
 | `disabled` | Disabled | "Disabled" | Enable (a disabled server is never an attention item, FR-002, but its card still offers the one step that brings it back) |
 
+The macOS Servers row, the tray server submenu's first line and the Server Detail header all render `ServerStatusLinePresentation.line(for:)` (`native/macos/MCPProxy/MCPProxy/Menu/TrayPresentation.swift`): the label, then ` · <summary>` when `admin_state` is `enabled` and the summary adds information beyond the label (the same rule as the Web card's status detail). Only a core that sends no `status` falls back to the legacy words (`Needs review`, `Disabled`, `Connecting`, `Connected`, `Disconnected`).
+
 Button labels per action: `login` Sign in · `set_secret` Add secret · `configure` Fix config · `edit_url` Edit URL · `approve` Review (opens the review screen; never approves directly, FR-005) · `restart` Restart · `view_logs` View logs · `enable` Enable.
 
 Colors (Web DaisyUI / macOS): `ready` success/green · `connecting` neutral/gray · `sign_in_required`, `needs_review`, `needs_secret`, `needs_config` warning/orange · `error` error/red · `disabled` neutral/gray. The tray badge keeps its Spec 044 rules (it reads `level` and diagnostics, not `status`).
