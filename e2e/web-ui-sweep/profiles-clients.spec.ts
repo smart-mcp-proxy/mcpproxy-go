@@ -62,8 +62,8 @@ test('goal flow: create a profile, deny a tool, try it, mint a token, assign a c
   await expect(rows.first()).toBeVisible()
 
   // A tool above the Read cap shows the reason in words, when the fixture has one.
-  const tools = (await api('GET', `/profiles/${WORK}/effective-tools`)).data.tools as Array<{ server: string; tool: string; intrinsic_tier: string; access: { visible: boolean } }>
-  const capped = tools.find(row => !row.access.visible)
+  const tools = (await api('GET', `/profiles/${WORK}/effective-tools`)).data.tools as Array<{ server: string; tool: string; intrinsic_tier: string; access: { visible: boolean; reason: string } }>
+  const capped = tools.find(row => row.access.reason === 'above_tier_cap')
   if (capped) {
     await expect(page.locator(`[data-test="profile-tool-row-${capped.server}__${capped.tool}"]`)).toContainText('Above tier cap')
   }
@@ -164,8 +164,9 @@ test('rename moves the client and the token, and back', async ({ page }) => {
 test('Explain access on a client shows the verdict and a fix that lands on the focused row', async ({ page }) => {
   // The tool the goal flow denied is hidden for the client by rule.
   const tools = (await api('GET', `/profiles/${WORK}/effective-tools`)).data.tools as Array<{ server: string; tool: string; access: { visible: boolean; reason: string } }>
-  const hidden = tools.find(row => !row.access.visible)
-  test.skip(!hidden, 'no hidden tool to explain')
+  // The tool the guard test denied: hidden for this client by a rule (rows of servers outside the profile are hidden too, with another fix).
+  const hidden = tools.find(row => row.access.reason === 'denied_by_rule')
+  test.skip(!hidden, 'no rule-hidden tool to explain')
   const key = `${hidden!.server}:${hidden!.tool}`
 
   await open(page, `/clients?focus=${CLIENT_ID}`)
