@@ -220,13 +220,31 @@ func TestUsageAggregate_Clone_IsDeepCopy(t *testing.T) {
 	agg := newUsageAggregate()
 	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 	agg.Apply(toolCall("s", "t", "success", 10, 0, 100, ts))
+	agg.ClientCalls["cursor"] = map[int64]int64{ts.Unix(): 1}
 
 	clone := agg.clone()
 	// Mutating the original after cloning must not affect the clone.
 	agg.Apply(toolCall("s", "t", "success", 10, 0, 100, ts))
+	agg.ClientCalls["cursor"][ts.Unix()]++
 
 	assert.Equal(t, int64(2), agg.Tools[toolKey("s", "t")].Calls)
 	assert.Equal(t, int64(1), clone.Tools[toolKey("s", "t")].Calls, "clone must be independent")
+	assert.Equal(t, int64(1), clone.ClientCalls["cursor"][ts.Unix()], "client-call buckets must be independent")
+}
+
+func TestUsageStore_SnapshotIncludesIndependentClientCalls(t *testing.T) {
+	store := newUsageStore()
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	record := toolCall("s", "t", "success", 10, 0, 100, ts)
+	record.Metadata = map[string]interface{}{"client_name": "Cursor"}
+	store.Apply(record)
+
+	snapshot := store.Snapshot()
+	bucket := ts.UTC().Truncate(time.Hour).Unix()
+	require.Equal(t, int64(1), snapshot.ClientCalls["cursor"][bucket])
+
+	store.working.ClientCalls["cursor"][bucket]++
+	require.Equal(t, int64(1), snapshot.ClientCalls["cursor"][bucket], "published UsageSnapshot must not share client-call maps with the working aggregate")
 }
 
 // TestUsageStore_SnapshotReflectsWrites_ReadsNeverBlock validates the actor
@@ -496,4 +514,43 @@ func TestUsageAggregate_HasObservedRetrieveToolsCall(t *testing.T) {
 		_, sizedOK := agg.AvgRetrieveToolsRespBytes()
 		assert.True(t, sizedOK)
 	})
+}
+
+func TestUsageAggregate_ClientCallsSinceUsesPersistedClientName(t *testing.T) {
+	base := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	agg := newUsageAggregate()
+	for _, client := range []string{"Claude Code", "cursor", "claude-code"} {
+		agg.Apply(&storage.ActivityRecord{
+			Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+			Status: storage.ActivityStatusSuccess, Timestamp: base,
+			Metadata: map[string]interface{}{"client_name": client},
+		})
+	}
+	// This legacy record is outside the rolling interval.
+	agg.Apply(&storage.ActivityRecord{
+		Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+		Status: storage.ActivityStatusSuccess, Timestamp: base.Add(-25 * time.Hour),
+		Metadata: map[string]interface{}{"client_name": "claude-code"},
+	})
+	require.Equal(t, 2, agg.ClientCallsSince([]string{"claude-code", "Claude Code"}, base.Add(-24*time.Hour)))
+	require.Equal(t, 1, agg.ClientCallsSince([]string{"cursor"}, base.Add(-24*time.Hour)))
+}
+
+func TestUsageAggregate_ClientCallsRetentionPreservesSupportedClients(t *testing.T) {
+	base := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	agg := newUsageAggregate()
+	for i := 0; i < 40; i++ {
+		agg.Apply(&storage.ActivityRecord{
+			Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+			Status: storage.ActivityStatusSuccess, Timestamp: base.Add(time.Duration(i) * time.Minute),
+			Metadata: map[string]interface{}{"client_name": fmt.Sprintf("other-client-%02d", i)},
+		})
+	}
+	agg.Apply(&storage.ActivityRecord{
+		Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+		Status: storage.ActivityStatusSuccess, Timestamp: base,
+		Metadata: map[string]interface{}{"client_name": "cursor"},
+	})
+	require.Equal(t, 1, agg.ClientCallsSince([]string{"cursor"}, base.Add(-24*time.Hour)))
+	require.LessOrEqual(t, len(agg.ClientCalls), 32)
 }

@@ -47,9 +47,11 @@ func (s *Server) handleCatalogSearch(w http.ResponseWriter, r *http.Request) {
 	// Catalog entries (registries.ServerEntry) carry no tags, so a tag filter
 	// cannot be honoured. Reject it explicitly instead of silently returning
 	// unfiltered results that look like a tag match.
-	if r.URL.Query().Get("tag") != "" {
-		s.writeError(w, r, http.StatusBadRequest, "tag filtering is not supported: catalog entries carry no tags")
-		return
+	for _, tag := range r.URL.Query()["tag"] {
+		if tag != "" {
+			s.writeError(w, r, http.StatusBadRequest, "tag filtering is not supported: catalog entries carry no tags")
+			return
+		}
 	}
 
 	limit := 20
@@ -197,15 +199,9 @@ func (s *Server) getVisibleServersForCatalog(ctx context.Context) ([]contracts.S
 // catalogInstallTargetForServer computes the same install-target key as
 // registries.CatalogInstallTarget, from a configured contracts.Server.
 func catalogInstallTargetForServer(srv contracts.Server) string {
-	if srv.URL != "" {
-		return "url:" + srv.URL
-	}
-	args := ""
-	for i, a := range srv.Args {
-		if i > 0 {
-			args += " "
-		}
-		args += a
-	}
-	return "cmd:" + srv.Command + " " + args
+	return registries.CatalogInstallTarget(registries.CatalogInstall{
+		URL:     srv.URL,
+		Command: srv.Command,
+		Args:    srv.Args,
+	})
 }

@@ -66,6 +66,16 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 	// before closing the runtime or either httptest server.
 	t.Cleanup(unblockFirst)
 	rt.StartBackgroundInitialization()
+	// Let the initial configuration load and the supervisor's initial reconcile
+	// settle before making A's tools/list request block. This keeps the startup
+	// reconciliation from retaining a stale cfgA reference through replacement.
+	require.Eventually(t, func() bool {
+		client, ok := rt.UpstreamManager().GetClient("quarantined")
+		if !ok || !client.IsConnected() || client.GetConfig().URL != first.URL {
+			return false
+		}
+		return rt.discoveryGeneration("quarantined").Epoch == client.ConnectionEpoch()
+	}, 10*time.Second, 10*time.Millisecond, "initial reconciliation must observe A before its blocked list begins")
 
 	// The capture grants its own inspection exemption, which connects A.
 	done := make(chan error, 1)
@@ -78,15 +88,20 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 	captureA := rt.discoveryGeneration("quarantined")
 	require.NotZero(t, captureA.Epoch, "the blocked list must be bound to a live connection")
 
-	// Replace the managed client while A's response is still in flight, then
-	// connect B directly. Background initialization may race this call, so an
-	// already-connecting or already-ready error is harmless; we verify the
-	// replacement reaches the expected connection generation below.
+	// Replace the desired configuration as well as the managed client while A's
+	// response is in flight. If only the manager is replaced, an overlapping
+	// LoadConfiguredServers or supervisor reconcile can still restore cfgA.
 	cfgB := *cfgA
 	cfgB.URL = second.URL
+	desired, err := rt.GetDesiredConfig()
+	require.NoError(t, err)
+	require.Len(t, desired.Servers, 1)
+	desired.Servers[0] = &cfgB
+	rt.UpdateConfig(desired, "")
 	require.NoError(t, rt.UpstreamManager().AddServerConfig("quarantined", &cfgB))
 	clientB, ok := rt.UpstreamManager().GetClient("quarantined")
 	require.True(t, ok)
+	require.Equal(t, second.URL, clientB.GetConfig().URL)
 	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelConnect()
 	if err := clientB.Connect(connectCtx); err != nil {
@@ -94,8 +109,13 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 		require.True(t, clientB.IsConnecting() || clientB.IsConnected(), "duplicate connect error without an active or ready connection: %v", err)
 	}
 	require.Eventually(t, func() bool {
-		return clientB.IsConnected() && clientB.ConnectionEpoch() > captureA.Epoch && rt.discoveryGeneration("quarantined") != captureA
-	}, 10*time.Second, 10*time.Millisecond, "replacement must connect and advance the capture before the old list returns")
+		current, ok := rt.UpstreamManager().GetClient("quarantined")
+		if !ok || current != clientB || current.GetConfig().URL != second.URL || !current.IsConnected() {
+			return false
+		}
+		generation := rt.discoveryGeneration("quarantined")
+		return current.ConnectionEpoch() > captureA.Epoch && generation.Epoch == current.ConnectionEpoch() && generation != captureA
+	}, 10*time.Second, 10*time.Millisecond, "replacement config, manager client, and discovery generation must agree before the old list returns")
 	unblockFirst()
 
 	select {

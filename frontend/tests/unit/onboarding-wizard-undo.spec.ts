@@ -144,30 +144,30 @@ describe('OnboardingWizard one-click undo (Spec 078 US3)', () => {
     const wrapper = await openClientsTab(pinia)
 
     // No undo affordance before any connect in this session.
-    expect(wrapper.find('[data-test="client-undo-cursor"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-undo"]').exists()).toBe(false)
 
     await connectViaPreview(wrapper, 'cursor')
 
-    const undoBtn = wrapper.find('[data-test="client-undo-cursor"]')
+    const undoBtn = wrapper.find('[data-test="connect-undo"]')
     expect(undoBtn.exists()).toBe(true)
 
     // FR-009: undo first shows the change to be reverted — nothing is called yet.
     await undoBtn.trigger('click')
     await flushPromises()
     expect(api.undoConnectClient).not.toHaveBeenCalled()
-    const panel = wrapper.find('[data-test="client-undo-panel-cursor"]')
+    const panel = wrapper.find('[data-test="connect-undo-panel"]')
     expect(panel.exists()).toBe(true)
     expect(panel.text()).toContain('will be reverted')
-    expect(wrapper.find('[data-test="client-undo-entry-cursor"]').text()).toContain('http://127.0.0.1:8080/mcp')
+    expect(wrapper.find('[data-test="connect-undo-entry"]').text()).toContain('http://127.0.0.1:8080/mcp')
 
-    await wrapper.find('[data-test="client-undo-confirm-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-undo-confirm"]').trigger('click')
     await flushPromises()
 
     // The undo passes the exact backup path this session's connect returned.
     expect(api.undoConnectClient).toHaveBeenCalledWith('cursor', 'mcpproxy', BACKUP)
     // Row returns to its pre-connect state: backup line + panel gone, honest result shown.
-    expect(wrapper.find('[data-test="client-backup-cursor"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="client-undo-panel-cursor"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-backup-path"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-undo-panel"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('Restored /Users/test/.cursor/mcp.json from backup')
     // Review & connect is available again.
     expect(wrapper.find('[data-test="connect-cursor"]').exists()).toBe(true)
@@ -177,16 +177,16 @@ describe('OnboardingWizard one-click undo (Spec 078 US3)', () => {
     const wrapper = await openClientsTab(pinia)
     await connectViaPreview(wrapper, 'cursor')
 
-    await wrapper.find('[data-test="client-undo-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-undo"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-test="client-undo-cancel-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-undo-cancel"]').trigger('click')
     await flushPromises()
 
     expect(api.undoConnectClient).not.toHaveBeenCalled()
-    expect(wrapper.find('[data-test="client-undo-panel-cursor"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-undo-panel"]').exists()).toBe(false)
     // The backup line (and thus the Undo affordance) is still there.
-    expect(wrapper.find('[data-test="client-backup-cursor"]').exists()).toBe(true)
-    expect(wrapper.find('[data-test="client-undo-cursor"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="connect-backup-path"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="connect-undo"]').exists()).toBe(true)
   })
 
   it('passes null backup for the no-prior-file case and states the file removal honestly', async () => {
@@ -207,12 +207,12 @@ describe('OnboardingWizard one-click undo (Spec 078 US3)', () => {
     const wrapper = await openClientsTab(pinia)
     await connectViaPreview(wrapper, 'cursor')
 
-    await wrapper.find('[data-test="client-undo-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-undo"]').trigger('click')
     await flushPromises()
-    const panel = wrapper.find('[data-test="client-undo-panel-cursor"]')
+    const panel = wrapper.find('[data-test="connect-undo-panel"]')
     expect(panel.text()).toContain('Undo removes')
 
-    await wrapper.find('[data-test="client-undo-confirm-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-undo-confirm"]').trigger('click')
     await flushPromises()
 
     expect(api.undoConnectClient).toHaveBeenCalledWith('cursor', 'mcpproxy', null)
@@ -229,27 +229,27 @@ describe('OnboardingWizard one-click undo (Spec 078 US3)', () => {
     const wrapper = await openClientsTab(pinia)
     await connectViaPreview(wrapper, 'cursor')
 
-    await wrapper.find('[data-test="client-undo-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-undo"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-test="client-undo-confirm-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-undo-confirm"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.text()).toContain('changed since mcpproxy connected')
     // The refusal does not pretend the undo happened: the backup line stays.
-    expect(wrapper.find('[data-test="client-backup-cursor"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="connect-backup-path"]').exists()).toBe(true)
   })
 
   it('does not replay undo state in a new wizard session', async () => {
     const wrapper = await openClientsTab(pinia)
     await connectViaPreview(wrapper, 'cursor')
-    expect(wrapper.find('[data-test="client-undo-cursor"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="connect-undo"]').exists()).toBe(true)
 
     await wrapper.setProps({ show: false })
     await flushPromises()
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    expect(wrapper.find('[data-test="client-undo-cursor"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="client-undo-panel-cursor"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-undo"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-undo-panel"]').exists()).toBe(false)
   })
 })

@@ -372,8 +372,9 @@ func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[str
 
 // assertSearchServersDelta: Spec 109 FR-067 makes 'registry' OPTIONAL (was
 // required) and updates its description, plus the tool's own description,
-// to the "search every catalog source" wording. No parameter is added or
-// removed, and every parameter OTHER than 'registry' is byte-identical.
+// to the "search every catalog source" wording. The catalog follow-up also
+// documents that non-empty 'tag' values are rejected. No parameter is added
+// or removed, and every parameter OTHER than 'registry' and 'tag' is identical.
 func assertSearchServersDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
 	t.Helper()
 
@@ -388,7 +389,7 @@ func assertSearchServersDelta(t *testing.T, surface string, preM, curM map[strin
 		"surface %s: search_servers must keep the same parameter set — FR-067 changes registry's requiredness/description only", surface)
 
 	for name, preProp := range preProps {
-		if name == "registry" {
+		if name == "registry" || name == "tag" {
 			continue
 		}
 		assert.Equal(t, preProp, curProps[name],
@@ -401,6 +402,15 @@ func assertSearchServersDelta(t *testing.T, surface string, preM, curM map[strin
 		"surface %s: precondition — pre-feature search_servers required 'registry'", surface)
 	assert.NotContains(t, curRequired, "registry",
 		"surface %s: 'registry' must become optional (FR-067)", surface)
+
+	preTag, ok := preProps["tag"].(map[string]interface{})
+	assert.True(t, ok, "surface %s: precondition — search_servers has tag parameter", surface)
+	curTag, ok := curProps["tag"].(map[string]interface{})
+	assert.True(t, ok, "surface %s: search_servers must keep tag parameter", surface)
+	assert.Equal(t, "Catalog entries do not carry tags. Omit this parameter or pass an empty value; non-empty values return an error.", curTag["description"],
+		"surface %s: tag must explain the unsupported filter behavior", surface)
+	assert.NotEqual(t, preTag["description"], curTag["description"],
+		"surface %s: tag description delta must be explicit", surface)
 }
 
 // assertListRegistriesDelta: Spec 109 FR-067 changes ONLY list_registries'

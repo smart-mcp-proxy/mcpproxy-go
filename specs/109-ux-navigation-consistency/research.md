@@ -65,9 +65,11 @@ Annotations are excluded from the approval hash (`tool_quarantine.go:26`), so an
 **Why**: gives Clients a useful page before Spec 108's credentials exist, without guessing. 108 later swaps the join key for the authoritative `client_id`.
 **Rejected**: fuzzy matching of client names (it misattributes); waiting for 108 (D1).
 
+**109-h refinement**: a successful reconnect is a new evidence generation. The successful-connect onboarding transaction clears every supported alias in `client_last_seen` while updating `client_connected_at`; a later `initialize` must repopulate it before the row can say `connected_seen`. The telemetry `mcp_clients_seen_ever` list remains a historical hint only. An observed unknown name becomes an `other:<name>` presence row; the manual "Other client" connection snippet is a separate UI affordance, not an API row.
+
 ## D9 — Sessions become an Activity view
 
-**Decision**: `/activity?view=sessions` renders today's Sessions table, and `/sessions` redirects there, keeping the query. The Sessions sidebar item is removed in 109-i. Each Clients row shows "N active sessions · last seen" with an inline expander listing the sessions, each linking to `/activity?session=<id>`. macOS: an Activity segmented control (Tool calls · Sessions · System events · All). DashboardSessions stays on Home.
+**Decision**: `/activity?view=sessions` renders today's Sessions table, and `/sessions` redirects there, keeping the query. The Sessions sidebar item is removed in 109-i. Each Clients list row shows only "N active sessions · last seen"; its inline expander fetches `GET /clients/{id}` for full session rows on demand, each linking to Activity by the work-session/legacy mapping. macOS: an Activity segmented control (Tool calls · Sessions · System events · All). DashboardSessions stays on Home.
 **Why**: N5 says an empty standalone page is confusing, while sessions are useful next to calls and clients. Keeping the URL working preserves Spec 108 acceptance check 6.
 **Rejected**: deleting the table (sessions carry capabilities and token counts, which nothing else shows).
 

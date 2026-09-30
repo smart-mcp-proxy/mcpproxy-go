@@ -393,7 +393,7 @@
           "type": "string"
         },
         "tag": {
-          "description": "Filter servers by tag/category (if supported by registry)",
+          "description": "Catalog entries do not carry tags. Omit this parameter or pass an empty value; non-empty values return an error.",
           "type": "string"
         }
       },

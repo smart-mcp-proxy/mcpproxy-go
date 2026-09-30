@@ -358,3 +358,17 @@ func TestMarkOnboarding_ChunkedBodyIsDecoded(t *testing.T) {
 	assert.Contains(t, ctrl.saved.ClientConnectedAt, "cursor")
 	assert.Equal(t, storage.StepStatusCompleted, ctrl.saved.ServerStepStatus)
 }
+
+func TestMarkOnboarding_DisconnectedClientIDEndsConnectionGeneration(t *testing.T) {
+	ctrl := &onboardingTestController{state: &storage.OnboardingState{
+		ClientConnectedAt: map[string]time.Time{"cursor": time.Now().Add(-time.Hour)},
+		ClientLastSeen:    map[string]time.Time{"cursor": time.Now().Add(-time.Hour)},
+	}}
+	srv := newOnboardingTestServer(t, ctrl)
+	w := postOnboardingMark(t, srv, OnboardingMarkRequest{DisconnectedClientID: "cursor"})
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NotNil(t, ctrl.saved)
+	assert.NotContains(t, ctrl.saved.ClientConnectedAt, "cursor")
+	assert.Contains(t, ctrl.saved.ClientLastSeen, "cursor", "disconnect preserves historical last-seen evidence")
+	assert.WithinDuration(t, time.Now(), ctrl.saved.ClientDisconnectedAt["cursor"], 5*time.Second)
+}

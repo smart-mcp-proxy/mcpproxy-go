@@ -97,6 +97,17 @@ func TestCatalogSearch_Unauthenticated401(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+func TestCatalogSearch_RejectsAnyNonEmptyDuplicateTag(t *testing.T) {
+	withCatalogFixtureRegistry(t)
+	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: catalogFixtureServers(), withManagement: true}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/catalog/search?tag=&tag=database", http.NoBody)
+	rec := httptest.NewRecorder()
+	srv.handleCatalogSearch(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "tag filtering is not supported")
+}
+
 // TestCatalogSearch_AddedScopedByCallerVisibility pins FR-007: "added" is
 // computed only over servers the caller may enumerate, and a manually added
 // server matches by install target alone while a registry-sourced one also
@@ -145,6 +156,13 @@ func TestCatalogSearch_AddedRequiresMatchingSourceForRegistryAdd(t *testing.T) {
 	assert.True(t, catalogAddedFor(results, "delta-tool"), "delta-tool (source=official) must match delta (source_registry_id=official)")
 	assert.False(t, catalogAddedFor(results, "lookalike-tool"),
 		"lookalike-tool (source=other) shares delta's install target but must NOT read added=true — delta was added from a different source")
+}
+
+func TestCatalogInstallTargetForServer_PreservesArgumentBoundaries(t *testing.T) {
+	configured := contracts.Server{Command: "npx", Args: []string{"a b", "c"}}
+	catalog := registries.CatalogInstall{Command: "npx", Args: []string{"a", "b c"}}
+
+	assert.NotEqual(t, registries.CatalogInstallTarget(catalog), catalogInstallTargetForServer(configured))
 }
 
 // TestCatalogSearch_AddedServerNameIsVisibleScopedAndUnique pins the

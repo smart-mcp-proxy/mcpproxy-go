@@ -80,9 +80,9 @@ async function openModal(pinia: any) {
 }
 
 async function connectViaPreview(wrapper: any, clientId: string) {
-  await wrapper.find(`[data-test="connect-start-${clientId}"]`).trigger('click')
+  await wrapper.find(`[data-test="connect-${clientId}"]`).trigger('click')
   await flushPromises()
-  await wrapper.find(`[data-test="connect-preview-confirm-${clientId}"]`).trigger('click')
+  await wrapper.find(`[data-test="client-preview-confirm-${clientId}"]`).trigger('click')
   await flushPromises()
 }
 

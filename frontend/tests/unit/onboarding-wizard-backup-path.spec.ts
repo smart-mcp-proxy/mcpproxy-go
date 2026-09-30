@@ -156,7 +156,7 @@ async function connectViaPreview(wrapper: any, clientId: string) {
 
     await connectViaPreview(wrapper, 'cursor')
 
-    const backup = wrapper.find('[data-test="client-backup-cursor"]')
+    const backup = wrapper.find('[data-test="connect-backup-path"]')
     expect(backup.exists()).toBe(true)
     expect(backup.text()).toContain('A backup of your previous config was saved to')
     expect(backup.text()).toContain('/Users/test/.cursor/mcp.json.bak.20260702-101530')
@@ -165,7 +165,7 @@ async function connectViaPreview(wrapper: any, clientId: string) {
     )
 
     // One-click copy of the backup path.
-    const copyBtn = wrapper.find('[data-test="client-copy-backup-cursor"]')
+    const copyBtn = wrapper.find('[data-test="connect-copy-backup"]')
     expect(copyBtn.exists()).toBe(true)
     await copyBtn.trigger('click')
     await flushPromises()
@@ -190,10 +190,10 @@ async function connectViaPreview(wrapper: any, clientId: string) {
 
     await connectViaPreview(wrapper, 'cursor')
 
-    const backup = wrapper.find('[data-test="client-backup-cursor"]')
+    const backup = wrapper.find('[data-test="connect-no-backup"]')
     expect(backup.exists()).toBe(true)
     expect(backup.text()).toContain('No prior config file existed, so no backup was needed.')
-    expect(backup.find('[data-test="client-copy-backup-cursor"]').exists()).toBe(false)
+    expect(backup.find('[data-test="connect-copy-backup"]').exists()).toBe(false)
   })
 
   // Spec 078 US2 independent test / FR-006: a bridge client with no config file
@@ -231,7 +231,7 @@ async function connectViaPreview(wrapper: any, clientId: string) {
 
     await connectViaPreview(wrapper, 'claude-desktop')
 
-    const backup = wrapper.find('[data-test="client-backup-claude-desktop"]')
+    const backup = wrapper.find('[data-test="connect-no-backup"]')
     expect(backup.exists()).toBe(true)
     expect(backup.text()).toContain('No prior config file existed, so no backup was needed.')
   })
@@ -269,7 +269,7 @@ async function connectViaPreview(wrapper: any, clientId: string) {
 
     const wrapper = await openClientsTab(pinia)
     await connectViaPreview(wrapper, 'cursor')
-    expect(wrapper.find('[data-test="client-backup-cursor"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="connect-backup-path"]').exists()).toBe(true)
 
     // Close and reopen the wizard: a fresh session must start clean.
     await wrapper.setProps({ show: false })
@@ -277,6 +277,6 @@ async function connectViaPreview(wrapper: any, clientId: string) {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    expect(wrapper.find('[data-test="client-backup-cursor"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-backup-path"]').exists()).toBe(false)
   })
 })

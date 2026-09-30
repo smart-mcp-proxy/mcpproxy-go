@@ -20,7 +20,7 @@
 
     <CatalogSearch v-if="activeTab === 'catalog'" :source="sourceFilter" @added="handleAdded" />
     <PasteServer v-else-if="activeTab === 'paste'" @added="handleAdded" />
-    <ImportServersPanel v-else-if="activeTab === 'import'" @imported="handleImported" />
+    <ImportServers v-else-if="activeTab === 'import'" @imported="handleImported" />
     <ManualServerForm v-else-if="activeTab === 'manual'" @added="handleAdded" />
   </div>
 </template>
@@ -30,7 +30,7 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import CatalogSearch from '@/components/CatalogSearch.vue'
 import PasteServer from '@/components/PasteServer.vue'
-import ImportServersPanel from '@/components/ImportServersPanel.vue'
+import ImportServers from '@/components/ImportServers.vue'
 import ManualServerForm from '@/components/ManualServerForm.vue'
 import { useSystemStore } from '@/stores/system'
 import { serverDetailPath } from '@/utils/serverRoute'

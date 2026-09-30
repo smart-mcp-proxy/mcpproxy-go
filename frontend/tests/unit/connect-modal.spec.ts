@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ConnectModal from '@/components/ConnectModal.vue'
+import ClientConnectList from '@/components/ClientConnectList.vue'
 import api from '@/services/api'
+
+// Keep the established test bodies while exercising the extracted owner.
+const ConnectModal = ClientConnectList
 
 vi.mock('@/services/api', () => ({
   default: {
@@ -36,7 +39,7 @@ function previewOk(overrides: Record<string, unknown> = {}) {
   }
 }
 
-describe('ConnectModal', () => {
+describe('ClientConnectList', () => {
   let pinia: any
 
   beforeEach(() => {
@@ -69,7 +72,7 @@ describe('ConnectModal', () => {
       }],
     })
 
-    const wrapper = mount(ConnectModal, {
+    const wrapper = mount(ClientConnectList, {
       props: { show: false },
       global: { plugins: [pinia] },
     })
@@ -441,9 +444,9 @@ describe('ConnectModal', () => {
     await flushPromises()
 
     // Spec 078 US1: click Review & connect → preview panel → confirm (Connect) writes.
-    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-test="connect-preview-confirm-cursor"]').trigger('click')
+    await wrapper.find('[data-test="client-preview-confirm-cursor"]').trigger('click')
     await flushPromises()
 
     const backup = wrapper.find('[data-test="connect-backup-path"]')
@@ -499,9 +502,9 @@ describe('ConnectModal', () => {
     await flushPromises()
 
     // Spec 078 US1: preview then confirm for the bridge (no-prior-file) case.
-    await wrapper.find('[data-test="connect-start-claude-desktop"]').trigger('click')
+    await wrapper.find('[data-test="connect-claude-desktop"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-test="connect-preview-confirm-claude-desktop"]').trigger('click')
+    await wrapper.find('[data-test="client-preview-confirm-claude-desktop"]').trigger('click')
     await flushPromises()
 
     const noBackup = wrapper.find('[data-test="connect-no-backup"]')
@@ -627,6 +630,14 @@ describe('ConnectModal', () => {
     expect(connectAllBtn.exists()).toBe(true)
     expect(connectAllBtn.text()).toContain('Connect 3 clients')
     await connectAllBtn.trigger('click')
+    await flushPromises()
+
+    // Every target is previewed before the first config write. This is the
+    // bulk equivalent of the row-level Review & connect contract.
+    expect(api.getConnectPreview).toHaveBeenCalledTimes(3)
+    expect(api.connectClient).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="connect-bulk-preview"]').exists()).toBe(true)
+    await wrapper.find('[data-test="connect-bulk-preview-confirm"]').trigger('click')
     await flushPromises()
 
     expect(api.connectClient).toHaveBeenCalledTimes(3)

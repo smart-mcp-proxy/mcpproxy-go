@@ -68,7 +68,7 @@
              tenant session cannot act on or read; hidden rather than
              issued-and-403'd (FR-041), matching the TopHeader fix above. -->
         <div v-if="authStore.principalKind !== 'tenant'" class="flex flex-col gap-2 w-full max-w-[260px] pt-3" data-test="dashboard-admin-left-actions">
-          <button @click="showConnectModal = true" class="btn btn-primary btn-sm w-full gap-1">
+          <button @click="router.push('/clients')" class="btn btn-primary btn-sm w-full gap-1">
             Connect Clients
           </button>
           <button @click="router.push('/add-server?tab=import')" class="btn btn-secondary btn-outline btn-sm w-full gap-1" data-test="dashboard-import-configs">
@@ -357,7 +357,6 @@
     <UsageSummaryStrip v-if="authStore.principalKind !== 'tenant' && attentionStore.loaded && attentionStore.count > 0" data-test="home-usage-strip-bottom" />
 
     <!-- Modals -->
-    <ConnectModal :show="showConnectModal" @close="showConnectModal = false" />
     <OnboardingWizard :show="onboardingStore.wizardOpen" @close="onboardingStore.closeWizard" />
   </div>
 </template>
@@ -376,7 +375,6 @@ import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import TelemetryBanner from '@/components/TelemetryBanner.vue'
 import UpdateBanner from '@/components/UpdateBanner.vue'
 import TokenPieChart from '@/components/TokenPieChart.vue'
-import ConnectModal from '@/components/ConnectModal.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import AttentionList from '@/components/AttentionList.vue'
 import UsageSummaryStrip from '@/components/UsageSummaryStrip.vue'
@@ -394,8 +392,6 @@ const attentionStore = useAttentionStore()
 
 const router = useRouter()
 
-// Modal state
-const showConnectModal = ref(false)
 
 // Auto-refresh interval
 let refreshInterval: ReturnType<typeof setInterval> | null = null

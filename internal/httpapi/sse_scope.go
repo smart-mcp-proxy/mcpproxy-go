@@ -163,6 +163,9 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 	internalRuntime.EventTypeConfigReloaded: {},
 	internalRuntime.EventTypeConfigSaved:    {},
 	internalRuntime.EventTypeSecretsChanged: {},
+	// Presence is an administrator-only local-client inventory. The invalidation
+	// frame names no server, so scoped callers cannot be given a safe subset.
+	internalRuntime.EventTypeClientPresenceChanged: {},
 }
 
 // identityBearingEventTypes are the event types whose payload is ABOUT one

@@ -134,3 +134,56 @@ func TestMutatingServerRoutes_AdminAllowed(t *testing.T) {
 		})
 	}
 }
+
+func TestConnectStatusReads_RequireAdminAndDoNotLeakClientDetails(t *testing.T) {
+	readers := []struct {
+		name       string
+		key        string
+		wantStatus int
+	}{
+		{name: "missing-key", wantStatus: http.StatusUnauthorized},
+		{name: "invalid-key", key: "not-admin", wantStatus: http.StatusUnauthorized},
+		{name: "agent-token", wantStatus: http.StatusForbidden},
+	}
+	for _, route := range []string{
+		"/api/v1/connect",
+		"/api/v1/connect/cursor",
+		"/api/v1/connect/cursor/preview",
+	} {
+		t.Run(route, func(t *testing.T) {
+			for _, reader := range readers {
+				t.Run(reader.name, func(t *testing.T) {
+					ctrl := &adminConfigController{ServerController: &MockServerController{}, apiKey: "admin-secret"}
+					srv, agentToken := agentTokenServer(t, ctrl)
+					key := reader.key
+					if reader.name == "agent-token" {
+						key = agentToken
+					}
+					req := httptest.NewRequest(http.MethodGet, route, nil)
+					if key != "" {
+						req.Header.Set("X-API-Key", key)
+					}
+					rec := httptest.NewRecorder()
+					srv.ServeHTTP(rec, req)
+					require.Equal(t, reader.wantStatus, rec.Code, rec.Body.String())
+					if reader.name == "agent-token" {
+						require.Contains(t, rec.Body.String(), "Admin credentials required to read client connection status")
+						require.NotContains(t, rec.Body.String(), "cursor")
+						require.NotContains(t, rec.Body.String(), "config_path")
+					}
+				})
+			}
+
+			t.Run("administrator-allowed", func(t *testing.T) {
+				ctrl := &adminConfigController{ServerController: &MockServerController{}, apiKey: "admin-secret"}
+				srv, _ := agentTokenServer(t, ctrl)
+				req := httptest.NewRequest(http.MethodGet, route, nil)
+				req.Header.Set("X-API-Key", "admin-secret")
+				rec := httptest.NewRecorder()
+				srv.ServeHTTP(rec, req)
+				require.NotEqual(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+				require.NotEqual(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			})
+		})
+	}
+}

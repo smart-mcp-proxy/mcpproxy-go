@@ -199,8 +199,9 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 //     field (assertCodeExecutionLive).
 //   - search_servers / list_registries — Spec 109 FR-060/067: 'registry'
 //     becomes optional on search_servers (was required) so it searches every
-//     enabled catalog source when omitted, and both tools' descriptions gained
-//     "catalog source" wording. Pinned field by field by
+//     enabled catalog source when omitted, both tools' descriptions gained
+//     "catalog source" wording, and search_servers documents its unsupported
+//     tag filter. Pinned field by field by
 //     TestMenuSurface_ExactDeltaFromPreFeature's assertSearchServersDelta /
 //     assertListRegistriesDelta.
 var toolsListAllowedDelta = map[string][]string{

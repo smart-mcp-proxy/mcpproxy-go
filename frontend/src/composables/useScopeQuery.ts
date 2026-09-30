@@ -136,6 +136,12 @@ function isAvailable(def: ScopeParamDef): boolean {
   return !def.requires || availableFeatures.has(def.requires)
 }
 
+/** Reports whether a contract parameter is enabled by this server build. */
+export function isScopeParamAvailable(name: string): boolean {
+  const def = registry.get(name)
+  return Boolean(def && isAvailable(def))
+}
+
 // ---------------------------------------------------------------------------
 // Relative time resolution (from/to; url-filter-contract.md `from`, `to`)
 // ---------------------------------------------------------------------------
