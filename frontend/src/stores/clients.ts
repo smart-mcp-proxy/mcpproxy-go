@@ -28,7 +28,22 @@ export const useClientsStore = defineStore('clients', () => {
   async function refreshPresence() {
     try {
       const response = await api.getClients()
-      if (response.success && Array.isArray(response.data?.clients)) clients.value = response.data.clients
+      if (response.success && Array.isArray(response.data?.clients)) {
+        // GET /clients is metadata-only. Merge by id so detail data that
+        // loadDetail() resolved for an expanded row (sessions, connected,
+        // connection_unverified) survives the badge poll.
+        const previous = new Map(clients.value.map(client => [client.id, client]))
+        clients.value = response.data.clients.map(incoming => {
+          const existing = previous.get(incoming.id)
+          if (!existing || existing.sessions === undefined) return incoming
+          return {
+            ...incoming,
+            sessions: existing.sessions,
+            connected: existing.connected,
+            connection_unverified: existing.connection_unverified,
+          }
+        })
+      }
     } catch {
       // A badge must not fail the sidebar on an old or offline core.
     }
