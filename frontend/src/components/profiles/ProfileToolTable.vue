@@ -49,6 +49,7 @@
             :class="focusedKey === key(row) && 'ring-2 ring-primary ring-inset bg-primary/10'"
             :aria-current="focusedKey === key(row) ? 'true' : undefined"
             :data-test="`profile-tool-row-${toolRowId(row)}`"
+            :ref="el => setRow(key(row), el as HTMLElement | null)"
           >
             <td class="font-mono text-xs break-all">{{ row.server }}:{{ row.tool }}</td>
             <td class="text-xs whitespace-nowrap">{{ row.intrinsic_tier }}<template v-if="row.profile_tier && row.profile_tier !== row.intrinsic_tier"> &rarr; {{ row.profile_tier }}</template></td>
@@ -138,6 +139,7 @@ const reasonFilter = ref('')
 const search = ref('')
 const focusedKey = ref('')
 const toggles = new Map<string, HTMLInputElement>()
+const rowEls = new Map<string, HTMLElement>()
 
 const key = toolKey
 const serverNames = computed(() => [...new Set(props.rows.map(row => row.server))].sort())
@@ -158,6 +160,10 @@ function isListed(list: 'allow' | 'deny', row: EffectiveTool): boolean {
 function classified(row: EffectiveTool): string {
   return props.draftRules?.classify?.[key(row)] ?? ''
 }
+function setRow(k: string, el: HTMLElement | null) {
+  if (el) rowEls.set(k, el)
+  else rowEls.delete(k)
+}
 function setToggle(k: string, el: HTMLInputElement | null) {
   if (el) toggles.set(k, el)
   else toggles.delete(k)
@@ -171,8 +177,7 @@ watch(() => [props.focusKey, props.rows.length] as const, async ([focus]) => {
   reasonFilter.value = ''
   search.value = ''
   await Promise.resolve()
-  const row = document.querySelector(`[data-test="profile-tool-row-${focus.replace(':', '__')}"]`)
-  row?.scrollIntoView?.({ block: 'center' })
+  rowEls.get(focus)?.scrollIntoView?.({ block: 'center' })
   toggles.get(focus)?.focus()
 }, { immediate: true, flush: 'post' })
 </script>

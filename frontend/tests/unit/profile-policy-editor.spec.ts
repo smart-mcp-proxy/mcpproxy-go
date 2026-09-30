@@ -194,8 +194,8 @@ describe('Profile policy editor (Spec 108-i T091, FR-041, FR-005)', () => {
   it('Rename lists what moves before posting the rename', async () => {
     ;(api.renameProfile as any).mockResolvedValue({ profile: { ...FULL, name: 'work-ro2' }, moved: { clients: ['cursor'], tokens: ['ci'] } })
     const { wrapper, router } = await mountEditor()
-    const store = useProfilesStore()
-    store.profiles = [FULL, makeProfile('other', { switchable_to: ['work-ro'] })]
+    // Opening the dialog refreshes the list, so the impact list never reads a stale one.
+    ;(api.getProfiles as any).mockResolvedValue({ profiles: [FULL, makeProfile('other', { switchable_to: ['work-ro'] })] })
     await wrapper.get('[data-test="profile-rename"]').trigger('click')
     await flushPromises()
     const impact = wrapper.get('[data-test="profile-rename-dialog"] [data-test="profile-impact"]')
@@ -296,6 +296,24 @@ describe('Profile policy editor (Spec 108-i T091, FR-041, FR-005)', () => {
     await flushPromises()
     expect(wrapper.find('[data-test="profile-changed-elsewhere"]').exists()).toBe(false)
     expect((wrapper.get('[data-test="profile-title"]').element as HTMLInputElement).value).toBe('Changed elsewhere')
+  })
+
+  it('drops the answer of a save for a profile the operator has already left', async () => {
+    let finish!: (value: unknown) => void
+    ;(api.updateProfile as any).mockReturnValue(new Promise(resolve => { finish = resolve }))
+    const { wrapper } = await mountEditor()
+    await wrapper.get('[data-test="profile-title"]').setValue('Edited')
+    await wrapper.get('[data-test="profile-form"]').trigger('submit')
+    // Navigate to another profile while the PUT is in flight.
+    ;(api.getProfile as any).mockResolvedValue(makeProfile('other', { title: 'Other profile', servers: ['github'] }))
+    await wrapper.setProps({ name: 'other' })
+    await flushPromises()
+    expect((wrapper.get('[data-test="profile-title"]').element as HTMLInputElement).value).toBe('Other profile')
+    finish({ profile: { ...FULL, title: 'Edited' }, warnings: [] })
+    await flushPromises()
+    // The late answer for work-ro did not replace the page that is showing "other".
+    expect((wrapper.get('[data-test="profile-title"]').element as HTMLInputElement).value).toBe('Other profile')
+    expect(wrapper.get('h1').text()).toBe('Other profile')
   })
 
   it('shows Profile not found for a 404', async () => {

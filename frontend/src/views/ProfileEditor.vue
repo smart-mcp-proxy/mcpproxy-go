@@ -413,8 +413,13 @@ async function save() {
   saving.value = true
   clearErrors()
   savedNote.value = ''
+  // The profile this save is for: if the operator navigates to another profile
+  // while the PUT is in flight, its answer must not replace the new page's state.
+  const name = props.name
+  const body = toConfig(draft)
   try {
-    const result = await api.updateProfile(props.name, toConfig(draft))
+    const result = await api.updateProfile(name, body)
+    if (props.name !== name) return
     saved.value = result.profile
     Object.assign(draft, draftFrom(result.profile))
     warnings.value = result.warnings ?? []
@@ -422,6 +427,7 @@ async function save() {
     void profiles.fetchProfiles()
     await loadTools(loadTicket)
   } catch (err) {
+    if (props.name !== name) return
     const refused = err as ApiError
     if (isGuardRefusal(err)) guard.value = refused
     else if (refused.field) fieldErrors[refused.field] = refused.message

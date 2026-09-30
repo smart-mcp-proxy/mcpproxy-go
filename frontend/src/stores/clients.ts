@@ -21,11 +21,22 @@ export const useClientsStore = defineStore('clients', () => {
   // Client ids whose detail-resolved fields must survive a metadata-only refresh.
   const detailLoaded = new Set<string>()
 
+  // A response is applied only while it is still the latest of its kind and the
+  // scope it was asked for is still the active one: changing ?profile= / ?client=
+  // must not let the previous scope's rows land afterwards.
+  let loadTicket = 0
+  let presenceTicket = 0
+  const scopeKey = () => JSON.stringify(scope)
+
   async function load(nextScope?: { profile?: string; client?: string }) {
     if (nextScope) scope = nextScope
+    const ticket = ++loadTicket
+    const asked = scopeKey()
     loading.value = true
     error.value = null
     const [clientResponse, routingResponse] = await Promise.all([api.getClients(scope), api.getRouting()])
+    // A newer load owns the loading flag and the rows.
+    if (ticket !== loadTicket || asked !== scopeKey()) return
     if (clientResponse.success && clientResponse.data) {
       clients.value = clientResponse.data.clients
       warnings.value = clientResponse.data.warnings ?? []
@@ -42,8 +53,11 @@ export const useClientsStore = defineStore('clients', () => {
   // and never touches loading/error/routing, so the Clients page does not
   // flash a spinner when a badge poll lands underneath it.
   async function refreshPresence() {
+    const ticket = ++presenceTicket
+    const asked = scopeKey()
     try {
       const response = await api.getClients(scope)
+      if (ticket !== presenceTicket || asked !== scopeKey()) return
       if (response.success && Array.isArray(response.data?.clients)) {
         warnings.value = response.data.warnings ?? []
         // GET /clients is metadata-only. For rows whose detail was loaded via

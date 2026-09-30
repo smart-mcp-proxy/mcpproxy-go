@@ -74,6 +74,33 @@ describe('profiles and client rows refresh on SSE events (Spec 108-i T102)', () 
     expect(store.clients).toHaveLength(1)
   })
 
+  it('only the latest profile fetch applies (a slow older answer cannot overwrite a newer list)', async () => {
+    const store = useProfilesStore()
+    let slow!: (value: unknown) => void
+    ;(api.getProfiles as any).mockReturnValueOnce(new Promise(resolve => { slow = resolve }))
+    const older = store.fetchProfiles()
+    ;(api.getProfiles as any).mockResolvedValueOnce({ profiles: [makeProfile('fresh')], anonymous_profile: 'fresh' })
+    await store.fetchProfiles()
+    slow({ profiles: [makeProfile('stale')], anonymous_profile: 'stale' })
+    await older
+    expect(store.profiles.map(profile => profile.name)).toEqual(['fresh'])
+    expect(store.anonymousProfile).toBe('fresh')
+    expect(store.loading).toBe(false)
+  })
+
+  it('rows of a superseded client scope are dropped', async () => {
+    const store = useClientsStore()
+    let slow!: (value: unknown) => void
+    ;(api.getClients as any).mockReturnValueOnce(new Promise(resolve => { slow = resolve }))
+    const older = store.load({ profile: 'old' })
+    ;(api.getClients as any).mockResolvedValueOnce({ success: true, data: { clients: [makeClient('current')], warnings: [] } })
+    await store.load({ profile: 'new' })
+    slow({ success: true, data: { clients: [makeClient('previous-scope')], warnings: [] } })
+    await older
+    expect(store.clients.map(client => client.id)).toEqual(['current'])
+    expect(store.loading).toBe(false)
+  })
+
   it('the SSE bridge re-dispatches both events as window events', async () => {
     const { useSystemStore } = await import('@/stores/system')
     const listeners = new Map<string, (event: MessageEvent) => void>()

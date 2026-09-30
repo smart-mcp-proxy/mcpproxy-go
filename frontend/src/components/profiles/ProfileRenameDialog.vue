@@ -48,7 +48,14 @@ const newName = ref('')
 const busy = ref(false)
 const error = ref<ApiError | null>(null)
 
-watch(() => props.open, open => { if (open) { newName.value = props.profile.name; error.value = null; busy.value = false } })
+watch(() => props.open, open => {
+  if (!open) return
+  newName.value = props.profile.name
+  error.value = null
+  busy.value = false
+  // The impact list reads other profiles' switchable_to: make sure it is current.
+  void profiles.fetchProfiles()
+})
 
 const usedBy = computed<ProfileUsedBy>(() => props.profile.used_by ?? { clients: [], tokens: [], anonymous_profile: false })
 const referenced = computed(() => profiles.profiles.some(other => other.name !== props.profile.name && other.switchable_to?.includes(props.profile.name)))

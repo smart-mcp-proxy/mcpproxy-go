@@ -33,20 +33,26 @@ export const useProfilesStore = defineStore('profiles', () => {
     return profile?.title || name
   }
 
+  // Every fetch takes a ticket and only the latest applies: a slow answer that
+  // started before a mutation or an invalidation must not overwrite a newer one.
+  let fetchTicket = 0
   async function fetchProfiles(): Promise<void> {
+    const ticket = ++fetchTicket
     loading.value = true
     error.value = null
     errorStatus.value = 0
     try {
       const list = await api.getProfiles()
+      if (ticket !== fetchTicket) return
       profiles.value = list?.profiles ?? []
       anonymousProfile.value = list?.anonymous_profile ?? ''
       loaded.value = true
     } catch (err) {
+      if (ticket !== fetchTicket) return
       error.value = err instanceof Error ? err.message : 'Failed to load profiles'
       errorStatus.value = (err as { status?: number })?.status ?? 0
     } finally {
-      loading.value = false
+      if (ticket === fetchTicket) loading.value = false
     }
   }
 

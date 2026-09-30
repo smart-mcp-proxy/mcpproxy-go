@@ -52,7 +52,14 @@ const leave = ref(false)
 const busy = ref(false)
 const apiError = ref<ApiError | null>(null)
 
-watch(() => props.open, open => { if (open) { target.value = ''; leave.value = false; busy.value = false; apiError.value = null } })
+watch(() => props.open, open => {
+  if (!open) return
+  target.value = ''
+  leave.value = false
+  busy.value = false
+  apiError.value = null
+  void profiles.fetchProfiles()
+}, { immediate: true })
 
 const usedBy = computed<ProfileUsedBy>(() => props.profile.used_by ?? { clients: [], tokens: [], anonymous_profile: false })
 const isAnonymous = computed(() => usedBy.value.anonymous_profile)
