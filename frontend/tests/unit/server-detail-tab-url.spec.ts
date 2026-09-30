@@ -81,7 +81,7 @@ async function mountSettings(path = '/settings') {
   const wrapper = mount(Settings, {
     global: {
       plugins: [router],
-      stubs: { VueMonacoEditor: true, ConnectModal: true },
+      stubs: { VueMonacoEditor: true },
     },
   })
   await flushPromises()

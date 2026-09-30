@@ -103,7 +103,7 @@ describe('CatalogSearch.vue secrets-prompt dialog uses showModal()/close(), not 
 describe('every <dialog class="modal"> drives its open state imperatively', () => {
   const files = [
     '../../src/components/OnboardingWizard.vue',
-    '../../src/components/ConnectModal.vue',
+    '../../src/components/ClientConnectList.vue',
     '../../src/components/AddSecretModal.vue',
     '../../src/components/CatalogSourcesSettings.vue',
     '../../src/components/CatalogSearch.vue',

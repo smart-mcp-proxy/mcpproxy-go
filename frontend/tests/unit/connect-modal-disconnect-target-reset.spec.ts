@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ConnectModal from '@/components/ConnectModal.vue'
+import ClientConnectList from '@/components/ClientConnectList.vue'
 import api from '@/services/api'
 
 // Spec 109 PR-a review round 2 (finding 3): close() (the useDialogOpen onClose
@@ -82,7 +82,7 @@ describe('ConnectModal — disconnectTarget cleared on close (review round 2, fi
   })
 
   it('does not show the stale "Disconnect cursor?" panel after Escape + reopen', async () => {
-    const wrapper = mount(ConnectModal, { props: { show: false }, global: { plugins: [pinia] } })
+    const wrapper = mount(ClientConnectList, { props: { show: false }, global: { plugins: [pinia] } })
     const dialogNode = wrapper.element as HTMLDialogElement
     polyfillNativeDialog(dialogNode)
 
