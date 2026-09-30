@@ -4085,11 +4085,26 @@ func (p *MCPProxyServer) handleAddServerFromRegistry(ctx context.Context, reques
 	return mcp.NewToolResultText(string(jsonData)), nil
 }
 
+// recordProfileManagementRefusal records the profile_management refusal of a
+// management built-in the caller's profile hides (contracts/refusals.md,
+// "Management tool hidden"), mirroring handleCodeExecution's profile refusal.
+// The row has no server name, so ActivityFilter.AllowedServers never shows it
+// to a scoped reader, and its reason is the non-disclosing text the caller
+// already received. It runs where the shared handler runs (REST /tools/call);
+// an MCP tools/call of a filter-hidden built-in is answered by mcp-go's
+// WithToolFilter before any handler, exactly as for code_execution.
+func (p *MCPProxyServer) recordProfileManagementRefusal(ctx context.Context, toolName string) {
+	p.emitActivityPolicyDecisionWithBlockReason(ctx, "", toolName, sessionIDFromContext(ctx),
+		mintActivityRequestID("", toolName), "blocked", "unknown tool: "+toolName,
+		telemetry.BlockReasonOther, string(profile.BlockReasonManagement))
+}
+
 // handleUpstreamServers implements upstream server management
 func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	p.recordMCPSurface()
 	p.recordBuiltinTool("upstream_servers")
 	if p.profileManagementToolHidden(ctx, "upstream_servers") {
+		p.recordProfileManagementRefusal(ctx, "upstream_servers")
 		return mcp.NewToolResultError("unknown tool: upstream_servers"), nil
 	}
 	startTime := time.Now()
@@ -4247,6 +4262,7 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	p.recordMCPSurface()
 	p.recordBuiltinTool("quarantine_security")
 	if p.profileManagementToolHidden(ctx, "quarantine_security") {
+		p.recordProfileManagementRefusal(ctx, "quarantine_security")
 		return mcp.NewToolResultError("unknown tool: quarantine_security"), nil
 	}
 	startTime := time.Now()

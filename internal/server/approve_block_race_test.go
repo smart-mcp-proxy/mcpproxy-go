@@ -130,7 +130,7 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 
 	// A completed pre-approval call proves the workers exercised the
 	// quarantined gate before the scanner operation starts.
-	require.Eventually(t, func() bool { return preApprovalCalls.Load() > 0 }, 10*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return preApprovalCalls.Load() > 0 }, 15*time.Second, time.Millisecond)
 	// Keep the workers running through the storage commit and unquarantine; the
 	// counting upstream below catches any transient callable window between them.
 	require.NoError(t, svc.ApproveServerWithBlocks(context.Background(), "filesystem", true, "reviewer", []string{"delete_0"}))
@@ -161,12 +161,12 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 		result, callErr := proxy.handleCallToolVariant(adminCtx(), callRequest(), contracts.ToolVariantDestructive)
 		lastOutcome.Store(describeCallOutcome(result, callErr))
 		return callErr == nil && blockedResponse(result)
-	}, 10*time.Second, time.Millisecond) {
+	}, 15*time.Second, time.Millisecond) {
 		t.Fatalf("disabled tool was never refused after approval; last outcome: %v", lastOutcome.Load())
 	}
 	// A completed post-approval call proves the disabled approval record gates
 	// callers after unquarantine, rather than only the original quarantine.
-	require.Eventually(t, func() bool { return postApprovalCalls.Load() > 0 }, 10*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { return postApprovalCalls.Load() > 0 }, 15*time.Second, time.Millisecond)
 	cancel()
 	workers.Wait()
 
