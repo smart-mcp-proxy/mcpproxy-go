@@ -333,6 +333,14 @@ type MCPSession struct {
 	// reconnects that make up one stretch of user work.
 	WorkspaceName string `json:"workspace_name,omitempty"`
 	WorkSessionID string `json:"work_session_id,omitempty"`
+
+	// Scope attribution (Spec 108 FR-033). ClientID and TokenName are the
+	// credential the session initialized with; Profile and ProfileSource are
+	// the session's latest effective resolution. Empty on legacy sessions.
+	ClientID      string `json:"client_id,omitempty"`
+	TokenName     string `json:"token_name,omitempty"`
+	Profile       string `json:"profile,omitempty"`
+	ProfileSource string `json:"profile_source,omitempty"`
 }
 
 // Tool represents an MCP tool with its metadata

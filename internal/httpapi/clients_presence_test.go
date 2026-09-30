@@ -55,7 +55,8 @@ func (c *clientPresenceController) GetConfig() (*config.Config, error) {
 	return &config.Config{APIKey: "clients-admin-key", RoutingMode: config.RoutingModeRetrieveTools}, nil
 }
 
-func (c *clientPresenceController) GetRecentSessions(limit int, _ string) ([]*contracts.MCPSession, int, error) {
+func (c *clientPresenceController) GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
+	limit := f.Limit
 	c.limits = append(c.limits, limit)
 	if c.sessions != nil {
 		if len(c.sessions) > limit {

@@ -96,7 +96,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	if profileIdx == nil {
 		return mcp.NewToolResultError("unknown tool: code_execution"), nil
 	}
-	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
+	ctx, profileResolution := p.resolveForDispatch(ctx, profileIdx)
 	danglingProfile := profileResolution.Base != "" && profileIdx.position(profileResolution.Base) < 0
 	if profileResolution.BindingGuarded || danglingProfile || (profileResolution.Policy != nil && !profileResolution.Policy.CodeExecution) {
 		requestID := mintActivityRequestID("", "code_execution")

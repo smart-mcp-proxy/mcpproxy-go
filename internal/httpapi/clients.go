@@ -11,6 +11,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 type clientPresence struct {
@@ -132,7 +133,7 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 		return nil, err
 	}
 	usage := s.controller.UsageSnapshot()
-	sessions, total, err := s.controller.GetRecentSessions(100, "")
+	sessions, total, err := s.controller.GetRecentSessions(storage.SessionFilter{Limit: 100})
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +141,7 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 	// Do not let another client's newer sessions hide this client's active rows
 	// or detail history when a controller retains more than this first page.
 	if total > len(sessions) {
-		sessions, _, err = s.controller.GetRecentSessions(total, "")
+		sessions, _, err = s.controller.GetRecentSessions(storage.SessionFilter{Limit: total})
 		if err != nil {
 			return nil, err
 		}

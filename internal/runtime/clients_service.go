@@ -353,6 +353,13 @@ func (s *ClientsService) writeChange(ctx context.Context, a Actor, c changeRecor
 		Timestamp: s.now().UTC(),
 		RequestID: reqcontext.GetRequestID(ctx),
 		Metadata:  meta,
+		// Spec 108 FR-030/T063: first-class beside the metadata keys (kept for
+		// one release) so /activity?client=&type=profile_change finds it.
+		// Profile is the NEW profile; a profile_change is not a resolution, so
+		// ProfileSource stays empty.
+		Profile:   c.profile,
+		ClientID:  c.clientID,
+		TokenName: c.tokenName,
 	}
 	if err := s.activity(rec); err != nil {
 		s.logger.Error("failed to write profile_change activity record", zap.String("client_id", c.clientID), zap.Error(err))

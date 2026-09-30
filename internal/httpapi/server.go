@@ -191,7 +191,7 @@ type ServerController interface {
 
 	// Session management. status filters on session status ("active" /
 	// "closed"); an empty string means no filter.
-	GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error)
+	GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error)
 	GetSessionByID(sessionID string) (*contracts.MCPSession, error)
 
 	// Configuration management
@@ -6570,8 +6570,12 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Spec 109-k FR-080a: /sessions ignores `agent` today — gated like `token`.
-	if !rejectUnsupportedScopeFilters(w, r) {
+	// Spec 108 FR-031: /sessions honours profile, client and token (`agent` is
+	// an alias of token). client_name is advisory and not filterable here.
+	if !rejectUnsupportedScopeFilters(w, r, "profile", "client", "token") {
+		return
+	}
+	if !s.rejectClientNameParam(w, r) {
 		return
 	}
 
@@ -6602,8 +6606,14 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sessionFilter, err := sessionFilterFromQuery(r.URL.Query(), limit, status)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Get recent sessions from controller
-	sessions, total, err := s.controller.GetRecentSessions(limit, status)
+	sessions, total, err := s.controller.GetRecentSessions(sessionFilter)
 	if err != nil {
 		s.logger.Errorw("Failed to get sessions", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to get sessions")
