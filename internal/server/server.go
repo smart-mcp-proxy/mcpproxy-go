@@ -376,6 +376,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	mcpProxy.auditSink = server.auditSink
 
 	server.mcpProxy = mcpProxy
+	// FR-008a: the one evaluator behind every guarded write (config routes,
+	// connect, client bindings) and the runtime anonymous guard.
+	rt.SetBindingGuard(mcpProxy)
 
 	go server.forwardRuntimeStatus()
 
@@ -3586,9 +3589,14 @@ func (s *Server) ValidateConfig(cfg *config.Config) ([]config.ValidationError, e
 	return s.runtime.ValidateConfig(cfg)
 }
 
-// ApplyConfig applies a new configuration
+// ApplyConfig applies a new configuration. It is the single funnel behind
+// PATCH /config, POST /config/apply and PATCH /config/docker-isolation, so the
+// FR-008a binding guard lives here: a write that would let a client bound to a
+// named profile escape it while require_mcp_auth is off returns
+// *runtime.BindingGuardError and writes nothing. File-watcher reloads (hand
+// edits) are not refused; the runtime guard in ResolveProfileV3 covers them.
 func (s *Server) ApplyConfig(cfg *config.Config, cfgPath string) (*runtime.ConfigApplyResult, error) {
-	return s.runtime.ApplyConfig(cfg, cfgPath)
+	return s.runtime.GuardedApplyConfig(cfg, cfgPath)
 }
 
 // GetTokenSavings calculates and returns token savings statistics

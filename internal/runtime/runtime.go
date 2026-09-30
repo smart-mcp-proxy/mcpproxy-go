@@ -261,6 +261,12 @@ type Runtime struct {
 	dockerProbedAt    time.Time
 	dockerProbeKnown  bool
 
+	// FR-008a binding guard: the injected evaluator and the mutex that
+	// serializes guard-check + write for every guarded path (binding_guard.go).
+	bindingGuardMu sync.RWMutex
+	bindingGuard   BindingGuard
+	bindingWriteMu sync.Mutex
+
 	appCtx    context.Context
 	appCancel context.CancelFunc
 }

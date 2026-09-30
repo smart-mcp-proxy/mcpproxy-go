@@ -5569,6 +5569,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
+// @Failure      409 {object} BindingGuardResponse "binding_bypassable_without_auth: the write would let a client bound to a named profile escape it while require_mcp_auth is off (FR-008a); nothing was written"
 // @Router       /api/v1/config/apply [post]
 func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -5650,6 +5651,7 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
+// @Failure      409 {object} BindingGuardResponse "binding_bypassable_without_auth (FR-008a); nothing was written"
 // @Router       /api/v1/config/docker-isolation [patch]
 func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
@@ -5718,6 +5720,7 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
+// @Failure      409 {object} BindingGuardResponse "binding_bypassable_without_auth: the patch would let a client bound to a named profile escape it while require_mcp_auth is off (FR-008a); nothing was written"
 // @Router       /api/v1/config [patch]
 func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	// UseNumber: every number rides through the merge as its decimal text, so
@@ -5847,6 +5850,11 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 //
 // Returns the status it wrote, for the callers that log.
 func (s *Server) writeApplyConfigError(w http.ResponseWriter, r *http.Request, msg string, result *internalRuntime.ConfigApplyResult, err error) {
+	// FR-008a: a write that would leave a named client binding bypassable
+	// without auth is refused whole, before anything is persisted.
+	if s.writeIfBindingGuardRefusal(w, r, err) {
+		return
+	}
 	if result != nil && len(result.ValidationErrors) > 0 {
 		// A rejected value is the operator's, not the server's: log it at warn
 		// and answer 400. The structured errors ride in `data` so a client can
