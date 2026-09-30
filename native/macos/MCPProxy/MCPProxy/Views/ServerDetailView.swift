@@ -211,7 +211,7 @@ struct ServerDetailView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
                     .font(.scaled(.title2, scale: fontScale).bold())
-                Text(server.health?.summary ?? statusText)
+                Text(ServerStatusLinePresentation.text(for: server))
                     .font(.scaled(.subheadline, scale: fontScale))
                     .foregroundStyle(.secondary)
             }
@@ -1074,11 +1074,6 @@ struct ServerDetailView: View {
     }
 
     // MARK: - Computed
-
-    private var statusText: String {
-        if !server.enabled { return "Disabled" }
-        return server.connected ? "Connected" : "Disconnected"
-    }
 
     private var pendingApprovalCount: Int {
         let fromModel = server.pendingApprovalCount

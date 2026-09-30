@@ -1,0 +1,132 @@
+---
+id: review-commands
+title: Review Commands
+sidebar_label: Review Commands
+sidebar_position: 7
+description: "CLI commands for reviewing quarantined servers and new or changed tools: list, show, approve and reject through the scan gate"
+keywords: [review, quarantine, approve, reject, tools, scan, cli]
+---
+
+# Review Commands
+
+`mcpproxy review` is the one CLI entry point for the review decisions that the Web UI **Review queue** and the macOS **Review Queue** also offer. It reads the same review payload as `GET /api/v1/review` and `GET /api/v1/servers/{id}/review`, and every decision goes through the scan gate: it never calls the legacy `unquarantine` endpoint.
+
+For the concepts behind quarantine and the four review verbs see [Security Quarantine](/features/security-quarantine#review-verbs). For scanner setup and scan reports see [Security Scanner Commands](/cli/security-commands).
+
+## Overview
+
+```
+mcpproxy review
+├── list                        Servers that need review
+├── show <server> [--full]      Captured tool definitions and scan verdicts
+├── approve <server> [flags]    Approve a server, or approve tools on a trusted server
+└── reject <server> [flags]     Keep a server quarantined, or block tools
+```
+
+All subcommands accept the global `-o table|json|yaml` flag. With `-o json` the output is the `data` object of the REST response.
+
+## review list
+
+```bash
+mcpproxy review list
+```
+
+```
+SERVER      KIND           QUARANTINED  PENDING  CHANGED  TIERS               SCAN
+filesystem  server_review  true         0        0        map[destructive:1]  map[verdict:clean]
+```
+
+## review show
+
+```bash
+mcpproxy review show filesystem --full
+```
+
+```
+Server: filesystem
+TOOL      TIER         APPROVAL  SCAN   DESCRIPTION
+delete_0  destructive  pending   clean  from the server, not verified:
+Delete a file
+This cannot be undone
+Input schema:
+{"type":"object"}
+```
+
+Descriptions and schemas come from the upstream server and are shown as plain text; they are not verified. Without `--full` only the first line of each description is shown and the schemas are left out.
+
+## review approve
+
+```bash
+mcpproxy review approve <server> [--tools a,b] [--except a,b] [--force] [--yes]
+```
+
+| Flag | Meaning |
+|------|---------|
+| `--except a,b` | Quarantined server only: block these tools while approving the server |
+| `--tools a,b` | Trusted server only: approve only these pending or changed tools |
+| `--force` | Approve although the scan verdict is dangerous (use only after reading the findings) |
+| `--yes` | Skip the confirmation prompt |
+
+The command picks the right endpoint for you:
+
+| Server state | Endpoint | Notes |
+|--------------|----------|-------|
+| Quarantined | `POST /api/v1/servers/{id}/security/approve` | `--except` becomes `block`; `--force` is sent as `force` |
+| Trusted (not quarantined) | `POST /api/v1/servers/{id}/tools/approve` | `--tools` selects tools; without it every pending or changed tool is approved |
+
+Using the wrong flag for the state fails with exit code 1 instead of doing something else:
+
+- `--tools` on a quarantined server: `--tools cannot select a quarantined server approval; use --except to block tools`
+- `--except` on a trusted server: `--except applies only while approving a quarantined server`
+
+```bash
+mcpproxy review approve filesystem --except delete_0 --force --yes
+```
+
+```
+Approved server filesystem
+```
+
+```bash
+mcpproxy review approve trusted --tools write_0 --yes
+```
+
+```
+Approved 1 tool for server trusted
+```
+
+## review reject
+
+```bash
+mcpproxy review reject <server> [--tools a,b] [--yes]
+```
+
+Without `--tools` the server stays quarantined (`POST /api/v1/servers/{id}/security/reject`). With `--tools` the listed pending or changed tools are blocked (`POST /api/v1/servers/{id}/tools/block`).
+
+```bash
+mcpproxy review reject filesystem --yes
+```
+
+```
+Rejected server filesystem
+```
+
+```bash
+mcpproxy review reject trusted --tools write_0 --yes
+```
+
+```
+Blocked 1 tool for server trusted
+```
+
+## Older commands
+
+These keep working and name the matching `mcpproxy review` command in their help:
+
+| Command | Same as |
+|---------|---------|
+| `mcpproxy upstream approve <server> [tools...]` | `mcpproxy review approve <server> --tools ...` for a trusted server |
+| `mcpproxy tools approve <server:tool>...` | `mcpproxy review approve <server> --tools ...` |
+| `mcpproxy tools reject <server:tool>...` | `mcpproxy review reject <server> --tools ...` |
+| `mcpproxy security approve <server>` | `mcpproxy review approve <server>` |
+| `mcpproxy security reject <server>` | `mcpproxy review reject <server>` |

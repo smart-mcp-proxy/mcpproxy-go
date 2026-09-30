@@ -147,12 +147,14 @@ func TestApproveWithBlockNeverDispatchesBlockedTool(t *testing.T) {
 	runRuntimeDiscovery(t, proxy, rt, up)
 	var lastOutcome atomic.Value
 	if !assert.Eventually(t, func() bool {
-		// The unquarantiner's background discovery pass re-stamps the
+		// The unquarantiner's background discovery pass may reconnect the
+		// client after the synchronous discovery above and re-stamps the
 		// StateView with the runtime manager's connection token, undoing the
 		// fixture's rebind to the proxy manager's client (the two hold
-		// independent counters only in tests). Re-bind on every poll so the
-		// probe reads a settled identity however the two passes interleave.
-		if client, ok := proxy.upstreamManager.GetClient("filesystem"); ok {
+		// independent counters only in tests). Re-bind the live epoch on every
+		// poll so the probe measures the disabled-tool refusal rather than
+		// that reconnect timing.
+		if client, ok := proxy.upstreamManager.GetClient("filesystem"); ok && client.IsConnected() {
 			epoch := client.ConnectionEpoch()
 			rt.Supervisor().StateView().UpdateServer("filesystem", func(s *stateview.ServerStatus) {
 				s.DiscoveryEpoch = epoch

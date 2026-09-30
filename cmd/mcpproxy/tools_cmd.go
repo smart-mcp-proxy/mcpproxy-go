@@ -45,7 +45,7 @@ Examples:
   mcpproxy tools list -o json                    # JSON output
   mcpproxy tools list --status disabled          # only disabled/config-denied
   mcpproxy tools list --risk read                # read-only tools
-  mcpproxy tools list --approval pending         # tools pending approval
+  mcpproxy tools list --approval pending         # tools that are new and need review
   mcpproxy tools list --server=github-server     # server-scoped (debug mode)
   mcpproxy tools list --server=github-server --log-level=trace`,
 		RunE: runToolsList,
@@ -324,7 +324,7 @@ func initToolsFlags() {
 	// (risk stays the scan-score term elsewhere in the CLI).
 	toolsListCmd.Flags().StringVar(&toolsTierFilter, "tier", "", "Filter by tier: read, write, destructive, unannotated")
 	toolsListCmd.Flags().StringVar(&toolsRiskFilter, "risk", "", "Alias of --tier")
-	toolsListCmd.Flags().StringVar(&toolsApprovalFilter, "approval", "", "Filter by approval: approved, pending, changed")
+	toolsListCmd.Flags().StringVar(&toolsApprovalFilter, "approval", "", "Filter by approval: approved (Approved), pending (New, needs review), changed (Changed, needs review)")
 
 	// Note: -o/--output flag is inherited from root command via globalOutputFormat
 	// Note: --server is NOT marked required — global list works without it.

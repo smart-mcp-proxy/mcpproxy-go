@@ -445,8 +445,8 @@ mcpproxy activity export [flags]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--output` | | | Output file path (stdout if not specified) |
-| `--format` | `-f` | json | Export format: `json`, `csv` |
+| `--output` | | | Destination file path (stdout if not specified); not the global `-o/--output` format flag |
+| `--format` | `-f` | json | Export file format: `json` (JSON Lines), `csv` |
 | `--include-bodies` | | false | Include full request/response bodies |
 | `--parent-id` | | | Export only child tool calls of a `code_execution` activity (value = the parent record `request_id`) |
 | *(filter flags)* | | | Same filters as `activity list` |

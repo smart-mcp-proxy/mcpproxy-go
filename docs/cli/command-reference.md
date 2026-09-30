@@ -588,3 +588,5 @@ mcpproxy security approve github-server         # unquarantine + index tools
 ```
 
 For the full reference — every flag, every status vocabulary, all output formats (`table` / `json` / `yaml` / `sarif`), workflow recipes, and troubleshooting — see **[Security Commands](/cli/security-commands)**. For the underlying feature architecture see [Security Scanner Plugin System](/features/security-scanner-plugins).
+
+Reviewing quarantined servers and new or changed tools has its own command group, `mcpproxy review list|show|approve|reject`: see **[Review Commands](/cli/review-commands)**.

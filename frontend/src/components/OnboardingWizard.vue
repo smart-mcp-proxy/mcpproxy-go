@@ -1654,7 +1654,7 @@ async function connectOne(clientId: string, force = false, preview?: ConnectPrev
 }
 
 // Spec 078 US2: one-click copy of a row's backup path (same clipboard pattern
-// as ConnectModal's copy affordances).
+// as ClientConnectList's copy affordances).
 async function copyBackupPath(clientId: string) {
   const path = connectBackups[clientId]
   if (!path) return
@@ -1788,7 +1788,7 @@ async function recordDismissalEngagement() {
 // fallback started the fetches but never chose the tab, so a wizard opened
 // that way landed on Clients regardless of what the opener asked for.
 
-// Spec 109-b: same per-client glyph ConnectModal.vue uses (clientIcon there),
+// Spec 109-b: same per-client glyph ClientConnectList.vue uses (clientIcon there),
 // duplicated rather than imported so this file stays self-contained — falls
 // back to the server-supplied ClientStatus.icon id, then a generic wrench.
 function clientRowIcon(client: ClientStatus): string {
@@ -1858,7 +1858,7 @@ const ClientRow: FunctionalComponent<
           ? h('span', { class: 'badge badge-ghost badge-sm' }, c.reason || 'Not supported')
           // Bridge clients (e.g. Claude Desktop) are connectable even without
           // an existing config file — Connect creates it (parity with
-          // ConnectModal's connectableClients gating; Spec 078 US2/FR-006:
+          // ClientConnectList's connectableClients gating; Spec 078 US2/FR-006:
           // this is the path that produces the "no prior file" backup case).
           : !c.exists && !c.bridge
             ? h('span', { class: 'text-xs opacity-40' }, 'Not installed')

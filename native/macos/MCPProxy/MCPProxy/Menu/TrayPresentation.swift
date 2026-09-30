@@ -388,6 +388,108 @@ enum TrayPrimaryPresentation {
     }
 }
 
+// MARK: - Spec 109 FR-011/FR-014 (T049) · The one server status line
+
+/// How a status line is coloured. Mirrors the colours in
+/// specs/109-ux-navigation-consistency/contracts/health-vocabulary.md; the
+/// AppKit/SwiftUI layers map it to a concrete colour.
+enum ServerStatusTone: Equatable {
+    case success
+    case neutral
+    case warning
+    case error
+}
+
+/// What the Servers row, the tray submenu's first line and the Server Detail
+/// header show for one server: the shared status label, then an optional detail.
+struct ServerStatusLine: Equatable {
+    let label: String
+    let detail: String?
+    let tooltip: String?
+    let tone: ServerStatusTone
+}
+
+/// The ONE function that turns a `ServerStatus` into visible status text on
+/// macOS (audit S4/S5). Before it, the row hardcoded "Connected" for any server
+/// whose transport was up — including one that still needed sign-in — and the
+/// tray submenu and detail header each derived their own wording. The label
+/// comes from `HealthStatus.statusLabels` (the same table Web and the CLI use);
+/// the detail mirrors `ServerCard.vue`'s `statusDetail`.
+enum ServerStatusLinePresentation {
+    static func line(for server: ServerStatus) -> ServerStatusLine {
+        if let health = server.health, let status = health.status, !status.isEmpty {
+            let label = health.statusLabel
+            // A summary that only restates the admin state (quarantined /
+            // disabled) or the label itself adds nothing.
+            var detail: String?
+            if health.adminState == "enabled", !health.summary.isEmpty,
+               normalised(health.summary).caseInsensitiveCompare(normalised(label)) != .orderedSame {
+                detail = health.summary
+            }
+            return ServerStatusLine(label: label, detail: detail,
+                                    tooltip: tooltip(for: health), tone: tone(forStatus: status))
+        }
+        // Old core: `health` without a `status` still has a sentence to show.
+        if let health = server.health, !health.summary.isEmpty {
+            return ServerStatusLine(label: health.summary, detail: nil,
+                                    tooltip: tooltip(for: health), tone: legacyTone(for: server, level: health.level))
+        }
+        // No vocabulary at all: the legacy words are the only thing left.
+        let tooltip = server.health.flatMap(tooltip(for:))
+        if server.quarantined {
+            return ServerStatusLine(label: "Needs review", detail: nil, tooltip: tooltip, tone: .warning)
+        }
+        if !server.enabled {
+            return ServerStatusLine(label: "Disabled", detail: nil, tooltip: tooltip, tone: .neutral)
+        }
+        if server.connecting == true {
+            return ServerStatusLine(label: "Connecting", detail: nil, tooltip: tooltip, tone: .neutral)
+        }
+        if server.connected {
+            return ServerStatusLine(label: "Connected", detail: nil, tooltip: tooltip, tone: .success)
+        }
+        return ServerStatusLine(label: "Disconnected", detail: nil, tooltip: tooltip, tone: .neutral)
+    }
+
+    /// The rendered text: `label`, then ` · detail` when there is one. Row,
+    /// tray submenu and detail header all show exactly this.
+    static func text(for server: ServerStatus) -> String {
+        let line = line(for: server)
+        guard let detail = line.detail else { return line.label }
+        return "\(line.label) · \(detail)"
+    }
+
+    private static func tooltip(for health: HealthStatus) -> String? {
+        if let detail = health.detail, !detail.isEmpty { return detail }
+        return health.summary.isEmpty ? nil : health.summary
+    }
+
+    private static func tone(forStatus status: String) -> ServerStatusTone {
+        switch status {
+        case "ready": return .success
+        case "sign_in_required", "needs_review", "needs_secret", "needs_config": return .warning
+        case "error": return .error
+        default: return .neutral // connecting, disabled, unknown
+        }
+    }
+
+    private static func legacyTone(for server: ServerStatus, level: String) -> ServerStatusTone {
+        if server.quarantined { return .warning }
+        if !server.enabled { return .neutral }
+        switch level {
+        case "healthy": return .success
+        case "degraded": return .warning
+        case "unhealthy": return .error
+        default: return .neutral
+        }
+    }
+
+    /// "Connecting..." restates the label "Connecting"; ignore trailing dots.
+    private static func normalised(_ text: String) -> String {
+        text.trimmingCharacters(in: CharacterSet(charactersIn: ".… ").union(.whitespacesAndNewlines))
+    }
+}
+
 // MARK: - F14 (round 2) · The always-present tail, minus the primary's echo
 
 /// One of the tray submenu's/Servers-row's always-present secondary rows —
