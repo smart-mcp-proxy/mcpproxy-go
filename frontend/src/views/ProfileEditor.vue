@@ -20,7 +20,7 @@
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div class="min-w-0">
           <h1 class="text-3xl font-bold truncate">{{ saved.title || saved.name }}</h1>
-          <p class="text-xs font-mono opacity-60">{{ saved.name }}</p>
+          <p class="text-xs font-mono opacity-70">{{ saved.name }}</p>
         </div>
         <div v-if="canEdit" class="flex gap-2">
           <button type="button" class="btn btn-sm btn-outline" data-test="profile-rename" @click="renameOpen = true">Rename&hellip;</button>
@@ -44,12 +44,12 @@
         <form class="space-y-5" data-test="profile-form" @submit.prevent="save">
           <fieldset :disabled="!canEdit" class="space-y-5">
             <div class="form-control">
-              <label class="label" for="profile-title"><span class="label-text font-medium">Title</span><span class="label-text-alt">{{ draft.title.length }} / 80</span></label>
+              <label class="label" for="profile-title"><span class="label-text font-medium">Title</span><span class="label-text-alt text-base-content/80">{{ draft.title.length }} / 80</span></label>
               <input id="profile-title" v-model="draft.title" maxlength="80" class="input input-bordered input-sm w-full" :class="fieldErrors.title && 'input-error'" data-test="profile-title" />
               <span v-if="fieldErrors.title" class="text-error text-xs mt-1">{{ fieldErrors.title }}</span>
             </div>
             <div class="form-control">
-              <label class="label" for="profile-description"><span class="label-text font-medium">Description</span><span class="label-text-alt">{{ draft.description.length }} / 500</span></label>
+              <label class="label" for="profile-description"><span class="label-text font-medium">Description</span><span class="label-text-alt text-base-content/80">{{ draft.description.length }} / 500</span></label>
               <textarea id="profile-description" v-model="draft.description" maxlength="500" rows="2" class="textarea textarea-bordered w-full" :class="fieldErrors.description && 'textarea-error'" data-test="profile-description" />
               <span v-if="fieldErrors.description" class="text-error text-xs mt-1">{{ fieldErrors.description }}</span>
             </div>
@@ -57,7 +57,7 @@
             <fieldset class="form-control" :class="fieldErrors.servers && 'border border-error rounded p-2'" data-test="profile-servers">
               <legend class="label-text font-medium mb-1">Servers</legend>
               <div class="max-h-44 overflow-y-auto space-y-1 border border-base-300 rounded-lg p-2">
-                <p v-if="!serverChoices.length" class="text-sm opacity-60 text-center py-1">No servers configured</p>
+                <p v-if="!serverChoices.length" class="text-sm opacity-70 text-center py-1">No servers configured</p>
                 <label v-for="choice in serverChoices" :key="choice.name" class="flex items-center gap-2 cursor-pointer px-1">
                   <input v-model="draft.servers" type="checkbox" class="checkbox checkbox-sm" :value="choice.name" :data-test="`profile-server-${choice.name}`" />
                   <span class="text-sm">{{ choice.name }}</span>
@@ -108,7 +108,7 @@
                   <span class="label-text">{{ option.label }}</span>
                 </label>
               </div>
-              <span class="text-xs opacity-60 mt-1">Add, change and restart servers from an MCP client.</span>
+              <span class="text-xs opacity-70 mt-1">Add, change and restart servers from an MCP client.</span>
               <span v-if="fieldErrors.management_tools" class="text-error text-xs mt-1">{{ fieldErrors.management_tools }}</span>
             </fieldset>
 
@@ -120,7 +120,7 @@
                 <label class="label cursor-pointer gap-2 py-0"><input v-model="draft.switch_mode" type="radio" class="radio radio-sm" value="list" name="switch-mode" data-test="profile-switch-list" /><span class="label-text">Only these</span></label>
               </div>
               <div v-if="draft.switch_mode === 'list'" class="space-y-1 border border-base-300 rounded-lg p-2">
-                <p v-if="!otherProfiles.length" class="text-sm opacity-60">No other profiles</p>
+                <p v-if="!otherProfiles.length" class="text-sm opacity-70">No other profiles</p>
                 <label v-for="other in otherProfiles" :key="other.name" class="flex items-center gap-2 cursor-pointer px-1">
                   <input v-model="draft.switchable_to" type="checkbox" class="checkbox checkbox-sm" :value="other.name" :data-test="`profile-switch-${other.name}`" />
                   <span class="text-sm">{{ other.title || other.name }}</span>
@@ -352,41 +352,58 @@ function clearErrors() {
   guard.value = null
 }
 
-async function loadProfile() {
+// Every load takes a ticket; a response that is not the latest is dropped. A
+// rename makes this matter: the profiles.changed event it emits can start a load
+// under the OLD name while the route is already moving to the new one, and that
+// 404 must never land after the new name's answer.
+let loadTicket = 0
+
+async function loadProfile(ticket: number = ++loadTicket): Promise<boolean> {
+  const name = props.name
   try {
-    saved.value = await api.getProfile(props.name)
+    const view = await api.getProfile(name)
+    if (ticket !== loadTicket) return false
+    saved.value = view
     notFound.value = false
     loadError.value = ''
   } catch (err) {
+    if (ticket !== loadTicket) return false
     if ((err as ApiError).status === 404) notFound.value = true
     else loadError.value = describeError(err, 'Failed to load the profile')
     saved.value = null
   }
+  return true
 }
 
-async function loadTools() {
+async function loadTools(ticket: number) {
+  const name = props.name
   toolsLoading.value = true
   toolsError.value = ''
   try {
-    tools.value = await api.getProfileEffectiveTools(props.name)
+    const result = await api.getProfileEffectiveTools(name)
+    if (ticket !== loadTicket) return
+    tools.value = result
   } catch (err) {
+    if (ticket !== loadTicket) return
     tools.value = null
     toolsError.value = (err as ApiError).status === 503 ? 'Profile evaluation is unavailable; retry in a moment' : describeError(err, 'Failed to load the tools')
   } finally {
-    toolsLoading.value = false
+    if (ticket === loadTicket) toolsLoading.value = false
   }
 }
 
 async function load() {
+  const ticket = ++loadTicket
   loading.value = true
   clearErrors()
-  await loadProfile()
+  const current = await loadProfile(ticket)
+  if (!current) return
   if (saved.value) {
     Object.assign(draft, draftFrom(saved.value))
     changedElsewhere.value = false
-    await loadTools()
+    await loadTools(ticket)
   }
-  loading.value = false
+  if (ticket === loadTicket) loading.value = false
 }
 
 function reloadFromServer() { void load() }
@@ -403,7 +420,7 @@ async function save() {
     warnings.value = result.warnings ?? []
     savedNote.value = 'Saved'
     void profiles.fetchProfiles()
-    await loadTools()
+    await loadTools(loadTicket)
   } catch (err) {
     const refused = err as ApiError
     if (isGuardRefusal(err)) guard.value = refused

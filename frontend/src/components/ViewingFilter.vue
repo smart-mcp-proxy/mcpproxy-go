@@ -1,5 +1,5 @@
 <template>
-  <div v-if="visible" class="relative" data-test="viewing-filter">
+  <div v-if="visible" class="relative" data-test="viewing-filter" @keydown.esc="closePopover">
     <div class="flex items-center gap-1">
       <button
         type="button"
@@ -10,6 +10,7 @@
         :aria-label="ariaLabel"
         :title="TOOLTIP"
         data-test="viewing-filter-button"
+        ref="button"
         @click="open = !open"
       >
         <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
@@ -127,6 +128,14 @@ const ariaLabel = computed(() => {
 
 function setParam(name: 'profile' | 'client', value: string) { scope.set({ [name]: value || undefined }) }
 function clear() { scope.clear(['profile', 'client']); open.value = false }
+
+// Escape closes the popover and hands focus back to the chip.
+const button = ref<HTMLButtonElement | null>(null)
+function closePopover() {
+  if (!open.value) return
+  open.value = false
+  button.value?.focus()
+}
 
 // The header is global, so it loads the list itself (TopHeader no longer does).
 // App only mounts the shell once the principal is known; a tenant never reads

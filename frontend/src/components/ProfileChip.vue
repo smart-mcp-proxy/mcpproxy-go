@@ -4,7 +4,7 @@
          unknown): the chip and the lock switch are disabled and never call PUT.
          The call to action depends on why (Spec 108-i I8). -->
     <template v-if="noRecord">
-      <span class="opacity-60" :data-test="`client-profile-none-${client.id}`">&mdash;</span>
+      <span class="opacity-70" :data-test="`client-profile-none-${client.id}`">&mdash;</span>
     </template>
     <template v-else-if="!bindable">
       <button
@@ -76,7 +76,7 @@
           @click="select(option.value)"
         >
           <span>{{ option.title }}</span>
-          <span v-if="option.slug" class="text-xs opacity-60">{{ option.slug }}</span>
+          <span v-if="option.slug" class="text-xs opacity-70">{{ option.slug }}</span>
         </button>
       </div>
       <div class="flex items-center gap-2" :title="client.profile ? '' : 'Choose a profile to lock'">
@@ -134,8 +134,16 @@ const open = ref(false)
 watch(() => props.autoOpen, value => { if (value) open.value = true }, { immediate: true })
 
 const busy = computed(() => bindings.busy[props.client.id] === true)
-// A client that has no credential record at all (an observed "other" client).
-const noRecord = computed(() => props.client.kind === 'other' || (props.client.kind === 'custom' && props.client.credential_state === 'none'))
+// A row with nothing to bind: an observed "other" client, a custom client whose
+// record is gone, or a supported client that is neither installed nor connected
+// and holds no credential (there is nothing to upgrade, so no call to action).
+const noRecord = computed(() => {
+  const c = props.client
+  if (c.kind === 'other') return true
+  const credentialless = !c.credential_state || c.credential_state === 'none' || c.credential_state === 'unknown'
+  if (c.kind === 'custom') return c.credential_state === 'none'
+  return credentialless && !c.installed && !c.connected
+})
 const bindable = computed(() => props.client.credential_state === 'client')
 const locked = computed(() => props.client.profile_mode === 'locked' || props.client.profile_source === 'pin')
 const missing = computed(() => props.client.profile_missing === true)

@@ -1,9 +1,9 @@
 <template>
   <div class="space-y-3" :data-test="`client-binding-controls-${client.id}`" @click.stop>
     <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
-      <div class="flex gap-2"><dt class="opacity-60">Credential</dt><dd>{{ credentialLabel(client.credential_state) }}<template v-if="client.token_name"> (<code class="text-xs">{{ client.token_name }}</code>)</template></dd></div>
-      <div v-if="client.expires_at" class="flex gap-2"><dt class="opacity-60">Expires</dt><dd :data-test="`client-expires-${client.id}`">{{ formatDateTimeShort(client.expires_at) }}</dd></div>
-      <div v-if="client.profile" class="flex gap-2"><dt class="opacity-60">Profile</dt><dd>{{ profiles.titleFor(client.profile) }} <span class="opacity-60">({{ client.profile_mode === 'locked' ? 'locked' : 'switchable' }})</span></dd></div>
+      <div class="flex gap-2"><dt class="opacity-70">Credential</dt><dd>{{ credentialLabel(client.credential_state) }}<template v-if="client.token_name"> (<code class="text-xs">{{ client.token_name }}</code>)</template></dd></div>
+      <div v-if="client.expires_at" class="flex gap-2"><dt class="opacity-70">Expires</dt><dd :data-test="`client-expires-${client.id}`">{{ formatDateTimeShort(client.expires_at) }}</dd></div>
+      <div v-if="client.profile" class="flex gap-2"><dt class="opacity-70">Profile</dt><dd>{{ profiles.titleFor(client.profile) }} <span class="opacity-70">({{ client.profile_mode === 'locked' ? 'locked' : 'switchable' }})</span></dd></div>
     </dl>
 
     <div v-if="client.rotation_pending" class="alert alert-info text-sm flex flex-wrap items-center gap-2" :data-test="`client-rotation-pending-${client.id}`" role="status">

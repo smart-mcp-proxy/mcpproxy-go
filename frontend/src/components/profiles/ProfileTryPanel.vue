@@ -28,7 +28,7 @@
           <ul class="text-xs space-y-0.5">
             <li v-for="item in result.hidden" :key="`${item.server}:${item.tool}`"><code>{{ item.server }}:{{ item.tool }}</code> &mdash; {{ reasonText(item.reason) }}</li>
           </ul>
-          <p v-if="result.hidden_truncated" class="text-xs opacity-60">The list is truncated.</p>
+          <p v-if="result.hidden_truncated" class="text-xs opacity-70">The list is truncated.</p>
         </div>
       </template>
     </div>

@@ -169,6 +169,15 @@ describe('Client binding controls on the Clients page (Spec 108-i T092)', () => 
     expect(wrapper.find('[data-test="client-profile-chip-other:zed"]').exists()).toBe(false)
   })
 
+  it('shows a dash, not a call to action, for a supported client that is not installed and holds no credential', async () => {
+    const { wrapper } = await mountClients([makeClient('windsurf', { credential_state: 'none', installed: false, connected: false })])
+    expect(wrapper.find('[data-test="client-profile-none-windsurf"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="client-credential-cta-windsurf"]').exists()).toBe(false)
+    // A revoked credential is still worth a Reconnect even when the app is gone.
+    const revoked = await mountClients([makeClient('windsurf', { credential_state: 'revoked', installed: false, connected: false })])
+    expect(revoked.wrapper.get('[data-test="client-credential-cta-windsurf"]').text()).toBe('Reconnect')
+  })
+
   it('a 409 guard renders two fix buttons that navigate and never call PATCH', async () => {
     ;(api.setClientBinding as any).mockRejectedValue(apiError(GUARD_REFUSAL.error, GUARD_REFUSAL))
     const { wrapper, router } = await mountClients([cursor])

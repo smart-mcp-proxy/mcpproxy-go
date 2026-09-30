@@ -5,7 +5,7 @@
         <label class="label" for="profile-name"><span class="label-text font-medium">Name</span></label>
         <input id="profile-name" v-model.trim="form.name" class="input input-bordered input-sm w-full font-mono" :class="fieldError('name') && 'input-error'" placeholder="work-readonly" autocomplete="off" data-test="profile-create-name" />
         <span v-if="fieldError('name')" class="text-error text-xs mt-1" data-test="profile-create-name-error">{{ fieldError('name') }}</span>
-        <span v-else class="text-xs opacity-60 mt-1">A short slug: lower-case letters, digits, '-' and '_'.</span>
+        <span v-else class="text-xs opacity-70 mt-1">A short slug: lower-case letters, digits, '-' and '_'.</span>
       </div>
       <div class="form-control">
         <label class="label" for="profile-title"><span class="label-text font-medium">Title (optional)</span></label>
@@ -15,7 +15,7 @@
       <fieldset class="form-control" :class="fieldError('servers') && 'border border-error rounded p-2'">
         <legend class="label-text font-medium mb-1">Servers</legend>
         <div class="max-h-40 overflow-y-auto space-y-1 border border-base-300 rounded-lg p-2" data-test="profile-create-servers">
-          <p v-if="!serverNames.length" class="text-sm opacity-60 text-center py-1">No servers configured</p>
+          <p v-if="!serverNames.length" class="text-sm opacity-70 text-center py-1">No servers configured</p>
           <label v-for="name in serverNames" :key="name" class="flex items-center gap-2 cursor-pointer px-1">
             <input v-model="form.servers" type="checkbox" class="checkbox checkbox-sm" :value="name" :data-test="`profile-create-server-${name}`" />
             <span class="text-sm">{{ name }}</span>

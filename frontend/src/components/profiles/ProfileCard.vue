@@ -4,27 +4,26 @@
       <div class="flex items-start justify-between gap-2">
         <div class="min-w-0">
           <h2 :id="`profile-card-title-${profile.name}`" class="card-title text-base truncate">{{ profile.title || profile.name }}</h2>
-          <p v-if="profile.title" class="text-xs font-mono opacity-60 truncate">{{ profile.name }}</p>
+          <p v-if="profile.title" class="text-xs font-mono opacity-70 truncate">{{ profile.name }}</p>
         </div>
         <span v-if="profile.is_legacy" class="badge badge-ghost badge-sm shrink-0" :data-test="`profile-legacy-${profile.name}`" title="This profile only lists servers; it sets no tier cap or tool rules.">Servers only</span>
       </div>
 
       <p class="text-sm" data-test="profile-tier">
-        <span class="opacity-60">Max tier</span>
+        <span class="opacity-70">Max tier</span>
         {{ tierPhrase(profile.max_tier) || 'No cap' }}
       </p>
       <dl class="flex flex-wrap gap-x-4 gap-y-1 text-sm" data-test="profile-counts">
-        <div class="flex gap-1"><dt class="opacity-60">Read</dt><dd>{{ profile.tool_counts.read }}</dd></div>
-        <div class="flex gap-1"><dt class="opacity-60">Write</dt><dd>{{ profile.tool_counts.write }}</dd></div>
-        <div class="flex gap-1"><dt class="opacity-60">Destructive</dt><dd>{{ profile.tool_counts.destructive }}</dd></div>
+        <div class="flex gap-1"><dt class="opacity-70">Read</dt><dd>{{ profile.tool_counts.read }}</dd></div>
+        <div class="flex gap-1"><dt class="opacity-70">Write</dt><dd>{{ profile.tool_counts.write }}</dd></div>
+        <div class="flex gap-1"><dt class="opacity-70">Destructive</dt><dd>{{ profile.tool_counts.destructive }}</dd></div>
       </dl>
       <p v-if="profile.tool_counts.unannotated_hidden > 0" class="text-xs opacity-70" data-test="profile-unannotated">{{ profile.tool_counts.unannotated_hidden }} unannotated hidden</p>
 
       <!-- used_by is administrator-only: absent, never empty, for anyone else. -->
       <p v-if="profile.used_by" class="text-sm" data-test="profile-used-by">
-        <span class="opacity-60">Used by</span>
-        <template v-if="usedByText">{{ usedByText }}</template>
-        <template v-else>nothing yet</template>
+        <span class="opacity-70">Used by</span>
+        {{ ' ' }}{{ usedByText || 'nothing yet' }}
       </p>
 
       <p class="text-xs opacity-70" data-test="profile-stats">{{ profile.calls_24h }} calls &middot; {{ profile.blocked_24h }} blocked (24 h)</p>
@@ -38,21 +37,31 @@
 
       <div class="card-actions justify-end items-center pt-1">
         <router-link class="btn btn-sm btn-primary" :to="{ name: 'profile-editor', params: { name: profile.name } }" :data-test="`profile-edit-${profile.name}`">{{ tenant ? 'View' : 'Edit' }}</router-link>
-        <details v-if="!tenant" class="dropdown dropdown-end">
-          <summary class="btn btn-sm btn-ghost" :aria-label="`More actions for ${profile.title || profile.name}`" :data-test="`profile-more-${profile.name}`">&hellip;</summary>
-          <ul class="dropdown-content menu menu-sm bg-base-100 rounded-box border border-base-300 shadow z-[var(--z-dropdown)] w-64 p-1">
-            <li><button type="button" :data-test="`profile-assign-${profile.name}`" @click="emit('assign')">Assign to client&hellip;</button></li>
-            <li><router-link :to="{ path: '/clients', query: { tab: 'tokens', create: '1', profile: profile.name } }" :data-test="`profile-create-token-${profile.name}`">Create token with this profile</router-link></li>
-            <li><button type="button" class="text-error" :data-test="`profile-delete-${profile.name}`" @click="emit('delete')">Delete&hellip;</button></li>
+        <!-- A plain disclosure (not a hidden daisyUI dropdown): nothing of the
+             menu is in the DOM, or measured by the contrast sweep, while it is closed. -->
+        <div v-if="!tenant" class="relative" @focusout="onFocusOut" @keydown.esc="menuOpen = false">
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost"
+            aria-haspopup="menu"
+            :aria-expanded="menuOpen ? 'true' : 'false'"
+            :aria-label="`More actions for ${profile.title || profile.name}`"
+            :data-test="`profile-more-${profile.name}`"
+            @click="menuOpen = !menuOpen"
+          >&hellip;</button>
+          <ul v-if="menuOpen" role="menu" class="absolute right-0 bottom-full mb-1 menu menu-sm bg-base-100 rounded-box border border-base-300 shadow z-[var(--z-dropdown)] w-64 p-1">
+            <li role="none"><button type="button" role="menuitem" :data-test="`profile-assign-${profile.name}`" @click="pick('assign')">Assign to client&hellip;</button></li>
+            <li role="none"><router-link role="menuitem" :to="{ path: '/clients', query: { tab: 'tokens', create: '1', profile: profile.name } }" :data-test="`profile-create-token-${profile.name}`">Create token with this profile</router-link></li>
+            <li role="none"><button type="button" role="menuitem" class="text-error" :data-test="`profile-delete-${profile.name}`" @click="pick('delete')">Delete&hellip;</button></li>
           </ul>
-        </details>
+        </div>
       </div>
     </div>
   </article>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useClientsStore } from '@/stores/clients'
 import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
 import { tierPhrase } from '@/utils/profiles'
@@ -64,6 +73,16 @@ import type { ProfileView } from '@/types/api'
 const props = defineProps<{ profile: ProfileView; tenant?: boolean }>()
 const emit = defineEmits<{ (e: 'assign'): void; (e: 'delete'): void }>()
 const scope = useScopeQuery('profiles')
+const menuOpen = ref(false)
+function onFocusOut(event: FocusEvent) {
+  const next = event.relatedTarget as Node | null
+  if (!next || !(event.currentTarget as HTMLElement).contains(next)) menuOpen.value = false
+}
+function pick(action: 'assign' | 'delete') {
+  menuOpen.value = false
+  if (action === 'assign') emit('assign')
+  else emit('delete')
+}
 const clients = useClientsStore()
 const profileScopeAvailable = computed(() => isScopeParamAvailable('profile'))
 

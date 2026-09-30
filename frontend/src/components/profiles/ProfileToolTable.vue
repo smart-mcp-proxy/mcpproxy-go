@@ -34,11 +34,12 @@
     <div v-if="visibleRows.length" class="overflow-x-auto rounded-box border border-base-300">
       <table class="table table-sm">
         <thead>
+          <!-- daisyUI mutes table headers; full text colour keeps them AA on base-200. -->
           <tr>
-            <th scope="col">Tool</th>
-            <th scope="col">Tier</th>
-            <th scope="col">Access</th>
-            <th scope="col">Actions</th>
+            <th scope="col" class="text-base-content">Tool</th>
+            <th scope="col" class="text-base-content">Tier</th>
+            <th scope="col" class="text-base-content">Access</th>
+            <th scope="col" class="text-base-content">Actions</th>
           </tr>
         </thead>
         <tbody>

@@ -18,7 +18,7 @@
           data-test="custom-client-id"
         />
         <span v-if="fieldError('id')" class="text-error text-xs mt-1" data-test="custom-client-id-error">{{ fieldError('id') }}</span>
-        <span v-else class="text-xs opacity-60 mt-1">Lower-case letters, digits, '-' or '_'; start with a letter or digit; at most 56 characters.</span>
+        <span v-else class="text-xs opacity-70 mt-1">Lower-case letters, digits, '-' or '_'; start with a letter or digit; at most 56 characters.</span>
       </div>
       <div class="form-control">
         <label class="label" for="custom-client-name"><span class="label-text font-medium">Display name (optional)</span></label>

@@ -185,6 +185,8 @@ describe('Profiles page (Spec 108-i T090, FR-040)', () => {
 
   it('"Create token with this profile" routes to the token dialog preset', async () => {
     const { wrapper } = await mountAt()
+    expect(wrapper.find('[data-test="profile-create-token-work-ro"]').exists()).toBe(false)
+    await wrapper.get('[data-test="profile-more-work-ro"]').trigger('click')
     const link = wrapper.get('[data-test="profile-create-token-work-ro"]')
     expect(link.attributes('href')).toBe('/clients?tab=tokens&create=1&profile=work-ro')
   })

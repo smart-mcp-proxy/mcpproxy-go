@@ -24,7 +24,7 @@
           <h2 id="profile-card-title-all-servers" class="card-title text-base">All servers</h2>
           <p class="text-sm">Clients and agents with no profile, and anonymous callers when no anonymous profile is set, reach every enabled server.</p>
           <p class="text-sm" data-test="profile-anonymous-status">
-            <span class="opacity-60">Anonymous callers</span>
+            <span class="opacity-70">Anonymous callers</span>
             {{ store.anonymousProfile ? profileTitle(store.anonymousProfile) : 'unconfined' }}
             <router-link v-if="!tenant" class="link ml-1" :to="{ path: '/settings', query: { tab: 'security', focus: 'anonymous_profile' } }" data-test="profile-anonymous-link">Change in Settings</router-link>
           </p>

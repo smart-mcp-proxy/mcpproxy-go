@@ -2,7 +2,7 @@
   <div class="rounded-lg border border-base-300 p-3 space-y-2" data-test="setting-row-anonymous_profile" :class="highlight && 'ring-2 ring-primary ring-offset-2'">
     <div data-test="settings-anonymous-profile">
       <label class="font-medium text-sm" for="anonymous-profile-select">Anonymous callers</label>
-      <p class="text-xs text-base-content/60 mt-1" data-test="anonymous-profile-explanation">
+      <p class="text-xs text-base-content/70 mt-1" data-test="anonymous-profile-explanation">
         <template v-if="requireMcpAuth">Anonymous callers are refused because authentication is required. This setting applies only if you turn authentication off.</template>
         <template v-else>Callers that send no credential get this profile. If any client is bound to a profile, anonymous callers must not reach more than it, or they are denied everything (binding guard).</template>
       </p>
