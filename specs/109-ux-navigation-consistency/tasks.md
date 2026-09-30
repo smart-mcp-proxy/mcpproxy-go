@@ -318,7 +318,7 @@ description: "Task list for Spec 109 — Navigation, scope filters and cross-sur
 - [x] T142 [P] [US6] `docs/development/web-ui-verification.md` + `release-gate.md`: name `navigation-consistency.spec.ts` in the sweep list (the script already runs it since 109-e); `docs/development/macos-tray.md` verification checklist (Home, Clients, Review Queue, tray items)
 
 ### Verification
-- [ ] T143 quickstart §1 + recipe 109-i
+- [x] T143 quickstart §1 + recipe 109-i
 
 ---
 
