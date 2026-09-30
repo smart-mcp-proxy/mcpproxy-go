@@ -186,3 +186,5 @@ Re-evaluated after data-model and contracts: all gates PASS; the only deviation 
 ## Phase 2 hand-off
 
 `tasks.md` lists tasks per PR in the merge order above, failing tests first, each PR with its test plan and live-verification recipe ([quickstart.md](quickstart.md)).
+
+**108-f (as planned and shipped).** One config funnel, `Runtime.MutateConfig`, holds `bindingWriteMu` across read, mutate, FR-008a guard over the whole candidate (mutated config plus the re-pinned tokens), token re-pin (one bbolt transaction, restored when the write fails) and apply, and writes the `profile_change` records from the diff; the profiles service, `PATCH /config`, `POST /config/apply` and `PATCH /config/docker-isolation` all go through it (risk R1: the merge moved inside the lock unchanged; R2: the service only calls the funnel's locked core, and a concurrent create/bulk-assign/PATCH test runs under a watchdog). `profiles.changed` has ONE emitter, the server's pre-publish snapshot observer, which also drives the FR-027 notifications through a single worker that waits for publication.
