@@ -127,6 +127,12 @@ Get server status and statistics.
 
 List all upstream servers with unified health status.
 
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `profile` | string | Restrict to the named profile's effective servers (intersected with the servers the caller may see). Each row's `tool_count` becomes the number of that server's tools **visible** under the profile, and `stats` are recomputed over the returned rows. An unknown or unreachable profile returns `404 profile not found`. `-` returns `400`. `client` and `token` are not server filters and return `400 unsupported_scope_filter` |
+
 ##### Header redaction and the mask format
 
 By default, sensitive header values (`Authorization`, `X-API-Key`, `Cookie`,
@@ -649,6 +655,19 @@ search/filter/sort over the full set. For relevance-ranked discovery use
 > is unchanged (bare tool `name` + separate `server_name`); only which tools
 > appear is filtered. `GET /api/v1/tools` (above) is the unfiltered operator
 > overview and still lists quarantined servers' tools with their state.
+
+**Query Parameters (view-as):**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `client` | string | Administrator only. Show what this client would see and be able to call. The client's credential, binding and current state are resolved exactly as its connection resolves them. A caller that is not an administrator gets `403 operation requires admin access`; an unknown client gets `404 client not found` |
+| `profile` | string | Show what this profile would expose. An unknown profile, or one a non-administrator cannot reach, returns the same `404 profile not found` |
+
+`client` and `profile` are mutually exclusive (`400 use either client or profile, not both`), `-` is not valid here (`400`), and `token` is not a tools filter (`400 unsupported_scope_filter`).
+
+With either parameter every row gains `profile_tier` (the tool's tier under the subject's profile; `tier` stays the tool's intrinsic tier) and `access {visible, callable, reason}`. `visible` means the subject's discovery would list the tool; `callable` means a real call would succeed, and it equals the outcome of one for every row. `reason` is empty when callable, otherwise it names the first failing step of the access chain (`credential`, `profile`, `server_in_scope`, `tool_rule`, `tier_cap`, `token_permission`, `global_gate`, `server_state`, `tool_approval`), where the profile decision reports its own reasons: `server_not_in_profile`, `denied_by_rule`, `unannotated_hidden`, `above_tier_cap`. `read_only_mode` gates management operations only, never an upstream tool, so it is never a `reason` for an upstream row. Rows of a quarantined server are not listed, with or without view-as.
+
+An administrator gets every row. A non-administrator (`profile=` only) gets just the rows that are visible under the profile, without a `reason`, plus `counts {visible, hidden}` for the rest; excluded rows, their tiers and their reasons are administrator-only. `stats` are recomputed over the returned rows. Without `client` or `profile` the response is unchanged.
 
 **Response:**
 ```json
@@ -1289,6 +1308,11 @@ List recent MCP sessions.
 | `offset` | integer | Pagination offset (default: 0) |
 | `parent_id` | string | Return only the sub-calls of one `code_execution` (value = the parent record's `request_id`) |
 | `status` | string | Filter by session status: `active`, `closed`. Any other value returns `400`. |
+| `profile` | string | Sessions whose **latest effective** profile is this name; `-` selects sessions with none |
+| `client` | string | Sessions whose credential is bound to this client id; `-` selects sessions with none |
+| `token` | string | Sessions that initialized with this token name; `-` selects sessions with none. `agent` is an alias of `token`; naming two different tokens returns `400` |
+
+Each row carries `client_id`, `token_name`, `profile` and `profile_source` (`pin`, `binding`, `url`, `session`, `anonymous` or `none`); they are empty on sessions recorded before Profiles v3. `client_name` is not a sessions filter and returns `400` (`client_name is not supported on this endpoint; filter by client`). The scope filters are applied before the `limit` truncation, so `total` is the filtered count.
 
 The `status` filter is applied during the storage walk, **before** the `limit`
 truncation, so a long-running session that is still active is returned even when
@@ -1319,10 +1343,20 @@ List activity records with filtering and pagination.
 | `tool` | string | Filter by tool name |
 | `session_id` | string | Filter by MCP session ID |
 | `status` | string | Filter by status: `success`, `error`, `blocked` |
+| `profile` | string | Filter by the profile in effect when the call ran (also matches the legacy `metadata.profile`); `-` selects records with none |
+| `client` | string | Filter by client id (the client's binding); `-` selects records with none |
+| `token` | string | Filter by the token name in effect (also matches records written before Profiles v3 through their stored agent name); `-` selects records with none. `agent` is an alias of `token`; naming two different tokens returns `400` |
+| `client_name` | string | Filter by the client's self-reported `clientInfo.name`. Advisory, never authoritative: a client can claim any name. Accepted by `GET /activity` and `GET /activity/export` only |
 | `start_time` | string | Filter after this time (RFC3339) |
 | `end_time` | string | Filter before this time (RFC3339) |
 | `limit` | integer | Max records (1-100, default: 50) |
 | `offset` | integer | Pagination offset (default: 0) |
+
+**Scope attribution (Profiles v3).** Every record written for an MCP or REST request carries the values in effect when the call ran: `profile`, `profile_source`, `client_id`, `client_name`, `token_name`, and `block_reason` for a blocked call. They are never rewritten, so reassigning a client later does not change history. Records with no request context (system events, configuration changes, concurrency-limiter rejections) are unattributed, and a `profile_change` record carries the new profile, the client id and the token name.
+
+A non-administrator caller sees another token's `profile`, `profile_source`, `client_id` and `token_name` blanked, and its own `profile`, `client` and `token` filters evaluate that same view, so a filter cannot be used to learn what another token did.
+
+The same `profile`, `client` and `token` filters (and the `agent` alias) apply to `GET /api/v1/activity/summary`, `GET /api/v1/activity/usage` and `GET /api/v1/activity/export`; `client_name` is rejected on `/activity/summary` and `/activity/usage` with `400`. Under a scope filter `/activity/usage` is computed from the matching records of the requested window (per-tool figures are window-bounded rather than lifetime, and the global tokens-saved headline is omitted). Export CSV appends `profile,profile_source,client_id,client_name,token_name,block_reason` after `parent_id`.
 
 **Response:**
 ```json

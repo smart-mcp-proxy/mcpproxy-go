@@ -142,7 +142,7 @@ func (s *Server) handleGetActiveProfile(w http.ResponseWriter, r *http.Request) 
 			// checked (cross-review round 3 — handleListProfiles already
 			// refuses outright on the same error; this door has no such
 			// escape hatch, so it clears the value instead).
-			if err != nil || cfg == nil || !activeProfileVisible(r.Context(), cfg, active) {
+			if err != nil || cfg == nil || !profileReachable(r.Context(), cfg, active) {
 				active = ""
 			}
 		}
@@ -151,10 +151,10 @@ func (s *Server) handleGetActiveProfile(w http.ResponseWriter, r *http.Request) 
 	s.writeSuccess(w, map[string]interface{}{"active_profile": active})
 }
 
-// activeProfileVisible reports whether the named profile's effective server
+// profileReachable reports whether the named profile's effective server
 // set has non-empty intersection with the caller's entitlement (Spec 107
 // T085) — the same rule handleListProfiles applies per row.
-func activeProfileVisible(ctx context.Context, cfg *config.Config, name string) bool {
+func profileReachable(ctx context.Context, cfg *config.Config, name string) bool {
 	for i := range cfg.Profiles {
 		if cfg.Profiles[i].Name != name {
 			continue

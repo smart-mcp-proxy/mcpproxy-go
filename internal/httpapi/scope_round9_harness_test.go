@@ -234,7 +234,7 @@ func (c *scopeController) UsageSnapshot() *internalRuntime.UsageAggregate {
 	}
 }
 
-func (c *scopeController) GetRecentSessions(_ int, _ string) ([]*contracts.MCPSession, int, error) {
+func (c *scopeController) GetRecentSessions(_ storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
 	return []*contracts.MCPSession{{
 		ID:            "session-1",
 		ClientName:    "claude-code",

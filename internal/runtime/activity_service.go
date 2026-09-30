@@ -684,6 +684,8 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		RequestBytes:      requestBytes,
 		ResponseBytes:     responseBytes,
 	}
+	// Spec 108 FR-029: the profile/client/token in effect when the call ran.
+	applyAttribution(record, attributionFromPayload(evt.Payload))
 
 	// Extract user identity from auth metadata injected into arguments (server edition)
 	if arguments != nil {
@@ -747,7 +749,8 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 		"decision": decision,
 		"reason":   reason,
 	}
-	if blockReason := getStringPayload(evt.Payload, storage.MetadataKeyBlockReason); blockReason != "" {
+	blockReason := getStringPayload(evt.Payload, storage.MetadataKeyBlockReason)
+	if blockReason != "" {
 		metadata[storage.MetadataKeyBlockReason] = blockReason
 	}
 	record := &storage.ActivityRecord{
@@ -763,7 +766,11 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 		// pre-090 payloads, which stays absent rather than becoming "".
 		RequestID:     getStringPayload(evt.Payload, "request_id"),
 		WorkSessionID: s.resolveWorkSession(sessionID),
+		// Spec 108 T062: first-class beside the metadata key (both written for
+		// one release). Display only; no filter reads it.
+		BlockReason: blockReason,
 	}
+	applyAttribution(record, attributionFromPayload(evt.Payload))
 
 	if err := s.storage.SaveActivity(record); err != nil {
 		s.logger.Error("Failed to save policy decision activity",
@@ -975,6 +982,7 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		RequestBytes:      internalRequestBytes,
 		ResponseBytes:     internalResponseBytes,
 	}
+	applyAttribution(record, attributionFromPayload(evt.Payload))
 
 	// Extract user identity from auth metadata injected into arguments (server edition)
 	if arguments != nil {
@@ -1072,6 +1080,7 @@ func (s *ActivityService) handlePromptGet(evt Event) {
 		RequestID:         requestID,
 		Metadata:          metadata,
 	}
+	applyAttribution(record, attributionFromPayload(evt.Payload))
 
 	// Server-edition identity, mirroring the tool path.
 	if arguments != nil {

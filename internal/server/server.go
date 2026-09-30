@@ -4051,7 +4051,7 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	// audit authorization or upstream I/O. Profile server scope is concealed
 	// as not-found; tool policy denials retain the shared refusal text.
 	profileIndex := s.mcpProxy.profileIndexCurrent(ctx)
-	profileResolution := s.mcpProxy.ResolveProfileV3(ctx, profileIndex)
+	ctx, profileResolution := s.mcpProxy.resolveForDispatch(ctx, profileIndex)
 	if profileResolution.Scope != nil && !profileResolution.Scope.Allows(original.ServerName) {
 		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
 			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonProfileScope)
@@ -4159,8 +4159,8 @@ func (s *Server) GetToolCallsBySession(sessionID string, limit, offset int, scop
 
 // GetRecentSessions retrieves recent MCP sessions, optionally filtered by
 // status ("active" / "closed"; empty means no filter).
-func (s *Server) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
-	return s.runtime.GetRecentSessions(limit, status)
+func (s *Server) GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
+	return s.runtime.GetRecentSessions(f)
 }
 
 // GetSessionByID retrieves a session by its ID

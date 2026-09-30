@@ -1649,14 +1649,15 @@ func (r *Runtime) GetToolCallsBySession(sessionID string, limit, offset int, sco
 
 // GetRecentSessions returns recent MCP sessions.
 //
-// status filters on the session status ("active" / "closed"); an empty string
-// means no filtering. Both the filter and the last-activity ordering are pushed
-// down into storage, so they are applied before truncation to limit.
-func (r *Runtime) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
+// f.Status filters on the session status ("active" / "closed"); f.Profile,
+// f.ClientID and f.TokenName are the Spec 108 scope filters ("-" = unattributed).
+// The filters and the last-activity ordering are pushed down into storage, so
+// they are applied before truncation to f.Limit.
+func (r *Runtime) GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	storageRecords, total, err := r.storageManager.GetRecentSessions(limit, status)
+	storageRecords, total, err := r.storageManager.GetRecentSessionsFiltered(f)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get recent sessions: %w", err)
 	}
@@ -1679,6 +1680,10 @@ func (r *Runtime) GetRecentSessions(limit int, status string) ([]*contracts.MCPS
 			Experimental:  rec.Experimental,
 			WorkspaceName: rec.WorkspaceName,
 			WorkSessionID: rec.WorkSessionID,
+			ClientID:      rec.ClientID,
+			TokenName:     rec.TokenName,
+			Profile:       rec.Profile,
+			ProfileSource: rec.ProfileSource,
 		})
 	}
 
@@ -1721,6 +1726,10 @@ func (r *Runtime) GetSessionByID(sessionID string) (*contracts.MCPSession, error
 		Experimental:  rec.Experimental,
 		WorkspaceName: rec.WorkspaceName,
 		WorkSessionID: rec.WorkSessionID,
+		ClientID:      rec.ClientID,
+		TokenName:     rec.TokenName,
+		Profile:       rec.Profile,
+		ProfileSource: rec.ProfileSource,
 	}, nil
 }
 

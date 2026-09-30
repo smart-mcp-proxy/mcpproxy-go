@@ -1471,6 +1471,15 @@ components:
           description: '"admin", "agent", "user" or "admin_user"; empty without an
             auth context or on another caller''s row for a scoped caller'
           type: string
+        block_reason:
+          description: Typed cause of a profile policy refusal
+          type: string
+        client_id:
+          description: Client id from the client-credential binding
+          type: string
+        client_name:
+          description: Self-reported clientInfo.name (advisory)
+          type: string
         detection_types:
           description: List of detection types found
           items:
@@ -1498,6 +1507,18 @@ components:
         parent_id:
           description: Correlation id of the parent call (the code_execution whose
             sandbox issued this sub-call)
+          type: string
+        profile:
+          description: |-
+            Scope attribution (Spec 108 FR-029): the profile, client and token in
+            effect when the call ran. Stamped at write time, never rewritten. For a
+            scoped (non-admin) caller the profile/profile_source/client_id/token_name
+            of a row it did not make are blanked (binding disclosure is admin-only);
+            client_name is self-reported and stays. Absent on records written before
+            Spec 108 and on records with no MCP/REST request context.
+          type: string
+        profile_source:
+          description: pin|binding|url|session|anonymous|none
           type: string
         request_bytes:
           description: |-
@@ -1538,6 +1559,9 @@ components:
           type: string
         timestamp:
           description: When activity occurred
+          type: string
+        token_name:
+          description: Agent/client token name
           type: string
         tool_name:
           description: Name of tool called
@@ -2043,6 +2067,8 @@ components:
       type: object
     contracts.GlobalToolsResponse:
       properties:
+        counts:
+          $ref: '#/components/schemas/contracts.ViewAsCounts'
         failed_servers:
           items:
             type: string
@@ -2277,6 +2303,12 @@ components:
       type: object
     contracts.MCPSession:
       properties:
+        client_id:
+          description: |-
+            Scope attribution (Spec 108 FR-033). ClientID and TokenName are the
+            credential the session initialized with; Profile and ProfileSource are
+            the session's latest effective resolution. Empty on legacy sessions.
+          type: string
         client_name:
           type: string
         client_version:
@@ -2297,9 +2329,15 @@ components:
           type: string
         last_activity:
           type: string
+        profile:
+          type: string
+        profile_source:
+          type: string
         start_time:
           type: string
         status:
+          type: string
+        token_name:
           type: string
         tool_call_count:
           type: integer
@@ -3074,6 +3112,8 @@ components:
       type: object
     contracts.Tool:
       properties:
+        access:
+          $ref: '#/components/schemas/contracts.ToolAccess'
         annotations:
           $ref: '#/components/schemas/contracts.ToolAnnotation'
         approval_status:
@@ -3125,6 +3165,20 @@ components:
           type: string
         name:
           type: string
+        profile_tier:
+          description: |-
+            ProfileTier and Access are present only in a view-as listing (a tools
+            listing with ?client= or ?profile=, Spec 108 FR-032). ProfileTier is the
+            tool's tier under the viewed subject's profile (Tier above stays the
+            intrinsic tier); Access is the subject's verdict for the tool. Absent
+            otherwise, so an ordinary listing is byte-identical to before.
+          type: string
+          x-enum-varnames:
+          - TierRead
+          - TierWrite
+          - TierDestructive
+          - TierUnannotated
+          - TierUnknown
         schema:
           type: object
         server_name:
@@ -3133,6 +3187,15 @@ components:
           $ref: '#/components/schemas/contracts.Tier'
         usage:
           type: integer
+      type: object
+    contracts.ToolAccess:
+      properties:
+        callable:
+          type: boolean
+        reason:
+          type: string
+        visible:
+          type: boolean
       type: object
     contracts.ToolAnnotation:
       description: Tool behavior hints snapshot
@@ -3453,6 +3516,18 @@ components:
           type: string
         message:
           type: string
+      type: object
+    contracts.ViewAsCounts:
+      description: |-
+        Counts is present only for a NON-administrator profile view-as (Spec 108
+        FR-032): the response then lists only the visible rows, and this is the
+        only trace of the rest, with no per-server, per-tier or per-reason
+        breakdown.
+      properties:
+        hidden:
+          type: integer
+        visible:
+          type: integer
       type: object
     data:
       properties:
@@ -4454,9 +4529,31 @@ paths:
           - medium
           - low
           type: string
-      - description: Filter by agent token name (Spec 028)
+      - description: Alias of token (Spec 028)
         in: query
         name: agent
+        schema:
+          type: string
+      - description: Filter by the token in effect for the call; - selects records
+          with no token (Spec 108)
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Filter by the profile in effect for the call; - selects records
+          with no profile (Spec 108)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Filter by client id; - selects records with no client (Spec 108)
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Filter by the client's self-reported name (advisory; Spec 108)
+        in: query
+        name: client_name
         schema:
           type: string
       - description: Filter by auth type (Spec 028)
@@ -4649,6 +4746,33 @@ paths:
         name: parent_id
         schema:
           type: string
+      - description: Alias of token (Spec 028)
+        in: query
+        name: agent
+        schema:
+          type: string
+      - description: Filter by the token in effect for the call; - selects records
+          with no token (Spec 108)
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Filter by the profile in effect for the call; - selects records
+          with no profile (Spec 108)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Filter by client id; - selects records with no client (Spec 108)
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Filter by the client's self-reported name (advisory; Spec 108)
+        in: query
+        name: client_name
+        schema:
+          type: string
       - description: Filter activities after this time (RFC3339)
         in: query
         name: start_time
@@ -4723,6 +4847,29 @@ paths:
       - description: 'Group by: server, tool (optional)'
         in: query
         name: group_by
+        schema:
+          type: string
+      - description: Alias of token (Spec 028)
+        in: query
+        name: agent
+        schema:
+          type: string
+      - description: Count only records made under this token; - selects records with
+          no token (Spec 108)
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Count only records made under this profile; - selects records
+          with no profile (Spec 108)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Count only records made by this client id; - selects records
+          with no client (Spec 108)
+        in: query
+        name: client
         schema:
           type: string
       requestBody:
@@ -4824,6 +4971,29 @@ paths:
           - resp_bytes
           - error_rate
           - p95
+          type: string
+      - description: Alias of token (Spec 028)
+        in: query
+        name: agent
+        schema:
+          type: string
+      - description: Restrict to calls made under this token; - selects records with
+          no token. Computed from a window-bounded scan (Spec 108)
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Restrict to calls made under this profile; - selects records
+          with no profile. Computed from a window-bounded scan (Spec 108)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Restrict to calls made by this client id; - selects records with
+          no client. Computed from a window-bounded scan (Spec 108)
+        in: query
+        name: client
+        schema:
           type: string
       requestBody:
         content:
@@ -6631,6 +6801,13 @@ paths:
     get:
       description: Get a list of all configured upstream MCP servers with their connection
         status and statistics
+      parameters:
+      - description: Restrict to the profile's effective servers; tool_count becomes
+          the number of that server's tools visible under the profile (Spec 108 FR-032)
+        in: query
+        name: profile
+        schema:
+          type: string
       responses:
         "200":
           content:
@@ -6643,8 +6820,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Unsupported scope filter (profile/client/token, Spec 109-k
-            FR-080a)
+          description: Unsupported scope filter (client/token), or '-' on a server
+            filter
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown or unreachable profile
         "500":
           content:
             application/json:
@@ -7956,6 +8139,29 @@ paths:
           - active
           - closed
           type: string
+      - description: Filter by the session's latest effective profile; - selects sessions
+          with none (Spec 108)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Filter by the client id the session's credential is bound to;
+          - selects sessions with none (Spec 108)
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Filter by the token name the session initialized with; - selects
+          sessions with none (Spec 108)
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Alias of token
+        in: query
+        name: agent
+        schema:
+          type: string
       responses:
         "200":
           content:
@@ -7968,7 +8174,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Invalid status filter
+          description: Invalid status filter, token and agent naming different tokens,
+            or client_name (not supported here; filter by client)
         "401":
           content:
             application/json:
@@ -8344,6 +8551,21 @@ paths:
         server (including disabled servers and disabled/config-denied tools), enriched
         with approval state and 30-day usage. Backs the global Tools page and the
         CLI global `tools list` (spec 050, issue #437).'
+      parameters:
+      - description: 'View-as (administrator only): the tools this client would see,
+          each with its access verdict {visible, callable, reason} and profile_tier
+          (Spec 108 FR-032)'
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: 'View-as: the tools this profile would expose. An administrator
+          gets every row with a verdict; any other caller gets only the visible rows
+          plus counts {visible, hidden} (Spec 108 FR-032)'
+        in: query
+        name: profile
+        schema:
+          type: string
       responses:
         "200":
           content:
@@ -8356,8 +8578,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Unsupported scope filter (profile/client/token, Spec 109-k
-            FR-080a)
+          description: Unsupported scope filter (token), both client and profile,
+            or '-' on a tools filter
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: client= requires administrator credentials
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown or unreachable client / profile
         "500":
           content:
             application/json:

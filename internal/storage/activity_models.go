@@ -238,6 +238,26 @@ type ActivityRecord struct {
 	// unattributed.
 	WorkSessionID string `json:"work_session_id,omitempty"`
 
+	// Scope attribution (Spec 108 FR-029): the profile, client and token IN
+	// EFFECT when the call ran, stamped once at write time and never rewritten
+	// (a later reassignment does not touch history). First-class rather than
+	// metadata because ActivityFilter.Matches compares struct fields.
+	//
+	// All omitempty: a record written before Spec 108, or one with no MCP/REST
+	// request context (system_*, config_change, limiter sheds), carries none of
+	// them and round-trips byte-identical. Legacy records keep matching the
+	// profile/client_name/token filters through the fallbacks on the effective*
+	// helpers below.
+	Profile       string `json:"profile,omitempty"`        // Effective profile name (profile_change: the NEW profile)
+	ProfileSource string `json:"profile_source,omitempty"` // pin|binding|url|session|anonymous|none
+	ClientID      string `json:"client_id,omitempty"`      // Client id from the client-credential binding
+	ClientName    string `json:"client_name,omitempty"`    // Self-reported clientInfo.name (advisory, never authoritative)
+	TokenName     string `json:"token_name,omitempty"`     // Agent/client token name
+	// BlockReason is the typed cause of a profile policy refusal. It is also
+	// written to Metadata[MetadataKeyBlockReason] for one release so existing
+	// readers keep working. Display only: no filter reads it.
+	BlockReason string `json:"block_reason,omitempty"`
+
 	// Byte sizes measured pre-truncation (Spec 069 A1). Zero means unknown (legacy records).
 	RequestBytes  int `json:"request_bytes,omitempty"`  // JSON-serialized request arguments size in bytes
 	ResponseBytes int `json:"response_bytes,omitempty"` // Raw upstream response size in bytes before truncation
@@ -255,6 +275,115 @@ func (a *ActivityRecord) MarshalBinary() ([]byte, error) {
 // UnmarshalBinary implements encoding.BinaryUnmarshaler for BBolt storage
 func (a *ActivityRecord) UnmarshalBinary(data []byte) error {
 	return json.Unmarshal(data, a)
+}
+
+// ScopeFilterUnattributed is the sentinel filter value ("-") that selects
+// records or sessions whose profile, client or token is EMPTY (Spec 108 FR-031,
+// url-filter-contract.md). It is never a valid stored value.
+const ScopeFilterUnattributed = "-"
+
+// authArgTokenPrefix and authArgAgentName are the Spec 028 internal arguments
+// that identify the calling agent token on a record.
+const (
+	authArgTokenPrefix = "_auth_token_prefix"
+	authArgAgentName   = "_auth_agent_name"
+)
+
+// ActivityIdentityOwner is the caller identity of a SCOPED (non-admin) reader.
+// When set on an ActivityFilter, Matches evaluates the profile/client/token
+// filters against the view that caller is allowed to see: a record the caller
+// did not make reads as unattributed. Without it a scoped caller could probe
+// "?token=<someone else>" and use total/the row set as an oracle for another
+// token's activity (Spec 108 FR-031 disclosure rule).
+//
+// "Own" needs the stored token prefix AND name to match (names are unique per
+// owner only; the 12-char prefix carries few random bits), the same rule as
+// httpapi.redactForeignIdentity.
+type ActivityIdentityOwner struct {
+	TokenName   string
+	TokenPrefix string
+}
+
+// Owns reports whether the record was made by this caller.
+func (o *ActivityIdentityOwner) Owns(r *ActivityRecord) bool {
+	if o == nil || o.TokenPrefix == "" {
+		return false
+	}
+	return extractAuthMetadataField(r, authArgTokenPrefix) == o.TokenPrefix &&
+		r.EffectiveTokenName() == o.TokenName
+}
+
+// EffectiveProfile is the first-class profile, else the legacy metadata.profile
+// (Spec 057) that every record with a resolved profile has carried.
+func (a *ActivityRecord) EffectiveProfile() string {
+	if a.Profile != "" {
+		return a.Profile
+	}
+	if s, ok := a.Metadata["profile"].(string); ok {
+		return s
+	}
+	return ""
+}
+
+// EffectiveClientName is the first-class client name, else metadata.client_name.
+func (a *ActivityRecord) EffectiveClientName() string {
+	if a.ClientName != "" {
+		return a.ClientName
+	}
+	if s, ok := a.Metadata["client_name"].(string); ok {
+		return s
+	}
+	return ""
+}
+
+// EffectiveTokenName is the first-class token name, else the Spec 028
+// _auth_agent_name argument older records carry.
+func (a *ActivityRecord) EffectiveTokenName() string {
+	if a.TokenName != "" {
+		return a.TokenName
+	}
+	return extractAuthMetadataField(a, authArgAgentName)
+}
+
+// EffectiveBlockReason is the first-class block reason, else the metadata key
+// 108-d wrote before the field existed.
+func (a *ActivityRecord) EffectiveBlockReason() string {
+	if a.BlockReason != "" {
+		return a.BlockReason
+	}
+	if s, ok := a.Metadata[MetadataKeyBlockReason].(string); ok {
+		return s
+	}
+	return ""
+}
+
+// scopeValueMatches applies one profile/client/token filter to an effective
+// value: "" is no filter, "-" matches only the empty value, anything else is
+// an exact match.
+func scopeValueMatches(want, have string) bool {
+	if want == "" {
+		return true
+	}
+	if want == ScopeFilterUnattributed {
+		return have == ""
+	}
+	return have == want
+}
+
+// matchesScopeAttribution evaluates the Spec 108 profile/client/client_name/
+// token filters. Foreign rows read as empty for a scoped IdentityOwner.
+func (f *ActivityFilter) matchesScopeAttribution(r *ActivityRecord) bool {
+	if f.Profile == "" && f.ClientID == "" && f.ClientName == "" && f.TokenName == "" {
+		return true
+	}
+	profile, clientID, tokenName := r.EffectiveProfile(), r.ClientID, r.EffectiveTokenName()
+	if f.IdentityOwner != nil && !f.IdentityOwner.Owns(r) {
+		profile, clientID, tokenName = "", "", ""
+	}
+	return scopeValueMatches(f.Profile, profile) &&
+		scopeValueMatches(f.ClientID, clientID) &&
+		scopeValueMatches(f.ClientName, r.EffectiveClientName()) &&
+		scopeValueMatches(f.TokenName, tokenName)
 }
 
 // ActivityFilter represents query parameters for filtering activity records
@@ -288,6 +417,19 @@ type ActivityFilter struct {
 	// Agent token identity filters (Spec 028)
 	AgentName string // Filter by agent token name in metadata
 	AuthType  string // Filter by auth type: "admin" or "agent"
+
+	// Scope attribution filters (Spec 108 FR-031). Each is exact-match, or "-"
+	// (ScopeFilterUnattributed) for "no value". Profile, TokenName and
+	// ClientName fall back to the legacy record shapes (see the effective*
+	// helpers); ClientID reads the first-class field only.
+	Profile    string // Effective profile name
+	ClientID   string // Client id (the binding), NOT the self-reported name
+	ClientName string // Advisory clientInfo.name; only /activity and /activity/export expose it
+	TokenName  string // Token name (REST "agent" is an alias)
+
+	// IdentityOwner is set for scoped (non-admin) callers: a row the owner did
+	// not make reads as unattributed to the Profile/ClientID/TokenName filters.
+	IdentityOwner *ActivityIdentityOwner
 
 	// AllowedServers is an AUTHORIZATION filter, not a user-facing one (#1166
 	// follow-up): nil means unrestricted, a non-nil slice restricts matches to
@@ -525,7 +667,9 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 		}
 	}
 
-	return true
+	// Scope attribution (Spec 108 FR-031). After the authorization block above,
+	// so a scope filter can never widen what the caller may see.
+	return f.matchesScopeAttribution(record)
 }
 
 // extractAuthMetadataField extracts an auth metadata field from the activity record's arguments.

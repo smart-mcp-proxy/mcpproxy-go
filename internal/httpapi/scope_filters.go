@@ -10,16 +10,16 @@ import (
 // scopeFilterSupportedFilters lists which of "profile", "client" and "token"
 // this build accepts as REST query parameters
 // (specs/109-ux-navigation-consistency/contracts/url-filter-contract.md,
-// "Backend gate", FR-080a). Empty in this PR — Spec 108-e fills it in once
-// profiles land. GET /api/v1/status reports the same list as
-// features.scope_filters (omitted while empty, scopeFiltersFeatureValue).
+// "Backend gate", FR-080a). GET /api/v1/status reports the same list as
+// features.scope_filters (scopeFiltersFeatureValue) - one variable feeds both,
+// so a build advertises a filter exactly when it accepts it.
 //
-// This spec (109-k, T121a) and Spec 108-e (T064) have no edge between them:
-// whichever of the two PRs merges first creates this variable and
-// rejectUnsupportedScopeFilters below (this signature and body); the second
-// reuses both and adds only its own call sites, so no build ever ships a
-// handler that parses a scope parameter without the gate.
-var scopeFilterSupportedFilters []string
+// A name here is the BUILD-wide feature. Each handler additionally passes the
+// names it honours to rejectUnsupportedScopeFilters, so an endpoint that does
+// not yet filter on a name keeps answering 400 unsupported_scope_filter for it
+// (Spec 108-e honours profile/client/token on activity, sessions, tools and
+// servers; /tokens and /clients follow in 108-f).
+var scopeFilterSupportedFilters = []string{"profile", "client", "token"}
 
 // scopeFiltersFeatureValue returns the value GET /api/v1/status reports for
 // features.scope_filters: nil (omitted from the JSON response) while the

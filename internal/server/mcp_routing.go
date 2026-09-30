@@ -496,7 +496,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// The operation is the tier this catalog entry's annotations derive
 		// (the same tier the permission gate below authorizes against).
 		profileIndex := p.profileIndexCurrent(ctx)
-		profileResolution := p.ResolveProfileV3(ctx, profileIndex)
+		ctx, profileResolution := p.resolveForDispatch(ctx, profileIndex)
 		profileSlug, profileScope := profileResolution.Name, profileResolution.Scope
 		{
 			var auditClientName, auditClientVersion string

@@ -485,6 +485,15 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // parentID is the correlation id of the parent code_execution call for a
 // sandbox sub-call; empty for every top-level dispatch
 func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}, parentID string) {
+	r.EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutput, parentID, ActivityAttribution{})
+}
+
+// EmitActivityToolCallCompletedAttributed is EmitActivityToolCallCompleted plus
+// the Spec 108 FR-029 scope attribution (profile, client, token in effect for
+// this call). attr is the LAST parameter, so the position of `status` that
+// TestActivityCompletionNeverHardcodesSuccess pins does not move; the zero
+// value leaves the payload exactly as it was before Spec 108.
+func (r *Runtime) EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}, parentID string, attr ActivityAttribution) {
 	// Spec 042: classify failed tool calls into the upstream error categories.
 	// We never record the error message itself; only a fixed enum value.
 	if status == "error" && errorMsg != "" {
@@ -554,6 +563,9 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 	if parentID != "" {
 		payload["parent_id"] = parentID
 	}
+	if a := attr.payload(); a != nil {
+		payload[attributionPayloadKey] = a
+	}
 	r.publishEvent(newEvent(EventTypeActivityToolCallCompleted, payload))
 }
 
@@ -596,16 +608,22 @@ func (r *Runtime) EmitActivityToolCallRejected(serverName, toolName, source, req
 // gained it in spec 090, so records written before then have none and must not
 // be correlated at all (FR-015) rather than correlated by an empty key.
 func (r *Runtime) EmitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason string) {
-	r.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, "")
+	r.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, "", ActivityAttribution{})
 }
 
 // EmitActivityPolicyDecisionWithBlockReason records the typed profile reason
 // alongside the operator-facing policy decision metadata.
 func (r *Runtime) EmitActivityPolicyDecisionWithBlockReason(serverName, toolName, sessionID, requestID, decision, reason, blockReason string) {
-	r.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, blockReason)
+	r.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, blockReason, ActivityAttribution{})
 }
 
-func (r *Runtime) emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, blockReason string) {
+// EmitActivityPolicyDecisionAttributed is the policy-decision emitter with the
+// Spec 108 FR-029 scope attribution. blockReason may be empty.
+func (r *Runtime) EmitActivityPolicyDecisionAttributed(serverName, toolName, sessionID, requestID, decision, reason, blockReason string, attr ActivityAttribution) {
+	r.emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, blockReason, attr)
+}
+
+func (r *Runtime) emitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason, blockReason string, attr ActivityAttribution) {
 	// Spec 042: classify policy blocks as a tool quarantine error category.
 	// "blocked" decisions are user-visible reliability events worth counting.
 	if decision == "blocked" || decision == "block" {
@@ -622,6 +640,9 @@ func (r *Runtime) emitActivityPolicyDecision(serverName, toolName, sessionID, re
 	}
 	if blockReason != "" {
 		payload["block_reason"] = blockReason
+	}
+	if a := attr.payload(); a != nil {
+		payload[attributionPayloadKey] = a
 	}
 	r.publishEvent(newEvent(EventTypeActivityPolicyDecision, payload))
 }
@@ -681,6 +702,12 @@ func (r *Runtime) EmitActivityInternalToolCall(internalToolName, targetServer, t
 // Spec 103 token benchmark exists to prevent, and one that cannot be detected
 // after the fact.
 func (r *Runtime) EmitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string, responseTruncated bool) {
+	r.EmitActivityInternalToolCallAttributed(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, responseTruncated, ActivityAttribution{})
+}
+
+// EmitActivityInternalToolCallAttributed is EmitActivityInternalToolCallTruncated
+// plus the Spec 108 FR-029 scope attribution.
+func (r *Runtime) EmitActivityInternalToolCallAttributed(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string, responseTruncated bool, attr ActivityAttribution) {
 	payload := map[string]any{
 		"internal_tool_name": internalToolName,
 		"session_id":         sessionID,
@@ -731,6 +758,9 @@ func (r *Runtime) EmitActivityInternalToolCallTruncated(internalToolName, target
 	if n := jsonByteLen(response); n > 0 {
 		payload["response_bytes"] = n
 	}
+	if a := attr.payload(); a != nil {
+		payload[attributionPayloadKey] = a
+	}
 	r.publishEvent(newEvent(EventTypeActivityInternalToolCall, payload))
 }
 
@@ -738,6 +768,12 @@ func (r *Runtime) EmitActivityInternalToolCallTruncated(internalToolName, target
 // (Finding F10). serverName/promptName identify the prompt, arguments are the
 // prompt inputs, response is the *mcp.GetPromptResult (marshaled by the handler).
 func (r *Runtime) EmitActivityPromptGet(serverName, promptName, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}) {
+	r.EmitActivityPromptGetAttributed(serverName, promptName, sessionID, requestID, status, errorMsg, durationMs, arguments, response, ActivityAttribution{})
+}
+
+// EmitActivityPromptGetAttributed is EmitActivityPromptGet plus the Spec 108
+// FR-029 scope attribution.
+func (r *Runtime) EmitActivityPromptGetAttributed(serverName, promptName, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, attr ActivityAttribution) {
 	payload := map[string]any{
 		"server_name":   serverName,
 		"prompt_name":   promptName,
@@ -752,6 +788,9 @@ func (r *Runtime) EmitActivityPromptGet(serverName, promptName, sessionID, reque
 	}
 	if response != nil {
 		payload["response"] = response
+	}
+	if a := attr.payload(); a != nil {
+		payload[attributionPayloadKey] = a
 	}
 	r.publishEvent(newEvent(EventTypeActivityPromptGet, payload))
 }

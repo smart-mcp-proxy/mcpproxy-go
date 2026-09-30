@@ -97,6 +97,13 @@ type SessionStore struct {
 	mu             sync.RWMutex
 	logger         *zap.Logger
 	storageManager *storage.Manager
+
+	// profileWriter, when non-nil, replaces the storage write-through of a
+	// changed profile resolution. Test seam only (counts writes).
+	profileWriter func(sessionID, profile, source string)
+	// writeThroughMu serializes the storage write-throughs of profile
+	// resolutions (see UpdateSessionProfile).
+	writeThroughMu sync.Mutex
 }
 
 // NewSessionStore creates a new session store
@@ -238,6 +245,11 @@ func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func
 		WorkspaceRoot: info.Workspace,
 		WorkspaceName: workspaceDisplayName(info.Workspace),
 		WorkSessionID: info.workSessionID,
+		// Spec 108 FR-033: the credential and the latest resolution so far.
+		TokenName:     info.TokenName,
+		ClientID:      info.ClientID,
+		Profile:       info.Profile,
+		ProfileSource: info.ProfileSource,
 	}
 	workSessionID := info.workSessionID
 	done := info.persistDone
@@ -516,15 +528,58 @@ func (s *SessionStore) NotifyTargets(tokenName string) []sessionTarget {
 // time from TokenName -> the token's current profile_pin, or, for a session
 // with no TokenName, from the snapshot's anonymous_profile — never from a
 // value cached here.
+//
+// Spec 108 FR-033: a CHANGED resolution of a persisted session is written
+// through to its row (one small write per change, never per call), so
+// /sessions?profile= filters on the latest effective profile. A session that
+// is not persisted yet is copied at EnsurePersisted instead.
 func (s *SessionStore) UpdateSessionProfile(sessionID, profileName, source string) {
 	if sessionID == "" {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if info, ok := s.sessions[sessionID]; ok {
-		info.Profile = profileName
-		info.ProfileSource = source
+	info, ok := s.sessions[sessionID]
+	if !ok {
+		s.mu.Unlock()
+		return
+	}
+	changed := info.Profile != profileName || info.ProfileSource != source
+	info.Profile = profileName
+	info.ProfileSource = source
+	persisted := info.persisted
+	done := info.persistDone
+	mgr := s.storageManager
+	writer := s.profileWriter
+	s.mu.Unlock()
+
+	if !changed || !persisted {
+		return
+	}
+	// The row may still be in flight (EnsurePersisted flips persisted before
+	// CreateSession returns); wait so the write lands on an existing row.
+	<-done
+
+	// Concurrent updates of one session must not persist an older resolution
+	// after a newer one: serialize the write-throughs and persist the CURRENT
+	// in-memory value at write time, so the last writer always leaves the
+	// latest resolution behind.
+	s.writeThroughMu.Lock()
+	defer s.writeThroughMu.Unlock()
+	s.mu.RLock()
+	if cur, ok := s.sessions[sessionID]; ok {
+		profileName, source = cur.Profile, cur.ProfileSource
+	}
+	s.mu.RUnlock()
+	if writer != nil {
+		writer(sessionID, profileName, source)
+		return
+	}
+	if mgr == nil {
+		return
+	}
+	if err := mgr.SetSessionProfile(sessionID, profileName, source); err != nil {
+		s.logger.Debug("failed to write session profile through to storage",
+			zap.String("session_id", sessionID), zap.Error(err))
 	}
 }
 

@@ -847,7 +847,7 @@ func (p *MCPProxyServer) emitActivityToolCallStarted(ctx context.Context, server
 func (p *MCPProxyServer) emitActivityToolCallCompleted(ctx context.Context, serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonDecisions []toonenc.Decision, parentID string) {
 	p.auditToolCallFromStatus(ctx, status, durationMs, requestBytes, responseBytes)
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutputMetadata(toonDecisions), parentID)
+		p.mainServer.runtime.EmitActivityToolCallCompletedAttributed(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutputMetadata(toonDecisions), parentID, p.activityAttribution(ctx, sessionID))
 	}
 }
 
@@ -914,11 +914,7 @@ func (p *MCPProxyServer) emitActivityPolicyDecisionWithBlockReason(ctx context.C
 		}
 	}
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		if blockReason == "" {
-			p.mainServer.runtime.EmitActivityPolicyDecision(serverName, toolName, sessionID, requestID, decision, reason)
-		} else {
-			p.mainServer.runtime.EmitActivityPolicyDecisionWithBlockReason(serverName, toolName, sessionID, requestID, decision, reason, blockReason)
-		}
+		p.mainServer.runtime.EmitActivityPolicyDecisionAttributed(serverName, toolName, sessionID, requestID, decision, reason, blockReason, p.activityAttribution(ctx, sessionID))
 	}
 	// Issue #969 (Phase 0): availability baseline. Only outright blocks count —
 	// a warning or a redaction still delivered the call.
@@ -1005,14 +1001,19 @@ func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetSe
 // path has always used.
 func (p *MCPProxyServer) emitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}, intent map[string]interface{}, contentTrust string, responseTruncated bool) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityInternalToolCallTruncated(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, responseTruncated)
+		// Spec 108 FR-029: no request context reaches this funnel (~60 call
+		// sites), so the attribution comes from the session's latest
+		// resolution, which the same request has just written.
+		p.mainServer.runtime.EmitActivityInternalToolCallAttributed(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust, responseTruncated, p.activityAttribution(context.Background(), sessionID))
 	}
 }
 
 // emitActivityPromptGet safely emits an upstream prompts/get completion (F10).
-func (p *MCPProxyServer) emitActivityPromptGet(serverName, promptName, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}) {
+// ctx is the prompt request's context: its auth identity is the attribution's
+// token and client (Spec 108 FR-029).
+func (p *MCPProxyServer) emitActivityPromptGet(ctx context.Context, serverName, promptName, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityPromptGet(serverName, promptName, sessionID, requestID, status, errorMsg, durationMs, arguments, response)
+		p.mainServer.runtime.EmitActivityPromptGetAttributed(serverName, promptName, sessionID, requestID, status, errorMsg, durationMs, arguments, response, p.activityAttribution(ctx, sessionID))
 	}
 }
 
@@ -1064,7 +1065,7 @@ func (p *MCPProxyServer) getPromptAggregated(ctx context.Context, name string, a
 			argsForRecord[k] = v
 		}
 	}
-	p.emitActivityPromptGet(serverName, promptName, sessionID, requestID, status, errMsg,
+	p.emitActivityPromptGet(ctx, serverName, promptName, sessionID, requestID, status, errMsg,
 		time.Since(start).Milliseconds(), argsForRecord, response)
 
 	return result, err
@@ -1983,7 +1984,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// profile that may no longer exist. The post-filter below returns the same
 	// empty result set from the shared index.
 	profileName, profileScope, profileIdx, profileSource := p.resolveActiveProfileWithSource(ctx)
-	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
+	ctx, profileResolution := p.resolveForDispatch(ctx, profileIdx)
 	if profileResolution.Scope != nil {
 		profileName = profileResolution.Name
 		profileScope = profileResolution.Scope
@@ -2692,7 +2693,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// never a second, independent one that could pair a decision made
 	// against this snapshot with an index built from a later one.
 	_, _, profileIdx := p.resolveActiveProfileWithIndex(ctx)
-	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
+	ctx, profileResolution := p.resolveForDispatch(ctx, profileIdx)
 	// Spec 108-d is the execution cutover from the Profiles v2 resolver to
 	// this single v3 result, including the authoritative empty-base case.
 	// Keeping a v2 selection when v3 resolves no profile would bypass
@@ -4171,7 +4172,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	// all write operations. The denied set is the shared agent-operation policy
 	// (internal/auth) consumed by both this MCP surface and the REST
 	// /api/v1/servers handlers, so the two can never drift (issues #877/#878).
-	profileResolution := p.ResolveProfileV3(ctx, p.profileIndexCurrent(ctx))
+	ctx, profileResolution := p.resolveForDispatch(ctx, p.profileIndexCurrent(ctx))
 	requestAuth := auth.AuthContextFromContext(ctx)
 	authCtx := auth.ScopedView(requestAuth, profileResolution.anonymousConfinementActive() && (requestAuth == nil || requestAuth.Anonymous))
 	if !auth.AuthorizeServerOp(authCtx, operation) {

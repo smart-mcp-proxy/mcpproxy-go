@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -337,6 +338,7 @@ func init() {
 	upstreamToolsCmd.AddCommand(upstreamToolsDisableAllCmd)
 
 	// Define flags (note: output format handled by global --output/-o flag from root command)
+	upstreamListCmd.Flags().StringVar(&upstreamListProfile, "profile", "", "Show only the servers of this profile's effective server set; TOOLS is the number of tools visible under it (Spec 108)")
 	upstreamListCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level (trace, debug, info, warn, error)")
 	upstreamListCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to MCP configuration file")
 	upstreamListCmd.Flags().StringArrayVar(&upstreamListStatus, "status", nil,
@@ -423,15 +425,34 @@ func runUpstreamList(_ *cobra.Command, _ []string) error {
 		logger.Info("Detected running daemon, using client mode")
 		return runUpstreamListClientMode(ctx, client, logger)
 	}
+	if upstreamListProfile != "" {
+		return outputError(output.NewStructuredError(output.ErrCodeConnectionFailed,
+			"--profile needs the running daemon: profile scope and tool visibility are resolved there").
+			WithGuidance("Start the daemon and retry").
+			WithRecoveryCommand("mcpproxy serve"), output.ErrCodeConnectionFailed)
+	}
 
 	// No daemon - load from config file
 	logger.Info("No daemon detected, reading from config file")
 	return runUpstreamListFromConfig(globalConfig)
 }
 
+// upstreamListProfile is `upstream list --profile` (Spec 108 FR-032): the REST
+// `profile` filter on GET /api/v1/servers.
+var upstreamListProfile string
+
+// upstreamListQuery is the REST query of the list flags.
+func upstreamListQuery() url.Values {
+	q := url.Values{}
+	if upstreamListProfile != "" {
+		q.Set("profile", upstreamListProfile)
+	}
+	return q
+}
+
 func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, _ *zap.Logger) error {
 	// Call GET /api/v1/servers
-	servers, err := client.GetServers(ctx)
+	servers, err := client.GetServersWithQuery(ctx, upstreamListQuery())
 	if err != nil {
 		return outputError(output.NewStructuredError(output.ErrCodeConnectionFailed, err.Error()).
 			WithGuidance("Ensure the mcpproxy daemon is running").

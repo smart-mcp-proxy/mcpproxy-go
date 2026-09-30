@@ -235,3 +235,29 @@ Three high findings, all on this spec, each checked against the spec text before
 - **Narrowing a member of P's `switchable_to` was not a named refusal condition (high, applied)** — verified: FR-008a's list named "narrow P" and "widen an anonymous-reachable profile", but a switchable binding reaches P ∪ P's `switchable_to`, so narrowing, deleting or unlisting a member S shrinks that union exactly like narrowing P. **Decision**: the API refusal is redefined as one delta over whole states — `BindingGuardDelta(current, candidate, pair)` returns the bindings bypassable in the candidate but not now — so no route enumerates conditions and every write that shrinks the binding-reachable set or grows the anonymous-reachable one is caught, including classifications and deleting S (which removes it from every `switchable_to`). Rejected: adding "narrow a member of `switchable_to`" to the per-route list — it would have left the next unlisted path (classify, delete of S) open in the same way. A binding already bypassable by a hand edit that stays so is not in the delta, so unrelated writes are not blocked (the runtime guard already denies anonymous callers). FR-008a, US2-7, US4-3, data-model §7, enforcement-matrix delta cases, T033a.
 - **FR-009a test-only override had no mechanism (high, applied)** — verified: T009 said "a test-only override" and T055a's grep only checked the constant's references, which an env-var or config read inside the validator would pass. **Decision**: `PolicyEnforcementReady` is a `const`; the gate is `policyGateOpen()` = the constant or an unexported `atomic.Bool` that only `EnablePolicyForTest(tb testing.TB)` sets, which panics unless `testing.Testing()`; no env var, config field, flag or build tag. T004a adds an AST test of the gate function and of every production reference, a `go build` probe proving the override panics outside a test binary, and a built-binary check that a `max_tier` or `anonymous_profile` config exits 4 even with arbitrary `MCPPROXY_*` env vars; T055a deletes the override with the flip. Rejected: a build tag (a release could be built with it) and an env var (a released binary could read it). Consequence: the 108-b and 108-c real-instance recipes can no longer enable the policy before 108-d, so the quickstart verifies the refusal there and reruns the policy steps from 108-d.
 - **Propagated to Spec 109**: no Spec 109 artifact changes; the Needs-attention `client_holds_admin_key` action opens Spec 108's bulk-upgrade sheet, whose preview may now carry a `guard` refusal when a profile is chosen (Spec 109 research D30).
+
+## D31 — 108-e implementation decisions (decided in the PR plan, 2026-09-30)
+
+- **E1** Attribution travels in the event payload as a nested `attribution` object (the flat `profile` key is the URL slug); new `…Attributed` emitters take it last and the old emitters wrap them.
+- **E2** Computed at emit time by `activityAttribution(ctx, session)`: the dispatch path's own resolution (`resolveForDispatch`) wins, then the AuthContext, then the session; nothing is re-resolved later.
+- **E3** `tool_call`, `policy_decision`, `internal_tool_call`, `prompt_get` and code-execution sub-calls are attributed; system events, config changes and limiter sheds stay unattributed (known gap).
+- **E4** `block_reason` is written to the field and the metadata key for one release; display only.
+- **E5** Legacy fallbacks: `profile` ← `metadata.profile`, `client_name` ← `metadata.client_name`, `token` ← `Arguments._auth_agent_name` (not `metadata.agent_name`); `client` has none.
+- **E6** `agent` is an alias of `token` on all five endpoints; a conflict is a `400`.
+- **E7** A scoped caller's filters see foreign attribution as empty; the SSE `attribution` object goes only to the owner and `_token_prefix` is never on the wire.
+- **E8** `/activity/usage` under a scope filter is a window-bounded scan through the same `Apply` admission rule; `usageAdmissionVersion` is not bumped.
+- **E9** `client_name` on summary, usage and sessions is a `400` with the exact text.
+- **E10** Session identity is persisted; a changed resolution is written through once; `GetRecentSessions` takes `storage.SessionFilter` applied before truncation.
+- **E11** `EvaluateAccess` lives in `internal/server/access_chain.go` (runtime cannot import the unexported predicates); 108-f renders its `Steps`.
+- **E12** `visible` = credential..tier_cap pass; `callable` = visible and every later step passes.
+- **E13** `read_only_mode` does not gate upstream tools; `global_gate` passes for upstream rows (one function to extend with dispatch).
+- **E14** Quarantined servers' rows stay withheld on `/tools` (#1064); `quarantined` is an explainer reason.
+- **E15** `client=` is admin only; subject resolution follows the connection (credential / admin key / keyless); `profile=` from a non-admin needs a reachable profile.
+- **E16** Row order: caller scope, caller's own profile, quarantine rule, then verdicts; non-admin gets visible rows plus `counts`.
+- **E17** `GET /servers?profile=` limits rows to the profile's effective servers and rewrites `tool_count` to the visible tools.
+- **E18** Honoured sets per endpoint; `/tokens` and `/clients*` keep the `400` until 108-f.
+- **E19** `tools list --profile/--client` and `upstream list --profile` moved here from 108-g.
+- **E20** No MCP tool arguments change (the MCP view-as is 108-h's `effective_tools`).
+- **E21** Web/macOS send scope parameters only to endpoints that honour them: no page receives a new `400` between 108-e and 108-f.
+- **E22** CSV export appends six columns after `parent_id`, blanked for foreign rows of a scoped caller.
+- **E23** `GET /sessions` parses `offset` but never uses it (pre-existing); reported, not fixed here.
