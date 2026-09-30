@@ -236,7 +236,7 @@ test('the sidebar has Home, Connect, Protect, Monitor and the footer (Spec 109 F
     els.map((el) => el.getAttribute('data-test')!.replace('sidebar-item-', '')),
   )
   expect(items).toEqual([
-    'home', 'clients', 'servers', 'tools', 'review', 'secrets', 'activity', 'usage',
+    'home', 'clients', 'profiles', 'servers', 'tools', 'review', 'secrets', 'activity', 'usage',
     'settings', 'docs', 'feedback', 'theme',
   ])
 
@@ -298,20 +298,20 @@ test('the header search field opens the palette on focus (Spec 109 FR-054)', asy
   await expect(page.locator('dialog[data-test="command-palette"]')).not.toHaveAttribute('open', '')
 })
 
-// FR-052: "+ Add" — Server, Client, Token.
-test('the "+ Add" menu opens Server, Client and Token (Spec 109 FR-052)', async ({ page }) => {
+// FR-052: "+ Add" — Server, Client, Token and (Spec 108-i registers /profiles) Profile.
+test('the "+ Add" menu opens Server, Client, Token and Profile (Spec 109 FR-052, Spec 108-i)', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await goto(page, '/activity', 'header [data-test="header-add-menu"]')
 
   const open = async () => {
     await page.locator('[data-test="header-add-menu"]').click()
-    await expect(page.locator('[role="menu"] [role="menuitem"]')).toHaveCount(3)
+    await expect(page.locator('[role="menu"] [role="menuitem"]')).toHaveCount(4)
   }
   await open()
   await expect(page.locator('[data-test="add-menu-server"]')).toBeVisible()
   await expect(page.locator('[data-test="add-menu-client"]')).toBeVisible()
   await expect(page.locator('[data-test="add-menu-token"]')).toBeVisible()
-  await expect(page.locator('[data-test="add-menu-profile"]')).toHaveCount(0)
+  await expect(page.locator('[data-test="add-menu-profile"]')).toBeVisible()
 
   await page.locator('[data-test="add-menu-server"]').click()
   await expect(page).toHaveURL(/\/ui\/add-server(?:\?|$)/)
@@ -327,6 +327,14 @@ test('the "+ Add" menu opens Server, Client and Token (Spec 109 FR-052)', async 
   await open()
   await page.locator('[data-test="add-menu-client"]').click()
   await expect(page.locator('dialog[data-test="client-connect-list"][open]')).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  // Profile opens the create dialog on the Profiles page and strips ?create=1.
+  await open()
+  await page.locator('[data-test="add-menu-profile"]').click()
+  await expect(page).toHaveURL(/\/ui\/profiles(?:\?|$)/)
+  await expect(page.locator('dialog[data-test="profile-create-dialog"][open]')).toBeVisible()
+  expect(new URL(page.url()).searchParams.has('create')).toBe(false)
 })
 
 // navigation-map.md "Redirects (query kept)".
@@ -440,12 +448,19 @@ test('the status pill opens Servers and attention "See all" opens Home (Spec 109
 })
 
 // Rows that need features.scope_filters stay hidden until the core lists it.
+// Spec 108-e lists them on current builds, so this checks exactly the names the
+// instance does NOT advertise (an older core); an instance that advertises all
+// three has nothing to hide.
 test('client, profile and token scope links stay hidden without scope_filters (Spec 109 FR-080a)', async ({ page }) => {
+  const status = await page.request.get(`${BASE}/api/v1/status`, { headers: { 'X-API-Key': KEY } })
+  const advertised: string[] = (await status.json())?.data?.features?.scope_filters ?? []
+  const hidden = ['client', 'profile', 'token'].filter((key) => !advertised.includes(key))
+  test.skip(hidden.length === 0, 'this core advertises every scope filter')
   await goto(page, '/clients', '[data-test="clients-page"]')
   await page.waitForTimeout(500)
   const rows = page.locator('[data-test="clients-page"] tbody tr')
   if ((await rows.count()) > 0) await rows.first().click()
-  for (const key of ['client', 'profile', 'token']) {
+  for (const key of hidden) {
     await expect(
       page.locator(`[data-test="clients-page"] a[href*="${key}="]`),
       `a ${key}= link must stay hidden until features.scope_filters lists it`,
