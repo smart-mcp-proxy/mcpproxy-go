@@ -268,7 +268,9 @@ func fwdText(res *mcp.CallToolResult) string {
 }
 
 func fwdCallReadRaw(c *client.Client, server, tool string) (*mcp.CallToolResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Generous: the Windows race build needs ~85s for the 50-client test, so a
+	// 30s per-call bound sits at the edge of a slow runner.
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	req := mcp.CallToolRequest{}
 	req.Params.Name = "call_tool_read"
@@ -409,7 +411,7 @@ func TestForwardHeaders_FiftyConcurrentClientsKeepTheirOwnValue(t *testing.T) {
 			}
 			c := client.NewClient(tr)
 			defer c.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 			defer cancel()
 			if err := c.Start(ctx); err != nil {
 				errs <- "start: " + err.Error()
