@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ConnectModal from '@/components/ConnectModal.vue'
+import ClientConnectList from '@/components/ClientConnectList.vue'
 import api from '@/services/api'
 
 // Spec 078 US3: the standalone Connect modal offers a session-scoped one-click
@@ -70,7 +70,7 @@ function connectOk(backupPath?: string) {
 }
 
 async function openModal(pinia: any) {
-  const wrapper = mount(ConnectModal, {
+  const wrapper = mount(ClientConnectList, {
     props: { show: false },
     global: { plugins: [pinia] },
   })

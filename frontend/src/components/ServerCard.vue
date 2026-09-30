@@ -69,7 +69,7 @@
                  menu's only path to review when that happens. -->
             <li v-if="server.quarantined">
               <router-link
-                :to="`/review/${encodeURIComponent(server.name)}`"
+                :to="reviewPath(server.name)"
                 data-test="server-card-menu-review"
               >Review</router-link>
             </li>
@@ -227,7 +227,7 @@ import type { Server, ActivityPerServer } from '@/types'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
-import { serverDetailPath, serverDisplayName } from '@/utils/serverRoute'
+import { serverDetailPath, serverDisplayName, reviewPath } from '@/utils/serverRoute'
 import { oauthSignInState, healthStatusText, healthActionLabel } from '@/utils/health'
 import { deriveTrustModeState, TRUST_MODES } from '@/utils/trustMode'
 
@@ -418,7 +418,7 @@ const primaryKind = computed<'execute' | 'navigate' | ''>(() => {
 const primaryHref = computed(() => {
   switch (primaryAction.value) {
     case 'approve':
-      return `/review/${encodeURIComponent(props.server.name)}`
+      return reviewPath(props.server.name)
     case 'set_secret':
       return '/secrets'
     case 'configure':

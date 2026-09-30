@@ -95,6 +95,11 @@ func maskAPIKey(apiKey string) string {
 	return apiKey[:4] + "****" + apiKey[len(apiKey)-4:]
 }
 
+// globalOutputFlagUsage is the help text of the root persistent -o/--output flag.
+// It points at `activity export --format`, whose local --output shadows this flag
+// (Spec 109 C6).
+const globalOutputFlagUsage = "Output format: table, json, yaml (terminal rendering; activity export uses --format for its file format)"
+
 func main() {
 	// Set up registries initialization callback to avoid circular imports
 	config.SetRegistriesInitCallback(registries.SetRegistriesFromConfig)
@@ -121,7 +126,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&logDir, "log-dir", "", "Custom log directory path (overrides standard OS location)")
 
 	// Output formatting flags (global)
-	rootCmd.PersistentFlags().StringVarP(&globalOutputFormat, "output", "o", "", "Output format: table, json, yaml")
+	rootCmd.PersistentFlags().StringVarP(&globalOutputFormat, "output", "o", "", globalOutputFlagUsage)
 	rootCmd.PersistentFlags().BoolVar(&globalJSONOutput, "json", false, "Shorthand for -o json")
 	rootCmd.MarkFlagsMutuallyExclusive("output", "json")
 

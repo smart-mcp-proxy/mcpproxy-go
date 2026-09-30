@@ -52,6 +52,7 @@ const sidebars = {
         'cli/activity-commands',
         'cli/sensitive-data-commands',
         'cli/security-commands',
+        'cli/review-commands',
         'cli/credential-commands',
         'cli/status-command',
         'cli/db-commands',

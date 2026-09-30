@@ -172,6 +172,25 @@ Manage held prompts with the `quarantine_security` MCP tool:
 
 ## Managing Quarantine
 
+## Review verbs and where to find them {#review-verbs}
+
+Every surface offers the same four decisions. Only the scan-gated approval can release a quarantined server; none of the first-party surfaces uses the legacy `POST /unquarantine` endpoint.
+
+| Verb | REST |
+|------|------|
+| Approve server | `POST /api/v1/servers/{id}/security/approve`. Scan-gated; `force` only after the dangerous-verdict confirmation; optional `block: [tools]` keeps tools disabled |
+| Reject server | `POST /api/v1/servers/{id}/security/reject` |
+| Approve tool | `POST /api/v1/servers/{id}/tools/approve` |
+| Reject tool | `POST /api/v1/servers/{id}/tools/block` |
+
+| Surface | Where |
+|---------|-------|
+| Web UI | The **Review queue** (`/review`) and one server's review screen (`/review/<server>`, also the **Review** tab of the server detail page). The Tools page links each new or changed tool to it, and its "Needs review" count opens the queue |
+| macOS app | Sidebar **Review Queue** and its review sheet. The tray item "Review Queue… (N)" and the Needs Attention rows open the sheet |
+| CLI | `mcpproxy review list`, `show`, `approve`, `reject` ([Review Commands](/cli/review-commands)) |
+| Tray on Windows and Linux (Go tray) | A server in the "Security Quarantine" submenu opens the Web UI at `/review/<name>` |
+| MCP | `quarantine_security` with `list_quarantined`, `inspect_quarantined`, `inspect_tools`, `approve_tool`, `approve_all_tools`, `block_tool`, `block_all_tools` (admin only). There is no server-level approve over MCP by design: an agent cannot release a quarantined server |
+
 ### Scan a Server for TPAs (MCP)
 
 The `quarantine_security` tool can also run and read the TPA scan, so an agent
@@ -209,8 +228,12 @@ Optional scanner setup lives at **Settings → Security → Scanners**.
 
 **CLI:**
 ```bash
-mcpproxy upstream list
-# Shows quarantine status for each server
+mcpproxy review list
+# One row per server that needs review: quarantined servers and trusted
+# servers with new or changed tools
+
+mcpproxy review show github [--full]
+# Captured tool definitions, tiers and scan verdicts for one server
 ```
 
 ### Approve a Server
@@ -246,6 +269,17 @@ curl -X POST -H "X-API-Key: your-key" -H "Content-Type: application/json" \
   -d '{"block":["tool-to-keep-disabled"]}' \
   http://127.0.0.1:8080/api/v1/servers/server-name/security/approve
 ```
+
+**CLI:**
+```bash
+# Quarantined server: scan-gated approval; --except keeps tools disabled
+mcpproxy review approve github [--except a,b] [--force] [--yes]
+
+# Trusted server: approve only the listed new or changed tools
+mcpproxy review approve github --tools create_issue
+```
+
+See [Review Commands](/cli/review-commands) for every flag.
 
 **Configuration:**
 
