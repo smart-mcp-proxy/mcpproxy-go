@@ -4,6 +4,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 )
 
@@ -27,4 +28,18 @@ func (s *Server) ClientBindingData(ctx context.Context, clientID string) (map[st
 		return nil, &requestError{http.StatusInternalServerError, "failed to read the client after the change"}
 	}
 	return toDataMap(ClientBindingResponse{Client: *view, Warnings: warnings})
+}
+
+// toDataMap converts a typed response to the generic JSON object a REST client
+// would decode from its `data`.
+func toDataMap(v any) (map[string]any, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

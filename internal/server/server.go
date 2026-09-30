@@ -3071,6 +3071,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Spec 108-f: the profiles service behind /profiles and /access/explain
 	// (both editions: profiles are admin-owned config in either).
 	httpAPIServer.SetProfilesService(s.runtime.ProfilesService())
+	// Spec 108-h: the `profiles` admin MCP tool reads the same admin views the
+	// REST routes do (one implementation, FR-037).
+	s.mcpProxy.SetAdminViews(httpAPIServer)
 	// Wire agent token management (Spec 028)
 	if sm := s.runtime.StorageManager(); sm != nil {
 		cfg := s.runtime.Config()

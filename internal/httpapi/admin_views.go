@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -102,18 +101,4 @@ func (s *Server) ExplainAccess(ctx context.Context, q ExplainRequest) (*internal
 		subject = profile.AccessSubject{Kind: profile.AccessSubjectAnonymous}
 	}
 	return s.profiles().Explain(ctx, subject, q.Tool)
-}
-
-// toDataMap converts a typed response to the generic JSON object a REST client
-// would decode from its `data`.
-func toDataMap(v any) (map[string]any, error) {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]any{}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
 }

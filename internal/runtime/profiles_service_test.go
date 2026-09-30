@@ -433,14 +433,14 @@ func TestProfilesService_ClassifyAndSetAnonymous(t *testing.T) {
 
 	v, err := h.svc.Classify(ctx, h.actor(), "ro", "a:list", "read")
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"a:list": "read"}, v.Tools.Classify)
+	assert.Equal(t, map[string]string{"a:list": "read"}, v.Profile.Tools.Classify)
 	recs := h.records()
 	require.Len(t, recs, 1)
 	assert.Equal(t, "classify", recs[0]["change"])
 
 	v, err = h.svc.Classify(ctx, h.actor(), "ro", "a:list", "")
 	require.NoError(t, err)
-	assert.Empty(t, v.Tools.Classify)
+	assert.Empty(t, v.Profile.Tools.Classify)
 
 	for _, bad := range []struct{ tool, tier string }{{"nocolon", "read"}, {"a:*", "read"}, {"a:t", "root"}} {
 		_, err = h.svc.Classify(ctx, h.actor(), "ro", bad.tool, bad.tier)
