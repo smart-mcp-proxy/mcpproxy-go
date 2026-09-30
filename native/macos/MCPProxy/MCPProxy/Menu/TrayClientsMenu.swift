@@ -7,6 +7,7 @@
 // title text, the checkmark, Lock/Unlock and the no-credential CTA) is
 // testable without AppKit. `AppController` only renders the model.
 
+import AppKit
 import Foundation
 
 /// One item of a client's submenu.
@@ -48,6 +49,44 @@ final class TrayClientAction: NSObject {
 }
 
 enum TrayClientsMenu {
+    /// Renders one client row's submenu. Auto-enabling is OFF: with it on AppKit
+    /// re-validates every item against its target and overrides `isEnabled`,
+    /// which enabled Lock on an All-servers row (a locked client needs a profile).
+    @MainActor
+    static func render(
+        _ row: TrayClientMenuRow, target: AnyObject,
+        profileAction: Selector, lockAction: Selector, upgradeAction: Selector
+    ) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for entry in row.items {
+            switch entry {
+            case .separator:
+                menu.addItem(.separator())
+            case .profile(let title, let profile, let isCurrent, let tooltip):
+                let item = NSMenuItem(title: title, action: profileAction, keyEquivalent: "")
+                item.target = target
+                item.representedObject = TrayClientAction(clientId: row.clientId, profile: profile, mode: nil)
+                item.state = isCurrent ? .on : .off
+                item.toolTip = tooltip
+                menu.addItem(item)
+            case .lock(let title, let mode, let isEnabled):
+                let item = NSMenuItem(title: title, action: lockAction, keyEquivalent: "")
+                item.target = target
+                item.representedObject = TrayClientAction(clientId: row.clientId, profile: nil, mode: mode)
+                item.isEnabled = isEnabled
+                if !isEnabled { item.toolTip = "Choose a profile to lock" }
+                menu.addItem(item)
+            case .upgrade(let title):
+                let item = NSMenuItem(title: title, action: upgradeAction, keyEquivalent: "")
+                item.target = target
+                item.representedObject = TrayClientAction(clientId: row.clientId, profile: nil, mode: nil)
+                menu.addItem(item)
+            }
+        }
+        return menu
+    }
+
     /// The top-level menu title.
     static let title = "Clients"
     static let upgradeTitle = "Upgrade to client credential…"
@@ -73,6 +112,17 @@ enum TrayClientsMenu {
             + "are in the configuration. Choosing it would leave the client with no tools."
     }
 
+    /// Two profiles may share a title (`Work Read-only` twice); the menu would
+    /// then show indistinguishable entries, so a shared title carries the slug.
+    static func distinctTitle(for profile: ProfileView, in profiles: [ProfileView]) -> String {
+        distinctTitle(profile.displayTitle, name: profile.name, in: profiles)
+    }
+
+    private static func distinctTitle(_ title: String, name: String, in profiles: [ProfileView]) -> String {
+        let clashes = profiles.filter { $0.displayTitle == title }.count > 1
+        return clashes && title != name ? "\(title) (\(name))" : title
+    }
+
     private static func row(
         for client: ClientPresenceRecord, profiles: [ProfileView], knownServers: Set<String>?
     ) -> TrayClientMenuRow {
@@ -89,7 +139,7 @@ enum TrayClientsMenu {
         ]
         for profile in profiles {
             items.append(.profile(
-                title: profile.displayTitle, profile: profile.name,
+                title: distinctTitle(for: profile, in: profiles), profile: profile.name,
                 isCurrent: profile.name == current && !missing,
                 tooltip: tooltip(for: profile, knownServers: knownServers)))
         }
@@ -106,11 +156,16 @@ enum TrayClientsMenu {
     /// profile that no longer exists. A client without a credential is not
     /// confined by any profile, which "All servers" states truthfully.
     static func profileLabel(for client: ClientPresenceRecord, profiles: [ProfileView]) -> String {
+        // A client without an active client credential is not confined by any
+        // profile (a revoked credential's stale binding included), so it reads
+        // "All servers" whatever the record still carries.
+        guard client.hasClientCredential else { return allServersTitle }
         let name = client.boundProfile
         if client.profileMissing == true { return "\(name) (missing)" }
         if name.isEmpty { return allServersTitle }
-        if let title = client.profileTitle, !title.isEmpty { return title }
-        return profiles.first { $0.name == name }?.displayTitle ?? name
+        if let title = client.profileTitle, !title.isEmpty { return distinctTitle(title, name: name, in: profiles) }
+        if let listed = profiles.first(where: { $0.name == name }) { return distinctTitle(for: listed, in: profiles) }
+        return name
     }
 }
 

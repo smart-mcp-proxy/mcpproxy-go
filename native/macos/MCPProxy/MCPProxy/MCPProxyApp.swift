@@ -1318,32 +1318,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let clientsSubmenu = NSMenu()
             for row in clientRows {
                 let rowItem = NSMenuItem(title: row.title, action: nil, keyEquivalent: "")
-                let rowMenu = NSMenu()
-                for entry in row.items {
-                    switch entry {
-                    case .separator:
-                        rowMenu.addItem(.separator())
-                    case .profile(let title, let profile, let isCurrent, let tooltip):
-                        let item = NSMenuItem(title: title, action: #selector(setClientProfile(_:)), keyEquivalent: "")
-                        item.target = self
-                        item.representedObject = TrayClientAction(clientId: row.clientId, profile: profile, mode: nil)
-                        item.state = isCurrent ? .on : .off
-                        item.toolTip = tooltip
-                        rowMenu.addItem(item)
-                    case .lock(let title, let mode, let isEnabled):
-                        let item = NSMenuItem(title: title, action: #selector(setClientLock(_:)), keyEquivalent: "")
-                        item.target = self
-                        item.representedObject = TrayClientAction(clientId: row.clientId, profile: nil, mode: mode)
-                        item.isEnabled = isEnabled
-                        if !isEnabled { item.toolTip = "Choose a profile to lock" }
-                        rowMenu.addItem(item)
-                    case .upgrade(let title):
-                        let item = NSMenuItem(title: title, action: #selector(upgradeClientCredential(_:)), keyEquivalent: "")
-                        item.target = self
-                        item.representedObject = TrayClientAction(clientId: row.clientId, profile: nil, mode: nil)
-                        rowMenu.addItem(item)
-                    }
-                }
+                let rowMenu = TrayClientsMenu.render(
+                    row, target: self,
+                    profileAction: #selector(setClientProfile(_:)),
+                    lockAction: #selector(setClientLock(_:)),
+                    upgradeAction: #selector(upgradeClientCredential(_:)))
                 rowItem.submenu = rowMenu
                 clientsSubmenu.addItem(rowItem)
             }

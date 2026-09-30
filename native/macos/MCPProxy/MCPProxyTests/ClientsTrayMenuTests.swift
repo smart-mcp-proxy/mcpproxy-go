@@ -138,6 +138,69 @@ final class ClientsTrayMenuTests: XCTestCase {
         XCTAssertEqual(row.items.last, .lock(title: "Lock", mode: .locked, isEnabled: false))
     }
 
+    // MARK: Rendered menu (live QA: Lock was enabled on an All-servers row)
+
+    private final class Target: NSObject {
+        @objc func profile(_ s: NSMenuItem) {}
+        @objc func lock(_ s: NSMenuItem) {}
+        @objc func upgrade(_ s: NSMenuItem) {}
+    }
+
+    @MainActor
+    private func render(_ c: ClientPresenceRecord) -> (NSMenu, Target) {
+        let target = Target()
+        let row = TrayClientsMenu.build(clients: [c], profiles: profiles)[0]
+        let menu = TrayClientsMenu.render(
+            row, target: target, profileAction: #selector(Target.profile(_:)),
+            lockAction: #selector(Target.lock(_:)), upgradeAction: #selector(Target.upgrade(_:)))
+        return (menu, target)
+    }
+
+    /// With auto-enabling on, AppKit validates a target/action item and
+    /// re-enables it; the rendered Lock item must stay disabled on All servers.
+    @MainActor
+    func testRenderedLockIsDisabledOnAllServers() {
+        let (menu, target) = render(client(id: "c", name: "Cursor"))
+        _ = target
+        XCTAssertFalse(menu.autoenablesItems)
+        menu.update()
+        let lock = menu.items.first { $0.title == "Lock" }
+        XCTAssertNotNil(lock)
+        XCTAssertFalse(lock!.isEnabled)
+    }
+
+    @MainActor
+    func testRenderedLockIsEnabledOnAProfile() {
+        let (menu, target) = render(client(id: "c", name: "Cursor", profile: "work-ro"))
+        _ = target
+        menu.update()
+        XCTAssertTrue(menu.items.first { $0.title == "Lock" }!.isEnabled)
+    }
+
+    // MARK: Distinct titles, revoked credential
+
+    func testProfilesSharingATitleShowTheirSlug() {
+        let twins = [profile("work-readonly", title: "Work Read-only"),
+                     profile("work-ro-mac", title: "Work Read-only"), profile("solo", title: "Solo")]
+        let row = TrayClientsMenu.build(
+            clients: [client(id: "c", name: "C", profile: "work-ro-mac", title: "Work Read-only")],
+            profiles: twins)[0]
+        XCTAssertEqual(row.title, "C — Work Read-only (work-ro-mac)")
+        let titles = row.items.compactMap { item -> String? in
+            if case .profile(let t, _, _, _) = item { return t }
+            return nil
+        }
+        XCTAssertEqual(titles, ["All servers", "Work Read-only (work-readonly)",
+                                "Work Read-only (work-ro-mac)", "Solo"])
+    }
+
+    func testARevokedCredentialClientDoesNotShowItsStaleProfile() {
+        let row = TrayClientsMenu.build(clients: [
+            client(id: "c", name: "C", credential: "revoked", profile: "work-ro", title: "Work Read-only", connected: true),
+        ], profiles: profiles)[0]
+        XCTAssertEqual(row.title, "C — All servers")
+    }
+
     // MARK: No credential
 
     /// A client without an active client credential cannot be bound: its whole
