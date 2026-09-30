@@ -377,13 +377,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import apiClient from '@/services/api'
 import { formatDateTimeShort } from '@/utils/datetime'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import type { AgentTokenInfo, Server } from '@/types'
 
+const route = useRoute()
+const router = useRouter()
 const systemStore = useSystemStore()
 const serversStore = useServersStore()
 
@@ -705,7 +708,20 @@ function dismissTokenSecret() {
   copied.value = false
 }
 
+// Spec 109 FR-052: "+ Add -> Token" arrives as /clients?tab=tokens&create=1.
+// Open the create dialog, then drop `create` (keeping tab and any sticky
+// params) so a reload or Back does not reopen it.
+function consumeCreateParam() {
+  if (route?.query.create !== '1') return
+  openCreateDialog()
+  const { create: _create, ...rest } = route.query
+  void router.replace({ query: rest })
+}
+
+watch(() => route?.query.create, consumeCreateParam)
+
 onMounted(async () => {
+  consumeCreateParam()
   await new Promise(resolve => setTimeout(resolve, 100))
   loadTokens()
 })

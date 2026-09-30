@@ -99,8 +99,9 @@ frontend/src/router/index.ts                           # routes + redirects (nav
 frontend/src/composables/useScopeQuery.ts (NEW)
 frontend/src/stores/attention.ts, clients.ts (NEW)
 frontend/src/views/Home.vue (NEW; Dashboard.vue's Overview parts move here), Usage.vue (page), Clients.vue (NEW), Review.vue (NEW), AddServer.vue (NEW; replaces Repositories.vue + AddServerModal entry), Activity.vue, Tools.vue, Servers.vue, ServerDetail.vue, Settings.vue, AgentTokens.vue (becomes a Clients tab), Sessions.vue (becomes an Activity view)
+frontend/src/navigation/navModel.ts (NEW; the one sidebar/add-menu/palette model)
 frontend/src/components/{AttentionList,StatusPill,AddMenu,CommandPalette,ClientConnectList,ImportServers,ReviewScreen,ToolDefinitionText,CatalogSearch,PasteServer,SecretToggle}.vue (NEW)
-frontend/src/components/{TopHeader,SidebarNav,ServerCard,OnboardingWizard,TelemetryBanner,ProfileSwitcher}.vue; ConnectModal.vue, ModeSwitcher.vue (removed/merged)
+frontend/src/components/{TopHeader,SidebarNav,ServerCard,OnboardingWizard,TelemetryBanner,ProfileSwitcher}.vue; ConnectModal.vue (removed/merged); ModeSwitcher.vue (moved to Clients → Endpoint & mode, 109-h)
 frontend/src/assets/z-index.css (NEW) or tailwind theme tokens
 frontend/tests/unit/*.spec.ts (NEW specs listed in tasks.md)
 e2e/web-ui-sweep/navigation-consistency.spec.ts (NEW); visual-a11y-sweep.spec.ts (widths 1100 added)

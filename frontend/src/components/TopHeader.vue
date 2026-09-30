@@ -1,81 +1,73 @@
 <template>
   <header class="bg-base-100 border-b border-base-300 sticky top-0 z-[var(--z-header)]">
-    <div class="flex items-center justify-between px-6 py-4 max-w-full">
-      <!-- Left: Mobile menu toggle + Search + Add Server -->
-<div class="flex items-center space-x-3 flex-1 min-w-0 overflow-x-hidden">
-        <!-- Mobile menu toggle -->
-        <label
-          for="sidebar-drawer"
-          class="btn btn-ghost btn-square lg:hidden"
-          aria-label="Open navigation menu"
-        >
-          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-          </svg>
-        </label>
+    <!-- Spec 109 FR-053: one row that never overflows —
+         [☰] [search] [viewing] ......... [status pill] [attention] [+ Add].
+         The right cluster is always rendered (it used to vanish below md, so a
+         phone had no status at all); text collapses below 1100px instead. -->
+    <div class="flex items-center gap-2 px-3 sm:px-6 py-3 min-w-0" data-test="header-row">
+      <!-- Mobile menu toggle -->
+      <label
+        for="sidebar-drawer"
+        class="btn btn-ghost btn-square lg:hidden shrink-0"
+        aria-label="Open navigation menu"
+        data-test="header-drawer-toggle"
+      >
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </label>
 
-        <!-- Search Box with Button.
-             The button stays enabled at rest (UX audit F32): a greyed-out
-             control next to an empty box reads as broken, when in fact the
-             search simply has nothing to run yet. Submitting an empty query
-             is a no-op. -->
-        <div class="flex items-center space-x-2 flex-1 max-w-2xl min-w-0">
-          <div class="relative flex-1">
-            <input
-              type="search"
-              placeholder="Search tools, servers..."
-              class="input input-bordered w-full pr-3"
-              aria-label="Search tools and servers"
-              data-test="header-search-input"
-              v-model="searchQuery"
-              @keydown.enter="handleSearch"
-            />
-          </div>
-          <!-- Always enabled: greyed out next to an empty box read as broken
-               (audit F20/F32). With nothing typed it simply opens Tools. -->
-          <button
-            @click="handleSearch"
-            class="btn btn-primary"
-            aria-label="Search"
-            data-test="header-search-button"
-          >
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
-            <span class="hidden sm:inline ml-2">Search</span>
-          </button>
+      <!-- Search. A launcher, not a form: focusing it opens the command
+           palette (Spec 109 FR-054), seeded with anything already typed.
+           Below 1100px it collapses to an icon button. -->
+      <div class="min-w-0 min-[1100px]:flex-1 min-[1100px]:max-w-xl">
+        <div class="relative hidden min-[1100px]:block">
+          <input
+            v-model="searchQuery"
+            type="text"
+            placeholder="Search servers, tools, settings…"
+            class="input input-bordered w-full pr-16"
+            aria-label="Search servers, tools, settings"
+            aria-keyshortcuts="Meta+K Control+K"
+            data-test="header-search-input"
+            @focus="openPalette"
+            @click="openPalette"
+          />
+          <kbd
+            class="kbd kbd-sm absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none"
+            data-test="header-search-hint"
+          >{{ shortcutHint }}</kbd>
         </div>
-
-        <!-- Spec 107 FR-041: tenants use /my/servers, which writes through
-             the tenant-scoped API. Keep this admin add flow hidden for them. -->
         <button
-          v-if="authStore.principalKind !== 'tenant'"
-          @click="router.push('/add-server')"
-          class="btn btn-primary"
-          :aria-label="addServerLabel"
-          data-test="header-add-server"
+          type="button"
+          class="btn btn-ghost btn-square min-[1100px]:hidden"
+          aria-label="Search"
+          aria-keyshortcuts="Meta+K Control+K"
+          data-test="header-search-icon"
+          @click="openPalette"
         >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
-          <span class="hidden sm:inline ml-2">{{ addServerLabel }}</span>
         </button>
       </div>
 
-      <!-- Right: Stats + Proxy Info -->
-      <div class="hidden md:flex items-center space-x-3 shrink-0">
-        <!-- Profile switcher (Profiles v2 / MCP-3243). Spec 107 cross-review
-             round 3, chunk 4 P2: selecting a profile calls
-             PUT /api/v1/profiles/active, which the tenant-session allowlist
-             rejects with 403 before the handler runs (rest-endpoints.md §8
-             lists only GET /profiles* as a tenant-reachable read) — so an
-             enabled control a tenant could open always failed to act. Hidden
-             for the same FR-041 reason as the button above; GET /profiles
-             stays reachable elsewhere (it is not this component's read).
-             Spec 109 FR-057 (H2 interim, until Spec 108 removes it entirely):
-             also hidden when no profiles exist yet — "Profile:" otherwise
-             looked like agent scoping while only setting a UI default. -->
-        <ProfileSwitcher v-if="authStore.principalKind !== 'tenant' && profilesStore.hasProfiles" />
+      <!-- "Viewing" slot (Spec 109 owns the slot, Spec 108 fills it). Fallback
+           is the interim ProfileSwitcher, unchanged from Spec 109 FR-057:
+           hidden for tenants (PUT /profiles/active is an admin door, Spec 107
+           FR-041) and while no profiles exist ("Profile:" otherwise looked like
+           agent scoping while only setting a UI default). An empty slot renders
+           no element at all. Hidden below 1100px so it can never clip the row. -->
+      <div v-if="$slots.viewing || showProfileSwitcher" class="shrink-0" data-test="header-viewing-slot">
+        <slot name="viewing">
+          <ProfileSwitcher class="hidden min-[1100px]:flex" />
+        </slot>
+      </div>
+
+      <div class="ml-auto flex items-center gap-2 shrink-0">
+        <!-- Spec 107 FR-041: a tenant never loads the fleet-wide servers store
+             and cannot add through admin doors, so neither control renders. -->
+        <StatusPill v-if="!isTenant" />
 
         <!-- Needs-attention pill (Spec 109 FR-001/FR-003): hidden at 0, the
              same FR-001 list/count every surface reads. Popover shows the
@@ -83,7 +75,7 @@
         <div v-if="attentionStore.count > 0" class="relative" data-test="header-attention-pill">
           <button
             @click="showAttentionPopover = !showAttentionPopover"
-            class="flex items-center space-x-2 px-3 py-2 bg-warning/10 text-warning rounded-lg cursor-pointer hover:bg-warning/20 transition-colors"
+            class="flex items-center gap-2 px-3 py-2 bg-warning/10 text-warning rounded-lg cursor-pointer hover:bg-warning/20 transition-colors"
             data-test="header-attention-pill-button"
             :aria-label="`${attentionStore.count} items need attention`"
           >
@@ -91,11 +83,11 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
             </svg>
             <span class="font-bold">{{ attentionStore.count }}</span>
-            <span class="text-xs hidden lg:inline">needs attention</span>
+            <span class="text-xs hidden min-[1100px]:inline whitespace-nowrap">needs attention</span>
           </button>
           <div
             v-if="showAttentionPopover"
-            class="absolute right-0 top-full mt-2 p-3 shadow-lg bg-base-100 rounded-box w-80 border border-base-300 z-50"
+            class="absolute right-0 top-full mt-2 p-3 shadow-lg bg-base-100 rounded-box w-80 max-w-[calc(100vw-1.5rem)] border border-base-300 z-[var(--z-dropdown)]"
             data-test="header-attention-popover"
           >
             <div class="space-y-1">
@@ -120,125 +112,59 @@
             </router-link>
           </div>
           <!-- Click-outside overlay -->
-          <div v-if="showAttentionPopover" class="fixed inset-0 z-40" @click="showAttentionPopover = false" />
+          <div v-if="showAttentionPopover" class="fixed inset-0 z-[calc(var(--z-dropdown)-1)]" @click="showAttentionPopover = false" />
         </div>
 
-        <!-- Servers -->
-        <div class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm">
-          <div
-            :class="[
-              'w-2 h-2 rounded-full',
-              systemStore.isRunning ? 'bg-success animate-pulse' : 'bg-error'
-            ]"
-          />
-          <span class="font-bold">{{ serversStore.serverCount.connected }}</span>
-          <span class="text-base-content/60">/</span>
-          <span>{{ serversStore.serverCount.total }}</span>
-          <span class="text-xs text-base-content/60">Servers</span>
-        </div>
-
-        <!-- Tools -->
-        <div class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm">
-          <span class="font-bold">{{ serversStore.totalTools }}</span>
-          <span class="text-xs text-base-content/60">Tools</span>
-        </div>
-
-        <!-- Routing + serialization mode switcher. Was a read-only badge whose
-             `cursor-help` promised an explanation the browser only produced
-             after a long hover (audit F31 follow-up); now it explains and
-             switches, like the profile switcher beside it.
-
-             Spec 107 FR-041 / cross-review round 2, chunk 4 P1: routing_mode
-             lives under PATCH /config, an admin-only core door (named
-             must-refuse, rest-endpoints.md §8), and routing_mode itself is
-             read from GET /routing (also must-refuse). A tenant session has
-             nothing to switch — the panel would open on a permanently
-             unresolved state and every selection would draw a fixed 403.
-             Hidden entirely, matching the FR-041 promise for tenant-
-             inapplicable chips (round 1 already suppressed the fetch this
-             component would otherwise issue on mount; this hides the
-             control itself, including its mutation path). -->
-        <ModeSwitcher v-if="authStore.principalKind !== 'tenant'" />
-
-        <!-- MCP Endpoints Dropdown -->
-        <div v-if="systemStore.listenAddr" class="relative">
-          <button
-            @click="showEndpoints = !showEndpoints"
-            class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg cursor-pointer hover:bg-base-300 transition-colors"
-          >
-            <span class="text-xs font-medium text-base-content/60">MCP:</span>
-            <code class="text-xs font-mono">{{ systemStore.listenAddr }}</code>
-            <svg class="w-3 h-3 opacity-60 transition-transform" :class="{ 'rotate-180': showEndpoints }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-            </svg>
-          </button>
-          <div
-            v-if="showEndpoints"
-            class="absolute right-0 top-full mt-2 p-3 shadow-lg bg-base-100 rounded-box w-96 border border-base-300 z-[var(--z-dropdown)]"
-          >
-            <div class="text-xs font-semibold text-base-content/60 mb-2 px-1">MCP Endpoints</div>
-            <div class="space-y-1">
-              <div
-                v-for="ep in mcpEndpoints"
-                :key="ep.path"
-                class="flex items-center justify-between px-2 py-1.5 rounded hover:bg-base-200 group"
-              >
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center space-x-2">
-                    <code class="text-xs font-mono truncate">{{ ep.url }}</code>
-                    <span v-if="ep.isDefault" class="badge badge-xs badge-primary">default</span>
-                  </div>
-                  <div class="text-xs text-base-content/60 mt-0.5">{{ ep.description }}</div>
-                </div>
-                <button
-                  @click.stop="copyEndpoint(ep)"
-                  class="btn btn-ghost btn-xs p-1 opacity-0 group-hover:opacity-100 transition-opacity tooltip tooltip-left shrink-0 ml-2"
-                  :data-tip="ep.copyTooltip"
-                >
-                  <svg v-if="ep.copyTooltip === 'Copied!'" class="w-3.5 h-3.5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                  </svg>
-                  <svg v-else class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-          </div>
-          <!-- Click-outside overlay -->
-          <div v-if="showEndpoints" class="fixed inset-0 z-[var(--z-header)]" @click="showEndpoints = false" />
-        </div>
+        <AddMenu v-if="!isTenant" />
       </div>
     </div>
 
+    <CommandPalette ref="palette" v-model:open="paletteOpen" />
   </header>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useSystemStore } from '@/stores/system'
-import { useServersStore } from '@/stores/servers'
 import { useAuthStore } from '@/stores/auth'
 import { useAttentionStore } from '@/stores/attention'
 import { useProfilesStore } from '@/stores/profiles'
 import ProfileSwitcher from './ProfileSwitcher.vue'
-import ModeSwitcher from './ModeSwitcher.vue'
+import StatusPill from './StatusPill.vue'
+import AddMenu from './AddMenu.vue'
+import CommandPalette from './CommandPalette.vue'
 
-const router = useRouter()
 const systemStore = useSystemStore()
-const serversStore = useServersStore()
 const authStore = useAuthStore()
 const attentionStore = useAttentionStore()
 const profilesStore = useProfilesStore()
 
 const showAttentionPopover = ref(false)
+const searchQuery = ref('')
+const paletteOpen = ref(false)
+const palette = ref<InstanceType<typeof CommandPalette> | null>(null)
+
+const isTenant = computed(() => authStore.principalKind === 'tenant')
+const showProfileSwitcher = computed(() => !isTenant.value && profilesStore.hasProfiles)
+const shortcutHint = computed(() =>
+  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K',
+)
+
+// The header field is only a launcher. Hand any typed text to the palette,
+// clear the field and blur it first so closing the palette does not restore
+// focus here and reopen it.
+function openPalette(event?: Event) {
+  const seed = searchQuery.value
+  searchQuery.value = ''
+  ;(event?.target as HTMLElement | null)?.blur?.()
+  palette.value?.show(seed)
+}
 
 // Spec 109 FR-057: ProfileSwitcher only renders once profilesStore.hasProfiles
 // is true, but that store is populated by a fetch ProfileSwitcher itself used
 // to trigger on its own mount — a component gated on data only it fetches
 // never mounts to fetch it. The header fetches once up front instead, so
-// hasProfiles reflects reality before the v-if below ever evaluates it.
+// hasProfiles reflects reality before the v-if above ever evaluates it.
 onMounted(() => {
   // Spec 109 FR-001/FR-003: the header is global, so it fetches its own copy
   // rather than depending on Home having mounted first.
@@ -256,74 +182,4 @@ watch(() => systemStore.authEpoch, () => {
   // Same gate as the mount load: a tenant session never reads admin profiles.
   if (!authStore.isTeamsEdition || authStore.canLoadCore) void profilesStore.fetchProfiles()
 })
-
-const addServerLabel = computed(() => authStore.isTeamsEdition ? 'Add Personal Server' : 'Add Server')
-
-const searchQuery = ref('')
-const showEndpoints = ref(false)
-
-interface McpEndpoint {
-  path: string
-  url: string
-  description: string
-  isDefault: boolean
-  copyTooltip: string
-}
-
-const mcpEndpoints = computed<McpEndpoint[]>(() => {
-  const addr = systemStore.listenAddr
-  if (!addr) return []
-  const base = `http://${addr}`
-  const mode = systemStore.routingMode
-  return [
-    {
-      path: '/mcp',
-      url: `${base}/mcp`,
-      description: `Default endpoint (${mode === 'direct' ? 'direct' : mode === 'code_execution' ? 'code execution' : 'retrieve tools'} mode)`,
-      isDefault: true,
-      copyTooltip: 'Copy URL',
-    },
-    {
-      path: '/mcp/call',
-      url: `${base}/mcp/call`,
-      description: 'Retrieve tools + call_tool_read/write/destructive',
-      isDefault: false,
-      copyTooltip: 'Copy URL',
-    },
-    {
-      path: '/mcp/all',
-      url: `${base}/mcp/all`,
-      description: 'Direct access to all tools (serverName__toolName)',
-      isDefault: false,
-      copyTooltip: 'Copy URL',
-    },
-    {
-      path: '/mcp/code',
-      url: `${base}/mcp/code`,
-      description: 'Code execution + retrieve_tools for discovery',
-      isDefault: false,
-      copyTooltip: 'Copy URL',
-    },
-  ]
-})
-
-async function copyEndpoint(ep: McpEndpoint) {
-  try {
-    await navigator.clipboard.writeText(ep.url)
-    ep.copyTooltip = 'Copied!'
-    setTimeout(() => { ep.copyTooltip = 'Copy URL' }, 2000)
-  } catch (err) {
-    console.error('Failed to copy:', err)
-    ep.copyTooltip = 'Failed'
-    setTimeout(() => { ep.copyTooltip = 'Copy URL' }, 2000)
-  }
-}
-
-// One canonical search surface (audit F20): the header box hands its query to
-// the Tools page instead of the retired /search view. An empty box is not an
-// error — it opens Tools unfiltered rather than leaving the button dead.
-function handleSearch() {
-  const q = searchQuery.value.trim()
-  router.push(q ? { path: '/tools', query: { q } } : { path: '/tools' })
-}
 </script>

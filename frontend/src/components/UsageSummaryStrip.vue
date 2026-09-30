@@ -5,7 +5,7 @@
        the attention list is empty. -->
   <div class="flex flex-wrap gap-3" data-test="usage-summary-strip">
     <router-link
-      to="/activity?view=calls&from=-24h"
+      :to="scope.linkTo('activity', { view: 'calls', from: '-24h' })"
       class="card card-compact bg-base-100 border border-base-300 hover:shadow-md transition-shadow flex-1 min-w-[140px]"
       data-test="usage-strip-calls"
     >
@@ -15,7 +15,7 @@
       </div>
     </router-link>
     <router-link
-      to="/activity?view=calls&from=-24h&status=blocked"
+      :to="scope.linkTo('activity', { view: 'calls', from: '-24h', status: 'blocked' })"
       class="card card-compact bg-base-100 border border-base-300 hover:shadow-md transition-shadow flex-1 min-w-[140px]"
       data-test="usage-strip-blocked"
     >
@@ -25,7 +25,7 @@
       </div>
     </router-link>
     <router-link
-      to="/activity?view=calls&from=-24h&status=error"
+      :to="scope.linkTo('activity', { view: 'calls', from: '-24h', status: 'error' })"
       class="card card-compact bg-base-100 border border-base-300 hover:shadow-md transition-shadow flex-1 min-w-[140px]"
       data-test="usage-strip-errors"
     >
@@ -34,12 +34,10 @@
         <div class="text-xs opacity-60 mt-1">errors</div>
       </div>
     </router-link>
-    <!-- Review finding F3: this PR removes the old Dashboard Usage/Overview
-         switcher without adding a replacement link anywhere in Home,
-         TopHeader or the sidebar (the Monitor/Usage sidebar entry is
-         109-i's, FR-050). Keep /usage reachable from Home in the meantime. -->
+    <!-- Review finding F3: Home keeps its own way into the full Usage page
+         (the sidebar's Monitor -> Usage entry, Spec 109-i, is a second one). -->
     <router-link
-      to="/usage"
+      :to="scope.linkTo('usage')"
       class="card card-compact bg-base-100 border border-base-300 hover:shadow-md transition-shadow flex items-center justify-center min-w-[100px]"
       data-test="usage-strip-view-usage"
     >
@@ -56,9 +54,13 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { useAuthStore } from '@/stores/auth'
+import { useScopeQuery } from '@/composables/useScopeQuery'
 import api from '@/services/api'
 
 const authStore = useAuthStore()
+// Spec 109 FR-058: links go through linkTo so sticky scope (from/to and, once
+// available, profile/client/token) carries from Home into Activity.
+const scope = useScopeQuery('home')
 const loaded = ref(false)
 const summary = reactive({ call_count: 0, blocked_count: 0, call_error_count: 0 })
 

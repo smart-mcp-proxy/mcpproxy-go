@@ -37,8 +37,10 @@ const router = createRouter({
     },
     { path: '/clients', name: 'clients', component: () => import('@/views/Clients.vue'), meta: { title: 'Clients' } },
     {
+      // Query and hash are kept explicitly (navigation-map.md "Redirects"),
+      // not left to vue-router's implicit carry-over for named redirects.
       path: '/overview',
-      redirect: { name: 'home' },
+      redirect: (to) => ({ path: '/', query: to.query, hash: to.hash }),
     },
     {
       path: '/servers',
