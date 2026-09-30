@@ -166,7 +166,7 @@
           <span v-if="filterServer" class="badge badge-sm badge-outline">Server: {{ filterServer }}</span>
           <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
           <span v-if="filterTier" class="badge badge-sm badge-outline">Tier: {{ filterTier }}</span>
-          <span v-if="filterApproval" class="badge badge-sm badge-outline">Approval: {{ filterApproval }}</span>
+          <span v-if="filterApproval" class="badge badge-sm badge-outline">Approval: {{ toolApprovalLabel(filterApproval) }}</span>
         </div>
       </div>
     </div>
@@ -392,10 +392,20 @@
                   </span>
                 </td>
                 <td>
-                  <span v-if="tool.approval_status" class="badge badge-sm" :class="getApprovalBadgeClass(tool.approval_status)">
-                    {{ tool.approval_status }}
+                  <span v-if="tool.approval_status" class="badge badge-sm whitespace-nowrap" :class="getApprovalBadgeClass(tool.approval_status)">
+                    {{ toolApprovalLabel(tool.approval_status) }}
                   </span>
                   <span v-else class="text-base-content/30 text-xs">—</span>
+                  <!-- Spec 109 FR-027 (link map "Tools row with pending/changed"):
+                       a plain path, not useScopeQuery.linkTo — /review/:server is
+                       a path-param route with no sticky parameters. -->
+                  <router-link
+                    v-if="isApprovable(tool)"
+                    :to="reviewPath(tool.server_name, tool.approval_status as 'pending' | 'changed')"
+                    class="link link-primary text-xs ml-1"
+                    data-test="tool-review-link"
+                    @click.stop
+                  >Review</router-link>
                   <!-- Compact hold evidence: reason icon + TPA ids + overflow. -->
                   <div
                     v-if="holdEvidenceFor(tool)"
@@ -527,8 +537,8 @@
             </div>
             <div v-if="selectedTool.approval_status">
               <span class="text-base-content/60">Approval:</span>
-              <span class="badge badge-sm ml-1" :class="getApprovalBadgeClass(selectedTool.approval_status)">
-                {{ selectedTool.approval_status }}
+              <span class="badge badge-sm ml-1 whitespace-nowrap" :class="getApprovalBadgeClass(selectedTool.approval_status)">
+                {{ toolApprovalLabel(selectedTool.approval_status) }}
               </span>
             </div>
           </div>
@@ -566,7 +576,8 @@
 </template>
 
 <script setup lang="ts">
-import { serverDetailPath } from '@/utils/serverRoute'
+import { serverDetailPath, reviewPath } from '@/utils/serverRoute'
+import { toolApprovalLabel } from '@/utils/toolQuarantine'
 import { formatDate } from '@/utils/datetime'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'

@@ -1534,7 +1534,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         // Per-server submenu with actions
         let sub = NSMenu()
-        let statusText = server.health?.summary ?? (server.connected ? "Connected" : server.enabled ? "Disconnected" : "Disabled")
+        // Spec 109 T049: the same status text the Servers row renders.
+        let statusText = ServerStatusLinePresentation.text(for: server)
         let statusLine = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
         statusLine.isEnabled = false
         sub.addItem(statusLine)

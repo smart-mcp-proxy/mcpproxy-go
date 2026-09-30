@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import ConnectModal from '@/components/ConnectModal.vue'
+import ClientConnectList from '@/components/ClientConnectList.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import api from '@/services/api'
 
@@ -87,7 +87,7 @@ describe('ConnectModal preview (Spec 078 US1)', () => {
   })
 
   async function open() {
-    const wrapper = mount(ConnectModal, { props: { show: false }, global: { plugins: [pinia] } })
+    const wrapper = mount(ClientConnectList, { props: { show: false }, global: { plugins: [pinia] } })
     await wrapper.setProps({ show: true })
     await flushPromises()
     return wrapper
