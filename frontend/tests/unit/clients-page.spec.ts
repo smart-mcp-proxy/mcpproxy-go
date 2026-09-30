@@ -105,6 +105,29 @@ describe('Clients page', () => {
     expect(router.currentRoute.value.query.tab).toBeUndefined()
   })
 
+  // Spec 109-i: the header MCP-endpoints dropdown is gone, so its per-URL copy
+  // buttons and descriptions live on this tab (FR-031 intent, T140).
+  it('offers a copy button and description per endpoint on the Endpoint & mode tab', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const router = makeRouter()
+    await router.push('/clients?tab=endpoint')
+    await router.isReady()
+    const wrapper = mount(Clients, {
+      global: { plugins: [router], stubs: { ClientConnectList: true, AgentTokens: true, ModeSwitcher: true } },
+    })
+    await flushPromises()
+
+    for (const name of ['default', 'direct', 'code_execution', 'retrieve_tools']) {
+      expect(wrapper.find(`[data-test="copy-endpoint-${name}"]`).exists(), name).toBe(true)
+    }
+    expect(wrapper.get('[data-test="endpoint-description-direct"]').text()).toContain('serverName__toolName')
+
+    await wrapper.get('[data-test="copy-endpoint-direct"]').trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('http://127.0.0.1:18081/mcp/all')
+  })
+
   it('checks an installed hand-configured client only after the explicit action', async () => {
     const router = makeRouter()
     await router.push('/clients')

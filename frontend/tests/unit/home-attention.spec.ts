@@ -76,6 +76,9 @@ function makeRouter() {
     routes: [
       { path: '/', name: 'home', component: Home },
       { path: '/servers/:name', name: 'server-detail', component: { template: '<div />' } },
+      // UsageSummaryStrip builds its links with useScopeQuery.linkTo (by route name).
+      { path: '/activity', name: 'activity', component: { template: '<div />' } },
+      { path: '/usage', name: 'usage', component: { template: '<div />' } },
       { path: '/:pathMatch(.*)*', name: 'other', component: { template: '<div />' } },
     ],
   })

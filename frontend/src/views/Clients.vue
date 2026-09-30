@@ -32,7 +32,7 @@
         <button v-if="otherClientSnippet" type="button" class="btn btn-ghost btn-xs" data-test="copy-other-client-snippet" @click="copyOtherClientSnippet">{{ snippetCopied ? 'Copied' : 'Copy config' }}</button>
       </div>
     </section>
-    <section v-else-if="tab === 'endpoint'" class="card bg-base-100 border border-base-300"><div class="card-body"><h2 class="card-title">Endpoint &amp; mode</h2><p class="text-sm text-base-content/70">Choose the MCP surface this instance serves. Changes are saved immediately and apply after restart.</p><ModeSwitcher /><dl v-if="store.routing" class="grid sm:grid-cols-2 gap-2 text-sm"><template v-for="(endpoint, name) in store.routing.endpoints" :key="name"><dt class="font-medium">{{ name }}</dt><dd><code>{{ endpoint }}</code></dd></template></dl><p v-if="store.routing?.restart_required" class="alert alert-warning text-sm">Restart MCPProxy to apply {{ store.routing.pending_routing_mode }} mode.</p></div></section>
+    <section v-else-if="tab === 'endpoint'" class="card bg-base-100 border border-base-300"><div class="card-body"><h2 class="card-title">Endpoint &amp; mode</h2><p class="text-sm text-base-content/70">Choose the MCP surface this instance serves. Changes are saved immediately and apply after restart.</p><ModeSwitcher /><dl v-if="store.routing" class="grid gap-1 text-sm" data-test="endpoint-list"><div v-for="(endpoint, name) in store.routing.endpoints" :key="name" class="flex items-start justify-between gap-3 rounded-lg px-2 py-1.5 hover:bg-base-200" :data-test="`endpoint-${name}`"><div class="min-w-0"><dt class="font-medium">{{ name }} <span v-if="name === 'default'" class="badge badge-xs badge-primary">default</span></dt><dd><code>{{ endpoint }}</code></dd><dd class="text-xs text-base-content/60" :data-test="`endpoint-description-${name}`">{{ endpointDescription(name) }}</dd></div><button v-if="systemStore.listenAddr" type="button" class="btn btn-ghost btn-xs shrink-0" :data-test="`copy-endpoint-${name}`" :aria-label="`Copy ${name} endpoint URL`" @click="copyEndpoint(name, endpoint)">{{ copiedEndpoint === name ? 'Copied' : 'Copy URL' }}</button></div></dl><p v-if="store.routing?.restart_required" class="alert alert-warning text-sm">Restart MCPProxy to apply {{ store.routing.pending_routing_mode }} mode.</p></div></section>
     <AgentTokens v-else />
     <ClientConnectList :show="connectOpen" @close="connectOpen = false" @updated="refreshClients" />
   </div>
@@ -60,6 +60,30 @@ const connectOpen = ref(false)
 const scopeQuery = useScopeQuery('clients')
 const clientScopeAvailable = computed(() => isScopeParamAvailable('client'))
 const snippetCopied = ref(false)
+// Endpoint copy + descriptions moved here from the retired header dropdown
+// (Spec 109-i). Descriptions are keyed by endpoint name from GET /routing.
+const copiedEndpoint = ref('')
+function endpointDescription(name: string | number): string {
+  switch (name) {
+    case 'default': {
+      const mode = store.routing?.routing_mode
+      return `Default endpoint (${mode === 'direct' ? 'direct' : mode === 'code_execution' ? 'code execution' : 'retrieve tools'} mode)`
+    }
+    case 'retrieve_tools': return 'Retrieve tools + call_tool_read/write/destructive'
+    case 'direct': return 'Direct access to all tools (serverName__toolName)'
+    case 'code_execution': return 'Code execution + retrieve_tools for discovery'
+    default: return ''
+  }
+}
+async function copyEndpoint(name: string | number, path: string) {
+  try {
+    await navigator.clipboard.writeText(`http://${systemStore.listenAddr}${path}`)
+    copiedEndpoint.value = String(name)
+    window.setTimeout(() => { if (copiedEndpoint.value === String(name)) copiedEndpoint.value = '' }, 2000)
+  } catch {
+    copiedEndpoint.value = ''
+  }
+}
 const otherClientSnippet = computed(() => {
   if (!systemStore.listenAddr) return ''
   return JSON.stringify({ mcpServers: { mcpproxy: { url: `http://${systemStore.listenAddr}/mcp` } } }, null, 2)
