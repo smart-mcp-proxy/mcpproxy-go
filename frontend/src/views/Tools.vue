@@ -392,7 +392,7 @@
                   </span>
                 </td>
                 <td>
-                  <span v-if="tool.approval_status" class="badge badge-sm" :class="getApprovalBadgeClass(tool.approval_status)">
+                  <span v-if="tool.approval_status" class="badge badge-sm whitespace-nowrap" :class="getApprovalBadgeClass(tool.approval_status)">
                     {{ toolApprovalLabel(tool.approval_status) }}
                   </span>
                   <span v-else class="text-base-content/30 text-xs">—</span>
@@ -537,7 +537,7 @@
             </div>
             <div v-if="selectedTool.approval_status">
               <span class="text-base-content/60">Approval:</span>
-              <span class="badge badge-sm ml-1" :class="getApprovalBadgeClass(selectedTool.approval_status)">
+              <span class="badge badge-sm ml-1 whitespace-nowrap" :class="getApprovalBadgeClass(selectedTool.approval_status)">
                 {{ toolApprovalLabel(selectedTool.approval_status) }}
               </span>
             </div>
