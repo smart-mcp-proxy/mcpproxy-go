@@ -1,0 +1,74 @@
+{
+  "name": "create",
+  "description": "Create a profile",
+  "usage": "mcpproxy profile create \u003cname\u003e [flags]",
+  "flags": [
+    {
+      "name": "allow",
+      "description": "Comma-separated server:tool allow globs",
+      "type": "stringSlice",
+      "default": "[]"
+    },
+    {
+      "name": "code-execution",
+      "description": "Code execution: on, off or inherit (inherit clears the field)",
+      "type": "string"
+    },
+    {
+      "name": "deny",
+      "description": "Comma-separated server:tool deny globs (deny beats allow)",
+      "type": "stringSlice",
+      "default": "[]"
+    },
+    {
+      "name": "description",
+      "description": "Description (at most 500 characters)",
+      "type": "string"
+    },
+    {
+      "name": "help",
+      "shorthand": "h",
+      "description": "help for create",
+      "type": "bool",
+      "default": "false"
+    },
+    {
+      "name": "management-tools",
+      "description": "Management tools (upstream_servers, quarantine_security): on, off or inherit",
+      "type": "string"
+    },
+    {
+      "name": "max-tier",
+      "description": "Highest tool tier the profile admits: read, write or destructive",
+      "type": "string"
+    },
+    {
+      "name": "servers",
+      "description": "Comma-separated upstream servers the profile exposes",
+      "type": "stringSlice",
+      "default": "[]"
+    },
+    {
+      "name": "switchable-to",
+      "description": "Comma-separated profiles a session may switch into; an empty value means none",
+      "type": "stringSlice",
+      "default": "[]"
+    },
+    {
+      "name": "title",
+      "description": "Display title (at most 80 characters)",
+      "type": "string"
+    },
+    {
+      "name": "unannotated",
+      "description": "Handling of tools with no tier hint: deny, as_write or as_read (as-write and as-read are accepted)",
+      "type": "string"
+    },
+    {
+      "name": "help-json",
+      "description": "Output help information as JSON",
+      "type": "bool",
+      "default": "false"
+    }
+  ]
+}

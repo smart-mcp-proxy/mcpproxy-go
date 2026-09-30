@@ -209,6 +209,8 @@ func main() {
 	// Add connect/disconnect commands
 	connectCmd := GetConnectCommand()
 	clientCmd := GetClientCommand()
+	profileCmd := GetProfileCommand()
+	accessCmd := GetAccessCommand()
 	disconnectCmd := GetDisconnectCommand()
 
 	// Add commands to root
@@ -237,6 +239,8 @@ func main() {
 	rootCmd.AddCommand(reviewCmd)
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(clientCmd)
+	rootCmd.AddCommand(profileCmd)
+	rootCmd.AddCommand(accessCmd)
 	rootCmd.AddCommand(disconnectCmd)
 	rootCmd.AddCommand(GetVersionCommand())
 	rootCmd.AddCommand(GetUpdateCommand())
