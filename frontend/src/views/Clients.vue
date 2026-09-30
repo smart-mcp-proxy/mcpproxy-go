@@ -27,7 +27,7 @@
               <router-link class="link" :to="scopeQuery.linkTo('tools', { client: client.id })">Tools</router-link>
               <router-link class="link" :to="scopeQuery.linkTo('usage', { client: client.id })">Usage</router-link>
             </div>
-            <ClientBindingControls class="mb-3" :client="client" @changed="refreshSilently" @credential="showCredential" />
+            <ClientBindingControls class="mb-3" :client="client" @changed="refreshSilently" @forget="forgetTarget = $event" @credential="showCredential" />
             <p v-if="!client.sessions?.length" class="text-sm opacity-60">No sessions recorded.</p>
             <router-link v-for="session in client.sessions" :key="session.id" :to="`/activity?view=sessions&session=${encodeURIComponent(session.work_session_id || session.id)}`" class="link block text-sm">Session {{ session.work_session_id || session.id }}</router-link>
           </td></tr></template></tbody>
@@ -47,6 +47,7 @@
     <CustomClientDialog :open="customOpen" @close="customOpen = false" @created="onCustomCreated" />
     <BulkMoveDialog :open="bulkOpen" :clients="store.clients" @close="bulkOpen = false" @done="refreshSilently" />
     <UpgradeAdminKeyDialog :open="upgradeOpen" @close="upgradeOpen = false" @done="refreshSilently" />
+    <ForgetClientDialog v-if="forgetTarget" :open="true" :client="forgetTarget" @close="forgetTarget = null" @done="refreshSilently" />
     <CredentialOnceDialog :open="!!secret" :credential="secret?.credential ?? ''" :snippet="secret?.snippet" :title="secret?.title" @close="secret = null" />
   </div>
 </template>
@@ -65,10 +66,11 @@ import CustomClientDialog from '@/components/clients/CustomClientDialog.vue'
 import BulkMoveDialog from '@/components/clients/BulkMoveDialog.vue'
 import UpgradeAdminKeyDialog from '@/components/clients/UpgradeAdminKeyDialog.vue'
 import CredentialOnceDialog from '@/components/clients/CredentialOnceDialog.vue'
+import ForgetClientDialog from '@/components/clients/ForgetClientDialog.vue'
 import { useProfilesStore } from '@/stores/profiles'
 import { useClientBindingsStore } from '@/stores/clientBindings'
 import { describeError, isGuardRefusal } from '@/utils/profiles'
-import type { CustomClientResponse } from '@/types/api'
+import type { ClientPresence, CustomClientResponse } from '@/types/api'
 import ModeSwitcher from '@/components/ModeSwitcher.vue'
 import AgentTokens from '@/views/AgentTokens.vue'
 import { useSystemStore } from '@/stores/system'
@@ -90,6 +92,7 @@ const upgradeOpen = ref(false)
 // never reaches Pinia, localStorage or the URL (Spec 108-i I12).
 const secret = ref<{ credential: string; snippet?: { generic_http: string; header_name: string } | null; title?: string } | null>(null)
 const moveRequest = ref('')
+const forgetTarget = ref<ClientPresence | null>(null)
 const hasAdminKeyWarning = computed(() => store.warnings.some(warning => warning.code === 'client_holds_admin_key'))
 const scopeQuery = useScopeQuery('clients')
 const clientScopeAvailable = computed(() => isScopeParamAvailable('client'))

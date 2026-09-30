@@ -1,20 +1,23 @@
 <template>
-  <div :role="plain ? undefined : 'alert'" class="alert alert-warning flex-col items-start gap-2 text-sm" data-test="guard-refusal">
-    <p class="font-medium">{{ refusal.error || defaultMessage }}</p>
-    <ul v-if="refusal.bindings?.length" class="list-disc list-inside text-xs" data-test="guard-bindings">
-      <li v-for="binding in refusal.bindings" :key="binding.token_name || binding.client_id">
-        {{ binding.client_id || binding.token_name }} &rarr; {{ binding.profile }} ({{ binding.mode }})
-      </li>
-    </ul>
-    <div v-if="refusal.fixes?.length" class="flex flex-wrap gap-2">
-      <button
-        v-for="fix in refusal.fixes"
-        :key="fix.kind + (fix.target ?? '')"
-        type="button"
-        class="btn btn-xs btn-outline"
-        :data-test="`guard-fix-${fix.kind}`"
-        @click="follow(fix)"
-      >{{ label(fix) }}</button>
+  <!-- daisyUI's .alert is a grid: one wrapper keeps the message, the bindings and the fixes in one column. -->
+  <div :role="plain ? undefined : 'alert'" class="alert alert-warning text-sm" data-test="guard-refusal">
+    <div class="w-full space-y-2">
+      <p class="font-medium">{{ refusal.error || defaultMessage }}</p>
+      <ul v-if="refusal.bindings?.length" class="list-disc list-inside text-xs" data-test="guard-bindings">
+        <li v-for="binding in refusal.bindings" :key="binding.token_name || binding.client_id">
+          {{ binding.client_id || binding.token_name }} &rarr; {{ binding.profile }} ({{ binding.mode }})
+        </li>
+      </ul>
+      <div v-if="refusal.fixes?.length" class="flex flex-wrap gap-2">
+        <button
+          v-for="fix in refusal.fixes"
+          :key="fix.kind + (fix.target ?? '')"
+          type="button"
+          class="btn btn-xs btn-outline"
+          :data-test="`guard-fix-${fix.kind}`"
+          @click="follow(fix)"
+        >{{ label(fix) }}</button>
+      </div>
     </div>
   </div>
 </template>

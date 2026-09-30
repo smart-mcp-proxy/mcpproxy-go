@@ -15,13 +15,12 @@
     <div class="flex flex-wrap gap-2">
       <button type="button" class="btn btn-xs btn-outline" :data-test="`client-explain-${client.id}`" @click="explainOpen = true">Explain access&hellip;</button>
       <button v-if="client.credential_state === 'client'" type="button" class="btn btn-xs btn-outline" :data-test="`client-rotate-${client.id}`" @click="startRotate">Rotate credential&hellip;</button>
-      <button v-if="hasRecord" type="button" class="btn btn-xs btn-outline btn-error" :data-test="`client-forget-${client.id}`" @click="forgetOpen = true">Forget client&hellip;</button>
+      <button v-if="hasRecord" type="button" class="btn btn-xs btn-outline btn-error" :data-test="`client-forget-${client.id}`" @click="emit('forget', client)">Forget client&hellip;</button>
     </div>
     <p v-if="actionResult" role="status" aria-live="polite" class="text-sm" :data-test="`client-action-result-${client.id}`">{{ actionResult }}</p>
     <p v-if="actionError" role="alert" class="text-sm text-error" :data-test="`client-action-error-${client.id}`">{{ actionError }}</p>
 
     <AccessExplainer :open="explainOpen" :subject="{ kind: 'client', name: client.id }" @close="explainOpen = false" />
-    <ForgetClientDialog :open="forgetOpen" :client="client" @close="forgetOpen = false" @done="emit('changed')" />
 
     <BaseDialog :open="rotateOpen" :title="`Rotate ${client.display_name} credential`" test-id="rotate-client-dialog" @close="closeRotate">
       <template v-if="isCustom">
@@ -48,7 +47,6 @@
 import { computed, ref } from 'vue'
 import BaseDialog from '@/components/BaseDialog.vue'
 import AccessExplainer from '@/components/AccessExplainer.vue'
-import ForgetClientDialog from '@/components/clients/ForgetClientDialog.vue'
 import api from '@/services/api'
 import { useProfilesStore } from '@/stores/profiles'
 import { useClientBindingsStore } from '@/stores/clientBindings'
@@ -61,13 +59,15 @@ import type { ClientPresence, ConnectPreview } from '@/types/api'
 const props = defineProps<{ client: ClientPresence }>()
 const emit = defineEmits<{
   (e: 'changed'): void
+  // The forget dialog lives on the page, not in the row: a forgotten custom
+  // client drops out of the list, and its result must outlive the row.
+  (e: 'forget', client: ClientPresence): void
   (e: 'credential', payload: { credential: string; snippet?: { generic_http: string; header_name: string } | null; title: string }): void
 }>()
 const profiles = useProfilesStore()
 const bindings = useClientBindingsStore()
 
 const explainOpen = ref(false)
-const forgetOpen = ref(false)
 const rotateOpen = ref(false)
 const rotatePreview = ref<ConnectPreview | null>(null)
 const rotateError = ref('')

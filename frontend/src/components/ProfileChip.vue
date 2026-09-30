@@ -1,5 +1,5 @@
 <template>
-  <div class="space-y-1 min-w-[10rem]" :data-test="`client-profile-cell-${client.id}`" @click.stop>
+  <div class="space-y-1 min-w-[10rem] max-w-[15rem]" :data-test="`client-profile-cell-${client.id}`" @click.stop>
     <!-- No client credential to bind (none, admin key, revoked, expired,
          unknown): the chip and the lock switch are disabled and never call PUT.
          The call to action depends on why (Spec 108-i I8). -->
@@ -28,7 +28,7 @@
       </div>
       <button
         type="button"
-        class="btn btn-xs btn-primary"
+        class="btn btn-xs btn-primary h-auto min-h-6 py-1 whitespace-normal"
         :data-test="`client-credential-cta-${client.id}`"
         @click="openConnect"
       >{{ credentialCta(client.credential_state) }}</button>
@@ -37,7 +37,7 @@
       <div class="flex items-center gap-2 flex-wrap">
         <button
           type="button"
-          class="btn btn-xs btn-outline max-w-[18rem] h-auto min-h-6 py-1 text-left normal-case"
+          class="btn btn-xs btn-outline max-w-[14rem] h-auto min-h-6 py-1 text-left normal-case"
           :class="missing && 'btn-error'"
           aria-haspopup="menu"
           :aria-expanded="open ? 'true' : 'false'"
