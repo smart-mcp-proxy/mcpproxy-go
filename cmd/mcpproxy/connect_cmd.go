@@ -104,6 +104,10 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Flags are valid from here on: a refusal (guard, name conflict, locked
+	// database) is a result to read, not a usage mistake, so do not bury it
+	// under the command's usage text.
+	cmd.SilenceUsage = true
 
 	// --all mode
 	if connectAll {
