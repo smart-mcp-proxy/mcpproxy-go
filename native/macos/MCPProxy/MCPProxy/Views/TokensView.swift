@@ -89,6 +89,8 @@ struct TokensView: View {
     @State private var selectedTokenID: String?
     @State private var migrating: AgentToken?
     @State private var reloadTask: Task<Void, Never>?
+    /// Only the newest load (on the current connection) may publish.
+    @State private var loadGeneration = 0
 
     private var apiClient: APIClient? { appState.apiClient }
 
@@ -285,17 +287,23 @@ struct TokensView: View {
             errorMessage = "Not connected to MCPProxy core"
             return
         }
+        loadGeneration += 1
+        let generation = loadGeneration
+        let connection = appState.connectionGeneration
         isLoading = true
         errorMessage = nil
-        defer { isLoading = false }
+        defer { if generation == loadGeneration { isLoading = false } }
 
         // The scope parameters ride only when the core advertises them.
         let request = filter.restRequest(for: .tokens, scopeFiltersAvailable: appState.scopeFiltersAvailable)
         let profile = request?.query.first { $0.name == "profile" }?.value
         let token = request?.query.first { $0.name == "token" }?.value
         do {
-            tokens = try await client.tokens(profile: profile, token: token)
+            let fetched = try await client.tokens(profile: profile, token: token)
+            guard generation == loadGeneration, appState.isCurrentConnection(connection) else { return }
+            tokens = fetched
         } catch {
+            guard generation == loadGeneration else { return }
             errorMessage = "Failed to load tokens: \(error.localizedDescription)"
         }
     }

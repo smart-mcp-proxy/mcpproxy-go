@@ -35,6 +35,8 @@ struct HomeView: View {
     @State private var homeFilter = ScopeFilter()
     @State private var scopedUsage: UsageAggregateResponse?
     @State private var tokenNames: [String] = []
+    /// Only the newest scoped reload (on the current connection) may publish.
+    @State private var scopedGeneration = 0
 
     var body: some View {
         ScrollView {
@@ -124,18 +126,24 @@ struct HomeView: View {
     /// surface shares, so the parameters are exactly the contract's.
     private func reloadScoped() async {
         guard let api = appState.apiClient else { return }
+        scopedGeneration += 1
+        let generation = scopedGeneration
+        let connection = appState.connectionGeneration
+        func isCurrent() -> Bool { generation == scopedGeneration && appState.isCurrentConnection(connection) }
         let available = appState.scopeFiltersAvailable
         var sessionsFilter = homeFilter
         sessionsFilter.view = .sessions
         if let request = sessionsFilter.restRequest(for: .activity, scopeFiltersAvailable: available) {
-            if let response: APIClient.SessionsResponse = try? await api.fetchScoped(request, extra: "limit=20") {
+            if let response: APIClient.SessionsResponse = try? await api.fetchScoped(request, extra: "limit=20"),
+               isCurrent() {
                 mcpSessions = response.sessions
             }
         }
         var usageFilter = homeFilter
         usageFilter.from = "-24h"
         if available, let request = usageFilter.restRequest(for: .usage, scopeFiltersAvailable: available) {
-            scopedUsage = try? await api.fetchScoped(request, extra: "top=1")
+            let usage: UsageAggregateResponse? = try? await api.fetchScoped(request, extra: "top=1")
+            if isCurrent() { scopedUsage = usage }
         } else {
             scopedUsage = nil
         }
