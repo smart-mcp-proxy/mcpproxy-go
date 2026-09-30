@@ -275,22 +275,46 @@ func TestPreview_PreconditionToken_PendingEntryDrift(t *testing.T) {
 	listenAddr, apiKey, requireAuth := "127.0.0.1:8080", "key-one", false
 	svc := NewServiceWithHome(listenAddr, apiKey, home).
 		WithConfigProvider(func() (string, string, bool) { return listenAddr, apiKey, requireAuth })
+	withFakeMinter(svc)
 
 	base := previewToken(t, svc, "claude-code")
 
-	// require_mcp_auth toggled on: the pending entry gains the credential —
-	// the FR-004 notice the user never saw. The token must invalidate.
+	// require_mcp_auth toggled on: the intent binds the auth toggle, so the
+	// token must invalidate even though the entry shape is the same (a client
+	// previewed under auth off must not silently be written under auth on).
 	requireAuth = true
 	authOn := previewToken(t, svc, "claude-code")
 	if authOn == base {
-		t.Fatal("token must change when require_mcp_auth flips the pending entry")
+		t.Fatal("token must change when require_mcp_auth flips")
 	}
 
-	// Credential rotated while the preview was on screen.
+	// The admin API key is never embedded, so rotating it changes nothing the
+	// write would produce: the token stays valid (Spec 108 FR-024).
 	apiKey = "key-two"
 	rotated := previewToken(t, svc, "claude-code")
-	if rotated == authOn {
-		t.Fatal("token must change when the API key rotates")
+	if rotated != authOn {
+		t.Fatal("rotating the admin API key must not drift the token: it is never written")
+	}
+
+	// A different credential intent (profile) drifts the token: preview with
+	// intent A then write with intent B is precondition_failed.
+	ro := "ro"
+	preview, err := svc.PreviewWithIntent("claude-code", "mcpproxy", CredentialIntent{Profile: &ro})
+	if err != nil {
+		t.Fatalf("PreviewWithIntent: %v", err)
+	}
+	if preview.PreconditionToken == rotated {
+		t.Fatal("token must change when the credential intent changes")
+	}
+	full := "full"
+	res, err := svc.ConnectWithOptions("claude-code", "mcpproxy", ConnectOptions{
+		PreconditionToken: preview.PreconditionToken, Intent: CredentialIntent{Profile: &full},
+	})
+	if err != nil {
+		t.Fatalf("ConnectWithOptions: %v", err)
+	}
+	if res.Success || res.Action != actionPreconditionFailed {
+		t.Fatalf("a write with a different intent than the preview must be precondition_failed, got %+v", res)
 	}
 
 	// Listen address changed: the entry would point somewhere else.

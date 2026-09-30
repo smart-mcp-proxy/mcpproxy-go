@@ -11,7 +11,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -28,6 +31,30 @@ type ConnectRequest struct {
 	// TOGETHER with force=true: the token, not the absence of force, is the
 	// overwrite safety.
 	PreconditionToken string `json:"precondition_token,omitempty"`
+
+	// Profile, Mode and Keyless are the client-credential intent (Spec 108
+	// FR-024). Profile names the profile the client's credential binds to;
+	// "" is the built-in All servers scope. Omitted means "not specified": a
+	// fresh credential defaults to All servers and a reconnect keeps the
+	// client's existing binding (a reconnect never silently widens a locked
+	// client). Mode is locked|switchable (default locked for a named profile,
+	// switchable for All servers). Keyless writes a credential-less entry and
+	// is only possible while require_mcp_auth is off; it cannot carry a
+	// profile or mode.
+	Profile *string `json:"profile,omitempty"`
+	Mode    *string `json:"mode,omitempty"`
+	Keyless bool    `json:"keyless,omitempty"`
+}
+
+// ClientCredentialConflictResponse is the 409 body when the token name
+// client-<id> is held by a grandfathered regular agent token: connect never
+// touches it and mints nothing (FR-021).
+type ClientCredentialConflictResponse struct {
+	Success          bool   `json:"success"` // Always false
+	Error            string `json:"error"`
+	ConflictingToken string `json:"conflicting_token"`
+	Remediation      string `json:"remediation"`
+	RequestID        string `json:"request_id,omitempty"`
 }
 
 // ConnectConflictResponse is the 409 body of POST /api/v1/connect/{client}.
@@ -49,7 +76,9 @@ type ConnectConflictResponse struct {
 // @Summary     List client connection status
 // @Description Returns the connection status for all known MCP client applications.
 // @Description Each entry indicates whether the client config file exists and whether
-// @Description MCPProxy is currently registered in it.
+// @Description MCPProxy is currently registered in it. This stat-only listing never reads
+// @Description a client config (Spec 075), so a client whose config exists reports
+// @Description credential_state "unknown"; GET /connect/{client} resolves it.
 // @Tags        connect
 // @Produce     json
 // @Security    ApiKeyAuth
@@ -74,6 +103,10 @@ func (s *Server) handleGetConnectStatus(w http.ResponseWriter, r *http.Request) 
 // @Description on macOS it is the sole place an App-Data privacy prompt may legitimately
 // @Description appear (scoped to this user action). Resolves access_state to
 // @Description accessible|absent|denied|malformed and populates remediation when denied.
+// @Description For a connected client it also resolves credential_state (Spec 108 FR-025):
+// @Description client (an active per-client credential), admin_key (the instance admin API
+// @Description key), none, revoked (a rotated-away or revoked credential) or expired. The
+// @Description credential value is classified and never echoed.
 // @Tags        connect
 // @Produce     json
 // @Security    ApiKeyAuth
@@ -97,6 +130,9 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// A rotation interrupted by a crash is resolved from what the client's
+	// config actually holds before it is classified (FR-021a). Best effort.
+	s.reconcileClient(r, clientID)
 	status, err := svc.GetStatus(clientID)
 	if err != nil {
 		// GetStatus only errors for an unknown client; a permission denial is
@@ -111,8 +147,10 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 // @Summary     Preview the change a connect would make (no write)
 // @Description Returns the exact entry a subsequent connect would add to the client's
 // @Description config — target path, server key, entry name, and entry contents — WITHOUT
-// @Description modifying the file or creating a backup (Spec 078 US1). The embedded API key
-// @Description is masked in the payload; contains_api_key flags that a credential is written.
+// @Description modifying the file or creating a backup (Spec 078 US1). The per-client credential
+// @Description is masked in the payload (credential, always starting mcp_cli_; contains_api_key is
+// @Description always false since connect never writes the admin API key); profile, mode and
+// @Description keyless echo the requested intent.
 // @Description entry_exists distinguishes a create from an overwrite of a same-named entry.
 // @Description Reads the config on demand to classify create-vs-overwrite, so on macOS this
 // @Description may raise an App-Data privacy prompt; a denial returns 403 + remediation.
@@ -130,7 +168,11 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 // @Security    ApiKeyQuery
 // @Param       client      path  string true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       server_name query string false "Entry name to preview (defaults to mcpproxy); mirror the value passed to POST connect"
+// @Param       profile     query string false "Profile the client credential would bind to (empty = All servers); mirror POST connect"
+// @Param       mode        query string false "locked|switchable; mirror POST connect" Enums(locked, switchable)
+// @Param       keyless     query bool   false "Preview a credential-less entry (only while require_mcp_auth is off)"
 // @Success     200    {object} contracts.APIResponse "ConnectPreview"
+// @Failure     400    {object} ClientBindingErrorResponse "Invalid intent (field names the input; keyless with auth on or with a profile)"
 // @Failure     403    {object} contracts.ErrorResponse "Administrator credentials required or access denied by macOS App Data"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
@@ -151,8 +193,12 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 	// Honor an optional server_name so a caller can preview the exact entry name
 	// a subsequent POST connect (which accepts server_name) will write; defaults
 	// to "mcpproxy" when omitted, matching Connect (Spec 078 FR-002).
-	preview, err := svc.Preview(clientID, r.URL.Query().Get("server_name"))
+	s.reconcileClient(r, clientID)
+	preview, err := svc.PreviewWithIntent(clientID, r.URL.Query().Get("server_name"), previewIntent(r))
 	if err != nil {
+		if s.writeCredentialFailure(w, r, clientID, err) {
+			return
+		}
 		// A macOS App-Data (TCC) denial during the on-demand read surfaces as
 		// 403 + remediation, matching connect/disconnect (Spec 078 FR-012).
 		if s.writeIfAccessDenied(w, r, err) {
@@ -178,19 +224,30 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 // @Description action discriminates the two conflict kinds: "precondition_failed" (stale
 // @Description preview — re-preview, do not retry) vs "already_exists" (entry present — pass
 // @Description force=true). force=true never rescues a stale token.
+// @Description
+// @Description Spec 108 FR-024: the entry carries a per-client mcp_cli_ credential bound to the
+// @Description requested profile (default: All servers, switchable; a reconnect keeps the client's
+// @Description existing binding unless a profile is given), never the instance admin API key.
+// @Description Reconnecting over an active credential is a staged rotation: the old secret keeps
+// @Description working until the config write succeeds. keyless=true writes no credential and is
+// @Description only possible while require_mcp_auth is off (400 otherwise, and with a profile).
+// @Description A write that would let the client escape its profile by omitting its credential
+// @Description while require_mcp_auth is off is refused with 409 binding_bypassable_without_auth
+// @Description (nothing minted or written); a token named client-<id> held by a regular agent
+// @Description token is refused with 409 conflicting_token.
 // @Tags        connect
 // @Accept      json
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
 // @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
-// @Param       body   body   ConnectRequest false "Optional connection parameters (server_name, force, precondition_token)"
-// @Success     200    {object} contracts.APIResponse "ConnectResult"
-// @Failure     400    {object} contracts.ErrorResponse "Bad request"
+// @Param       body   body   ConnectRequest false "Optional connection parameters (server_name, force, precondition_token, profile, mode, keyless)"
+// @Success     200    {object} contracts.APIResponse "ConnectResult (credential is the masked mcp_cli_ value, with token_name, profile, mode, keyless and rotation)"
+// @Failure     400    {object} ClientBindingErrorResponse "Bad request; field names the offending input (profile, mode, keyless)"
 // @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
-// @Failure     409    {object} ConnectConflictResponse "Conflict: action=already_exists (use force=true) or action=precondition_failed (preview is stale; re-preview)"
-// @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
+// @Failure     409    {object} ConnectConflictResponse "Conflict: action=already_exists (use force=true) or action=precondition_failed (preview is stale; re-preview); or binding_bypassable_without_auth (BindingGuardResponse); or conflicting_token (ClientCredentialConflictResponse)"
+// @Failure     503    {object} contracts.ErrorResponse "Service unavailable (or no credential store wired while require_mcp_auth is on)"
 // @Router      /api/v1/connect/{client} [post]
 func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 	svc := s.getConnectService()
@@ -211,11 +268,23 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := svc.ConnectWithPrecondition(clientID, req.ServerName, req.Force, req.PreconditionToken)
+	s.reconcileClient(r, clientID)
+	actor := actorFromRequest(r)
+	result, err := svc.ConnectWithOptions(clientID, req.ServerName, connect.ConnectOptions{
+		Force:             req.Force,
+		PreconditionToken: req.PreconditionToken,
+		Intent: connect.CredentialIntent{
+			Profile: req.Profile, Mode: req.Mode, Keyless: req.Keyless,
+			ActorKind: actor.Kind, ActorName: actor.Name, Surface: string(actor.Surface),
+		},
+	})
 	if err != nil {
 		// A macOS App-Data (TCC) denial surfaces as 403 carrying remediation,
 		// distinct from a generic 400 or a 404 not-found (Spec 075 contract).
 		if s.writeIfAccessDenied(w, r, err) {
+			return
+		}
+		if s.writeCredentialFailure(w, r, clientID, err) {
 			return
 		}
 		// Distinguish between "unknown client" and other errors
@@ -401,7 +470,9 @@ type UndoConnectRequest struct {
 // @Description Refuses with 409 when the config changed since the connect (undo never
 // @Description clobbers later edits; use DELETE /connect/{client} for a surgical entry
 // @Description removal instead). Takes its own safety backup first; its path is returned
-// @Description as backup_path in the result.
+// @Description as backup_path in the result. Undo is "as if the connect never happened": a
+// @Description client credential the connect minted or rotated is revoked unless the restored
+// @Description config still holds it, and the result names it in credential_revoked.
 // @Tags        connect
 // @Accept      json
 // @Produce     json
@@ -435,7 +506,10 @@ func (s *Server) handleUndoConnectClient(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	result, err := svc.Undo(clientID, req.ServerName, req.BackupName)
+	actor := actorFromRequest(r)
+	result, err := svc.UndoWithIntent(clientID, req.ServerName, req.BackupName, connect.CredentialIntent{
+		ActorKind: actor.Kind, ActorName: actor.Name, Surface: string(actor.Surface),
+	})
 	if err != nil {
 		if s.writeIfAccessDenied(w, r, err) {
 			return
@@ -516,6 +590,75 @@ func (s *Server) writeIfAccessDenied(w http.ResponseWriter, r *http.Request, err
 	var accessErr *connect.AccessError
 	if errors.As(err, &accessErr) {
 		s.writeError(w, r, http.StatusForbidden, accessErr.Error())
+		return true
+	}
+	return false
+}
+
+// previewIntent reads the credential intent of a preview from its query:
+// ?profile= (present, possibly empty, means a named or All servers scope),
+// ?mode=locked|switchable and ?keyless=true.
+func previewIntent(r *http.Request) connect.CredentialIntent {
+	q := r.URL.Query()
+	intent := connect.CredentialIntent{Keyless: q.Get("keyless") == "true"}
+	if q.Has("profile") {
+		p := q.Get("profile")
+		intent.Profile = &p
+	}
+	if m := q.Get("mode"); m != "" {
+		intent.Mode = &m
+	}
+	return intent
+}
+
+// reconcileClient resolves a staged rotation of clientID from what its config
+// holds before the client is classified or rewritten (FR-021a, plan D15).
+// Best effort: a failure is logged and never fails the request.
+func (s *Server) reconcileClient(r *http.Request, clientID string) {
+	if s.clientsService == nil {
+		return
+	}
+	if err := s.clientsService.ReconcileClient(r.Context(), clientID); err != nil && s.logger != nil {
+		s.logger.Warnw("client rotation reconcile failed", "client", clientID, "error", err)
+	}
+}
+
+// writeCredentialFailure maps the errors of the connect credential path to
+// their wire shapes and reports whether it handled err:
+//
+//   - FR-008a guard refusal            -> 409 binding_bypassable_without_auth
+//   - token name held by a regular one -> 409 {error, conflicting_token}
+//   - invalid profile/mode/id          -> 400 {error, field}
+//   - keyless with auth on / a profile -> 400 {error, field:"keyless"}
+//   - no credential store wired        -> 503
+func (s *Server) writeCredentialFailure(w http.ResponseWriter, r *http.Request, clientID string, err error) bool {
+	if s.writeIfBindingGuardRefusal(w, r, err) {
+		return true
+	}
+	switch {
+	case errors.Is(err, storage.ErrClientCredentialConflict):
+		name := auth.ClientTokenName(clientID)
+		s.writeJSON(w, http.StatusConflict, ClientCredentialConflictResponse{
+			Success:          false,
+			Error:            fmt.Sprintf("token name %s is held by a regular agent token", name),
+			ConflictingToken: name,
+			Remediation:      fmt.Sprintf("revoke or delete token %s, then connect again", name),
+			RequestID:        reqcontext.GetRequestID(r.Context()),
+		})
+		return true
+	case errors.Is(err, storage.ErrAgentTokenLimitReached):
+		s.writeClientBindingError(w, r, http.StatusConflict, "", "", err.Error())
+		return true
+	case errors.Is(err, connect.ErrKeylessRequiresAuthOff), errors.Is(err, connect.ErrKeylessWithProfile):
+		s.writeClientBindingError(w, r, http.StatusBadRequest, "", "keyless", err.Error())
+		return true
+	case errors.Is(err, connect.ErrNoCredentialMinter):
+		s.writeError(w, r, http.StatusServiceUnavailable, err.Error())
+		return true
+	}
+	var val *internalRuntime.ValidationError
+	if errors.As(err, &val) {
+		s.writeClientBindingError(w, r, http.StatusBadRequest, "", val.Field, val.Message)
 		return true
 	}
 	return false

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -288,9 +289,8 @@ func TestHandleConnectClient_TrueConflictStillReturns409(t *testing.T) {
 // preview endpoint end-to-end: it returns the exact entry a connect would write
 // with the API key masked, does not modify the config, and creates no backup.
 func TestHandleConnectClientPreview_MaskedNoSideEffects(t *testing.T) {
-	logger := zap.NewNop().Sugar()
-	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
-	srv := NewServer(mockCtrl, logger, nil)
+	h := newBindingHarness(t, internalRuntime.ConservativeBindingGuard{})
+	srv := h.srv
 	home := t.TempDir()
 
 	cfgPath := connect.ConfigPath("claude-code", home)
@@ -299,18 +299,21 @@ func TestHandleConnectClientPreview_MaskedNoSideEffects(t *testing.T) {
 	require.NoError(t, os.WriteFile(cfgPath, original, 0o644))
 
 	const secret = "rest-secret-key-9999"
-	// require_mcp_auth on so a credential is written (masked in the preview).
-	svc := connect.NewServiceWithHome("127.0.0.1:8080", secret, home).WithRequireMCPAuth(true)
+	// require_mcp_auth on, so the entry carries a per-client credential
+	// (masked in the preview). The admin key is never written (Spec 108).
+	svc := connect.NewServiceWithHome("127.0.0.1:8080", secret, home).
+		WithRequireMCPAuth(true).
+		WithCredentialMinter(h.svc.ConnectMinter())
 	srv.SetConnectService(svc)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect/claude-code/preview", http.NoBody)
-	req.Header.Set("X-API-Key", "test-key")
+	req.Header.Set("X-API-Key", bindingAdminKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
 	rawBody := w.Body.Bytes()
-	assert.NotContains(t, string(rawBody), secret, "real API key must not appear in the preview payload")
+	assert.NotContains(t, string(rawBody), secret, "the admin API key must not appear in the preview payload")
 
 	var resp struct {
 		Success bool                   `json:"success"`
@@ -321,7 +324,8 @@ func TestHandleConnectClientPreview_MaskedNoSideEffects(t *testing.T) {
 	assert.Equal(t, cfgPath, resp.Data.ConfigPath)
 	assert.Equal(t, "mcpServers", resp.Data.ServerKey)
 	assert.Equal(t, "mcpproxy", resp.Data.ServerName)
-	assert.True(t, resp.Data.ContainsAPIKey)
+	assert.False(t, resp.Data.ContainsAPIKey, "connect never writes the admin API key")
+	assert.Equal(t, "mcp_cli_••••", resp.Data.Credential)
 	assert.False(t, resp.Data.EntryExists)
 	assert.Equal(t, "accessible", resp.Data.AccessState)
 	assert.Contains(t, resp.Data.EntryText, "http://127.0.0.1:8080/mcp")
@@ -329,7 +333,7 @@ func TestHandleConnectClientPreview_MaskedNoSideEffects(t *testing.T) {
 	assert.Contains(t, resp.Data.EntryText, "X-API-Key")
 	assert.NotContains(t, resp.Data.EntryText, "apikey=")
 
-	// No write, no backup.
+	// No write, no backup, nothing minted.
 	after, err := os.ReadFile(cfgPath)
 	require.NoError(t, err)
 	assert.Equal(t, string(original), string(after))
@@ -338,6 +342,9 @@ func TestHandleConnectClientPreview_MaskedNoSideEffects(t *testing.T) {
 	for _, e := range entries {
 		assert.NotContains(t, e.Name(), ".bak.", "preview must not create a backup")
 	}
+	toks, err := h.sm.ListAgentTokens()
+	require.NoError(t, err)
+	assert.Empty(t, toks)
 }
 
 // TestHandleConnectClientPreview_HonorsServerName asserts the preview endpoint

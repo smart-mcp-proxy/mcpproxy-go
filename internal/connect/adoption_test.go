@@ -150,12 +150,12 @@ func TestUndoReplay_AdoptionIsDeterministic(t *testing.T) {
 		`"a-clean":{"type":"remote","url":"http://127.0.0.1:8080/mcp"},` +
 		`"b-legacy":{"type":"remote","url":"http://127.0.0.1:8080/mcp?apikey=old"}}}`)
 
-	first, err := svc.replayConnectWrite(client, "proxy", backup)
+	first, err := svc.replayConnectWrite(client, "proxy", backup, "")
 	if err != nil {
 		t.Fatalf("replayConnectWrite: %v", err)
 	}
 	for i := 0; i < 100; i++ {
-		again, err := svc.replayConnectWrite(client, "proxy", backup)
+		again, err := svc.replayConnectWrite(client, "proxy", backup, "")
 		if err != nil {
 			t.Fatalf("replayConnectWrite: %v", err)
 		}
