@@ -115,9 +115,17 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, map[string]interface{}{"profiles": out})
 }
 
+// setActiveProfileDeprecation marks /profiles/active deprecated (Spec 108
+// FR-039): a client reads the header, the behaviour is unchanged. The
+// successor is the profile listing; the route is removed in a later minor.
+func setActiveProfileDeprecation(w http.ResponseWriter) {
+	w.Header().Set("Deprecation", "true")
+	w.Header().Set("Link", `</api/v1/profiles>; rel="successor-version"`)
+}
+
 // handleGetActiveProfile godoc
 // @Summary Get the default active profile
-// @Description Get the server-level default active profile used by UI surfaces (Web UI / tray). Empty string means "all servers". Note: within a live MCP session, the set_profile tool selection takes precedence over this default.
+// @Description Deprecated (Spec 108 FR-039; sends a Deprecation header, successor GET /api/v1/profiles). Get the server-level default active profile used by UI surfaces (Web UI / tray). Empty string means "all servers". Note: within a live MCP session, the set_profile tool selection takes precedence over this default.
 // @Tags profiles
 // @Produce json
 // @Security ApiKeyAuth
@@ -125,6 +133,7 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} contracts.SuccessResponse "Active profile"
 // @Router /api/v1/profiles/active [get]
 func (s *Server) handleGetActiveProfile(w http.ResponseWriter, r *http.Request) {
+	setActiveProfileDeprecation(w)
 	s.activeProfileMu.RLock()
 	active := s.activeProfile
 	s.activeProfileMu.RUnlock()
@@ -179,7 +188,7 @@ type SetActiveProfileRequest struct {
 
 // handleSetActiveProfile godoc
 // @Summary Set the default active profile
-// @Description Set the server-level default active profile for UI surfaces. The slug must match a configured profile; pass an empty string to clear. This does not affect live MCP sessions, which use the set_profile tool.
+// @Description Deprecated (Spec 108 FR-039; sends a Deprecation header, successor GET /api/v1/profiles). Set the server-level default active profile for UI surfaces. The slug must match a configured profile; pass an empty string to clear. This does not affect live MCP sessions, which use the set_profile tool.
 // @Tags profiles
 // @Accept json
 // @Produce json
@@ -192,6 +201,7 @@ type SetActiveProfileRequest struct {
 // @Failure 404 {object} contracts.ErrorResponse "Unknown profile"
 // @Router /api/v1/profiles/active [put]
 func (s *Server) handleSetActiveProfile(w http.ResponseWriter, r *http.Request) {
+	setActiveProfileDeprecation(w)
 	var req SetActiveProfileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
