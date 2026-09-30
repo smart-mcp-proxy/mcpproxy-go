@@ -60,8 +60,16 @@ func (s *ClientsService) issueLocked(clientID string, profilePtr, modePtr *strin
 		return nil, &ValidationError{Field: "id", Message: fmt.Sprintf("client %s already has an active credential; rotate it instead", clientID)}
 	}
 
+	// A reconnect that names no profile keeps the recorded binding, so it can
+	// never silently widen a locked client. That holds for an EXPIRED
+	// credential too (it lapsed; the operator's binding did not). A revoked
+	// credential was cut off deliberately, so reconnecting it is a fresh
+	// grant and starts from the defaults (All servers) unless a profile is
+	// given.
+	keepBinding := rec != nil && profilePtr == nil &&
+		(active || s.stateOf(rec) == profile.CredentialStateExpired)
 	var pin, mode string
-	if active && profilePtr == nil {
+	if keepBinding {
 		pin = rec.ProfilePin
 		mode, err = resolveMode(pin, modePtr, rec.ProfileMode)
 	} else {

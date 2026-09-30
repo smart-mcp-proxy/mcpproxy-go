@@ -452,6 +452,40 @@ func TestConnectMinter_ReconnectIsStagedRotation(t *testing.T) {
 	require.Equal(t, []string{"client-cursor"}, h.notified)
 }
 
+// A reconnect of an EXPIRED locked client with no explicit binding must keep
+// the recorded profile/mode; it must never silently widen to All servers.
+func TestConnectMinter_ExpiredReconnectKeepsBinding(t *testing.T) {
+	h := newSvcHarness(t)
+	m := h.svc.ConnectMinter()
+	// The store validates expiry against the wall clock, so age the record in
+	// place: mint it so it expires 300ms from now, then let it lapse.
+	h.clock = time.Now().Add(-auth.MaxTokenExpiry + 300*time.Millisecond)
+	h.mint("cursor", "ro", nil)
+	time.Sleep(450 * time.Millisecond)
+	h.clock = time.Now()
+	view, err := h.svc.Get("cursor")
+	require.NoError(t, err)
+	require.Equal(t, profile.CredentialStateExpired, view.CredentialState)
+
+	intent := connect.CredentialIntent{ActorKind: "cli_offline", Surface: "cli"}
+	issued, err := m.Issue("cursor", intent)
+	require.NoError(t, err)
+	require.Equal(t, "ro", issued.Profile, "expired reconnect keeps the pinned profile")
+	require.Equal(t, "locked", issued.Mode, "expired reconnect keeps the locked mode")
+	require.NoError(t, m.Commit("cursor", intent, issued))
+	require.True(t, h.authenticates(issued.Secret))
+	view, err = h.svc.Get("cursor")
+	require.NoError(t, err)
+	require.Equal(t, "ro", view.Profile)
+	require.Equal(t, "locked", view.Mode)
+
+	// an explicit profile still overrides the recorded binding (the credential
+	// minted above is active again, so this is a normal rotation)
+	issued, err = m.Issue("cursor", connect.CredentialIntent{Profile: strp("full"), ActorKind: "api_key", Surface: "api"})
+	require.NoError(t, err)
+	require.Equal(t, "full", issued.Profile)
+}
+
 func TestClientsService_ReconcileStagedRotation(t *testing.T) {
 	ctx := context.Background()
 	stage := func(t *testing.T, h *svcHarness, id string) (oldSecret, newSecret string) {

@@ -997,7 +997,8 @@ and threat model.
 
 **Client credential (Spec 108).** The body also accepts `profile` (a profile
 name; `""` is All servers; omitted means All servers for a fresh credential and
-the existing binding on a reconnect), `mode` (`locked` or `switchable`) and
+the existing binding on a reconnect, including over an expired credential; a
+revoked one restarts at All servers), `mode` (`locked` or `switchable`) and
 `keyless`. The write embeds a per-client `mcp_cli_` credential, never the admin
 API key, and the result carries `credential` (masked), `token_name`, `profile`,
 `mode`, `keyless` and, for a reconnect over an active credential, `rotation`
