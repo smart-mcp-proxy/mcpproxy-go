@@ -170,6 +170,19 @@ func (s *ProfilesService) getFrom(ctx context.Context, cfg *config.Config, name 
 // view builds a ProfileView from stored config. The 24 h stats and tool counts
 // are computed for the viewer's scope.
 func (s *ProfilesService) view(ctx context.Context, cfg *config.Config, p *config.ProfileConfig, viewer ViewerScope, stats ActivityStats24h) ProfileView {
+	v := ProfileViewFromConfig(cfg, p)
+	if ev := s.evaluator(); ev != nil {
+		v.ToolCounts = ev.ToolCounts(ctx, p.Name, viewer)
+	}
+	c := stats.ByProfile[p.Name]
+	v.Calls24h, v.Blocked24h = c.Calls, c.Blocked
+	return v
+}
+
+// ProfileViewFromConfig projects a stored profile and its derived effective
+// values (no tool counts, stats or used_by: those need the runtime). It copies
+// every slice and map, so the view never aliases the live config.
+func ProfileViewFromConfig(cfg *config.Config, p *config.ProfileConfig) ProfileView {
 	v := ProfileView{
 		Name: p.Name, Title: p.Title, Description: p.Description,
 		Servers: append([]string{}, p.Servers...), MaxTier: p.MaxTier, Unannotated: p.Unannotated,
@@ -180,18 +193,22 @@ func (s *ProfilesService) view(ctx context.Context, cfg *config.Config, p *confi
 		IsLegacy:               p.IsLegacy(),
 	}
 	if p.Tools != nil {
-		t := *p.Tools
+		t := config.ProfileToolRules{
+			Allow: append([]string(nil), p.Tools.Allow...),
+			Deny:  append([]string(nil), p.Tools.Deny...),
+		}
+		if p.Tools.Classify != nil {
+			t.Classify = make(map[string]string, len(p.Tools.Classify))
+			for k, val := range p.Tools.Classify {
+				t.Classify[k] = val
+			}
+		}
 		v.Tools = &t
 	}
 	if p.SwitchableTo != nil {
 		st := append([]string{}, (*p.SwitchableTo)...)
 		v.SwitchableTo = &st
 	}
-	if ev := s.evaluator(); ev != nil {
-		v.ToolCounts = ev.ToolCounts(ctx, p.Name, viewer)
-	}
-	c := stats.ByProfile[p.Name]
-	v.Calls24h, v.Blocked24h = c.Calls, c.Blocked
 	return v
 }
 

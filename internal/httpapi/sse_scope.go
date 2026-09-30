@@ -171,6 +171,9 @@ var adminConfigEventTypes = map[internalRuntime.EventType]struct{}{
 	// (Spec 108 FR-032 rule): administrator-only, never shown to a scoped
 	// caller.
 	internalRuntime.EventTypeClientBindingChanged: {},
+	// A profile change names profiles (and so servers and policy) a scoped
+	// caller may not reach (Spec 108-f FR-038): administrator-only invalidation.
+	internalRuntime.EventTypeProfilesChanged: {},
 }
 
 // identityBearingEventTypes are the event types whose payload is ABOUT one

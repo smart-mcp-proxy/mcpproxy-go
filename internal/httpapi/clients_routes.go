@@ -8,6 +8,9 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 )
 
+// clientRoutesSupported is true in the personal edition.
+const clientRoutesSupported = true
+
 // registerClientRoutes is personal-edition only. Client presence exposes local
 // configuration paths, so it has the same administrator-only boundary as
 // configuration reads.

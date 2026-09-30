@@ -592,6 +592,7 @@ func TestSSE_EveryRuntimeEventTypeIsClassified(t *testing.T) {
 		"attention.changed":        "rendered per subscriber, never dropped: structured items narrowed by canSeeServer (Spec 109 FR-006)",
 		"clients.presence.changed": "administrator-only local client inventory invalidation; dropped for scoped callers",
 		"client.binding_changed":   "administrator-only client -> profile binding change (Spec 108 FR-026); dropped for scoped callers",
+		"profiles.changed":         "administrator-only profile change invalidation (Spec 108-f FR-038): names profiles a scoped caller may not reach; dropped for scoped callers",
 		"config.reloaded":          "admin config document — dropped for a scoped caller",
 		"config.saved":             "admin config document — dropped for a scoped caller",
 		"secrets.changed":          "admin config document — dropped for a scoped caller",

@@ -232,12 +232,14 @@ func TestTenantProfiles_AdminSeesBothProfiles(t *testing.T) {
 	assert.Len(t, profiles, 2, "an administrator's projection must stay byte-for-byte unchanged (SC-006)")
 }
 
-// TestTenantProfiles_AgentTokenBehaviourUnchanged pins the pre-existing #1166
-// per-server narrowing for agent tokens: an agent token scoped to
-// research-srv keeps seeing BOTH profiles (the whole-profile omission this
-// change adds is session-principal-only), with "deploy"'s servers array
-// narrowed to empty exactly as it is today.
-func TestTenantProfiles_AgentTokenBehaviourUnchanged(t *testing.T) {
+// TestTenantProfiles_AgentTokenOmitsUnreachableProfile: since Spec 108-f
+// (FR-034) the whole-profile omission applies to EVERY non-administrator caller,
+// not only a session principal. An agent token scoped to research-srv used to
+// see both profiles with "deploy"'s servers narrowed to []; that hands back the
+// existence of a profile the token cannot reach (and, with the v3 fields, its
+// rules), so it is now omitted entirely. The #1166 per-server narrowing of the
+// profile it CAN reach is unchanged.
+func TestTenantProfiles_AgentTokenOmitsUnreachableProfile(t *testing.T) {
 	cfg := &config.Config{
 		APIKey: "test-key",
 		Servers: []*config.ServerConfig{
@@ -262,13 +264,8 @@ func TestTenantProfiles_AgentTokenBehaviourUnchanged(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	data, _ := resp["data"].(map[string]interface{})
 	profiles, _ := data["profiles"].([]interface{})
-	require.Len(t, profiles, 2, "agent-token behaviour (#1166 per-server narrowing) must not change")
-
-	byName := map[string]map[string]interface{}{}
-	for _, p := range profiles {
-		pm, _ := p.(map[string]interface{})
-		byName[pm["name"].(string)] = pm
-	}
-	deployServers, _ := byName["deploy"]["servers"].([]interface{})
-	assert.Empty(t, deployServers, "deploy-srv stays narrowed out of the servers array, as today")
+	require.Len(t, profiles, 1, "the unreachable profile is omitted, never shown with servers:[]")
+	only, _ := profiles[0].(map[string]interface{})
+	assert.Equal(t, "research", only["name"])
+	assert.NotContains(t, w.Body.String(), "deploy", "the unreachable profile and its servers are not named anywhere")
 }

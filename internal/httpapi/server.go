@@ -305,6 +305,7 @@ type Server struct {
 	feedbackSubmitter  FeedbackSubmitter               // Feedback submission (Spec 036)
 	connectService     *connect.Service                // Client connect/disconnect operations
 	clientsService     *internalRuntime.ClientsService // Client credentials and bindings (Spec 108 FR-026)
+	profilesService    ProfilesAPI                     // Profiles service (Spec 108-f FR-034)
 	securityController SecurityController              // Security scanner operations (Spec 039)
 
 	// sensitiveMasker masks detected secrets out of payloads before they are
@@ -1012,7 +1013,22 @@ func (s *Server) setupRoutes() {
 
 		// Profiles (Profiles v2 T2) — list + default active get/set for UI surfaces
 		r.Get("/profiles", s.handleListProfiles)
+		// Spec 108-f: profile CRUD, rename, try, effective tools and the access
+		// explainer, in BOTH editions (profiles are admin-owned config in either).
+		// The static /profiles/active and /profiles/try routes win over {name}.
+		// guarded: BindingGuardDelta (FR-008a) - every write goes through the
+		// profiles service, whose MutateConfig runs the guard over the whole
+		// candidate state before anything is written.
+		r.Post("/profiles", s.requireServerOp(auth.ServerOpConfigWrite, s.handleCreateProfile))
+		// exempt: nothing is written (a draft is searched against the index).
+		r.Post("/profiles/try", s.requireServerOp(auth.ServerOpConfigWrite, s.handleTryProfile))
 		r.Get("/profiles/active", s.handleGetActiveProfile)
+		r.Get("/profiles/{name}", s.handleGetProfile)
+		r.Put("/profiles/{name}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleUpdateProfile))         // guarded: MutateConfig
+		r.Delete("/profiles/{name}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleDeleteProfile))      // guarded: MutateConfig
+		r.Post("/profiles/{name}/rename", s.requireServerOp(auth.ServerOpConfigWrite, s.handleRenameProfile)) // guarded: MutateConfig
+		r.Get("/profiles/{name}/effective-tools", s.handleProfileEffectiveTools)
+		r.Get("/access/explain", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAccessExplain))
 		// #1166 round 11: the ONLY mutating route in this group, and it was
 		// ungated. The active profile is server-level shared state — it decides
 		// which servers the Web UI and the tray render — so a READ-scoped agent

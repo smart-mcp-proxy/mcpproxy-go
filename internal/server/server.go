@@ -3068,6 +3068,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// MCP-32: pass the observability manager so /metrics is served (and HTTP
 	// request metrics/tracing middleware applied) when enabled.
 	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar(), s.observability)
+	// Spec 108-f: the profiles service behind /profiles and /access/explain
+	// (both editions: profiles are admin-owned config in either).
+	httpAPIServer.SetProfilesService(s.runtime.ProfilesService())
 	// Wire agent token management (Spec 028)
 	if sm := s.runtime.StorageManager(); sm != nil {
 		cfg := s.runtime.Config()
