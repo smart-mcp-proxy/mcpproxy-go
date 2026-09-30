@@ -271,7 +271,7 @@
                 <span class="label-text text-xs">Connect without a credential (unidentified client)</span>
               </label>
             </details>
-            <GuardRefusal v-if="guardOf(client.id)" :refusal="guardOf(client.id)!" />
+            <GuardRefusal v-if="guardOf(client.id)" :refusal="guardOf(client.id)!" @navigate="close" />
             <div v-else-if="conflictOf(client.id)" role="alert" class="alert alert-error text-xs flex-col items-start" :data-test="`connect-conflict-${client.id}`">
               <span>{{ conflictOf(client.id)!.message }}</span>
               <span>Revoke or delete token <code>{{ conflictOf(client.id)!.conflicting_token }}</code>, then connect again.</span>
@@ -409,6 +409,15 @@
             >
               Keep
             </button>
+          </div>
+        </div>
+        <!-- Review round 1 (F3.2, FR-008a): a bulk connect has no per-client
+             preview panel, so a guard refusal of one of its writes is listed
+             here with its bindings and fix buttons. -->
+        <div v-if="bulkRefusals.length > 0" data-test="connect-bulk-refusals" class="mt-2 space-y-2">
+          <div v-for="r in bulkRefusals" :key="r.id" :data-test="`connect-bulk-refusal-${r.id}`">
+            <p class="text-xs font-medium mb-1">{{ r.name }} was not connected</p>
+            <GuardRefusal :refusal="r.refusal" @navigate="close" />
           </div>
         </div>
         <!-- Spec 078 US2 / SC-005: Connect All renders EVERY successful
@@ -808,6 +817,12 @@ function guardOf(clientId: string): ApiError | undefined {
   const err = connectRefusal.value[clientId]
   return err && isGuardRefusal(err) ? err : undefined
 }
+// Guard refusals of clients that have no preview panel open (a bulk connect).
+const bulkRefusals = computed(() =>
+  Object.keys(connectRefusal.value)
+    .filter(id => !previews.value[id] && guardOf(id))
+    .map(id => ({ id, name: clients.value.find(c => c.id === id)?.name || id, refusal: guardOf(id)! }))
+)
 function conflictOf(clientId: string): ApiError | undefined {
   const err = connectRefusal.value[clientId]
   return err?.conflicting_token ? err : undefined
@@ -1195,6 +1210,7 @@ async function connectAll() {
   bulkPreview.value = []
   bulkBackups.value = []
   copiedBulkClient.value = null
+  for (const { client } of planned) setRefusal(client.id, null)
   // Snapshot: connect() refetches the client list mid-loop, which mutates the
   // connectableClients computed while we iterate it.
   const collected: Array<{ id: string; name: string; backupPath: string | null; reloadHint: string }> = []

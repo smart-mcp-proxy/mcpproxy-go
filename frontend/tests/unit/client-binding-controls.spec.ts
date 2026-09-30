@@ -380,6 +380,22 @@ describe('Client binding controls on the Clients page (Spec 108-i T092)', () => 
     expect(result.get('[data-test="bulk-skipped-zed"] [data-test="guard-refusal"]').exists()).toBe(true)
   })
 
+  it('bulk move counts every client on the from-profile, not just the filtered rows (F4.1)', async () => {
+    const codex = makeClient('codex', { display_name: 'Codex', profile: 'work-ro', profile_mode: 'locked' })
+    const { wrapper } = await mountClients([cursor], [], '?client=cursor')
+    // The page is scoped to cursor; the unscoped list holds both clients.
+    ;(api.getClients as any).mockImplementation(async (scope: any = {}) => ({
+      success: true,
+      data: { clients: scope?.client ? [cursor] : [cursor, codex], warnings: [] },
+    }))
+    await wrapper.get('[data-test="clients-bulk-move"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="bulk-from"]').setValue('work-ro')
+    await wrapper.get('[data-test="bulk-to"]').setValue('work-full')
+    await flushPromises()
+    expect(wrapper.get('[data-test="bulk-preview-line"]').text()).toBe('2 clients use Work')
+  })
+
   it('bulk move sends the chosen mode', async () => {
     ;(api.bulkAssignClients as any).mockResolvedValue({ moved: [], skipped: [] })
     const { wrapper } = await mountClients([cursor])

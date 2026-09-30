@@ -73,6 +73,10 @@ const mode = ref<'' | 'locked' | 'switchable'>('')
 const busy = ref(false)
 const error = ref('')
 const result = ref<BulkAssignResponse | null>(null)
+// POST /clients/bulk-assign moves every client on the from-profile instance-wide,
+// while props.clients is the page's ?profile=/?client= filtered list. The preview
+// counts the unscoped list (props.clients until it arrives or if it fails).
+const allClients = ref<ClientPresence[] | null>(null)
 
 watch(() => props.open, open => {
   if (!open) return
@@ -82,13 +86,24 @@ watch(() => props.open, open => {
   busy.value = false
   error.value = ''
   result.value = null
+  allClients.value = null
+  void loadAllClients()
   if (!profiles.loaded) void profiles.fetchProfiles()
 })
 
 // A switch to All servers can only be switchable.
 watch(to, value => { if (!value && mode.value === 'locked') mode.value = '' })
 
-const affected = computed(() => props.clients.filter(client => client.credential_state === 'client' && (client.profile ?? '') === from.value))
+async function loadAllClients() {
+  try {
+    const response = await api.getClients()
+    if (response.success && Array.isArray(response.data?.clients) && props.open) allClients.value = response.data.clients
+  } catch {
+    // The page's rows stay the fallback.
+  }
+}
+
+const affected = computed(() => (allClients.value ?? props.clients).filter(client => client.credential_state === 'client' && (client.profile ?? '') === from.value))
 const previewLine = computed(() => {
   const name = from.value ? profiles.titleFor(from.value) : 'All servers'
   const n = affected.value.length

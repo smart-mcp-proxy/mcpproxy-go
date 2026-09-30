@@ -181,6 +181,35 @@ describe('ClientConnectList profile and mode fields (Spec 108-i T042w)', () => {
     expect(panel.findAll('[data-test^="guard-fix-"]')).toHaveLength(2)
   })
 
+  it('closes the connect dialog when a guard fix navigates to Settings (F3.3)', async () => {
+    ;(api.connectClient as any).mockRejectedValue(apiError(GUARD_REFUSAL.error, GUARD_REFUSAL))
+    const { wrapper, router } = await open()
+    await startCursor(wrapper)
+    await wrapper.get('[data-test="client-preview-confirm-cursor"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test^="guard-fix-"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/settings')
+    expect(wrapper.emitted('close')).toBeTruthy()
+  })
+
+  it('shows the bindings and fix buttons of a refused bulk connect (F3.2)', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({ success: true, data: [cursorStatus(), { ...cursorStatus(), id: 'codex', name: 'Codex' }] })
+    ;(api.connectClient as any).mockImplementation((id: string) => (id === 'codex'
+      ? Promise.reject(apiError(GUARD_REFUSAL.error, GUARD_REFUSAL))
+      : Promise.resolve({ success: true, data: { success: true, client: id, config_path: '/x', server_name: 'mcpproxy', action: 'created', message: 'ok' } })))
+    const { wrapper } = await open()
+    await wrapper.get('[data-test="connect-all"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="connect-bulk-preview-confirm"]').trigger('click')
+    await flushPromises()
+    const refusal = wrapper.get('[data-test="connect-bulk-refusal-codex"]')
+    expect(refusal.text()).toContain('Codex was not connected')
+    expect(refusal.get('[data-test="guard-refusal"]').text()).toContain('reachable without authentication')
+    expect(refusal.findAll('[data-test^="guard-fix-"]')).toHaveLength(2)
+    expect(wrapper.find('[data-test="connect-bulk-refusal-cursor"]').exists()).toBe(false)
+  })
+
   it('shows the remediation of a token-name conflict', async () => {
     ;(api.connectClient as any).mockRejectedValue(apiError('token name client-cursor is held by a regular agent token', { status: 409, conflicting_token: 'client-cursor' }))
     const { wrapper } = await open()
