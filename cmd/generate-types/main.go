@@ -851,6 +851,11 @@ export type CredentialState =
 
 export const ErrorCodeBindingBypassable = 'binding_bypassable_without_auth' as const;
 export const ErrorCodeNoClientCredential = 'no_client_credential' as const;
+export const ErrorCodeProfileInUse = 'profile_in_use' as const;
+export const ErrorCodeProfileIsAnonymousProfile = 'profile_is_anonymous_profile' as const;
+export const ErrorCodeProfileExists = 'profile_exists' as const;
+export const ErrorCodeNameMismatch = 'name_mismatch' as const;
+export const ErrorCodePreconditionFailed = 'precondition_failed' as const;
 
 export const GuardFixRequireMCPAuth = 'require_mcp_auth' as const;
 export const GuardFixSetAnonymousProfile = 'set_anonymous_profile' as const;
@@ -912,6 +917,165 @@ export type ClientWarningCode =
   | typeof WarningClientRotationPending
   | typeof WarningProfileMissing
   | typeof WarningClientTokenNameConflict;
+
+// Spec 108-f: warning severity and action, the access explainer and the REST
+// view shapes of GET /profiles, GET /clients and GET /access/explain.
+export const WarningSeverityWarn = 'warn' as const;
+export const WarningSeverityInfo = 'info' as const;
+export type WarningSeverity = typeof WarningSeverityWarn | typeof WarningSeverityInfo;
+
+// A warning's action.kind is a FixAction spelling or this one (the bulk admin-key upgrade).
+export const WarningActionUpgradeAdminKeyHolders = 'upgrade_admin_key_holders' as const;
+
+export const ExplainVerdictAllowed = 'allowed' as const;
+export const ExplainVerdictBlocked = 'blocked' as const;
+export const ExplainVerdictHidden = 'hidden' as const;
+export type ExplainVerdict =
+  | typeof ExplainVerdictAllowed
+  | typeof ExplainVerdictBlocked
+  | typeof ExplainVerdictHidden;
+
+export const ExplainStepStatusPass = 'pass' as const;
+export const ExplainStepStatusFail = 'fail' as const;
+export const ExplainStepStatusSkip = 'skip' as const;
+export type ExplainStepStatus =
+  | typeof ExplainStepStatusPass
+  | typeof ExplainStepStatusFail
+  | typeof ExplainStepStatusSkip;
+
+export const AccessSubjectClient = 'client' as const;
+export const AccessSubjectToken = 'token' as const;
+export const AccessSubjectProfile = 'profile' as const;
+export const AccessSubjectAnonymous = 'anonymous' as const;
+export type AccessSubjectKind =
+  | typeof AccessSubjectClient
+  | typeof AccessSubjectToken
+  | typeof AccessSubjectProfile
+  | typeof AccessSubjectAnonymous;
+
+export interface ProfileToolRules {
+  allow?: string[];
+  deny?: string[];
+  classify?: Record<string, string>;
+}
+
+export interface ProfileToolCounts {
+  read: number;
+  write: number;
+  destructive: number;
+  unannotated_hidden: number;
+}
+
+// used_by is administrator-only: it is omitted, never emptied, for every other caller.
+export interface ProfileUsedBy {
+  clients: { id: string; mode: string }[];
+  tokens: string[];
+  anonymous_profile: boolean;
+}
+
+// GET /api/v1/profiles row and GET /api/v1/profiles/{name} (Spec 108-f FR-034).
+export interface ProfileView {
+  name: string;
+  title?: string;
+  description?: string;
+  servers: string[];
+  max_tier?: string;
+  unannotated?: string;
+  tools?: ProfileToolRules;
+  code_execution?: boolean;
+  management_tools?: boolean;
+  switchable_to?: string[];
+  effective_servers: string[];
+  effective_unannotated: string;
+  effective_code_execution: boolean;
+  is_legacy: boolean;
+  tool_counts: ProfileToolCounts;
+  // Deprecated v2 field: indexed tools on the effective servers.
+  tool_count: number;
+  calls_24h: number;
+  blocked_24h: number;
+  used_by?: ProfileUsedBy;
+}
+
+export interface ProfileList {
+  profiles: ProfileView[];
+  anonymous_profile?: string;
+}
+
+export interface ProfileWriteResult {
+  profile: ProfileView;
+  warnings: string[];
+}
+
+// GET /api/v1/profiles/{name}/effective-tools (Spec 108-f FR-005, FR-032).
+export interface EffectiveTool {
+  server: string;
+  tool: string;
+  intrinsic_tier: string;
+  profile_tier: string;
+  access: { visible: boolean; callable: boolean; reason: ProfileReason | string };
+  classification_stale: boolean;
+}
+
+export interface EffectiveToolsResult {
+  profile: string;
+  tools: EffectiveTool[];
+  counts: { visible: number; hidden: number; callable?: number; by_reason?: Record<string, number> };
+  // Administrators only: classify entries for annotated or missing tools.
+  stale_classifications?: string[];
+}
+
+// GET /api/v1/access/explain (Spec 108-f FR-035). first_failure is "" when allowed.
+export interface AccessExplanation {
+  subject: { kind: AccessSubjectKind; name?: string };
+  tool: string;
+  profile: { name: string; source: string };
+  steps: { step: ExplainStep; status: ExplainStepStatus; detail: string }[];
+  verdict: ExplainVerdict;
+  first_failure: ExplainStep | '';
+  fixes: { step: ExplainStep; action: FixAction; target: string; label: string }[];
+}
+
+// One Clients-surface warning (GET /api/v1/clients warnings[]).
+export interface ClientWarning {
+  code: ClientWarningCode;
+  severity: WarningSeverity;
+  client_id?: string;
+  message: string;
+  action?: { kind: FixAction | typeof WarningActionUpgradeAdminKeyHolders; target?: string };
+  bindings?: { client_id: string; token_name: string; profile: string; mode: string }[];
+  fixes?: { kind: string; target?: string }[];
+}
+
+// GET /api/v1/clients row: Spec 109's presence fields plus the Spec 108-f credential and binding fields.
+export interface ClientView {
+  id: string;
+  display_name: string;
+  kind: 'supported' | 'other' | 'custom';
+  icon?: string;
+  state: string;
+  installed: boolean;
+  connected: boolean;
+  connection_unverified?: boolean;
+  config_path?: string;
+  display_path?: string;
+  last_seen: string | null;
+  active_sessions: number;
+  calls_24h: number;
+  reload_hint?: string;
+  sessions?: { id: string; work_session_id?: string; started_at: string; last_activity: string; profile?: string; profile_source?: string }[];
+  credential_state: CredentialState;
+  credential_checked_at?: string;
+  token_name?: string;
+  profile?: string;
+  profile_title?: string;
+  profile_mode?: 'locked' | 'switchable';
+  profile_source?: 'pin' | 'binding';
+  profile_missing?: boolean;
+  expires_at?: string;
+  rotation_pending?: boolean;
+  blocked_24h: number;
+}
 `)
 
 	return sb.String()

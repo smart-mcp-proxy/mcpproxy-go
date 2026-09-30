@@ -1041,7 +1041,9 @@ activity record; the client's config file is never touched. A reassignment that
 would leave the binding bypassable is refused with `409
 binding_bypassable_without_auth`. `PATCH /api/v1/config`, `POST
 /api/v1/config/apply` and `PATCH /api/v1/config/docker-isolation` answer the
-same `409` when the write would create that condition.
+same `409` when the write would create that condition. The response is
+`{client, warnings}`: the full client row (see `GET /api/v1/clients`) and the
+warnings about it.
 
 #### GET /api/v1/connect/{client}/preview
 
@@ -1121,6 +1123,215 @@ The overall `GET /api/v1/connect` listing never triggers this prompt (it is
 content-read-free); only the per-client routes above (status, preview,
 connect/disconnect, undo) can.
 
+### Clients (personal edition)
+
+Client routes live under `/api/v1/clients` and are administrator-only. They do
+not exist in the server edition, which has no per-client credentials.
+
+#### GET /api/v1/clients
+
+Every client row (`kind` is `supported`, `other` or `custom`) and response-level
+`warnings[]`. The Spec 109 presence fields (`id`, `display_name`, `kind`, `icon`,
+`state`, `installed`, `connected`, `config_path`, `display_path`, `last_seen`,
+`active_sessions`, `calls_24h`, `reload_hint`) are unchanged; Profiles v3 adds:
+
+| Field | Meaning |
+|-------|---------|
+| `credential_state` | `client`, `admin_key`, `none`, `revoked`, `expired` or `unknown` |
+| `credential_checked_at` | When the classification was last read from the client's config (present when it came from an observation) |
+| `token_name`, `profile`, `profile_title`, `profile_mode`, `profile_source` | The binding. `profile_source` is `pin` (locked) or `binding` (switchable) and is empty unless `credential_state` is `client` |
+| `profile_missing` | The bound profile no longer exists: the client is denied everything |
+| `expires_at`, `rotation_pending`, `blocked_24h` | Credential expiry, an unfinished rotation, blocked calls in the last 24 hours |
+
+The list never reads a client config (macOS shows no App-Data prompt for it).
+`credential_state` comes from the token store, else from the last on-demand
+classification (`GET /clients/{client}`, `GET /connect/{client}`, the admin-key
+upgrade preview), else it is `unknown`. A `custom` row is a credential added
+with `POST /clients`; a revoked custom row is omitted here and still served by
+the detail route.
+
+`warnings[]` items are `{code, severity, client_id?, message, action?, bindings?, fixes?}`.
+Codes: `anonymous_denied_by_binding_guard`, `client_holds_admin_key` (action
+`upgrade_admin_key_holders`), `client_credential_expiring`,
+`client_rotation_pending` (severity `info`), `profile_missing` and
+`client_token_name_conflict`.
+
+| Query | Meaning |
+|-------|---------|
+| `profile` | Rows whose active credential is bound to this profile (a dangling pin included); `-` = bound to All servers. A row with no active credential matches no profile |
+| `client` | Exact client id (also `other:<id>` and custom ids) |
+
+The filters apply after `warnings` are computed over the full set. An unknown
+value is not an error. `token` is not a clients filter (`400 unsupported_scope_filter`).
+
+#### GET /api/v1/clients/{client}
+
+The row plus `sessions[]` (the latest 20, each with its `profile` and
+`profile_source`). This is the one read that may open the client's config: it
+runs the full rotation reconciler first, classifies the credential the config
+holds and records the observation. No scope filter is honoured here.
+
+#### POST /api/v1/clients
+
+Adds a custom client (one not in the connect registry). Body `{id,
+display_name?, profile?, mode?, expires_in?}`; `expires_in` defaults to and is
+capped at 365 days. `201 {client, credential, snippet}`: `credential` is the
+`mcp_cli_` secret, shown once; `snippet.generic_http` is a paste-ready JSON
+config that carries it in the `X-API-Key` header. Refusals: `400 {error, field}`
+(the id rule, a supported client's id, profile, mode, `expires_in`,
+`display_name`), `409 binding_bypassable_without_auth`, `409` with
+`conflicting_token`.
+
+#### POST /api/v1/clients/{client}/rotate
+
+Replaces the secret without invalidating the old one mid-flight. For a
+supported client it rewrites the entry through connect (staged rotation, the
+binding is kept, finalized when the write succeeds, rolled back when it
+fails); body `{precondition_token?}` binds it to a connect preview, and a
+mismatch is the connect `409` with `action: "precondition_failed"`. Response
+`{client, connect, rotation: {state: "finalized"}}`. For a custom client the
+response is `{client, credential, snippet, rotation: {state: "pending"}}`; both
+secrets authenticate until `POST /clients/{client}/rotate/finalize` or 24 hours.
+A client with no active credential is `409 no_client_credential`.
+
+#### POST /api/v1/clients/{client}/rotate/finalize
+
+Promotes the pending secret; the old one stops authenticating. Idempotent.
+`{client, rotation: {state: "finalized"}}`.
+
+#### DELETE /api/v1/clients/{client}
+
+Revokes the client's credential. With `disconnect=true` a supported client's
+config entry is removed first, but the credential is revoked either way:
+revocation never waits for a file write. Response `{revoked, disconnected,
+disconnect_error?}`. No credential record: `409 no_client_credential`.
+
+#### POST /api/v1/clients/bulk-assign
+
+Body `{from_profile, to_profile, mode?}` (both required; `""` = All servers).
+Moves every client bound to `from_profile`. The FR-008a guard and the
+credential precondition apply per client: `{moved: [ids], skipped: [{client_id,
+code, error}]}`. Each moved client writes an `assign` record and emits
+`client.binding_changed`.
+
+#### POST /api/v1/clients/upgrade-admin-key-holders
+
+Moves every supported client whose config still holds the admin API key onto a
+per-client credential. Body `{profile?, mode?, apply?, precondition_token?}`.
+Without `apply` it returns `{preview: [{client_id, display_name, display_path,
+diff, credential: "mcp_cli_••••", profile, mode, precondition_token}],
+precondition_token, guard?, next_step?}`; nothing is written or minted, `guard`
+reports the refusal an apply would get, and `next_step` is
+`rotate_admin_api_key` when nothing holds the key. With `apply: true` a sent
+`precondition_token` that no longer matches is `409` with `code:
+"precondition_failed"`; a named profile that would make the bindings
+bypassable is `409 binding_bypassable_without_auth` (nothing minted, no file
+written); otherwise `{upgraded, failed: [{client_id, error}], next_step?}`. The
+guard applies only when a named profile is given.
+
+### Profiles
+
+Profile routes exist in both editions. Every mutating route is administrator
+only and writes one `profile_change` record; none is gated by `read_only_mode`.
+A write that would let a bound client escape its profile by omitting its
+credential while `require_mcp_auth` is off is refused `409
+binding_bypassable_without_auth` (personal edition) and writes nothing.
+
+#### GET /api/v1/profiles
+
+`{profiles: ProfileView[], anonymous_profile?}`. A `ProfileView` has the config
+fields as stored (`name`, `title`, `description`, `servers`, `max_tier`,
+`unannotated`, `tools {allow, deny, classify}`, `code_execution`,
+`management_tools`, `switchable_to`), the derived `effective_servers`,
+`effective_unannotated`, `effective_code_execution`, `is_legacy`,
+`tool_counts {read, write, destructive, unannotated_hidden}` (visible tools by
+the tier the profile gives them), the deprecated v2 `tool_count`, `calls_24h`,
+`blocked_24h`, and `used_by {clients, tokens, anonymous_profile}`.
+
+A caller that is not an administrator sees only profiles its entitlement
+reaches (an unreachable one is omitted, never shown empty), with `servers`,
+rule entries and `switchable_to` narrowed to what it may see. `used_by` and
+`anonymous_profile` are administrator-only and omitted, not emptied, otherwise.
+
+#### GET /api/v1/profiles/{name}
+
+One `ProfileView`. A non-administrator gets the same `404 profile not found`
+for an unreachable profile as for an unknown one.
+
+#### POST /api/v1/profiles, PUT /api/v1/profiles/{name}
+
+Body is a `ProfileConfig`. `POST` answers `201 {profile, warnings}`; `PUT`
+answers `200` with the same shape and requires the body's name to equal the path
+(`409 name_mismatch`). `409 profile_exists`; `400 {error, field}` names the
+offending field with the unchanged validator text. `active` and `try` are
+reserved by the REST API. A `PUT` whose only change is `tools.classify` is
+recorded as `classify`.
+
+#### POST /api/v1/profiles/{name}/rename
+
+Body `{new_name}`. Moves token pins, client bindings, other profiles'
+`switchable_to` and the `anonymous_profile` in one write; tokens move first, so
+a failure never widens a scope. `{profile, moved: {clients, tokens}}`.
+
+#### DELETE /api/v1/profiles/{name}
+
+Query `reassign_to` and `force`. `409 profile_in_use` (with `used_by`) while
+clients or tokens point at it, unless `reassign_to` names another existing
+profile (every pin moves there) or `force` leaves them dangling (deny-all).
+`409 profile_is_anonymous_profile` whenever it is the `anonymous_profile` and
+`reassign_to` is absent, even with `force`. Both paths remove the name from every
+`switchable_to`. `{deleted, moved, anonymous_profile_moved_to?}`.
+
+#### GET /api/v1/profiles/{name}/effective-tools
+
+Query `client`, `server`, `reason`. One row per catalog tool: `server`, `tool`,
+`intrinsic_tier`, `profile_tier`, `access {visible, callable, reason}`,
+`classification_stale`. With `client=` the client's credential is evaluated under
+this profile. An administrator also gets `counts.callable`, `counts.by_reason`
+and `stale_classifications`; every other caller gets only visible rows and
+`counts {visible, hidden}`, and `client=` / `reason=` are `403`.
+
+#### POST /api/v1/profiles/try
+
+Body `{profile, query, limit?}` (default 10, maximum 50). Evaluates a draft
+profile as `retrieve_tools` would, with policy applied before the limit, and
+returns the hits, `hidden_by_profile` and up to 100 `hidden {server, tool,
+reason}`. Nothing is persisted, no record is written, the guard does not run.
+
+#### GET /api/v1/profiles/active, PUT /api/v1/profiles/active
+
+Deprecated. Both send `Deprecation: true` and a `Link` header whose
+`successor-version` is `/api/v1/profiles`. Behaviour and `active_profile.changed`
+are unchanged.
+
+### Access explain
+
+#### GET /api/v1/access/explain
+
+Query `tool` (an upstream `server:tool`) and exactly one of `client`, `token`,
+`profile` or `anonymous=true`. Administrator only. Returns the ordered chain of
+gates a real call would meet (`credential`, `profile`, `server_in_scope`,
+`tool_rule`, `tier_cap`, `token_permission`, `global_gate`, `server_state`,
+`tool_approval`), each `pass`, `fail` or `skip`; the `verdict` (`allowed` =
+callable, `hidden` = not visible, `blocked` = visible but not callable); the
+`first_failure`; and `fixes[]` for it in preference order, each `{step, action,
+target, label}`. The chain is the one every discovery and dispatch path walks, so
+`allowed` equals what a real call does. Errors: `400 exactly one of client, token,
+profile, anonymous is required`, `400 use client=<id> for a client credential`
+(a `client-` token name), `400 access/explain covers upstream tools (server:tool)
+only`, `404` for an unknown client, token or profile.
+
+### Tokens
+
+`GET /api/v1/tokens` rows add `kind` (`agent` or `client`), `client_id`,
+`profile_mode` and `legacy_scope` (true when `allowed_servers` is not `["*"]` or
+the permissions are not all three). `?profile=<name>` matches the **current**
+`profile_pin` of either kind (`-` = unpinned) and `?token=<name>` is an exact
+name; an unknown value returns no rows. `POST /api/v1/tokens` accepts `profile`
+(the Profiles v3 spelling of `profile_pin`; with it, omitted `allowed_servers`
+and `permissions` default to `["*"]` and all three). A name starting with
+`client-` is `400 {error, field: "name"}`.
+
 ### Real-time Updates
 
 #### GET /events
@@ -1148,6 +1359,7 @@ published it. For an agent token limited by `allowed_servers` (issue #1166):
 | Names a server outside the scope, through `server_name`, `server`, `target_server` or `affected_entity` — every `activity.*`, `oauth.*` and `security.*` event | **No.** The whole frame is dropped: blanking the name still discloses the mutation, its timing, and how many servers are hidden. |
 | `servers.changed` | **Yes, always** — it is coalesced last-write-wins and carries renderable state. The embedded server list is narrowed, `stats` recomputed, and a coalescer extra naming an out-of-scope server is removed. |
 | `config.reloaded`, `config.saved`, `secrets.changed` | **No.** They announce mutations of the admin config document, which `GET /api/v1/config` already answers `403` for this caller. |
+| `profiles.changed`, `client.binding_changed` | **No.** They name profiles, clients and bindings a scoped caller may not reach. `profiles.changed {name, change: create|update|delete|anonymous, previous_name?}` is an invalidation, not a log: refetch `GET /api/v1/profiles`. One event per changed profile, published after the new configuration is live, for service writes and hand edits alike. |
 | Everything else (`active_profile.changed`, `activity.system.*`, `sensitive_data.detected`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
 
 ## Error Responses

@@ -35,8 +35,8 @@ type PutClientBindingRequest struct {
 // ClientBindingResponse is the data of a successful binding write: the full
 // decorated client row and the warnings that concern it (Spec 108-f F17).
 type ClientBindingResponse struct {
-	Client   clientPresence            `json:"client"`
-	Warnings []internalRuntime.Warning `json:"warnings"`
+	Client   clientPresence  `json:"client"`
+	Warnings []ClientWarning `json:"warnings"`
 }
 
 // clientViewAndWarnings returns the decorated row of one client (list
@@ -520,8 +520,8 @@ type BulkAssignRequest struct {
 
 // BulkAssignResponse is the data of POST /clients/bulk-assign.
 type BulkAssignResponse struct {
-	Moved   []string                  `json:"moved"`
-	Skipped []internalRuntime.Skipped `json:"skipped"`
+	Moved   []string            `json:"moved"`
+	Skipped []BulkAssignSkipped `json:"skipped"`
 }
 
 // handleBulkAssignClients godoc

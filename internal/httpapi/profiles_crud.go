@@ -48,7 +48,7 @@ func (s *Server) badProfileBody(w http.ResponseWriter, r *http.Request, err erro
 // @Param body body config.ProfileConfig true "The profile"
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
-// @Success 201 {object} contracts.APIResponse{data=internalRuntime.WriteResult} "Created, with the validator's warnings"
+// @Success 201 {object} contracts.APIResponse{data=ProfileWriteData} "Created, with the validator's warnings"
 // @Failure 400 {object} ClientBindingErrorResponse "Invalid input; field names the offending input"
 // @Failure 403 {object} contracts.ErrorResponse "Administrator credentials required"
 // @Failure 409 {object} ProfileConflictResponse "profile_exists, or binding_bypassable_without_auth (BindingGuardResponse)"
@@ -78,7 +78,7 @@ func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
 // @Param body body config.ProfileConfig true "The profile"
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
-// @Success 200 {object} contracts.APIResponse{data=internalRuntime.WriteResult} "Updated, with the validator's warnings"
+// @Success 200 {object} contracts.APIResponse{data=ProfileWriteData} "Updated, with the validator's warnings"
 // @Failure 400 {object} ClientBindingErrorResponse "Invalid input; field names the offending input"
 // @Failure 403 {object} contracts.ErrorResponse "Administrator credentials required"
 // @Failure 404 {object} contracts.ErrorResponse "profile not found"
@@ -118,7 +118,7 @@ type RenameProfileRequest struct {
 // @Param body body RenameProfileRequest true "new_name"
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
-// @Success 200 {object} contracts.APIResponse{data=internalRuntime.RenameResult} "Renamed; moved lists the clients and tokens that followed"
+// @Success 200 {object} contracts.APIResponse{data=ProfileRenameData} "Renamed; moved lists the clients and tokens that followed"
 // @Failure 400 {object} ClientBindingErrorResponse "Invalid input; field names the offending input"
 // @Failure 403 {object} contracts.ErrorResponse "Administrator credentials required"
 // @Failure 404 {object} contracts.ErrorResponse "profile not found"
@@ -152,7 +152,7 @@ func (s *Server) handleRenameProfile(w http.ResponseWriter, r *http.Request) {
 // @Param force query boolean false "Delete although in use, leaving pins dangling"
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
-// @Success 200 {object} contracts.APIResponse{data=internalRuntime.DeleteResult} "Deleted"
+// @Success 200 {object} contracts.APIResponse{data=ProfileDeleteData} "Deleted"
 // @Failure 400 {object} ClientBindingErrorResponse "reassign_to does not name another existing profile"
 // @Failure 403 {object} contracts.ErrorResponse "Administrator credentials required"
 // @Failure 404 {object} contracts.ErrorResponse "profile not found"
@@ -192,7 +192,7 @@ type TryProfileRequest struct {
 // @Param body body TryProfileRequest true "draft profile, query and optional limit (default 10, max 50)"
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
-// @Success 200 {object} contracts.APIResponse{data=internalRuntime.TryResult} "Search result under the draft"
+// @Success 200 {object} contracts.APIResponse{data=ProfileTryData} "Search result under the draft"
 // @Failure 400 {object} ClientBindingErrorResponse "Invalid draft; field names the offending input"
 // @Failure 403 {object} contracts.ErrorResponse "Administrator credentials required"
 // @Failure 503 {object} contracts.ErrorResponse "Service unavailable"
@@ -226,7 +226,7 @@ func (s *Server) handleTryProfile(w http.ResponseWriter, r *http.Request) {
 // @Param reason query string false "Keep only rows with this access reason (administrators only)"
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
-// @Success 200 {object} contracts.APIResponse{data=internalRuntime.EffectiveToolsResult} "Effective tools"
+// @Success 200 {object} contracts.APIResponse{data=EffectiveToolsData} "Effective tools"
 // @Failure 403 {object} contracts.ErrorResponse "operation requires admin access"
 // @Failure 404 {object} contracts.ErrorResponse "profile not found / client not found"
 // @Failure 503 {object} contracts.ErrorResponse "Service unavailable"

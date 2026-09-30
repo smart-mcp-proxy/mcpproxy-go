@@ -21,7 +21,7 @@ import (
 // @Param anonymous query boolean false "Explain an anonymous (credential-less) caller"
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
-// @Success 200 {object} contracts.APIResponse{data=internalRuntime.AccessExplanation} "The explanation"
+// @Success 200 {object} contracts.APIResponse{data=AccessExplanationData} "The explanation"
 // @Failure 400 {object} contracts.ErrorResponse "Not exactly one subject, a built-in tool, or token=client-<id>"
 // @Failure 403 {object} contracts.ErrorResponse "Administrator credentials required"
 // @Failure 404 {object} contracts.ErrorResponse "client / token / profile not found"

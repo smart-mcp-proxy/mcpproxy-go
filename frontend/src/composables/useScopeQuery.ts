@@ -299,31 +299,31 @@ function registerDefaultScopeParams(): void {
   // features.scope_filters lists them.
   //
   // `restPages` is exactly the set of endpoints whose backend honours the
-  // parameter (Spec 108-e: activity, usage, sessions, tools, servers). The
-  // Clients and Tokens pages read the parameters for their chips, but nothing
-  // is sent to GET /clients or GET /tokens, which keep answering 400
-  // unsupported_scope_filter until Spec 108-f — so no page can start receiving
-  // a new 400 between the two PRs. 108-f adds those pages here.
+  // parameter: activity, usage, sessions, tools and servers (Spec 108-e), plus
+  // GET /clients (`profile`, `client`) and GET /tokens (`profile`, `token`)
+  // from Spec 108-f. A page lists the parameters it shows chips for in `pages`
+  // and sends only the `restPages` ones to REST, so no page can receive a 400
+  // for a filter its backend does not honour.
   registerScopeParam({
     name: 'profile',
     sticky: true,
     requires: 'scope_filters',
     pages: ['activity', 'usage', 'tools', 'servers', 'clients', 'tokens'],
-    restPages: ['activity', 'usage', 'tools', 'servers'],
+    restPages: ['activity', 'usage', 'tools', 'servers', 'clients', 'tokens'],
   })
   registerScopeParam({
     name: 'client',
     sticky: true,
     requires: 'scope_filters',
     pages: ['activity', 'usage', 'tools', 'clients'],
-    restPages: ['activity', 'usage', 'tools'],
+    restPages: ['activity', 'usage', 'tools', 'clients'],
   })
   registerScopeParam({
     name: 'token',
     sticky: true,
     requires: 'scope_filters',
     pages: ['activity', 'usage', 'tokens'],
-    restPages: ['activity', 'usage'],
+    restPages: ['activity', 'usage', 'tokens'],
   })
 }
 

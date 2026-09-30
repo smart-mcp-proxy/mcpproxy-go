@@ -3534,6 +3534,39 @@ components:
         data:
           $ref: '#/components/schemas/contracts.InfoResponse'
       type: object
+    httpapi.AccessExplanationData:
+      properties:
+        first_failure:
+          type: string
+          x-enum-varnames:
+          - StepCredential
+          - StepProfile
+          - StepServerInScope
+          - StepToolRule
+          - StepTierCap
+          - StepTokenPermission
+          - StepGlobalGate
+          - StepServerState
+          - StepToolApproval
+        fixes:
+          items:
+            $ref: '#/components/schemas/runtime.Fix'
+          type: array
+          uniqueItems: false
+        profile:
+          $ref: '#/components/schemas/runtime.ExplainProfileView'
+        steps:
+          items:
+            $ref: '#/components/schemas/runtime.ExplainStepView'
+          type: array
+          uniqueItems: false
+        subject:
+          $ref: '#/components/schemas/runtime.ExplainSubjectView'
+        tool:
+          type: string
+        verdict:
+          $ref: '#/components/schemas/profile.ExplainVerdict'
+      type: object
     httpapi.AddServerRequest:
       properties:
         args:
@@ -3650,6 +3683,37 @@ components:
           description: Always false
           type: boolean
       type: object
+    httpapi.BulkAssignRequest:
+      properties:
+        from_profile:
+          type: string
+        mode:
+          type: string
+        to_profile:
+          type: string
+      type: object
+    httpapi.BulkAssignResponse:
+      properties:
+        moved:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        skipped:
+          items:
+            $ref: '#/components/schemas/httpapi.BulkAssignSkipped'
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.BulkAssignSkipped:
+      properties:
+        client_id:
+          type: string
+        code:
+          type: string
+        error:
+          type: string
+      type: object
     httpapi.CanonicalConfigPath:
       properties:
         description:
@@ -3700,34 +3764,42 @@ components:
     httpapi.ClientBindingResponse:
       properties:
         client:
-          $ref: '#/components/schemas/httpapi.ClientBindingView'
+          $ref: '#/components/schemas/httpapi.clientPresence'
         warnings:
           items:
             $ref: '#/components/schemas/httpapi.ClientWarning'
           type: array
           uniqueItems: false
       type: object
-    httpapi.ClientBindingView:
+    httpapi.ClientSnippet:
       properties:
-        credential_state:
-          $ref: '#/components/schemas/profile.CredentialState'
-        id:
+        generic_http:
           type: string
-        mode:
-          type: string
-        profile:
-          type: string
-        token_name:
+        header_name:
           type: string
       type: object
     httpapi.ClientWarning:
       properties:
+        action:
+          $ref: '#/components/schemas/runtime.WarningAction'
+        bindings:
+          items:
+            $ref: '#/components/schemas/runtime.BindingRef'
+          type: array
+          uniqueItems: false
         client_id:
           type: string
         code:
           $ref: '#/components/schemas/profile.WarningCode'
+        fixes:
+          items:
+            $ref: '#/components/schemas/runtime.GuardFix'
+          type: array
+          uniqueItems: false
         message:
           type: string
+        severity:
+          $ref: '#/components/schemas/profile.WarningSeverity'
       type: object
     httpapi.ConnectConflictResponse:
       properties:
@@ -3779,6 +3851,50 @@ components:
           description: Defaults to "mcpproxy"
           type: string
       type: object
+    httpapi.CreateClientRequest:
+      properties:
+        display_name:
+          type: string
+        expires_in:
+          description: ExpiresIn is a duration like 30d or 720h; default and cap are
+            365 days.
+          type: string
+        id:
+          type: string
+        mode:
+          type: string
+        profile:
+          type: string
+      type: object
+    httpapi.CreateClientResponse:
+      properties:
+        client:
+          $ref: '#/components/schemas/httpapi.clientPresence'
+        credential:
+          type: string
+        snippet:
+          $ref: '#/components/schemas/httpapi.ClientSnippet'
+      type: object
+    httpapi.EffectiveToolsData:
+      properties:
+        counts:
+          $ref: '#/components/schemas/runtime.EffectiveCounts'
+        profile:
+          type: string
+        stale_classifications:
+          description: |-
+            StaleClassifications lists classify entries for tools that are now
+            annotated or no longer exist (FR-005). Administrators only.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        tools:
+          items:
+            $ref: '#/components/schemas/runtime.EffectiveTool'
+          type: array
+          uniqueItems: false
+      type: object
     httpapi.EnvFieldPreview:
       properties:
         empty_or_placeholder:
@@ -3789,6 +3905,22 @@ components:
           type: boolean
         value_present:
           type: boolean
+      type: object
+    httpapi.FinalizeClientResponse:
+      properties:
+        client:
+          $ref: '#/components/schemas/httpapi.clientPresence'
+        rotation:
+          $ref: '#/components/schemas/httpapi.RotationState'
+      type: object
+    httpapi.ForgetClientResponse:
+      properties:
+        disconnect_error:
+          type: string
+        disconnected:
+          type: boolean
+        revoked:
+          type: string
       type: object
     httpapi.GuardBinding:
       properties:
@@ -4153,6 +4285,142 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.ProfileConflictResponse:
+      properties:
+        code:
+          type: string
+        error:
+          type: string
+        request_id:
+          type: string
+        success:
+          description: Always false
+          type: boolean
+        used_by:
+          $ref: '#/components/schemas/httpapi.ProfileUsedByData'
+      type: object
+    httpapi.ProfileDeleteData:
+      properties:
+        anonymous_profile_moved_to:
+          type: string
+        deleted:
+          type: string
+        moved:
+          $ref: '#/components/schemas/runtime.MovedRefs'
+      type: object
+    httpapi.ProfileListData:
+      properties:
+        anonymous_profile:
+          type: string
+        profiles:
+          items:
+            $ref: '#/components/schemas/runtime.ProfileView'
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ProfileRenameData:
+      properties:
+        moved:
+          $ref: '#/components/schemas/runtime.MovedRefs'
+        profile:
+          $ref: '#/components/schemas/runtime.ProfileView'
+      type: object
+    httpapi.ProfileTryData:
+      properties:
+        hidden:
+          items:
+            $ref: '#/components/schemas/runtime.TryHidden'
+          type: array
+          uniqueItems: false
+        hidden_by_profile:
+          type: integer
+        hidden_truncated:
+          type: boolean
+        results:
+          items:
+            additionalProperties: {}
+            type: object
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ProfileUsedByData:
+      properties:
+        anonymous_profile:
+          type: boolean
+        clients:
+          items:
+            $ref: '#/components/schemas/runtime.UsedByClient'
+          type: array
+          uniqueItems: false
+        tokens:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.ProfileViewData:
+      properties:
+        blocked_24h:
+          type: integer
+        calls_24h:
+          type: integer
+        code_execution:
+          type: boolean
+        description:
+          type: string
+        effective_code_execution:
+          type: boolean
+        effective_servers:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        effective_unannotated:
+          type: string
+        is_legacy:
+          type: boolean
+        management_tools:
+          type: boolean
+        max_tier:
+          type: string
+        name:
+          type: string
+        servers:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        switchable_to:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        title:
+          type: string
+        tool_count:
+          description: |-
+            ToolCount is the v2 field: indexed tools on the effective servers.
+            Deprecated: use tool_counts.
+          type: integer
+        tool_counts:
+          $ref: '#/components/schemas/runtime.ToolCounts'
+        tools:
+          $ref: '#/components/schemas/config.ProfileToolRules'
+        unannotated:
+          type: string
+        used_by:
+          $ref: '#/components/schemas/runtime.UsedBy'
+      type: object
+    httpapi.ProfileWriteData:
+      properties:
+        profile:
+          $ref: '#/components/schemas/runtime.ProfileView'
+        warnings:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
     httpapi.PutClientBindingRequest:
       properties:
         mode:
@@ -4160,11 +4428,51 @@ components:
         profile:
           type: string
       type: object
+    httpapi.RenameProfileRequest:
+      properties:
+        new_name:
+          type: string
+      type: object
+    httpapi.RotateClientRequest:
+      properties:
+        precondition_token:
+          description: |-
+            PreconditionToken is the token of GET /connect/{client}/preview; it
+            binds a supported client's rotation to what the preview showed.
+          type: string
+      type: object
+    httpapi.RotateClientResponse:
+      properties:
+        client:
+          $ref: '#/components/schemas/httpapi.clientPresence'
+        connect:
+          $ref: '#/components/schemas/connect.ConnectResult'
+        credential:
+          type: string
+        rotation:
+          $ref: '#/components/schemas/httpapi.RotationState'
+        snippet:
+          $ref: '#/components/schemas/httpapi.ClientSnippet'
+      type: object
+    httpapi.RotationState:
+      properties:
+        state:
+          type: string
+      type: object
     httpapi.SetActiveProfileRequest:
       properties:
         active_profile:
           type: string
         profile:
+          type: string
+      type: object
+    httpapi.TryProfileRequest:
+      properties:
+        limit:
+          type: integer
+        profile:
+          $ref: '#/components/schemas/config.ProfileConfig'
+        query:
           type: string
       type: object
     httpapi.UndoConnectRequest:
@@ -4193,6 +4501,17 @@ components:
           - other
           type: string
       type: object
+    httpapi.UpgradeAdminKeyHoldersRequest:
+      properties:
+        apply:
+          type: boolean
+        mode:
+          type: string
+        precondition_token:
+          type: string
+        profile:
+          type: string
+      type: object
     httpapi.attentionResponse:
       properties:
         count:
@@ -4202,6 +4521,99 @@ components:
         items:
           items:
             $ref: '#/components/schemas/contracts.AttentionItem'
+          type: array
+          uniqueItems: false
+      type: object
+    httpapi.clientPresence:
+      properties:
+        active_sessions:
+          type: integer
+        blocked_24h:
+          type: integer
+        calls_24h:
+          type: integer
+        config_path:
+          type: string
+        connected:
+          type: boolean
+        connection_unverified:
+          type: boolean
+        credential_checked_at:
+          type: string
+        credential_state:
+          $ref: '#/components/schemas/profile.CredentialState'
+        display_name:
+          type: string
+        display_path:
+          type: string
+        expires_at:
+          type: string
+        icon:
+          type: string
+        id:
+          type: string
+        installed:
+          type: boolean
+        kind:
+          type: string
+        last_seen:
+          type: string
+        profile:
+          type: string
+        profile_missing:
+          type: boolean
+        profile_mode:
+          type: string
+        profile_source:
+          description: |-
+            profile_source is pin (locked) or binding (switchable) and is empty when
+            credential_state is not client.
+          type: string
+        profile_title:
+          type: string
+        reload_hint:
+          type: string
+        rotation_pending:
+          type: boolean
+        sessions:
+          items:
+            $ref: '#/components/schemas/httpapi.clientSession'
+          type: array
+          uniqueItems: false
+        state:
+          type: string
+        token_name:
+          type: string
+      type: object
+    httpapi.clientSession:
+      properties:
+        id:
+          type: string
+        last_activity:
+          type: string
+        profile:
+          description: |-
+            Profile and ProfileSource are the session's latest effective resolution
+            (Spec 108-e FR-033); empty on legacy sessions.
+          type: string
+        profile_source:
+          type: string
+        started_at:
+          type: string
+        work_session_id:
+          type: string
+      type: object
+    httpapi.clientsResponse:
+      properties:
+        clients:
+          items:
+            $ref: '#/components/schemas/httpapi.clientPresence'
+          type: array
+          uniqueItems: false
+        routing: {}
+        warnings:
+          items:
+            $ref: '#/components/schemas/httpapi.ClientWarning'
           type: array
           uniqueItems: false
       type: object
@@ -4270,7 +4682,28 @@ components:
         timestamp:
           type: string
       type: object
+    profile.AccessStepStatus:
+      type: string
+      x-enum-varnames:
+      - AccessStepPass
+      - AccessStepFail
+      - AccessStepSkip
+    profile.AccessSubjectKind:
+      type: string
+      x-enum-varnames:
+      - AccessSubjectClient
+      - AccessSubjectProfile
+      - AccessSubjectToken
+      - AccessSubjectAnonymous
     profile.CredentialState:
+      description: |-
+        Spec 108-f ClientView additions (data-model §7). The Spec 109 fields above
+        are unchanged; everything below is additive.
+
+        credential_state is what the client's connection carries (client |
+        admin_key | none | revoked | expired | unknown). The stat-only list never
+        reads a config: it reports the token store, else the last on-demand
+        observation (credential_checked_at says when), else unknown.
       type: string
       x-enum-varnames:
       - CredentialStateClient
@@ -4279,6 +4712,36 @@ components:
       - CredentialStateRevoked
       - CredentialStateExpired
       - CredentialStateUnknown
+    profile.ExplainStep:
+      type: string
+      x-enum-varnames:
+      - StepCredential
+      - StepProfile
+      - StepServerInScope
+      - StepToolRule
+      - StepTierCap
+      - StepTokenPermission
+      - StepGlobalGate
+      - StepServerState
+      - StepToolApproval
+    profile.ExplainVerdict:
+      type: string
+      x-enum-varnames:
+      - ExplainVerdictAllowed
+      - ExplainVerdictBlocked
+      - ExplainVerdictHidden
+    profile.FixAction:
+      type: string
+      x-enum-varnames:
+      - FixAllowInProfile
+      - FixClassifyInProfile
+      - FixAddServerToProfile
+      - FixMoveClient
+      - FixEditToken
+      - FixEnableServer
+      - FixApproveTool
+      - FixChangeSetting
+      - FixReconnectClient
     profile.WarningCode:
       type: string
       x-enum-varnames:
@@ -4288,6 +4751,225 @@ components:
       - WarningClientRotationPending
       - WarningProfileMissing
       - WarningClientTokenNameConflict
+    profile.WarningSeverity:
+      type: string
+      x-enum-varnames:
+      - WarningSeverityWarn
+      - WarningSeverityInfo
+    runtime.BindingRef:
+      properties:
+        client_id:
+          type: string
+        mode:
+          type: string
+        profile:
+          type: string
+        token_name:
+          type: string
+      type: object
+    runtime.EffectiveCounts:
+      properties:
+        by_reason:
+          additionalProperties:
+            type: integer
+          type: object
+        callable:
+          type: integer
+        hidden:
+          type: integer
+        visible:
+          type: integer
+      type: object
+    runtime.EffectiveTool:
+      properties:
+        access:
+          $ref: '#/components/schemas/runtime.ToolAccessView'
+        classification_stale:
+          type: boolean
+        intrinsic_tier:
+          type: string
+        profile_tier:
+          type: string
+        server:
+          type: string
+        tool:
+          type: string
+      type: object
+    runtime.ExplainProfileView:
+      properties:
+        name:
+          type: string
+        source:
+          type: string
+      type: object
+    runtime.ExplainStepView:
+      properties:
+        detail:
+          type: string
+        status:
+          $ref: '#/components/schemas/profile.AccessStepStatus'
+        step:
+          $ref: '#/components/schemas/profile.ExplainStep'
+      type: object
+    runtime.ExplainSubjectView:
+      properties:
+        kind:
+          $ref: '#/components/schemas/profile.AccessSubjectKind'
+        name:
+          type: string
+      type: object
+    runtime.Fix:
+      properties:
+        action:
+          $ref: '#/components/schemas/profile.FixAction'
+        label:
+          type: string
+        step:
+          type: string
+          x-enum-varnames:
+          - StepCredential
+          - StepProfile
+          - StepServerInScope
+          - StepToolRule
+          - StepTierCap
+          - StepTokenPermission
+          - StepGlobalGate
+          - StepServerState
+          - StepToolApproval
+        target:
+          type: string
+      type: object
+    runtime.GuardFix:
+      properties:
+        kind:
+          type: string
+        target:
+          type: string
+      type: object
+    runtime.MovedRefs:
+      properties:
+        clients:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        tokens:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    runtime.ProfileView:
+      properties:
+        blocked_24h:
+          type: integer
+        calls_24h:
+          type: integer
+        code_execution:
+          type: boolean
+        description:
+          type: string
+        effective_code_execution:
+          type: boolean
+        effective_servers:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        effective_unannotated:
+          type: string
+        is_legacy:
+          type: boolean
+        management_tools:
+          type: boolean
+        max_tier:
+          type: string
+        name:
+          type: string
+        servers:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        switchable_to:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        title:
+          type: string
+        tool_count:
+          description: |-
+            ToolCount is the v2 field: indexed tools on the effective servers.
+            Deprecated: use tool_counts.
+          type: integer
+        tool_counts:
+          $ref: '#/components/schemas/runtime.ToolCounts'
+        tools:
+          $ref: '#/components/schemas/config.ProfileToolRules'
+        unannotated:
+          type: string
+        used_by:
+          $ref: '#/components/schemas/runtime.UsedBy'
+      type: object
+    runtime.ToolAccessView:
+      properties:
+        callable:
+          type: boolean
+        reason:
+          type: string
+        visible:
+          type: boolean
+      type: object
+    runtime.ToolCounts:
+      properties:
+        destructive:
+          type: integer
+        read:
+          type: integer
+        unannotated_hidden:
+          type: integer
+        write:
+          type: integer
+      type: object
+    runtime.TryHidden:
+      properties:
+        reason:
+          type: string
+        server:
+          type: string
+        tool:
+          type: string
+      type: object
+    runtime.UsedBy:
+      properties:
+        anonymous_profile:
+          type: boolean
+        clients:
+          items:
+            $ref: '#/components/schemas/runtime.UsedByClient'
+          type: array
+          uniqueItems: false
+        tokens:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    runtime.UsedByClient:
+      properties:
+        id:
+          type: string
+        mode:
+          type: string
+      type: object
+    runtime.WarningAction:
+      properties:
+        kind:
+          type: string
+        target:
+          type: string
+      type: object
     secureenv.EnvConfig:
       description: Environment configuration for secure variable filtering
       properties:
@@ -4315,6 +4997,13 @@ components:
         inherit_system_safe:
           type: boolean
       type: object
+    storage.ClientCredentialObservation:
+      properties:
+        at:
+          type: string
+        state:
+          type: string
+      type: object
     storage.OnboardingState:
       description: |-
         State is the persisted wizard engagement record. Engaged is true once
@@ -4331,6 +5020,21 @@ components:
             concurrent onboarding/mark write can never drop it. Consumed by the
             Verify step / presence layer to tell "connected, never seen" apart from
             "connected seconds ago, hasn't reconnected yet".
+          type: object
+        client_credential_observed:
+          additionalProperties:
+            $ref: '#/components/schemas/storage.ClientCredentialObservation'
+          description: |-
+            ClientCredentialObserved records, per client id, the LAST credential
+            classification an on-demand read produced (Spec 108-f FR-025, F11): what
+            the client's config held (client | admin_key | none | revoked | expired)
+            and when it was read. The stat-only GET /clients listing never reads a
+            config (Spec 075: no macOS App-Data prompt from a list), so this is how
+            it still reports a client that holds the admin key across restarts. It is
+            written only when the classification CHANGES, by every on-demand read
+            (GET /clients/{id}, GET /connect/{client}, the admin-key upgrade preview,
+            a connect write) and deleted on disconnect. Additive: an older binary
+            ignores it, and a record without it reads as "unknown".
           type: object
         client_disconnected_at:
           additionalProperties:
@@ -4430,6 +5134,92 @@ info:
   version: "1.0"
 openapi: 3.1.0
 paths:
+  /api/v1/access/explain:
+    get:
+      description: For one subject (exactly one of client=<id>, token=<name>, profile=<name>
+        or anonymous=true) and one upstream tool (server:tool), returns the ordered
+        chain of gates a real call would meet - credential, profile, server_in_scope,
+        tool_rule, tier_cap, token_permission, global_gate, server_state, tool_approval
+        - the overall verdict (allowed, blocked, hidden), the first failing step and
+        the fixes for it in preference order. The chain is the one every discovery
+        and dispatch path walks, so `allowed` equals what a real call does. Built-in
+        management tools are not explained (400). A client credential is explained
+        with client=, never token=. Administrators only.
+      parameters:
+      - description: Upstream tool as server:tool
+        in: query
+        name: tool
+        required: true
+        schema:
+          type: string
+      - description: Client id
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Regular agent token name
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Profile name
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Explain an anonymous (credential-less) caller
+        in: query
+        name: anonymous
+        schema:
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The explanation
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Not exactly one subject, a built-in tool, or token=client-<id>
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: client / token / profile not found
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Explain why a tool is or is not reachable
+      tags:
+      - access
   /api/v1/activity:
     get:
       description: Returns paginated list of activity records with optional filtering
@@ -5125,6 +5915,225 @@ paths:
       summary: Search the server catalog across every enabled source
       tags:
       - catalog
+  /api/v1/clients:
+    get:
+      description: 'Lists every client row (supported, other and custom) with its
+        presence, its credential and its profile binding, plus response-level warnings.
+        The list is content-read-free (Spec 075): credential_state comes from the
+        token store, else the last on-demand observation (credential_checked_at),
+        else unknown. It runs only the time-based half of the rotation reconciler.
+        The profile and client filters match the CURRENT binding and are applied AFTER
+        warnings are computed over the full set.'
+      parameters:
+      - description: Rows whose active credential is bound to this profile; - = bound
+          to All servers
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Exact client id
+        in: query
+        name: client
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Client rows, routing and warnings
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List clients
+      tags:
+      - clients
+    post:
+      description: Creates a per-client credential for a client that is NOT in the
+        connect registry (a script, a CI job, an editor without a connect adapter).
+        The secret (mcp_cli_...) is returned ONCE, with a paste-ready snippet that
+        carries it in the X-API-Key header. The id follows the client-id rule (lower-case
+        letters, digits, '-' or '_', at most 56 characters) and must not be a supported
+        client's id. A named profile binds the credential locked unless mode says
+        otherwise. Refused with 409 binding_bypassable_without_auth when the binding
+        would be bypassable while require_mcp_auth is off (FR-008a), and 409 conflicting_token
+        when a regular token holds client-<id>. Writes one assign record. Personal
+        edition only.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.CreateClientRequest'
+        description: id (required), optional display_name, profile, mode and expires_in
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The new client row, its credential (once) and a snippet
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: binding_bypassable_without_auth, or conflicting_token (ClientCredentialConflictResponse)
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Add a custom client
+      tags:
+      - clients
+  /api/v1/clients/{client}:
+    delete:
+      description: 'Revokes the client''s credential; it stops authenticating at once.
+        With disconnect=true a SUPPORTED client''s mcpproxy entry is removed from
+        its config FIRST, but the credential is revoked either way: revocation never
+        waits for a config write, so a failed write (for example a macOS App-Data
+        denial) leaves the client cut off and is reported as disconnected:false with
+        disconnect_error. A client with no credential record is 409 no_client_credential.
+        disconnect=true on a custom client is ignored. Writes one forget record naming
+        the revoked token. The FR-008a guard is not involved: revoking only removes
+        a binding.'
+      parameters:
+      - description: Client id
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      - description: Also remove the entry from the client's config (supported clients)
+        in: query
+        name: disconnect
+        schema:
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Revoked token name and what happened to the config entry
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: no_client_credential
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Forget a client (revoke its credential)
+      tags:
+      - clients
+    get:
+      description: 'Returns one client row with its sessions (newest 20, each with
+        its latest effective profile). This is the only read that may open the client''s
+        config file: it runs the full rotation reconciler first, classifies the credential
+        the config holds and records the observation. No scope filter is honoured
+        on this route.'
+      parameters:
+      - description: Client id
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Client row
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: client not found
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get one client
+      tags:
+      - clients
   /api/v1/clients/{client}/binding:
     put:
       description: |-
@@ -5170,7 +6179,7 @@ paths:
                   success:
                     type: boolean
                 type: object
-          description: The client's binding after the change
+          description: The client row after the change, with its warnings
         "400":
           content:
             application/json:
@@ -5200,6 +6209,238 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Reassign a client's profile and/or mode
+      tags:
+      - clients
+  /api/v1/clients/{client}/rotate:
+    post:
+      description: 'Replaces a client''s secret without ever invalidating the old
+        one mid-flight (FR-021a). A SUPPORTED client is rewritten through connect:
+        staged rotation, binding kept, finalized when the config write succeeds, rolled
+        back (the old secret keeps working) when it fails; a preview''s precondition_token
+        binds the call, a mismatch is the connect 409 precondition_failed. A CUSTOM
+        client gets a new secret returned ONCE with a snippet; both secrets authenticate
+        until POST /clients/{client}/rotate/finalize or 24 hours. A client with no
+        active credential is 409 no_client_credential. The FR-008a guard is not involved:
+        a rotation never changes a binding''s reach. Writes one rotate record when
+        it finalizes.'
+      parameters:
+      - description: Client id
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.RotateClientRequest'
+        description: Optional precondition_token of a connect preview
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The client row and the rotation state
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required (or macOS App-Data block)
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ConnectConflictResponse'
+          description: no_client_credential, or precondition_failed
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Rotate a client's credential
+      tags:
+      - clients
+  /api/v1/clients/{client}/rotate/finalize:
+    post:
+      description: 'Promotes a client''s pending secret: the old secret stops authenticating.
+        Idempotent: with no rotation in progress it is a no-op success. A client with
+        no client credential is 409 no_client_credential. Writes one rotate record
+        when it promotes.'
+      parameters:
+      - description: Client id
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The client row; rotation.state is finalized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: no_client_credential
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Finalize a staged rotation
+      tags:
+      - clients
+  /api/v1/clients/bulk-assign:
+    post:
+      description: 'Moves every client credential bound to from_profile ("" = All
+        servers) onto to_profile ("" = All servers). The guard and the credential
+        precondition apply PER CLIENT: a refused client is reported in skipped[] with
+        the code the single operation returns, the others move and each writes its
+        own assign record and emits client.binding_changed. Personal edition only.'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.BulkAssignRequest'
+        description: from_profile and to_profile (both required; empty = All servers)
+          and optional mode
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Moved client ids and the clients that were skipped
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Move every client of one profile to another
+      tags:
+      - clients
+  /api/v1/clients/upgrade-admin-key-holders:
+    post:
+      description: 'Without apply: classifies every supported client whose config
+        still holds the instance admin API key (an on-demand read per client) and
+        returns preview[] (display path, what would change, the masked credential
+        mcp_cli_••••, the binding and a precondition_token per client), a combined
+        precondition_token, and guard when the whole request would be refused by FR-008a;
+        next_step is rotate_admin_api_key when nothing holds the key. Nothing is written
+        or minted. With apply=true: recomputes the preview, refuses with 409 precondition_failed
+        when a sent precondition_token no longer matches, runs the FR-008a guard over
+        the WHOLE request (409 binding_bypassable_without_auth, nothing minted, no
+        file written), then connects each client with force bound to its own token;
+        one client''s failure does not stop the others. Each mint writes its own assign
+        record. The guard only applies when a named profile is given. Personal edition
+        only.'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.UpgradeAdminKeyHoldersRequest'
+        description: Optional profile and mode for every upgraded client; apply and
+          precondition_token
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: UpgradePreview (no apply) or UpgradeResult (apply)
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BindingGuardResponse'
+          description: precondition_failed, or binding_bypassable_without_auth
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Upgrade every client that holds the admin API key
       tags:
       - clients
   /api/v1/code/scripts:
@@ -6235,15 +7476,29 @@ paths:
       - tools
   /api/v1/profiles:
     get:
-      description: List all configured profiles with their effective servers and indexed
-        tool count (Profiles v2). A profile scopes tool discovery and calls to a named
-        subset of upstream servers.
+      description: 'Lists every profile as a ProfileView: the config fields as stored,
+        the derived effective values, visible tool counts by tier, 24 h calls and
+        blocked calls, and (administrators only) used_by and the anonymous_profile.
+        A caller that is not an administrator sees only the profiles its entitlement
+        reaches, with servers, rules and switchable_to narrowed to what it may see;
+        an unreachable profile is omitted, never shown empty.'
       responses:
         "200":
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.SuccessResponse'
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
           description: Profile list
         "500":
           content:
@@ -6257,11 +7512,406 @@ paths:
       summary: List configured profiles
       tags:
       - profiles
+    post:
+      description: Adds a profile. The body is a ProfileConfig. A name that already
+        exists is 409 profile_exists; `active` and `try` are reserved by the REST
+        API; a fatal validation rule is 400 with the offending field and the unchanged
+        FR-007 text. A write that would let a client bound to a named profile escape
+        it while require_mcp_auth is off is refused 409 binding_bypassable_without_auth
+        (FR-008a) and nothing is written. Writes one profile_change record.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/config.ProfileConfig'
+        description: The profile
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Created, with the validator's warnings
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ProfileConflictResponse'
+          description: profile_exists, or binding_bypassable_without_auth (BindingGuardResponse)
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Create a profile
+      tags:
+      - profiles
+  /api/v1/profiles/{name}:
+    delete:
+      description: Deletes a profile. 409 profile_in_use (with used_by) while clients
+        or tokens point at it, unless reassign_to names another existing profile (every
+        pin moves there) or force is set (pins are left dangling, which the resolver
+        treats as deny-all). 409 profile_is_anonymous_profile whenever it is the anonymous_profile
+        and reassign_to is absent, even with force. Both paths remove the name from
+        every switchable_to. Guarded by FR-008a. Writes one `delete` record.
+      parameters:
+      - description: Profile name
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: Another existing profile that takes over the pins
+        in: query
+        name: reassign_to
+        schema:
+          type: string
+      - description: Delete although in use, leaving pins dangling
+        in: query
+        name: force
+        schema:
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Deleted
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: reassign_to does not name another existing profile
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: profile not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ProfileConflictResponse'
+          description: profile_in_use, profile_is_anonymous_profile, or binding_bypassable_without_auth
+            (BindingGuardResponse)
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Delete a profile
+      tags:
+      - profiles
+    get:
+      description: Returns the ProfileView of the named profile. A caller that is
+        not an administrator gets the same 404 for an unreachable profile as for an
+        unknown one.
+      parameters:
+      - description: Profile name
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The profile
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: profile not found
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get one profile
+      tags:
+      - profiles
+    put:
+      description: Replaces the named profile with the body (a ProfileConfig whose
+        name must equal the path; 409 name_mismatch otherwise - a rename has its own
+        route). A write whose only change is tools.classify is recorded as `classify`.
+        Guarded by FR-008a like a create.
+      parameters:
+      - description: Profile name
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/config.ProfileConfig'
+        description: The profile
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Updated, with the validator's warnings
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: profile not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ProfileConflictResponse'
+          description: name_mismatch, or binding_bypassable_without_auth (BindingGuardResponse)
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Replace a profile
+      tags:
+      - profiles
+  /api/v1/profiles/{name}/effective-tools:
+    get:
+      description: 'One row per catalog tool with the verdict of the access chain
+        (the same rendering GET /tools?profile= uses): server, tool, intrinsic_tier,
+        profile_tier, access{visible, callable, reason} and classification_stale.
+        With client=<id> the client''s credential is evaluated UNDER this profile
+        ("what would Cursor get here"). An administrator gets every row plus counts.callable,
+        counts.by_reason and stale_classifications; every other caller gets only visible
+        rows and counts{visible, hidden}, and client= and reason= are refused 403.
+        An unreachable profile answers exactly like an unknown one.'
+      parameters:
+      - description: Profile name
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: Evaluate this client's credential under the profile (administrators
+          only)
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Keep only this server's rows
+        in: query
+        name: server
+        schema:
+          type: string
+      - description: Keep only rows with this access reason (administrators only)
+        in: query
+        name: reason
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Effective tools
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: operation requires admin access
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: profile not found / client not found
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Effective tools of a profile
+      tags:
+      - profiles
+  /api/v1/profiles/{name}/rename:
+    post:
+      description: Renames a profile and moves every reference to it - token pins,
+        client bindings, other profiles' switchable_to and the anonymous_profile -
+        in one write (D19). Tokens move first, so a failure part-way never widens
+        a scope. Guarded by FR-008a. Writes one `rename` record.
+      parameters:
+      - description: Profile name
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.RenameProfileRequest'
+        description: new_name
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Renamed; moved lists the clients and tokens that followed
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid input; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: profile not found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ProfileConflictResponse'
+          description: profile_exists, or binding_bypassable_without_auth (BindingGuardResponse)
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Rename a profile
+      tags:
+      - profiles
   /api/v1/profiles/active:
     get:
-      description: 'Get the server-level default active profile used by UI surfaces
-        (Web UI / tray). Empty string means "all servers". Note: within a live MCP
-        session, the set_profile tool selection takes precedence over this default.'
+      description: 'Deprecated (Spec 108 FR-039; sends a Deprecation header, successor
+        GET /api/v1/profiles). Get the server-level default active profile used by
+        UI surfaces (Web UI / tray). Empty string means "all servers". Note: within
+        a live MCP session, the set_profile tool selection takes precedence over this
+        default.'
       responses:
         "200":
           content:
@@ -6276,9 +7926,10 @@ paths:
       tags:
       - profiles
     put:
-      description: Set the server-level default active profile for UI surfaces. The
-        slug must match a configured profile; pass an empty string to clear. This
-        does not affect live MCP sessions, which use the set_profile tool.
+      description: Deprecated (Spec 108 FR-039; sends a Deprecation header, successor
+        GET /api/v1/profiles). Set the server-level default active profile for UI
+        surfaces. The slug must match a configured profile; pass an empty string to
+        clear. This does not affect live MCP sessions, which use the set_profile tool.
       requestBody:
         content:
           application/json:
@@ -6315,6 +7966,64 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Set the default active profile
+      tags:
+      - profiles
+  /api/v1/profiles/try:
+    post:
+      description: Evaluates a DRAFT profile against a query exactly as retrieve_tools
+        would (policy is applied before the limit) and returns the hits plus what
+        the draft hides (hidden_by_profile and up to 100 {server, tool, reason}).
+        The draft is validated as if it replaced the same-named profile, or was appended
+        under a placeholder name when it has none. Nothing is persisted, no record
+        is written, no event is published and the FR-008a guard does not run. Administrators
+        only.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.TryProfileRequest'
+        description: draft profile, query and optional limit (default 10, max 50)
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: Search result under the draft
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
+          description: Invalid draft; field names the offending input
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Try a draft profile
       tags:
       - profiles
   /api/v1/registries:

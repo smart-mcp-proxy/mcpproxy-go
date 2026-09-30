@@ -79,9 +79,9 @@ type clientSession struct {
 const clientSessionCap = 20
 
 type clientsResponse struct {
-	Clients  []clientPresence          `json:"clients"`
-	Routing  interface{}               `json:"routing"`
-	Warnings []internalRuntime.Warning `json:"warnings"`
+	Clients  []clientPresence `json:"clients"`
+	Routing  interface{}      `json:"routing"`
+	Warnings []ClientWarning  `json:"warnings"`
 }
 
 // presenceContext is what one presence read learned that the decorator reuses:

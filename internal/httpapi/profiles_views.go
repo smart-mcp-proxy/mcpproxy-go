@@ -247,7 +247,7 @@ func (s *Server) serverToolCounts() map[string]int {
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
-// @Success 200 {object} contracts.APIResponse{data=internalRuntime.ProfileList} "Profile list"
+// @Success 200 {object} contracts.APIResponse{data=ProfileListData} "Profile list"
 // @Failure 500 {object} contracts.ErrorResponse "Configuration unavailable"
 // @Router /api/v1/profiles [get]
 func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
@@ -294,7 +294,7 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 // @Param name path string true "Profile name"
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
-// @Success 200 {object} contracts.APIResponse{data=internalRuntime.ProfileView} "The profile"
+// @Success 200 {object} contracts.APIResponse{data=ProfileViewData} "The profile"
 // @Failure 404 {object} contracts.ErrorResponse "profile not found"
 // @Router /api/v1/profiles/{name} [get]
 func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
@@ -328,11 +328,11 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 
 // ProfileConflictResponse is the 409 body of a refused profile write.
 type ProfileConflictResponse struct {
-	Success   bool                    `json:"success"` // Always false
-	Error     string                  `json:"error"`
-	Code      string                  `json:"code"`
-	UsedBy    *internalRuntime.UsedBy `json:"used_by,omitempty"`
-	RequestID string                  `json:"request_id,omitempty"`
+	Success   bool               `json:"success"` // Always false
+	Error     string             `json:"error"`
+	Code      string             `json:"code"`
+	UsedBy    *ProfileUsedByData `json:"used_by,omitempty"`
+	RequestID string             `json:"request_id,omitempty"`
 }
 
 func (s *Server) writeProfileConflict(w http.ResponseWriter, r *http.Request, msg, code string, used *internalRuntime.UsedBy) {
