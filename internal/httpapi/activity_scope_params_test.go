@@ -378,3 +378,47 @@ func TestActivityScopeParams_ScopedCallerCannotProbeForeignAttribution(t *testin
 	assert.NotContains(t, rec.Body.String(), "client-zed")
 	assert.NotContains(t, rec.Body.String(), "work-full")
 }
+
+// Live QA failure 2: the legacy Spec 057 metadata.profile slug (the /mcp/p/<slug>
+// a call arrived on) names a profile just like the first-class field does, so a
+// scoped caller must not read it off another token's row either (FR-031/FR-032:
+// binding disclosure is admin-only). Its own rows keep it.
+func TestActivityScopeParams_ForeignMetadataProfileIsRedacted(t *testing.T) {
+	records := []*storage.ActivityRecord{
+		attribRecord("own", "alpha", "alpha_tool", func(r *storage.ActivityRecord) {
+			r.Metadata = map[string]interface{}{"profile": "work-readonly", "client_name": "CI"}
+			r.Arguments = map[string]interface{}{"_auth_token_prefix": "PLACEHOLDER", "_auth_agent_name": "scoped-ci", "_auth_auth_type": "agent"}
+		}),
+		attribRecord("foreign", "alpha", "alpha_tool", func(r *storage.ActivityRecord) {
+			r.Metadata = map[string]interface{}{"profile": "work-full", "client_name": "Zed"}
+			r.Arguments = map[string]interface{}{"_auth_token_prefix": "mcp_cli_bbbb", "_auth_agent_name": "client-zed", "_auth_auth_type": "agent"}
+		}),
+	}
+	ctrl := &scopeParamsController{records: records}
+	srv, token := scopedAgentServer(t, ctrl, []string{"alpha"})
+	records[0].Arguments["_auth_token_prefix"] = auth.TokenPrefix(token)
+
+	var list struct {
+		Data contracts.ActivityListResponse `json:"data"`
+	}
+	rec := scopeGetJSON(t, srv, "/api/v1/activity", token, &list)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	byID := map[string]contracts.ActivityRecord{}
+	for _, a := range list.Data.Activities {
+		byID[a.ID] = a
+	}
+	require.Contains(t, byID, "own")
+	require.Contains(t, byID, "foreign")
+	assert.Equal(t, "work-readonly", byID["own"].Metadata["profile"], "its own rows keep the slug")
+	assert.NotContains(t, byID["foreign"].Metadata, "profile", "another token's slug is withheld")
+	assert.Equal(t, "Zed", byID["foreign"].Metadata["client_name"], "self-reported client_name stays")
+	// The stored record is never edited in place.
+	assert.Equal(t, "work-full", records[1].Metadata["profile"])
+
+	var detail struct {
+		Data contracts.ActivityDetailResponse `json:"data"`
+	}
+	rec = scopeGetJSON(t, srv, "/api/v1/activity/foreign", token, &detail)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, detail.Data.Activity.Metadata, "profile")
+}

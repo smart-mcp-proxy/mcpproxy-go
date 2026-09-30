@@ -4451,7 +4451,7 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 //     client re-fetches through the gated REST door. Costs one extra GET per
 //     coalescing window, and only when reveal_secret_headers is on.
 func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRuntime.Event) map[string]interface{} {
-	payload := renderActivityAttributionForCaller(ctx, evt.Payload)
+	payload := renderActivityAttributionForCaller(ctx, evt.Type, evt.Payload)
 	if evt.Type == internalRuntime.EventTypeAttentionChanged {
 		return renderAttentionChangedForCaller(ctx, payload)
 	}

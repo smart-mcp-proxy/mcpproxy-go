@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -318,24 +319,42 @@ func isOutOfScopeIdentityField(ctx context.Context, key string, value interface{
 //     and name both match); on every other event the whole object is removed,
 //     because it discloses which profile and client another token used
 //     (binding disclosure is admin-only, FR-032).
-func renderActivityAttributionForCaller(ctx context.Context, payload map[string]interface{}) map[string]interface{} {
-	raw, ok := payload["attribution"]
-	if !ok {
+//
+// The legacy flat `profile` key (Spec 057, the /mcp/p/<slug> a call arrived on)
+// names a profile exactly as attribution.profile does, so on an activity.*
+// event it follows the same rule: a scoped subscriber keeps it only on its own
+// events, and an event that carries no ownership proof (no attribution) is
+// treated as foreign.
+func renderActivityAttributionForCaller(ctx context.Context, eventType internalRuntime.EventType, payload map[string]interface{}) map[string]interface{} {
+	raw, hasAttr := payload["attribution"]
+	_, hasFlatProfile := payload["profile"]
+	flatProfile := hasFlatProfile && strings.HasPrefix(string(eventType), "activity.")
+	if !hasAttr && !flatProfile {
 		return payload
 	}
 	attr, _ := raw.(map[string]any)
 
-	keep := attr != nil
-	if keep && auth.IsScopedCaller(ctx) {
+	scoped := auth.IsScopedCaller(ctx)
+	owned := attr != nil
+	if owned && scoped {
 		ac := auth.AuthContextFromContext(ctx)
 		prefix, _ := attr["_token_prefix"].(string)
 		name, _ := attr["token_name"].(string)
-		keep = ac.Type == auth.AuthTypeAgent && ac.TokenPrefix != "" && prefix == ac.TokenPrefix && name == ac.AgentName
+		owned = ac.Type == auth.AuthTypeAgent && ac.TokenPrefix != "" && prefix == ac.TokenPrefix && name == ac.AgentName
+	}
+	keep := owned
+	// Without a scope restriction there is nothing to withhold from.
+	keepFlatProfile := !scoped || owned
+	if !hasAttr && !scoped {
+		return payload
 	}
 
 	out := make(map[string]interface{}, len(payload))
 	for k, v := range payload {
-		if k != "attribution" {
+		switch {
+		case k == "attribution":
+		case k == "profile" && flatProfile && !keepFlatProfile:
+		default:
 			out[k] = v
 		}
 	}

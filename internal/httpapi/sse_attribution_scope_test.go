@@ -107,3 +107,33 @@ func TestSSE_EventWithoutAttributionIsUnchanged(t *testing.T) {
 	out := srv.renderEventPayloadForCaller(agentCtxFor("scoped-ci", "p"), evt)
 	assert.Equal(t, evt.Payload, out)
 }
+
+// Live QA failure 2: the legacy flat `profile` payload key (Spec 057, the
+// /mcp/p/<slug> slug) names a profile exactly as attribution.profile does, so
+// it follows the same own-events-only rule.
+func TestSSE_FlatProfileKeyOnlyOnOwnEventsForScopedSubscriber(t *testing.T) {
+	srv := NewServer(&scopeParamsController{}, zap.NewNop().Sugar(), nil)
+	flat := func(evt internalRuntime.Event) map[string]any {
+		evt.Payload["profile"] = "work-full"
+		return evt.Payload
+	}
+	own := attributionEvent("scoped-ci", "mcp_agt_aaaa")
+	foreign := attributionEvent("client-zed", "mcp_cli_bbbb")
+	flat(own)
+	flat(foreign)
+	legacy := internalRuntime.Event{
+		Type:    internalRuntime.EventTypeActivityToolCallCompleted,
+		Payload: map[string]any{"server_name": "alpha", "profile": "work-full"},
+	}
+
+	scoped := agentCtxFor("scoped-ci", "mcp_agt_aaaa")
+	assert.Equal(t, "work-full", srv.renderEventPayloadForCaller(scoped, own)["profile"], "own events keep it")
+	assert.NotContains(t, srv.renderEventPayloadForCaller(scoped, foreign), "profile", "another token's slug is withheld")
+	assert.NotContains(t, srv.renderEventPayloadForCaller(scoped, legacy), "profile", "no ownership proof: withheld")
+
+	admin := auth.WithAuthContext(context.Background(), auth.AdminContext())
+	assert.Equal(t, "work-full", srv.renderEventPayloadForCaller(admin, foreign)["profile"])
+	assert.Equal(t, "work-full", srv.renderEventPayloadForCaller(admin, legacy)["profile"])
+	// Shared payload untouched.
+	assert.Equal(t, "work-full", foreign.Payload["profile"])
+}

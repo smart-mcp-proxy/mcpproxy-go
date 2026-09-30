@@ -497,6 +497,18 @@ func redactForeignIdentity(ctx context.Context, stored *storage.ActivityRecord, 
 	record.ProfileSource = ""
 	record.ClientID = ""
 	record.TokenName = ""
+	// The legacy Spec 057 metadata.profile (the /mcp/p/<slug> the call arrived
+	// on) names the profile just like the first-class field. Metadata may share
+	// its map with the stored record, so narrow a copy.
+	if _, ok := record.Metadata["profile"]; ok {
+		narrowed := make(map[string]interface{}, len(record.Metadata))
+		for k, v := range record.Metadata {
+			if k != "profile" {
+				narrowed[k] = v
+			}
+		}
+		record.Metadata = narrowed
+	}
 }
 
 // authArgString reads one internal `_auth_*` identity key (Spec 028) from a

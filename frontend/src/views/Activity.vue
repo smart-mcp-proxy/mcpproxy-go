@@ -1702,6 +1702,9 @@ const sessionsRaw = ref<MCPSession[]>([])
 const unresolvableSessions = ref(new Set<string>())
 
 let sessionsInFlight: Promise<void> | null = null
+// Set by onMounted: gates the "scope cleared -> refetch unscoped" branch of the
+// scope watcher, which also fires immediately during setup.
+let sessionsLoadedOnce = false
 
 const loadSessions = async () => {
   // Spec 107 FR-041 / T088: /sessions is an admin-only core door — a tenant
@@ -1715,7 +1718,11 @@ const loadSessions = async () => {
     try {
       const response = await api.getSessions(100)
       const sessions = response.data?.sessions ?? []
-      sessionsRaw.value = sessions
+      // While the Sessions view is narrowed by a scope filter, sessionsRaw
+      // belongs to loadScopedSessionsForView(): this general fetch is
+      // unscoped and would otherwise land last and show every session
+      // (live QA failure 1). The name-resolution map below stays unscoped.
+      if (!sessionsViewScopeActive()) sessionsRaw.value = sessions
       const next = new Map<string, { clientName?: string; startTime?: string; workspace?: string }>()
       for (const s of sessions) {
         const info = {
@@ -1788,13 +1795,23 @@ const sessionsScopeParams = computed(() => {
  * scope filter is both available and set, `GET /sessions` is narrowed by it
  * — never the general on-mount `loadSessions()` fetch above, which feeds
  * session-name resolution for every OTHER view too and must stay unscoped. */
-async function loadScopedSessionsForView(): Promise<void> {
-  if (activeView.value !== 'sessions') return
+/** True when the Sessions view is active and at least one available scope
+ * filter is set — the state in which `sessionsRaw` must hold the scoped rows. */
+function sessionsViewScopeActive(): boolean {
+  if (activeView.value !== 'sessions') return false
+  if (authStore.principalKind === 'tenant') return false
   const { profile, client, token } = sessionsScopeParams.value
-  if (!profile && !client && !token) return
-  if (authStore.principalKind === 'tenant') return
+  return Boolean(profile || client || token)
+}
+
+async function loadScopedSessionsForView(): Promise<void> {
+  if (!sessionsViewScopeActive()) return
+  const { profile, client, token } = sessionsScopeParams.value
   try {
     const response = await api.getSessions(100, undefined, { profile, client, token })
+    // Drop a response the user has already navigated/re-filtered away from.
+    const now = sessionsScopeParams.value
+    if (!sessionsViewScopeActive() || now.profile !== profile || now.client !== client || now.token !== token) return
     sessionsRaw.value = response.data?.sessions ?? []
   } catch {
     // Non-fatal — the unscoped fetch already in sessionsRaw degrades gracefully.
@@ -1803,7 +1820,15 @@ async function loadScopedSessionsForView(): Promise<void> {
 
 watch(
   () => [activeView.value, sessionsScopeParams.value.profile, sessionsScopeParams.value.client, sessionsScopeParams.value.token] as const,
-  () => { void loadScopedSessionsForView() },
+  () => {
+    if (sessionsViewScopeActive()) {
+      void loadScopedSessionsForView()
+    } else if (sessionsLoadedOnce) {
+      // Left the scoped state: sessionsRaw still holds the narrowed rows, so
+      // refetch the general unscoped list that every other view relies on.
+      void loadSessions()
+    }
+  },
   { immediate: true }
 )
 
@@ -2785,6 +2810,7 @@ onMounted(() => {
   // (rule 1: read before the first fetch) — this is that first fetch.
   loadActivities()
   loadSessions()
+  sessionsLoadedOnce = true
 
   // Listen for SSE activity events
   window.addEventListener('mcpproxy:activity', handleActivityEvent as EventListener)
