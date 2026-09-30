@@ -84,6 +84,7 @@
             </span>
           </div>
           <SettingsSection :key="`sec-${formEpoch}`" section-id="security" :fields="securityFields" :working="state.working" :original="state.original" />
+          <AnonymousProfileSetting :require-mcp-auth="!!state.working.require_mcp_auth" />
           <ScannerSettings />
         </div>
       </div>
@@ -192,6 +193,7 @@ import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import SettingsSection from '@/components/settings/SettingsSection.vue'
 import CatalogSourcesSettings from '@/components/CatalogSourcesSettings.vue'
 import ScannerSettings from '@/components/ScannerSettings.vue'
+import AnonymousProfileSetting from '@/components/settings/AnonymousProfileSetting.vue'
 import {
   SECURITY_FIELDS,
   GENERAL_FIELDS,
@@ -505,6 +507,8 @@ function handleConfigSaved() {
 // it, switch to that tab, open the enclosing accordion if it lives under
 // Advanced, then scroll to and briefly highlight the field row.
 function tabForFieldKey(key: string): string {
+  // Spec 108-i: the anonymous-callers control is not a fields.ts entry.
+  if (key === 'anonymous_profile') return 'security'
   if (securityFields.some((f) => f.key === key)) return 'security'
   if (generalFields.some((f) => f.key === key)) return 'general'
   if (advancedAccordions.value.some((a) => a.fields.some((f) => f.key === key))) return 'advanced'

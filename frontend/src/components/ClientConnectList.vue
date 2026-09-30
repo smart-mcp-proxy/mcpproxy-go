@@ -216,14 +216,66 @@
                 class="text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5 leading-relaxed"
               >{{ previews[client.id]!.entry_text }}</pre>
             </div>
-            <!-- API-key honesty (FR-004): masked in the preview, real key written. -->
-            <p
-              v-if="previews[client.id]!.contains_api_key"
-              :data-test="`client-preview-apikey-${client.id}`"
-              class="text-[11px] opacity-60 leading-relaxed"
-            >
-              This entry includes your API key (shown masked). The real key is written into the config so the client can authenticate.
-            </p>
+            <!-- Spec 108-i I15 (T042w): every connect mints the client its OWN
+                 credential, bound to a profile. The admin API key is never
+                 written, so there is no API-key notice any more. -->
+            <div v-if="!formFor(client.id).keyless" class="space-y-2" :data-test="`client-preview-credential-${client.id}`">
+              <p class="text-xs leading-relaxed" :data-test="`connect-credential-notice-${client.id}`">
+                MCPProxy writes a client credential for {{ client.name }}. The admin API key is never written.
+              </p>
+              <p class="text-xs font-mono opacity-80" :data-test="`connect-credential-${client.id}`">
+                Credential: {{ previews[client.id]!.credential || 'mcp_cli_••••' }} (client credential)
+              </p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 items-end">
+                <div class="form-control">
+                  <label class="label py-0" :for="`connect-profile-${client.id}`"><span class="label-text text-xs font-medium">Profile</span></label>
+                  <select
+                    :id="`connect-profile-${client.id}`"
+                    v-model="formFor(client.id).profile"
+                    class="select select-bordered select-xs w-full"
+                    :data-test="`connect-profile-select-${client.id}`"
+                    @change="onProfileChange(client.id)"
+                  >
+                    <option value="">All servers</option>
+                    <option v-for="profile in profilesStore.profiles" :key="profile.name" :value="profile.name">{{ profile.title || profile.name }}{{ profile.title ? ` (${profile.name})` : '' }}</option>
+                  </select>
+                </div>
+                <label class="label cursor-pointer justify-start gap-2 py-0" :title="formFor(client.id).profile ? '' : 'Choose a profile to lock'">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    class="toggle toggle-xs"
+                    v-model="formFor(client.id).locked"
+                    :disabled="!formFor(client.id).profile"
+                    :aria-label="`Lock ${client.name} to this profile`"
+                    :data-test="`connect-lock-switch-${client.id}`"
+                    @change="onBindingToggle(client.id)"
+                  />
+                  <span class="label-text text-xs">Locked</span>
+                </label>
+              </div>
+              <p class="text-[11px] opacity-70" :data-test="`connect-binding-summary-${client.id}`">
+                Profile: {{ formFor(client.id).profile ? profilesStore.titleFor(formFor(client.id).profile) : 'All servers' }} &middot; Mode: {{ previews[client.id]!.mode || (formFor(client.id).profile && formFor(client.id).locked ? 'locked' : 'switchable') }}
+              </p>
+              <p
+                v-if="showMgmtNotice(client.id)"
+                class="text-xs text-warning leading-relaxed"
+                :data-test="`connect-mgmt-notice-${client.id}`"
+              >{{ MGMT_NOTICE }}</p>
+            </div>
+            <!-- Keyless (unidentified client): only while authentication is off. -->
+            <details v-if="requireMcpAuth === false" class="text-xs" :data-test="`connect-advanced-${client.id}`">
+              <summary class="cursor-pointer opacity-70">Advanced</summary>
+              <label class="label cursor-pointer justify-start gap-2">
+                <input v-model="formFor(client.id).keyless" type="checkbox" class="checkbox checkbox-xs" :data-test="`connect-keyless-${client.id}`" @change="onBindingToggle(client.id)" />
+                <span class="label-text text-xs">Connect without a credential (unidentified client)</span>
+              </label>
+            </details>
+            <GuardRefusal v-if="guardOf(client.id)" :refusal="guardOf(client.id)!" />
+            <div v-else-if="conflictOf(client.id)" role="alert" class="alert alert-error text-xs flex-col items-start" :data-test="`connect-conflict-${client.id}`">
+              <span>{{ conflictOf(client.id)!.message }}</span>
+              <span>Revoke or delete token <code>{{ conflictOf(client.id)!.conflicting_token }}</code>, then connect again.</span>
+            </div>
             <div class="flex items-center gap-2 pt-1">
               <button
                 :data-test="`client-preview-confirm-${client.id}`"
@@ -452,6 +504,20 @@
         <div class="modal-box max-w-xl">
           <h3 class="font-bold text-lg">Review {{ bulkPreview.length }} client changes</h3>
           <p class="text-sm opacity-70 mt-2">Nothing is written until you confirm every change below. Each existing config is backed up first.</p>
+          <div class="mt-3 flex flex-wrap items-end gap-3" data-test="connect-bulk-binding">
+            <div class="form-control">
+              <label class="label py-0" for="connect-bulk-profile"><span class="label-text text-xs font-medium">Profile for every client</span></label>
+              <select id="connect-bulk-profile" v-model="bulkForm.profile" class="select select-bordered select-xs" data-test="connect-bulk-profile-select" @change="onBulkProfileChange">
+                <option value="">All servers</option>
+                <option v-for="profile in profilesStore.profiles" :key="profile.name" :value="profile.name">{{ profile.title || profile.name }}</option>
+              </select>
+            </div>
+            <label class="label cursor-pointer justify-start gap-2 py-0">
+              <input v-model="bulkForm.locked" type="checkbox" role="switch" class="toggle toggle-xs" :disabled="!bulkForm.profile" aria-label="Lock every client to this profile" data-test="connect-bulk-lock-switch" @change="onBulkLockChange" />
+              <span class="label-text text-xs">Locked</span>
+            </label>
+          </div>
+          <p v-if="bulkMgmtNotice" class="text-xs text-warning mt-2" data-test="connect-bulk-mgmt-notice">{{ MGMT_NOTICE }}</p>
           <div class="mt-3 space-y-2 max-h-64 overflow-y-auto">
             <div v-for="entry in bulkPreview" :key="entry.id" class="rounded border border-base-300 p-2">
               <p class="text-sm font-medium">{{ entry.client.name }} <span v-if="entry.preview.entry_exists" class="text-warning">(will replace existing entry)</span></p>
@@ -479,16 +545,25 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, nextTick, watch } from 'vue'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { useDialogOpen } from '@/composables/useDialogOpen'
-import type { ClientStatus, AccessState, ConnectPreview } from '@/types'
+import { useProfilesStore } from '@/stores/profiles'
+import { useClientsStore } from '@/stores/clients'
+import GuardRefusal from '@/components/GuardRefusal.vue'
+import { describeError, isGuardRefusal } from '@/utils/profiles'
+import type { ApiError } from '@/services/api'
+import type { ClientStatus, AccessState, ConnectPreview, ConnectOptions } from '@/types'
 
 interface Props {
   show: boolean
   embedded?: boolean
+  // Spec 108-i I8: a client to focus on open (the Clients row's "Upgrade to
+  // client credential" / "Reconnect" call to action): its preview opens at
+  // once, so the profile picker is in front of the operator.
+  focusClient?: string
 }
 
 interface Emits {
@@ -501,6 +576,20 @@ const emit = defineEmits<Emits>()
 const { dialogEl } = useDialogOpen(() => !props.embedded && props.show, () => close())
 const systemStore = useSystemStore()
 const onboarding = useOnboardingStore()
+const profilesStore = useProfilesStore()
+const clientsStore = useClientsStore()
+
+// Spec 108-i I15 (D5): what a client without management tools can no longer do.
+const MGMT_NOTICE = 'This client can no longer add, change or restart servers; manage servers from the Web UI, the macOS app or the CLI'
+// Known only once GET /config answers; keyless is offered only for `false`.
+const requireMcpAuth = ref<boolean | null>(null)
+// `touched` is set once the operator changes a binding control. Until then the
+// request carries no profile/mode/keyless at all, so a fresh connect is All
+// servers and a reconnect keeps the credential's current binding (Spec 108-c2).
+interface ConnectForm { profile: string; locked: boolean; keyless: boolean; touched: boolean }
+const forms = reactive<Record<string, ConnectForm>>({})
+const connectRefusal = ref<Record<string, ApiError>>({})
+const bulkForm = reactive({ profile: '', locked: false, touched: false })
 
 const clients = ref<ClientStatus[]>([])
 const error = ref<string | null>(null)
@@ -676,14 +765,94 @@ async function fetchClients() {
   }
 }
 
+// Spec 108-i I15: the binding a connect asks for. A client that already holds a
+// client credential starts from its current binding, so reconnecting it never
+// silently resets it to All servers; anything else starts at All servers.
+function initialForm(clientId: string): ConnectForm {
+  const row = clientsStore.clients.find(c => c.id === clientId)
+  const bound = row?.credential_state === 'client'
+  return { profile: bound ? (row?.profile ?? '') : '', locked: bound ? row?.profile_mode === 'locked' : false, keyless: false, touched: false }
+}
+
+function formFor(clientId: string): ConnectForm {
+  if (!forms[clientId]) forms[clientId] = initialForm(clientId)
+  return forms[clientId]
+}
+
+type Intent = { profile?: string; mode?: 'locked' | 'switchable'; keyless?: boolean }
+function intentFor(clientId: string): Intent {
+  const form = formFor(clientId)
+  if (!form.touched) return {}
+  if (form.keyless) return { keyless: true }
+  return { profile: form.profile, mode: form.profile && form.locked ? 'locked' : 'switchable' }
+}
+
+// D5: the client gets no management tools unless its profile says so.
+function showMgmtNotice(clientId: string): boolean {
+  const form = formFor(clientId)
+  if (form.keyless) return false
+  return !form.profile || profilesStore.byName.get(form.profile)?.management_tools !== true
+}
+const bulkMgmtNotice = computed(() => !bulkForm.profile || profilesStore.byName.get(bulkForm.profile)?.management_tools !== true)
+
+// Choosing a profile turns the Lock switch on (All servers can only be
+// switchable), and the preview is fetched again for the new binding.
+async function onProfileChange(clientId: string) {
+  const form = formFor(clientId)
+  form.touched = true
+  form.locked = Boolean(form.profile)
+  await refreshPreview(clientId)
+}
+
+function guardOf(clientId: string): ApiError | undefined {
+  const err = connectRefusal.value[clientId]
+  return err && isGuardRefusal(err) ? err : undefined
+}
+function conflictOf(clientId: string): ApiError | undefined {
+  const err = connectRefusal.value[clientId]
+  return err?.conflicting_token ? err : undefined
+}
+
+function setRefusal(clientId: string, err: ApiError | null) {
+  const next = { ...connectRefusal.value }
+  if (err) next[clientId] = err
+  else delete next[clientId]
+  connectRefusal.value = next
+}
+
+// The preview is fetched with the intent only when there is one.
+function fetchPreview(clientId: string, intent: Intent) {
+  return Object.keys(intent).length ? api.getConnectPreview(clientId, intent) : api.getConnectPreview(clientId)
+}
+
+// Lock and keyless toggles come through here; they are binding changes.
+async function onBindingToggle(clientId: string) {
+  formFor(clientId).touched = true
+  await refreshPreview(clientId)
+}
+
+async function refreshPreview(clientId: string) {
+  setRefusal(clientId, null)
+  try {
+    const response = await fetchPreview(clientId, intentFor(clientId))
+    if (response.success && response.data) previews.value = { ...previews.value, [clientId]: response.data }
+  } catch (err) {
+    setRefusal(clientId, err as ApiError)
+  }
+}
+
 // Spec 078 US1: clicking the row's Connect fetches the preview first and shows
 // the confirm/cancel panel — no file is written until the user confirms. A
 // denied read (403) is surfaced as the access-state banner via checkAccess.
 async function startConnect(clientId: string) {
   previewLoading[clientId] = true
   previewError.value = { ...previewError.value, [clientId]: '' }
+  setRefusal(clientId, null)
+  // The row's current binding lives in the clients store; make sure it is there.
+  if (!clientsStore.clients.some(c => c.id === clientId)) await clientsStore.refreshPresence()
+  delete forms[clientId]
   try {
-    const response = await api.getConnectPreview(clientId)
+    const response = await fetchPreview(clientId, intentFor(clientId))
     if (response.success && response.data) {
       previews.value = { ...previews.value, [clientId]: response.data }
     } else {
@@ -693,7 +862,7 @@ async function startConnect(clientId: string) {
       void checkAccess(clientId)
     }
   } catch (err) {
-    previewError.value = { ...previewError.value, [clientId]: err instanceof Error ? err.message : 'Failed to load preview' }
+    previewError.value = { ...previewError.value, [clientId]: describeError(err, 'Failed to load preview') }
     void checkAccess(clientId)
   } finally {
     previewLoading[clientId] = false
@@ -721,7 +890,7 @@ async function confirmConnect(clientId: string) {
   const force = preview?.entry_exists === true
   bulkBackups.value = []
   copiedBulkClient.value = null
-  const outcome = await connect(clientId, force)
+  const outcome = await connect(clientId, force, { intent: { ...intentFor(clientId), precondition_token: preview?.precondition_token } })
   // Spec 078 US3: a successful single connect becomes undoable in this session.
   if (outcome.ok) {
     lastConnect.value = {
@@ -733,7 +902,9 @@ async function confirmConnect(clientId: string) {
     }
     undoPanelOpen.value = false
   }
-  clearPreview(clientId)
+  // A refused connect keeps its panel open so the refusal (and its fix buttons)
+  // stays next to the profile choice; a success closes it.
+  if (outcome.ok) clearPreview(clientId)
 }
 
 // After a successful write the stat-only listing still reports connected=false
@@ -764,7 +935,7 @@ async function refreshAfterWrite(clientId: string) {
 async function connect(
   clientId: string,
   force = false,
-  { verify = true }: { verify?: boolean } = {}
+  { verify = true, intent = {} }: { verify?: boolean; intent?: ConnectOptions } = {}
 ): Promise<{ ok: boolean; backupPath: string | null; configPath: string; reloadHint: string }> {
   loading.clients[clientId] = true
   resultMessage.value = ''
@@ -775,7 +946,11 @@ async function connect(
   undoPanelOpen.value = false
 
   try {
-    const response = await api.connectClient(clientId, 'mcpproxy', force)
+    // A fourth argument only when the request carries something beyond the default.
+    const extra = Object.fromEntries(Object.entries(intent).filter(([, value]) => value !== undefined)) as ConnectOptions
+    const response = Object.keys(extra).length
+      ? await api.connectClient(clientId, 'mcpproxy', force, extra)
+      : await api.connectClient(clientId, 'mcpproxy', force)
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Connected to ${clientId}`
       resultSuccess.value = true
@@ -803,6 +978,9 @@ async function connect(
   } catch (err) {
     resultMessage.value = err instanceof Error ? err.message : 'Unknown error'
     resultSuccess.value = false
+    // A guard refusal or a token-name conflict is shown under the preview.
+    const refused = err as ApiError
+    if (refused?.conflicting_token || isGuardRefusal(refused)) setRefusal(clientId, refused)
     void checkAccess(clientId)
   } finally {
     loading.clients[clientId] = false
@@ -967,7 +1145,7 @@ async function prepareConnectAll() {
   try {
     const responses = await Promise.all(targets.map(async client => ({
       client,
-      response: await api.getConnectPreview(client.id),
+      response: await fetchPreview(client.id, bulkIntent()),
     })))
     const failed = responses.find(({ response }) => !response.success || !response.data)
     if (failed) {
@@ -984,6 +1162,33 @@ async function prepareConnectAll() {
   }
 }
 
+// The bulk path gives every selected client the same binding.
+function bulkIntent(): Intent {
+  if (!bulkForm.touched) return {}
+  return { profile: bulkForm.profile, mode: bulkForm.profile && bulkForm.locked ? 'locked' : 'switchable' }
+}
+function onBulkProfileChange() {
+  bulkForm.touched = true
+  bulkForm.locked = Boolean(bulkForm.profile)
+  void refreshBulkPreview()
+}
+function onBulkLockChange() {
+  bulkForm.touched = true
+  void refreshBulkPreview()
+}
+async function refreshBulkPreview() {
+  bulkPreviewLoading.value = true
+  try {
+    const responses = await Promise.all(bulkPreview.value.map(async entry => ({ entry, response: await fetchPreview(entry.id, bulkIntent()) })))
+    bulkPreview.value = responses.map(({ entry, response }) => (response.success && response.data ? { ...entry, preview: response.data } : entry))
+  } catch (err) {
+    resultMessage.value = describeError(err, 'Could not preview client changes')
+    resultSuccess.value = false
+  } finally {
+    bulkPreviewLoading.value = false
+  }
+}
+
 async function connectAll() {
   const planned = [...bulkPreview.value]
   if (!planned.length) return
@@ -994,7 +1199,7 @@ async function connectAll() {
   // connectableClients computed while we iterate it.
   const collected: Array<{ id: string; name: string; backupPath: string | null; reloadHint: string }> = []
   for (const { client, preview } of planned) {
-    const outcome = await connect(client.id, preview.entry_exists === true, { verify: false })
+    const outcome = await connect(client.id, preview.entry_exists === true, { verify: false, intent: { ...bulkIntent(), precondition_token: preview.precondition_token } })
     if (outcome.ok) {
       collected.push({ id: client.id, name: client.name, backupPath: outcome.backupPath, reloadHint: outcome.reloadHint })
     }
@@ -1053,10 +1258,30 @@ function close() {
 // Fetch client list when modal opens. Also refresh the onboarding state so
 // connected_client_ids is current — this is the wizard-scoped, #706-safe path
 // that already content-resolves connections (MCP-2952).
+async function loadRequireMcpAuth() {
+  try {
+    const response = await api.getConfig()
+    if (response.success && response.data) requireMcpAuth.value = !!(response.data.config ?? {}).require_mcp_auth
+  } catch {
+    requireMcpAuth.value = null
+  }
+}
+
+async function openSequence() {
+  await fetchClients()
+  const id = props.focusClient
+  if (!id || !clients.value.some(c => c.id === id)) return
+  await startConnect(id)
+  // Bring the row into view once its preview has rendered.
+  void nextTick(() => document.querySelector(`[data-test="client-row-${id}"]`)?.scrollIntoView?.({ block: 'center' }))
+}
+
 watch(() => props.show, (newVal) => {
   if (newVal) {
-    fetchClients()
+    void openSequence()
     void onboarding.fetchState()
+    if (!profilesStore.loaded) void profilesStore.fetchProfiles()
+    void loadRequireMcpAuth()
     resultMessage.value = ''
     resultReloadHint.value = ''
     resultBackupPath.value = undefined
@@ -1065,6 +1290,9 @@ watch(() => props.show, (newVal) => {
     copiedBulkClient.value = null
     previews.value = {}
     previewError.value = {}
+    connectRefusal.value = {}
+    for (const id of Object.keys(forms)) delete forms[id]
+    Object.assign(bulkForm, { profile: '', locked: false, touched: false })
     lastConnect.value = null
     undoPanelOpen.value = false
   }
