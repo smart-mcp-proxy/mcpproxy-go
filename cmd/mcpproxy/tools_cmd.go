@@ -357,7 +357,7 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 
 	// Enable transport tracing if requested
 	if traceTransport {
-		transport.GlobalTraceEnabled = true
+		transport.SetGlobalTraceEnabled(true)
 		fmt.Fprintln(os.Stderr, "HTTP/SSE TRANSPORT TRACING ENABLED")
 		fmt.Fprintln(os.Stderr, "   All HTTP requests/responses and SSE frames will be logged")
 		fmt.Fprintln(os.Stderr)

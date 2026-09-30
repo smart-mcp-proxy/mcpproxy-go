@@ -89,6 +89,7 @@ func LoadFromFile(configPath string) (*Config, error) {
 	// Migrate an unrecognized per-server trust_mode to the fail-closed tier
 	// BEFORE validating: a bogus value must not brick an existing install.
 	warnNormalizedTrustModes(cfg)
+	warnNormalizedForwardHeaders(cfg)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -111,6 +112,17 @@ func warnNormalizedTrustModes(cfg *Config) {
 		fmt.Fprintf(os.Stderr,
 			"WARN: server %q has an unrecognized trust_mode %q; treating it as %q (valid: %s)\n",
 			n.Server, n.Original, TrustModeManual, strings.Join(ValidTrustModes(), ", "))
+	}
+}
+
+// warnNormalizedForwardHeaders applies NormalizeForwardHeaders and reports each
+// dropped entry on stderr. Names only, never values; boot never fails (Spec 112
+// FR-005b).
+func warnNormalizedForwardHeaders(cfg *Config) {
+	for _, n := range NormalizeForwardHeaders(cfg) {
+		fmt.Fprintf(os.Stderr,
+			"WARN: server %q forward_headers: dropped unusable entries %q (invalid, denied, duplicate, over the 32-entry cap, or colliding with a static header)\n",
+			n.Server, strings.Join(n.Dropped, ", "))
 	}
 }
 
@@ -224,6 +236,7 @@ func LoadWithPath() (*Config, string, error) {
 
 	// Same migration as LoadFromFile: normalize-and-warn, never fail the load.
 	warnNormalizedTrustModes(cfg)
+	warnNormalizedForwardHeaders(cfg)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -767,6 +780,18 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// Override data directory from environment (for backward compatibility)
 	value = os.Getenv("MCPPROXY_DATA")
 	envOverride(b, cfg, FieldDataDir, value != "", value)
+
+	// Spec 112 FR-003: MCPPROXY_FORWARD_CLIENT_HEADERS=false|0|off disables
+	// client header forwarding for this process. Only the disabling vocabulary
+	// overrides; anything else leaves the file value (fail-open on typos would
+	// silently enable, so an unrecognized value is ignored, not applied).
+	var fwd *bool
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvForwardClientHeaders))) {
+	case falseValue, "0", "off":
+		off := false
+		fwd = &off
+	}
+	envOverride(b, cfg, FieldForwardClientHeaders, fwd != nil, fwd)
 
 	// Override trusted hosts for reverse-proxy deployments (GH #898).
 	// Comma-separated list of Host header values accepted on loopback listeners.

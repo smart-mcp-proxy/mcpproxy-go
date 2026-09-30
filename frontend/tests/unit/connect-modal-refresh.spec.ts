@@ -89,6 +89,7 @@ describe('ConnectModal — state refresh after connect/disconnect', () => {
     // Default: the verification read fails, so the refreshed onboarding state
     // is the only thing that can flip the row.
     ;(api.getConnectClientStatus as any).mockResolvedValue({ success: false, error: 'nope' })
+    ;(api.getConnectPreview as any).mockResolvedValue({ success: true, data: { config_path: '/tmp/mcp.json', entry_exists: false, access_state: 'accessible', entry_text: '{}' } })
     ;(api.connectClient as any).mockImplementation(async (id: string) => {
       connectedIds.push(id)
       return connectOk(id)
@@ -103,12 +104,12 @@ describe('ConnectModal — state refresh after connect/disconnect', () => {
     const wrapper = await openModal(pinia)
     expect(wrapper.find('[data-test="connect-all"]').text()).toBe('Connect 2 clients')
 
-    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-test="connect-preview-confirm-cursor"]').trigger('click')
+    await wrapper.find('[data-test="client-preview-confirm-cursor"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.find('[data-test="connect-start-cursor"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-cursor"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="connect-disconnect-cursor"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="connect-all"]').text()).toBe('Connect 1 client')
   })
@@ -117,10 +118,12 @@ describe('ConnectModal — state refresh after connect/disconnect', () => {
     const wrapper = await openModal(pinia)
     await wrapper.find('[data-test="connect-all"]').trigger('click')
     await flushPromises()
+    await wrapper.find('[data-test="connect-bulk-preview-confirm"]').trigger('click')
+    await flushPromises()
 
     expect(api.connectClient).toHaveBeenCalledTimes(2)
-    expect(wrapper.find('[data-test="connect-start-cursor"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="connect-start-codex"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-cursor"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="connect-codex"]').exists()).toBe(false)
     const all = wrapper.find('[data-test="connect-all"]')
     expect(all.text()).toBe('Connect All')
     expect(all.attributes('disabled')).toBeDefined()
@@ -140,13 +143,15 @@ describe('ConnectModal — state refresh after connect/disconnect', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-test="connect-disconnect-cursor"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="connect-start-cursor"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="connect-cursor"]').exists()).toBe(true)
   })
 
   it('verifies the endpoint automatically after a connect', async () => {
     ;(api.getConnectClientStatus as any).mockImplementation(async (id: string) => resolvedRow(id))
     const wrapper = await openModal(pinia)
     await wrapper.find('[data-test="connect-all"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-test="connect-bulk-preview-confirm"]').trigger('click')
     await flushPromises()
 
     expect(api.getConnectClientStatus).toHaveBeenCalledWith('cursor')
@@ -164,13 +169,15 @@ describe('ConnectModal — state refresh after connect/disconnect', () => {
       data: { client_id: 'cursor', config_path: '/Users/test/.cursor/mcp.json', file_exists: true, entry_exists: false, server_name: 'mcpproxy', entry: {} },
     })
     const wrapper = await openModal(pinia)
-    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
     await flushPromises()
-    await wrapper.find('[data-test="connect-preview-confirm-cursor"]').trigger('click')
+    await wrapper.find('[data-test="client-preview-confirm-cursor"]').trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-test="connect-endpoint-cursor"]').exists()).toBe(true)
 
     await wrapper.find('[data-test="connect-all"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-test="connect-bulk-preview-confirm"]').trigger('click')
     await flushPromises()
     expect(api.connectClient).toHaveBeenLastCalledWith('codex', 'mcpproxy', false)
     expect(wrapper.find('[data-test="connect-endpoint-cursor"]').text()).toContain(PROXY)
@@ -185,6 +192,6 @@ describe('ConnectModal — state refresh after connect/disconnect', () => {
     await flushPromises()
     // No success → no onboarding refresh.
     expect((api.getOnboardingState as any).mock.calls.length).toBe(before)
-    expect(wrapper.find('[data-test="connect-start-cursor"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="connect-cursor"]').exists()).toBe(true)
   })
 })

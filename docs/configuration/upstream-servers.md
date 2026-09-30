@@ -118,6 +118,7 @@ than stopping the daemon from booting.
 | `auth_broker` | object | No | Server-edition per-user `oauth_connect` credential store — the stored credential is **not** injected into upstream calls. See [Auth Broker](../features/auth-broker.md). `mode` must be `oauth_connect`; `authorization_endpoint` and `token_endpoint` are required. |
 | `health_check_interval` | duration | No | Per-server override for the liveness `ping` cadence (`0s` disables; falls back to the global value, then the `30s` default). No-op for Docker-isolated servers. |
 | `tool_discovery_interval` | duration | No | Per-server override for the `tools/list` re-index sweep (`0s` disables; falls back to the global value, then the `5m` default). |
+| `forward_headers` | array | No | Names of inbound MCP client HTTP headers to forward to this server on `tools/call` (streamable HTTP only; ignored for `stdio` and `sse`). See [Client Header Forwarding](#client-header-forwarding). |
 
 See [Tool Discovery & Health Check Intervals](/configuration/config-file#tool-discovery--health-check-intervals) for the global defaults, accepted ranges, and trade-offs.
 
@@ -315,6 +316,39 @@ When mcpproxy connects to an upstream it substitutes the reference with
 the actual secret. The reference itself never reaches the upstream MCP
 server. See [Keyring Integration](../features/keyring-integration.md)
 for the full secret-storage story.
+
+## Client Header Forwarding {#client-header-forwarding}
+
+MCPProxy can forward selected HTTP headers from the MCP client's request to an upstream server, for example `X-Tenant-Id` or a per-user `X-User-Id`, so an upstream that keys behaviour on a header can see it. It is enabled by default but inert until a server lists header names.
+
+```json
+{
+  "forward_client_headers": true,
+  "mcpServers": [
+    {
+      "name": "tenant-api",
+      "url": "https://api.example.com/mcp",
+      "protocol": "streamable-http",
+      "headers": { "Authorization": "Bearer static-token" },
+      "forward_headers": ["X-Tenant-Id", "X-User-Id"]
+    }
+  ]
+}
+```
+
+- **Format**: `forward_headers` is a list of header **names** (case-insensitive, exact match, no wildcards, at most 32 per server). Values are never configured; they come from each inbound request.
+- **Default and switches**: the top-level `forward_client_headers` defaults to on when absent. Set it to `false`, or start with `MCPPROXY_FORWARD_CLIENT_HEADERS=false|0|off`, to stop all forwarding without editing servers. A server with no `forward_headers` forwards nothing. Changes apply to the next call, with no reconnect.
+- **Precedence**: forwarded headers have the lowest precedence. They never replace a header that MCPProxy, OAuth or the server's static `headers` set. A name that equals a static header key is rejected on write and skipped at runtime, so the configured value always wins. On OAuth servers the upstream always receives MCPProxy's own token.
+- **Deny list**: these are never forwarded, even if listed: `Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Cookie`, `Set-Cookie`, `Forwarded`, `X-Real-Ip`, `X-Forwarded-*`; `Host`, `Connection` and other hop-by-hop headers (and any name in the request's own `Connection` header), `Proxy-*`; `Content-*`, `Accept`, `Accept-Encoding`, `Range`, `If-*`, `Last-Event-Id`, `Mcp-*`; `Traceparent`, `Tracestate`, `Baggage`, `X-Request-Id`, `X-Mcpproxy-*`, `Sec-*`; `User-Agent`, `Origin`, `Referer`. The filter is re-applied on every request; write-time validation is only a convenience.
+- **Transports**: streamable HTTP only (`protocol: http`, `streamable-http`, or `auto` resolving to it). Header forwarding is not implemented for the deprecated `sse` transport (SSE upstreams still work, they just never receive forwarded headers), and `stdio` servers have no HTTP request to carry headers. An allowlist on either is ignored, and a warning names the header.
+- **Which upstream requests carry headers**: only the `tools/call` request made for a call that arrives on an MCP endpoint (`/mcp`, `/mcp/all` and the other MCP mounts): `call_tool_read|write|destructive`, direct `server__tool` calls, and `code_execution` sub-calls. These never carry them: `initialize`, `tools/list`, prompts, pings and notifications, reconnects (including `reconnect_on_use`), health checks, background discovery and indexing, `upstream_servers refresh`, quarantine inspection, the REST API (`/api/v1/tools/call` and friends), the CLI, and OAuth flows.
+- **Limits**: each value at most 4 KiB, 16 KiB total per request. Oversized values, empty values and values with control characters are dropped. Repeated inbound headers are joined with `, `.
+- **Redirects**: if an upstream redirects a `tools/call` to a different origin, the forwarded headers are removed from the redirected request.
+- **Redaction**: MCPProxy never writes forwarded values to logs, the activity log, tool-call records, audit lines, events or error text; only names appear. Trace logging masks them too. If an upstream echoes a value back in an error or a result, the copy MCPProxy stores or logs has it replaced by `[forwarded:<Name>]`. This is best effort: it catches the exact value (and its JSON-escaped form), not a transformed one (base64, URL-encoding, hashing, splitting), and values shorter than 4 characters are only caught in name-anchored forms. The client still receives the unmodified result. Results that came from a call with forwarded headers are only served from `read_cache` to a request carrying the same forwarded values.
+- **Trust warning**: forwarded values are **unverified client assertions**, not authenticated identity. Any client that can reach `/mcp` can send any value, including another user's `X-User-Id`. MCPProxy copies values and does not check them. Only forward a header to an upstream that authenticates it some other way, or when every client that can reach MCPProxy is trusted to assert it.
+- **Limitations**: MCPProxy keeps one shared upstream session per server, so `initialize` never carries client headers and session-bound identity is not supported. Sampling, elicitation and the session-close request carry none. Plain `http://` to a non-loopback upstream sends values in cleartext.
+
+To verify locally, run `mcpfixture --transport http --port 18080 --echo-headers` and call its `echo_headers` tool through MCPProxy; it returns the headers the upstream received.
 
 ## Docker Isolation
 

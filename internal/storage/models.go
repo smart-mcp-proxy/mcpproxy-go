@@ -122,6 +122,12 @@ type OnboardingState struct {
 	// Verify step / presence layer to tell "connected, never seen" apart from
 	// "connected seconds ago, hasn't reconnected yet".
 	ClientConnectedAt map[string]time.Time `json:"client_connected_at,omitempty"`
+
+	// ClientLastSeen records the latest MCP initialize for a recognised client
+	// alias. It is intentionally kept with onboarding state: presence is a
+	// local UI concern and must still work when telemetry is disabled.
+	ClientLastSeen       map[string]time.Time `json:"client_last_seen,omitempty"`
+	ClientDisconnectedAt map[string]time.Time `json:"client_disconnected_at,omitempty"`
 }
 
 // Meta keys
@@ -220,6 +226,11 @@ type UpstreamRecord struct {
 	// ExposePrompts is the per-server override for exposing upstream prompts
 	// through mcpproxy's aggregated prompts/list and prompts/get.
 	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// ForwardHeaders (Spec 112) is the per-server allowlist of inbound MCP
+	// client header NAMES to forward on tools/call. Names only, never values.
+	// Persisted here because SaveConfiguration rebuilds the JSON server list
+	// from these records: a field absent here is wiped on the next mutation.
+	ForwardHeaders []string `json:"forward_headers,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics

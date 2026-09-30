@@ -161,6 +161,17 @@ components:
           $ref: '#/components/schemas/secureenv.EnvConfig'
         features:
           $ref: '#/components/schemas/config.FeatureFlags'
+        forward_client_headers:
+          description: |-
+            ForwardClientHeaders is the global switch for client header forwarding
+            (Spec 112): copying allowlisted headers from the inbound /mcp request into
+            the upstream tools/call request. nil (absent) means enabled; because every
+            per-server forward_headers allowlist is empty by default, the default
+            forwards nothing. false disables forwarding for every server. Read via
+            IsClientHeaderForwardingEnabled(); MCPPROXY_FORWARD_CLIENT_HEADERS
+            overrides it for the process. Distinct from ForwardedHeaders/trusted_proxies
+            (Spec 107), which trusts inbound X-Forwarded-*.
+          type: boolean
         forward_proxy_env:
           description: |-
             ForwardProxyEnv opts in to forwarding the ambient HTTP(S)/ALL/NO/FTP proxy
@@ -1081,6 +1092,18 @@ components:
             default-aggregate behavior (included if the server advertises
             Capabilities.Prompts); false excludes it regardless of capability.
           type: boolean
+        forward_headers:
+          description: |-
+            ForwardHeaders lists inbound MCP-client header NAMES (never values) that
+            are copied into this server's upstream tools/call requests (Spec 112).
+            Exact names, case-insensitive, at most 32, no wildcards. Empty forwards
+            nothing. Only HTTP-based transports (http, streamable-http) forward; the
+            deny list (Authorization, Host, hop-by-hop, ...) is enforced at runtime
+            regardless of what is configured here.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         headers:
           additionalProperties:
             type: string
@@ -2786,6 +2809,15 @@ components:
             default aggregation". Surfaced on GET so a caller that PATCHed the override
             can read it back; PATCH/POST accept it via AddServerRequest.
           type: boolean
+        forward_headers:
+          description: |-
+            ForwardHeaders mirrors config.ServerConfig.ForwardHeaders (Spec 112): the
+            allowlist of inbound MCP client header NAMES forwarded to this server on
+            tools/call. Names only, never values. Omitted when empty.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         headers:
           additionalProperties:
             type: string
@@ -3430,6 +3462,17 @@ components:
             a nil pointer means "leave unchanged" on PATCH (and "inherit the default
             aggregate behavior" on create); a present value (including false) is applied.
           type: boolean
+        forward_headers:
+          description: |-
+            ForwardHeaders is the per-server allowlist of inbound MCP client header
+            NAMES forwarded to this server on tools/call (Spec 112). Names only, never
+            values. On PATCH a nil slice (field omitted) leaves the stored allowlist
+            unchanged and an empty array ([]) clears it. Invalid, denied, duplicate
+            and static-header-colliding names are rejected with 400.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         headers:
           additionalProperties:
             type: string
@@ -3795,6 +3838,12 @@ components:
             matching the field's "bounded by the registry" invariant
             (data-model.md §7).
           type: string
+        disconnected_client_id:
+          description: |-
+            DisconnectedClientID relays a successful local CLI disconnect to a running
+            daemon, which cannot observe the CLI's direct config-file edit itself.
+            Like ConnectedClientID, it is bounded to the fixed client registry.
+          type: string
         engaged:
           description: |-
             Engaged marks the wizard as engaged (completed or explicitly skipped).
@@ -4049,6 +4098,18 @@ components:
             concurrent onboarding/mark write can never drop it. Consumed by the
             Verify step / presence layer to tell "connected, never seen" apart from
             "connected seconds ago, hasn't reconnected yet".
+          type: object
+        client_disconnected_at:
+          additionalProperties:
+            type: string
+          type: object
+        client_last_seen:
+          additionalProperties:
+            type: string
+          description: |-
+            ClientLastSeen records the latest MCP initialize for a recognised client
+            alias. It is intentionally kept with onboarding state: presence is a
+            local UI concern and must still work when telemetry is disabled.
           type: object
         connect_step_status:
           description: |-
@@ -5016,6 +5077,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.APIResponse'
           description: List of ClientStatus objects
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -5100,6 +5167,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.APIResponse'
           description: ClientStatus
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
         "404":
           content:
             application/json:
@@ -5230,7 +5303,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Permission denied (macOS App-Data block)
+          description: Administrator credentials required or access denied by macOS
+            App Data
         "404":
           content:
             application/json:

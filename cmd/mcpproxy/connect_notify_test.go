@@ -33,11 +33,16 @@ func newOnboardingMarkServer(t *testing.T, key string) (srv *httptest.Server, ma
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/onboarding/mark":
 			body, _ := io.ReadAll(r.Body)
 			var req struct {
-				ConnectedClientID string `json:"connected_client_id"`
+				ConnectedClientID    string `json:"connected_client_id"`
+				DisconnectedClientID string `json:"disconnected_client_id"`
 			}
 			_ = json.Unmarshal(body, &req)
+			clientID := req.ConnectedClientID
+			if clientID == "" && req.DisconnectedClientID != "" {
+				clientID = "disconnect:" + req.DisconnectedClientID
+			}
 			mu.Lock()
-			received = append(received, req.ConnectedClientID)
+			received = append(received, clientID)
 			mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
@@ -74,6 +79,18 @@ func TestNotifyClientConnected_RelaysToReachableDaemon(t *testing.T) {
 	got := marks()
 	if len(got) != 1 || got[0] != "claude-code" {
 		t.Fatalf("expected one relay for claude-code, got %v", got)
+	}
+}
+
+func TestNotifyClientDisconnected_RelaysToReachableDaemon(t *testing.T) {
+	clearDaemonEnv(t)
+	srv, marks := newOnboardingMarkServer(t, "secret")
+	defer srv.Close()
+	listen := strings.TrimPrefix(srv.URL, "http://")
+	cfg := &config.Config{DataDir: t.TempDir(), Listen: listen, APIKey: "secret"}
+	notifyClientDisconnected(cfg, "cursor")
+	if got := marks(); len(got) != 1 || got[0] != "disconnect:cursor" {
+		t.Fatalf("expected one disconnect relay for cursor, got %v", got)
 	}
 }
 

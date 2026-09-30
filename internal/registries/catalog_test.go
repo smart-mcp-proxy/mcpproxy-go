@@ -278,6 +278,15 @@ func TestToCatalogResult_StdioInstall(t *testing.T) {
 	}
 }
 
+func TestCatalogInstallTarget_PreservesArgumentBoundaries(t *testing.T) {
+	first := CatalogInstall{Command: "npx", Args: []string{"a b", "c"}}
+	second := CatalogInstall{Command: "npx", Args: []string{"a", "b c"}}
+
+	if CatalogInstallTarget(first) == CatalogInstallTarget(second) {
+		t.Fatalf("distinct argv values must not share an install target: %q", CatalogInstallTarget(first))
+	}
+}
+
 // TestToCatalogResult_HybridPrefersInstallCmdOverConnectURL pins review
 // round 4 F-B: officialServerToEntry documents "package wins for stdio; keep
 // the remote as a fallback" for a hybrid entry (both packages[] and

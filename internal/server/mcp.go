@@ -22,6 +22,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
@@ -524,6 +525,7 @@ func NewMCPProxyServer(
 		// MCP layer stays unaware of BBolt details. nil-safe all the way down.
 		if mainServer != nil && mainServer.runtime != nil {
 			mainServer.runtime.RecordMCPClientForActivation(clientName)
+			mainServer.runtime.RecordClientSeen(clientName)
 		}
 
 		logger.Info("MCP client initialized with capabilities",
@@ -1382,6 +1384,9 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithBoolean("expose_prompts",
 				mcp.Description("Per-server prompt-aggregation override (F9): true = include this server's MCP prompts in mcpproxy's aggregated prompts/list; false = exclude them regardless of capability. Omit to leave unchanged (patch) / inherit the default (aggregate if advertised). Only meaningful when aggregate_upstream_prompts is enabled globally. Used with add/update/patch."),
 			),
+			mcp.WithString("forward_headers_json",
+				mcp.Description("Client header forwarding allowlist (Spec 112) as a JSON array of inbound MCP client header NAMES to copy into this server's tools/call requests, e.g. [\"X-User-Id\",\"X-Tenant-Id\"]. Names only, never values; exact names, case-insensitive, at most 32, no wildcards. Authorization, Host, Cookie, X-API-Key, hop-by-hop and proxy headers are never forwarded. Only HTTP-based upstreams forward. Patch: omit to leave unchanged, '[]' to clear (the array replaces entirely). Used with add/update/patch."),
+			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: upstreamServersTool, Handler: p.handleUpstreamServers})
 	}
@@ -1427,7 +1432,7 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 				mcp.Description("Search term to filter servers by name or description (case-insensitive)"),
 			),
 			mcp.WithString("tag",
-				mcp.Description("Filter servers by tag/category (if supported by registry)"),
+				mcp.Description("Catalog entries do not carry tags. Omit this parameter or pass an empty value; non-empty values return an error."),
 			),
 			mcp.WithNumber("limit",
 				mcp.Description("Maximum number of results to return (default: 10, max: 50)"),
@@ -1607,6 +1612,11 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	}
 	if tag != "" {
 		args["tag"] = tag
+	}
+	if tag != "" {
+		err := errors.New("tag filtering is not supported: catalog entries carry no tags")
+		p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	if registry == "" {
@@ -3178,7 +3188,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// tool-call latency/outcome metrics. No-ops when observability is disabled.
 	callCtx, toolSpan := p.startToolCallSpan(ctx, serverName, actualToolName, profileSlug)
 	startTime := time.Now()
-	result, err := p.dispatchOnEpoch(callCtx, certified, toolName, args)
+	// Spec 112 FR-016.3: a per-call sink receives this call's outbound set from
+	// core.Client.CallTool so every record written below can be scrubbed.
+	dispatchCtx, fwdSink := headerfwd.WithSink(callCtx)
+	result, err := p.dispatchOnEpoch(dispatchCtx, certified, toolName, args)
+	fwdOut := fwdSink.Outbound()
 	duration := time.Since(startTime)
 	p.finishToolCall(toolSpan, serverName, actualToolName, duration, err)
 
@@ -3351,12 +3365,17 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// spotlighting mutate the result in place — so the recorded message is the
 	// upstream's own words. This governs the ACTIVITY RECORD ONLY; the result
 	// itself is still forwarded to the caller verbatim below.
-	activityStatus, activityErrMsg := activityStatusForResult(result)
+	//
+	// Spec 112: recResult is what the recording sinks see. It equals result
+	// unless this call forwarded client headers, in which case it is a copy
+	// with the forwarded values scrubbed; the client still gets result.
+	recResult := scrubResultForRecord(result, fwdOut)
+	activityStatus, activityErrMsg := activityStatusForResult(recResult)
 
 	// Record the response. An isError answer is still a response — it is stored
 	// as one, with the upstream's explanation mirrored into Error so the tool
 	// call history agrees with the activity log.
-	toolCallRecord.Response = result
+	toolCallRecord.Response = recResult
 	toolCallRecord.Error = activityErrMsg
 
 	// Count output tokens for successful response
@@ -3393,6 +3412,13 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		return blockResult, nil
 	}
+	// Spec 112: sanitisation mutates result in place, so the scrubbed record
+	// copy is rebuilt from the sanitised result (redact/strip must reach the
+	// recording sinks too).
+	if !fwdOut.IsEmpty() {
+		recResult = scrubResultForRecord(result, fwdOut)
+		toolCallRecord.Response = recResult
+	}
 
 	// Spec 069 A1: measure raw sizes before truncation.
 	activityResponseBytes := rawByteSize(result)
@@ -3412,12 +3438,12 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		toonDetectionText, toonDecisions = p.encodeToonBlocks(serverName, actualToolName, contentTrust, args, ctr)
 	}
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAs(producer), p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
 	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded); blockResult != nil {
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded, fwdOut); blockResult != nil {
 		return blockResult, nil
 	}
 
@@ -3460,14 +3486,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if intent != nil {
 		intentMap = intent.ToMap()
 	}
-	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes, toonDetectionText, toonDecisions, "")
+	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, scrubForRecord(response, fwdOut), responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes, scrubForRecord(toonDetectionText, fwdOut), toonDecisions, "")
 
 	// Spec 024: Emit internal tool call event. It carries the SAME classification
 	// as the tool_call record above (issue #935) — the two describe one dispatch,
 	// and a "success" wrapper around a failed call is exactly what made the
 	// failure invisible.
 	internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
-	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, activityStatus, activityErrMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, result, intentMap, "")
+	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, activityStatus, activityErrMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, recResult, intentMap, "")
 
 	return forwarded, nil
 }
@@ -3682,7 +3708,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Call tool via upstream manager with circuit breaker pattern
 	startTime := time.Now()
-	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
+	// Spec 112 FR-016.3: per-call sink for the recording scrub below.
+	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
+	result, err := p.upstreamManager.CallTool(dispatchCtx, toolName, args)
+	fwdOut := fwdSink.Outbound()
 	duration := time.Since(startTime)
 
 	p.logger.Debug("handleCallTool: upstream call completed",
@@ -3812,11 +3841,14 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Issue #935: an upstream that answered isError:true failed, even though the
 	// transport hop did not. Classified before the result is truncated/forwarded.
-	activityStatus, activityErrMsg := activityStatusForResult(result)
+	//
+	// Spec 112: recResult is the scrubbed copy the recording sinks see.
+	recResult := scrubResultForRecord(result, fwdOut)
+	activityStatus, activityErrMsg := activityStatusForResult(recResult)
 
 	// Record the response (an isError answer is still a response; its
 	// explanation is mirrored into Error so history agrees with activity).
-	toolCallRecord.Response = result
+	toolCallRecord.Response = recResult
 	toolCallRecord.Error = activityErrMsg
 
 	// Count output tokens for successful response
@@ -3853,17 +3885,24 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
 		return blockResult, nil
 	}
+	// Spec 112: sanitisation mutates result in place, so the scrubbed record
+	// copy is rebuilt from the sanitised result (redact/strip must reach the
+	// recording sinks too).
+	if !fwdOut.IsEmpty() {
+		recResult = scrubResultForRecord(result, fwdOut)
+		toolCallRecord.Response = recResult
+	}
 
 	// Spec 069 A1: measure raw sizes before truncation.
 	legacyResponseBytes := rawByteSize(result)
 	legacyRequestBytes := rawByteSize(activityArgs)
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAs(producer), p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
 	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded); blockResult != nil {
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded, fwdOut); blockResult != nil {
 		return blockResult, nil
 	}
 
@@ -3901,7 +3940,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Emit activity completed event with determined source (legacy - no intent).
 	// Status comes from the upstream result, not from err alone (issue #935).
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil, "")
+	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, scrubForRecord(response, fwdOut), responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil, "")
 
 	return forwarded, nil
 }
@@ -4037,11 +4076,26 @@ func (p *MCPProxyServer) handleAddServerFromRegistry(ctx context.Context, reques
 	return mcp.NewToolResultText(string(jsonData)), nil
 }
 
+// recordProfileManagementRefusal records the profile_management refusal of a
+// management built-in the caller's profile hides (contracts/refusals.md,
+// "Management tool hidden"), mirroring handleCodeExecution's profile refusal.
+// The row has no server name, so ActivityFilter.AllowedServers never shows it
+// to a scoped reader, and its reason is the non-disclosing text the caller
+// already received. It runs where the shared handler runs (REST /tools/call);
+// an MCP tools/call of a filter-hidden built-in is answered by mcp-go's
+// WithToolFilter before any handler, exactly as for code_execution.
+func (p *MCPProxyServer) recordProfileManagementRefusal(ctx context.Context, toolName string) {
+	p.emitActivityPolicyDecisionWithBlockReason(ctx, "", toolName, sessionIDFromContext(ctx),
+		mintActivityRequestID("", toolName), "blocked", "unknown tool: "+toolName,
+		telemetry.BlockReasonOther, string(profile.BlockReasonManagement))
+}
+
 // handleUpstreamServers implements upstream server management
 func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	p.recordMCPSurface()
 	p.recordBuiltinTool("upstream_servers")
 	if p.profileManagementToolHidden(ctx, "upstream_servers") {
+		p.recordProfileManagementRefusal(ctx, "upstream_servers")
 		return mcp.NewToolResultError("unknown tool: upstream_servers"), nil
 	}
 	startTime := time.Now()
@@ -4199,6 +4253,7 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 	p.recordMCPSurface()
 	p.recordBuiltinTool("quarantine_security")
 	if p.profileManagementToolHidden(ctx, "quarantine_security") {
+		p.recordProfileManagementRefusal(ctx, "quarantine_security")
 		return mcp.NewToolResultError("unknown tool: quarantine_security"), nil
 	}
 	startTime := time.Now()
@@ -5686,6 +5741,18 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 	}
 
+	// Spec 112: optional forward_headers allowlist on add, validated at write time.
+	if fhJSON := request.GetString("forward_headers_json", ""); fhJSON != "" {
+		names, ferr := parseForwardHeadersJSON(fhJSON)
+		if ferr != nil {
+			return mcp.NewToolResultError(ferr.Error()), nil
+		}
+		if err := forwardHeadersWriteError(names, headers); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		serverConfig.ForwardHeaders = names
+	}
+
 	// #1148 round 6 (finding 4): on CREATE there is no stored value to bind a
 	// mask back to, so ANY mask this proxy rendered can only be a placeholder
 	// an agent copied out of another server's read payload — never a value
@@ -5921,6 +5988,13 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil, nil
 	}
+	// Spec 112 FR-005a: validate the resulting allowlist against the resulting
+	// static headers, so a headers change cannot introduce a collision either.
+	if patch.ForwardHeaders != nil || patch.Headers != nil {
+		if err := forwardHeadersWriteError(mergedServer.ForwardHeaders, mergedServer.Headers); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil, nil
+		}
+	}
 
 	// Log the config diff for audit trail (FR-006). Issue #1146: config.FieldChange
 	// carries raw before/after VALUES, so logging Modified verbatim wrote env
@@ -6033,6 +6107,13 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 	mergedServer, configDiff, err := config.MergeServerConfig(existingServer, patch, mergeOpts)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil, nil
+	}
+	// Spec 112 FR-005a: validate the resulting allowlist against the resulting
+	// static headers, so a headers change cannot introduce a collision either.
+	if patch.ForwardHeaders != nil || patch.Headers != nil {
+		if err := forwardHeadersWriteError(mergedServer.ForwardHeaders, mergedServer.Headers); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil, nil
+		}
 	}
 
 	// Log the config diff for audit trail (FR-006), values masked (issue #1146).
@@ -6274,6 +6355,17 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		}
 	}
 
+	// Spec 112: forward_headers allowlist. The array replaces entirely; '[]'
+	// clears; omitted leaves it unchanged (nil for MergeServerConfig). The
+	// merged result is validated against the merged static headers below.
+	if fhJSON := request.GetString("forward_headers_json", ""); fhJSON != "" {
+		names, ferr := parseForwardHeadersJSON(fhJSON)
+		if ferr != nil {
+			return nil, opts, ferr
+		}
+		patch.ForwardHeaders = names
+	}
+
 	// Handle oauth JSON string - deep merge for nested config
 	if oauthJSON := request.GetString("oauth_json", ""); oauthJSON != "" {
 		// Check for explicit null removal
@@ -6462,6 +6554,15 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		return readCacheRefusal(err, reader), nil
 	}
 
+	// Spec 112 FR-017: an entry produced by a call that forwarded client
+	// headers is redeemable only by a request forwarding the same set to the
+	// same upstream. Same refusal shape as an authorization mismatch.
+	redeemable, fwdOut := p.forwardedEntryRedeem(ctx, response)
+	if !redeemable {
+		p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "error", cache.ErrForwardedMismatch.Error(), time.Since(startTime).Milliseconds(), activityArgs, nil, nil, "")
+		return readCacheRefusal(cache.ErrForwardedMismatch, reader), nil
+	}
+
 	// Serialize response
 	jsonResult, err := json.Marshal(response)
 	if err != nil {
@@ -6492,7 +6593,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		args,
 		len(response.Records),
 		p.currentTruncator(),
-		p.cacheStoreAs(childPageProducer(response, reader)),
+		p.cacheStoreAsChildPage(childPageProducer(response, reader), response),
 		p.logger,
 	)
 
@@ -6512,7 +6613,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	}
 
 	// Spec 024: Emit success event with args and response
-	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil, "")
+	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), activityArgs, scrubResultForRecord(response, fwdOut), nil, "")
 
 	return mcp.NewToolResultText(text), nil
 }
@@ -8090,7 +8191,7 @@ func (p *MCPProxyServer) lookupOutputSchema(serverName, toolName string) string 
 // schema violation.
 // requestID is the dispatch's correlation id, passed down because the decision
 // this records belongs to that call and is otherwise unattributable.
-func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, toolName, requestID string, forwarded *mcp.CallToolResult) *mcp.CallToolResult {
+func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, toolName, requestID string, forwarded *mcp.CallToolResult, fwdOut headerfwd.Snapshot) *mcp.CallToolResult {
 	// Disabled (mode=off) or validator not constructed -> no-op (FR-A4/FR-A7).
 	if p.outputValidator == nil || !p.config.OutputValidation.IsEnabled() {
 		return nil
@@ -8119,6 +8220,9 @@ func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, 
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		sessionID = sess.SessionID()
 	}
+	// FR-016.3: the validator reason can quote the offending instance value,
+	// which may be an echoed forwarded header value.
+	d.reason = scrubForRecord(d.reason, fwdOut)
 	p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, d.decision, d.reason, telemetry.BlockReasonOutputSchema)
 	if d.block {
 		return mcp.NewToolResultError("output schema validation failed: " + d.reason)
@@ -8142,4 +8246,31 @@ func rawByteSize(v interface{}) int {
 		return 0
 	}
 	return len(b)
+}
+
+// parseForwardHeadersJSON decodes the forward_headers_json argument. The result
+// is non-nil even for '[]', so MergeServerConfig treats it as "clear".
+func parseForwardHeadersJSON(raw string) ([]string, error) {
+	names := []string{}
+	if err := json.Unmarshal([]byte(raw), &names); err != nil {
+		return nil, fmt.Errorf("invalid forward_headers_json format: expected a JSON array of header names: %v", err)
+	}
+	if names == nil {
+		names = []string{}
+	}
+	return names, nil
+}
+
+// forwardHeadersWriteError is the write-time validation of a forward_headers
+// allowlist (Spec 112 FR-005a). Messages name headers only, never values.
+func forwardHeadersWriteError(names []string, static map[string]string) error {
+	errs := config.ForwardHeadersValidationErrors("forward_headers", names, static)
+	if len(errs) == 0 {
+		return nil
+	}
+	msgs := make([]string, 0, len(errs))
+	for _, e := range errs {
+		msgs = append(msgs, e.Message)
+	}
+	return fmt.Errorf("invalid forward_headers: %s", strings.Join(msgs, "; "))
 }

@@ -162,8 +162,7 @@ Review verbs (existing routes; one change):
       "installed": true, "connected": true,
       "config_path": "/Users/you/.claude.json", "display_path": "~/.claude.json",
       "last_seen": "2026-09-25T06:10:00Z", "active_sessions": 1, "calls_24h": 38,
-      "reload_hint": "Run /mcp in Claude Code (or restart it) to load MCPProxy",
-      "sessions": [{"id": "…", "work_session_id": "…", "started_at": "…", "last_activity": "…"}]
+      "reload_hint": "Run /mcp in Claude Code (or restart it) to load MCPProxy"
     },
     {"id": "cursor", "display_name": "Cursor", "kind": "supported", "icon": "cursor", "state": "installed",
      "installed": true, "connected": false, "connection_unverified": true,
@@ -176,7 +175,22 @@ Review verbs (existing routes; one change):
 }
 ```
 
-These field names are the base of Spec 108's `ClientView`, which extends them without renaming, narrowing or dropping any (`icon`, `state`, `config_path`, `display_path` and `reload_hint` included). `kind` is `supported|other` here (`other` = an unrecognised `clientInfo.name`, no credential), and Spec 108 adds `custom` (a user-added client with a credential). `routing` is the `GET /routing` payload verbatim (same keys), so the Endpoint & mode tab and the old header dropdown read one shape. `state` ∈ `connected_seen | connected_never_seen | installed | not_installed | other`. `sessions` is present only on `GET /clients/{id}`. The server edition does not register the route (404). **`connected` without a content read** (FR-030): the list reads `connect.GetAllStatus()`, which never opens a client config (Spec 075 FR-001, no macOS App-Data prompt) and always reports `Connected=false`, so `connected` on the list is MCPProxy's own evidence — a recorded connect write, or a session seen from the client (`last_seen`). A client configured by hand with no session yet is `state: installed`, `connection_unverified: true` (the Cursor row above); `GET /clients/{id}` — the explicit per-client read — additionally calls `connect.GetStatus()` (the Spec 075 FR-002 content read) and reports it `connected` when its config points at MCPProxy.
+`GET /clients/{id}` returns one row with the same base fields and, on this explicit detail read only, full session rows (example `data` value):
+
+```json
+{
+  "id": "claude-code", "display_name": "Claude Code", "kind": "supported", "icon": "claude",
+  "state": "connected_seen", "installed": true, "connected": true,
+  "config_path": "/Users/you/.claude.json", "display_path": "~/.claude.json",
+  "last_seen": "2026-09-25T06:10:00Z", "active_sessions": 1, "calls_24h": 38,
+  "reload_hint": "Run /mcp in Claude Code (or restart it) to load MCPProxy",
+  "sessions": [{"id": "S1", "work_session_id": "ws-W1", "started_at": "2026-09-25T06:00:00Z", "last_activity": "2026-09-25T06:10:00Z"}]
+}
+```
+
+The list example has lightweight presence and `active_sessions` counts; it **omits** `sessions` for every row. The Clients page fetches `GET /clients/{id}` only when that row is expanded, and its session links use the work-session/legacy mapping in [url-filter-contract.md](url-filter-contract.md). An observed unrecognised `clientInfo.name` is an API row such as `other:zed`; the manual "Other client" connection snippet is a Web/macOS presentation affordance, never a synthetic `/clients` row and never assigned an `other:<name>` id.
+
+These field names are the base of Spec 108's `ClientView`, which extends them without renaming, narrowing or dropping any (`icon`, `state`, `config_path`, `display_path` and `reload_hint` included). `kind` is `supported|other` here (`other` = an unrecognised `clientInfo.name`, no credential), and Spec 108 adds `custom` (a user-added client with a credential). `routing` is the `GET /routing` payload verbatim (same keys), so the Endpoint & mode tab and the old header dropdown read one shape. `state` ∈ `connected_seen | connected_never_seen | installed | not_installed | other`. The server edition does not register the route (404). **`connected` without a content read** (FR-030): the list reads `connect.GetAllStatus()`, which never opens a client config (Spec 075 FR-001, no macOS App-Data prompt) and always reports `Connected=false`, so `connected` on the list is MCPProxy's own evidence — a recorded connect write, or a session seen from the client (`last_seen`) after the current connect generation. On successful connect/reconnect, the transaction that records `client_connected_at` also clears that supported client's `client_last_seen` aliases and `client_disconnected_at`: the row is `connected_never_seen` until a later `initialize` writes a new timestamp, even if it was seen before reconnect. A client configured by hand with no session yet is `state: installed`, `connection_unverified: true` (the Cursor row above); `GET /clients/{id}` — the explicit per-client read — additionally calls `connect.GetStatus()` (the Spec 075 FR-002 content read) and reports it `connected` when its config points at MCPProxy.
 
 ## Connect (existing routes, additive)
 
@@ -210,7 +224,7 @@ No new route: the Web UI and macOS write each secret with the existing `POST /se
 
 ## Catalog
 
-`GET /catalog/search?q=&source=&tag=&limit=20` — both editions. Rule: **filtered** on `added` only. Catalog entries are catalog-source data, readable by any authenticated caller exactly like today's `GET /registries/{id}/servers` (no admin gate). `added` is derived from the configured servers, so for a scoped caller it is computed only over servers passing `CanEnumerateServer`: an entry matching an out-of-scope server reads `added: false`, and no field names or reveals a configured server's name, URL or command. The MCP `search_servers` result carries no `added` field at all (contracts/mcp-tools.md).
+`GET /catalog/search?q=&source=&tag=&limit=20` — both editions. Rule: **filtered** on `added` only. Catalog entries do not carry tags: an absent or empty `tag` is accepted for compatibility, while a non-empty `tag` returns `400` and never produces an unfiltered result. Catalog entries are catalog-source data, readable by any authenticated caller exactly like today's `GET /registries/{id}/servers` (no admin gate). `added` is derived from the configured servers, so for a scoped caller it is computed only over servers passing `CanEnumerateServer`: an entry matching an out-of-scope server reads `added: false`, and no field names or reveals a configured server's name, URL or command. The MCP `search_servers` result carries no `added` field at all (contracts/mcp-tools.md).
 
 ```json
 {

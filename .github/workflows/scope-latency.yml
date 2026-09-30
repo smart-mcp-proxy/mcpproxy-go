@@ -31,6 +31,11 @@ name: Scope Latency (Spec 105 FR-011)
 # history. This workflow is NOT (yet) a required status check; a tight gate
 # that flakes is worse than no gate, so start generous and tighten only with
 # real multi-run evidence.
+#
+# The `TestScopeLatency_` regex below also runs Spec 108's
+# TestScopeLatency_ProfileV3VsLegacy (SC-007) on HEAD. That measurement is
+# informational: it is not one of cmd/scope-latency-compare's requiredOperations,
+# and its own assertion is a same-run relative gap, so it needs no merge-base copy.
 
 on:
   pull_request:

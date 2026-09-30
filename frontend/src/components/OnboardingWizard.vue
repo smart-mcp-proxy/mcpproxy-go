@@ -48,6 +48,13 @@
         <!-- Tab: Clients -->
         <!-- ============================ -->
         <section v-if="activeTab === 'clients'" data-test="panel-clients">
+          <!-- The wizard's primary client path is the same component used by
+               Clients. Keep the legacy markup below inert temporarily while
+               its presentation-only helpers are retired; it must never own a
+               second preview/write flow. -->
+          <ClientConnectList :show="show" embedded @close="dismiss" />
+        </section>
+        <section v-if="false" aria-hidden="true">
           <p class="text-sm opacity-70 mb-4">
             Pick at least one AI tool. MCPProxy registers itself in that tool's config so the assistant can talk to mcpproxy. You'll see the exact change before anything is written, and a timestamped backup is created first.
           </p>
@@ -200,8 +207,10 @@
             <code class="font-mono text-[11px] bg-base-200 px-1 rounded">mcpproxy_claude_code</code> so each entry stays distinct.
           </p>
 
+          <ImportServers :key="importSession" detected @imported="onSharedImport" />
+
           <!-- Detected import sources (Spec 046 v2 — sectioned checkbox layout) -->
-          <div v-if="loadingImportSources" class="flex justify-center py-4">
+          <div v-if="false" class="flex justify-center py-4">
             <span class="loading loading-spinner loading-md"></span>
           </div>
           <!-- Spec 109-ux-navigation-consistency US7 Acceptance Scenario 4:
@@ -272,7 +281,7 @@
                that more existed; the cap also leaves the security panel below
                it partly on screen, so the choice it offers is visible rather
                than something the user has to go looking for. -->
-          <div v-else class="border border-base-300 rounded-lg overflow-hidden mb-4 max-h-[32vh] overflow-y-auto">
+          <div v-else-if="false" class="border border-base-300 rounded-lg overflow-hidden mb-4 max-h-[32vh] overflow-y-auto">
             <div
               v-for="(src, idx) in importSourcesWithServers"
               :key="src.path"
@@ -399,6 +408,10 @@
                 {{ serverCountLabel }} configured.
               </p>
             </div>
+          </details>
+          <details class="border border-base-300 rounded-lg p-3 text-sm mt-3" data-test="wizard-shared-import-details">
+            <summary class="cursor-pointer font-medium">Paste a config to import instead</summary>
+            <div class="mt-3"><ImportServers @imported="onSharedImport" /></div>
           </details>
         </section>
 
@@ -571,7 +584,7 @@
            buttons stay visible as the list above scrolls. The security panel
            itself sits in the step body, not here — see the comment there. -->
       <div
-        v-if="activeTab === 'servers'"
+        v-if="false"
         class="border-t border-base-300 shrink-0 bg-base-200/40"
       >
         <!-- Action footer. Only shown when there is something to import — the
@@ -669,6 +682,8 @@ import { useOnboardingStore } from '@/stores/onboarding'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import ManualServerForm from '@/components/ManualServerForm.vue'
+import ImportServers from '@/components/ImportServers.vue'
+import ClientConnectList from '@/components/ClientConnectList.vue'
 import ReviewQueueList from '@/components/ReviewQueueList.vue'
 import { useDialogOpen } from '@/composables/useDialogOpen'
 import { skipReasonLabel } from '@/utils/importSkipReason'
@@ -693,6 +708,9 @@ const router = useRouter()
 
 type TabID = 'clients' | 'servers' | 'verify'
 const activeTab = ref<TabID>('clients')
+// A reopened wizard starts a new import session. Keying the shared importer
+// ensures its selection and quarantine confirmation never leak across opens.
+const importSession = ref(0)
 // True once the user picks a tab (tab strip or Back) during the current open.
 // onOpened() awaits several fetches before choosing the initial tab; without
 // this flag a delayed result would overwrite the tab the user already chose
@@ -1037,6 +1055,7 @@ async function onOpened() {
   const seq = ++openSeq
   userPickedTab = false
   const requested = onboarding.consumeWizardInitialTab()
+  importSession.value++
   serverAddedJustNow.value = false
   connectMessage.value = ''
   // Backup lines are session-scoped (Spec 078 US2): don't replay backup
@@ -1719,6 +1738,12 @@ async function onServerAdded() {
     title: 'Server added',
     message: 'It is in quarantine. Review and approve from the Review queue.',
   })
+}
+
+async function onSharedImport(count: number) {
+  if (count === 0) return
+  serverAddedJustNow.value = true
+  await Promise.all([fetchImportSources(), serversStore.fetchServers(), onboarding.fetchState()])
 }
 
 // `dismiss` is the onClose handler useDialogOpen calls for a NATIVE close

@@ -84,6 +84,10 @@ func newTruncatingRetrieveToolsProxy(t *testing.T, responseLimit int) (*MCPProxy
 // Emission publishes onto the event bus synchronously but the service drains it
 // on its own goroutine, so a bare read after the handler returns is a race.
 func awaitRetrieveToolsActivity(t *testing.T, sm *storage.Manager) *storage.ActivityRecord {
+	return awaitInternalToolActivity(t, sm, "retrieve_tools")
+}
+
+func awaitInternalToolActivity(t *testing.T, sm *storage.Manager, toolName string) *storage.ActivityRecord {
 	t.Helper()
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -91,12 +95,12 @@ func awaitRetrieveToolsActivity(t *testing.T, sm *storage.Manager) *storage.Acti
 		records, _, err := sm.ListActivities(storage.ActivityFilter{Limit: 50})
 		require.NoError(t, err)
 		for _, rec := range records {
-			if rec.Type == storage.ActivityTypeInternalToolCall && rec.ToolName == "retrieve_tools" {
+			if rec.Type == storage.ActivityTypeInternalToolCall && rec.ToolName == toolName {
 				return rec
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("no retrieve_tools activity record was persisted within 5s")
+			t.Fatalf("no %s activity record was persisted within 5s", toolName)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

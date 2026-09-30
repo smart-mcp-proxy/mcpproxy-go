@@ -652,7 +652,8 @@ func printStatusTable(info *StatusInfo) {
 
 	if info.Endpoints != nil {
 		fmt.Println()
-		fmt.Println("MCP Endpoints")
+		fmt.Println("Endpoint & mode")
+		fmt.Printf("  %-16s %s\n", "Routing mode:", info.RoutingMode)
 		if v, ok := info.Endpoints["default"]; ok {
 			fmt.Printf("  %-16s %s  (default, %s mode)\n", "/mcp", v, info.RoutingMode)
 		}

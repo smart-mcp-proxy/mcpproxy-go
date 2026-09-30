@@ -471,10 +471,10 @@ final class TrayAuditMenuTests: XCTestCase {
 
     // MARK: - F5 / F16 · The unreachable views
 
-    func testAgentTokensAndToolsAreReachableFromTheSidebar() {
+    func testClientsAndToolsAreReachableFromTheSidebar() {
         let items = SidebarItem.allCases.map(\.rawValue)
-        XCTAssertTrue(items.contains("Agent Tokens"),
-                      "TokensView was 444 lines of finished UI that nothing instantiated")
+        XCTAssertTrue(items.contains("Clients"),
+                      "Clients is the native hub for connection, endpoint mode, and agent tokens")
         XCTAssertTrue(items.contains("Tools"),
                       "BM25 discovery is the headline feature and had no native home")
     }

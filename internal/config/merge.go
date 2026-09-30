@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 )
 
@@ -261,6 +262,16 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 		}
 		merged.Args = make([]string, len(patch.Args))
 		copy(merged.Args, patch.Args)
+	}
+
+	// ForwardHeaders (Spec 112): nil keeps the base allowlist; a non-nil slice
+	// replaces it entirely, and an empty non-nil slice ([]) clears it.
+	if patch.ForwardHeaders != nil {
+		if diff != nil && !slices.Equal(base.ForwardHeaders, patch.ForwardHeaders) {
+			diff.Modified["forward_headers"] = FieldChange{Path: "forward_headers", From: base.ForwardHeaders, To: patch.ForwardHeaders}
+		}
+		merged.ForwardHeaders = make([]string, len(patch.ForwardHeaders))
+		copy(merged.ForwardHeaders, patch.ForwardHeaders)
 	}
 
 	// Map fields - deep merge with RFC 7396 null-means-remove support
@@ -624,6 +635,10 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	if src.DisabledTools != nil {
 		dst.DisabledTools = make([]string, len(src.DisabledTools))
 		copy(dst.DisabledTools, src.DisabledTools)
+	}
+	if src.ForwardHeaders != nil {
+		dst.ForwardHeaders = make([]string, len(src.ForwardHeaders))
+		copy(dst.ForwardHeaders, src.ForwardHeaders)
 	}
 
 	// Copy maps

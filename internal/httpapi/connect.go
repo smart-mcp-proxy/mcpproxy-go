@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -54,6 +55,7 @@ type ConnectConflictResponse struct {
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
 // @Success     200 {object} contracts.APIResponse "List of ClientStatus objects"
+// @Failure     403 {object} contracts.ErrorResponse "Administrator credentials required"
 // @Router      /api/v1/connect [get]
 func (s *Server) handleGetConnectStatus(w http.ResponseWriter, r *http.Request) {
 	svc := s.getConnectService()
@@ -78,6 +80,7 @@ func (s *Server) handleGetConnectStatus(w http.ResponseWriter, r *http.Request) 
 // @Security    ApiKeyQuery
 // @Param       client path   string true "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Success     200    {object} contracts.APIResponse "ClientStatus"
+// @Failure     403    {object} contracts.ErrorResponse "Administrator credentials required"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/connect/{client} [get]
@@ -128,7 +131,7 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 // @Param       client      path  string true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode, zcode)"
 // @Param       server_name query string false "Entry name to preview (defaults to mcpproxy); mirror the value passed to POST connect"
 // @Success     200    {object} contracts.APIResponse "ConnectPreview"
-// @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
+// @Failure     403    {object} contracts.ErrorResponse "Administrator credentials required or access denied by macOS App Data"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/connect/{client}/preview [get]
@@ -260,6 +263,9 @@ func (s *Server) recordClientConnected(clientID string) {
 	if err != nil && s.logger != nil {
 		s.logger.Warnf("onboarding: failed to record client_connected_at for %s: %v", clientID, err)
 	}
+	if err == nil {
+		s.notifyClientPresenceChanged()
+	}
 }
 
 // applyClientConnected sets state.ClientConnectedAt[clientID] = now, creating
@@ -273,6 +279,14 @@ func applyClientConnected(state *storage.OnboardingState, clientID string, now t
 		state.ClientConnectedAt = map[string]time.Time{}
 	}
 	state.ClientConnectedAt[clientID] = now
+	if state.ClientDisconnectedAt != nil {
+		delete(state.ClientDisconnectedAt, clientID)
+	}
+	if client := connect.FindClient(clientID); client != nil && state.ClientLastSeen != nil {
+		for _, alias := range client.ClientInfoNames {
+			delete(state.ClientLastSeen, strings.ToLower(alias))
+		}
+	}
 }
 
 // handleDisconnectClient godoc
@@ -326,8 +340,42 @@ func (s *Server) handleDisconnectClient(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusNotFound, result.Message)
 		return
 	}
+	if result.Success {
+		s.recordClientDisconnected(clientID)
+	}
 
 	s.writeSuccess(w, result)
+}
+
+func (s *Server) recordClientDisconnected(clientID string) {
+	err := s.controller.UpdateOnboardingState(func(state *storage.OnboardingState) error {
+		applyClientDisconnected(state, clientID, time.Now())
+		return nil
+	})
+	if err != nil && s.logger != nil {
+		s.logger.Warnf("onboarding: failed to record client_disconnected_at for %s: %v", clientID, err)
+	}
+	if err == nil {
+		s.notifyClientPresenceChanged()
+	}
+}
+
+// applyClientDisconnected updates the connection generation atomically for
+// REST and CLI disconnects relayed through onboarding/mark.
+func applyClientDisconnected(state *storage.OnboardingState, clientID string, now time.Time) {
+	if state.ClientDisconnectedAt == nil {
+		state.ClientDisconnectedAt = map[string]time.Time{}
+	}
+	state.ClientDisconnectedAt[clientID] = now
+	delete(state.ClientConnectedAt, clientID)
+}
+
+type clientPresenceNotifier interface{ NotifyClientPresenceChanged() }
+
+func (s *Server) notifyClientPresenceChanged() {
+	if notifier, ok := s.controller.(clientPresenceNotifier); ok {
+		notifier.NotifyClientPresenceChanged()
+	}
 }
 
 // UndoConnectRequest is the JSON body for POST /api/v1/connect/{client}/undo.
@@ -416,8 +464,30 @@ func (s *Server) handleUndoConnectClient(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	if result.Success {
+		s.recordClientPresenceAfterUndo(svc, clientID)
+	}
 
 	s.writeSuccess(w, result)
+}
+
+// recordClientPresenceAfterUndo restores presence to match the configuration
+// Undo put back. A backup can legitimately contain an existing entry for this
+// instance, so an undo is not always a disconnect; read the just-restored
+// client config while this user-initiated write is still in scope.
+func (s *Server) recordClientPresenceAfterUndo(svc *connect.Service, clientID string) {
+	status, err := svc.GetStatus(clientID)
+	if err == nil && status.Connected && status.EndpointMatch == connect.EndpointMatchThis {
+		// The restored configuration is proven to point at this instance. Keep
+		// the previous connection generation and notify derived presenters of
+		// the completed write.
+		s.notifyClientPresenceChanged()
+		return
+	}
+	// A restored file with no entry, a different or indeterminate endpoint, or
+	// an unreadable config must not retain the connect timestamp created by the
+	// write we just undid.
+	s.recordClientDisconnected(clientID)
 }
 
 // decodeOptionalJSONBody decodes an optional JSON request body. An absent or

@@ -22,7 +22,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
@@ -2663,6 +2665,11 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["expose_prompts"] = *serverStatus.Config.ExposePrompts
 		}
 
+		// Spec 112: surface the forward_headers allowlist (names only).
+		if serverStatus.Config != nil && len(serverStatus.Config.ForwardHeaders) > 0 {
+			serverMap["forward_headers"] = append([]string(nil), serverStatus.Config.ForwardHeaders...)
+		}
+
 		// Spec 086: surface the per-server trust tier so the REST GET payload
 		// (and SSE servers.changed embed) can read back the persisted mode, in
 		// parity with its deprecated predecessor auto_approve_tool_changes.
@@ -2874,6 +2881,11 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		// path. Tri-state *bool — only emit when set.
 		if srv.ExposePrompts != nil {
 			serverInfo["expose_prompts"] = *srv.ExposePrompts
+		}
+
+		// Spec 112: forward_headers allowlist in parity with the StateView path.
+		if len(srv.ForwardHeaders) > 0 {
+			serverInfo["forward_headers"] = append([]string(nil), srv.ForwardHeaders...)
 		}
 
 		// Spec 086: per-server trust tier in parity with the StateView path.
@@ -3932,4 +3944,143 @@ func (r *Runtime) UpdateOnboardingState(fn func(*storage.OnboardingState) error)
 		return fmt.Errorf("storage not available")
 	}
 	return r.storageManager.UpdateOnboardingState(fn)
+}
+
+// RecordClientSeen persists an initialize observation independently of the
+// telemetry activation funnel. Presence must remain accurate when telemetry is
+// disabled, and UpdateOnboardingState keeps this write from racing connect or
+// onboarding mutations.
+func (r *Runtime) RecordClientSeen(clientName string) {
+	name := sanitizeClientName(clientName)
+	if name == "" || r.storageManager == nil {
+		return
+	}
+	changed := false
+	err := r.storageManager.UpdateOnboardingState(func(state *storage.OnboardingState) error {
+		if state.ClientLastSeen == nil {
+			state.ClientLastSeen = map[string]time.Time{}
+		}
+		now := time.Now()
+		// An MCP client can initialise repeatedly while reconnecting. Persisting
+		// every identical observation needlessly contends with the onboarding
+		// writers, but must not suppress a fresh generation after reconnect (the
+		// successful connect path clears its aliases).
+		if previous, ok := state.ClientLastSeen[name]; ok && now.Sub(previous) < time.Minute && !clientDisconnectedAfterSeen(state, name, previous) {
+			return nil
+		}
+		state.ClientLastSeen[name] = now
+		changed = true
+		protected := knownClientAliases()
+		for len(state.ClientLastSeen) > 32 {
+			var oldest string
+			var at time.Time
+			for key, value := range state.ClientLastSeen {
+				if protected[key] {
+					continue
+				}
+				if oldest == "" || value.Before(at) {
+					oldest, at = key, value
+				}
+			}
+			if oldest == "" { // the fixed supported-client registry itself fits in the cap
+				break
+			}
+			delete(state.ClientLastSeen, oldest)
+		}
+		return nil
+	})
+	if err != nil && r.logger != nil {
+		r.logger.Debug("presence: unable to record MCP client", zap.Error(err))
+	}
+	if err == nil && changed {
+		r.publishEvent(newEvent(EventTypeClientPresenceChanged, nil))
+	}
+}
+
+// clientDisconnectedAfterSeen lets the first initialize in a new connection
+// generation through the write throttle. A recent observation from the prior
+// generation must not suppress fresh presence after an explicit disconnect.
+func clientDisconnectedAfterSeen(state *storage.OnboardingState, alias string, seenAt time.Time) bool {
+	if state == nil {
+		return false
+	}
+	for _, client := range connect.GetAllClients() {
+		for _, knownAlias := range client.ClientInfoNames {
+			if alias == sanitizeClientName(knownAlias) {
+				if disconnectedAt := state.ClientDisconnectedAt[client.ID]; !disconnectedAt.IsZero() && !disconnectedAt.Before(seenAt) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// AttentionClients returns the minimal client evidence needed by the attention
+// subscriber. It intentionally does not inspect client config files or session
+// rows, keeping attention snapshot construction bounded and privacy-safe.
+func (r *Runtime) AttentionClients() []AttentionClient {
+	state, err := r.GetOnboardingState()
+	if err != nil || state == nil {
+		return nil
+	}
+	clients := make([]AttentionClient, 0, len(state.ClientConnectedAt))
+	for _, client := range connect.GetAllClients() {
+		connectedAt, ok := state.ClientConnectedAt[client.ID]
+		if !ok || connectedAt.IsZero() {
+			continue
+		}
+		at := connectedAt
+		clients = append(clients, AttentionClient{
+			ID: client.ID, DisplayName: client.Name, ConnectedAt: &at,
+			LastSeen: latestSeenForAliases(state.ClientLastSeen, client.ClientInfoNames),
+		})
+	}
+	return clients
+}
+
+// NotifyClientPresenceChanged prompts derived presenters to refresh after a
+// successful connect or disconnect write performed outside Runtime.
+func (r *Runtime) NotifyClientPresenceChanged() {
+	r.publishEvent(newEvent(EventTypeClientPresenceChanged, nil))
+}
+
+func latestSeenForAliases(seen map[string]time.Time, aliases []string) *time.Time {
+	var latest *time.Time
+	for _, alias := range aliases {
+		if at, ok := seen[sanitizeClientName(alias)]; ok && (latest == nil || at.After(*latest)) {
+			copy := at
+			latest = &copy
+		}
+	}
+	return latest
+}
+
+// sanitizeClientName returns the canonical safe key shared with session
+// presence. Supported aliases retain their legacy normalized key because
+// lifecycle timestamps and existing onboarding state already use it; unknown
+// names use the disjoint versioned namespace from clientidentity.
+func sanitizeClientName(raw string) string {
+	identity := clientidentity.FromRaw(raw)
+	if identity.Key == "" {
+		return ""
+	}
+	if isKnownClientAlias(identity.RawNormalized) {
+		return identity.RawNormalized
+	}
+	return identity.Key
+}
+
+func knownClientAliases() map[string]bool {
+	aliases := make(map[string]bool)
+	for _, client := range connect.GetAllClients() {
+		for _, alias := range client.ClientInfoNames {
+			aliases[clientidentity.NormalizeRaw(alias)] = true
+		}
+	}
+	return aliases
+}
+
+func isKnownClientAlias(rawNormalized string) bool {
+	return knownClientAliases()[rawNormalized]
 }

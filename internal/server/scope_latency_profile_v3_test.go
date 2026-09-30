@@ -15,16 +15,19 @@ import (
 // Spec 108 (Profiles v3) T025 (SC-007): the v3 policy-aware SearchToolsAdmitted
 // path resolves one EffectiveAnnotations lookup and one CompiledPolicy.Decide
 // call per scanned hit, on top of the plain server-scope check
-// SearchToolsScoped already paid for (Spec 105 T078). This is a prototype
-// measurement, not a CI gate (mirrors TestRetrieveTools_ScopeLatency_
-// ScopedVsAdmin's own framing): it runs once, locally, over a 1,000+-tool
-// corpus (the Spec 102/083 LiveMCPBench snapshot, doubled under a second
-// server-name suffix to clear the SC-007 scale) and asserts the v3-vs-legacy
-// p95 gap stays within FR-011's 20ms budget on this machine.
+// SearchToolsScoped already paid for (Spec 105 T078). It measures over a
+// 1,000+-tool corpus (the Spec 102/083 LiveMCPBench snapshot, doubled under a
+// second server-name suffix to clear the SC-007 scale) and asserts the
+// v3-vs-legacy p95 gap stays within FR-011's 20ms budget in the same run.
+//
+// The name matches the `TestScopeLatency_` regex of
+// .github/workflows/scope-latency.yml, so that advisory job (continue-on-error)
+// runs it on HEAD; the v3 measurement is informational there and is not one of
+// cmd/scope-latency-compare's requiredOperations.
 //
 // Skipped under -race and testing.Short() for the same reasons as its Spec
 // 105 sibling in scope_latency_test.go.
-func TestRetrieveTools_ScopeLatency_ProfileV3VsLegacy(t *testing.T) {
+func TestScopeLatency_ProfileV3VsLegacy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration — 400+ retrieve_tools calls over a 1,000+-tool corpus")
 	}

@@ -1112,7 +1112,7 @@ func (s *Server) Start(ctx context.Context) error {
 		// not serving.
 		s.runtime.SetServedRoutingMode(config.ResolveRoutingMode(routingMode))
 		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(routingMode),
-			clientFacingStreamableOptions()...)
+			clientFacingStreamableOptions(s.liveConfig)...)
 
 		// Create custom HTTP server for handling multiple routes
 		if err := s.startCustomHTTPServer(ctx, streamableServer); err != nil {
@@ -2013,6 +2013,13 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
 	}
 
+	// ForwardHeaders (Spec 112): nil means "leave unchanged"; a non-nil slice
+	// replaces the allowlist and an empty one clears it. The PATCH handler
+	// preserves the existing slice when the request omits the field.
+	if updates.ForwardHeaders != nil {
+		existing.ForwardHeaders = append([]string{}, updates.ForwardHeaders...)
+	}
+
 	// TrustMode (spec 086) is a plain string: empty means "leave unchanged"; a
 	// non-empty value is applied. The PATCH handler preserves the existing value
 	// when the request omits the field, so this empty-guard is the second half of
@@ -2886,11 +2893,26 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 //     Lifting this pin is a deliberate, separately verified change; it is a
 //     function rather than a package variable so it cannot be flipped at
 //     runtime or from a test.
-func clientFacingStreamableOptions() []server.StreamableHTTPOption {
+//
+//   - WithHTTPContextFunc (Spec 112): captures the allowlist-eligible client
+//     headers of each POST into the request context so they can be forwarded
+//     to upstream tools/call. cfgProvider supplies the live config; nil
+//     disables capture. This is the single capture point, which is why it
+//     lives in this shared option set.
+func clientFacingStreamableOptions(cfgProvider func() *config.Config) []server.StreamableHTTPOption {
 	return []server.StreamableHTTPOption{
 		server.WithDisableLocalhostProtection(true),
 		server.WithStreamableHTTPProtocolVersions(mcp.LegacyProtocolVersions()...),
+		server.WithHTTPContextFunc(captureClientHeaders(cfgProvider)),
 	}
+}
+
+// liveConfig returns the runtime's current config, tolerating a nil runtime.
+func (s *Server) liveConfig() *config.Config {
+	if s == nil || s.runtime == nil {
+		return nil
+	}
+	return s.runtime.Config()
 }
 
 func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *server.StreamableHTTPServer) error {
@@ -2968,21 +2990,21 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Each endpoint always serves its specific routing mode regardless of config.
 	// /mcp/all → direct mode (all tools with serverName__toolName naming)
 	directStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeDirect),
-		clientFacingStreamableOptions()...)
+		clientFacingStreamableOptions(s.liveConfig)...)
 	directHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(directStreamable)))))
 	mux.Handle("/mcp/all", directHandler)
 	mux.Handle("/mcp/all/", directHandler)
 
 	// /mcp/code → code_execution mode (JS orchestration)
 	codeExecStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeCodeExecution),
-		clientFacingStreamableOptions()...)
+		clientFacingStreamableOptions(s.liveConfig)...)
 	codeExecHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(codeExecStreamable)))))
 	mux.Handle("/mcp/code", codeExecHandler)
 	mux.Handle("/mcp/code/", codeExecHandler)
 
 	// /mcp/call → retrieve_tools mode (focused: retrieve_tools + call_tool_read/write/destructive)
 	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
-		clientFacingStreamableOptions()...)
+		clientFacingStreamableOptions(s.liveConfig)...)
 	callToolHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(loggingHandler(callToolStreamable)))))
 	mux.Handle("/mcp/call", callToolHandler)
 	mux.Handle("/mcp/call/", callToolHandler)
@@ -2991,7 +3013,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Profile resolution is done by profileMiddleware which runs AFTER mcpAuthMiddleware
 	// so that agent-token scope can compose downstream with the profile scope.
 	profileStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
-		clientFacingStreamableOptions()...)
+		clientFacingStreamableOptions(s.liveConfig)...)
 	profileHandler := s.streamingNoDeadline(s.hostValidationMiddleware(tagMCP(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable))))))
 	mux.Handle("/mcp/p/", profileHandler)
 	mux.Handle("/mcp/p", profileHandler)

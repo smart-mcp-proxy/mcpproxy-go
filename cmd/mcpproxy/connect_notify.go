@@ -35,13 +35,25 @@ func notifyClientConnected(cfg *config.Config, clientID string) {
 	notifyClientsConnected(cfg, []string{clientID})
 }
 
+// notifyClientDisconnected mirrors a successful local CLI disconnect into a
+// running daemon's presence record. It never makes disconnect depend on the
+// daemon being available.
+func notifyClientDisconnected(cfg *config.Config, clientID string) {
+	notifyClientConnectionChange(cfg, "disconnected_client_id", clientID)
+}
+
+func notifyClientConnectionChange(cfg *config.Config, field, clientID string) {
+	notifyClientConnectionsChanged(cfg, field, []string{clientID})
+}
+
 // notifyClientsConnected is the batch form used by `connect --all`. It
-// resolves the daemon (socket stat + status probe) ONCE and relays every
-// client concurrently under a single overall deadline, so the total added
-// latency is bounded by one daemonProbeTimeout instead of growing with the
-// number of clients (the old per-client synchronous loop could add several
-// seconds per client when the daemon was slow or unreachable).
+// resolves the daemon (socket stat + status probe) once and relays every
+// client concurrently under a single overall deadline.
 func notifyClientsConnected(cfg *config.Config, clientIDs []string) {
+	notifyClientConnectionsChanged(cfg, "connected_client_id", clientIDs)
+}
+
+func notifyClientConnectionsChanged(cfg *config.Config, field string, clientIDs []string) {
 	if len(clientIDs) == 0 {
 		return
 	}
@@ -58,7 +70,7 @@ func notifyClientsConnected(cfg *config.Config, clientIDs []string) {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
-			body, err := json.Marshal(map[string]string{"connected_client_id": id})
+			body, err := json.Marshal(map[string]string{field: id})
 			if err != nil {
 				return
 			}

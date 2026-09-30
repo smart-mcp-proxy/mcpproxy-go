@@ -63,6 +63,7 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 | `trusted_proxies` | string[] | `[]` (trust nobody) | CIDRs or IP addresses whose `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` and `X-Forwarded-Host` headers are believed. Headers from any other peer are ignored and the direct `RemoteAddr` is used. Env `MCPPROXY_TRUSTED_PROXIES` (comma list). Live (hot-reload, no restart). Validation: `trusted_proxies[N] "value" is not a valid CIDR or IP address` — refused identically at boot, `PATCH /api/v1/config` and `/config/apply`. See [Reverse Proxy Deployment](/operations/reverse-proxy#trusted_proxies-forwarded-headers) |
 | `require_mcp_auth` | boolean | `false` | Require an API key on the `/mcp` endpoint (off by default for client compatibility). Enable when exposing MCPProxy beyond localhost. **Server edition:** forced to `true` whenever `server_edition.enabled` is `true` — an explicit `false` is not an error, but boot logs `require_mcp_auth: false is overridden to true because server_edition.enabled is true` and `mcpproxy doctor` reports the same finding |
 | `enable_socket` | boolean | `true` | Enable Unix socket/named pipe for local communication |
+| `forward_client_headers` | boolean | `true` | Master switch for [client header forwarding](/configuration/upstream-servers#client-header-forwarding). Nothing is forwarded until a server lists names in `forward_headers`. Env `MCPPROXY_FORWARD_CLIENT_HEADERS=false` disables it for the process (never persisted). |
 
 ### `audit_log` (edition-neutral JSONL audit record)
 

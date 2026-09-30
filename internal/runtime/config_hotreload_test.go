@@ -1158,3 +1158,27 @@ func TestDetectConfigChanges_AuditLog_RestartPinned(t *testing.T) {
 		assert.NotContains(t, DetectConfigChanges(mk(nil), mk(nil)).ChangedFields, "audit_log")
 	})
 }
+
+// Spec 112: the global client-header-forwarding switch is hot-reloadable and
+// compared as a RESOLVED bool, so nil and an explicit true are the same.
+func TestDetectConfigChanges_ForwardClientHeaders(t *testing.T) {
+	tr, fl := true, false
+	mk := func(v *bool) *config.Config {
+		return &config.Config{Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{}, ForwardClientHeaders: v}
+	}
+
+	t.Run("on to off is detected without a restart", func(t *testing.T) {
+		result := DetectConfigChanges(mk(nil), mk(&fl))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "forward_client_headers")
+		assert.False(t, result.RequiresRestart)
+	})
+	t.Run("nil and explicit true are not a change", func(t *testing.T) {
+		result := DetectConfigChanges(mk(nil), mk(&tr))
+		assert.NotContains(t, result.ChangedFields, "forward_client_headers")
+	})
+	t.Run("off to nil is detected", func(t *testing.T) {
+		result := DetectConfigChanges(mk(&fl), mk(nil))
+		assert.Contains(t, result.ChangedFields, "forward_client_headers")
+	})
+}

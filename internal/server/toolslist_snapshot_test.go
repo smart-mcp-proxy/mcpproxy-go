@@ -199,8 +199,9 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 //     field (assertCodeExecutionLive).
 //   - search_servers / list_registries — Spec 109 FR-060/067: 'registry'
 //     becomes optional on search_servers (was required) so it searches every
-//     enabled catalog source when omitted, and both tools' descriptions gained
-//     "catalog source" wording. Pinned field by field by
+//     enabled catalog source when omitted, both tools' descriptions gained
+//     "catalog source" wording, and search_servers documents its unsupported
+//     tag filter. Pinned field by field by
 //     TestMenuSurface_ExactDeltaFromPreFeature's assertSearchServersDelta /
 //     assertListRegistriesDelta.
 var toolsListAllowedDelta = map[string][]string{
@@ -407,6 +408,22 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 			// Every other entry is byte-equal to the frozen capture.
 			for name, pre := range before {
 				if name == spec105CodeExecutionTool || spec109CatalogTools[name] {
+					continue
+				}
+				if name == "upstream_servers" {
+					// Spec 112 adds exactly one optional parameter,
+					// forward_headers_json. With that property removed the
+					// entry must still equal the frozen pre-105 capture.
+					var postM map[string]interface{}
+					require.NoError(t, json.Unmarshal(after[name], &postM))
+					props := schemaProps(postM)
+					assert.Contains(t, props, "forward_headers_json",
+						"surface %s: upstream_servers carries the Spec 112 parameter", surface)
+					delete(props, "forward_headers_json")
+					trimmed, err := json.Marshal(postM)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(pre), string(trimmed),
+						"surface %s: upstream_servers may differ from the pre-105 golden only by the Spec 112 forward_headers_json parameter", surface)
 					continue
 				}
 				assert.True(t, bytes.Equal(pre, after[name]),

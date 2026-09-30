@@ -324,11 +324,42 @@ const upstreamServersRedactionMarker = "REDACTION (update/patch):"
 // description, which gains the redaction note above. No parameter may be added,
 // removed or altered — this is a documentation change over an existing
 // behaviour, not a new capability.
+//
+// Spec 112 adds exactly ONE parameter, forward_headers_json (a string holding a
+// JSON array of header names), for the per-server client header forwarding
+// allowlist. It is enumerated here so any other parameter movement still fails.
 func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
 	t.Helper()
 
-	assert.Equal(t, schemaWithout(preM, "description"), schemaWithout(curM, "description"),
-		"surface %s: only upstream_servers' description may move (issue #1146)", surface)
+	const spec112Param = "forward_headers_json"
+	curProps := schemaProps(curM)
+	if assert.Contains(t, curProps, spec112Param,
+		"surface %s: upstream_servers must expose the Spec 112 forward_headers_json parameter", surface) {
+		prop, _ := curProps[spec112Param].(map[string]interface{})
+		assert.Equal(t, "string", prop["type"], "surface %s: forward_headers_json is a JSON-array string", surface)
+		assert.NotContains(t, requiredParams(curM), spec112Param, "surface %s: forward_headers_json is optional", surface)
+	}
+	// Compare the two schemas with that one added parameter removed from the
+	// current side; everything else must be identical apart from the description.
+	curWithout := schemaWithout(curM, "description")
+	if schema, ok := curWithout["inputSchema"].(map[string]interface{}); ok {
+		trimmed := make(map[string]interface{}, len(schema))
+		for k, v := range schema {
+			trimmed[k] = v
+		}
+		if props, ok := schema["properties"].(map[string]interface{}); ok {
+			np := make(map[string]interface{}, len(props))
+			for k, v := range props {
+				if k != spec112Param {
+					np[k] = v
+				}
+			}
+			trimmed["properties"] = np
+		}
+		curWithout["inputSchema"] = trimmed
+	}
+	assert.Equal(t, schemaWithout(preM, "description"), curWithout,
+		"surface %s: only upstream_servers' description and the Spec 112 forward_headers_json parameter may move", surface)
 
 	assert.Contains(t, curM["description"], upstreamServersRedactionMarker,
 		"surface %s: upstream_servers must document that update/patch mask secret values in the diff", surface)
@@ -341,8 +372,9 @@ func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[str
 
 // assertSearchServersDelta: Spec 109 FR-067 makes 'registry' OPTIONAL (was
 // required) and updates its description, plus the tool's own description,
-// to the "search every catalog source" wording. No parameter is added or
-// removed, and every parameter OTHER than 'registry' is byte-identical.
+// to the "search every catalog source" wording. The catalog follow-up also
+// documents that non-empty 'tag' values are rejected. No parameter is added
+// or removed, and every parameter OTHER than 'registry' and 'tag' is identical.
 func assertSearchServersDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
 	t.Helper()
 
@@ -357,7 +389,7 @@ func assertSearchServersDelta(t *testing.T, surface string, preM, curM map[strin
 		"surface %s: search_servers must keep the same parameter set — FR-067 changes registry's requiredness/description only", surface)
 
 	for name, preProp := range preProps {
-		if name == "registry" {
+		if name == "registry" || name == "tag" {
 			continue
 		}
 		assert.Equal(t, preProp, curProps[name],
@@ -370,6 +402,15 @@ func assertSearchServersDelta(t *testing.T, surface string, preM, curM map[strin
 		"surface %s: precondition — pre-feature search_servers required 'registry'", surface)
 	assert.NotContains(t, curRequired, "registry",
 		"surface %s: 'registry' must become optional (FR-067)", surface)
+
+	preTag, ok := preProps["tag"].(map[string]interface{})
+	assert.True(t, ok, "surface %s: precondition — search_servers has tag parameter", surface)
+	curTag, ok := curProps["tag"].(map[string]interface{})
+	assert.True(t, ok, "surface %s: search_servers must keep tag parameter", surface)
+	assert.Equal(t, "Catalog entries do not carry tags. Omit this parameter or pass an empty value; non-empty values return an error.", curTag["description"],
+		"surface %s: tag must explain the unsupported filter behavior", surface)
+	assert.NotEqual(t, preTag["description"], curTag["description"],
+		"surface %s: tag description delta must be explicit", surface)
 }
 
 // assertListRegistriesDelta: Spec 109 FR-067 changes ONLY list_registries'

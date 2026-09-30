@@ -124,6 +124,11 @@ type OnboardingMarkRequest struct {
 	// matching the field's "bounded by the registry" invariant
 	// (data-model.md §7).
 	ConnectedClientID string `json:"connected_client_id,omitempty"`
+
+	// DisconnectedClientID relays a successful local CLI disconnect to a running
+	// daemon, which cannot observe the CLI's direct config-file edit itself.
+	// Like ConnectedClientID, it is bounded to the fixed client registry.
+	DisconnectedClientID string `json:"disconnected_client_id,omitempty"`
 }
 
 // handleGetOnboardingState godoc
@@ -203,6 +208,10 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("unknown client id: %s", req.ConnectedClientID))
 		return
 	}
+	if req.DisconnectedClientID != "" && connect.FindClient(req.DisconnectedClientID) == nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("unknown client id: %s", req.DisconnectedClientID))
+		return
+	}
 
 	// externalConnectionEvidence (FR-002a) itself reads the connect service and
 	// the shared telemetry/activation BBolt bucket. It must run OUTSIDE the
@@ -241,11 +250,17 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 		if req.ConnectedClientID != "" {
 			applyClientConnected(state, req.ConnectedClientID, now)
 		}
+		if req.DisconnectedClientID != "" {
+			applyClientDisconnected(state, req.DisconnectedClientID, now)
+		}
 		return nil
 	})
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("save state: %v", err))
 		return
+	}
+	if req.ConnectedClientID != "" || req.DisconnectedClientID != "" {
+		s.notifyClientPresenceChanged()
 	}
 
 	resp, err := s.computeOnboardingState(r.Context())
