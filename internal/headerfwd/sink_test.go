@@ -154,3 +154,18 @@ func TestScrubErrorAsRefusesMatchesHidingRawValue(t *testing.T) {
 		t.Fatal("typed error holding the value in a field must not be returned")
 	}
 }
+
+// formattedErr hides its field behind a custom Formatter (review round 12).
+type formattedErr struct{ detail string }
+
+func (e *formattedErr) Error() string                 { return "rejected" }
+func (e *formattedErr) Format(f fmt.State, verb rune) { _, _ = f.Write([]byte("rejected")) }
+
+func TestScrubErrorAsSeesFieldsBehindFormatter(t *testing.T) {
+	s := snapWith(t, "X-Tenant-Id", "tenant-secret-1")
+	got := ScrubError(fmt.Errorf("z tenant-secret-1: %w", &formattedErr{detail: "echo tenant-secret-1"}), s, nil)
+	var f *formattedErr
+	if errors.As(got, &f) {
+		t.Fatal("a Formatter must not hide a raw field from the As check")
+	}
+}

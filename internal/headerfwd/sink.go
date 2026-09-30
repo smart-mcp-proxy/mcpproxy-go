@@ -128,7 +128,7 @@ func (e *scrubbedError) As(target any) bool {
 // any error in its Unwrap chain (single or joined).
 func (e *scrubbedError) carriesValue(x any) bool {
 	dirty := func(t string) bool { return e.scrub(t) != t }
-	if dirty(fmt.Sprintf("%#v", x)) {
+	if fieldsCarry(reflect.ValueOf(x), dirty, 0) {
 		return true
 	}
 	err, ok := x.(error)
@@ -142,7 +142,7 @@ func (e *scrubbedError) carriesValue(x any) bool {
 			return false
 		}
 		seen++
-		if dirty(err.Error()) || dirty(fmt.Sprintf("%#v", err)) {
+		if dirty(err.Error()) || fieldsCarry(reflect.ValueOf(err), dirty, 0) {
 			return true
 		}
 		switch u := err.(type) {
@@ -183,4 +183,42 @@ func ScrubError(err error, s Snapshot, allow []string) error {
 		return err
 	}
 	return &scrubbedError{msg: clean, err: err, scrub: func(t string) string { return Scrub(t, s, allow) }}
+}
+
+// fieldsCarry walks v's string data directly through reflect (unexported
+// fields included), so a custom Format or GoString method cannot hide a raw
+// value. Depth-bounded; maps, slices and interfaces are followed.
+func fieldsCarry(v reflect.Value, dirty func(string) bool, depth int) bool {
+	if !v.IsValid() || depth > 6 {
+		return false
+	}
+	switch v.Kind() {
+	case reflect.String:
+		return dirty(v.String())
+	case reflect.Pointer, reflect.Interface:
+		return !v.IsNil() && fieldsCarry(v.Elem(), dirty, depth+1)
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			if fieldsCarry(v.Field(i), dirty, depth+1) {
+				return true
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8 {
+			return dirty(string(v.Bytes()))
+		}
+		for i := 0; i < v.Len() && i < 256; i++ {
+			if fieldsCarry(v.Index(i), dirty, depth+1) {
+				return true
+			}
+		}
+	case reflect.Map:
+		it := v.MapRange()
+		for n := 0; it.Next() && n < 256; n++ {
+			if fieldsCarry(it.Key(), dirty, depth+1) || fieldsCarry(it.Value(), dirty, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
 }
