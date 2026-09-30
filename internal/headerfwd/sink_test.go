@@ -215,7 +215,7 @@ func TestScrubErrorAsByteSlices(t *testing.T) {
 
 func TestScrubErrorAsDeepChainFailsClosed(t *testing.T) {
 	s := snapWith(t, "X-Tenant-Id", "tenant-secret-1")
-	var inner error = errors.New("tenant-secret-1")
+	inner := errors.New("tenant-secret-1")
 	for i := 0; i < 100; i++ {
 		inner = &genericWrapErr{Cause: inner}
 	}
