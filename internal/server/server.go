@@ -3616,6 +3616,20 @@ func (s *Server) ApplyConfig(cfg *config.Config, cfgPath string) (*runtime.Confi
 	return s.runtime.GuardedApplyConfig(cfg, cfgPath)
 }
 
+// MutateConfig is the config funnel (Spec 108-f F2): the read of the desired
+// config, the caller's mutation, the FR-008a guard, an optional token re-pin and
+// the write run under one lock, and the write's profile_change records are
+// attributed to actor. PATCH /config, POST /config/apply, PATCH
+// /config/docker-isolation and every profiles-service mutation go through it.
+func (s *Server) MutateConfig(
+	ctx context.Context,
+	actor runtime.Actor,
+	mutate func(desired *config.Config) (runtime.ChangeHint, error),
+	tokens runtime.TokenRewrite,
+) (*runtime.ConfigApplyResult, *runtime.ConfigDiff, error) {
+	return s.runtime.MutateConfig(ctx, actor, mutate, tokens)
+}
+
 // GetTokenSavings calculates and returns token savings statistics
 func (s *Server) GetTokenSavings() (*contracts.ServerTokenMetrics, error) {
 	return s.runtime.CalculateTokenSavings()

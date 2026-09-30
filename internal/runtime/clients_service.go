@@ -47,6 +47,7 @@ type ClientsService struct {
 // *storage.Manager implements it.
 type ClientCredentialStore interface {
 	MintClientCredential(clientID, rawToken string, hmacKey []byte, mode, pin string, expiresAt time.Time) (*auth.AgentToken, error)
+	MintClientCredentialNamed(clientID, rawToken string, hmacKey []byte, mode, pin string, expiresAt time.Time, displayName string) (*auth.AgentToken, error)
 	StageClientCredentialRotation(clientID, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
 	FinalizeClientCredentialRotation(clientID string) (*auth.AgentToken, error)
 	RollbackClientCredentialRotation(clientID string) (*auth.AgentToken, error)
@@ -330,7 +331,14 @@ func surfaceSource(s profile.Surface) storage.ActivitySource {
 }
 
 func (s *ClientsService) writeChange(ctx context.Context, a Actor, c changeRecord) {
-	if s.activity == nil {
+	writeChangeRecord(ctx, s.activity, s.logger, s.now(), a, c)
+}
+
+// writeChangeRecord builds and saves one `profile_change` activity record. It
+// is shared by the clients service and the profiles/config funnel, so every
+// record has one shape (FR-030).
+func writeChangeRecord(ctx context.Context, activity func(*storage.ActivityRecord) error, logger *zap.Logger, now time.Time, a Actor, c changeRecord) {
+	if activity == nil {
 		return
 	}
 	meta := map[string]interface{}{
@@ -350,7 +358,7 @@ func (s *ClientsService) writeChange(ctx context.Context, a Actor, c changeRecor
 		Type:      storage.ActivityTypeProfileChange,
 		Source:    surfaceSource(a.Surface),
 		Status:    "success",
-		Timestamp: s.now().UTC(),
+		Timestamp: now.UTC(),
 		RequestID: reqcontext.GetRequestID(ctx),
 		Metadata:  meta,
 		// Spec 108 FR-030/T063: first-class beside the metadata keys (kept for
@@ -361,8 +369,8 @@ func (s *ClientsService) writeChange(ctx context.Context, a Actor, c changeRecor
 		ClientID:  c.clientID,
 		TokenName: c.tokenName,
 	}
-	if err := s.activity(rec); err != nil {
-		s.logger.Error("failed to write profile_change activity record", zap.String("client_id", c.clientID), zap.Error(err))
+	if err := activity(rec); err != nil {
+		logger.Error("failed to write profile_change activity record", zap.String("client_id", c.clientID), zap.Error(err))
 	}
 }
 

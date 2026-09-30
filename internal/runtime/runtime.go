@@ -267,6 +267,9 @@ type Runtime struct {
 	bindingGuardMu sync.RWMutex
 	bindingGuard   BindingGuard
 	bindingWriteMu sync.Mutex
+	// pinStoreOverride replaces the storage manager as the target of a token
+	// pin rewrite (UpdateConfig); tests inject failures through it.
+	pinStoreOverride ProfilePinStore
 	// clientsService is Spec 108's single client-credential service.
 	clientsService *ClientsService
 

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // errMalformedCredential is the exact FR-021 refusal text returned by
@@ -55,6 +56,9 @@ var clientIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,55}$`)
 func ValidClientID(id string) bool {
 	return clientIDPattern.MatchString(id)
 }
+
+// MaxClientDisplayName bounds AgentToken.DisplayName (characters).
+const MaxClientDisplayName = 64
 
 // ClientTokenName is the FR-021 token name for a client credential.
 func ClientTokenName(clientID string) string {
@@ -110,6 +114,12 @@ type AgentToken struct {
 	Kind        string `json:"kind,omitempty"`
 	ClientID    string `json:"client_id,omitempty"`
 	ProfileMode string `json:"profile_mode,omitempty"`
+
+	// DisplayName is the human name of a CUSTOM client (one not in the connect
+	// registry), shown on the Clients page (Spec 108-f, FR-021). It is set
+	// only for Kind=client and is at most MaxClientDisplayName characters.
+	// Additive and omitempty: a binary that predates it ignores the field.
+	DisplayName string `json:"display_name,omitempty"`
 
 	// PendingHash/PendingPrefix/RotationStartedAt track an in-progress
 	// staged rotation (FR-021a, Kind=client only): both the old secret's
@@ -349,6 +359,9 @@ func ValidateTokenInvariants(t *AgentToken, claimedKind string) error {
 		if !hasAllPermissions(t.Permissions) {
 			return errMalformedCredential
 		}
+		if utf8.RuneCountInString(t.DisplayName) > MaxClientDisplayName {
+			return errMalformedCredential
+		}
 		if t.ProfileMode != ProfileModeLocked && t.ProfileMode != ProfileModeSwitchable {
 			return errMalformedCredential
 		}
@@ -374,7 +387,7 @@ func ValidateTokenInvariants(t *AgentToken, claimedKind string) error {
 	// client-only fields may be set. A legacy unpinned token (no mode, no
 	// pin) and a legacy pinned token (no mode, a pin) are both VALID and
 	// keep their exact existing semantics.
-	if t.ClientID != "" || t.ProfileMode != "" || t.PendingHash != "" {
+	if t.ClientID != "" || t.ProfileMode != "" || t.PendingHash != "" || t.DisplayName != "" {
 		return errMalformedCredential
 	}
 	return nil

@@ -110,6 +110,14 @@ const (
 	// AccessSubjectProfile is a profile's own reach, independent of any
 	// credential: the credential and token_permission steps are skipped.
 	AccessSubjectProfile AccessSubjectKind = "profile"
+	// AccessSubjectToken is a regular agent token (Spec 108-f): its pin is
+	// the base profile, and its AllowedServers/Permissions apply. A client
+	// credential is explained as a client, never as a token.
+	AccessSubjectToken AccessSubjectKind = "token"
+	// AccessSubjectAnonymous is a caller that presents no credential
+	// (Spec 108-f): refused outright under require_mcp_auth, otherwise
+	// resolved through anonymous_profile and the FR-008a binding guard.
+	AccessSubjectAnonymous AccessSubjectKind = "anonymous"
 )
 
 // AccessSubject names the subject of an access evaluation.
@@ -121,8 +129,13 @@ type AccessSubject struct {
 	// (client | admin_key | none | revoked | expired). Empty means "derive it
 	// from the client's credential record".
 	CredentialState CredentialState
-	// Profile names the profile for AccessSubjectProfile.
+	// Profile names the profile for AccessSubjectProfile. For
+	// AccessSubjectClient it is an optional OVERRIDE: the client's credential
+	// evaluated under this profile ("what would Cursor get on that profile",
+	// GET /profiles/{name}/effective-tools?client=).
 	Profile string
+	// TokenName names the token for AccessSubjectToken.
+	TokenName string
 }
 
 // AccessStepStatus is the outcome of one step of the chain.
