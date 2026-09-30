@@ -379,6 +379,11 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// FR-008a: the one evaluator behind every guarded write (config routes,
 	// connect, client bindings) and the runtime anonymous guard.
 	rt.SetBindingGuard(mcpProxy)
+	// Spec 108-f: the profiles service asks the same proxy for effective tools,
+	// try, explain and tool counts, and tells it to rewrite live sessions'
+	// stored selections on a rename or delete.
+	rt.SetProfileEvaluator(mcpProxy)
+	rt.ProfilesService().SetSessionHook(mcpProxy)
 	// FR-026: a binding change clears the stored set_profile selection of every
 	// live session of that credential and sends tools/list_changed to each.
 	rt.ClientsService().SetNotifier(mcpProxy)
@@ -405,14 +410,41 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// the observer runs on the exact *Config about to be stored — and the
 	// startup snapshot now, which NewService stored without running any
 	// observer (see warmProfileIndex).
-	if svc := server.runtime.ConfigService(); svc != nil {
-		svc.AddPrePublishObserver(func(cfg *config.Config) { server.profileIndexes.warmPublishing(cfg) })
-	}
+	server.installProfilePublishObserver(mcpProxy)
 	server.warmProfileIndex()
 
 	server.runtime.StartBackgroundInitialization()
 
 	return server, nil
+}
+
+// installProfilePublishObserver registers the pre-publish observer that indexes
+// every config snapshot (Spec 105 FR-004) and, for a snapshot that changed a
+// profile or the anonymous_profile, enqueues the FR-027 notification and the
+// profiles.changed event (Spec 108-f F9, F10). One observer covers a
+// profiles-service write and a hand edit alike. It returns the notifier (nil
+// when the runtime has no config service).
+func (s *Server) installProfilePublishObserver(mcpProxy *MCPProxyServer) *profileChangeNotifier {
+	svc := s.runtime.ConfigService()
+	if svc == nil {
+		return nil
+	}
+	notifier := newProfileChangeNotifier(mcpProxy, func(name, change string) { s.runtime.EmitProfilesChanged(name, change, "") })
+	mcpProxy.profileNotifier = notifier
+	notifier.start()
+	svc.AddPrePublishObserver(func(cfg *config.Config) {
+		// The snapshot this one replaces, read BEFORE the warm path stores the
+		// new pair: the FR-027 delta is computed between the two.
+		var previous *config.Config
+		if old := s.profileIndexes.Current(); old != nil {
+			previous = old.cfg
+		}
+		s.profileIndexes.warmPublishing(cfg)
+		if previous != nil && previous != cfg {
+			notifier.enqueue(previous, cfg)
+		}
+	})
+	return notifier
 }
 
 // trustedProxiesProvider yields the LIVE trusted_proxies list (Spec 107

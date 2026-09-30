@@ -435,6 +435,16 @@ func (r *Runtime) EmitActiveProfileChanged(profile string) {
 	r.publishEvent(newEvent(EventTypeActiveProfileChanged, payload))
 }
 
+// EmitProfilesChanged publishes profiles.changed for one changed profile (or,
+// with change "anonymous", the anonymous_profile). previousName is optional.
+func (r *Runtime) EmitProfilesChanged(name, change, previousName string) {
+	payload := map[string]any{"name": name, "change": change}
+	if previousName != "" {
+		payload["previous_name"] = previousName
+	}
+	r.publishEvent(newEvent(EventTypeProfilesChanged, payload))
+}
+
 // EmitOAuthTokenRefreshed emits an event when proactive token refresh succeeds.
 // This is used by the RefreshManager to notify subscribers of successful token refresh.
 func (r *Runtime) EmitOAuthTokenRefreshed(serverName string, expiresAt time.Time) {

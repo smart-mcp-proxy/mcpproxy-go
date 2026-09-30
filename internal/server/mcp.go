@@ -196,6 +196,14 @@ type MCPProxyServer struct {
 	// MCP session tracking
 	sessionStore *SessionStore
 
+	// profileNotifier delivers FR-027 profile-edit notifications and the
+	// profiles.changed event after a snapshot is published (Spec 108-f).
+	profileNotifier *profileChangeNotifier
+
+	// toolCounts memoizes an administrator's per-profile tool counts for one
+	// published (profile index, tool tier generation) pair (Spec 108-f F35).
+	toolCounts profileToolCountsCache
+
 	// Hooks shared across all routing mode servers
 	hooks *mcpserver.Hooks
 
@@ -527,6 +535,9 @@ func NewMCPProxyServer(
 			sessionStore.SetSessionIdentity(sessionID, ac.AgentName, ac.ClientID)
 		}
 		sessionStore.SetSessionServer(sessionID, mcpserver.ServerFromContext(ctx))
+		// Spec 108-f F10: a session that presented no credential has
+		// anonymous_profile as its base; a change of that profile re-lists it.
+		sessionStore.SetSessionAnonymous(sessionID, anonymousProfileCaller(ctx))
 
 		// Spec 044 (T038): feed the activation funnel. Mark first-ever client
 		// + record the sanitized clientInfo.name in the capped seen-ever list.
@@ -700,6 +711,9 @@ func NewMCPProxyServer(
 
 // Close gracefully shuts down the MCP proxy server and releases resources
 func (p *MCPProxyServer) Close() error {
+	if p.profileNotifier != nil {
+		p.profileNotifier.close()
+	}
 	if p.jsPool != nil {
 		if err := p.jsPool.Close(); err != nil {
 			p.logger.Warn("failed to close JavaScript runtime pool", zap.Error(err))

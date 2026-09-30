@@ -26,6 +26,10 @@ var reservedRESTProfileNames = map[string]bool{"active": true, "try": true}
 type ProfileSessionHook interface {
 	ProfileRenamed(from, to string)
 	ProfileDeleted(name string)
+	// ProfileTokensMoved is called after a delete-with-reassign moved these
+	// tokens' pins: their sessions' base changed, so each is re-listed and its
+	// stored selection cleared (FR-026 semantics).
+	ProfileTokensMoved(tokenNames []string)
 }
 
 // ProfilesService is THE service behind every profile operation (Spec 108
@@ -599,6 +603,7 @@ func (s *ProfilesService) Delete(ctx context.Context, a Actor, name, reassignTo 
 				return ChangeHint{}, &ValidationError{Field: "reassign_to", Message: fmt.Sprintf("reassign_to must name another existing profile, got %q", reassignTo)}
 			}
 			res.Moved = movedRefs(u)
+			res.movedTokenNames = u.tokenNames()
 			if u.AnonymousProfile {
 				d.AnonymousProfile = reassignTo
 				res.AnonymousProfileMovedTo = reassignTo
@@ -632,6 +637,9 @@ func (s *ProfilesService) Delete(ctx context.Context, a Actor, name, reassignTo 
 	}
 	if h := s.sessionHook(); h != nil {
 		h.ProfileDeleted(name)
+		if reassignTo != "" {
+			h.ProfileTokensMoved(res.movedTokenNames)
+		}
 	}
 	return res, nil
 }

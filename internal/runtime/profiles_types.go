@@ -38,6 +38,15 @@ type UsedBy struct {
 	AnonymousProfile bool           `json:"anonymous_profile"`
 }
 
+// tokenNames lists the token-store names of every referencing credential.
+func (u UsedBy) tokenNames() []string {
+	out := append([]string{}, u.Tokens...)
+	for _, c := range u.Clients {
+		out = append(out, "client-"+c.ID)
+	}
+	return out
+}
+
 // Empty reports whether nothing points at the profile through a client or a
 // token (the anonymous_profile flag is its own refusal).
 func (u UsedBy) Empty() bool { return len(u.Clients) == 0 && len(u.Tokens) == 0 }
@@ -96,6 +105,8 @@ type DeleteResult struct {
 	Deleted                 string    `json:"deleted"`
 	Moved                   MovedRefs `json:"moved"`
 	AnonymousProfileMovedTo string    `json:"anonymous_profile_moved_to,omitempty"`
+
+	movedTokenNames []string
 }
 
 // WriteResult is the outcome of a create or update: the stored profile and the
