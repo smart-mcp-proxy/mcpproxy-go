@@ -77,6 +77,15 @@ func newProfilesV3Fixture(t *testing.T) (*MCPProxyServer, *runtime.Runtime) {
 
 func newProfilesV3FixtureWithConfig(t *testing.T, configure func(*config.Config)) (*MCPProxyServer, *runtime.Runtime) {
 	t.Helper()
+	proxy, rt, _ := newProfilesV3FixtureUpstreams(t, configure)
+	return proxy, rt
+}
+
+// newProfilesV3FixtureUpstreams is newProfilesV3FixtureWithConfig that also
+// returns the three counting upstreams keyed by server name, so a test can
+// assert zero upstream dispatch without restarting the upstream itself.
+func newProfilesV3FixtureUpstreams(t *testing.T, configure func(*config.Config)) (*MCPProxyServer, *runtime.Runtime, map[string]*countingUpstream) {
+	t.Helper()
 
 	proxy, rt := createTestProxyWithRuntimeCfg(t, nil, func(cfg *config.Config) {
 		cfg.Servers = []*config.ServerConfig{
@@ -90,17 +99,19 @@ func newProfilesV3FixtureWithConfig(t *testing.T, configure func(*config.Config)
 		}
 	})
 
-	startCountingUpstream(t, proxy, rt, "github",
-		readSpec("list_issues"),
-		writeSpec("create_issue"),
-		destructiveSpec("delete_repo"),
-		toolSpec{Name: "search_code", Description: "Search code"},
-		readSpec("get_secret_scanning_alert"),
-	)
-	startCountingUpstream(t, proxy, rt, "notion", writeSpec("update_page"))
-	startCountingUpstream(t, proxy, rt, "filesystem", readSpec("read_text_file"))
+	upstreams := map[string]*countingUpstream{
+		"github": startCountingUpstream(t, proxy, rt, "github",
+			readSpec("list_issues"),
+			writeSpec("create_issue"),
+			destructiveSpec("delete_repo"),
+			toolSpec{Name: "search_code", Description: "Search code"},
+			readSpec("get_secret_scanning_alert"),
+		),
+		"notion":     startCountingUpstream(t, proxy, rt, "notion", writeSpec("update_page")),
+		"filesystem": startCountingUpstream(t, proxy, rt, "filesystem", readSpec("read_text_file")),
+	}
 
-	return proxy, rt
+	return proxy, rt, upstreams
 }
 
 // anonCtx returns a context with no AuthContext at all — the "no credential"
