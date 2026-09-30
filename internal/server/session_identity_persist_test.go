@@ -1,6 +1,7 @@
 package server
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -79,4 +80,33 @@ func TestUpdateSessionProfile_BeforePersistIsCopiedAtPersist(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "work-readonly", rec.Profile)
 	assert.Equal(t, "url", rec.ProfileSource)
+}
+
+// Concurrent resolutions of one session must leave the persisted row equal to
+// the in-memory latest, never an older value written by a slower goroutine.
+func TestUpdateSessionProfile_ConcurrentWritesLeaveLatest(t *testing.T) {
+	store, mgr := newPersistStore(t)
+	store.SetSession("s1", "Cursor", "1.0", false, false, nil)
+	store.EnsurePersisted("s1", nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := "p-even"
+			if i%2 == 1 {
+				name = "p-odd"
+			}
+			store.UpdateSessionProfile("s1", name, "session")
+		}(i)
+	}
+	wg.Wait()
+
+	info := store.GetSession("s1")
+	require.NotNil(t, info)
+	rec, err := mgr.GetSessionByID("s1")
+	require.NoError(t, err)
+	assert.Equal(t, info.Profile, rec.Profile, "the persisted row equals the in-memory latest")
+	assert.Equal(t, info.ProfileSource, rec.ProfileSource)
 }

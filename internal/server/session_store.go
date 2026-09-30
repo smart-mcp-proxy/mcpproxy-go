@@ -101,6 +101,9 @@ type SessionStore struct {
 	// profileWriter, when non-nil, replaces the storage write-through of a
 	// changed profile resolution. Test seam only (counts writes).
 	profileWriter func(sessionID, profile, source string)
+	// writeThroughMu serializes the storage write-throughs of profile
+	// resolutions (see UpdateSessionProfile).
+	writeThroughMu sync.Mutex
 }
 
 // NewSessionStore creates a new session store
@@ -555,6 +558,18 @@ func (s *SessionStore) UpdateSessionProfile(sessionID, profileName, source strin
 	// The row may still be in flight (EnsurePersisted flips persisted before
 	// CreateSession returns); wait so the write lands on an existing row.
 	<-done
+
+	// Concurrent updates of one session must not persist an older resolution
+	// after a newer one: serialize the write-throughs and persist the CURRENT
+	// in-memory value at write time, so the last writer always leaves the
+	// latest resolution behind.
+	s.writeThroughMu.Lock()
+	defer s.writeThroughMu.Unlock()
+	s.mu.RLock()
+	if cur, ok := s.sessions[sessionID]; ok {
+		profileName, source = cur.Profile, cur.ProfileSource
+	}
+	s.mu.RUnlock()
 	if writer != nil {
 		writer(sessionID, profileName, source)
 		return

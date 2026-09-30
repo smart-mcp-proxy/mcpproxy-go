@@ -1009,9 +1009,11 @@ func (p *MCPProxyServer) emitActivityInternalToolCallTruncated(internalToolName,
 }
 
 // emitActivityPromptGet safely emits an upstream prompts/get completion (F10).
-func (p *MCPProxyServer) emitActivityPromptGet(serverName, promptName, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}) {
+// ctx is the prompt request's context: its auth identity is the attribution's
+// token and client (Spec 108 FR-029).
+func (p *MCPProxyServer) emitActivityPromptGet(ctx context.Context, serverName, promptName, sessionID, requestID, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response interface{}) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityPromptGetAttributed(serverName, promptName, sessionID, requestID, status, errorMsg, durationMs, arguments, response, p.activityAttribution(context.Background(), sessionID))
+		p.mainServer.runtime.EmitActivityPromptGetAttributed(serverName, promptName, sessionID, requestID, status, errorMsg, durationMs, arguments, response, p.activityAttribution(ctx, sessionID))
 	}
 }
 
@@ -1063,7 +1065,7 @@ func (p *MCPProxyServer) getPromptAggregated(ctx context.Context, name string, a
 			argsForRecord[k] = v
 		}
 	}
-	p.emitActivityPromptGet(serverName, promptName, sessionID, requestID, status, errMsg,
+	p.emitActivityPromptGet(ctx, serverName, promptName, sessionID, requestID, status, errMsg,
 		time.Since(start).Milliseconds(), argsForRecord, response)
 
 	return result, err
