@@ -60,7 +60,9 @@ func diffProfiles(before, after *config.Config, hint ChangeHint) []ProfileChange
 	}
 	oldByName, newByName := byName(before), byName(after)
 
-	names := make([]string, 0, len(oldByName)+len(newByName))
+	// Capacity from one side only: summing both lengths trips CodeQL's
+	// allocation-overflow check, and append grows the slice as needed.
+	names := make([]string, 0, len(oldByName))
 	seen := map[string]bool{}
 	for n := range oldByName {
 		names, seen[n] = append(names, n), true
