@@ -1,10 +1,7 @@
 package runtime
 
 import (
-	"fmt"
-
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // SetBindingGuard installs the FR-008a evaluator (the server's
@@ -35,27 +32,6 @@ func (r *Runtime) BindingGuard() BindingGuard {
 func (r *Runtime) LockBindingWrites() (unlock func()) {
 	r.bindingWriteMu.Lock()
 	return r.bindingWriteMu.Unlock
-}
-
-// GuardedApplyConfig applies newCfg after the FR-008a guard: the delta over
-// the whole candidate state (candidate config + the client credentials that
-// exist now) must be empty, else *BindingGuardError is returned and nothing
-// is written. It is the single funnel behind PATCH /config, POST
-// /config/apply and PATCH /config/docker-isolation.
-func (r *Runtime) GuardedApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApplyResult, error) {
-	unlock := r.LockBindingWrites()
-	defer unlock()
-
-	tokens, err := r.clientCredentialSnapshot()
-	if err != nil {
-		return nil, fmt.Errorf("cannot inspect client bindings: %w", err)
-	}
-	current := GuardState{Config: r.Config(), Tokens: tokens}
-	candidate := GuardState{Config: newCfg, Tokens: tokens}
-	if err := CheckBindingGuard(r.BindingGuard(), current, candidate); err != nil {
-		return nil, err
-	}
-	return r.ApplyConfig(newCfg, cfgPath)
 }
 
 // ClientsService returns the runtime's single client-credential service

@@ -44,6 +44,7 @@ type restV3Fixture struct {
 	proxy     *MCPProxyServer
 	rt        *runtime.Runtime
 	srv       *Server
+	api       *httpapi.Server
 	router    http.Handler
 	cfg       *config.Config
 	upstreams map[string]*countingUpstream
@@ -78,7 +79,7 @@ func newProfilesV3RESTFixture(t *testing.T, configure func(*config.Config)) *res
 		"activity service must subscribe before the first refusal is emitted")
 
 	return &restV3Fixture{
-		t: t, proxy: proxy, rt: rt, srv: srv, router: api.Router(),
+		t: t, proxy: proxy, rt: rt, srv: srv, api: api, router: api.Router(),
 		cfg: rt.Config(), upstreams: upstreams, hmacKey: hmacKey,
 	}
 }

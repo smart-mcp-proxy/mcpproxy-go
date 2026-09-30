@@ -90,24 +90,41 @@ func TestContractFixtures_Decode(t *testing.T) {
 	})
 
 	t.Run("explain_blocked.json decodes step/action/verdict enums", func(t *testing.T) {
+		// The F24 shape (Spec 108-f): subject{kind, name}, the resolved profile,
+		// a hidden verdict (visible = false, so not `blocked`), and move_client
+		// targeting the client id.
 		var explanation struct {
+			Subject struct {
+				Kind AccessSubjectKind `json:"kind"`
+				Name string            `json:"name"`
+			} `json:"subject"`
+			Profile struct {
+				Name   string `json:"name"`
+				Source Source `json:"source"`
+			} `json:"profile"`
 			Steps []struct {
 				Step   ExplainStep `json:"step"`
 				Status string      `json:"status"`
 			} `json:"steps"`
-			Verdict      string      `json:"verdict"`
-			FirstFailure ExplainStep `json:"first_failure"`
+			Verdict      ExplainVerdict `json:"verdict"`
+			FirstFailure ExplainStep    `json:"first_failure"`
 			Fixes        []struct {
 				Step   ExplainStep `json:"step"`
 				Action FixAction   `json:"action"`
+				Target string      `json:"target"`
 			} `json:"fixes"`
 		}
 		require.NoError(t, json.Unmarshal(readFixture(t, "explain_blocked.json"), &explanation))
 		require.Equal(t, StepOrder(), stepsOf(explanation.Steps))
 		require.Equal(t, StepTierCap, explanation.FirstFailure)
-		require.Equal(t, "blocked", explanation.Verdict)
+		require.Equal(t, ExplainVerdictHidden, explanation.Verdict)
+		require.Equal(t, AccessSubjectClient, explanation.Subject.Kind)
+		require.Equal(t, "cursor", explanation.Subject.Name)
+		require.Equal(t, SourcePin, explanation.Profile.Source)
 		require.Equal(t, FixAllowInProfile, explanation.Fixes[0].Action)
+		require.Equal(t, "work-readonly", explanation.Fixes[0].Target)
 		require.Equal(t, FixMoveClient, explanation.Fixes[1].Action)
+		require.Equal(t, "cursor", explanation.Fixes[1].Target, "move_client targets the client id")
 	})
 
 	t.Run("activity_attributed.json decodes source and block-reason enums", func(t *testing.T) {

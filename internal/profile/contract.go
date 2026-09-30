@@ -130,6 +130,40 @@ const (
 const (
 	ErrorCodeBindingBypassable  = "binding_bypassable_without_auth"
 	ErrorCodeNoClientCredential = "no_client_credential"
+
+	// Spec 108-f: the profile CRUD refusals (contracts/rest-api.md).
+	ErrorCodeProfileInUse       = "profile_in_use"
+	ErrorCodeProfileIsAnonymous = "profile_is_anonymous_profile"
+	ErrorCodeProfileExists      = "profile_exists"
+	ErrorCodeNameMismatch       = "name_mismatch"
+	// ErrorCodePreconditionFailed answers an upgrade-admin-key-holders apply
+	// whose precondition_token no longer matches what the preview showed.
+	// (Connect's own 409 carries the same meaning under `action`.)
+	ErrorCodePreconditionFailed = "precondition_failed"
+)
+
+// WarningSeverity grades a Clients-surface warning (data-model.md §7).
+type WarningSeverity string
+
+const (
+	WarningSeverityWarn WarningSeverity = "warn"
+	WarningSeverityInfo WarningSeverity = "info"
+)
+
+// WarningActionUpgradeAdminKeyHolders is the `action.kind` of the
+// client_holds_admin_key warning: a one-click "upgrade every client that holds
+// the admin key" (FR-025). The other action kinds reuse FixAction spellings
+// (change_setting, reconnect_client, move_client, edit_token).
+const WarningActionUpgradeAdminKeyHolders = "upgrade_admin_key_holders"
+
+// ExplainVerdict is the overall answer of an access explanation (FR-035):
+// allowed = callable; hidden = not visible; blocked = visible but not callable.
+type ExplainVerdict string
+
+const (
+	ExplainVerdictAllowed ExplainVerdict = "allowed"
+	ExplainVerdictBlocked ExplainVerdict = "blocked"
+	ExplainVerdictHidden  ExplainVerdict = "hidden"
 )
 
 // GuardFix kinds offered by the FR-008a binding-guard refusal `fixes[]`.

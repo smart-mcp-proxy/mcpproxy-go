@@ -106,6 +106,14 @@ func (p *MCPProxyServer) NewAccessEvaluator(subject profile.AccessSubject) (*Acc
 		ev.markDangling()
 		return ev, nil
 
+	case profile.AccessSubjectToken:
+		return p.newTokenEvaluator(ev, subject)
+
+	case profile.AccessSubjectAnonymous:
+		ev.evaluateAnonymous()
+		ev.markDangling()
+		return ev, nil
+
 	case profile.AccessSubjectClient:
 		record, err := p.clientCredentialRecord(subject.ClientID)
 		if err != nil {
@@ -131,22 +139,72 @@ func (p *MCPProxyServer) NewAccessEvaluator(subject profile.AccessSubject) (*Acc
 			ev.res = p.resolveProfileV3(base, idx)
 			ev.authCtx = nil
 		case profile.CredentialStateNone:
-			if cfg != nil && cfg.RequireMCPAuth {
+			if cfg != nil && config.EffectiveRequireMCPAuth(cfg) {
 				ev.failCredential("the client holds no credential and require_mcp_auth is on")
 				return ev, nil
 			}
-			ac := auth.AnonymousContext()
-			ctx := auth.WithAuthContext(context.Background(), ac)
-			ev.res = p.resolveProfileV3(ctx, idx)
-			ev.authCtx = auth.ScopedView(ac, ev.res.anonymousConfinementActive())
+			ev.evaluateAnonymous()
 		default: // revoked, expired
 			ev.failCredential(fmt.Sprintf("the client's credential is %s", state))
 			return ev, nil
+		}
+		// "What would this client get on profile X": the client's credential
+		// (its token servers and permissions) evaluated under another profile.
+		// The profile reach comes from the profile itself, like a profile
+		// subject; the client's pin or binding would otherwise win FR-020.
+		if subject.Profile != "" && (state == profile.CredentialStateClient || state == profile.CredentialStateAdminKey) {
+			scope := profileScopeFromIndex(idx, subject.Profile)
+			if scope == nil {
+				return nil, profile.ErrUnknownProfile
+			}
+			ev.res = p.resolveProfileV3(profile.WithProfileScope(base, scope), idx)
 		}
 		ev.markDangling()
 		return ev, nil
 	}
 	return nil, fmt.Errorf("unknown access subject kind %q", subject.Kind)
+}
+
+// evaluateAnonymous resolves the subject as the anonymous caller a keyless
+// connection would be: through anonymous_profile and the FR-008a binding guard.
+func (ev *AccessEvaluator) evaluateAnonymous() {
+	if ev.cfg != nil && config.EffectiveRequireMCPAuth(ev.cfg) {
+		ev.failCredential("an anonymous caller is refused: require_mcp_auth is on")
+		return
+	}
+	ac := auth.AnonymousContext()
+	ctx := auth.WithAuthContext(context.Background(), ac)
+	ev.res = ev.p.resolveProfileV3(ctx, ev.idx)
+	ev.authCtx = auth.ScopedView(ac, ev.res.anonymousConfinementActive())
+}
+
+// newTokenEvaluator resolves a regular agent token: its pin is the base
+// profile, its AllowedServers and Permissions apply, and a revoked or expired
+// token fails the credential step. A client credential is not a token here.
+func (p *MCPProxyServer) newTokenEvaluator(ev *AccessEvaluator, subject profile.AccessSubject) (*AccessEvaluator, error) {
+	if p.storage == nil {
+		return nil, profile.ErrUnknownToken
+	}
+	rec, err := p.storage.GetAgentTokenByName(subject.TokenName)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the token: %w", err)
+	}
+	if rec == nil {
+		return nil, profile.ErrUnknownToken
+	}
+	if rec.Kind == auth.KindClient {
+		return nil, profile.ErrClientCredentialToken
+	}
+	switch state := credentialStateOf(rec, time.Now()); state {
+	case profile.CredentialStateRevoked, profile.CredentialStateExpired:
+		ev.failCredential(fmt.Sprintf("the token is %s", state))
+		return ev, nil
+	}
+	ac := rec.AuthContext()
+	ev.res = p.resolveProfileV3(auth.WithAuthContext(context.Background(), ac), ev.idx)
+	ev.authCtx = ac
+	ev.markDangling()
+	return ev, nil
 }
 
 func (ev *AccessEvaluator) failCredential(detail string) {

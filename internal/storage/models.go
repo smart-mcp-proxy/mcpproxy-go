@@ -128,6 +128,25 @@ type OnboardingState struct {
 	// local UI concern and must still work when telemetry is disabled.
 	ClientLastSeen       map[string]time.Time `json:"client_last_seen,omitempty"`
 	ClientDisconnectedAt map[string]time.Time `json:"client_disconnected_at,omitempty"`
+
+	// ClientCredentialObserved records, per client id, the LAST credential
+	// classification an on-demand read produced (Spec 108-f FR-025, F11): what
+	// the client's config held (client | admin_key | none | revoked | expired)
+	// and when it was read. The stat-only GET /clients listing never reads a
+	// config (Spec 075: no macOS App-Data prompt from a list), so this is how
+	// it still reports a client that holds the admin key across restarts. It is
+	// written only when the classification CHANGES, by every on-demand read
+	// (GET /clients/{id}, GET /connect/{client}, the admin-key upgrade preview,
+	// a connect write) and deleted on disconnect. Additive: an older binary
+	// ignores it, and a record without it reads as "unknown".
+	ClientCredentialObserved map[string]ClientCredentialObservation `json:"client_credential_observed,omitempty"`
+}
+
+// ClientCredentialObservation is one on-demand credential classification of a
+// client's config (see OnboardingState.ClientCredentialObserved).
+type ClientCredentialObservation struct {
+	State string    `json:"state"`
+	At    time.Time `json:"at"`
 }
 
 // Meta keys

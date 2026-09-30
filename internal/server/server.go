@@ -379,6 +379,11 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// FR-008a: the one evaluator behind every guarded write (config routes,
 	// connect, client bindings) and the runtime anonymous guard.
 	rt.SetBindingGuard(mcpProxy)
+	// Spec 108-f: the profiles service asks the same proxy for effective tools,
+	// try, explain and tool counts, and tells it to rewrite live sessions'
+	// stored selections on a rename or delete.
+	rt.SetProfileEvaluator(mcpProxy)
+	rt.ProfilesService().SetSessionHook(mcpProxy)
 	// FR-026: a binding change clears the stored set_profile selection of every
 	// live session of that credential and sends tools/list_changed to each.
 	rt.ClientsService().SetNotifier(mcpProxy)
@@ -405,14 +410,41 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// the observer runs on the exact *Config about to be stored — and the
 	// startup snapshot now, which NewService stored without running any
 	// observer (see warmProfileIndex).
-	if svc := server.runtime.ConfigService(); svc != nil {
-		svc.AddPrePublishObserver(func(cfg *config.Config) { server.profileIndexes.warmPublishing(cfg) })
-	}
+	server.installProfilePublishObserver(mcpProxy)
 	server.warmProfileIndex()
 
 	server.runtime.StartBackgroundInitialization()
 
 	return server, nil
+}
+
+// installProfilePublishObserver registers the pre-publish observer that indexes
+// every config snapshot (Spec 105 FR-004) and, for a snapshot that changed a
+// profile or the anonymous_profile, enqueues the FR-027 notification and the
+// profiles.changed event (Spec 108-f F9, F10). One observer covers a
+// profiles-service write and a hand edit alike. It returns the notifier (nil
+// when the runtime has no config service).
+func (s *Server) installProfilePublishObserver(mcpProxy *MCPProxyServer) *profileChangeNotifier {
+	svc := s.runtime.ConfigService()
+	if svc == nil {
+		return nil
+	}
+	notifier := newProfileChangeNotifier(mcpProxy, func(name, change string) { s.runtime.EmitProfilesChanged(name, change, "") })
+	mcpProxy.profileNotifier = notifier
+	notifier.start()
+	svc.AddPrePublishObserver(func(cfg *config.Config) {
+		// The snapshot this one replaces, read BEFORE the warm path stores the
+		// new pair: the FR-027 delta is computed between the two.
+		var previous *config.Config
+		if old := s.profileIndexes.Current(); old != nil {
+			previous = old.cfg
+		}
+		s.profileIndexes.warmPublishing(cfg)
+		if previous != nil && previous != cfg {
+			notifier.enqueue(previous, cfg)
+		}
+	})
+	return notifier
 }
 
 // trustedProxiesProvider yields the LIVE trusted_proxies list (Spec 107
@@ -3036,6 +3068,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// MCP-32: pass the observability manager so /metrics is served (and HTTP
 	// request metrics/tracing middleware applied) when enabled.
 	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar(), s.observability)
+	// Spec 108-f: the profiles service behind /profiles and /access/explain
+	// (both editions: profiles are admin-owned config in either).
+	httpAPIServer.SetProfilesService(s.runtime.ProfilesService())
 	// Wire agent token management (Spec 028)
 	if sm := s.runtime.StorageManager(); sm != nil {
 		cfg := s.runtime.Config()
@@ -3614,6 +3649,20 @@ func (s *Server) ValidateConfig(cfg *config.Config) ([]config.ValidationError, e
 // edits) are not refused; the runtime guard in ResolveProfileV3 covers them.
 func (s *Server) ApplyConfig(cfg *config.Config, cfgPath string) (*runtime.ConfigApplyResult, error) {
 	return s.runtime.GuardedApplyConfig(cfg, cfgPath)
+}
+
+// MutateConfig is the config funnel (Spec 108-f F2): the read of the desired
+// config, the caller's mutation, the FR-008a guard, an optional token re-pin and
+// the write run under one lock, and the write's profile_change records are
+// attributed to actor. PATCH /config, POST /config/apply, PATCH
+// /config/docker-isolation and every profiles-service mutation go through it.
+func (s *Server) MutateConfig(
+	ctx context.Context,
+	actor runtime.Actor,
+	mutate func(desired *config.Config) (runtime.ChangeHint, error),
+	tokens runtime.TokenRewrite,
+) (*runtime.ConfigApplyResult, *runtime.ConfigDiff, error) {
+	return s.runtime.MutateConfig(ctx, actor, mutate, tokens)
 }
 
 // GetTokenSavings calculates and returns token savings statistics

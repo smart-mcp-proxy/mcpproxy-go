@@ -1056,7 +1056,10 @@ func (b *BleveIndex) SearchToolsAdmitted(queryStr string, limit int, admit func(
 
 	b.logger.Debug("Searching tools with admitted query", zap.String("query", queryStr), zap.Int("limit", limit))
 
-	results = make([]*config.SearchResult, 0, limit)
+	// Not preallocated from limit: no caller-supplied value may size an
+	// allocation, and result lists are small (callers clamp limit, e.g.
+	// ProfilesService.Try caps it at 50), so append growth is negligible.
+	results = []*config.SearchResult{}
 	for from := 0; ; from += pageSize {
 		searchResult, err := b.index.Search(newToolSearchRequest(q, from, pageSize))
 		if err != nil {

@@ -305,6 +305,7 @@ type Server struct {
 	feedbackSubmitter  FeedbackSubmitter               // Feedback submission (Spec 036)
 	connectService     *connect.Service                // Client connect/disconnect operations
 	clientsService     *internalRuntime.ClientsService // Client credentials and bindings (Spec 108 FR-026)
+	profilesService    ProfilesAPI                     // Profiles service (Spec 108-f FR-034)
 	securityController SecurityController              // Security scanner operations (Spec 039)
 
 	// sensitiveMasker masks detected secrets out of payloads before they are
@@ -463,12 +464,28 @@ func (s *Server) SetFeedbackSubmitter(submitter FeedbackSubmitter) {
 // SetConnectService configures the client connect/disconnect service.
 func (s *Server) SetConnectService(svc *connect.Service) {
 	s.connectService = svc
+	s.wireClientsService()
 }
 
 // SetClientsService configures the clients service behind the client
 // binding route and the connect credential path (Spec 108).
 func (s *Server) SetClientsService(svc *internalRuntime.ClientsService) {
 	s.clientsService = svc
+	s.wireClientsService()
+}
+
+// wireClientsService connects the clients service to the REST server's
+// on-demand credential observations and, when the connect service is set, to
+// the connect port behind the admin-key upgrade (Spec 108-f F11, F22). Either
+// setter may run first.
+func (s *Server) wireClientsService() {
+	if s.clientsService == nil {
+		return
+	}
+	s.clientsService.SetObserver(s.recordCredentialObservation)
+	if s.connectService != nil {
+		s.clientsService.SetUpgradePort(s.connectService)
+	}
 }
 
 // SetSensitiveMasker configures the detector used to mask secrets out of
@@ -1012,7 +1029,22 @@ func (s *Server) setupRoutes() {
 
 		// Profiles (Profiles v2 T2) — list + default active get/set for UI surfaces
 		r.Get("/profiles", s.handleListProfiles)
+		// Spec 108-f: profile CRUD, rename, try, effective tools and the access
+		// explainer, in BOTH editions (profiles are admin-owned config in either).
+		// The static /profiles/active and /profiles/try routes win over {name}.
+		// guarded: BindingGuardDelta (FR-008a) - every write goes through the
+		// profiles service, whose MutateConfig runs the guard over the whole
+		// candidate state before anything is written.
+		r.Post("/profiles", s.requireServerOp(auth.ServerOpConfigWrite, s.handleCreateProfile))
+		// exempt: nothing is written (a draft is searched against the index).
+		r.Post("/profiles/try", s.requireServerOp(auth.ServerOpConfigWrite, s.handleTryProfile))
 		r.Get("/profiles/active", s.handleGetActiveProfile)
+		r.Get("/profiles/{name}", s.handleGetProfile)
+		r.Put("/profiles/{name}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleUpdateProfile))         // guarded: MutateConfig
+		r.Delete("/profiles/{name}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleDeleteProfile))      // guarded: MutateConfig
+		r.Post("/profiles/{name}/rename", s.requireServerOp(auth.ServerOpConfigWrite, s.handleRenameProfile)) // guarded: MutateConfig
+		r.Get("/profiles/{name}/effective-tools", s.handleProfileEffectiveTools)
+		r.Get("/access/explain", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAccessExplain))
 		// #1166 round 11: the ONLY mutating route in this group, and it was
 		// ungated. The active profile is server-level shared state — it decides
 		// which servers the Web UI and the tray render — so a READ-scoped agent
@@ -5648,31 +5680,20 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stored, err := s.desiredConfigForPatch()
-	if err != nil {
-		s.logger.Errorw("Failed to read configuration for apply", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-
 	// Revert what binds to a key, refuse what does not. Without this the
-	// raw-JSON editor's own GET → edit → POST round trip would write the read
-	// door's masks over the operator's credentials.
-	resolved, err := oauth.UnmaskLiveConfigDocument(document, stored)
-	if err != nil {
-		s.logger.Warnw("Refused a configuration write carrying an unbindable mask", "error", err)
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-	cfg := *resolved
-
-	// Get config path from controller
-	cfgPath := s.controller.GetConfigPath()
-
-	// Apply configuration
-	result, err := s.controller.ApplyConfig(&cfg, cfgPath)
-	if err != nil {
-		s.writeApplyConfigError(w, r, "Failed to apply configuration", result, err)
+	// raw-JSON editor's own GET -> edit -> POST round trip would write the read
+	// door's masks over the operator's credentials. The unmask runs INSIDE the
+	// config funnel, against the desired config it read under the lock.
+	result, ok := s.mutateConfig(w, r, "Failed to apply configuration", func(stored *config.Config) error {
+		resolved, err := oauth.UnmaskLiveConfigDocument(document, stored)
+		if err != nil {
+			s.logger.Warnw("Refused a configuration write carrying an unbindable mask", "error", err)
+			return &configMutationRefusal{status: http.StatusBadRequest, msg: err.Error()}
+		}
+		*stored = *resolved
+		return nil
+	})
+	if !ok {
 		return
 	}
 
@@ -5718,32 +5739,22 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Fetch current config, mutate the single field, and push it back through
-	// the existing apply pipeline so we benefit from validation, change
-	// detection, disk persistence, and hot-reload without duplicating any of
-	// that logic here.
-	// Desired, not running: same reason as handlePatchConfig — a read-modify-
-	// write of the running config discards any restart-pending field.
-	cfg, err := s.desiredConfigForPatch()
-	if err != nil {
-		s.logger.Errorw("Failed to get configuration for docker-isolation patch", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-	if cfg == nil {
-		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
-		return
-	}
-
-	if cfg.DockerIsolation == nil {
-		cfg.DockerIsolation = config.DefaultDockerIsolationConfig()
-	}
-	cfg.DockerIsolation.Enabled = *payload.Enabled
-
-	cfgPath := s.controller.GetConfigPath()
-	result, err := s.controller.ApplyConfig(cfg, cfgPath)
-	if err != nil {
-		s.writeApplyConfigError(w, r, "Failed to apply docker-isolation toggle", result, err)
+	// Mutate the single field on the desired config (what is on disk, not the
+	// running one: a read-modify-write of the running config discards any
+	// restart-pending field) and push it back through the config funnel, so
+	// validation, change detection, disk persistence, hot-reload and the
+	// FR-008a guard all run under one lock.
+	result, ok := s.mutateConfig(w, r, "Failed to apply docker-isolation toggle", func(cfg *config.Config) error {
+		isolation := config.DefaultDockerIsolationConfig()
+		if cfg.DockerIsolation != nil {
+			copied := *cfg.DockerIsolation // never edit a shared pointee in place
+			isolation = &copied
+		}
+		isolation.Enabled = *payload.Enabled
+		cfg.DockerIsolation = isolation
+		return nil
+	})
+	if !ok {
 		return
 	}
 
@@ -5795,86 +5806,26 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the REAL config (secrets intact — redaction only happens on the GET
+	// The merge runs INSIDE the config funnel, on the desired config it reads
+	// under the write lock (secrets intact - redaction only happens on the GET
 	// response path). We deep-merge only the client-sent keys so untouched
 	// fields, including masked secrets, are preserved verbatim.
 	//
-	// The merge base is the DESIRED config — what is on disk — not the running
+	// The merge base is the DESIRED config - what is on disk - not the running
 	// one. They differ only while a restart-gated field (routing_mode, listen,
-	// api_key, …) has been saved but not yet adopted, and merging onto the
+	// api_key, ...) has been saved but not yet adopted, and merging onto the
 	// running config there silently reverted it: an operator who switched to
 	// Direct and then changed any other setting lost the routing switch with no
 	// warning, on disk, with a success toast.
-	cfg, err := s.desiredConfigForPatch()
-	if err != nil {
-		s.logger.Errorw("Failed to get configuration for patch", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-	if cfg == nil {
-		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
-		return
-	}
-
-	// Round-trip the live config through JSON to get a generic map we can
-	// deep-merge the patch onto without enumerating every field.
-	baseBytes, err := json.Marshal(cfg)
-	if err != nil {
-		s.logger.Errorw("Failed to marshal live configuration", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-	baseDecoder := json.NewDecoder(bytes.NewReader(baseBytes))
-	baseDecoder.UseNumber()
-	var baseMap map[string]interface{}
-	if err := baseDecoder.Decode(&baseMap); err != nil {
-		s.logger.Errorw("Failed to unmarshal live configuration", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
-		return
-	}
-
-	// Issue #1148, round 9: resolve any mask the client echoed back BEFORE the
-	// merge. A patch is exactly the shape that used to corrupt — the client
-	// read `env: {GITHUB_TOKEN: "••••56 (40 chars)"}` off a read door and sent
-	// it back — and the merge would have written the mask straight over the
-	// stored credential. Bound by key it is reverted; unbound (an argv slot, a
-	// renamed server) the write is refused.
-	resolvedPatch, err := oauth.UnmaskLiveConfigTree(patchMap, cfg)
-	if err != nil {
-		s.logger.Warnw("Refused a configuration patch carrying an unbindable mask", "error", err)
-		s.writeError(w, r, http.StatusBadRequest, err.Error())
-		return
-	}
-	if m, ok := resolvedPatch.(map[string]interface{}); ok {
-		patchMap = m
-	}
-
-	deepMergeJSON(baseMap, patchMap)
-
-	// Spec 107 FR-039: refuse the removed server-edition keys / auth_broker
-	// modes on the MERGED generic map, before the typed decode drops them
-	// without a trace (json.Unmarshal into config.Config ignores unknown
-	// keys, so Config.Validate can never see them). No-op in the personal
-	// build.
-	if s.refuseRemovedConfigKeys(w, r, baseMap, "Invalid configuration patch") {
-		return
-	}
-
-	mergedBytes, err := json.Marshal(baseMap)
-	if err != nil {
-		s.logger.Errorw("Failed to marshal merged configuration", "error", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to build configuration")
-		return
-	}
-	var merged config.Config
-	if err := json.Unmarshal(mergedBytes, &merged); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid configuration patch: %v", err))
-		return
-	}
-
-	result, err := s.controller.ApplyConfig(&merged, s.controller.GetConfigPath())
-	if err != nil {
-		s.writeApplyConfigError(w, r, "Failed to apply configuration patch", result, err)
+	result, ok := s.mutateConfig(w, r, "Failed to apply configuration patch", func(cfg *config.Config) error {
+		merged, refusal := s.mergeConfigPatch(cfg, patchMap)
+		if refusal != nil {
+			return refusal
+		}
+		*cfg = *merged
+		return nil
+	})
+	if !ok {
 		return
 	}
 
@@ -5887,6 +5838,68 @@ func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		ValidationErrors:   contracts.ConvertValidationErrors(result.ValidationErrors),
 	}
 	s.writeSuccess(w, response)
+}
+
+// mergeConfigPatch deep-merges patchMap onto a JSON round trip of base and
+// returns the typed result: the merge PATCH /config performs. A refusal is the
+// response the handler must answer (unbindable mask, removed keys, a patch
+// that does not decode into a config).
+func (s *Server) mergeConfigPatch(base *config.Config, patchMap map[string]interface{}) (*config.Config, *configMutationRefusal) {
+	// Round-trip the live config through JSON to get a generic map we can
+	// deep-merge the patch onto without enumerating every field.
+	baseBytes, err := json.Marshal(base)
+	if err != nil {
+		s.logger.Errorw("Failed to marshal live configuration", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusInternalServerError, msg: "Failed to read configuration"}
+	}
+	baseDecoder := json.NewDecoder(bytes.NewReader(baseBytes))
+	baseDecoder.UseNumber()
+	var baseMap map[string]interface{}
+	if err := baseDecoder.Decode(&baseMap); err != nil {
+		s.logger.Errorw("Failed to unmarshal live configuration", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusInternalServerError, msg: "Failed to read configuration"}
+	}
+
+	// Issue #1148, round 9: resolve any mask the client echoed back BEFORE the
+	// merge. A patch is exactly the shape that used to corrupt - the client
+	// read `env: {GITHUB_TOKEN: "••••56 (40 chars)"}` off a read door and sent
+	// it back - and the merge would have written the mask straight over the
+	// stored credential. Bound by key it is reverted; unbound (an argv slot, a
+	// renamed server) the write is refused.
+	resolvedPatch, err := oauth.UnmaskLiveConfigTree(patchMap, base)
+	if err != nil {
+		s.logger.Warnw("Refused a configuration patch carrying an unbindable mask", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusBadRequest, msg: err.Error()}
+	}
+	if m, ok := resolvedPatch.(map[string]interface{}); ok {
+		patchMap = m
+	}
+
+	deepMergeJSON(baseMap, patchMap)
+
+	// Spec 107 FR-039: refuse the removed server-edition keys / auth_broker
+	// modes on the MERGED generic map, before the typed decode drops them
+	// without a trace (json.Unmarshal into config.Config ignores unknown
+	// keys, so Config.Validate can never see them). No-op in the personal
+	// build.
+	if errs := config.ValidateRemovedKeys(baseMap); len(errs) > 0 {
+		return nil, &configMutationRefusal{
+			result:   &internalRuntime.ConfigApplyResult{Success: false, ValidationErrors: errs},
+			applyMsg: "Invalid configuration patch",
+			err:      fmt.Errorf("%s", errs[0].Error()),
+		}
+	}
+
+	mergedBytes, err := json.Marshal(baseMap)
+	if err != nil {
+		s.logger.Errorw("Failed to marshal merged configuration", "error", err)
+		return nil, &configMutationRefusal{status: http.StatusInternalServerError, msg: "Failed to build configuration"}
+	}
+	var merged config.Config
+	if err := json.Unmarshal(mergedBytes, &merged); err != nil {
+		return nil, &configMutationRefusal{status: http.StatusBadRequest, msg: fmt.Sprintf("Invalid configuration patch: %v", err)}
+	}
+	return &merged, nil
 }
 
 // writeApplyConfigError reports an ApplyConfig failure with the right status

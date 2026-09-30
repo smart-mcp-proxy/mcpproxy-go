@@ -72,6 +72,7 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/connect":                  {scopeRefused, "MCP client connection status is admin-only"},
 	"/api/v1/connect/{client}":         {scopeRefused, "MCP client connection status is admin-only"},
 	"/api/v1/connect/{client}/preview": {scopeRefused, "MCP client configuration preview is admin-only"},
+	"/api/v1/access/explain":           {scopeRefused, "access explainer names other credentials' bindings and every gate; requireServerOp(ConfigWrite); TestAccessExplainRoute_ScopedCallerIs403"},
 
 	// --- Filtered: reachable, per-server content narrowed to the grant ---
 	"/api/v1/servers":                       {scopeFiltered, "visibleServers; TestGetServers_AgentTokenSeesOnlyAllowedSubset_ManagementPath"},
@@ -107,6 +108,12 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/servers/{id}/scan/files":        {scopeFiltered, "scopedServerSubtree gate"},
 	"/api/v1/servers/{id}/integrity":         {scopeFiltered, "scopedServerSubtree gate"},
 	"/api/v1/servers/{id}/review":            {scopeFiltered, "scopedServerSubtree gate; TestServerReviewUsesScopedSubtreeGuard"},
+
+	// /profiles/{name}: a profile the caller's entitlement does not reach reads
+	// exactly as an unknown one (404); a reachable one is redacted (Spec 108-f
+	// FR-034). TestProfilesCrud_ScopedCallerSeesUnreachableProfileAsUnknown.
+	"/api/v1/profiles/{name}":                 {scopeFiltered, "profileReachable + redactProfileView; uniform 404 for unreachable; TestProfilesCrud_ScopedCallerSeesUnreachableProfileAsUnknown"},
+	"/api/v1/profiles/{name}/effective-tools": {scopeFiltered, "profileReachable gate + visible rows only; TestProfilesEffectiveTools_ScopedCallerGetsVisibleRowsOnly"},
 
 	// --- Open: no per-server identity a scoped token could learn beyond its grant ---
 	"/api/v1/profiles":                      {scopeOpen, "profile names, not server inventory"},
@@ -162,16 +169,18 @@ var routeParamSubstitutions = map[string]string{
 // getRouteScopes `why`. A route that STOPS short-circuiting (e.g. a handler that
 // begins serving the synthetic id) trips this and must be re-examined.
 var shortCircuitCodes = map[string]int{
-	"/api/v1/index/search":                  http.StatusBadRequest,         // no ?q= on the probe request
-	"/api/v1/activity/{id}":                 http.StatusNotFound,           // synthetic id absent → 404 before canSeeServer
-	"/api/v1/tool-calls/{id}":               http.StatusNotFound,           // synthetic id absent → 404 before canSeeServer
-	"/api/v1/security/scans/{jobId}/report": http.StatusNotFound,           // synthetic jobId absent → 404 before canSeeServer
-	"/api/v1/servers/{id}/scan/status":      http.StatusNotFound,           // no scan record for alpha in the fixture
-	"/api/v1/servers/{id}/scan/report":      http.StatusNotFound,           // no scan record for alpha in the fixture
-	"/api/v1/servers/{id}/scan/files":       http.StatusNotFound,           // no scan record for alpha in the fixture
-	"/api/v1/security/scanners/{id}/status": http.StatusNotFound,           // "alpha" is not a configured scanner plugin
-	"/api/v1/review":                        http.StatusServiceUnavailable, // review service not wired in the fixture
-	"/api/v1/servers/{id}/review":           http.StatusServiceUnavailable, // review service not wired in the fixture
+	"/api/v1/index/search":                    http.StatusBadRequest,         // no ?q= on the probe request
+	"/api/v1/activity/{id}":                   http.StatusNotFound,           // synthetic id absent → 404 before canSeeServer
+	"/api/v1/tool-calls/{id}":                 http.StatusNotFound,           // synthetic id absent → 404 before canSeeServer
+	"/api/v1/security/scans/{jobId}/report":   http.StatusNotFound,           // synthetic jobId absent → 404 before canSeeServer
+	"/api/v1/servers/{id}/scan/status":        http.StatusNotFound,           // no scan record for alpha in the fixture
+	"/api/v1/servers/{id}/scan/report":        http.StatusNotFound,           // no scan record for alpha in the fixture
+	"/api/v1/servers/{id}/scan/files":         http.StatusNotFound,           // no scan record for alpha in the fixture
+	"/api/v1/security/scanners/{id}/status":   http.StatusNotFound,           // "alpha" is not a configured scanner plugin
+	"/api/v1/review":                          http.StatusServiceUnavailable, // review service not wired in the fixture
+	"/api/v1/profiles/{name}":                 http.StatusNotFound,           // synthetic profile "alpha" is unknown, which reads the same as unreachable
+	"/api/v1/profiles/{name}/effective-tools": http.StatusNotFound,           // same uniform 404
+	"/api/v1/servers/{id}/review":             http.StatusServiceUnavailable, // review service not wired in the fixture
 }
 
 func fillRouteParams(pattern string) string {
@@ -194,6 +203,7 @@ var routeDenialMarkers = map[string]string{
 	"/api/v1/connect":                  "Admin credentials required to read client connection status",
 	"/api/v1/connect/{client}":         "Admin credentials required to read client connection status",
 	"/api/v1/connect/{client}/preview": "Admin credentials required to read client connection status",
+	"/api/v1/access/explain":           "operation requires admin access",
 }
 
 func init() {

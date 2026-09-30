@@ -71,6 +71,11 @@ type SessionInfo struct {
 	TokenName string
 	ClientID  string
 
+	// Anonymous marks a session that presented no credential (Spec 108-f F10):
+	// its base is the snapshot's anonymous_profile, read at notify time. Memory
+	// only, stamped once at initialize.
+	Anonymous bool
+
 	// Profile and ProfileSource are the LATEST effective resolution for this
 	// session (data-model.md §6 "latest effective, updated on each call").
 	// The session's BASE (pin, bound profile or anonymous_profile) is
@@ -481,6 +486,64 @@ func (s *SessionStore) SetSessionIdentity(sessionID, tokenName, clientID string)
 	if info, ok := s.sessions[sessionID]; ok {
 		info.TokenName = tokenName
 		info.ClientID = clientID
+	}
+}
+
+// SetSessionAnonymous records whether a session presented no credential.
+func (s *SessionStore) SetSessionAnonymous(sessionID string, anonymous bool) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.Anonymous = anonymous
+	}
+}
+
+// SessionsMatching returns every live session for which pred is true, with its
+// serving instance (the FR-027 fan-out seam). pred runs under the store's read
+// lock and must not call back into the store.
+func (s *SessionStore) SessionsMatching(pred func(*SessionInfo) bool) []sessionTarget {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []sessionTarget
+	for id, info := range s.sessions {
+		if pred(info) {
+			out = append(out, sessionTarget{ID: id, Server: info.server})
+		}
+	}
+	return out
+}
+
+// RenameSelection rewrites every stored set_profile selection of profile
+// `from` to `to` (a profile rename must not strand a session on a name that
+// no longer exists).
+func (s *SessionStore) RenameSelection(from, to string) {
+	if from == "" || to == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, sel := range s.activeProfiles {
+		if sel == from {
+			s.activeProfiles[id] = to
+		}
+	}
+}
+
+// ClearSelection drops every stored set_profile selection of the named
+// profile (it was deleted): those sessions fall back to their base.
+func (s *SessionStore) ClearSelection(name string) {
+	if name == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, sel := range s.activeProfiles {
+		if sel == name {
+			delete(s.activeProfiles, id)
+		}
 	}
 }
 

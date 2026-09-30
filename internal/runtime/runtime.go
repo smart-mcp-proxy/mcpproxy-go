@@ -267,8 +267,17 @@ type Runtime struct {
 	bindingGuardMu sync.RWMutex
 	bindingGuard   BindingGuard
 	bindingWriteMu sync.Mutex
+	// pinStoreOverride replaces the storage manager as the target of a token
+	// pin rewrite (UpdateConfig); tests inject failures through it.
+	pinStoreOverride ProfilePinStore
 	// clientsService is Spec 108's single client-credential service.
 	clientsService *ClientsService
+	// profilesService is Spec 108-f's single profiles service; the evaluator
+	// and session hook are installed by the server.
+	profilesService    *ProfilesService
+	profileEvaluatorMu sync.RWMutex
+	profileEvaluator   ProfileEvaluator
+	profileSessionHook ProfileSessionHook
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -487,6 +496,8 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		Mu:       &rt.bindingWriteMu,
 		Logger:   logger,
 	})
+
+	rt.profilesService = newProfilesService(rt)
 
 	// Spec 047: drainer goroutine that publishes coalesced servers.changed
 	// events. Lifetime is tied to appCtx so it shuts down with the runtime.
@@ -1938,7 +1949,10 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// Apply hot-reloadable changes
 	oldCfg := r.cfg
 	r.cfg = newCfg
-	if cfgPath != "" {
+	// Skip the write when the path is unchanged: LoadConfiguredServers goroutines
+	// spawned by an earlier apply read r.cfgPath without this lock, and two
+	// back-to-back funnel writes would otherwise race on an identical value.
+	if cfgPath != "" && cfgPath != r.cfgPath {
 		r.cfgPath = cfgPath
 	}
 

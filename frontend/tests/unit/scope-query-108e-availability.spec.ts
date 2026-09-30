@@ -12,9 +12,10 @@ import {
 
 // Spec 108-e: GET /api/v1/status `features.scope_filters` is the list of
 // parameter NAMES the backend accepts. The composable must un-hide exactly the
-// listed names, and must never send profile/client/token to an endpoint that
-// does not honour them yet (GET /clients and GET /tokens keep answering 400
-// unsupported_scope_filter until Spec 108-f).
+// listed names, and must never send a parameter to an endpoint that does not
+// honour it. Spec 108-f makes GET /clients honour profile and client and GET
+// /tokens honour profile and token; each still answers 400
+// unsupported_scope_filter for the names it does not.
 
 async function scopeFor(page: PageId, query: Record<string, string>): Promise<UseScopeQueryResult> {
   const router = createRouter({
@@ -61,13 +62,13 @@ describe('scope filter availability (Spec 108-e)', () => {
     expect((await scopeFor('servers', q)).toRest()).toEqual({ profile: 'work-readonly' })
   })
 
-  it('the Clients and Tokens pages send no unsupported params', async () => {
+  it('the Clients and Tokens pages send exactly the parameters their endpoint honours', async () => {
     setAvailableFeatures(['profile', 'client', 'token'])
-    const q = { profile: 'work-readonly', client: 'cursor', token: 'client-cursor' }
-    // GET /clients and GET /tokens answer 400 unsupported_scope_filter for any
-    // of these until Spec 108-f: nothing may be sent to them.
-    expect((await scopeFor('clients', q)).toRest()).toEqual({})
-    expect((await scopeFor('tokens', q)).toRest()).toEqual({})
+    const q = { profile: 'work-readonly', client: 'cursor', token: 'ci-bot' }
+    // Spec 108-f: GET /clients honours profile + client, GET /tokens honours
+    // profile + token. The third name would be a 400 unsupported_scope_filter.
+    expect((await scopeFor('clients', q)).toRest()).toEqual({ profile: 'work-readonly', client: 'cursor' })
+    expect((await scopeFor('tokens', q)).toRest()).toEqual({ profile: 'work-readonly', token: 'ci-bot' })
   })
 
   it('the Clients and Tokens pages still show the active filters as chips', async () => {
