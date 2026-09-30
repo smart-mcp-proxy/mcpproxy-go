@@ -263,6 +263,37 @@ func TestClientsService_SetBindingRefusalsWriteNothing(t *testing.T) {
 	require.Equal(t, profile.CredentialStateRevoked, noCred.State)
 }
 
+// The credential precondition (409 no_client_credential) is checked before the
+// requested profile is validated: a client without an active credential gets
+// the contract's 409 whatever profile the request names.
+func TestClientsService_SetBindingCredentialCheckedBeforeProfile(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name    string
+		revoked bool
+		state   string
+	}{
+		{"no credential", false, "none"},
+		{"revoked credential", true, "revoked"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSvcHarness(t)
+			a := h.actor()
+			if tc.revoked {
+				h.mint("cursor", "ro", nil)
+				_, err := h.svc.Forget(ctx, a, "cursor", true)
+				require.NoError(t, err)
+			}
+			_, err := h.svc.SetBinding(ctx, a, "cursor", "ghost", nil)
+			var noCred *NoClientCredentialError
+			require.ErrorAs(t, err, &noCred, "unknown profile must not mask the credential precondition")
+			require.Equal(t, "no_client_credential", noCred.Code())
+			require.Equal(t, tc.state, string(noCred.State))
+		})
+	}
+}
+
 func TestClientsService_AddIDRules(t *testing.T) {
 	h := newSvcHarness(t)
 	ctx := context.Background()

@@ -415,16 +415,18 @@ func (s *ClientsService) SetBinding(ctx context.Context, a Actor, clientID, prof
 }
 
 func (s *ClientsService) setBindingLocked(ctx context.Context, a Actor, clientID, profileName string, modeArg *string) (*ClientCredentialView, error) {
-	if profileName != "" && !s.profileExists(s.cfg(), profileName) {
-		return nil, &ValidationError{Field: "profile", Message: fmt.Sprintf("unknown profile %q", profileName)}
-	}
 	all, err := s.records()
 	if err != nil {
 		return nil, err
 	}
 	rec := clientRecord(all, clientID)
+	// The credential precondition (409) comes before request validation (400)
+	// so a client without an active credential always gets no_client_credential.
 	if state := s.stateOf(rec); state != profile.CredentialStateClient {
 		return nil, &NoClientCredentialError{ClientID: clientID, State: state}
+	}
+	if profileName != "" && !s.profileExists(s.cfg(), profileName) {
+		return nil, &ValidationError{Field: "profile", Message: fmt.Sprintf("unknown profile %q", profileName)}
 	}
 	mode, err := resolveMode(profileName, modeArg, rec.ProfileMode)
 	if err != nil {
