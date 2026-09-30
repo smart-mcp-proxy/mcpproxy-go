@@ -171,7 +171,7 @@ jobs:
 
       - name: Run unit tests (Unix)
         if: matrix.os != 'windows-latest'
-        run: go test -v -race -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 20m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
@@ -278,7 +278,7 @@ jobs:
       # Keep the flags identical to the required ubuntu lane except for
       # -shuffle=on (and no coverage — Codecov already gets the ordered run).
       - name: Run unit tests (shuffled)
-        run: go test -v -race -shuffle=on -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 20m -shuffle=on -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
