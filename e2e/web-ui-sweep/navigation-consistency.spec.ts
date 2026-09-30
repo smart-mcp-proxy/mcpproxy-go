@@ -380,7 +380,7 @@ for (const [id, landing, rest] of STRIP) {
     await goto(page, '/', `[data-test="${id}"]`)
     const seen = collect(page, /^\/api\/v1\/activity$/)
     await page.locator(`[data-test="${id}"]`).click()
-    await expect(page).toHaveURL(new RegExp(landing.replace(/[?.]/g, '\\$&')))
+    await expect(page).toHaveURL(new RegExp(landing.replace(/[\\?.]/g, '\\$&')))
     await page.locator('main').first().waitFor({ state: 'visible' })
     await page.waitForTimeout(1000)
     everyCarries(seen, rest, id)
