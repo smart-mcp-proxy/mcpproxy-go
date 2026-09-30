@@ -1,6 +1,7 @@
 // Visual / accessibility sweep — the regression net for the 2026-08 UX audit
 // findings F9 (WCAG AA contrast), F14 (390px layout), F30 (accessible names,
-// aria-live, table caption), F29 (system theme) and F32 (header search).
+// aria-live, table caption) and F29 (system theme). F32 (header search) is
+// now covered by navigation-consistency.spec.ts.
 //
 // It runs against the Web UI served by a REAL mcpproxy binary, exactly like
 // web-ui-sweep.spec.ts, and it MEASURES rather than eyeballs: every visible
@@ -566,33 +567,12 @@ test('activity rows open their details from the keyboard, at every width', async
 })
 
 // ---------------------------------------------------------------------------
-// F32 — the header search must not read as disabled at rest.
+// F32 (the header search button) and the header Add Server action moved to
+// navigation-consistency.spec.ts with Spec 109-i: the header search is now a
+// launcher that opens the command palette (no separate button), and the Add
+// Server action is the "+ Add" menu. Browser-level modal focus coverage stays
+// on the still-reachable Add Secret dialog below.
 // ---------------------------------------------------------------------------
-test('header search button is enabled with an empty box', async ({ page }) => {
-  await goto(page, '/')
-  const button = page.locator('[data-test="header-search-button"]')
-  await expect(button).toBeEnabled()
-  await expect(page.locator('[data-test="header-search-input"]')).toHaveValue('')
-  // Clicking with an empty query is a no-op, not a navigation.
-  await button.click()
-  await page.waitForTimeout(250)
-  expect(page.url()).not.toContain('/search')
-})
-
-// ---------------------------------------------------------------------------
-// Spec 109 FR-062: the header entry starts the catalog-first Add Server flow,
-// rather than opening the legacy modal. Keep browser-level modal focus coverage
-// on the still-reachable Add Secret dialog.
-// ---------------------------------------------------------------------------
-test('the header Add Server action opens the catalog-first Add Server page', async ({ page }) => {
-  await goto(page, '/activity')
-
-  await page.locator('[data-test="header-add-server"]').click()
-  await expect(page).toHaveURL(/\/ui\/add-server(?:\?|$)/)
-  await expect(page.locator('[data-test="add-server-page"] h1')).toHaveText('Add Server')
-  await expect(page.locator('[data-test="add-server-tab-catalog"]')).toHaveClass(/tab-active/)
-})
-
 test('the Add Secret modal takes focus, traps Tab and closes on Escape', async ({ page }) => {
   await goto(page, '/secrets')
 
