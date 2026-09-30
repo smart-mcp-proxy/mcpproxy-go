@@ -464,12 +464,28 @@ func (s *Server) SetFeedbackSubmitter(submitter FeedbackSubmitter) {
 // SetConnectService configures the client connect/disconnect service.
 func (s *Server) SetConnectService(svc *connect.Service) {
 	s.connectService = svc
+	s.wireClientsService()
 }
 
 // SetClientsService configures the clients service behind the client
 // binding route and the connect credential path (Spec 108).
 func (s *Server) SetClientsService(svc *internalRuntime.ClientsService) {
 	s.clientsService = svc
+	s.wireClientsService()
+}
+
+// wireClientsService connects the clients service to the REST server's
+// on-demand credential observations and, when the connect service is set, to
+// the connect port behind the admin-key upgrade (Spec 108-f F11, F22). Either
+// setter may run first.
+func (s *Server) wireClientsService() {
+	if s.clientsService == nil {
+		return
+	}
+	s.clientsService.SetObserver(s.recordCredentialObservation)
+	if s.connectService != nil {
+		s.clientsService.SetUpgradePort(s.connectService)
+	}
 }
 
 // SetSensitiveMasker configures the detector used to mask secrets out of

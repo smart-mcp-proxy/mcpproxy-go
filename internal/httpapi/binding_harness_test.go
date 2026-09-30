@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -15,6 +16,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -27,18 +29,55 @@ const bindingAdminKey = "binding-admin-key"
 type bindingController struct {
 	baseController
 	cfg *config.Config
+
+	// The onboarding state persists in memory across requests (and across a
+	// second REST server built over the same controller: a "restart"), and the
+	// session page is whatever the test set.
+	mu       sync.Mutex
+	state    *storage.OnboardingState
+	sessions []*contracts.MCPSession
 }
 
 func (c *bindingController) GetCurrentConfig() *config.Config   { return c.cfg }
 func (c *bindingController) GetConfig() (*config.Config, error) { return c.cfg, nil }
 
+func (c *bindingController) GetOnboardingState() (*storage.OnboardingState, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == nil {
+		return &storage.OnboardingState{}, nil
+	}
+	cp := *c.state
+	return &cp, nil
+}
+
+func (c *bindingController) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == nil {
+		c.state = &storage.OnboardingState{}
+	}
+	return fn(c.state)
+}
+
+func (c *bindingController) GetRecentSessions(f storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.sessions
+	if f.Limit > 0 && len(out) > f.Limit {
+		out = out[:f.Limit]
+	}
+	return out, len(c.sessions), nil
+}
+
 type bindingHarness struct {
-	t   *testing.T
-	srv *Server
-	sm  *storage.Manager
-	svc *internalRuntime.ClientsService
-	key []byte
-	cfg *config.Config
+	t    *testing.T
+	ctrl *bindingController
+	srv  *Server
+	sm   *storage.Manager
+	svc  *internalRuntime.ClientsService
+	key  []byte
+	cfg  *config.Config
 }
 
 type refusingGuard struct {
@@ -71,10 +110,11 @@ func newBindingHarness(t *testing.T, guard internalRuntime.BindingGuard) *bindin
 		Guard:    func() internalRuntime.BindingGuard { return guard },
 		Activity: sm.SaveActivity,
 	})
-	srv := NewServer(&bindingController{cfg: cfg}, zap.NewNop().Sugar(), nil)
+	ctrl := &bindingController{cfg: cfg}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
 	srv.SetTokenStore(sm, dir)
 	srv.SetClientsService(svc)
-	return &bindingHarness{t: t, srv: srv, sm: sm, svc: svc, key: key, cfg: cfg}
+	return &bindingHarness{t: t, ctrl: ctrl, srv: srv, sm: sm, svc: svc, key: key, cfg: cfg}
 }
 
 func (h *bindingHarness) mint(clientID, prof string) string {

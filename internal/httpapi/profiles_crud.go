@@ -239,6 +239,12 @@ func (s *Server) handleProfileEffectiveTools(w http.ResponseWriter, r *http.Requ
 
 	cfg, err := s.controller.GetConfig()
 	if err != nil || cfg == nil {
+		// The server edition has no client credentials at all: a client= that
+		// could never resolve is a 404 whatever the configuration says.
+		if admin && q.Get("client") != "" && !clientRoutesSupported {
+			s.writeError(w, r, http.StatusNotFound, errClientNotFound)
+			return
+		}
 		s.writeError(w, r, http.StatusInternalServerError, "Configuration unavailable")
 		return
 	}

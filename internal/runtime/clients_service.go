@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 
@@ -41,6 +43,11 @@ type ClientsService struct {
 
 	notifier BindingNotifier
 	reader   ClientConfigReader
+
+	// upgrade is the connect port behind the admin-key upgrade, observe the
+	// sink for on-demand credential classifications (Spec 108-f).
+	upgrade AdminKeyUpgradePort
+	observe func(clientID string, state profile.CredentialState)
 }
 
 // ClientCredentialStore is the token-store surface the service needs;
@@ -117,6 +124,7 @@ func ActorFromContext(ctx context.Context, surface profile.Surface) Actor {
 // ClientCredentialView is a client's credential as the surfaces show it.
 type ClientCredentialView struct {
 	ID              string                  `json:"id"`
+	DisplayName     string                  `json:"display_name,omitempty"`
 	TokenName       string                  `json:"token_name"`
 	Profile         string                  `json:"profile"`
 	Mode            string                  `json:"mode"`
@@ -196,6 +204,35 @@ func (s *ClientsService) SetConfigReader(r ClientConfigReader) { s.reader = r }
 
 // --- helpers -------------------------------------------------------------
 
+// Records returns every ownerless token record that concerns a client
+// credential: the kind=client records (any state) and any regular token that
+// holds a client-<id> name (the FR-021 conflict). The REST clients list reads
+// it once to decorate its rows.
+func (s *ClientsService) Records() ([]auth.AgentToken, error) {
+	all, err := s.records()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]auth.AgentToken, 0, len(all))
+	for i := range all {
+		t := &all[i]
+		if t.UserID != "" {
+			continue
+		}
+		if t.Kind == auth.KindClient || strings.HasPrefix(t.Name, "client-") {
+			out = append(out, *t)
+		}
+	}
+	return out, nil
+}
+
+// Now is the service's clock (tests inject one); REST uses it so "expiring"
+// and "last observed" agree with the service.
+func (s *ClientsService) Now() time.Time { return s.now() }
+
+// StateOf classifies a credential record (client | revoked | expired | none).
+func (s *ClientsService) StateOf(t *auth.AgentToken) profile.CredentialState { return s.stateOf(t) }
+
 func (s *ClientsService) records() ([]auth.AgentToken, error) {
 	all, err := s.store.ListAgentTokens()
 	if err != nil {
@@ -232,7 +269,7 @@ func (s *ClientsService) stateOf(t *auth.AgentToken) profile.CredentialState {
 func (s *ClientsService) view(t *auth.AgentToken) *ClientCredentialView {
 	exp := t.ExpiresAt
 	return &ClientCredentialView{
-		ID: t.ClientID, TokenName: t.Name, Profile: t.ProfilePin, Mode: t.ProfileMode,
+		ID: t.ClientID, DisplayName: t.DisplayName, TokenName: t.Name, Profile: t.ProfilePin, Mode: t.ProfileMode,
 		CredentialState: s.stateOf(t), ExpiresAt: &exp, ConnectedAt: t.ConnectedAt,
 		RotationPending: t.PendingHash != "",
 	}
@@ -677,10 +714,14 @@ func (s *ClientsService) rollbackLocked(ctx context.Context, a Actor, clientID s
 }
 
 // AddRequest creates a credential for a custom (non-connect-registry) client.
+// ExpiresAt zero means the 365-day default; DisplayName is at most
+// auth.MaxClientDisplayName characters.
 type AddRequest struct {
-	ID      string
-	Profile string
-	Mode    *string
+	ID          string
+	DisplayName string
+	Profile     string
+	Mode        *string
+	ExpiresAt   time.Time
 }
 
 // Add mints a credential for a custom client and returns the secret once.
@@ -693,9 +734,12 @@ func (s *ClientsService) Add(ctx context.Context, a Actor, req AddRequest) (*Cli
 	if connect.FindClient(req.ID) != nil {
 		return nil, "", &ValidationError{Field: "id", Message: fmt.Sprintf("client id %q is a supported client; use connect instead", req.ID)}
 	}
+	if n := utf8.RuneCountInString(req.DisplayName); n > auth.MaxClientDisplayName {
+		return nil, "", &ValidationError{Field: "display_name", Message: fmt.Sprintf("display_name is too long (%d characters, max %d)", n, auth.MaxClientDisplayName)}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	issued, err := s.issueLocked(req.ID, &req.Profile, req.Mode, false)
+	issued, err := s.issueLocked(req.ID, &req.Profile, req.Mode, false, issueOptions{expiresAt: req.ExpiresAt, displayName: req.DisplayName})
 	if err != nil {
 		return nil, "", err
 	}

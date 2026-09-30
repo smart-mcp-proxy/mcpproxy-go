@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
@@ -14,6 +15,13 @@ import (
 // (FR-021: default and maximum 365 days). A rotation keeps the record's
 // expiry (plan D14).
 const clientCredentialTTL = auth.MaxTokenExpiry
+
+// issueOptions are the parts of an issue a connect never sets: a custom
+// client's expiry and display name (Spec 108-f F21).
+type issueOptions struct {
+	expiresAt   time.Time
+	displayName string
+}
 
 // pendingBinding is the state a rotating connect carries from Issue to
 // Commit: the binding it asked for, applied only after the config write
@@ -46,7 +54,7 @@ func deref(p *string) string {
 // issueLocked is Issue's body (s.mu held): resolve the binding, run the guard
 // over the candidate state, then mint a fresh credential or stage a rotation.
 // allowRotate=false (client add) refuses an already-active credential.
-func (s *ClientsService) issueLocked(clientID string, profilePtr, modePtr *string, allowRotate bool) (*connect.IssuedCredential, error) {
+func (s *ClientsService) issueLocked(clientID string, profilePtr, modePtr *string, allowRotate bool, opts issueOptions) (*connect.IssuedCredential, error) {
 	all, err := s.records()
 	if err != nil {
 		return nil, err
@@ -84,9 +92,13 @@ func (s *ClientsService) issueLocked(clientID string, profilePtr, modePtr *strin
 	}
 
 	now := s.now().UTC()
+	expiresAt := now.Add(clientCredentialTTL)
+	if !opts.expiresAt.IsZero() {
+		expiresAt = opts.expiresAt
+	}
 	next := auth.AgentToken{
 		Name: auth.ClientTokenName(clientID), Kind: auth.KindClient, ClientID: clientID,
-		ProfilePin: pin, ProfileMode: mode, CreatedAt: now, ExpiresAt: now.Add(clientCredentialTTL),
+		ProfilePin: pin, ProfileMode: mode, CreatedAt: now, ExpiresAt: expiresAt, DisplayName: opts.displayName,
 	}
 	if active {
 		next = *rec
@@ -113,7 +125,7 @@ func (s *ClientsService) issueLocked(clientID string, profilePtr, modePtr *strin
 			Pending: pendingBinding{pin: pin, mode: mode},
 		}, nil
 	}
-	tok, err := s.store.MintClientCredential(clientID, raw, key, mode, pin, now.Add(clientCredentialTTL))
+	tok, err := s.store.MintClientCredentialNamed(clientID, raw, key, mode, pin, expiresAt, opts.displayName)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +139,7 @@ func (m connectMinter) Issue(clientID string, intent connect.CredentialIntent) (
 	}
 	m.s.mu.Lock()
 	defer m.s.mu.Unlock()
-	return m.s.issueLocked(clientID, intent.Profile, intent.Mode, true)
+	return m.s.issueLocked(clientID, intent.Profile, intent.Mode, true, issueOptions{})
 }
 
 // Commit implements connect.CredentialMinter.
