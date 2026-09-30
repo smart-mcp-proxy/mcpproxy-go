@@ -1758,12 +1758,14 @@ actor CoreProcessManager {
             }
             await appState.prependGlanceActivity(entry, generation: generation)
 
-        case "active_profile.changed":
-            // Profiles v2 T5: the server-level default active profile was switched
-            // (possibly by another client). Refetch profiles + active so the tray
-            // submenu reflects it. The payload carries active_profile, but a
-            // refetch also picks up tool-count/profile-set changes uniformly.
-            await refreshProfiles()
+        case "profiles.changed":
+            // Spec 108-f: a profile was created, edited, renamed or deleted (by
+            // any surface). Refetch the list; bursts coalesce (250 ms).
+            scheduleProfilesRefresh()
+
+        case "client.binding_changed":
+            // Spec 108-f: a client's binding, credential or lock changed.
+            scheduleClientsRefresh()
 
         case "ping":
             // Keepalive; no action needed
@@ -1931,6 +1933,7 @@ actor CoreProcessManager {
         await refreshTokenMetrics()
         await refreshSecurityStatus()
         await refreshProfiles()
+        await refreshClients()
         await refreshAttention()
         await refreshReviewQueue()
         // Bump activityVersion so ActivityView reloads. Still needed after the
@@ -2030,21 +2033,66 @@ actor CoreProcessManager {
         await refreshServers()
     }
 
-    /// Fetch the configured profiles + active profile and update appState
-    /// (Profiles v2 T5). Driven on connect, on the periodic refresh, and on the
-    /// `active_profile.changed` SSE event so a switch made by another client
-    /// (Web UI, CLI, the Go tray) is reflected in the macOS tray submenu.
+    /// Debounce window for the `profiles.changed` / `client.binding_changed`
+    /// refetches: a bulk move or an admin-key upgrade emits one event per client.
+    static let profileRefreshDebounce: UInt64 = 250_000_000
+
+    private var profilesRefreshTask: Task<Void, Never>?
+    private var clientsRefreshTask: Task<Void, Never>?
+
+    func scheduleProfilesRefresh() {
+        profilesRefreshTask?.cancel()
+        profilesRefreshTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.profileRefreshDebounce)
+            guard !Task.isCancelled else { return }
+            await self?.refreshProfiles()
+            // A rename or delete also moves bindings; the rows follow.
+            await self?.refreshClients()
+        }
+    }
+
+    func scheduleClientsRefresh() {
+        clientsRefreshTask?.cancel()
+        clientsRefreshTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.profileRefreshDebounce)
+            guard !Task.isCancelled else { return }
+            await self?.refreshClients()
+        }
+    }
+
+    /// Fetch the profile list (Spec 108-k) and update appState. Driven on
+    /// connect, on the periodic refresh and on `profiles.changed`, so an edit
+    /// made in the Web UI, the CLI or by an agent reaches every native picker.
     func refreshProfiles() async {
         guard let apiClient else { return }
+        let generation = await MainActor.run { appState.connectionGeneration }
         do {
-            let profiles = try await apiClient.profiles()
-            let active = try await apiClient.activeProfile()
+            let list = try await apiClient.profilesV3()
             await MainActor.run {
-                if appState.profiles != profiles { appState.profiles = profiles }
-                if appState.activeProfile != active { appState.activeProfile = active }
+                guard appState.isCurrentConnection(generation) else { return }
+                if appState.profiles != list.profiles { appState.profiles = list.profiles }
+                let anonymous = list.anonymousProfile ?? ""
+                if appState.anonymousProfile != anonymous { appState.anonymousProfile = anonymous }
             }
         } catch {
             // Non-fatal; we'll retry on the next refresh or SSE event.
+        }
+    }
+
+    /// Fetch the client rows with their bindings and warnings (Spec 108-k).
+    func refreshClients() async {
+        guard let apiClient else { return }
+        let generation = await MainActor.run { appState.connectionGeneration }
+        do {
+            let response = try await apiClient.clientsV3()
+            await MainActor.run {
+                guard appState.isCurrentConnection(generation) else { return }
+                if appState.clients != response.clients { appState.clients = response.clients }
+                let warnings = response.warnings ?? []
+                if appState.clientWarnings != warnings { appState.clientWarnings = warnings }
+            }
+        } catch {
+            // Non-fatal (a server-edition core has no /clients); retry later.
         }
     }
 

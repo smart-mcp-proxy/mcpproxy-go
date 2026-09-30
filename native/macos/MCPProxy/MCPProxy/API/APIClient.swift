@@ -24,6 +24,10 @@ enum APIClientError: Error, LocalizedError {
     /// An administrative write was attempted while the app is not talking to the
     /// core over its private local socket. Never sent, by design.
     case socketRequired
+    /// A non-2xx answer from a Profiles v3 route (Spec 108-k K1): the status and
+    /// the FULL structured body, so a caller can branch on `code`, highlight the
+    /// offending `field`, list `used_by`, or render the guard's `fixes`.
+    case service(status: Int, body: ServiceErrorBody)
 
     var errorDescription: String? {
         switch self {
@@ -39,6 +43,8 @@ enum APIClientError: Error, LocalizedError {
             return "Invalid URL: \(url)"
         case .connectConflict(_, let message, _, _):
             return message
+        case .service(_, let body):
+            return body.error
         case .socketRequired:
             return "This action requires MCPProxy's private local socket; "
                 + "the app is currently talking to the core over TCP."
@@ -276,32 +282,6 @@ actor APIClient {
         try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/login")
     }
 
-    // MARK: - Profiles (Profiles v2 T5)
-
-    /// List configured profiles from `GET /api/v1/profiles`.
-    func profiles() async throws -> [ProfileSummary] {
-        let response: ProfilesListResponse = try await fetchWrapped(path: "/api/v1/profiles")
-        return response.profiles
-    }
-
-    /// Get the server-level default active profile from
-    /// `GET /api/v1/profiles/active`. An empty string means "all servers".
-    func activeProfile() async throws -> String {
-        let response: ActiveProfileResponse = try await fetchWrapped(path: "/api/v1/profiles/active")
-        return response.activeProfile
-    }
-
-    /// Set the server-level default active profile via
-    /// `PUT /api/v1/profiles/active`. An empty slug clears the selection.
-    func setActiveProfile(_ slug: String) async throws {
-        let bodyData = try JSONSerialization.data(withJSONObject: ["profile": slug])
-        let (data, response) = try await performRequest(path: "/api/v1/profiles/active", method: "PUT", body: bodyData)
-        if let errorResponse = try? JSONDecoder().decode(APIErrorResponse.self, from: data),
-           !errorResponse.success, let message = errorResponse.error {
-            throw APIClientError.httpError(statusCode: response.statusCode, message: message)
-        }
-    }
-
     /// Quarantine a server via `POST /api/v1/servers/{id}/quarantine`.
     func quarantineServer(_ id: String) async throws {
         try await postAction(path: "/api/v1/servers/\(id)/quarantine")
@@ -427,8 +407,12 @@ actor APIClient {
         /// effect (Spec 109-b FR-037/FR-042), e.g. "Restart Cursor to load
         /// MCPProxy". Nil for an unsupported client or an older core.
         let reloadHint: String?
+        /// Spec 108-c (108-k K21): what the client's connection carries. Nil for
+        /// a core that predates client credentials.
+        let credentialState: CredentialState?
 
         enum CodingKeys: String, CodingKey {
+            case credentialState = "credential_state"
             case clientId = "id"
             case name
             case configPath = "config_path"
@@ -489,6 +473,15 @@ actor APIClient {
         /// 109-b FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Nil
         /// for an unsupported client or a core that predates this field.
         let reloadHint: String?
+        /// Spec 108-c2 (108-k K21): the MASKED credential the write embedded
+        /// (`mcp_cli_••••`), never the secret, plus the binding it carries.
+        let credential: String?
+        let tokenName: String?
+        let profile: String?
+        let mode: BindingMode?
+        let keyless: Bool?
+        /// `finalized` when a reconnect replaced an active credential.
+        let rotation: String?
 
         enum CodingKeys: String, CodingKey {
             case success, client, action, message
@@ -497,6 +490,8 @@ actor APIClient {
             case serverName = "server_name"
             case displayPath = "display_path"
             case reloadHint = "reload_hint"
+            case credential, profile, mode, keyless, rotation
+            case tokenName = "token_name"
         }
 
         init(
@@ -508,7 +503,13 @@ actor APIClient {
             action: String? = nil,
             message: String? = nil,
             displayPath: String? = nil,
-            reloadHint: String? = nil
+            reloadHint: String? = nil,
+            credential: String? = nil,
+            tokenName: String? = nil,
+            profile: String? = nil,
+            mode: BindingMode? = nil,
+            keyless: Bool? = nil,
+            rotation: String? = nil
         ) {
             self.success = success
             self.client = client
@@ -519,10 +520,22 @@ actor APIClient {
             self.message = message
             self.displayPath = displayPath
             self.reloadHint = reloadHint
+            self.credential = credential
+            self.tokenName = tokenName
+            self.profile = profile
+            self.mode = mode
+            self.keyless = keyless
+            self.rotation = rotation
         }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            credential = try container.decodeIfPresent(String.self, forKey: .credential)
+            tokenName = try container.decodeIfPresent(String.self, forKey: .tokenName)
+            profile = try container.decodeIfPresent(String.self, forKey: .profile)
+            mode = try container.decodeIfPresent(BindingMode.self, forKey: .mode)
+            keyless = try container.decodeIfPresent(Bool.self, forKey: .keyless)
+            rotation = try container.decodeIfPresent(String.self, forKey: .rotation)
             success = try container.decodeIfPresent(Bool.self, forKey: .success) ?? false
             client = try container.decodeIfPresent(String.self, forKey: .client)
             configPath = try container.decodeIfPresent(String.self, forKey: .configPath)
@@ -537,6 +550,16 @@ actor APIClient {
         /// The path to show in the UI: the home-shortened form when the core
         /// sent one, falling back to the full path for an older core.
         var effectiveDisplayPath: String? { displayPath ?? configPath }
+
+        /// The CLI's credential line: `Credential: mcp_cli_•••• (token
+        /// client-codex, profile work-ro, locked)`; nil when the write embedded
+        /// no credential (a disconnect, a refusal, a core that predates 108).
+        var credentialLine: String? {
+            if keyless == true { return "Credential: none (keyless)" }
+            guard let credential, !credential.isEmpty else { return nil }
+            let scope = (profile?.isEmpty == false) ? "profile \(profile!)" : "all servers"
+            return "Credential: \(credential) (token \(tokenName ?? ""), \(scope), \(mode?.wire ?? ""))"
+        }
     }
 
     /// Response wrapper for the client list endpoint.
@@ -729,9 +752,21 @@ actor APIClient {
         /// work. The Sessions view links a row by this id (Spec 109-k link
         /// map); a legacy row without one links by its transport `id`.
         let workSessionId: String?
+        // Spec 108-e attribution (108-k K18): the credential the session
+        // initialized with and its latest effective profile. Empty on legacy
+        // sessions; `var` keeps the memberwise initialiser defaulting them.
+        var clientId: String?
+        var tokenName: String?
+        var profile: String?
+        /// `pin`, `binding`, `url`, `session`, `anonymous`.
+        var profileSource: String?
 
         enum CodingKeys: String, CodingKey {
             case id
+            case clientId = "client_id"
+            case tokenName = "token_name"
+            case profile
+            case profileSource = "profile_source"
             case workSessionId = "work_session_id"
             case clientName = "client_name"
             case clientVersion = "client_version"
@@ -1175,7 +1210,7 @@ actor APIClient {
     }
 
     /// Fetch a resource wrapped in the standard `APIResponse` envelope.
-    private func fetchWrapped<T: Decodable>(path: String) async throws -> T {
+    func fetchWrapped<T: Decodable>(path: String) async throws -> T {
         let (data, _) = try await performRequest(path: path, method: "GET")
         let decoder = JSONDecoder()
         do {
@@ -1264,7 +1299,7 @@ actor APIClient {
     /// raw body and response for any status. Callers that need to inspect error
     /// bodies (e.g. the registry add-source flow, which reads a stable `code`)
     /// use this directly; most callers use `performRequest`, which validates.
-    private func rawRequest(
+    func rawRequest(
         path: String,
         method: String,
         body: Data? = nil,
@@ -1310,7 +1345,7 @@ actor APIClient {
     }
 
     /// Low-level request execution with HTTP status validation.
-    private func performRequest(
+    func performRequest(
         path: String,
         method: String,
         body: Data? = nil
