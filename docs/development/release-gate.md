@@ -109,8 +109,12 @@ The `web-ui-sweep` job runs the Playwright sweep
 see [Web UI verification](web-ui-verification.md)) against the Web UI **served by
 the candidate binary** — embedded frontend, never a dev server — with a live
 `mcpfixture` stdio upstream so the servers/tools screens have real data. It
-covers the servers list, server detail (+ security tab), tools page and its
-search, activity log, and settings, and fails on uncaught page exceptions.
+runs three spec files: `web-ui-sweep.spec.ts` (servers list, server detail
+(+ security tab), tools page and its search, activity log, and settings; fails
+on uncaught page exceptions), `visual-a11y-sweep.spec.ts` (WCAG contrast,
+layouts, accessible names, themes) and `navigation-consistency.spec.ts` (Spec
+109 sidebar, header, command palette, `+ Add` menu, redirects and filtered
+deep links).
 
 Setup is not duplicated in YAML: the job calls
 [`scripts/run-web-smoke.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-web-smoke.sh),
