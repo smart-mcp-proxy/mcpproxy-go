@@ -497,6 +497,14 @@ final class ConnectClientModel: ObservableObject {
         return candidate
     }
 
+    /// Select a client from an entry point that carries the profile the client
+    /// was last bound to ("Reconnect…", "Upgrade to client credential…"), so the
+    /// picker opens on it instead of silently widening to All servers (K9).
+    func preselect(_ clientId: String, profile: String?) async {
+        if let profile, !profile.isEmpty { initialProfile = profile }
+        await select(clientId)
+    }
+
     /// Select a client: resolve its authoritative state and a fresh preview.
     /// This is the only place a client config's *contents* are read, and only
     /// because the user explicitly asked for this client (FR-002).

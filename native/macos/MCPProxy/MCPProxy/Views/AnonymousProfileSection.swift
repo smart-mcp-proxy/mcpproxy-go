@@ -120,7 +120,11 @@ struct AnonymousProfileSection: View {
         self.appState = appState
         self.store = store
         self.preselect = preselect
-        let source: AnonymousProfileSource = appState.apiClient ?? UnavailableAnonymousSource()
+        // Resolved at save time: the core may connect after this section's
+        // model was built, and a source captured then would stay "not ready".
+        let source: AnonymousProfileSource = DeferredAnonymousSource { [weak appState] in
+            await MainActor.run { appState?.apiClient }
+        }
         _model = StateObject(wrappedValue: AnonymousProfileModel(source: source, current: appState.anonymousProfile))
     }
 
@@ -180,6 +184,12 @@ struct AnonymousProfileSection: View {
     }
 }
 
-private struct UnavailableAnonymousSource: AnonymousProfileSource {
-    func patchAnonymousProfile(_ value: String) async throws { throw APIClientError.notReady }
+/// Resolves the real source on every call; `notReady` only while there is none.
+struct DeferredAnonymousSource: AnonymousProfileSource {
+    let resolve: @Sendable () async -> AnonymousProfileSource?
+
+    func patchAnonymousProfile(_ value: String) async throws {
+        guard let source = await resolve() else { throw APIClientError.notReady }
+        try await source.patchAnonymousProfile(value)
+    }
 }

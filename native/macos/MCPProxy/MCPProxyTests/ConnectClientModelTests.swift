@@ -1343,6 +1343,26 @@ final class ConnectClientPresentationTests: XCTestCase {
         XCTAssertNil(model.initialProfile)
     }
 
+    func testPreselectCarriesTheClientsPreviousProfileIntoThePicker() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([FakeConnectSource.client(id: "claude-code")])]
+        let model = ConnectClientModel(source: source, sleeper: { _ in })
+        await model.loadList()
+        await model.preselect("claude-code", profile: "work")
+        XCTAssertEqual(model.profile, "work")
+        XCTAssertEqual(source.previewBindings.last, ConnectBinding(profile: "work", mode: .locked))
+    }
+
+    func testPreselectWithoutAProfileLeavesAllServers() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([FakeConnectSource.client(id: "claude-code")])]
+        let model = ConnectClientModel(source: source, sleeper: { _ in })
+        await model.loadList()
+        await model.preselect("claude-code", profile: "")
+        XCTAssertEqual(model.profile, "")
+        XCTAssertEqual(model.binding, .unspecified)
+    }
+
     func testAGuardRefusalOfTheWriteIsKeptForTheGuardView() async {
         let source = FakeConnectSource()
         source.connectResults = [.failure(APIClientError.service(status: 409, body: ServiceErrorBody(

@@ -86,6 +86,23 @@ final class AnonymousProfileSectionTests: XCTestCase {
         XCTAssertEqual(model.saved, "c")
     }
 
+    func testASourceThatAppearsAfterTheModelWasBuiltIsUsedForTheSave() async {
+        let late = StubSource()
+        let box = LateBox()
+        let model = AnonymousProfileModel(
+            source: DeferredAnonymousSource { box.value }, current: "")
+        model.selection = "work"
+        await model.save()
+        XCTAssertNotNil(model.errorMessage, "no core yet: the save fails")
+        XCTAssertTrue(model.isDirty)
+        box.value = late
+        await model.save()
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.isDirty)
+    }
+
+    final class LateBox: @unchecked Sendable { var value: AnonymousProfileSource? }
+
     func testTheSectionIsMountedOnTheSecurityTabAndIdentified() throws {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<2 { url.deleteLastPathComponent() }

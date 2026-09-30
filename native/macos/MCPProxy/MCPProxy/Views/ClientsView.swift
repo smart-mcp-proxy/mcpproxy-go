@@ -77,6 +77,9 @@ struct ClientsView: View {
                     await MainActor.run { state.apiClient }
                 }),
                 preselect: connectPreselect,
+                presetProfile: connectPreselect.flatMap { id in
+                    (clients.first { $0.id == id } ?? state.clients.first { $0.id == id })?.boundProfile
+                },
                 onRoute: { route in
                     showConnect = false
                     appState.navigate(route)

@@ -723,6 +723,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // reachability poll alive inside a retained, invisible window.
         MainActor.assumeIsolated {
             connectClientForm.windowWillClose(notification.object as? NSWindow)
+            // A closed Settings window keeps its SwiftUI tree alive
+            // (isReleasedWhenClosed = false), and that hidden SettingsView
+            // would win the race to consume a guard-fix route meant for the
+            // window about to be built. Drop the tree with the window.
+            if let closing = notification.object as? NSWindow, closing === settingsWindow {
+                SettingsWindowRetirement.retire(closing)
+                settingsWindow = nil
+            }
         }
         // Defer so the closing window has already left the visible set.
         DispatchQueue.main.async { [weak self] in self?.restoreAccessoryIfNoVisibleWindows() }
@@ -2324,5 +2332,15 @@ private struct SettingsSceneBridge: View {
         Color.clear
             .frame(width: 1, height: 1)
             .onAppear { controller.openSettingsFromScene() }
+    }
+}
+
+/// Tears the SwiftUI content of a closed Settings window down so it cannot
+/// consume `AppState.pendingRoute` (scroll target, anonymous preselect) that
+/// belongs to the next Settings window (Spec 108-k K13/K20).
+enum SettingsWindowRetirement {
+    @MainActor
+    static func retire(_ window: NSWindow) {
+        window.contentView = nil
     }
 }

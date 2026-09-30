@@ -114,6 +114,8 @@ struct ConnectClientView: View {
     /// Select this client as soon as the list loads (an "Upgrade to client
     /// credential…" or "Reconnect…" entry point).
     var preselect: String? = nil
+    /// The profile that client was bound to, preset in the picker (K9).
+    var presetProfile: String? = nil
     /// Follows a guard fix (Settings…). The sheet closes first.
     var onRoute: (AppRoute) -> Void = { _ in }
 
@@ -139,7 +141,7 @@ struct ConnectClientView: View {
             await model.loadList()
             if let preselect, model.selection == nil {
                 selectedID = preselect
-                await model.select(preselect)
+                await model.preselect(preselect, profile: presetProfile)
             }
         }
         .alert("Disconnect this client?", isPresented: disconnectConfirmationIsPresented,
