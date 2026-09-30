@@ -304,3 +304,51 @@ func isOutOfScopeIdentityField(ctx context.Context, key string, value interface{
 	}
 	return false
 }
+
+// renderActivityAttributionForCaller renders the Spec 108 FR-029 `attribution`
+// object of an activity event for ONE SSE subscriber. The payload map is
+// shared by pointer with every other subscriber, so a changed view is a fresh
+// map and nothing is written into the original.
+//
+//   - `_token_prefix` is internal: it lets this function recognise a scoped
+//     subscriber's OWN events and is stripped for EVERY subscriber, admins
+//     included, so it never reaches the wire.
+//   - An admin (or a caller with no AuthContext) sees the rest of the object.
+//   - A scoped subscriber sees it only on events its own token made (prefix
+//     and name both match); on every other event the whole object is removed,
+//     because it discloses which profile and client another token used
+//     (binding disclosure is admin-only, FR-032).
+func renderActivityAttributionForCaller(ctx context.Context, payload map[string]interface{}) map[string]interface{} {
+	raw, ok := payload["attribution"]
+	if !ok {
+		return payload
+	}
+	attr, _ := raw.(map[string]any)
+
+	keep := attr != nil
+	if keep && auth.IsScopedCaller(ctx) {
+		ac := auth.AuthContextFromContext(ctx)
+		prefix, _ := attr["_token_prefix"].(string)
+		name, _ := attr["token_name"].(string)
+		keep = ac.Type == auth.AuthTypeAgent && ac.TokenPrefix != "" && prefix == ac.TokenPrefix && name == ac.AgentName
+	}
+
+	out := make(map[string]interface{}, len(payload))
+	for k, v := range payload {
+		if k != "attribution" {
+			out[k] = v
+		}
+	}
+	if keep {
+		view := make(map[string]any, len(attr))
+		for k, v := range attr {
+			if k != "_token_prefix" {
+				view[k] = v
+			}
+		}
+		if len(view) > 0 {
+			out["attribution"] = view
+		}
+	}
+	return out
+}

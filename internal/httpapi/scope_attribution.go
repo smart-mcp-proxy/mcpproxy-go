@@ -1,10 +1,12 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -62,4 +64,29 @@ func sessionFilterFromQuery(q url.Values, limit int, status string) (storage.Ses
 		ClientID:  q.Get("client"),
 		TokenName: token,
 	}, nil
+}
+
+// activityIdentityOwner is the caller identity a scoped reader's filters are
+// evaluated under (storage.ActivityFilter.IdentityOwner). It is nil for an
+// admin. A scoped caller that is not an agent token (a session principal) gets
+// an owner with no prefix, which owns nothing: every row reads as foreign.
+func activityIdentityOwner(ctx context.Context) *storage.ActivityIdentityOwner {
+	if !auth.IsScopedCaller(ctx) {
+		return nil
+	}
+	ac := auth.AuthContextFromContext(ctx)
+	owner := &storage.ActivityIdentityOwner{}
+	if ac.Type == auth.AuthTypeAgent {
+		owner.TokenName = ac.AgentName
+		owner.TokenPrefix = ac.TokenPrefix
+	}
+	return owner
+}
+
+// callerOwnsActivity reports whether the scoped caller in ctx made the record:
+// the stored token prefix AND name both match (names are unique per owner only
+// and the 12-char prefix carries few random bits, so neither alone identifies
+// a token). An admin owns nothing here; callers guard with IsScopedCaller.
+func callerOwnsActivity(ctx context.Context, a *storage.ActivityRecord) bool {
+	return activityIdentityOwner(ctx).Owns(a)
 }

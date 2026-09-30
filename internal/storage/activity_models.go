@@ -310,12 +310,12 @@ func (o *ActivityIdentityOwner) Owns(r *ActivityRecord) bool {
 		return false
 	}
 	return extractAuthMetadataField(r, authArgTokenPrefix) == o.TokenPrefix &&
-		r.effectiveTokenName() == o.TokenName
+		r.EffectiveTokenName() == o.TokenName
 }
 
-// effectiveProfile is the first-class profile, else the legacy metadata.profile
+// EffectiveProfile is the first-class profile, else the legacy metadata.profile
 // (Spec 057) that every record with a resolved profile has carried.
-func (a *ActivityRecord) effectiveProfile() string {
+func (a *ActivityRecord) EffectiveProfile() string {
 	if a.Profile != "" {
 		return a.Profile
 	}
@@ -325,8 +325,8 @@ func (a *ActivityRecord) effectiveProfile() string {
 	return ""
 }
 
-// effectiveClientName is the first-class client name, else metadata.client_name.
-func (a *ActivityRecord) effectiveClientName() string {
+// EffectiveClientName is the first-class client name, else metadata.client_name.
+func (a *ActivityRecord) EffectiveClientName() string {
 	if a.ClientName != "" {
 		return a.ClientName
 	}
@@ -336,13 +336,25 @@ func (a *ActivityRecord) effectiveClientName() string {
 	return ""
 }
 
-// effectiveTokenName is the first-class token name, else the Spec 028
+// EffectiveTokenName is the first-class token name, else the Spec 028
 // _auth_agent_name argument older records carry.
-func (a *ActivityRecord) effectiveTokenName() string {
+func (a *ActivityRecord) EffectiveTokenName() string {
 	if a.TokenName != "" {
 		return a.TokenName
 	}
 	return extractAuthMetadataField(a, authArgAgentName)
+}
+
+// EffectiveBlockReason is the first-class block reason, else the metadata key
+// 108-d wrote before the field existed.
+func (a *ActivityRecord) EffectiveBlockReason() string {
+	if a.BlockReason != "" {
+		return a.BlockReason
+	}
+	if s, ok := a.Metadata[MetadataKeyBlockReason].(string); ok {
+		return s
+	}
+	return ""
 }
 
 // scopeValueMatches applies one profile/client/token filter to an effective
@@ -364,13 +376,13 @@ func (f *ActivityFilter) matchesScopeAttribution(r *ActivityRecord) bool {
 	if f.Profile == "" && f.ClientID == "" && f.ClientName == "" && f.TokenName == "" {
 		return true
 	}
-	profile, clientID, tokenName := r.effectiveProfile(), r.ClientID, r.effectiveTokenName()
+	profile, clientID, tokenName := r.EffectiveProfile(), r.ClientID, r.EffectiveTokenName()
 	if f.IdentityOwner != nil && !f.IdentityOwner.Owns(r) {
 		profile, clientID, tokenName = "", "", ""
 	}
 	return scopeValueMatches(f.Profile, profile) &&
 		scopeValueMatches(f.ClientID, clientID) &&
-		scopeValueMatches(f.ClientName, r.effectiveClientName()) &&
+		scopeValueMatches(f.ClientName, r.EffectiveClientName()) &&
 		scopeValueMatches(f.TokenName, tokenName)
 }
 
