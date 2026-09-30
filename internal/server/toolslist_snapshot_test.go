@@ -410,6 +410,22 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 				if name == spec105CodeExecutionTool || spec109CatalogTools[name] {
 					continue
 				}
+				if name == "upstream_servers" {
+					// Spec 112 adds exactly one optional parameter,
+					// forward_headers_json. With that property removed the
+					// entry must still equal the frozen pre-105 capture.
+					var postM map[string]interface{}
+					require.NoError(t, json.Unmarshal(after[name], &postM))
+					props := schemaProps(postM)
+					assert.Contains(t, props, "forward_headers_json",
+						"surface %s: upstream_servers carries the Spec 112 parameter", surface)
+					delete(props, "forward_headers_json")
+					trimmed, err := json.Marshal(postM)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(pre), string(trimmed),
+						"surface %s: upstream_servers may differ from the pre-105 golden only by the Spec 112 forward_headers_json parameter", surface)
+					continue
+				}
 				assert.True(t, bytes.Equal(pre, after[name]),
 					"surface %s: tool %q must be byte-identical to the pre-105 golden (FR-012: only code_execution may move)", surface, name)
 			}

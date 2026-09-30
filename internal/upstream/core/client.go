@@ -16,6 +16,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -103,6 +104,13 @@ type Client struct {
 	// current attempt's slate — and the current attempt starts empty by
 	// construction rather than by racing a Clear.
 	retryAfter atomic.Pointer[proxytransport.RetryAfterRecorder]
+
+	// forwardPolicy supplies the LIVE client-header forwarding policy (Spec 112
+	// R6). The managed client installs a closure over its atomically swapped
+	// config, so allowlist edits and the global switch apply without a
+	// reconnect. Only the provider function is stored here: no header names or
+	// values live on the client (FR-011). Unset means nothing is forwarded.
+	forwardPolicy atomic.Pointer[func() headerfwd.Policy]
 
 	// Transport type and stderr access (for stdio)
 	transportType string
@@ -445,6 +453,11 @@ func toolAnnotationsFromWire(annotation mcp.ToolAnnotation) *config.ToolAnnotati
 }
 
 // CallTool executes a tool on the upstream server
+//
+// Spec 112: this is the ONLY place that derives the per-server outbound set of
+// forwarded client headers (from the edge snapshot in ctx, key A) and puts it
+// on the context handed to mcp-go (key B). Every other request (initialize,
+// list, reconnect) never sets key B and so cannot forward.
 func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error) {
 	c.mu.RLock()
 	client := c.client
@@ -507,6 +520,31 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		defer cancel()
 	}
 
+	// Spec 112: derive the outbound set from the edge snapshot and this
+	// server's live policy. The resolved transport type is authoritative here
+	// ("auto" is already resolved), so SSE and stdio never forward (FR-014).
+	var (
+		outbound     headerfwd.Snapshot
+		forwardAllow []string
+	)
+	if snap, ok := headerfwd.SnapshotFrom(ctx); ok && !snap.IsEmpty() {
+		if pp := c.forwardPolicy.Load(); pp != nil {
+			policy := (*pp)()
+			policy.Transport = transportType
+			forwardAllow = policy.Allow
+			outbound = headerfwd.Outbound(snap, policy)
+		}
+	}
+	callCtx = headerfwd.WithOutbound(callCtx, outbound)
+	headerfwd.RecordOutbound(ctx, outbound)
+	if !outbound.IsEmpty() {
+		// Names and count only (FR-015a).
+		c.logger.Debug("Forwarding client headers on tools/call",
+			zap.String("server", c.config.Name),
+			zap.Strings("headers", outbound.Names()),
+			zap.Int("count", outbound.Len()))
+	}
+
 	// Extra debug before sending request through transport
 	c.logger.Debug("Starting upstream CallTool",
 		zap.String("server", c.config.Name),
@@ -514,6 +552,10 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 
 	result, err := client.CallTool(callCtx, request)
 	if err != nil {
+		// Spec 112 FR-016.1: scrub echoed forwarded values before this error
+		// reaches any sink (managed classification, health, activity, logs).
+		err = headerfwd.ScrubError(err, outbound, forwardAllow)
+
 		// Log CallTool failure to server-specific log
 		if c.upstreamLogger != nil {
 			c.upstreamLogger.Error("CallTool operation failed",
@@ -550,7 +592,7 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 			c.upstreamLogger.Debug("JSON-RPC CallTool Response",
 				zap.String("method", "tools/call"),
 				zap.String("tool", toolName),
-				zap.String("formatted_json", string(respBytes)))
+				zap.String("formatted_json", headerfwd.Scrub(string(respBytes), outbound, forwardAllow)))
 		}
 	}
 
@@ -585,7 +627,25 @@ func (c *Client) httpTransportConfig(serverConfig *config.ServerConfig, oauthCon
 	// with — which is exactly what keeps generations from bleeding into each
 	// other (#1040).
 	cfg.RetryAfter = c.retryAfter.Load()
+	// Spec 112 FR-018: the trace transport masks the live allowlisted names.
+	cfg.ForwardNames = func() []string {
+		if pp := c.forwardPolicy.Load(); pp != nil {
+			return (*pp)().Allow
+		}
+		return nil
+	}
 	return cfg
+}
+
+// SetForwardPolicyProvider installs the live forwarding policy provider
+// (Spec 112). It is read on every CallTool, so it takes effect immediately and
+// never forces a reconnect. Passing nil removes forwarding.
+func (c *Client) SetForwardPolicyProvider(p func() headerfwd.Policy) {
+	if p == nil {
+		c.forwardPolicy.Store(nil)
+		return
+	}
+	c.forwardPolicy.Store(&p)
 }
 
 // beginRetryAfterGeneration retires the current recorder and installs a fresh

@@ -1038,3 +1038,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [108-profiles-v3](./specs/108-profiles-v3/) | `in-flight` | 23/153 (15%) |
 | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) | `in-flight` | 36/180 (20%) |
 | [110-catalog-popularity](./specs/110-catalog-popularity/) | `in-flight` | 19/23 (83%) |
+| [112-client-header-forwarding](./specs/112-client-header-forwarding/) | `shipped` | 38/40 (95%) |

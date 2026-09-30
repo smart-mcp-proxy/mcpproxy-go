@@ -2665,6 +2665,11 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["expose_prompts"] = *serverStatus.Config.ExposePrompts
 		}
 
+		// Spec 112: surface the forward_headers allowlist (names only).
+		if serverStatus.Config != nil && len(serverStatus.Config.ForwardHeaders) > 0 {
+			serverMap["forward_headers"] = append([]string(nil), serverStatus.Config.ForwardHeaders...)
+		}
+
 		// Spec 086: surface the per-server trust tier so the REST GET payload
 		// (and SSE servers.changed embed) can read back the persisted mode, in
 		// parity with its deprecated predecessor auto_approve_tool_changes.
@@ -2876,6 +2881,11 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		// path. Tri-state *bool — only emit when set.
 		if srv.ExposePrompts != nil {
 			serverInfo["expose_prompts"] = *srv.ExposePrompts
+		}
+
+		// Spec 112: forward_headers allowlist in parity with the StateView path.
+		if len(srv.ForwardHeaders) > 0 {
+			serverInfo["forward_headers"] = append([]string(nil), srv.ForwardHeaders...)
 		}
 
 		// Spec 086: per-server trust tier in parity with the StateView path.

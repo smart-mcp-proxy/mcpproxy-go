@@ -20,6 +20,12 @@
 // Tools (deterministic, FR-007c):
 //   - echo — returns the call arguments back as JSON text:
 //     {"echo": {...arguments...}}
+//   - echo_headers — OPT-IN (--echo-headers, http transport only, Spec 112):
+//     returns the inbound HTTP request headers of the tools/call POST as JSON
+//     text {"headers": {"Name": ["v"...]}}. It exists so client header
+//     forwarding can be verified against a real instance. It deliberately
+//     echoes values, which is the upstream behaviour mcpproxy's scrubbing
+//     must tolerate. Off by default so the gate's two-tool contract holds.
 //   - ping — returns {"message":"pong","counter":N,"instance_id":"…"}; the
 //     counter increases monotonically per process and the instance_id is
 //     random per process start, so kill/restart tests (FR-007d) can prove the
@@ -60,6 +66,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -108,9 +115,17 @@ func main() {
 	transportFlag := flag.String("transport", transportStdio, "Transport to serve: stdio|http|sse")
 	port := flag.Int("port", 0, "TCP port to bind (required for http/sse)")
 	addr := flag.String("addr", "127.0.0.1", "Bind address (http/sse)")
+	echoHeaders := flag.Bool("echo-headers", false, "Also register the echo_headers tool (http transport only)")
 	flag.Parse()
 
 	mcpSrv := newFixtureServer()
+	if *echoHeaders {
+		if *transportFlag != transportHTTP {
+			fmt.Fprintln(os.Stderr, "[mcpfixture] --echo-headers requires --transport http")
+			os.Exit(2)
+		}
+		addEchoHeadersTool(mcpSrv)
+	}
 
 	// A stdio parent (mcpproxy, or mcp-go's stdio client) may close our stderr
 	// pipe before we write the final shutdown line; without this, Go's runtime
@@ -173,6 +188,36 @@ func newFixtureServer() *server.MCPServer {
 	return s
 }
 
+type requestHeadersKey struct{}
+
+// captureRequestHeaders stashes the inbound request headers in the tool-call
+// context so echo_headers can report them.
+func captureRequestHeaders(ctx context.Context, r *http.Request) context.Context {
+	return context.WithValue(ctx, requestHeadersKey{}, r.Header.Clone())
+}
+
+func addEchoHeadersTool(s *server.MCPServer) {
+	s.AddTool(mcp.NewTool("echo_headers",
+		mcp.WithDescription("Returns the inbound HTTP request headers of this tool call (http transport only)."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(false),
+	), handleEchoHeaders)
+}
+
+func handleEchoHeaders(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	hdr, _ := ctx.Value(requestHeadersKey{}).(http.Header)
+	out := make(map[string][]string, len(hdr))
+	for k, v := range hdr {
+		out[http.CanonicalHeaderKey(strings.TrimSpace(k))] = v
+	}
+	payload, err := json.Marshal(map[string]any{"headers": out})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("marshal headers payload: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(payload)), nil
+}
+
 func handleEcho(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 	if args == nil {
@@ -211,7 +256,7 @@ func serveNetwork(transportName string, mcpSrv *server.MCPServer, listenAddr str
 	var srv networkServer
 	switch transportName {
 	case transportHTTP:
-		srv = server.NewStreamableHTTPServer(mcpSrv)
+		srv = server.NewStreamableHTTPServer(mcpSrv, server.WithHTTPContextFunc(captureRequestHeaders))
 	case transportSSE:
 		// No WithBaseURL: the endpoint event advertises a relative
 		// /message?sessionId=… URL, which mcp-go's SSE client (the one

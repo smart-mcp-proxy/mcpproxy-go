@@ -46,6 +46,22 @@ type MockUpstreamServer struct {
 
 // NewTestEnvironment creates a complete test environment
 func NewTestEnvironment(t *testing.T) *TestEnvironment {
+	return NewTestEnvironmentWithOptions(t, TestEnvironmentOptions{})
+}
+
+// TestEnvironmentOptions customises NewTestEnvironmentWithOptions. Every field
+// is optional; the zero value is exactly NewTestEnvironment.
+type TestEnvironmentOptions struct {
+	// Mutate edits the proxy config before the server is constructed. tempDir
+	// is the environment's scratch directory (removed at Cleanup).
+	Mutate func(cfg *config.Config, tempDir string)
+	// Logger replaces the default development logger; it runs after Mutate.
+	Logger func(cfg *config.Config) (*zap.Logger, error)
+}
+
+// NewTestEnvironmentWithOptions is NewTestEnvironment with config and logger
+// hooks, for tests that must observe boot-time behaviour (Spec 112).
+func NewTestEnvironmentWithOptions(t *testing.T, opts TestEnvironmentOptions) *TestEnvironment {
 	// Disable OAuth for e2e tests to avoid network calls to mock servers
 	oldValue := os.Getenv("MCPPROXY_DISABLE_OAUTH")
 	os.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
@@ -54,15 +70,10 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 	tempDir, err := os.MkdirTemp("", "mcpproxy-e2e-*")
 	require.NoError(t, err)
 
-	// Create logger
-	logger, err := zap.NewDevelopment()
-	require.NoError(t, err)
-
 	env := &TestEnvironment{
 		t:           t,
 		tempDir:     tempDir,
 		mockServers: make(map[string]*MockUpstreamServer),
-		logger:      logger,
 	}
 
 	// Create data directory with secure permissions (0700 required for Unix socket security)
@@ -91,6 +102,19 @@ func NewTestEnvironment(t *testing.T) *TestEnvironment {
 		DebugSearch:       true,
 		QuarantineEnabled: &quarantineDisabled, // Disable tool-level quarantine in E2E tests (tested separately)
 	}
+
+	if opts.Mutate != nil {
+		opts.Mutate(cfg, tempDir)
+	}
+
+	var logger *zap.Logger
+	if opts.Logger != nil {
+		logger, err = opts.Logger(cfg)
+	} else {
+		logger, err = zap.NewDevelopment()
+	}
+	require.NoError(t, err)
+	env.logger = logger
 
 	env.proxyServer, err = NewServer(cfg, logger)
 	require.NoError(t, err)

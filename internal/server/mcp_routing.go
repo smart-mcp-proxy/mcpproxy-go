@@ -20,6 +20,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
@@ -673,11 +674,14 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			result interface{}
 			err    error
 		)
+		// Spec 112 FR-016.3: per-call sink for the recording scrub below.
+		dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 		if epoch, ok := p.liveConnectionEpoch(serverName); ok {
-			result, err = p.upstreamManager.CallToolOnEpoch(ctx, qualifiedName, args, epoch)
+			result, err = p.upstreamManager.CallToolOnEpoch(dispatchCtx, qualifiedName, args, epoch)
 		} else {
-			result, err = p.upstreamManager.CallTool(ctx, qualifiedName, args)
+			result, err = p.upstreamManager.CallTool(dispatchCtx, qualifiedName, args)
 		}
+		fwdOut := fwdSink.Outbound()
 
 		durationMs := time.Since(startTime).Milliseconds()
 
@@ -718,7 +722,9 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// Issue #935: direct mode reaches the same upstreams as call_tool_*, so
 		// it must classify an isError:true answer as a failure too. Read from
 		// the raw result, before the truncation loop below rewrites it.
-		activityStatus, activityErrMsg := activityStatusForResult(result)
+		//
+		// Spec 112: the activity classification reads the scrubbed copy.
+		activityStatus, activityErrMsg := activityStatusForResult(scrubResultForRecord(result, fwdOut))
 
 		// Forward content blocks (preserving ImageContent, AudioContent, etc.)
 		// while applying truncation only to TextContent. See issue #368.
@@ -788,7 +794,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// Spec 069 A1: pre-truncation sizes; result was measured before the truncation loop above.
 		routingResponseBytes := rawByteSize(result)
 		routingRequestBytes := rawByteSize(enrichedArgs)
-		p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil, "")
+		p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, scrubForRecord(responseText, fwdOut), truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil, "")
 
 		return forwarded, nil
 	}

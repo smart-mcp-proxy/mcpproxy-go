@@ -16,6 +16,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
@@ -339,7 +340,11 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 
 	// Update execution start time to actual execution start
 	executionStart = time.Now()
-	result := jsruntime.Execute(ctx, toolCaller, code, options)
+	// Spec 112 FR-016.3: execution-level sink; nested sub-calls fold their
+	// outbound sets into it (see upstreamToolCaller.CallTool).
+	execCtx, execFwdSink := headerfwd.WithSink(ctx)
+	result := jsruntime.Execute(execCtx, toolCaller, code, options)
+	execFwdOut := execFwdSink.Outbound()
 	executionDuration := time.Since(executionStart)
 
 	// Log execution result with metrics
@@ -354,7 +359,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 			zap.String("execution_id", options.ExecutionID),
 			zap.Duration("execution_duration", executionDuration),
 			zap.String("error_code", string(result.Error.Code)),
-			zap.String("error_message", result.Error.Message),
+			zap.String("error_message", scrubForRecord(result.Error.Message, execFwdOut)),
 			zap.Int("tool_calls_made", len(toolCaller.getToolCalls())),
 		)
 	}
@@ -427,7 +432,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		ServerName:       "mcpproxy",       // Built-in tool
 		ToolName:         "code_execution",
 		Arguments:        codeExecRecordArguments(code, scriptName, effectiveLanguage, options.Input),
-		Response:         result,
+		Response:         scrubResultForRecord(result, execFwdOut),
 		Duration:         int64(executionDuration),
 		Timestamp:        executionStart,
 		ConfigPath:       configPath,
@@ -476,7 +481,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	} else {
 		status = "error"
 		if result.Error != nil {
-			errorMsg = result.Error.Message
+			errorMsg = scrubForRecord(result.Error.Message, execFwdOut)
 		}
 	}
 	codeExecArgs := codeExecRecordArguments(code, scriptName, effectiveLanguage, options.Input)
@@ -503,7 +508,7 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		}
 	}
 
-	p.emitActivityInternalToolCall("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, result, nil, codeExecContentTrust)
+	p.emitActivityInternalToolCall("code_execution", "", "", "", sessionID, parentCallID, status, errorMsg, executionDuration.Milliseconds(), codeExecArgs, scrubResultForRecord(result, execFwdOut), nil, codeExecContentTrust)
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
@@ -999,11 +1004,18 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		result *mcp.CallToolResult
 		err    error
 	)
+	// Spec 112 FR-016.3: a per-sub-call sink receives this call's outbound set;
+	// it is also folded into the execution-level sink so the code_execution
+	// wrapper's own records can be scrubbed with everything any sub-call sent.
+	parentFwdSink := headerfwd.SinkFrom(ctx)
+	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 	if certified.certified() {
-		result, err = client.CallToolOnEpoch(ctx, toolName, args, certified.DiscoveryEpoch)
+		result, err = client.CallToolOnEpoch(dispatchCtx, toolName, args, certified.DiscoveryEpoch)
 	} else {
-		result, err = client.CallTool(ctx, toolName, args)
+		result, err = client.CallTool(dispatchCtx, toolName, args)
 	}
+	fwdOut := fwdSink.Outbound()
+	parentFwdSink.Merge(fwdOut)
 	if errors.Is(err, managed.ErrConnectionGenerationChanged) {
 		refusal := errors.New(unresolvedToolIdentityMessage(serverName, toolName, false))
 		duration := time.Since(startTime)
@@ -1035,12 +1047,16 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// is a fourth upstream dispatch path, so it classifies an isError:true
 	// answer as a failure exactly like call_tool_* does — otherwise the same
 	// upstream rejection is a clean success here and an error there.
-	u.recordUpstreamCall(serverName, toolName, startTime, duration, result, err)
-	u.storeToolCallInHistory(serverName, toolName, args, result, err, startTime, duration)
+	//
+	// Spec 112: the result handed to the script (below) is untouched; every
+	// record written from it sees the scrubbed copy.
+	recResult := scrubResultForRecord(result, fwdOut)
+	u.recordUpstreamCall(serverName, toolName, startTime, duration, recResult, err)
+	u.storeToolCallInHistory(serverName, toolName, args, recResult, err, startTime, duration)
 	if err != nil {
 		auditNoteError(ctx, err)
 	}
-	u.emitSubCallActivity(ctx, serverName, toolName, requestID, args, result, err, startTime, duration)
+	u.emitSubCallActivity(ctx, serverName, toolName, requestID, args, recResult, err, startTime, duration)
 
 	u.logger.Debug("upstream tool call completed",
 		zap.String("execution_id", u.executionID),

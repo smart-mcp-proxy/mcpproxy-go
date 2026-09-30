@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 )
 
@@ -392,6 +393,16 @@ type Config struct {
 	// (hot-reloadable). Env override: MCPPROXY_TRUSTED_PROXIES (comma-separated).
 	// The one reader is ForwardedHeaders; validation is validateTrustedProxies.
 	TrustedProxies []string `json:"trusted_proxies,omitempty" mapstructure:"trusted-proxies"`
+
+	// ForwardClientHeaders is the global switch for client header forwarding
+	// (Spec 112): copying allowlisted headers from the inbound /mcp request into
+	// the upstream tools/call request. nil (absent) means enabled; because every
+	// per-server forward_headers allowlist is empty by default, the default
+	// forwards nothing. false disables forwarding for every server. Read via
+	// IsClientHeaderForwardingEnabled(); MCPPROXY_FORWARD_CLIENT_HEADERS
+	// overrides it for the process. Distinct from ForwardedHeaders/trusted_proxies
+	// (Spec 107), which trusts inbound X-Forwarded-*.
+	ForwardClientHeaders *bool `json:"forward_client_headers,omitempty" mapstructure:"forward-client-headers"`
 	// AuditLog configures the Spec 107 edition-neutral audit sink
 	// (internal/audit). nil means "use the per-edition/per-transport
 	// default" (EffectiveAuditLog); restart-pinned (bound at sink
@@ -711,6 +722,14 @@ type ServerConfig struct {
 	// default-aggregate behavior (included if the server advertises
 	// Capabilities.Prompts); false excludes it regardless of capability.
 	ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompts"`
+
+	// ForwardHeaders lists inbound MCP-client header NAMES (never values) that
+	// are copied into this server's upstream tools/call requests (Spec 112).
+	// Exact names, case-insensitive, at most 32, no wildcards. Empty forwards
+	// nothing. Only HTTP-based transports (http, streamable-http) forward; the
+	// deny list (Authorization, Host, hop-by-hop, ...) is enforced at runtime
+	// regardless of what is configured here.
+	ForwardHeaders []string `json:"forward_headers,omitempty" mapstructure:"forward_headers"`
 
 	// LauncherWaitTimeout caps how long mcpproxy will wait for a locally-launched
 	// HTTP/SSE upstream's URL to become reachable after Spawn(). Only consulted
@@ -2301,6 +2320,7 @@ func (v ValidationError) Error() string {
 // new v3 ones.
 func (c *Config) ValidateDetailed() []ValidationError {
 	errors := append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
+	errors = append(errors, c.forwardHeadersErrors()...)
 	if _, err := ValidateProfiles(c); err != nil {
 		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
 	}
@@ -2332,6 +2352,104 @@ func (c *Config) oauthRedirectURIErrors() []ValidationError {
 		}
 	}
 	return errors
+}
+
+// forwardHeadersErrors reports every per-server `forward_headers` problem
+// (Spec 112 FR-005a): an invalid token, wildcard, denied name, duplicate, more
+// than 32 entries, or a collision with the same server's static headers.
+//
+// Write-time only, like oauthRedirectURIErrors: a hand-edited bad entry must
+// not brick boot. Load drops such entries via NormalizeForwardHeaders and the
+// runtime filter in internal/headerfwd stays the authoritative boundary.
+// Messages name headers only, never values.
+func (c *Config) forwardHeadersErrors() []ValidationError {
+	var errors []ValidationError
+	for i, server := range c.Servers {
+		if server == nil {
+			continue
+		}
+		errors = append(errors, ForwardHeadersValidationErrors(fmt.Sprintf("mcpServers[%d].forward_headers", i), server.ForwardHeaders, server.Headers)...)
+	}
+	return errors
+}
+
+// ForwardHeadersValidationErrors validates one server's forward_headers
+// allowlist against its static headers (Spec 112 FR-005a). It is the shared
+// write-time check for ValidateDetailed and the REST/MCP single-server write
+// paths. field is the reported ValidationError.Field.
+func ForwardHeadersValidationErrors(field string, names []string, static map[string]string) []ValidationError {
+	if len(names) == 0 {
+		return nil
+	}
+	var errors []ValidationError
+	for _, err := range headerfwd.ValidateNames(names, static) {
+		errors = append(errors, ValidationError{Field: field, Message: err.Error()})
+	}
+	return errors
+}
+
+// ForwardHeaderNormalization records one dropped forward_headers entry.
+type ForwardHeaderNormalization struct {
+	Server  string
+	Dropped []string
+}
+
+// NormalizeForwardHeaders is the lenient load-time counterpart of
+// forwardHeadersErrors (Spec 112 FR-005b): it rewrites each server's allowlist
+// in place to the usable canonical names, dropping invalid, denied, duplicate
+// and over-cap entries plus names colliding with the server's static headers,
+// and reports what it dropped (names only). It never fails. Idempotent and
+// nil-safe.
+func NormalizeForwardHeaders(cfg *Config) []ForwardHeaderNormalization {
+	if cfg == nil {
+		return nil
+	}
+	var out []ForwardHeaderNormalization
+	for _, s := range cfg.Servers {
+		if s == nil || len(s.ForwardHeaders) == 0 {
+			continue
+		}
+		kept, dropped := headerfwd.NormalizeNames(s.ForwardHeaders)
+		var final []string
+		for _, n := range kept {
+			collides := false
+			for k := range s.Headers {
+				if strings.EqualFold(k, n) {
+					collides = true
+					break
+				}
+			}
+			if collides {
+				dropped = append(dropped, n)
+				continue
+			}
+			final = append(final, n)
+		}
+		if len(dropped) > 0 {
+			out = append(out, ForwardHeaderNormalization{Server: s.Name, Dropped: dropped})
+		}
+		s.ForwardHeaders = final
+	}
+	return out
+}
+
+// EnvForwardClientHeaders is the environment kill switch for client header
+// forwarding (Spec 112 FR-003): false|0|off disables it for the process.
+const EnvForwardClientHeaders = "MCPPROXY_FORWARD_CLIENT_HEADERS"
+
+// IsClientHeaderForwardingEnabled reports the resolved global switch: nil means
+// enabled, an explicit value wins, and MCPPROXY_FORWARD_CLIENT_HEADERS
+// (false|0|off) outranks both on every path (loader, hot reload,
+// /config/apply) because the precedence is resolved here.
+func (c *Config) IsClientHeaderForwardingEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvForwardClientHeaders))) {
+	case "false", "0", "off":
+		return false
+	}
+	if c == nil || c.ForwardClientHeaders == nil {
+		return true
+	}
+	return *c.ForwardClientHeaders
 }
 
 func (c *Config) validateDetailedCore() []ValidationError {

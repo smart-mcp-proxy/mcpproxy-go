@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
@@ -142,9 +144,17 @@ func (p *MCPProxyServer) cacheAuthorizationWith(ctx context.Context, profileName
 type producerCacheStore struct {
 	store    *cache.Manager
 	producer cache.Authorization
+	// fwdDigest / fwdServer (Spec 112 FR-017) are set only when the producing
+	// call forwarded client headers: the entry is then stamped with the digest
+	// of that set so it is redeemable only by a request that forwards the same.
+	fwdDigest string
+	fwdServer string
 }
 
 func (s producerCacheStore) Store(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int) error {
+	if s.fwdDigest != "" {
+		return s.store.StoreAsForwarded(key, toolName, args, content, recordPath, totalRecords, s.producer, s.fwdDigest, s.fwdServer)
+	}
 	return s.store.StoreAs(key, toolName, args, content, recordPath, totalRecords, s.producer)
 }
 
@@ -160,6 +170,63 @@ func (p *MCPProxyServer) cacheStoreAs(producer cache.Authorization) CacheStore {
 		return nil
 	}
 	return producerCacheStore{store: p.cacheManager, producer: producer}
+}
+
+// cacheStoreAsForwarded is cacheStoreAs for a result produced by a call that
+// forwarded the client headers in out to upstream `server` (Spec 112 FR-017):
+// the entry is stamped with Digest(out) and the server. An empty out is
+// exactly cacheStoreAs. The unscrubbed result is what is cached, isolated by
+// that digest, because only a request forwarding the same set can redeem it.
+func (p *MCPProxyServer) cacheStoreAsForwarded(producer cache.Authorization, out headerfwd.Snapshot, server string) CacheStore {
+	if p.cacheManager == nil {
+		return nil
+	}
+	return producerCacheStore{store: p.cacheManager, producer: producer, fwdDigest: headerfwd.Digest(out), fwdServer: server}
+}
+
+// cacheStoreAsChildPage is cacheStoreAs for a recursively re-truncated
+// read_cache page: the child inherits its PARENT's forwarded-set fact along
+// with the parent's producer snapshot, so a child page is redeemable by
+// exactly the parent's readers (FR-017 stays monotone down the chain).
+func (p *MCPProxyServer) cacheStoreAsChildPage(producer cache.Authorization, parent *cache.ReadCacheResponse) CacheStore {
+	if p.cacheManager == nil {
+		return nil
+	}
+	s := producerCacheStore{store: p.cacheManager, producer: producer}
+	if parent != nil {
+		s.fwdDigest, s.fwdServer = parent.ForwardedDigest, parent.ForwardedServer
+	}
+	return s
+}
+
+// forwardedEntryRedeem enforces the FR-017 digest fact for one gated
+// read_cache page: an entry with no fact is unaffected; an entry produced
+// under forwarded headers is redeemable only when this request's forwarded set
+// for the same upstream digests equal (a different set, or none, is refused).
+// The digest is compared and dropped; it is never logged or returned.
+// It also returns the outbound set the
+// redeeming request forwards to the entry's upstream, so the caller can scrub
+// the forwarded values out of the activity copy of the page (FR-015b: the
+// cache store holds the unscrubbed payload, the activity log must not).
+// The set is empty for an entry with no forwarded fact.
+func (p *MCPProxyServer) forwardedEntryRedeem(ctx context.Context, page *cache.ReadCacheResponse) (bool, headerfwd.Snapshot) {
+	if page == nil || page.ForwardedDigest == "" {
+		return true, headerfwd.Snapshot{}
+	}
+	snap, ok := headerfwd.SnapshotFrom(ctx)
+	if !ok {
+		return false, headerfwd.Snapshot{}
+	}
+	policy, ok := p.forwardPolicyFor(page.ForwardedServer)
+	if !ok {
+		return false, headerfwd.Snapshot{}
+	}
+	out := headerfwd.Outbound(snap, policy)
+	got := headerfwd.Digest(out)
+	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(page.ForwardedDigest)) != 1 {
+		return false, headerfwd.Snapshot{}
+	}
+	return true, out
 }
 
 // childPageProducer is the snapshot a recursively re-truncated read_cache
@@ -206,6 +273,8 @@ func readCacheRefusal(err error, reader cache.Authorization) *mcp.CallToolResult
 		return mcp.NewToolResultError("Cache entry is not readable: it predates provenance stamping and has been invalidated. Re-run the original tool call to obtain a new cache key.")
 	case errors.Is(err, cache.ErrInternalEntry):
 		return mcp.NewToolResultError("Cache entry is not readable: it is internal to mcpproxy (registry or repository metadata) and cannot be paged through read_cache.")
+	case errors.Is(err, cache.ErrForwardedMismatch):
+		return mcp.NewToolResultError("Cache entry is not readable with this request: it was produced for a different set of forwarded client headers (Spec 112). Re-run the original tool call from this client to obtain your own cache key.")
 	case errors.Is(err, cache.ErrUnauthorizedRead):
 		return mcp.NewToolResultError("Cache entry is not readable with this credential: it was produced under a broader authorization (server scope, permission tier or profile) than this request holds. Re-run the original tool call with this credential to obtain your own cache key.")
 	}
