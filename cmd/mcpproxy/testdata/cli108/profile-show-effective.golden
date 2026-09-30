@@ -1,0 +1,8 @@
+Profile: work-ro2 (visible 1, hidden 2)
+SERVER  TOOL          TIER         PROFILE TIER  ACCESS    REASON              NOTE
+github  list_issues   read         read          callable  -                   classification ignored — tool is now annotated
+github  create_issue  write        write         hidden    above_tier_cap      -
+github  search_code   unannotated  unannotated   hidden    unannotated_hidden  -
+Stale classifications:
+  github:list_issues: classification ignored — tool is now annotated
+  github:gone_tool: classification ignored — tool not found

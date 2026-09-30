@@ -169,7 +169,14 @@ func runDoctorClientMode(ctx context.Context, client *cliclient.Client, logger *
 		attention = filterAttentionByServer(attention, doctorServerFilter)
 	}
 
-	return outputDiagnostics(diag, info, quarantineStats, envHint, attention)
+	// Spec 108-g: profile/client checks derived from GET /clients warnings.
+	// Instance-level, so skipped when the run is scoped to one server.
+	var profileChecks []profileCheck
+	if doctorServerFilter == "" {
+		profileChecks = collectProfileChecks(client)
+	}
+
+	return outputDiagnosticsWithProfileChecks(diag, info, quarantineStats, envHint, attention, profileChecks)
 }
 
 // filterAttentionByServer narrows an attention response to the items whose
@@ -319,6 +326,10 @@ func printDoctorAttentionSection(attention *cliclient.AttentionResponse) {
 }
 
 func outputDiagnostics(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats, envHint string, attention *cliclient.AttentionResponse) error {
+	return outputDiagnosticsWithProfileChecks(diag, info, quarantineStats, envHint, attention, nil)
+}
+
+func outputDiagnosticsWithProfileChecks(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats, envHint string, attention *cliclient.AttentionResponse, profileChecks []profileCheck) error {
 	switch doctorOutput {
 	case "json":
 		// Combine diagnostics with info for JSON output
@@ -336,6 +347,9 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		}
 		if attention != nil {
 			combined["attention"] = attention
+		}
+		if profileChecks != nil {
+			combined["profile_checks"] = profileChecks
 		}
 		output, err := json.MarshalIndent(combined, "", "  ")
 		if err != nil {
@@ -389,13 +403,14 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		// Spec 109 FR-004: doctor's first section, from the same GET
 		// /attention every other surface reads (FR-001/FR-003).
 		printDoctorAttentionSection(attention)
+		printProfileChecksSection(profileChecks)
 
 		// Fix review finding: the "all clear" verdict must also require the
 		// FR-001 attention list (a separate counter from `total_issues`) to
 		// be empty, or a quarantined server / tool awaiting review with no
 		// other diagnostics findings prints two contradicting verdicts back
 		// to back — exactly what FR-004 exists to prevent.
-		attentionClear := attention == nil || attention.Count == 0
+		attentionClear := (attention == nil || attention.Count == 0) && !profileChecksWarn(profileChecks)
 		if totalIssues == 0 && attentionClear {
 			fmt.Println("✅ All systems operational! No issues detected.")
 			fmt.Println()
