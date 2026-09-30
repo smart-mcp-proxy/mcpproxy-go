@@ -1949,7 +1949,10 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 	// Apply hot-reloadable changes
 	oldCfg := r.cfg
 	r.cfg = newCfg
-	if cfgPath != "" {
+	// Skip the write when the path is unchanged: LoadConfiguredServers goroutines
+	// spawned by an earlier apply read r.cfgPath without this lock, and two
+	// back-to-back funnel writes would otherwise race on an identical value.
+	if cfgPath != "" && cfgPath != r.cfgPath {
 		r.cfgPath = cfgPath
 	}
 

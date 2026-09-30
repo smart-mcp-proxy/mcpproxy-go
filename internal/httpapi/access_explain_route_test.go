@@ -77,12 +77,15 @@ func TestAccessExplainRoute_SubjectAndToolRules(t *testing.T) {
 
 	// Every subject kind reaches the service.
 	g.fake.err, g.fake.calls = nil, nil
-	for q, kind := range map[string]profile.AccessSubjectKind{
-		"?client=cursor&tool=alpha:list":    profile.AccessSubjectClient,
+	subjects := map[string]profile.AccessSubjectKind{
 		"?token=ro-bot&tool=alpha:list":     profile.AccessSubjectToken,
 		"?profile=research&tool=alpha:list": profile.AccessSubjectProfile,
 		"?anonymous=true&tool=alpha:list":   profile.AccessSubjectAnonymous,
-	} {
+	}
+	if clientRoutesSupported {
+		subjects["?client=cursor&tool=alpha:list"] = profile.AccessSubjectClient
+	}
+	for q, kind := range subjects {
 		require.Equal(t, http.StatusOK, get(q).Code, q)
 		assert.Contains(t, g.fake.calls, "explain:"+string(kind)+":alpha:list")
 	}

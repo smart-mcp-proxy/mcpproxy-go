@@ -239,10 +239,12 @@ func TestProfileV3REST_EffectiveToolsAdminAndClientOnAnotherProfile(t *testing.T
 	assert.Contains(t, counts, "by_reason")
 	assert.Contains(t, counts, "callable")
 
-	status, resp = f.json(http.MethodGet, "/api/v1/profiles/work-full/effective-tools?client=cursor&server=github", nil)
-	require.Equal(t, http.StatusOK, status, resp)
-	for _, r := range dataOf(resp)["tools"].([]interface{}) {
-		assert.Equal(t, "github", r.(map[string]interface{})["server"])
+	if clientsEdition {
+		status, resp = f.json(http.MethodGet, "/api/v1/profiles/work-full/effective-tools?client=cursor&server=github", nil)
+		require.Equal(t, http.StatusOK, status, resp)
+		for _, r := range dataOf(resp)["tools"].([]interface{}) {
+			assert.Equal(t, "github", r.(map[string]interface{})["server"])
+		}
 	}
 
 	status, _ = f.json(http.MethodGet, "/api/v1/profiles/nope/effective-tools", nil)
@@ -291,17 +293,19 @@ func TestProfileV3REST_AccessExplainEndToEnd(t *testing.T) {
 	f.mintClient("cursor", "work-readonly", auth.ProfileModeLocked)
 	f.mint("ro-bot", "work-readonly")
 
-	status, resp := f.json(http.MethodGet, "/api/v1/access/explain?client=cursor&tool=github:create_issue", nil)
-	require.Equal(t, http.StatusOK, status, resp)
-	d := dataOf(resp)
-	assert.Equal(t, "hidden", d["verdict"])
-	assert.Equal(t, "tier_cap", d["first_failure"])
-	fixes := d["fixes"].([]interface{})
-	require.Len(t, fixes, 2)
-	assert.Equal(t, "allow_in_profile", fixes[0].(map[string]interface{})["action"])
-	assert.Equal(t, "move_client", fixes[1].(map[string]interface{})["action"])
+	if clientsEdition {
+		status, resp := f.json(http.MethodGet, "/api/v1/access/explain?client=cursor&tool=github:create_issue", nil)
+		require.Equal(t, http.StatusOK, status, resp)
+		d := dataOf(resp)
+		assert.Equal(t, "hidden", d["verdict"])
+		assert.Equal(t, "tier_cap", d["first_failure"])
+		fixes := d["fixes"].([]interface{})
+		require.Len(t, fixes, 2)
+		assert.Equal(t, "allow_in_profile", fixes[0].(map[string]interface{})["action"])
+		assert.Equal(t, "move_client", fixes[1].(map[string]interface{})["action"])
+	}
 
-	status, resp = f.json(http.MethodGet, "/api/v1/access/explain?token=ro-bot&tool=github:list_issues", nil)
+	status, resp := f.json(http.MethodGet, "/api/v1/access/explain?token=ro-bot&tool=github:list_issues", nil)
 	require.Equal(t, http.StatusOK, status, resp)
 	assert.Equal(t, "allowed", dataOf(resp)["verdict"])
 

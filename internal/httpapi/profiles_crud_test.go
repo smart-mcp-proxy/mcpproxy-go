@@ -462,9 +462,11 @@ func TestProfilesEffectiveTools_ScopedCallerGetsVisibleRowsOnly(t *testing.T) {
 	assert.Contains(t, g.fake.calls, "effective:research::")
 
 	// An administrator may pass both.
-	rec = g.do(scopeAdminAPIKey, http.MethodGet, "/api/v1/profiles/research/effective-tools?client=cursor&reason=above_tier_cap", "")
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Contains(t, g.fake.calls, "effective:research:cursor:above_tier_cap")
+	if clientRoutesSupported {
+		rec = g.do(scopeAdminAPIKey, http.MethodGet, "/api/v1/profiles/research/effective-tools?client=cursor&reason=above_tier_cap", "")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, g.fake.calls, "effective:research:cursor:above_tier_cap")
+	}
 }
 
 func TestProfilesEffectiveTools_ErrorMapping(t *testing.T) {

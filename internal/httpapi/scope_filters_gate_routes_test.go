@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -39,6 +40,9 @@ func TestRejectUnsupportedScopeFilters_RealRoutes(t *testing.T) {
 
 	for _, path := range gatedRoutes {
 		t.Run(path, func(t *testing.T) {
+			if path == "/api/v1/clients" && !clientRoutesSupported {
+				t.Skip("the server edition has no per-client surface")
+			}
 			rec := scopeGet(t, srv, path+"?profile=work", scopeAdminAPIKey)
 			require.Equal(t, http.StatusBadRequest, rec.Code,
 				"expected the gate to reject ?profile= before any handler logic; body: %s", rec.Body.String())
@@ -125,6 +129,9 @@ func TestRealRoutes_ListFilled_UnhonouredStillRejected(t *testing.T) {
 		{"/api/v1/clients/cursor?client=x", "client"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
+			if strings.HasPrefix(tc.path, "/api/v1/clients") && !clientRoutesSupported {
+				t.Skip("the server edition has no per-client surface")
+			}
 			rec := scopeGet(t, srv, tc.path, scopeAdminAPIKey)
 			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), "unsupported_scope_filter")
