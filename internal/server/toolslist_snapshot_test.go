@@ -223,8 +223,13 @@ var toolsListAllowedDelta = map[string][]string{
 //     tool on the flag, so the frozen (flag-off) capture never carried it
 //     there. With the flag on by default (v0.66.0) the default surface now
 //     registers the live tool.
+//   - profiles on every surface — the Spec 108-h administrator tool (FR-017). It
+//     is registered on the three static surfaces and hidden per session from
+//     everything but an administrator credential, so the goldens carry it.
 var toolsListAllowedAdditions = map[string][]string{
-	"default_server": {"code_execution"},
+	"default_server":      {"code_execution", "profiles"},
+	"retrieve_tools_mode": {"profiles"},
+	"code_execution_mode": {"profiles"},
 }
 
 // TestToolsListSnapshot_DeltaIsEnumerated is the FR-014 gate: the goldens
