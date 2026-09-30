@@ -1138,6 +1138,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 			mcp.Description(fmt.Sprintf("Tool name in format 'server:tool' (e.g., '%s'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail.", nameExample)),
 		),
 		mcp.WithObject("args",
+			openObject(),
 			mcp.Description("Arguments to pass to the upstream tool as a native JSON object. Build arguments from the tool's compact signature ('sig') in retrieve_tools results — '*' marks required parameters, '~' marks a lossy signature (call describe_tool for the full JSON Schema before calling). Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects."),
 		),
 		mcp.WithString("args_json",

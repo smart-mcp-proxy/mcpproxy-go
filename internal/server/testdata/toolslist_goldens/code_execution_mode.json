@@ -15,8 +15,8 @@
           "type": "string"
         },
         "input": {
+          "additionalProperties": true,
           "description": "Input data accessible as global `input` variable in code (default: {})",
-          "properties": {},
           "type": "object"
         },
         "language": {
@@ -28,8 +28,8 @@
           "type": "string"
         },
         "options": {
+          "additionalProperties": true,
           "description": "Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (\u003e= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed). Batch concurrency is not an execution option: call_tools() defaults to the configured code_execution_max_parallel and is overridden per batch with call_tools(requests, {max_parallel}).",
-          "properties": {},
           "type": "object"
         },
         "script": {
