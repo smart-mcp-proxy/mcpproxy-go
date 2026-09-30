@@ -459,6 +459,10 @@ func TestClientsRoutes_Spec109PresenceFieldsAreUnchanged(t *testing.T) {
 // admin key, from the last on-demand observation, across a restart.
 func TestClientsRoutes_ListNeverReadsConfigsButRemembersAdminKeyHolders(t *testing.T) {
 	h := newBindingHarness(t, internalRuntime.ConservativeBindingGuard{})
+	// Build the "restarted" server before LOCALAPPDATA points into a TempDir:
+	// NewServer opens http.log under LOCALAPPDATA, and on Windows an open log
+	// file makes the TempDir cleanup fail.
+	srv2 := NewServer(h.ctrl, zap.NewNop().Sugar(), nil)
 	home := t.TempDir()
 	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
 	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
@@ -502,7 +506,6 @@ func TestClientsRoutes_ListNeverReadsConfigsButRemembersAdminKeyHolders(t *testi
 	reads.Store(0)
 
 	// "Restart": a new REST server over the same persisted state.
-	srv2 := NewServer(h.ctrl, zap.NewNop().Sugar(), nil)
 	srv2.SetTokenStore(h.sm, t.TempDir())
 	srv2.SetClientsService(h.svc)
 	srv2.SetConnectService(conn)
