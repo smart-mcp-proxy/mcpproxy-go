@@ -47,8 +47,17 @@ var (
 	activityNoIcons       bool   // Disable emoji icons in output
 	activityDetectionType string // Spec 026: Filter by detection type (e.g., "aws_access_key")
 	activitySeverity      string // Spec 026: Filter by severity level (critical, high, medium, low)
-	activityAgent         string // Spec 028: Filter by agent token name
+	activityAgent         string // Spec 028: deprecated alias of --token
 	activityAuthType      string // Spec 028: Filter by auth type (admin, agent)
+
+	// Spec 108 FR-031 scope filters: the profile, client and token in effect
+	// when a call ran ("-" selects records with none). --client-name is the
+	// client's self-reported name (advisory); --agent is the old spelling of
+	// --token.
+	activityProfile    string
+	activityClient     string
+	activityToken      string
+	activityClientName string
 
 	// Spec 109-k (activity-scope-filters, url-filter-contract.md): the `view`
 	// segmented filter and the `--from`/`--to` aliases of `--start-time`/
@@ -95,8 +104,13 @@ type ActivityFilter struct {
 	SensitiveData *bool  // Spec 026: Filter by sensitive data detection
 	DetectionType string // Spec 026: Filter by detection type
 	Severity      string // Spec 026: Filter by severity level
-	AgentName     string // Spec 028: Filter by agent token name
 	AuthType      string // Spec 028: Filter by auth type (admin, agent)
+
+	// Spec 108 FR-031 scope filters ("-" = unattributed).
+	Profile    string
+	Client     string
+	Token      string // REST also accepts `agent` as an alias
+	ClientName string // advisory; list, export and watch only
 }
 
 // Validate validates the filter options
@@ -263,14 +277,70 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 	if f.Severity != "" {
 		q.Set("severity", f.Severity)
 	}
-	// Spec 028: Agent token identity filters
-	if f.AgentName != "" {
-		q.Set("agent", f.AgentName)
-	}
+	// Spec 028: auth type; Spec 108: the token filter (the old --agent is an
+	// alias resolved before this point) and the profile/client filters.
 	if f.AuthType != "" {
 		q.Set("auth_type", f.AuthType)
 	}
+	if f.Token != "" {
+		q.Set("token", f.Token)
+	}
+	if f.Profile != "" {
+		q.Set("profile", f.Profile)
+	}
+	if f.Client != "" {
+		q.Set("client", f.Client)
+	}
+	if f.ClientName != "" {
+		q.Set("client_name", f.ClientName)
+	}
 	return q
+}
+
+// errActivityClientNameUnsupported is the REST text for `client_name` on an
+// endpoint that does not filter on the advisory name (summary, usage,
+// sessions); `activity summary --client-name` is registered and always
+// rejected with it, like --to there.
+const errActivityClientNameUnsupported = "client_name is not supported on this endpoint; filter by client"
+
+// activityScope is the resolved Spec 108 scope filter set of one invocation.
+type activityScope struct {
+	Profile    string
+	Client     string
+	Token      string
+	ClientName string
+	// Deprecation is a notice to print to stderr (the old --agent spelling).
+	Deprecation string
+}
+
+// resolveActivityScope reads the scope flags. --agent is a deprecated alias of
+// --token: it works, prints a notice, and a conflicting pair is an error.
+func resolveActivityScope() (activityScope, error) {
+	sc := activityScope{
+		Profile:    activityProfile,
+		Client:     activityClient,
+		Token:      activityToken,
+		ClientName: activityClientName,
+	}
+	if activityAgent != "" {
+		sc.Deprecation = "--agent is deprecated; use --token"
+		if sc.Token != "" && sc.Token != activityAgent {
+			return sc, errors.New("--token and --agent must name the same token (--agent is an alias of --token)")
+		}
+		sc.Token = activityAgent
+	}
+	return sc, nil
+}
+
+// registerActivityScopeFlags adds the Spec 108 scope filter flags to a command.
+// clientName is false only where the flag is registered to be rejected.
+func registerActivityScopeFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&activityProfile, "profile", "", "Filter by the profile in effect for the call; - selects records with no profile")
+	cmd.Flags().StringVar(&activityClient, "client", "", "Filter by client id (the client's binding); - selects records with no client")
+	cmd.Flags().StringVar(&activityToken, "token", "", "Filter by the agent or client token name; - selects records with no token")
+	cmd.Flags().StringVar(&activityClientName, "client-name", "", "Filter by the client's self-reported name (advisory, not authoritative)")
+	cmd.Flags().StringVar(&activityAgent, "agent", "", "Deprecated alias of --token")
+	_ = cmd.Flags().MarkHidden("agent")
 }
 
 // Spec 109-k (activity-scope-filters): the `view` segmented filter
@@ -1167,7 +1237,7 @@ func init() {
 	activityCmd.AddCommand(activityExportCmd)
 
 	// List command flags
-	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight")
+	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change")
 	activityListCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityListCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
 	activityListCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked, rejected")
@@ -1185,17 +1255,18 @@ func init() {
 	activityListCmd.Flags().StringVar(&activityDetectionType, "detection-type", "", "Filter by detection type (e.g., aws_access_key, stripe_key)")
 	activityListCmd.Flags().StringVar(&activitySeverity, "severity", "", "Filter by severity level: critical, high, medium, low")
 	// Spec 028: Agent token identity filters
-	activityListCmd.Flags().StringVar(&activityAgent, "agent", "", "Filter by agent token name")
 	activityListCmd.Flags().StringVar(&activityAuthType, "auth-type", "", "Filter by auth type: admin, agent")
+	registerActivityScopeFlags(activityListCmd)
 	// Spec 109-k: view + --from/--to aliases (url-filter-contract.md)
 	activityListCmd.Flags().StringVar(&activityView, "view", "", "Filter by view: calls, system, all (default all); overridden by --type")
 	activityListCmd.Flags().StringVar(&activityFrom, "from", "", "Filter records after this time (RFC3339 or relative: -1h, -24h, -7d, -30d); alias of --start-time")
 	activityListCmd.Flags().StringVar(&activityTo, "to", "", "Filter records before this time (RFC3339 or relative); alias of --end-time")
 
 	// Watch command flags
-	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight")
+	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change")
 	activityWatchCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	// Spec 109-k: view + --from/--to
+	registerActivityScopeFlags(activityWatchCmd)
 	activityWatchCmd.Flags().StringVar(&activityView, "view", "", "Filter by view: calls, system, all (default all); overridden by --type")
 	activityWatchCmd.Flags().StringVar(&activityFrom, "from", "", "Only print records at/after this time (RFC3339 or relative: -1h, -24h, -7d, -30d)")
 	activityWatchCmd.Flags().StringVar(&activityTo, "to", "", "Stop watching once this time has passed — must be an absolute RFC3339 timestamp still ahead of now (a relative shorthand like -30m always resolves to the past and is rejected)")
@@ -1207,6 +1278,9 @@ func init() {
 	// Summary command flags
 	activitySummaryCmd.Flags().StringVarP(&activityPeriod, "period", "p", "24h", "Time period: 1h, 24h, 7d, 30d")
 	activitySummaryCmd.Flags().StringVar(&activityGroupBy, "by", "", "Group by: server, tool, status")
+	// Spec 108 FR-031: summary honours profile, client and token. --client-name
+	// is registered so the refusal is the REST text, and always rejected.
+	registerActivityScopeFlags(activitySummaryCmd)
 	// Spec 109-k FR-075: --from is an alias of --period (accepts only -1h/-24h/-7d/-30d); no --view on summary.
 	activitySummaryCmd.Flags().StringVar(&activityFrom, "from", "", "Alias of --period, as a relative shorthand: -1h, -24h, -7d, -30d")
 	activitySummaryCmd.Flags().StringVar(&activityTo, "to", "", "Not supported on 'activity summary' (present for contract symmetry; always rejected)")
@@ -1216,7 +1290,7 @@ func init() {
 	activityExportCmd.Flags().StringVarP(&activityExportFormat, "format", "f", "json", "Export file format: json (JSON Lines), csv")
 	activityExportCmd.Flags().BoolVar(&activityIncludeBodies, "include-bodies", false, "Include full request/response bodies")
 	// Reuse list filter flags for export
-	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight")
+	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change")
 	activityExportCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityExportCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
 	activityExportCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked, rejected")
@@ -1224,6 +1298,7 @@ func init() {
 	activityExportCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter after this time (RFC3339)")
 	activityExportCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter before this time (RFC3339)")
 	activityExportCmd.Flags().StringVar(&activityParentID, "parent-id", "", "Export only child tool calls of a code_execution activity (value = the parent record request_id)")
+	registerActivityScopeFlags(activityExportCmd)
 	// Spec 109-k: view + --from/--to (url-filter-contract.md)
 	activityExportCmd.Flags().StringVar(&activityView, "view", "", "Filter by view: calls, system, all (default all); overridden by --type")
 	activityExportCmd.Flags().StringVar(&activityFrom, "from", "", "Filter records after this time (RFC3339 or relative: -1h, -24h, -7d, -30d); alias of --start-time")
@@ -1295,6 +1370,13 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return outputActivityError(err, "INVALID_FILTER")
 	}
+	scope, err := resolveActivityScope()
+	if err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+	if scope.Deprecation != "" {
+		fmt.Fprintln(os.Stderr, scope.Deprecation)
+	}
 
 	// Build filter
 	filter := &ActivityFilter{
@@ -1313,8 +1395,11 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		SensitiveData: sensitiveDataPtr,
 		DetectionType: activityDetectionType,
 		Severity:      activitySeverity,
-		AgentName:     activityAgent,
 		AuthType:      activityAuthType,
+		Profile:       scope.Profile,
+		Client:        scope.Client,
+		Token:         scope.Token,
+		ClientName:    scope.ClientName,
 	}
 
 	if err := filter.Validate(); err != nil {
@@ -1364,9 +1449,58 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// Spec 026: Add SENSITIVE column to indicate activities with sensitive data detected
-	headers := []string{"ID", "SRC", "TYPE", "SERVER", "TOOL", "INTENT", "SENSITIVE", "STATUS", "DURATION", "TIME"}
-	rows := make([][]string, 0, len(activities))
+	headers, rows := activityListRows(activities)
+
+	result, err := formatter.FormatTable(headers, rows)
+	if err != nil {
+		return err
+	}
+	fmt.Print(result)
+
+	// Show pagination info
+	fmt.Printf("\nShowing %d of %d records", len(activities), total)
+	if filter.Offset > 0 || total > filter.Limit {
+		page := (filter.Offset / filter.Limit) + 1
+		fmt.Printf(" (page %d)", page)
+	}
+	fmt.Println()
+
+	return nil
+}
+
+// activityListHeaders is the `activity list` table header row. CLIENT and
+// PROFILE (Spec 108 FR-029) sit between TOOL and INTENT.
+var activityListHeaders = []string{"ID", "SRC", "TYPE", "SERVER", "TOOL", "CLIENT", "PROFILE", "INTENT", "SENSITIVE", "STATUS", "DURATION", "TIME"}
+
+// activityClientCell renders the CLIENT column: the client id when the record
+// carries a binding, else the client's self-reported name marked with "~"
+// (advisory: a client can claim any name), else "-".
+func activityClientCell(act map[string]interface{}) string {
+	if id := getStringField(act, "client_id"); id != "" {
+		return sanitizeCell(id, 24)
+	}
+	if name := getStringField(act, "client_name"); name != "" {
+		return "~" + sanitizeCell(name, 23)
+	}
+	return "-"
+}
+
+// activityProfileCell renders the PROFILE column: "name (source)", or "-".
+func activityProfileCell(act map[string]interface{}) string {
+	name := getStringField(act, "profile")
+	if name == "" {
+		return "-"
+	}
+	if src := getStringField(act, "profile_source"); src != "" {
+		return sanitizeCell(name, 32) + " (" + src + ")"
+	}
+	return sanitizeCell(name, 32)
+}
+
+// activityListRows builds the `activity list` table rows.
+func activityListRows(activities []map[string]interface{}) (headers []string, rows [][]string) {
+	headers = activityListHeaders
+	rows = make([][]string, 0, len(activities))
 
 	for _, act := range activities {
 		id := getStringField(act, "id")
@@ -1415,6 +1549,8 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 			// Activity transparency: a sub-call of a code_execution parent is
 			// indented so a mixed list reads as a tree, not a flat run of rows.
 			activityChildToolCell(act, tool),
+			activityClientCell(act),
+			activityProfileCell(act),
 			intentStr,
 			sensitiveStr, // Spec 026: Show sensitive data indicator
 			status,
@@ -1422,22 +1558,7 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 			timeStr,
 		})
 	}
-
-	result, err := formatter.FormatTable(headers, rows)
-	if err != nil {
-		return err
-	}
-	fmt.Print(result)
-
-	// Show pagination info
-	fmt.Printf("\nShowing %d of %d records", len(activities), total)
-	if filter.Offset > 0 || total > filter.Limit {
-		page := (filter.Offset / filter.Limit) + 1
-		fmt.Printf(" (page %d)", page)
-	}
-	fmt.Println()
-
-	return nil
+	return headers, rows
 }
 
 // runActivityWatch implements the activity watch command
@@ -1751,6 +1872,12 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 		}
 	}
 
+	// Spec 108 FR-031: --profile/--client/--token/--client-name filter on the
+	// event's `attribution` object ("-" = none).
+	if !activityWatchScopeMatches(event) {
+		return
+	}
+
 	// Spec 109-k FR-075: --from/--to bound which streamed records print.
 	//
 	// zcode round 1 (F1): the SSE wrapper's "timestamp" is a Unix integer
@@ -1808,6 +1935,32 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 	}
 
 	fmt.Println(line)
+}
+
+// activityWatchScopeMatches applies the Spec 108 scope filters to one streamed
+// event. The values are read from the event's nested `attribution` object (an
+// event with none has an empty value for each), and "-" selects the empty
+// value, exactly as on the REST filters. --agent is the --token alias.
+func activityWatchScopeMatches(event map[string]interface{}) bool {
+	scope, err := resolveActivityScope()
+	if err != nil {
+		return false
+	}
+	attr, _ := event["attribution"].(map[string]interface{})
+	matches := func(want, key string) bool {
+		if want == "" {
+			return true
+		}
+		have := getStringField(attr, key)
+		if want == "-" {
+			return have == ""
+		}
+		return have == want
+	}
+	return matches(scope.Profile, "profile") &&
+		matches(scope.Client, "client_id") &&
+		matches(scope.Token, "token_name") &&
+		matches(scope.ClientName, "client_name")
 }
 
 // formatToolCallEvent formats a tool_call event for display
@@ -2069,6 +2222,9 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Error:        %s\n", errMsg)
 	}
 
+	// Spec 108 FR-029: the profile, client and token in effect for the call.
+	displayScopeAttribution(activity)
+
 	// Intent information (Spec 018)
 	displayIntentSection(activity)
 
@@ -2102,6 +2258,33 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// displayScopeAttribution prints the Spec 108 attribution lines of one record:
+// Client, Profile, Token and Block reason, each only when present.
+func displayScopeAttribution(activity map[string]interface{}) {
+	if id := getStringField(activity, "client_id"); id != "" {
+		line := id
+		if name := getStringField(activity, "client_name"); name != "" {
+			line += " (reports itself as " + sanitizeCell(name, 40) + ")"
+		}
+		fmt.Printf("Client:       %s\n", line)
+	} else if name := getStringField(activity, "client_name"); name != "" {
+		fmt.Printf("Client:       ~%s (self-reported, no client binding)\n", sanitizeCell(name, 40))
+	}
+	if name := getStringField(activity, "profile"); name != "" {
+		line := name
+		if src := getStringField(activity, "profile_source"); src != "" {
+			line += " (" + src + ")"
+		}
+		fmt.Printf("Profile:      %s\n", line)
+	}
+	if token := getStringField(activity, "token_name"); token != "" {
+		fmt.Printf("Token:        %s\n", token)
+	}
+	if reason := getStringField(activity, "block_reason"); reason != "" {
+		fmt.Printf("Block reason: %s\n", reason)
+	}
+}
+
 // runActivitySummary implements the activity summary command
 func runActivitySummary(cmd *cobra.Command, _ []string) error {
 	// Setup logger
@@ -2128,6 +2311,19 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 		activityPeriod = period
 	}
 
+	// Spec 108 FR-031: the summary filters on profile, client and token; the
+	// advisory --client-name is rejected with the REST text.
+	if cmd.Flags().Changed("client-name") {
+		return outputActivityError(errors.New(errActivityClientNameUnsupported), "INVALID_FILTER")
+	}
+	scope, err := resolveActivityScope()
+	if err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+	if scope.Deprecation != "" {
+		fmt.Fprintln(os.Stderr, scope.Deprecation)
+	}
+
 	// Validate period
 	validPeriods := []string{"1h", "24h", "7d", "30d"}
 	valid := false
@@ -2151,7 +2347,7 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	summary, err := client.GetActivitySummary(ctx, activityPeriod, activityGroupBy)
+	summary, err := client.GetActivitySummary(ctx, activityPeriod, activityGroupBy, activityScopeQuery(scope))
 	if err != nil {
 		return outputActivityError(err, "FETCH_ERROR")
 	}
@@ -2245,6 +2441,22 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// activityScopeQuery is the REST query for the summary's scope filters
+// (profile, client, token; never client_name).
+func activityScopeQuery(scope activityScope) url.Values {
+	q := url.Values{}
+	if scope.Profile != "" {
+		q.Set("profile", scope.Profile)
+	}
+	if scope.Client != "" {
+		q.Set("client", scope.Client)
+	}
+	if scope.Token != "" {
+		q.Set("token", scope.Token)
+	}
+	return q
+}
+
 // activityExportQueryParams builds the export query string from the export
 // flags. Export does NOT go through ActivityFilter.ToQueryParams, so every
 // filter flag has to be wired here as well or it is a silent no-op.
@@ -2309,6 +2521,16 @@ func activityExportQueryParams() (url.Values, error) {
 	// Activity transparency: export the sub-calls of one code_execution.
 	if activityParentID != "" {
 		q.Set("parent_id", activityParentID)
+	}
+	// Spec 108 FR-031: scope filters (the advisory client name included).
+	scope, err := resolveActivityScope()
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range map[string]string{"profile": scope.Profile, "client": scope.Client, "token": scope.Token, "client_name": scope.ClientName} {
+		if v != "" {
+			q.Set(k, v)
+		}
 	}
 	if activityIncludeBodies {
 		q.Set("include_bodies", "true")

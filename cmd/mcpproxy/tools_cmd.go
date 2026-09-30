@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -94,6 +96,11 @@ Examples:
 
 	// Global list filter flags (T019)
 	toolsStatusFilter string // enabled | disabled | config-denied
+
+	// Spec 108 FR-032 view-as: what a client or a profile would see and be able
+	// to call. Global list only; mutually exclusive.
+	toolsClientView  string
+	toolsProfileView string
 	// toolsTierFilter / toolsRiskFilter (Spec 109 FR-028, X11): --risk is kept
 	// as an alias of --tier for old scripts/muscle-memory; whichever is
 	// non-empty wins (tier preferred if both are set). Both filter on the
@@ -324,6 +331,8 @@ func initToolsFlags() {
 	// (risk stays the scan-score term elsewhere in the CLI).
 	toolsListCmd.Flags().StringVar(&toolsTierFilter, "tier", "", "Filter by tier: read, write, destructive, unannotated")
 	toolsListCmd.Flags().StringVar(&toolsRiskFilter, "risk", "", "Alias of --tier")
+	toolsListCmd.Flags().StringVar(&toolsClientView, "client", "", "View as a client (administrator only): adds ACCESS and REASON columns, the verdict of each tool for that client")
+	toolsListCmd.Flags().StringVar(&toolsProfileView, "profile", "", "View as a profile: adds ACCESS and REASON columns; a non-administrator sees only the visible tools and a count of the rest")
 	toolsListCmd.Flags().StringVar(&toolsApprovalFilter, "approval", "", "Filter by approval: approved (Approved), pending (New, needs review), changed (Changed, needs review)")
 
 	// Note: -o/--output flag is inherited from root command via globalOutputFormat
@@ -350,6 +359,12 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 	}
 	if err := validateTierFilter("risk", toolsRiskFilter); err != nil {
 		return err
+	}
+	if _, err := toolsViewAsQuery(); err != nil {
+		return err
+	}
+	if (toolsClientView != "" || toolsProfileView != "") && serverName != "" {
+		return errors.New("--client and --profile view-as apply to the global list; omit --server")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -411,7 +426,11 @@ func runToolsListGlobal(ctx context.Context, globalConfig *config.Config, logger
 
 	fmt.Fprintf(os.Stderr, "Using daemon mode\n\n")
 
-	tools, err := client.GetGlobalTools(ctx)
+	query, err := toolsViewAsQuery()
+	if err != nil {
+		return err
+	}
+	tools, counts, err := client.GetGlobalToolsView(ctx, query)
 	if err != nil {
 		return cliError("failed to get global tools from daemon", err)
 	}
@@ -419,7 +438,48 @@ func runToolsListGlobal(ctx context.Context, globalConfig *config.Config, logger
 	// Apply client-side filters
 	tools = applyGlobalToolFilters(tools, toolsStatusFilter, resolvedTierFilter(), toolsApprovalFilter)
 
-	return outputGlobalTools(tools)
+	if err := outputGlobalTools(tools); err != nil {
+		return err
+	}
+	if counts != nil && ResolveOutputFormat() == "table" {
+		fmt.Fprintf(os.Stderr, "\n%d visible, %d hidden under profile %s (hidden tools are administrator-only)\n",
+			getIntField(counts, "visible"), getIntField(counts, "hidden"), toolsProfileView)
+	}
+	return nil
+}
+
+// toolsViewAsQuery is the REST query of the view-as flags (Spec 108 FR-032):
+// `client` (administrator only) or `profile`, never both.
+func toolsViewAsQuery() (url.Values, error) {
+	if toolsClientView != "" && toolsProfileView != "" {
+		return nil, errors.New("use either --client or --profile, not both")
+	}
+	q := url.Values{}
+	if toolsClientView != "" {
+		q.Set("client", toolsClientView)
+	}
+	if toolsProfileView != "" {
+		q.Set("profile", toolsProfileView)
+	}
+	return q, nil
+}
+
+// viewAsAccessCell renders the ACCESS column of a view-as row: callable (a real
+// call would succeed), visible (listed by discovery but a later gate refuses it
+// or it awaits approval), hidden (not visible at all).
+func viewAsAccessCell(t map[string]interface{}) string {
+	access, ok := t["access"].(map[string]interface{})
+	if !ok {
+		return "-"
+	}
+	switch {
+	case getBoolField(access, "callable"):
+		return "callable"
+	case getBoolField(access, "visible"):
+		return "visible"
+	default:
+		return "hidden"
+	}
 }
 
 // tpaSignatureRe matches a TPA signature id embedded in a deterministic check id
@@ -554,6 +614,12 @@ func serverToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 // testable.
 func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]string) {
 	headers = []string{"NAME", "SERVER", "STATE", "TIER", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
+	// Spec 108 FR-032: a view-as listing adds ACCESS and REASON after TIER
+	// (the intrinsic tier stays the TIER column).
+	viewAs := len(tools) > 0 && tools[0]["access"] != nil
+	if viewAs {
+		headers = []string{"NAME", "SERVER", "STATE", "TIER", "ACCESS", "REASON", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
+	}
 	for _, t := range tools {
 		name := sanitizeName(getStringField(t, "name"))
 		srv := getStringField(t, "server_name")
@@ -588,6 +654,16 @@ func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]
 
 		desc := sanitizeCell(getStringField(t, "description"), maxToolDescriptionCell)
 
+		if viewAs {
+			reason := "-"
+			if access, ok := t["access"].(map[string]interface{}); ok {
+				if r := getStringField(access, "reason"); r != "" {
+					reason = r
+				}
+			}
+			rows = append(rows, []string{name, srv, state, tier, viewAsAccessCell(t), reason, approval, formatToolHold(t), usage, lastUsed, desc})
+			continue
+		}
 		rows = append(rows, []string{name, srv, state, tier, approval, formatToolHold(t), usage, lastUsed, desc})
 	}
 	return headers, rows

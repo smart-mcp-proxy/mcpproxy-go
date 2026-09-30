@@ -486,7 +486,16 @@ func (c *Client) Ping(ctx context.Context) error {
 
 // GetServers retrieves list of servers from daemon.
 func (c *Client) GetServers(ctx context.Context) ([]map[string]interface{}, error) {
+	return c.GetServersWithQuery(ctx, nil)
+}
+
+// GetServersWithQuery is GetServers with query parameters (Spec 108 FR-032:
+// `profile` restricts the rows to that profile's effective servers).
+func (c *Client) GetServersWithQuery(ctx context.Context, query url.Values) ([]map[string]interface{}, error) {
 	url := c.baseURL + "/api/v1/servers"
+	if encoded := query.Encode(); encoded != "" {
+		url += "?" + encoded
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -1115,46 +1124,65 @@ func (c *Client) DisableAll(ctx context.Context) (*BulkOperationResult, error) {
 // consolidated GET /api/v1/tools endpoint (Spec 050). The returned slice
 // contains one map per tool with the same fields as the web page's data source.
 func (c *Client) GetGlobalTools(ctx context.Context) ([]map[string]interface{}, error) {
+	return c.GetGlobalToolsWithQuery(ctx, nil)
+}
+
+// GetGlobalToolsWithQuery is GetGlobalTools with query parameters (Spec 108
+// FR-032: `client` or `profile` turn the listing into a view-as, adding an
+// access verdict and profile_tier to every row).
+func (c *Client) GetGlobalToolsWithQuery(ctx context.Context, query url.Values) ([]map[string]interface{}, error) {
+	tools, _, err := c.GetGlobalToolsView(ctx, query)
+	return tools, err
+}
+
+// GetGlobalToolsView is GetGlobalToolsWithQuery that also returns the
+// response's `counts` ({visible, hidden}), present only for a non-administrator
+// profile view-as (nil otherwise).
+func (c *Client) GetGlobalToolsView(ctx context.Context, query url.Values) ([]map[string]interface{}, map[string]interface{}, error) {
 	url := c.baseURL + "/api/v1/tools"
+	if encoded := query.Encode(); encoded != "" {
+		url += "?" + encoded
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	c.prepareRequest(ctx, req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to call global tools API: %w", err)
+		return nil, nil, fmt.Errorf("failed to call global tools API: %w", err)
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		return nil, nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var apiResp struct {
 		Success bool `json:"success"`
 		Data    struct {
-			Tools []map[string]interface{} `json:"tools"`
+			Tools  []map[string]interface{} `json:"tools"`
+			Counts map[string]interface{}   `json:"counts"`
 		} `json:"data"`
 		Error     string `json:"error"`
 		RequestID string `json:"request_id"`
 	}
 
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	if !apiResp.Success {
-		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+		return nil, nil, parseAPIError(apiResp.Error, apiResp.RequestID)
 	}
 
-	return apiResp.Data.Tools, nil
+	return apiResp.Data.Tools, apiResp.Data.Counts, nil
 }
 
 // GetServerTools retrieves tools for a specific server from daemon.
@@ -1746,10 +1774,14 @@ func (c *Client) GetActivityDetail(ctx context.Context, activityID string) (map[
 }
 
 // GetActivitySummary retrieves activity summary statistics.
-func (c *Client) GetActivitySummary(ctx context.Context, period, groupBy string) (map[string]interface{}, error) {
+func (c *Client) GetActivitySummary(ctx context.Context, period, groupBy string, scope url.Values) (map[string]interface{}, error) {
 	url := c.baseURL + "/api/v1/activity/summary?period=" + period
 	if groupBy != "" {
 		url += "&group_by=" + groupBy
+	}
+	// Spec 108 FR-031: profile / client / token scope filters.
+	if encoded := scope.Encode(); encoded != "" {
+		url += "&" + encoded
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
