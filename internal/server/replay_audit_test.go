@@ -92,6 +92,14 @@ func seedReplayableCall(t *testing.T, proxy *MCPProxyServer, mainSrv *Server, se
 // audit line's `operation` tier.
 func seedReplayableCallWithAnnotations(t *testing.T, proxy *MCPProxyServer, mainSrv *Server, server, tool, url string, annotations *config.ToolAnnotations) string {
 	t.Helper()
+	return seedReplayableCallWithID(t, proxy, mainSrv, "replay-fixture-1", server, tool, url, annotations)
+}
+
+// seedReplayableCallWithID is seedReplayableCallWithAnnotations with the
+// persisted record's id chosen by the caller, so one test can seed several
+// replayable records (Spec 108 T046b seeds one per profile-scope outcome).
+func seedReplayableCallWithID(t *testing.T, proxy *MCPProxyServer, mainSrv *Server, callID, server, tool, url string, annotations *config.ToolAnnotations) string {
+	t.Helper()
 	sm := mainSrv.runtime.StorageManager()
 
 	serverCfg := &config.ServerConfig{Name: server, URL: url, Protocol: "streamable-http", Enabled: true}
@@ -101,7 +109,6 @@ func seedReplayableCallWithAnnotations(t *testing.T, proxy *MCPProxyServer, main
 	require.NoError(t, mainSrv.runtime.UpstreamManager().AddServerConfig(server, serverCfg))
 	require.NoError(t, mainSrv.runtime.UpstreamManager().ConnectAll(context.Background()))
 
-	callID := "replay-fixture-1"
 	require.NoError(t, sm.RecordToolCall(&storage.ToolCallRecord{
 		ID:          callID,
 		ServerID:    identity.ID,
