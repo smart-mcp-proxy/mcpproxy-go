@@ -51,13 +51,19 @@ struct ProfileEditorView: View {
                         HStack(alignment: .top, spacing: 0) {
                             ScrollView { formSection.padding() }.frame(width: min(480, proxy.size.width * 0.42))
                             Divider()
-                            toolsSection.padding()
+                            VStack(alignment: .leading, spacing: 10) {
+                                toolsTableSection
+                                tryIt
+                            }
+                            .padding()
                         }
                     } else {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 16) {
-                                formSection
-                                if !model.isNew { Divider(); toolsSection }
+                                ForEach(Array(model.sections.enumerated()), id: \.element) { index, section in
+                                    if index > 0 { Divider() }
+                                    sectionView(section)
+                                }
                             }
                             .padding()
                         }
@@ -89,6 +95,17 @@ struct ProfileEditorView: View {
         }
         .sheet(isPresented: $showAssign) {
             if let original = model.original { AssignProfileSheet(appState: appState, profile: original) }
+        }
+    }
+
+    /// One section of the layout, as the model lists them: a new profile has
+    /// no tool table but still gets "Try it".
+    @ViewBuilder
+    private func sectionView(_ section: ProfileEditorSection) -> some View {
+        switch section {
+        case .form: formSection
+        case .toolTable: toolsTableSection
+        case .tryIt: tryIt
         }
     }
 
@@ -350,7 +367,7 @@ struct ProfileEditorView: View {
     // MARK: Tools
 
     @ViewBuilder
-    private var toolsSection: some View {
+    private var toolsTableSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Tools").font(.headline)
@@ -369,7 +386,6 @@ struct ProfileEditorView: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
             toolTable
-            tryIt
         }
     }
 
