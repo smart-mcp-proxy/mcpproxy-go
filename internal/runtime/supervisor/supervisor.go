@@ -173,7 +173,13 @@ type Supervisor struct {
 	// so no new action is added once Stop() begins — preventing a WaitGroup
 	// Add-after-Wait.
 	actionWg sync.WaitGroup
-	stopping bool
+	// actionsInFlight mirrors actionWg as a readable count, and
+	// startupReconciled is set once the delayed startup reconciliation pass
+	// has dispatched. Together they back ReconcileQuiescent (observability
+	// and deterministic tests only; never consulted by production logic).
+	actionsInFlight   atomic.Int64
+	startupReconciled atomic.Bool
+	stopping          bool
 }
 
 // inspectionFailureInfo tracks inspection failures for circuit breaker pattern
@@ -272,6 +278,7 @@ func (s *Supervisor) Start() {
 		case <-timer.C:
 		}
 		currentConfig := s.configSvc.Current()
+		defer s.startupReconciled.Store(true)
 		if err := s.reconcile(currentConfig); err != nil {
 			s.logger.Error("Initial reconciliation failed", zap.Error(err))
 		} else {
@@ -431,8 +438,10 @@ func (s *Supervisor) reconcile(configSnapshot *configsvc.Snapshot) error {
 		// before the goroutine starts) so Stop() can drain in-flight actions before
 		// disconnecting clients.
 		s.actionWg.Add(1)
+		s.actionsInFlight.Add(1)
 		go func(name string, act ReconcileAction, snapshot *configsvc.Snapshot) {
 			defer s.actionWg.Done()
+			defer s.actionsInFlight.Add(-1)
 			if err := s.executeAction(name, act, snapshot); err != nil {
 				s.logger.Error("Failed to execute action",
 					zap.String("server", name),
@@ -1739,6 +1748,12 @@ func (s *Supervisor) drainActions() {
 			"proceeding to disconnect (a Connect may still be in flight)",
 			zap.Duration("timeout", actionDrainTimeout))
 	}
+}
+
+// ReconcileQuiescent reports whether the delayed startup reconciliation has
+// dispatched and no reconcile action goroutine is in flight.
+func (s *Supervisor) ReconcileQuiescent() bool {
+	return s.startupReconciled.Load() && s.actionsInFlight.Load() == 0
 }
 
 // RequestInspectionExemption grants temporary connection permission for a quarantined server.

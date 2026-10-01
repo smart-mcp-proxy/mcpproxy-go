@@ -1024,6 +1024,65 @@ func TestSupervisor_StopBeforeInitialReconcileIsBarrier(t *testing.T) {
 		"error-code notifier fired after Supervisor.Stop() returned")
 }
 
+// blockingUpstreamAdapter wraps MockUpstreamAdapter and blocks AddServer on a
+// release channel, signalling entered the first time it is reached. Used to
+// hold a reconcile action in flight deterministically.
+type blockingUpstreamAdapter struct {
+	*MockUpstreamAdapter
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+}
+
+func (b *blockingUpstreamAdapter) AddServer(name string, cfg *config.ServerConfig) error {
+	b.enteredOnce.Do(func() { close(b.entered) })
+	<-b.release
+	return b.MockUpstreamAdapter.AddServer(name, cfg)
+}
+
+// TestSupervisor_ReconcileQuiescent proves the observability seam used by
+// deterministic capture tests (#1453): it is false before the delayed startup
+// reconciliation has run, false while a reconcile action is in flight, and
+// true only once the startup pass has run and every action has finished.
+func TestSupervisor_ReconcileQuiescent(t *testing.T) {
+	cfg := &config.Config{
+		Listen: "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{
+			{Name: "srv", URL: "http://127.0.0.1:1/mcp", Protocol: "streamable-http", Enabled: true},
+		},
+	}
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	upstream := &blockingUpstreamAdapter{
+		MockUpstreamAdapter: NewMockUpstreamAdapter(),
+		entered:             make(chan struct{}),
+		release:             make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(upstream.release) }) }
+
+	sup := New(configSvc, upstream, zap.NewNop())
+	// Stop() unsubscribes (closing the mock event channel) after draining
+	// actions, so blocked actions are released first (LIFO defers).
+	defer sup.Stop()
+	defer releaseAll()
+
+	sup.Start()
+	require.False(t, sup.ReconcileQuiescent(), "startup reconciliation has not run yet")
+
+	select {
+	case <-upstream.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no reconcile action reached AddServer")
+	}
+	require.False(t, sup.ReconcileQuiescent(), "an action is in flight")
+
+	releaseAll()
+	require.Eventually(t, sup.ReconcileQuiescent, 10*time.Second, 10*time.Millisecond,
+		"quiescent once startup reconcile ran and all actions finished")
+}
+
 // TestToolInfosFromMetadata_ParsesParamsJSON verifies that the cached upstream
 // schema (ToolMetadata.ParamsJSON) is actually parsed into StateView's
 // InputSchema. The REST/CLI tool listings serve StateView verbatim, so a
