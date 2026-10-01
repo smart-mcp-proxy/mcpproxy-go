@@ -16,8 +16,7 @@ vi.mock('@/services/api', () => {
     getAttention: attention,
     hasAPIKey,
     onAuthError: vi.fn(() => () => {}),
-    getProfiles: vi.fn().mockResolvedValue({ success: true, data: { profiles: [] } }),
-    getActiveProfile: vi.fn().mockResolvedValue({ success: true, data: { active_profile: '' } }),
+    getProfiles: vi.fn().mockResolvedValue({ profiles: [] }),
   }
   return {
     default: new Proxy(base, {
@@ -118,20 +117,20 @@ describe('TopHeader layout (Spec 109-i FR-053)', () => {
     wrapper.unmount()
   })
 
-  it('renders the slot instead of ProfileSwitcher when filled', async () => {
+  it('renders the viewing slot content when filled (Spec 108-i: App passes the ViewingFilter chip)', async () => {
     useProfilesStore().profiles = [{ name: 'work', servers: ['a'], tool_count: 1 }] as any
     const wrapper = await mountHeader({ slots: { viewing: '<span data-test="viewing-content">V</span>' } })
+    expect(wrapper.find('[data-test="header-viewing-slot"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="viewing-content"]').exists()).toBe(true)
-    expect(wrapper.findComponent({ name: 'ProfileSwitcher' }).exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('keeps the ProfileSwitcher interim as the slot fallback once profiles exist', async () => {
+  it('has no ProfileSwitcher fallback: profiles alone never fill the slot', async () => {
     const api = (await import('@/services/api')).default as any
-    api.getProfiles.mockResolvedValue({ success: true, data: { profiles: [{ name: 'work', servers: ['a'], tool_count: 1 }] } })
+    api.getProfiles.mockResolvedValue({ profiles: [{ name: 'work', servers: ['a'], tool_count: 1 }] })
     const wrapper = await mountHeader()
-    expect(wrapper.find('[data-test="header-viewing-slot"]').exists()).toBe(true)
-    expect(wrapper.findComponent({ name: 'ProfileSwitcher' }).exists()).toBe(true)
+    expect(wrapper.find('[data-test="header-viewing-slot"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="profile-switcher"]').exists()).toBe(false)
     wrapper.unmount()
   })
 

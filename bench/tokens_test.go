@@ -137,9 +137,18 @@ func TestComputeReport_SavingsAreReal(t *testing.T) {
 	// regression (on 084-base main the same menu was 1707, already only ~1% under
 	// the baseline). The retrieve_tools thesis is exercised at realistic scale by
 	// the corpus_v2 profiler path; code_execution (7 built-ins, no per-tool call
-	// variants) stays well under the baseline and still guards the thesis here.
-	if ce.Tokens >= base.Tokens {
-		t.Errorf("code_execution (%d) should use fewer tokens than baseline (%d)", ce.Tokens, base.Tokens)
+	// variants) stayed under the baseline and guarded the thesis here.
+	//
+	// Spec 108-h added the administrator-only `profiles` tool (about 870 tokens
+	// with its reflected input schema) to every routing mode's catalog, which the
+	// benchmark includes on purpose (an operator session lists it, and leaving it
+	// out would understate the proxy's context cost, MCP-3161). That takes the
+	// code_execution menu past this schema-less micro-corpus too, exactly as
+	// retrieve_tools is; the thesis stays exercised at realistic scale by the
+	// corpus_v2 profiler path. What this test still guards is that the report
+	// arithmetic is exact and that a mode never claims to save everything.
+	if ce.Tokens <= 0 {
+		t.Errorf("code_execution tokens must be positive, got %d", ce.Tokens)
 	}
 
 	// Savings ratios must match the arithmetic exactly (sign included).
@@ -151,8 +160,8 @@ func TestComputeReport_SavingsAreReal(t *testing.T) {
 	if diff := ce.SavingsRatio - wantCE; diff > 1e-9 || diff < -1e-9 {
 		t.Errorf("code_execution savings ratio %v != computed %v", ce.SavingsRatio, wantCE)
 	}
-	if ce.SavingsRatio <= 0 || ce.SavingsRatio >= 1 {
-		t.Errorf("code_execution savings ratio out of (0,1): %v", ce.SavingsRatio)
+	if ce.SavingsRatio >= 1 {
+		t.Errorf("code_execution savings ratio must be below 1: %v", ce.SavingsRatio)
 	}
 }
 

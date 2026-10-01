@@ -533,16 +533,16 @@ policy is a separate piece of work.
 
 ## Profile Pinning
 
-A [profile](./profiles.md) scopes tool discovery and calls to a named subset of upstream servers. With `--profile-pin`, you can **bind a token to a single profile** so it can never operate outside it — regardless of the URL it connects to or any `set_profile` call it makes.
+A [profile](./profiles.md) scopes tool discovery and calls to a named subset of upstream servers. With `--profile` (the older spelling `--profile-pin` still works but is deprecated), you can **bind a token to a single profile** so it can never operate outside it — regardless of the URL it connects to or any `set_profile` call it makes.
 
 ```bash
 # This token can ONLY ever see/use the "research" profile
 mcpproxy token create \
   --name research-agent \
-  --servers "*" \
-  --permissions read \
-  --profile-pin research
+  --profile research
 ```
+
+The token takes its scope from the profile, so `--servers` and `--permissions` are optional with `--profile`.
 
 Server-side enforcement (no client cooperation required):
 
@@ -721,10 +721,11 @@ mcpproxy serve --require-mcp-auth    # Enforce /mcp authentication
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `--name` | Yes | — | Unique token name |
-| `--servers` | Yes | — | Comma-separated server names or `"*"` |
-| `--permissions` | Yes | — | Comma-separated: `read`, `write`, `destructive` |
+| `--profile` | One of `--profile` or `--servers`/`--permissions` | — | Pin the token to a single profile; its scope comes from the profile (see [Profile Pinning](#profile-pinning)) |
+| `--servers` | Legacy scope | — | Comma-separated server names or `"*"` (prefer `--profile`) |
+| `--permissions` | Legacy scope | — | Comma-separated: `read`, `write`, `destructive` (prefer `--profile`) |
 | `--expires` | No | `30d` | Expiry duration (e.g., `7d`, `90d`, `365d`) |
-| `--profile-pin` | No | — | Pin the token to a single profile (see [Profile Pinning](#profile-pinning)) |
+| `--profile-pin` | No | — | Deprecated alias of `--profile` |
 
 ### Documented invariant (Spec 107 FR-046)
 

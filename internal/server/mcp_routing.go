@@ -840,6 +840,7 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 	codeExecRetrieveOpts = append(codeExecRetrieveOpts, retrieveToolsAnnotationFilterOptions()...)
 	retrieveToolsTool := mcp.NewTool("retrieve_tools", codeExecRetrieveOpts...)
 	tools = append(tools, p.setProfileServerTool())
+	tools = append(tools, p.buildProfilesServerTool()) // Spec 108-h admin tool
 	tools = append(tools, mcpserver.ServerTool{
 		Tool:    retrieveToolsTool,
 		Handler: p.handleRetrieveToolsForMode(config.RoutingModeCodeExecution),
@@ -911,6 +912,7 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 	// set_profile — Profiles v2 (T2): also available in call-tool mode (/mcp/call,
 	// and /mcp/p/<slug> which is served by this same server instance).
 	tools = append(tools, p.setProfileServerTool())
+	tools = append(tools, p.buildProfilesServerTool()) // Spec 108-h admin tool
 
 	// call_tool_read / call_tool_write / call_tool_destructive — all three
 	// built from the shared helper in mcp.go so schema stays in sync across
@@ -1024,6 +1026,10 @@ func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 // every request-scoped tools/list response. Handler gates remain mandatory:
 // tool filters are discovery controls, not an execution boundary.
 func (p *MCPProxyServer) filterProfileV3Tools(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
+	// The `profiles` admin tool (Spec 108-h, FR-017) is visible to an
+	// administrator credential under no profile or a management_tools: true
+	// profile only; nothing below may let it through.
+	tools = p.filterProfilesTool(ctx, tools)
 	idx, ok := profileRequestIndexFromContext(ctx)
 	if !ok {
 		idx = p.profileIndexCurrent(ctx)

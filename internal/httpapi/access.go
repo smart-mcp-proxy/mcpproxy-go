@@ -1,12 +1,8 @@
 package httpapi
 
 import (
-	"errors"
 	"net/http"
 	"strings"
-
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // handleAccessExplain godoc
@@ -29,59 +25,12 @@ import (
 // @Router /api/v1/access/explain [get]
 func (s *Server) handleAccessExplain(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	client, token, prof := q.Get("client"), q.Get("token"), q.Get("profile")
-	anonymous := q.Get("anonymous") == "true"
-	n := 0
-	for _, set := range []bool{client != "", token != "", prof != "", anonymous} {
-		if set {
-			n++
-		}
-	}
-	if n != 1 {
-		s.writeError(w, r, http.StatusBadRequest, "exactly one of client, token, profile, anonymous is required")
-		return
-	}
-	tool := q.Get("tool")
-	if !looksLikeUpstreamTool(tool) {
-		s.writeError(w, r, http.StatusBadRequest, profile.ErrExplainBuiltinTool.Error())
-		return
-	}
-
-	var subject profile.AccessSubject
-	switch {
-	case client != "":
-		if !clientRoutesSupported {
-			s.writeError(w, r, http.StatusNotFound, errClientNotFound)
-			return
-		}
-		subject = profile.AccessSubject{Kind: profile.AccessSubjectClient, ClientID: client}
-		if state, ok := s.clientCredentialState(client); ok {
-			subject.CredentialState = state
-		}
-	case token != "":
-		if strings.HasPrefix(token, auth.ClientTokenName("")) {
-			s.writeError(w, r, http.StatusBadRequest, "use client=<id> for a client credential")
-			return
-		}
-		subject = profile.AccessSubject{Kind: profile.AccessSubjectToken, TokenName: token}
-	case prof != "":
-		subject = profile.AccessSubject{Kind: profile.AccessSubjectProfile, Profile: prof}
-	default:
-		subject = profile.AccessSubject{Kind: profile.AccessSubjectAnonymous}
-	}
-
-	res, err := s.profiles().Explain(r.Context(), subject, tool)
+	res, err := s.ExplainAccess(r.Context(), ExplainRequest{
+		Client: q.Get("client"), Token: q.Get("token"), Profile: q.Get("profile"),
+		Anonymous: q.Get("anonymous") == "true", Tool: q.Get("tool"),
+	})
 	if err != nil {
-		switch {
-		case errors.Is(err, profile.ErrUnknownToken):
-			s.writeError(w, r, http.StatusNotFound, "token not found")
-		case errors.Is(err, profile.ErrClientCredentialToken):
-			s.writeError(w, r, http.StatusBadRequest, profile.ErrClientCredentialToken.Error())
-		case errors.Is(err, profile.ErrExplainBuiltinTool):
-			s.writeError(w, r, http.StatusBadRequest, profile.ErrExplainBuiltinTool.Error())
-		default:
-			s.writeProfileServiceError(w, r, err)
-		}
+		s.writeProfileServiceError(w, r, err)
 		return
 	}
 	s.writeSuccess(w, res)

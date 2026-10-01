@@ -110,6 +110,9 @@ func withClientDaemon(t *testing.T, endpoint string) {
 
 func assertClientGolden(t *testing.T, name, got string) {
 	t.Helper()
+	if os.Getenv("MCPPROXY_UPDATE_GOLDEN") == "1" {
+		require.NoError(t, os.WriteFile(filepath.Join("testdata", "cli109", name), []byte(got), 0o644))
+	}
 	want, err := os.ReadFile(filepath.Join("testdata", "cli109", name))
 	if err != nil {
 		t.Fatalf("read golden %s: %v\nactual:\n%s", name, err, got)

@@ -1,0 +1,4 @@
+NAME           PREFIX        KIND    CLIENT  PROFILE   MODE    SERVERS  PERMISSIONS             LEGACY SCOPE  REVOKED  EXPIRES
+ci             mcp_agt_ab12  agent   -       work-ro2  -       *        read,write,destructive  no            no       2026-10-30 00:00
+old            mcp_agt_cd34  agent   -       -         -       github   read                    yes           no       2026-10-30 00:00
+client-cursor  mcp_cli_ef56  client  cursor  work-ro2  locked  *        read,write,destructive  no            no       2027-09-25 00:00

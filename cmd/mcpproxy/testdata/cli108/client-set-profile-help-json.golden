@@ -1,0 +1,42 @@
+{
+  "name": "set-profile",
+  "description": "Bind a client to a profile (or move every client of one profile to another)",
+  "usage": "mcpproxy client set-profile \u003cid\u003e \u003cprofile|all\u003e [flags]",
+  "flags": [
+    {
+      "name": "from-profile",
+      "description": "Bulk: the profile whose clients move (all = All servers)",
+      "type": "string"
+    },
+    {
+      "name": "help",
+      "shorthand": "h",
+      "description": "help for set-profile",
+      "type": "bool",
+      "default": "false"
+    },
+    {
+      "name": "lock",
+      "description": "Lock the client to the profile: it can never switch",
+      "type": "bool",
+      "default": "false"
+    },
+    {
+      "name": "switchable",
+      "description": "Let the client switch within the profile's switchable_to",
+      "type": "bool",
+      "default": "false"
+    },
+    {
+      "name": "to-profile",
+      "description": "Bulk: the profile they move to (all = All servers)",
+      "type": "string"
+    },
+    {
+      "name": "help-json",
+      "description": "Output help information as JSON",
+      "type": "bool",
+      "default": "false"
+    }
+  ]
+}

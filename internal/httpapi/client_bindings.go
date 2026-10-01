@@ -131,26 +131,7 @@ func (s *Server) handlePutClientBinding(w http.ResponseWriter, r *http.Request) 
 
 // writeClientBindingFailure maps a clients-service error to its wire shape.
 func (s *Server) writeClientBindingFailure(w http.ResponseWriter, r *http.Request, err error) {
-	if s.writeIfBindingGuardRefusal(w, r, err) {
-		return
-	}
-	var noCred *internalRuntime.NoClientCredentialError
-	if errors.As(err, &noCred) {
-		s.writeClientBindingError(w, r, http.StatusConflict, noCred.Code(), "", noCred.Error())
-		return
-	}
-	var pre *internalRuntime.PreconditionFailedError
-	if errors.As(err, &pre) {
-		s.writeClientBindingError(w, r, http.StatusConflict, pre.Code(), "", pre.Error())
-		return
-	}
-	var val *internalRuntime.ValidationError
-	if errors.As(err, &val) {
-		s.writeClientBindingError(w, r, http.StatusBadRequest, "", val.Field, val.Message)
-		return
-	}
-	if errors.Is(err, connect.ErrNoCredentialMinter) {
-		s.writeError(w, r, http.StatusServiceUnavailable, err.Error())
+	if s.writeProfilesError(w, r, err) {
 		return
 	}
 	s.logger.Errorw("client operation failed", "error", err)

@@ -223,8 +223,13 @@ var toolsListAllowedDelta = map[string][]string{
 //     tool on the flag, so the frozen (flag-off) capture never carried it
 //     there. With the flag on by default (v0.66.0) the default surface now
 //     registers the live tool.
+//   - profiles on every surface — the Spec 108-h administrator tool (FR-017). It
+//     is registered on the three static surfaces and hidden per session from
+//     everything but an administrator credential, so the goldens carry it.
 var toolsListAllowedAdditions = map[string][]string{
-	"default_server": {"code_execution"},
+	"default_server":      {"code_execution", "profiles"},
+	"retrieve_tools_mode": {"profiles"},
+	"code_execution_mode": {"profiles"},
 }
 
 // TestToolsListSnapshot_DeltaIsEnumerated is the FR-014 gate: the goldens
@@ -407,8 +412,17 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 			before := decodeToolsListGolden(t, filepath.Join("testdata", toolsListGoldenDir, toolsListPre105Dir, surface+".json"))
 			after := decodeToolsListGolden(t, toolsListGoldenPath(surface))
 
-			// The tool SET is untouched: nothing added, nothing removed.
-			assert.Equal(t, sortedToolNames(before), sortedToolNames(after),
+			// The tool SET is untouched: nothing added, nothing removed. The one
+			// addition since this baseline is the Spec 108-h `profiles` admin tool
+			// (declared in toolsListAllowedAdditions and asserted by
+			// TestToolsList_ProfilesPresentUnderReadOnlyMode).
+			afterNames := []string{}
+			for _, name := range sortedToolNames(after) {
+				if name != "profiles" {
+					afterNames = append(afterNames, name)
+				}
+			}
+			assert.Equal(t, sortedToolNames(before), afterNames,
 				"surface %s: the FR-012 exception changes two strings, never the tool set", surface)
 
 			// Every other entry is byte-equal to the frozen capture.
