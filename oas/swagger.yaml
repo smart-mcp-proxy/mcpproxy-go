@@ -3881,6 +3881,16 @@ components:
           $ref: '#/components/schemas/runtime.EffectiveCounts'
         profile:
           type: string
+        stale_classification_reasons:
+          additionalProperties:
+            type: string
+          description: |-
+            StaleClassificationReasons maps each stale classify entry to why it no
+            longer applies: profile.StaleClassificationAnnotated or
+            profile.StaleClassificationMissing. It is computed over the UNFILTERED
+            tool set, so a server or reason filter never changes it. Administrators
+            only.
+          type: object
         stale_classifications:
           description: |-
             StaleClassifications lists classify entries for tools that are now
@@ -6197,8 +6207,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/httpapi.BindingGuardResponse'
-          description: no_client_credential, or binding_bypassable_without_auth with
-            bindings and fixes
+          description: no_client_credential, connect_in_progress (a connect of this
+            client is mid-write), or binding_bypassable_without_auth with bindings
+            and fixes
         "503":
           content:
             application/json:
@@ -6271,7 +6282,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/httpapi.ConnectConflictResponse'
-          description: no_client_credential, or precondition_failed
+          description: no_client_credential, precondition_failed, connect_in_progress
+            (another connect of this client is mid-write), or credential_superseded
+            (the written credential was replaced or revoked before it could be finalized;
+            reconnect)
         "503":
           content:
             application/json:
@@ -6326,7 +6340,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/httpapi.ClientBindingErrorResponse'
-          description: no_client_credential
+          description: no_client_credential, or connect_in_progress (a connect of
+            this client is mid-write)
       security:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
@@ -6936,7 +6951,10 @@ paths:
                 $ref: '#/components/schemas/httpapi.ConnectConflictResponse'
           description: 'Conflict: action=already_exists (use force=true) or action=precondition_failed
             (preview is stale; re-preview); or binding_bypassable_without_auth (BindingGuardResponse);
-            or conflicting_token (ClientCredentialConflictResponse)'
+            or conflicting_token (ClientCredentialConflictResponse); or connect_in_progress
+            (another connect of this client is mid-write) or credential_superseded
+            (the written credential was replaced or revoked before it could be finalized;
+            reconnect)'
         "503":
           content:
             application/json:
