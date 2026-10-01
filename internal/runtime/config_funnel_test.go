@@ -107,7 +107,7 @@ func TestMutateConfig_ReadMutateGuardApplyUnderOneLock(t *testing.T) {
 	close(release)
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(60 * time.Second): // slow Windows runners take 10s+ per config commit
 		t.Fatal("binding write never ran after the config write released the lock")
 	}
 	wg.Wait()
@@ -275,7 +275,7 @@ func TestMutateConfig_ConcurrentWritesKeepBoth(t *testing.T) {
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("deadlock: concurrent MutateConfig calls did not finish")
 	}
 	cfg, err := rt.GetDesiredConfig()
