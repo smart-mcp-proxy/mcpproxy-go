@@ -750,9 +750,12 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
-  // Resolves when the feature list is known, or after `timeoutMs` (the params
-  // then stay hidden and the page fetches unfiltered, with a disabled chip). A
-  // build whose features were already set elsewhere needs no wait.
+  // Resolves when the feature list is known, or after `timeoutMs`. The timeout is
+  // deliberate (plan J3): a /status that never answers must not leave a page on a
+  // spinner forever, so the params then stay hidden (rule 7), the page fetches
+  // unfiltered and shows a disabled "Filter unavailable on this server" chip, and
+  // the features arriving later trigger a filtered refetch. A build whose features
+  // were already set elsewhere needs no wait.
   async function waitForScopeFeatures(timeoutMs = 2000): Promise<void> {
     if (scopeFeaturesKnown.value) return
     if (['profile', 'client', 'token'].some(name => isScopeParamAvailable(name))) return

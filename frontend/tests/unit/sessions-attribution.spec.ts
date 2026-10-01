@@ -86,6 +86,12 @@ describe('Sessions attribution (Spec 108-j J11)', () => {
     expect(wrapper.find('[data-test="sessions-tools-it-sees-s1"]').exists()).toBe(false)
   })
 
+  it('"Tools it sees" needs the client filter itself: a build that advertises only profile and token hides it', async () => {
+    setAvailableFeatures(['profile', 'token'])
+    const { wrapper } = await mountPanel([session('s1', { client_id: 'cursor' })])
+    expect(wrapper.find('[data-test="sessions-tools-it-sees-s1"]').exists()).toBe(false)
+  })
+
   it('the empty state names the applied filter', async () => {
     const { wrapper } = await mountPanel([], '/activity?view=sessions&client=cursor')
     expect(wrapper.get('[data-test="sessions-empty-title"]').text()).toBe('No sessions for Client: Cursor')

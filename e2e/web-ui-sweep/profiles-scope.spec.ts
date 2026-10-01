@@ -119,6 +119,21 @@ test('1. Tools view-as: filtered from the first render, greyed rows with reasons
   await expect(why).toBeFocused()
 })
 
+test('1b. Both client and profile: the conflict state and no scoped /tools request (rule 8)', async ({ page }) => {
+  const scoped: string[] = []
+  page.on('request', request => {
+    if (/\/api\/v1\/tools\?/.test(request.url())) scoped.push(request.url())
+  })
+  await open(page, `/tools?client=${SCOPE_CLIENT}&profile=${SCOPE_PROFILE}`)
+  await expect(page.locator('[data-test="tools-view-as-conflict"]')).toBeVisible()
+  await expect(page.locator('[data-test="scope-chip-client"]')).toHaveAttribute('data-conflicting', 'true')
+  await page.waitForTimeout(500)
+  expect(scoped, 'GET /tools takes one subject, so no request carries either').toEqual([])
+  await page.locator('[data-test="tools-view-as-keep-client"]').click()
+  await expect(page).not.toHaveURL(/profile=/)
+  await expect(page.locator('[data-test="tools-view-as-banner"]')).toBeVisible()
+})
+
 test('2. Usage carries the profile and does not print a false "0 tokens saved"', async ({ page }) => {
   const scopedUsage = page.waitForRequest(request => request.url().includes('/api/v1/activity/usage') && request.url().includes(`profile=${SCOPE_PROFILE}`))
   await open(page, `/usage?profile=${SCOPE_PROFILE}`)
