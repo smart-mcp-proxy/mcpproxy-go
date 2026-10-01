@@ -99,7 +99,7 @@ test('1. Tools view-as: filtered from the first render, greyed rows with reasons
   await page.route('**/api/v1/tools?client=*', async route => {
     scopedSeen = true
     await new Promise(resolve => setTimeout(resolve, 1500))
-    await route.continue()
+    await route.continue().catch(() => {})
   })
   const firstScoped = page.waitForRequest(request => request.url().includes('/api/v1/tools?client=' + SCOPE_CLIENT))
   await open(page, `/tools?client=${SCOPE_CLIENT}`)
