@@ -1013,11 +1013,13 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
         return nil
     }
 
-    /// `work-ro (pin)`; nil for an unattributed record.
+    /// `work-ro · locked by credential`: the profile and how it was resolved, in
+    /// the words the Web UI shows (Spec 108-l L6, `source` table of labels.json).
+    /// nil for an unattributed record.
     var callerProfileLabel: String? {
         guard let profile, !profile.isEmpty else { return nil }
-        if let source = profileSource, !source.isEmpty { return "\(profile) (\(source))" }
-        return profile
+        let source = ProfileSourceText.label(profileSource ?? "")
+        return source.isEmpty ? profile : "\(profile) · \(source)"
     }
 
     /// Whether any attribution field is present.

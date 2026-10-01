@@ -98,6 +98,15 @@ enum BindingMode: TolerantStringEnum {
         case .unknown(let raw): return raw
         }
     }
+
+    /// Terminology: Locked / Switchable (labels.json `binding_mode`).
+    var label: String {
+        switch self {
+        case .locked: return "Locked"
+        case .switchable: return "Switchable"
+        case .unknown(let raw): return raw
+        }
+    }
 }
 
 /// A tool's tier (`intrinsic_tier`, `profile_tier`).
@@ -483,12 +492,7 @@ struct ProfileView: Codable, Identifiable, Equatable {
 
     /// The phrase for `max_tier`.
     var maxTierLabel: String {
-        switch maxTier ?? "" {
-        case "read": return "Read"
-        case "write": return "+ Write"
-        case "destructive": return "+ Destructive"
-        default: return "No cap"
-        }
+        MaxTierText.label(maxTier ?? "") ?? "No cap"
     }
 }
 
@@ -674,21 +678,84 @@ struct ProfileDeleteResponse: Decodable, Equatable {
 
 /// The words for an access `reason` (FR-032): the first step of the chain that
 /// failed. Shared by the profile editor's table and the Tools view-as listing.
+/// Spec 108-l (L6): these strings are the `access_reason` table of
+/// internal/profile/testdata/contract/labels.json, the same words the Web UI
+/// shows (ProfilesEnumsLabelsTests pins both).
 enum AccessReasonText {
     static func label(_ reason: String) -> String {
         switch reason {
-        case "": return "Allowed"
-        case "above_tier_cap": return "Above tier cap"
-        case "unannotated_hidden": return "Unannotated — hidden"
+        case "": return "Visible"
+        case "server_not_in_profile": return "Server not in profile"
         case "denied_by_rule": return "Denied by rule"
-        case "server_not_in_profile", "server_in_scope": return "Server not in scope"
-        case "credential": return "Credential not valid"
-        case "profile": return "Profile missing or unsafe"
+        case "unannotated_hidden": return "Unannotated — classify"
+        case "above_tier_cap": return "Above tier cap"
+        case "credential": return "Credential revoked or expired"
+        case "profile": return "Profile missing — denied everything"
+        case "server_in_scope": return "Server outside the token's scope"
         case "token_permission": return "Token permission"
         case "global_gate": return "Blocked by a global setting"
-        case "server_state": return "Server not ready"
-        case "tool_approval": return "Awaiting approval"
+        case "server_state": return "Server disabled or not connected"
+        case "tool_approval": return "Needs review"
         default: return reason.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+}
+
+/// How a call's or session's profile was resolved, in words (`source` table of
+/// labels.json). `none` and an unknown value carry no suffix.
+enum ProfileSourceText {
+    static func label(_ source: String) -> String {
+        switch source {
+        case "pin": return "locked by credential"
+        case "binding": return "switchable"
+        case "url": return "from URL"
+        case "session": return "switched in session"
+        case "anonymous": return "anonymous"
+        default: return ""
+        }
+    }
+}
+
+/// One link of the access-explanation chain, in words (`explain_step` table).
+enum ExplainStepText {
+    static func label(_ step: String) -> String {
+        switch step {
+        case "credential": return "Credential"
+        case "profile": return "Profile"
+        case "server_in_scope": return "Server in scope"
+        case "tool_rule": return "Tool rule"
+        case "tier_cap": return "Tier cap"
+        case "token_permission": return "Token permission"
+        case "global_gate": return "Global gate"
+        case "server_state": return "Server state"
+        case "tool_approval": return "Tool approval"
+        default:
+            let words = step.replacingOccurrences(of: "_", with: " ")
+            return words.prefix(1).uppercased() + words.dropFirst()
+        }
+    }
+}
+
+/// `unannotated` handling in words (Terminology: Hide, Treat as write, Treat as read).
+enum UnannotatedText {
+    static func label(_ value: String) -> String? {
+        switch value {
+        case "deny": return "Hide"
+        case "as_write": return "Treat as write"
+        case "as_read": return "Treat as read"
+        default: return nil
+        }
+    }
+}
+
+/// `max_tier` in words (Terminology: Read, + Write, + Destructive).
+enum MaxTierText {
+    static func label(_ value: String) -> String? {
+        switch value {
+        case "read": return "Read"
+        case "write": return "+ Write"
+        case "destructive": return "+ Destructive"
+        default: return nil
         }
     }
 }
@@ -1213,10 +1280,7 @@ struct ExplainStepRow: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey { case step, status, detail }
 
     /// "tier_cap" → "Tier cap".
-    var stepLabel: String {
-        let words = step.replacingOccurrences(of: "_", with: " ")
-        return words.prefix(1).uppercased() + words.dropFirst()
-    }
+    var stepLabel: String { ExplainStepText.label(step) }
 }
 
 struct ExplainFix: Codable, Identifiable, Equatable {

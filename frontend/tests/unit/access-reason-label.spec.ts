@@ -25,10 +25,10 @@ describe('accessReasonLabel (Spec 108-j J7)', () => {
     }
   })
 
-  it('tool_approval reads Disabled for an operator-disabled tool and Awaiting approval otherwise', () => {
+  it('tool_approval reads Disabled for an operator-disabled tool and Needs review otherwise', () => {
     expect(accessReasonLabel('tool_approval', { disabled: true })).toBe('Disabled')
-    expect(accessReasonLabel('tool_approval', { disabled: false })).toBe('Awaiting approval')
-    expect(accessReasonLabel('tool_approval')).toBe('Awaiting approval')
+    expect(accessReasonLabel('tool_approval', { disabled: false })).toBe('Needs review')
+    expect(accessReasonLabel('tool_approval')).toBe('Needs review')
   })
 
   it('names the words US3-3 asks for', () => {

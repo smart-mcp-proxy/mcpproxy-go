@@ -57,6 +57,33 @@ final class ScopeFilterTests: XCTestCase {
         XCTAssertEqual(items(activity(f))["type"], ["config_change"])
     }
 
+    /// Spec 108-j/108-l: a call a profile refuses is persisted as a
+    /// `policy_decision` (status blocked), not a `tool_call`, so the default Tool
+    /// calls view must widen its type set for a blocked filter or it hides exactly
+    /// the rows `client=cursor&status=blocked` asks for (the Web UI does the same).
+    func testToolCallsViewWidensToPolicyDecisionsForABlockedFilter() {
+        var f = ScopeFilter(query: ["client": "cursor", "status": "blocked"])
+        XCTAssertEqual(f.view, .calls)
+        let r = f.restRequest(for: .activity, scopeFiltersAvailable: true)
+        XCTAssertEqual(items(r)["type"], ["tool_call,internal_tool_call,policy_decision"])
+        XCTAssertEqual(items(r)["client"], ["cursor"])
+        XCTAssertEqual(items(r)["status"], ["blocked"])
+
+        // Not widened for any other status, nor on the other views.
+        f.status = "success"
+        XCTAssertEqual(items(activity(f))["type"], ["tool_call,internal_tool_call"])
+        f.status = "blocked"
+        f.view = .all
+        XCTAssertNil(items(activity(f))["type"])
+        f.view = .system
+        XCTAssertFalse((items(activity(f))["type"]?.first ?? "").contains("tool_call,"))
+
+        // An explicit type override still wins.
+        f.view = .calls
+        f.type = "tool_call"
+        XCTAssertEqual(items(activity(f))["type"], ["tool_call"])
+    }
+
     func testSegmentsAreToolCallsSessionsSystemAll() {
         XCTAssertEqual(ActivityViewMode.allCases.map(\.label),
                        ["Tool calls", "Sessions", "System events", "All"])

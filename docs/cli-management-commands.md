@@ -541,81 +541,9 @@ mcpproxy connect cursor --profile work --switchable
 mcpproxy connect --all --profile all           # Every supported client, all servers
 ```
 
-### `mcpproxy profile` (Spec 108)
+### Profiles, clients, access explanations and token profiles (Spec 108)
 
-A profile is a named view over your upstream servers with a tool policy: the
-highest tool tier it admits (`read`, `write`, `destructive`), rules for
-individual tools, and what happens to tools that declare no tier. Every command
-needs a running daemon and honours `-o json|yaml`; JSON output is exactly the
-REST `data` object.
-
-```bash
-mcpproxy profile create work-readonly --servers github,notion --max-tier read
-mcpproxy client set-profile cursor work-readonly --lock
-mcpproxy token create --name ci --profile work-readonly
-mcpproxy profile show work-readonly --effective
-```
-
-| Command | What it does |
-|---|---|
-| `profile list` | One row per profile: servers, tool counts by tier, who uses it (administrators only), last-24h calls and blocked calls |
-| `profile show <name> [--effective] [--client <id>] [--server <s>] [--reason <r>]` | The profile with the effective value of each policy field and its origin (`off (default under max tier read)`, `on (inherited)`). `--effective` lists every tool with its verdict (callable, visible, hidden) and reason; a classification that no longer applies is flagged `classification ignored — tool is now annotated` |
-| `profile create <name> --servers a,b [--title] [--description] [--max-tier] [--unannotated deny\|as_write\|as_read] [--allow p,...] [--deny p,...] [--code-execution on\|off\|inherit] [--management-tools on\|off\|inherit] [--switchable-to x,y]` | Create a profile. `--switchable-to ''` means "none"; `inherit` leaves a field unset. `as-write` and `as-read` are accepted as aliases and stored as `as_write` and `as_read` |
-| `profile update <name> [create flags] [--add-server] [--remove-server] [--add-allow] [--remove-allow] [--add-deny] [--remove-deny] [--clear-<field>]` | Read the stored profile, apply the flags (set, then add/remove, then clear) and write it back. Contradicting flags are rejected before any request. REST has no ETag, so a concurrent edit between the read and the write is lost (last writer wins) |
-| `profile rename <old> <new>` | Rename and move every client binding and token pin; prints what moved |
-| `profile delete <name> [--reassign-to <p>] [--force]` | Exits 1 and prints who uses the profile unless `--reassign-to` moves them or `--force` leaves them dangling. The `anonymous_profile` can only be deleted with `--reassign-to` |
-| `profile classify <name> <server:tool> read\|write\|destructive` / `--clear` | Give an unannotated tool a tier in this profile |
-| `profile try <name> --query "..." [--limit N] [--set k=v ...]` | Preview what `retrieve_tools` would return under a draft (the saved profile, or a new one when the name does not exist, plus `--set` overrides such as `max_tier=write`); nothing is saved |
-| `profile anonymous [<name> \| --clear]` | Print, set or clear the profile callers without a credential are confined to |
-
-A write that would let a client bound to a profile escape it while
-`require_mcp_auth` is off exits 1 with the refusal, the bindings it concerns and
-the fixes (turn `require_mcp_auth` on, or `mcpproxy profile anonymous <p>`).
-
-### `mcpproxy client` (Spec 108 bindings)
-
-`client list` and `client show` (Spec 109) gain the credential and binding
-columns `CREDENTIAL PROFILE MODE SOURCE BLOCKED 24H`, appended after the
-existing ones; `client list --profile <p|->` and `--client <id>` filter by the
-client's current binding. Warnings print to stderr with the command that fixes
-them.
-
-| Command | What it does |
-|---|---|
-| `client set-profile <id> <profile\|all> [--lock\|--switchable]` | Rebind a client. Without a flag the current mode is kept; `all` is All servers. The client's config file is not touched |
-| `client set-profile --from-profile <p\|all> --to-profile <p\|all> [--lock\|--switchable]` | Move every client of one profile to another; skipped clients (no client credential, or refused by the guard) print to stderr and the command exits 0 |
-| `client lock <id>` / `client unlock <id>` | Keep the client's profile and change only its mode |
-| `client add <id> [--display-name N] [--profile P] [--lock\|--switchable] [--expires-in 90d]` | A custom client (a script, a CI job) with its own credential, printed once with a header snippet |
-| `client rotate <id> [--yes]` / `--finalize` | Replace a credential without cutting the client off. A supported client previews the config change and asks to confirm (`--yes` for scripts; a non-interactive run without it exits 1); a custom client gets the new secret once and stays pending until `--finalize` or 24 hours |
-| `client upgrade-admin-key-holders [--profile P\|all] [--lock\|--switchable] [--yes]` | Replace the admin API key in every supported client's config with a per-client credential, after a preview. With `--profile` and `require_mcp_auth` off the guard can refuse: the command prints the preview and the refusal, exits 1 and changes nothing. It ends with the step that remains: rotate the admin API key |
-| `client forget <id> [--disconnect]` | Revoke the credential; with `--disconnect` also remove the config entry of a supported client |
-
-A client without an active client credential exits 1 with
-`mcpproxy connect <id> --profile <p>` as the fix.
-
-### `mcpproxy access explain` (Spec 108)
-
-```bash
-mcpproxy access explain --tool github:create_issue (--client cursor | --token ci | --profile work-readonly | --anonymous)
-```
-
-Walks the gates a call meets (credential, profile, server in scope, tool rule,
-tier cap, token permission, global gate, server state, tool approval), prints
-the verdict (`allowed`, `blocked`, `hidden`) and the fixes in preference order,
-each with the command that performs it. Exit code 0 whenever an explanation is
-produced: the verdict is data.
-
-### `mcpproxy token` (Spec 108 changes)
-
-- `token create --profile <p>`: pin the token to a profile; its scope comes from the
-  profile. `--servers`/`--permissions` are optional with `--profile` and without it
-  at least one is required (legacy scope, which prints a hint to prefer a profile).
-  `--profile-pin` still works as a hidden alias and prints a deprecation notice.
-  Names starting with `client-` are reserved for client credentials.
-- `token list` columns: `NAME PREFIX KIND CLIENT PROFILE MODE SERVERS PERMISSIONS LEGACY SCOPE REVOKED EXPIRES`;
-  `--profile <p|->` and `--token <name>` filter; `-o json|yaml` supported.
-- `token show` prints `Kind`, `Client`, `Profile`, `Mode` and, for a legacy scope,
-  how to migrate it.
+The `profile`, `client` (bindings), `access explain` and `token --profile` commands are documented on the published site: <https://docs.mcpproxy.app/cli/profile-commands> (source: `docs/cli/profile-commands.md`).
 
 ## Common Workflows
 
