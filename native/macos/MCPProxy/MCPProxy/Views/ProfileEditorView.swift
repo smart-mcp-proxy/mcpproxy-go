@@ -390,18 +390,16 @@ struct ProfileEditorView: View {
         } else if model.draft.servers.isEmpty {
             Text("Choose servers to see their tools").font(.caption).foregroundStyle(.secondary)
         } else {
-            // The fixed columns need ~700 pt; a vertical-only parent let that
-            // widen the whole editor past a 900 pt window and clip its right
-            // edge (Spec 108-k live QA). A horizontal scroll keeps the editor
-            // as wide as the window and the table reachable.
-            ScrollView(.horizontal, showsIndicators: true) {
+            // Columns total ~530 pt (Tool flexes), so the table fits a 900 pt
+            // window's ~640 pt content area without clipping or a horizontal
+            // scroll (Spec 108-k live QA). Tier and Access share one stacked
+            // column to save width.
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
-                    Text("Tool").frame(minWidth: 160, maxWidth: .infinity, alignment: .leading)
-                    Text("Tier").frame(width: 120, alignment: .leading)
-                    Text("Access").frame(width: 170, alignment: .leading)
-                    Text("Rule").frame(width: 120, alignment: .leading)
-                    Text("Classify").frame(width: 100, alignment: .leading)
+                    Text("Tool").frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
+                    Text("Tier / Access").frame(width: 150, alignment: .leading)
+                    Text("Rule").frame(width: 110, alignment: .leading)
+                    Text("Classify").frame(width: 110, alignment: .leading)
                 }
                 .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 .padding(.horizontal, 8).padding(.vertical, 4)
@@ -421,10 +419,8 @@ struct ProfileEditorView: View {
                     }
                 }
             }
-            .frame(minWidth: 700, alignment: .leading)
             .background(Color.secondary.opacity(0.04))
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
         }
     }
 
@@ -434,14 +430,16 @@ struct ProfileEditorView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
                 Text(row.fullName).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
-                    .frame(minWidth: 160, maxWidth: .infinity, alignment: .leading)
-                Text(tierText(row)).font(.caption).frame(width: 120, alignment: .leading)
-                HStack(spacing: 4) {
-                    Image(systemName: row.access.visible ? "eye" : "eye.slash")
-                    Text(row.access.visible ? "Visible" : ProfileEditorModel.reasonLabel(row.access.reason))
+                    .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(tierText(row)).font(.caption).lineLimit(2)
+                    HStack(spacing: 4) {
+                        Image(systemName: row.access.visible ? "eye" : "eye.slash")
+                        Text(row.access.visible ? "Visible" : ProfileEditorModel.reasonLabel(row.access.reason)).lineLimit(2)
+                    }
+                    .font(.caption).foregroundStyle(row.access.visible ? Color.primary : Color.orange)
                 }
-                .font(.caption).foregroundStyle(row.access.visible ? Color.primary : Color.orange)
-                .frame(width: 170, alignment: .leading)
+                .frame(width: 150, alignment: .leading)
                 HStack(spacing: 4) {
                     Toggle("Allow", isOn: Binding(
                         get: { rule == .allow }, set: { _ in model.toggle(.allow, for: row.fullName) }))
@@ -452,7 +450,7 @@ struct ProfileEditorView: View {
                         .toggleStyle(.button).controlSize(.small)
                         .accessibilityLabel("Deny \(row.fullName) in \(model.draft.title.isEmpty ? model.draft.name : model.draft.title)")
                 }
-                .frame(width: 120, alignment: .leading)
+                .frame(width: 110, alignment: .leading)
                 Group {
                     if model.canClassify(row) {
                         Menu(model.classification(for: row.fullName)?.label ?? "Classify") {
@@ -469,7 +467,7 @@ struct ProfileEditorView: View {
                         Text("—").foregroundStyle(.tertiary)
                     }
                 }
-                .font(.caption).frame(width: 100, alignment: .leading)
+                .font(.caption).frame(width: 110, alignment: .leading)
             }
             if let stale = model.staleMarker(for: row) {
                 HStack {

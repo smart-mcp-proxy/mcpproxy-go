@@ -48,6 +48,7 @@ struct ClientsView: View {
                 Text("Agent Tokens").tag(2)
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
             .padding()
             Divider()
             if tab == 0 {
