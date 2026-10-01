@@ -10,7 +10,9 @@
       :class="systemStore.sidebarCollapsed ? 'lg:pl-14' : 'lg:pl-64'"
     >
       <!-- Top Header -->
-      <TopHeader v-if="authStore.shellPresented" />
+      <TopHeader v-if="authStore.shellPresented">
+        <template #viewing><ViewingFilter /></template>
+      </TopHeader>
 
       <!-- Page content. `min-h-0` / `min-w-0`: a grid item defaults to
            `min-height:auto`, so a tall page pushed this scroll container past
@@ -57,6 +59,7 @@ import { onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import SidebarNav from '@/components/SidebarNav.vue'
 import TopHeader from '@/components/TopHeader.vue'
+import ViewingFilter from '@/components/ViewingFilter.vue'
 import AppFooter from '@/components/AppFooter.vue'
 import ToastContainer from '@/components/ToastContainer.vue'
 import ConnectionStatus from '@/components/ConnectionStatus.vue'

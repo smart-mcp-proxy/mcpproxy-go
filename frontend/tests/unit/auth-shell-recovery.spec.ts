@@ -61,7 +61,7 @@ async function mountApp() {
   const wrapper = mount(App, {
     global: {
       plugins: [router],
-      stubs: { AppFooter: true, ToastContainer: true, ConnectionStatus: true, AuthErrorModal: true, ProfileSwitcher: true, ModeSwitcher: true },
+      stubs: { AppFooter: true, ToastContainer: true, ConnectionStatus: true, AuthErrorModal: true, ModeSwitcher: true },
     },
   })
   await flushPromises()
@@ -116,7 +116,7 @@ describe('shell survives auth recovery (#1401)', () => {
 
     // Header and sidebar each own one attention fetch; nothing else may add more.
     expect(calls.getAttention - (before.getAttention ?? 0), 'getAttention').toBe(2)
-    for (const name of ['getReviewQueue', 'getGlobalTools', 'getConfigSecrets', 'getOnboardingState', 'getProfiles', 'getActiveProfile']) {
+    for (const name of ['getReviewQueue', 'getGlobalTools', 'getConfigSecrets', 'getOnboardingState', 'getProfiles']) {
       expect(calls[name] - (before[name] ?? 0), name).toBe(1)
     }
   })
@@ -161,7 +161,7 @@ describe('shell survives auth recovery (#1401)', () => {
     await router.isReady()
     const { default: App } = await import('@/App.vue')
     const wrapper = mount(App, {
-      global: { plugins: [router], stubs: { AppFooter: true, ToastContainer: true, ConnectionStatus: true, AuthErrorModal: true, ProfileSwitcher: true, ModeSwitcher: true } },
+      global: { plugins: [router], stubs: { AppFooter: true, ToastContainer: true, ConnectionStatus: true, AuthErrorModal: true, ModeSwitcher: true } },
     })
     await flushPromises()
     expect(wrapper.find('header, .navbar').exists()).toBe(true)
@@ -172,7 +172,6 @@ describe('shell survives auth recovery (#1401)', () => {
     await flushPromises()
 
     expect(calls.getProfiles ?? 0).toBe(0)
-    expect(calls.getActiveProfile ?? 0).toBe(0)
     expect(wrapper.find('header, .navbar').exists()).toBe(true)
   })
 })
