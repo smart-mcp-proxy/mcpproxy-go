@@ -2011,6 +2011,16 @@ func (r *Runtime) applyConfigLocked(newCfg *config.Config, cfgPath string) (*Con
 		r.logger.Error("Failed to update config service", zap.Error(err))
 	}
 
+	// Issue #1458: a profile edit is live the moment the apply returns, so its
+	// per-profile search index must be too, not after the next discovery pass.
+	// A stale index only hides in-scope tools (retrieve_tools re-admits every
+	// hit against the live profile scope), but a widened or new profile would
+	// search an incomplete store. After configSvc.Update because the reconcile
+	// reads r.Config(); before the event so a subscriber that re-queries sees it.
+	if profileIndexInputsChanged(changedFieldsCopy) {
+		r.reconcileProfileIndexes()
+	}
+
 	// Emit config.reloaded event (after releasing lock)
 	r.emitConfigReloaded(cfgPathCopy)
 

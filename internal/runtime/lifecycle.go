@@ -1925,6 +1925,15 @@ func (r *Runtime) ReloadConfiguration() error {
 	r.applyComponentConfigLocked(oldSnapshot.Config, running)
 	r.mu.Unlock()
 
+	// Issue #1458: a hand edit of profiles / anonymous_profile must reach the
+	// per-profile search indexes now, not after postConfigReload's reconnect and
+	// discovery pass. The detector ran on the restart-pinned configs, so a
+	// restart-gated field cannot hide the profile fields from it.
+	if oldSnapshot != nil && oldSnapshot.Config != nil &&
+		profileIndexInputsChanged(DetectConfigChanges(oldSnapshot.Config, running).ChangedFields) {
+		r.reconcileProfileIndexes()
+	}
+
 	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
 		return fmt.Errorf("failed to reload servers: %w", err)
