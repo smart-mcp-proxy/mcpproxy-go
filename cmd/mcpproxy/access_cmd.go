@@ -146,8 +146,12 @@ func fixCommand(f runtime.Fix, tool string) string {
 	case profile.FixEnableServer:
 		return "mcpproxy upstream enable " + f.Target
 	case profile.FixApproveTool:
-		if i := strings.Index(f.Target, ":"); i > 0 {
-			return "mcpproxy upstream approve " + f.Target[:i]
+		// A tool-approval target is "server:tool": approve only that tool (a bare
+		// `approve <server>` approves every pending tool of the server). A
+		// quarantined-server target is the server name alone, where approving
+		// the whole server is the intended action.
+		if server, tool, ok := strings.Cut(f.Target, ":"); ok && server != "" && tool != "" {
+			return "mcpproxy upstream approve " + server + " " + tool
 		}
 		return "mcpproxy upstream approve " + f.Target
 	case profile.FixChangeSetting:
