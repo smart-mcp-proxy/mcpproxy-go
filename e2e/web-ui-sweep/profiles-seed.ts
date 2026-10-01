@@ -57,3 +57,56 @@ export async function cleanupProfiles(extraProfiles: string[] = [], tokens: stri
     await quiet(() => api('DELETE', `/profiles/${encodeURIComponent(name)}?force=true`))
   }
 }
+
+// ---- Spec 108-j (profiles-scope.spec.ts): attributed activity -----------------
+
+export const SCOPE_PROFILE = 'e2e-scope-ro'
+export const SCOPE_CLIENT = 'e2e-scope'
+
+/** One MCP session with a client credential: initialize, then each call_tool_read in order. */
+async function mcpSession(credential: string, calls: Array<{ name: string }>): Promise<void> {
+  const endpoint = `${BASE}/mcp`
+  const rpc = async (body: unknown, sessionId?: string) => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      'X-API-Key': credential,
+    }
+    if (sessionId) headers['Mcp-Session-Id'] = sessionId
+    const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) })
+    await response.text()
+    return response.headers.get('mcp-session-id') || sessionId || ''
+  }
+  const sessionId = await rpc({
+    jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'e2e-scope-client', version: '1.0' } },
+  })
+  await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId)
+  let id = 2
+  for (const call of calls) {
+    await rpc({ jsonrpc: '2.0', id: id++, method: 'tools/call', params: { name: 'call_tool_read', arguments: { name: call.name, args_json: '{}' } } }, sessionId)
+  }
+}
+
+/**
+ * Seeds one locked client on a profile that denies `<SERVER>:echo`, then makes two
+ * calls with its credential: `<SERVER>:ping` (allowed) and `<SERVER>:echo` (refused,
+ * a `policy_decision` record with block_reason profile_rule). The fixture tools are
+ * all read-only, so a deny rule is what makes the blocked row. Idempotent.
+ */
+export async function seedScopeActivity(): Promise<void> {
+  await api('POST', '/profiles', { name: SCOPE_PROFILE, title: 'E2E Scope RO', servers: [SERVER], tools: { deny: [`${SERVER}:echo`] }, max_tier: 'read' })
+  await api('PATCH', '/config', { anonymous_profile: SCOPE_PROFILE })
+  const created = await api('POST', '/clients', { id: SCOPE_CLIENT, display_name: 'E2E Scope', profile: SCOPE_PROFILE, mode: 'locked' })
+  const credential: string = created.data?.credential
+  if (!credential) throw new Error(`seeding ${SCOPE_CLIENT} returned no credential (status ${created.status})`)
+  await mcpSession(credential, [{ name: `${SERVER}:ping` }, { name: `${SERVER}:echo` }])
+}
+
+/** Removes what seedScopeActivity created. Never throws. */
+export async function cleanupScopeActivity(): Promise<void> {
+  const quiet = async (run: () => Promise<unknown>) => { try { await run() } catch { /* best effort */ } }
+  await quiet(() => api('DELETE', `/clients/${SCOPE_CLIENT}`))
+  await quiet(() => api('PATCH', '/config', { anonymous_profile: '' }))
+  await quiet(() => api('DELETE', `/profiles/${SCOPE_PROFILE}?force=true`))
+}
