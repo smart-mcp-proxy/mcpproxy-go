@@ -127,6 +127,7 @@ Merge order: `a → (b ∥ c) → d → e → f → (g ∥ h ∥ i ∥ k) → j 
 | 108-k | `108-k-macos-profiles-clients` | Profiles view + editor, profile/credential controls in **Spec 109-h's** `ClientsView`, tray Clients submenu (replaces Profile), connect sheet profile/mode/masked credential (T042m, moved from 108-c), token sheet, un-hiding the profile/client/token filters of **Spec 109-k's** `ScopeFilter` on Activity/Tools/Dashboard/Servers, attribution columns, explainer sheet, contract tests | FR-047–050, FR-005 (editor stale marker) | f, **109-h, 109-i, 109-k** | macOS |
 | 108-l | `108-l-profiles-v3-parity-docs` | cross-surface parity test, Playwright `profiles-scope.spec.ts` in the release-gate sweep, docs, release notes, CLAUDE.md line | FR-051, SC-001, SC-006 | g, h, j, k | all |
 | 108-retro-go | `fix/108-retro-go` | post-merge Sol findings; Go only; after 108-k | FR-021a, 008a, 029, 031, 005 | k | Go core, REST, MCP, CLI |
+| fix-1458 | `fix-1458-profile-index-reconcile` | reconcile per-profile indexes on every apply/reload that changes `profiles` or `anonymous_profile` | FR-011 (`retrieve_tools` under a profile), L9 follow-up | l, retro-go | Go core |
 
 ## Design — the five mechanisms
 
