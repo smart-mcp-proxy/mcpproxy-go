@@ -249,6 +249,22 @@ for (const width of [1440, 1280, 1100, 1024, 900, 768, 390]) {
         })
         // Phone width keeps its own table-fixed layout (F14), which is not the subject here.
         if (width >= 768) expect(fit.overflow, `activity table at ${width} must fit its card (overflow ${fit.overflow}px, columns ${fit.columns})`).toBeLessThanOrEqual(1)
+        // Attribution chips are never clipped: a chip whose own box is narrower than its content is cut at
+        // both ends (an inline-flex badge cannot ellipsise), so the label must truncate inside it, and every
+        // chip must sit inside the cell that holds it.
+        const clippedChips = await page.evaluate(() => {
+          const out: string[] = []
+          for (const chip of Array.from(document.querySelectorAll('[data-test="activity-row"] [data-test^="attribution-"]')) as HTMLElement[]) {
+            if (chip.offsetParent === null) continue
+            const cell = chip.closest('td')
+            const cellBox = cell?.getBoundingClientRect()
+            const box = chip.getBoundingClientRect()
+            if (chip.scrollWidth > chip.clientWidth + 1) out.push(`${chip.dataset.test} content ${chip.scrollWidth} > box ${chip.clientWidth}`)
+            if (cellBox && (box.left < cellBox.left - 1 || box.right > cellBox.right + 1)) out.push(`${chip.dataset.test} outside its cell`)
+          }
+          return out
+        })
+        expect(clippedChips, `attribution chips at ${width} must not be clipped`).toEqual([])
         // The inline Why? shares the Status cell, so it only shows where the card has room for it.
         const rowWhy = page.locator('[data-test^="activity-row-why-"]').first()
         if (width >= 1280) await expect(rowWhy).toBeVisible()

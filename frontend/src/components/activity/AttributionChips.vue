@@ -4,35 +4,35 @@
       <router-link
         v-if="clientId"
         :to="scopeQuery.linkTo('clients', { client: clientId })"
-        class="badge badge-sm badge-outline max-w-full truncate hover:bg-base-200"
+        class="badge badge-sm badge-outline max-w-full min-w-0 justify-start hover:bg-base-200"
         :title="`Client ${clientId}`"
         data-test="attribution-client"
         @click.stop
-      >{{ clientLabel }}</router-link>
+      ><span class="truncate min-w-0">{{ clientLabel }}</span></router-link>
       <span
         v-else-if="record.client_name"
-        class="badge badge-sm badge-ghost max-w-full truncate"
+        class="badge badge-sm badge-ghost max-w-full min-w-0 justify-start"
         title="The client reported this name about itself; it is not a verified identity"
         data-test="attribution-client-reported"
-      >~{{ record.client_name }} (reported)</span>
+      ><span class="truncate min-w-0">~{{ record.client_name }} (reported)</span></span>
 
       <router-link
         v-if="record.profile"
         :to="profileEditorLink(record.profile)"
-        class="badge badge-sm badge-outline max-w-full truncate hover:bg-base-200"
+        class="badge badge-sm badge-outline max-w-full min-w-0 justify-start hover:bg-base-200"
         :title="`Open profile ${record.profile}`"
         data-test="attribution-profile"
         @click.stop
-      >{{ profileLabel }}</router-link>
+      ><span class="truncate min-w-0">{{ profileLabel }}</span></router-link>
 
       <router-link
         v-if="showToken"
         :to="scopeQuery.linkTo('tokens', { token: record.token_name! })"
-        class="badge badge-sm badge-outline max-w-full truncate hover:bg-base-200"
+        class="badge badge-sm badge-outline max-w-full min-w-0 justify-start hover:bg-base-200"
         :title="`Token ${record.token_name}`"
         data-test="attribution-token"
         @click.stop
-      >{{ record.token_name }}</router-link>
+      ><span class="truncate min-w-0">{{ record.token_name }}</span></router-link>
     </template>
     <span v-else class="text-xs text-base-content/60" data-test="attribution-none">{{ emptyLabel }}</span>
   </div>
