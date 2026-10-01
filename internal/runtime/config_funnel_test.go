@@ -284,9 +284,8 @@ func TestMutateConfig_ConcurrentWritesKeepBoth(t *testing.T) {
 }
 
 // A profile that is created or renamed through the funnel gets its per-profile
-// search index NOW: the apply reconciles indexes only when mcpServers changed,
-// and a locked client of a renamed profile would otherwise search an empty index
-// until the next discovery pass (found in live QA of Spec 108-f).
+// search index NOW (found in live QA of Spec 108-f). The funnel gets this
+// through ApplyConfig, which owns the reconcile for every apply (#1458).
 func TestMutateConfig_ReconcilesPerProfileIndexes(t *testing.T) {
 	rt := newFunnelRuntime(t)
 	dirs := func() []string {
