@@ -149,6 +149,16 @@ const (
 	ErrorCodePreconditionFailed = "precondition_failed"
 )
 
+// Why a classify entry no longer applies (EffectiveToolsResult.
+// StaleClassificationReasons, FR-005).
+const (
+	// StaleClassificationAnnotated: the tool now carries its own annotations,
+	// which a classify entry never overrides.
+	StaleClassificationAnnotated = "annotated"
+	// StaleClassificationMissing: the tool no longer exists.
+	StaleClassificationMissing = "missing"
+)
+
 // WarningSeverity grades a Clients-surface warning (data-model.md §7).
 type WarningSeverity string
 
