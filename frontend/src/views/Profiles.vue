@@ -13,11 +13,11 @@
       <button type="button" class="btn btn-sm" data-test="profiles-retry" @click="store.fetchProfiles()">Retry</button>
     </div>
 
-    <div v-else-if="store.loading && !store.loaded" class="grid gap-4 grid-cols-1 md:grid-cols-2 min-[1280px]:grid-cols-3" aria-busy="true" data-test="profiles-skeleton">
+    <div v-else-if="store.loading && !store.loaded" class="grid gap-4 grid-cols-1 min-[768px]:grid-cols-2 min-[1280px]:grid-cols-3" aria-busy="true" data-test="profiles-skeleton">
       <div v-for="n in 3" :key="n" class="skeleton h-44 w-full" />
     </div>
 
-    <div v-else class="grid gap-4 grid-cols-1 md:grid-cols-2 min-[1280px]:grid-cols-3" data-test="profiles-grid">
+    <div v-else class="grid gap-4 grid-cols-1 min-[768px]:grid-cols-2 min-[1280px]:grid-cols-3" data-test="profiles-grid">
       <!-- The All servers card is the default everything falls back to. -->
       <article class="card bg-base-100 border border-base-300" data-test="profile-card-all-servers" aria-labelledby="profile-card-title-all-servers">
         <div class="card-body p-4 space-y-2">

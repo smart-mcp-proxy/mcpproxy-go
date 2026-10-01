@@ -149,8 +149,11 @@
             <button v-if="canEdit" type="button" class="btn btn-sm btn-outline" data-test="profile-assign" @click="assignOpen = true">Assign to client&hellip;</button>
           </section>
 
-          <GuardRefusal v-if="guard" :refusal="guard" />
-          <div v-else-if="saveError" role="alert" class="alert alert-error text-sm" data-test="profile-save-error">{{ saveError }}</div>
+          <!-- scroll-mb keeps a revealed refusal clear of the sticky footer below. -->
+          <div ref="refusalEl" class="scroll-mb-28">
+            <GuardRefusal v-if="guard" :refusal="guard" />
+            <div v-else-if="saveError" role="alert" class="alert alert-error text-sm" tabindex="-1" data-test="profile-save-error">{{ saveError }}</div>
+          </div>
 
           <!-- The footer stays in view: Save and Discard are never below the fold. -->
           <div v-if="canEdit" class="sticky bottom-0 -mx-1 px-3 py-3 bg-base-100 border-t border-base-300 flex items-center justify-between gap-2 z-10" data-test="profile-editor-footer">
@@ -186,7 +189,7 @@
         </div>
       </div>
 
-      <ProfileRenameDialog :open="renameOpen" :profile="saved" @close="renameOpen = false" @renamed="onRenamed" />
+      <ProfileRenameDialog :open="renameOpen" :profile="saved" @close="renameOpen = false" @renaming="renaming = true" @rename-failed="renaming = false" @renamed="onRenamed" />
       <ProfileDeleteDialog :open="deleteOpen" :profile="saved" @close="deleteOpen = false" @deleted="onDeleted" />
       <AssignClientDialog :open="assignOpen" :profile-name="saved.name" @close="assignOpen = false" @assigned="loadProfile" />
     </template>
@@ -194,7 +197,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GuardRefusal from '@/components/GuardRefusal.vue'
 import ProfileToolTable from '@/components/profiles/ProfileToolTable.vue'
@@ -306,6 +309,10 @@ const deleteOpen = ref(false)
 const assignOpen = ref(false)
 const assignError = ref('')
 const announcement = ref('')
+const refusalEl = ref<HTMLElement | null>(null)
+// True from the moment a rename is sent until the route carries the new name. The
+// events the rename emits must not reload the OLD name (a 404 per event).
+const renaming = ref(false)
 
 const draftTools = computed<ProfileToolRules>(() => ({ allow: draft.allow, deny: draft.deny, classify: draft.classify }))
 const dirty = computed(() => Boolean(saved.value) && JSON.stringify(toConfig(draft)) !== JSON.stringify(toConfig(draftFrom(saved.value as ProfileView))))
@@ -432,10 +439,22 @@ async function save() {
     if (isGuardRefusal(err)) guard.value = refused
     else if (refused.field) fieldErrors[refused.field] = refused.message
     else saveError.value = describeError(err, 'Failed to save the profile')
-    // The draft stays: nothing was written.
+    // The draft stays: nothing was written. Bring the reason into view: it sits
+    // under the form, behind the sticky footer, and the footer alone only says
+    // "Unsaved changes".
+    void revealRefusal()
   } finally {
     saving.value = false
   }
+}
+
+async function revealRefusal() {
+  await nextTick()
+  const target = refusalEl.value?.querySelector<HTMLElement>('[data-test="guard-refusal"], [data-test="profile-save-error"]')
+  if (!target) return
+  target.setAttribute('tabindex', '-1')
+  target.focus({ preventScroll: true })
+  target.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
 }
 
 function discard() {
@@ -483,7 +502,7 @@ function onDeleted() {
 
 // A change made elsewhere never overwrites an unsaved draft.
 function onChangedElsewhere() {
-  if (!saved.value || saving.value) return
+  if (!saved.value || saving.value || renaming.value) return
   if (dirty.value) changedElsewhere.value = true
   else void load()
 }
@@ -500,5 +519,5 @@ onBeforeUnmount(() => {
   window.removeEventListener(PROFILES_CHANGED_EVENT, onChangedElsewhere)
   window.removeEventListener(CLIENT_BINDING_CHANGED_EVENT, onChangedElsewhere)
 })
-watch(() => props.name, () => { void load() })
+watch(() => props.name, () => { renaming.value = false; void load() })
 </script>

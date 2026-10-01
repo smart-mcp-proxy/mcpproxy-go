@@ -66,6 +66,15 @@ describe('Profiles page (Spec 108-i T090, FR-040)', () => {
     ;(api.getClients as any).mockResolvedValue({ success: true, data: { clients: [makeClient('cursor'), makeClient('claude-code', { display_name: 'Claude Code' })], warnings: [] } })
   })
 
+  it('the grid uses one breakpoint family so three columns win from 1280px (named md: is emitted after min-[…] and would override it)', async () => {
+    ;(api.getProfiles as any).mockResolvedValue({ profiles: [work] })
+    const { wrapper } = await mountAt()
+    const classes = wrapper.get('[data-test="profiles-grid"]').classes()
+    expect(classes).toContain('min-[768px]:grid-cols-2')
+    expect(classes).toContain('min-[1280px]:grid-cols-3')
+    expect(classes).not.toContain('md:grid-cols-2')
+  })
+
   it('renders cards with title, tier counts, unannotated hidden, used-by and calls/blocked', async () => {
     const { wrapper } = await mountAt()
     const card = wrapper.get('[data-test="profile-card-work-ro"]')

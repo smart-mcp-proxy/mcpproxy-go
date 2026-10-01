@@ -1,5 +1,5 @@
 <template>
-  <div class="space-y-1 min-w-[10rem] max-w-[15rem]" :data-test="`client-profile-cell-${client.id}`" @click.stop>
+  <div class="space-y-1 min-w-0 w-full max-w-[15rem]" :data-test="`client-profile-cell-${client.id}`" @click.stop>
     <!-- No client credential to bind (none, admin key, revoked, expired,
          unknown): the chip and the lock switch are disabled and never call PUT.
          The call to action depends on why (Spec 108-i I8). -->
@@ -34,16 +34,18 @@
       >{{ credentialCta(client.credential_state) }}</button>
     </template>
     <template v-else>
-      <div class="flex items-center gap-2 flex-wrap">
+      <div class="flex items-center gap-2 flex-wrap min-w-0">
         <button
+          ref="chipEl"
           type="button"
-          class="btn btn-xs btn-outline max-w-[14rem] h-auto min-h-6 py-1 text-left normal-case"
+          class="btn btn-xs btn-outline max-w-full min-w-0 h-auto min-h-6 py-1 text-left normal-case"
           :class="missing && 'btn-error'"
           aria-haspopup="menu"
           :aria-expanded="open ? 'true' : 'false'"
           :disabled="busy"
           :data-test="`client-profile-chip-${client.id}`"
-          @click="open = !open"
+          @click="toggleMenu"
+          @keydown="onChipKeydown"
         >
           <span v-if="locked" aria-hidden="true">&#128274;</span>
           <span v-if="locked" class="sr-only">Locked</span>
@@ -54,15 +56,17 @@
           type="button"
           class="btn btn-xs btn-ghost text-error"
           :data-test="`client-profile-move-${client.id}`"
-          @click="open = true"
+          @click="openMenu(true)"
         >Move&hellip;</button>
       </div>
       <div
         v-if="open"
+        ref="menuEl"
         role="menu"
         :aria-label="`Profile for ${client.display_name}`"
         class="rounded-box border border-base-300 bg-base-100 p-1 space-y-0.5 text-sm"
         :data-test="`client-profile-menu-${client.id}`"
+        @keydown="onMenuKeydown"
       >
         <button
           v-for="option in options"
@@ -70,6 +74,7 @@
           type="button"
           role="menuitemradio"
           :aria-checked="option.value === (client.profile ?? '') ? 'true' : 'false'"
+          :tabindex="-1"
           class="w-full text-left px-2 py-1 rounded hover:bg-base-200 flex flex-col"
           :class="option.value === (client.profile ?? '') && 'bg-base-200 font-medium'"
           :data-test="`client-profile-option-${client.id}-${option.value || 'all'}`"
@@ -81,6 +86,7 @@
       </div>
       <div class="flex items-center gap-2" :title="client.profile ? '' : 'Choose a profile to lock'">
         <input
+          ref="lockEl"
           type="checkbox"
           role="switch"
           class="toggle toggle-xs"
@@ -110,7 +116,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useProfilesStore } from '@/stores/profiles'
 import { useClientBindingsStore } from '@/stores/clientBindings'
 import { CONNECT_CLIENT_EVENT } from '@/navigation/navModel'
@@ -130,6 +136,9 @@ const bindings = useClientBindingsStore()
 const scope = useScopeQuery('clients')
 const clientScopeAvailable = computed(() => isScopeParamAvailable('client'))
 const open = ref(false)
+const chipEl = ref<HTMLButtonElement | null>(null)
+const lockEl = ref<HTMLInputElement | null>(null)
+const menuEl = ref<HTMLElement | null>(null)
 // `?move=1` (the explainer's "Move client" fix) lands here with the menu open.
 watch(() => props.autoOpen, value => { if (value) open.value = true }, { immediate: true })
 
@@ -165,15 +174,82 @@ const options = computed(() => [
   ...profiles.profiles.map(profile => ({ value: profile.name, title: profile.title || profile.name, slug: profile.title ? profile.name : '' })),
 ])
 
+// The chip and the switch are disabled while a PUT is in flight, and a disabled
+// control drops keyboard focus to <body>. Put focus back where it was once the
+// row is enabled again, so a second Space or Enter keeps working.
+async function restoreFocus(target: () => HTMLElement | null) {
+  await nextTick()
+  if (document.activeElement && document.activeElement !== document.body) return
+  target()?.focus()
+}
+
 async function select(profile: string) {
   open.value = false
-  if (profile === (props.client.profile ?? '')) return
+  if (profile === (props.client.profile ?? '')) {
+    void restoreFocus(() => chipEl.value)
+    return
+  }
   await bindings.setBinding(props.client.id, { profile })
+  await restoreFocus(() => chipEl.value)
 }
 
 async function toggleLock(on: boolean) {
   if (!props.client.profile) return
   await bindings.setBinding(props.client.id, { profile: props.client.profile, mode: on ? 'locked' : 'switchable' })
+  await restoreFocus(() => lockEl.value)
+}
+
+function items(): HTMLElement[] {
+  return menuEl.value ? Array.from(menuEl.value.querySelectorAll<HTMLElement>('[role="menuitemradio"]')) : []
+}
+
+// Open the menu; a keyboard open (or an explicit request) moves focus into it
+// on the current choice, so ArrowUp/ArrowDown and Escape work from there.
+async function openMenu(focusItem: boolean) {
+  open.value = true
+  if (!focusItem) return
+  await nextTick()
+  const all = items()
+  ;(all.find(item => item.getAttribute('aria-checked') === 'true') ?? all[0])?.focus()
+}
+
+function closeMenu(returnFocus: boolean) {
+  open.value = false
+  if (returnFocus) void nextTick(() => chipEl.value?.focus())
+}
+
+function toggleMenu(event: MouseEvent) {
+  if (open.value) closeMenu(false)
+  // detail 0 is a keyboard activation (Enter or Space).
+  else void openMenu(event.detail === 0)
+}
+
+function onChipKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && open.value) {
+    event.preventDefault()
+    closeMenu(true)
+  } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault()
+    void openMenu(true)
+  }
+}
+
+function onMenuKeydown(event: KeyboardEvent) {
+  const all = items()
+  const index = all.indexOf(document.activeElement as HTMLElement)
+  const focusAt = (next: number) => { event.preventDefault(); all[(next + all.length) % all.length]?.focus() }
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeMenu(true)
+  } else if (event.key === 'ArrowDown') focusAt(index + 1)
+  else if (event.key === 'ArrowUp') focusAt(index < 0 ? all.length - 1 : index - 1)
+  else if (event.key === 'Home') focusAt(0)
+  else if (event.key === 'End') focusAt(all.length - 1)
+  else if (event.key === 'Tab') {
+    // Leave the menu closed and let Tab carry on from the chip.
+    chipEl.value?.focus()
+    open.value = false
+  }
 }
 
 function openConnect() {

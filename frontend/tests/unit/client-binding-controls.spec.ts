@@ -93,6 +93,63 @@ describe('Client binding controls on the Clients page (Spec 108-i T092)', () => 
     expect(chip.attributes('aria-expanded')).toBe('true')
   })
 
+  it('keyboard: Enter opens and focuses the menu, arrows move, Escape closes and returns focus to the chip', async () => {
+    const { wrapper } = await mountClients([cursor])
+    const chip = wrapper.get('[data-test="client-profile-chip-cursor"]')
+    ;(chip.element as HTMLElement).focus()
+    await chip.trigger('keydown', { key: 'ArrowDown' })
+    await flushPromises()
+    const menu = wrapper.get('[data-test="client-profile-menu-cursor"]')
+    const items = menu.findAll('[role="menuitemradio"]').map(item => item.element as HTMLElement)
+    // Focus lands on the current choice (Work), not the chip.
+    expect(document.activeElement).toBe(items[1])
+    await menu.trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(items[2])
+    await menu.trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(items[0])
+    await menu.trigger('keydown', { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(items[2])
+    await menu.trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(wrapper.find('[data-test="client-profile-menu-cursor"]').exists()).toBe(false)
+    expect(chip.attributes('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(chip.element)
+  })
+
+  it('Escape on the chip itself closes an open menu', async () => {
+    const { wrapper } = await mountClients([cursor])
+    const chip = wrapper.get('[data-test="client-profile-chip-cursor"]')
+    await chip.trigger('click')
+    expect(chip.attributes('aria-expanded')).toBe('true')
+    await chip.trigger('keydown', { key: 'Escape' })
+    expect(chip.attributes('aria-expanded')).toBe('false')
+  })
+
+  it('focus is restored to the lock switch and to the chip after the PUT finishes', async () => {
+    const { wrapper } = await mountClients([cursor])
+    const lock = wrapper.get('[data-test="client-lock-switch-cursor"]')
+    ;(lock.element as HTMLElement).focus()
+    await lock.setValue(false)
+    // While the PUT is pending the control is disabled and browsers drop focus.
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    await flushPromises()
+    expect(document.activeElement).toBe(wrapper.get('[data-test="client-lock-switch-cursor"]').element)
+
+    const chip = wrapper.get('[data-test="client-profile-chip-cursor"]')
+    await chip.trigger('click')
+    await wrapper.get('[data-test="client-profile-option-cursor-work-full"]').trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(wrapper.get('[data-test="client-profile-chip-cursor"]').element)
+  })
+
+  it('the chip may shrink to its cell and wrap, so it is never clipped', async () => {
+    const { wrapper } = await mountClients([cursor])
+    const chip = wrapper.get('[data-test="client-profile-chip-cursor"]')
+    expect(chip.classes()).toContain('max-w-full')
+    expect(chip.classes()).not.toContain('max-w-[14rem]')
+    expect(wrapper.get('[data-test="client-profile-cell-cursor"]').classes()).toContain('min-w-0')
+  })
+
   it('selecting a profile sends PUT binding WITHOUT mode; the lock switch sends {profile, mode}', async () => {
     const { wrapper } = await mountClients([cursor])
     await wrapper.get('[data-test="client-profile-chip-cursor"]').trigger('click')

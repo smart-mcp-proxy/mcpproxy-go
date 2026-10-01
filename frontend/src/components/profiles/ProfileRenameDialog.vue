@@ -42,7 +42,7 @@ import type { ApiError } from '@/services/api'
 // Spec 108-i I19: rename shows what it moves BEFORE the POST. The server rewrites
 // every pin, binding, switchable_to entry and the anonymous_profile.
 const props = defineProps<{ open: boolean; profile: ProfileView }>()
-const emit = defineEmits<{ (e: 'close'): void; (e: 'renamed', newName: string): void }>()
+const emit = defineEmits<{ (e: 'close'): void; (e: 'renamed', newName: string): void; (e: 'renaming'): void; (e: 'rename-failed'): void }>()
 const profiles = useProfilesStore()
 const newName = ref('')
 const busy = ref(false)
@@ -67,11 +67,14 @@ const otherError = computed(() => (error.value && !guard.value && !fieldError.va
 async function submit() {
   busy.value = true
   error.value = null
+  // Tell the page before the PUT leaves: its events must not refetch the old name.
+  emit('renaming')
   try {
     const result = await api.renameProfile(props.profile.name, newName.value)
     emit('renamed', result.profile.name)
   } catch (err) {
     error.value = err as ApiError
+    emit('rename-failed')
   } finally {
     busy.value = false
   }

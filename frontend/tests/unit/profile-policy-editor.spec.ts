@@ -211,6 +211,46 @@ describe('Profile policy editor (Spec 108-i T091, FR-041, FR-005)', () => {
     expect(router.currentRoute.value.params.name).toBe('work-ro2')
   })
 
+  it('a rename never refetches the old name when its events arrive (no 404 console noise)', async () => {
+    ;(api.renameProfile as any).mockImplementation(async () => {
+      // The server emits profiles.changed and client.binding_changed while the
+      // rename is still in flight: the open editor must not reload the old name.
+      window.dispatchEvent(new CustomEvent('mcpproxy:profiles.changed'))
+      window.dispatchEvent(new CustomEvent('mcpproxy:client.binding_changed'))
+      window.dispatchEvent(new CustomEvent('mcpproxy:profiles.changed'))
+      await Promise.resolve()
+      return { profile: { ...FULL, name: 'work-ro2' }, moved: { clients: ['cursor'], tokens: ['ci'] } }
+    })
+    ;(api.getProfile as any).mockImplementation(async (name: string) => {
+      if (name !== 'work-ro') return { ...FULL, name }
+      return FULL
+    })
+    const { wrapper, router } = await mountEditor()
+    ;(api.getProfile as any).mockClear()
+    await wrapper.get('[data-test="profile-rename"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="profile-rename-input"]').setValue('work-ro2')
+    await wrapper.get('[data-test="profile-rename-submit"]').trigger('submit')
+    await flushPromises()
+    expect(router.currentRoute.value.params.name).toBe('work-ro2')
+    const names = (api.getProfile as any).mock.calls.map((call: any[]) => call[0])
+    expect(names).not.toContain('work-ro')
+  })
+
+  it('a failed rename re-enables reloads for the unchanged name', async () => {
+    ;(api.renameProfile as any).mockRejectedValue(apiError('name already exists', { field: 'new_name', status: 409 }))
+    const { wrapper } = await mountEditor()
+    await wrapper.get('[data-test="profile-rename"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-test="profile-rename-input"]').setValue('taken')
+    await wrapper.get('[data-test="profile-rename-submit"]').trigger('submit')
+    await flushPromises()
+    ;(api.getProfile as any).mockClear()
+    window.dispatchEvent(new CustomEvent('mcpproxy:profiles.changed'))
+    await flushPromises()
+    expect(api.getProfile).toHaveBeenCalledWith('work-ro')
+  })
+
   it('Delete of an in-use profile requires a target and hides force for the anonymous_profile', async () => {
     ;(api.deleteProfile as any).mockResolvedValue({ deleted: 'work-ro', moved: { clients: ['cursor'], tokens: ['ci'] } })
     const { wrapper } = await mountEditor()
@@ -265,6 +305,21 @@ describe('Profile policy editor (Spec 108-i T091, FR-041, FR-005)', () => {
     expect(wrapper.findAll('[data-test^="guard-fix-"]')).toHaveLength(2)
     expect((wrapper.get('[data-test="profile-title"]').element as HTMLInputElement).value).toBe('Edited')
     expect(wrapper.get('[data-test="profile-save-status"]').text()).toBe('Unsaved changes')
+  })
+
+  it('a refused save moves focus to the refusal and scrolls it clear of the sticky footer', async () => {
+    const scroll = vi.fn()
+    ;(Element.prototype as any).scrollIntoView = scroll
+    ;(api.updateProfile as any).mockRejectedValue(apiError(GUARD_REFUSAL.error, GUARD_REFUSAL))
+    const { wrapper } = await mountEditor()
+    await wrapper.get('[data-test="profile-title"]').setValue('Edited')
+    await wrapper.get('[data-test="profile-form"]').trigger('submit')
+    await flushPromises()
+    const refusal = wrapper.get('[data-test="guard-refusal"]').element
+    expect(document.activeElement).toBe(refusal)
+    expect(scroll).toHaveBeenCalledWith(expect.objectContaining({ block: 'center' }))
+    expect(wrapper.get('[data-test="guard-refusal"]').element.parentElement?.className).toContain('scroll-mb')
+    delete (Element.prototype as any).scrollIntoView
   })
 
   it('a 400 marks the field the validator names', async () => {
