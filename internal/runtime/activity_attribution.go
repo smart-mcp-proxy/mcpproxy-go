@@ -25,8 +25,9 @@ type ActivityAttribution struct {
 	ClientName string
 	TokenName  string
 	// TokenPrefix is the 12-char display prefix of the calling token. It is
-	// INTERNAL: it lets a scoped SSE subscriber recognise its own events, and
-	// is stripped from every subscriber's view and never persisted.
+	// INTERNAL: persisted on the storage record as the ownership proof (so a
+	// scoped caller recognises its own policy_decision and prompt_get rows),
+	// never in any API shape, export or SSE frame for another caller.
 	TokenPrefix string
 }
 
@@ -81,6 +82,7 @@ func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 	rec.ClientID = a.ClientID
 	rec.TokenName = a.TokenName
 	rec.ClientName = a.ClientName
+	rec.TokenPrefix = a.TokenPrefix
 	if rec.ClientName == "" {
 		if name, ok := rec.Metadata["client_name"].(string); ok {
 			rec.ClientName = name

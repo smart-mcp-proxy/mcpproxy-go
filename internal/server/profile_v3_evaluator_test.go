@@ -75,6 +75,7 @@ func TestProfileV3EffectiveTools_ClassificationStaleIsIgnoredByDecide(t *testing
 	assert.Equal(t, row.IntrinsicTier, row.ProfileTier, "a classify entry never overrides an annotated tool")
 	assert.True(t, row.Access.Callable)
 	assert.Equal(t, []string{"github:gone_tool", "github:list_issues"}, res.StaleClassifications)
+	assert.Equal(t, map[string]string{"github:gone_tool": "missing", "github:list_issues": "annotated"}, res.StaleClassificationReasons)
 	for _, r := range res.Tools {
 		if r.Tool != "list_issues" {
 			assert.False(t, r.ClassificationStale, r.Tool)

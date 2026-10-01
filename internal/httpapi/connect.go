@@ -250,7 +250,7 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 // @Failure     400    {object} ClientBindingErrorResponse "Bad request; field names the offending input (profile, mode, keyless)"
 // @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
-// @Failure     409    {object} ConnectConflictResponse "Conflict: action=already_exists (use force=true) or action=precondition_failed (preview is stale; re-preview); or binding_bypassable_without_auth (BindingGuardResponse); or conflicting_token (ClientCredentialConflictResponse)"
+// @Failure     409    {object} ConnectConflictResponse "Conflict: action=already_exists (use force=true) or action=precondition_failed (preview is stale; re-preview); or binding_bypassable_without_auth (BindingGuardResponse); or conflicting_token (ClientCredentialConflictResponse); or connect_in_progress (another connect of this client is mid-write) or credential_superseded (the written credential was replaced or revoked before it could be finalized; reconnect)"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable (or no credential store wired while require_mcp_auth is on)"
 // @Router      /api/v1/connect/{client} [post]
 func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
@@ -639,6 +639,8 @@ func (s *Server) reconcileClient(r *http.Request, clientID string) {
 // their wire shapes and reports whether it handled err:
 //
 //   - FR-008a guard refusal            -> 409 binding_bypassable_without_auth
+//   - another connect in flight        -> 409 connect_in_progress
+//   - credential replaced before commit -> 409 credential_superseded
 //   - token name held by a regular one -> 409 {error, conflicting_token}
 //   - invalid profile/mode/id          -> 400 {error, field}
 //   - keyless with auth on / a profile -> 400 {error, field:"keyless"}
@@ -646,6 +648,11 @@ func (s *Server) reconcileClient(r *http.Request, clientID string) {
 func (s *Server) writeCredentialFailure(w http.ResponseWriter, r *http.Request, clientID string, err error) bool {
 	if s.writeIfBindingGuardRefusal(w, r, err) {
 		return true
+	}
+	var busy *internalRuntime.ConnectInProgressError
+	var superseded *internalRuntime.CredentialSupersededError
+	if errors.As(err, &busy) || errors.As(err, &superseded) {
+		return s.writeProfilesError(w, r, err)
 	}
 	switch {
 	case errors.Is(err, storage.ErrClientCredentialConflict):

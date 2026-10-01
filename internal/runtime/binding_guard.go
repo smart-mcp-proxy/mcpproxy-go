@@ -152,6 +152,47 @@ func (ConservativeBindingGuard) BindingGuardFixes(GuardState, []BindingRef) []Gu
 // BindingGuardActiveBindings implements BindingGuard.
 func (ConservativeBindingGuard) BindingGuardActiveBindings() []BindingRef { return nil }
 
+// StrictOfflineBindingGuard is the guard of the offline CLI connect (no daemon,
+// no published tool snapshot). It cannot evaluate reach, so it exempts only an
+// UNCHANGED binding: the identity of a binding is (client_id, profile_pin,
+// profile_mode), and any candidate bypassable binding without an identical one
+// among the current bypassable bindings is refused. A reconnect that keeps the
+// recorded binding passes; a re-point or mode change of an already-bound client
+// does not, which ConservativeBindingGuard (whose re-point allowance other
+// callers rely on) would let through.
+type StrictOfflineBindingGuard struct{}
+
+type bindingIdentity struct{ client, pin, mode string }
+
+// BindingGuardDelta implements BindingGuard.
+func (StrictOfflineBindingGuard) BindingGuardDelta(current, candidate GuardState) []BindingRef {
+	now := time.Now()
+	already := make(map[bindingIdentity]bool)
+	for i := range current.Tokens {
+		t := &current.Tokens[i]
+		if conservativeBypassable(current, t, now) {
+			already[bindingIdentity{t.ClientID, t.ProfilePin, t.ProfileMode}] = true
+		}
+	}
+	var out []BindingRef
+	for i := range candidate.Tokens {
+		t := &candidate.Tokens[i]
+		if conservativeBypassable(candidate, t, now) && !already[bindingIdentity{t.ClientID, t.ProfilePin, t.ProfileMode}] {
+			out = append(out, BindingRefOf(t))
+		}
+	}
+	SortBindingRefs(out)
+	return out
+}
+
+// BindingGuardFixes implements BindingGuard.
+func (StrictOfflineBindingGuard) BindingGuardFixes(st GuardState, delta []BindingRef) []GuardFix {
+	return ConservativeBindingGuard{}.BindingGuardFixes(st, delta)
+}
+
+// BindingGuardActiveBindings implements BindingGuard.
+func (StrictOfflineBindingGuard) BindingGuardActiveBindings() []BindingRef { return nil }
+
 // SortBindingRefs orders refs by client id (the refusal's stable order).
 func SortBindingRefs(refs []BindingRef) {
 	sort.Slice(refs, func(i, j int) bool { return refs[i].ClientID < refs[j].ClientID })

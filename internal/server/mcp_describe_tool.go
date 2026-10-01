@@ -383,7 +383,7 @@ func (p *MCPProxyServer) handleDescribeToolOnSurface(ctx context.Context, reques
 	}
 
 	emitError := func(errMsg string, args map[string]interface{}) {
-		p.emitActivityInternalToolCall("describe_tool", "", "", "", sessionID, requestID,
+		p.emitActivityInternalToolCall(ctx, "describe_tool", "", "", "", sessionID, requestID,
 			"error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 	}
 
@@ -448,7 +448,7 @@ func (p *MCPProxyServer) handleDescribeToolOnSurface(ctx context.Context, reques
 	}
 
 	activityArgs := injectAuthMetadata(ctx, args)
-	p.emitActivityInternalToolCall("describe_tool", "", "", "", sessionID, requestID,
+	p.emitActivityInternalToolCall(ctx, "describe_tool", "", "", "", sessionID, requestID,
 		"success", "", time.Since(startTime).Milliseconds(), activityArgs, response, nil, "")
 
 	return mcp.NewToolResultText(string(jsonResult)), nil
