@@ -25,7 +25,7 @@ func TestInternalToolCall_AttributionCarriesTokenPrefix(t *testing.T) {
 	ch := f.rt.SubscribeEvents()
 	defer f.rt.UnsubscribeEvents(ch)
 
-	f.proxy.emitActivityInternalToolCall("retrieve_tools", "", "", "", "s-int", "req-int-1", "success", "", 5, nil, "ok", nil, "")
+	f.proxy.emitActivityInternalToolCall(context.Background(), "retrieve_tools", "", "", "", "s-int", "req-int-1", "success", "", 5, nil, "ok", nil, "")
 
 	var attr map[string]any
 	require.Eventually(t, func() bool {
