@@ -75,6 +75,9 @@ async function mcpSession(credential: string, calls: Array<{ name: string }>): P
     if (sessionId) headers['Mcp-Session-Id'] = sessionId
     const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) })
     await response.text()
+    // A refused or failed MCP request would leave the sweep with no attributed
+    // activity and every later check failing with a misleading fixture error.
+    if (!response.ok) throw new Error(`MCP request failed with HTTP ${response.status}`)
     return response.headers.get('mcp-session-id') || sessionId || ''
   }
   const sessionId = await rpc({
@@ -95,8 +98,22 @@ async function mcpSession(credential: string, calls: Array<{ name: string }>): P
  * all read-only, so a deny rule is what makes the blocked row. Idempotent.
  */
 export async function seedScopeActivity(): Promise<void> {
-  await api('POST', '/profiles', { name: SCOPE_PROFILE, title: 'E2E Scope RO', servers: [SERVER], tools: { deny: [`${SERVER}:echo`] }, max_tier: 'read' })
-  await api('PATCH', '/config', { anonymous_profile: SCOPE_PROFILE })
+  // Idempotent: a leftover client or profile from an interrupted run would make
+  // the POSTs below fail, so start from nothing; a failed seed removes what it made.
+  await cleanupScopeActivity()
+  try {
+    await seedScopeActivityOnce()
+  } catch (error) {
+    await cleanupScopeActivity()
+    throw error
+  }
+}
+
+async function seedScopeActivityOnce(): Promise<void> {
+  const profile = await api('POST', '/profiles', { name: SCOPE_PROFILE, title: 'E2E Scope RO', servers: [SERVER], tools: { deny: [`${SERVER}:echo`] }, max_tier: 'read' })
+  if (profile.status >= 300) throw new Error(`seeding ${SCOPE_PROFILE} failed (status ${profile.status})`)
+  const config = await api('PATCH', '/config', { anonymous_profile: SCOPE_PROFILE })
+  if (config.status >= 300) throw new Error(`setting anonymous_profile failed (status ${config.status})`)
   const created = await api('POST', '/clients', { id: SCOPE_CLIENT, display_name: 'E2E Scope', profile: SCOPE_PROFILE, mode: 'locked' })
   const credential: string = created.data?.credential
   if (!credential) throw new Error(`seeding ${SCOPE_CLIENT} returned no credential (status ${created.status})`)
