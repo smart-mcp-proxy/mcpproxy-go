@@ -35,6 +35,11 @@ export function unannotatedLabel(value: string | undefined): string {
   return UNANNOTATED_OPTIONS.find(option => option.value === value)?.label ?? 'Default'
 }
 
+// How a client credential is bound, in words (Terminology: Locked / Switchable).
+export function modeLabel(mode: string | undefined): string {
+  return mode === 'locked' ? 'Locked' : 'Switchable'
+}
+
 // Why a tool is hidden or not callable, in words: the FR-010 reasons plus the
 // rest of profile.AccessReasons that a view-as listing and the explainer can
 // return (Spec 108-j J7). One map for the editor table, Tools view-as and the
@@ -43,7 +48,7 @@ export function reasonText(reason: string | undefined): string {
   switch (reason) {
     case 'server_not_in_profile': return 'Server not in profile'
     case 'denied_by_rule': return 'Denied by rule'
-    case 'unannotated_hidden': return 'Unannotated — hidden'
+    case 'unannotated_hidden': return 'Unannotated — classify'
     case 'above_tier_cap': return 'Above tier cap'
     case 'credential': return 'Credential revoked or expired'
     case 'profile': return 'Profile missing — denied everything'
@@ -51,7 +56,7 @@ export function reasonText(reason: string | undefined): string {
     case 'token_permission': return 'Token permission'
     case 'global_gate': return 'Blocked by a global setting'
     case 'server_state': return 'Server disabled or not connected'
-    case 'tool_approval': return 'Awaiting approval'
+    case 'tool_approval': return 'Needs review'
     case '':
     case undefined: return 'Visible'
     default: return reason.replaceAll('_', ' ')

@@ -80,8 +80,8 @@ struct ClientBindingControlsState: Equatable {
         lockEnabled = canBind && !client.boundProfile.isEmpty
         lockHelp = (canBind && client.boundProfile.isEmpty) ? "Choose a profile to lock" : nil
         switch (canBind, client.profileMode) {
-        case (true, .some(.locked)) where !client.boundProfile.isEmpty: sourceLabel = "locked by credential"
-        case (true, _): sourceLabel = "switchable"
+        case (true, .some(.locked)) where !client.boundProfile.isEmpty: sourceLabel = ProfileSourceText.label("pin")
+        case (true, _): sourceLabel = ProfileSourceText.label("binding")
         default: sourceLabel = nil
         }
         credentialBadge = state.badgeLabel

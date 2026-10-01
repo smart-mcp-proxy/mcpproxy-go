@@ -7,18 +7,19 @@ Complete reference for MCPProxy configuration file (`mcp_config.json`). This doc
 1. [Configuration File Location](#configuration-file-location)
 2. [Basic Configuration](#basic-configuration)
 3. [Server Configuration](#server-configuration)
-4. [Security Settings](#security-settings)
-5. [Tokenizer Configuration](#tokenizer-configuration)
-6. [TLS/HTTPS Configuration](#tlshttps-configuration)
-7. [Logging Configuration](#logging-configuration)
-8. [Docker Isolation](#docker-isolation)
-9. [Docker Recovery](#docker-recovery)
-10. [Environment Configuration](#environment-configuration)
-11. [Code Execution](#code-execution)
-12. [Feature Flags](#feature-flags)
-13. [Registries](#registries)
-14. [Update Check](#update-check)
-15. [Complete Example](#complete-example)
+4. [Profiles](#profiles-profiles-and-anonymous_profile)
+5. [Security Settings](#security-settings)
+6. [Tokenizer Configuration](#tokenizer-configuration)
+7. [TLS/HTTPS Configuration](#tlshttps-configuration)
+8. [Logging Configuration](#logging-configuration)
+9. [Docker Isolation](#docker-isolation)
+10. [Docker Recovery](#docker-recovery)
+11. [Environment Configuration](#environment-configuration)
+12. [Code Execution](#code-execution)
+13. [Feature Flags](#feature-flags)
+14. [Registries](#registries)
+15. [Update Check](#update-check)
+16. [Complete Example](#complete-example)
 
 ---
 
@@ -685,6 +686,58 @@ the next login re-registers against the pinned URL; a statically configured
 `client_id` is never cleared.
 
 See [OAuth Documentation](mcp-go-oauth.md) for complete details.
+
+---
+
+## Profiles (`profiles`) and `anonymous_profile`
+
+A profile is a named view over your upstream servers with a tool policy. The full model, the resolution order and the refusal texts are in [Profiles](features/profiles.md); this is the configuration reference.
+
+```json
+{
+  "require_mcp_auth": true,
+  "anonymous_profile": "",
+  "profiles": [
+    {
+      "name": "work-readonly",
+      "title": "Work · Read-only",
+      "description": "GitHub and Notion, read tools only",
+      "servers": ["github", "notion"],
+      "max_tier": "read",
+      "unannotated": "deny",
+      "tools": {
+        "allow": ["notion:update_page"],
+        "deny": ["github:*secret*"],
+        "classify": { "github:search_code": "read" }
+      },
+      "code_execution": false,
+      "management_tools": false,
+      "switchable_to": ["work-full"]
+    },
+    { "name": "work-full", "servers": ["github", "notion", "filesystem"] }
+  ]
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `profiles[].name` | string | required | Slug `^[a-z0-9][a-z0-9_-]{0,62}$`. Reserved: `all`, `code`, `call`, `p` (URL segments), `active`, `try` (REST routes). Duplicates are a fatal error |
+| `profiles[].servers` | string[] | required | Servers the profile reaches. An unknown server is a warning and is skipped; an empty list denies everything |
+| `profiles[].title` | string | name | Display title, at most 80 characters |
+| `profiles[].description` | string | none | At most 500 characters |
+| `profiles[].max_tier` | `read` \| `write` \| `destructive` | no cap | The highest tool tier the profile admits |
+| `profiles[].unannotated` | `deny` \| `as_write` \| `as_read` | `deny` under a `read` or `write` cap, otherwise `as_read` | How to treat a tool that declares no tier |
+| `profiles[].tools.allow` | string[] | none | `server:tool` patterns (`*` is the only wildcard) admitted even above the cap. Cannot add a server |
+| `profiles[].tools.deny` | string[] | none | Patterns hidden from the profile. Deny beats allow |
+| `profiles[].tools.classify` | object | none | `server:tool` to `read`, `write` or `destructive`; applies only to tools with no annotations |
+| `profiles[].code_execution` | boolean | off under a `read` or `write` cap, otherwise inherits `enable_code_execution` | `false` removes the `code_execution` tool for the profile; the global flag always wins |
+| `profiles[].management_tools` | boolean | inherit | `true` shows `upstream_servers` and `quarantine_security` (still limited by the caller's own permissions); `false` hides them |
+| `profiles[].switchable_to` | string[] | unset (none) | Profiles a client bound to this profile, or a confined anonymous caller, may switch to with `set_profile` |
+| `anonymous_profile` | string | empty (unconfined) | Confines every caller that presents no credential, or an unrecognised token while `require_mcp_auth` is off, to this profile. A missing profile denies everything and logs a warning |
+
+A profile that sets only `name` and `servers` behaves exactly as before: no cap, unannotated tools count as read, no rules. Invalid input (an unknown tier or `unannotated` value, a malformed pattern, `switchable_to` naming the profile itself) is refused with the same message on every surface. Both `profiles` and `anonymous_profile` are **live**: an edit takes effect without a restart, and `PATCH /api/v1/config` reports them in `changed_fields`.
+
+With `require_mcp_auth` off, a change that would let a client bound to a profile escape it by omitting its credential is refused with `409 binding_bypassable_without_auth` (see [Profiles, the binding guard](features/profiles.md#the-binding-guard)). **Before downgrading to a pre-profiles-v3 binary, turn `require_mcp_auth` on**; the older binary does not know client credentials or `anonymous_profile`.
 
 ---
 

@@ -270,9 +270,9 @@ struct ProfileEditorView: View {
             Picker("Max tool tier", selection: Binding(
                 get: { model.draft.maxTier ?? "" },
                 set: { model.draft.maxTier = $0.isEmpty ? nil : $0 })) {
-                Text("Read").tag("read")
-                Text("+ Write").tag("write")
-                Text("+ Destructive").tag("destructive")
+                ForEach(["read", "write", "destructive"], id: \.self) { tier in
+                    Text(MaxTierText.label(tier) ?? tier).tag(tier)
+                }
                 Text("No cap").tag("")
             }
             .pickerStyle(.segmented).labelsHidden()
@@ -285,9 +285,9 @@ struct ProfileEditorView: View {
             Picker("Unannotated tools", selection: Binding(
                 get: { model.draft.unannotated ?? "" },
                 set: { model.draft.unannotated = $0.isEmpty ? nil : $0 })) {
-                Text("Hide").tag("deny")
-                Text("Treat as write").tag("as_write")
-                Text("Treat as read").tag("as_read")
+                ForEach(["deny", "as_write", "as_read"], id: \.self) { policy in
+                    Text(UnannotatedText.label(policy) ?? policy).tag(policy)
+                }
                 Text("Default\(model.original?.effectiveUnannotated.map { " (\($0))" } ?? "")").tag("")
             }
             .labelsHidden()

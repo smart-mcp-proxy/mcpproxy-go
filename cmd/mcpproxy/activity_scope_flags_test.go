@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/url"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -202,4 +203,45 @@ func TestActivityScopeFlags_HelpJSONListsTheFlags(t *testing.T) {
 	assert.Contains(t, activityListCmd.Flags().Lookup("type").Usage, "profile_change")
 	_, err := json.Marshal(activityListCmd.Flags().Lookup("token").Usage)
 	require.NoError(t, err)
+}
+
+// Spec 108-l (L7, SC-001 audit check 2, second half): the blocked call from check 2
+// (TestProfilesV3Acceptance_Check2_WriteRefusedAndRecorded in internal/server)
+// is listed by `mcpproxy activity list --client cursor --status blocked`. The
+// fake daemon holds that record and one that must not match; the CLI must send
+// exactly the client+status query and print exactly the blocked record.
+func TestProfilesV3Acceptance_Check2_CLIListsBlockedRecord(t *testing.T) {
+	blocked := map[string]any{
+		"id": "01BLOCKED", "source": "mcp", "type": "policy_decision", "server_name": "github", "tool_name": "create_issue",
+		"status": "blocked", "timestamp": "2026-10-01T09:00:00Z",
+		"client_id": "cursor", "profile": "work-readonly", "profile_source": "pin", "token_name": "client-cursor",
+		"metadata": map[string]any{"block_reason": "profile_tier"},
+	}
+	other := map[string]any{
+		"id": "01OTHER", "source": "mcp", "type": "tool_call", "server_name": "github", "tool_name": "list_issues",
+		"status": "success", "timestamp": "2026-10-01T09:00:01Z", "client_id": "codex", "profile": "work-full", "profile_source": "binding",
+	}
+	daemon := p108StartActivityDaemon(t, func(q url.Values) []map[string]any {
+		var out []map[string]any
+		for _, rec := range []map[string]any{blocked, other} {
+			if (q.Get("client") == "" || q.Get("client") == rec["client_id"]) && (q.Get("status") == "" || q.Get("status") == rec["status"]) {
+				out = append(out, rec)
+			}
+		}
+		return out
+	})
+
+	ids, err := p108RunActivityList(t, "--client", "cursor", "--status", "blocked")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"01BLOCKED"}, ids, "exactly the blocked record is listed")
+	q := daemon.last(t)
+	assert.Equal(t, "cursor", q.Get("client"))
+	assert.Equal(t, "blocked", q.Get("status"))
+	assert.Empty(t, q.Get("profile"), "no scope parameter the operator did not ask for")
+
+	t.Run("mutation: without the filters both records come back", func(t *testing.T) {
+		all, err := p108RunActivityList(t)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"01BLOCKED", "01OTHER"}, all)
+	})
 }

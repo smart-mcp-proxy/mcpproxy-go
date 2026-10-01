@@ -97,7 +97,7 @@
           :data-test="`client-lock-switch-${client.id}`"
           @change="toggleLock(($event.target as HTMLInputElement).checked)"
         />
-        <span class="text-xs">{{ locked ? 'Locked' : 'Switchable' }}</span>
+        <span class="text-xs">{{ modeLabel(locked ? 'locked' : 'switchable') }}</span>
       </div>
     </template>
 
@@ -121,7 +121,7 @@ import { useProfilesStore } from '@/stores/profiles'
 import { useClientBindingsStore } from '@/stores/clientBindings'
 import { CONNECT_CLIENT_EVENT } from '@/navigation/navModel'
 import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
-import { credentialCta, credentialLabel, tierPhrase } from '@/utils/profiles'
+import { credentialCta, credentialLabel, modeLabel, tierPhrase } from '@/utils/profiles'
 import type { ClientPresence } from '@/types/api'
 
 // Spec 108-i I7: the profile chip of a Clients row. A menu button lists All

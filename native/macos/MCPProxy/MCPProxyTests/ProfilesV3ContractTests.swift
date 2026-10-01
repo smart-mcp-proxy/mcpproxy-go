@@ -126,7 +126,7 @@ final class ProfilesV3ContractTests: XCTestCase {
         XCTAssertEqual(entry.tokenName, "client-cursor")
         XCTAssertEqual(entry.profileBlockReason, "profile_tier")
         XCTAssertEqual(entry.callerClientLabel, "cursor", "an id beats the advisory name")
-        XCTAssertEqual(entry.callerProfileLabel, "work-readonly (pin)")
+        XCTAssertEqual(entry.callerProfileLabel, "work-readonly · locked by credential")
     }
 
     /// An advisory client NAME is never shown as an identity: it is marked "~".

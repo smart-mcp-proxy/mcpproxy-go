@@ -136,7 +136,7 @@
             <p v-if="!usedByAny" class="text-sm opacity-70">Nothing yet.</p>
             <ul class="space-y-1 text-sm">
               <li v-for="client in saved.used_by.clients" :key="client.id" class="flex flex-wrap items-center gap-2" :data-test="`profile-assigned-client-${client.id}`">
-                <span>Client {{ clientName(client.id) }}</span><span class="badge badge-sm">{{ client.mode === 'locked' ? 'Locked' : 'Switchable' }}</span>
+                <span>Client {{ clientName(client.id) }}</span><span class="badge badge-sm">{{ modeLabel(client.mode) }}</span>
                 <button v-if="canEdit" type="button" class="btn btn-xs btn-ghost" :data-test="`profile-unassign-${client.id}`" @click="unassign(client.id)">Unassign</button>
               </li>
               <li v-for="token in saved.used_by.tokens" :key="token" class="flex flex-wrap items-center gap-2" :data-test="`profile-assigned-token-${token}`">
@@ -211,7 +211,7 @@ import { useClientsStore, CLIENT_BINDING_CHANGED_EVENT } from '@/stores/clients'
 import { useClientBindingsStore } from '@/stores/clientBindings'
 import { useProfilesStore, PROFILES_CHANGED_EVENT } from '@/stores/profiles'
 import { useServersStore } from '@/stores/servers'
-import { MAX_TIER_OPTIONS, UNANNOTATED_OPTIONS, describeError, isGuardRefusal, unannotatedLabel } from '@/utils/profiles'
+import { MAX_TIER_OPTIONS, UNANNOTATED_OPTIONS, describeError, isGuardRefusal, modeLabel, unannotatedLabel } from '@/utils/profiles'
 import type { EffectiveToolsResult, ProfileConfig, ProfileToolRules, ProfileView } from '@/types/api'
 import type { ApiError } from '@/services/api'
 
