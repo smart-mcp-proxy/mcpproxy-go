@@ -1,0 +1,1446 @@
+{
+  "schema": "parity-matrix/v1",
+  "spec": "108",
+  "comment": "One entry per row of the spec.md parity table (FR-051). Status: must = a tick in the spec, out = a dash (reason required), na = n/a, deprecated = row 25 REST. Identifiers: route:<vue route name>, testid:<data-test> (a trailing -<x> matches a template interpolation), component:<repo path>, symbol:<repo path>#<name>, a11y:<accessibility identifier>, nav:<SidebarItem case>, add:<AddMenuItem case>, approute:<AppRoute case>, cmd:<command path>, mcp:<tool>[.<operation>], rest:<METHOD> <swagger path>. fields: REST/MCP argument names that must exist on the surface (CLI: as a kebab-case flag of at least one command in the cell). tests: go:<repo path>#<Test>, vitest:<repo path>, xctest:<repo path>#<method>, pw:<repo path>. A cell may carry pending:<spec> while another spec lands the implementing id; the resolver then tolerates its absence (at most one such cell).",
+  "rows": [
+    {
+      "row": 1,
+      "capability": "List profiles with stats (tier counts, unannotated, used by)",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:profiles",
+            "testid:profiles-page",
+            "testid:profile-card-<x>"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/profiles-page.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "nav:profiles",
+            "a11y:profiles-view",
+            "a11y:profile-card-<x>"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ProfileModelsTests.swift#testTheFullVersionThreePayloadDecodes"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:profile list"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/profile_cmd_test.go#TestProfileList_TableAndJSON"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:profiles.list"
+          ],
+          "tests": [
+            "go:internal/server/mcp_profiles_tool_v3_test.go#TestProfilesTool_EachOpResultEqualsRESTData"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/profiles"
+          ],
+          "tests": [
+            "go:internal/httpapi/profiles_crud_test.go#TestProfilesCrud_AdminShapes"
+          ]
+        }
+      }
+    },
+    {
+      "row": 2,
+      "capability": "Show profile + effective tools with reasons",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:profile-editor",
+            "testid:profile-tool-table",
+            "component:frontend/src/components/profiles/ProfileToolTable.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/profile-policy-editor.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:profile-editor",
+            "a11y:profile-tool-row-<x>"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ProfileEditorModelTests.swift#testTheEditorRendersTheModelSections"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:profile show"
+          ],
+          "fields": [
+            "client",
+            "reason",
+            "server"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/profile_cmd_test.go#TestProfileShow_EffectiveQueryMapping"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:profiles.effective_tools"
+          ],
+          "fields": [
+            "name",
+            "client",
+            "reason",
+            "server"
+          ],
+          "tests": [
+            "go:internal/server/mcp_profiles_tool_v3_test.go#TestProfilesTool_EffectiveToolsServerAndReasonArgs"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/profiles/{name}/effective-tools"
+          ],
+          "tests": [
+            "go:internal/httpapi/profiles_crud_test.go#TestProfilesEffectiveTools_ScopedCallerGetsVisibleRowsOnly"
+          ]
+        }
+      }
+    },
+    {
+      "row": 3,
+      "capability": "Create / update profile policy",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:profile-editor-save",
+            "testid:profile-create-submit"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/profile-policy-editor.spec.ts",
+            "pw:e2e/web-ui-sweep/profiles-clients.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:profile-editor-save",
+            "a11y:profiles-new",
+            "add:profile"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ProfileEditorModelTests.swift#testSaveOfANewProfileCreatesIt"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:profile create",
+            "cmd:profile update"
+          ],
+          "fields": [
+            "max_tier",
+            "unannotated",
+            "servers",
+            "switchable_to",
+            "code_execution",
+            "management_tools",
+            "title",
+            "description"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/profile_cmd_test.go#TestProfileCreate_BodyFieldNames"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:profiles.create",
+            "mcp:profiles.update"
+          ],
+          "fields": [
+            "max_tier",
+            "unannotated",
+            "servers",
+            "switchable_to",
+            "code_execution",
+            "management_tools",
+            "title",
+            "description"
+          ],
+          "tests": [
+            "go:internal/server/mcp_profiles_tool_v3_test.go#TestProfilesTool_SchemaPropertiesEqualProfileConfigPlusOpArgs"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/profiles",
+            "rest:PUT /api/v1/profiles/{name}"
+          ],
+          "tests": [
+            "go:internal/httpapi/profiles_crud_test.go#TestProfilesCrud_AdminShapes"
+          ]
+        }
+      }
+    },
+    {
+      "row": 4,
+      "capability": "Rename / delete with reassignment",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:profile-rename-submit",
+            "testid:profile-delete-confirm"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/profiles-page.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:profile-rename-confirm",
+            "a11y:profile-delete-confirm"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ProfileEditorModelTests.swift#testADeleteSendsTheTargetAndForce"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:profile rename",
+            "cmd:profile delete"
+          ],
+          "fields": [
+            "reassign_to",
+            "force"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/profile_cmd_test.go#TestProfileDelete_ReassignPrintsMoved"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:profiles.rename",
+            "mcp:profiles.delete"
+          ],
+          "fields": [
+            "new_name",
+            "reassign_to",
+            "force"
+          ],
+          "tests": [
+            "go:internal/server/mcp_profiles_tool_v3_test.go#TestProfilesTool_CreateRenameDeleteClassifyResults"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/profiles/{name}/rename",
+            "rest:DELETE /api/v1/profiles/{name}"
+          ],
+          "tests": [
+            "go:internal/httpapi/profiles_crud_test.go#TestProfilesCrud_ErrorMapping"
+          ]
+        }
+      }
+    },
+    {
+      "row": 5,
+      "capability": "Classify unannotated tool",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:tool-classify-<x>"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/profile-policy-editor.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:profile-tool-row-<x>"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ProfileEditorModelTests.swift#testClassifyIsOnlyForUnannotatedTools"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:profile classify"
+          ],
+          "fields": [
+            "clear"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/profile_cmd_test.go#TestProfileClassify_SetsAndClears"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:profiles.classify"
+          ],
+          "fields": [
+            "name",
+            "tier"
+          ],
+          "tests": [
+            "go:internal/server/mcp_profiles_tool_v3_test.go#TestProfilesTool_CreateRenameDeleteClassifyResults"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:PUT /api/v1/profiles/{name}"
+          ],
+          "tests": [
+            "go:internal/httpapi/profiles_crud_test.go#TestProfilesCrud_AdminShapes"
+          ]
+        }
+      }
+    },
+    {
+      "row": 6,
+      "capability": "Try it (draft query)",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:profile-try",
+            "component:frontend/src/components/profiles/ProfileTryPanel.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/profile-policy-editor.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:profile-try",
+            "a11y:profile-try-query"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ProfileEditorModelTests.swift#testTrySendsTheUnsavedDraft"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:profile try"
+          ],
+          "fields": [
+            "query",
+            "limit"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/profile_cmd_test.go#TestProfileTry_DraftFromSavedOrNew"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "an admin agent can simply call `retrieve_tools` after `update`; a draft tool adds no capability",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/profiles/try"
+          ],
+          "tests": [
+            "go:internal/server/profile_v3_try_test.go#TestProfileV3Try_ADraftReplacesTheSameNamedProfileWithoutPersisting"
+          ]
+        }
+      }
+    },
+    {
+      "row": 7,
+      "capability": "List clients (state, credential, profile, lock, source, last seen), filterable by current profile",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:clients",
+            "testid:clients-page",
+            "testid:client-row-<x>",
+            "testid:client-profile-chip-<x>"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/clients-page.spec.ts",
+            "vitest:frontend/tests/unit/client-binding-controls.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "nav:clients",
+            "a11y:clients-view",
+            "a11y:client-row-<x>",
+            "a11y:client-profile-picker-<x>"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ClientBindingModelTests.swift#testAnActiveClientCredentialEnablesThePickerAndToggle",
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ClientsTrayMenuTests.swift#testTitleShowsTheProfileAndALockForALockedClient"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:client list"
+          ],
+          "fields": [
+            "profile",
+            "client"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/client_binding_cmd_test.go#TestClientList_ProfileAndClientFilters"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:profiles.list_clients"
+          ],
+          "fields": [
+            "profile",
+            "client"
+          ],
+          "tests": [
+            "go:internal/server/mcp_profiles_tool_v3_test.go#TestProfilesTool_ListClientsEqualsRESTMinusPaths"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/clients"
+          ],
+          "tests": [
+            "go:internal/httpapi/clients_routes_test.go#TestClientsRoutes_ListShowsCustomRowsFiltersAndKeepsWarningsUnfiltered"
+          ]
+        }
+      }
+    },
+    {
+      "row": 8,
+      "capability": "Assign profile / lock / unlock",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:client-profile-chip-<x>",
+            "testid:client-lock-switch-<x>"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/client-binding-controls.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:client-profile-picker-<x>",
+            "a11y:client-lock-toggle-<x>"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ClientBindingModelTests.swift#testAssignSendsProfileAndModeInOneRequest"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:client set-profile",
+            "cmd:client lock",
+            "cmd:client unlock"
+          ],
+          "fields": [
+            "lock",
+            "switchable"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/client_binding_cmd_test.go#TestClientLockUnlock_GetThenPut"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:profiles.assign"
+          ],
+          "fields": [
+            "client",
+            "profile",
+            "mode"
+          ],
+          "tests": [
+            "go:internal/server/mcp_profiles_tool_v3_test.go#TestProfilesTool_AssignModeOmittedKeepsMode"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:PUT /api/v1/clients/{client}/binding"
+          ],
+          "tests": [
+            "go:internal/httpapi/client_bindings_test.go#TestPutClientBinding_ModeSemantics"
+          ]
+        }
+      }
+    },
+    {
+      "row": 9,
+      "capability": "Bulk move X→Y",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:clients-bulk-move",
+            "testid:bulk-submit"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/client-binding-controls.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:clients-bulk-move",
+            "a11y:bulk-move-confirm"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ClientBindingModelTests.swift#testBulkMoveNeedsDifferentProfiles"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:client set-profile"
+          ],
+          "fields": [
+            "from_profile",
+            "to_profile"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/client_binding_cmd_test.go#TestClientSetProfile_BulkUsesFromToProfile"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:profiles.assign"
+          ],
+          "fields": [
+            "from_profile",
+            "to_profile"
+          ],
+          "tests": [
+            "go:internal/server/mcp_profiles_tool_v3_test.go#TestProfilesTool_BulkAssignMovedSkipped"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/clients/bulk-assign"
+          ],
+          "tests": [
+            "go:internal/httpapi/clients_routes_test.go#TestClientsRoutes_BulkAssign"
+          ]
+        }
+      }
+    },
+    {
+      "row": 10,
+      "capability": "Connect client with profile (mint credential)",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:connect-profile-select-<x>",
+            "testid:connect-lock-switch-<x>"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/connect-profile-fields.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:connect-profile-picker"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/APIClientProfilesTests.swift#testConnectWithABindingSendsProfileModeAndKeylessInTheBody"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:connect"
+          ],
+          "fields": [
+            "profile",
+            "keyless"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/connect_profile_flags_test.go#TestConnectProfileFlags_DaemonPathSendsTheIntentAndPrintsTheResult"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "writing local client config files is an operator action (issue #878 class)",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/connect/{client}"
+          ],
+          "tests": [
+            "go:internal/httpapi/connect_client_credential_test.go#TestConnectREST_MintsAClientCredentialNotTheAdminKey"
+          ]
+        }
+      }
+    },
+    {
+      "row": 11,
+      "capability": "Custom client (snippet + credential once)",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:clients-add-other",
+            "testid:custom-client-submit",
+            "testid:credential-once-secret"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/clients-page.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "add:client",
+            "a11y:clients-other-client",
+            "a11y:other-client-create",
+            "a11y:credential-once"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ClientBindingModelTests.swift#testTheCustomClientCredentialIsShownOnceAndZeroedOnDismiss"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:client add"
+          ],
+          "fields": [
+            "profile",
+            "display_name"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/client_binding_cmd_test.go#TestClientAdd_PrintsCredentialOnceAndHeaderSnippet"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "same reason as 10",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/clients"
+          ],
+          "tests": [
+            "go:internal/httpapi/clients_routes_test.go#TestClientsRoutes_CreateCustomClientReturnsTheSecretOnceWithAHeaderSnippet"
+          ]
+        }
+      }
+    },
+    {
+      "row": 12,
+      "capability": "Rotate / forget client credential (staged rotation, FR-021a)",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:client-rotate-<x>",
+            "testid:client-finalize-<x>",
+            "testid:client-forget-<x>"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/client-binding-controls.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:client-rotate-<x>",
+            "a11y:client-finalize-<x>",
+            "a11y:client-forget-<x>"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ClientBindingModelTests.swift#testForgetPassesDisconnectAndAnnouncesTheResult"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:client rotate",
+            "cmd:client forget"
+          ],
+          "fields": [
+            "finalize",
+            "disconnect"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/client_binding_cmd_test.go#TestClientRotate_Finalize"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "same reason as 10",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:POST /api/v1/clients/{client}/rotate",
+            "rest:POST /api/v1/clients/{client}/rotate/finalize",
+            "rest:DELETE /api/v1/clients/{client}"
+          ],
+          "tests": [
+            "go:internal/httpapi/clients_routes_test.go#TestClientsRoutes_CustomRotateFinalizeAndTheOverlap"
+          ]
+        }
+      }
+    },
+    {
+      "row": 13,
+      "capability": "Token bound to profile",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:token-profile-select"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/token-dialog-profile.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "add:token",
+            "a11y:token-profile-picker",
+            "a11y:token-profile-picker-create"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/TokensCreateModelTests.swift#testAProfileTokenBodyCarriesNoLegacyScope"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:token create"
+          ],
+          "fields": [
+            "profile"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/token_cmd_profile_test.go#TestTokenCreate_ProfileDefaults"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "minting credentials from an agent session is refused today (Spec 028)",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "symbol:internal/httpapi/tokens.go#handleCreateToken"
+          ],
+          "tests": [
+            "go:internal/httpapi/tokens_profile_test.go#TestTokensProfile_ProfileSetsThePinWithDefaults"
+          ]
+        }
+      }
+    },
+    {
+      "row": 14,
+      "capability": "Access explainer",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:explain-run",
+            "component:frontend/src/components/AccessExplainer.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/access-explainer.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:access-explainer",
+            "a11y:access-explainer-run"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/AccessExplainerModelTests.swift#testExactlyOneSubjectIsSent"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:access explain"
+          ],
+          "fields": [
+            "client",
+            "profile",
+            "token",
+            "tool",
+            "anonymous"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/access_cmd_test.go#TestAccessExplain_SubjectQueryMapping"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:profiles.explain"
+          ],
+          "fields": [
+            "client",
+            "profile",
+            "tool",
+            "anonymous"
+          ],
+          "tests": [
+            "go:internal/server/mcp_profiles_tool_v3_test.go#TestProfilesTool_ExplainSubjectCount400Text"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/access/explain"
+          ],
+          "tests": [
+            "go:internal/httpapi/access_explain_route_test.go#TestAccessExplainRoute_SubjectAndToolRules"
+          ]
+        }
+      }
+    },
+    {
+      "row": 15,
+      "capability": "Activity filters profile/client/token",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:activity",
+            "testid:scope-select-profile",
+            "testid:scope-select-client",
+            "testid:scope-select-token",
+            "testid:activity-scope-chips"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/activity-scope-params.spec.ts",
+            "pw:e2e/web-ui-sweep/profiles-scope.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:activity-filter-profile",
+            "a11y:activity-filter-client",
+            "a11y:activity-filter-token"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift#testSessionsCarryTheThreeScopeFilters"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:activity list"
+          ],
+          "fields": [
+            "profile",
+            "client",
+            "token"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/activity_scope_flags_test.go#TestActivityScopeFlags_ListQueryMapping"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "no activity tool exists; agents do not query history",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/activity"
+          ],
+          "tests": [
+            "go:internal/httpapi/activity_scope_params_test.go#TestActivityScopeParams_ListFiltersAndAliases"
+          ]
+        }
+      }
+    },
+    {
+      "row": 16,
+      "capability": "Usage/summary filters",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:usage",
+            "testid:usage-scope-chips"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/usage-scope-params.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:home-filter-profile",
+            "a11y:home-filter-client",
+            "a11y:home-filter-token"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift#testUsageCarriesTheThreeScopeFiltersAndA24hWindow"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:activity summary"
+          ],
+          "fields": [
+            "profile",
+            "client",
+            "token"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/activity_scope_flags_test.go#TestActivityScopeFlags_SummaryScopeQueryAndClientNameRejected"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "same reason as 15",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/activity/summary",
+            "rest:GET /api/v1/activity/usage"
+          ],
+          "tests": [
+            "go:internal/httpapi/activity_scope_params_test.go#TestActivityScopeParams_SummaryCountsOnlyTheFilteredRecords"
+          ]
+        }
+      }
+    },
+    {
+      "row": 17,
+      "capability": "Sessions filters + profile/client columns",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:sessions",
+            "testid:sessions-profile-col",
+            "testid:sessions-client"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/sessions-attribution.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:activity-sessions-list",
+            "a11y:activity-session-row"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift#testSessionsCarryTheThreeScopeFilters"
+          ]
+        },
+        "cli": {
+          "status": "out",
+          "reason": "no `sessions` command exists; `activity list --session` covers it",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "agents have no session listing; an agent switches its own session with `set_profile`",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/sessions"
+          ],
+          "tests": [
+            "go:internal/httpapi/sessions_scope_test.go#TestSessionsScope_RowsCarryAttributionAndFiltersReachStorage"
+          ]
+        }
+      }
+    },
+    {
+      "row": 18,
+      "capability": "Tools \"view as\" client/profile",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:tools",
+            "testid:tools-scope-chips",
+            "testid:tools-view-as-keep-client"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/tools-view-as.spec.ts",
+            "pw:e2e/web-ui-sweep/profiles-scope.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:tools-view-as",
+            "a11y:tools-view-as-client",
+            "a11y:tools-view-as-profile"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/APIClientProfilesTests.swift#testViewAsToolsSendsClientOrProfile"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:tools list"
+          ],
+          "fields": [
+            "client",
+            "profile"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/tools_cmd_view_as_test.go#TestToolsViewAs_FlagsRegisteredAndQueryMapping"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:profiles.effective_tools"
+          ],
+          "fields": [
+            "client"
+          ],
+          "tests": [
+            "go:internal/server/mcp_profiles_tool_v3_test.go#TestProfilesTool_EffectiveToolsServerAndReasonArgs"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/tools"
+          ],
+          "tests": [
+            "go:internal/httpapi/scope_route_table_guard_test.go#TestScopeRouteTableGuard"
+          ]
+        }
+      }
+    },
+    {
+      "row": 19,
+      "capability": "Servers filter by profile",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:servers-profile-select"
+          ],
+          "pending": "109-l",
+          "tests": [
+            "vitest:frontend/tests/unit/servers-scope.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:servers-profile-filter"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift#testServersSendsOnlyProfile"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:upstream list"
+          ],
+          "fields": [
+            "profile"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/tools_cmd_view_as_test.go#TestUpstreamListProfile_FlagAndQueryMapping"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "`upstream_servers list` is already profile-scoped for the session",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/servers"
+          ],
+          "tests": [
+            "go:internal/httpapi/scope_route_table_guard_test.go#TestScopeRouteTableGuard"
+          ]
+        }
+      }
+    },
+    {
+      "row": 20,
+      "capability": "Deep links with scope params",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "component:frontend/src/composables/useScopeQuery.ts",
+            "component:frontend/src/utils/scopeParams.ts",
+            "component:frontend/src/components/scope/ScopeChips.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/scope-query.spec.ts",
+            "vitest:frontend/tests/unit/scope-params-api.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/State/ScopeFilter.swift#ScopeFilter",
+            "approute:clients",
+            "approute:tools",
+            "approute:servers",
+            "approute:home"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift#testOpenScopedRoutesEachPageThroughItsChannel"
+          ]
+        },
+        "cli": {
+          "status": "out",
+          "reason": "CLI has no navigation",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "MCP has no navigation",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "out",
+          "reason": "no REST surface: navigation is a UI concern, owned by Spec 109",
+          "ids": [],
+          "tests": []
+        }
+      }
+    },
+    {
+      "row": 21,
+      "capability": "Binding guard refusal and warning / admin-key client warning + bulk upgrade / token-name conflict / rotation pending",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:clients-warnings-banner",
+            "testid:clients-upgrade-admin-key",
+            "testid:guard-refusal"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/clients-page.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:clients-warnings-banner",
+            "a11y:clients-upgrade-admin-key",
+            "a11y:guard-refusal"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ClientBindingModelTests.swift#testEachWarningActionMapsToItsDestination"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:doctor",
+            "cmd:client upgrade-admin-key-holders"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/doctor_profiles_test.go#TestDoctorProfileChecks_BindingBypassFromWarning",
+            "go:cmd/mcpproxy/client_binding_cmd_test.go#TestClientUpgradeAdminKeyHolders_GuardPreviewExit1NoApply"
+          ]
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:profiles.assign"
+          ],
+          "tests": [
+            "go:internal/server/mcp_profiles_tool_v3_test.go#TestProfilesTool_AssignReturnsClientViewAndWarnings"
+          ]
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:GET /api/v1/clients",
+            "rest:POST /api/v1/clients/upgrade-admin-key-holders"
+          ],
+          "tests": [
+            "go:internal/httpapi/clients_routes_test.go#TestClientsRoutes_ListShowsCustomRowsFiltersAndKeepsWarningsUnfiltered"
+          ]
+        }
+      }
+    },
+    {
+      "row": 22,
+      "capability": "Session profile switch",
+      "cells": {
+        "web": {
+          "status": "out",
+          "reason": "agent-facing by design; operators reassign bindings (row 8)",
+          "ids": [],
+          "tests": []
+        },
+        "macos": {
+          "status": "out",
+          "reason": "agent-facing by design; operators reassign bindings (row 8)",
+          "ids": [],
+          "tests": []
+        },
+        "cli": {
+          "status": "out",
+          "reason": "agent-facing by design; operators reassign bindings (row 8)",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "must",
+          "ids": [
+            "mcp:set_profile"
+          ],
+          "tests": [
+            "go:internal/server/set_profile_v3_test.go#TestSetProfileV3_ManagementAndSwitchingMatrix"
+          ]
+        },
+        "rest": {
+          "status": "out",
+          "reason": "agent-facing by design; operators reassign bindings (row 8)",
+          "ids": [],
+          "tests": []
+        }
+      }
+    },
+    {
+      "row": 23,
+      "capability": "`anonymous_profile` setting",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:anonymous-profile-select",
+            "testid:anonymous-profile-save",
+            "testid:settings-anonymous-profile"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/settings-anonymous-profile.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:settings-anonymous-profile",
+            "a11y:settings-anonymous-profile-save"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/AnonymousProfileSectionTests.swift#testSavingAProfileSendsItsNameAndMarksItSaved"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:profile anonymous"
+          ],
+          "fields": [
+            "clear"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/profile_cmd_test.go#TestProfileAnonymous_GetSetClear"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "a config-level authentication setting stays operator-only (research D13)",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "rest:PATCH /api/v1/config"
+          ],
+          "tests": [
+            "go:internal/httpapi/binding_guard_config_test.go#TestConfigRoutes_MapBindingGuardRefusalTo409"
+          ]
+        }
+      }
+    },
+    {
+      "row": 24,
+      "capability": "Legacy token scope shown read-only + migrate hint; tokens filterable by current profile",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "route:tokens",
+            "testid:token-legacy-scope",
+            "testid:token-migrate-<x>"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/tokens-redirect.spec.ts",
+            "vitest:frontend/tests/unit/token-dialog-profile.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "a11y:token-migrate-<x>",
+            "a11y:token-profile-chip-<x>",
+            "a11y:token-profile-picker",
+            "a11y:token-name-filter"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/TokensCreateModelTests.swift#testTheListFilterParamsAreProfileAndToken"
+          ]
+        },
+        "cli": {
+          "status": "must",
+          "ids": [
+            "cmd:token list"
+          ],
+          "fields": [
+            "profile",
+            "token"
+          ],
+          "tests": [
+            "go:cmd/mcpproxy/token_cmd_profile_test.go#TestTokenCreate_LegacyHint"
+          ]
+        },
+        "mcp": {
+          "status": "out",
+          "reason": "no token tool exists (same reason as 13)",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "must",
+          "ids": [
+            "symbol:internal/httpapi/tokens.go#handleListTokens"
+          ],
+          "tests": [
+            "go:internal/httpapi/tokens_profile_test.go#TestTokensProfile_ListFilters"
+          ]
+        }
+      }
+    },
+    {
+      "row": 25,
+      "capability": "Remove misleading \"Profile:\" default switcher",
+      "cells": {
+        "web": {
+          "status": "must",
+          "ids": [
+            "testid:viewing-filter",
+            "component:frontend/src/components/ViewingFilter.vue"
+          ],
+          "tests": [
+            "vitest:frontend/tests/unit/header-layout.spec.ts",
+            "vitest:frontend/tests/unit/viewing-filter.spec.ts"
+          ]
+        },
+        "macos": {
+          "status": "must",
+          "ids": [
+            "symbol:native/macos/MCPProxy/MCPProxy/Menu/TrayClientsMenu.swift#TrayClientsMenu"
+          ],
+          "tests": [
+            "xctest:native/macos/MCPProxy/MCPProxyTests/ClientsTrayMenuTests.swift#testOnlyCredentialedOrConnectedClientsAppear"
+          ]
+        },
+        "cli": {
+          "status": "na",
+          "ids": [],
+          "tests": []
+        },
+        "mcp": {
+          "status": "na",
+          "ids": [],
+          "tests": []
+        },
+        "rest": {
+          "status": "deprecated",
+          "ids": [
+            "rest:GET /api/v1/profiles/active",
+            "rest:PUT /api/v1/profiles/active"
+          ],
+          "tests": [
+            "go:internal/httpapi/profiles_active_deprecation_test.go#TestProfilesActive_DeprecationHeader"
+          ]
+        }
+      }
+    }
+  ]
+}
