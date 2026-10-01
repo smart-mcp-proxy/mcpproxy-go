@@ -709,6 +709,12 @@ export interface ActivityRunFields {
   max_severity?: string
   detection_types?: string[]
   metadata?: Record<string, any> | null
+  // Attribution (Spec 108-j): the row's attribution chips print these.
+  client_id?: string
+  client_name?: string
+  profile?: string
+  profile_source?: string
+  token_name?: string
 }
 
 /** A run of identical consecutive rows. `count === 1` for an ordinary row. */
@@ -776,6 +782,13 @@ const runIdentity = (a: ActivityRunFields): string => {
     a.has_sensitive_data ? '1' : '0',
     a.max_severity ?? '',
     a.detection_types?.length ?? 0,
+    // The attribution chips print the lead row's client, profile and token, so
+    // calls from different callers must not fold under one caller's chips (FR-029).
+    a.client_id ?? '',
+    a.client_name ?? '',
+    a.profile ?? '',
+    a.profile_source ?? '',
+    a.token_name ?? '',
     // A preflight or config change says everything in metadata.action / verdict;
     // two of them are only "the same row twice" if that text matches too.
     batch ? '' : activityDetailsText(a as Parameters<typeof activityDetailsText>[0]),

@@ -1,5 +1,6 @@
 <template>
-  <BaseDialog :open="open" :title="`Explain access${subjectLabel ? ' — ' + subjectLabel : ''}`" wide test-id="access-explainer" @close="emit('close')">
+  <BaseDialog :open="open" :title="title ?? `Explain access${subjectLabel ? ' — ' + subjectLabel : ''}`" wide test-id="access-explainer" @close="emit('close')">
+    <p v-if="note" class="text-sm opacity-80" data-test="explain-note">{{ note }}</p>
     <form class="flex flex-wrap items-end gap-2" @submit.prevent="run">
       <div class="form-control flex-1 min-w-[14rem]">
         <label class="label" for="explain-tool"><span class="label-text font-medium">Tool</span></label>
@@ -69,6 +70,7 @@ import { useProfilesStore } from '@/stores/profiles'
 import { useScopeQuery } from '@/composables/useScopeQuery'
 import { CONNECT_CLIENT_EVENT } from '@/navigation/navModel'
 import { STEP_LABELS, describeError, reasonText } from '@/utils/profiles'
+import { profileEditorLink } from '@/utils/profileRoute'
 import type { AccessExplanation, ExplainSubjectQuery } from '@/types/api'
 
 // Spec 108-i T099 / FR-046: "Why can't this client use this tool?" The steps are
@@ -79,6 +81,11 @@ const props = defineProps<{
   open: boolean
   subject: { kind: 'client' | 'token' | 'profile' | 'anonymous'; name?: string }
   tool?: string
+  // Spec 108-j J8: an entry point (a blocked Activity row) can retitle the
+  // dialog and say what the verdict is evaluated against; the explainer is live,
+  // never a replay of the moment of the call.
+  title?: string
+  note?: string
 }>()
 const emit = defineEmits<{ (e: 'close'): void }>()
 const router = useRouter()
@@ -98,7 +105,14 @@ const resultSubject = computed(() => {
   return s.kind === 'anonymous' ? 'anonymous callers' : `${s.kind} ${s.name ?? ''}`.trim()
 })
 
+// Every explain takes a ticket and only the latest applies: closing and
+// reopening the still-mounted dialog during a pending request must not let the
+// old answer repopulate the reset dialog (#1446 F5.2).
+let runTicket = 0
+
 watch(() => props.open, open => {
+  runTicket++
+  busy.value = false
   if (!open) return
   toolInput.value = props.tool ?? ''
   result.value = null
@@ -119,6 +133,7 @@ async function loadTools() {
 
 async function run() {
   if (!toolInput.value) return
+  const ticket = ++runTicket
   busy.value = true
   error.value = ''
   const query: ExplainSubjectQuery = { tool: toolInput.value }
@@ -127,12 +142,15 @@ async function run() {
   else if (props.subject.kind === 'profile') query.profile = props.subject.name
   else query.anonymous = true
   try {
-    result.value = await api.explainAccess(query)
+    const explained = await api.explainAccess(query)
+    if (ticket !== runTicket) return
+    result.value = explained
   } catch (err) {
+    if (ticket !== runTicket) return
     result.value = null
     error.value = describeError(err)
   } finally {
-    busy.value = false
+    if (ticket === runTicket) busy.value = false
   }
 }
 
@@ -157,7 +175,7 @@ function follow(fix: { action: string; target: string }) {
     case 'allow_in_profile':
     case 'classify_in_profile':
     case 'add_server_to_profile':
-      void router.push({ name: 'profile-editor', params: { name: fix.target }, query: { focus: tool } })
+      void router.push(profileEditorLink(fix.target, tool))
       break
     case 'move_client':
       void router.push({ name: 'clients', query: { focus: fix.target, move: '1' } })

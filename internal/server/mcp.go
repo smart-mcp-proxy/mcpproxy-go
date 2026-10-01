@@ -539,6 +539,7 @@ func NewMCPProxyServer(
 		// The credential never changes mid-connection, so this is once.
 		if ac := auth.AuthContextFromContext(ctx); ac != nil && ac.AgentName != "" {
 			sessionStore.SetSessionIdentity(sessionID, ac.AgentName, ac.ClientID)
+			sessionStore.SetSessionTokenPrefix(sessionID, ac.TokenPrefix)
 		}
 		sessionStore.SetSessionServer(sessionID, mcpserver.ServerFromContext(ctx))
 		// Spec 108-f F10: a session that presented no credential has

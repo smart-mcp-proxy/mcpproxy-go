@@ -119,12 +119,18 @@ describe('Activity Sessions view — scope params to GET /sessions (Spec 108 FR-
     expect(rows).toBe(1)
   })
 
-  it('does not send scope params outside the Sessions view', async () => {
+  // Spec 108-j T107 (inverted from "does not send scope params outside the
+  // Sessions view"): the calls view now sends profile/client/token to
+  // GET /activity (list, summary and export), so the scope narrows the table. The
+  // general /sessions fetch that feeds session-name resolution stays unscoped,
+  // because every other view relies on it.
+  it('outside the Sessions view the scope narrows /activity, and the general /sessions fetch stays unscoped', async () => {
     setAvailableFeatures(['scope_filters'])
     const { wrapper } = await mountActivityAt('/activity?view=calls&client=cursor')
     for (const call of getSessionsMock.mock.calls) {
       expect(call[2]).toBeUndefined()
     }
+    expect(getActivitiesMock).toHaveBeenCalledWith(expect.objectContaining({ client: 'cursor' }))
     wrapper.unmount()
   })
 

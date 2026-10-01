@@ -35,16 +35,73 @@ export function unannotatedLabel(value: string | undefined): string {
   return UNANNOTATED_OPTIONS.find(option => option.value === value)?.label ?? 'Default'
 }
 
-// Why a tool is hidden, in words (FR-010 reasons).
+// Why a tool is hidden or not callable, in words: the FR-010 reasons plus the
+// rest of profile.AccessReasons that a view-as listing and the explainer can
+// return (Spec 108-j J7). One map for the editor table, Tools view-as and the
+// Activity "Why?" text; utils/accessReason.ts adds the row-dependent word.
 export function reasonText(reason: string | undefined): string {
   switch (reason) {
     case 'server_not_in_profile': return 'Server not in profile'
     case 'denied_by_rule': return 'Denied by rule'
     case 'unannotated_hidden': return 'Unannotated — hidden'
     case 'above_tier_cap': return 'Above tier cap'
+    case 'credential': return 'Credential revoked or expired'
+    case 'profile': return 'Profile missing — denied everything'
+    case 'server_in_scope': return "Server outside the token's scope"
+    case 'token_permission': return 'Token permission'
+    case 'global_gate': return 'Blocked by a global setting'
+    case 'server_state': return 'Server disabled or not connected'
+    case 'tool_approval': return 'Awaiting approval'
     case '':
     case undefined: return 'Visible'
     default: return reason.replaceAll('_', ' ')
+  }
+}
+
+// How a call's or session's profile was resolved, in words (Spec 108-j J10).
+// `none` and an empty source carry no suffix.
+export function profileSourceLabel(source: string | undefined): string {
+  switch (source) {
+    case 'pin': return 'locked by credential'
+    case 'binding': return 'switchable'
+    case 'url': return 'from URL'
+    case 'session': return 'switched in session'
+    case 'anonymous': return 'anonymous'
+    default: return ''
+  }
+}
+
+// Spec 108-j J8 (FR-046): who a blocked Activity record is explained for, in
+// order: the client, else the token, else an anonymous caller, else the profile
+// the call was recorded under. Nothing to explain for (null) means no "Why?".
+export interface ExplainSubject { kind: 'client' | 'token' | 'profile' | 'anonymous'; name?: string }
+export function explainSubjectForRecord(record: {
+  client_id?: string
+  token_name?: string
+  profile?: string
+  profile_source?: string
+}): ExplainSubject | null {
+  if (record.client_id) return { kind: 'client', name: record.client_id }
+  if (record.token_name) return { kind: 'token', name: record.token_name }
+  if (record.profile_source === 'anonymous') return { kind: 'anonymous' }
+  if (record.profile) return { kind: 'profile', name: record.profile }
+  return null
+}
+
+// Spec 108-j J9: what a blocked record can offer. `allow` edits a rule or the
+// tier of one tool (the editor opens focused on it); `open` is the profile
+// itself (code execution and management are profile switches, not a tool row).
+export function blockedProfileAction(reason: string | undefined): 'allow' | 'open' | null {
+  switch (reason) {
+    case 'profile_tier':
+    case 'profile_rule':
+    case 'profile_unannotated':
+      return 'allow'
+    case 'profile_code_execution':
+    case 'profile_management':
+      return 'open'
+    default:
+      return null
   }
 }
 

@@ -46,7 +46,7 @@
                 :data-test="`dashboard-live-client-${client.name}`"
               >
                 <span class="font-medium truncate">{{ client.name }}</span>
-                <span class="text-xs opacity-50 shrink-0">{{ formatRelativeTime(client.lastActivity) }}</span>
+                <span class="text-xs text-base-content/60 shrink-0" data-test="dashboard-live-client-age">{{ formatRelativeTime(client.lastActivity) }}</span>
               </router-link>
             </div>
             <div v-if="availableClientNames.length > 0">

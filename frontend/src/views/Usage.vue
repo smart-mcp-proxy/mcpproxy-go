@@ -66,6 +66,17 @@
       </span>
     </div>
 
+    <!-- Spec 108-j J4/J5 (FR-031): the profile/client/token this view is
+         narrowed to, as removable chips, with the pickers that write them. -->
+    <div
+      v-if="scopeQuery && (scopeChipsVisible || scopePickersVisible)"
+      class="flex flex-wrap items-end gap-3"
+      data-test="usage-scope-chips"
+    >
+      <ScopeFilterSelects page="usage" :scope-query="scopeQuery" allow-unattributed />
+      <ScopeChips page="usage" :scope-query="scopeQuery" :unavailable="scopeUnavailableNames" />
+    </div>
+
     <!-- Tokens-saved headline (FR-007) -->
     <div v-if="data" class="stats stats-vertical sm:stats-horizontal shadow w-full" data-test="usage-tokens-saved">
       <!--
@@ -78,7 +89,15 @@
         cumulative-savings-so-far. It now says what it measures, and the tooltip
         says how it is derived.
       -->
-      <div class="stat" data-test="usage-tokens-saved-tile">
+      <!-- Spec 108-j J12: the tokens-saved figure is a structural property of the
+           whole catalogue, so the backend zeroes it for a scoped read. Printing
+           that 0 would read as "nothing saved". -->
+      <div v-if="scopeApplied" class="stat" data-test="usage-tokens-saved-scoped">
+        <div class="stat-title">Tokens saved</div>
+        <div class="stat-value text-base font-normal text-base-content/70">not computed for a filtered view</div>
+        <div class="stat-desc">Remove the profile, client or token filter to see it.</div>
+      </div>
+      <div v-else class="stat" data-test="usage-tokens-saved-tile">
         <div class="stat-title flex items-center gap-1">
           Tokens saved per request
           <span
@@ -175,8 +194,11 @@
         <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
         </svg>
-        <h3 class="font-semibold text-lg mt-2">No usage data yet</h3>
-        <p class="text-sm text-base-content/60 max-w-md">
+        <h3 class="font-semibold text-lg mt-2">{{ scopeSummary ? `No calls for ${scopeSummary} in the ${windowLabel}` : 'No usage data yet' }}</h3>
+        <p v-if="scopeSummary" class="text-sm text-base-content/60 max-w-md" data-test="usage-scoped-empty">
+          Remove a filter chip above or widen the window to see more.
+        </p>
+        <p v-else class="text-sm text-base-content/60 max-w-md">
           Once your agents start calling tools through the proxy, you'll see call volume,
           token sinks, error rates and a timeline here. Try widening the window or clearing filters.
         </p>
@@ -219,11 +241,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
-import { useScopeQuery, splitScopeTool, usageWindowFor } from '@/composables/useScopeQuery'
+import { isScopeParamAvailable, useScopeQuery, splitScopeTool, usageWindowFor } from '@/composables/useScopeQuery'
+import { useScopeLabels, type ScopeName } from '@/composables/useScopeLabels'
+import { useSystemStore } from '@/stores/system'
+import { useProfilesStore } from '@/stores/profiles'
+import { pickScopeParams, scopeParamsKey } from '@/utils/scopeParams'
+import ScopeChips from '@/components/scope/ScopeChips.vue'
+import ScopeFilterSelects from '@/components/scope/ScopeFilterSelects.vue'
 import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, UsageToolStat } from '@/types'
 import { formatNumber, partitionUsageTools, usageHeadline } from '@/utils/usageFormat'
 import CallHistogram from '@/components/usage/CallHistogram.vue'
@@ -253,6 +281,38 @@ const authStore = useAuthStore()
 const route = useRoute() as ReturnType<typeof useRoute> | undefined
 const router = useRouter() as ReturnType<typeof useRouter> | undefined
 const scopeQuery = route ? useScopeQuery('usage') : undefined
+const systemStore = useSystemStore()
+const profilesStore = useProfilesStore()
+const { chipLabel } = useScopeLabels()
+
+// ---- Spec 108-j: profile / client / token scope ----------------------------
+const SCOPE_URL_NAMES = ['profile', 'client', 'token'] as const
+/** The three REST names the page applies right now, from useScopeQuery.toRest()
+ * (rule 7: none while the build does not advertise them). */
+const usageScopeParams = computed(() => pickScopeParams(scopeQuery?.toRest()))
+const scopeApplied = computed(() => Object.keys(usageScopeParams.value).length > 0)
+const scopeKey = computed(() => scopeParamsKey(usageScopeParams.value))
+const scopeChipsVisible = computed(() =>
+  Boolean(scopeQuery?.chips.value.some(chip => (SCOPE_URL_NAMES as readonly string[]).includes(chip.name))) ||
+  scopeUnavailableNames.value.length > 0
+)
+// The pickers show whenever the build advertises a filter this page registers.
+const scopePickersVisible = computed(() => SCOPE_URL_NAMES.some(name => isScopeParamAvailable(name)))
+/** "Profile: Work Read-only": for the empty state. */
+const scopeSummary = computed(() =>
+  (scopeQuery?.chips.value ?? [])
+    .filter(chip => (SCOPE_URL_NAMES as readonly string[]).includes(chip.name))
+    .map(chip => chipLabel(chip.name as ScopeName, chip.value))
+    .join(', ')
+)
+const scopeWaitTimedOut = ref(false)
+const scopeUnavailableNames = computed(() => {
+  if (!scopeWaitTimedOut.value || !route) return []
+  return SCOPE_URL_NAMES.filter(name => {
+    const raw = route.query[name]
+    return typeof raw === 'string' && raw !== '' && !isScopeParamAvailable(name)
+  })
+})
 
 // Spec 109-k (activity-scope-filters), T119: Usage had no `server`/`tool`
 // deep-link support at all — a link built with `?server=<n>` (a server
@@ -361,6 +421,7 @@ function clearScopeConflict(): void {
 }
 
 async function reload() {
+  if (!scopeReady) await scopeReadyPromise
   // Spec 107 FR-041 / cross-review round 2, chunk 4 P1: GET /activity/usage
   // is an admin-only core door (named must-refuse, rest-endpoints.md §8).
   // Usage is the tenant dashboard's DEFAULT landing panel, so an unguarded
@@ -383,6 +444,7 @@ async function reload() {
   try {
     const split = splitScopeTool(filterTool.value || undefined, filterServer.value || undefined)
     const resp = await api.getActivityUsage({
+      ...usageScopeParams.value,
       window: window.value,
       status: status.value || undefined,
       sort: sort.value,
@@ -444,8 +506,42 @@ function onSelectBucket(range: { start: string; end: string }): void {
   router.push(scopeQuery.linkTo('activity', patch))
 }
 
+// Spec 108-j J3 (rule 1): a URL that names a profile/client/token waits for
+// /status before the FIRST fetch, so that request carries it instead of
+// flashing the unfiltered aggregate. Not armed before it, so the wait never
+// double-fetches; after it, a changed scope (a chip removed, the header chip,
+// a picker, the feature list arriving late) refetches.
+// Rule-1 ready gate (F2.1/F3.1/F4.1): every loader waits for the startup
+// /status wait to finish, so no control, refresh or SSE event can send an
+// unfiltered request while the first filtered one is still pending.
+let scopeReady = false
+let releaseScopeReady: () => void = () => {}
+const scopeReadyPromise = new Promise<void>(resolve => { releaseScopeReady = resolve })
+let scopeWatchArmed = false
+async function firstLoad() {
+  const urlHasScope = Boolean(route && SCOPE_URL_NAMES.some(name => {
+    const raw = route.query[name]
+    return typeof raw === 'string' && raw !== ''
+  }))
+  if (urlHasScope) {
+    await systemStore.waitForScopeFeatures()
+    // The wait is over: any named param still unavailable gets the disabled
+    // chip, including when /status answered but did not advertise it (F5.2).
+    scopeWaitTimedOut.value = true
+  }
+  scopeReady = true
+  releaseScopeReady()
+  scopeWatchArmed = true
+  await reload()
+}
+
+watch(scopeKey, () => {
+  if (scopeWatchArmed) void reload()
+})
+
 onMounted(() => {
-  reload()
+  void firstLoad()
+  if (!profilesStore.loaded && !profilesStore.loading) void profilesStore.fetchProfiles()
   // Light auto-refresh so the page stays live without hammering the endpoint
   // (the backend already serves from a short-TTL cached snapshot).
   refreshTimer = setInterval(reload, 30_000)
