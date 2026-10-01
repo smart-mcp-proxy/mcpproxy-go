@@ -181,6 +181,18 @@ func (m connectMinter) Issue(clientID string, intent connect.CredentialIntent) (
 	return issued, nil
 }
 
+// CheckIdle implements connect.CredentialMinter: it refuses while another
+// connect of clientID holds the in-flight claim, without taking one itself (a
+// keyless connect mints nothing, so it has no credential to protect).
+func (m connectMinter) CheckIdle(clientID string) error {
+	m.s.mu.Lock()
+	defer m.s.mu.Unlock()
+	if m.s.connectInFlight(clientID) {
+		return &ConnectInProgressError{ClientID: clientID}
+	}
+	return nil
+}
+
 // PreviewBinding implements connect.CredentialMinter: the binding Issue would
 // apply for this intent, minting and staging nothing.
 func (m connectMinter) PreviewBinding(clientID string, intent connect.CredentialIntent) (string, string, error) {

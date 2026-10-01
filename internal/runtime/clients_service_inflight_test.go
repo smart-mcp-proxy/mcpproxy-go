@@ -65,6 +65,25 @@ func TestConnectMinter_SecondIssueWhileInFlightIsRefused(t *testing.T) {
 	require.NoError(t, err, "the claim ends at abort")
 }
 
+// FR-021a: a keyless connect never mints, but it still writes the client's
+// config, so it must be refused while another connect holds the claim.
+func TestConnectMinter_CheckIdleRefusedWhileInFlight(t *testing.T) {
+	h := newSvcHarness(t)
+	m := h.svc.ConnectMinter()
+	h.mint("cursor", "ro", nil)
+	intent := connect.CredentialIntent{ActorKind: "api_key", Surface: "api"}
+
+	require.NoError(t, m.CheckIdle("cursor"), "no claim, no refusal")
+	first, err := m.Issue("cursor", intent)
+	require.NoError(t, err)
+	var busy *ConnectInProgressError
+	require.ErrorAs(t, m.CheckIdle("cursor"), &busy)
+	require.Equal(t, "connect_in_progress", busy.Code())
+	require.NoError(t, m.CheckIdle("other"), "the claim is per client")
+	require.NoError(t, m.Commit("cursor", intent, first))
+	require.NoError(t, m.CheckIdle("cursor"), "the claim ends at commit")
+}
+
 func TestConnectMinter_CommitFailsWhenPendingWasDropped(t *testing.T) {
 	h := newSvcHarness(t)
 	m := h.svc.ConnectMinter()

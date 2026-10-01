@@ -72,6 +72,11 @@ type CredentialMinter interface {
 	// Issue validates the intent, runs the FR-008a guard over the candidate
 	// state, and mints a fresh credential or stages a rotation.
 	Issue(clientID string, intent CredentialIntent) (*IssuedCredential, error)
+	// CheckIdle refuses (connect_in_progress) while another connect of
+	// clientID holds the in-flight claim. A keyless connect mints nothing and
+	// so never calls Issue, but it still writes the client's config and must
+	// honour the same claim (FR-021a).
+	CheckIdle(clientID string) error
 	// Commit finalizes a successful write (fresh: records the mint; rotation:
 	// finalizes it and applies any binding change).
 	Commit(clientID string, intent CredentialIntent, issued *IssuedCredential) error

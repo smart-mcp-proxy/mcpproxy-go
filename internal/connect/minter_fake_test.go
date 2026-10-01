@@ -14,6 +14,8 @@ type fakeMinter struct {
 	mu       sync.Mutex
 	n        int
 	issueErr error
+	// busy is what CheckIdle reports (an in-flight claim held by another connect).
+	busy     error
 	rotating bool
 
 	intents []CredentialIntent
@@ -65,6 +67,12 @@ func (m *fakeMinter) Issue(clientID string, intent CredentialIntent) (*IssuedCre
 	m.held[is.Secret] = true
 	m.classify[is.Secret] = profile.CredentialStateClient
 	return is, nil
+}
+
+func (m *fakeMinter) CheckIdle(string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.busy
 }
 
 func (m *fakeMinter) Commit(string, CredentialIntent, *IssuedCredential) error {
