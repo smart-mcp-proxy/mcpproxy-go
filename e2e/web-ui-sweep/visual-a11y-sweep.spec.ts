@@ -11,7 +11,7 @@
 //
 // Launcher: scripts/run-web-smoke.sh (see docs/development/web-ui-verification.md).
 import { test, expect, Page } from '@playwright/test'
-import { CLIENT_ID, RO_PROFILE, SERVER, cleanupProfiles, seedMissingProfile, seedProfiles } from './profiles-seed'
+import { CLIENT_ID, RO_PROFILE, SERVER, cleanupProfiles, openMcpSession, seedMissingProfile, seedProfiles } from './profiles-seed'
 
 const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
@@ -235,6 +235,29 @@ for (const theme of THEMES) {
       ).toEqual([])
     })
   }
+}
+
+// The Home dashboard lists every live MCP session under "Connected" with a relative
+// "Xs ago" timestamp. The loop above only sees that line when some earlier spec happens
+// to leave a session open, which made this gate depend on spec order (Spec 108-j QA.1,
+// follow-up #1433 item 1), so the session is opened here on purpose.
+for (const theme of THEMES) {
+  test(`contrast AA: / with a live MCP client (${theme})`, async ({ page }) => {
+    const session = await openMcpSession(KEY, [], 'e2e-home-client', true)
+    try {
+      await goto(page, '/', theme)
+      const age = page.locator('[data-test="dashboard-live-client-age"]').first()
+      await expect(age).toBeVisible()
+      const failures = await contrastFailures(page)
+      expect(
+        failures,
+        `WCAG AA contrast failures on / with a live client (${theme}):\n` +
+          failures.map((f) => `  ${f.ratio}:1  ${f.selector}  ${f.fg} on ${f.bg}  "${f.text}"`).join('\n'),
+      ).toEqual([])
+    } finally {
+      await session.close()
+    }
+  })
 }
 
 test('contrast AA: filled primary buttons in both themes', async ({ page }) => {

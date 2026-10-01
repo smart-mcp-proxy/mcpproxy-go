@@ -63,8 +63,18 @@ export async function cleanupProfiles(extraProfiles: string[] = [], tokens: stri
 export const SCOPE_PROFILE = 'e2e-scope-ro'
 export const SCOPE_CLIENT = 'e2e-scope'
 
-/** One MCP session with a client credential: initialize, then each call_tool_read in order. */
-async function mcpSession(credential: string, calls: Array<{ name: string }>): Promise<void> {
+/** An open MCP session; `close()` ends it (HTTP DELETE with the session id). Never throws. */
+export interface McpSession {
+  sessionId: string
+  close: () => Promise<void>
+}
+
+/**
+ * Opens one MCP session with a credential (initialize, then each call_tool_read in
+ * order; `touch` adds one retrieve_tools call) and leaves it OPEN: a live session shows on the Home dashboard as a
+ * connected client for 30 minutes of idle, so every caller must close it.
+ */
+export async function openMcpSession(credential: string, calls: Array<{ name: string }> = [], clientName = 'e2e-scope-client', touch = false): Promise<McpSession> {
   const endpoint = `${BASE}/mcp`
   const rpc = async (body: unknown, sessionId?: string) => {
     const headers: Record<string, string> = {
@@ -82,13 +92,27 @@ async function mcpSession(credential: string, calls: Array<{ name: string }>): P
   }
   const sessionId = await rpc({
     jsonrpc: '2.0', id: 1, method: 'initialize',
-    params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'e2e-scope-client', version: '1.0' } },
+    params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: clientName, version: '1.0' } },
   })
-  await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId)
-  let id = 2
-  for (const call of calls) {
-    await rpc({ jsonrpc: '2.0', id: id++, method: 'tools/call', params: { name: 'call_tool_read', arguments: { name: call.name, args_json: '{}' } } }, sessionId)
+  const close = async () => {
+    if (!sessionId) return
+    try {
+      await fetch(endpoint, { method: 'DELETE', headers: { 'X-API-Key': credential, 'Mcp-Session-Id': sessionId } })
+    } catch { /* best effort */ }
   }
+  try {
+    await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId)
+    let id = 2
+    // The proxy records a session on its first tool call, so a bare initialize is not yet "live".
+    if (touch) await rpc({ jsonrpc: '2.0', id: id++, method: 'tools/call', params: { name: 'retrieve_tools', arguments: { query: 'echo' } } }, sessionId)
+    for (const call of calls) {
+      await rpc({ jsonrpc: '2.0', id: id++, method: 'tools/call', params: { name: 'call_tool_read', arguments: { name: call.name, args_json: '{}' } } }, sessionId)
+    }
+  } catch (error) {
+    await close()
+    throw error
+  }
+  return { sessionId, close }
 }
 
 /**
@@ -117,7 +141,10 @@ async function seedScopeActivityOnce(): Promise<void> {
   const created = await api('POST', '/clients', { id: SCOPE_CLIENT, display_name: 'E2E Scope', profile: SCOPE_PROFILE, mode: 'locked' })
   const credential: string = created.data?.credential
   if (!credential) throw new Error(`seeding ${SCOPE_CLIENT} returned no credential (status ${created.status})`)
-  await mcpSession(credential, [{ name: `${SERVER}:ping` }, { name: `${SERVER}:echo` }])
+  // The session is closed again: left open it stays a live client on the Home dashboard
+  // for the rest of the run and makes every later spec depend on this one's timing.
+  const session = await openMcpSession(credential, [{ name: `${SERVER}:ping` }, { name: `${SERVER}:echo` }])
+  await session.close()
 }
 
 /** Removes what seedScopeActivity created. Never throws. */

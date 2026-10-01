@@ -49,7 +49,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, useId } from 'vue'
+import { computed, onMounted, ref, useId, watch } from 'vue'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import { useClientsStore } from '@/stores/clients'
@@ -113,11 +113,16 @@ function pick(name: ScopeName, event: Event) {
   props.scopeQuery.set({ [name]: value || undefined })
 }
 
-onMounted(() => {
+// The pickers can mount before GET /status has said which filters the build offers
+// (a remembered-open filter panel), so the lists load when a picker first becomes
+// visible, not only at mount. Each list loads at most once per picker.
+let tokensRequested = false
+function loadLists() {
   if (!profiles.loaded && !profiles.loading) void profiles.fetchProfiles()
   if (isTenant.value) return
   if (shown.value.includes('client') && clients.clients.length === 0) void clients.refreshPresence()
-  if (shown.value.includes('token')) {
+  if (shown.value.includes('token') && !tokensRequested) {
+    tokensRequested = true
     void (async () => {
       try {
         const response = await api.listAgentTokens()
@@ -128,5 +133,8 @@ onMounted(() => {
       }
     })()
   }
-})
+}
+
+onMounted(loadLists)
+watch(shown, loadLists)
 </script>

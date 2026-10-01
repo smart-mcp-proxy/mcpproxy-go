@@ -14,12 +14,13 @@
 //      chips, "Allow in profile…" and "Why?".
 //   6. Layout at 1440 / 1100 / 900 / 390.
 //   7. Keyboard.
+//   0. The seed closes its MCP session.
 //
 // Launcher: scripts/run-web-smoke.sh (docs/development/web-ui-verification.md).
 import { test, expect, Page } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
-import { SCOPE_CLIENT, SCOPE_PROFILE, SERVER, cleanupScopeActivity, seedScopeActivity } from './profiles-seed'
+import { SCOPE_CLIENT, SCOPE_PROFILE, SERVER, api, cleanupScopeActivity, seedScopeActivity } from './profiles-seed'
 
 const BASE = process.env.MCPPROXY_BASE_URL || 'http://127.0.0.1:18080'
 const KEY = process.env.MCPPROXY_API_KEY || ''
@@ -78,6 +79,17 @@ test.afterAll(async () => {
 })
 
 const ECHO = `${SERVER}__echo`
+
+test('0. the seed leaves no live MCP session behind (order-independent specs, QA.1)', async () => {
+  // An open seed session stays a "connected" client on the Home dashboard for 30
+  // minutes of idle, which is what made the contrast sweep depend on spec order.
+  const { status, data } = await api('GET', '/sessions?limit=100')
+  expect(status).toBe(200)
+  const sessions: Array<{ client_name?: string; status?: string }> = data?.sessions ?? []
+  const seeded = sessions.filter(session => session.client_name === 'e2e-scope-client')
+  expect(seeded.length, 'the seed made its session').toBeGreaterThan(0)
+  expect(seeded.filter(session => session.status === 'active')).toEqual([])
+})
 
 test('1. Tools view-as: filtered from the first render, greyed rows with reasons, Why? and a real Escape', async ({ page }) => {
   // Hold the scoped answer back: if the page asked for the unfiltered list first,
@@ -214,7 +226,8 @@ test('5. A blocked call: attribution chips, Allow in profile… and Why?', async
   await expect(page.locator('[data-test^="activity-why-"]')).toBeFocused()
 })
 
-for (const width of [1440, 1100, 900, 390]) {
+// 1280 is the first width that shows the Scope column; 768-1100 is where it used to clip Status and Duration.
+for (const width of [1440, 1280, 1100, 1024, 900, 768, 390]) {
   test(`6. layout at ${width}px: no horizontal scroll, chips not clipped`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 })
     for (const [name, route, chip] of [
@@ -236,6 +249,10 @@ for (const width of [1440, 1100, 900, 390]) {
         })
         // Phone width keeps its own table-fixed layout (F14), which is not the subject here.
         if (width >= 768) expect(fit.overflow, `activity table at ${width} must fit its card (overflow ${fit.overflow}px, columns ${fit.columns})`).toBeLessThanOrEqual(1)
+        // The inline Why? shares the Status cell, so it only shows where the card has room for it.
+        const rowWhy = page.locator('[data-test^="activity-row-why-"]').first()
+        if (width >= 1280) await expect(rowWhy).toBeVisible()
+        else await expect(rowWhy).toBeHidden()
         const status = page.locator('[data-test="activity-row"]').first().locator('.badge').last()
         const statusBox = await status.boundingBox()
         expect(statusBox, `status badge at ${width}`).not.toBeNull()

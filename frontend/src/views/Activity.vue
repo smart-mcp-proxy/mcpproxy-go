@@ -850,10 +850,13 @@
                   <span v-else data-test="activity-status" class="sr-only">
                     {{ statusPresentation(row.activity.status).label }}
                   </span>
+                  <!-- Inline "Why?" only from xl: with the sidebar open the card is ~700px at 1024px and the
+                       extra button pushed Status and Duration past it (Spec 108-j QA.2). The detail drawer
+                       carries the same entry point at every width. -->
                   <button
                     v-if="canExplain(row.activity)"
                     type="button"
-                    class="btn btn-ghost btn-xs min-h-6 hidden md:inline-flex ml-1"
+                    class="btn btn-ghost btn-xs min-h-6 hidden xl:inline-flex ml-1"
                     :data-test="`activity-row-why-${row.activity.id}`"
                     :aria-label="`Why was ${row.activity.tool_name} blocked?`"
                     @click.stop="openExplain(row.activity)"
