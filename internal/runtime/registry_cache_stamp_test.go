@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 )
 
 // Spec 105 FR-002 (gap FR001-G2, task T029): the registry search path is one
@@ -30,9 +32,16 @@ func TestSearchRegistryServers_CacheEntryIsStampedInternal(t *testing.T) {
 	// A single-page official-protocol listing on loopback; the SSRF guard is
 	// relaxed through the same config flag an operator running a private
 	// mirror would set.
-	fetches := 0
-	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fetches++
+	//
+	// Only the registry's own list request (GET with version=latest) is
+	// counted, atomically: the handler runs on the server goroutine, and a
+	// stray request from elsewhere (e.g. a client retrying against a recycled
+	// loopback port under -shuffle) must not be mistaken for a fetch.
+	var fetches atomic.Int64
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Query().Get("version") == "latest" {
+			fetches.Add(1)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"servers": []map[string]interface{}{{
@@ -58,6 +67,10 @@ func TestSearchRegistryServers_CacheEntryIsStampedInternal(t *testing.T) {
 		}},
 		AllowPrivateRegistryFetch: true,
 	}
+	// New installs the registry list and the relaxed SSRF flag process-wide;
+	// reset them so later tests in this binary do not inherit the loopback
+	// allowance.
+	t.Cleanup(func() { registries.SetRegistriesFromConfig(nil) })
 	rt, err := New(cfg, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
@@ -67,7 +80,7 @@ func TestSearchRegistryServers_CacheEntryIsStampedInternal(t *testing.T) {
 	require.Len(t, servers, 1, "premise: the fake registry lists one server")
 	require.NotNil(t, info)
 	require.Zero(t, info.AgeSeconds, "premise: a fresh fetch reports age zero")
-	require.Equal(t, 1, fetches)
+	require.EqualValues(t, 1, fetches.Load())
 
 	key := fmt.Sprintf("registry-servers:%s:%s:%s:%d", "stamp-test", "", "", 5)
 	rec, ok := rt.CacheManager().Peek(key)
@@ -82,5 +95,5 @@ func TestSearchRegistryServers_CacheEntryIsStampedInternal(t *testing.T) {
 	require.Len(t, servers, 1)
 	require.NotNil(t, info, "the cached list must be served with its freshness info")
 	assert.False(t, info.Stale)
-	assert.Equal(t, 1, fetches, "the stamped entry must still be served to the registry's own read path")
+	assert.EqualValues(t, 1, fetches.Load(), "the stamped entry must still be served to the registry's own read path")
 }

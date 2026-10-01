@@ -240,7 +240,7 @@ func TestActivityTargetServer_AddFromRegistryLiftsResolvedName(t *testing.T) {
 // (c') Guard against a new emit site reintroducing the "-" Server column: no
 // call inside these two handlers may hardcode the targetServer argument.
 func TestActivityEmitsNeverHardcodeEmptyTargetServer(t *testing.T) {
-	const targetServerArgIndex = 1
+	const targetServerArgIndex = 2
 	guardedFuncs := map[string]bool{
 		"handleUpstreamServers":    true,
 		"handleQuarantineSecurity": true,

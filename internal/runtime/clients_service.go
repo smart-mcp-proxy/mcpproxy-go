@@ -48,6 +48,10 @@ type ClientsService struct {
 	// sink for on-demand credential classifications (Spec 108-f).
 	upgrade AdminKeyUpgradePort
 	observe func(clientID string, state profile.CredentialState)
+
+	// inflight holds the per-client connect claim (FR-021a), guarded by mu: a
+	// connect holds it from Issue until Commit, Abort or Release.
+	inflight map[string]time.Time
 }
 
 // ClientCredentialStore is the token-store surface the service needs;
@@ -156,6 +160,30 @@ func (e *NoClientCredentialError) Error() string {
 
 // Code is the wire `code` of the refusal.
 func (e *NoClientCredentialError) Code() string { return profile.ErrorCodeNoClientCredential }
+
+// ConnectInProgressError is the 409 connect_in_progress refusal: a connect of
+// the client holds the in-flight claim (FR-021a), so another connect, rotate,
+// finalize or binding change must wait for it.
+type ConnectInProgressError struct{ ClientID string }
+
+func (e *ConnectInProgressError) Error() string {
+	return fmt.Sprintf("a connect of %s is already in progress; retry when it finishes", e.ClientID)
+}
+
+// Code is the wire `code` of the refusal.
+func (e *ConnectInProgressError) Code() string { return profile.ErrorCodeConnectInProgress }
+
+// CredentialSupersededError is the 409 credential_superseded refusal: the
+// credential a connect wrote was replaced or revoked before it could be
+// finalized, so the written secret must not be treated as live (FR-021a).
+type CredentialSupersededError struct{ ClientID string }
+
+func (e *CredentialSupersededError) Error() string {
+	return fmt.Sprintf("the credential written for %s was replaced or revoked before it could be finalized; reconnect the client", e.ClientID)
+}
+
+// Code is the wire `code` of the refusal.
+func (e *CredentialSupersededError) Code() string { return profile.ErrorCodeCredentialSuperseded }
 
 // ClientsServiceDeps wires a ClientsService. Zero values are safe in tests:
 // Now defaults to time.Now, Mu to a private mutex, Guard to the conservative
@@ -463,6 +491,9 @@ func (s *ClientsService) SetBinding(ctx context.Context, a Actor, clientID, prof
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.connectInFlight(clientID) {
+		return nil, &ConnectInProgressError{ClientID: clientID}
+	}
 	return s.setBindingLocked(ctx, a, clientID, profileName, modeArg)
 }
 
@@ -536,6 +567,10 @@ func (s *ClientsService) BulkAssign(ctx context.Context, a Actor, from, to strin
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
+		if s.connectInFlight(id) {
+			skipped = append(skipped, skipReason(id, &ConnectInProgressError{ClientID: id}))
+			continue
+		}
 		if _, err := s.setBindingLocked(ctx, a, id, to, modeArg); err != nil {
 			skipped = append(skipped, skipReason(id, err))
 			continue
@@ -548,8 +583,11 @@ func (s *ClientsService) BulkAssign(ctx context.Context, a Actor, from, to strin
 func skipReason(id string, err error) Skipped {
 	var guardErr *BindingGuardError
 	var noCred *NoClientCredentialError
+	var busy *ConnectInProgressError
 	var val *ValidationError
 	switch {
+	case errors.As(err, &busy):
+		return Skipped{ClientID: id, Code: busy.Code(), Error: err.Error()}
 	case errors.As(err, &guardErr):
 		return Skipped{ClientID: id, Code: profile.ErrorCodeBindingBypassable, Error: err.Error()}
 	case errors.As(err, &noCred):
@@ -630,6 +668,9 @@ func (s *ClientsService) Rotate(ctx context.Context, a Actor, clientID string) (
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.connectInFlight(clientID) {
+		return "", nil, &ConnectInProgressError{ClientID: clientID}
+	}
 	key, err := s.hmacKey()
 	if err != nil {
 		return "", nil, err
@@ -657,6 +698,9 @@ func (s *ClientsService) FinalizeRotation(ctx context.Context, a Actor, clientID
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.connectInFlight(clientID) {
+		return nil, &ConnectInProgressError{ClientID: clientID}
+	}
 	return s.finalizeLocked(ctx, a, clientID)
 }
 

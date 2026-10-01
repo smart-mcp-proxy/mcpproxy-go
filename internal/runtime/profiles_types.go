@@ -180,6 +180,12 @@ type EffectiveToolsResult struct {
 	// StaleClassifications lists classify entries for tools that are now
 	// annotated or no longer exist (FR-005). Administrators only.
 	StaleClassifications []string `json:"stale_classifications,omitempty"`
+	// StaleClassificationReasons maps each stale classify entry to why it no
+	// longer applies: profile.StaleClassificationAnnotated or
+	// profile.StaleClassificationMissing. It is computed over the UNFILTERED
+	// tool set, so a server or reason filter never changes it. Administrators
+	// only.
+	StaleClassificationReasons map[string]string `json:"stale_classification_reasons,omitempty"`
 }
 
 // --- try ---------------------------------------------------------------------

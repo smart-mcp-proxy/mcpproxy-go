@@ -30,6 +30,49 @@ func captureTestServer(name, tool string) *mcpserver.StreamableHTTPServer {
 	return mcpserver.NewStreamableHTTPServer(upstream)
 }
 
+// settleQuarantinedCapture waits until no startup actor still carrying the
+// initial config can replace the manager entry: the supervisor's delayed
+// startup reconcile has run with all its actions finished, and
+// LoadConfiguredServers' async AddServer has created the client (before any
+// exemption, it is the only actor that creates a quarantined client). It then
+// grants the inspection exemption and waits for the exempted connection to be
+// bound (quiescent, connected, snapshot and discovery generation agree).
+//
+// Without this, a late startup actor carrying cfgA can legitimately reconcile
+// the manager back to the desired config after a test swaps in B, so the
+// capture lists a fresh A' and persists A's definition (#1453).
+func settleQuarantinedCapture(t *testing.T, rt *Runtime, name, url string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		if !rt.Supervisor().ReconcileQuiescent() {
+			return false
+		}
+		client, ok := rt.UpstreamManager().GetClient(name)
+		return ok && client.GetConfig().URL == url
+	}, 10*time.Second, 10*time.Millisecond, "startup reconcile and the initial client creation must finish before the capture test begins")
+	require.NoError(t, rt.Supervisor().RequestInspectionExemption(name, 15*time.Minute))
+	waitQuarantinedCaptureBound(t, rt, name, url)
+}
+
+// waitQuarantinedCaptureBound waits until the supervisor is quiescent and the
+// manager client for name has URL url, is connected, and is the connection
+// the supervisor snapshot and discovery generation both agree on.
+func waitQuarantinedCaptureBound(t *testing.T, rt *Runtime, name, url string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		if !rt.Supervisor().ReconcileQuiescent() {
+			return false
+		}
+		client, ok := rt.UpstreamManager().GetClient(name)
+		if !ok || !client.IsConnected() || client.GetConfig().URL != url {
+			return false
+		}
+		state, ok := rt.Supervisor().CurrentSnapshot().Servers[name]
+		return ok && state != nil && state.Config != nil && state.Config.URL == url &&
+			rt.discoveryGeneration(name).Epoch == client.ConnectionEpoch()
+	}, 10*time.Second, 10*time.Millisecond, "exempted connection must be bound to the supervisor snapshot and discovery generation")
+}
+
 // TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement proves
 // that a review capture cannot persist a tools/list result from connection A
 // after the supervisor has observed replacement connection B. This is separate
@@ -66,16 +109,10 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 	// before closing the runtime or either httptest server.
 	t.Cleanup(unblockFirst)
 	rt.StartBackgroundInitialization()
-	// Let the initial configuration load and the supervisor's initial reconcile
-	// settle before making A's tools/list request block. This keeps the startup
-	// reconciliation from retaining a stale cfgA reference through replacement.
-	require.Eventually(t, func() bool {
-		client, ok := rt.UpstreamManager().GetClient("quarantined")
-		if !ok || !client.IsConnected() || client.GetConfig().URL != first.URL {
-			return false
-		}
-		return rt.discoveryGeneration("quarantined").Epoch == client.ConnectionEpoch()
-	}, 10*time.Second, 10*time.Millisecond, "initial reconciliation must observe A before its blocked list begins")
+	// Let the initial configuration load and the supervisor's startup
+	// reconcile settle before making A's tools/list request block. This keeps
+	// startup actors from retaining a stale cfgA reference through replacement.
+	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
 
 	// The capture grants its own inspection exemption, which connects A.
 	done := make(chan error, 1)
@@ -136,6 +173,12 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 // first validation, then a reconcile replaces A immediately before approval
 // records would be written. The stale response must be discarded and re-listed
 // from B rather than becoming a pending review item.
+//
+// The replacement goes through the production desired-config path
+// (UpdateConfig -> supervisor reconcile). A manager-only swap would be
+// legitimately undone by any startup reconciler still carrying cfgA, which
+// made this test flaky under load (#1453); settleQuarantinedCapture removes
+// those actors before the capture starts.
 func TestCaptureQuarantinedToolDefinitions_DropsReplacementBeforePersist(t *testing.T) {
 	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
 	first := httptest.NewServer(captureTestServer("first", "old_definition"))
@@ -148,6 +191,7 @@ func TestCaptureQuarantinedToolDefinitions_DropsReplacementBeforePersist(t *test
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
 	rt.StartBackgroundInitialization()
+	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
 
 	var replaced atomic.Bool
 	rt.quarantinedCaptureBeforePersist = func() {
@@ -156,10 +200,12 @@ func TestCaptureQuarantinedToolDefinitions_DropsReplacementBeforePersist(t *test
 		}
 		cfgB := *cfgA
 		cfgB.URL = second.URL
-		require.NoError(t, rt.UpstreamManager().AddServerConfig("quarantined", &cfgB))
-		clientB, ok := rt.UpstreamManager().GetClient("quarantined")
-		require.True(t, ok)
-		require.NoError(t, clientB.Connect(context.Background()))
+		desired, err := rt.GetDesiredConfig()
+		require.NoError(t, err)
+		require.Len(t, desired.Servers, 1)
+		desired.Servers[0] = &cfgB
+		rt.UpdateConfig(desired, "")
+		waitQuarantinedCaptureBound(t, rt, "quarantined", second.URL)
 	}
 
 	require.NoError(t, rt.captureQuarantinedToolDefinitions(context.Background(), "quarantined"))
@@ -188,10 +234,7 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
 	rt.StartBackgroundInitialization()
-	require.Eventually(t, func() bool {
-		clientA, ok := rt.UpstreamManager().GetClient("quarantined")
-		return ok && clientA.IsConnected() && clientA.ConnectionEpoch() > 0
-	}, 10*time.Second, 10*time.Millisecond, "initial quarantined client must finish connecting before capture serialization is tested")
+	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
 
 	replaceStarted := make(chan struct{})
 	replaceDone := make(chan error, 1)

@@ -306,6 +306,20 @@ The former scope of this PR — `useScopeQuery.ts`, the parameter registry, the 
 
 ---
 
+## Phase 14: PR 108-retro-go — post-merge review fixes (backend + CLI)
+
+Verified post-merge review findings of 108-c2, 108-e and 108-g (audit finding ids in each task); Go only, after 108-k.
+
+- [x] T140 [US2] `pr1430:F1` (FR-021a): per-client in-flight connect claim, Commit verifies the secret it finalizes (`409 connect_in_progress` / `credential_superseded`), `CredentialMinter.Release` on an ambiguous write. Tests: `TestConnectMinter_ReconcileBetweenIssueAndCommitKeepsPending`, `…SecondIssueWhileInFlightIsRefused`, `…CommitFailsWhenPendingWasDropped`, `…ForgetDuringConnectFailsCommitClosed`, `…RotateFinalizeSetBindingRefusedWhileInFlight`, `…ReleaseClearsClaimAndLetsReconcilerResolve`, `…StaleClaimIsIgnoredAfterTTL`, `TestConnect_ReconcileRaceThroughConnectService`, `TestSettle_AmbiguousWriteReleasesClaim`, `TestProfilesErrorBody_EveryTypedError`
+- [x] T141 [US2] `pr1430:F2` (FR-008a): `StrictOfflineBindingGuard` for the offline CLI connect refuses a re-point of a bound client. Tests: `TestStrictOfflineBindingGuard_RepointIsRefused`, `TestConnectProfileFlags_OfflineRefusesRepointOfABoundClient`, `…OfflineReconnectKeepingBindingSucceeds`
+- [x] T142 [US2] `pr1430:F3`: the reconnect preview shows the binding the write applies (`resolveBindingLocked` shared by `Issue` and `PreviewBinding`). Tests: `TestConnectMinter_PreviewBindingEqualsIssue`, `TestPreview_ReconnectShowsRecordedBinding`
+- [x] T143 [US3] `pr1436:sol:A.1+sol:C.1` (FR-029/FR-031): persist the token prefix as an internal ownership proof. Tests: `TestActivityIdentityOwner_OwnsByPersistedPrefix`, `TestActivityService_PolicyDecisionAndPromptGetPersistTokenPrefix`, `TestActivity_ScopedCallerFindsOwnPolicyDecision`, `TestActivityContract_NeverCarriesTokenPrefix`
+- [x] T144 [US3] `pr1436:sol:B.1+sol:6.1` (FR-029): `internal_tool_call` attribution from the request context. Tests: `TestActivityAttribution_RESTInternalToolCallCarriesCallerAttribution`, `TestActivityAttribution_InternalToolCallEventCarriesTokenPrefix`
+- [x] T145 [US4] `pr1441:F1.1`: the `access explain` approve-tool hint names only that tool. Test: `TestAccessExplain_ApproveToolFixNamesOnlyThatTool`
+- [x] T146 [US4] `pr1441:F2.1` (FR-005): `stale_classification_reasons` from the server (REST and MCP `effective_tools`); the CLI note no longer depends on the filter. Tests: `TestProfileV3EffectiveTools_StaleReasonsSurviveFilters`, `TestProfileShow_EffectiveStaleNoteWithServerFilter`, `…OldDaemonFilteredFallsBackToNeutralNote`
+
+---
+
 ## Dependencies & Execution Order
 
 ```text
@@ -338,4 +352,4 @@ MVP = 108-a + 108-b (US1 discovery via config + `/mcp/p/<slug>` or pinned tokens
 
 ## Task Count
 
-157 tasks: setup 3 · a 14 · b 13 · c 23 · d 19 · e 14 · f 16 · g 8 · h 4 · i 16 · j 11 · k 14 · l 6 (codex round 4 added T005a; codex round 3 added T046c, T052b; codex round 1 added T004a, T016a, T027a, T027b, T028a, T030a, T033a, T040a, T055a; 108-j's composable/link-map tasks were merged into Spec 109-k and replaced by profile-specific UI tasks).
+164 tasks: setup 3 · a 14 · b 13 · c 23 · d 19 · e 14 · f 16 · g 8 · h 4 · i 16 · j 11 · k 14 · l 6 · retro-go 7 (codex round 4 added T005a; codex round 3 added T046c, T052b; codex round 1 added T004a, T016a, T027a, T027b, T028a, T030a, T033a, T040a, T055a; 108-j's composable/link-map tasks were merged into Spec 109-k and replaced by profile-specific UI tasks).

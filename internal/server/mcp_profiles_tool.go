@@ -228,9 +228,9 @@ func (p *MCPProxyServer) handleProfiles(ctx context.Context, request mcp.CallToo
 		}
 	}
 	if errText != "" {
-		p.emitActivityInternalToolCall(profilesToolName, "", "", "", sessionID, requestID, "error", errText, time.Since(start).Milliseconds(), args, nil, nil, "")
+		p.emitActivityInternalToolCall(ctx, profilesToolName, "", "", "", sessionID, requestID, "error", errText, time.Since(start).Milliseconds(), args, nil, nil, "")
 	} else {
-		p.emitActivityInternalToolCall(profilesToolName, "", "", "", sessionID, requestID, "success", "", time.Since(start).Milliseconds(), args, redactBuiltinResponseForActivity(responseText), nil, "")
+		p.emitActivityInternalToolCall(ctx, profilesToolName, "", "", "", sessionID, requestID, "success", "", time.Since(start).Milliseconds(), args, redactBuiltinResponseForActivity(responseText), nil, "")
 	}
 	return result, nil
 }

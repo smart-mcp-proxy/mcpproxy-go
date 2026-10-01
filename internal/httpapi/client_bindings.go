@@ -85,7 +85,7 @@ func (s *Server) clientViewAndWarnings(ctx context.Context, clientID string) (*c
 // @Success     200 {object} contracts.APIResponse{data=ClientBindingResponse} "The client row after the change, with its warnings"
 // @Failure     400 {object} ClientBindingErrorResponse "Invalid input; field names the offending input"
 // @Failure     403 {object} contracts.ErrorResponse "Administrator credentials required"
-// @Failure     409 {object} BindingGuardResponse "no_client_credential, or binding_bypassable_without_auth with bindings and fixes"
+// @Failure     409 {object} BindingGuardResponse "no_client_credential, connect_in_progress (a connect of this client is mid-write), or binding_bypassable_without_auth with bindings and fixes"
 // @Failure     503 {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/clients/{client}/binding [put]
 func (s *Server) handlePutClientBinding(w http.ResponseWriter, r *http.Request) {
@@ -291,7 +291,7 @@ type RotateClientResponse struct {
 // @Success     200 {object} contracts.APIResponse{data=RotateClientResponse} "The client row and the rotation state"
 // @Failure     400 {object} ClientBindingErrorResponse "Invalid input"
 // @Failure     403 {object} contracts.ErrorResponse "Administrator credentials required (or macOS App-Data block)"
-// @Failure     409 {object} ConnectConflictResponse "no_client_credential, or precondition_failed"
+// @Failure     409 {object} ConnectConflictResponse "no_client_credential, precondition_failed, connect_in_progress (another connect of this client is mid-write), or credential_superseded (the written credential was replaced or revoked before it could be finalized; reconnect)"
 // @Failure     503 {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/clients/{client}/rotate [post]
 func (s *Server) handleRotateClient(w http.ResponseWriter, r *http.Request) {
@@ -393,7 +393,7 @@ type FinalizeClientResponse struct {
 // @Param       client path string true "Client id"
 // @Success     200 {object} contracts.APIResponse{data=FinalizeClientResponse} "The client row; rotation.state is finalized"
 // @Failure     403 {object} contracts.ErrorResponse "Administrator credentials required"
-// @Failure     409 {object} ClientBindingErrorResponse "no_client_credential"
+// @Failure     409 {object} ClientBindingErrorResponse "no_client_credential, or connect_in_progress (a connect of this client is mid-write)"
 // @Router      /api/v1/clients/{client}/rotate/finalize [post]
 func (s *Server) handleFinalizeClientRotation(w http.ResponseWriter, r *http.Request) {
 	svc := s.clientsService
