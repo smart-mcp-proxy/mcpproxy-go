@@ -61,6 +61,8 @@ func profilesErrorBody(err error) (int, map[string]any, bool) {
 	var val *internalRuntime.ValidationError
 	var noCred *internalRuntime.NoClientCredentialError
 	var pre *internalRuntime.PreconditionFailedError
+	var busy *internalRuntime.ConnectInProgressError
+	var superseded *internalRuntime.CredentialSupersededError
 	switch {
 	case errors.As(err, &guard):
 		bindings := make([]GuardBinding, 0, len(guard.Bindings))
@@ -97,6 +99,10 @@ func profilesErrorBody(err error) (int, map[string]any, bool) {
 		return http.StatusConflict, errorBody(noCred.Error(), noCred.Code(), ""), true
 	case errors.As(err, &pre):
 		return http.StatusConflict, errorBody(pre.Error(), pre.Code(), ""), true
+	case errors.As(err, &busy):
+		return http.StatusConflict, errorBody(busy.Error(), busy.Code(), ""), true
+	case errors.As(err, &superseded):
+		return http.StatusConflict, errorBody(superseded.Error(), superseded.Code(), ""), true
 	case errors.Is(err, profile.ErrUnknownClient):
 		return http.StatusNotFound, errorBody(errClientNotFound, "", ""), true
 	case errors.Is(err, profile.ErrUnknownToken):

@@ -51,6 +51,55 @@ func deref(p *string) string {
 	return *p
 }
 
+// connectInFlightTTL is a safety valve for the in-flight connect claim: a
+// config write takes milliseconds, so a claim older than this was abandoned
+// (a panic between Issue and settle) and is ignored.
+const connectInFlightTTL = 2 * time.Minute
+
+// connectInFlight reports whether a connect of clientID holds a live claim
+// (s.mu held).
+func (s *ClientsService) connectInFlight(clientID string) bool {
+	started, ok := s.inflight[clientID]
+	return ok && s.now().Sub(started) < connectInFlightTTL
+}
+
+func (s *ClientsService) claimConnect(clientID string) {
+	if s.inflight == nil {
+		s.inflight = map[string]time.Time{}
+	}
+	s.inflight[clientID] = s.now()
+}
+
+func (s *ClientsService) releaseConnect(clientID string) { delete(s.inflight, clientID) }
+
+// resolveBindingLocked is THE rule for the binding a connect applies, shared by
+// the write (issueLocked) and the reconnect preview (PreviewBinding) so the two
+// cannot diverge (s.mu held).
+//
+// A reconnect that names no profile keeps the recorded binding, so it can
+// never silently widen a locked client. That holds for an EXPIRED credential
+// too (it lapsed; the operator's binding did not). A revoked credential was
+// cut off deliberately, so reconnecting it is a fresh grant and starts from
+// the defaults (All servers) unless a profile is given.
+func (s *ClientsService) resolveBindingLocked(rec *auth.AgentToken, profilePtr, modePtr *string) (pin, mode string, err error) {
+	keepBinding := rec != nil && profilePtr == nil &&
+		(s.stateOf(rec) == profile.CredentialStateClient || s.stateOf(rec) == profile.CredentialStateExpired)
+	if keepBinding {
+		pin = rec.ProfilePin
+		mode, err = resolveMode(pin, modePtr, rec.ProfileMode)
+	} else {
+		pin = deref(profilePtr)
+		mode, err = resolveMode(pin, modePtr, "")
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if pin != "" && !s.profileExists(s.cfg(), pin) {
+		return "", "", &ValidationError{Field: "profile", Message: fmt.Sprintf("unknown profile %q", pin)}
+	}
+	return pin, mode, nil
+}
+
 // issueLocked is Issue's body (s.mu held): resolve the binding, run the guard
 // over the candidate state, then mint a fresh credential or stage a rotation.
 // allowRotate=false (client add) refuses an already-active credential.
@@ -68,27 +117,9 @@ func (s *ClientsService) issueLocked(clientID string, profilePtr, modePtr *strin
 		return nil, &ValidationError{Field: "id", Message: fmt.Sprintf("client %s already has an active credential; rotate it instead", clientID)}
 	}
 
-	// A reconnect that names no profile keeps the recorded binding, so it can
-	// never silently widen a locked client. That holds for an EXPIRED
-	// credential too (it lapsed; the operator's binding did not). A revoked
-	// credential was cut off deliberately, so reconnecting it is a fresh
-	// grant and starts from the defaults (All servers) unless a profile is
-	// given.
-	keepBinding := rec != nil && profilePtr == nil &&
-		(active || s.stateOf(rec) == profile.CredentialStateExpired)
-	var pin, mode string
-	if keepBinding {
-		pin = rec.ProfilePin
-		mode, err = resolveMode(pin, modePtr, rec.ProfileMode)
-	} else {
-		pin = deref(profilePtr)
-		mode, err = resolveMode(pin, modePtr, "")
-	}
+	pin, mode, err := s.resolveBindingLocked(rec, profilePtr, modePtr)
 	if err != nil {
 		return nil, err
-	}
-	if pin != "" && !s.profileExists(s.cfg(), pin) {
-		return nil, &ValidationError{Field: "profile", Message: fmt.Sprintf("unknown profile %q", pin)}
 	}
 
 	now := s.now().UTC()
@@ -139,7 +170,68 @@ func (m connectMinter) Issue(clientID string, intent connect.CredentialIntent) (
 	}
 	m.s.mu.Lock()
 	defer m.s.mu.Unlock()
-	return m.s.issueLocked(clientID, intent.Profile, intent.Mode, true, issueOptions{})
+	if m.s.connectInFlight(clientID) {
+		return nil, &ConnectInProgressError{ClientID: clientID}
+	}
+	issued, err := m.s.issueLocked(clientID, intent.Profile, intent.Mode, true, issueOptions{})
+	if err != nil {
+		return nil, err
+	}
+	m.s.claimConnect(clientID)
+	return issued, nil
+}
+
+// PreviewBinding implements connect.CredentialMinter: the binding Issue would
+// apply for this intent, minting and staging nothing.
+func (m connectMinter) PreviewBinding(clientID string, intent connect.CredentialIntent) (string, string, error) {
+	s := m.s
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	all, err := s.records()
+	if err != nil {
+		return "", "", err
+	}
+	rec := clientRecord(all, clientID)
+	if rec != nil && rec.Kind != auth.KindClient {
+		return "", "", storage.ErrClientCredentialConflict
+	}
+	return s.resolveBindingLocked(rec, intent.Profile, intent.Mode)
+}
+
+// Release implements connect.CredentialMinter: it ends the in-flight claim
+// without committing or aborting, leaving an ambiguous write to the reconciler.
+func (m connectMinter) Release(clientID string, _ *connect.IssuedCredential) {
+	m.s.mu.Lock()
+	defer m.s.mu.Unlock()
+	m.s.releaseConnect(clientID)
+}
+
+// verifyIssuedLocked is Commit's fail-closed check (s.mu held): the secret it
+// is about to finalize must still be the record's pending secret (rotation) or
+// primary secret (fresh mint). alreadyFinal reports a rotation that was
+// already finalized for this same secret.
+func (s *ClientsService) verifyIssuedLocked(clientID string, issued *connect.IssuedCredential) (alreadyFinal bool, err error) {
+	superseded := &CredentialSupersededError{ClientID: clientID}
+	all, err := s.records()
+	if err != nil {
+		return false, err
+	}
+	rec := clientRecord(all, clientID)
+	if rec == nil || rec.Kind != auth.KindClient || rec.Revoked {
+		return false, superseded
+	}
+	key, err := s.hmacKey()
+	if err != nil {
+		return false, err
+	}
+	h := auth.HashToken(issued.Secret, key)
+	switch {
+	case issued.Rotating && rec.PendingHash != "" && auth.ConstantTimeEqual(h, rec.PendingHash):
+		return false, nil
+	case auth.ConstantTimeEqual(h, rec.TokenHash):
+		return issued.Rotating, nil
+	}
+	return false, superseded
 }
 
 // Commit implements connect.CredentialMinter.
@@ -147,14 +239,21 @@ func (m connectMinter) Commit(clientID string, intent connect.CredentialIntent, 
 	s := m.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.releaseConnect(clientID)
 	ctx := context.Background()
 	a := actorOf(intent)
+	alreadyFinal, err := s.verifyIssuedLocked(clientID, issued)
+	if err != nil {
+		return err
+	}
 	if !issued.Rotating {
 		s.recordMint(ctx, a, clientID, issued)
 		return nil
 	}
-	if _, err := s.finalizeLocked(ctx, a, clientID); err != nil {
-		return err
+	if !alreadyFinal {
+		if _, err := s.finalizeLocked(ctx, a, clientID); err != nil {
+			return err
+		}
 	}
 	if pb, ok := issued.Pending.(pendingBinding); ok {
 		mode := pb.mode
@@ -170,6 +269,7 @@ func (m connectMinter) Abort(clientID string, intent connect.CredentialIntent, i
 	s := m.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.releaseConnect(clientID)
 	if issued.Rotating {
 		return s.rollbackLocked(context.Background(), actorOf(intent), clientID)
 	}

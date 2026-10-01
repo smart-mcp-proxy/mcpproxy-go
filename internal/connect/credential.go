@@ -78,6 +78,14 @@ type CredentialMinter interface {
 	// Abort undoes Issue after a failed write (fresh: forget; rotation:
 	// rollback, the old secret keeps working).
 	Abort(clientID string, intent CredentialIntent, issued *IssuedCredential) error
+	// Release ends the in-flight claim Issue took without committing or
+	// aborting: the write outcome is ambiguous, so the reconciler resolves the
+	// staged rotation from what the config actually holds (FR-021a).
+	Release(clientID string, issued *IssuedCredential)
+	// PreviewBinding reports the profile and mode Issue would apply for this
+	// intent (a reconnect with no profile keeps the recorded binding),
+	// minting and staging nothing.
+	PreviewBinding(clientID string, intent CredentialIntent) (profile, mode string, err error)
 	// Classify reports the credential state of a `mcp_cli_` secret found in
 	// clientID's config: client|revoked|expired, or none for anything that is
 	// not a credential of this client.

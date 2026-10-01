@@ -754,7 +754,10 @@ func (h *credentialHandle) settle(res *ConnectResult, writeErr error) error {
 	}
 	if writeErr != nil || res == nil || !res.Success {
 		if h.wrote {
-			return nil // ambiguous outcome: leave it to the reconciler
+			// Ambiguous outcome: leave it to the reconciler, which must be free
+			// to resolve it from the file (FR-021a).
+			h.svc.minter.Release(h.clientID, h.issued)
+			return nil
 		}
 		_ = h.svc.minter.Abort(h.clientID, h.intent, h.issued)
 		h.issued = nil

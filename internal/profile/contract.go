@@ -130,6 +130,13 @@ const (
 const (
 	ErrorCodeBindingBypassable  = "binding_bypassable_without_auth"
 	ErrorCodeNoClientCredential = "no_client_credential"
+	// ErrorCodeConnectInProgress answers a second connect, rotate, finalize or
+	// binding change of a client whose connect holds the in-flight claim
+	// (FR-021a).
+	ErrorCodeConnectInProgress = "connect_in_progress"
+	// ErrorCodeCredentialSuperseded answers a connect whose credential was
+	// replaced or revoked before it could be finalized (FR-021a).
+	ErrorCodeCredentialSuperseded = "credential_superseded"
 
 	// Spec 108-f: the profile CRUD refusals (contracts/rest-api.md).
 	ErrorCodeProfileInUse       = "profile_in_use"
