@@ -207,22 +207,6 @@
     },
     "name": "describe_tool"
   },
-  "list_registries": {
-    "annotations": {
-      "title": "List Registries",
-      "readOnlyHint": true,
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": false
-    },
-    "description": "📋 List all available catalog sources (registries). 'search_servers' already searches every enabled source when 'registry' is omitted (FR-060) — call this to see source ids, e.g. to narrow a search with 'registry', or to check what's enabled. Each source contains different collections of MCP servers that can be added as upstreams.",
-    "inputSchema": {
-      "properties": {},
-      "required": [],
-      "type": "object"
-    },
-    "name": "list_registries"
-  },
   "profiles": {
     "annotations": {
       "title": "Manage profiles and client bindings",
@@ -406,58 +390,6 @@
     },
     "name": "profiles"
   },
-  "quarantine_security": {
-    "annotations": {
-      "title": "Quarantine Security",
-      "readOnlyHint": false,
-      "destructiveHint": true,
-      "idempotentHint": false,
-      "openWorldHint": false
-    },
-    "description": "Security quarantine management AND TPA scanning for MCP servers and tools. Review and manage quarantined servers and tools to prevent Tool Poisoning Attacks (TPAs), and scan a server for them: 'scan_server' runs the always-on offline baseline scan (in-process, no Docker required) and 'get_scan_report' returns the latest verdict and findings. Every listing/inspection response also carries a one-line scan status, so an unscanned server is visible as unscanned. Supports server-level quarantine and tool-level approval for individual tool description/schema changes. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.",
-    "inputSchema": {
-      "properties": {
-        "name": {
-          "description": "Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, approve_prompt, approve_all_prompts, scan_server, get_scan_report)",
-          "type": "string"
-        },
-        "operation": {
-          "description": "Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool, inspect_prompts, approve_prompt, approve_all_prompts, scan_server, get_scan_report. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled. The prompt operations (spec 100) manage aggregated upstream prompts held by the metadata rug-pull baseline: a prompt whose advertised metadata changed since approval is withheld from prompts/list until approved. 'scan_server' starts the offline TPA baseline scan for one server (no Docker needed) and returns the verdict once it settles, or a job id to poll; 'get_scan_report' returns that server's latest verdict, counts and findings.",
-          "enum": [
-            "list_quarantined",
-            "inspect_quarantined",
-            "quarantine_server",
-            "inspect_tools",
-            "approve_tool",
-            "approve_all_tools",
-            "block_tool",
-            "block_all_tools",
-            "enable_tool",
-            "disable_tool",
-            "inspect_prompts",
-            "approve_prompt",
-            "approve_all_prompts",
-            "scan_server",
-            "get_scan_report"
-          ],
-          "type": "string"
-        },
-        "prompt_name": {
-          "description": "Prompt name (required for approve_prompt; spec 100)",
-          "type": "string"
-        },
-        "tool_name": {
-          "description": "Tool name (required for approve_tool and block_tool operations)",
-          "type": "string"
-        }
-      },
-      "required": [
-        "operation"
-      ],
-      "type": "object"
-    },
-    "name": "quarantine_security"
-  },
   "read_cache": {
     "annotations": {
       "title": "Read Cache",
@@ -466,11 +398,11 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "Retrieve paginated data when mcpproxy indicates a tool response was truncated. Use the cache key provided in truncation messages.",
+    "description": "Retrieve paginated data when mcpproxy indicates a tool response was truncated. Use the cache key provided in truncation messages to access the complete dataset with pagination.",
     "inputSchema": {
       "properties": {
         "key": {
-          "description": "Cache key provided by mcpproxy when a response was truncated.",
+          "description": "Cache key provided by mcpproxy when a response was truncated (e.g. 'Use read_cache tool: key=\"abc123def...\"')",
           "type": "string"
         },
         "limit": {
@@ -497,7 +429,7 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "Search and discover available upstream tools using BM25 full-text search. WORKFLOW: 1) Call this tool first to find relevant tools, 2) Check the 'call_with' field in results to determine which variant to use, 3) Call the tool using call_tool_read, call_tool_write, or call_tool_destructive. Results include 'annotations' (tool behavior hints like destructiveHint), 'call_with' recommendation, and a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools). Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. Use natural language to describe what you want to accomplish. ANNOTATION FILTERS: read_only_only, exclude_destructive and exclude_open_world self-restrict discovery. When they withhold tools that matched your query, the response carries a 'filter_diagnostics' block with per-filter counts (split into missing upstream annotations vs. explicitly unsafe ones) and one suggestion; it is absent when nothing was withheld. Filter diagnostics describe this call's candidate window, not the whole catalog.",
+    "description": "🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers. ANNOTATION FILTERS: read_only_only, exclude_destructive and exclude_open_world self-restrict discovery. When they withhold tools that matched your query, the response carries a 'filter_diagnostics' block with per-filter counts (split into missing upstream annotations vs. explicitly unsafe ones) and one suggestion; it is absent when nothing was withheld. Filter diagnostics describe this call's candidate window, not the whole catalog.",
     "inputSchema": {
       "properties": {
         "debug": {
@@ -524,6 +456,10 @@
           "description": "When debug=true, explain why a specific tool was ranked low (format: 'server:tool')",
           "type": "string"
         },
+        "include_disabled": {
+          "description": "Set true to also surface tools that exist but are currently locked by config, user, or quarantine (default: false). Returns a 'disabled' list (name/server/description/status) plus a 'remediation' map; callable results are unaffected and listed first.",
+          "type": "boolean"
+        },
         "include_session_risk_warning": {
           "description": "Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag.",
           "type": "boolean"
@@ -537,7 +473,7 @@
           "type": "number"
         },
         "query": {
-          "description": "Natural language description of what you want to accomplish. Be specific (e.g., 'create a new GitHub repository', 'get weather for London').",
+          "description": "Natural language description of what you want to accomplish. Be specific about your task (e.g., 'create a new GitHub repository', 'get weather for London', 'query SQLite database for users'). The search will find the most relevant tools across all connected servers.",
           "type": "string"
         },
         "read_only_only": {
@@ -551,39 +487,6 @@
       "type": "object"
     },
     "name": "retrieve_tools"
-  },
-  "search_servers": {
-    "annotations": {
-      "title": "Search Servers",
-      "readOnlyHint": true,
-      "destructiveHint": false,
-      "idempotentHint": false,
-      "openWorldHint": true
-    },
-    "description": "🔍 Discover MCP servers from the catalog, with repository type detection. Omit 'registry' to search every enabled catalog source at once, ranked official-first then by relevance (FR-060) — this is the recommended way to search. Pass 'registry' to narrow to one catalog source (e.g., 'smithery', 'mcprun', 'pulse'); use 'list_registries' to see source ids. Features npm/PyPI package detection for enhanced install commands. Results include server URLs and repository information ready for direct use with upstream_servers add command.",
-    "inputSchema": {
-      "properties": {
-        "limit": {
-          "description": "Maximum number of results to return (default: 10, max: 50)",
-          "type": "number"
-        },
-        "registry": {
-          "description": "Optional: a catalog source id or name to narrow the search to (e.g., 'smithery', 'mcprun', 'pulse'). Omit to search every enabled catalog source at once. Use 'list_registries' to see source ids.",
-          "type": "string"
-        },
-        "search": {
-          "description": "Search term to filter servers by name or description (case-insensitive)",
-          "type": "string"
-        },
-        "tag": {
-          "description": "Catalog entries do not carry tags. Omit this parameter or pass an empty value; non-empty values return an error.",
-          "type": "string"
-        }
-      },
-      "required": [],
-      "type": "object"
-    },
-    "name": "search_servers"
   },
   "set_profile": {
     "annotations": {
@@ -605,121 +508,5 @@
       "type": "object"
     },
     "name": "set_profile"
-  },
-  "upstream_servers": {
-    "annotations": {
-      "title": "Upstream Servers",
-      "readOnlyHint": false,
-      "destructiveHint": true,
-      "idempotentHint": false,
-      "openWorldHint": false
-    },
-    "description": "Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Use 'isolation_json' parameter to configure per-server Docker images, CPU/memory limits, and network isolation. Example: {\"enabled\": true, \"image\": \"node:20\", \"network_mode\": \"bridge\"}.\n\nSMART PATCHING (update/patch): Uses deep merge - only specify fields you want to change. Omitted fields are PRESERVED, not removed. Examples:\n- Enable server: {\"operation\": \"patch\", \"name\": \"my-server\", \"enabled\": true} - only enabled changes\n- Enable isolation: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"enabled\\\": true}\"} - enables isolation with defaults\n- Update image: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"image\\\": \\\"python:3.12\\\"}\"} - other isolation fields preserved\n- Add env var: env_json merges with existing vars\n- Replace args: args_json replaces entirely (arrays not merged)\n- Remove field: use 'null' (e.g., isolation_json: \"null\" removes isolation)\n\nREDACTION (update/patch): the returned 'changes' diff keeps every field PATH exact, but MASKS values under secret-bearing keys (env vars, headers, oauth secrets, credential-shaped argv tokens) in both this response and the activity log. Non-secret values round-trip unchanged; do not read a masked value back as what was stored.",
-    "inputSchema": {
-      "properties": {
-        "args_json": {
-          "description": "Command arguments for stdio servers as a JSON array of strings (e.g., '[\"mcp-server-sqlite\", \"--db-path\", \"/path/to/db\"]'). For update/patch: REPLACES all existing args (arrays are not merged).",
-          "type": "string"
-        },
-        "command": {
-          "description": "Command to run for stdio servers (e.g., 'uvx', 'python')",
-          "type": "string"
-        },
-        "enabled": {
-          "description": "Whether server should be enabled (default: true)",
-          "type": "boolean"
-        },
-        "env_json": {
-          "description": "Environment variables for stdio servers as JSON object (e.g., '{\"API_KEY\": \"value\"}'). For update/patch: MERGES with existing vars (new keys added, existing keys updated).",
-          "type": "string"
-        },
-        "expose_prompts": {
-          "description": "Per-server prompt-aggregation override (F9): true = include this server's MCP prompts in mcpproxy's aggregated prompts/list; false = exclude them regardless of capability. Omit to leave unchanged (patch) / inherit the default (aggregate if advertised). Only meaningful when aggregate_upstream_prompts is enabled globally. Used with add/update/patch.",
-          "type": "boolean"
-        },
-        "forward_headers_json": {
-          "description": "Client header forwarding allowlist (Spec 112) as a JSON array of inbound MCP client header NAMES to copy into this server's tools/call requests, e.g. [\"X-User-Id\",\"X-Tenant-Id\"]. Names only, never values; exact names, case-insensitive, at most 32, no wildcards. Authorization, Host, Cookie, X-API-Key, hop-by-hop and proxy headers are never forwarded. Only HTTP-based upstreams forward. Patch: omit to leave unchanged, '[]' to clear (the array replaces entirely). Used with add/update/patch.",
-          "type": "string"
-        },
-        "headers_json": {
-          "description": "HTTP headers for authentication as JSON object (e.g., '{\"Authorization\": \"Bearer token\"}'). For update/patch: MERGES with existing headers (new keys added, existing keys updated).",
-          "type": "string"
-        },
-        "id": {
-          "description": "Server id within the registry - required for add_from_registry.",
-          "type": "string"
-        },
-        "init_timeout": {
-          "description": "Per-server MCP `initialize` handshake deadline as a duration string (e.g. '120s', '3m'). Raise this for upstreams that do legitimate first-run warmup (cache/index build) before responding to `initialize`, so they are not killed mid-startup. Unset → global default (30s). Bounds: 1s–30m. Used with add/update/patch.",
-          "type": "string"
-        },
-        "isolation_json": {
-          "description": "Docker isolation config as JSON object. MERGES with existing settings - only provided fields change. Use 'null' to remove isolation entirely. Example: '{\"image\": \"python:3.12\"}' updates only the image.",
-          "type": "string"
-        },
-        "lines": {
-          "description": "Number of lines to tail from server log (default: 50, max: 500) - used with tail_log operation",
-          "type": "number"
-        },
-        "name": {
-          "description": "Server name (required for add/remove/update/patch/tail_log operations; optional name override for add_from_registry)",
-          "type": "string"
-        },
-        "oauth_json": {
-          "description": "OAuth config as JSON object. MERGES with existing settings. Use 'null' to remove OAuth entirely. Fields: client_id, client_secret, scopes (array - replaces).",
-          "type": "string"
-        },
-        "operation": {
-          "description": "Operation: list, add, remove, update, patch, tail_log, add_from_registry, enable, disable, restart, refresh. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. 'refresh' re-discovers and re-indexes a server's tools without changing any security state - use it to make just-approved tools searchable immediately. For quarantine operations, use the 'quarantine_security' tool.",
-          "enum": [
-            "list",
-            "add",
-            "remove",
-            "update",
-            "patch",
-            "tail_log",
-            "add_from_registry",
-            "enable",
-            "disable",
-            "restart",
-            "refresh"
-          ],
-          "type": "string"
-        },
-        "protocol": {
-          "description": "Transport protocol: stdio, http, sse, streamable-http, auto (default: auto-detect)",
-          "enum": [
-            "stdio",
-            "http",
-            "sse",
-            "streamable-http",
-            "auto"
-          ],
-          "type": "string"
-        },
-        "registry": {
-          "description": "Registry id to add from (e.g. 'pulse') - required for add_from_registry. Use the 'list_registries'/'search_servers' tools to discover registries and server ids.",
-          "type": "string"
-        },
-        "trust_mode": {
-          "description": "Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch.",
-          "enum": [
-            "auto",
-            "scan",
-            "manual"
-          ],
-          "type": "string"
-        },
-        "url": {
-          "description": "Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')",
-          "type": "string"
-        }
-      },
-      "required": [
-        "operation"
-      ],
-      "type": "object"
-    },
-    "name": "upstream_servers"
   }
 }

@@ -671,14 +671,16 @@ func (s *ProfilesService) Delete(ctx context.Context, a Actor, name, reassignTo 
 
 // Classify sets (or, with tier "", removes) the classification of one exact
 // server:tool under the named profile, atomically under the write lock, and
-// records a `classify` change (F29).
-func (s *ProfilesService) Classify(ctx context.Context, a Actor, name, tool, tier string) (*ProfileView, error) {
+// records a `classify` change (F29). Like a create or an update it returns the
+// stored profile and the validator's warnings about it.
+func (s *ProfilesService) Classify(ctx context.Context, a Actor, name, tool, tier string) (*WriteResult, error) {
 	if tier != "" && tier != config.ProfileTierRead && tier != config.ProfileTierWrite && tier != config.ProfileTierDestructive {
 		return nil, &ValidationError{Field: "tools.classify", Message: fmt.Sprintf("invalid classify tier %q: must be one of read, write, destructive", tier)}
 	}
 	if !strings.Contains(tool, ":") || strings.ContainsAny(tool, "*") || strings.HasPrefix(tool, ":") || strings.HasSuffix(tool, ":") {
 		return nil, &ValidationError{Field: "tools.classify", Message: fmt.Sprintf("invalid tool pattern %q", tool)}
 	}
+	var warnings []string
 	_, _, err := s.rt.MutateConfig(ctx, a, func(d *config.Config) (ChangeHint, error) {
 		i := indexOfProfile(d, name)
 		if i < 0 {
@@ -704,7 +706,8 @@ func (s *ProfilesService) Classify(ctx context.Context, a Actor, name, tool, tie
 		}
 		rules.Classify = classify
 		p.Tools = &rules
-		if _, err := validateProfilesFor(d, name); err != nil {
+		var err error
+		if warnings, err = validateProfilesFor(d, name); err != nil {
 			return ChangeHint{}, err
 		}
 		return ChangeHint{Kind: profile.ChangeClassify, Profile: name, PreviousProfile: name,
@@ -713,7 +716,7 @@ func (s *ProfilesService) Classify(ctx context.Context, a Actor, name, tool, tie
 	if err != nil {
 		return nil, err
 	}
-	return s.Get(ctx, name, ViewerScope{})
+	return s.written(ctx, name, warnings)
 }
 
 // SetAnonymous sets (or, with "", clears) the anonymous_profile. An unknown

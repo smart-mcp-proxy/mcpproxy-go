@@ -176,6 +176,13 @@ for (const width of WIDTHS) {
       const attention = await apiGet(page, '/api/v1/attention')
       const attentionCount: number = attention.count ?? attention.items?.length ?? 0
       const wide = width >= 1100
+      // Spec 108-i I16: the header's Viewing chip (the viewing slot) renders when
+      // there is a profile or a client with its own credential to filter by.
+      const profilesData = await apiGet(page, '/api/v1/profiles')
+      const clientsData = await apiGet(page, '/api/v1/clients')
+      const hasViewing =
+        (profilesData?.profiles ?? []).length > 0 ||
+        (clientsData?.clients ?? []).some((client: { credential_state?: string }) => client.credential_state === 'client')
 
       for (const route of MATRIX_ROUTES) {
         const where = `${route} at ${width}px (${theme})`
@@ -212,7 +219,9 @@ for (const width of WIDTHS) {
         else expect(add, `add button on ${where}`).not.toContain('Add')
 
         if (width === 390) {
-          const expected = ['header-drawer-toggle', 'header-search-icon', 'header-status-pill']
+          const expected = ['header-drawer-toggle', 'header-search-icon']
+          if (hasViewing) expected.push('header-viewing-slot')
+          expected.push('header-status-pill')
           if (attentionCount > 0) expected.push('header-attention-pill')
           expected.push('header-add-menu')
           expect(visible, `the phone header holds exactly these controls on ${where}`).toEqual(expected)
