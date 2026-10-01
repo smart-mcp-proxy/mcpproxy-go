@@ -298,7 +298,12 @@ struct ScopeFilter: Equatable {
                 add("type", type)
             } else {
                 switch view {
-                case .calls: add("type", Self.callTypes.joined(separator: ","))
+                case .calls:
+                    // A call a profile refuses is persisted as a `policy_decision`
+                    // (status blocked), so a blocked filter on this view includes
+                    // that type, as the Web UI does (Spec 108-j).
+                    let types = status == "blocked" ? Self.callTypes + ["policy_decision"] : Self.callTypes
+                    add("type", types.joined(separator: ","))
                 case .system: add("type", Self.systemTypes.joined(separator: ","))
                 case .all, .sessions: break
                 }

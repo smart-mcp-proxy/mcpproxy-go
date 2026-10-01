@@ -27,6 +27,11 @@ import (
 // (SC006RecordSetTests.swift) must each SEND the combination's query and RENDER
 // exactly its ids.
 
+const (
+	sc006CallsType        = "tool_call,internal_tool_call"
+	sc006CallsBlockedType = "tool_call,internal_tool_call,policy_decision"
+)
+
 const sc006GoldenPath = "internal/httpapi/testdata/sc006_activity_recordsets.json"
 
 // p108SC006Row is one seeded record with the attribution it must be listed under
@@ -35,6 +40,7 @@ type p108SC006Row struct {
 	id                   string
 	profile, client, tok string // "" = unattributed on that axis
 	status               string
+	typ                  storage.ActivityType // "" = tool_call
 	build                func(*storage.ActivityRecord)
 }
 
@@ -50,12 +56,12 @@ func p108SC006Seed() []p108SC006Row {
 	}
 	return []p108SC006Row{
 		{id: "c1", profile: "work-readonly", client: "cursor", tok: "client-cursor", status: "success", build: attr("work-readonly", "pin", "cursor", "client-cursor")},
-		{id: "c2", profile: "work-readonly", client: "cursor", tok: "client-cursor", status: "blocked", build: attr("work-readonly", "pin", "cursor", "client-cursor")},
+		{id: "c2", typ: storage.ActivityTypePolicyDecision, profile: "work-readonly", client: "cursor", tok: "client-cursor", status: "blocked", build: attr("work-readonly", "pin", "cursor", "client-cursor")},
 		{id: "c3", profile: "work-full", client: "cursor", tok: "client-cursor", status: "success", build: attr("work-full", "pin", "cursor", "client-cursor")},
 		{id: "x1", profile: "work-full", client: "codex", tok: "client-codex", status: "success", build: attr("work-full", "binding", "codex", "client-codex")},
-		{id: "x2", profile: "work-full", client: "codex", tok: "client-codex", status: "blocked", build: attr("work-full", "binding", "codex", "client-codex")},
+		{id: "x2", typ: storage.ActivityTypePolicyDecision, profile: "work-full", client: "codex", tok: "client-codex", status: "blocked", build: attr("work-full", "binding", "codex", "client-codex")},
 		{id: "b1", profile: "work-readonly", tok: "ro-bot", status: "success", build: attr("work-readonly", "pin", "", "ro-bot")},
-		{id: "b2", profile: "work-readonly", tok: "ro-bot", status: "blocked", build: attr("work-readonly", "pin", "", "ro-bot")},
+		{id: "b2", typ: storage.ActivityTypePolicyDecision, profile: "work-readonly", tok: "ro-bot", status: "blocked", build: attr("work-readonly", "pin", "", "ro-bot")},
 		{id: "u1", status: "success"},
 		{
 			// legacy: only metadata.profile and the auth agent name; the filters must
@@ -77,6 +83,9 @@ func p108SC006Records(rows []p108SC006Row) []*storage.ActivityRecord {
 		rec := &storage.ActivityRecord{
 			ID: row.id, Type: storage.ActivityTypeToolCall, ServerName: "srv", ToolName: "tool_" + row.id,
 			Status: row.status, Timestamp: base.Add(time.Duration(i) * time.Minute),
+		}
+		if row.typ != "" {
+			rec.Type = row.typ
 		}
 		if row.build != nil {
 			row.build(rec)
@@ -110,6 +119,11 @@ type p108SC006Set struct {
 	URLQuery  string   `json:"url_query"`
 	RESTQuery string   `json:"rest_query"`
 	IDs       []string `json:"ids"`
+	// CallsViewType is the `type` a surface's default "Tool calls" view must send
+	// with the combination (omitted when no `type` is implied beyond the view's
+	// own call types). A profile refusal is persisted as a policy_decision, so a
+	// status=blocked filter on that view widens the type set to include it.
+	CallsViewType string `json:"calls_view_type,omitempty"`
 }
 
 type p108SC006Refusal struct {
@@ -169,7 +183,19 @@ func TestSC006ActivityRecordSets(t *testing.T) {
 					}
 					got := activityIDs(t, srv, path, scopeAdminAPIKey)
 					require.Equal(t, want, got, "REST disagrees with the reference filter for %q", query)
-					sets = append(sets, p108SC006Set{URLQuery: query, RESTQuery: query, IDs: want})
+					set := p108SC006Set{URLQuery: query, RESTQuery: query, IDs: want}
+					if status == "blocked" {
+						// The default Tool calls view sends a type filter. The refusals
+						// are policy_decision records, so it must include that type or it
+						// hides exactly what status=blocked asks for.
+						set.CallsViewType = sc006CallsBlockedType
+						viewPath := "/api/v1/activity?" + query + "&type=" + url.QueryEscape(set.CallsViewType)
+						require.Equal(t, want, activityIDs(t, srv, viewPath, scopeAdminAPIKey),
+							"the widened Tool calls view must list the same refusals for %q", query)
+						narrow := activityIDs(t, srv, "/api/v1/activity?"+query+"&type="+url.QueryEscape(sc006CallsType), scopeAdminAPIKey)
+						require.Empty(t, narrow, "without policy_decision the Tool calls view hides every seeded refusal for %q", query)
+					}
+					sets = append(sets, set)
 					if profile == "work-readonly" && client == "cursor" && token == "" && status == "" {
 						sawPreReassignment = true
 						require.Equal(t, []string{"c2", "c1"}, got, "calls made before Cursor was reassigned still match the profile it had then (US3-5)")
@@ -205,7 +231,7 @@ func TestSC006ActivityRecordSets(t *testing.T) {
 	}
 
 	golden := p108SC006Golden{
-		Comment:    "Spec 108-l SC-006: generated by TestSC006ActivityRecordSets (UPDATE_GOLDEN=1). Seed: c1,c2 = Cursor on work-readonly before it was reassigned, c3 = Cursor on work-full after; x1,x2 = Codex (switchable, work-full); b1,b2 = token ro-bot pinned to work-readonly; u1 = a pre-upgrade record with no attribution; u2 = a pre-upgrade record with only the legacy metadata shape. ids are newest first. url_query and rest_query are the same four parameters: the Spec 109 url-filter contract maps the URL names 1:1 onto the REST names.",
+		Comment:    "Spec 108-l SC-006: generated by TestSC006ActivityRecordSets (UPDATE_GOLDEN=1). Seed: c1,c2 = Cursor on work-readonly before it was reassigned, c3 = Cursor on work-full after; x1,x2 = Codex (switchable, work-full); b1,b2 = token ro-bot pinned to work-readonly; every blocked row (c2,x2,b2) is a policy_decision, as a profile refusal is persisted; u1 = a pre-upgrade record with no attribution; u2 = a pre-upgrade record with only the legacy metadata shape. ids are newest first. url_query and rest_query are the same four parameters: the Spec 109 url-filter contract maps the URL names 1:1 onto the REST names.",
 		RecordSets: sets,
 		Refused:    refused,
 	}

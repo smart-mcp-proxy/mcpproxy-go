@@ -15,8 +15,10 @@ final class SC006RecordSetTests: XCTestCase {
         let urlQuery: String
         let restQuery: String
         let ids: [String]
+        let callsViewType: String?
         enum CodingKeys: String, CodingKey {
             case urlQuery = "url_query", restQuery = "rest_query", ids
+            case callsViewType = "calls_view_type"
         }
     }
     private struct Golden: Decodable { let recordsets: [RecordSet] }
@@ -51,9 +53,12 @@ final class SC006RecordSetTests: XCTestCase {
         return components.percentEncodedQuery ?? ""
     }
 
+    /// A blocked record is what a profile refusal really persists: a
+    /// `policy_decision`, not a `tool_call`.
     private func entries(_ ids: [String], status: String) throws -> [ActivityEntry] {
+        let type = status == "blocked" ? "policy_decision" : "tool_call"
         let records: [[String: Any]] = ids.enumerated().map { index, id in
-            ["id": id, "type": "tool_call", "source": "mcp", "server_name": "srv",
+            ["id": id, "type": type, "source": "mcp", "server_name": "srv",
              "tool_name": "tool_\(id)", "status": status,
              "timestamp": String(format: "2026-10-01T09:%02d:00Z", 59 - index)]
         }
@@ -75,6 +80,12 @@ final class SC006RecordSetTests: XCTestCase {
             XCTAssertEqual(request?.path, "/api/v1/activity", set.urlQuery)
             XCTAssertEqual(canonical(request), set.restQuery,
                            "macOS must send exactly the combination \(set.urlQuery.isEmpty ? "(no filter)" : set.urlQuery)")
+
+            // The default Tool calls view also sends its type filter; for a blocked
+            // filter it must include policy_decision, where a refusal is stored.
+            let type = request?.query.first { $0.name == "type" }?.value
+            XCTAssertEqual(type, set.callsViewType ?? "tool_call,internal_tool_call",
+                           "the Tool calls view must send the golden's type set for \(set.urlQuery)")
 
             // The list the view builds from the server's answer: exactly the ids,
             // in the server's order, whatever the folding does to the rows.

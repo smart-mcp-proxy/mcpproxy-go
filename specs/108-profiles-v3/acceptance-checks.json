@@ -20,7 +20,8 @@
         "go:cmd/mcpproxy/activity_scope_flags_test.go#TestProfilesV3Acceptance_Check2_CLIListsBlockedRecord",
         "go:internal/httpapi/activity_scope_params_test.go#TestActivityScopeParams_ListFiltersAndAliases",
         "vitest:frontend/tests/unit/activity-scope-params.spec.ts",
-        "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift#testSessionsCarryTheThreeScopeFilters"
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift#testToolCallsViewWidensToPolicyDecisionsForABlockedFilter",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/SC006RecordSetTests.swift#testEveryCombinationSendsItsQueryAndShowsItsIds"
       ]
     },
     {
