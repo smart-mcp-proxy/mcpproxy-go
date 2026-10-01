@@ -1,0 +1,69 @@
+{
+  "schema": "acceptance-checks/v1",
+  "spec": "108",
+  "comment": "SC-001: the six audit acceptance checks and the automated tests that carry them. Check n is carried by TestProfilesV3Acceptance_Check<n>_* (internal/server) plus the cross-surface tests listed. Test refs use the parity-matrix grammar: go:<repo path>#<Test>, vitest:<repo path>, xctest:<repo path>#<method>, pw:<repo path>. TestProfilesV3AcceptanceIndexResolves resolves every ref and fails when a TestProfilesV3Acceptance_Check* function is missing from this index.",
+  "checks": [
+    {
+      "check": 1,
+      "title": "A read-only profile hides every non-read, denied, unclassified and out-of-scope tool from discovery",
+      "spec": ["US1-1"],
+      "tests": [
+        "go:internal/server/profiles_v3_acceptance_test.go#TestProfilesV3Acceptance_Check1_DiscoveryHidesNonReadTools"
+      ]
+    },
+    {
+      "check": 2,
+      "title": "A write call is refused before any upstream I/O, recorded as blocked with attribution, and the record is listed by client and status on REST, CLI, Web UI and macOS",
+      "spec": ["US1-2", "US3-1"],
+      "tests": [
+        "go:internal/server/profiles_v3_acceptance_test.go#TestProfilesV3Acceptance_Check2_WriteRefusedAndRecorded",
+        "go:cmd/mcpproxy/activity_scope_flags_test.go#TestProfilesV3Acceptance_Check2_CLIListsBlockedRecord",
+        "go:internal/httpapi/activity_scope_params_test.go#TestActivityScopeParams_ListFiltersAndAliases",
+        "vitest:frontend/tests/unit/activity-scope-params.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift#testSessionsCarryTheThreeScopeFilters"
+      ]
+    },
+    {
+      "check": 3,
+      "title": "An unannotated tool stays hidden until classified, then is visible and callable within one request",
+      "spec": ["US1-3"],
+      "tests": [
+        "go:internal/server/profiles_v3_acceptance_test.go#TestProfilesV3Acceptance_Check3_UnannotatedHiddenUntilClassified",
+        "go:cmd/mcpproxy/profile_cmd_test.go#TestProfileClassify_SetsAndClears",
+        "vitest:frontend/tests/unit/profile-policy-editor.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ProfileEditorModelTests.swift#testClassifyIsOnlyForUnannotatedTools"
+      ]
+    },
+    {
+      "check": 4,
+      "title": "Reassigning a client takes effect on its next request without touching its credential, and its live session is told its tool list changed",
+      "spec": ["US2-2", "US2-3"],
+      "tests": [
+        "go:internal/server/profiles_v3_acceptance_test.go#TestProfilesV3Acceptance_Check4_ReassignTakesEffectNextRequest",
+        "go:internal/server/mcp_profiles_notify_v3_test.go#TestProfilesTool_AssignSendsListChangedLikeREST",
+        "go:internal/server/profile_notify_test.go#TestBindingChange_NotifiesEachSessionOfTheTokenOnce",
+        "go:cmd/mcpproxy/client_binding_cmd_test.go#TestClientLockUnlock_GetThenPut",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ClientBindingModelTests.swift#testAssignSendsProfileAndModeInOneRequest"
+      ]
+    },
+    {
+      "check": 5,
+      "title": "A locked client cannot switch profile and the management tool is for administrators only",
+      "spec": ["US2-4", "US2-5"],
+      "tests": [
+        "go:internal/server/profiles_v3_acceptance_test.go#TestProfilesV3Acceptance_Check5_LockedCannotSwitchAndManagementHidden",
+        "go:internal/server/set_profile_v3_test.go#TestSetProfileV3_ManagementAndSwitchingMatrix"
+      ]
+    },
+    {
+      "check": 6,
+      "title": "Web UI deep links /tools?client=, /usage?profile= and /sessions?client= load filtered, show a removable chip and keep it across navigation and Back",
+      "spec": ["US3-2"],
+      "tests": [
+        "pw:e2e/web-ui-sweep/profiles-scope.spec.ts",
+        "vitest:frontend/tests/unit/scope-features-wait.spec.ts",
+        "vitest:frontend/tests/unit/scope-filters-url-writeback.spec.ts"
+      ]
+    }
+  ]
+}

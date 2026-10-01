@@ -578,3 +578,73 @@ func TestProfilesV3ParityMatrixResolves(t *testing.T) {
 		require.Empty(t, p108Unresolved(t, "web", "testid:clients-page", nil))
 	})
 }
+
+// ---------------------------------------------------------------------------
+// SC-001 index (L7)
+// ---------------------------------------------------------------------------
+
+const p108AcceptancePath = "specs/108-profiles-v3/acceptance-checks.json"
+
+var p108AcceptanceFuncRe = regexp.MustCompile(`(?m)^func (TestProfilesV3Acceptance_Check(\d)_\w+)\(`)
+
+// TestProfilesV3AcceptanceIndexResolves: acceptance-checks.json names six checks,
+// every test it lists exists (the same resolver as the parity matrix), a check's
+// Go test carries the check number in its name, and no TestProfilesV3Acceptance_
+// function in the repository is missing from the index.
+func TestProfilesV3AcceptanceIndexResolves(t *testing.T) {
+	var index struct {
+		Checks []struct {
+			Check int      `json:"check"`
+			Title string   `json:"title"`
+			Spec  []string `json:"spec"`
+			Tests []string `json:"tests"`
+		} `json:"checks"`
+	}
+	p108ReadJSON(t, p108AcceptancePath, &index)
+	require.Len(t, index.Checks, 6, "SC-001 names six audit acceptance checks")
+
+	indexed := map[string]bool{}
+	for i, c := range index.Checks {
+		require.Equal(t, i+1, c.Check)
+		require.NotEmpty(t, c.Title)
+		require.NotEmpty(t, c.Spec, "check %d names its user story scenarios", c.Check)
+		require.NotEmpty(t, c.Tests, "check %d has no test", c.Check)
+		for _, ref := range c.Tests {
+			if why := p108TestUnresolved(t, ref); why != "" {
+				t.Errorf("check %d: %s: %s", c.Check, ref, why)
+			}
+			indexed[ref[strings.Index(ref, "#")+1:]] = true
+			if name := ref[strings.Index(ref, "#")+1:]; strings.HasPrefix(name, "TestProfilesV3Acceptance_Check") {
+				require.True(t, strings.HasPrefix(name, fmt.Sprintf("TestProfilesV3Acceptance_Check%d_", c.Check)),
+					"%s is indexed under check %d", name, c.Check)
+			}
+		}
+	}
+
+	// Every acceptance test in the repository is indexed (no orphan).
+	root := p108RepoRoot(t)
+	found := 0
+	for _, dir := range []string{"internal", "cmd"} {
+		_ = filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			b, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil
+			}
+			for _, m := range p108AcceptanceFuncRe.FindAllStringSubmatch(string(b), -1) {
+				found++
+				if !indexed[m[1]] {
+					t.Errorf("%s in %s is not listed in %s", m[1], strings.TrimPrefix(path, root+"/"), p108AcceptancePath)
+				}
+			}
+			return nil
+		})
+	}
+	require.GreaterOrEqual(t, found, 6, "the five named server tests plus the CLI check 2 test exist")
+
+	t.Run("mutation: an unknown test ref is reported", func(t *testing.T) {
+		require.NotEmpty(t, p108TestUnresolved(t, "go:internal/server/profiles_v3_acceptance_test.go#TestProfilesV3Acceptance_Check9_Nope"))
+	})
+}
