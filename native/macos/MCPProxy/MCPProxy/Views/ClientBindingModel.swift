@@ -250,6 +250,7 @@ final class ClientBindingModel: ObservableObject {
 
     func forget(_ client: ClientPresenceRecord, disconnect: Bool) async -> ForgetClientResponse? {
         busyClientId = client.id
+        guardRefusal = nil
         errorMessage = nil
         defer { busyClientId = nil }
         do {
@@ -264,6 +265,7 @@ final class ClientBindingModel: ObservableObject {
 
     func finalizeRotation(_ client: ClientPresenceRecord) async -> ClientPresenceRecord? {
         busyClientId = client.id
+        guardRefusal = nil
         errorMessage = nil
         defer { busyClientId = nil }
         do {

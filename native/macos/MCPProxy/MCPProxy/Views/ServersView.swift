@@ -39,6 +39,9 @@ struct ServersView: View {
                     initialFocusField: selectedServerInitialFocusField,
                     onDismiss: { selectedServer = nil }
                 )
+                // The detail keeps its server in @State(initialValue:); a route
+                // or notification for another server must remount it.
+                .id(server.id)
             } else {
                 serverListView
             }

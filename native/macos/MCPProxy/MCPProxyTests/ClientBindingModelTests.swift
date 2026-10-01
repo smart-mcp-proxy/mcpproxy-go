@@ -202,6 +202,32 @@ final class ClientBindingModelTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
+    func testForgetClearsAStaleGuardRefusalFromAnEarlierBindingChange() async {
+        let source = StubSource()
+        source.bindingResult = .failure(service(409, """
+        {"error":"could escape","code":"binding_bypassable_without_auth","bindings":[],"fixes":[{"kind":"require_mcp_auth"}]}
+        """))
+        source.forgetResult = .failure(APIClientError.notReady)
+        let model = ClientBindingModel(source: source)
+        _ = await model.chooseProfile(Self.record(profile: "a"), profile: "b")
+        XCTAssertNotNil(model.guardRefusal)
+        _ = await model.forget(Self.record(), disconnect: false)
+        XCTAssertNil(model.guardRefusal, "the Forget sheet must not show the earlier binding refusal")
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    func testFinalizeRotationClearsAStaleGuardRefusal() async {
+        let source = StubSource()
+        source.bindingResult = .failure(service(409, """
+        {"error":"could escape","code":"binding_bypassable_without_auth","bindings":[],"fixes":[{"kind":"require_mcp_auth"}]}
+        """))
+        source.finalizeResult = .failure(APIClientError.notReady)
+        let model = ClientBindingModel(source: source)
+        _ = await model.chooseProfile(Self.record(profile: "a"), profile: "b")
+        _ = await model.finalizeRotation(Self.record())
+        XCTAssertNil(model.guardRefusal)
+    }
+
     // MARK: Assign (108-retro-mac R4)
 
     func testAssignSendsProfileAndModeInOneRequest() async {

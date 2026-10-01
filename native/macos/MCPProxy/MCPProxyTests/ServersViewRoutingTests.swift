@@ -66,6 +66,26 @@ final class ServersViewRoutingTests: XCTestCase {
         XCTAssertFalse(listText.contains("consumeRoute()"))
     }
 
+    /// ServerDetailView holds its server in @State(initialValue:), so a route or
+    /// notification for server B arriving while A's detail is mounted must remount
+    /// the detail (identity = server id), or it keeps showing and acting on A.
+    func testDetailViewIsRemountedWhenTheSelectedServerChanges() throws {
+        let source = try serversViewSource()
+        let bodyText = try topLevelBody(in: source)
+        guard let start = bodyText.range(of: "ServerDetailView(") else {
+            XCTFail("body must mount ServerDetailView")
+            return
+        }
+        let tail = String(bodyText[start.lowerBound...])
+        guard let close = tail.range(of: "onDismiss: { selectedServer = nil }") else {
+            XCTFail("could not find the ServerDetailView call")
+            return
+        }
+        let after = String(tail[close.upperBound...].prefix(300))
+        XCTAssertTrue(after.contains(".id(server.id)"),
+                      "ServerDetailView must carry .id(server.id) so a different server remounts it")
+    }
+
     func testManualDoubleClickResetsTheDetailTabToTools() throws {
         let source = try serversViewSource()
         let onDoubleClick = try closureBody(labelled: "onDoubleClick: { server in", in: source)
