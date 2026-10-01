@@ -10,7 +10,7 @@
         <div v-if="stats" class="badge badge-outline badge-lg">
           {{ stats.total }} tools
         </div>
-        <button @click="loadTools" class="btn btn-sm btn-ghost" :disabled="loading">
+        <button @click="loadTools" class="btn btn-sm btn-ghost" :disabled="loading" data-test="tools-refresh">
           <svg class="w-4 h-4" :class="{ 'animate-spin': loading }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
@@ -1404,6 +1404,7 @@ const selectedToolSchema = computed(() => {
 let loadSeq = 0
 
 async function loadTools() {
+  if (!scopeReady) await scopeReadyPromise
   const seq = ++loadSeq
   // Rule 8 (J18): two subjects means no request at all.
   if (scopeConflict.value) {
@@ -1478,8 +1479,14 @@ function formatRelativeTime(ts: string): string {
 }
 
 // Reset page when filters/sort change
-watch([filterServer, filterStatus, filterTier, filterApproval, sortColumn, sortDirection], () => {
+watch([filterServer, filterStatus, filterTier, filterApproval, sortColumn, sortDirection, showFilter], () => {
   currentPage.value = 1
+})
+
+// A shrinking result (another view-as subject, a refresh) must never strand the
+// table on a page past the end: zero rows and no pager (F2.2).
+watch(() => Math.ceil(sortedTools.value.length / pageSize.value), (pages) => {
+  if (currentPage.value > pages) currentPage.value = Math.max(1, pages)
 })
 
 // Live QA fix (Spec 109-k, FR-080 "router.replace on change"): the controls
@@ -1561,6 +1568,12 @@ onMounted(() => {
 // GET /status has said whether the build supports it, or the first request goes
 // out unfiltered and every row flashes before the refetch. A URL with no scope
 // parameter does not wait at all.
+// Rule-1 ready gate (F2.1/F3.1/F4.1): every loader waits for the startup
+// /status wait to finish, so no control, refresh or SSE event can send an
+// unfiltered request while the first filtered one is still pending.
+let scopeReady = false
+let releaseScopeReady: () => void = () => {}
+const scopeReadyPromise = new Promise<void>(resolve => { releaseScopeReady = resolve })
 let scopeWatchArmed = false
 async function firstLoad() {
   const urlHasScope = Boolean(route && ['profile', 'client', 'token'].some(name => {
@@ -1569,8 +1582,12 @@ async function firstLoad() {
   }))
   if (urlHasScope) {
     await systemStore.waitForScopeFeatures()
-    scopeWaitTimedOut.value = !systemStore.scopeFeaturesKnown && !viewAsAvailable.value
+    // The wait is over: any named param still unavailable gets the disabled
+    // chip, including when /status answered but did not advertise it (F5.2).
+    scopeWaitTimedOut.value = true
   }
+  scopeReady = true
+  releaseScopeReady()
   scopeWatchArmed = true
   await loadTools()
 }
@@ -1580,6 +1597,7 @@ async function firstLoad() {
 watch(requestKey, () => {
   if (!scopeWatchArmed) return
   showFilter.value = 'all'
+  currentPage.value = 1
   selectedKeys.value.clear()
   void loadTools()
 })

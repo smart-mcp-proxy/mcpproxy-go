@@ -49,7 +49,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, useId } from 'vue'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
 import { useClientsStore } from '@/stores/clients'
@@ -75,7 +75,7 @@ const props = defineProps<{
 
 type ScopeName = 'profile' | 'client' | 'token'
 
-const uid = `scope-${Math.random().toString(36).slice(2, 8)}`
+const uid = `scope-${useId()}`
 const auth = useAuthStore()
 const profiles = useProfilesStore()
 const clients = useClientsStore()

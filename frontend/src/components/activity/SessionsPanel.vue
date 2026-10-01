@@ -122,7 +122,7 @@
                   <!-- Link map: "Session row" -> the tools this client sees. -->
                   <router-link
                     v-if="session.client_id && clientFilterAvailable"
-                    :to="scopeQuery.linkTo('tools', { client: session.client_id })"
+                    :to="scopeQuery.linkTo('tools', { client: session.client_id, profile: '' })"
                     class="btn btn-xs btn-outline whitespace-nowrap"
                     :data-test="`sessions-tools-it-sees-${session.id}`"
                   >

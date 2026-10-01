@@ -101,4 +101,13 @@ describe('Sessions attribution (Spec 108-j J11)', () => {
     const { wrapper } = await mountPanel([])
     expect(wrapper.get('[data-test="sessions-empty-title"]').text()).toBe('No sessions found')
   })
+
+  // F5.1: profile is sticky, so a profile-filtered Sessions view used to open
+  // Tools with BOTH profile and client (the two-subject conflict, no request).
+  it('"Tools it sees" opens Tools for the client alone under a profile filter', async () => {
+    const { wrapper, router } = await mountPanel([session('s1', { client_id: 'cursor' })], '/activity?view=sessions&profile=work-readonly')
+    const href = wrapper.get('[data-test="sessions-tools-it-sees-s1"]').attributes('href')
+    expect(href).toBe(router.resolve({ name: 'tools', query: { client: 'cursor' } }).fullPath)
+    expect(href).not.toContain('profile=')
+  })
 })

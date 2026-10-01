@@ -495,6 +495,9 @@ export function useScopeQuery(page: PageId): UseScopeQueryResult {
       if (v) query[def.name] = v
     }
     Object.assign(query, patch)
+    // An empty patch value clears a sticky param (the caller names the subject
+    // for the target page and must not inherit a competing one: F5.1).
+    for (const key of Object.keys(query)) if (query[key] === '') delete query[key]
     const name = pageRouteNames[target]
     return name ? { name, query } : { path: `/${target}`, query }
   }

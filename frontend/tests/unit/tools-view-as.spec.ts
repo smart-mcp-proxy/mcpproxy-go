@@ -287,7 +287,7 @@ describe('Tools view-as (Spec 108-j)', () => {
     expect(wrapper.get('[data-test="tools-scope-error"]').text()).toContain('Profile not found')
   })
 
-  it('rule 7: with scope_filters absent the page sends one unscoped request, shows no chip and keeps client in the URL', async () => {
+  it('rule 7: with scope_filters absent the page sends one unscoped request, shows only the disabled chip and keeps client in the URL', async () => {
     setAvailableFeatures([])
     getStatusMock.mockResolvedValue({ success: true, data: {} })
     const { useSystemStore } = await import('@/stores/system')
@@ -295,8 +295,51 @@ describe('Tools view-as (Spec 108-j)', () => {
     const { wrapper, router } = await mountToolsAt('/tools?client=cursor')
     expect(getGlobalToolsMock).toHaveBeenCalledTimes(1)
     expect(getGlobalToolsMock.mock.calls[0]).toHaveLength(0)
-    expect(wrapper.find('[data-test="scope-chips"]').exists()).toBe(false)
+    // No active chip, but the disabled "Filter unavailable" chip names the param (F5.2).
+    expect(wrapper.find('[data-test="scope-chip-client"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="scope-chip-na-client"]').text()).toContain('Filter unavailable on this server')
     expect(router.currentRoute.value.query.client).toBe('cursor')
+  })
+
+  it('F2.1: Refresh during the startup /status wait sends nothing unfiltered', async () => {
+    setAvailableFeatures([])
+    let resolveStatus!: (v: unknown) => void
+    getStatusMock.mockReturnValue(new Promise(r => { resolveStatus = r }))
+    const { useSystemStore } = await import('@/stores/system')
+    void useSystemStore().fetchScopeFilterFeatures()
+    const { wrapper } = await mountToolsAt('/tools?client=cursor')
+    await wrapper.get('[data-test="tools-refresh"]').trigger('click')
+    await flushPromises()
+    expect(getGlobalToolsMock).not.toHaveBeenCalled()
+    resolveStatus({ success: true, data: { features: { scope_filters: ['profile', 'client', 'token'] } } })
+    await flushPromises()
+    await flushPromises()
+    expect(getGlobalToolsMock.mock.calls.length).toBeGreaterThan(0)
+    for (const call of getGlobalToolsMock.mock.calls) expect(call[0]).toEqual({ client: 'cursor' })
+  })
+
+  it('F2.2: a smaller result after the view-as subject or Show changes returns to page 1, never an empty page without a pager', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => row(`t${i}`, 'github', { visible: true, callable: i < 10 }))
+    const few = many.slice(0, 10)
+    getGlobalToolsMock.mockImplementation((scope?: { client?: string; profile?: string }) =>
+      scope?.profile ? ok({ tools: few, stats: stats(few) }) : ok({ tools: many, stats: stats(many) }))
+    const { wrapper } = await mountToolsAt('/tools?client=cursor')
+    // Page 2 (25 rows per page).
+    const nextPage = () => wrapper.findAll('button').find(b => b.text() === '›')!
+    await nextPage().trigger('click')
+    expect(wrapper.findAll('[data-test="tool-row"]')).toHaveLength(5)
+    await wrapper.get('[data-test="tools-view-as-select"]').setValue('profile:work-ro')
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="tool-row"]')).toHaveLength(10)
+
+    // Show: Callable on a 30-row list where 10 match, from page 2.
+    getGlobalToolsMock.mockImplementation(() => ok({ tools: many, stats: stats(many) }))
+    await wrapper.get('[data-test="tools-view-as-select"]').setValue('client:cursor')
+    await flushPromises()
+    await nextPage().trigger('click')
+    await wrapper.get('[data-test="tools-show-callable"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="tool-row"]')).toHaveLength(10)
   })
 
   it('"Show: Callable" filters the loaded rows without touching the URL or refetching', async () => {

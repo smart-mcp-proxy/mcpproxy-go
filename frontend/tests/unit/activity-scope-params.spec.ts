@@ -126,15 +126,36 @@ describe('Activity scope params (Spec 108-j)', () => {
     expect(getActivitiesMock.mock.calls[0][0]).toEqual(expect.objectContaining({ client: 'cursor' }))
   })
 
-  it('rule 7: with the filters not advertised, no scope parameter is sent and no chip shows (the URL keeps it)', async () => {
+  it('rule 7: with the filters not advertised, no scope parameter is sent and only the disabled chip shows (the URL keeps it)', async () => {
     setAvailableFeatures([])
     getStatusMock.mockResolvedValue({ success: true, data: {} })
     const { useSystemStore } = await import('@/stores/system')
     await useSystemStore().fetchScopeFilterFeatures()
     const { wrapper, router } = await mountActivityAt('/activity?client=cursor')
     expect(getActivitiesMock.mock.calls.at(-1)![0].client).toBeUndefined()
-    expect(wrapper.find('[data-test="scope-chips"]').exists()).toBe(false)
+    // The picker/filter chip stays hidden, but the named param is not silently
+    // dropped: the disabled "Filter unavailable" chip names it (F5.2).
+    expect(wrapper.find('[data-test="scope-chip-client"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="scope-chip-na-client"]').text()).toContain('Filter unavailable on this server')
     expect(router.currentRoute.value.query.client).toBe('cursor')
+  })
+
+  it('F3.1: an SSE activity event during the startup /status wait does not send an unfiltered request', async () => {
+    setAvailableFeatures([])
+    let resolveStatus!: (v: unknown) => void
+    getStatusMock.mockReturnValue(new Promise(r => { resolveStatus = r }))
+    const { useSystemStore } = await import('@/stores/system')
+    void useSystemStore().fetchScopeFilterFeatures()
+    await mountActivityAt('/activity?client=cursor')
+    window.dispatchEvent(new CustomEvent('mcpproxy:activity-completed', { detail: { server_name: 'github', tool_name: 'x', status: 'success' } }))
+    await flushPromises()
+    expect(getActivitiesMock).not.toHaveBeenCalled()
+    expect(getSummaryMock).not.toHaveBeenCalled()
+    resolveStatus({ success: true, data: { features: { scope_filters: ['profile', 'client', 'token'] } } })
+    await flushPromises()
+    await flushPromises()
+    expect(getActivitiesMock.mock.calls.length).toBeGreaterThan(0)
+    for (const call of getActivitiesMock.mock.calls) expect(call[0]).toEqual(expect.objectContaining({ client: 'cursor' }))
   })
 
   it('removing the chip drops the parameter and refetches unscoped; a late scoped answer does not overwrite it', async () => {

@@ -421,6 +421,7 @@ function clearScopeConflict(): void {
 }
 
 async function reload() {
+  if (!scopeReady) await scopeReadyPromise
   // Spec 107 FR-041 / cross-review round 2, chunk 4 P1: GET /activity/usage
   // is an admin-only core door (named must-refuse, rest-endpoints.md §8).
   // Usage is the tenant dashboard's DEFAULT landing panel, so an unguarded
@@ -510,6 +511,12 @@ function onSelectBucket(range: { start: string; end: string }): void {
 // flashing the unfiltered aggregate. Not armed before it, so the wait never
 // double-fetches; after it, a changed scope (a chip removed, the header chip,
 // a picker, the feature list arriving late) refetches.
+// Rule-1 ready gate (F2.1/F3.1/F4.1): every loader waits for the startup
+// /status wait to finish, so no control, refresh or SSE event can send an
+// unfiltered request while the first filtered one is still pending.
+let scopeReady = false
+let releaseScopeReady: () => void = () => {}
+const scopeReadyPromise = new Promise<void>(resolve => { releaseScopeReady = resolve })
 let scopeWatchArmed = false
 async function firstLoad() {
   const urlHasScope = Boolean(route && SCOPE_URL_NAMES.some(name => {
@@ -518,8 +525,12 @@ async function firstLoad() {
   }))
   if (urlHasScope) {
     await systemStore.waitForScopeFeatures()
-    scopeWaitTimedOut.value = !systemStore.scopeFeaturesKnown && !scopePickersVisible.value
+    // The wait is over: any named param still unavailable gets the disabled
+    // chip, including when /status answered but did not advertise it (F5.2).
+    scopeWaitTimedOut.value = true
   }
+  scopeReady = true
+  releaseScopeReady()
   scopeWatchArmed = true
   await reload()
 }

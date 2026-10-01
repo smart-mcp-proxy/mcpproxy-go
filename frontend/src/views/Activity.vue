@@ -2400,12 +2400,22 @@ const filterBadgeCount = computed(() =>
   activeChips.value.length + scopeQuery.chips.value.filter(chip => (SCOPE_URL_NAMES as readonly string[]).includes(chip.name)).length
 )
 
+// Rule-1 ready gate (F2.1/F3.1/F4.1): every loader waits for the startup
+// /status wait to finish, so no control, refresh or SSE event can send an
+// unfiltered request while the first filtered one is still pending.
+let scopeReady = false
+let releaseScopeReady: () => void = () => {}
+const scopeReadyPromise = new Promise<void>(resolve => { releaseScopeReady = resolve })
 let scopeWatchArmed = false
 async function firstLoad() {
   if (urlHasScopeParam()) {
     await systemStore.waitForScopeFeatures()
-    scopeWaitTimedOut.value = !systemStore.scopeFeaturesKnown && !SCOPE_URL_NAMES.some(name => isScopeParamAvailable(name))
+    // The wait is over: any named param still unavailable gets the disabled
+    // chip, including when /status answered but did not advertise it (F5.2).
+    scopeWaitTimedOut.value = true
   }
+  scopeReady = true
+  releaseScopeReady()
   scopeWatchArmed = true
   await loadActivities()
 }
@@ -2473,6 +2483,7 @@ function missingProfileName(record: ActivityRecord | null): string {
 let activitiesLoadSeq = 0
 
 const loadActivities = async () => {
+  if (!scopeReady) await scopeReadyPromise
   const seq = ++activitiesLoadSeq
   // Contract "view -> REST" (url-filter-contract.md): `sessions` issues no
   // /activity request at all — `loadSessions()` (its own watch/onMounted

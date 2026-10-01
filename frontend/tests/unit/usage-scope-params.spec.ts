@@ -103,16 +103,47 @@ describe('Usage scope params (Spec 108-j)', () => {
     expect(getUsageMock.mock.calls[0][0]).toEqual(expect.objectContaining({ client: 'cursor' }))
   })
 
-  it('rule 7: with the filters not advertised nothing is sent, no chip shows and the tile is unchanged', async () => {
+  it('rule 7: with the filters not advertised nothing is sent, only the disabled chip shows and the tile is unchanged', async () => {
     setAvailableFeatures([])
     getStatusMock.mockResolvedValue({ success: true, data: {} })
     const { useSystemStore } = await import('@/stores/system')
     await useSystemStore().fetchScopeFilterFeatures()
     const { wrapper, router } = await mountUsageAt('/usage?client=cursor')
     expect(getUsageMock.mock.calls[0][0].client).toBeUndefined()
-    expect(wrapper.find('[data-test="scope-chips"]').exists()).toBe(false)
+    // No active filter chip, but the URL's parameter is not silently dropped
+    // either: the disabled "Filter unavailable on this server" chip names it (F5.2).
+    expect(wrapper.find('[data-test="scope-chip-client"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="scope-chip-na-client"] [data-test="scope-chip-note"]').text()).toContain('Filter unavailable on this server')
     expect(wrapper.find('[data-test="usage-tokens-saved-tile"]').exists()).toBe(true)
     expect(router.currentRoute.value.query.client).toBe('cursor')
+  })
+
+  it('F5.2: /status failing still ends in the disabled "Filter unavailable" chip', async () => {
+    setAvailableFeatures([])
+    getStatusMock.mockRejectedValue(new Error('down'))
+    const { useSystemStore } = await import('@/stores/system')
+    await useSystemStore().fetchScopeFilterFeatures()
+    const { wrapper } = await mountUsageAt('/usage?profile=work-ro')
+    expect(wrapper.get('[data-test="scope-chip-na-profile"]').text()).toContain('Filter unavailable on this server')
+  })
+
+  it('F4.1: a sort/status control used while /status is pending sends nothing unfiltered', async () => {
+    setAvailableFeatures([])
+    let resolveStatus!: (v: unknown) => void
+    getStatusMock.mockReturnValue(new Promise(r => { resolveStatus = r }))
+    const { useSystemStore } = await import('@/stores/system')
+    void useSystemStore().fetchScopeFilterFeatures()
+    const { wrapper } = await mountUsageAt('/usage?profile=work-ro')
+    await wrapper.get('[data-test="usage-sort"]').setValue('calls')
+    await flushPromises()
+    expect(getUsageMock).not.toHaveBeenCalled()
+    resolveStatus({ success: true, data: { features: { scope_filters: ['profile', 'client', 'token'] } } })
+    await flushPromises()
+    await flushPromises()
+    expect(getUsageMock.mock.calls.length).toBeGreaterThan(0)
+    for (const call of getUsageMock.mock.calls) {
+      expect(call[0]).toEqual(expect.objectContaining({ profile: 'work-ro' }))
+    }
   })
 
   it('removing the chip refetches unscoped and brings the tile back', async () => {
