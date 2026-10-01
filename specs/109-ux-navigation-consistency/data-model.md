@@ -42,7 +42,7 @@ type AttentionItem struct {
     ID      string            `json:"id"`      // kind:type:subject
     Kind    string            `json:"kind"`
     Rank    int               `json:"rank"`
-    Subject AttentionSubject  `json:"subject"` // {type: server|tool|client, id, name}
+    Subject AttentionSubject  `json:"subject"` // {type: server|tool|client|setting, id, name}
     Summary string            `json:"summary"`
     Detail  string            `json:"detail,omitempty"`
     Fix     AttentionFix      `json:"fix"`     // {verb, label, target}
@@ -51,6 +51,7 @@ type AttentionItem struct {
 type AttentionInput struct {
     Servers        []AttentionServer     // minimal subset, defined here (109-d)
     Clients        []AttentionClient     // minimal subset, defined here (109-d)
+    ClientWarnings []AttentionClientWarning // 109-l: the Spec 108 warnings; empty in the server edition
     Now            time.Time
 }
 // AttentionServer is the only server data Compute needs. 109-d defines it and
@@ -72,6 +73,16 @@ type AttentionClient struct {
     ConnectedAt     *time.Time // last successful connect write
     LastSeen        *time.Time // last MCP session mapped to this client
 }
+// AttentionClientWarning is the only Spec 108 data Compute needs (109-l).
+type AttentionClientWarning struct {
+    Code                   string     // a profile.Warning* value; equals the attention kind
+    ClientID, DisplayName  string
+    Profile                string     // profile_missing: the missing slug
+    ExpiresAt              *time.Time // client_credential_expiring
+    BindingCount           int        // the guard: how many bindings are bypassable
+    BindingNames           []string   // display names of the bound clients, for the guard detail
+    Since                  time.Time  // first seen (filled by the subscriber's firstSeen map)
+}
 func Compute(in AttentionInput) []AttentionItem // pure; sorted by rank, subject.name
 ```
 
@@ -82,6 +93,8 @@ Client input wiring: 109-d's subscriber passes `Clients: nil` (so live instances
 The `sign_in_required`, `missing_secret` and `config_error` conditions key on `health.status`, never on `actions` membership (a `ready` server can carry `actions: ["login"]` as a proactive nudge; contracts/rest-api.md#attention).
 
 SSE: the runtime `attention.changed` event carries `items: [{id, subject_type, subject_id}]`; `internal/httpapi` renders `{count, ids}` per subscriber (FR-006).
+
+Spec 108 input wiring (109-l): `(*Runtime).AttentionClientWarnings()` calls `ClientsService.Warnings(states)` with `states` from `ClientsService.ObservedCredentialStates(OnboardingState.ClientCredentialObserved)` (the same builder `GET /clients` uses), reads the credential store once per recompute and never a client config. The subscriber keeps a `firstSeen` map keyed by `(code, client id)`, pruned when the warning clears, so `since` survives recomputes (it resets on restart, like `stateSince`). It recomputes on `client.binding_changed`, `profiles.changed`, `config.reloaded`, `config.saved`, re-reads the warnings every `AttentionTimerCap` while a clients service exists (rotations, forget and token creation emit no event of their own) and adds `ExpiresAt − 14 d` of each active client credential to the threshold timer. `attention.changed` still fires only when the id set changes.
 
 `stateSince` (per server, the time `health.status` last changed) is tracked by the runtime subscriber in memory (it resets on restart, which only delays an item by ≤ 60 s). **Recompute triggers**: the debounced events above **and** a threshold timer — after each recompute the subscriber computes `next = min(StateSince+60s over connecting/error servers, ConnectedAt+5min over connected-never-seen clients)` and arms one timer for `min(next, now+30s)`, so a time-based item appears at its threshold even when no event fires (FR-002). Kinds, ranks and fixes are enums in `internal/runtime/attention_contract.go`, exported to `contracts.ts`.
 

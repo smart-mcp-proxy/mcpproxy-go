@@ -276,3 +276,19 @@ No finding on this spec. **Propagated from Spec 108** (its research D32): the FR
 - **macOS add actions via `AppState.pendingAddAction`** — a toolbar "+" cannot use the tray's timed notifications, so it hands off through published state like `scopeFilter`.
 - **"Activity" label** — the sidebar says "Activity" on Web and macOS. Page headings and the Web route title still say "Activity Log"; renaming them is a follow-up for 109-m.
 - **Redirect** — `/overview` now states `query` and `hash` explicitly instead of relying on vue-router carrying them over for a named redirect.
+
+## D33 — Spec 109-l implementation decisions (profiles integration)
+
+- **P1 The six kinds** — exact wire values, ranks 4–9 and fixes are the table in contracts/rest-api.md#attention; every `summary`/`detail` is English UI text without a secret, a path or a token prefix.
+- **P2 One source** — `(*Runtime).AttentionClientWarnings()` calls `ClientsService.Warnings(ObservedCredentialStates(...))`, the call `GET /clients` serves in `warnings[]`; `ObservedCredentialStates` (runtime) is the one builder both use, and a test asserts the attention set equals the `warnings[]` set. No client config is ever read (Spec 075).
+- **P3 Triggers** — `client.binding_changed`, `profiles.changed`, `config.reloaded`, `config.saved`, plus a re-read every `AttentionTimerCap` (30 s) while a clients service exists; `ExpiresAt − 14 d` joins the threshold timer. No new runtime event type. `since` for expiry is `ExpiresAt − 14 d`; for the rest the first time seen (`firstSeen`, pruned).
+- **P4 Scoped callers** — an allow-list: a scoped caller keeps only a server item it can enumerate (REST and SSE); every other subject type is administrator-only and fails closed.
+- **P5 Guard subject** — `{setting, require_mcp_auth, "Anonymous callers"}`: instance-level, so its id does not change when the bound set does.
+- **P6 Granularity** — one item per `(code, client_id)`, mirroring `warnings[]`; the guard is one item listing up to three bound clients.
+- **P7 Admin-key visibility** — only after the credential state has been observed; no background config reads. A limitation, recorded in FR-093; follow-up: background detection without config reads.
+- **P8/P9 Web and macOS** — no `AttentionList.vue` change (the targets are existing routes; one vitest resolves each in the real router). macOS maps the five verbs through `AttentionWarningAction` into 108-k's K13 dispatcher; Home and the tray only navigate.
+- **P10 Link-map gaps** — the Clients "Sessions" link (and "Tools it sees"), the Token-row links and the Servers `profile` control are rendered in the page files, never in `useScopeQuery.ts`. The Servers result is page-local (the shared store keeps the full list). A link renders only when its destination route exists.
+- **P11 #1437 item 1** — `limitServersToProfile` holds a pinned caller to its own pin like `GET /tools`; the administrator path is unchanged.
+- **P12 #1437 item 5** — a revoked token's name stays reserved (activity history references it); the `409` says so. Spec 108 FR-043 and the Tokens contract carry one sentence.
+- **P14 Agent-token expiry** — no attention kind in this PR (a regular token's expiry is not a Spec 108 warning); follow-up.
+- **R3 cost** — one credential-store scan plus an onboarding-state read per 30 s; ~1 ms at the 100-token deployment cap (`auth.MaxTokens`), asserted by `TestAttention108ClientWarningInputBudget`.
