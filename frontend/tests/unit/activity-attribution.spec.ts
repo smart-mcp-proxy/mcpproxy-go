@@ -148,6 +148,32 @@ describe('Activity attribution chips (Spec 108-j)', () => {
       expect(dialog.get('[data-test="explain-note"]').text()).toContain('Evaluated against the current configuration')
     })
 
+    it('the drawer panel fits a 390px viewport (full width, capped at 500px)', async () => {
+      const { wrapper } = await mountActivity([blocked()])
+      await openDrawer(wrapper)
+      const classes = wrapper.get('[data-test="activity-detail-panel"]').classes()
+      expect(classes).toContain('w-full')
+      expect(classes).toContain('max-w-[500px]')
+      expect(classes.some(c => /^w-\[\d+px\]$/.test(c))).toBe(false)
+    })
+
+    it('Escape while the explainer is open leaves the drawer (and its Why? button) in place', async () => {
+      explainAccessMock.mockResolvedValue({ subject: { kind: 'client', name: 'cursor' }, tool: 'github:create_issue', profile: { name: 'work-readonly', source: 'pin' }, steps: [], verdict: 'hidden', first_failure: 'tier_cap', fixes: [] })
+      const { wrapper } = await mountActivity([blocked()])
+      await openDrawer(wrapper)
+      await wrapper.get('[data-test="activity-why-b1"]').trigger('click')
+      await flushPromises()
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await flushPromises()
+      expect(wrapper.find('[data-test="activity-why-b1"]').exists()).toBe(true)
+      // With the explainer closed, Escape closes the drawer as before.
+      wrapper.getComponent({ name: 'AccessExplainer' }).vm.$emit('close')
+      await flushPromises()
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await flushPromises()
+      expect(wrapper.find('[data-test="activity-why-b1"]').exists()).toBe(false)
+    })
+
     it('the row itself offers "Why?" for a blocked call', async () => {
       explainAccessMock.mockResolvedValue({ subject: { kind: 'client', name: 'cursor' }, tool: 'github:create_issue', profile: { name: 'work-readonly', source: 'pin' }, steps: [], verdict: 'hidden', first_failure: 'tier_cap', fixes: [] })
       const { wrapper } = await mountActivity([blocked()])

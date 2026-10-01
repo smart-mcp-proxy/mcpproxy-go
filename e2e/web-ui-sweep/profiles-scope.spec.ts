@@ -208,6 +208,10 @@ test('5. A blocked call: attribution chips, Allow in profile… and Why?', async
   await expect(dialog.locator('[data-test="explain-note"]')).toContainText('Evaluated against the current configuration')
   await expect(dialog.locator('[data-test="explain-step-tool_rule"]')).toContainText('Fail')
   await expect(dialog.locator('[data-test="explain-fixes"]')).toBeVisible()
+  // Escape closes only the explainer: the drawer stays and focus returns to Why?.
+  await page.keyboard.press('Escape')
+  await expect(dialog.locator('[data-test="explain-verdict"]')).toHaveCount(0)
+  await expect(page.locator('[data-test^="activity-why-"]')).toBeFocused()
 })
 
 for (const width of [1440, 1100, 900, 390]) {
@@ -234,6 +238,18 @@ for (const width of [1440, 1100, 900, 390]) {
     await page.locator('[data-test="activity-row"]').first().locator('[data-test^="activity-open-"]').click()
     const why = page.locator('[data-test^="activity-why-"]')
     await expect(why).toBeVisible()
+    // The drawer panel itself fits the viewport: nothing sits off-screen.
+    // The drawer slides in, so wait for the transition to settle before measuring.
+    const panelBox = () => page.locator('[data-test="activity-detail-panel"]').boundingBox()
+    await expect.poll(async () => { const b = await panelBox(); return b ? b.x + b.width : Infinity }, { message: `drawer panel right edge at ${width}` }).toBeLessThanOrEqual(width + 1)
+    const panel = await panelBox()
+    expect(panel!.x).toBeGreaterThanOrEqual(0)
+    for (const sel of ['[data-test="activity-drawer-attribution"]', '[data-test^="activity-allow-in-profile-"]', '[data-test^="activity-why-"]']) {
+      const box = await page.locator(sel).first().boundingBox()
+      expect(box, `${sel} at ${width}`).not.toBeNull()
+      expect(box!.x, `${sel} left edge at ${width}`).toBeGreaterThanOrEqual(0)
+      expect(box!.x + box!.width, `${sel} right edge at ${width}`).toBeLessThanOrEqual(width)
+    }
     const target = await why.boundingBox()
     expect(target!.width).toBeGreaterThanOrEqual(24)
     expect(target!.height).toBeGreaterThanOrEqual(24)

@@ -965,7 +965,7 @@
       <input id="activity-detail-drawer" type="checkbox" class="drawer-toggle" v-model="showDetailDrawer" />
       <div class="drawer-side z-50">
         <label for="activity-detail-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
-        <div class="bg-base-100 w-[500px] min-h-full p-6">
+        <div class="bg-base-100 w-full max-w-[500px] min-h-full p-6" data-test="activity-detail-panel">
           <div v-if="selectedActivity" class="space-y-4">
             <!-- Header -->
             <div class="flex justify-between items-start">
@@ -3002,7 +3002,10 @@ watch(filterAuthType, (val) => {
 
 // Keyboard handler for closing drawer
 const handleKeydown = (event: KeyboardEvent) => {
-  if (event.key === 'Escape' && showDetailDrawer.value) {
+  // The access explainer opened from the drawer owns Escape while it is open:
+  // closing the drawer too would unmount the "Why?" button the dialog returns
+  // focus to and drop focus on <body> (Spec 108-j live QA).
+  if (event.key === 'Escape' && showDetailDrawer.value && explain.value === null) {
     closeDetailDrawer()
   }
 }
