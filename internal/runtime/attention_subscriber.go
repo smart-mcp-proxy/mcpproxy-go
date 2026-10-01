@@ -61,11 +61,19 @@ type attentionSubscriber struct {
 	clientNeverSeenThreshold time.Duration
 	timerCap                 time.Duration
 
+	// clientSource supplies the Spec 108 client warnings (109-l). Nil when the
+	// runtime has no clients service (the server edition); tests inject one.
+	clientSource attentionClientSource
+
 	mu      sync.Mutex
 	servers []contracts.Server
 	clients []AttentionClient
 	state   map[string]attentionServerState
 	lastIDs map[string]struct{}
+	// firstSeen records when each client warning (code + client id) first
+	// appeared, for the item's `since`; pruned when the warning clears. It
+	// resets on restart, like state.
+	firstSeen map[string]time.Time
 
 	snapshot atomic.Pointer[[]contracts.AttentionItem]
 }
@@ -87,6 +95,10 @@ func newAttentionSubscriber(rt *Runtime, debounce time.Duration) *attentionSubsc
 		timerCap:                 AttentionTimerCap,
 		state:                    make(map[string]attentionServerState),
 		lastIDs:                  make(map[string]struct{}),
+		firstSeen:                make(map[string]time.Time),
+	}
+	if rt != nil && rt.clientsService != nil {
+		a.clientSource = rt.attentionClientState
 	}
 	empty := []contracts.AttentionItem{}
 	a.snapshot.Store(&empty)
@@ -164,7 +176,7 @@ func (a *attentionSubscriber) loop(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if evt.Type != EventTypeServersChanged && evt.Type != EventTypeClientPresenceChanged {
+			if !attentionTriggers(evt.Type) {
 				continue
 			}
 			if evt.Type == EventTypeServersChanged && !a.updateFromPayload(evt.Payload) {
@@ -185,6 +197,19 @@ func (a *attentionSubscriber) loop(ctx context.Context) {
 			thresholdTimer = rearmTimer(thresholdTimer, next)
 		}
 	}
+}
+
+// attentionTriggers reports whether an event type makes the attention list
+// stale. servers.changed and clients.presence.changed feed the server and
+// presence items; the rest (109-l) can change a Spec 108 warning.
+func attentionTriggers(t EventType) bool {
+	switch t {
+	case EventTypeServersChanged, EventTypeClientPresenceChanged,
+		EventTypeClientBindingChanged, EventTypeProfilesChanged,
+		EventTypeConfigReloaded, EventTypeConfigSaved:
+		return true
+	}
+	return false
 }
 
 // updateFromPayload stores the servers.changed embed for the next recompute.
@@ -224,9 +249,17 @@ func (a *attentionSubscriber) recompute() time.Duration {
 		clientsCopy = a.rt.AttentionClients()
 	}
 
+	var upcomingExpiries []time.Time
+	var warnings []AttentionClientWarning
+	if a.clientSource != nil {
+		warnings, upcomingExpiries = a.clientSource()
+		warnings = a.stampFirstSeen(warnings, now)
+	}
+
 	input := AttentionInput{
 		Now:                      now,
 		Clients:                  clientsCopy,
+		ClientWarnings:           warnings,
 		ServerErrorThreshold:     a.serverErrorThreshold,
 		ClientNeverSeenThreshold: a.clientNeverSeenThreshold,
 	}
@@ -254,7 +287,56 @@ func (a *attentionSubscriber) recompute() time.Duration {
 		}))
 	}
 
-	return capThreshold(a.nextThreshold(input.Servers, input.Clients, now), a.timerCap)
+	next := capThreshold(a.nextThreshold(input.Servers, input.Clients, now), a.timerCap)
+	if d := capThreshold(a.nextExpiryThreshold(upcomingExpiries, now), a.timerCap); d > 0 && (next == 0 || d < next) {
+		next = d
+	}
+	if next == 0 && a.clientSource != nil {
+		// Rotations, forgets, token creation and time passing change the
+		// Spec 108 warnings without a runtime event; re-read them every
+		// timerCap while a clients service exists (109-l P3).
+		next = a.timerCap
+	}
+	return next
+}
+
+// stampFirstSeen fills Since on each warning from the firstSeen map, adding new
+// keys at now and pruning keys that are no longer present.
+func (a *attentionSubscriber) stampFirstSeen(warnings []AttentionClientWarning, now time.Time) []AttentionClientWarning {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	live := make(map[string]struct{}, len(warnings))
+	out := make([]AttentionClientWarning, len(warnings))
+	for i, w := range warnings {
+		key := attentionWarningKey(w)
+		live[key] = struct{}{}
+		at, ok := a.firstSeen[key]
+		if !ok {
+			at = now
+			a.firstSeen[key] = at
+		}
+		w.Since = at
+		out[i] = w
+	}
+	for key := range a.firstSeen {
+		if _, ok := live[key]; !ok {
+			delete(a.firstSeen, key)
+		}
+	}
+	return out
+}
+
+// nextExpiryThreshold returns the time until the earliest active client
+// credential enters the expiring window (ExpiresAt minus the window), or 0.
+func (a *attentionSubscriber) nextExpiryThreshold(expiries []time.Time, now time.Time) time.Duration {
+	var earliest time.Duration
+	for _, exp := range expiries {
+		d := exp.Add(-clientCredentialExpiringWindow).Sub(now)
+		if d > 0 && (earliest == 0 || d < earliest) {
+			earliest = d
+		}
+	}
+	return earliest
 }
 
 // buildAttentionServer maps one contracts.Server row (already redacted and

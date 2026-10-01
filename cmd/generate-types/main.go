@@ -150,6 +150,12 @@ export interface HealthStatus {
 // Needs-attention list (Spec 109 FR-001-007) - generated from
 // internal/contracts/attention.go. One list, one count, every surface (Web
 // UI, macOS tray/Home, CLI) reads from GET /api/v1/attention.
+export const AttentionKindAnonymousDeniedByBindingGuard = 'anonymous_denied_by_binding_guard' as const;
+export const AttentionKindClientHoldsAdminKey = 'client_holds_admin_key' as const;
+export const AttentionKindClientTokenNameConflict = 'client_token_name_conflict' as const;
+export const AttentionKindProfileMissing = 'profile_missing' as const;
+export const AttentionKindClientRotationPending = 'client_rotation_pending' as const;
+export const AttentionKindClientCredentialExpiring = 'client_credential_expiring' as const;
 export const AttentionKindSignInRequired = 'sign_in_required' as const;
 export const AttentionKindMissingSecret = 'missing_secret' as const;
 export const AttentionKindConfigError = 'config_error' as const;
@@ -159,6 +165,12 @@ export const AttentionKindToolReview = 'tool_review' as const;
 export const AttentionKindClientNeverSeen = 'client_never_seen' as const;
 
 export type AttentionKind =
+  | typeof AttentionKindAnonymousDeniedByBindingGuard
+  | typeof AttentionKindClientHoldsAdminKey
+  | typeof AttentionKindClientTokenNameConflict
+  | typeof AttentionKindProfileMissing
+  | typeof AttentionKindClientRotationPending
+  | typeof AttentionKindClientCredentialExpiring
   | typeof AttentionKindSignInRequired
   | typeof AttentionKindMissingSecret
   | typeof AttentionKindConfigError
@@ -168,7 +180,7 @@ export type AttentionKind =
   | typeof AttentionKindClientNeverSeen;
 
 export interface AttentionSubject {
-  type: 'server' | 'tool' | 'client';
+  type: 'server' | 'tool' | 'client' | 'setting';
   id: string;
   name: string;
 }
