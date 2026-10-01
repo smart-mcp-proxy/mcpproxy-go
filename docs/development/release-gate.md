@@ -109,7 +109,7 @@ The `web-ui-sweep` job runs the Playwright sweep
 see [Web UI verification](web-ui-verification.md)) against the Web UI **served by
 the candidate binary** — embedded frontend, never a dev server — with a live
 `mcpfixture` stdio upstream so the servers/tools screens have real data. It
-runs five spec files (the launcher's `playwright test` line is the list, and
+runs six spec files (the launcher's `playwright test` line is the list, and
 `TestWebUISweepSpecListIsComplete` fails when it, `e2e/web-ui-sweep` and this
 page disagree):
 
@@ -125,6 +125,10 @@ page disagree):
   and Usage (audit acceptance check 6: the deep links `/tools?client=`,
   `/usage?profile=` and `/sessions?client=` load filtered, with a removable
   chip that survives navigation and Back).
+- `profiles-unhide.spec.ts`: Spec 109-l un-hide of Spec 108 (Profiles in the
+  sidebar and `+ Add`, the Viewing chip across pages, Clients-row and
+  agent-token-row links, `/servers?profile=`, a Spec 108 warning surfacing as a
+  needs-attention item, layout and keyboard order).
 
 Setup is not duplicated in YAML: the job calls
 [`scripts/run-web-smoke.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-web-smoke.sh),
