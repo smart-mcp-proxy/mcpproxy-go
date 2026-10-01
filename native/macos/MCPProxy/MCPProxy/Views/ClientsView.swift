@@ -20,6 +20,26 @@ struct ClientsView: View {
     /// sheet and resets it.
     @State private var tokenCreateRequested = false
 
+    // Spec 108-k
+    /// Instance-level binding warnings from `GET /clients`.
+    @State private var warnings: [ClientWarning] = []
+    /// Scope filters of the Clients and Agent Tokens tabs (profile chips).
+    @State private var clientsFilter = ScopeFilter()
+    @State private var tokensFilter = ScopeFilter()
+    @StateObject private var bindingModel: ClientBindingModel
+    @State private var connectPreselect: String?
+    @State private var showBulkMove = false
+    @State private var showUpgrade = false
+    @State private var showOtherClient = false
+    @State private var rotating: ClientPresenceRecord?
+    @State private var forgetting: ClientPresenceRecord?
+    @State private var focusedClientID: String?
+
+    init(appState: AppState) {
+        self.appState = appState
+        _bindingModel = StateObject(wrappedValue: ClientBindingModel(source: appState.deferredClientSource))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Picker("Clients section", selection: $tab) {
@@ -28,6 +48,7 @@ struct ClientsView: View {
                 Text("Agent Tokens").tag(2)
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
             .padding()
             Divider()
             if tab == 0 {
@@ -35,24 +56,109 @@ struct ClientsView: View {
             } else if tab == 1 {
                 endpointAndModePane
             } else {
-                TokensView(appState: appState, requestCreate: $tokenCreateRequested)
+                TokensView(appState: appState, requestCreate: $tokenCreateRequested, filter: $tokensFilter)
             }
         }
         .accessibilityIdentifier("clients-view")
         .task { await load() }
         // Spec 109-i FR-052: toolbar "+ -> Client / Token" hand-off (see
         // AppState.pendingAddAction). Only Client and Token are this view's.
-        .onAppear { consumePendingAddAction() }
+        .onAppear { consumePendingAddAction(); consumeRoute() }
         .onChange(of: appState.pendingAddAction) { _ in consumePendingAddAction() }
+        .onChange(of: appState.pendingRoute) { _ in consumeRoute() }
+        .onChange(of: appState.clients) { fresh in adopt(fresh) }
+        .onChange(of: clientsFilter) { _ in Task { await load() } }
         .sheet(isPresented: $showConnect, onDismiss: {
             Task { await load() }
+            connectPreselect = nil
         }) {
-            let state = appState
-            ConnectClientView(model: ConnectClientModel(source: DeferredConnectSource {
-                await MainActor.run { state.apiClient }
-            }))
+            ConnectClientSheetHost(
+                appState: appState,
+                preselect: connectPreselect,
+                presetProfile: connectPreselect.flatMap { id in
+                    (clients.first { $0.id == id } ?? appState.clients.first { $0.id == id })?.boundProfile
+                },
+                onClose: { showConnect = false },
+                onRoute: { route in
+                    showConnect = false
+                    appState.navigate(route)
+                }
+            )
                 .frame(minWidth: 780, minHeight: 560)
         }
+        .sheet(isPresented: $showBulkMove) {
+            BulkMoveSheet(appState: appState) { Task { await load() } }
+        }
+        .sheet(isPresented: $showUpgrade) {
+            AdminKeyUpgradeSheet(appState: appState) { Task { await load() } }
+        }
+        .sheet(isPresented: $showOtherClient) {
+            OtherClientSheet(appState: appState) { Task { await load() } }
+        }
+        .sheet(item: $rotating) { client in
+            RotateClientSheet(appState: appState, client: client) { Task { await load() } }
+        }
+        .sheet(item: $forgetting) { client in
+            ForgetClientSheet(client: client) { disconnect in
+                Task {
+                    if await bindingModel.forget(client, disconnect: disconnect) != nil { await load() }
+                }
+            }
+        }
+    }
+
+    /// Routes this hub owns (Spec 108-k): a tab with its filter, a row's detail,
+    /// the connect sheet on a client, and the admin-key upgrade sheet.
+    private func consumeRoute() {
+        enum Landing { case tab(ClientsTab, ScopeFilter?), detail(String), connect(String?), upgrade }
+        let landing: Landing? = appState.consumeRoute { route in
+            switch route {
+            case .clients(let tab, let filter): return .tab(tab, filter)
+            case .clientDetail(let id): return .detail(id)
+            case .connectSheet(let id): return .connect(id)
+            case .upgradeAdminKeys: return .upgrade
+            default: return nil
+            }
+        }
+        switch landing {
+        case .tab(let landedTab, let filter)?:
+            tab = landedTab.rawValue
+            if landedTab == .tokens { tokensFilter = filter ?? ScopeFilter() }
+            else { clientsFilter = filter ?? ScopeFilter() }
+        case .detail(let id)?:
+            tab = 0
+            focusedClientID = id
+            if expandedClientID != id, let row = clients.first(where: { $0.id == id }) {
+                Task { await toggle(row) }
+            }
+        case .connect(let id)?:
+            tab = 0
+            connectPreselect = id
+            showConnect = true
+        case .upgrade?:
+            tab = 0
+            showUpgrade = true
+        case nil:
+            break
+        }
+    }
+
+    /// Follow the app-wide client list (SSE `client.binding_changed`) without
+    /// losing the sessions a row's detail loaded. A filtered view refetches.
+    private func adopt(_ fresh: [ClientPresenceRecord]) {
+        guard clientsFilter.profile == nil, clientsFilter.client == nil else {
+            Task { await load() }
+            return
+        }
+        let sessions = Dictionary(uniqueKeysWithValues: clients.compactMap { row in
+            row.sessions.map { (row.id, $0) }
+        })
+        clients = fresh.map { row in
+            var merged = row
+            if merged.sessions == nil, let kept = sessions[row.id] { merged.sessions = kept }
+            return merged
+        }
+        warnings = appState.clientWarnings
     }
 
     private func consumePendingAddAction() {
@@ -83,10 +189,25 @@ struct ClientsView: View {
                 if isLoading { ProgressView().controlSize(.small) }
                 Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.borderless).help("Refresh clients")
-                Button("Connect client") { showConnect = true }
+                Menu("More") {
+                    Button("Move Clients…") { showBulkMove = true }
+                        .accessibilityIdentifier("clients-bulk-move")
+                    if warnings.contains(where: { $0.code == ClientWarning.holdsAdminKey }) {
+                        Button("Upgrade Admin-Key Clients…") { showUpgrade = true }
+                            .accessibilityIdentifier("clients-upgrade-admin-key")
+                    }
+                    Button("Other Client…") { showOtherClient = true }
+                        .accessibilityIdentifier("clients-other-client")
+                }
+                .menuStyle(.borderlessButton).frame(width: 70)
+                .accessibilityIdentifier("clients-more-menu")
+                Button("Connect client") { connectPreselect = nil; showConnect = true }
                     .buttonStyle(.borderedProminent)
             }
             .padding()
+
+            ClientWarningsBanner(warnings: warnings) { appState.navigate($0) }
+            clientsFilterChips
 
             if let errorMessage {
                 HStack {
@@ -153,6 +274,7 @@ struct ClientsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(client.displayName).font(.headline)
                         Text(client.stateLabel).font(.caption).foregroundStyle(client.connected ? .green : .secondary)
+                        ClientBindingRowLabel(client: client)
                     }
                     Spacer()
                     VStack(alignment: .trailing, spacing: 2) {
@@ -203,10 +325,61 @@ struct ClientsView: View {
                 Button("Show activity") { appState.openActivity(with: .forClient(client.id)) }
                     .buttonStyle(.link).font(.caption)
             }
+            Divider()
+            ClientBindingDetail(
+                appState: appState, model: bindingModel, client: client,
+                onUpdate: { updated in replace(updated) },
+                onUpgrade: { connectPreselect = client.id; showConnect = true },
+                onRotate: { rotating = client },
+                onForget: { forgetting = client },
+                onExplain: { appState.navigate(.explain(subject: .client(client.id), tool: nil)) })
         }
         .padding(10)
         .background(Color.secondary.opacity(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.accentColor, lineWidth: focusedClientID == client.id ? 2 : 0))
+    }
+
+    /// Profile / client chips with a clear (✕) button: the filter a Profiles
+    /// card link (or a Clients row link) set.
+    @ViewBuilder
+    private var clientsFilterChips: some View {
+        if clientsFilter.profile != nil || clientsFilter.client != nil {
+            HStack(spacing: 8) {
+                if let profile = clientsFilter.profile {
+                    chip("Profile: \(profile)") { clientsFilter.profile = nil }
+                }
+                if let client = clientsFilter.client {
+                    chip("Client: \(client)") { clientsFilter.client = nil }
+                }
+                Spacer()
+            }
+            .padding(.horizontal).padding(.bottom, 6)
+            .accessibilityIdentifier("clients-filter-chips")
+        }
+    }
+
+    private func chip(_ text: String, clear: @escaping () -> Void) -> some View {
+        HStack(spacing: 4) {
+            Text(text).font(.caption)
+            Button(action: clear) { Image(systemName: "xmark.circle.fill") }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Clear filter \(text)")
+        }
+        .padding(.horizontal, 8).padding(.vertical, 3)
+        .background(Color.accentColor.opacity(0.15)).clipShape(Capsule())
+    }
+
+    private func replace(_ updated: ClientPresenceRecord) {
+        guard let index = clients.firstIndex(where: { $0.id == updated.id }) else { return }
+        var merged = updated
+        if merged.sessions == nil { merged.sessions = clients[index].sessions }
+        clients[index] = merged
+        if let shared = appState.clients.firstIndex(where: { $0.id == updated.id }) {
+            appState.clients[shared] = updated
+        }
     }
 
     // MARK: - Endpoint & mode
@@ -292,9 +465,19 @@ struct ClientsView: View {
         errorMessage = nil
         defer { isLoading = false }
         do {
-            async let loadedClients = apiClient.clients()
+            // The scope parameters ride only when the core advertises them.
+            let request = clientsFilter.restRequest(for: .clients, scopeFiltersAvailable: appState.scopeFiltersAvailable)
+            let profile = request?.query.first { $0.name == "profile" }?.value
+            let client = request?.query.first { $0.name == "client" }?.value
+            async let loadedClients = apiClient.clientsV3(profile: profile, client: client)
             async let loadedRouting = apiClient.routing()
-            clients = try await loadedClients
+            let response = try await loadedClients
+            clients = response.clients
+            warnings = response.warnings ?? []
+            if profile == nil && client == nil {
+                appState.clients = response.clients
+                appState.clientWarnings = warnings
+            }
             let loaded = try await loadedRouting
             routing = loaded
             defaultMCPEndpoint = APIClient.endpointURL(
@@ -354,5 +537,34 @@ struct ClientsView: View {
         let formatter = ISO8601DateFormatter()
         guard let date = formatter.date(from: value) else { return value }
         return date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+/// Owns the Connect sheet's model for the life of the sheet.
+///
+/// The model used to be built inline in the `.sheet` closure, which runs again
+/// whenever `ClientsView` re-renders, so every `profiles.changed` /
+/// `client.binding_changed` event handed the sheet a fresh model stuck on
+/// "Loading clients…" (its `.task` runs once). `@StateObject` keeps one.
+private struct ConnectClientSheetHost: View {
+    @StateObject private var model: ConnectClientModel
+    let preselect: String?
+    let presetProfile: String?
+    let onClose: () -> Void
+    let onRoute: (AppRoute) -> Void
+
+    init(appState: AppState, preselect: String?, presetProfile: String?,
+         onClose: @escaping () -> Void, onRoute: @escaping (AppRoute) -> Void) {
+        _model = StateObject(wrappedValue: ConnectClientModel(source: DeferredConnectSource {
+            await MainActor.run { appState.apiClient }
+        }))
+        self.preselect = preselect
+        self.presetProfile = presetProfile
+        self.onClose = onClose
+        self.onRoute = onRoute
+    }
+
+    var body: some View {
+        ConnectClientView(model: model, onClose: onClose, preselect: preselect, presetProfile: presetProfile, onRoute: onRoute)
     }
 }

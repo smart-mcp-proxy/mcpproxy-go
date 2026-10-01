@@ -297,6 +297,98 @@ final class ScopeFilterTests: XCTestCase {
         let s2 = try JSONDecoder().decode(StatusResponse.self, from: Data(without.utf8))
         XCTAssertFalse(s2.scopeFiltersAvailable)
     }
+
+    // MARK: - Spec 108-k K12 / T113 / T119b: Clients and Tokens pages
+
+    func testClientsPageMapsProfileAndClientOnlyWhenTheCoreAdvertisesThem() {
+        var f = ScopeFilter.forProfile("work-ro")
+        f.client = "cursor"
+        f.token = "ci"
+        let on = f.restRequest(for: .clients, scopeFiltersAvailable: true, now: now)
+        XCTAssertEqual(on?.path, "/api/v1/clients")
+        XCTAssertEqual(items(on), ["profile": ["work-ro"], "client": ["cursor"]], "token is not a Clients filter")
+        let off = f.restRequest(for: .clients, scopeFiltersAvailable: false, now: now)
+        XCTAssertEqual(off?.path, "/api/v1/clients")
+        XCTAssertTrue(off?.query.isEmpty ?? false, "hidden until features.scope_filters")
+    }
+
+    func testTokensPageMapsProfileAndTokenOnlyWhenTheCoreAdvertisesThem() {
+        var f = ScopeFilter.forProfile("-")
+        f.token = "ci"
+        f.client = "cursor"
+        let on = f.restRequest(for: .tokens, scopeFiltersAvailable: true, now: now)
+        XCTAssertEqual(on?.path, "/api/v1/tokens")
+        XCTAssertEqual(items(on), ["profile": ["-"], "token": ["ci"]], "unpinned is `-`; client is not a Tokens filter")
+        XCTAssertTrue(f.restRequest(for: .tokens, scopeFiltersAvailable: false, now: now)?.query.isEmpty ?? false)
+    }
+
+    func testForProfileCarriesOnlyTheProfile() {
+        let f = ScopeFilter.forProfile("work-ro")
+        XCTAssertEqual(f.profile, "work-ro")
+        XCTAssertNil(f.client)
+        XCTAssertNil(f.token)
+        XCTAssertEqual(f.visibleScopeParams(scopeFiltersAvailable: true), ["profile"])
+    }
+
+    /// The Profiles-card links (Tools · Activity · Clients · Tokens) each produce
+    /// the FR-031 request for that page.
+    func testTheProfilesCardLinksProduceTheirRequests() {
+        let filter = ScopeFilter.forProfile("work-ro")
+        let expected: [(ScopePage, String)] = [
+            (.tools, "/api/v1/tools"), (.activity, "/api/v1/activity"),
+            (.clients, "/api/v1/clients"), (.tokens, "/api/v1/tokens"),
+        ]
+        for (page, path) in expected {
+            let request = filter.restRequest(for: page, scopeFiltersAvailable: true, now: now)
+            XCTAssertEqual(request?.path, path, "\(page)")
+            XCTAssertEqual(items(request)["profile"], ["work-ro"], "\(page)")
+        }
+    }
+
+    func testOpenScopedRoutesEachPageThroughItsChannel() {
+        let appState = AppState()
+        let filter = ScopeFilter.forProfile("work-ro")
+
+        appState.openScoped(page: .clients, filter: filter)
+        XCTAssertEqual(appState.pendingRoute, .clients(tab: .clients, filter: filter))
+
+        appState.openScoped(page: .tokens, filter: filter)
+        XCTAssertEqual(appState.pendingRoute, .clients(tab: .tokens, filter: filter))
+
+        appState.openScoped(page: .tools, filter: filter)
+        XCTAssertEqual(appState.pendingRoute, .tools(filter: filter))
+
+        appState.pendingRoute = nil
+        appState.openScoped(page: .activity, filter: filter)
+        XCTAssertEqual(appState.scopeFilter, filter, "Activity keeps 109-k's own channel")
+        XCTAssertNil(appState.pendingRoute)
+    }
+
+    /// `view=sessions` → `GET /sessions` with profile/client/token (FR-031).
+    func testSessionsCarryTheThreeScopeFilters() {
+        var f = ScopeFilter()
+        f.view = .sessions
+        f.profile = "work-ro"
+        f.client = "cursor"
+        f.token = "ci"
+        let request = f.restRequest(for: .activity, scopeFiltersAvailable: true, now: now)
+        XCTAssertEqual(request?.path, "/api/v1/sessions")
+        XCTAssertEqual(items(request), ["profile": ["work-ro"], "client": ["cursor"], "token": ["ci"]])
+    }
+
+    func testUsageCarriesTheThreeScopeFiltersAndA24hWindow() {
+        var f = ScopeFilter()
+        f.from = "-24h"
+        f.profile = "work-ro"
+        f.client = "cursor"
+        f.token = "ci"
+        let request = f.restRequest(for: .usage, scopeFiltersAvailable: true, now: now)
+        XCTAssertEqual(request?.path, "/api/v1/activity/usage")
+        XCTAssertEqual(items(request)["window"], ["24h"])
+        XCTAssertEqual(items(request)["profile"], ["work-ro"])
+        XCTAssertEqual(items(request)["client"], ["cursor"])
+        XCTAssertEqual(items(request)["token"], ["ci"])
+    }
 }
 
 /// The in-app link channel (T122): a tray glance client row, a Clients row or a

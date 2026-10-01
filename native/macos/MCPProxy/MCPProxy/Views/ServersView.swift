@@ -26,6 +26,8 @@ struct ServersView: View {
     @State private var selectedServerInitialFocusField: TrayConfigFocusField?
     @State private var showAddServer = false
     @State private var addServerInitialTab: AddServerTab = .catalog
+    /// Spec 108-k K18: only the servers a profile reaches (`GET /servers?profile=`).
+    @State private var profileFilter: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -112,6 +114,30 @@ struct ServersView: View {
                     .foregroundStyle(.secondary)
                 Text("\(appState.totalTools) tools")
                     .foregroundStyle(.secondary)
+
+                if appState.scopeFiltersAvailable {
+                    Picker("Profile", selection: Binding(
+                        get: { profileFilter ?? "" },
+                        set: { profileFilter = $0.isEmpty ? nil : $0 })) {
+                        Text("All profiles").tag("")
+                        ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
+                        if let current = profileFilter, !appState.profiles.contains(where: { $0.name == current }) {
+                            Text(current).tag(current)
+                        }
+                    }
+                    .frame(maxWidth: 200)
+                    .accessibilityIdentifier("servers-profile-filter")
+                    if let profile = profileFilter {
+                        HStack(spacing: 4) {
+                            Text("Profile: \(profile)").font(.caption)
+                            Button { profileFilter = nil } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Clear profile filter")
+                        }
+                        .padding(.horizontal, 8).padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.15)).clipShape(Capsule())
+                    }
+                }
 
                 Button {
                     // Spec 109 FR-062: the generic entry point opens on the
@@ -236,12 +262,15 @@ struct ServersView: View {
             .accessibilityIdentifier("servers-list")
         }
         .onAppear {
+            consumeRoute()
             triggerLoad()
             consumePendingAddAction()
         }
         .onChange(of: appState.serversVersion) { _ in
             triggerLoad()
         }
+        .onChange(of: profileFilter) { _ in triggerLoad() }
+        .onChange(of: appState.pendingRoute) { _ in consumeRoute() }
         // Spec 109-i FR-052: the window toolbar "+ -> Server" hands off through
         // AppState (a view created by the sidebar switch reads it on appear; one
         // already showing reads it here). The tray's `.showAddServer`
@@ -275,18 +304,44 @@ struct ServersView: View {
         showAddServer = true
     }
 
+    /// Routes this view owns (Spec 108-k): a profile filter from a link, and a
+    /// server's detail from an explainer fix.
+    private func consumeRoute() {
+        enum Landing { case filter(String?), detail(String) }
+        let landing: Landing? = appState.consumeRoute { route in
+            switch route {
+            case .servers(let filter): return .filter(filter?.profile)
+            case .serverDetail(let name): return .detail(name)
+            default: return nil
+            }
+        }
+        switch landing {
+        case .filter(let profile)?:
+            selectedServer = nil
+            profileFilter = profile
+        case .detail(let name)?:
+            if let server = servers.first(where: { $0.name == name }) ?? appState.servers.first(where: { $0.name == name }) {
+                selectedServerInitialTab = .tools
+                selectedServer = server
+            }
+        case nil:
+            break
+        }
+    }
+
     private func triggerLoad() {
         loadTask?.cancel()
         loadTask = Task {
             guard let client = appState.apiClient else {
-                servers = appState.servers
+                servers = profileFilter == nil ? appState.servers : []
                 return
             }
             isLoading = true
             do {
-                servers = try await client.servers()
+                // The profile parameter rides only when the core advertises it.
+                servers = try await client.servers(profile: appState.scopeFiltersAvailable ? profileFilter : nil)
             } catch {
-                servers = appState.servers
+                servers = profileFilter == nil ? appState.servers : []
             }
             isLoading = false
         }

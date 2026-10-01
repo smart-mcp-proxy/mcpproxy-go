@@ -21,6 +21,9 @@ final class ConfigStore: ObservableObject {
     @Published var loadError: String?
     /// Bumped on every mutation so SwiftUI re-evaluates dirty state.
     @Published var revision = 0
+    /// Spec 108-k: a setting a fix button asked to show ("Require
+    /// authentication…"). The tab scrolls to it and its row is highlighted.
+    @Published var highlightedKey: String?
     /// The core's built-in MCP `instructions` text (MCP-2176), shown as the
     /// placeholder of the instructions field so a blank box reads as "the
     /// default is this" instead of "nothing". Fetched, never hardcoded — the
@@ -277,6 +280,7 @@ struct ConfigSectionView: View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(fields) { field in
                 ConfigFieldRow(store: store, field: field)
+                    .id(field.key)
                 Divider()
             }
 
@@ -390,6 +394,9 @@ struct ConfigFieldRow: View {
             }
         }
         .padding(.vertical, 8)
+        .background(store.highlightedKey == field.key ? Color.accentColor.opacity(0.15) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .accessibilityIdentifier("setting-\(field.key)")
     }
 
     private var labelBlock: some View {
@@ -496,6 +503,8 @@ struct ConfigFieldRow: View {
 
 struct ConfigTabContainer<Content: View>: View {
     @ObservedObject var store: ConfigStore
+    /// A setting key to scroll to once loaded (Spec 108-k fix buttons).
+    var scrollTarget: String? = nil
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -511,18 +520,39 @@ struct ConfigTabContainer<Content: View>: View {
                 ProgressView("Loading configuration…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView { content().padding(20) }
+                ScrollViewReader { proxy in
+                    ScrollView { content().padding(20) }
+                        .onAppear { scroll(proxy) }
+                        .onChange(of: scrollTarget) { _ in scroll(proxy) }
+                }
             }
         }
         .task { if !store.loaded { await store.load() } }
     }
+
+    private func scroll(_ proxy: ScrollViewProxy) {
+        guard let scrollTarget else { return }
+        DispatchQueue.main.async { withAnimation { proxy.scrollTo(scrollTarget, anchor: .top) } }
+    }
 }
 
 struct SecuritySettingsTab: View {
+    @ObservedObject var appState: AppState
     @ObservedObject var store: ConfigStore
+    /// Setting key to scroll to and highlight (`require_mcp_auth`).
+    var scrollTarget: String? = nil
+    /// Profile to PRESELECT (not save) in the Anonymous callers picker.
+    var anonymousPreselect: String? = nil
+
     var body: some View {
-        ConfigTabContainer(store: store) {
-            ConfigSectionView(store: store, sectionId: "security", fields: SettingsCatalog.security)
+        ConfigTabContainer(store: store, scrollTarget: scrollTarget) {
+            VStack(alignment: .leading, spacing: 0) {
+                ConfigSectionView(store: store, sectionId: "security", fields: SettingsCatalog.security)
+                Divider().padding(.vertical, 8)
+                // Spec 108-k K20: custom (its options are the live profile list).
+                AnonymousProfileSection(appState: appState, store: store, preselect: anonymousPreselect)
+                    .id("anonymous_profile")
+            }
         }
     }
 }

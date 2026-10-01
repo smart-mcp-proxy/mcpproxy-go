@@ -29,7 +29,8 @@ final class TrayAuditMenuTests: XCTestCase {
     }
 
     private func makeController(servers: [ServerStatus] = [],
-                                profiles: [ProfileSummary] = []) -> (AppController, TestMenuHost) {
+                                profiles: [ProfileView] = [],
+                                clients: [ClientPresenceRecord] = []) -> (AppController, TestMenuHost) {
         let host = TestMenuHost()
         let controller = AppController(
             glanceDataSource: CountingGlanceDataSource(), menuHost: host
@@ -37,6 +38,7 @@ final class TrayAuditMenuTests: XCTestCase {
         controller.appState.coreState = .connected
         controller.appState.servers = servers
         controller.appState.profiles = profiles
+        controller.appState.clients = clients
         // Spec 109 FR-001: the tray's "Needs Attention" group is built from
         // `appState.attention` (fed from the core's GET /api/v1/attention /
         // SSE attention.changed), not derived from `servers` in-process any
@@ -432,20 +434,45 @@ final class TrayAuditMenuTests: XCTestCase {
                        "alphabetical order buried the servers that need something")
     }
 
-    // MARK: - F11 · Empty profiles
+    // MARK: - Spec 108-k · Profiles are a property of a client
 
-    func testAProfileWithNoConfiguredServersIsFlaggedInTheMenu() throws {
+    /// The v2 "Profile: <active>" instance switcher is gone (FR-048): profiles
+    /// are bound per client, in the Clients submenu.
+    func testThereIsNoInstanceWideProfileSwitcher() throws {
         let (controller, host) = makeController(
             servers: [Self.server(name: "everything", proto: "http", enabled: true)],
             profiles: [
                 Self.profile(name: "research", servers: ["github", "gitlab"], toolCount: 0),
                 Self.profile(name: "live", servers: ["everything"], toolCount: 12),
-            ])
+            ],
+            clients: [Self.client(id: "cursor", name: "Cursor", credential: "client", profile: "live")])
         controller.rebuildMenu()
 
-        let titles = try submenu(host, startingWith: "Profile:").items.map(\.title)
-        XCTAssertTrue(titles.contains("research — no servers"), "\(titles)")
-        XCTAssertTrue(titles.contains("live (1 server · 12 tools)"), "\(titles)")
+        let titles = topLevelTitles(host)
+        XCTAssertFalse(titles.contains { $0.hasPrefix("Profile:") }, "\(titles)")
+        XCTAssertNotNil(clientsSubmenuItem(host), "\(titles)")
+    }
+
+    func testTheClientsSubmenuListsACredentialedClientWithItsProfile() throws {
+        let (controller, host) = makeController(
+            profiles: [Self.profile(name: "live", servers: ["everything"], toolCount: 12)],
+            clients: [Self.client(id: "cursor", name: "Cursor", credential: "client", profile: "live", locked: true)])
+        controller.rebuildMenu()
+
+        let clients = try XCTUnwrap(clientsSubmenuItem(host)?.submenu, "\(topLevelTitles(host))")
+        XCTAssertEqual(clients.items.map(\.title), ["Cursor — live 🔒"])
+    }
+
+    func testNoClientsMeansNoClientsItem() {
+        let (controller, host) = makeController(profiles: [Self.profile(name: "live", servers: [], toolCount: 0)])
+        controller.rebuildMenu()
+        XCTAssertNil(clientsSubmenuItem(host), "no credentialed or connected client: no Clients submenu")
+    }
+
+    /// The top-level "Clients" submenu (not the glance section's header of the
+    /// same name, which is a plain disabled row).
+    private func clientsSubmenuItem(_ host: TestMenuHost) -> NSMenuItem? {
+        (host.menu?.items ?? []).first { $0.title == "Clients" && $0.submenu != nil }
     }
 
     // MARK: - F9 · Names that say what happens
@@ -530,12 +557,23 @@ final class TrayAuditMenuTests: XCTestCase {
         return try! JSONDecoder().decode(ServerStatus.self, from: json)
     }
 
-    private static func profile(name: String, servers: [String], toolCount: Int) -> ProfileSummary {
+    private static func profile(name: String, servers: [String], toolCount: Int) -> ProfileView {
         let list = servers.map { "\"\($0)\"" }.joined(separator: ",")
         let json = """
         {"name": "\(name)", "servers": [\(list)], "tool_count": \(toolCount)}
         """.data(using: .utf8)!
         // swiftlint:disable:next force_try
-        return try! JSONDecoder().decode(ProfileSummary.self, from: json)
+        return try! JSONDecoder().decode(ProfileView.self, from: json)
+    }
+
+    private static func client(id: String, name: String, credential: String, profile: String = "",
+                               locked: Bool = false, connected: Bool = true) -> ClientPresenceRecord {
+        let json = """
+        {"id":"\(id)","display_name":"\(name)","kind":"supported","state":"connected_seen","installed":true,
+         "connected":\(connected),"active_sessions":0,"calls_24h":0,"credential_state":"\(credential)",
+         "profile":"\(profile)","profile_mode":"\(locked ? "locked" : "switchable")"}
+        """.data(using: .utf8)!
+        // swiftlint:disable:next force_try
+        return try! JSONDecoder().decode(ClientPresenceRecord.self, from: json)
     }
 }
