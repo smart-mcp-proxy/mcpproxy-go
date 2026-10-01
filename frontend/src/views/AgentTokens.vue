@@ -149,7 +149,7 @@
               <span v-else class="text-base-content/40 text-sm">&mdash;</span>
             </td>
             <td>
-              <span v-if="isClientCredential(token) && token.profile_mode" class="text-sm">{{ token.profile_mode === 'locked' ? 'Locked' : 'Switchable' }}</span>
+              <span v-if="isClientCredential(token) && token.profile_mode" class="text-sm">{{ modeLabel(token.profile_mode) }}</span>
               <span v-else class="text-base-content/40 text-sm">&mdash;</span>
             </td>
             <td>
@@ -440,7 +440,7 @@ import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import { useProfilesStore } from '@/stores/profiles'
 import { useScopeQuery } from '@/composables/useScopeQuery'
-import { describeError } from '@/utils/profiles'
+import { describeError, modeLabel } from '@/utils/profiles'
 import type { ApiError } from '@/services/api'
 import type { AgentTokenInfo, CreateAgentTokenRequest, Server } from '@/types'
 

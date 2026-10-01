@@ -1,0 +1,58 @@
+{
+  "_comment": "Spec 108-l (L6, FR-052): the words of the Terminology table (spec.md), identical on the Web UI and macOS. Hand-maintained. Keys of every family equal the matching enums.json family (TestProfilesV3LabelsCoverEnums); utils/profiles.ts and ProfilesModels.swift must return exactly these strings (profiles-enums-labels.spec.ts, ProfilesEnumsLabelsTests). The CLI keeps the raw enum values.",
+  "access_reason": {
+    "server_not_in_profile": "Server not in profile",
+    "denied_by_rule": "Denied by rule",
+    "unannotated_hidden": "Unannotated — classify",
+    "above_tier_cap": "Above tier cap",
+    "credential": "Credential revoked or expired",
+    "profile": "Profile missing — denied everything",
+    "server_in_scope": "Server outside the token's scope",
+    "token_permission": "Token permission",
+    "global_gate": "Blocked by a global setting",
+    "server_state": "Server disabled or not connected",
+    "tool_approval": "Needs review"
+  },
+  "access_reason_none": "Visible",
+  "source": {
+    "pin": "locked by credential",
+    "binding": "switchable",
+    "url": "from URL",
+    "session": "switched in session",
+    "anonymous": "anonymous",
+    "none": ""
+  },
+  "explain_step": {
+    "credential": "Credential",
+    "profile": "Profile",
+    "server_in_scope": "Server in scope",
+    "tool_rule": "Tool rule",
+    "tier_cap": "Tier cap",
+    "token_permission": "Token permission",
+    "global_gate": "Global gate",
+    "server_state": "Server state",
+    "tool_approval": "Tool approval"
+  },
+  "credential_state": {
+    "client": "Client credential",
+    "admin_key": "Admin key",
+    "none": "No credential",
+    "revoked": "Revoked",
+    "expired": "Expired",
+    "unknown": "Unknown"
+  },
+  "binding_mode": {
+    "locked": "Locked",
+    "switchable": "Switchable"
+  },
+  "unannotated": {
+    "deny": "Hide",
+    "as_write": "Treat as write",
+    "as_read": "Treat as read"
+  },
+  "max_tier": {
+    "read": "Read",
+    "write": "+ Write",
+    "destructive": "+ Destructive"
+  }
+}

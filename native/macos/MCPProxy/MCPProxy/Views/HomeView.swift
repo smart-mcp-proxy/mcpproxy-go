@@ -715,7 +715,7 @@ struct HomeView: View {
                                     .lineLimit(1)
                                     .frame(width: 120, alignment: .leading)
                                     .padding(.leading, 12)
-                                Text(session.profileSource?.isEmpty == false ? session.profileSource! : "—")
+                                Text(ProfileSourceText.label(session.profileSource ?? "").isEmpty ? "—" : ProfileSourceText.label(session.profileSource ?? ""))
                                     .font(.scaled(.caption, scale: fontScale))
                                     .foregroundStyle(.secondary)
                                     .frame(width: 80, alignment: .leading)

@@ -134,7 +134,7 @@ describe('Profile policy editor (Spec 108-i T091, FR-041, FR-005)', () => {
     const cap = wrapper.get('[data-test="profile-tool-row-github__create_issue"]')
     expect(cap.text()).toContain('Hidden')
     expect(cap.text()).toContain('Above tier cap')
-    expect(wrapper.get('[data-test="profile-tool-row-github__other"]').text()).toContain('Unannotated — hidden')
+    expect(wrapper.get('[data-test="profile-tool-row-github__other"]').text()).toContain('Unannotated — classify')
     expect(wrapper.get('[data-test="profile-tool-row-github__search_code"]').text()).toContain('Visible')
     expect(wrapper.get('[data-test="profile-tool-counts"]').text()).toContain('2 visible')
   })

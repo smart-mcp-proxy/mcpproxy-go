@@ -762,6 +762,8 @@ export type CredentialState =
 
 export const ErrorCodeBindingBypassable = 'binding_bypassable_without_auth' as const;
 export const ErrorCodeNoClientCredential = 'no_client_credential' as const;
+export const ErrorCodeConnectInProgress = 'connect_in_progress' as const;
+export const ErrorCodeCredentialSuperseded = 'credential_superseded' as const;
 export const ErrorCodeProfileInUse = 'profile_in_use' as const;
 export const ErrorCodeProfileIsAnonymousProfile = 'profile_is_anonymous_profile' as const;
 export const ErrorCodeProfileExists = 'profile_exists' as const;

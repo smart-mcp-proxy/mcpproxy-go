@@ -140,7 +140,7 @@ describe('Tools view-as (Spec 108-j)', () => {
       if (labels[reason]) expect(cell.text()).toContain(labels[reason])
     }
     expect(wrapper.get('[data-test="tools-row-access-github__off_tool"]').text()).toContain('Disabled')
-    expect(wrapper.get('[data-test="tools-row-access-github__t_tool_approval"]').text()).toContain('Awaiting approval')
+    expect(wrapper.get('[data-test="tools-row-access-github__t_tool_approval"]').text()).toContain('Needs review')
 
     const blockedRow = wrapper.findAll('[data-test="tool-row"]').find(r => r.text().includes('t_above_tier_cap'))!
     expect(blockedRow.attributes('data-not-callable')).toBe('true')
