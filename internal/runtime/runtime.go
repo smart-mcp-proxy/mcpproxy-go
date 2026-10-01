@@ -2491,8 +2491,13 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	// Read the global isolation block ONCE, outside the loop: every server's
 	// projection needs it to resolve the effective isolation state (GH #1142).
 	var globalIsolation *config.DockerIsolationConfig
+	var oauthExpiryWarningHours float64
 	if cfg, err := r.GetConfig(); err == nil && cfg != nil {
 		globalIsolation = cfg.DockerIsolation
+		// Read here rather than via r.cfg in the loop below: the servers.changed
+		// coalescer calls this from its own goroutine, and r.cfg is swapped by
+		// applyConfigLocked under r.mu (data race with a concurrent apply).
+		oauthExpiryWarningHours = cfg.OAuthExpiryWarningHours
 	}
 
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
@@ -2810,8 +2815,8 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 
 		// Calculate unified health status
 		healthConfig := health.DefaultHealthConfig()
-		if r.cfg != nil && r.cfg.OAuthExpiryWarningHours > 0 {
-			healthConfig.ExpiryWarningDuration = time.Duration(r.cfg.OAuthExpiryWarningHours * float64(time.Hour))
+		if oauthExpiryWarningHours > 0 {
+			healthConfig.ExpiryWarningDuration = time.Duration(oauthExpiryWarningHours * float64(time.Hour))
 		}
 
 		healthInput := health.HealthCalculatorInput{
