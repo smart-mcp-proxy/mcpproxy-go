@@ -1,5 +1,5 @@
 <template>
-  <div class="flex flex-wrap items-center gap-1" :data-test="testId ? `activity-attribution-${testId}` : 'attribution-chips'">
+  <div :class="stacked ? 'flex flex-col items-start gap-1' : 'flex flex-wrap items-center gap-1'" :data-test="testId ? `activity-attribution-${testId}` : 'attribution-chips'">
     <template v-if="hasAny">
       <router-link
         v-if="clientId"
@@ -68,7 +68,12 @@ interface Attributed {
   token_name?: string
 }
 
-const props = defineProps<{ record: Attributed; testId?: string }>()
+const props = defineProps<{
+  record: Attributed
+  testId?: string
+  /** One chip per line (a narrow table column); each truncates instead of widening it. */
+  stacked?: boolean
+}>()
 
 const profiles = useProfilesStore()
 const clients = useClientsStore()

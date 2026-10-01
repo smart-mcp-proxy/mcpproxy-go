@@ -572,7 +572,7 @@
                 <!-- Spec 108-j J10: who made the call and under which profile.
                      Folded away below md; the detail drawer carries the same
                      chips in an "Attribution" section. -->
-                <th v-if="hasScopeColumn" class="hidden md:table-cell" data-test="activity-scope-col">Scope</th>
+                <th v-if="hasScopeColumn" class="hidden xl:table-cell" data-test="activity-scope-col">Scope</th>
                 <th>Details</th>
                 <th v-if="hasSensitiveColumn" class="hidden lg:table-cell">Sensitive</th>
                 <!-- Intent carries the declared reason, not a 52px icon slot. -->
@@ -683,8 +683,8 @@
                   </router-link>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
-                <td v-if="hasScopeColumn" class="hidden md:table-cell">
-                  <AttributionChips :record="row.activity" :test-id="row.activity.id" />
+                <td v-if="hasScopeColumn" class="hidden xl:table-cell max-w-[11rem]">
+                  <AttributionChips :record="row.activity" :test-id="row.activity.id" stacked />
                 </td>
                 <td>
                   <div class="max-w-[6rem] sm:max-w-xs truncate flex items-center gap-1.5">
@@ -1679,7 +1679,14 @@ function applyRouteFilters(): void {
   // computed from `activeView` reactively rather than copied in here, so
   // switching tabs (which never touches `type`) is not a no-op.
   const typeParam = str(q.type)
-  selectedTypes.value = typeParam ? typeParam.split(',').map(t => t.trim()).filter(Boolean) : []
+  // Assign only a real change: a fresh array of the same values still re-runs
+  // `effectiveTypes` and the deep refetch watch below, so every unrelated
+  // query-string write (a scope select, a chip) sent the list and the summary
+  // twice.
+  const nextTypes = typeParam ? typeParam.split(',').map(t => t.trim()).filter(Boolean) : []
+  if (nextTypes.length !== selectedTypes.value.length || nextTypes.some((t, i) => t !== selectedTypes.value[i])) {
+    selectedTypes.value = nextTypes
+  }
 
   const fromParam = str(q.from)
   rawFromParam.value = fromParam

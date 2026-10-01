@@ -213,7 +213,7 @@
     <!-- Spec 108-j J6/J14 (FR-032): what the viewed subject can do. A status
          region, in words: a view must never look like it edits the subject's
          access. -->
-    <div v-if="viewAsActive" role="status" class="alert flex-wrap items-start shadow-md" data-test="tools-view-as-banner">
+    <div v-if="viewAsActive && !scopeError" role="status" class="alert flex-wrap items-start shadow-md" data-test="tools-view-as-banner">
       <div class="flex-1 min-w-0 space-y-1">
         <div class="font-medium" data-test="tools-view-as-summary">{{ viewAsBannerText }}</div>
         <div v-if="disabledServerNote" class="text-sm" data-test="tools-view-as-disabled-note">
@@ -899,12 +899,13 @@ const viewAsEmptyText = computed(() => {
   return `${viewAsSubjectLabel.value[0].toUpperCase()}${viewAsSubjectLabel.value.slice(1)} can see no tools`
 })
 
-// J14 (#1437 item 2): a disabled server is disconnected and has no tool set, so
-// it is absent from every listing; say so instead of implying the list is whole.
+// J14 (#1437 item 2): a disabled server's tools may or may not be in the listing
+// (the last-known set can linger after a disable), so say so instead of implying
+// the list is whole.
 const disabledServerNote = computed(() => {
   const count = serversStore.serverCount.disabled
   if (!viewAsActive.value || count === 0) return ''
-  return `${count} disabled server${count === 1 ? ' is' : 's are'} not listed.`
+  return `${count} disabled server${count === 1 ? '' : 's'}: ${count === 1 ? 'its' : 'their'} tools may not be listed.`
 })
 const disabledServersLink = computed(() => (scopeQuery ? scopeQuery.linkTo('servers', { status: 'disabled' }) : null))
 

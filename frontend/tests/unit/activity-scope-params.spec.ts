@@ -189,6 +189,24 @@ describe('Activity scope params (Spec 108-j)', () => {
     expect(getActivitiesMock.mock.calls.at(-1)![0]).toEqual(expect.objectContaining({ token: 'ro-bot' }))
   })
 
+  it('picking a profile in the filter panel sends one /activity and one /activity/summary request for it', async () => {
+    const { wrapper } = await mountActivityAt('/activity')
+    // The panel's open state is remembered across mounts; open it only if closed.
+    const toggle = wrapper.get('[data-test="activity-filters-toggle"]')
+    if (toggle.attributes('aria-expanded') !== 'true') await toggle.trigger('click')
+    await flushPromises()
+    getActivitiesMock.mockClear()
+    getSummaryMock.mockClear()
+    await wrapper.get('[data-test="scope-select-profile"]').setValue(WORK_RO.name)
+    await flushPromises()
+    await flushPromises()
+    const listCalls = getActivitiesMock.mock.calls.filter(call => call[0]?.profile === WORK_RO.name)
+    const summaryCalls = getSummaryMock.mock.calls.filter(call => call[1]?.profile === WORK_RO.name)
+    expect(listCalls).toHaveLength(1)
+    expect(summaryCalls).toHaveLength(1)
+    expect(getActivitiesMock).toHaveBeenCalledTimes(1)
+  })
+
   it('a blocked filter on the Tool calls view also asks for policy decisions (a profile refusal is stored as one)', async () => {
     await mountActivityAt('/activity?client=cursor&status=blocked')
     const types = String(getActivitiesMock.mock.calls.at(-1)![0].type).split(',')

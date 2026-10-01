@@ -225,7 +225,22 @@ for (const width of [1440, 1100, 900, 390]) {
       await open(page, route)
       await expect(page.locator(chip).first()).toBeVisible()
       if (name === 'tools') await expect(page.locator('[data-test="tools-view-as-banner"]')).toBeVisible()
-      if (name === 'activity') await expect(page.locator('[data-test="activity-row"]')).toHaveCount(1)
+      if (name === 'activity') {
+        await expect(page.locator('[data-test="activity-row"]')).toHaveCount(1)
+        // The table fits its card: nothing (Status, Duration) is cut off or hidden behind an inner scroll.
+        const fit = await page.evaluate(() => {
+          const box = document.querySelector('[data-test="activity-row"]')?.closest('.overflow-x-auto')
+          const columns = Array.from(document.querySelectorAll('table thead th')).filter(th => (th as HTMLElement).offsetParent !== null)
+            .map(th => `${th.textContent?.trim() || '-'}:${Math.round(th.getBoundingClientRect().width)}`)
+          return { overflow: box ? box.scrollWidth - box.clientWidth : 0, columns: columns.join(' ') }
+        })
+        // Phone width keeps its own table-fixed layout (F14), which is not the subject here.
+        if (width >= 768) expect(fit.overflow, `activity table at ${width} must fit its card (overflow ${fit.overflow}px, columns ${fit.columns})`).toBeLessThanOrEqual(1)
+        const status = page.locator('[data-test="activity-row"]').first().locator('.badge').last()
+        const statusBox = await status.boundingBox()
+        expect(statusBox, `status badge at ${width}`).not.toBeNull()
+        expect(statusBox!.x + statusBox!.width, `status badge at ${width} inside the viewport`).toBeLessThanOrEqual(width)
+      }
       await noHorizontalScroll(page, `${name} at ${width}`)
       const box = await page.locator(chip).first().boundingBox()
       expect(box, `${name} chip at ${width}`).not.toBeNull()
@@ -253,8 +268,8 @@ for (const width of [1440, 1100, 900, 390]) {
     const target = await why.boundingBox()
     expect(target!.width).toBeGreaterThanOrEqual(24)
     expect(target!.height).toBeGreaterThanOrEqual(24)
-    if (width < 768) {
-      // Below md the Scope column folds away; the drawer carries the chips.
+    if (width < 1280) {
+      // Below xl the Scope column folds away (it widened the table past its card); the drawer carries the chips.
       await expect(page.locator('[data-test="activity-scope-col"]')).toBeHidden()
       await expect(page.locator('[data-test="activity-drawer-attribution"]')).toBeVisible()
       await expect(page.locator('[data-test="activity-drawer-attribution"] [data-test="attribution-client"]')).toBeVisible()

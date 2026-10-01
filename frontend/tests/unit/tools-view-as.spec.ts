@@ -189,7 +189,7 @@ describe('Tools view-as (Spec 108-j)', () => {
     expect(banner.text()).toContain('Nothing here changes it')
   })
 
-  it('J14: the banner says how many disabled servers are not listed, with a link to them', async () => {
+  it('J14: the banner says how many disabled servers there are and that their tools may not be listed, with a link to them', async () => {
     const { useServersStore } = await import('@/stores/servers')
     const { wrapper } = await (async () => {
       const mounted = mountToolsAt('/tools?profile=work-ro')
@@ -198,7 +198,7 @@ describe('Tools view-as (Spec 108-j)', () => {
     useServersStore().servers = [{ name: 'notion', enabled: false, quarantined: false }] as any
     await flushPromises()
     const note = wrapper.get('[data-test="tools-view-as-disabled-note"]')
-    expect(note.text()).toContain('1 disabled server is not listed')
+    expect(note.text()).toContain('1 disabled server: its tools may not be listed')
     expect(note.get('a').attributes('href')).toContain('/servers?')
     expect(note.get('a').attributes('href')).toContain('status=disabled')
   })
@@ -273,6 +273,7 @@ describe('Tools view-as (Spec 108-j)', () => {
       : ok({ tools: [row('x', 'github')], stats: stats([1]) })))
     const { wrapper, router } = await mountToolsAt('/tools?client=ghost')
     expect(wrapper.get('[data-test="tools-scope-error"]').text()).toContain('Client not found')
+    expect(wrapper.find('[data-test="tools-view-as-banner"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="tools-page"]').exists()).toBe(true)
     await wrapper.get('[data-test="tools-scope-error-clear"]').trigger('click')
     await flushPromises()
@@ -285,6 +286,8 @@ describe('Tools view-as (Spec 108-j)', () => {
     getGlobalToolsMock.mockImplementation(() => Promise.reject(Object.assign(new Error('profile not found'), { status: 404 })))
     const { wrapper } = await mountToolsAt('/tools?profile=ghost')
     expect(wrapper.get('[data-test="tools-scope-error"]').text()).toContain('Profile not found')
+    // The "0 visible / 0 callable / 0 hidden" banner would describe a subject that does not exist.
+    expect(wrapper.find('[data-test="tools-view-as-banner"]').exists()).toBe(false)
   })
 
   it('rule 7: with scope_filters absent the page sends one unscoped request, shows only the disabled chip and keeps client in the URL', async () => {
