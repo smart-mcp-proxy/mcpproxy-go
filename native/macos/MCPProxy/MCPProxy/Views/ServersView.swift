@@ -39,6 +39,9 @@ struct ServersView: View {
                     initialFocusField: selectedServerInitialFocusField,
                     onDismiss: { selectedServer = nil }
                 )
+                // The detail keeps its server in @State(initialValue:); a route
+                // or notification for another server must remount it.
+                .id(server.id)
             } else {
                 serverListView
             }
@@ -47,6 +50,20 @@ struct ServersView: View {
             AddServerView(appState: appState, isPresented: $showAddServer, initialTab: addServerInitialTab, onOpenServer: openServerAfterAddSheetDismisses)
                 .id(addServerInitialTab)
         }
+        // Spec 109-i FR-052: the window toolbar "+ -> Server" hands off through
+        // AppState (a view created by the sidebar switch reads it on appear; one
+        // already showing reads it here). The pending route (a profile filter or
+        // a server detail from a link) is consumed the same way. These live on
+        // `body`, which stays mounted while a server detail is open: on
+        // `serverListView` (unmounted then) the action was lost and replayed when
+        // the detail closed (108-retro-mac G). The tray's `.showAddServer`
+        // notification below stays as it was.
+        .onAppear {
+            consumeRoute()
+            consumePendingAddAction()
+        }
+        .onChange(of: appState.pendingRoute) { _ in consumeRoute() }
+        .onChange(of: appState.pendingAddAction) { _ in consumePendingAddAction() }
         // Review finding (this round): these two `.onReceive` handlers used to
         // live on `serverListView`'s own VStack, a computed property this
         // body's `else` branch only includes while `selectedServer == nil`.
@@ -262,22 +279,12 @@ struct ServersView: View {
             .accessibilityIdentifier("servers-list")
         }
         .onAppear {
-            consumeRoute()
             triggerLoad()
-            consumePendingAddAction()
         }
         .onChange(of: appState.serversVersion) { _ in
             triggerLoad()
         }
         .onChange(of: profileFilter) { _ in triggerLoad() }
-        .onChange(of: appState.pendingRoute) { _ in consumeRoute() }
-        // Spec 109-i FR-052: the window toolbar "+ -> Server" hands off through
-        // AppState (a view created by the sidebar switch reads it on appear; one
-        // already showing reads it here). The tray's `.showAddServer`
-        // notification below stays as it was.
-        .onChange(of: appState.pendingAddAction) { _ in
-            consumePendingAddAction()
-        }
         .onReceive(NotificationCenter.default.publisher(for: .showAddServer)) { notification in
             if let tab = notification.object as? AddServerTab {
                 addServerInitialTab = tab

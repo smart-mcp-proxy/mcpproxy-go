@@ -148,7 +148,6 @@ struct AdminKeyUpgradeSheet: View {
     let onDone: () -> Void
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model: AdminKeyUpgradeModel
-    @State private var chosenProfile = ""
 
     init(appState: AppState, onDone: @escaping () -> Void) {
         self.appState = appState
@@ -163,13 +162,19 @@ struct AdminKeyUpgradeSheet: View {
                 .font(.caption).foregroundStyle(.secondary)
 
             HStack {
-                Picker("Profile", selection: $chosenProfile) {
+                // Bound straight to the model: changing it drops the previewed
+                // result and loads a fresh one, so Apply only ever applies the
+                // profile that was previewed.
+                Picker("Profile", selection: Binding(
+                    get: { model.profile ?? "" },
+                    set: { model.profile = $0.isEmpty ? nil : $0 })) {
                     Text("All servers").tag("")
                     ForEach(appState.profiles) { Text($0.displayTitle).tag($0.name) }
                 }
                 .frame(maxWidth: 320)
+                .disabled(model.phase == .applying)
                 .accessibilityIdentifier("upgrade-profile")
-                Button("Preview") { Task { await preview() } }
+                Button("Preview") { Task { await model.loadPreview() } }
                     .accessibilityIdentifier("upgrade-preview")
             }
 
@@ -185,19 +190,17 @@ struct AdminKeyUpgradeSheet: View {
             }
         }
         .padding(20).frame(minWidth: 620, minHeight: 420)
-        .task { await preview() }
-    }
-
-    private func preview() async {
-        model.profile = chosenProfile.isEmpty ? nil : chosenProfile
-        await model.loadPreview()
+        .task { await model.loadPreview() }
+        .onChange(of: model.profile) { _ in Task { await model.loadPreview() } }
     }
 
     @ViewBuilder
     private var content: some View {
         switch model.phase {
         case .idle:
-            EmptyView()
+            Text("Preview to see which clients change.")
+                .font(.callout).foregroundStyle(.secondary)
+                .accessibilityIdentifier("upgrade-idle")
         case .loading, .applying:
             ProgressView().controlSize(.small)
         case .failed(let message):
@@ -485,17 +488,47 @@ struct RotateClientSheet: View {
 
 // MARK: - Forget
 
+/// Runs the forget itself and always shows the outcome in the sheet (the Web
+/// UI's `ForgetClientDialog` does the same): a credential that was revoked
+/// while its config entry could not be removed is a warning, not a silent close.
 struct ForgetClientSheet: View {
     let client: ClientPresenceRecord
-    let onConfirm: (_ disconnect: Bool) -> Void
+    @ObservedObject var model: ClientBindingModel
+    /// Called once the core answered, so the list reloads (the credential is
+    /// revoked either way).
+    let onDone: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var disconnect = false
+    @State private var result: ForgetResult?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Forget \(client.displayName)?").font(.title3.bold())
             Text("Its client credential is revoked, so it can no longer use MCPProxy.")
                 .font(.callout)
+            if let result {
+                Label(result.text,
+                      systemImage: result.isWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .font(.callout)
+                    .foregroundStyle(result.isWarning ? Color.orange : Color.green)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("forget-result")
+                HStack {
+                    Spacer()
+                    Button("Close") { dismiss() }
+                        .keyboardShortcut(.defaultAction)
+                        .accessibilityIdentifier("forget-close")
+                }
+            } else {
+                confirmStep
+            }
+        }
+        .padding(20).frame(width: 440)
+    }
+
+    @ViewBuilder
+    private var confirmStep: some View {
+        Group {
             if client.kind == "supported" {
                 Toggle("Also remove MCPProxy from its configuration file", isOn: $disconnect)
                     .accessibilityIdentifier("forget-disconnect")
@@ -504,14 +537,28 @@ struct ForgetClientSheet: View {
                      : "Its config file keeps the entry; it stops working once the credential is revoked.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            // Forgetting removes a binding, so the core never refuses it with a
+            // guard; the text is still shown if it ever does.
+            if let message = model.guardRefusal?.error ?? model.errorMessage {
+                Label(message, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.red)
+            }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Forget", role: .destructive) { onConfirm(disconnect); dismiss() }
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityIdentifier("forget-confirm")
+                Button("Forget", role: .destructive) {
+                    Task {
+                        if let response = await model.forget(client, disconnect: disconnect) {
+                            let outcome = ForgetResult(response, displayName: client.displayName)
+                            result = outcome
+                            AccessibilityAnnouncer.post(outcome.text)
+                            onDone()
+                        }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(model.busyClientId == client.id)
+                .accessibilityIdentifier("forget-confirm")
             }
         }
-        .padding(20).frame(width: 440)
     }
 }

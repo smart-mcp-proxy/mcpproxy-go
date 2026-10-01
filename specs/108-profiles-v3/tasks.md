@@ -284,6 +284,15 @@ The former scope of this PR — `useScopeQuery.ts`, the parameter registry, the 
 - [x] T119b [US3] macOS in-app deep links (parity row 20): the `ScopeFilter` channel, the Clients-row and Token-row links are **Spec 109-k's** (merged there, the owner); this task only wires the Profiles-card links (Tools · Activity · Clients · Tokens with `profile`) of the 108-owned Profiles view through 109's `ScopeFilter` navigation, and adds those cases to T113
 - [x] T120 Verification: `swift test`, build + swap per docs/development/macos-tray.md, `mcpproxy-ui-test` (`list_menu_items`, `click_menu_item`, `screenshot_window`), recipe 108-k; update docs/development/macos-tray.md verification checklist
 
+#### Post-merge review fixes — PR 108-retro-mac (codex gpt-6.1-sol retro of #1442)
+
+- [x] T120a [US2] Forget shows the outcome in the sheet (Web wording; disconnect_error → warning "Credential revoked; the config entry could not be removed: …") — ClientBindingModelTests ForgetResult cases
+- [x] T120b [US4] Try it on a new, unsaved profile (ProfileEditorModel.sections; new = form + Try it) — ProfileEditorModelTests
+- [x] T120c [US4] "Changed elsewhere — Reload" discards the draft and adopts the saved profile — ProfileEditorModelTests
+- [x] T120d [US2] Assign sheet sends profile + mode in one PUT /clients/{id}/binding and can change only the lock (ClientBindingModel.assign) — ClientBindingModelTests
+- [x] T120e [US5] Anonymous callers save adopts only anonymous_profile (ConfigStore.adoptSaved); unrelated unsaved Settings edits survive — AnonymousProfileSectionTests
+- [x] T120f [US2] Admin-key upgrade: a profile change invalidates the preview; Apply sends the previewed request only — ClientBindingModelTests
+
 ---
 
 ## Phase 13: PR 108-l — `profiles-v3-parity-docs` (FR-051, SC-001, SC-006) — last
