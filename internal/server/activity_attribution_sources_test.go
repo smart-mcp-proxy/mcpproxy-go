@@ -142,8 +142,8 @@ func TestActivityAttribution_BlockedCallHasBlockReasonFieldAndMetadata(t *testin
 	assert.Equal(t, "Cursor", rec.ClientName)
 }
 
-// An internal_tool_call record has no request context at its funnel; it reads
-// the session's latest resolution, which the same request has just written.
+// An internal_tool_call record takes its attribution from the request context;
+// fields the context lacks fall back to the session's latest resolution.
 func TestActivityAttribution_InternalToolCallReadsSessionResolution(t *testing.T) {
 	f := newProfilesV3RESTFixture(t, nil)
 	registerAttributionSession(f, "s-int", "Cursor", "client-cursor", "cursor")
