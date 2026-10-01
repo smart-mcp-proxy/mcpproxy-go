@@ -49,6 +49,23 @@ func hasAttentionID(sub *attentionSubscriber, id string) bool {
 	return false
 }
 
+// waitForStartupRecompute blocks until the loop's startup recompute (armed by
+// loop() on a thresholdTimer) has read the clients source at least once, so a
+// later recompute can only have been caused by what the test does next.
+func (s *attn108Source) waitForStartupRecompute(t *testing.T) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.calls > 0
+	}, 2*time.Second, time.Millisecond, "startup recompute never read the clients source")
+}
+
+// TestAttention108EventsTriggerRecompute fails if an event type is dropped
+// from attentionTriggers: the startup recompute is awaited first (it would
+// otherwise emit attention.changed on its own), timerCap is an hour so no
+// periodic tick can fire, and the warning only appears after the startup read,
+// so the event is the sole thing that can make the item show up.
 func TestAttention108EventsTriggerRecompute(t *testing.T) {
 	for _, evt := range []EventType{EventTypeClientBindingChanged, EventTypeProfilesChanged, EventTypeConfigReloaded, EventTypeConfigSaved} {
 		t.Run(string(evt), func(t *testing.T) {
@@ -63,6 +80,18 @@ func TestAttention108EventsTriggerRecompute(t *testing.T) {
 			watcher := rt.SubscribeEvents()
 			defer rt.UnsubscribeEvents(watcher)
 			sub.start(ctx)
+
+			src.waitForStartupRecompute(t)
+			// Let the startup recompute finish publishing before the warning
+			// exists, then drop anything it emitted.
+			time.Sleep(50 * time.Millisecond)
+			for drained := false; !drained; {
+				select {
+				case <-watcher:
+				default:
+					drained = true
+				}
+			}
 
 			src.set([]AttentionClientWarning{{Code: string(profile.WarningClientHoldsAdminKey), ClientID: "cursor", DisplayName: "Cursor"}}, nil)
 			rt.publishEvent(newEvent(evt, nil))
@@ -84,9 +113,17 @@ func TestAttention108PeriodicTickPicksUpChangeWithoutEvent(t *testing.T) {
 	watcher := rt.SubscribeEvents()
 	defer rt.UnsubscribeEvents(watcher)
 	sub.start(ctx)
-	// Arm the loop once: the first recompute happens on the first event.
-	rt.publishEvent(newEvent(EventTypeConfigReloaded, nil))
+	// The loop arms its own startup recompute (thresholdTimer), which re-arms
+	// the periodic tick; no event is needed. Wait for it, then drain.
+	src.waitForStartupRecompute(t)
 	time.Sleep(60 * time.Millisecond)
+	for drained := false; !drained; {
+		select {
+		case <-watcher:
+		default:
+			drained = true
+		}
+	}
 
 	// A rotation started directly in storage: no event, only the periodic tick.
 	src.set([]AttentionClientWarning{{Code: string(profile.WarningClientRotationPending), ClientID: "codex", DisplayName: "Codex"}}, nil)
