@@ -1929,7 +1929,7 @@ func (r *Runtime) ReloadConfiguration() error {
 	// per-profile search indexes now, not after postConfigReload's reconnect and
 	// discovery pass. The detector ran on the restart-pinned configs, so a
 	// restart-gated field cannot hide the profile fields from it.
-	if oldSnapshot != nil && oldSnapshot.Config != nil &&
+	if oldSnapshot.Config != nil &&
 		profileIndexInputsChanged(DetectConfigChanges(oldSnapshot.Config, running).ChangedFields) {
 		r.reconcileProfileIndexes()
 	}
