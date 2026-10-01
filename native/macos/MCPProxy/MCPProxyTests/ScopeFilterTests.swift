@@ -322,6 +322,74 @@ final class ScopeFilterTests: XCTestCase {
         XCTAssertTrue(f.restRequest(for: .tokens, scopeFiltersAvailable: false, now: now)?.query.isEmpty ?? false)
     }
 
+    // MARK: - Spec 109-l T153: the scope fields are un-hidden once the core lists them
+
+    /// A /status that lists `features.scope_filters` un-hides profile / client /
+    /// token on every page that honours them (and only those), including 108-k's
+    /// Clients and Tokens pages; the same status without it hides them all.
+    func testScopeFiltersUnhiddenOnceStatusListsThem() throws {
+        let listed = try JSONDecoder().decode(
+            StatusResponse.self,
+            from: Data(#"{"running":true,"features":{"scope_filters":["profile","client","token"]}}"#.utf8))
+        let unlisted = try JSONDecoder().decode(StatusResponse.self, from: Data(#"{"running":true}"#.utf8))
+        var f = ScopeFilter()
+        f.profile = "work"; f.client = "cursor"; f.token = "ci-bot"
+
+        let expected: [(ScopePage, Set<String>)] = [
+            (.activity, ["profile", "client", "token"]),
+            (.usage, ["profile", "client", "token"]),
+            (.tools, ["profile", "client"]),
+            (.servers, ["profile"]),
+            (.clients, ["profile", "client"]),
+            (.tokens, ["profile", "token"]),
+        ]
+        for (page, names) in expected {
+            let shown = f.restRequest(for: page, scopeFiltersAvailable: listed.scopeFiltersAvailable, now: now)
+            XCTAssertEqual(Set(items(shown).keys).intersection(["profile", "client", "token"]), names, "\(page)")
+            let hidden = f.restRequest(for: page, scopeFiltersAvailable: unlisted.scopeFiltersAvailable, now: now)
+            XCTAssertTrue(Set(items(hidden).keys).isDisjoint(with: ["profile", "client", "token"]), "\(page) hidden")
+        }
+        XCTAssertEqual(f.visibleScopeParams(scopeFiltersAvailable: listed.scopeFiltersAvailable), ["profile", "client", "token"])
+        XCTAssertTrue(f.visibleScopeParams(scopeFiltersAvailable: unlisted.scopeFiltersAvailable).isEmpty)
+    }
+
+    /// A Web URL's profile / client / token translate to the same filter and the
+    /// same query string on every page that carries them.
+    func testScopeFiltersRoundTripThroughURLQuery() {
+        let f = ScopeFilter(query: ["profile": "work", "client": "cursor", "token": "ci-bot", "view": "all"])
+        XCTAssertEqual(f.profile, "work")
+        XCTAssertEqual(f.client, "cursor")
+        XCTAssertEqual(f.token, "ci-bot")
+        let expected: [(ScopePage, String)] = [
+            (.activity, "profile=work&client=cursor&token=ci-bot"),
+            (.usage, "profile=work&client=cursor&token=ci-bot"),
+            (.tools, "profile=work&client=cursor"),
+            (.servers, "profile=work"),
+            (.clients, "profile=work&client=cursor"),
+            (.tokens, "profile=work&token=ci-bot"),
+        ]
+        for (page, query) in expected {
+            let request = f.restRequest(for: page, scopeFiltersAvailable: true, now: now)
+            let scopeOnly = (request?.query ?? [])
+                .filter { ["profile", "client", "token"].contains($0.name) }
+                .map { "\($0.name)=\($0.value ?? "")" }
+                .joined(separator: "&")
+            XCTAssertEqual(scopeOnly, query, "\(page)")
+        }
+    }
+
+    /// The Servers page link of a profile (Spec 109-l P10c, Web parity) sends the
+    /// profile and nothing else the page cannot apply.
+    func testForProfileLinksCarryProfile() {
+        let f = ScopeFilter.forProfile("work-ro")
+        let servers = f.restRequest(for: .servers, scopeFiltersAvailable: true, now: now)
+        XCTAssertEqual(servers?.path, "/api/v1/servers")
+        XCTAssertEqual(items(servers), ["profile": ["work-ro"]])
+        for page in [ScopePage.tools, .clients, .tokens, .usage, .activity] {
+            XCTAssertEqual(items(f.restRequest(for: page, scopeFiltersAvailable: true, now: now))["profile"], ["work-ro"], "\(page)")
+        }
+    }
+
     func testForProfileCarriesOnlyTheProfile() {
         let f = ScopeFilter.forProfile("work-ro")
         XCTAssertEqual(f.profile, "work-ro")

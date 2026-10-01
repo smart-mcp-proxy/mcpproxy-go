@@ -396,8 +396,14 @@ class APIService {
   }
 
   // Server endpoints
-  async getServers(): Promise<APIResponse<{ servers: Server[] }>> {
-    return this.request<{ servers: Server[] }>('/api/v1/servers')
+  // Spec 109-l: `scope.profile` asks for the servers (and tool counts) a profile
+  // admits (GET /servers?profile=, Spec 108-e). An unscoped call is the plain
+  // request; a scoped one throws an ApiError that carries the status, so the
+  // page can say "Profile not found" instead of a generic failure.
+  async getServers(scope?: { profile?: string }): Promise<APIResponse<{ servers: Server[] }>> {
+    const query = queryString({ profile: scope?.profile })
+    if (!query) return this.request<{ servers: Server[] }>('/api/v1/servers')
+    return this.requestRaw<{ servers: Server[] }>(`/api/v1/servers${query}`)
   }
 
   async enableServer(serverName: string): Promise<APIResponse> {

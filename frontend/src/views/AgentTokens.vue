@@ -142,6 +142,12 @@
                 @click="expandedToken = expandedToken === token.name ? '' : token.name"
               >{{ token.name }}</button>
               <span v-if="token.legacy_scope" class="badge badge-warning badge-xs ml-2" :data-test="`token-legacy-badge-${token.name}`">Legacy scope</span>
+              <!-- Spec 109-l: the Token-row links of the link map (agent rows only;
+                   a client credential is filtered as a client, from Clients). -->
+              <div v-if="tokenLinksAvailable && !isClientCredential(token)" class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs font-normal">
+                <router-link class="link" :data-test="`token-row-link-activity-${token.name}`" :aria-label="`Activity for token ${token.name}`" :to="scopeQuery!.linkTo('activity', { view: 'calls', token: token.name, client: '' })">Activity</router-link>
+                <router-link class="link" :data-test="`token-row-link-usage-${token.name}`" :aria-label="`Usage for token ${token.name}`" :to="scopeQuery!.linkTo('usage', { token: token.name, client: '' })">Usage</router-link>
+              </div>
             </td>
             <td :data-test="`token-kind-${token.name}`">{{ isClientCredential(token) ? 'Client' : 'Agent' }}</td>
             <td>
@@ -439,7 +445,7 @@ import { formatDateTimeShort } from '@/utils/datetime'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import { useProfilesStore } from '@/stores/profiles'
-import { useScopeQuery } from '@/composables/useScopeQuery'
+import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
 import { describeError } from '@/utils/profiles'
 import type { ApiError } from '@/services/api'
 import type { AgentTokenInfo, CreateAgentTokenRequest, Server } from '@/types'
@@ -452,6 +458,10 @@ const profilesStore = useProfilesStore()
 // Spec 108-f/108-i: the `profile` and `token` filters of the URL contract are
 // sent to GET /tokens, so the Viewing chip narrows this list on the server.
 const scopeQuery = route ? useScopeQuery('tokens') : undefined
+// Spec 109-l: the Token-row Activity / Usage links appear only once the build lists `token`.
+// A link is never dead: both destinations must be registered routes.
+const tokenLinksAvailable = computed(() =>
+  Boolean(scopeQuery) && isScopeParamAvailable('token') && router.hasRoute('activity') && router.hasRoute('usage'))
 // The sentinel option of the profile select: a token with no profile, scoped by
 // its own server list and permissions (the pre-108 shape).
 const LEGACY = '__legacy__'
