@@ -164,3 +164,26 @@ func TestAttention108NoClientSourceMeansNoItemsAndNoPeriodicTimer(t *testing.T) 
 	assert.Equal(t, time.Duration(0), sub.recompute())
 	assert.Empty(t, sub.Items())
 }
+
+// TestAttention108QuietBootSurfacesWarningWithoutAnyEvent pins F1.1: a core
+// that boots with a client warning already present and then sees no event at
+// all (no servers, no presence change) must still surface it. The subscriber
+// starts before the management service is wired, so primeFromManagement
+// returns early; start() itself has to schedule the first recompute.
+func TestAttention108QuietBootSurfacesWarningWithoutAnyEvent(t *testing.T) {
+	rt := newAttn108Runtime()
+	src := &attn108Source{}
+	src.set([]AttentionClientWarning{{Code: string(profile.WarningClientRotationPending), ClientID: "codex", DisplayName: "Codex"}}, nil)
+	sub := newAttentionSubscriber(rt, 5*time.Millisecond)
+	sub.clientSource = src.read
+	sub.timerCap = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(watcher)
+	sub.start(ctx) // no event is ever published
+
+	waitForEvent(t, watcher, EventTypeAttentionChanged)
+	assert.True(t, hasAttentionID(sub, "client_rotation_pending:client:codex"))
+}

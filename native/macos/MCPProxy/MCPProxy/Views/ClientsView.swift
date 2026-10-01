@@ -34,6 +34,10 @@ struct ClientsView: View {
     @State private var rotating: ClientPresenceRecord?
     @State private var forgetting: ClientPresenceRecord?
     @State private var focusedClientID: String?
+    /// A `.clientDetail` route that arrived before the row was in `clients`
+    /// (Clients not yet loaded when Home or the tray routed here). Expanded as
+    /// soon as the row appears so the profile picker is visible (109-l F4.1).
+    @State private var pendingExpandID: String?
 
     init(appState: AppState) {
         self.appState = appState
@@ -124,9 +128,8 @@ struct ClientsView: View {
         case .detail(let id)?:
             tab = 0
             focusedClientID = id
-            if expandedClientID != id, let row = clients.first(where: { $0.id == id }) {
-                Task { await toggle(row) }
-            }
+            pendingExpandID = id
+            expandPendingClient(dropIfAbsent: false)
         case .connect(let id)?:
             tab = 0
             connectPreselect = id
@@ -136,6 +139,20 @@ struct ClientsView: View {
             showUpgrade = true
         case nil:
             break
+        }
+    }
+
+    /// Expand the row a `.clientDetail` route asked for, once it is loaded.
+    /// After a full load the request is dropped when the client is gone.
+    private func expandPendingClient(dropIfAbsent: Bool) {
+        guard let id = pendingExpandID else { return }
+        if expandedClientID == id {
+            pendingExpandID = nil
+        } else if let row = clients.first(where: { $0.id == id }) {
+            pendingExpandID = nil
+            Task { await toggle(row) }
+        } else if dropIfAbsent {
+            pendingExpandID = nil
         }
     }
 
@@ -155,6 +172,7 @@ struct ClientsView: View {
             return merged
         }
         warnings = appState.clientWarnings
+        expandPendingClient(dropIfAbsent: false)
     }
 
     private func consumePendingAddAction() {
@@ -470,6 +488,7 @@ struct ClientsView: View {
             let response = try await loadedClients
             clients = response.clients
             warnings = response.warnings ?? []
+            expandPendingClient(dropIfAbsent: true)
             if profile == nil && client == nil {
                 appState.clients = response.clients
                 appState.clientWarnings = warnings

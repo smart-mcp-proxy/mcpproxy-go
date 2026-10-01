@@ -156,9 +156,15 @@ func (a *attentionSubscriber) primeFromManagement(ctx context.Context) {
 func (a *attentionSubscriber) loop(ctx context.Context) {
 	defer a.rt.UnsubscribeEvents(a.ch)
 
-	var debounceTimer, thresholdTimer *time.Timer
-	defer stopTimer(debounceTimer)
-	defer stopTimer(thresholdTimer)
+	var debounceTimer *time.Timer
+	// Arm an initial recompute: this subscriber starts before the management
+	// service is wired, so primeFromManagement may have done nothing, and a
+	// quiet instance would otherwise never recompute (and so never arm the
+	// periodic client-warning refresh or the expiry wake-up) until some event
+	// fires. The recompute re-arms thresholdTimer from its own result.
+	thresholdTimer := time.NewTimer(a.debounce)
+	// Closures: both timers are reassigned below, so stop their final values.
+	defer func() { stopTimer(thresholdTimer); stopTimer(debounceTimer) }()
 
 	for {
 		var debounceC, thresholdC <-chan time.Time
