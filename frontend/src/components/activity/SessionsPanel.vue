@@ -21,8 +21,8 @@
           <svg class="w-16 h-16 mx-auto mb-4 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
           </svg>
-          <p class="text-lg">No sessions found</p>
-          <p class="text-sm mt-1">Sessions will appear here when MCP clients connect</p>
+          <p class="text-lg" data-test="sessions-empty-title">{{ scopeSummary ? `No sessions for ${scopeSummary}` : 'No sessions found' }}</p>
+          <p class="text-sm mt-1">{{ scopeSummary ? 'Remove a filter chip above to see more.' : 'Sessions will appear here when MCP clients connect' }}</p>
         </div>
 
         <div v-else class="overflow-x-auto" data-test="sessions-table">
@@ -31,6 +31,10 @@
               <tr>
                 <th>Session ID</th>
                 <th>Client</th>
+                <!-- Spec 108-j J11 (FR-033): the credential and profile the
+                     session initialized with. Folded away below lg. -->
+                <th class="hidden lg:table-cell" data-test="sessions-profile-col">Profile</th>
+                <th class="hidden lg:table-cell" data-test="sessions-token-col">Token</th>
                 <th>Status</th>
                 <th>Capabilities</th>
                 <th>Tool Calls</th>
@@ -48,10 +52,39 @@
                   </code>
                 </td>
                 <td>
-                  <div class="font-medium">{{ session.client_name || 'Unknown' }}</div>
+                  <!-- A credentialed client is its display name (a link to the
+                       Clients page); the self-reported clientInfo.name is only
+                       ever advisory ("~name (reported)"). -->
+                  <template v-if="session.client_id">
+                    <router-link
+                      :to="scopeQuery.linkTo('clients', { client: session.client_id })"
+                      class="link link-hover font-medium"
+                      data-test="sessions-client"
+                    >{{ clientLabel(session.client_id) }}</router-link>
+                    <div v-if="session.client_name" class="text-xs text-base-content/60">~{{ session.client_name }} (reported)</div>
+                  </template>
+                  <template v-else>
+                    <div class="font-medium" data-test="sessions-client">{{ session.client_name || 'Unknown' }}</div>
+                  </template>
                   <div v-if="session.client_version" class="text-xs text-base-content/60">
                     v{{ session.client_version }}
                   </div>
+                </td>
+                <td class="hidden lg:table-cell" data-test="sessions-profile">
+                  <router-link
+                    v-if="session.profile"
+                    :to="profileEditorLink(session.profile)"
+                    class="link link-hover text-sm"
+                  >{{ profileLabel(session) }}</router-link>
+                  <span v-else class="text-xs text-base-content/60">—</span>
+                </td>
+                <td class="hidden lg:table-cell" data-test="sessions-token">
+                  <router-link
+                    v-if="showToken(session)"
+                    :to="scopeQuery.linkTo('tokens', { token: session.token_name! })"
+                    class="link link-hover text-sm"
+                  >{{ session.token_name }}</router-link>
+                  <span v-else class="text-xs text-base-content/60">—</span>
                 </td>
                 <td>
                   <div class="badge" :class="session.status === 'active' ? 'badge-success' : 'badge-neutral'">
@@ -84,7 +117,16 @@
                   <div class="text-sm">{{ formatTimestamp(session.last_activity) }}</div>
                   <div class="text-xs text-base-content/60">{{ formatRelativeTime(session.last_activity) }}</div>
                 </td>
-                <td class="whitespace-nowrap">
+                <td class="whitespace-nowrap space-x-1">
+                  <!-- Link map: "Session row" -> the tools this client sees. -->
+                  <router-link
+                    v-if="session.client_id && clientFilterAvailable"
+                    :to="scopeQuery.linkTo('tools', { client: session.client_id })"
+                    class="btn btn-xs btn-outline whitespace-nowrap"
+                    :data-test="`sessions-tools-it-sees-${session.id}`"
+                  >
+                    Tools it sees
+                  </router-link>
                   <!-- Link map: "Activity row (Sessions view)" -> session ->
                        `/activity?view=calls&session=<work_session_id>` — the
                        WORK session (Spec 082), falling back to the transport
@@ -133,13 +175,44 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { MCPSession } from '@/types/api'
 import { formatDateTime } from '@/utils/datetime'
-import { useScopeQuery } from '@/composables/useScopeQuery'
+import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
+import { useScopeLabels, type ScopeName } from '@/composables/useScopeLabels'
+import { profileEditorLink } from '@/utils/profileRoute'
+import { profileSourceLabel } from '@/utils/profiles'
+import { useProfilesStore } from '@/stores/profiles'
 
 defineProps<{ sessions: MCPSession[] }>()
 
 const scopeQuery = useScopeQuery('activity')
+const profiles = useProfilesStore()
+const { valueLabel, chipLabel } = useScopeLabels()
+
+const clientFilterAvailable = computed(() => isScopeParamAvailable('client'))
+const clientLabel = (id: string): string => valueLabel('client', id)
+
+// "Work · locked by credential": the profile title and how it was resolved.
+function profileLabel(session: MCPSession): string {
+  const title = profiles.titleFor(session.profile)
+  const source = profileSourceLabel(session.profile_source)
+  return source ? `${title} · ${source}` : title
+}
+
+// The client's own credential (`client-<id>`) is the client column already.
+function showToken(session: MCPSession): boolean {
+  if (!session.token_name) return false
+  return !(session.client_id && session.token_name === `client-${session.client_id}`)
+}
+
+// "Client: Cursor" for the empty state, from the applied filters.
+const scopeSummary = computed(() =>
+  scopeQuery.chips.value
+    .filter(chip => chip.name === 'profile' || chip.name === 'client' || chip.name === 'token')
+    .map(chip => chipLabel(chip.name as ScopeName, chip.value))
+    .join(', ')
+)
 
 const formatTimestamp = (timestamp: string): string => formatDateTime(timestamp)
 

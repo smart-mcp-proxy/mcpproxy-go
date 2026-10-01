@@ -19,7 +19,7 @@ export {
 
 // Import HealthStatus/Tier for use in this file
 import type {
-  CredentialState, HealthStatus, Tier,
+  CredentialState, HealthStatus, Tier, ProfileSource, ProfileBlockReason,
   ProfileView, ProfileList, ProfileWriteResult, ProfileUsedBy, ProfileToolCounts, ProfileToolRules,
   EffectiveTool, EffectiveToolsResult, AccessExplanation, ClientWarning, ClientView,
   ExplainStep, ExplainStepStatus, ExplainVerdict, FixAction, RotationState,
@@ -33,6 +33,7 @@ export type {
   ProfileView, ProfileList, ProfileWriteResult, ProfileUsedBy, ProfileToolCounts, ProfileToolRules,
   EffectiveTool, EffectiveToolsResult, AccessExplanation, ClientWarning, ClientView,
   ExplainStep, ExplainStepStatus, ExplainVerdict, FixAction, RotationState, CredentialState,
+  ProfileSource, ProfileBlockReason,
 }
 
 // Quarantine stats for tool-level quarantine (Spec 032)
@@ -365,7 +366,27 @@ export interface GlobalTool {
   held_reason?: string     // "scan_findings" (threat) | "scan_coverage" (precaution)
   held_verdict?: string    // "dangerous" | "warnings" | "clean"
   held_signals?: string[]  // matched deterministic check ids, producer order, ≤16
+  // Spec 108 FR-032: present only in a view-as listing (`GET /tools?client=|profile=`).
+  // `tier` stays the intrinsic tier; `profile_tier` is the tier under the viewed
+  // subject's profile and `access` is the subject's verdict for the tool.
+  profile_tier?: Tier
+  access?: ToolAccess
   // derived locally: enabled = !disabled && !config_denied
+}
+
+// Spec 108 FR-032: a view-as verdict for one tool. `reason` is empty when the
+// tool is callable, otherwise one of profile.AccessReasons (see
+// utils/profiles.ts reasonText for the words).
+export interface ToolAccess {
+  visible: boolean
+  callable: boolean
+  reason?: string
+}
+
+// Spec 108 FR-032: the row accounting of a NON-administrator profile view-as.
+export interface ViewAsCounts {
+  visible: number
+  hidden: number
 }
 
 export interface GlobalToolsStats {
@@ -380,6 +401,9 @@ export interface GlobalToolsResponse {
   stats: GlobalToolsStats
   partial: boolean
   failed_servers: string[]
+  // Only for a non-administrator `profile=` view-as: the response lists the
+  // visible rows and this is the only trace of the rest.
+  counts?: ViewAsCounts
 }
 
 // Tool Annotation types
@@ -411,6 +435,12 @@ export interface MCPSession {
   // belongs to.
   workspace_name?: string
   work_session_id?: string
+  // Spec 108 FR-033: the credential the session initialized with and the latest
+  // profile resolution. Absent on sessions recorded before Spec 108.
+  client_id?: string
+  token_name?: string
+  profile?: string
+  profile_source?: ProfileSource
 }
 
 // Tool types
@@ -996,6 +1026,16 @@ export interface ActivityRecord {
   auth_type?: 'admin' | 'agent' | 'user' | 'admin_user'
   /** Spec 028: agent token name when auth_type is "agent". */
   agent_name?: string
+  // Spec 108 FR-029: the profile, client and token IN EFFECT when the call ran,
+  // stamped at emit time. All absent on records that predate Spec 108.
+  profile?: string
+  profile_source?: ProfileSource
+  client_id?: string
+  /** The self-reported clientInfo.name: advisory, never authoritative. */
+  client_name?: string
+  token_name?: string
+  /** Why a profile refused the call (activity of status "blocked"). */
+  block_reason?: ProfileBlockReason
   // Spec 026: Sensitive data detection fields
   has_sensitive_data?: boolean
   detection_types?: string[]

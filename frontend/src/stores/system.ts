@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed, onScopeDispose, toRaw } from 'vue'
 import type { StatusUpdate, Theme, Toast, InfoResponse, RoutingInfo } from '@/types'
 import api from '@/services/api'
-import { setAvailableFeatures } from '@/composables/useScopeQuery'
+import { isScopeParamAvailable, setAvailableFeatures } from '@/composables/useScopeQuery'
 
 /** Pseudo-theme: follow the operating system's light/dark preference. */
 export const SYSTEM_THEME = 'system'
@@ -725,6 +725,17 @@ export const useSystemStore = defineStore('system', () => {
   // narrower payload (internal/httpapi/server.go) and does not include
   // `features`, so this has to be a REST fetch, not something read off the
   // existing event-stream `status` ref.
+  //
+  // Spec 108-j J3: `scopeFeaturesKnown` flips once that fetch has finished, on
+  // success OR failure, and waitForScopeFeatures() is the gate a page awaits
+  // before its FIRST fetch when its URL carries profile/client/token. Without
+  // it a page that mounts before /status answers sends the first request
+  // unfiltered (the parameter is still hidden, rule 7), loads every row and
+  // refetches: the flash url-filter-contract.md rule 1 forbids.
+  const scopeFeaturesKnown = ref(false)
+  let markScopeFeaturesKnown: () => void = () => {}
+  const scopeFeaturesSettled = new Promise<void>(resolve => { markScopeFeaturesKnown = resolve })
+
   async function fetchScopeFilterFeatures() {
     try {
       const response = await api.getStatus()
@@ -733,6 +744,24 @@ export const useSystemStore = defineStore('system', () => {
       }
     } catch (error) {
       console.error('Failed to fetch status features:', error)
+    } finally {
+      scopeFeaturesKnown.value = true
+      markScopeFeaturesKnown()
+    }
+  }
+
+  // Resolves when the feature list is known, or after `timeoutMs` (the params
+  // then stay hidden and the page fetches unfiltered, with a disabled chip). A
+  // build whose features were already set elsewhere needs no wait.
+  async function waitForScopeFeatures(timeoutMs = 2000): Promise<void> {
+    if (scopeFeaturesKnown.value) return
+    if (['profile', 'client', 'token'].some(name => isScopeParamAvailable(name))) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<void>(resolve => { timer = setTimeout(resolve, timeoutMs) })
+    try {
+      await Promise.race([scopeFeaturesSettled, timeout])
+    } finally {
+      if (timer) clearTimeout(timer)
     }
   }
 
@@ -786,6 +815,8 @@ export const useSystemStore = defineStore('system', () => {
     fetchInfo,
     fetchRouting,
     fetchScopeFilterFeatures,
+    scopeFeaturesKnown,
+    waitForScopeFeatures,
     applyModeField,
     checkForUpdates,
     setAuthRequired,

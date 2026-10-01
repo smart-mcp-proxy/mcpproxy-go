@@ -77,6 +77,33 @@
     <div class="card bg-base-100 shadow-md">
       <div class="card-body py-4">
         <div class="flex flex-wrap gap-4 items-end">
+          <!-- Spec 108-j J6: view the catalogue as a client or a profile. It
+               only looks: it never changes what that subject can access. Both
+               choices write the same URL parameters the header Viewing chip
+               writes (useScopeQuery), and choosing one clears the other
+               because GET /tools takes one subject at a time. -->
+          <div v-if="viewAsAvailable" class="form-control min-w-[160px]">
+            <label class="label py-1" for="tools-view-as">
+              <span class="label-text text-xs">View as</span>
+            </label>
+            <select
+              id="tools-view-as"
+              class="select select-bordered select-sm"
+              :value="viewAsSelectValue"
+              data-test="tools-view-as-select"
+              @change="pickViewAs(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">Nobody (all tools)</option>
+              <optgroup v-if="!isTenant && clientOptions.length > 0" label="Clients">
+                <option v-for="client in clientOptions" :key="client.id" :value="`client:${client.id}`">{{ client.display_name }}</option>
+              </optgroup>
+              <optgroup v-if="profilesStore.profiles.length > 0" label="Profiles">
+                <option v-for="profile in profilesStore.profiles" :key="profile.name" :value="`profile:${profile.name}`">{{ profile.title || profile.name }}</option>
+              </optgroup>
+              <option v-if="viewAsSelectOrphan" :value="viewAsSelectValue">{{ viewAsSelectOrphan }}</option>
+            </select>
+          </div>
+
           <!-- Search -->
           <div class="form-control flex-1 min-w-[200px]">
             <label class="label py-1">
@@ -159,6 +186,18 @@
           </button>
         </div>
 
+        <!-- Spec 108-j J4: the profile/client/token chips (removable), with the
+             disabled variants for a value Tools cannot apply. -->
+        <div v-if="scopeQuery" class="mt-2" data-test="tools-scope-chips">
+          <ScopeChips
+            page="tools"
+            :scope-query="scopeQuery"
+            :disabled="disabledScope"
+            :conflicting="scopeConflict ? ['client', 'profile'] : []"
+            :unavailable="scopeUnavailableNames"
+          />
+        </div>
+
         <!-- Active filter chips -->
         <div v-if="hasActiveFilters" class="flex flex-wrap gap-2 mt-2 pt-2 border-t border-base-300">
           <span class="text-xs text-base-content/60">Active filters:</span>
@@ -171,13 +210,40 @@
       </div>
     </div>
 
+    <!-- Spec 108-j J6/J14 (FR-032): what the viewed subject can do. A status
+         region, in words: a view must never look like it edits the subject's
+         access. -->
+    <div v-if="viewAsActive" role="status" class="alert flex-wrap items-start shadow-md" data-test="tools-view-as-banner">
+      <div class="flex-1 min-w-0 space-y-1">
+        <div class="font-medium" data-test="tools-view-as-summary">{{ viewAsBannerText }}</div>
+        <div v-if="disabledServerNote" class="text-sm" data-test="tools-view-as-disabled-note">
+          {{ disabledServerNote }}
+          <router-link v-if="disabledServersLink" :to="disabledServersLink" class="link link-primary">See them</router-link>
+        </div>
+        <div class="text-xs opacity-80">This is a view of {{ viewAsSubjectLabel }}'s access. Nothing here changes it.</div>
+      </div>
+      <div v-if="viewAsAdmin" class="join" role="group" aria-label="Show tools" data-test="tools-show-filter">
+        <button
+          v-for="option in SHOW_OPTIONS"
+          :key="option.value"
+          type="button"
+          class="btn btn-xs join-item"
+          :class="showFilter === option.value ? 'btn-primary' : 'btn-ghost'"
+          :aria-pressed="showFilter === option.value"
+          :data-test="`tools-show-${option.value}`"
+          @click="showFilter = option.value"
+        >{{ option.label }}</button>
+      </div>
+    </div>
+
     <!-- Batch action bar -->
     <div v-if="selectedKeys.size > 0" class="alert shadow-md" data-test="tools-batch-bar">
       <div class="flex items-center gap-3 w-full flex-wrap">
         <span class="font-medium">{{ selectedKeys.size }} tool{{ selectedKeys.size === 1 ? '' : 's' }} selected</span>
         <button
           @click="batchEnable(true)"
-          :disabled="batchLoading"
+          :disabled="batchLoading || viewAsActive"
+          :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
           class="btn btn-sm btn-success"
           data-test="batch-enable"
         >
@@ -186,7 +252,8 @@
         </button>
         <button
           @click="batchEnable(false)"
-          :disabled="batchLoading"
+          :disabled="batchLoading || viewAsActive"
+          :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
           class="btn btn-sm btn-warning"
           data-test="batch-disable"
         >
@@ -195,7 +262,8 @@
         </button>
         <button
           @click="batchApproval('approve')"
-          :disabled="batchLoading || !hasApprovableSelection"
+          :disabled="batchLoading || viewAsActive || !hasApprovableSelection"
+          :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
           class="btn btn-sm btn-primary"
           data-test="batch-approve"
         >
@@ -204,7 +272,8 @@
         </button>
         <button
           @click="batchApproval('reject')"
-          :disabled="batchLoading || !hasApprovableSelection"
+          :disabled="batchLoading || viewAsActive || !hasApprovableSelection"
+          :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
           class="btn btn-sm btn-error"
           data-test="batch-reject"
         >
@@ -234,9 +303,26 @@
     <!-- Table card -->
     <div class="card bg-base-100 shadow-md">
       <div class="card-body p-0">
+        <!-- Spec 108-j J18 (rule 8): GET /tools takes one subject at a time, so
+             both applied means no request at all, never one silently dropped. -->
+        <div v-if="scopeConflict" class="text-center py-12 px-4 space-y-3" data-test="tools-view-as-conflict">
+          <h2 class="text-lg font-semibold">Tools can view as a client or a profile, not both</h2>
+          <p class="text-sm text-base-content/70">The address names both. Pick the one to keep.</p>
+          <div class="flex flex-wrap justify-center gap-2">
+            <button type="button" class="btn btn-sm btn-primary" data-test="tools-view-as-keep-client" @click="resolveConflict('client')">View as {{ conflictClientLabel }}</button>
+            <button type="button" class="btn btn-sm btn-primary" data-test="tools-view-as-keep-profile" @click="resolveConflict('profile')">View as {{ conflictProfileLabel }}</button>
+          </div>
+        </div>
+
         <!-- Loading -->
-        <div v-if="loading && allTools.length === 0" class="flex justify-center py-12">
+        <div v-else-if="loading && allTools.length === 0" class="flex justify-center py-12">
           <span class="loading loading-spinner loading-lg"></span>
+        </div>
+
+        <!-- Spec 108-j J19: a refused view-as never blanks the page. -->
+        <div v-else-if="scopeError" role="alert" class="alert alert-warning m-4" data-test="tools-scope-error">
+          <span>{{ scopeError }}</span>
+          <button type="button" class="btn btn-sm btn-ghost" data-test="tools-scope-error-clear" @click="clearViewAs">Clear filter</button>
         </div>
 
         <!-- Error -->
@@ -290,6 +376,10 @@
               <router-link to="/review" class="link">review in the Review queue</router-link>.
             </p>
           </div>
+          <template v-else-if="viewAsActive && allTools.length === 0">
+            <p class="text-lg" data-test="tools-view-as-empty">{{ viewAsEmptyText }}</p>
+            <p class="text-sm mt-1">Clear the filter to see every tool.</p>
+          </template>
           <template v-else>
             <p class="text-lg">
               {{ hasActiveFilters ? 'No matching tools' : 'No tools available' }}
@@ -299,7 +389,8 @@
             </p>
           </template>
           <div class="mt-4 space-x-2">
-            <button v-if="hasActiveFilters" @click="clearFilters" class="btn btn-outline btn-sm">Clear Filters</button>
+            <button v-if="viewAsActive && allTools.length === 0" type="button" class="btn btn-outline btn-sm" @click="clearViewAs">Clear filter</button>
+            <button v-else-if="hasActiveFilters" @click="clearFilters" class="btn btn-outline btn-sm">Clear Filters</button>
             <router-link v-else to="/servers" class="btn btn-primary btn-sm">Manage Servers</router-link>
           </div>
         </div>
@@ -316,6 +407,8 @@
                     aria-label="Select all tools on this page"
                     :checked="allPageSelected"
                     :indeterminate="somePageSelected && !allPageSelected"
+                    :disabled="viewAsActive"
+                    :title="viewAsActive ? LEAVE_VIEW_AS : undefined"
                     @change="toggleSelectAll"
                     data-test="tools-select-all"
                   />
@@ -326,8 +419,9 @@
                 <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('server_name')">
                   Server {{ getSortIndicator('server_name') }}
                 </th>
-                <th>Description</th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('tier')">
+                <th v-if="viewAsAdmin">Access</th>
+                <th :class="viewAsAdmin ? 'hidden lg:table-cell' : ''">Description</th>
+                <th :class="viewAsAdmin ? 'hidden lg:table-cell' : ''" class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('tier')">
                   Tier {{ getSortIndicator('tier') }}
                 </th>
                 <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('approval_status')">
@@ -339,7 +433,7 @@
                 <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('usage')">
                   Usage {{ getSortIndicator('usage') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200 select-none" @click="sortBy('last_used')">
+                <th class="cursor-pointer hover:bg-base-200 select-none" :class="viewAsAdmin ? 'hidden lg:table-cell' : ''" @click="sortBy('last_used')">
                   Last Used {{ getSortIndicator('last_used') }}
                 </th>
               </tr>
@@ -350,6 +444,7 @@
                 :key="toolKey(tool)"
                 class="hover cursor-pointer"
                 :class="{ 'bg-primary/5': selectedKeys.has(toolKey(tool)) }"
+                :data-not-callable="viewAsAdmin && !isCallable(tool) ? 'true' : undefined"
                 @click="openDetail(tool)"
                 data-test="tool-row"
               >
@@ -359,10 +454,11 @@
                     class="checkbox checkbox-sm"
                     :aria-label="`Select tool ${tool.name}`"
                     :checked="selectedKeys.has(toolKey(tool))"
+                    :disabled="viewAsActive"
                     @change="toggleSelect(tool)"
                   />
                 </td>
-                <td>
+                <td :class="mutedCell(tool)">
                   <code class="text-xs bg-base-200 px-1.5 py-0.5 rounded">{{ tool.name }}</code>
                 </td>
                 <td>
@@ -374,7 +470,25 @@
                     {{ tool.server_name }}
                   </router-link>
                 </td>
-                <td>
+                <!-- Spec 108-j J6: the subject's verdict for this tool. The state
+                     and the reason are words (never opacity alone) and are not
+                     dimmed; only the secondary cells of a tool the subject
+                     cannot call are. -->
+                <td v-if="viewAsAdmin" :data-test="`tools-row-access-${rowId(tool)}`">
+                  <div class="flex flex-wrap items-center gap-1">
+                    <span class="badge badge-sm whitespace-nowrap" :class="accessBadgeClass(tool)">{{ accessState(tool) }}</span>
+                    <span v-if="!isCallable(tool)" class="text-xs" data-test="tools-access-reason">{{ accessReasonLabel(tool.access?.reason, tool) }}</span>
+                    <button
+                      v-if="!isCallable(tool)"
+                      type="button"
+                      class="btn btn-ghost btn-xs min-h-6 min-w-6"
+                      :aria-label="`Why is ${tool.name} not callable?`"
+                      :data-test="`tools-why-${rowId(tool)}`"
+                      @click.stop="openWhy(tool)"
+                    >Why?</button>
+                  </div>
+                </td>
+                <td :class="[mutedCell(tool), viewAsAdmin ? 'hidden lg:table-cell' : '']">
                   <!-- Descriptions are clipped to keep the row height stable;
                        without a title the clipped half was unreadable without
                        opening the tool (audit F36) — expose the full text on
@@ -386,10 +500,11 @@
                     {{ tool.description || '—' }}
                   </div>
                 </td>
-                <td>
+                <td :class="[mutedCell(tool), viewAsAdmin ? 'hidden lg:table-cell' : '']">
                   <span class="badge badge-sm" :class="getTierBadgeClass(tool)">
                     {{ getTierLabel(tool) }}
                   </span>
+                  <span v-if="viewAsAdmin && tool.profile_tier && tool.profile_tier !== tool.tier" class="block text-xs mt-0.5" data-test="tools-profile-tier">as {{ tool.profile_tier }}</span>
                 </td>
                 <td>
                   <span v-if="tool.approval_status" class="badge badge-sm whitespace-nowrap" :class="getApprovalBadgeClass(tool.approval_status)">
@@ -451,7 +566,7 @@
                   <span v-else-if="tool.disabled" class="badge badge-sm badge-warning">disabled</span>
                   <span v-else class="badge badge-sm badge-success">enabled</span>
                 </td>
-                <td class="text-sm text-right">
+                <td class="text-sm text-right" :class="mutedCell(tool)">
                   <router-link
                     v-if="tool.usage && toolCallsLink(tool)"
                     :to="toolCallsLink(tool)!"
@@ -463,7 +578,7 @@
                   </router-link>
                   <span v-else>{{ tool.usage || 0 }}</span>
                 </td>
-                <td class="text-sm text-base-content/60">
+                <td class="text-sm text-base-content/60" :class="[mutedCell(tool), viewAsAdmin ? 'hidden lg:table-cell' : '']">
                   <span v-if="tool.last_used">{{ formatRelativeTime(tool.last_used) }}</span>
                   <span v-else class="text-base-content/30">never</span>
                 </td>
@@ -570,6 +685,14 @@
       </div>
     </div>
 
+    <!-- Spec 108-j J6/J17 (FR-046): "Why?" from a view-as row. -->
+    <AccessExplainer
+      :open="explain !== null"
+      :subject="explain?.subject ?? { kind: 'client', name: '' }"
+      :tool="explain?.tool"
+      @close="explain = null"
+    />
+
     <!-- Hints Panel -->
     <CollapsibleHintsPanel :hints="toolsHints" />
   </div>
@@ -581,17 +704,28 @@ import { toolApprovalLabel } from '@/utils/toolQuarantine'
 import { formatDate } from '@/utils/datetime'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { useScopeQuery } from '@/composables/useScopeQuery'
+import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
+import AccessExplainer from '@/components/AccessExplainer.vue'
+import ScopeChips from '@/components/scope/ScopeChips.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import type { GlobalTool, GlobalToolsStats } from '@/types/api'
+import type { GlobalTool, GlobalToolsStats, ViewAsCounts } from '@/types/api'
 import { parseHoldEvidence, displaySignals, reasonPresentation, verdictPresentation } from '@/utils/holdEvidence'
+import { accessReasonLabel, accessStateLabel } from '@/utils/accessReason'
+import { tierPhrase } from '@/utils/profiles'
+import { pickScopeParams, scopeParamsKey } from '@/utils/scopeParams'
 import api from '@/services/api'
+import { useAuthStore } from '@/stores/auth'
+import { useClientsStore } from '@/stores/clients'
+import { useProfilesStore } from '@/stores/profiles'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 
 const systemStore = useSystemStore()
 const serversStore = useServersStore()
+const authStore = useAuthStore()
+const clientsStore = useClientsStore()
+const profilesStore = useProfilesStore()
 
 // Quarantined servers contribute no tools to GET /api/v1/tools (#1064), so they
 // are silently outside every search on this page. App.vue already fetches the
@@ -616,11 +750,188 @@ function toolCallsLink(tool: GlobalTool) {
 // ---- State ----
 const allTools = ref<GlobalTool[]>([])
 const stats = ref<GlobalToolsStats | null>(null)
+// Spec 108 FR-032: set only for a non-administrator `profile=` view-as.
+const viewAsCounts = ref<ViewAsCounts | null>(null)
+// Spec 108-j J19: a refused view-as (404 or 403), shown inline with a way out.
+const scopeError = ref<string | null>(null)
 const partial = ref(false)
 const failedServers = ref<string[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 const selectedTool = ref<GlobalTool | null>(null)
+
+// ---- Spec 108-j: view-as (profile / client scope) ----
+//
+// `client` and `profile` are the URL parameters the header Viewing chip and the
+// "View as" select write. GET /tools takes ONE subject, so both applied is a
+// conflict (rule 8: no request, a two-button state), and a value the endpoint
+// cannot take (`-` unattributed, or a client from a non-administrator) is a
+// disabled chip that is never sent (rule 5). The chips come from
+// useScopeQuery, which already hides a parameter the build does not advertise
+// (rule 7); the REST names come from its toRest() through pickScopeParams.
+const LEAVE_VIEW_AS = 'Leave view-as to change tools'
+const UNATTRIBUTED_NOTE = 'Unattributed applies to Activity and Usage only'
+const TENANT_CLIENT_NOTE = 'Viewing as a client requires an administrator'
+
+const isTenant = computed(() => authStore.principalKind === 'tenant')
+const chipValue = (name: string): string => scopeQuery?.chips.value.find(chip => chip.name === name)?.value ?? ''
+
+const disabledScope = computed<Record<string, string>>(() => {
+  const out: Record<string, string> = {}
+  if (chipValue('client') === '-') out.client = UNATTRIBUTED_NOTE
+  else if (chipValue('client') && isTenant.value) out.client = TENANT_CLIENT_NOTE
+  if (chipValue('profile') === '-') out.profile = UNATTRIBUTED_NOTE
+  return out
+})
+
+/** The subject the request will carry: the values from toRest(), minus the two
+ * Tools cannot apply. */
+const appliedScope = computed<{ client?: string; profile?: string }>(() => {
+  if (!scopeQuery) return {}
+  const rest = pickScopeParams(scopeQuery.toRest())
+  const out: { client?: string; profile?: string } = {}
+  if (rest.client && !disabledScope.value.client) out.client = rest.client
+  if (rest.profile && !disabledScope.value.profile) out.profile = rest.profile
+  return out
+})
+const scopeConflict = computed(() => Boolean(appliedScope.value.client && appliedScope.value.profile))
+const requestScope = computed(() => (scopeConflict.value ? {} : appliedScope.value))
+const viewAsActive = computed(() => Boolean(requestScope.value.client || requestScope.value.profile))
+// An administrator sees every row with its verdict; a tenant's profile view is
+// the visible rows only plus a count (no reason, no "Why?").
+const viewAsAdmin = computed(() => viewAsActive.value && !isTenant.value)
+const requestKey = computed(() => scopeParamsKey(requestScope.value) + (scopeConflict.value ? '!' : ''))
+
+// The server answered /status but the wait timed out first: the filters stay
+// hidden (rule 7) and the page fetches unfiltered, with a disabled chip.
+const scopeWaitTimedOut = ref(false)
+const scopeUnavailableNames = computed(() => {
+  if (!scopeWaitTimedOut.value || !route) return []
+  return (['client', 'profile'] as const).filter(name => {
+    const raw = route.query[name]
+    return typeof raw === 'string' && raw !== '' && !isScopeParamAvailable(name)
+  })
+})
+
+const viewAsAvailable = computed(() => isScopeParamAvailable('profile') || isScopeParamAvailable('client'))
+const clientOptions = computed(() => clientsStore.clients.filter(client => client.credential_state !== 'none'))
+const viewAsSelectValue = computed(() => {
+  if (scopeConflict.value) return ''
+  if (appliedScope.value.client) return `client:${appliedScope.value.client}`
+  if (appliedScope.value.profile) return `profile:${appliedScope.value.profile}`
+  return ''
+})
+// A subject in the URL that is not in the loaded lists still shows in the select.
+const viewAsSelectOrphan = computed(() => {
+  const value = viewAsSelectValue.value
+  if (!value) return ''
+  const [kind, id] = [value.slice(0, value.indexOf(':')), value.slice(value.indexOf(':') + 1)]
+  const known = kind === 'client' ? clientOptions.value.some(client => client.id === id) : profilesStore.profiles.some(profile => profile.name === id)
+  return known ? '' : id
+})
+
+function pickViewAs(value: string) {
+  if (!scopeQuery) return
+  if (value.startsWith('client:')) scopeQuery.set({ client: value.slice(7), profile: undefined })
+  else if (value.startsWith('profile:')) scopeQuery.set({ profile: value.slice(8), client: undefined })
+  else scopeQuery.set({ client: undefined, profile: undefined })
+}
+
+function clearViewAs() {
+  scopeQuery?.clear(['client', 'profile'])
+}
+
+function resolveConflict(keep: 'client' | 'profile') {
+  scopeQuery?.clear([keep === 'client' ? 'profile' : 'client'])
+}
+
+const profileLabelFor = (name: string) => profilesStore.titleFor(name)
+const clientLabelFor = (id: string) => clientsStore.clients.find(client => client.id === id)?.display_name ?? id
+const conflictClientLabel = computed(() => clientLabelFor(appliedScope.value.client ?? ''))
+const conflictProfileLabel = computed(() => profileLabelFor(appliedScope.value.profile ?? ''))
+
+/** "Work · Read-only": a profile's title and what its tier cap means. */
+function profilePhrase(name: string): string {
+  const title = profilesStore.titleFor(name)
+  const tier = tierPhrase(profilesStore.byName.get(name)?.max_tier)
+  return tier ? `${title} · ${tier}` : title
+}
+
+const viewAsSubjectLabel = computed(() => {
+  const { client, profile } = requestScope.value
+  return client ? clientLabelFor(client) : `profile ${profileLabelFor(profile ?? '')}`
+})
+
+// Spec 108-j J6: the numbers are computed from the rows the administrator got.
+const viewAsCountsFromRows = computed(() => {
+  let visible = 0
+  let callable = 0
+  let hidden = 0
+  for (const tool of allTools.value) {
+    const access = tool.access
+    if (!access) { visible++; callable++; continue }
+    if (access.visible) visible++
+    else hidden++
+    if (access.callable) callable++
+  }
+  return { visible, callable, hidden }
+})
+
+const viewAsBannerText = computed(() => {
+  const { client, profile } = requestScope.value
+  if (isTenant.value) {
+    const hidden = viewAsCounts.value?.hidden ?? 0
+    return `${hidden} tool${hidden === 1 ? '' : 's'} hidden by this profile`
+  }
+  const counts = viewAsCountsFromRows.value
+  let who: string
+  if (client) {
+    const profileName = clientsStore.clients.find(row => row.id === client)?.profile
+    who = `Viewing as ${clientLabelFor(client)}${profileName ? ` (${profilePhrase(profileName)})` : ''}`
+  } else {
+    who = `Viewing as profile ${profilePhrase(profile ?? '')}`
+  }
+  return `${who}: ${counts.visible} visible · ${counts.callable} callable · ${counts.hidden} hidden`
+})
+
+const viewAsEmptyText = computed(() => {
+  if (isTenant.value) return 'No tools visible under this profile'
+  return `${viewAsSubjectLabel.value[0].toUpperCase()}${viewAsSubjectLabel.value.slice(1)} can see no tools`
+})
+
+// J14 (#1437 item 2): a disabled server is disconnected and has no tool set, so
+// it is absent from every listing; say so instead of implying the list is whole.
+const disabledServerNote = computed(() => {
+  const count = serversStore.serverCount.disabled
+  if (!viewAsActive.value || count === 0) return ''
+  return `${count} disabled server${count === 1 ? ' is' : 's are'} not listed.`
+})
+const disabledServersLink = computed(() => (scopeQuery ? scopeQuery.linkTo('servers', { status: 'disabled' }) : null))
+
+const SHOW_OPTIONS = [
+  { value: 'all', label: 'All' },
+  { value: 'callable', label: 'Callable' },
+  { value: 'not_callable', label: 'Not callable' },
+] as const
+// Page-local, never in the URL: it only narrows the rows already loaded.
+const showFilter = ref<'all' | 'callable' | 'not_callable'>('all')
+
+const isCallable = (tool: GlobalTool): boolean => tool.access?.callable !== false
+const accessState = (tool: GlobalTool): string => accessStateLabel(tool.access ?? { visible: true, callable: true })
+const accessBadgeClass = (tool: GlobalTool): string => {
+  if (isCallable(tool)) return 'badge-success'
+  return tool.access?.visible ? 'badge-warning' : 'badge-error'
+}
+// Only the secondary cells dim: the state word and the reason stay full contrast.
+const mutedCell = (tool: GlobalTool): string => (viewAsAdmin.value && !isCallable(tool) ? 'opacity-60' : '')
+const rowId = (tool: GlobalTool): string => `${tool.server_name}__${tool.name}`
+
+const explain = ref<{ subject: { kind: 'client' | 'profile'; name: string }; tool: string } | null>(null)
+function openWhy(tool: GlobalTool) {
+  const { client, profile } = requestScope.value
+  const subject = client ? { kind: 'client' as const, name: client } : { kind: 'profile' as const, name: profile ?? '' }
+  explain.value = { subject, tool: `${tool.server_name}:${tool.name}` }
+}
 
 // ---- Filters ----
 const searchQuery = ref('')
@@ -991,6 +1302,10 @@ const searchScope = computed(() => {
     tools = tools.filter(t => t.approval_status === filterApproval.value)
   }
 
+  if (viewAsAdmin.value && showFilter.value !== 'all') {
+    tools = tools.filter(t => (showFilter.value === 'callable' ? isCallable(t) : !isCallable(t)))
+  }
+
   return tools
 })
 
@@ -1082,24 +1397,60 @@ const selectedToolSchema = computed(() => {
 })
 
 // ---- Methods ----
+// Every load takes a ticket and only the latest applies: choosing another
+// subject, removing a chip or a refresh must never let an older answer for the
+// previous subject land afterwards (R1).
+let loadSeq = 0
+
 async function loadTools() {
+  const seq = ++loadSeq
+  // Rule 8 (J18): two subjects means no request at all.
+  if (scopeConflict.value) {
+    allTools.value = []
+    stats.value = null
+    viewAsCounts.value = null
+    scopeError.value = null
+    error.value = null
+    loading.value = false
+    return
+  }
+
   loading.value = true
   error.value = null
+  scopeError.value = null
+  const scope = requestScope.value
+  const scoped = Boolean(scope.client || scope.profile)
 
   try {
-    const resp = await api.getGlobalTools()
+    const resp = scoped ? await api.getGlobalTools(scope) : await api.getGlobalTools()
+    if (seq !== loadSeq) return
     if (resp.success && resp.data) {
       allTools.value = resp.data.tools || []
       stats.value = resp.data.stats
       partial.value = resp.data.partial || false
       failedServers.value = resp.data.failed_servers || []
+      viewAsCounts.value = resp.data.counts ?? null
     } else {
       error.value = resp.error || 'Failed to load tools'
     }
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Unknown error'
+    if (seq !== loadSeq) return
+    const status = (err as { status?: number } | null)?.status
+    if (scoped && (status === 404 || status === 403)) {
+      // J19: a refused view-as is an inline message with a way out, never a
+      // blanked page. The rows of the previous subject are dropped so they are
+      // not mistaken for this one's.
+      allTools.value = []
+      stats.value = null
+      viewAsCounts.value = null
+      scopeError.value = status === 403
+        ? 'Requires an administrator'
+        : scope.client ? 'Client not found' : 'Profile not found'
+    } else {
+      error.value = err instanceof Error ? err.message : 'Unknown error'
+    }
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
@@ -1198,7 +1549,38 @@ onMounted(() => {
   // (Home/Server-card links, a Clients row "Tools it sees", ...) actually
   // narrows the page instead of landing on the unfiltered table.
   applyQueryParam()
-  loadTools()
+  // The Viewing chip and the sidebar normally load these lists; a direct visit
+  // to a view-as URL must not wait for them to name the subject.
+  if (!profilesStore.loaded && !profilesStore.loading) void profilesStore.fetchProfiles()
+  if (!isTenant.value && clientsStore.clients.length === 0) void clientsStore.refreshPresence()
+  void firstLoad()
+})
+
+// Spec 108-j J3 (rule 1): a URL that names a subject must not fetch before
+// GET /status has said whether the build supports it, or the first request goes
+// out unfiltered and every row flashes before the refetch. A URL with no scope
+// parameter does not wait at all.
+let scopeWatchArmed = false
+async function firstLoad() {
+  const urlHasScope = Boolean(route && ['profile', 'client', 'token'].some(name => {
+    const raw = route.query[name]
+    return typeof raw === 'string' && raw !== ''
+  }))
+  if (urlHasScope) {
+    await systemStore.waitForScopeFeatures()
+    scopeWaitTimedOut.value = !systemStore.scopeFeaturesKnown && !viewAsAvailable.value
+  }
+  scopeWatchArmed = true
+  await loadTools()
+}
+
+// The applied subject changed (a chip removed, the header chip, the select, or
+// the feature list arriving after the first fetch): refetch under it.
+watch(requestKey, () => {
+  if (!scopeWatchArmed) return
+  showFilter.value = 'all'
+  selectedKeys.value.clear()
+  void loadTools()
 })
 
 // A second search/filter from elsewhere while Tools is already open is a

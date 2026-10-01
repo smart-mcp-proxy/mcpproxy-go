@@ -52,6 +52,13 @@
       </button>
     </div>
 
+    <!-- Spec 108-j J4/J5 (FR-031, rules 5, 7, 8): the profile/client/token
+         filters of the page as removable chips, in every view (the Sessions
+         view is narrowed by the same three). -->
+    <div v-if="scopeChipsVisible" data-test="activity-scope-chips">
+      <ScopeChips page="activity" :scope-query="scopeQuery" :unavailable="scopeUnavailableNames" />
+    </div>
+
     <SessionsPanel v-if="activeView === 'sessions'" :sessions="sessionsRaw" />
 
     <!-- Rule 5 (zcode review round 1, F4): from/to/server/tool/status/type/
@@ -166,11 +173,11 @@
             </svg>
             Filters
             <span
-              v-if="activeChips.length > 0"
+              v-if="filterBadgeCount > 0"
               data-test="activity-filters-count"
               class="badge badge-xs badge-neutral"
             >
-              {{ activeChips.length }}
+              {{ filterBadgeCount }}
             </span>
             <svg
               class="w-3 h-3 transition-transform"
@@ -417,6 +424,11 @@
             </select>
           </div>
 
+          <!-- Spec 108-j J5: Profile / Client / Token (plus "Unattributed"). Each
+               shows only when the page registers it and the build advertises
+               it, and writes the same URL parameter the header chip writes. -->
+          <ScopeFilterSelects page="activity" :scope-query="scopeQuery" allow-unattributed />
+
           <!-- Date Range Filter. The native control renders in the OS locale,
                so the hint states the format the table itself prints (F35). -->
           <div class="form-control min-w-[160px]">
@@ -529,8 +541,8 @@
           <svg class="w-16 h-16 mx-auto mb-4 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
           </svg>
-          <p class="text-lg">{{ hasActiveFilters ? 'No matching activities' : 'No activity records found' }}</p>
-          <p class="text-sm mt-1">{{ hasActiveFilters ? 'Try adjusting your filters' : 'Activity will appear here as tools are called and actions are taken' }}</p>
+          <p class="text-lg">{{ hasActiveFilters || scopeApplied ? 'No matching activities' : 'No activity records found' }}</p>
+          <p class="text-sm mt-1">{{ hasActiveFilters || scopeApplied ? 'Try adjusting your filters, or remove a profile, client or token chip above' : 'Activity will appear here as tools are called and actions are taken' }}</p>
         </div>
 
         <!-- Activity Table.
@@ -557,6 +569,10 @@
                 <th class="hidden sm:table-cell cursor-pointer hover:bg-base-200" @click="sortBy('server_name')">
                   Server {{ getSortIndicator('server_name') }}
                 </th>
+                <!-- Spec 108-j J10: who made the call and under which profile.
+                     Folded away below md; the detail drawer carries the same
+                     chips in an "Attribution" section. -->
+                <th v-if="hasScopeColumn" class="hidden md:table-cell" data-test="activity-scope-col">Scope</th>
                 <th>Details</th>
                 <th v-if="hasSensitiveColumn" class="hidden lg:table-cell">Sensitive</th>
                 <!-- Intent carries the declared reason, not a 52px icon slot. -->
@@ -666,6 +682,9 @@
                     {{ row.activity.server_name }}
                   </router-link>
                   <span v-else class="text-base-content/40">-</span>
+                </td>
+                <td v-if="hasScopeColumn" class="hidden md:table-cell">
+                  <AttributionChips :record="row.activity" :test-id="row.activity.id" />
                 </td>
                 <td>
                   <div class="max-w-[6rem] sm:max-w-xs truncate flex items-center gap-1.5">
@@ -831,6 +850,14 @@
                   <span v-else data-test="activity-status" class="sr-only">
                     {{ statusPresentation(row.activity.status).label }}
                   </span>
+                  <button
+                    v-if="canExplain(row.activity)"
+                    type="button"
+                    class="btn btn-ghost btn-xs min-h-6 hidden md:inline-flex ml-1"
+                    :data-test="`activity-row-why-${row.activity.id}`"
+                    :aria-label="`Why was ${row.activity.tool_name} blocked?`"
+                    @click.stop="openExplain(row.activity)"
+                  >Why?</button>
                 </td>
                 <td class="hidden md:table-cell whitespace-nowrap">
                   <!-- A run reports the SPAN its members took, not one member's. -->
@@ -923,6 +950,17 @@
     </div>
 
     <!-- Activity Detail Drawer -->
+    <!-- Spec 108-j J8 (FR-046): the access explainer for a blocked row. It
+         evaluates the CURRENT configuration and says so. -->
+    <AccessExplainer
+      :open="explain !== null"
+      :subject="explain?.subject ?? { kind: 'client', name: '' }"
+      :tool="explain?.tool"
+      title="Why is this blocked?"
+      :note="explain?.note"
+      @close="explain = null"
+    />
+
     <div class="drawer drawer-end">
       <input id="activity-detail-drawer" type="checkbox" class="drawer-toggle" v-model="showDetailDrawer" />
       <div class="drawer-side z-50">
@@ -1014,6 +1052,34 @@
               <div v-if="selectedActivity.parent_id" class="flex gap-2">
                 <span class="text-sm text-base-content/60 w-24 shrink-0">Parent call:</span>
                 <code class="text-xs bg-base-200 px-2 py-1 rounded break-all">{{ selectedActivity.parent_id }}</code>
+              </div>
+            </div>
+
+            <!-- Spec 108-j J10/J8/J9: who made the call, under which profile, and
+                 for a blocked call the two ways forward. Below md this is the
+                 only place the chips and the actions appear. -->
+            <div v-if="hasAttribution(selectedActivity) || canExplain(selectedActivity)" class="space-y-2" data-test="activity-drawer-attribution">
+              <h4 class="text-sm font-semibold text-base-content/70">Attribution</h4>
+              <AttributionChips :record="selectedActivity" :test-id="`drawer-${selectedActivity.id}`" />
+              <div v-if="canExplain(selectedActivity) || profileAction(selectedActivity)" class="flex flex-wrap items-center gap-2">
+                <router-link
+                  v-if="profileAction(selectedActivity)"
+                  :to="profileAction(selectedActivity)!.to"
+                  class="btn btn-sm btn-outline"
+                  :data-test="`activity-allow-in-profile-${selectedActivity.id}`"
+                >{{ profileAction(selectedActivity)!.label }}</router-link>
+                <span
+                  v-else-if="missingProfileName(selectedActivity)"
+                  class="text-sm text-base-content/60"
+                  data-test="activity-profile-missing"
+                >Profile {{ missingProfileName(selectedActivity) }} no longer exists</span>
+                <button
+                  v-if="canExplain(selectedActivity)"
+                  type="button"
+                  class="btn btn-sm btn-outline"
+                  :data-test="`activity-why-${selectedActivity.id}`"
+                  @click="openExplain(selectedActivity)"
+                >Why?</button>
               </div>
             </div>
 
@@ -1379,6 +1445,15 @@ import type { ActivityRecord, ActivitySummaryResponse, MCPSession } from '@/type
 import { buildSessionLabels } from '@/utils/sessionLabel'
 import { splitScopeTool, useScopeQuery, resolveScopeTime, sessionRestParam } from '@/composables/useScopeQuery'
 import SessionsPanel from '@/components/activity/SessionsPanel.vue'
+import AttributionChips from '@/components/activity/AttributionChips.vue'
+import AccessExplainer from '@/components/AccessExplainer.vue'
+import ScopeChips from '@/components/scope/ScopeChips.vue'
+import ScopeFilterSelects from '@/components/scope/ScopeFilterSelects.vue'
+import { useProfilesStore } from '@/stores/profiles'
+import { isScopeParamAvailable } from '@/composables/useScopeQuery'
+import { pickScopeParams, scopeParamsKey } from '@/utils/scopeParams'
+import { profileEditorLink } from '@/utils/profileRoute'
+import { blockedProfileAction, explainSubjectForRecord, type ExplainSubject } from '@/utils/profiles'
 import { DATE_TIME_FORMAT_HINT, formatDateTime, formatTime } from '@/utils/datetime'
 import {
   buildWorkSessionIndex,
@@ -1434,6 +1509,7 @@ const route = useRoute()
 const systemStore = useSystemStore()
 const authStore = useAuthStore()
 const scopeQuery = useScopeQuery('activity')
+const profilesStore = useProfilesStore()
 
 // Spec 109-k (activity-scope-filters), FR-070: the four Activity views, in
 // the URL as `?view=calls|sessions|system|all`, defaulting to `calls` when
@@ -2283,7 +2359,113 @@ const displayRows = computed((): ActivityDisplayRow[] => {
 })
 
 // Load activities
+// ---- Spec 108-j: profile / client / token scope -------------------------------
+
+/** The three REST names the page applies right now (rule 7: none while the build
+ * does not advertise them; a server/tool conflict is null, so none either). */
+const activityScopeParams = computed(() => pickScopeParams(scopeQuery.toRest()))
+const scopeApplied = computed(() => Object.keys(activityScopeParams.value).length > 0)
+const scopeKey = computed(() => scopeParamsKey(activityScopeParams.value))
+
+const SCOPE_URL_NAMES = ['profile', 'client', 'token'] as const
+const scopeWaitTimedOut = ref(false)
+/** Named in the URL but never advertised (the wait timed out): a disabled
+ * "Filter unavailable on this server" chip instead of silence. */
+const scopeUnavailableNames = computed(() => {
+  if (!scopeWaitTimedOut.value) return []
+  return SCOPE_URL_NAMES.filter(name => {
+    const raw = route.query[name]
+    return typeof raw === 'string' && raw !== '' && !isScopeParamAvailable(name)
+  })
+})
+const urlHasScopeParam = (): boolean => SCOPE_URL_NAMES.some(name => {
+  const raw = route.query[name]
+  return typeof raw === 'string' && raw !== ''
+})
+
+const scopeChipsVisible = computed(() =>
+  scopeQuery.chips.value.some(chip => (SCOPE_URL_NAMES as readonly string[]).includes(chip.name)) ||
+  SCOPE_URL_NAMES.some(name => typeof route.query[name] === 'string' && route.query[name] !== '' && isScopeParamAvailable(name)) ||
+  scopeUnavailableNames.value.length > 0
+)
+const filterBadgeCount = computed(() =>
+  activeChips.value.length + scopeQuery.chips.value.filter(chip => (SCOPE_URL_NAMES as readonly string[]).includes(chip.name)).length
+)
+
+let scopeWatchArmed = false
+async function firstLoad() {
+  if (urlHasScopeParam()) {
+    await systemStore.waitForScopeFeatures()
+    scopeWaitTimedOut.value = !systemStore.scopeFeaturesKnown && !SCOPE_URL_NAMES.some(name => isScopeParamAvailable(name))
+  }
+  scopeWatchArmed = true
+  await loadActivities()
+}
+
+// The applied scope changed: a chip removed, a header chip or select set, or the
+// feature list arriving after the first fetch. Not armed before the first load,
+// so the wait above never double-fetches.
+watch(scopeKey, () => {
+  if (!scopeWatchArmed) return
+  currentPage.value = 1
+  void loadActivities()
+})
+
+const hasScopeColumn = computed(() =>
+  SCOPE_URL_NAMES.some(name => isScopeParamAvailable(name)) || activities.value.some(hasAttribution)
+)
+
+function hasAttribution(record: ActivityRecord): boolean {
+  return Boolean(record.profile || record.client_id || record.client_name || record.token_name)
+}
+
+// ---- "Why?" and "Allow in profile..." on a blocked row (J8, J9) ----
+const isTenantPrincipal = computed(() => authStore.principalKind === 'tenant')
+
+/** Blocked, with a tool to ask about and a subject to ask for. */
+function canExplain(record: ActivityRecord | null): boolean {
+  if (!record || isTenantPrincipal.value) return false
+  if (record.status !== 'blocked' || !record.server_name || !record.tool_name) return false
+  return explainSubjectForRecord(record) !== null
+}
+
+const explain = ref<{ subject: ExplainSubject; tool: string; note: string } | null>(null)
+function openExplain(record: ActivityRecord) {
+  const subject = explainSubjectForRecord(record)
+  if (!subject || !record.server_name || !record.tool_name) return
+  explain.value = {
+    subject,
+    tool: `${record.server_name}:${record.tool_name}`,
+    note: `Evaluated against the current configuration; the call was blocked on ${formatDateTime(record.timestamp)}.`,
+  }
+}
+
+/** The editor link for a profile-blocked record, when its profile still exists. */
+function profileAction(record: ActivityRecord | null): { to: ReturnType<typeof profileEditorLink>; label: string } | null {
+  if (!record || isTenantPrincipal.value || record.status !== 'blocked' || !record.profile) return null
+  if (!profilesStore.byName.has(record.profile)) return null
+  const kind = blockedProfileAction(record.block_reason)
+  if (kind === 'allow' && record.server_name && record.tool_name) {
+    return { to: profileEditorLink(record.profile, `${record.server_name}:${record.tool_name}`), label: 'Allow in profile…' }
+  }
+  if (kind) return { to: profileEditorLink(record.profile), label: 'Open profile…' }
+  return null
+}
+
+/** A blocked record whose profile has been deleted since. */
+function missingProfileName(record: ActivityRecord | null): string {
+  if (!record || isTenantPrincipal.value || record.status !== 'blocked' || !record.profile) return ''
+  if (!blockedProfileAction(record.block_reason) || !profilesStore.loaded) return ''
+  return profilesStore.byName.has(record.profile) ? '' : record.profile
+}
+
+// Every load takes a ticket and only the latest applies, so a slower answer
+// for the previous scope (a chip removed, a header chip set) can never land
+// after, and replace, the current one (Spec 108-j R1).
+let activitiesLoadSeq = 0
+
 const loadActivities = async () => {
+  const seq = ++activitiesLoadSeq
   // Contract "view -> REST" (url-filter-contract.md): `sessions` issues no
   // /activity request at all — `loadSessions()` (its own watch/onMounted
   // calls) is what feeds that view. Skipping it here is also what SC-009's
@@ -2328,9 +2510,15 @@ const loadActivities = async () => {
     return
   }
 
+  // Spec 108-j J2/J13: the profile/client/token the page applies, from the one
+  // source (useScopeQuery.toRest), sent to the list, the summary and the export
+  // alike so the header counts and a downloaded file match the table.
+  const scope = activityScopeParams.value
+
   try {
     const [activitiesResponse, summaryResponse] = await Promise.all([
       api.getActivities({
+        ...scope,
         limit: 200,
         parent_id: filterParentId.value || undefined,
         // Spec 109-k: url-filter-contract.md sends these to REST on Activity
@@ -2365,9 +2553,10 @@ const loadActivities = async () => {
         start_time: dateTimeLocalToISO(filterStartDate.value),
         end_time: dateTimeLocalToISO(filterEndDate.value),
       }),
-      api.getActivitySummary('24h')
+      api.getActivitySummary('24h', scope)
     ])
 
+    if (seq !== activitiesLoadSeq) return
     if (activitiesResponse.success && activitiesResponse.data) {
       activities.value = activitiesResponse.data.activities || []
     } else {
@@ -2378,9 +2567,10 @@ const loadActivities = async () => {
       summary.value = summaryResponse.data
     }
   } catch (err) {
+    if (seq !== activitiesLoadSeq) return
     error.value = err instanceof Error ? err.message : 'Unknown error'
   } finally {
-    loading.value = false
+    if (seq === activitiesLoadSeq) loading.value = false
   }
 }
 
@@ -2557,6 +2747,7 @@ const filterBySession = (activity: ActivityRecord) => {
 // Export activities
 const exportActivities = (format: 'json' | 'csv') => {
   const url = api.getActivityExportUrl({
+    ...activityScopeParams.value,
     format,
     // Spec 024/109-k: pass comma-separated types for the multi-type filter
     // or the active view's implied types, whichever is in force.
@@ -2807,10 +2998,13 @@ watch(activities, refreshSessionsIfUnknown)
 onMounted(() => {
   // Filters (incl. `session`, linked from Dashboard/Sessions pages) are
   // already hydrated from the URL by applyRouteFilters() during setup, above
-  // (rule 1: read before the first fetch) — this is that first fetch.
-  loadActivities()
+  // (rule 1: read before the first fetch) — this is that first fetch. A URL
+  // that names a profile/client/token waits for /status first (Spec 108-j J3),
+  // so the first request carries it instead of flashing every row.
+  void firstLoad()
   loadSessions()
   sessionsLoadedOnce = true
+  if (!profilesStore.loaded && !profilesStore.loading) void profilesStore.fetchProfiles()
 
   // Listen for SSE activity events
   window.addEventListener('mcpproxy:activity', handleActivityEvent as EventListener)
