@@ -390,6 +390,11 @@ struct ProfileEditorView: View {
         } else if model.draft.servers.isEmpty {
             Text("Choose servers to see their tools").font(.caption).foregroundStyle(.secondary)
         } else {
+            // The fixed columns need ~700 pt; a vertical-only parent let that
+            // widen the whole editor past a 900 pt window and clip its right
+            // edge (Spec 108-k live QA). A horizontal scroll keeps the editor
+            // as wide as the window and the table reachable.
+            ScrollView(.horizontal, showsIndicators: true) {
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
                     Text("Tool").frame(minWidth: 160, maxWidth: .infinity, alignment: .leading)
@@ -416,8 +421,10 @@ struct ProfileEditorView: View {
                     }
                 }
             }
+            .frame(minWidth: 700, alignment: .leading)
             .background(Color.secondary.opacity(0.04))
             .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
         }
     }
 
@@ -506,7 +513,7 @@ struct ProfileEditorView: View {
                     .accessibilityIdentifier("profile-try-hidden-count")
                 ForEach(result.results) { hit in
                     HStack(alignment: .firstTextBaseline) {
-                        Text("\(hit.serverName):\(hit.name)").font(.caption.monospaced())
+                        Text(hit.displayName).font(.caption.monospaced())
                         Text(hit.description).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }

@@ -798,20 +798,32 @@ struct EffectiveToolsResponse: Decodable, Equatable {
 }
 
 /// One hit of `POST /profiles/try` (a `retrieve_tools` result item).
+///
+/// The core sends `{score, tool: {name: "server:tool", server_name,
+/// description, ...}}` (108-f). A flat `{name, server_name, description}` is
+/// accepted too, so a core that flattens the item keeps working.
 struct TryHit: Decodable, Identifiable, Equatable {
     let name: String
     let serverName: String
     let description: String
 
-    var id: String { "\(serverName):\(name)" }
+    /// `server:tool`; the name from the core is already canonical, so it is
+    /// never prefixed twice.
+    var displayName: String {
+        name.contains(":") || serverName.isEmpty ? name : "\(serverName):\(name)"
+    }
 
-    enum CodingKeys: String, CodingKey {
-        case name, description
+    var id: String { displayName }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, description, tool
         case serverName = "server_name"
     }
 
     init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let outer = try decoder.container(keyedBy: CodingKeys.self)
+        // The tool lives under `tool` on the wire; fall back to the item itself.
+        let c = (try? outer.nestedContainer(keyedBy: CodingKeys.self, forKey: .tool)) ?? outer
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
         serverName = try c.decodeIfPresent(String.self, forKey: .serverName) ?? ""
         description = try c.decodeIfPresent(String.self, forKey: .description) ?? ""

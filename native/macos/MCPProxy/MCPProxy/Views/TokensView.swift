@@ -360,6 +360,10 @@ struct TokenRow: View {
 
                 // Profile, mode and (legacy) scope
                 HStack(spacing: 8) {
+                    if presentation.isRevoked {
+                        badge("Revoked", color: .red)
+                            .accessibilityIdentifier("token-revoked-\(token.name)")
+                    }
                     if let profile = presentation.profileChip {
                         badge("Profile: \(profile)", color: .green)
                             .accessibilityIdentifier("token-profile-chip-\(token.name)")

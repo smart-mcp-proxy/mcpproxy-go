@@ -95,6 +95,20 @@ final class APIClientProfilesTests: XCTestCase {
         XCTAssertEqual((last?.json["profile"] as? [String: Any])?["max_tier"] as? String, "read")
         XCTAssertEqual(response.hiddenByProfile, 3)
         XCTAssertEqual(response.results.first?.id, "github:create_issue")
+        XCTAssertEqual(response.results.first?.displayName, "github:create_issue")
+    }
+
+    /// The shape 108-f ships: each hit is a `retrieve_tools` item, `{score, tool:
+    /// {name: "server:tool", server_name, description, ...}}`. The flat shape
+    /// above is what a hand-written stub looks like; a live core never sends it.
+    func testTryProfileDecodesTheShippedRetrieveToolsHit() async throws {
+        ConnectStubURLProtocol.responseBody = ConnectStubURLProtocol.envelope(#"{"results":[{"score":4.7,"tool":{"annotations":{"readOnlyHint":true},"description":"list_issues","input_schema":{"properties":{},"type":"object"},"name":"github:list_issues","server_name":"github"}}],"hidden_by_profile":1,"hidden":[{"server":"github","tool":"create_issue","reason":"above_tier_cap"}],"hidden_truncated":false}"#)
+        let response = try await client.tryProfile(draft: ProfileConfigPayload(name: "ro"), query: "list_issues")
+        let hit = try XCTUnwrap(response.results.first)
+        XCTAssertEqual(hit.id, "github:list_issues")
+        XCTAssertEqual(hit.displayName, "github:list_issues", "a canonical name is not prefixed twice")
+        XCTAssertEqual(hit.serverName, "github")
+        XCTAssertEqual(hit.description, "list_issues")
     }
 
     // MARK: Clients

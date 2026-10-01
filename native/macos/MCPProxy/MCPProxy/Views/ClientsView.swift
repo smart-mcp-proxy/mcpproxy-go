@@ -71,15 +71,13 @@ struct ClientsView: View {
             Task { await load() }
             connectPreselect = nil
         }) {
-            let state = appState
-            ConnectClientView(
-                model: ConnectClientModel(source: DeferredConnectSource {
-                    await MainActor.run { state.apiClient }
-                }),
+            ConnectClientSheetHost(
+                appState: appState,
                 preselect: connectPreselect,
                 presetProfile: connectPreselect.flatMap { id in
-                    (clients.first { $0.id == id } ?? state.clients.first { $0.id == id })?.boundProfile
+                    (clients.first { $0.id == id } ?? appState.clients.first { $0.id == id })?.boundProfile
                 },
+                onClose: { showConnect = false },
                 onRoute: { route in
                     showConnect = false
                     appState.navigate(route)
@@ -538,5 +536,34 @@ struct ClientsView: View {
         let formatter = ISO8601DateFormatter()
         guard let date = formatter.date(from: value) else { return value }
         return date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+/// Owns the Connect sheet's model for the life of the sheet.
+///
+/// The model used to be built inline in the `.sheet` closure, which runs again
+/// whenever `ClientsView` re-renders, so every `profiles.changed` /
+/// `client.binding_changed` event handed the sheet a fresh model stuck on
+/// "Loading clients…" (its `.task` runs once). `@StateObject` keeps one.
+private struct ConnectClientSheetHost: View {
+    @StateObject private var model: ConnectClientModel
+    let preselect: String?
+    let presetProfile: String?
+    let onClose: () -> Void
+    let onRoute: (AppRoute) -> Void
+
+    init(appState: AppState, preselect: String?, presetProfile: String?,
+         onClose: @escaping () -> Void, onRoute: @escaping (AppRoute) -> Void) {
+        _model = StateObject(wrappedValue: ConnectClientModel(source: DeferredConnectSource {
+            await MainActor.run { appState.apiClient }
+        }))
+        self.preselect = preselect
+        self.presetProfile = presetProfile
+        self.onClose = onClose
+        self.onRoute = onRoute
+    }
+
+    var body: some View {
+        ConnectClientView(model: model, onClose: onClose, preselect: preselect, presetProfile: presetProfile, onRoute: onRoute)
     }
 }

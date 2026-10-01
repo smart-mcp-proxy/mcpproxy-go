@@ -72,6 +72,8 @@ After a change under `Views/Profiles*`, `Views/Client*`, `Views/AccessExplainer*
 10. **Scoped views.** Tools "View as Client… / Profile…" greys rows the subject cannot use, with the reason and a "Why?" button that opens the explainer. Activity shows a Caller column and Profile, Client and Token pickers. Home filters usage and sessions by the same three and shows Profile and Source columns. Servers filters by profile.
 11. **Width and accessibility.** At a 900 pt window nothing is clipped on Profiles, the editor and Clients; run `check_accessibility`. The accessibility ids are listed in the plan for 108-k (K22): `profile-card-<name>`, `profile-editor`, `profile-editor-save`, `client-profile-picker-<id>`, `client-lock-toggle-<id>`, `clients-warnings-banner`, `access-explainer`, `guard-refusal`, `settings-anonymous-profile`, `connect-profile-picker`, `connect-lock-toggle`, `connect-mgmt-notice`.
 
+**Driving the window without screenshots.** `screenshot_window` needs Screen Recording; when it fails (`Failed to capture window`), drive and read the window through the accessibility tree instead (`AXPress`, `AXValue`, `AXFocused` on the `profile-*`, `client-*`, `token-*`, `connect-*` ids above), keystroke into focused fields with System Events, and check a 900 pt window by listing elements whose frame leaves the window. Navigation shortcuts: ⌘1 Home, ⌘2 Clients, ⌘3 Profiles, ⌘4 Servers, ⌘5 Tools. A tray attached to an already-running core (`MCPPROXY_TRAY_SKIP_CORE=1`) needs the core's `MCPPROXY_SOCKET_PATH`; the SSE stream authenticates with the key it reads from `/api/v1/info`.
+
 **MCP config** (in Claude Code settings or `~/.claude/settings.json`):
 ```json
 {

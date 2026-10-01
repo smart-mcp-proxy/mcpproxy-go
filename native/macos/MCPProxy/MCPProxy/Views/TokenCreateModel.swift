@@ -110,6 +110,8 @@ struct TokenRowPresentation: Equatable {
     let profileChip: String?
     let modeLabel: String?
     let canRevoke: Bool
+    /// The core keeps a revoked token in `GET /tokens` (`revoked: true`).
+    let isRevoked: Bool
     let migrateHint: String?
 
     static let migrateText = "Migrate to a profile"
@@ -128,7 +130,8 @@ struct TokenRowPresentation: Equatable {
         case .some(.switchable): modeLabel = "Switchable"
         default: modeLabel = nil
         }
-        canRevoke = !isClientCredential
+        isRevoked = token.revoked == true
+        canRevoke = !isClientCredential && !isRevoked
         migrateHint = isLegacyScope ? Self.migrateText : nil
     }
 }

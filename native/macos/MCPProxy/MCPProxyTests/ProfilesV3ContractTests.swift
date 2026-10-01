@@ -137,15 +137,14 @@ final class ProfilesV3ContractTests: XCTestCase {
         XCTAssertNil(entry.callerProfileLabel)
     }
 
-    /// The access-explanation fixture. The pre-F24 shape (a `subject` without a
-    /// `kind`) is skipped, never edited: 108-i migrates it (I22).
+    /// The access-explanation fixture (F24 shape: `subject.kind`, shipped by
+    /// 108-f and migrated on main by 108-i, I22). A fixture without `subject.kind`
+    /// is a failure now, never a skip.
     func testExplainBlockedFixtureDecodesIntoAnAccessExplanation() throws {
         let data = try fixture("explain_blocked")
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-        let subject = root["subject"] as? [String: Any]
-        guard subject?["kind"] != nil else {
-            throw XCTSkip("pre-F24 fixture; migrated by 108-i (I22)")
-        }
+        let subject = try XCTUnwrap(root["subject"] as? [String: Any])
+        XCTAssertNotNil(subject["kind"], "explain_blocked.json must carry the F24 subject shape")
         let explanation = try JSONDecoder().decode(AccessExplanation.self, from: data)
         XCTAssertEqual(explanation.subject, ExplainSubject(kind: "client", name: "cursor"))
         XCTAssertEqual(explanation.tool, "github:create_issue")

@@ -364,12 +364,14 @@ struct OtherClientSheet: View {
 struct CredentialOnceView: View {
     let credential: String
     let snippet: String?
+    /// "Client created" on first issue, "New credential issued" on a rotation.
+    var title: String = "Client created"
     @State private var copiedCredential = false
     @State private var copiedSnippet = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Client created", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            Label(title, systemImage: "checkmark.circle.fill").foregroundStyle(.green)
             Text("Shown once. MCPProxy stores only a hash.").font(.callout.weight(.semibold))
             HStack {
                 Text(credential)
@@ -433,7 +435,7 @@ struct RotateClientSheet: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let credential = model.credential {
-                CredentialOnceView(credential: credential, snippet: model.snippet)
+                CredentialOnceView(credential: credential, snippet: model.snippet, title: "New credential issued")
             }
             outcomeView
             if let refusal = model.guardRefusal {

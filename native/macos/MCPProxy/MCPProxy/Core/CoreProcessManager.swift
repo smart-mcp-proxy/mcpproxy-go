@@ -740,7 +740,7 @@ actor CoreProcessManager {
         do {
             try await connectToCore()
             await transitionState(to: .connected)
-            await refreshState()
+            await refreshStateOnConnect()
             startSSEStream()
             startPeriodicRefresh()
             // Spec 092 FR-001: the #957 case. The core we just attached to may
@@ -778,7 +778,7 @@ actor CoreProcessManager {
 
         await transitionState(to: .connected)
         retryCount = 0
-        await refreshState()
+        await refreshStateOnConnect()
         startSSEStream()
         startPeriodicRefresh()
         // A launch can still land on a core we did not start: `waitForSocket`
@@ -1920,6 +1920,16 @@ actor CoreProcessManager {
         await attemptReconnection()
     }
 
+    /// `refreshState()` for a fresh connection (attach, launch, reconnect).
+    /// The server list is SSE-driven (Spec 048), so a core that is already
+    /// settled never sends the `servers.changed` that would fill it; fetch it
+    /// once here so Home, Servers and the Profile editor are not empty until the
+    /// five-minute safety net runs (Spec 108-k live QA).
+    private func refreshStateOnConnect() async {
+        await refreshState()
+        await refreshServers()
+    }
+
     /// Fetch full state from the core and update appState.
     /// Spec 048: dropped the per-tick refreshServers() call. The server list
     /// is now SSE-driven (spec 047 servers.changed payload). MCPProxyApp
@@ -2294,7 +2304,7 @@ actor CoreProcessManager {
                     try await connectToCore()
                     await transitionState(to: .connected)
                     retryCount = 0
-                    await refreshState()
+                    await refreshStateOnConnect()
                     startSSEStream()
                     startPeriodicRefresh()
                     // A reconnect can land on a DIFFERENT core than the one we

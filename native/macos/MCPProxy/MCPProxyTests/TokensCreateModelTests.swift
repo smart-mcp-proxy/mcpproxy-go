@@ -137,6 +137,20 @@ final class TokensCreateModelTests: XCTestCase {
         XCTAssertFalse(row.isLegacyScope)
     }
 
+    /// `GET /tokens` keeps a revoked credential in the list (a forgotten client's
+    /// `client-<id>` stays with `revoked: true`); the row must say so and offer
+    /// no second Revoke.
+    func testARevokedTokenIsMarkedAndCannotBeRevokedAgain() {
+        let agent = TokenRowPresentation(token(#"{"name":"ci","profile_pin":"work-ro","kind":"agent","legacy_scope":false,"revoked":true,"created_at":"x"}"#))
+        XCTAssertTrue(agent.isRevoked)
+        XCTAssertFalse(agent.canRevoke)
+        let client = TokenRowPresentation(token(#"{"name":"client-dev","kind":"client","client_id":"dev","revoked":true,"created_at":"x"}"#))
+        XCTAssertTrue(client.isRevoked)
+        let live = TokenRowPresentation(token(#"{"name":"ci","kind":"agent","revoked":false,"created_at":"x"}"#))
+        XCTAssertFalse(live.isRevoked)
+        XCTAssertTrue(live.canRevoke)
+    }
+
     // MARK: Filters
 
     func testTheListFilterParamsAreProfileAndToken() {
