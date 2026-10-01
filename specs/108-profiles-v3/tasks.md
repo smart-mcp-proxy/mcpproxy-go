@@ -262,7 +262,7 @@ The former scope of this PR — `useScopeQuery.ts`, the parameter registry, the 
 - [x] T108a [US3] #1437 item 3: a scoped SSE subscriber's own `activity.internal_tool_call.completed` keeps its attribution (the session records the credential's display prefix and the ctx-less internal-tool funnel reads it back; `TestInternalToolCall_AttributionCarriesTokenPrefix`, `TestSSEInternalAttribution`)
 - [x] T109 [US3] Playwright `e2e/web-ui-sweep/profiles-scope.spec.ts` (seeded through `profiles-seed.ts`, extended additively): audit acceptance check 6 end to end (`/tools?client=…`, `/usage?profile=…`, `/sessions?client=…` → 109's redirect to `/activity?view=sessions&client=…`, chip survives navigation and Back) + blocked-row link + explainer, at 1440/1100/900/390 px and by keyboard (seeded via REST against the smoke binary)
 - [x] T109a [US3] #1437 items 2 and 4: the Tools banner states how many disabled servers are not listed (item 2 is closed by the spec amendment, no backend change) and `/ui/usage?profile=` and `/ui/tools?client=` load filtered with a chip (item 4), pinned by T104/T106a and the Playwright steps 1-2
-- [ ] T110 Verification: vitest, web smoke, recipe 108-j
+- [x] T110 Verification: vitest, web smoke, recipe 108-j
 
 ---
 
