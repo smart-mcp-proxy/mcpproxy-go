@@ -35,6 +35,10 @@ enum ScopePage {
     case usage
     case tools
     case servers
+    /// Spec 108-k K12: the Clients list (`profile`, `client`).
+    case clients
+    /// Spec 108-k K12: the Agent Tokens list (`profile`, `token`).
+    case tokens
 }
 
 /// A resolved request: path plus query items, in a stable order.
@@ -138,6 +142,14 @@ struct ScopeFilter: Equatable {
         return f
     }
 
+    /// Profiles-card link (requires `scope_filters`): Tools · Activity · Clients
+    /// · Tokens filtered by one profile (Spec 108-k, parity row 20).
+    static func forProfile(_ name: String) -> ScopeFilter {
+        var f = ScopeFilter()
+        f.profile = name
+        return f
+    }
+
     /// Token row link (requires `scope_filters`).
     static func forToken(_ name: String) -> ScopeFilter {
         var f = ScopeFilter()
@@ -234,7 +246,7 @@ struct ScopeFilter: Equatable {
             if Self.usageWindow(from: from, to: to) == nil {
                 add("from", from); add("to", to)
             }
-        case .tools, .servers:
+        case .tools, .servers, .clients, .tokens:
             add("from", from); add("to", to)
         }
         return out
@@ -318,6 +330,14 @@ struct ScopeFilter: Equatable {
         case .servers:
             addScope(["profile"])
             return ScopeRequest(path: "/api/v1/servers", query: items)
+
+        case .clients:
+            addScope(["profile", "client"])
+            return ScopeRequest(path: "/api/v1/clients", query: items)
+
+        case .tokens:
+            addScope(["profile", "token"])
+            return ScopeRequest(path: "/api/v1/tokens", query: items)
         }
     }
 }

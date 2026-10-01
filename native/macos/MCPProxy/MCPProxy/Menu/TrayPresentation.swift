@@ -166,26 +166,6 @@ enum TrayProtocolDisplay {
     }
 }
 
-// MARK: - F11 · Profiles that would scope agents to nothing
-
-enum TrayProfileDisplay {
-    /// The Web UI's ProfileSwitcher shows "N servers · M tools"; the tray showed
-    /// only the tool count, so a profile whose servers are not in the config
-    /// ("research (0 tools)") read as merely empty rather than broken. Switching
-    /// to it scopes every agent to zero servers.
-    ///
-    /// `knownServers` is the set of configured server names; a profile
-    /// referencing none of them is called out by name.
-    static func label(name: String, servers: [String], toolCount: Int, knownServers: Set<String>) -> String {
-        let effective = servers.filter { knownServers.contains($0) }.count
-        if effective == 0 {
-            return "\(name) — no servers"
-        }
-        let serverWord = effective == 1 ? "server" : "servers"
-        return "\(name) (\(effective) \(serverWord) · \(toolCount) tools)"
-    }
-}
-
 // MARK: - F15 · A Servers submenu that fits on screen
 
 /// How one server is filed in the Servers submenu.

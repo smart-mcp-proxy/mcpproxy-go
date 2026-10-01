@@ -29,6 +29,14 @@ struct HomeView: View {
     @ObservedObject var appState: AppState
     @Environment(\.fontScale) var fontScale
     @State private var mcpSessions: [APIClient.MCPSession] = []
+    /// Spec 108-k K18: profile / client / token scope of the usage summary and
+    /// the sessions list (109-k's `ScopeFilter`; the parameters are hidden and
+    /// never sent until the core advertises `features.scope_filters`).
+    @State private var homeFilter = ScopeFilter()
+    @State private var scopedUsage: UsageAggregateResponse?
+    @State private var tokenNames: [String] = []
+    /// Only the newest scoped reload (on the current connection) may publish.
+    @State private var scopedGeneration = 0
 
     var body: some View {
         ScrollView {
@@ -43,6 +51,9 @@ struct HomeView: View {
                 if !appState.attention.isEmpty {
                     attentionSection
                 }
+
+                // Spec 108-k K18: usage and sessions, scoped.
+                if appState.scopeFiltersAvailable { scopeSection }
 
                 // Hub visualization
                 hubSection
@@ -80,12 +91,124 @@ struct HomeView: View {
             Text(item.detail ?? item.summary)
         }
         .task {
-            do {
-                mcpSessions = try await appState.apiClient?.sessions(limit: 20) ?? []
-            } catch {
-                // Non-fatal; sessions will be empty
+            await reloadScoped()
+            if appState.scopeFiltersAvailable {
+                tokenNames = ((try? await appState.apiClient?.tokens()) ?? [])
+                    .filter { $0.kind != "client" }.map(\.name)
             }
         }
+        .onAppear { consumeRoute() }
+        .onChange(of: appState.pendingRoute) { _ in consumeRoute() }
+        .onChange(of: homeFilter) { _ in Task { await reloadScoped() } }
+        .onChange(of: appState.scopeFiltersAvailable) { _ in Task { await reloadScoped() } }
+    }
+
+    // MARK: - Scoped usage and sessions (Spec 108-k K18)
+
+    private var hasScope: Bool {
+        appState.scopeFiltersAvailable
+            && (homeFilter.profile != nil || homeFilter.client != nil || homeFilter.token != nil)
+    }
+
+    private func consumeRoute() {
+        let landed: ScopeFilter? = appState.consumeRoute { route in
+            if case .home(let filter) = route { return filter ?? ScopeFilter() }
+            return nil
+        }
+        guard let landed else { return }
+        homeFilter.profile = landed.profile
+        homeFilter.client = landed.client
+        homeFilter.token = landed.token
+    }
+
+    /// Reload the sessions list and the usage summary with the current scope.
+    /// Both go through `ScopeFilter.restRequest`, the one mapping every
+    /// surface shares, so the parameters are exactly the contract's.
+    private func reloadScoped() async {
+        guard let api = appState.apiClient else { return }
+        scopedGeneration += 1
+        let generation = scopedGeneration
+        let connection = appState.connectionGeneration
+        func isCurrent() -> Bool { generation == scopedGeneration && appState.isCurrentConnection(connection) }
+        let available = appState.scopeFiltersAvailable
+        var sessionsFilter = homeFilter
+        sessionsFilter.view = .sessions
+        if let request = sessionsFilter.restRequest(for: .activity, scopeFiltersAvailable: available) {
+            if let response: APIClient.SessionsResponse = try? await api.fetchScoped(request, extra: "limit=20"),
+               isCurrent() {
+                mcpSessions = response.sessions
+            }
+        }
+        var usageFilter = homeFilter
+        usageFilter.from = "-24h"
+        if available, let request = usageFilter.restRequest(for: .usage, scopeFiltersAvailable: available) {
+            let usage: UsageAggregateResponse? = try? await api.fetchScoped(request, extra: "top=1")
+            if isCurrent() { scopedUsage = usage }
+        } else {
+            scopedUsage = nil
+        }
+    }
+
+    @ViewBuilder
+    private var scopeSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Label("Usage · last 24 h", systemImage: "chart.bar.xaxis")
+                    .font(.scaled(.headline, scale: fontScale))
+                if let usage = scopedUsage {
+                    let calls = usage.timeline.reduce(0) { $0 + $1.calls }
+                    let errors = usage.timeline.reduce(0) { $0 + $1.errors }
+                    Text("\(calls) calls")
+                        .font(.scaled(.callout, scale: fontScale).monospacedDigit())
+                        .accessibilityIdentifier("home-usage-calls")
+                    Text("\(errors) errors")
+                        .font(.scaled(.callout, scale: fontScale).monospacedDigit())
+                        .foregroundStyle(errors > 0 ? Color.red : Color.secondary)
+                }
+                Spacer()
+            }
+            HStack(spacing: 12) {
+                Picker("Profile", selection: scopeBinding(\.profile)) {
+                    Text("Any Profile").tag("all")
+                    ForEach(homeChoices(appState.profiles.map(\.name), current: homeFilter.profile), id: \.self) { Text($0).tag($0) }
+                }
+                .frame(maxWidth: 200)
+                .accessibilityIdentifier("home-filter-profile")
+                Picker("Client", selection: scopeBinding(\.client)) {
+                    Text("Any Client").tag("all")
+                    ForEach(homeChoices(appState.clients.map(\.id), current: homeFilter.client), id: \.self) { Text($0).tag($0) }
+                }
+                .frame(maxWidth: 200)
+                .accessibilityIdentifier("home-filter-client")
+                Picker("Token", selection: scopeBinding(\.token)) {
+                    Text("Any Token").tag("all")
+                    ForEach(homeChoices(tokenNames, current: homeFilter.token), id: \.self) { Text($0).tag($0) }
+                }
+                .frame(maxWidth: 200)
+                .accessibilityIdentifier("home-filter-token")
+                if hasScope {
+                    Button("Clear") { homeFilter.profile = nil; homeFilter.client = nil; homeFilter.token = nil }
+                        .buttonStyle(.link)
+                        .accessibilityIdentifier("home-filter-clear")
+                }
+            }
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func scopeBinding(_ keyPath: WritableKeyPath<ScopeFilter, String?>) -> Binding<String> {
+        Binding(
+            get: { homeFilter[keyPath: keyPath].flatMap { $0.isEmpty ? nil : $0 } ?? "all" },
+            set: { homeFilter[keyPath: keyPath] = ($0 == "all") ? nil : $0 }
+        )
+    }
+
+    private func homeChoices(_ names: [String], current: String?) -> [String] {
+        var all = Set(names)
+        if let current, !current.isEmpty { all.insert(current) }
+        return all.sorted()
     }
 
     // MARK: - Hub Visualization
@@ -526,7 +649,8 @@ struct HomeView: View {
             }
 
             // One row per client, most recently active first — see DashboardSessions.
-            let rawSessions = mcpSessions.isEmpty ? appState.recentSessions : mcpSessions
+            // A scoped list never falls back to the unscoped one.
+            let rawSessions = (mcpSessions.isEmpty && !hasScope) ? appState.recentSessions : mcpSessions
             let sessions = DashboardSessions.rows(from: rawSessions)
             if sessions.isEmpty {
                 HStack {
@@ -549,6 +673,13 @@ struct HomeView: View {
                             .frame(width: 80, alignment: .leading)
                         Text("Tool Calls")
                             .frame(width: 80, alignment: .trailing)
+                        if appState.scopeFiltersAvailable {
+                            Text("Profile")
+                                .frame(width: 120, alignment: .leading)
+                                .padding(.leading, 12)
+                            Text("Source")
+                                .frame(width: 80, alignment: .leading)
+                        }
                         Text("Last Active")
                             .frame(maxWidth: .infinity, alignment: .trailing)
                     }
@@ -577,6 +708,18 @@ struct HomeView: View {
                             Text("\(session.toolCallCount ?? 0)")
                                 .font(.scaledMonospacedDigit(.caption, scale: fontScale))
                                 .frame(width: 80, alignment: .trailing)
+
+                            if appState.scopeFiltersAvailable {
+                                Text(session.profile?.isEmpty == false ? session.profile! : "—")
+                                    .font(.scaled(.caption, scale: fontScale))
+                                    .lineLimit(1)
+                                    .frame(width: 120, alignment: .leading)
+                                    .padding(.leading, 12)
+                                Text(session.profileSource?.isEmpty == false ? session.profileSource! : "—")
+                                    .font(.scaled(.caption, scale: fontScale))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 80, alignment: .leading)
+                            }
 
                             Text(DashboardSessions.relativeTime(for: session))
                                 .font(.scaled(.caption, scale: fontScale))

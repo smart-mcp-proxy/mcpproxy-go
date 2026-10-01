@@ -102,9 +102,18 @@ final class AppState: ObservableObject {
     /// guidance as an alert — never a dead click — until that screen ships.
     @Published var pendingReloadHint: AttentionItem?
 
-    // MARK: - Profiles (Profiles v2 T5)
-    /// Configured profiles for the tray profile switcher.
-    @Published var profiles: [ProfileSummary] = []
+    // MARK: - Profiles and clients (Spec 108-k)
+    /// Configured profiles (GET /profiles). Refreshed on connect and on SSE
+    /// `profiles.changed`; the Profiles view, the tray Clients submenu and every
+    /// profile picker read this one list.
+    @Published var profiles: [ProfileView] = []
+    /// The profile anonymous callers get; "" is unconfined (All servers).
+    /// Administrator-only on the wire, so it is empty when the core withholds it.
+    @Published var anonymousProfile: String = ""
+    /// Client rows with their credential state and binding (GET /clients) and
+    /// the instance-level warnings. Refreshed on SSE `client.binding_changed`.
+    @Published var clients: [ClientPresenceRecord] = []
+    @Published var clientWarnings: [ClientWarning] = []
 
     /// The filter the next scope-aware view should apply as soon as it exists
     /// (Spec 109-k T122; replaces F10's `pendingActivitySessionFilter`). Every
@@ -151,6 +160,10 @@ final class AppState: ObservableObject {
     /// filter: a view created by the click subscribes too late.
     @Published var pendingAddAction: AddMenuItem?
 
+    /// The view the next navigation should land on, with its payload (Spec
+    /// 108-k; see `AppRoute`). Same hand-off shape as `pendingAddAction`.
+    @Published var pendingRoute: AppRoute?
+
     /// Take the pending add action only if it is one of `kinds`, clearing it.
     /// A view consumes just the kinds it owns, so ClientsView cannot swallow a
     /// `.server` action meant for ServersView.
@@ -159,9 +172,6 @@ final class AppState: ObservableObject {
         pendingAddAction = nil
         return action
     }
-    /// Server-level default active profile slug; empty means "all servers".
-    @Published var activeProfile: String = ""
-
     /// Set to true once the tray has received its first response from
     /// `/api/v1/servers`. Used by `statusSummary` to distinguish "haven't
     /// fetched yet" from "fetched and the list is genuinely empty", so the

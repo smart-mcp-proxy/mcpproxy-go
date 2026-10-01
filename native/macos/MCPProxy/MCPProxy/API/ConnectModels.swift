@@ -145,6 +145,14 @@ struct ConnectPreviewModel: Codable, Equatable {
     /// Verbatim refusal from the same guard the write runs; presence means
     /// "Connect unavailable" (contracts §1).
     let connectRefusal: String?
+    /// Spec 108-c2 (108-k K21): the MASKED client credential the write would
+    /// embed (`mcp_cli_••••`, never the secret), nil for a keyless entry or a
+    /// core that predates client credentials.
+    let credential: String?
+    /// The requested binding echoed back (`""` is All servers).
+    let profile: String?
+    let mode: BindingMode?
+    let keyless: Bool
     /// Whether the core that produced this preview speaks the spec-091
     /// precondition protocol at all — i.e. it sent `precondition_token`, which
     /// a 091 core always does even when the value is empty.
@@ -167,6 +175,7 @@ struct ConnectPreviewModel: Codable, Equatable {
         case existingEntrySummary = "existing_entry_summary"
         case preconditionToken = "precondition_token"
         case connectRefusal = "connect_refusal"
+        case credential, profile, mode, keyless
     }
 
     init(
@@ -181,7 +190,11 @@ struct ConnectPreviewModel: Codable, Equatable {
         existingEntrySummary: ConnectEntrySummary? = nil,
         preconditionToken: String? = nil,
         connectRefusal: String? = nil,
-        coreSupportsPreconditionTokens: Bool = true
+        coreSupportsPreconditionTokens: Bool = true,
+        credential: String? = nil,
+        profile: String? = nil,
+        mode: BindingMode? = nil,
+        keyless: Bool = false
     ) {
         self.client = client
         self.configPath = configPath
@@ -195,6 +208,10 @@ struct ConnectPreviewModel: Codable, Equatable {
         self.preconditionToken = preconditionToken
         self.connectRefusal = connectRefusal
         self.coreSupportsPreconditionTokens = coreSupportsPreconditionTokens
+        self.credential = credential
+        self.profile = profile
+        self.mode = mode
+        self.keyless = keyless
     }
 
     init(from decoder: Decoder) throws {
@@ -220,6 +237,11 @@ struct ConnectPreviewModel: Codable, Equatable {
         // as "no refusal" so `connect_refusal: ""` cannot disable Connect.
         let refusal = try container.decodeIfPresent(String.self, forKey: .connectRefusal)
         connectRefusal = (refusal?.isEmpty ?? true) ? nil : refusal
+        let masked = try container.decodeIfPresent(String.self, forKey: .credential)
+        credential = (masked?.isEmpty ?? true) ? nil : masked
+        profile = try container.decodeIfPresent(String.self, forKey: .profile)
+        mode = try container.decodeIfPresent(BindingMode.self, forKey: .mode)
+        keyless = try container.decodeIfPresent(Bool.self, forKey: .keyless) ?? false
     }
 
     /// The entry name the form defaults to, matching the core's own default.
@@ -281,8 +303,27 @@ struct ConnectPreviewModel: Codable, Equatable {
     }
 
     /// Disclosure that the pending entry embeds the admin credential (FR-004).
+    /// Since Spec 108 a connect never writes the admin key: this stays only for
+    /// a core that predates client credentials and still reports it.
     var credentialNotice: String? {
         guard containsAPIKey else { return nil }
         return "This entry embeds the MCPProxy API key in the client's config file."
+    }
+
+    /// Spec 108-k K21: what the entry embeds. A client credential says so and
+    /// says the admin key is not written; a keyless entry says it holds nothing.
+    /// Falls back to the legacy API-key disclosure for an older core.
+    func credentialDisclosure(clientName: String) -> String? {
+        if keyless { return "No credential is written. The client connects anonymously." }
+        if credential != nil && !containsAPIKey {
+            return "MCPProxy writes a client credential for \(clientName). The admin API key is never written."
+        }
+        return credentialNotice
+    }
+
+    /// `Credential: mcp_cli_•••• (client credential)`, nil when there is none.
+    var credentialLine: String? {
+        guard let credential, !keyless else { return nil }
+        return "Credential: \(credential) (client credential)"
     }
 }
