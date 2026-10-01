@@ -1,0 +1,29 @@
+{
+  "_comment": "Spec 108-l (L14, contracts/refusals.md): the four refusals every surface shares, byte-for-byte after substituting <p> (a profile name) and <id> (a client id). REST (TestProfilesV3RefusalParity in internal/httpapi), the MCP profiles tool (TestProfilesV3RefusalParity_MCP in internal/server) and the CLI (TestProfilesV3RefusalParity_CLI in cmd/mcpproxy) each compare their own output to this file, so none of them can drift from another. `error` is the exact message; the CLI prints it as the first line of its error.",
+  "refusals": [
+    {
+      "name": "binding_bypassable_without_auth",
+      "status": 409,
+      "code": "binding_bypassable_without_auth",
+      "error": "a client bound to profile <p> could escape it by omitting its credential while require_mcp_auth is off"
+    },
+    {
+      "name": "no_client_credential",
+      "status": 409,
+      "code": "no_client_credential",
+      "error": "client <id> has no active client credential; connect it with a profile first"
+    },
+    {
+      "name": "profile_in_use",
+      "status": 409,
+      "code": "profile_in_use",
+      "error": "profile in use"
+    },
+    {
+      "name": "unknown_profile",
+      "status": 400,
+      "field": "profile",
+      "error": "unknown profile \"<p>\""
+    }
+  ]
+}
