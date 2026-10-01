@@ -77,6 +77,19 @@ final class ConfigStore: ObservableObject {
         revision += 1
     }
 
+    /// A single key was saved elsewhere (the Anonymous callers section PATCHes
+    /// `anonymous_profile` on its own): adopt just that key as saved, in the
+    /// snapshot, the working copy and the Raw tab, leaving every other unsaved
+    /// edit alone. A full `load()` would reset them all. No-op before the first
+    /// load, which brings the truth itself.
+    func adoptSaved(_ key: String, value: Any?) {
+        guard loaded else { return }
+        configSet(&raw, key, value)
+        configSet(&original, key, value)
+        configSet(&working, key, value)
+        revision += 1
+    }
+
     /// The core's current (saved) configuration, pretty-printed for the
     /// read-only Raw tab. Reflects server truth — not unsaved form edits.
     var prettyJSON: String {

@@ -103,6 +103,38 @@ final class AnonymousProfileSectionTests: XCTestCase {
 
     final class LateBox: @unchecked Sendable { var value: AnonymousProfileSource? }
 
+    // MARK: Saving keeps unrelated unsaved Settings edits (108-retro-mac R5)
+
+    func testSavingAnonymousCallersKeepsUnrelatedUnsavedSettings() {
+        let app = AppState()
+        let store = ConfigStore(appState: app)
+        store.hydrate(from: ["require_mcp_auth": false, "anonymous_profile": ""])
+        store.setValue("require_mcp_auth", true)
+
+        AnonymousProfileSection.commitSaved("ro", appState: app, store: store)
+
+        XCTAssertTrue(store.isDirty("require_mcp_auth"), "the unsaved toggle survives")
+        XCTAssertEqual(store.value("require_mcp_auth") as? Bool, true)
+        XCTAssertFalse(store.isDirty("anonymous_profile"))
+        XCTAssertEqual(store.value("anonymous_profile") as? String, "ro")
+        XCTAssertTrue(store.prettyJSON.contains("\"anonymous_profile\" : \"ro\""), "the Raw tab shows the saved truth")
+        XCTAssertEqual(app.anonymousProfile, "ro")
+    }
+
+    func testAdoptSavedBeforeTheStoreLoadedIsANoOp() {
+        let store = ConfigStore(appState: AppState())
+        store.adoptSaved("anonymous_profile", value: "ro")
+        XCTAssertFalse(store.loaded)
+        XCTAssertNil(store.value("anonymous_profile"))
+    }
+
+    func testTheSectionNeverReloadsTheWholeSettingsStore() throws {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<2 { url.deleteLastPathComponent() }
+        let view = try String(contentsOf: url.appendingPathComponent("MCPProxy/Views/AnonymousProfileSection.swift"))
+        XCTAssertFalse(view.contains("store.load()"))
+    }
+
     func testTheSectionIsMountedOnTheSecurityTabAndIdentified() throws {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<2 { url.deleteLastPathComponent() }

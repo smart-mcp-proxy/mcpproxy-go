@@ -128,6 +128,15 @@ struct AnonymousProfileSection: View {
         _model = StateObject(wrappedValue: AnonymousProfileModel(source: source, current: appState.anonymousProfile))
     }
 
+    /// After a successful save: record the new value in `AppState` and adopt
+    /// ONLY that key in the Settings store, so unrelated unsaved edits on the
+    /// same tab survive (108-retro-mac R5).
+    @MainActor
+    static func commitSaved(_ value: String, appState: AppState, store: ConfigStore) {
+        appState.anonymousProfile = value
+        store.adoptSaved("anonymous_profile", value: value)
+    }
+
     private var requireMCPAuth: Bool { (store.value("require_mcp_auth") as? Bool) ?? false }
 
     var body: some View {
@@ -151,8 +160,7 @@ struct AnonymousProfileSection: View {
                     Task {
                         await model.save()
                         if model.savedNote != nil {
-                            appState.anonymousProfile = model.selection
-                            await store.load()
+                            Self.commitSaved(model.selection, appState: appState, store: store)
                         }
                     }
                 } label: {

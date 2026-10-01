@@ -84,12 +84,23 @@ struct ProfileImpact: Equatable {
     }
 }
 
+/// The blocks of the editor's layout (108-retro-mac R2).
+enum ProfileEditorSection: Hashable {
+    case form, toolTable, tryIt
+}
+
 @MainActor
 final class ProfileEditorModel: ObservableObject {
 
     /// The exact marker text of a classification whose tool gained annotations
     /// (FR-005).
     static let staleMarkerText = "classification ignored — tool is now annotated"
+
+    /// What the editor lays out, in order. A new profile has no saved version,
+    /// so no `effective-tools` table, but "Try it" works on the unsaved draft.
+    var sections: [ProfileEditorSection] {
+        isNew ? [.form, .tryIt] : [.form, .toolTable, .tryIt]
+    }
 
     // MARK: Draft
 
@@ -186,8 +197,12 @@ final class ProfileEditorModel: ObservableObject {
     /// The human words for an `access.reason`.
     static func reasonLabel(_ reason: String) -> String { AccessReasonText.label(reason) }
 
-    /// Discard the draft and take the saved version.
+    /// Discard the draft and take the saved version. The draft is reverted
+    /// first: `load()` never overwrites a dirty draft, so without that it would
+    /// only raise the "changed elsewhere" marker again. Edits typed while the
+    /// GET is in flight still win and re-raise it (K15).
     func reload() async {
+        revert()
         changedElsewhere = false
         await load()
     }
