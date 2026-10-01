@@ -20,6 +20,26 @@ Releases follow [Semantic Versioning](https://semver.org/).
   longer receive tool hash pins or `server_not_in_scope` scope diagnostics from
   `POST /api/v1/preflight` and the tool-listing endpoints. Admin API key, Unix socket, Windows
   named pipe and the OAuth **admin** role are unaffected. (spec 099 FR-018a)
+- **connect:** `mcpproxy connect` (and the Web UI and macOS Connect screens) no longer write the
+  instance admin API key into a client's config. Every write now carries a per-client credential
+  (`mcp_cli_...`, token `client-<id>`) bound to a profile, valid on MCP endpoints only; REST
+  answers it with `403`. Existing entries that hold the admin key are reported (Clients page,
+  `mcpproxy doctor`) and are never rewritten automatically: use "Upgrade clients holding the admin
+  key", then rotate the admin API key. **Downgrade precondition:** before downgrading to a binary
+  older than this release, set `require_mcp_auth: true`. A pre-profiles-v3 binary does not know
+  `mcp_cli_` credentials; with `require_mcp_auth` off it treats them like an omitted credential
+  and gives them unconfined access (REST and, with authentication required, MCP reject them with
+  `401`). (spec 108 SC-010,
+  [Profiles](https://docs.mcpproxy.app/features/profiles#upgrading-and-downgrading))
+
+### Deprecations
+
+- **profiles:** `GET /api/v1/profiles/active` and `PUT /api/v1/profiles/active` send
+  `Deprecation: true` and are removed in the next minor release; no first-party surface calls them.
+  The Web UI header "Profile:" switcher and the macOS tray "Profile:" submenu are gone (a "Viewing"
+  filter chip replaces the former, a Clients submenu the latter). (spec 108)
+- **cli:** `mcpproxy token create --profile-pin` is now `--profile` (the old spelling still works,
+  hidden, and prints a notice); `mcpproxy activity --agent` is now `--token` (a hidden alias). (spec 108)
 
 ### Features
 
@@ -55,6 +75,34 @@ Releases follow [Semantic Versioning](https://semver.org/).
 - **server edition / sso:** an attributable JSONL audit line is now emitted at every
   authorization decision and tool-call funnel, so a tenant admin can trace who did what.
   (spec 107 PR-D, [#1296](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/1296))
+- **profiles:** Profiles v3. A profile is now a tool policy as well as a server list: `max_tier`
+  (`read`, `write`, `destructive`), `unannotated` handling, `tools.allow`, `tools.deny` and
+  `tools.classify` rules, `code_execution`, `management_tools` and `switchable_to`. It is enforced
+  on every discovery and dispatch path, so a "read-only" profile cannot find, describe or call a
+  write, destructive, denied or unclassified tool, and a refusal is recorded as `blocked` with a
+  `block_reason`. Legacy profiles behave exactly as before. Manage profiles from the Web UI and the
+  macOS app (Profiles in the sidebar), `mcpproxy profile ...` and the MCP `profiles` tool.
+  ([Profiles](https://docs.mcpproxy.app/features/profiles),
+  [Profile and client commands](https://docs.mcpproxy.app/cli/profile-commands))
+- **clients:** bind a client to a profile, locked or switchable, from the Clients page, the macOS
+  Clients view and tray submenu, `mcpproxy client set-profile` or the `profiles` MCP tool. A change
+  takes effect on the client's next request without touching its config file, and its live session
+  is told its tool list changed. Add custom clients, rotate and forget credentials, and upgrade
+  every client that holds the admin key in one previewed action.
+- **profiles:** `anonymous_profile` confines callers that present no credential. While
+  `require_mcp_auth` is off, a change that would let a bound client escape its profile by omitting
+  its credential is refused with `409 binding_bypassable_without_auth` and two fixes. Both settings
+  apply without a restart.
+- **tokens:** `mcpproxy token create --profile <p>` (and the token dialogs) pin a token to a profile
+  without listing servers and permissions; older tokens show their scope as a read-only "legacy
+  scope" with a migrate hint.
+- **activity:** every record carries the profile and how it was resolved, the client and the token.
+  Activity, Sessions, Usage, Tools, Servers, Clients and Tokens filter by `profile`, `client` and
+  `token` (in the URL, `mcpproxy activity list --profile --client --token`, and REST), and
+  `/tools?client=cursor` shows exactly what a client can see and call.
+- **profiles:** an access explainer ("Why can't Cursor use `github:create_issue`?") walks the same
+  chain that enforcement walks and names the fix, in the Web UI, the macOS app, `mcpproxy access
+  explain` and the `profiles` MCP tool.
 
 ### Bug Fixes
 
@@ -103,6 +151,12 @@ Releases follow [Semantic Versioning](https://semver.org/).
   ([#1084](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1084))
 
 - **homebrew:** One-line install in docs + guard tap job against pre-release tags (#486) ([#486](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/486)) ([`1098701`](https://github.com/smart-mcp-proxy/mcpproxy-go/commit/109870116fe17aa1ce7ecfd603962c1d3de21ba0))
+- **profiles:** the Web UI and macOS words for why a tool is hidden now agree ("Unannotated —
+  classify", "Needs review"), and both show how a call's profile was resolved ("locked by
+  credential", "switchable", "from URL", "switched in session", "anonymous"). (spec 108-l)
+- **config:** saving `anonymous_profile` or editing a profile no longer reports "No configuration
+  changes detected" with `applied_immediately: false`; both are reported in `changed_fields` and
+  applied at once. (spec 108-l)
 
 ### CI/Build
 

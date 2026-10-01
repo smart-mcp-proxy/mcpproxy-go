@@ -1351,6 +1351,9 @@ Events include:
 - `activity.tool_call.started` - Tool call initiated
 - `activity.tool_call.completed` - Tool call finished
 - `activity.policy_decision` - Tool call blocked by policy
+- `profiles.changed` - A profile was created, updated, renamed, deleted or the `anonymous_profile` changed (an invalidation: refetch `GET /api/v1/profiles`)
+- `client.binding_changed` - A client's profile or mode was reassigned (an invalidation: refetch `GET /api/v1/clients`)
+- `attention.changed` - The [Needs attention](../features/needs-attention.md) list changed (`{count, ids}`, narrowed per subscriber; refetch `GET /api/v1/attention`).
 
 The stream is rendered **per connection**. An admin subscriber (API key, Web UI,
 tray over the unix socket) receives every event exactly as the event bus

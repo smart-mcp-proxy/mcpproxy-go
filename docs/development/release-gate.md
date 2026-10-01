@@ -109,12 +109,22 @@ The `web-ui-sweep` job runs the Playwright sweep
 see [Web UI verification](web-ui-verification.md)) against the Web UI **served by
 the candidate binary** — embedded frontend, never a dev server — with a live
 `mcpfixture` stdio upstream so the servers/tools screens have real data. It
-runs three spec files: `web-ui-sweep.spec.ts` (servers list, server detail
-(+ security tab), tools page and its search, activity log, and settings; fails
-on uncaught page exceptions), `visual-a11y-sweep.spec.ts` (WCAG contrast,
-layouts, accessible names, themes) and `navigation-consistency.spec.ts` (Spec
-109 sidebar, header, command palette, `+ Add` menu, redirects and filtered
-deep links).
+runs five spec files (the launcher's `playwright test` line is the list, and
+`TestWebUISweepSpecListIsComplete` fails when it, `e2e/web-ui-sweep` and this
+page disagree):
+
+- `web-ui-sweep.spec.ts`: servers list, server detail (+ security tab), tools
+  page and its search, activity log, and settings; fails on uncaught page
+  exceptions.
+- `visual-a11y-sweep.spec.ts`: WCAG contrast, layouts, accessible names, themes.
+- `navigation-consistency.spec.ts`: Spec 109 sidebar, header, command palette,
+  `+ Add` menu, redirects and filtered deep links.
+- `profiles-clients.spec.ts`: Spec 108 Profiles and Clients screens, the goal
+  flow, the binding-guard refusal, the Viewing chip, dialogs and layout.
+- `profiles-scope.spec.ts`: Spec 108 profile scope on Tools, Activity, Sessions
+  and Usage (audit acceptance check 6: the deep links `/tools?client=`,
+  `/usage?profile=` and `/sessions?client=` load filtered, with a removable
+  chip that survives navigation and Back).
 
 Setup is not duplicated in YAML: the job calls
 [`scripts/run-web-smoke.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/run-web-smoke.sh),

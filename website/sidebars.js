@@ -50,6 +50,7 @@ const sidebars = {
         'cli/command-reference',
         'cli/management-commands',
         'cli/activity-commands',
+        'cli/profile-commands',
         'cli/sensitive-data-commands',
         'cli/security-commands',
         'cli/review-commands',
