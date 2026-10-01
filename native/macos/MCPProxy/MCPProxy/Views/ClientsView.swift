@@ -99,11 +99,7 @@ struct ClientsView: View {
             RotateClientSheet(appState: appState, client: client) { Task { await load() } }
         }
         .sheet(item: $forgetting) { client in
-            ForgetClientSheet(client: client) { disconnect in
-                Task {
-                    if await bindingModel.forget(client, disconnect: disconnect) != nil { await load() }
-                }
-            }
+            ForgetClientSheet(client: client, model: bindingModel) { Task { await load() } }
         }
     }
 

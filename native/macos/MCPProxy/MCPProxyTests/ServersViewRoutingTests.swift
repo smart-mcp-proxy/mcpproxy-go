@@ -43,6 +43,29 @@ final class ServersViewRoutingTests: XCTestCase {
                       "the .showAddServer observer must likewise stay attached to body, not serverListView")
     }
 
+    /// 108-retro-mac G (post-merge review of 109-i, F4.1 and F6.1): the toolbar
+    /// "+ -> Server" hand-off and pending routes were consumed by
+    /// `serverListView`, which is unmounted while a detail is open, so the
+    /// action was lost and replayed when the detail closed. `body` stays mounted.
+    func testToolbarAddHandOffStaysLiveWhileADetailViewIsOpen() throws {
+        let source = try serversViewSource()
+        let bodyText = try topLevelBody(in: source)
+        let listText = try serverListViewText(in: source)
+        XCTAssertTrue(bodyText.contains(".onChange(of: appState.pendingAddAction)"))
+        XCTAssertTrue(bodyText.contains("consumePendingAddAction()"))
+        XCTAssertFalse(listText.contains("consumePendingAddAction()"),
+                       "serverListView is unmounted while a detail is open; the hand-off must not live there")
+    }
+
+    func testRoutesAreConsumedWhileADetailViewIsOpen() throws {
+        let source = try serversViewSource()
+        let bodyText = try topLevelBody(in: source)
+        let listText = try serverListViewText(in: source)
+        XCTAssertTrue(bodyText.contains(".onChange(of: appState.pendingRoute)"))
+        XCTAssertTrue(bodyText.contains("consumeRoute()"))
+        XCTAssertFalse(listText.contains("consumeRoute()"))
+    }
+
     func testManualDoubleClickResetsTheDetailTabToTools() throws {
         let source = try serversViewSource()
         let onDoubleClick = try closureBody(labelled: "onDoubleClick: { server in", in: source)
@@ -70,6 +93,19 @@ final class ServersViewRoutingTests: XCTestCase {
         }
         guard let end = source.range(of: "private var serverListView", range: start.upperBound..<source.endIndex) else {
             XCTFail("could not find `serverListView` in ServersView.swift")
+            return ""
+        }
+        return String(source[start.upperBound..<end.lowerBound])
+    }
+
+    /// `serverListView`'s own text, up to the consume helper that follows it.
+    private func serverListViewText(in source: String) throws -> String {
+        guard let start = source.range(of: "private var serverListView") else {
+            XCTFail("could not find `serverListView` in ServersView.swift")
+            return ""
+        }
+        guard let end = source.range(of: "private func consumePendingAddAction()", range: start.upperBound..<source.endIndex) else {
+            XCTFail("could not find `consumePendingAddAction` in ServersView.swift")
             return ""
         }
         return String(source[start.upperBound..<end.lowerBound])

@@ -19,6 +19,8 @@ final class ProfileEditorModelTests: XCTestCase {
 
         /// Runs while an update is in flight (the user typing during a save).
         var onUpdate: (@MainActor () -> Void)?
+        /// Runs while a profile GET is in flight (the user typing during a reload).
+        var onProfile: (@MainActor () -> Void)?
 
         private(set) var created: [ProfileConfigPayload] = []
         private(set) var updated: [(String, ProfileConfigPayload)] = []
@@ -26,7 +28,10 @@ final class ProfileEditorModelTests: XCTestCase {
         private(set) var deleted: [(String, String?, Bool)] = []
         private(set) var tried: [(ProfileConfigPayload, String)] = []
 
-        func profile(_ name: String) async throws -> ProfileView { try (profileResult ?? .success(ProfileView(name: name))).get() }
+        func profile(_ name: String) async throws -> ProfileView {
+            if let hook = onProfile { await MainActor.run { hook() } }
+            return try (profileResult ?? .success(ProfileView(name: name))).get()
+        }
         func createProfile(_ payload: ProfileConfigPayload) async throws -> ProfileWriteResponse {
             created.append(payload)
             return try (createResult ?? .success(StubSource.write(ProfileView(name: payload.name)))).get()
@@ -293,6 +298,67 @@ final class ProfileEditorModelTests: XCTestCase {
         model.draft.title = "dirty"
         model.profileChangedElsewhere(fresh)
         XCTAssertFalse(model.changedElsewhere)
+    }
+
+    // MARK: Reload (108-retro-mac R3)
+
+    func testReloadDiscardsTheDraftAndAdoptsTheServerVersion() async {
+        let (model, source) = editor()
+        model.draft.title = "mine"
+        XCTAssertTrue(model.isDirty)
+        let fresh = ProfileView(name: "work", servers: ["github", "notion"])
+        source.profileResult = .success(fresh)
+        model.profileChangedElsewhere(fresh)
+        XCTAssertTrue(model.changedElsewhere)
+
+        await model.reload()
+        XCTAssertFalse(model.changedElsewhere)
+        XCTAssertFalse(model.isDirty)
+        XCTAssertEqual(model.draft.servers, ["github", "notion"])
+        XCTAssertEqual(model.draft.title, "")
+        XCTAssertEqual(model.original?.servers, ["github", "notion"])
+    }
+
+    func testEditsTypedDuringAReloadAreKeptAndRaiseTheMarker() async {
+        let (model, source) = editor()
+        model.draft.title = "mine"
+        source.profileResult = .success(ProfileView(name: "work", servers: ["github", "notion"]))
+        source.onProfile = { model.draft.title = "typed" }
+
+        await model.reload()
+        XCTAssertEqual(model.draft.title, "typed", "a draft is never overwritten without a click")
+        XCTAssertTrue(model.changedElsewhere)
+    }
+
+    // MARK: Sections (108-retro-mac R2)
+
+    func testANewProfileOffersTryItButNoToolTable() {
+        let new = ProfileEditorModel(source: StubSource(), profile: nil)
+        XCTAssertEqual(new.sections, [.form, .tryIt])
+        let (existing, _) = editor()
+        XCTAssertEqual(existing.sections, [.form, .toolTable, .tryIt])
+    }
+
+    func testTryOnANewProfileSendsTheUnsavedDraft() async {
+        let source = StubSource()
+        let model = ProfileEditorModel(source: source, profile: nil)
+        model.draft.name = ""
+        model.draft.servers = ["github"]
+        model.tryQuery = "issue"
+        await model.tryIt()
+        XCTAssertEqual(source.tried.count, 1)
+        XCTAssertEqual(source.tried[0].0.servers, ["github"])
+        XCTAssertEqual(source.tried[0].0.name, "")
+        XCTAssertNotNil(model.tryResult)
+    }
+
+    func testTheEditorRendersTheModelSections() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("MCPProxy/Views/ProfileEditorView.swift")
+        let text = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(text.contains("model.sections"))
+        XCTAssertFalse(text.contains("if !model.isNew { Divider(); toolsSection }"))
     }
 
     // MARK: Rename and delete impact (K8)

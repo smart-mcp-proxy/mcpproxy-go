@@ -148,6 +148,46 @@ enum ClientWarningNavigation {
     }
 }
 
+// MARK: - Forget and assign results
+
+/// What the Forget sheet says once the core answered (108-retro-mac R1): the
+/// same three texts as the Web UI's `ForgetClientDialog`. A `disconnect_error`
+/// means the credential IS revoked but the config entry could not be removed.
+struct ForgetResult: Equatable {
+    let text: String
+    let isWarning: Bool
+
+    init(_ response: ForgetClientResponse, displayName: String) {
+        if let error = response.disconnectError, !error.isEmpty {
+            text = "Credential revoked; the config entry could not be removed: \(error)"
+            isWarning = true
+        } else if response.disconnected {
+            text = "Credential revoked and MCPProxy removed from \(displayName)'s config."
+            isWarning = false
+        } else {
+            text = "Credential revoked."
+            isWarning = false
+        }
+    }
+}
+
+/// The result of "Assign to client…" (108-retro-mac R4).
+enum AssignOutcome: Equatable {
+    /// The core changed the profile and/or the lock; the refreshed row.
+    case changed(ClientPresenceRecord)
+    /// The client was already on the profile with the wanted lock: nothing sent.
+    case unchanged(ClientPresenceRecord)
+
+    /// `Cursor is now on Work, locked.` / `Cursor is already on Work, switchable.`
+    func note(displayName: String, title: String, locked: Bool) -> String {
+        let mode = locked ? "locked" : "switchable"
+        switch self {
+        case .changed: return "\(displayName) is now on \(title), \(mode)."
+        case .unchanged: return "\(displayName) is already on \(title), \(mode)."
+        }
+    }
+}
+
 // MARK: - Row actions
 
 @MainActor
@@ -178,6 +218,21 @@ final class ClientBindingModel: ObservableObject {
         return await send(client, profile: client.boundProfile, mode: locked ? .locked : .switchable)
     }
 
+    /// "Assign to client…": the profile AND the wanted lock in ONE binding
+    /// change (FR-026: one service operation, one `assign` record), so it can
+    /// also change only the lock of a client already on the profile. Nothing is
+    /// sent when the binding already is what was asked for.
+    func assign(_ client: ClientPresenceRecord, to profile: String, locked: Bool) async -> AssignOutcome? {
+        guard client.hasClientCredential, !profile.isEmpty else { return nil }
+        if client.boundProfile == profile && client.isLocked == locked {
+            let outcome = AssignOutcome.unchanged(client)
+            announcement = outcome.note(displayName: client.displayName, title: profile, locked: locked)
+            return outcome
+        }
+        let row = await send(client, profile: profile, mode: locked ? .locked : .switchable)
+        return row.map(AssignOutcome.changed)
+    }
+
     private func send(_ client: ClientPresenceRecord, profile: String, mode: BindingMode?) async -> ClientPresenceRecord? {
         busyClientId = client.id
         guardRefusal = nil
@@ -199,7 +254,7 @@ final class ClientBindingModel: ObservableObject {
         defer { busyClientId = nil }
         do {
             let response = try await source.forgetClient(client.id, disconnect: disconnect)
-            announcement = "\(client.displayName) forgotten"
+            announcement = ForgetResult(response, displayName: client.displayName).text
             return response
         } catch {
             route(error)
@@ -297,13 +352,30 @@ final class AdminKeyUpgradeModel: ObservableObject {
         case failed(String)
     }
 
+    /// What a preview was computed for. Apply sends exactly this (R6).
+    struct Request: Equatable {
+        var profile: String?
+        var mode: BindingMode?
+    }
+
     @Published private(set) var phase: Phase = .idle
     /// nil sends no profile (All servers, switchable): the guard never has a
-    /// named binding to refuse.
-    @Published var profile: String?
-    @Published var mode: BindingMode?
+    /// named binding to refuse. Changing it (or `mode`) after a preview drops
+    /// that preview: Apply must never upgrade to a profile nobody previewed.
+    @Published var profile: String? {
+        didSet { if profile != oldValue { invalidatePreview() } }
+    }
+    @Published var mode: BindingMode? {
+        didSet { if mode != oldValue { invalidatePreview() } }
+    }
 
     private let source: ClientBindingSource
+    /// Bumped on every preview start and invalidation, so a preview that
+    /// returns after the request changed is dropped.
+    private var generation = 0
+    private(set) var previewedRequest: Request?
+
+    var currentRequest: Request { Request(profile: profile, mode: mode) }
 
     init(source: ClientBindingSource, profile: String? = nil) {
         self.source = source
@@ -312,16 +384,32 @@ final class AdminKeyUpgradeModel: ObservableObject {
 
     /// The preview is computed by the core; the sheet only shows it.
     func loadPreview() async {
+        let request = currentRequest
+        generation += 1
+        let mine = generation
+        previewedRequest = nil
         phase = .loading
         do {
-            let preview = try await source.previewAdminKeyUpgrade(profile: profile, mode: mode)
+            let preview = try await source.previewAdminKeyUpgrade(profile: request.profile, mode: request.mode)
+            guard mine == generation else { return }
+            previewedRequest = request
             if preview.preview.isEmpty {
                 phase = .nothingToUpgrade
             } else {
                 phase = .preview(preview)
             }
         } catch {
+            guard mine == generation else { return }
             phase = .failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+        }
+    }
+
+    private func invalidatePreview() {
+        generation += 1
+        previewedRequest = nil
+        switch phase {
+        case .preview, .failed, .loading: phase = .idle
+        default: break
         }
     }
 
@@ -333,17 +421,17 @@ final class AdminKeyUpgradeModel: ObservableObject {
 
     /// Apply is offered only for a non-empty preview that no guard refuses.
     var canApply: Bool {
-        guard case .preview(let preview) = phase else { return false }
+        guard case .preview(let preview) = phase, previewedRequest == currentRequest else { return false }
         return !preview.preview.isEmpty && preview.guardRefusal == nil
     }
 
     /// Apply sends the preview's combined `precondition_token`.
     func apply() async {
-        guard canApply, case .preview(let preview) = phase else { return }
+        guard canApply, case .preview(let preview) = phase, let sent = previewedRequest else { return }
         phase = .applying
         do {
             let result = try await source.applyAdminKeyUpgrade(
-                profile: profile, mode: mode, preconditionToken: preview.preconditionToken)
+                profile: sent.profile, mode: sent.mode, preconditionToken: preview.preconditionToken)
             phase = .applied(result)
         } catch {
             if case APIClientError.service(_, let body) = error, body.code == ServiceErrorBody.preconditionFailed {

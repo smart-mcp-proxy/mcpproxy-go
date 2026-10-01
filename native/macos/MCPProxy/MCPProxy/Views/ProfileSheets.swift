@@ -219,15 +219,15 @@ struct AssignProfileSheet: View {
 
     private func assign() async {
         guard let model, let client = eligible.first(where: { $0.id == clientId }) else { return }
-        if let updated = await model.chooseProfile(client, profile: profile.name) {
-            // Choosing the profile keeps the credential's own mode; the toggle
-            // states the wanted one.
-            var row = updated
-            if (row.profileMode == .locked) != locked,
-               let final = await model.setLocked(row, locked: locked) { row = final }
-            if let index = appState.clients.firstIndex(where: { $0.id == row.id }) { appState.clients[index] = row }
-            done = "\(client.displayName) is now on \(profile.displayTitle)\(locked ? ", locked" : "")."
+        done = nil
+        // One binding change carries the profile and the wanted lock, so a
+        // client already on this profile can have just its lock changed.
+        guard let outcome = await model.assign(client, to: profile.name, locked: locked) else { return }
+        if case .changed(let row) = outcome,
+           let index = appState.clients.firstIndex(where: { $0.id == row.id }) {
+            appState.clients[index] = row
         }
+        done = outcome.note(displayName: client.displayName, title: profile.displayTitle, locked: locked)
     }
 }
 

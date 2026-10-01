@@ -18,10 +18,16 @@ final class ClientBindingModelTests: XCTestCase {
         var previewResults: [Result<UpgradePreview, Error>] = []
         var applyResult: Result<UpgradeResult, Error>?
         var connectPreviewResult: Result<ConnectPreviewModel, Error>?
+        var forgetResult: Result<ForgetClientResponse, Error>?
+        /// Runs inside `previewAdminKeyUpgrade`, i.e. while the preview is in flight.
+        var onPreview: (@MainActor () -> Void)?
 
         private(set) var bindings: [(id: String, profile: String, mode: BindingMode?)] = []
         private(set) var bulks: [(String, String, BindingMode?)] = []
         private(set) var applies: [String?] = []
+        private(set) var appliedProfiles: [String?] = []
+        private(set) var previews: [(String?, BindingMode?)] = []
+        private(set) var forgets: [(String, Bool)] = []
         private(set) var rotations: [String?] = []
         private(set) var order: [String] = []
 
@@ -46,13 +52,17 @@ final class ClientBindingModelTests: XCTestCase {
             return try (finalizeResult ?? .failure(APIClientError.noData)).get()
         }
         func forgetClient(_ id: String, disconnect: Bool) async throws -> ForgetClientResponse {
-            try JSONDecoder().decode(ForgetClientResponse.self, from: Data(#"{"revoked":"client-x","disconnected":false}"#.utf8))
+            forgets.append((id, disconnect))
+            return try (forgetResult ?? .success(ClientBindingModelTests.forgetResponse(#"{"revoked":"client-x","disconnected":false}"#))).get()
         }
         func previewAdminKeyUpgrade(profile: String?, mode: BindingMode?) async throws -> UpgradePreview {
-            try (previewResults.count > 1 ? previewResults.removeFirst() : previewResults[0]).get()
+            previews.append((profile, mode))
+            await onPreview?()
+            return try (previewResults.count > 1 ? previewResults.removeFirst() : previewResults[0]).get()
         }
         func applyAdminKeyUpgrade(profile: String?, mode: BindingMode?, preconditionToken: String?) async throws -> UpgradeResult {
             applies.append(preconditionToken)
+            appliedProfiles.append(profile)
             return try (applyResult ?? .failure(APIClientError.noData)).get()
         }
         func connectPreview(_ clientId: String, serverName: String, binding: ConnectBinding) async throws -> ConnectPreviewModel {
@@ -74,6 +84,10 @@ final class ClientBindingModelTests: XCTestCase {
         ]
         if let credential { json["credential_state"] = credential }
         return try! JSONDecoder().decode(ClientPresenceRecord.self, from: JSONSerialization.data(withJSONObject: json))
+    }
+
+    nonisolated static func forgetResponse(_ json: String) -> ForgetClientResponse {
+        try! JSONDecoder().decode(ForgetClientResponse.self, from: Data(json.utf8))
     }
 
     nonisolated static func bindingResponse(id: String, profile: String, mode: BindingMode) -> ClientBindingResponse {
@@ -186,6 +200,101 @@ final class ClientBindingModelTests: XCTestCase {
         _ = await model.chooseProfile(Self.record(profile: "a"), profile: "b")
         XCTAssertEqual(model.guardRefusal?.fixes?.first?.kind, "require_mcp_auth")
         XCTAssertNil(model.errorMessage)
+    }
+
+    // MARK: Assign (108-retro-mac R4)
+
+    func testAssignSendsProfileAndModeInOneRequest() async {
+        let source = StubSource()
+        let model = ClientBindingModel(source: source)
+        let outcome = await model.assign(Self.record(profile: "", mode: "switchable"), to: "work", locked: true)
+        XCTAssertEqual(source.bindings.count, 1)
+        XCTAssertEqual(source.bindings[0].id, "cursor")
+        XCTAssertEqual(source.bindings[0].profile, "work")
+        XCTAssertEqual(source.bindings[0].mode, .locked)
+        guard case .changed(let row)? = outcome else { return XCTFail("\(String(describing: outcome))") }
+        XCTAssertTrue(row.isLocked)
+    }
+
+    func testAssignChangesOnlyTheLockOfAClientAlreadyOnTheProfile() async {
+        let source = StubSource()
+        let model = ClientBindingModel(source: source)
+        let outcome = await model.assign(Self.record(profile: "work", mode: "switchable"), to: "work", locked: true)
+        XCTAssertEqual(source.bindings.count, 1)
+        XCTAssertEqual(source.bindings[0].profile, "work")
+        XCTAssertEqual(source.bindings[0].mode, .locked)
+        guard case .changed? = outcome else { return XCTFail("\(String(describing: outcome))") }
+    }
+
+    func testAssignOfAnUnchangedBindingSendsNothing() async {
+        let source = StubSource()
+        let model = ClientBindingModel(source: source)
+        let outcome = await model.assign(Self.record(profile: "work", mode: "locked"), to: "work", locked: true)
+        XCTAssertTrue(source.bindings.isEmpty)
+        guard case .unchanged? = outcome else { return XCTFail("\(String(describing: outcome))") }
+        XCTAssertEqual(model.announcement, "Cursor is already on work, locked.")
+    }
+
+    func testAssignRefusesARowWithoutAClientCredential() async {
+        let source = StubSource()
+        let model = ClientBindingModel(source: source)
+        let outcome = await model.assign(Self.record(credential: "admin_key"), to: "work", locked: true)
+        XCTAssertNil(outcome)
+        XCTAssertTrue(source.bindings.isEmpty)
+    }
+
+    func testAssignKeepsAGuardRefusal() async {
+        let source = StubSource()
+        source.bindingResult = .failure(service(409, """
+        {"error":"could escape","code":"binding_bypassable_without_auth","bindings":[],"fixes":[{"kind":"require_mcp_auth"}]}
+        """))
+        let model = ClientBindingModel(source: source)
+        let outcome = await model.assign(Self.record(profile: "a"), to: "b", locked: true)
+        XCTAssertNil(outcome)
+        XCTAssertEqual(model.guardRefusal?.fixes?.first?.kind, "require_mcp_auth")
+    }
+
+    func testAssignNotesNameTheWantedEndState() {
+        let row = Self.record()
+        XCTAssertEqual(AssignOutcome.changed(row).note(displayName: "Cursor", title: "Work", locked: true), "Cursor is now on Work, locked.")
+        XCTAssertEqual(AssignOutcome.changed(row).note(displayName: "Cursor", title: "Work", locked: false), "Cursor is now on Work, switchable.")
+        XCTAssertEqual(AssignOutcome.unchanged(row).note(displayName: "Cursor", title: "Work", locked: false), "Cursor is already on Work, switchable.")
+    }
+
+    // MARK: Forget (108-retro-mac R1)
+
+    func testForgetResultWarnsWhenTheConfigEntryCouldNotBeRemoved() {
+        let response = Self.forgetResponse(#"{"revoked":"client-cursor","disconnected":false,"disconnect_error":"permission denied"}"#)
+        let result = ForgetResult(response, displayName: "Cursor")
+        XCTAssertTrue(result.isWarning)
+        XCTAssertEqual(result.text, "Credential revoked; the config entry could not be removed: permission denied")
+    }
+
+    func testForgetResultSaysTheEntryWasRemoved() {
+        let response = Self.forgetResponse(#"{"revoked":"client-cursor","disconnected":true}"#)
+        let result = ForgetResult(response, displayName: "Cursor")
+        XCTAssertFalse(result.isWarning)
+        XCTAssertEqual(result.text, "Credential revoked and MCPProxy removed from Cursor's config.")
+    }
+
+    func testForgetResultWithoutDisconnectSaysOnlyRevoked() {
+        let response = Self.forgetResponse(#"{"revoked":"client-cursor","disconnected":false}"#)
+        let result = ForgetResult(response, displayName: "Cursor")
+        XCTAssertFalse(result.isWarning)
+        XCTAssertEqual(result.text, "Credential revoked.")
+    }
+
+    func testForgetPassesDisconnectAndAnnouncesTheResult() async {
+        let source = StubSource()
+        let response = Self.forgetResponse(#"{"revoked":"client-cursor","disconnected":false,"disconnect_error":"permission denied"}"#)
+        source.forgetResult = .success(response)
+        let model = ClientBindingModel(source: source)
+        let returned = await model.forget(Self.record(), disconnect: true)
+        XCTAssertEqual(returned, response)
+        XCTAssertEqual(source.forgets.count, 1)
+        XCTAssertEqual(source.forgets[0].0, "cursor")
+        XCTAssertTrue(source.forgets[0].1)
+        XCTAssertEqual(model.announcement, ForgetResult(response, displayName: "Cursor").text)
     }
 
     // MARK: Warnings and fixes (K13)
@@ -309,6 +418,44 @@ final class ClientBindingModelTests: XCTestCase {
         await model.loadPreview()
         await model.apply()
         if case .preview(let fresh) = model.phase { XCTAssertEqual(fresh.preconditionToken, "new") } else { XCTFail("\(model.phase)") }
+    }
+
+    // MARK: Upgrade preview invalidation (108-retro-mac R6)
+
+    func testChangingTheProfileAfterAPreviewDisablesApply() async {
+        let source = StubSource()
+        source.previewResults = [.success(preview(rows: 2))]
+        let model = AdminKeyUpgradeModel(source: source)
+        await model.loadPreview()
+        XCTAssertTrue(model.canApply)
+        model.profile = "ro"
+        XCTAssertEqual(model.phase, .idle)
+        XCTAssertFalse(model.canApply)
+        await model.apply()
+        XCTAssertTrue(source.applies.isEmpty, "a stale preview is never applied")
+    }
+
+    func testApplySendsTheProfileThatWasPreviewed() async {
+        let source = StubSource()
+        source.previewResults = [.success(preview(rows: 1))]
+        source.applyResult = .success(try! JSONDecoder().decode(UpgradeResult.self, from: Data(
+            #"{"upgraded":["c0"],"failed":[]}"#.utf8)))
+        let model = AdminKeyUpgradeModel(source: source)
+        model.profile = "ro"
+        await model.loadPreview()
+        await model.apply()
+        XCTAssertEqual(source.appliedProfiles, ["ro"])
+        XCTAssertEqual(source.previews.first?.0, "ro")
+    }
+
+    func testAPreviewThatReturnsAfterTheProfileChangedIsDropped() async {
+        let source = StubSource()
+        source.previewResults = [.success(preview(rows: 2))]
+        let model = AdminKeyUpgradeModel(source: source)
+        source.onPreview = { model.profile = "ro" }
+        await model.loadPreview()
+        XCTAssertEqual(model.phase, .idle)
+        XCTAssertFalse(model.canApply)
     }
 
     // MARK: Other client and the one-time credential (K11)
