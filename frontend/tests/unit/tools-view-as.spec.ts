@@ -144,11 +144,12 @@ describe('Tools view-as (Spec 108-j)', () => {
 
     const blockedRow = wrapper.findAll('[data-test="tool-row"]').find(r => r.text().includes('t_above_tier_cap'))!
     expect(blockedRow.attributes('data-not-callable')).toBe('true')
-    expect(blockedRow.find('td.opacity-60').exists()).toBe(true)
-    // The state word and the reason are never dimmed.
-    expect(blockedRow.get('[data-test^="tools-row-access-"]').classes()).not.toContain('opacity-60')
+    // Greyed by a tinted row, never by opacity (which would drop the text under AA contrast).
+    expect(blockedRow.classes()).toContain('bg-base-200/70')
+    expect(blockedRow.findAll('.opacity-60')).toHaveLength(0)
     const openRow = wrapper.findAll('[data-test="tool-row"]').find(r => r.text().includes('open_tool'))!
     expect(openRow.attributes('data-not-callable')).toBeUndefined()
+    expect(openRow.classes()).not.toContain('bg-base-200/70')
   })
 
   it('"Why?" opens the explainer for the subject and the tool', async () => {

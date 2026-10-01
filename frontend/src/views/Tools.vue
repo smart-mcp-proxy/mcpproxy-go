@@ -443,7 +443,7 @@
                 v-for="tool in paginatedTools"
                 :key="toolKey(tool)"
                 class="hover cursor-pointer"
-                :class="{ 'bg-primary/5': selectedKeys.has(toolKey(tool)) }"
+                :class="{ 'bg-primary/5': selectedKeys.has(toolKey(tool)), 'bg-base-200/70': viewAsAdmin && !isCallable(tool) }"
                 :data-not-callable="viewAsAdmin && !isCallable(tool) ? 'true' : undefined"
                 @click="openDetail(tool)"
                 data-test="tool-row"
@@ -458,7 +458,7 @@
                     @change="toggleSelect(tool)"
                   />
                 </td>
-                <td :class="mutedCell(tool)">
+                <td>
                   <code class="text-xs bg-base-200 px-1.5 py-0.5 rounded">{{ tool.name }}</code>
                 </td>
                 <td>
@@ -488,7 +488,7 @@
                     >Why?</button>
                   </div>
                 </td>
-                <td :class="[mutedCell(tool), viewAsAdmin ? 'hidden lg:table-cell' : '']">
+                <td :class="viewAsAdmin ? 'hidden lg:table-cell' : ''">
                   <!-- Descriptions are clipped to keep the row height stable;
                        without a title the clipped half was unreadable without
                        opening the tool (audit F36) — expose the full text on
@@ -500,7 +500,7 @@
                     {{ tool.description || '—' }}
                   </div>
                 </td>
-                <td :class="[mutedCell(tool), viewAsAdmin ? 'hidden lg:table-cell' : '']">
+                <td :class="viewAsAdmin ? 'hidden lg:table-cell' : ''">
                   <span class="badge badge-sm" :class="getTierBadgeClass(tool)">
                     {{ getTierLabel(tool) }}
                   </span>
@@ -566,7 +566,7 @@
                   <span v-else-if="tool.disabled" class="badge badge-sm badge-warning">disabled</span>
                   <span v-else class="badge badge-sm badge-success">enabled</span>
                 </td>
-                <td class="text-sm text-right" :class="mutedCell(tool)">
+                <td class="text-sm text-right">
                   <router-link
                     v-if="tool.usage && toolCallsLink(tool)"
                     :to="toolCallsLink(tool)!"
@@ -578,7 +578,7 @@
                   </router-link>
                   <span v-else>{{ tool.usage || 0 }}</span>
                 </td>
-                <td class="text-sm text-base-content/60" :class="[mutedCell(tool), viewAsAdmin ? 'hidden lg:table-cell' : '']">
+                <td class="text-sm text-base-content/60" :class="viewAsAdmin ? 'hidden lg:table-cell' : ''">
                   <span v-if="tool.last_used">{{ formatRelativeTime(tool.last_used) }}</span>
                   <span v-else class="text-base-content/30">never</span>
                 </td>
@@ -922,8 +922,9 @@ const accessBadgeClass = (tool: GlobalTool): string => {
   if (isCallable(tool)) return 'badge-success'
   return tool.access?.visible ? 'badge-warning' : 'badge-error'
 }
-// Only the secondary cells dim: the state word and the reason stay full contrast.
-const mutedCell = (tool: GlobalTool): string => (viewAsAdmin.value && !isCallable(tool) ? 'opacity-60' : '')
+// A tool the subject cannot call is marked by a tinted row (`bg-base-200/70`) and,
+// above all, by the state and reason words in its Access cell. Opacity is not used:
+// it multiplies the alpha of every cell and drops the row's text under AA contrast.
 const rowId = (tool: GlobalTool): string => `${tool.server_name}__${tool.name}`
 
 const explain = ref<{ subject: { kind: 'client' | 'profile'; name: string }; tool: string } | null>(null)

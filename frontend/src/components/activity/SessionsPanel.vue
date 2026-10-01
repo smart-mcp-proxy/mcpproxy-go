@@ -36,7 +36,7 @@
                 <th class="hidden lg:table-cell" data-test="sessions-profile-col">Profile</th>
                 <th class="hidden lg:table-cell" data-test="sessions-token-col">Token</th>
                 <th>Status</th>
-                <th>Capabilities</th>
+                <th class="hidden 2xl:table-cell">Capabilities</th>
                 <th>Tool Calls</th>
                 <th>Tokens</th>
                 <th>Started</th>
@@ -91,7 +91,7 @@
                     {{ session.status === 'active' ? 'Active' : 'Closed' }}
                   </div>
                 </td>
-                <td>
+                <td class="hidden 2xl:table-cell">
                   <div class="flex flex-wrap gap-1">
                     <span v-if="session.has_roots" class="badge badge-sm badge-info" title="Client supports roots capability">Roots</span>
                     <span v-if="session.has_sampling" class="badge badge-sm badge-info" title="Client supports sampling capability">Sampling</span>
@@ -117,7 +117,8 @@
                   <div class="text-sm">{{ formatTimestamp(session.last_activity) }}</div>
                   <div class="text-xs text-base-content/60">{{ formatRelativeTime(session.last_activity) }}</div>
                 </td>
-                <td class="whitespace-nowrap space-x-1">
+                <td>
+                  <div class="flex flex-wrap gap-1">
                   <!-- Link map: "Session row" -> the tools this client sees. -->
                   <router-link
                     v-if="session.client_id && clientFilterAvailable"
@@ -140,6 +141,7 @@
                   >
                     View Activity
                   </router-link>
+                  </div>
                 </td>
               </tr>
             </tbody>

@@ -168,6 +168,14 @@ describe('Activity scope params (Spec 108-j)', () => {
     expect(getActivitiesMock.mock.calls.at(-1)![0]).toEqual(expect.objectContaining({ token: 'ro-bot' }))
   })
 
+  it('a blocked filter on the Tool calls view also asks for policy decisions (a profile refusal is stored as one)', async () => {
+    await mountActivityAt('/activity?client=cursor&status=blocked')
+    const types = String(getActivitiesMock.mock.calls.at(-1)![0].type).split(',')
+    expect(types).toEqual(expect.arrayContaining(['tool_call', 'internal_tool_call', 'policy_decision']))
+    await mountActivityAt('/activity?client=cursor')
+    expect(String(getActivitiesMock.mock.calls.at(-1)![0].type)).not.toContain('policy_decision')
+  })
+
   it('the Sessions view issues no /activity request but still narrows /sessions by the same scope', async () => {
     await mountActivityAt('/activity?view=sessions&client=cursor')
     expect(getActivitiesMock).not.toHaveBeenCalled()

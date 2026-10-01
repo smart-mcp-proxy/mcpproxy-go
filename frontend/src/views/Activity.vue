@@ -1727,7 +1727,15 @@ const activityTypes = Object.keys(ACTIVITY_TYPE_LABELS).map(value => ({
  * silently kept showing (and re-fetching) the OLD tab's rows, because this
  * computed had nothing telling it to re-run. */
 const effectiveTypes = computed<string[]>(() => {
-  const viewTypes = activityViewTypes(activeView.value) ?? []
+  const viewTypes = [...(activityViewTypes(activeView.value) ?? [])]
+  // Spec 108-j: a call a profile refuses is stored as a `policy_decision`
+  // (status `blocked`, with its `block_reason`), not as a `tool_call`, so the
+  // Tool calls view hid exactly the rows "status = blocked" asks for (and the
+  // Home "blocked" link, and the blocked-row actions below, led to an empty
+  // table). A blocked filter on that view therefore includes them. Read
+  // unconditionally, for the same dependency-tracking reason as above.
+  const blockedOnly = filterStatus.value === 'blocked'
+  if (activeView.value === 'calls' && blockedOnly && !viewTypes.includes('policy_decision')) viewTypes.push('policy_decision')
   return selectedTypes.value.length > 0 ? selectedTypes.value : viewTypes
 })
 
