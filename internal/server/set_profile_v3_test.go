@@ -165,6 +165,22 @@ type managementMatrixRow struct {
 	base string
 }
 
+func refusedText(t *testing.T, proxy *MCPProxyServer, ctx context.Context, slug, wantStoredSelection, hiddenBase string) string {
+	t.Helper()
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]interface{}{"profile": slug}
+	result, err := proxy.handleSetProfile(ctx, request)
+	require.NoError(t, err)
+	require.True(t, result.IsError, "set_profile(%q) must be refused", slug)
+	text := resultText(t, result)
+	require.Equal(t, wantStoredSelection, proxy.sessionStore.GetActiveProfile(sessionIDFromContext(ctx)), "a refusal leaves the stored session selection unchanged")
+	require.Equal(t, fmt.Sprintf("unknown profile '%s'", slug), text)
+	if hiddenBase != "" && hiddenBase != slug {
+		require.NotContains(t, text, hiddenBase, "a refusal must not name the caller's base profile (FR-018)")
+	}
+	return text
+}
+
 func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 	allPerms := []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}
 	rows := []managementMatrixRow{
@@ -319,20 +335,7 @@ func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 				require.NoError(t, err)
 				return result
 			}
-			// (a) uniform refusal: every refused cell has the exact bytes the
-			// caller gets for a profile that does not exist, slug substituted.
-			refusedText := func(slug string) string {
-				ctx := session()
-				result := setProfile(ctx, slug)
-				require.True(t, result.IsError, "%s: set_profile(%q) must be refused", row.name, slug)
-				text := resultText(t, result)
-				require.Equal(t, "", proxy.sessionStore.GetActiveProfile(sessionIDFromContext(ctx)), "a refusal leaves the session unchanged")
-				require.Equal(t, fmt.Sprintf("unknown profile '%s'", slug), text)
-				if row.base != "" && row.base != slug {
-					require.NotContains(t, text, row.base, "a refusal must not name the caller's base profile (FR-018)")
-				}
-				return text
-			}
+			// (a) shared refusal helper also protects row 17's existing selection.
 			admitted := func(slug string) {
 				ctx := session()
 				result := setProfile(ctx, slug)
@@ -393,18 +396,18 @@ func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 				if cell.want {
 					admitted(cell.slug)
 				} else {
-					refusedText(cell.slug)
+					refusedText(t, proxy, session(), cell.slug, "", row.base)
 				}
 			}
 			if row.ownBase != "" {
 				admitted(row.ownBase)
 			}
 			for _, slug := range row.extraRefused {
-				refusedText(slug)
+				refusedText(t, proxy, session(), slug, "", row.base)
 			}
 			// A slug that does not exist is answered with the same shape.
 			if auth.IsScopedCaller(session()) || row.base != "" {
-				refusedText("no-such-profile")
+				refusedText(t, proxy, session(), "no-such-profile", "", row.base)
 			}
 
 			// set_profile("") is never an error and returns the session to its
@@ -499,11 +502,6 @@ func TestSetProfileV3_ManagementAndSwitchingMatrix(t *testing.T) {
 		require.Equal(t, "work-readonly", locked.Name, "a locked binding ignores the stored selection")
 		require.Equal(t, string(profile.SourcePin), locked.Source)
 
-		other := mcp.CallToolRequest{}
-		other.Params.Arguments = map[string]interface{}{"profile": "legacy"}
-		refused, err := proxy.handleSetProfile(sessionCtx(clientCtx("laptop", "work-readonly", "locked"), sid), other)
-		require.NoError(t, err)
-		require.True(t, refused.IsError)
-		require.Equal(t, "unknown profile 'legacy'", resultText(t, refused))
+		refusedText(t, proxy, sessionCtx(clientCtx("laptop", "work-readonly", "locked"), sid), "legacy", "work-full", "work-readonly")
 	})
 }
