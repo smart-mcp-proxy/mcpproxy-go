@@ -181,6 +181,13 @@ func applyViewAs(ev ViewAsEvaluator, req *viewAsRequest, tools []contracts.Tool)
 // effective servers and rewrites each row's tool_count to the number of that
 // server's tools visible under the profile (Spec 108 FR-032). servers is
 // already limited to what the caller may see.
+//
+// A caller pinned to its own profile (an agent token with a profile pin) is
+// held to that pin as well, exactly as GET /tools is (filterProfileToolRows):
+// a tool counts only when the caller's own profile admits it too, and a server
+// the caller's pin does not admit disappears, so a count never discloses a
+// tool the caller cannot see and /servers never disagrees with /tools
+// (Spec 109-l, #1437 item 1). The administrator path is unchanged.
 func (s *Server) limitServersToProfile(ctx context.Context, servers []contracts.Server, req *viewAsRequest, ev ViewAsEvaluator) []contracts.Server {
 	cfg, err := s.controller.GetConfig()
 	if err != nil || cfg == nil {
@@ -195,21 +202,57 @@ func (s *Server) limitServersToProfile(ctx context.Context, servers []contracts.
 			effective[name] = struct{}{}
 		}
 	}
+	callerPinned := callerHasProfilePin(ctx)
+	callerServers := map[string]struct{}{}
+	if callerPinned {
+		for _, name := range callerProfileServers(ctx, cfg) {
+			callerServers[name] = struct{}{}
+		}
+	}
 	out := make([]contracts.Server, 0, len(servers))
 	for i := range servers {
 		if _, ok := effective[servers[i].Name]; !ok {
 			continue
 		}
 		row := servers[i]
-		row.ToolCount = 0
+		visible := make([]map[string]interface{}, 0)
 		for _, tool := range s.serverToolNames(ctx, row.Name) {
 			if ev.Evaluate(row.Name, tool).Visible {
-				row.ToolCount++
+				visible = append(visible, map[string]interface{}{"name": tool})
 			}
 		}
+		if callerPinned {
+			visible = filterProfileToolRows(s.controller, ctx, row.Name, visible)
+			if _, inPin := callerServers[row.Name]; !inPin && len(visible) == 0 {
+				continue
+			}
+		}
+		row.ToolCount = len(visible)
 		out = append(out, row)
 	}
 	return out
+}
+
+// callerHasProfilePin reports whether the request's caller is a
+// non-administrator bound to a profile (an agent token with a pin).
+func callerHasProfilePin(ctx context.Context) bool {
+	ac := auth.AuthContextFromContext(ctx)
+	return ac != nil && !ac.IsAdmin() && ac.ProfilePin != ""
+}
+
+// callerProfileServers lists the servers the caller's own pinned profile
+// admits; a pin naming no configured profile admits nothing (fail closed).
+func callerProfileServers(ctx context.Context, cfg *config.Config) []string {
+	ac := auth.AuthContextFromContext(ctx)
+	if ac == nil {
+		return nil
+	}
+	for i := range cfg.Profiles {
+		if cfg.Profiles[i].Name == ac.ProfilePin {
+			return cfg.Profiles[i].EffectiveServers(cfg)
+		}
+	}
+	return nil
 }
 
 // serverToolNames lists the raw tool names of one server the same way the

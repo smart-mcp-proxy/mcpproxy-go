@@ -1758,7 +1758,7 @@ components:
         name:
           type: string
         type:
-          description: server|tool|client
+          description: server|tool|client|setting
           type: string
       type: object
     contracts.ConfigApplyResult:
@@ -5858,7 +5858,8 @@ paths:
       description: 'One list, one count, every surface (Web UI, macOS tray/Home, CLI)
         reads from it. Filtered per caller: an administrator sees every item; a scoped
         caller (agent token, or a non-admin server-edition OAuth user session) sees
-        only items whose server it may enumerate, and never a client item.'
+        only server items whose server it may enumerate; every other subject type
+        (client, setting) is administrator-only.'
       responses:
         "200":
           content:
