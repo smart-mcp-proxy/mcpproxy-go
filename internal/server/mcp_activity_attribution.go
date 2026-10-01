@@ -79,6 +79,12 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 			if attr.TokenName == "" {
 				attr.TokenName = info.TokenName
 			}
+			// Spec 108-j J15: the ctx-less internal-tool funnel has no
+			// AuthContext, so the prefix comes from the session, but only for
+			// the token name the session itself recorded.
+			if attr.TokenPrefix == "" && attr.TokenName != "" && attr.TokenName == info.TokenName {
+				attr.TokenPrefix = info.TokenPrefix
+			}
 			if attr.ClientID == "" {
 				attr.ClientID = info.ClientID
 			}

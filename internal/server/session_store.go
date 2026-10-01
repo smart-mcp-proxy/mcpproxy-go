@@ -70,6 +70,11 @@ type SessionInfo struct {
 	// the credential does not change mid-connection.
 	TokenName string
 	ClientID  string
+	// TokenPrefix is the credential's 12-char display prefix (Spec 108-j J15).
+	// It is INTERNAL (never persisted or serialized): the activity funnels with
+	// no request context read it back so an event carries the same ownership
+	// proof the SSE renderer checks (name AND prefix).
+	TokenPrefix string
 
 	// Anonymous marks a session that presented no credential (Spec 108-f F10):
 	// its base is the snapshot's anonymous_profile, read at notify time. Memory
@@ -486,6 +491,19 @@ func (s *SessionStore) SetSessionIdentity(sessionID, tokenName, clientID string)
 	if info, ok := s.sessions[sessionID]; ok {
 		info.TokenName = tokenName
 		info.ClientID = clientID
+	}
+}
+
+// SetSessionTokenPrefix records the display prefix of the credential that
+// authenticated a session (Spec 108-j J15), next to SetSessionIdentity.
+func (s *SessionStore) SetSessionTokenPrefix(sessionID, prefix string) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		info.TokenPrefix = prefix
 	}
 }
 
