@@ -18,10 +18,19 @@ import (
 // per-profile indexes, so ro holds 1 doc and full holds 3.
 func seedProfileIndexes(t *testing.T, rt *Runtime) {
 	t.Helper()
+	// Settle the server set first: the config-load admission gate quarantines
+	// the unreviewed fixture servers a and b, and the first LoadConfiguredServers
+	// that sees them as new purges their docs from the shared index. Left to run
+	// asynchronously after an apply, that purge empties the index mid-test.
+	require.NoError(t, rt.LoadConfiguredServers(nil))
 	require.NoError(t, rt.IndexManager().BatchIndexTools([]*config.ToolMetadata{
 		toolMeta("a", "x"), toolMeta("b", "y"), toolMeta("b", "z"),
 	}))
-	rt.reconcileProfileIndexes()
+	// reindexAffectedProfiles, not reconcileProfileIndexes: the settle above
+	// already recorded the (then empty) membership, so a reconcile would skip
+	// the profiles as unchanged.
+	rt.reindexAffectedProfiles("a")
+	rt.reindexAffectedProfiles("b")
 	require.Equal(t, uint64(1), profileDocCount(t, rt.IndexManager(), "ro"))
 }
 
